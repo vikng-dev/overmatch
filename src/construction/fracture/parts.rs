@@ -303,6 +303,45 @@ impl Graph {
         self.nodes = nodes;
     }
 
+    /// Per structure chunk: the forces its part's interfaces to other unburied parts hand it in
+    /// `field`, about its centroid. Ground and buried ends are kernel anchors, not loads. `visit`
+    /// sees every edge's joint and carried wrench.
+    fn interface_loads(
+        &self,
+        structure: &Structure,
+        field: &[Wrench],
+        mut visit: impl FnMut(usize, &Edge, Wrench),
+    ) -> Vec<Wrench> {
+        let mut loads = vec![Wrench::default(); structure.chunks.len()];
+        for (edge, &j) in self.edges.iter().zip(&self.joints) {
+            let carried = edge.resultant(&self.nodes, field);
+            visit(j, edge, carried);
+            let Some(b) = edge.b else {
+                continue; // The ground anchors the internal solve.
+            };
+            if self.parts[edge.a].node.fixed || self.parts[b].node.fixed {
+                continue; // Buried matter anchors the internal solve.
+            }
+            let joint = &structure.joints[j];
+            let Side::Chunk(far) = joint.b else {
+                panic!("a part interface has two chunk endpoints");
+            };
+            for (chunk, sign) in [(joint.a, -1.0), (far, 1.0)] {
+                let force = carried.linear * sign;
+                loads[chunk].add(
+                    Wrench {
+                        linear: force,
+                        angular: carried.angular * sign
+                            + (edge.centre - structure.chunks[chunk].centroid.as_dvec3())
+                                .cross(force),
+                    },
+                    1.0,
+                );
+            }
+        }
+        loads
+    }
+
     /// The slipping joints that leave `node` a mechanism: those touching the parts `node`
     /// reaches through interfaces with a stiff joint, short of a fixed node.
     fn mechanism(&self, node: usize) -> Vec<usize> {
@@ -798,38 +837,13 @@ impl Gravity {
             let mut normal = vec![0.0; structure.joints.len()];
             let graph = &equilibrium.graph;
             let field = &equilibrium.gravity;
-            // Assemble every part's boundary in one adjacency pass. Ground and buried ends
-            // remain kernel anchors; only interfaces between free parts supply loads.
-            let mut boundary = vec![Wrench::default(); structure.chunks.len()];
-            for (edge, &j) in graph.edges.iter().zip(&graph.joints) {
+            let boundary = graph.interface_loads(structure, field, |j, edge, carried| {
                 #[cfg(test)]
                 {
                     self.work.boundary_visits += 1;
                 }
-                let carried = edge.resultant(&graph.nodes, field);
                 normal[j] = carried.linear.dot(edge.normal);
-                if let Some(b) = edge.b {
-                    if graph.parts[edge.a].node.fixed || graph.parts[b].node.fixed {
-                        continue; // Buried matter anchors the internal solve.
-                    }
-                    let joint = &structure.joints[j];
-                    let Side::Chunk(far) = joint.b else {
-                        panic!("a part interface has two chunk endpoints");
-                    };
-                    for (chunk, sign) in [(joint.a, -1.0), (far, 1.0)] {
-                        let force = carried.linear * sign;
-                        boundary[chunk].add(
-                            Wrench {
-                                linear: force,
-                                angular: carried.angular * sign
-                                    + (edge.centre - structure.chunks[chunk].centroid.as_dvec3())
-                                        .cross(force),
-                            },
-                            1.0,
-                        );
-                    }
-                }
-            }
+            });
             // A part's kernel reads its own joints and writes only its internal ones: the parts
             // solve in parallel, and their preloads commit in part order. A part's fallen chunks
             // left with their joints, so its kernel holds only what stands.
@@ -854,30 +868,11 @@ impl Gravity {
                             "a sweep owner's assessment carries its design's kernels: pieces, \
                              whose assessments start empty, are never sweep owners",
                         );
-                        let intact = (design.chunks == *chunks
-                            && chunks.iter().all(|&c| {
-                                state.topology.incident[c].iter().all(|&j| {
-                                    #[cfg(test)]
-                                    {
-                                        solved.visits += 1;
-                                    }
-                                    let joint = &structure.joints[j];
-                                    let belongs = match joint.b {
-                                        Side::Ground => true,
-                                        Side::Chunk(b) => {
-                                            let other = if joint.a == c { b } else { joint.a };
-                                            structure.chunks[other].buried
-                                                || graph.part[other] == Some(p)
-                                        }
-                                    };
-                                    // External interfaces supply loads, not kernel stiffness.
-                                    !belongs
-                                        || (!state.cracked[j]
-                                            && !state.separated[j]
-                                            && state.live(joint))
-                                })
-                            }))
-                        .then_some(design);
+                        let intact = design.current(structure, state, chunks).then_some(design);
+                        #[cfg(test)]
+                        {
+                            solved.visits += design.edge_count();
+                        }
                         let changed;
                         let kernel = if let Some(kernel) = intact {
                             kernel
@@ -1296,10 +1291,31 @@ impl Assessment {
         (failures, columns)
     }
 
-    /// Settle contacts, then judge bonds on the final field. Contact changes keep rigid membership
-    /// fixed; mechanisms remove the interfaces that leave them free. Returns failures and solved
-    /// load columns.
+    /// Settle contacts, then judge bonds on the final field. Returns failures and solved load
+    /// columns.
     fn settle(
+        &mut self,
+        structure: &Structure,
+        state: &mut State,
+        sources: &[Load],
+        spin: Vec3,
+        step: f32,
+    ) -> (Vec<Failure>, usize) {
+        let (mut failures, columns) = self.settle_contacts(structure, state, sources, spin, step);
+        let (cracks, separated) = self.bonds(structure);
+        for failure in &cracks {
+            state.cracked[failure.joint] = true;
+        }
+        for &j in &separated {
+            state.separated[j] = true;
+        }
+        failures.extend(cracks);
+        (failures, columns)
+    }
+
+    /// The contact active set: contact changes keep rigid membership fixed; mechanisms remove the
+    /// interfaces that leave them free. Returns what opened and the solved load columns.
+    fn settle_contacts(
         &mut self,
         structure: &Structure,
         state: &mut State,
@@ -1325,15 +1341,77 @@ impl Assessment {
             failures.extend(self.refactor(structure, state));
             self.loads = self.loads_of(sources, spin, step);
         }
-        let (cracks, separated) = self.bonds(structure);
-        for failure in &cracks {
-            state.cracked[failure.joint] = true;
-        }
-        for &j in &separated {
-            state.separated[j] = true;
-        }
-        failures.extend(cracks);
         (failures, columns)
+    }
+
+    /// One pass of a landing on `state`'s moving group, under the forces `sources` press into it
+    /// (no blow, no spin: a landing's patch is already a force). The standing law's two levels:
+    /// the part graph settles its contacts and judges its interfaces, and each part's own
+    /// [`Kernel`], the design's while the part is intact, judges the joints inside it under what
+    /// its interfaces hand it. Partings cost no fracture work, so what opens at either contact
+    /// stage is committed to `state`; what cracks is returned for the landing's energy to pay.
+    pub(crate) fn landing(
+        design: &[Kernel],
+        structure: &Structure,
+        state: &mut State,
+        sources: &[Load],
+    ) -> LandingPass {
+        let mut part_law = Self::default();
+        let mut parted = part_law.rebuild(structure, state);
+        part_law.loads = part_law.loads_of(sources, Vec3::ZERO, 1.0);
+        parted.extend(
+            part_law
+                .settle_contacts(structure, state, sources, Vec3::ZERO, 1.0)
+                .0,
+        );
+        let (mut failures, separated) = part_law.bonds(structure);
+        let mut pass = LandingPass {
+            parted: parted.iter().map(|failure| failure.joint).collect(),
+            separated: separated.into_iter().collect(),
+            ..LandingPass::default()
+        };
+        let steady = &part_law.answer[..part_law.graph.parts.len()];
+        let loads = part_law.chunk_loads(structure, steady, sources);
+        let field: &State = state;
+        let parts: Vec<&Part> = part_law
+            .graph
+            .parts
+            .iter()
+            .filter(|part| part.chunks.len() > 1)
+            .collect();
+        // A part's kernel reads only its own chunks: the parts solve apart, in worker-sized
+        // batches, and their verdicts commit in part order.
+        let holds = parts.par_splat_map(
+            ComputeTaskPool::get_or_init(TaskPool::default),
+            None,
+            |_, parts| {
+                parts
+                    .iter()
+                    .map(|part| {
+                        let design = design
+                            .get(part.element)
+                            .expect("a moving group's elements are its design's");
+                        let changed;
+                        let (kernel, factored) = if design.current(structure, field, &part.chunks) {
+                            (design, 0)
+                        } else {
+                            changed = Kernel::of(structure, field, &part.chunks);
+                            (&changed, changed.factor.ops)
+                        };
+                        let on_part: Vec<_> = part.chunks.iter().map(|&c| loads[c]).collect();
+                        (factored, kernel.hold(structure, &on_part))
+                    })
+                    .collect::<Vec<_>>()
+            },
+        );
+        pass.work = part_law.work;
+        for (factored, hold) in holds.into_iter().flatten() {
+            pass.work += factored + hold.work;
+            failures.extend(hold.failures);
+            pass.separated.extend(hold.separated);
+        }
+        pass.failures = failures;
+        pass
     }
 
     /// Holes: each unburied part beside a chunk in `removed` is solved at chunk scale ([`Kernel`],
@@ -1359,12 +1437,14 @@ impl Assessment {
         }
         // A part holds no buried chunk, so each joint is an edge of one part's kernel at most: the
         // parts are solved apart, in parallel, and their verdicts commit in part order.
+        let steady = &self.answer[..self.graph.parts.len()];
+        let chunk_loads = self.chunk_loads(structure, steady, sources);
         let parts: Vec<(Vec<usize>, Vec<Wrench>)> = beside
             .into_iter()
             .filter(|&p| !self.graph.parts[p].node.fixed) // The soil holds buried matter.
             .map(|p| {
                 let chunks = self.graph.parts[p].chunks.clone();
-                let loads = self.boundary(structure, p, &chunks, sources);
+                let loads = chunks.iter().map(|&c| chunk_loads[c]).collect();
                 (chunks, loads)
             })
             .collect();
@@ -1399,50 +1479,18 @@ impl Assessment {
         failures.concat()
     }
 
-    /// Per chunk of part `p`: the presses of `sources` on it, and the sustained forces the part
-    /// graph's edges to other unburied parts hand it (friction included), about its centroid. The
-    /// ground and buried parts are the kernel's anchors, not loads.
-    fn boundary(
+    /// Per structure chunk: the presses of `sources` on it, and the forces its part's interfaces
+    /// hand it in `field` ([`Graph::interface_loads`]), about its centroid.
+    fn chunk_loads(
         &self,
         structure: &Structure,
-        p: usize,
-        chunks: &[usize],
+        field: &[Wrench],
         sources: &[Load],
     ) -> Vec<Wrench> {
-        let steady = &self.answer[..self.graph.parts.len()];
-        let index: BTreeMap<usize, usize> =
-            chunks.iter().enumerate().map(|(i, &c)| (c, i)).collect();
-        let centroid = |c: usize| structure.chunks[c].centroid.as_dvec3();
-        let mut loads = vec![Wrench::default(); chunks.len()];
+        let mut loads = self.graph.interface_loads(structure, field, |_, _, _| {});
         for source in sources {
-            if let Some(&i) = index.get(&source.chunk) {
-                let arm = source.at.as_dvec3() - centroid(source.chunk);
-                loads[i].add(Wrench::at(source.press.as_dvec3(), arm), 1.0);
-            } // A press on another part reaches this one through its interfaces.
-        }
-        for (e, edge) in self.graph.edges.iter().enumerate() {
-            let (far, sign) = match edge.b {
-                Some(b) if edge.a == p => (b, -1.0),
-                Some(b) if b == p => (edge.a, 1.0),
-                _ => continue, // Not this part's, or the ground: an anchor.
-            };
-            if self.graph.parts[far].node.fixed {
-                continue; // Buried matter is an anchor.
-            }
-            let joint = &structure.joints[self.graph.joints[e]];
-            let chunk = match joint.b {
-                Side::Chunk(b) if sign > 0.0 => b,
-                _ => joint.a,
-            };
-            let carried = edge.resultant(&self.graph.nodes, steady);
-            let force = carried.linear * sign;
-            loads[index[&chunk]].add(
-                Wrench {
-                    linear: force,
-                    angular: carried.angular * sign + (edge.centre - centroid(chunk)).cross(force),
-                },
-                1.0,
-            );
+            let arm = source.at.as_dvec3() - structure.chunks[source.chunk].centroid.as_dvec3();
+            loads[source.chunk].add(Wrench::at(source.press.as_dvec3(), arm), 1.0);
         }
         loads
     }
@@ -1735,6 +1783,19 @@ impl Assessment {
             ));
         }
     }
+}
+
+/// One landing pass's verdict ([`Assessment::landing`]).
+#[derive(Debug, Default)]
+pub(crate) struct LandingPass {
+    /// The joints that parted at no fracture work, already separated on the state.
+    pub parted: Vec<usize>,
+    /// What the field breaks, at either level, for the landing's energy to pay.
+    pub failures: Vec<Failure>,
+    /// Of those failures' joints, the ones that separate when paid.
+    pub separated: std::collections::BTreeSet<usize>,
+    /// Scalar operations of its factors and solves, a DERIVED count.
+    pub work: u64,
 }
 
 /// One contact pass's changes.

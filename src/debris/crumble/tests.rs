@@ -3,6 +3,7 @@
 //! fixtures state their geometry and material inputs.
 
 use super::*;
+use crate::construction::fracture::parts::Kernel;
 use crate::construction::tests::shipped_house;
 use crate::contact_transfer::ContactTransfer;
 
@@ -25,6 +26,7 @@ struct Part {
     state: State,
     group: Vec<usize>,
     low: Vec<f32>,
+    kernels: std::sync::Arc<Vec<Kernel>>,
 }
 
 fn released_part() -> Part {
@@ -63,6 +65,7 @@ fn released_part() -> Part {
         state,
         group,
         low,
+        kernels: breakage.kind.equilibrium.kernels.clone(),
     }
 }
 
@@ -144,17 +147,25 @@ impl Part {
     }
 
     fn crumble(&self, touches: &[Touch], energy: f32) -> Crumble {
-        crumble(&self.structure, &self.state, &self.group, touches, energy)
+        crumble(
+            &self.structure,
+            &self.state,
+            &self.kernels,
+            &self.group,
+            touches,
+            energy,
+        )
     }
 
-    /// The kernel's failures under `touches`, before any energy is judged.
+    /// The failures of the landing's first field under `touches`, before any energy is judged.
     fn failures(&self, touches: &[Touch]) -> Vec<Failure> {
-        Kernel::of(&self.structure, &self.state, &self.group)
-            .hold(
-                &self.structure,
-                &loads(&self.structure, &self.group, touches),
-            )
-            .failures
+        Assessment::landing(
+            &self.kernels,
+            &self.structure,
+            &mut self.state.clone(),
+            &loads(touches),
+        )
+        .failures
     }
 
     /// The least speed at which a flat landing on `against` fails a bond, m/s (DERIVED): the free

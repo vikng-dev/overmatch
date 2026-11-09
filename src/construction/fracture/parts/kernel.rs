@@ -192,6 +192,25 @@ impl Kernel {
         }
     }
 
+    /// Whether this kernel still states `chunks`' stiffness under `state`: the same chunks, every
+    /// joint it reads still bearing as it was factored, and none it parted for being loose.
+    /// Joints only ever leave or crack, so no new edge can have appeared.
+    pub(crate) fn current(&self, structure: &Structure, state: &State, chunks: &[usize]) -> bool {
+        self.chunks == chunks
+            && self.loose.is_empty()
+            && self.edges.iter().zip(&self.joints).all(|(edge, &j)| {
+                let joint = &structure.joints[j];
+                !state.separated[j]
+                    && state.live(joint)
+                    && edge.push.is_some() == (state.cracked[j] || joint.seam().is_none())
+            })
+    }
+
+    #[cfg(test)]
+    pub(super) fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
     /// One event: the field of `loads` (per node, about its chunk's centroid: the forces of the
     /// joints to chunks outside the set, contacts and presses) with each chunk's weight added on
     /// anchored sets, and every joint's verdict on it. An unanchored set's rigid acceleration is

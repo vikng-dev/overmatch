@@ -1849,3 +1849,97 @@ fn a_new_interface_invalidates_the_factor_pattern() {
         "the two ground reactions balance the applied load",
     );
 }
+
+/// Four fixture cubes on the x axis, 1 m apart, in two elements of two: the outer joints lie
+/// inside an element, `inner` holding chunk 3 to chunk 2, and the one across x = 1.5 between
+/// elements is unbreakable. Equal cube masses. Returns the structure and the joints' area.
+fn free_chain(inner: Bond) -> (Structure, f32) {
+    let (side, area) = (0.4_f32, 0.04_f32);
+    let strong = Bond::Bonded(seam(1e12, 1e12));
+    let at = |x: f32| Vec3::new(x, 0.0, 0.0);
+    let chunks = (0..4).map(|i| cube(at(i as f32), side, false)).collect();
+    let joints = vec![
+        joint(1, Side::Chunk(0), at(0.5), Vec3::X, area, strong),
+        joint(2, Side::Chunk(1), at(1.5), Vec3::X, area, strong),
+        joint(3, Side::Chunk(2), at(2.5), Vec3::X, area, inner),
+    ];
+    (structure(chunks, vec![0, 0, 1, 1], joints), area)
+}
+
+/// A LANDING'S INTERFACES HAND THEIR FORCE ON TO THE NEXT PART'S KERNEL. A free chain pulled at
+/// one end accelerates as one body, so the joint before its last chunk carries that chunk's share
+/// F/4 (DERIVED, equal masses), though no contact touches that part: without the interface's
+/// force on it, its kernel would judge an unloaded part. The law's cracks rely on this to lie
+/// where the force runs.
+#[test]
+fn a_landing_force_reaches_the_part_it_does_not_touch() {
+    let pull = 4e6_f32;
+    let breaks = |margin: f32| {
+        let area = free_chain(Bond::Resting).1;
+        let strength = pull / 4.0 / area * margin;
+        let (structure, _) = free_chain(Bond::Bonded(seam(strength, 1e12)));
+        let design = Assessment::at_rest(&structure).kernels;
+        let mut state = State::new(&structure);
+        let load = press(0, Vec3::ZERO, Vec3::NEG_X * pull);
+        Assessment::landing(&design, &structure, &mut state, &[load])
+            .failures
+            .iter()
+            .any(|failure| failure.joint == 2 && matches!(failure.cause, Cause::Tension))
+    };
+    assert!(breaks(0.99), "past the carried F/4 the far joint cracks");
+    assert!(!breaks(1.01), "the far joint carries F/4 and no more");
+}
+
+/// A PARTING COSTS NOTHING, A CRACK COSTS ITS FRACTURE WORK. A landing that dissipated no energy
+/// still lets a rest open under a pull, since no seam is broken there, and pays for no bond,
+/// however overloaded. The energy conservation of the crumble law relies on the split.
+#[test]
+fn a_landing_with_no_energy_parts_a_rest_and_cracks_no_bond() {
+    let (side, area) = (0.4_f32, 0.04_f32);
+    let at = |x: f32| Vec3::new(x, 0.0, 0.0);
+    let bond = Bond::Bonded(seam(1.0, 1e12));
+    let structure = structure(
+        (0..3).map(|i| cube(at(i as f32), side, false)).collect(),
+        vec![0, 1, 2],
+        vec![
+            joint(1, Side::Chunk(0), at(0.5), Vec3::X, area, Bond::Resting),
+            joint(2, Side::Chunk(1), at(1.5), Vec3::X, area, bond),
+        ],
+    );
+    let design = Assessment::at_rest(&structure).kernels;
+    let touch = |chunk: usize, force: Vec3| crate::debris::crumble::Touch {
+        chunk,
+        at: structure.chunks[chunk].centroid,
+        force,
+    };
+    let landed = crate::debris::crumble::crumble(
+        &structure,
+        &State::new(&structure),
+        &design,
+        &[0, 1, 2],
+        &[touch(0, Vec3::NEG_X * 1e6), touch(2, Vec3::X * 1e6)],
+        0.0,
+    );
+    assert_eq!(landed.separated, vec![0], "the rest opens for free");
+    assert!(landed.cracked.is_empty(), "no energy pays for a bond");
+    assert_eq!(landed.spent, 0.0);
+    assert_eq!(landed.fragments, vec![vec![0], vec![1, 2]]);
+}
+
+/// A DESIGN KERNEL ANSWERS ONLY FOR THE PART IT WAS FACTORED ON. Its stiffness holds every joint
+/// as designed, so a landing reusing it past a crack, a parting or another chunk set would judge
+/// a joint on stiffness that joint no longer has.
+#[test]
+fn a_design_kernel_is_current_only_on_its_own_intact_chunks() {
+    let (structure, _) = free_chain(Bond::Bonded(seam(1e12, 1e12)));
+    let pristine = State::new(&structure);
+    let design = Kernel::of(&structure, &pristine, &[0, 1]);
+    assert!(design.current(&structure, &pristine, &[0, 1]));
+    assert!(!design.current(&structure, &pristine, &[2, 3]));
+    let mut cracked = pristine.clone();
+    cracked.cracked[0] = true;
+    assert!(!design.current(&structure, &cracked, &[0, 1]));
+    let mut parted = pristine;
+    parted.separated[0] = true;
+    assert!(!design.current(&structure, &parted, &[0, 1]));
+}

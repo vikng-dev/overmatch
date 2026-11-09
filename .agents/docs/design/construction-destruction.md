@@ -861,12 +861,13 @@ anchors is balanced by its rigid acceleration and gauged at its first chunk. Joi
 outside the set are no edge: their force is the caller's load. A heavily cracked set can be a
 mechanism: the joints its free motion moves part (`Slide`, as at part scale), every event on it
 reports them, and the rest is factored again. It is factored once per element
-design at load (`Assessment::kernels`) and again only for a part whose chunks changed, and it runs
+design at load (`Assessment::kernels`) and again only for a part that no longer matches its design
+(`Kernel::current`: other chunks, or a joint cracked or parted), and it runs
 only on events through one entry, `Kernel::hold(structure, loads)`: per chunk, the loads beside
 gravity (the forces its other interfaces hand it, contacts, presses), returning each joint's
 carried wrench, the bonds that crack (tension past `f_t`, or shear past cohesion plus friction on
-compression) and the push-only joints the field pulls apart. A landing's seam cracks read the
-same entry with the landing's contact loads.
+compression) and the push-only joints the field pulls apart. A landing reaches the same entry
+through the same two levels (**Crumble on landing**).
 
 **Holes.** When chunks are removed, each part beside them is solved at chunk scale for gravity,
 the presses on its chunks and the sustained forces its other interfaces hand it, friction included
@@ -1102,19 +1103,29 @@ stating neither is refused at the load gate), the ground by
 `ground_youngs_modulus_pa` and `ground_poisson_ratio` (`Unknown`, `physical_laws.ron`), or a body
 with no stiffness data, such as a hull, as rigid (StandIn). The solver's step enters nowhere: the
 contact's stiffness sets how hard it stops. The patch's peak, and each point's press, is a force on
-the chunk it touches. The group's chunk kernel (**Inside a standing part**,
-`Kernel::hold`) balances those forces by the group's rigid acceleration, so uniform gravity
-cancels and the internal forces are the inertial relief, and judges every joint: a bond past its
-tensile strength, or past its cohesion plus friction, cracks and bears only push; a joint the
-field pulls apart parts. The field is solved again on what is left until it holds (at most 16
-passes, `Resolution`); once a joint parts, a touched fragment takes only its share `m_f / M` of the
+the chunk it touches. A standing building's two levels judge those forces, one pass at a time
+(`Assessment::landing`). A part is what it is there: the chunks of one element joined by intact
+bonds, and since a falling group's bonds change as it cracks, the part graph is rebuilt each pass.
+The graph is balanced by the group's rigid acceleration, so uniform gravity cancels and the
+internal forces are the inertial relief. Its contacts settle by the standing law's active set: a
+rest that lifts or tips opens, and one past its friction slips for that pass. The part law judges
+each interface, which cracks whole. Each part's kernel (**Inside a standing part**, `Kernel::hold`)
+then judges the joints inside it, under the presses on its chunks and the forces its interfaces
+hand them: a bond past its tensile strength, or past its cohesion plus friction, cracks and bears
+only push; a joint the field pulls apart parts. A part still as designed reuses its load-time
+factor; one that is not, always the case for an element released from its anchors, is factored for
+the pass. The field is solved again on what is left until it holds (at most 16 passes,
+`Resolution`); once a joint parts, a touched fragment takes only its share `m_f / M` of the
 landing's force, the momentum a plastic stop of that fragment alone needs (DERIVED). Cracks lie
-where the force runs, and a short drop cracks nothing.
+where the force runs, and a short drop cracks nothing. The law runs on the authority alone
+(ADR-0037): players receive the dust record, the sheds and the pieces. Everything it builds lives
+for the pass, so no sim state is added (ADR-0014).
 
 Energy is conserved, not capped. A crack absorbs its fracture work `G × A`: its seam's fracture
 energy in the failing mode (`fracture_energy`, mode I, for tension; `shear.energy`, mode II, for
 shear; material data with their own labels) over the joint's area. A parting holds by no cohesion
-and costs nothing. All cracks together never absorb more than the kinetic energy the landing
+and costs nothing, so a parting commits whatever energy is left, at either level. All cracks
+together never absorb more than the kinetic energy the landing
 dissipated, `E = ½ Σ |J_i| v_i` over its blows and closing speeds (DERIVED, a plastic impact).
 When the other side is a moving group crumbling from the same collision, each side reads that one
 collision with its one effective mass and closing speed, so each spends only its own compliance's
@@ -1176,12 +1187,15 @@ it, and two players drawing one event at one cursor draw one pose.
 lowest course, it cracks nothing below a 0.48 m drop (DERIVED from the seams' strengths and the
 two sides' stiffness, `a_short_drop_lands_whole`; on a rigid floor, 1.1 cm); from 10 m it cracks 28
 bonds, parts 19 joints and stays one server body. Through one corner chunk, a 1 cm drop (28.6 kN
-peak) cracks nothing; 10 cm (114 kN) cracks 119 bonds into 23 fragments, 2 kept as server bodies;
-10 m, 29 fragments, 1 kept. The cracks absorb 87–122 J of the landing's 1.7–168 kJ. The corner's
+peak) cracks nothing; 10 cm (114 kN) cracks 108 bonds into 21 fragments, 3 kept as server bodies;
+10 m, 44 fragments, 1 kept. The cracks absorb 82–117 J of the landing's 1.7–168 kJ. The corner's
 peak against this ground is close to the step-based force it replaced, so the corner's breakup
-does not come from the solver's step. A landing that cracks nothing costs 0.55 M scalar
-operations, its kernel's factorization included (DERIVED); a cracking one 1.2–3.2 M over its
-passes.
+does not come from the solver's step. A landing that cracks nothing costs 1.0 M scalar
+operations, the kernel's factorization included, this element having lost its anchors (DERIVED); a
+cracking one 1.4–5.8 M over its passes. Over the one-house schedule (`scripts/perf/collapse.sh`,
+local rehearsal, one house, 30 tanks; DERIVED counts of one run) the collapse's six impact ticks
+cost 6.4–7.6 M, and the heaviest landing tick of the run 10.6 M. The rejected path, one solve of
+each group's whole chunk graph at every pass, costs 25–35 M on those ticks.
 
 ## Rubble settlement and the cap
 

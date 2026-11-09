@@ -878,6 +878,9 @@ pub(crate) enum Origin {
     /// another plastic exchange. Joint geometry supplies bearing directions; contacts supply
     /// applied loads.
     Contact { other: Entity, step: f32 },
+    /// A moving group's own landing: the force its contact put on one of its chunks. Only the
+    /// landing's part solve reads it, and a landing launches nothing.
+    Landing,
 }
 
 impl Load {

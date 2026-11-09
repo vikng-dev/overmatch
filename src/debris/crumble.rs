@@ -7,15 +7,15 @@
 //! sampling changes nothing. Each patch's blow peaks as two elastic bodies stopping each other do
 //! ([`peak_force`], [`crate::contact_law`]), from the two sides' stiffness and curvature, never
 //! from the solver's step; it and each point's press are forces on the chunk they touch
-//! ([`touches`]). The group's chunk kernel
-//! ([`Kernel::hold`]) balances those forces by the group's rigid acceleration and judges every
-//! joint in the field that leaves: a bond past its strength cracks, a joint pulled apart parts,
-//! and the field is solved again on what is left until it holds. Cracks therefore lie where the
-//! force runs. Energy conserves: the cracks absorb their fracture
-//! work, each bond's fracture energy in its failing mode over its area ([`crack_work`]), and all of
-//! them together never more than the kinetic energy the landing dissipated, `E = ½ Σ |J_i| v_i`
-//! over its blows and closing speeds (DERIVED, a plastic impact), shared with a moving group on the
-//! other side by compliance ([`touches`]). Past that, the most overloaded
+//! ([`touches`]). The standing law's two levels ([`Assessment::landing`]) balance those forces by
+//! the group's rigid acceleration and judge every joint: an interface between parts by the part
+//! graph, a joint inside a part by that part's kernel. What opens at no fracture work parts, a
+//! bond past its strength cracks, and the field is solved again on what is left until it holds.
+//! Cracks therefore lie where the force runs. Energy conserves: the cracks absorb their fracture
+//! work, each bond's fracture energy in its failing mode over its area ([`crack_work`]), and all
+//! of them together never more than the kinetic energy the landing dissipated,
+//! `E = ½ Σ |J_i| v_i` over its blows and closing speeds (DERIVED, a plastic impact), shared with
+//! a moving group on the other side by compliance ([`touches`]). Past that, the most overloaded
 //! crack first, it stops at the first the energy left cannot pay. What stays connected over the
 //! joints that did not part is a fragment.
 //!
@@ -36,9 +36,8 @@ use crate::construction::Element;
 use crate::construction::breakage::{
     Breakage, ChunkCollider, Entry, Event, PendingSplit, Piece, Record, ReleasedMotion,
 };
-use crate::construction::fracture::bondsolve::Wrench;
-use crate::construction::fracture::parts::Kernel;
-use crate::construction::fracture::{Cause, Failure, Fate, Side, State, Structure};
+use crate::construction::fracture::parts::{Assessment, Kernel};
+use crate::construction::fracture::{Cause, Failure, Fate, Load, Origin, Side, State, Structure};
 use crate::contact_law::{Contactor, peak_force};
 use crate::contact_transfer::ContactTransfers;
 use crate::cost::stages::{Stage, Stages, Work};
@@ -66,7 +65,8 @@ pub(crate) struct Crumble {
     /// What stays connected over the joints that did not part, each ascending, ordered by its
     /// first chunk.
     pub(crate) fragments: Vec<Vec<usize>>,
-    /// Scalar operations of its passes, each kernel's factorization and solve, a DERIVED count.
+    /// Scalar operations of its passes, the part graph's and each kernel's factors and solves, a
+    /// DERIVED count.
     pub(crate) work: u64,
     /// Field evaluations attempted by this landing, including its final holding pass.
     pub(crate) passes: usize,
@@ -84,18 +84,21 @@ pub(crate) fn crack_work(structure: &Structure, j: usize, cause: Cause) -> f32 {
     }
 }
 
-/// The kernel's loads for `touches` on `group` (ascending): each touch's force about its chunk's
-/// centroid, summed per chunk.
-fn loads(structure: &Structure, group: &[usize], touches: &[Touch]) -> Vec<Wrench> {
-    let mut loads = vec![Wrench::default(); group.len()];
-    for touch in touches {
-        let node = group
-            .binary_search(&touch.chunk)
-            .expect("a landing touches the group's own chunks");
-        let arm = touch.at - structure.chunks[touch.chunk].centroid;
-        loads[node].add(Wrench::at(touch.force.as_dvec3(), arm.as_dvec3()), 1.0);
-    }
-    loads
+/// `touches` as the part solve's sources: each a force held on its chunk.
+fn loads(touches: &[Touch]) -> Vec<Load> {
+    touches
+        .iter()
+        .map(|touch| Load {
+            chunk: touch.chunk,
+            at: touch.at,
+            energy: 0.0,
+            crushed: 0.0,
+            blow: Vec3::ZERO,
+            press: touch.force,
+            peak: None,
+            origin: Origin::Landing,
+        })
+        .collect()
 }
 
 /// The overload a failure carries: demand over capacity, unbounded for a joint that only parts.
@@ -147,13 +150,14 @@ pub(crate) fn fragments(structure: &Structure, state: &State, group: &[usize]) -
 }
 
 /// The landing `touches` on `group` (ascending, owned by `state`), which dissipated `energy` J
-/// (module doc): the field is solved again after each pass's failures, the cracked bonds bearing
-/// only push, until it holds, the energy is spent or [`PASSES`] end. Once a joint parts, a touched
-/// fragment takes only its share `m_f / M` of the landing's force: the momentum a plastic stop of
-/// that fragment alone needs (DERIVED).
+/// (module doc), on its design's `kernels`: the field is solved again after each pass's failures,
+/// the cracked bonds bearing only push, until it holds, the energy is spent or [`PASSES`] end.
+/// Once a joint parts, a touched fragment takes only its share `m_f / M` of the landing's force:
+/// the momentum a plastic stop of that fragment alone needs (DERIVED).
 pub(crate) fn crumble(
     structure: &Structure,
     state: &State,
+    kernels: &[Kernel],
     group: &[usize],
     touches: &[Touch],
     energy: f32,
@@ -185,11 +189,11 @@ pub(crate) fn crumble(
                 ..*touch
             })
             .collect();
-        let kernel = Kernel::of(structure, &after, group);
-        let hold = kernel.hold(structure, &loads(structure, group, &shared));
-        work += kernel.factor.ops + hold.work;
-        let mut failures = hold.failures;
-        if failures.is_empty() {
+        let pass = Assessment::landing(kernels, structure, &mut after, &loads(&shared));
+        work += pass.work;
+        separated.extend(&pass.parted);
+        let mut failures = pass.failures;
+        if failures.is_empty() && pass.parted.is_empty() {
             break; // The field holds.
         }
         failures.sort_by(|a, b| {
@@ -208,7 +212,7 @@ pub(crate) fn crumble(
                 after.cracked[j] = true;
                 cracked.push(j);
             }
-            if hold.separated.contains(&j) {
+            if pass.separated.contains(&j) {
                 after.separated[j] = true;
                 separated.push(j);
             }
@@ -670,8 +674,16 @@ fn crumble_landings(
                 let (energy, touches) = &landings[&entity];
                 let owned: Vec<usize> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
                 let frame = breakage.physics_frame(pose);
+                let kernels = breakage.kind.equilibrium.kernels.clone();
                 let live = breakage.live.as_mut();
-                let mut result = crumble(&live.structure, &live.state, &owned, touches, *energy);
+                let mut result = crumble(
+                    &live.structure,
+                    &live.state,
+                    &kernels,
+                    &owned,
+                    touches,
+                    *energy,
+                );
                 if let Some(stages) = stages.as_deref() {
                     stages.add(Work::Landings, 1);
                     stages.add(Work::LandingPasses, result.passes as u64);

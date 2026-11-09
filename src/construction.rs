@@ -73,7 +73,7 @@ pub(crate) struct ConstructionKind {
     pub(crate) dressing: view::Dressing,
     /// Checked geometry and initial gravity, shared until an instance changes.
     structure: Arc<fracture::Structure>,
-    equilibrium: Arc<fracture::parts::Assessment>,
+    pub(crate) equilibrium: Arc<fracture::parts::Assessment>,
     pub(crate) sweep: sweep::Geometry,
 }
 
