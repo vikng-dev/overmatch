@@ -843,7 +843,15 @@ crack changes topology for the next tick.
   Resolution √1e-9 of the most any joint does carries it, since the mode moves a stiff joint by
   about 1e-9 of a free one. A fallen coordinate is held for the rest of the elimination, so one
   factorization finds every mechanism the held coordinates leave free and they part together:
-  a shattered group's independent mechanisms cost one failed factorization, not one each.
+  a shattered group's independent mechanisms cost one failed factorization, not one each, and
+  the result no longer depends on the order of cuts. Known limit: holding a coordinate only
+  stiffens what remains under exact symmetric stiffness (DERIVED), and a slipping patch's matrix
+  is nonsymmetric. Coupled slips can classify a second node negative after the first is held,
+  parting a rest that cuts made one at a time would have kept (DERIVED on a two-node graph;
+  whether a baked construction reaches it is unverified). Replaying 7825 captured landings
+  against the one-at-a-time order (MEASURED): 4 differ, by +2 to +6 parted joints, none kept
+  that the order parted, and at most one more fragment. How a house breaks is not pinned, and
+  that order was never a physical truth.
 - Separation is permanent: no re-close. What lifts, tips or slides as a mechanism leaves the
   graph; once released, Avian owns its motion. The ledger records `Crack` and `Separate` per
   joint, and replicas derive support from those causes without any equilibrium; a slip is

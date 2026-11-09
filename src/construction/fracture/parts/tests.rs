@@ -2014,7 +2014,8 @@ fn factor_counts_include_failure_and_distinguish_reused_ordering() {
             .unwrap();
         let mut edge = graph.edges[0].clone();
         edge.shear_stiffness = 0.0;
-        Factor::new(&graph.nodes, &[edge]).unwrap_err();
+        let (failed, mechanisms) = Factor::new(&graph.nodes, &[edge]).unwrap_err();
+        failed.mode(mechanisms[0].column);
     });
     // Outside the owner scope, factors do not contribute to a recorder from an earlier task.
     Factor::new(&graph.nodes, &graph.edges).unwrap();
@@ -2025,10 +2026,11 @@ fn factor_counts_include_failure_and_distinguish_reused_ordering() {
     assert_eq!(counts["factor_ordering_builds"], 3);
     // DERIVED, the fixture's elimination to its last column: the first (x) passes, 6 rows; the
     // Y, Z and X-rotation pivots fall and are held, the two bending rotations pass (2 + 1 rows),
-    // and each column updates its rows from every column before it (4 operations per row).
+    // and each column updates its rows from every column before it (4 operations per row). The
+    // free motion then back-substitutes through the one column before the first fallen pivot.
     assert_eq!(
         counts["factor_failed_ops"],
-        6 + 2 + 1 + 4 * (5 + 8 + 9 + 8 + 5)
+        6 + 2 + 1 + 4 * (5 + 8 + 9 + 8 + 5) + 5 * 2 + 1
     );
 }
 

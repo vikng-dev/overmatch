@@ -601,7 +601,9 @@ impl FactorPattern {
     /// Factor `edges`. Every node with a coordinate that falls is reported, each once: a fallen
     /// coordinate is held for the rest of the elimination, so one factorization finds every
     /// mechanism the held coordinates leave free, and a shattered group's independent ones cost
-    /// one failed factorization together. On `Err`, `factor` serves only [`Factor::mode`].
+    /// one failed factorization together. Under a slip's nonsymmetric stiffness a hold can report
+    /// a node that cuts made in turn would keep, a limit the construction design states. On
+    /// `Err`, `factor` serves only [`Factor::mode`].
     fn refactor(
         &mut self,
         factor: &mut Factor,
@@ -758,6 +760,7 @@ impl Factor {
         // unit pivot and empty row leave its coordinate at zero.
         let mut x = vec![0.0; self.columns.len()];
         x[column] = 1.0;
+        let mut ops = 0;
         for c in (0..column).rev() {
             let entry = &self.columns[c];
             let sum: f64 = entry
@@ -768,7 +771,10 @@ impl Factor {
                 .map(|(&i, &u)| u * x[i])
                 .sum();
             x[c] = -sum / entry.upper[0];
+            // DERIVED: multiply + add per upper entry, then one division.
+            ops += 2 * (entry.rows.len() - 1) as u64 + 1;
         }
+        count_factor(crate::cost::stages::Work::FactorFailedOps, ops);
         self.map
             .iter()
             .map(|&base| base.map_or_else(Wrench::default, |b| wrench(&x[b..b + 6])))
