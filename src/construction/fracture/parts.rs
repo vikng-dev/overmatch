@@ -430,30 +430,31 @@ pub(crate) struct Factor {
     pub ops: u64,
 }
 
-/// A node graph's stiffness that leaves a motion free within [`MECHANISM`].
-#[derive(Clone, Debug, PartialEq)]
+/// A node whose pivot fell below [`MECHANISM`] of its elastic diagonal: its stiffness leaves a
+/// motion free. One factorization reports each such node once.
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Mechanism {
-    /// The node whose pivot fell.
     node: usize,
-    /// Per node, the free motion: that pivot's coordinate moved by one, every node ordered
-    /// after it held, and the nodes before it in equilibrium. A fixed node does not move.
-    mode: Vec<Wrench>,
+    /// The first of its coordinates to fall.
+    column: usize,
 }
 
 impl Mechanism {
-    /// The edges that carry its motion: those whose two sides move apart, over their patch, by
-    /// more than `√MECHANISM` of the most any edge does (Resolution: the mode moves a stiff
-    /// edge by about [`MECHANISM`] of a free one, so the geometric mean parts the two).
-    fn carriers(&self, nodes: &[Node], edges: &[Edge]) -> Vec<usize> {
+    /// The edges that carry its motion in `factor`, the factorization that found it: those whose
+    /// two sides move apart, over their patch, by more than `√MECHANISM` of the most any edge
+    /// does (Resolution: the mode moves a stiff edge by about [`MECHANISM`] of a free one, so
+    /// the geometric mean parts the two).
+    fn carriers(&self, factor: &Factor, nodes: &[Node], edges: &[Edge]) -> Vec<usize> {
+        let mode = factor.mode(self.column);
         let motion = |e: &Edge| {
             let at = |n: usize| {
-                let w = self.mode[n];
+                let w = mode[n];
                 w.linear + w.angular.cross(e.centre - nodes[n].centre)
             };
-            let (mut shift, mut turn) = (at(e.a), self.mode[e.a].angular);
+            let (mut shift, mut turn) = (at(e.a), mode[e.a].angular);
             if let Some(b) = e.b {
                 shift -= at(b);
-                turn -= self.mode[b].angular;
+                turn -= mode[b].angular;
             }
             // The patch's radius of gyration turns a rotation into the motion over its area.
             shift.length() + turn.length() * e.patch.polar.sqrt()
@@ -597,12 +598,16 @@ impl FactorPattern {
         }
     }
 
+    /// Factor `edges`. Every node with a coordinate that falls is reported, each once: a fallen
+    /// coordinate is held for the rest of the elimination, so one factorization finds every
+    /// mechanism the held coordinates leave free, and a shattered group's independent ones cost
+    /// one failed factorization together. On `Err`, `factor` serves only [`Factor::mode`].
     fn refactor(
         &mut self,
         factor: &mut Factor,
         nodes: &[Node],
         edges: &[Edge],
-    ) -> Result<(), Mechanism> {
+    ) -> Result<(), Vec<Mechanism>> {
         // One attempt per numeric factorization; Factor::new delegates here.
         count_factor(crate::cost::stages::Work::FactorAttempts, 1);
         self.prepare(factor, nodes, edges);
@@ -674,6 +679,7 @@ impl FactorPattern {
         }
         let (mut lower, mut upper) = (vec![0.0; n], vec![0.0; n]);
         let mut ops = 0;
+        let mut mechanisms = Vec::new();
         for j in 0..n {
             let c = &columns[j];
             for ((&i, &l), &u) in c.rows.iter().zip(&c.values).zip(&c.upper) {
@@ -699,32 +705,18 @@ impl FactorPattern {
                  has finite pivots"
             );
             if lower[j] <= MECHANISM * elastic[j] {
-                // DERIVED: rows before `j` of `K x = 0`, with `x_j = 1` and every later
-                // coordinate held, are `U₁₁ x₁ = −U₁₂ e_j`: the factor's own back-substitution.
-                let mut x = vec![0.0; n];
-                x[j] = 1.0;
-                for c in (0..j).rev() {
-                    let column = &columns[c];
-                    let sum: f64 = column
-                        .rows
-                        .iter()
-                        .zip(&column.upper)
-                        .skip(1)
-                        .map(|(&i, &u)| u * x[i])
-                        .sum();
-                    x[c] = -sum / column.upper[0];
-                    // DERIVED: multiply + add per upper entry, then one division.
-                    ops += 2 * (column.rows.len() - 1) as u64 + 1;
+                let node = order[j / 6];
+                if mechanisms.last().is_none_or(|m: &Mechanism| m.node != node) {
+                    mechanisms.push(Mechanism { node, column: j });
                 }
-                count_factor(crate::cost::stages::Work::FactorFailures, 1);
-                count_factor(crate::cost::stages::Work::FactorFailedOps, ops);
-                return Err(Mechanism {
-                    node: order[j / 6],
-                    mode: map
-                        .iter()
-                        .map(|&base| base.map_or_else(Wrench::default, |b| wrench(&x[b..b + 6])))
-                        .collect(),
-                });
+                // Held: a unit pivot with an empty row and column drops the coordinate from
+                // every later elimination.
+                let c = &mut columns[j];
+                c.values.fill(0.0);
+                c.upper.fill(0.0);
+                c.values[0] = 1.0;
+                c.upper[0] = 1.0;
+                continue;
             }
             let pivot = lower[j];
             let c = &mut columns[j];
@@ -736,18 +728,51 @@ impl FactorPattern {
             }
             ops += c.rows.len() as u64;
         }
+        if !mechanisms.is_empty() {
+            count_factor(crate::cost::stages::Work::FactorFailures, 1);
+            count_factor(crate::cost::stages::Work::FactorFailedOps, ops);
+            return Err(mechanisms);
+        }
         factor.ops = ops;
         Ok(())
     }
 }
 
 impl Factor {
-    /// The factor, or the mechanism whose pivot fell below [`MECHANISM`] of its elastic diagonal.
-    fn new(nodes: &[Node], edges: &[Edge]) -> Result<Self, Mechanism> {
+    /// The factor, or the failed factorization and every mechanism it found.
+    fn new(nodes: &[Node], edges: &[Edge]) -> Result<Self, (Self, Vec<Mechanism>)> {
         count_factor(crate::cost::stages::Work::FactorNewCalls, 1);
         let mut factor = Self::default();
-        FactorPattern::default().refactor(&mut factor, nodes, edges)?;
-        Ok(factor)
+        match FactorPattern::default().refactor(&mut factor, nodes, edges) {
+            Ok(()) => Ok(factor),
+            Err(mechanisms) => Err((factor, mechanisms)),
+        }
+    }
+
+    /// Per node, the free motion of the coordinate at `column` in a failed factorization: that
+    /// coordinate moved by one, every later coordinate held, as are those that fell before it,
+    /// and the rest before it in equilibrium. A fixed node does not move.
+    fn mode(&self, column: usize) -> Vec<Wrench> {
+        // DERIVED: rows before `j` of `K x = 0`, with `x_j = 1` and every later coordinate
+        // held, are `U₁₁ x₁ = −U₁₂ e_j`: the factor's own back-substitution. A held column's
+        // unit pivot and empty row leave its coordinate at zero.
+        let mut x = vec![0.0; self.columns.len()];
+        x[column] = 1.0;
+        for c in (0..column).rev() {
+            let entry = &self.columns[c];
+            let sum: f64 = entry
+                .rows
+                .iter()
+                .zip(&entry.upper)
+                .skip(1)
+                .map(|(&i, &u)| u * x[i])
+                .sum();
+            x[c] = -sum / entry.upper[0];
+        }
+        self.map
+            .iter()
+            .map(|&base| base.map_or_else(Wrench::default, |b| wrench(&x[b..b + 6])))
+            .collect()
     }
 
     /// Unknown coordinates: six per free part.
@@ -1117,7 +1142,8 @@ impl Assessment {
         parted
     }
 
-    /// A mechanism removes interfaces; rigid membership changes only at the next topology rebuild.
+    /// Factor the part graph, removing the interfaces of every mechanism each factorization
+    /// finds until one passes; rigid membership changes only at the next topology rebuild.
     fn refactor(&mut self, structure: &Structure, state: &mut State) -> Vec<Failure> {
         let mut lost = Vec::new();
         // A slip ends with its joint: once it opens or its chunks fall.
@@ -1129,18 +1155,24 @@ impl Assessment {
                     .refactor(&mut self.factor, &self.graph.nodes, &self.graph.edges);
             match refactored {
                 Ok(()) => break,
-                Err(mechanism) => {
-                    let mut joints = self.graph.mechanism(mechanism.node);
-                    if joints.is_empty() {
-                        // No slip made it: the joints its free motion moves are too slight to
-                        // hold it (a remnant of removed or cracked matter), and they part.
-                        joints = mechanism
-                            .carriers(&self.graph.nodes, &self.graph.edges)
-                            .into_iter()
-                            .map(|e| self.graph.joints[e])
-                            .collect();
+                Err(mechanisms) => {
+                    let mut parted = std::collections::BTreeSet::new();
+                    for mechanism in &mechanisms {
+                        let joints = self.graph.mechanism(mechanism.node);
+                        if joints.is_empty() {
+                            // No slip made it: the joints its free motion moves are too slight
+                            // to hold it (a remnant of removed or cracked matter), and they part.
+                            parted.extend(
+                                mechanism
+                                    .carriers(&self.factor, &self.graph.nodes, &self.graph.edges)
+                                    .into_iter()
+                                    .map(|e| self.graph.joints[e]),
+                            );
+                        } else {
+                            parted.extend(joints);
+                        }
                     }
-                    for j in joints {
+                    for j in parted {
                         state.cracked[j] = true;
                         state.separated[j] = true;
                         self.slipping.remove(&j);

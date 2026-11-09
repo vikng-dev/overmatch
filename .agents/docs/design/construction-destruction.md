@@ -838,9 +838,12 @@ crack changes topology for the next tick.
   the physics engine, which owns sliding bodies. A mechanism no slipping rest made (removal or
   cracks leave a part on a joint too slight to hold it) separates the joints its free motion
   moves (`parts::Mechanism`): the mode with the fallen pivot's coordinate moved by one, every
-  later coordinate held and the earlier ones in equilibrium (DERIVED from the factor's own
-  back-substitution); a joint whose sides move apart by more than Resolution √1e-9 of the most
-  any joint does carries it, since the mode moves a stiff joint by about 1e-9 of a free one.
+  later coordinate and every coordinate fallen before it held and the others in equilibrium
+  (DERIVED from the factor's own back-substitution); a joint whose sides move apart by more than
+  Resolution √1e-9 of the most any joint does carries it, since the mode moves a stiff joint by
+  about 1e-9 of a free one. A fallen coordinate is held for the rest of the elimination, so one
+  factorization finds every mechanism the held coordinates leave free and they part together:
+  a shattered group's independent mechanisms cost one failed factorization, not one each.
 - Separation is permanent: no re-close. What lifts, tips or slides as a mechanism leaves the
   graph; once released, Avian owns its motion. The ledger records `Crack` and `Separate` per
   joint, and replicas derive support from those causes without any equilibrium; a slip is

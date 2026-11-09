@@ -163,10 +163,16 @@ impl Kernel {
             }
             match Factor::new(&nodes, &edges) {
                 Ok(factor) => break (factor, free),
-                Err(mechanism) => {
+                Err((failed, mechanisms)) => {
                     // Loose chunks: the joints their free motion moves part, and the rest is
                     // factored again. Each pass parts at least one joint, so it ends.
-                    for e in mechanism.carriers(&nodes, &edges).into_iter().rev() {
+                    let mut carriers: Vec<usize> = mechanisms
+                        .iter()
+                        .flat_map(|m| m.carriers(&failed, &nodes, &edges))
+                        .collect();
+                    carriers.sort_unstable();
+                    carriers.dedup();
+                    for e in carriers.into_iter().rev() {
                         edges.remove(e);
                         loose.push(joints.remove(e));
                     }

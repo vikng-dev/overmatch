@@ -1279,13 +1279,51 @@ fn a_friction_lowered_diagonal_still_finds_the_mechanism() {
     };
     let slipping = BTreeMap::from([(0, slip(up)), (1, slip(DVec3::X))]);
     let graph = Graph::of(&structure, &State::new(&structure), &slipping);
-    let mechanism = Factor::new(&graph.nodes, &graph.edges).expect_err("the block is free along t");
-    let motion = mechanism.mode[0].linear;
+    let (failed, mechanisms) =
+        Factor::new(&graph.nodes, &graph.edges).expect_err("the block is free along t");
+    let motion = failed.mode(mechanisms[0].column)[0].linear;
     let normal = graph.edges[0].normal;
     assert!(
         motion.dot(normal).abs() <= 1e-9 * motion.length(),
         "the free motion runs along the steep rest: {motion} against {normal}"
     );
+}
+
+/// A group that shatters on landing leaves many independent mechanisms at once: one failed
+/// factorization reports them all, and their slipping rests part together. A mutant that stops
+/// at the first fallen pivot pays one factorization per block, the cost this invariant removes
+/// from the landing solve.
+#[test]
+fn one_factorization_parts_every_independent_mechanism() {
+    use crate::cost::stages::Stages;
+    let side = 0.4_f32;
+    let blocks = [Vec3::ZERO, Vec3::X * 2.0];
+    let chunks = blocks
+        .iter()
+        .map(|&at| cube(at + Vec3::Y * (side / 2.0), side, false))
+        .collect();
+    let joints = blocks
+        .iter()
+        .enumerate()
+        .map(|(c, &at)| joint(c, Side::Ground, at, Vec3::Y, 0.04, Bond::Resting))
+        .collect();
+    let structure = structure(chunks, vec![0, 1], joints);
+    let slip = Slip {
+        force: DVec3::X,
+        twist: DVec3::ZERO,
+    };
+    let mut assessment = Assessment {
+        slipping: BTreeMap::from([(0, slip), (1, slip)]),
+        ..Assessment::default()
+    };
+    let mut state = State::new(&structure);
+    let stages = Stages::default();
+    let lost = record_factors(Some(&stages), || assessment.rebuild(&structure, &mut state));
+    assert_eq!(lost.iter().map(|f| f.joint).collect::<Vec<_>>(), vec![0, 1]);
+    assert!(lost.iter().all(|f| f.cause == Cause::Slide));
+    let counts = serde_json::to_value(stages.take_counts()).unwrap();
+    assert_eq!(counts["factor_failures"], 1);
+    assert_eq!(counts["factor_attempts"], 2);
 }
 
 fn shipped(id: &str) -> crate::construction::ConstructionLibrary {
@@ -1985,9 +2023,13 @@ fn factor_counts_include_failure_and_distinguish_reused_ordering() {
     assert_eq!(counts["factor_new_calls"], 2);
     assert_eq!(counts["factor_failures"], 1);
     assert_eq!(counts["factor_ordering_builds"], 3);
-    // DERIVED: first 6-row column's factor-operation count, 5 trailing row updates (4 operations),
-    // then its 5-entry back-substitution and division at the failed second pivot.
-    assert_eq!(counts["factor_failed_ops"], 6 + 5 * 4 + 5 * 2 + 1);
+    // DERIVED, the fixture's elimination to its last column: the first (x) passes, 6 rows; the
+    // Y, Z and X-rotation pivots fall and are held, the two bending rotations pass (2 + 1 rows),
+    // and each column updates its rows from every column before it (4 operations per row).
+    assert_eq!(
+        counts["factor_failed_ops"],
+        6 + 2 + 1 + 4 * (5 + 8 + 9 + 8 + 5)
+    );
 }
 
 /// The game's scenery recorder counts kernel input chunks once, while retries count as fresh
