@@ -27,6 +27,42 @@ def tick_fixture(i, tanks):
 
 
 class CollapseTests(unittest.TestCase):
+    def test_headless_frame_counts_distinguish_clients_that_keep_up(self):
+        # Fixture: a healthy 100 Hz update stream and an overloaded 25 Hz stream.
+        log = "client: connected (entity fixture)\nharness: released frame_s=0.000\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "frames.jsonl"
+            for step, healthy in [(0.01, True), (0.04, False)]:
+                path.write_text("".join(json.dumps(dict(t=i * step, frame_ms=step * 1000)) + "\n"
+                                        for i in range(int(10 / step))))
+                counts = collapse.client_frames(log, path, 10)
+                self.assertEqual(counts["keeping_up"], healthy)
+            with self.assertRaisesRegex(RuntimeError, "one connection"):
+                collapse.client_frames(log + log, path, 10)
+            path.write_text("{bad}\n")
+            with self.assertRaisesRegex(RuntimeError, "malformed frame row"):
+                collapse.client_frames(log, path, 10)
+
+    def test_bunched_fast_frames_do_not_hide_missing_update_slots(self):
+        # Fixture: 100 frames/s, 95% short frames, but long gaps cover most wall-clock ticks.
+        log = "client: connected (entity fixture)\nharness: released frame_s=0.000\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "frames.jsonl"
+            path.write_text("".join(json.dumps(dict(t=burst / 5 + i / 1000,
+                frame_ms=181 if i == 0 else 1)) + "\n" for burst in range(50) for i in range(20)))
+            self.assertFalse(collapse.client_frames(log, path, 10)["keeping_up"])
+
+    def test_link_bytes_weight_wall_span_and_house_rest_requires_an_unchanged_sleeping_suffix(self):
+        _, rows = self.match_fixture()
+        counts = collapse.match_counts(rows)
+        self.assertEqual(counts["links"]["fixture"]["bytes_per_s"], 24000 / 3)
+        self.assertTrue(counts["links"]["fixture"]["all_windows"])
+        self.assertEqual(counts["targets"]["a"]["quiet_s"], 2)
+        for field, value in [("awake", 1), ("dust", 2), ("sleeping", 0)]:
+            changed = copy.deepcopy(rows)
+            changed[-1]["loadtest"]["targets"][0][field] = value
+            self.assertEqual(collapse.match_counts(changed)["targets"]["a"]["quiet_s"], 0)
+
     def test_only_kernel_allocation_evidence_admits_two_vcpu(self):
         # Fixture: a wide cpuset with a two-core quota is the hosted contract, not pool sizing.
         line = "server: host available_parallelism=2 pools(compute/async_compute/io)=2/1/1 cpu_quota=2.00 cpus (200000/100000 us) cpuset=0-15"
@@ -43,14 +79,14 @@ class CollapseTests(unittest.TestCase):
         # Fixture: two unequal server periods, with a real link and actual ledger outcomes.
         recipe = dict(tanks=2, events=[dict(at_s=0.5, instances=["a", "b"])])
         row = dict(period_s=1, ticks=64, budget_us=15625, tick_hz=64, tanks=2,
-                   clients=1, cpu_pct=80,
+                   clients=1, cpu_pct=80, send_clients=[dict(link="fixture", bytes=12000, bytes_per_s=12000)],
                    tick_us=dict(p50=1000, p95=2000, p99=3000, total=100000),
                    physics_us=dict(p50=200, p95=300, p99=400, total=25000),
                    send_us=dict(p50=10, p95=20, p99=30, total=500),
                    loadtest=dict(recipe=recipe, sequence=1, elapsed_s=1.1, window_start_s=0.1, combat=True,
                                  send_bytes=12000, awake_bodies=12, construction_pieces=20,
                                  constructions=10, events_fired=1,
-                                 targets=[dict(id=i, falls=1, dust=1, chunks=3) for i in ["a", "b"]],
+                                 targets=[dict(id=i, falls=1, dust=1, chunks=3, awake=0, sleeping=2) for i in ["a", "b"]],
                                  ticks=[tick_fixture(1, 2)], sends=[dict(tick=1, us=10)],
                                  pieces=EMPTY_PIECES))
         second = copy.deepcopy(row)
@@ -76,7 +112,10 @@ class CollapseTests(unittest.TestCase):
             def wait(self):
                 return 0
         def spawn(*args, **kwargs):
-            kwargs["stdout"].write("client: connected (entity fixture)\nharness: released\n")
+            kwargs["stdout"].write("client: connected (entity fixture)\nharness: released frame_s=0.000\n")
+            frame_path = Path(kwargs["env"]["SPIKE_FRAME_COST"])
+            frame_path.with_name(frame_path.stem + ".client.jsonl").write_text("".join(
+                json.dumps(dict(t=i / 100, frame_ms=10)) + "\n" for i in range(301)))
             kwargs["stdout"].flush()
             child = Client()
             children.append(child)

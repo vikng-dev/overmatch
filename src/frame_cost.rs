@@ -16,7 +16,8 @@
 //!
 //! Uses [`JsonlSink`]/[`role_path`] like the other `SPIKE_*` recorders. The first `frame_ms` is 0
 //! (no previous row): positive warmup discards it; `--warmup-s 0` keeps it. Unset means
-//! nothing registered and zero cost. Windowed roots only; headless servers present no frames.
+//! nothing registered and zero cost. Headless clients record update frames without window or
+//! render systems; servers mount no recorder.
 //!
 //! # Validity signals (the anti-fiction half)
 //!
@@ -175,7 +176,8 @@ struct FrameCost {
 ///
 /// When the run is offscreen without it: nothing else renders into the offscreen image.
 pub fn client_plugin(app: &mut App) {
-    let offscreen = RunWindow::of_run(RunWindow::Visible) == RunWindow::Offscreen;
+    let window = RunWindow::of_run(RunWindow::Visible);
+    let offscreen = window == RunWindow::Offscreen;
     let Some(path) = crate::env_value("SPIKE_FRAME_COST").unwrap_or_else(crate::refuse_start)
     else {
         assert!(
@@ -195,6 +197,10 @@ pub fn client_plugin(app: &mut App) {
     });
     let drawn = DrawnFrames::default();
     app.insert_resource(drawn.clone());
+    if window == RunWindow::Headless {
+        app.add_systems(Update, sample);
+        return;
+    }
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app.insert_resource(drawn).add_systems(
             Render,

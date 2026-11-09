@@ -47,6 +47,7 @@ const PORT: u16 = 5888;
 pub(super) const TICK: Duration = Duration::from_nanos(15_625_000);
 
 pub fn run() {
+    bot_policy();
     let hosted = match HostedConfig::from_env() {
         Ok(hosted) => hosted,
         Err(err) => {
@@ -150,6 +151,7 @@ pub fn run() {
             // A bot authors its command as a device does, before the parse and the Battle's hold.
             drive_bot
                 .in_set(crate::cost::phases::FixedWork::BotBrain)
+                .after(super::protocol::publish_shot_clock)
                 .before(crate::command::ParseCommands),
             player_respawn_system(),
         ),
@@ -961,22 +963,66 @@ fn spawn_player_tank(
     root
 }
 
-/// An ownerless test-bot tank ([`spawn_bots`]) — scopes [`drive_bot`] to it, and keeps it out of
-/// every other tank query the server runs. `home` is the XZ it spawns and respawns at.
+/// An ownerless tank whose device commands come from [`drive_bot`]. Its home and primary-fire
+/// cadence survive respawn; both are derived before the initial complete tank spawn.
 #[derive(Component, Clone, Copy)]
 struct Bot {
     home: Vec2,
+    fire_period: crate::sim_tick::TickSpan,
+    fire_phase: u32,
 }
 
-/// Bot 0's home spawn POINT — horizontal, like every spawn definition (the old flat-pad
-/// `(0, 12)`). Its Y is sampled at spawn time by the shared rule; the fixed `y = 2` pose it used to
-/// carry measured 113.65 m underground once the heightmap world landed.
-pub(crate) const BOT_SPAWN_XZ: Vec2 = Vec2::new(0.0, 12.0);
+impl Bot {
+    /// Uniform identity slots over the primary cycle prevent a simultaneous spawn/combat release
+    /// from inventing a volley. A zero-duration mechanism still fires at most once per tick.
+    fn new(home: Vec2, index: u32, count: u32, cycle: crate::spec::FireCycle) -> Self {
+        assert!(index < count, "a bot index belongs to its spawn cohort");
+        let fire_period = match cycle {
+            crate::spec::FireCycle::Single { reload } => reload,
+            crate::spec::FireCycle::Automatic { cyclic, .. } => cyclic,
+        }
+        .at_least_one();
+        Self {
+            home,
+            fire_period,
+            fire_phase: (u64::from(index) * u64::from(fire_period.raw()) / u64::from(count)) as u32,
+        }
+    }
+}
 
-/// Bot `index`'s home: the player lanes' fan-out ([`lane_spawn_xz`]) around [`BOT_SPAWN_XZ`], so
-/// bot 0 keeps the one bot's home and no two bots share a point.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BotPolicy {
+    home_xz: crate::provenance::Sourced<[f32; 2]>,
+    throttle: crate::provenance::Sourced<f32>,
+    steer: crate::provenance::Sourced<f32>,
+}
+
+fn bot_policy() -> &'static BotPolicy {
+    static POLICY: std::sync::LazyLock<BotPolicy> = std::sync::LazyLock::new(|| {
+        let policy: BotPolicy = crate::provenance::from_shipped_str(
+            "assets/net/bot.ron",
+            include_str!("../../assets/net/bot.ron"),
+        )
+        .expect("assets/net/bot.ron: author every bot policy field with provenance");
+        assert!(
+            Vec2::from(policy.home_xz.0).is_finite(),
+            "assets/net/bot.ron: home_xz must be finite; author a map position"
+        );
+        for (field, value) in [("throttle", policy.throttle.0), ("steer", policy.steer.0)] {
+            assert!(
+                value.is_finite() && (-1.0..=1.0).contains(&value),
+                "assets/net/bot.ron: {field} must be finite and within -1..=1; author a device demand"
+            );
+        }
+        policy
+    });
+    &POLICY
+}
+
+/// Fan out by identity using the player lanes' occupancy rule around the authored bot home.
 fn bot_home_xz(index: u32, radius: f32) -> Vec2 {
-    lane_spawn_xz(BOT_SPAWN_XZ, index, radius)
+    lane_spawn_xz(Vec2::from(bot_policy().home_xz.0), index, radius)
 }
 
 /// Operator bot count: unset means none; a u32 requests that many. The tracked load runners
@@ -1010,10 +1056,20 @@ fn spawn_bots(
         return;
     }
     let content = source.get();
+    let cycle = content
+        .spec()
+        .weapons
+        .values()
+        .find(|weapon| weapon.trigger == crate::spec::Trigger::Primary)
+        .expect("the tank load gate requires exactly one primary weapon")
+        .fire_cycle;
     for index in 0..count.0 {
-        let bot = Bot {
-            home: bot_home_xz(index, content.contact_radius()),
-        };
+        let bot = Bot::new(
+            bot_home_xz(index, content.contact_radius()),
+            index,
+            count.0,
+            cycle,
+        );
         let pos = spawn_pos(height.as_deref(), bot.home);
         let combatant = combatants.bot(index);
         let life = combatants.life(combatant);
@@ -1306,23 +1362,15 @@ fn respawn_player_tanks(
     }
 }
 
-/// Drive the bot in a steady circle AND hold its main gun's trigger: constants written straight into
-/// its own `TankCommand` (a required component of `Tank`). The bot carries no `ActionState`, so
-/// `bridge_action_state_to_tank_command` (protocol.rs) never touches it. It writes every tick before
-/// the parse, as a device does, so the Battle's hold (`battle::hold_commands`) holds it until combat
-/// like every tank; from then on it circles and fires for good. Firing makes the bot a self-firing target that exercises remote shot presentation, recoil,
-/// and hit-reaction paths without a second client.
-fn drive_bot(mut bots: Query<&mut TankCommand, With<Bot>>) {
-    for mut command in &mut bots {
-        // Gentle constants: enough drive + differential yaw to circle on the flat pad without
-        // leaving it or flipping. Everything else stays at `TankCommand::default()`.
-        command.throttle = 0.5;
-        command.steer = 0.5;
-        // Hold primary fire: the gun fires each time its reload completes (so ~one main-gun shot per
-        // reload), forward/unaimed as it circles. Aiming at a player is later bot-AI work; for now
-        // this is purely the solo test-fire source described above.
-        command.fire_primary = true;
-    }
+/// Bots author device commands before parsing and the Battle's hold. Primary clicks occupy the
+/// spawn-derived identity slots in [`Bot::new`]; the weapon's ordinary readiness gate still applies.
+fn drive_bot(clock: Res<crate::WeaponClock>, mut bots: Query<(&Bot, &mut TankCommand)>) {
+    let policy = bot_policy();
+    bots.par_iter_mut().for_each(|(bot, mut command)| {
+        command.throttle = policy.throttle.0;
+        command.steer = policy.steer.0;
+        command.fire_primary = clock.0.raw() % bot.fire_period.raw() == bot.fire_phase;
+    });
 }
 
 #[cfg(test)]
@@ -1484,6 +1532,53 @@ mod tests {
         }
     }
 
+    /// The game's damage-model workload must not invent a shared volley: at most
+    /// ceil(bot count / reload ticks) primary triggers share a tick, for clients observing bots.
+    #[test]
+    fn bot_primary_triggers_spread_across_the_reload_period() {
+        use crate::sim_tick::{SimTick, TickSpan};
+        // Fixture: short, zero and long mechanisms; populations below and above tick resolution.
+        for period in [0_u32, 7, 192, 257] {
+            for count in [1_u32, 3, 29, 300] {
+                let mut app = App::new();
+                app.add_plugins(TaskPoolPlugin::default())
+                    .insert_resource(crate::WeaponClock(SimTick::new(0)))
+                    .add_systems(Update, drive_bot);
+                for index in 0..count {
+                    app.world_mut().spawn((
+                        Bot::new(
+                            Vec2::ZERO,
+                            index,
+                            count,
+                            crate::spec::FireCycle::Single {
+                                reload: TickSpan::of(period),
+                            },
+                        ),
+                        TankCommand::default(),
+                    ));
+                }
+                let ticks = period.max(1);
+                let mut total = 0;
+                for tick in 0..ticks * 3 {
+                    app.world_mut().resource_mut::<crate::WeaponClock>().0 = SimTick::new(tick);
+                    app.update();
+                    let firing = app
+                        .world_mut()
+                        .query::<&TankCommand>()
+                        .iter(app.world())
+                        .filter(|command| command.fire_primary)
+                        .count();
+                    assert!(
+                        firing <= count.div_ceil(ticks) as usize,
+                        "{firing}/{count} bot triggers on tick {tick}, period {ticks}"
+                    );
+                    total += firing;
+                }
+                assert_eq!(total, 3 * count as usize, "each bot clicks once per cycle");
+            }
+        }
+    }
+
     /// N bots are N complete tanks: one spawn pass builds every one from the blueprint, each its own
     /// combatant at its own home, bot 0 at the one bot's home; a later pass adds none. The server's
     /// load test reads its tank count off this lever, so a mutant that spawns one bot, or stacks
@@ -1529,6 +1624,20 @@ mod tests {
             .run_system_once(|source: TankSimSource| source.get().contact_radius())
             .unwrap();
         let world = app.world_mut();
+        let cadence: Vec<_> = world
+            .query::<&Bot>()
+            .iter(world)
+            .map(|bot| (bot.fire_period.raw(), bot.fire_phase))
+            .collect();
+        let period = cadence[0].0;
+        assert!(cadence.iter().all(|&(ticks, _)| ticks == period));
+        for tick in 0..period {
+            assert!(
+                cadence.iter().filter(|&&(_, phase)| phase == tick).count()
+                    <= (cadence.len() as u32).div_ceil(period) as usize,
+                "the production spawn path must assign distinct identity slots at tick resolution"
+            );
+        }
         let bots: Vec<(Vec2, CombatantId)> = world
             .query_filtered::<(&Bot, &CombatantId), With<crate::tank::Tank>>()
             .iter(world)
@@ -1586,7 +1695,8 @@ mod tests {
             }
         }
         assert!(
-            bots.iter().any(|(home, _)| *home == BOT_SPAWN_XZ),
+            bots.iter()
+                .any(|(home, _)| *home == Vec2::from(bot_policy().home_xz.0)),
             "bot 0 keeps the one bot's home",
         );
     }

@@ -8,6 +8,7 @@ use std::{
     time::Instant,
 };
 
+use avian3d::prelude::Sleeping;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -21,7 +22,7 @@ use crate::{
     ballistics::{BallisticVolume, DeliveredLine, PenetrationMarks, ShellMarched, VolumeCrossing},
     construction::{
         Body, Element,
-        breakage::{Breakage, Event, Record},
+        breakage::{Breakage, Event, Piece, Record},
     },
     cost::{TickSample, Trace, stages::NamedCounts},
     scatter::MapInstance,
@@ -143,6 +144,7 @@ impl Loadtest {
         &mut self,
         record: &Record,
         constructions: &Query<(&MapInstance, &Breakage), With<Body>>,
+        pieces: &Query<(&Piece, Option<&Sleeping>), With<crate::debris::DebrisPiece>>,
         now: Instant,
         period: std::time::Duration,
     ) -> Value {
@@ -152,6 +154,7 @@ impl Loadtest {
                 *dust_by_construction.entry(entry.construction).or_default() += 1;
             }
         }
+        let rest = rest_counts(pieces);
         let targets: Vec<_> = constructions
             .iter()
             .filter(|(id, _)| self.recipe.events.iter().any(|e| e.instances.contains(&id.id)))
@@ -159,7 +162,9 @@ impl Loadtest {
                 let falls = body.live.state.fate.iter().filter(|&&fate| fate == crate::construction::fracture::Fate::Fallen).count();
                 // A construction with no dust events has a zero census.
                 let dust = dust_by_construction.get(&id.ordinal).copied().unwrap_or(0);
-                json!({"id": id.id, "falls": falls, "dust": dust, "chunks": body.kind.layout.chunks.len()})
+                // A target with no loose bodies has zero awake and sleeping groups.
+                let (awake, sleeping) = rest.get(&id.ordinal).copied().unwrap_or_default();
+                json!({"id": id.id, "falls": falls, "dust": dust, "chunks": body.kind.layout.chunks.len(), "awake": awake, "sleeping": sleeping})
             })
             .collect();
         let (elapsed, next) = match &self.state {
@@ -172,6 +177,22 @@ impl Loadtest {
         json!({"recipe": self.recipe, "elapsed_s": elapsed, "window_start_s": elapsed.map(|t| t - period.as_secs_f64()), "events_fired": next, "targets": targets,
             "ticks": ticks, "sends": sends})
     }
+}
+
+/// Only physical loose bodies own matter; replicated pose carriers repeat metadata.
+fn rest_counts(
+    pieces: &Query<(&Piece, Option<&Sleeping>), With<crate::debris::DebrisPiece>>,
+) -> BTreeMap<u16, (usize, usize)> {
+    let mut rest = BTreeMap::<u16, (usize, usize)>::new();
+    for (piece, sleeping) in pieces {
+        let counts = rest.entry(piece.construction).or_default();
+        if sleeping.is_some() {
+            counts.1 += 1;
+        } else {
+            counts.0 += 1;
+        }
+    }
+    rest
 }
 
 pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
@@ -365,6 +386,33 @@ fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Operators rely on per-instance rest counts excluding repeated network metadata and
+    /// retaining both awake and sleeping authority bodies, even when an island mixes targets.
+    #[test]
+    fn resting_census_counts_only_physical_groups_by_construction() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        // Fixture: two constructions, one awake group, two sleeping groups and one pose carrier.
+        let piece = |construction| Piece {
+            construction,
+            chunks: vec![0],
+            born: 0,
+            retired: None,
+        };
+        world.spawn((piece(1), crate::debris::DebrisPiece));
+        world.spawn((piece(1), crate::debris::DebrisPiece, Sleeping));
+        world.spawn((piece(2), crate::debris::DebrisPiece, Sleeping));
+        world.spawn(piece(1));
+        let counts = world
+            .run_system_once(
+                |pieces: Query<(&Piece, Option<&Sleeping>), With<crate::debris::DebrisPiece>>| {
+                    rest_counts(&pieces)
+                },
+            )
+            .unwrap();
+        assert_eq!(counts, BTreeMap::from([(1, (1, 1)), (2, (0, 1))]));
+    }
 
     /// The trace reader numbers match ticks from combat admission: a tick before the workload
     /// clock starts takes no row and owns no send, and the first admitted row is tick 1.

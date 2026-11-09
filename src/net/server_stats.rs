@@ -66,6 +66,9 @@
 //! sequence, clock, construction outcomes, awake dynamic bodies, loose construction chunks and
 //! attempted encrypted send bytes. Its `ticks` use the ram schema plus admission-relative
 //! `elapsed_s`, `events_fired` and work counts; `sends` remain outside the fixed ticks.
+//! `send_bytes` and `send_clients` also appear without a loadtest. Each connected link carries its
+//! period bytes and bytes/s; `send_us_per_client_s` amortizes shared send work over links and wall
+//! seconds. `send_census_us` times the byte collector separately and is excluded from `send_us`.
 //! Bytes exclude IP/UDP headers and do not attest delivery.
 //!
 //! Ram and `loadtest` tick rows also carry `contacts`, the contact census ([`super::contact_census`]),
@@ -76,7 +79,10 @@ mod linux;
 
 use bevy::app::MainScheduleOrder;
 use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use avian3d::prelude::{PhysicsSchedule, PhysicsStepSystems, RigidBody, Sleeping};
 use bevy::app::FixedMain;
@@ -141,11 +147,13 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         post_update: TickWindow::default(),
         #[cfg(target_os = "linux")]
         host: linux::HostProbe::new(),
+        send_census: TickWindow::default(),
         cpu_at_start: process_cpu(),
         throttle_at_start: read_throttle(),
         husk_strikes_at_start: 0,
         sequence: 0,
         send_bytes: 0,
+        send_by_client: BTreeMap::new(),
     });
     app.init_resource::<PhaseStarts>();
     app.init_resource::<PieceRecords>();
@@ -173,14 +181,13 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         )
             .run_if(resource_changed::<ServerTick>),
     );
-    if app.world().contains_resource::<Loadtest>() {
-        app.add_systems(
-            PostUpdate,
-            count_send_bytes
-                .after(ConnectionSystems::Send)
-                .before(LinkSystems::Send),
-        );
-    }
+    app.add_systems(
+        PostUpdate,
+        count_send_bytes
+            .after(open_send)
+            .after(ConnectionSystems::Send)
+            .before(LinkSystems::Send),
+    );
     install_iteration_clock(app);
     app.add_systems(IterationClock::Close, emit_line.after(close_iteration));
     Ok(())
@@ -287,6 +294,7 @@ struct ServerStats {
     post_update: TickWindow,
     #[cfg(target_os = "linux")]
     host: linux::HostProbe,
+    send_census: TickWindow,
     /// The process's CPU time when the current period opened.
     cpu_at_start: Option<Duration>,
     /// The cgroup's throttle counters when the current period opened.
@@ -295,6 +303,7 @@ struct ServerStats {
     husk_strikes_at_start: u64,
     sequence: u64,
     send_bytes: u64,
+    send_by_client: BTreeMap<Entity, u64>,
 }
 
 /// The open phase brackets' starts.
@@ -307,6 +316,7 @@ struct PhaseStarts {
     send: Option<Instant>,
     frame: Option<Instant>,
     post_update: Option<Instant>,
+    send_census_us: f64,
 }
 
 /// The wall-clock period gate.
@@ -399,6 +409,9 @@ struct Snapshot {
     post_update: Option<TickSummary>,
     #[cfg(target_os = "linux")]
     host: Value,
+    send_census: Option<TickSummary>,
+    send_bytes: u64,
+    send_clients: Value,
     debris: Value,
     clients: usize,
     tanks: usize,
@@ -458,6 +471,11 @@ fn stats_line(snapshot: &Snapshot) -> String {
         "send_us": percentiles(snapshot.send.as_ref()),
         "frame_us": percentiles(snapshot.frame.as_ref()),
         "post_update_us": percentiles(snapshot.post_update.as_ref()),
+        "send_census_us": percentiles(snapshot.send_census.as_ref()),
+        "send_bytes": snapshot.send_bytes,
+        "send_clients": snapshot.send_clients,
+        // Amortized shared send work, not a separately timed per-link path.
+        "send_us_per_client_s": snapshot.send.as_ref().filter(|_| snapshot.clients > 0).map(|s| tenth(s.total / period_s / snapshot.clients as f64)),
         "throttled_usec": snapshot.throttled.map(|t| t.throttled_usec),
         "nr_throttled": snapshot.throttled.map(|t| t.nr_throttled),
         "husk_strikes": snapshot.husk_strikes,
@@ -567,6 +585,7 @@ fn close_sleep(mut starts: ResMut<PhaseStarts>, mut stats: ResMut<ServerStats>) 
 
 fn open_send(mut starts: ResMut<PhaseStarts>) {
     starts.send = Some(Instant::now());
+    starts.send_census_us = 0.0;
 }
 
 fn close_send(
@@ -579,7 +598,8 @@ fn close_send(
         .send
         .take()
         .expect("the send bracket opens before ServerSystems::Send under the same ServerTick gate");
-    let us = start.elapsed().as_secs_f64() * 1.0e6;
+    let us = start.elapsed().as_secs_f64() * 1.0e6 - starts.send_census_us;
+    assert!(us >= 0.0, "send census is nested within the send bracket");
     stats.send.push(us);
     if let Some(load) = load.as_deref_mut() {
         load.trace.send(us);
@@ -591,18 +611,27 @@ fn close_send(
 
 /// Encrypted UDP payload bytes queued for transport, including netcode overhead. Rotating the
 /// FIFO once preserves packet order (lightyear_link 0.30.1 exposes no production iterator).
-/// This counts attempted sends, not IP/UDP headers or delivery; only the load-test user pays it.
+/// This counts attempted sends, not IP/UDP headers or delivery; only an armed stats reader pays it.
 fn count_send_bytes(
     mut stats: ResMut<ServerStats>,
-    mut links: Query<&mut Link>,
-    mut worker_bytes: Local<Parallel<u64>>,
+    mut starts: ResMut<PhaseStarts>,
+    mut links: Query<(Entity, &mut Link)>,
+    mut worker_bytes: Local<Parallel<Vec<(Entity, u64)>>>,
 ) {
+    let started = Instant::now();
     // Each link owns its FIFO. Integer subtotals commit once, before the transport flush.
     let worker_bytes = &mut *worker_bytes;
-    links.par_iter_mut().for_each(|mut link| {
-        worker_bytes.scope(|bytes| *bytes += queued_bytes(&mut link));
+    links.par_iter_mut().for_each(|(entity, mut link)| {
+        worker_bytes.scope(|bytes| bytes.push((entity, queued_bytes(&mut link))));
     });
-    stats.send_bytes += worker_bytes.iter_mut().map(std::mem::take).sum::<u64>();
+    for bytes in worker_bytes.iter_mut() {
+        for (entity, bytes) in bytes.drain(..) {
+            stats.send_bytes += bytes;
+            *stats.send_by_client.entry(entity).or_default() += bytes;
+        }
+    }
+    starts.send_census_us = started.elapsed().as_secs_f64() * 1.0e6;
+    stats.send_census.push(starts.send_census_us);
 }
 
 fn queued_bytes(link: &mut Link) -> u64 {
@@ -622,12 +651,18 @@ fn queued_bytes(link: &mut Link) -> u64 {
 #[derive(bevy::ecs::system::SystemParam)]
 struct Census<'w, 's> {
     ram: Option<ResMut<'w, super::ram::Ram>>,
-    clients: Query<'w, 's, (), (With<ClientOf>, With<Connected>)>,
+    clients: Query<'w, 's, Entity, (With<ClientOf>, With<Connected>)>,
     tanks: Query<'w, 's, (), With<Tank>>,
     projectiles: Query<'w, 's, (), With<Projectile>>,
     all: Query<'w, 's, Entity>,
     bodies: Query<'w, 's, &'static RigidBody, Without<Sleeping>>,
     pieces: Query<'w, 's, &'static Piece, With<Breakage>>,
+    loose: Query<
+        'w,
+        's,
+        (&'static Piece, Option<&'static Sleeping>),
+        With<crate::debris::DebrisPiece>,
+    >,
     constructions: Query<'w, 's, (&'static MapInstance, &'static Breakage), With<Body>>,
     battle: Query<'w, 's, &'static super::battle::BattleState>,
     piece_records: ResMut<'w, PieceRecords>,
@@ -662,11 +697,18 @@ fn emit_line(
     stats.husk_strikes_at_start = recorder.husk_strikes();
     stats.sequence += 1;
     let pieces = census.piece_records.drain();
+    let send_bytes = std::mem::take(&mut stats.send_bytes);
+    let send_by_client = std::mem::take(&mut stats.send_by_client);
+    let send_clients: Vec<_> = census.clients.iter().map(|link| {
+        // A connected link may queue no packet in this period.
+        let bytes = send_by_client.get(&link).copied().unwrap_or(0);
+        json!({"link": link.to_string(), "bytes": bytes, "bytes_per_s": bytes as f64 / elapsed.as_secs_f64()})
+    }).collect();
     let workload = load.map(|mut load| {
-        let mut value = load.json(&record, &census.constructions, now, elapsed);
+        let mut value = load.json(&record, &census.constructions, &census.loose, now, elapsed);
         value["pieces"] = pieces.clone();
         value["sequence"] = json!(stats.sequence);
-        value["send_bytes"] = json!(std::mem::take(&mut stats.send_bytes));
+        value["send_bytes"] = json!(send_bytes);
         value["awake_bodies"] = json!(
             census
                 .bodies
@@ -733,6 +775,9 @@ fn emit_line(
         post_update: stats.post_update.drain(budget_us),
         #[cfg(target_os = "linux")]
         host: stats.host.sample(elapsed),
+        send_census: stats.send_census.drain(budget_us),
+        send_bytes,
+        send_clients: json!(send_clients),
         debris: debris.json(),
         clients: census.clients.iter().count(),
         tanks: census.tanks.iter().count(),
@@ -837,11 +882,13 @@ mod tests {
             post_update: TickWindow::default(),
             #[cfg(target_os = "linux")]
             host: linux::HostProbe::new(),
+            send_census: TickWindow::default(),
             cpu_at_start: None,
             throttle_at_start: None,
             husk_strikes_at_start: 0,
             sequence: 0,
             send_bytes: 0,
+            send_by_client: BTreeMap::new(),
         }
     }
 
@@ -960,6 +1007,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(TaskPoolPlugin::default())
             .insert_resource(fixture_stats())
+            .init_resource::<PhaseStarts>()
             .add_systems(Update, count_send_bytes);
         // Fixture: independent links with unequal packets expose missing workers and reordering.
         let links = 32;
@@ -974,6 +1022,9 @@ mod tests {
         app.update();
         let expected = links * packets.iter().map(Vec::len).sum::<usize>() as u64;
         assert_eq!(app.world().resource::<ServerStats>().send_bytes, expected);
+        let per_link = &app.world().resource::<ServerStats>().send_by_client;
+        assert_eq!(per_link.len(), links as usize);
+        assert!(per_link.values().all(|&bytes| bytes == expected / links));
         for mut link in app
             .world_mut()
             .query::<&mut Link>()
@@ -1109,6 +1160,9 @@ mod tests {
             post_update: None,
             #[cfg(target_os = "linux")]
             host: json!({}),
+            send_census: None,
+            send_bytes: 6000,
+            send_clients: json!([{"link": "fixture", "bytes": 6000, "bytes_per_s": 600.0}]),
             sleep: None,
             collector: None,
             stages: std::array::from_fn(|_| None),
@@ -1166,6 +1220,10 @@ mod tests {
             "belt_contacts_us": null,
             "phases_us": phases::NAMES.into_iter().map(|name| (name.to_owned(), Value::Null)).collect::<serde_json::Map<_, _>>(),
             "physics_us": {"p50": 301.0, "p95": 455.0, "p99": 600.0, "total": 200000.0, "max": 900.0},
+            "send_census_us": null,
+            "send_bytes": 6000,
+            "send_clients": [{"link": "fixture", "bytes": 6000, "bytes_per_s": 600.0}],
+            "send_us_per_client_s": 4000.0,
             "send_us": {"p50": 120.0, "p95": 180.1, "p99": 200.0, "total": 80000.0, "max": 250.0},
             "throttled_usec": 45000,
             "nr_throttled": 3,
