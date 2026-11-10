@@ -2265,6 +2265,38 @@ impl ProjectileMarchWorld<'_, '_> {
         (self.placed(entity), collider, surfaces)
     }
 
+    /// The game's damage model, for instruments: the nearest `t ≤ max` at which the ray
+    /// `origin + dir · t` meets a collider `admit` passes, each found, posed and shaped as the
+    /// march finds them ([`Self::near`], [`Self::geometry`]); solid, so a start inside meets at 0.
+    #[cfg(test)]
+    fn ray_distance(
+        &self,
+        origin: Vec3,
+        dir: Dir3,
+        max: f32,
+        admit: &dyn Fn(Entity) -> bool,
+    ) -> Option<f32> {
+        let mut nearest: Option<f32> = None;
+        let probe = collect::Probe::Segment {
+            origin,
+            axis: Vec3::from(dir),
+            length: max,
+            radius: 0.0,
+        };
+        self.near(probe, &mut |entity, _| {
+            if !admit(entity) {
+                return;
+            }
+            let (pose, collider, _) = self.geometry(entity);
+            if let Some((distance, _)) =
+                collider.cast_ray(pose.position, pose.rotation, origin, *dir, max, true)
+            {
+                nearest = Some(nearest.map_or(distance, |near| near.min(distance)));
+            }
+        });
+        nearest
+    }
+
     /// `entity`'s part in its tank's armour set; `None` for a collider outside every set.
     fn part(&self, entity: Entity) -> Option<&armour_set::Part> {
         let part = self.parts.get(entity).ok()?;
@@ -2405,6 +2437,17 @@ impl ProjectileMarchWorld<'_, '_> {
             self.set_near(set, clock, Some(probe), false, visit, &mut tested);
         }
         tested
+    }
+
+    /// The game's damage model, for instruments: every collider within reach of the origin, with
+    /// its box, as [`Self::near`] finds it.
+    fn everything(&self, visit: &mut dyn FnMut(Entity, ColliderAabb)) {
+        // Fixture reach, m: every instrument's scene sits well inside it.
+        let reach = Vec3::splat(1.0e5);
+        self.near(
+            collect::Probe::Region(ColliderAabb::from_min_max(-reach, reach)),
+            visit,
+        );
     }
 
     /// The parts of `set` `probe` may meet, each with its box under `clock`: every part for no

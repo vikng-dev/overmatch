@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use avian3d::prelude::{ColliderAabb, Position, Rotation};
+use avian3d::prelude::{Position, Rotation};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::time::TimeUpdateStrategy;
 
@@ -169,7 +169,7 @@ fn rays(layout: &Layout, pose: Pose) -> Vec<WorldRay> {
 }
 
 /// The bounds the layout is built from: the armour set's parts and damageable boxes, at spawn
-/// pose, as the march's broad query boxes them ([`ProjectileMarchWorld::near`]).
+/// pose, as the march's broad query boxes them ([`ProjectileMarchWorld::everything`]).
 fn layout(app: &mut App) -> Layout {
     let layout = app
         .world_mut()
@@ -179,11 +179,7 @@ fn layout(app: &mut App) -> Layout {
                 let mut boxes: Vec<(String, Vec3, Vec3)> = Vec::new();
                 // The broad query's visit order is unspecified; sorting by name below makes the
                 // layout independent of it, and min/max is order-free.
-                let everywhere = collect::Probe::Region(ColliderAabb::from_min_max(
-                    Vec3::splat(-1.0e5),
-                    Vec3::splat(1.0e5),
-                ));
-                world.near(everywhere, &mut |entity, aabb| {
+                world.everything(&mut |entity, aabb| {
                     let Some(volume) = world.volume_of(entity) else {
                         return; // Terrain and other bodies' colliders.
                     };

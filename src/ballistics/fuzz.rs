@@ -44,7 +44,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use avian3d::prelude::{ColliderAabb, RigidBody};
+use avian3d::prelude::RigidBody;
 use bevy::prelude::*;
 
 use super::resolve::{self, Decision, Flight, ResolveContext};
@@ -1062,7 +1062,7 @@ impl Pass<'_, '_, '_> {
 }
 
 /// The tank's world bounding sphere and its local box, from the boxes the march's broad query
-/// holds its armour in ([`ProjectileMarchWorld::near`]): its armour set's parts.
+/// holds its armour in ([`ProjectileMarchWorld::everything`]): its armour set's parts.
 fn tank_bounds(
     world: &ProjectileMarchWorld,
     to_local: bevy::math::Affine3A,
@@ -1070,32 +1070,26 @@ fn tank_bounds(
     let (mut wmin, mut wmax) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
     let (mut lmin, mut lmax) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
     let mut any = false;
-    world.near(
-        super::collect::Probe::Region(ColliderAabb::from_min_max(
-            Vec3::splat(-1.0e5),
-            Vec3::splat(1.0e5),
-        )),
-        &mut |entity, aabb| {
-            if world.armour(entity).is_none() {
-                return;
-            }
-            any = true;
-            wmin = wmin.min(aabb.min);
-            wmax = wmax.max(aabb.max);
-            for corner in 0..8 {
-                let pick =
-                    |bit: usize, lo: f32, hi: f32| if corner & (1 << bit) == 0 { lo } else { hi };
-                let world_corner = Vec3::new(
-                    pick(0, aabb.min.x, aabb.max.x),
-                    pick(1, aabb.min.y, aabb.max.y),
-                    pick(2, aabb.min.z, aabb.max.z),
-                );
-                let local = to_local.transform_point3(world_corner);
-                lmin = lmin.min(local);
-                lmax = lmax.max(local);
-            }
-        },
-    );
+    world.everything(&mut |entity, aabb| {
+        if world.armour(entity).is_none() {
+            return;
+        }
+        any = true;
+        wmin = wmin.min(aabb.min);
+        wmax = wmax.max(aabb.max);
+        for corner in 0..8 {
+            let pick =
+                |bit: usize, lo: f32, hi: f32| if corner & (1 << bit) == 0 { lo } else { hi };
+            let world_corner = Vec3::new(
+                pick(0, aabb.min.x, aabb.max.x),
+                pick(1, aabb.min.y, aabb.max.y),
+                pick(2, aabb.min.z, aabb.max.z),
+            );
+            let local = to_local.transform_point3(world_corner);
+            lmin = lmin.min(local);
+            lmax = lmax.max(local);
+        }
+    });
     any.then(|| {
         (
             (wmin + wmax) * 0.5,

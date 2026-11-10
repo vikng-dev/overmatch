@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use avian3d::parry::shape::TypedShape;
 use avian3d::prelude::{
     AngularVelocity, Collider, CollisionLayers, LayerMask, LinearVelocity, PhysicsPlugins,
-    Position, RigidBody, Rotation, SpatialQueryFilter,
+    Position, RigidBody, Rotation,
 };
 use bevy::ecs::system::RunSystemOnce;
 use bevy::time::TimeUpdateStrategy;
@@ -630,18 +630,21 @@ struct WorldTriangle {
     shell: u32,
 }
 
-fn world_triangles(
-    colliders: Query<(Entity, &Position, &Rotation, &Collider, &BallisticSurfaces)>,
-) -> Vec<WorldTriangle> {
+/// Every surfaced collider's triangles in the world, each posed and shaped as the march meets it
+/// ([`ProjectileMarchWorld::everything`], [`ProjectileMarchWorld::geometry`]).
+fn world_triangles(world: ProjectileMarchWorld) -> Vec<WorldTriangle> {
     let mut out = Vec::new();
-    for (entity, position, rotation, collider, surfaces) in &colliders {
+    world.everything(&mut |entity, _| {
+        let (pose, collider, Some(surfaces)) = world.geometry(entity) else {
+            return; // Terrain and other unsurfaced colliders.
+        };
         let TypedShape::TriMesh(mesh) = collider.shape_scaled().as_typed_shape() else {
-            continue;
+            return;
         };
         for index in 0..surfaces.shells.len() {
             let triangle = mesh.triangle(index as u32);
-            let corners =
-                [triangle.a, triangle.b, triangle.c].map(|corner| position.0 + rotation.0 * corner);
+            let corners = [triangle.a, triangle.b, triangle.c]
+                .map(|corner| pose.position + pose.rotation * corner);
             let cross = (corners[1] - corners[0]).cross(corners[2] - corners[0]);
             let Some(normal) = cross.try_normalize() else {
                 continue;
@@ -654,7 +657,7 @@ fn world_triangles(
                 shell: surfaces.shells[index],
             });
         }
-    }
+    });
     out
 }
 
@@ -956,7 +959,7 @@ fn classify(
     let radians = theta.to_radians();
     let radius = calibre * 0.5;
     let frame = DiscFrame::anchored(along)?;
-    let filter = SpatialQueryFilter::from_mask(crate::Layer::Armor);
+    let armour = |entity| context.world.armour(entity).is_some();
     let heading = Dir3::new(along).ok()?;
     let lead = 0.1 + 1.5 * radius * radians.tan();
     let (start, back) = if source == Source::Inside {
@@ -966,15 +969,13 @@ fn classify(
         }
         let room = context
             .world
-            .spatial
-            .cast_ray(
+            .ray_distance(
                 point - along * 1.0e-3,
                 Dir3::new(-along).ok()?,
                 far,
-                true,
-                &filter,
+                &armour,
             )
-            .map_or(far, |hit| hit.distance);
+            .unwrap_or(far);
         let back = (room * 0.5).min(1.0);
         if back < lead {
             return None;
@@ -985,8 +986,7 @@ fn classify(
         for offset in resolve::layout(&frame, radius) {
             if context
                 .world
-                .spatial
-                .cast_ray(start + offset - along * far, heading, far, true, &filter)
+                .ray_distance(start + offset - along * far, heading, far, &armour)
                 .is_some()
             {
                 return None;
@@ -2692,20 +2692,9 @@ impl Reach {
     }
 }
 
-/// The bounds of every armour volume in the world.
-fn armour_bounds(world: &mut World) -> (Vec3, Vec3) {
-    use avian3d::prelude::SimpleCollider;
-    let mut lo = Vec3::splat(f32::INFINITY);
-    let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    for (_, position, rotation, collider) in world
-        .query::<(&VolumeOf, &Position, &Rotation, &Collider)>()
-        .iter(world)
-    {
-        let aabb = collider.aabb(position.0, rotation.0);
-        lo = lo.min(aabb.min);
-        hi = hi.max(aabb.max);
-    }
-    (lo, hi)
+/// The world bounds of the tank's armour set, posed live.
+fn armour_bounds(world: &World, root: Entity) -> (Vec3, Vec3) {
+    armour_set::live_box(world, root).expect("the range's tank carries its armour set")
 }
 
 /// Where a volley's hull stands and how it moves.
@@ -2851,7 +2840,7 @@ impl Range {
             * Quat::from_rotation_y(unit(seed) * std::f32::consts::TAU);
         let root = self.root;
         let world = self.app.world_mut();
-        let (low, _) = armour_bounds(world);
+        let (low, _) = armour_bounds(world, root);
         let foot = world
             .get::<Position>(root)
             .expect("the tank root is a body")
@@ -2873,7 +2862,7 @@ impl Range {
             spin,
         };
         self.stand(stance);
-        let (lo, hi) = armour_bounds(self.app.world_mut());
+        let (lo, hi) = armour_bounds(self.app.world(), root);
         let centre = (lo + hi) * 0.5;
 
         let range = REACH_RANGES[(unit(seed) * REACH_RANGES.len() as f32) as usize];

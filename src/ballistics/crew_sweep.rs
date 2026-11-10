@@ -13,7 +13,7 @@
 //! round stopping there).
 //!
 //! The hits are [`PER_BEARING`] per bearing of [`BEARINGS`], each a horizontal shot aimed
-//! uniformly at random over the rectangle an [`Aim`]'s colliders span across the line of fire and
+//! uniformly at random over the rectangle an [`Aim`]'s parts span across the line of fire and
 //! kept when its line meets one of them, so the kept hits are uniform over that silhouette:
 //! [`Aim::Random`] the whole tank's (its hard volumes), [`Aim::Crew`] the union of the crew boxes'
 //! (an aimed shot). The tank stands at its spawn pose, turret and gun at rest; the round is the weapon
@@ -22,7 +22,6 @@
 //! each shot's bearing drawn from [`BEARINGS`]. An ammunition volume left at zero hit points has
 //! cooked off.
 //!
-use avian3d::prelude::{ColliderAabb, SpatialQuery, SpatialQueryFilter};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::time::TimeUpdateStrategy;
 use std::collections::BTreeMap;
@@ -162,6 +161,16 @@ enum Aim {
     Crew,
 }
 
+impl Aim {
+    /// Whether the march's collider `entity` is one this aim draws over.
+    fn admits(self, world: &ProjectileMarchWorld, entity: Entity) -> bool {
+        match self {
+            Aim::Random => world.armour(entity).is_some(),
+            Aim::Crew => world.witness(entity).is_some(),
+        }
+    }
+}
+
 /// Draws shots uniform over an [`Aim`]'s silhouette from a bearing.
 struct Aimer {
     centre: Vec3,
@@ -169,16 +178,13 @@ struct Aimer {
     corners: Vec<Vec3>,
     /// The distance a shot starts from `centre`, clear of the whole tank.
     standoff: f32,
-    layer: crate::Layer,
+    aim: Aim,
 }
 
 impl Aimer {
     fn new(app: &mut App, aim: Aim) -> Self {
-        let ((lo, hi), layer) = match aim {
-            Aim::Random => (world_bounds::<BallisticSurfaces>(app), crate::Layer::Armor),
-            Aim::Crew => (world_bounds::<WitnessSurface>(app), crate::Layer::Witness),
-        };
-        let (tank_lo, tank_hi) = world_bounds::<BallisticSurfaces>(app);
+        let (lo, hi) = world_bounds(app, aim);
+        let (tank_lo, tank_hi) = world_bounds(app, Aim::Random);
         let centre = (lo + hi) / 2.0;
         let corners = (0..8)
             .map(|i| {
@@ -193,11 +199,11 @@ impl Aimer {
             centre,
             corners,
             standoff: (tank_hi - tank_lo).length() + 5.0,
-            layer,
+            aim,
         }
     }
 
-    /// A shot `(origin, direction)` from `bearing` (degrees) whose line meets the aimed colliders.
+    /// A shot `(origin, direction)` from `bearing` (degrees) whose line meets the aimed parts.
     fn draw(&self, app: &mut App, bearing: f32, state: &mut u64) -> (Vec3, Vec3) {
         let b = bearing.to_radians();
         // The tank's front is -Z: a shot from bearing 0 travels +Z.
@@ -213,22 +219,18 @@ impl Aimer {
         };
         let ((u0, u1), (v0, v1)) = (span(across), span(Vec3::Y));
         let dir = Dir3::new(direction).expect("a unit bearing");
-        let (standoff, layer) = (self.standoff, self.layer);
+        let (standoff, aim) = (self.standoff, self.aim);
         loop {
             let u = u0 + (u1 - u0) * unit(state);
             let v = v0 + (v1 - v0) * unit(state);
             let origin = self.centre + across * u + Vec3::Y * v - direction * standoff;
             let struck = app
                 .world_mut()
-                .run_system_once(move |spatial: SpatialQuery| {
-                    spatial
-                        .cast_ray(
-                            origin,
-                            dir,
-                            2.0 * standoff,
-                            true,
-                            &SpatialQueryFilter::from_mask(layer),
-                        )
+                .run_system_once(move |world: ProjectileMarchWorld| {
+                    world
+                        .ray_distance(origin, dir, 2.0 * standoff, &|entity| {
+                            aim.admits(&world, entity)
+                        })
                         .is_some()
                 })
                 .expect("the ray query runs");
@@ -253,15 +255,23 @@ fn draw_hits(app: &mut App, aim: Aim) -> Vec<(Vec3, Vec3)> {
     hits
 }
 
-/// The world bounds of every collider carrying `C`: `(min, max)`.
-fn world_bounds<C: Component>(app: &mut App) -> (Vec3, Vec3) {
-    let world = app.world_mut();
-    let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
-    for aabb in world.query_filtered::<&ColliderAabb, With<C>>().iter(world) {
-        lo = lo.min(aabb.min);
-        hi = hi.max(aabb.max);
-    }
-    assert!(lo.x <= hi.x, "no collider to aim at");
+/// The world bounds `(min, max)` of the parts `aim` draws over, boxed as the march's broad query
+/// boxes them ([`ProjectileMarchWorld::everything`]).
+fn world_bounds(app: &mut App, aim: Aim) -> (Vec3, Vec3) {
+    let (lo, hi) = app
+        .world_mut()
+        .run_system_once(move |world: ProjectileMarchWorld| {
+            let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+            world.everything(&mut |entity, aabb| {
+                if aim.admits(&world, entity) {
+                    lo = lo.min(aabb.min);
+                    hi = hi.max(aabb.max);
+                }
+            });
+            (lo, hi)
+        })
+        .expect("the bounds query runs");
+    assert!(lo.x <= hi.x, "no part to aim at");
     (lo, hi)
 }
 
