@@ -1566,11 +1566,11 @@ pub(super) mod tests {
                 fields += usize::from(ended > 0);
             }
         }
-        // The shipped library checks 1,792 directions over 22 fields, 152 of them in 3 fields met no
-        // hard body (MEASURED): floors under that, so a library that stops reaching the mirror, or
-        // holds no direction drawn on, fails here.
+        // The shipped library checks 768 directions over 22 fields, 72 of which met no hard body
+        // (MEASURED): floors under that, so a library that stops reaching the mirror, or holds no
+        // direction drawn on, fails here.
         assert!(
-            stopped + open > 1700 && fields > 20 && open > 100,
+            stopped + open > 700 && fields > 20 && open > 50,
             "{stopped} {open} {fields}"
         );
     }

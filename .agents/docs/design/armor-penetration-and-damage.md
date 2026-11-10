@@ -315,13 +315,14 @@ calibres; reading charged work fails at the 36 mm fixture. At the shipped thresh
 thin share would move the 88 mm arming plate to **60.85788 mm (DERIVED)** from `t g(t/88) = 35`.
 That coupling is removed; plate met is not a potency or dose readout.
 
-**Recorded consequences (MEASURED).** Original aims stay. The table compares the law before the
-thin share with its current outcome, including independent plate-met arming. Nine records differ;
-the other seven do not. Counts are skids / armour crossings / spall fields, excluding a burst field.
-Only s16 changes verdict. It is named `s16_side_burst`: the wheel arms it, the later wheel and near
-hull exits restart the delay, and it bursts in flight before the transmission. The nose piece stops
-in the transmission. Compared with the first thin-share recordings, only s16's report changes;
-the other fifteen reports are identical.
+**Recorded consequences (MEASURED at 64 cone and 256 ring directions; the records in
+`assets/dev/pen_cam/` hold the outcomes at the shipped counts).** Original aims stay. The table
+compares the law before the thin share with its current outcome, including independent plate-met
+arming. Nine records differ; the other seven do not. Counts are skids / armour crossings / spall
+fields, excluding a burst field. Only s16 changes verdict. It is named `s16_side_burst`: the wheel
+arms it, the later wheel and near hull exits restart the delay, and it bursts in flight before the
+transmission. The nose piece stops in the transmission. Compared with the first thin-share
+recordings, only s16's report changes; the other fifteen reports are identical.
 
 | Changed record | Before counts | After counts | Verdict and visible change |
 |---|---:|---:|---|
@@ -954,7 +955,7 @@ cone record with every addressed contribution (absent only when the field carrie
 The path runs on with the nose piece's line
 to its own end, its open air timed at the carried speed. A struck tank's record stays open while a
 fuze that tank armed runs, so a burst past its last body lands in it. The wire round-trips the
-burst; its 256 directions add 0.3–1.3 KB to a message (MEASURED, `src/damage_cam/wire.rs`). The pen
+burst; its 64 directions add about 0.3 KB to a message (MEASURED, `src/damage_cam/wire.rs`). The pen
 cam draws the burst field as it draws a plate cone (`src/damage_cam/pen_cam/picture.rs`): thrown
 when the shell's nose reaches the burst point on the corner's clock, its front running out each
 direction's reach, over the band alone. It reads as a band about the line with nothing drawn inside
@@ -964,8 +965,8 @@ first field that dosed it, a plate cone's or the burst's, reaches it.
 **Scenarios** (`assets/dev/pen_cam/`, fixture data; each record's `shows` says what it shows).
 s13 flies s1's line with the burst round: the upper front plate arms the fuze, and the round bursts
 0.318 m past its exit at 211.70023 m/s, short of the driver's station. The record empties the HP
-pools of the bow gunner, driver, gunner, transmission and one right ammunition pool; the commander,
-two left ammunition pools, engine and breech are reduced. The nose piece flies through the driver's
+pools of the bow gunner, driver, gunner, commander, transmission and one right ammunition pool; the
+two left ammunition pools and the engine are reduced. The nose piece flies through the driver's
 station to the rear plate (MEASURED, from the record). s15 flies s6's line with the burst round:
 no body meets the arming threshold, so it stays a solid shot. s16 (`s16_side_burst`) is the moving
 side-burst comparison in §3b, which owns its current account. The library has no at-rest burst;

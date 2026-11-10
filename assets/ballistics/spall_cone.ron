@@ -30,14 +30,15 @@
     // cone each, every one weighted by its stratum's share of the field. The emitted total is S/2
     // at every N, so N changes how finely a box's dose is resolved, never how much the cone
     // carries.
-    directions: (64, Resolution("owner decision 2026-10-17 ('64 for now'), the cost against the
-        resolution: one throw under the ball law MEASURED 2026-10-24 by
-        ballistics::pen_cam::spall_law_cost (release, macOS arm64, best of 9, the 7 cones of the
-        penetrating scenarios): 0.30 ms at N = 24, 0.64 at 64, 1.23 at 128, 2.29 at 256; the dose
-        step per direction on the s1 cone at 64 runs from 10.5 HP on the axis to 0.65 HP at the rim,
-        6.25 HP on average (DERIVED from that historical record's 400 emitted HP:
-        H_C·f_k / (q·N), q = 1/2, the field weights' exact normalization).
-        The count changes how finely a box's dose is resolved, never the emitted total")),
+    directions: (32, Resolution("owner decision 2026-11-10, for server cost, judged by eye on
+        side-by-side pen cam renders at 64 and 32: the cost against the resolution. One throw
+        under the ball law MEASURED 2026-10-24 by ballistics::pen_cam::spall_law_cost (release,
+        macOS arm64, best of 9, the 7 cones of the penetrating scenarios): 0.30 ms at N = 24, 0.64
+        at 64, 1.23 at 128, 2.29 at 256; 32 not measured. The dose step per direction on the s1
+        cone at 32 runs from 20.8 HP on the axis to 1.8 HP at the rim, 12.5 HP on average (DERIVED
+        from that historical record's 400 emitted HP: H_C·f_k / (q·N), q = 1/2, the field weights'
+        exact normalization). The count changes how finely a box's dose is resolved, never the
+        emitted total")),
 
     // κ: the share of the energy a round loses across a body that its debris carries out through
     // an exit of the reference steel's strength. A cone carries κ × the exit's strength ratio of
@@ -93,9 +94,10 @@
         // arm64, best of 9, s1's line fired with the burst round). At rest each direction carries
         // H_B / N emitted HP (DERIVED, the field uniform over its support). S/2 is the wall's
         // driven energy, the joules environment construction is struck with.
-        ring_directions: (256, Resolution("provisional, flagged for the owner: the cost against the
-            resolution. The ring's throw: 0.50 ms at N = 64, 1.47 at 256, 4.01 at 684; at rest 218,
-            54 and 20 HP points per direction (DERIVED: H_B = 0.035 HP/J × 397.7 kJ, then
-            H_B / N), so at 256 one direction is about two crew pools")),
+        ring_directions: (64, Resolution("owner decision 2026-11-10, for server cost, judged by eye
+            on side-by-side pen cam renders at 256 and 64: the cost against the resolution. The
+            ring's throw: 0.50 ms at N = 64, 1.47 at 256, 4.01 at 684; at rest 218, 54 and 20 HP
+            points per direction (DERIVED: H_B = 0.035 HP/J × 397.7 kJ, then H_B / N), so at 64
+            one direction is about seven 30 HP crew pools")),
     ),
 )

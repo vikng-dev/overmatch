@@ -94,7 +94,7 @@
     ),
     (
         name: "s9_breech_and_loader",
-        shows: "the turret traversed 30 degrees: an 88 through its side knocks out the breech (142 of 142 HP taken) and the gunner station (30 of 30 HP taken), and leaves the loader station reduced (16.0 of 30 HP taken) and the commander station reduced (5.0 of 30 HP taken)",
+        shows: "the turret traversed 30 degrees: an 88 through its side knocks out the breech (142 of 142 HP taken) and the gunner station (30 of 30 HP taken), and leaves the loader station reduced (2.4 of 30 HP taken) and the commander station reduced (5.9 of 30 HP taken)",
         weapon: "MainGun",
         round: "88mm_AP",
         from: (-4.0, 2.0, -0.6),
@@ -130,7 +130,7 @@
     ),
     (
         name: "s13_ring_through_crew",
-        shows: "s1's line with the burst round: the front plate arms the fuze and the round bursts beyond its exit, before the driver station; the ring empties the bow gunner, transmission and one ammunition rack HP pools, and the nose piece flies on through the driver station and stops in the rear plate; the driver and gunner are knocked out",
+        shows: "s1's line with the burst round: the front plate arms the fuze and the round bursts beyond its exit, before the driver station; the ring empties the bow gunner, transmission and one ammunition rack HP pools, and the nose piece flies on through the driver station and stops in the rear plate; the driver, gunner and commander are knocked out",
         weapon: "MainGun",
         round: "88mm_APHE_ring",
         from: (-0.57, 1.45, -6.5),
