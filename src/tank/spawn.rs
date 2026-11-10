@@ -894,6 +894,7 @@ fn armour_set(
         };
         listed[index] = Some(armour_nodes.len());
         armour_nodes.push(Node {
+            name: &node.name,
             entity,
             parent: match node.parent {
                 Some(0) | None => None,

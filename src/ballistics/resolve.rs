@@ -949,11 +949,10 @@ impl FieldReach {
         admit: &dyn Fn(Entity) -> bool,
         bounds: TankBox,
     ) -> Self {
-        let colliders = context
-            .world
-            .body_colliders
-            .get(bounds.tank)
-            .expect("a tank box is built from its body's colliders");
+        let colliders =
+            context.world.body_colliders.get(bounds.tank).expect(
+                "a tank box is built only for a body carrying armour parts, which lists them",
+            );
         let mut reach = Self::empty(Some(bounds));
         for entity in colliders.iter() {
             reach.take(context, admit, entity);
