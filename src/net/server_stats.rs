@@ -112,6 +112,7 @@ use super::debris_stress::DebrisCensus;
 use super::harness::{LeverError, env_text};
 use super::loadtest::Loadtest;
 use super::server_host::{Throttle, read_throttle};
+use super::sync_margin::MAX_INPUT_LOOKAHEAD_TICKS;
 use crate::ballistics::Projectile;
 use crate::construction::{
     Body,
@@ -131,11 +132,6 @@ const LEVER: &str = "OVERMATCH_SERVER_STATS_S";
 
 /// The line's grep anchor.
 const PREFIX: &str = "server_stats";
-
-/// Sourced fact: lightyear_inputs 0.30.1 src/server.rs:59, checked at its receive gate
-/// (:370). Private upstream; diagnostics mirror it without changing acceptance behavior.
-/// Recheck this fact when upgrading Lightyear.
-pub(super) const MAX_INPUT_LOOKAHEAD_TICKS: i32 = 64;
 
 #[derive(Default, serde::Serialize)]
 struct InputCounts {
@@ -1042,19 +1038,24 @@ mod tests {
         assert_eq!(counts[&second].last_for_tick_offset, Some(-2));
     }
 
-    /// The observer must count messages beyond the private gate while preserving every message
-    /// for Lightyear to accept or refuse. Exercise its typed receiver through local delivery.
+    /// The clamp and census mirror a private library gate. Drive its actual receive path:
+    /// gate is accepted, gate+1 is dropped, and the census leaves both messages available.
+    /// Changing upstream's private bound in either direction must fail this tripwire.
     #[test]
-    fn the_lookahead_census_preserves_messages_on_both_sides_of_the_gate() {
+    fn the_lookahead_census_matches_lightyears_receive_gate_without_consuming_messages() {
         use bevy::ecs::system::RunSystemOnce;
         use lightyear::prelude::*;
+        use lightyear_inputs::input_message::{ActionStateSequence, InputTarget, PerTargetData};
+        use lightyear_inputs_native::prelude::NativeBuffer;
         type Inputs = InputMessage<NativeStateSequence<TankCommand>>;
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
             .add_plugins(lightyear::prelude::client::ClientPlugins {
                 tick_duration: super::super::server::TICK,
             });
-        app.register_message::<Inputs>();
+        app.add_plugins(lightyear_inputs::server::ServerInputPlugin::<
+            NativeStateSequence<TankCommand>,
+        >::default());
         app.add_channel::<super::super::protocol::SpawnChannel>(ChannelSettings::default());
         app.insert_resource(fixture_stats());
         app.finish();
@@ -1073,11 +1074,28 @@ mod tests {
             ))
             .id();
         let tick = app.world().resource::<LocalTimeline>().tick();
+        let mut targets = Vec::new();
         for offset in [MAX_INPUT_LOOKAHEAD_TICKS, MAX_INPUT_LOOKAHEAD_TICKS + 1] {
+            let target = app
+                .world_mut()
+                .spawn(NativeBuffer::<TankCommand>::default())
+                .id();
+            let end = tick + offset;
+            let mut source = NativeBuffer::<TankCommand>::default();
+            source.set(end, ActionState(TankCommand::default()));
+            let mut message = Inputs::new(end);
+            message.inputs.push(PerTargetData {
+                target: InputTarget::Entity(target),
+                states: NativeStateSequence::<TankCommand>::build_from_input_buffer(
+                    &source, 1, end,
+                )
+                .unwrap(),
+            });
+            targets.push((offset, target));
             app.world_mut()
                 .get_mut::<MessageSender<Inputs>>(link)
                 .unwrap()
-                .send::<super::super::protocol::SpawnChannel>(Inputs::new(tick + offset));
+                .send::<super::super::protocol::SpawnChannel>(message);
         }
         app.update(); // Local delivery fills the receiver in Last.
         app.world_mut()
@@ -1089,17 +1107,40 @@ mod tests {
             counts.max_message_lookahead,
             Some(MAX_INPUT_LOOKAHEAD_TICKS + 1)
         );
-        let received: Vec<_> = app
-            .world_mut()
+        let mut received = Vec::new();
+        app.world_mut()
             .get_mut::<MessageReceiver<Inputs>>(link)
             .unwrap()
-            .receive()
-            .map(|message| message.end_tick - tick)
-            .collect();
+            .retain_messages(|message| {
+                received.push(message.end_tick - tick);
+                true
+            });
         assert_eq!(
             received,
             [MAX_INPUT_LOOKAHEAD_TICKS, MAX_INPUT_LOOKAHEAD_TICKS + 1]
         );
+        // The missing server relationship kept delivery pending for the census. Attach it now
+        // and let the plugin's private receive_input_message system drain the real receiver.
+        let server = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .entity_mut(link)
+            .insert(lightyear::link::prelude::LinkOf { server });
+        app.update();
+        for (offset, target) in targets {
+            let buffer = app
+                .world()
+                .get::<NativeBuffer<TankCommand>>(target)
+                .unwrap();
+            assert_eq!(
+                buffer.last_remote_tick,
+                if offset == MAX_INPUT_LOOKAHEAD_TICKS {
+                    Some(tick + offset)
+                } else {
+                    None
+                },
+                "the real receive path must accept at the mirrored gate and drop gate+1",
+            );
+        }
     }
 
     fn bracket_world() -> World {

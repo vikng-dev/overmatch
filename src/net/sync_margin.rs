@@ -28,17 +28,13 @@
 //! "each gap normal" while the buffer starves (the NetEQ migration rationale; a test below pins
 //! that failure case).
 //!
-//! # Contract constants (SLOs, not tunings)
+//! # Sampling contract
 //!
-//! ```text
-//! B         = 60 freezes/hour            product freeze budget: one perceptible starvation
-//!                                        event per minute, ceiling (initial product contract)
-//! p         = 1 − B/(64 × 3600)          the covered fraction of per-tick arrivals = 1 − 1/3840
-//! ring_cap  = 1/(1 − p) = 3840           the minimum sample count that resolves tail mass 1 − p;
-//!                                        forgetting is by sample eviction (nominally 60 s at
-//!                                        64 samples/s); Q_p excludes one sample at capacity
-//! T         = 2 s                        min-anchor spike window (NetEQ precedent)
-//! ```
+//! The ring retains one minute of per-tick samples (DERIVED: 3840 at the authority's 64 Hz).
+//! Its empirical quantile covers `p = 1 - 1/N`, where `N = RING_CAP`: at capacity it excludes
+//! one sample. Eviction counts samples, so skipped remote ticks lengthen wall-time retention.
+//! The minimum anchors use a separate two-second spike window. These are sampling resolutions;
+//! an excluded arrival sample is not a bound on the number of perceptible starvation events.
 //!
 //! # Downlink (the interpolation timeline)
 //!
@@ -60,15 +56,19 @@
 //!   `max(Q_p − max(Q_50, min{l_i}), 0)/tick`;
 //! - `error_margin` (deadband) = `max(Q_50 − min, 0)/tick` — a deadband need only exceed the error
 //!   signal's own noise, whose scale is the bulk spread; the tail belongs to coverage;
-//! - `jitter_multiple` = 0 — the ping EWMA leaves the law entirely.
+//! - `jitter_multiple` = 0 — the Gaussian jitter term is off; RTT/2 remains in the objective.
 //!
-//! Together the objective pays the floor plus the nonnegative spread `Q_p − min{l_i}`, split at
-//! the median when it lies above that minimum. A sustained delay increase (including discarded
+//! Before the acceptance clamp, the margins pay the floor plus the nonnegative spread
+//! `Q_p − min{l_i}`, split at the median when it lies above that minimum. A sustained delay increase (including discarded
 //! server wall time) becomes the baseline within [`SPIKE_WINDOW`] of resumed arrivals, rather
 //! than inflating input lead until the ring median catches up. While the minimum exceeds the old
 //! median, input coverage gives up the part of the burst tail below that new baseline; bursts
 //! above it remain covered. Old burst history is not translated onto the new baseline, so input
 //! coverage can briefly reach zero until a fresh burst is sampled.
+//! The combined input margins are capped by the server's receive gate, reserving the fixed input
+//! delay, the objective's pipeline tick, half RTT and [`INPUT_HEADROOM_TICKS`]. Coverage takes
+//! priority over deadband. This bounds the adaptive objective, not remote-estimate error or the
+//! clock controller's convergence; network delay alone can exhaust the available budget.
 //! The announcement recovery deadline still reads [`ArrivalStats::coverage`]'s long-ring tail:
 //! it bounds announcement/state skew, not the client's input lead.
 //!
@@ -83,7 +83,8 @@ use lightyear::core::tick::{Tick, TickDuration};
 use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimeline};
 use lightyear::prelude::client::InputDelayConfig;
 use lightyear::prelude::{
-    Controlled as NetControlled, InputTimelineConfig, Interpolated, SyncConfig, SyncSystems,
+    Client, Controlled as NetControlled, InputTimelineConfig, Interpolated, PingManager,
+    SyncConfig, SyncSystems,
 };
 use lightyear_transport::plugin::PacketReceived;
 
@@ -95,18 +96,24 @@ use crate::state::AppState;
 /// structure, not a tuned number: it moves only if content stops advancing once per tick.
 const CONTENT_PHASE_MEAN_TICKS: f32 = 0.5;
 
-/// Resolution: the smallest tail mass resolved by the empirical quantile. DERIVED from the
-/// product ceiling of one starvation per minute at the authority's tick rate: ceil(60 s / tick).
-/// DERIVED nominal retention is 60 s at 64 samples/s; skipped remote ticks lengthen it.
+/// Resolution: one minute of per-tick samples resolves a one-sample tail without unbounded
+/// storage. DERIVED capacity: ceil(60 s / tick); skipped ticks lengthen wall-time retention.
 const RING_CAP: usize = Duration::from_secs(60)
     .as_nanos()
     .div_ceil(super::server::TICK.as_nanos()) as usize;
 
+/// Fact: lightyear_inputs 0.30.1 src/server.rs:59 sets its private future-input gate to 64;
+/// receive_input_message applies it at :370 before any buffer write. Shared by the input law
+/// and the server census; the census test drives the actual receive path on both sides.
+pub(super) const MAX_INPUT_LOOKAHEAD_TICKS: i32 = 64;
+
+/// Resolution: reserve one tick for fractional-tick rounding and receive-schedule phase.
+const INPUT_HEADROOM_TICKS: f32 = 1.0;
+
 /// DERIVED from the authority's timestep; sampling and warmup count remote ticks.
 const TICK_RATE_HZ: f64 = 1.0 / super::server::TICK.as_secs_f64();
 
-/// `p = 1 − B/(64 × 3600)`: the fraction of per-tick arrivals the delay target must cover so that
-/// at most B starvation events/hour escape it.
+/// Empirical covered fraction: exclude one sample when the ring is full.
 fn quantile_p() -> f64 {
     1.0 - 1.0 / RING_CAP as f64
 }
@@ -370,13 +377,36 @@ struct InputSyncBase {
     input_delay: InputDelayConfig,
 }
 
-/// The uplink law: coverage = floor + the measured burst tail, deadband = the measured bulk
-/// spread, ping term off. Controller bounds carry over from the installed config.
-fn derived_input_sync(installed: SyncConfig, stats: &ArrivalStats, tick: Duration) -> SyncConfig {
+#[derive(Default)]
+struct InputMarginState {
+    armed: bool,
+    written: Option<(u8, f32, f32)>,
+}
+
+/// The uplink law prioritizes burst coverage over deadband within the acceptance budget.
+/// Controller bounds carry over from the installed config.
+fn derived_input_sync(
+    installed: SyncConfig,
+    stats: &ArrivalStats,
+    tick: Duration,
+    rtt: Duration,
+) -> SyncConfig {
+    // Lightyear 0.30.1 timeline/input.rs:599-630 adds RTT/2, a pipeline tick and both margins,
+    // subtracting input delay; the sender re-adds that delay to the message's end tick.
+    // Conservatively reserve the fixed delay too. Cover beyond the gate buys nothing:
+    // receive_input_message drops those inputs by construction, before any buffer write.
+    let budget = (MAX_INPUT_LOOKAHEAD_TICKS as f32
+        - f32::from(super::client::SHIPPING_INPUT_DELAY_TICKS)
+        - 1.0 // The objective's pipeline tick.
+        - INPUT_HEADROOM_TICKS
+        - in_ticks(rtt / 2, tick))
+    .max(0.0);
+    let jitter_margin =
+        (CONTENT_PHASE_MEAN_TICKS + in_ticks(stats.input_coverage(), tick)).min(budget);
     SyncConfig {
         jitter_multiple: 0,
-        jitter_margin: CONTENT_PHASE_MEAN_TICKS + in_ticks(stats.input_coverage(), tick),
-        error_margin: in_ticks(stats.bulk(), tick),
+        jitter_margin,
+        error_margin: in_ticks(stats.bulk(), tick).min((budget - jitter_margin).max(0.0)),
         ..installed
     }
 }
@@ -442,24 +472,31 @@ fn derive_input_margins(
         ),
     >,
     config: Option<ResMut<InputTimelineConfig>>,
-    mut armed: Local<bool>,
-    mut written: Local<Option<(u8, f32, f32)>>,
+    pings: Query<&PingManager, With<Client>>,
+    mut state: Local<InputMarginState>,
 ) {
-    if !*armed {
+    if !state.armed {
         if own.is_empty() {
             return;
         }
-        *armed = true;
+        state.armed = true;
         info!("net: input sync margins ARMED derived — own hull rides the server stream");
     }
     if let Some(mut config) = config {
-        let sync = derived_input_sync(base.sync, &estimator.stats, tick.0);
+        // The armed role can outlive its link during disconnect cleanup.
+        if pings.is_empty() {
+            return;
+        }
+        let pings = pings
+            .single()
+            .expect("the client has exactly one server link");
+        let sync = derived_input_sync(base.sync, &estimator.stats, tick.0, pings.rtt());
         let key = (sync.jitter_multiple, sync.jitter_margin, sync.error_margin);
-        if *written == Some(key) {
+        if state.written == Some(key) {
             return;
         }
         *config = InputTimelineConfig::new(sync, base.input_delay);
-        *written = Some(key);
+        state.written = Some(key);
     }
 }
 
@@ -506,6 +543,8 @@ mod tests {
         .init_resource::<ArrivalDelay>()
         .insert_resource(InputTimelineConfig::new(installed(), input_delay))
         .add_systems(Update, super::derive_input_margins);
+        app.world_mut()
+            .spawn((super::Client, super::PingManager::default()));
         app.update();
         let before = app
             .world()
@@ -532,9 +571,9 @@ mod tests {
         );
     }
 
-    fn stats(min_ms: f64, q50_ms: f64, qp_ms: f64) -> ArrivalStats {
+    fn stats(anchor_ms: f64, min_ms: f64, q50_ms: f64, qp_ms: f64) -> ArrivalStats {
         ArrivalStats {
-            anchor_s: min_ms / 1000.0,
+            anchor_s: anchor_ms / 1000.0,
             min_s: min_ms / 1000.0,
             q50_s: q50_ms / 1000.0,
             qp_s: qp_ms / 1000.0,
@@ -639,8 +678,8 @@ mod tests {
         );
     }
 
-    /// DERIVED: at ring capacity the product quantile excludes one sample, not zero. Input and
-    /// delay controllers rely on that freeze budget; calling the quantile a maximum overstates it.
+    /// DERIVED: at ring capacity the quantile excludes one sample, not zero. Input and delay
+    /// controllers rely on that empirical rank; calling it a maximum overstates coverage.
     #[test]
     fn the_full_ring_quantile_excludes_exactly_one_sample() {
         let n = super::RING_CAP;
@@ -842,19 +881,28 @@ mod tests {
     /// term reads the wrong spread, the floor is dropped or absorbed, the ping multiple survives,
     /// or the law rebuilds from `SyncConfig::default()`.
     #[test]
-    fn the_uplink_law_splits_the_spread_at_the_median() {
+    fn the_uplink_law_splits_the_spread_at_the_higher_of_median_and_minimum() {
         // Fixture: median half a tick above min, tail one tick above median.
         let tick_ms = TICK.as_secs_f64() * 1000.0;
-        let sync = derived_input_sync(installed(), &stats(0.0, tick_ms / 2.0, tick_ms * 1.5), TICK);
-        assert_eq!(sync.jitter_multiple, 0, "the ping EWMA leaves the law");
+        let sync = derived_input_sync(
+            installed(),
+            &stats(-tick_ms * 4.0, 0.0, tick_ms / 2.0, tick_ms * 1.5),
+            TICK,
+            Duration::ZERO,
+        );
+        assert_eq!(
+            sync.jitter_multiple, 0,
+            "the Gaussian jitter term leaves the margins"
+        );
         assert_close(sync.jitter_margin, 1.5, "floor 0.5 + coverage 1.0");
         assert_close(sync.error_margin, 0.5, "deadband = bulk spread");
         assert_close(sync.max_error_margin, 12.5, "resync bound must carry over");
         // Fixture: a risen minimum above the old median, with one tick of tail still above it.
         let shifted = derived_input_sync(
             installed(),
-            &stats(tick_ms * 2.0, tick_ms / 2.0, tick_ms * 3.0),
+            &stats(0.0, tick_ms * 2.0, tick_ms / 2.0, tick_ms * 3.0),
             TICK,
+            Duration::ZERO,
         );
         assert_close(
             shifted.jitter_margin,
@@ -867,61 +915,125 @@ mod tests {
             "the old bulk is below the new baseline",
         );
         // An empty estimator degenerates to the structural floor alone.
-        let cold = derived_input_sync(installed(), &ArrivalStats::default(), TICK);
+        let cold = derived_input_sync(installed(), &ArrivalStats::default(), TICK, Duration::ZERO);
         assert_close(cold.jitter_margin, 0.5, "cold-start floor");
         assert_close(cold.error_margin, 0.0, "cold-start deadband");
     }
 
-    /// The input sender relies on a server stall never leaving its coverage objective outside
-    /// the server's acceptance window for longer than W = SPIKE_WINDOW + one arrival tick.
-    /// Keeping the ring median as the sole reference leaves this five-second step there for
-    /// half a ring. This tests the margin law, not the clock controller's convergence or RTT.
+    /// The sender needs the full objective (pipeline tick and deadband included) inside the
+    /// receive gate. Zero input delay is conservative: shipping subtracts it from this objective
+    /// and re-adds it to the message tick. This exercises Lightyear's law, not clock convergence.
+    fn input_objective_lead(stats: &ArrivalStats, rtt: Duration) -> f32 {
+        use lightyear::prelude::{InputTimelineConfig, PingManager};
+        use lightyear_sync::prelude::client::RemoteTimeline;
+        use lightyear_sync::timeline::input::{InputDelayConfig, LocalTimelineSync};
+        use lightyear_sync::timeline::sync::{SyncTargetTimeline, TimelineSync};
+        let remote = RemoteTimeline::default();
+        let config = InputTimelineConfig::new(
+            derived_input_sync(installed(), stats, TICK, rtt),
+            InputDelayConfig::no_input_delay(),
+        );
+        let mut pings = PingManager::default();
+        pings.rtt_estimator_ewma.final_stats.rtt = rtt;
+        let objective = LocalTimelineSync::default().sync_objective(&remote, &config, &pings, TICK);
+        (objective - remote.current_estimate()).to_f32()
+    }
+
+    /// The sender's baseline recovers within the declared two-second contract, independently of
+    /// the implementation's window constant. A clamp alone must not leave a step at the cap.
     #[test]
-    fn a_server_stall_cannot_leave_input_coverage_outside_acceptance_past_the_spike_window() {
-        // Fixture: a full steady ring, then five seconds discarded by the server. The
-        // client's ordinary drain frames continue; consecutive server ticks resume later.
-        let step = Duration::from_secs(5);
+    fn a_server_stall_releases_input_coverage_within_two_seconds() {
+        // Fixture: five discarded seconds after a full steady ring; ordinary drain frames.
         let mut estimator = fed(std::iter::repeat_n(0.0, super::RING_CAP));
         let mut scratch = Vec::new();
-        let recovery_ticks = (super::SPIKE_WINDOW.as_nanos() / TICK.as_nanos()) as u32 + 1;
+        let recovery_ticks = (Duration::from_secs(2).as_nanos() / TICK.as_nanos()) as u32 + 1;
         let start = super::RING_CAP as u32;
         for after in 0..=recovery_ticks {
             let i = start + after;
             estimator.record(
-                f64::from(i) * TICK_SECS + step.as_secs_f64(),
+                f64::from(i) * TICK_SECS + 5.0,
                 TICK_SECS,
                 Tick(1_000 + i),
                 TICK_SECS,
             );
             estimator.refresh(&mut scratch);
         }
-        let sync = derived_input_sync(installed(), &estimator.stats, TICK);
-        // Fixture: zero RTT/jitter and input delay isolate the stall's margin contribution.
-        // Use the library's objective so its pipeline and deadband terms count toward the gate.
-        use lightyear::prelude::{InputTimelineConfig, PingManager};
-        use lightyear_sync::prelude::client::RemoteTimeline;
-        use lightyear_sync::timeline::input::{InputDelayConfig, LocalTimelineSync};
-        use lightyear_sync::timeline::sync::{SyncTargetTimeline, TimelineSync};
-        let remote = RemoteTimeline::default();
-        let config = InputTimelineConfig::new(sync, InputDelayConfig::no_input_delay());
-        let objective = LocalTimelineSync::default().sync_objective(
-            &remote,
-            &config,
-            &PingManager::default(),
-            TICK,
+        assert_close(
+            input_objective_lead(&estimator.stats, Duration::ZERO),
+            1.5,
+            "pipeline + phase floor",
         );
-        let lead = (objective - remote.current_estimate()).to_f32();
-        eprintln!(
-            "DERIVED five-second stall replay at W={:?}: coverage={} ticks, input objective lead={lead} ticks",
-            super::SPIKE_WINDOW + TICK,
-            sync.jitter_margin
-        );
+    }
+
+    /// Drive every sample through the real estimator and objective; the input sender must never
+    /// buy coverage that the receive gate drops. Mutant: remove the combined-margin clamp.
+    fn assert_trace_within_gate(arrivals: impl IntoIterator<Item = f64>) {
+        let mut estimator = fed(std::iter::repeat_n(0.0, super::RING_CAP));
+        let mut scratch = Vec::new();
+        let start = super::RING_CAP as u32;
+        for (after, arrival) in arrivals.into_iter().enumerate() {
+            estimator.record(
+                f64::from(start) * TICK_SECS + arrival,
+                0.0,
+                Tick(1_000 + start + after as u32),
+                TICK_SECS,
+            );
+            estimator.refresh(&mut scratch);
+            for rtt in [Duration::ZERO, Duration::from_millis(250)] {
+                assert_objective_within_gate(&estimator.stats, rtt, after);
+            }
+        }
+    }
+
+    fn assert_objective_within_gate(stats: &ArrivalStats, rtt: Duration, sample: usize) {
+        let lead = input_objective_lead(stats, rtt);
         assert!(
-            lead < super::super::server_stats::MAX_INPUT_LOOKAHEAD_TICKS as f32,
-            "a server stall must stop putting the input objective beyond the library gate \
-             within {:?}; got {lead} ticks",
-            super::SPIKE_WINDOW + TICK,
+            lead <= super::MAX_INPUT_LOOKAHEAD_TICKS as f32
+                - f32::from(crate::net::client::SHIPPING_INPUT_DELAY_TICKS)
+                - 1.0,
+            "sample {sample}, RTT {rtt:?}: objective {lead} must reserve fixed delay and one tick of headroom",
         );
+    }
+
+    /// The sender's budget includes deadband and RTT as well as coverage. Clamping only the tail
+    /// fails the bulk-heavy case; omitting half RTT fails the nonzero-RTT case.
+    #[test]
+    fn input_acceptance_budget_counts_deadband_and_half_rtt() {
+        // Fixture: a bulk-heavy distribution and a tail-heavy one, both beyond the gate.
+        let tick_ms = TICK_SECS * 1000.0;
+        for stats in [
+            stats(0.0, 0.0, tick_ms * 100.0, tick_ms * 101.0),
+            stats(0.0, 0.0, 0.0, tick_ms * 200.0),
+        ] {
+            for rtt in [Duration::ZERO, Duration::from_millis(250)] {
+                assert_objective_within_gate(&stats, rtt, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn input_lead_stays_inside_acceptance_during_a_server_stall_ramp() {
+        // Fixture: 20 Hz for two seconds, then four seconds at the authority's normal cadence.
+        assert_trace_within_gate((0..40 + 256).map(|i| {
+            if i < 40 {
+                f64::from(i) / 20.0
+            } else {
+                2.0 + f64::from(i - 40) * TICK_SECS
+            }
+        }));
+    }
+
+    #[test]
+    fn input_lead_stays_inside_acceptance_while_a_transient_lingers_in_the_ring() {
+        // Fixture: two packets delayed 1.25 s; following packets drain in order behind them,
+        // then resume normal cadence. Replay beyond a full ring so tail eviction is covered too.
+        let mut last_arrival: f64 = 0.0;
+        let arrivals = (0..super::RING_CAP + 129).map(|i| {
+            let delay = if i < 2 { 1.25 } else { 0.0 };
+            last_arrival = last_arrival.max(i as f64 * TICK_SECS + delay);
+            last_arrival
+        });
+        assert_trace_within_gate(arrivals);
     }
 
     /// The downlink margins: the Gaussian chain zeroed (the quantile subsumes it), the half-tick
