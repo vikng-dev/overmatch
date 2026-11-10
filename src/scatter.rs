@@ -22,7 +22,10 @@
 //! the live [`HeightGrid`] at its own XZ. Yaw is taken as authored; every prototype keeps its authored size.
 //!
 //! Graybox blocks and constructions of the destruction model are colliders outside
-//! the immutable terrain field; construction bounds also supply spawn obstacles.
+//! the immutable terrain field; construction bounds also supply spawn obstacles. No two instances'
+//! solids interpenetrate ([`clearance`]).
+
+pub(crate) mod clearance;
 
 use std::collections::BTreeMap;
 
@@ -205,6 +208,7 @@ impl ScatterView {
 /// obstacles ([`crate::world::SpawnObstacles`]), never as analytic terrain. Colliders spawn in every
 /// composition; meshes only where `view_assets` offers a server to draw
 /// with — the dedicated server draws nothing, exactly as it skips the terrain's render tiles.
+/// Refuses a placement whose solids interpenetrate on this grid ([`clearance::check`]).
 pub(crate) fn spawn(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -212,6 +216,7 @@ pub(crate) fn spawn(
     grid: &HeightGrid,
     mut view_assets: Option<ViewAssets<'_>>,
 ) -> Vec<Transform> {
+    clearance::check(manifest, grid);
     let view = view_assets
         .as_mut()
         .map(|assets| ScatterView::new(commands, meshes, assets, manifest));
