@@ -599,9 +599,6 @@ pub(crate) enum Layer {
     /// what the penetration march meets in avian's tree. A tank's armour is no collider; the march
     /// reads it from the tank's armour set.
     Armor,
-    /// Witness volumes (crew, ADR-0040): never cast against, never in the armour walk; read only
-    /// by the witness pass (`ballistics::wound`).
-    Witness,
     /// Server-simulated pieces (`crate::debris`): a construction's fallen chunks and the debris stress
     /// lever's fragments. They collide with `Terrain`, `Vehicle` and each other, and no ground
     /// query reads them. A construction piece's separate occupied-hull sensors carry `Armor`

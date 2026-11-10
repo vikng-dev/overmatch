@@ -162,8 +162,6 @@ fn tank(
                         WitnessVolume {
                             substance: "fixture".to_owned(),
                         },
-                        WitnessSurface,
-                        CollisionLayers::new([Layer::Witness], LayerMask::NONE),
                         ComponentHealth::full(hp),
                         CrewStation::Gunner,
                     ));

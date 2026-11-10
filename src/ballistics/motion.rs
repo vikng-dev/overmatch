@@ -276,10 +276,9 @@ pub(super) fn snapshot(
         }
         history.colliders.insert(entity, poses);
         if stages.is_some() {
-            let armour = layers.get(entity).is_ok_and(|layers| {
-                layers.memberships.has_all(crate::Layer::Armor)
-                    || layers.memberships.has_all(crate::Layer::Witness)
-            });
+            let armour = layers
+                .get(entity)
+                .is_ok_and(|layers| layers.memberships.has_all(crate::Layer::Armor));
             inserts[usize::from(armour)] += 1;
         }
     }

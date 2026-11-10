@@ -103,7 +103,7 @@ labelled!(
         BeltPartitionAllocs = "belt_partition_allocs",
         BeltTerrainSamples = "belt_terrain_samples",
         // The game's damage model: one planned crossing, one field throw, and per throw the
-        // armour colliders its reach holds; per direction the candidates whose geometry was read
+        // armour its reach holds; per direction the candidates whose geometry was read
         // and their face crossings.
         MarchCrossings = "march_crossings",
         FieldThrows = "field_throws",
@@ -121,8 +121,7 @@ labelled!(
         BlastOwnerRays = "blast_owner_rays",
         BlastPieceRays = "blast_piece_rays",
         // The game's damage model's pose history: per-collider entries written, of colliders on
-        // the armour or crew box layer (construction pieces share the armour layer) and of every
-        // other.
+        // the armour layer (a construction's; a tank's armour is no collider) and of every other.
         PoseInsertsArmour = "pose_inserts_armour",
         PoseInsertsOther = "pose_inserts_other",
         // Armour-set frame poses written, one per frame whose node's local pose was written.

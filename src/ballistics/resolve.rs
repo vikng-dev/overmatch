@@ -768,11 +768,11 @@ fn next_starts(
 /// [`ColliderAabb`]s (avian's `EnlargedAabb::update` keeps the enlarged bounds around the tight
 /// ones), and a set's tank and frame boxes hold its part boxes. So each direction reads exactly the
 /// colliders, in the order, that a query of its own box returns. A throw from inside a tank's box
-/// reads that tank's colliders alone, the same way ([`Self::of_box`]).
+/// reads that tank's parts alone, the same way ([`Self::of_box`]).
 pub(crate) struct FieldReach {
-    /// Armour colliders (a [`ProjectileMarchWorld::armour`] ancestor) the throw admits.
+    /// Armour colliders and parts (a [`ProjectileMarchWorld::armour`] ancestor) the throw admits.
     hard: Vec<Reached>,
-    /// Witness colliders the throw admits, with their witness node.
+    /// Crew box parts the throw admits, with their witness node.
     witnesses: Vec<(Entity, Entity, ColliderAabb)>,
     /// The box of the tank the throw was made inside ([`Self::of_box`]), where its directions
     /// end; `None` for a throw in the open, whose directions end at `union`.
@@ -792,7 +792,7 @@ struct StopScratch {
     hits: Vec<walk::FaceHit>,
 }
 
-/// One armour collider of a [`FieldReach`].
+/// One armour collider or part of a [`FieldReach`].
 struct Reached {
     node: Entity,
     collider: Entity,
@@ -980,14 +980,14 @@ impl FieldReach {
         self.hard.len()
     }
 
-    /// The armour colliders whose broad boxes meet `swept`.
+    /// The armour whose broad boxes meet `swept`.
     fn hard_meeting(&self, swept: ColliderAabb) -> impl Iterator<Item = &Reached> {
         self.hard
             .iter()
             .filter(move |reached| reached.broad.intersects(&swept))
     }
 
-    /// The witness colliders whose broad boxes meet `swept`, as `(witness, collider)`.
+    /// The crew box parts whose broad boxes meet `swept`, as `(witness, part)`.
     pub(super) fn witnesses_meeting(&self, swept: ColliderAabb) -> Vec<(Entity, Entity)> {
         self.witnesses
             .iter()

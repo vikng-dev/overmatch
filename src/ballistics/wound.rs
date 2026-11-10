@@ -27,8 +27,8 @@ use super::resolve::{FieldReach, Leg, PROBE_MARGIN, ResolveContext, field_presen
 use super::walk::{self, WalkError, WitnessSpans};
 use crate::cost::stages::{Stage, Stages, Work};
 
-/// The witness colliders `admit` keeps whose bounds meet the stretch from `from` along `axis` for
-/// `length` m, grown by `radius`: `(witness, collider)` pairs in entity order.
+/// The crew box parts `admit` keeps whose bounds meet the stretch from `from` along `axis` for
+/// `length` m, grown by `radius`: `(witness, part)` pairs in entity order.
 fn candidates(
     context: &ResolveContext<'_, '_, '_>,
     admit: &dyn Fn(Entity) -> bool,
@@ -130,7 +130,8 @@ fn presence(
         return Ok(None);
     };
     let (enter, leave) = line_in_box(axis, lo, hi).expect(
-        "the game's damage model admitted each witness collider on this line, so their union meets it");
+        "the game's damage model admitted each crew box part on this line, so their union meets it",
+    );
     let behind = (-enter).max(0.0);
     let total = behind + leave.max(0.0);
     assert!(

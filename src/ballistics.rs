@@ -1369,10 +1369,6 @@ pub struct WitnessVolume {
     pub substance: String,
 }
 
-/// A witness volume's collider: excluded from every armour broad phase, read by the witness pass.
-#[derive(Component)]
-pub struct WitnessSurface;
-
 /// The bake's manifold certificate, carried with an armour part's shape in its set (or on a test
 /// fixture's collider) so the corridor collector can name the surface and the welded feature a
 /// crossing came from (`walk::ShellKey`, `walk::Contact`).
@@ -2134,10 +2130,6 @@ struct ProjectileMarchWorld<'w, 's> {
     step_crossings: Option<Res<'w, resolve::StepCrossings>>,
     #[cfg(test)]
     contact_log: Option<Res<'w, contact_classes::ContactLog>>,
-    // Witness volumes (ADR-0040) and their colliders: read by the witness pass, excluded from every
-    // armour classification.
-    witnesses: Query<'w, 's, &'static WitnessVolume>,
-    witness_surfaces: Query<'w, 's, (), With<WitnessSurface>>,
     // Present only where the authority stats consumer installed it.
     stages: Option<Res<'w, crate::cost::stages::Stages>>,
 }
@@ -2297,17 +2289,13 @@ impl ProjectileMarchWorld<'_, '_> {
         Some(set.located(part).1)
     }
 
-    /// The game's damage model: what collider `entity` is to a round. An armour part's role is its
-    /// set's; any other collider's is a crew box's when it is a [`WitnessSurface`] under a
-    /// [`WitnessVolume`], armour under its nearest [`BallisticVolume`], and `None` otherwise
-    /// (terrain, a body's proxy).
+    /// The game's damage model: what collider or part `entity` is to a round. An armour part's
+    /// role is its set's, a crew box's among them (crew boxes are parts alone); any other
+    /// collider's is armour under its nearest [`BallisticVolume`], and `None` otherwise (terrain, a
+    /// body's proxy).
     fn role(&self, entity: Entity) -> Option<armour_set::Role> {
         if let Some(part) = self.part(entity) {
             return Some(part.role);
-        }
-        if self.witness_surfaces.contains(entity) {
-            return hit_ancestor(entity, &self.witnesses, &self.parents)
-                .map(|(node, _)| armour_set::Role::CrewBox(node));
         }
         let (volume, _) = hit_ancestor(entity, &self.volumes, &self.parents)?;
         assert!(

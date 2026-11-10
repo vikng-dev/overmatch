@@ -817,9 +817,10 @@ pub(super) fn snapshot(
     }
 }
 
-/// The set of a fixture body from its live hierarchy: every descendant collider on the armour or
-/// crew box layer is a part, its role its nearest volume of that layer's kind, and the body its
-/// only frame. Each part then stops being a collider, as a spawned tank's part is none.
+/// The set of a fixture body from its live hierarchy: every descendant collider on the armour layer
+/// is a part, its role its nearest volume ([`layered_role`]), every descendant a node a deeper part
+/// may hang under, and the body its only frame. Each part then stops being a collider, as a spawned
+/// tank's part is none.
 #[cfg(test)]
 pub(crate) fn fixture(world: &mut World, root: Entity) {
     let mut nodes = Vec::new();
@@ -840,16 +841,15 @@ pub(crate) fn fixture(world: &mut World, root: Entity) {
                     .clone();
                 let surfaces = world.get::<super::BallisticSurfaces>(child).cloned();
                 parts.push((child, node, transform, shape, surfaces, role));
-            } else {
-                nodes.push(Node {
-                    name: "a fixture node",
-                    entity: child,
-                    parent: node,
-                    transform,
-                    frame: false,
-                });
-                walk.push((child, Some(nodes.len() - 1)));
             }
+            nodes.push(Node {
+                name: "a fixture node",
+                entity: child,
+                parent: node,
+                transform,
+                frame: false,
+            });
+            walk.push((child, Some(nodes.len() - 1)));
         }
     }
     let set = ArmourSet::build(
@@ -869,40 +869,36 @@ pub(crate) fn fixture(world: &mut World, root: Entity) {
     for &(entity, ..) in &parts {
         world
             .entity_mut(entity)
-            .remove_with_requires::<(Collider, super::BallisticSurfaces, super::WitnessSurface)>();
+            .remove_with_requires::<(Collider, super::BallisticSurfaces)>();
     }
     set.insert(&mut world.commands(), root);
     world.flush();
 }
 
-/// Test support: the role of collider `entity` as a fixture authors it, `None` for one on neither
-/// the armour nor the crew box layer: a `WitnessSurface` is its nearest `WitnessVolume`'s crew box,
-/// any other its nearest `BallisticVolume`'s armour.
+/// Test support: the role of collider `entity` as a fixture authors it, `None` for one off the
+/// armour layer: its nearest volume at or above it, a `WitnessVolume`'s crew box or a
+/// `BallisticVolume`'s armour.
 #[cfg(test)]
 fn layered_role(world: &World, entity: Entity) -> Option<Role> {
     use avian3d::prelude::CollisionLayers;
     let layers = world.get::<CollisionLayers>(entity)?;
-    if !(layers.memberships.has_all(crate::Layer::Armor)
-        || layers.memberships.has_all(crate::Layer::Witness))
-    {
+    if !layers.memberships.has_all(crate::Layer::Armor) {
         return None;
     }
-    let nearest = |has: &dyn Fn(Entity) -> bool| {
-        std::iter::successors(Some(entity), |&node| {
-            world.get::<ChildOf>(node).map(ChildOf::parent)
-        })
-        .find(|&node| has(node))
-        .expect("a fixture part hangs under the volume its role names")
-    };
-    Some(if world.get::<super::WitnessSurface>(entity).is_some() {
-        Role::CrewBox(nearest(&|node| {
-            world.get::<super::WitnessVolume>(node).is_some()
-        }))
-    } else {
-        Role::Armour(nearest(&|node| {
-            world.get::<super::BallisticVolume>(node).is_some()
-        }))
+    let role = std::iter::successors(Some(entity), |&node| {
+        world.get::<ChildOf>(node).map(ChildOf::parent)
     })
+    .find_map(|node| {
+        if world.get::<super::WitnessVolume>(node).is_some() {
+            Some(Role::CrewBox(node))
+        } else {
+            world
+                .get::<super::BallisticVolume>(node)
+                .map(|_| Role::Armour(node))
+        }
+    })
+    .expect("a fixture part hangs under the volume its role names");
+    Some(role)
 }
 
 #[cfg(test)]
