@@ -1445,9 +1445,13 @@ fn driver(
         };
     }
     let one_way = !brake && st.clutch != ClutchState::Out && command.abs() >= DEAD && work;
+    // The pivot's own clutch clause, not every open clutch: a shift window is no pivot. A tick
+    // whose per-side brakes act (park lever, service or Brake intent) keeps their capacity whole.
     let mean_hold = tp.neutral_mean == NeutralMean::Held
-        && st.clutch == ClutchState::Out
-        && neutral_pivot(&input, mean);
+        && propulsive < DEAD
+        && neutral_pivot(&input, mean)
+        && !st.park
+        && !service;
     Controls {
         input,
         command,

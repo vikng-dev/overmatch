@@ -922,7 +922,13 @@ the turn completes. The held drift runs down the fall line: the sliding footprin
 grade while `m` stays at zero. The 35° row exceeds the DERIVED static capacity (2 × 96 kN × 1.5 =
 288 kN against 57 t × g × sin 35° = 321 kN facing the fall line, saturating at about 31°). Breached,
 the dynamic 192 kN holds only about 20°, so the tank runs downhill and the law leaves the neutral
-regime; the parked tank's lever has the same capacity and would slide there too (DERIVED). Every
-geared probe row is bit-identical. Of the rows that enter a neutral pivot while rolling,
-`flat g3 lifted tight` goes from nine neutral/geared flips at the threshold to one entry, stopping
-its mean at a MEASURED peak 3.5 m/s² hull deceleration where the free mean reached 2.8.
+regime; the parked tank's lever has the same capacity and would slide there too (DERIVED).
+
+Geared rows that stay geared are bit-identical. One geared row moved: `flat g3 lifted tight`, a
+lifted-throttle steer that falls under 0.5 m/s, now stops on the hold. Its nine neutral/geared flips
+at the threshold become one entry, and its peak hull deceleration rises from 2.8 to 3.5 m/s²
+(MEASURED).
+
+The hold acts on the pivot's own clutch clause (no pedal, steering, under the neutral thresholds),
+not on every open clutch, so a shift window is no pivot. It also stays off on any tick whose park
+lever or service brakes act, Brake intent included, so `brake_force` is never counted twice.

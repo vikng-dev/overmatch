@@ -406,6 +406,53 @@ fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
     }
 }
 
+/// A held mean is bounded by the parking hold's two-sided capacity, static while the mean is at
+/// rest and dynamic once breached (`brake_capacity_for_regime`). A grade between the two holds a
+/// resting pivot but keeps a breached one sliding; a grade beyond the static capacity moves a
+/// resting one. A pivot on a slope the parked tank cannot hold relies on this to slide too.
+#[test]
+fn a_held_mean_gives_way_beyond_its_capacity_and_slides_once_breached() {
+    let fp = lab_fp();
+    let tp = TransmissionParams {
+        neutral_mean: NeutralMean::Held,
+        ..lab_tp()
+    };
+    let at_rest = 2.0 * brake_capacity_for_regime(&tp, true, false, 0.0);
+    let breached = 2.0 * brake_capacity_for_regime(&tp, true, false, PARK_ENGAGE_SPEED);
+    // The final and the peak mean speed over `ticks` of a full-lever pivot under a total grade
+    // pull (N).
+    let pivot = |pull: f32, mean: f32, ticks: usize| {
+        let mut st = fresh(&tp);
+        let mut speeds = [mean; 2];
+        let side = [-0.5 * pull; 2];
+        let mut peak = 0.0f32;
+        for _ in 0..ticks {
+            speeds = step(&fp, &tp, &mut st, &input(0.0, 1.0, speeds, side)).next_speeds;
+            peak = peak.max(((speeds[0] + speeds[1]) * 0.5).abs());
+        }
+        ((speeds[0] + speeds[1]) * 0.5, peak)
+    };
+    // Fixture: a pull halfway between the two capacities, observed for one simulated second.
+    let between = 0.5 * (at_rest + breached);
+    let (_, rest) = pivot(between, 0.0, 64);
+    assert!(
+        rest < PARK_ENGAGE_SPEED,
+        "the static capacity holds a resting mean, peaked at {rest} m/s"
+    );
+    // One tick from the first breached mean speed.
+    let (sliding, _) = pivot(between, PARK_ENGAGE_SPEED, 1);
+    assert!(
+        sliding > PARK_ENGAGE_SPEED,
+        "a breached hold has only its dynamic capacity, so the mean keeps sliding: {sliding} m/s"
+    );
+    // Fixture: a pull a quarter beyond the static capacity, one tick from rest.
+    let (beyond, _) = pivot(1.25 * at_rest, 0.0, 1);
+    assert!(
+        beyond >= PARK_ENGAGE_SPEED,
+        "the hold is bounded: a pull beyond it moves the mean, got {beyond} m/s"
+    );
+}
+
 /// The L600 constraint converges to the geared ratio: under sustained throttle + tight
 /// steer with no ground reaction, d/|m| lands on κ_tight of the active gear.
 #[test]
