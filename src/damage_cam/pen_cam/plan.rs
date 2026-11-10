@@ -6,19 +6,22 @@
 //!
 //! Whether the round stopped, where it left the tank and where the line entered a component are the
 //! record's own facts; nothing here re-derives them from geometry. A component's shape, and the
-//! whole tank's bounds, serve only framing, never timing. Three things are derived rather than
+//! whole tank's bounds, serve only framing, never timing. Four things are derived rather than
 //! read, and are labelled where they are made: the line's remaining capability, `(v/v₀)²` from the
 //! path's times (the record carries no capability), the moment a component is reached (the
 //! earliest of the line's recorded entry and each dosing field's front arriving; a synthetic clip
-//! that names neither is reached at contact), and each field front's speed ([`Cone::speed`]; the
-//! record holds no fragment speed). Every time here is the record's own (s); the corner plays it at
+//! that names neither is reached at contact), each field front's speed ([`Cone::speed`]; the
+//! record holds no fragment speed), and how far a direction no hard body of the struck tank stops
+//! is drawn ([`drawn_reach`]). Every time here is the record's own (s); the corner plays it at
 //! a fixed slowdown (`super::timeline::REPLAY_SLOWDOWN`).
 
 use bevy::prelude::*;
 
 use std::sync::Arc;
 
-use super::picture::{Lay, PictureJobs, Pictures, RecordAtlas, ViewPictures, pictured_fields};
+use super::picture::{
+    self, Lay, PictureJobs, Pictures, RecordAtlas, ViewPictures, pictured_fields,
+};
 use super::potency::Potency;
 use super::timeline::CornerKind;
 use crate::ballistics::spall_cone::{self, FieldDescriptor};
@@ -386,7 +389,8 @@ pub struct BurstPlan {
     pub cone: Option<usize>,
 }
 
-/// One direction of a cone that left its origin: unit direction and reach (m).
+/// One direction of a cone that left its origin: unit direction and the reach (m) it is drawn to
+/// ([`drawn_reach`]).
 #[derive(Clone)]
 pub struct Ray {
     pub direction: Vec3,
@@ -530,19 +534,21 @@ impl Plan {
                 arc: line.arc_at_time(bounce.t),
             })
             .collect();
+        let potency = Potency::of_tank(shapes);
+        let drawing = shapes.hard().map(|bodies| &**bodies).zip(potency);
         // The game's damage-model field uses the leg leaving its event's node in time.
         // Its disc-mean origin can stand off that node; on a reflected path a later node can
         // be closer in space without belonging to this exit.
         let spall = report.spall.iter().map(|c| {
             let node = line.nearest_node_at(c.t);
             let exit = line.leg_speed(node + 1).unwrap_or(0.0);
-            cone(c, &line, exit, units.0)
+            cone(c, &line, exit, units.0, drawing)
         });
         let burst_unit = units.1;
         let burst_field = report.burst.iter().filter_map(|b| {
             b.field
                 .as_ref()
-                .map(|c| cone(c, &line, b.sideways_mps, burst_unit))
+                .map(|c| cone(c, &line, b.sideways_mps, burst_unit, drawing))
         });
         let cones: Vec<Cone> = spall.chain(burst_field).collect();
         let mass = report.projectile.mass_kg;
@@ -639,7 +645,7 @@ impl Plan {
             boxes,
             tank_bounds: shapes.bounds(),
             bodies: shapes.hard().cloned(),
-            potency: Potency::of_tank(shapes),
+            potency,
             pictures: Arc::default(),
             line,
         }
@@ -859,19 +865,61 @@ fn dosing_reach(field: &SpallCone, name: &str) -> Option<f32> {
         .reduce(f32::min)
 }
 
+/// The struck tank's hard bodies and its potency: what a field's direction is drawn by
+/// ([`drawn_reach`]); `None` without either, when no field is drawn.
+type Drawing<'a> = Option<(&'a HardBodies, Potency)>;
+
+/// How far (m) the pen cam draws a direction of `field` the record ended `recorded` m from its
+/// origin along unit `direction`, thrown with `strength` HP points: the record's reach where the
+/// struck tank's hard bodies stop it ([`picture::meets_a_body`]), and otherwise on past the
+/// record's end to where its intensity falls below the floor band, `sqrt(e / T_floor)` with `e`
+/// its emission ([`Potency::emission`]), never short of the record. Drawn on past the record's
+/// end (a tank's box, design doc §5, "Containment"), it doses nothing: the record's doses stand.
+/// Without `drawing` nothing is drawn and the record's reach stands.
+fn drawn_reach(
+    field: &SpallCone,
+    direction: Vec3,
+    recorded: f32,
+    strength: f32,
+    drawing: Drawing,
+) -> f32 {
+    let Some((bodies, potency)) = drawing else {
+        return recorded;
+    };
+    let descriptor = field.field;
+    let emission = potency.emission(strength, descriptor.inner_angle(), descriptor.half_angle());
+    let floor = (emission / potency.floor).sqrt();
+    let origin = Vec3::from(field.origin);
+    if floor <= recorded || picture::meets_a_body(bodies, origin, direction, floor) {
+        recorded
+    } else {
+        floor
+    }
+}
+
 /// The plan's field of `cone`, thrown on `line`, its front running at `speed` (m/s of record), its
-/// joules worth `unit` HP points each.
-fn cone(cone: &SpallCone, line: &Polyline, speed: f32, unit: spall_cone::FieldUnit) -> Cone {
+/// joules worth `unit` HP points each, each direction drawn as `drawing` draws it
+/// ([`drawn_reach`]).
+fn cone(
+    cone: &SpallCone,
+    line: &Polyline,
+    speed: f32,
+    unit: spall_cone::FieldUnit,
+    drawing: Drawing,
+) -> Cone {
     let origin = Vec3::from(cone.origin);
     let axis = Vec3::from(cone.axis).normalize_or(Vec3::NEG_Z);
+    let hp = |joules: f32| (f64::from(joules) * unit.hp_per_joule()) as f32;
     let rays = cone
         .fragments
         .iter()
         .filter_map(|fragment| {
             let span = Vec3::from(fragment.end) - origin;
+            let direction = span.try_normalize()?;
+            let strength = hp(fragment.strength);
             Some(Ray {
-                direction: span.try_normalize()?,
-                reach: span.length(),
+                direction,
+                reach: drawn_reach(cone, direction, span.length(), strength, drawing),
             })
         })
         .collect();
@@ -880,7 +928,7 @@ fn cone(cone: &SpallCone, line: &Polyline, speed: f32, unit: spall_cone::FieldUn
         axis,
         cone.field,
         cone.fragments.len(),
-        (f64::from(cone.strength) * unit.hp_per_joule()) as f32,
+        hp(cone.strength),
         Thrown {
             arc: line.arc_of(origin),
             t: cone.t,

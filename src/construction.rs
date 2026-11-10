@@ -259,16 +259,21 @@ pub(crate) fn element_layers() -> CollisionLayers {
     CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL)
 }
 
+/// Element `k`'s standing solid in the construction frame: its authored hull.
+pub(crate) fn element_collider(kind: &ConstructionKind, k: usize) -> Collider {
+    let element = &kind.asset.elements[k];
+    Collider::convex_hull(element.points())
+        .unwrap_or_else(|| panic!("construction: element {} has no convex hull", element.name))
+}
+
 /// Element `k`'s collider entity, less its parent: its authored hull and a
 /// ballistic volume of its substance.
 fn element_bundle(kind: &ConstructionKind, k: usize) -> impl Bundle {
     let element = &kind.asset.elements[k];
-    let points = element.points();
     let material = usize::from(element.material);
     (
         Transform::IDENTITY,
-        Collider::convex_hull(points)
-            .unwrap_or_else(|| panic!("construction: element {} has no convex hull", element.name)),
+        element_collider(kind, k),
         element_layers(),
         kind.element_friction(k),
         BallisticVolume {
@@ -415,6 +420,19 @@ pub(crate) mod tests {
                     .clone()
             })
             .clone()
+    }
+
+    /// A library holding `kinds`, keyed by their asset ids, for a fixture map that places them.
+    pub(crate) fn library_of(
+        kinds: impl IntoIterator<Item = Arc<ConstructionKind>>,
+    ) -> ConstructionLibrary {
+        ConstructionLibrary {
+            kinds: kinds
+                .into_iter()
+                .map(|kind| (kind.asset.id.clone(), kind))
+                .collect(),
+            texts: Vec::new(),
+        }
     }
 
     /// The shipped house with its material table's `from` entry named `to`, resolved through the

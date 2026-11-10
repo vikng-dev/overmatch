@@ -268,3 +268,82 @@ fn nonfinite_flight_velocity_is_an_invariant_failure() {
         .x = f32::NAN;
     app.update();
 }
+
+/// Fixture data: a tank behind the fixture wall, its body 6 m down range of the muzzle, its armour
+/// a front and a rear plate 3 m apart and a floor and a roof, so its box spans 4.49 m to 7.51 m
+/// down range. Returns its body.
+fn tank_behind_the_wall(app: &mut App) -> Entity {
+    use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody};
+    let body = app
+        .world_mut()
+        .spawn((Transform::from_xyz(0.0, ORIGIN.y, -6.0), RigidBody::Static))
+        .id();
+    let plate = Vec3::new(3.0, 2.0, 0.02);
+    let deck = Vec3::new(3.0, 0.1, 3.0);
+    for (size, at) in [
+        (plate, Vec3::Z * 1.5),
+        (plate, Vec3::NEG_Z * 1.5),
+        (deck, Vec3::NEG_Y),
+        (deck, Vec3::Y),
+    ] {
+        app.world_mut().spawn((
+            Transform::from_translation(at),
+            ChildOf(body),
+            Collider::cuboid(size.x, size.y, size.z),
+            CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
+            BallisticVolume {
+                material: walk::VolumeMaterial::fixture(1000.0),
+                substance: "RHA".to_string(),
+            },
+            crate::damage::VolumeOf(body),
+        ));
+    }
+    for _ in 0..8 {
+        app.update();
+    }
+    body
+}
+
+/// The game's damage model: a burst is contained by the box of the tank the round is in, whatever
+/// armed its fuze. An `Impact` fuze functions on a wall, which has no tank, and its delay carries
+/// the round through the tank's front plate: it bursts inside the tank's box, and its burst names
+/// that tank (`ArmourMark::Burst::inside`), so its field ends at the box and it casts no blast
+/// (`construction::breakage::read_shell`). A shorter delay bursts between the wall and the tank,
+/// in the open. A containment read from the fuze's attribution, which is the wall's (none), fails
+/// it. Fixture: a 2 cm wall and [`tank_behind_the_wall`]; delays of 4 m and 1.6 m of flight.
+#[test]
+fn a_burst_inside_a_tank_box_is_contained_whatever_armed_its_fuze() {
+    for (metres, contained) in [(4.0, true), (1.6, false)] {
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.02), PLATE);
+        let tank = tank_behind_the_wall(&mut app);
+        let shell = shot(
+            &mut app,
+            ORIGIN,
+            Vec3::NEG_Z * SPEED,
+            impact(metres / SPEED),
+        );
+        advance(&mut app);
+        let bursts: Vec<_> = app
+            .world()
+            .get::<PenetrationMarks>(shell)
+            .unwrap()
+            .log
+            .iter()
+            .filter_map(|mark| match mark {
+                ArmourMark::Burst {
+                    at, tank, inside, ..
+                } => Some((*at, *tank, *inside)),
+                _ => None,
+            })
+            .collect();
+        let [(at, armed_by, inside)] = bursts[..] else {
+            panic!("one burst: {bursts:?}");
+        };
+        assert_eq!(armed_by, None, "fixture: the wall armed the fuze");
+        assert_eq!(
+            inside,
+            contained.then_some(tank),
+            "a burst at {at} after {metres} m of delay"
+        );
+    }
+}

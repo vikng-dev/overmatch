@@ -515,12 +515,10 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
         }
     }
 
-    /// OVERMATCH PATCH: reduces the contacts between each pair of [`ReducibleContacts`] bodies
-    /// (`contact_types::reduction`). Pairs group by their two bodies, whose groups own disjoint
-    /// pairs and reduce in parallel; moving the manifolds out needs no unsafe aliasing. Runs
-    /// after the pair update and before status bits are read, so the constraint graph sees only
-    /// the reduced manifolds. A pair losing all of them stays touching, keeping its events and
-    /// its island link.
+    /// OVERMATCH PATCH: applies `contact_types::reduction` to each pair of [`ReducibleContacts`]
+    /// bodies. Groups own disjoint pairs and reduce in parallel; moving the manifolds out needs
+    /// no unsafe aliasing. Runs after the pair update and before status bits are read, so the
+    /// constraint graph sees only the reduced manifolds.
     fn reduce_body_pair_contacts(&mut self, delta_secs: Scalar) {
         *self.reduction_counts = ReductionCounts::default();
         let entries = &mut *self.reduction_entries;

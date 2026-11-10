@@ -824,6 +824,7 @@ fn cast_disc_segment(
                         to: pose,
                     }
                 };
+                let mut tested = 0;
                 for &offset in offsets {
                     let swept = motion::sweep_collider(
                         poses,
@@ -834,6 +835,7 @@ fn cast_disc_segment(
                         surfaces,
                         origin + offset,
                         origin + offset + dir * max,
+                        &mut tested,
                     );
                     let (mut contact, hit) = if poses.from == poses.to
                         && !swept.as_ref().is_some_and(|(motion, _)| motion.contained)
@@ -890,6 +892,7 @@ fn cast_disc_segment(
                         nearest = Some((hit, contact));
                     }
                 }
+                world.count(crate::cost::stages::Work::MarchTriTests, tested);
                 true
             },
         );
@@ -1245,6 +1248,11 @@ pub(crate) struct Projectile {
     contacted: Vec<Entity>,
     /// The game's damage model: source clearance ends permanently at the first box exit.
     source_cleared: bool,
+    /// The game's damage model: the tank owning the body the round last met (crossed, bounced
+    /// off, or met at a functioning contact); `None` before any, or after a body of no tank. The
+    /// box a burst's field is tested against ([`ProjectileMarchWorld::holding_box`]), apart from
+    /// the fuze's attribution.
+    met: Option<Entity>,
 }
 
 impl Projectile {
@@ -1310,6 +1318,7 @@ impl Projectile {
             replica: None,
             contacted: Vec::new(),
             source_cleared: false,
+            met: None,
         }
     }
 }
@@ -1577,6 +1586,9 @@ pub enum ArmourMark {
         nose: f32,
         /// The tank whose body armed or last restarted the fuze, for attribution only.
         tank: Option<Entity>,
+        /// The tank whose box held the burst point ([`resolve::TankBox`]): the burst loads
+        /// nothing outside that box, so it casts no blast. `None` for a burst in the open.
+        inside: Option<Entity>,
     },
     /// The round's line through witness volumes (ADR-0040) along the legs it flew since the last
     /// mark, logged before the mark of the decision whose legs they are: each witness's disc-mean
@@ -1640,6 +1652,9 @@ pub struct SpallCone {
     /// The game's damage-model source volumes, retained for authority-local effect attribution.
     #[cfg(any(test, feature = "dev_ui"))]
     pub(crate) exited: Vec<Entity>,
+    /// The tank whose box held its origin ([`resolve::TankBox`]): it loads nothing outside that
+    /// box. `None` for a cone thrown in the open.
+    pub inside: Option<Entity>,
     pub origin: Vec3,
     pub axis: Dir3,
     /// The field law and ratio its directions were weighted by: its exit layer's substance's.
@@ -2000,6 +2015,7 @@ fn on_fire_shell(
             path_sequence: 0,
             contacted: Vec::new(),
             source_cleared: false,
+            met: None,
             replica: replica.is_some().then(|| {
                 path::Replica::born(
                     fire.shot
@@ -2096,6 +2112,8 @@ struct ProjectileMarchWorld<'w, 's> {
     motion: Option<Res<'w, motion::ColliderMotion>>,
     collider_bodies: Query<'w, 's, &'static avian3d::prelude::ColliderOf>,
     body_colliders: Query<'w, 's, &'static avian3d::prelude::RigidBodyColliders>,
+    // A body's pose where no interval history poses it (static fixtures): [`Self::tank_box`].
+    body_poses: Query<'w, 's, (&'static Position, &'static Rotation)>,
     layers: Query<'w, 's, &'static avian3d::prelude::CollisionLayers>,
     rigs: Query<'w, 's, (Entity, &'static crate::tank::Rig)>,
     locals: Query<'w, 's, &'static Transform, Without<Projectile>>,
@@ -2136,9 +2154,17 @@ struct ProjectileMarchWorld<'w, 's> {
     // armour classification.
     witnesses: Query<'w, 's, &'static WitnessVolume>,
     witness_surfaces: Query<'w, 's, (), With<WitnessSurface>>,
+    // Present only where the authority stats consumer installed it.
+    stages: Option<Res<'w, crate::cost::stages::Stages>>,
 }
 
 impl ProjectileMarchWorld<'_, '_> {
+    fn count(&self, work: crate::cost::stages::Work, count: usize) {
+        if let Some(stages) = &self.stages {
+            stages.add(work, count as u64);
+        }
+    }
+
     fn source_box(&self, tank: Entity) -> Option<SourceBox> {
         // Tank-less tool fire and a despawned shooter have no source body to clear.
         let colliders = self.body_colliders.get(tank).ok()?;
@@ -2181,6 +2207,60 @@ impl ProjectileMarchWorld<'_, '_> {
             }
         }
         bounds
+    }
+
+    /// The game's damage model: `tank`'s box at the field moment ([`resolve::TankBox`]), the
+    /// bounds of its body's armour colliders in that body's frame. `None` for an entity with no
+    /// body (a fixture's bare owner) or no armour.
+    fn tank_box(&self, tank: Entity) -> Option<resolve::TankBox> {
+        let colliders = self.body_colliders.get(tank).ok()?;
+        let body = match (self.moment.get(), self.motion.as_ref()) {
+            (Some(fraction), Some(history)) => history
+                .bodies
+                .get(&tank)
+                .expect("game's damage model: a struck rigid body has captured endpoint poses")
+                .at(fraction),
+            _ => {
+                let (position, rotation) = self
+                    .body_poses
+                    .get(tank)
+                    .expect("a rigid body carries the Position and Rotation it requires");
+                motion::Pose {
+                    position: position.0,
+                    rotation: rotation.0,
+                }
+            }
+        };
+        let (mut min, mut max) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+        for entity in colliders
+            .iter()
+            .filter(|&entity| self.armour(entity).is_some())
+        {
+            let (position, rotation, shape, _) = self
+                .geometry
+                .get(entity)
+                .expect("an armour collider has prepared geometry before the march");
+            let part = self.pose(entity).unwrap_or(motion::Pose {
+                position: position.0,
+                rotation: rotation.0,
+            });
+            let aabb = shape.aabb(
+                body.local(part.position),
+                body.rotation.inverse() * part.rotation,
+            );
+            min = min.min(aabb.min);
+            max = max.max(aabb.max);
+        }
+        min.cmple(max)
+            .all()
+            .then(|| resolve::TankBox::new(tank, min, max, body))
+    }
+
+    /// The box of `tank` when it holds the world point `at` ([`Self::tank_box`]); `None` for a
+    /// throw with no tank or one outside its tank's box: a throw in the open.
+    fn holding_box(&self, tank: Option<Entity>, at: Vec3) -> Option<resolve::TankBox> {
+        tank.and_then(|tank| self.tank_box(tank))
+            .filter(|bounds| bounds.holds(at))
     }
 
     fn pose(&self, entity: Entity) -> Option<motion::Pose> {
@@ -3266,6 +3346,9 @@ fn decide_playback(
             }
         };
         budget.charge().unwrap_or_else(|error| error.panic());
+        context
+            .world
+            .count(crate::cost::stages::Work::MarchCrossings, 1);
         let mut playing = resolve::Playback::new(
             decision.clone(),
             &flight,
@@ -3346,6 +3429,7 @@ fn function_on_contact(
         .fuze
         .entered(force, flight.speed, owner, contact);
     shell.projectile.fuze.due_within(contact)?;
+    shell.projectile.met = owner;
     Some(burst_ahead(
         shell, context, not_own, flight, budget, contact, moving, health,
     ))
@@ -3417,6 +3501,11 @@ fn follow_crossing(
     decision: resolve::Decision,
     health: &mut Query<&mut ComponentHealth>,
 ) -> (bool, u64) {
+    match &decision {
+        resolve::Decision::Bite(bite) => shell.projectile.met = bite.owner,
+        resolve::Decision::Bounce(bounce) => shell.projectile.met = bounce.owner,
+        resolve::Decision::Clear { .. } => {}
+    }
     if follow_fuzed(&mut shell.projectile.fuze, flight, decision) {
         return (true, 0);
     }
@@ -3486,6 +3575,9 @@ fn burst_here(
     };
     shell.projectile.fuze = burst::Fuze::Inert;
     let nose = burst.nose;
+    let inside = context
+        .world
+        .holding_box(shell.projectile.met, flight.position);
     shell.marks.log.push(ArmourMark::Burst {
         at: flight.position,
         field_origin: burst.filler_center(flight.position, flight.direction),
@@ -3494,9 +3586,10 @@ fn burst_here(
         sideways: burst.sideways_speed,
         nose: nose.mass,
         tank,
+        inside: inside.map(|bounds| bounds.tank()),
     });
     shell.path.points.push(flight.position);
-    throw_burst(shell, context, &burst, flight, speed, &|volume| {
+    throw_burst(shell, context, &burst, (flight, inside), speed, &|volume| {
         health.contains(volume)
     });
     let removed = shell.dose.settle(health, shell.marks.log.len() - 1);
@@ -3587,14 +3680,15 @@ fn next_surface(
 /// burst's unit ([`spall_cone::BurstFields::unit`]): nothing the round lost reaching `flight`
 /// enters it. Its field is the ring at ratio `speed / v_s`
 /// ([`spall_cone::BurstFields::field`]), walked through every spatially reached volume, leaving
-/// none. Every nonzero field contributes to the shot tally before pool rounding. The game's
-/// damage model requires a derived field to stay inside the
+/// none; from inside a tank's box `inside`, through that tank's alone, to the box
+/// ([`resolve::FieldReach::of_box`]). Every nonzero field contributes to the shot tally before
+/// pool rounding. The game's damage model requires a derived field to stay inside the
 /// law's domain: the round and law are validated before play, so a contradiction is a bug.
 fn throw_burst(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
     burst: &burst::Burst,
-    flight: &resolve::Flight,
+    (flight, inside): (&resolve::Flight, Option<resolve::TankBox>),
     speed: f32,
     is_box: &dyn Fn(Entity) -> bool,
 ) {
@@ -3611,6 +3705,7 @@ fn throw_burst(
         strength: spall_cone::field_strength(burst.energy),
         unit: fields.unit(),
         exited: &[],
+        inside,
     };
     assert!(
         throw.strength.is_finite() && throw.strength >= 0.0,
@@ -3635,23 +3730,26 @@ fn throw_burst(
 }
 
 /// The game's damage model: one field's origin, axis, strength (J), its mechanism's unit (the HP
-/// its doses are worth per joule), and the volumes it leaves (a body exit's), which a direction
-/// starting inside one does not enter while leaving. Re-entry can dose it again
-/// ([`resolve::field_direction`]).
+/// its doses are worth per joule), the volumes it leaves (a body exit's), which a direction
+/// starting inside one does not enter while leaving (re-entry can dose it again,
+/// [`resolve::field_direction`]), and the box of the tank it is thrown inside, `None` in the open.
 struct FieldThrow<'a> {
     origin: Vec3,
     axis: Dir3,
     strength: f32,
     unit: spall_cone::FieldUnit,
     exited: &'a [Entity],
+    inside: Option<resolve::TankBox>,
 }
 
 /// Walk every direction of `spread` about `throw`'s axis from its origin, direction `k` at
 /// strength `S·f_k`, standing for `1/N` of the field, through every spatially reached volume
 /// ([`resolve::field_direction`]), adding its doses to `dose`; returns the rays in stratum order.
 /// Every contribution reaches the shot tally before its accumulated total rounds to pool units.
-/// Ownership is attribution only: neighboring tanks and unowned environment matter resist and
-/// receive the same field. Material presence and occlusion decide where each direction stops.
+/// Thrown in the open, ownership is attribution only: neighboring tanks and unowned environment
+/// matter resist and receive the same field. Thrown inside a tank's box, it reads that tank alone
+/// and ends at the box (design doc §5, "Containment"). Material presence and occlusion decide where
+/// each direction stops.
 /// The game's damage model requires every direction and witness pass to pair; a contradiction
 /// panics in every build.
 fn walk_field(
@@ -3661,10 +3759,20 @@ fn walk_field(
     context: &resolve::ResolveContext<'_, '_, '_>,
     is_box: &dyn Fn(Entity) -> bool,
 ) -> Vec<SpallRay> {
+    use crate::cost::stages::{Stage, Stages, Work};
     let world = context.world;
     let weight = 1.0 / spread.directions_count() as f32;
     let within = |collider: Entity| world.volume_of(collider).is_some();
-    let reach = resolve::FieldReach::of_throw(context, &within, throw.origin);
+    let reach = {
+        let _leaf = Stages::start(world.stages.as_deref(), Stage::FieldReach);
+        match throw.inside {
+            Some(bounds) => resolve::FieldReach::of_box(context, &within, bounds),
+            None => resolve::FieldReach::of_throw(context, &within, throw.origin),
+        }
+    };
+    let _leaf = Stages::start(world.stages.as_deref(), Stage::FieldWalk);
+    world.count(Work::FieldThrows, 1);
+    world.count(Work::FieldReached, reach.hard_count());
     let mut rays = Vec::with_capacity(spread.directions_count());
     for (ray_dir, profile) in spread.directions(throw.axis) {
         let thrown = throw.strength * profile;
@@ -3692,6 +3800,7 @@ fn walk_field(
             doses,
         });
     }
+    world.count(Work::FieldDirections, rays.len());
     rays
 }
 
@@ -3730,12 +3839,17 @@ fn throw_spall_cone(
     let direction = Dir3::new(source.direction).expect(
         "the game's damage model derives a spall source from the resolved flight direction",
     );
+    let world = context.world;
+    let tank = source.exited.iter().find_map(|&volume| {
+        hit_ancestor(volume, &world.owners, &world.parents).map(|(_, owner)| owner.tank())
+    });
     let throw = FieldThrow {
         origin: source.position,
         axis: shape.axis(source.face, direction),
         strength,
         unit: spall_cone::cone_unit(),
         exited: &source.exited,
+        inside: world.holding_box(tank, source.position),
     };
     if strength == 0.0 {
         return false; // A cone carrying no energy has nothing for a pool or a construction.
@@ -3750,6 +3864,7 @@ fn throw_spall_cone(
     spall.cones.push(SpallCone {
         #[cfg(any(test, feature = "dev_ui"))]
         exited: source.exited.clone(),
+        inside: throw.inside.map(|bounds| bounds.tank()),
         origin: source.position,
         axis: throw.axis,
         field: spread.field(),
@@ -4677,6 +4792,7 @@ pub(crate) mod march_tests {
             replica: None,
             contacted: Vec::new(),
             source_cleared: false,
+            met: None,
         }
     }
 

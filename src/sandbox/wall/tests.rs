@@ -639,6 +639,7 @@ fn the_inspector_attributes_cones_to_their_wall_and_shell() {
     let strength = 17.0; // Fixture: recorded field strength, J.
     let cone = SpallCone {
         exited: vec![volume],
+        inside: None,
         origin: Vec3::ZERO,
         axis: Dir3::NEG_Z,
         field: spread.field(),

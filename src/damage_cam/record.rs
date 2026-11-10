@@ -1536,6 +1536,7 @@ pub(crate) mod tests {
         let origin = Vec3::new(0.5, 0.0385, 0.0);
         let cones = [ThrownCone {
             exited: Vec::new(),
+            inside: None,
             origin,
             axis: Dir3::NEG_Y,
             field: FieldDescriptor::ball(3.0),
@@ -1607,6 +1608,7 @@ pub(crate) mod tests {
         ];
         let cone = ThrownCone {
             exited: Vec::new(),
+            inside: None,
             origin: Vec3::new(0.5, 0.0385, 0.0),
             axis: Dir3::NEG_Y,
             field: FieldDescriptor::ball(3.0),

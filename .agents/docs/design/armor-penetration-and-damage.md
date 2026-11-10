@@ -528,8 +528,8 @@ cone's `μ_k`, `sin θ_k` and `f_k` are built from its `λ` with IEEE arithmetic
 their bits match on every shipped target and a decoder rebuilds them from the descriptor.
 
 **Shadowing and reach.** A direction's strength is constant in air — no drag, no range —
-and ownership does not restrict its receivers: neighbouring tanks and environment matter take
-part in the same walk. Full shadowing means the first hard body entered stops the direction:
+and, for a field thrown in the open, ownership does not restrict its receivers: neighbouring tanks
+and environment matter take part in the same walk. Full shadowing means the first hard body entered stops the direction:
 armour takes no HP dose, a hard box takes its whole weighted strength, and either shields what
 lies behind. A direction still leaving the emitting body has not entered it; after departure,
 genuine re-entry transfers the returning debris energy to that body, including its far wall.
@@ -538,6 +538,22 @@ same energy twice. A direction entering no hard body ends at the field's candida
 A witness (§6) never stops a direction: each one entered before the stop takes its strength,
 so crew stations never shield other crew stations. The `1/r²` fall-off is geometric: a farther
 box covers fewer directions.
+
+**Containment.** A field thrown from inside a tank's box ends at that box. The box is the bounds
+of the tank's armour volumes in its body's frame at the field's moment (every ballistic volume's
+collider on the tank's rigid body, turret and gun groups included; never a witness or a collision
+proxy), grown by a few f32 spacings at its coordinates (`BOX_SPACINGS`) so a point on the tank's
+own outer face is inside whatever the rounding. The walk then reads that tank's volumes alone: its
+armour shadows its HP boxes and crew stations exactly as above, and a direction that leaves the
+armour without a stop ends where it leaves the box, its horizon, and doses nothing beyond it. So
+no other tank, construction or body is loaded, and a burst inside the box casts no blast and no
+construction takes its rays or a contained cone's. The tank is the throw's own: for a cone, the
+body its exit leaves; for a burst, the body the round last met (crossed, bounced off, or met at
+a functioning contact), never the tank its fuze is attributed to. Overlapping boxes resolve to
+that body, and a point inside only another tank's box is in the open. A throw outside its tank's
+box walks every spatially reached volume. What a field does past the box is a law the game does
+not have yet; the pen cam draws a direction the box ended on past it, with no effect (**Potency
+colour**).
 
 **Walk.** A direction is walked like the line's corridors: the collector and the pairing walk along
 the ray through spatially reached volumes, from outside every candidate's bounds through the throw
@@ -598,8 +614,13 @@ colour; neither is the state scale's red. Along a direction the intensity reache
 strongest direction (1,038 HP points per steradian) reaches mid at 2.65 m and the floor at 14.5 m,
 past every reach of the shipped records (5.2 m at most); the weakest field, the road wheel's
 rubber cone in s4 and s16 (11.5), reaches its floor at 1.5 m, past its 0.79 m reach (DERIVED from
-the records). So the reduced band ends at a reach or a shadow of the struck tank's hard bodies,
-rarely at the floor, and its edges are theirs.
+the records). So where a hard body of the struck tank stops a direction, the reduced band ends
+at it, and its edges are that body's. A direction none stops ended where the walk ran out of
+volumes (at the tank's box for a field thrown inside it, **Containment**) and is drawn on past that end, with no effect, to its floor: its
+**drawn reach** is `max(reach, sqrt(u s / (Ω T_floor)))` over its own recorded strength `s`
+(`plan::drawn_reach`), so no authored length sets it. Drawn on, a direction may cross a
+neighbouring tank or a construction, which the pen cam does not draw. Three shipped fields hold
+such directions, 152 in all, drawn on to 4.7 m at most (MEASURED).
 
 A direction's strength is the field's law, read where the point lies
 (`src/damage_cam/pen_cam/look.rs`, `law`; the shader's `law`): `S` times the law's weight
@@ -614,7 +635,8 @@ The pen cam reads each field's reach from a **depth picture**
 (`src/damage_cam/pen_cam/picture.rs`): the struck tank's hard bodies, posed for the record, drawn
 on the GPU from the field's origin once per record and screen size, each texel holding the radial
 distance (record m) to the nearest face its direction meets head-on, so a line from inside a body
-leaves it; a direction that meets no body ends on the world-axis box about them. Crew stations are witnesses
+leaves it; a direction that meets no body ends on the horizon, the world-axis box about them and
+the fields' volume, past every point a field is drawn at. Crew stations are witnesses
 and never cast (ADR-0040). A field's colour is the law's intensity wherever its picture says it
 reaches: the law × the depth picture. The picture is the cube about the field's axis, each face
 cropped to the support, and a record's faces share one atlas, which every view of the record
@@ -640,8 +662,9 @@ one's rendering has been submitted, and a record's first pictures not before the
 reads an unwritten atlas and none drops the fields across a resize. The viewer's drag, the x-ray and the gunner's sight see the field at that pitch. The
 shipped records' finest at a 4K target is 5.5·10⁻⁴ rad (MEASURED). Over every recorded direction
 of every shipped record, the picture's CPU mirror (`Casters::reach`: the GPU's near plane, culling
-and horizon, computed on the CPU) ends where the record's direction does to within 10⁻⁴ m
-(MEASURED: 1,728 directions in 21 fields): a direction stops at the first hard body it enters. No readback checks the GPU's
+and horizon, computed on the CPU) ends a direction a hard body stops where the record's does, to
+within 10⁻⁴ m, and runs every other on at least to its drawn reach (MEASURED: 1,640 and 152
+directions in 22 fields): a direction stops at the first hard body it enters. No readback checks the GPU's
 picture against it. **The record wins**: a field whose
 recorded directions all ended at its origin is drawn nowhere,
 whatever its picture would hold. A point reads its field from the four texels about its

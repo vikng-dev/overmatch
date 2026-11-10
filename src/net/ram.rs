@@ -412,16 +412,24 @@ impl Census<'_, '_> {
         tick_us: f64,
         physics_us: f64,
         sleep_us: f64,
-        stages: [f64; stages::COUNT],
-        phases_us: NamedTimes<{ phases::COUNT }>,
+        stages: ([f64; stages::COUNT], NamedTimes<{ stages::COUNT }>),
+        phases: &phases::Phases,
         dt: f64,
     ) -> TickSample {
         TickSample {
             tick_us,
             physics_us,
             sleep_us,
-            stages: NamedTimes::new(&stages::NAMES, stages),
-            phases_us,
+            stages: NamedTimes::new(&stages::NAMES, stages.0),
+            phases_us: phases.times(),
+            phases_cpu_us: phases.cpu_times(),
+            stages_cpu_us: stages.1,
+            tick_cpu_us: stages
+                .1
+                .values
+                .iter()
+                .chain(&phases.cpu_times().values)
+                .sum(),
             crumble_detail: NamedTimes::new(&stages::DETAIL_NAMES, [0.0; stages::DETAIL_COUNT]),
             sweep_sources: self.sweep.sources,
             sweep_casts: self.sweep.work.casts,
@@ -689,8 +697,15 @@ mod tests {
         world.init_resource::<StepSnapshot>();
         world
             .run_system_once(|mut census: Census| {
-                let times = NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]);
-                let sample = census.sample(0.0, 0.0, 0.0, [0.0; stages::COUNT], times, 1.0);
+                let cpu = NamedTimes::new(&stages::NAMES, [0.0; stages::COUNT]);
+                let sample = census.sample(
+                    0.0,
+                    0.0,
+                    0.0,
+                    ([0.0; stages::COUNT], cpu),
+                    &phases::Phases::default(),
+                    1.0,
+                );
                 census
                     .record(
                         sample,

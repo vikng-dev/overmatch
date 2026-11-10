@@ -9,6 +9,7 @@
 //! Invariant: use a distinct base path from `SPIKE_TRACE`; both recorders otherwise open the same
 //! role-qualified file independently.
 
+pub(crate) mod clock;
 pub(crate) mod phases;
 pub(crate) mod stages;
 
@@ -28,6 +29,9 @@ pub(crate) struct TickSample {
     #[serde(flatten)]
     pub(crate) stages: NamedTimes<{ stages::COUNT }>,
     pub(crate) phases_us: NamedTimes<{ phases::COUNT }>,
+    pub(crate) phases_cpu_us: NamedTimes<{ phases::COUNT }>,
+    pub(crate) stages_cpu_us: NamedTimes<{ stages::COUNT }>,
+    pub(crate) tick_cpu_us: f64,
     pub(crate) sweep_sources: usize,
     pub(crate) sweep_casts: usize,
     pub(crate) awake: usize,
@@ -105,6 +109,9 @@ impl TickSample {
             sleep_us: 0.0,
             stages: NamedTimes::new(&stages::NAMES, [0.0; stages::COUNT]),
             phases_us: NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]),
+            phases_cpu_us: NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]),
+            stages_cpu_us: NamedTimes::new(&stages::NAMES, [0.0; stages::COUNT]),
+            tick_cpu_us: 0.0,
             sweep_sources: 0,
             sweep_casts: 0,
             awake: 0,

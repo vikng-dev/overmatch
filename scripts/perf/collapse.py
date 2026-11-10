@@ -194,7 +194,51 @@ def complete_windows(rows, recipe, duration, clients):
     return windows
 
 
+def core_balance(row):
+    """DERIVED two-state estimate: wall * clamp(2 - cpu/wall, 0, 1).
+
+    This is actual one-thread wall only with exactly one/two active threads throughout.
+    Process background CPU, waiting and wider pools violate that premise. Phase rankings apply
+    the model to period totals; the tick estimate sums the server's per-tick estimates.
+    """
+    if "tick_cpu_us" not in row:
+        # Historical traces predate the process phase clock; absence is not idle CPU.
+        return ["unavailable"] * 5
+    count = row["ticks"]
+    if not count:
+        return ["no ticks"] * 5
+    wall = row["tick_us"]["total"]
+    cpu = row["tick_cpu_us"]["total"]
+    quota = row["quota_used_pct"]
+    quota_text = f"{quota['Ok']:.1f}%" if "Ok" in quota else "n/a:" + quota["Err"]["absence"]
+    estimates = {}
+    for walls, cpus in [(row["phases_us"], row["phases_cpu_us"]),
+                        ({name: row[name] for name in row["stages_cpu_us"]}, row["stages_cpu_us"])]:
+        if walls.keys() != cpus.keys():
+            raise ValueError("CPU/wall phase keys differ")
+        for name, summary in walls.items():
+            estimates[name] = min(summary["total"], max(0, 2 * summary["total"] - cpus[name]["total"]))
+    top = sorted(estimates, key=estimates.get, reverse=True)[:3]
+    return [f"{cpu / wall:.2f}" if wall else "no wall", quota_text,
+            str(row["nr_throttled"]) if row["nr_throttled"] is not None else "n/a",
+            f"{row['one_thread_estimate_us']['total'] / count / 1000:.3f}",
+            ", ".join(f"{name.removesuffix('_us')} {estimates[name] / count / 1000:.3f}" for name in top)]
+
+
+def report_core_balance(rows):
+    print("DERIVED busy threads = tick process CPU / tick wall. One-thread estimates use a one/two-thread model; they are not measured single-thread time. Phase estimates use period totals and include exclusive leaves. Quota uses all process CPU, including outside ticks. Throttled periods are cgroup-wide.")
+    print("| end s | tick mean ms | busy threads | quota used | throttled periods | one-thread estimate ms/tick | top 3 phase estimates ms/tick |")
+    print("|---:|---:|---:|---:|---:|---:|---|")
+    elapsed = 0
+    for row in rows:
+        elapsed += row.get("period_s", 0)
+        end = row["loadtest"]["elapsed_s"] if "loadtest" in row else row.get("wall_s", elapsed)
+        mean = row["tick_us"]["total"] / row["ticks"] / 1000 if row["ticks"] and row["tick_us"] is not None else None
+        print("| " + " | ".join([display(end), display(mean, 3), *core_balance(row)]) + " |")
+
+
 def report_match(rows):
+    report_core_balance(rows)
     print("MEASURED instrument observations; each row is one complete server window. CPU is % of one core; shares use summed tick/physics wall time; send is queued encrypted payload bytes, excluding IP/UDP headers.")
     print("| end s | span s | tanks | tick p50/p95/p99 ms | budget ms | CPU % | physics/other tick % | awake | pieces | send B | Hz |")
     print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
@@ -478,7 +522,7 @@ def tick_seconds():
 
 
 # Inclusive or outside-tick measurements, not independent leaf stages.
-RAM_NON_ADDITIVE = {"tick_us", "physics_us", "sleep_us", "collector_us", "phases_us"}
+RAM_NON_ADDITIVE = {"tick_us", "physics_us", "sleep_us", "collector_us", "phases_us", "phases_cpu_us", "stages_cpu_us", "tick_cpu_us"}
 # Resolution: one nanosecond permits floating conversion/summation noise, not a missing stage.
 RAM_ROUNDING_US = 0.001
 
@@ -522,10 +566,10 @@ def read_tick_samples(batches, tanks, ticks=None, sends=None):
                 raise RuntimeError("missing, duplicated or reordered instrument tick")
             if tick["tanks"] != tanks:
                 raise RuntimeError("tick population differs from requested tanks")
-            required = {"tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "sweep_us", "crumble_us", "collector_us", "dt_s", "phases_us"}
+            required = {"tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "sweep_us", "crumble_us", "collector_us", "dt_s", "phases_us", "phases_cpu_us", "stages_cpu_us", "tick_cpu_us"}
             if missing := required - tick.keys():
                 raise ValueError(f"missing tick timing fields: {sorted(missing)}")
-            for field in {name for name in tick if name.endswith("_us") and name != "phases_us"} | {"dt_s"}:
+            for field in {name for name in tick if name.endswith("_us") and name not in {"phases_us", "phases_cpu_us", "stages_cpu_us"}} | {"dt_s"}:
                 finite(tick[field], f"ticks.{field}")
                 if tick[field] < 0:
                     raise ValueError(f"invalid {field}")
@@ -538,6 +582,18 @@ def read_tick_samples(batches, tanks, ticks=None, sends=None):
                 finite(us, f"phases_us.{name}")
                 if us < 0:
                     raise ValueError(f"invalid phases_us.{name}")
+            leaf_keys = {name for name in tick if name.endswith("_us") and name not in RAM_NON_ADDITIVE}
+            for field, keys in [("phases_cpu_us", phases.keys()), ("stages_cpu_us", leaf_keys)]:
+                cpu = tick[field]
+                if not isinstance(cpu, dict) or cpu.keys() != keys:
+                    raise ValueError(f"{field} keys differ from wall timings")
+                for name, us in cpu.items():
+                    finite(us, f"{field}.{name}")
+                    if us < 0:
+                        raise ValueError(f"invalid {field}.{name}")
+            cpu_total = sum(tick["phases_cpu_us"].values()) + sum(tick["stages_cpu_us"].values())
+            if abs(cpu_total - tick["tick_cpu_us"]) > RAM_ROUNDING_US:
+                raise ValueError("CPU shares do not sum to tick_cpu_us")
             parts = ram_parts(tick)
             if ticks and parts.keys() != ram_parts(ticks[0]).keys():
                 raise ValueError("instrument timing fields changed during capture")
@@ -742,6 +798,7 @@ def ram_summary(text, recipe):
 
 
 def report_ram(result):
+    report_core_balance(result["rows"])
     compact = {k: v for k, v in result.items() if k not in ("ticks", "rows", "piece_census")}
     print("MEASURED ram (shared physics; send outside fixed ticks): " + json.dumps(compact), flush=True)
 
@@ -861,6 +918,7 @@ def display(value, places=2):
 
 
 def report(rows):
+    report_core_balance(rows)
     print("| time s | bursts | awake | asleep | speed | tick ms | physics ms | send ms | RSS MiB |")
     print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for row in rows:

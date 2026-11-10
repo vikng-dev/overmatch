@@ -45,6 +45,12 @@
 //! - `phases_us`: complete schedule/phase intervals after debiting the leaf brackets above.
 //!   ECS application, synchronous hooks and dispatch stay in their phase; `physics_step_us`
 //!   includes sleep. Add phases and leaves once; `physics_us` and `sleep_us` are nested detail.
+//! - `phases_cpu_us` and `stages_cpu_us`: process CPU micros with exactly the wall maps' keys.
+//!   They include every process thread running inside the edge, including background tasks.
+//!   `tick_cpu_us` sums these exclusive shares; CPU/wall is average busy threads.
+//! - `quota_used_pct`: process CPU as percent of the cgroup quota, or a typed absence.
+//! - `one_thread_estimate_us`: the derived two-state estimate (see `one_thread_estimate`),
+//!   summarized per tick. It does not measure actual single-thread wall time.
 //! - `collector_us`: stats tick sampling after `TickClosed`, outside `tick_us`; includes the
 //!   armed ram census. Clock-read/bracket cost remains inside the measured stages.
 //! - `sleep_us`: Avian's island-sleep bracket, included in `physics_us`. Physics covers all
@@ -62,7 +68,8 @@
 //!   debris stress lever's (`net::debris_stress`); while the lever is armed also its cumulative
 //!   `breaches` and `released`.
 //!
-//! `cpu_pct`, `rss_mb` and the throttle fields are null where the platform gives no reading.
+//! RSS and throttle fields are null where the platform gives no reading. A process CPU clock
+//! failure visibly refuses the armed instrument rather than emitting an idle-core reading.
 //!
 //! The tick wall time is the cost recorder's measurement ([`crate::cost::TickClock`]), never a
 //! second timer. `physics_us` sits inside it; `send_us` runs after the fixed loop, outside it.
@@ -111,13 +118,14 @@ use super::contact_census::PieceRecords;
 use super::debris_stress::DebrisCensus;
 use super::harness::{LeverError, env_text};
 use super::loadtest::Loadtest;
-use super::server_host::{Throttle, read_throttle};
+use super::server_host::{QuotaAbsence, Throttle, quota_cpus, read_throttle};
 use super::sync_margin::MAX_INPUT_LOOKAHEAD_TICKS;
 use crate::ballistics::Projectile;
 use crate::construction::{
     Body,
     breakage::{Breakage, Piece, Record},
 };
+use crate::cost::clock::process_cpu;
 use crate::cost::{
     TickClock, TickClosed, arm_tick_clock,
     phases::{self, Phases},
@@ -232,13 +240,17 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         collector: TickWindow::default(),
         stages: std::array::from_fn(|_| TickWindow::default()),
         phases: std::array::from_fn(|_| TickWindow::default()),
+        stages_cpu: std::array::from_fn(|_| TickWindow::default()),
+        phases_cpu: std::array::from_fn(|_| TickWindow::default()),
+        tick_cpu: TickWindow::default(),
+        one_thread_estimate: TickWindow::default(),
         send: TickWindow::default(),
         frame: TickWindow::default(),
         post_update: TickWindow::default(),
         #[cfg(target_os = "linux")]
         host: linux::HostProbe::new(),
         send_census: TickWindow::default(),
-        cpu_at_start: process_cpu(),
+        cpu_at_start: Some(process_cpu().unwrap_or_else(crate::refuse_start)),
         throttle_at_start: read_throttle(),
         husk_strikes_at_start: 0,
         sequence: 0,
@@ -387,6 +399,10 @@ struct ServerStats {
     collector: TickWindow,
     stages: [TickWindow; COUNT],
     phases: [TickWindow; phases::COUNT],
+    stages_cpu: [TickWindow; COUNT],
+    phases_cpu: [TickWindow; phases::COUNT],
+    tick_cpu: TickWindow,
+    one_thread_estimate: TickWindow,
     /// The period's outbound brackets, wall micros.
     send: TickWindow,
     frame: TickWindow,
@@ -504,6 +520,10 @@ struct Snapshot {
     collector: Option<TickSummary>,
     stages: [Option<TickSummary>; COUNT],
     phases: [Option<TickSummary>; phases::COUNT],
+    stages_cpu: [Option<TickSummary>; COUNT],
+    phases_cpu: [Option<TickSummary>; phases::COUNT],
+    tick_cpu: Option<TickSummary>,
+    one_thread_estimate: Option<TickSummary>,
     send: Option<TickSummary>,
     frame: Option<TickSummary>,
     post_update: Option<TickSummary>,
@@ -519,6 +539,7 @@ struct Snapshot {
     projectiles: usize,
     entities: usize,
     cpu_pct: Option<f64>,
+    quota_used_pct: Result<f64, QuotaAbsence>,
     rss_bytes: Option<u64>,
     /// The period's throttling, when the cgroup reports it.
     throttled: Option<Throttle>,
@@ -565,6 +586,9 @@ fn stats_line(snapshot: &Snapshot) -> String {
         "projectiles": snapshot.projectiles,
         "entities": snapshot.entities,
         "cpu_pct": snapshot.cpu_pct.map(tenth),
+        "quota_used_pct": snapshot.quota_used_pct,
+        "tick_cpu_us": percentiles(snapshot.tick_cpu.as_ref()),
+        "one_thread_estimate_us": percentiles(snapshot.one_thread_estimate.as_ref()),
         "rss_mb": snapshot.rss_bytes.map(|bytes| tenth(bytes as f64 / (1024.0 * 1024.0))),
         "physics_us": percentiles(snapshot.physics.as_ref()),
         "sleep_us": percentiles(snapshot.sleep.as_ref()),
@@ -589,6 +613,20 @@ fn stats_line(snapshot: &Snapshot) -> String {
         phases::NAMES
             .into_iter()
             .zip(&snapshot.phases)
+            .map(|(name, summary)| (name.to_owned(), percentiles(summary.as_ref())))
+            .collect(),
+    );
+    body["phases_cpu_us"] = Value::Object(
+        phases::NAMES
+            .into_iter()
+            .zip(&snapshot.phases_cpu)
+            .map(|(name, summary)| (name.to_owned(), percentiles(summary.as_ref())))
+            .collect(),
+    );
+    body["stages_cpu_us"] = Value::Object(
+        NAMES
+            .into_iter()
+            .zip(&snapshot.stages_cpu)
             .map(|(name, summary)| (name.to_owned(), percentiles(summary.as_ref())))
             .collect(),
     );
@@ -622,6 +660,24 @@ fn record_tick(
         let collect_start = Instant::now();
         stats.ticks.push(closed.us);
         let measured = stages.take_us();
+        let cpu = stages.take_cpu_us();
+        let phases_cpu = phases.cpu_times();
+        let tick_cpu_us = cpu.values.iter().chain(&phases_cpu.values).sum();
+        stats.tick_cpu.push(tick_cpu_us);
+        stats
+            .one_thread_estimate
+            .push(one_thread_estimate(closed.us, tick_cpu_us));
+        for (window, us) in stats.stages_cpu.iter_mut().zip(cpu.values) {
+            window.push(us);
+        }
+        for (window, us) in stats.phases_cpu.iter_mut().zip(phases_cpu.values) {
+            window.push(us);
+        }
+        // DERIVED: COUNT phases share COUNT + 1 CPU edges; leaves count their actual edges.
+        stages.add(
+            crate::cost::stages::Work::ProcessCpuReads,
+            (phases::COUNT + 1) as u64,
+        );
         stages.add(
             crate::cost::stages::Work::ContactPoints,
             census.contact_points() as u64,
@@ -631,8 +687,8 @@ fn record_tick(
             closed.us,
             starts.physics_us,
             starts.sleep_us,
-            measured,
-            phases.times(),
+            (measured, cpu),
+            &phases,
             fixed.timestep().as_secs_f64(),
         );
         sample.crumble_detail = stages.take_details();
@@ -785,7 +841,7 @@ fn emit_line(
         return;
     };
     let budget_us = fixed.timestep().as_secs_f64() * 1.0e6;
-    let cpu = process_cpu();
+    let cpu = Some(process_cpu().unwrap_or_else(crate::refuse_start));
     let cpu_pct = cpu
         .zip(stats.cpu_at_start)
         .map(|(now, then)| now.saturating_sub(then).as_secs_f64() / elapsed.as_secs_f64() * 100.0);
@@ -876,6 +932,10 @@ fn emit_line(
         collector: stats.collector.drain(budget_us),
         stages: std::array::from_fn(|i| stats.stages[i].drain(budget_us)),
         phases: std::array::from_fn(|i| stats.phases[i].drain(budget_us)),
+        stages_cpu: std::array::from_fn(|i| stats.stages_cpu[i].drain(budget_us)),
+        phases_cpu: std::array::from_fn(|i| stats.phases_cpu[i].drain(budget_us)),
+        tick_cpu: stats.tick_cpu.drain(budget_us),
+        one_thread_estimate: stats.one_thread_estimate.drain(budget_us),
         send: stats.send.drain(budget_us),
         frame: stats.frame.drain(budget_us),
         post_update: stats.post_update.drain(budget_us),
@@ -890,6 +950,8 @@ fn emit_line(
         tanks: census.tanks.iter().count(),
         projectiles: census.projectiles.iter().count(),
         entities: census.all.iter().count(),
+        quota_used_pct: quota_cpus()
+            .map(|quota| cpu_pct.expect("armed process CPU clock is available") / quota),
         cpu_pct,
         rss_bytes: resident_bytes(),
         throttled,
@@ -905,26 +967,11 @@ fn emit_line(
     println!("{}", stats_line(&snapshot));
 }
 
-/// The user + system CPU time this process has used.
-#[cfg(unix)]
-fn process_cpu() -> Option<Duration> {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    // SAFETY: the pointer is valid for one `rusage`, and `getrusage` only writes through it.
-    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    if status != 0 {
-        return None;
-    }
-    // SAFETY: a zero status means `getrusage` filled the whole struct.
-    let usage = unsafe { usage.assume_init() };
-    let time = |tv: libc::timeval| {
-        Duration::from_secs(tv.tv_sec as u64) + Duration::from_micros(tv.tv_usec as u64)
-    };
-    Some(time(usage.ru_utime) + time(usage.ru_stime))
-}
-
-#[cfg(not(unix))]
-fn process_cpu() -> Option<Duration> {
-    None
+/// DERIVED two-state estimate: wall * clamp(2 - cpu/wall, 0, 1).
+/// Equals one-thread wall only if exactly one or two threads run throughout the interval.
+/// Waiting, background work and more workers break that model; this is not a measured duration.
+fn one_thread_estimate(wall: f64, cpu: f64) -> f64 {
+    (2.0 * wall - cpu).clamp(0.0, wall)
 }
 
 /// The process's resident memory, from the kernel's own `VmRSS` line.
@@ -974,6 +1021,21 @@ fn resident_bytes() -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// Reporting must clamp the stated two-state estimate without mistaking it for a measured
+    /// one-thread duration; empty/waiting and wider-worker intervals are valid instrument inputs.
+    #[test]
+    fn two_state_estimate_stays_inside_wall() {
+        // Fixture: CPU spans below one worker, between one and two, and above two.
+        for (wall, cpu, expected) in [
+            (0.0, 0.0, 0.0),
+            (10.0, 5.0, 10.0),
+            (10.0, 15.0, 5.0),
+            (10.0, 30.0, 0.0),
+        ] {
+            assert_eq!(one_thread_estimate(wall, cpu), expected);
+        }
+    }
+
     fn fixture_stats() -> ServerStats {
         // Fixture: an arbitrary reporting period, with empty sampling windows.
         ServerStats {
@@ -984,6 +1046,10 @@ mod tests {
             collector: TickWindow::default(),
             stages: std::array::from_fn(|_| TickWindow::default()),
             phases: std::array::from_fn(|_| TickWindow::default()),
+            stages_cpu: std::array::from_fn(|_| TickWindow::default()),
+            phases_cpu: std::array::from_fn(|_| TickWindow::default()),
+            tick_cpu: TickWindow::default(),
+            one_thread_estimate: TickWindow::default(),
             send: TickWindow::default(),
             frame: TickWindow::default(),
             post_update: TickWindow::default(),
@@ -1419,12 +1485,17 @@ mod tests {
             collector: None,
             stages: std::array::from_fn(|_| None),
             phases: std::array::from_fn(|_| None),
+            stages_cpu: std::array::from_fn(|_| None),
+            phases_cpu: std::array::from_fn(|_| None),
+            tick_cpu: None,
+            one_thread_estimate: None,
             debris: json!({"live": 35, "sleeping": 140}),
             clients: 2,
             tanks: 6,
             projectiles: 3,
             entities: 1_234,
             cpu_pct: Some(37.56),
+            quota_used_pct: Err(QuotaAbsence::NotLinux),
             rss_bytes: Some(200 * 1024 * 1024),
             throttled: Some(Throttle {
                 nr_throttled: 3,
@@ -1454,6 +1525,11 @@ mod tests {
             "projectiles": 3,
             "entities": 1234,
             "cpu_pct": 37.6,
+            "quota_used_pct": {"Err": {"absence": "not_linux"}},
+            "tick_cpu_us": null,
+            "one_thread_estimate_us": null,
+            "stages_cpu_us": NAMES.into_iter().map(|name| (name.to_owned(), Value::Null)).collect::<serde_json::Map<_, _>>(),
+            "phases_cpu_us": phases::NAMES.into_iter().map(|name| (name.to_owned(), Value::Null)).collect::<serde_json::Map<_, _>>(),
             "rss_mb": 200.0,
             "sleep_us": null,
             "collector_us": null,

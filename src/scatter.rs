@@ -22,7 +22,10 @@
 //! the live [`HeightGrid`] at its own XZ. Yaw is taken as authored; every prototype keeps its authored size.
 //!
 //! Graybox blocks and constructions of the destruction model are colliders outside
-//! the immutable terrain field; construction bounds also supply spawn obstacles.
+//! the immutable terrain field; construction bounds also supply spawn obstacles. No two instances'
+//! solids interpenetrate ([`clearance`]).
+
+pub(crate) mod clearance;
 
 use std::collections::BTreeMap;
 
@@ -205,6 +208,7 @@ impl ScatterView {
 /// obstacles ([`crate::world::SpawnObstacles`]), never as analytic terrain. Colliders spawn in every
 /// composition; meshes only where `view_assets` offers a server to draw
 /// with — the dedicated server draws nothing, exactly as it skips the terrain's render tiles.
+/// Refuses a placement whose solids interpenetrate on this grid ([`clearance::check`]).
 pub(crate) fn spawn(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -212,6 +216,7 @@ pub(crate) fn spawn(
     grid: &HeightGrid,
     mut view_assets: Option<ViewAssets<'_>>,
 ) -> Vec<Transform> {
+    clearance::check(manifest, grid);
     let view = view_assets
         .as_mut()
         .map(|assets| ScatterView::new(commands, meshes, assets, manifest));
@@ -441,6 +446,28 @@ mod tests {
             );
         });
         (app, obstacles)
+    }
+
+    /// Spawn is the gate every map passes before play, preset or decoded terrain alike: a placement
+    /// whose solids interpenetrate ([`clearance`]) never spawns. A spawn without the check would
+    /// stand two firs in one trunk, and their pieces would never come to rest once they break.
+    #[test]
+    fn spawn_refuses_a_placement_whose_solids_interpenetrate() {
+        let mut manifest = construction_fixture_manifest();
+        let mut twin = manifest
+            .instances
+            .iter()
+            .find(|instance| instance.id == "fir_0001")
+            .expect("the fixture places a fir")
+            .clone();
+        twin.id = "fir_0002".to_owned();
+        manifest.instances.push(twin);
+        let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            spawned(&manifest, false, false).1
+        }))
+        .expect_err("a spawn must refuse interpenetrating solids");
+        let reason = refusal.downcast_ref::<String>().unwrap();
+        assert!(reason.contains("fir_0001 and fir_0002"), "{reason}");
     }
 
     /// EVERY CONSTRUCTION WEARS THE ONE MATERIAL, the draw-count invariant the brick-and-timber surface

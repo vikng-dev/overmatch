@@ -1168,14 +1168,24 @@ fn read_shell(
         .log
         .get(marched.marks_from..)
         .expect("ShellMarched's mark cursor is its log's length before the step; logs only grow");
+    // The game's damage model: a burst or cone the march marks inside a tank's box loads no
+    // construction (design doc §5, "Containment", `.agents/docs/design/armor-penetration-and-damage.md`).
+    let mut in_open = true;
     for mark in marks {
-        if let ArmourMark::Burst { field_origin, .. } = mark
+        if let ArmourMark::Burst {
+            field_origin,
+            inside,
+            ..
+        } = mark
             && let Some(burst) = marched.burst
         {
-            deposit.blast = Some((
-                *field_origin,
-                Blast::of(burst.blast, burst.charge_radius, burst.products_momentum()),
-            ));
+            in_open = inside.is_none();
+            deposit.blast = in_open.then(|| {
+                (
+                    *field_origin,
+                    Blast::of(burst.blast, burst.charge_radius, burst.products_momentum()),
+                )
+            });
         }
     }
     // The game's damage model exposes only lines whose path moments fell in this tick. A
@@ -1185,7 +1195,7 @@ fn read_shell(
         let cones = spall.cones.get(marched.cones_from..).expect(
             "ShellMarched's cone cursor is its cone list's length before the step; lists only grow",
         );
-        for cone in cones {
+        for cone in cones.iter().filter(|cone| cone.inside.is_none()) {
             let share = cone.ray_share();
             deposit.rays.extend(cone.rays.iter().map(|ray| RayDeposit {
                 end: ray.end,
@@ -1197,7 +1207,7 @@ fn read_shell(
             }));
         }
         // A source carrying no field energy emits no recorded field.
-        if let (Some(burst), Some(field)) = (marched.burst, spall.burst.as_ref()) {
+        if let (Some(burst), Some(field), true) = (marched.burst, spall.burst.as_ref(), in_open) {
             deposit.rays.extend(RayDeposit::casing(field, &burst));
         }
     }
@@ -1860,17 +1870,24 @@ fn apply_deposits(mut p: DepositParam) {
     let step = p.fixed.timestep().as_secs_f32();
     let mut taken: BTreeMap<Entity, Taken> = BTreeMap::new();
     for deposit in std::mem::take(&mut p.queue.0) {
-        let intake = Stages::start(p.stages.as_deref(), Stage::Intake);
+        let mut intake = Stages::start(p.stages.as_deref(), Stage::Intake);
         take_lines(ComputeTaskPool::get(), &p, &frames, &deposit, &mut taken);
         // All deposits read the tick's intake geometry. Each owner keeps ray order;
         // nearest-stop reduction keeps source-entity order, independent of worker completion.
         if !deposit.rays.is_empty() || deposit.blast.is_some() {
             let mut geometry = bevy::utils::Parallel::<Vec<OwnerGeometry>>::default();
+            let stages = p.stages.as_deref();
             p.constructions
                 .par_iter()
                 .for_each(|(root, _, breakage, piece)| {
-                    let result =
-                        owner_geometry(root, frames[&root], breakage, piece.is_none(), &deposit);
+                    let result = owner_geometry(
+                        root,
+                        frames[&root],
+                        breakage,
+                        piece.is_none(),
+                        &deposit,
+                        stages,
+                    );
                     geometry.scope(|results| results.push(result));
                 });
             let (fields, stops) =
@@ -1879,7 +1896,13 @@ fn apply_deposits(mut p: DepositParam) {
                 taken.entry(root).or_default().field.extend(field);
             }
             if let Some((origin, blast)) = deposit.blast {
-                cast_blast(&mut p, stops, &mut taken, origin, blast);
+                // Leaf brackets never overlap: the blast's casts leave the intake interval.
+                drop(intake);
+                {
+                    let _blast = Stages::start(p.stages.as_deref(), Stage::Blast);
+                    cast_blast(&mut p, stops, &mut taken, origin, blast);
+                }
+                intake = Stages::start(p.stages.as_deref(), Stage::Intake);
             }
         }
         for root in deposit.changed {
@@ -2051,6 +2074,7 @@ fn owner_geometry(
     breakage: &Breakage,
     placed: bool,
     deposit: &RawDeposit,
+    stages: Option<&Stages>,
 ) -> OwnerGeometry {
     if !deposit
         .rays
@@ -2090,6 +2114,7 @@ fn owner_geometry(
         }
     }
     let mut faces = BTreeMap::new();
+    let mut walked = 0;
     let blast = deposit.blast.map_or_else(Vec::new, |(origin, blast)| {
         let reach = blast.reach();
         let local = frame.local(origin);
@@ -2103,6 +2128,7 @@ fn owner_geometry(
                 }
                 let turned = frame.turn(dir);
                 bounds.span(local, turned)?;
+                walked += 1;
                 let (chunk, t) = first_chunk(&kind.layout, &shape, placed, local, turned)?;
                 let distance = t;
                 if distance > reach {
@@ -2131,6 +2157,12 @@ fn owner_geometry(
             })
             .collect()
     });
+    if let Some(stages) = stages {
+        stages.add(Work::BlastOwnerRays, walked);
+        if !placed {
+            stages.add(Work::BlastPieceRays, walked);
+        }
+    }
     OwnerGeometry { root, field, blast }
 }
 
@@ -2168,7 +2200,7 @@ fn reduce_geometry(
 /// Each chunk and body collider takes the share of its rays' cones its silhouette intercepts
 /// ([`fracture::intercepted`]): a chunk's from its faces, a collider's from its bounds, the
 /// silhouette of the box that holds it. A collider holding `origin` shades nothing and takes
-/// nothing: what a burst inside a body does to it is no law here.
+/// nothing. A burst inside a tank's box is never cast ([`read_shell`]).
 fn cast_blast(
     p: &mut DepositParam,
     stops: Vec<Option<BlastStop>>,
@@ -2190,10 +2222,12 @@ fn cast_blast(
                 .is_ok_and(|of| p.constructions.contains(of.body))
     };
     let mut stops = stops.into_iter();
+    let mut casts = 0;
     let hits = fracture::trace_blast(blast, fracture::blast_directions(), |dir| {
         let stop = stops
             .next()
             .expect("geometry supplies one stop per declared blast ray");
+        casts += 1;
         let surface = p.spatial.cast_ray_predicate(
             origin,
             Dir3::new(dir).expect("the blast field's directions are unit"),
@@ -2226,6 +2260,9 @@ fn cast_blast(
         }
         stop?.surface
     });
+    if let Some(stages) = p.stages.as_deref() {
+        stages.add(Work::BlastCasts, casts);
+    }
     for (target, hit) in hits {
         match target {
             Stop::Chunk(root, c) => taken.entry(root).or_default().blast.push((c, hit)),

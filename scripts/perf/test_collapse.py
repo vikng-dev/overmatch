@@ -20,13 +20,31 @@ EMPTY_PIECES = dict(thresholds=None, records=[], episodes=[], lifecycle_outside_
 
 def tick_fixture(i, tanks):
     # Fixture: unequal ticks expose percentile-of-percentile and nested-cost bugs.
-    return dict(tick=i, tick_us=100*i, physics_us=30, sleep_us=10,
+    tick = dict(tick=i, tick_us=100*i, physics_us=30, sleep_us=10,
                 intake_us=5, structure_us=15, refit_us=10, publish_us=5, contacts_us=2,
                 sweep_us=3, crumble_us=7, collector_us=1, dt_s=0.1, awake=4-i, tanks=tanks,
                 phases_us=dict(fixed_update_us=10, physics_step_us=28, construction_ecs_us=10, fixed_last_us=2))
+    tick["phases_cpu_us"] = dict(tick["phases_us"])
+    tick["stages_cpu_us"] = {name: us for name, us in tick.items() if name.endswith("_us") and name not in collapse.RAM_NON_ADDITIVE}
+    tick["tick_cpu_us"] = sum(tick["phases_cpu_us"].values()) + sum(tick["stages_cpu_us"].values())
+    return tick
 
 
 class CollapseTests(unittest.TestCase):
+    def test_core_balance_uses_totals_and_ranks_exclusive_phases_and_leaves(self):
+        # Fixture: differing CPU/wall ratios, capped and uncapped quota, and zero wall.
+        row = dict(ticks=2, tick_us=dict(total=10000), tick_cpu_us=dict(total=15000),
+                   one_thread_estimate_us=dict(total=5000), nr_throttled=3,
+                   quota_used_pct={"Ok": 75}, phases_us={"serial_us": dict(total=2000), "parallel_us": dict(total=3000)},
+                   phases_cpu_us={"serial_us": dict(total=2000), "parallel_us": dict(total=6000)},
+                   leaf_us=dict(total=5000), stages_cpu_us={"leaf_us": dict(total=7000)})
+        balance = collapse.core_balance(row)
+        self.assertEqual(balance[:4], ["1.50", "75.0%", "3", "2.500"])
+        self.assertEqual(balance[4], "leaf 1.500, serial 1.000, parallel 0.000")
+        row["quota_used_pct"] = {"Err": {"absence": "unlimited"}}
+        row["tick_us"]["total"] = 0
+        self.assertEqual(collapse.core_balance(row)[:2], ["no wall", "n/a:unlimited"])
+
     def test_headless_frame_counts_distinguish_clients_that_keep_up(self):
         # Fixture: a healthy 100 Hz update stream and an overloaded 25 Hz stream.
         log = "client: connected (entity fixture)\nharness: released frame_s=0.000\n"
@@ -562,6 +580,9 @@ class RamTests(unittest.TestCase):
         for tick in ram["ticks"]:
             tick["new_law_us"] = 2  # Fixture: a newly instrumented leaf.
             tick["phases_us"]["new_phase_us"] = 1
+            tick["stages_cpu_us"]["new_law_us"] = 3
+            tick["phases_cpu_us"]["new_phase_us"] = 2
+            tick["tick_cpu_us"] += 5
         result = collapse.ram_summary(self.text(ram), recipe)
         self.assertEqual(result["stage_us"]["new_law"], 6)
         self.assertEqual(result["stage_us"]["new_phase"], 3)
@@ -571,6 +592,11 @@ class RamTests(unittest.TestCase):
         recipe, ram = self.fixture()
         for change in (lambda t: t.pop("sweep_us"), lambda t: t.pop("crumble_us"),
                        lambda t: t.pop("phases_us"), lambda t: t.update(phases_us={}),
+                       lambda t: t.pop("phases_cpu_us"),
+                       lambda t: t["phases_cpu_us"].pop("fixed_update_us"),
+                       lambda t: t["stages_cpu_us"].pop("sweep_us"),
+                       lambda t: t["stages_cpu_us"].update(sweep_us=float("nan")),
+                       lambda t: t.update(tick_cpu_us=t["tick_cpu_us"] + 1),
                        lambda t: t["phases_us"].update(physics_step_us=9),
                        lambda t: t["phases_us"].update(fixed_update_us=1000),
                        lambda t: t["phases_us"].update(fixed_update_us=float("nan")),
