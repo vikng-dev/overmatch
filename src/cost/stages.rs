@@ -80,6 +80,7 @@ labelled!(
         BeltBoundaryBuilds = "belt_boundary_builds",
         BeltPartitionFaces = "belt_partition_faces",
         BeltPartitionCells = "belt_partition_cells",
+        BeltPartitionPatches = "belt_partition_patches",
         BeltTerrainSamples = "belt_terrain_samples",
     }
 );

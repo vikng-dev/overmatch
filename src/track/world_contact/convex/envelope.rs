@@ -1,8 +1,6 @@
 //! Vertical decomposition of the visible upper envelope over a positive column rectangle.
 //! `partition` refuses nonpositive dimensions. Hidden edges never enter the sweep.
-//! Work to discover visibility depends on the input faces; integration cells depend only on
-//! visible finite edges. With E edges and X proper crossings, at most 1 + 4E + 4X bands close:
-//! each endpoint changes at most two neighbouring bands, and each crossing at most four.
+//! Integration bands are internal geometry; `super::integrated_regions` owns the patch bound.
 
 use super::{Cell, ClippedFace};
 use bevy::math::DVec3;
@@ -229,14 +227,14 @@ fn owner(point: DVec3, base: DVec3, regions: &[Region]) -> Option<usize> {
     owner
 }
 
-pub(super) fn partition<'a>(
+pub(super) fn partition(
     a: f32,
     b: f32,
     strip: (f32, f32),
     base: Vec3,
     free: Vec3,
-    faces: &[(usize, &'a ClippedFace)],
-) -> Vec<Cell<'a>> {
+    faces: &[(usize, &ClippedFace)],
+) -> Vec<Cell> {
     assert!(
         a < b && strip.0 < strip.1,
         "a support half has positive length and width"
@@ -298,7 +296,7 @@ pub(super) fn partition<'a>(
     let events = events(&edges);
     let mut open: BTreeMap<(usize, usize), f64> = BTreeMap::new();
     let mut cells = Vec::new();
-    let emit = |key: (usize, usize), start: f64, end: f64, cells: &mut Vec<Cell<'a>>| {
+    let emit = |key: (usize, usize), start: f64, end: f64, cells: &mut Vec<Cell>| {
         let (lower, upper) = (edges[key.0], edges[key.1]);
         let corners = [
             lower.at(start),
@@ -321,7 +319,7 @@ pub(super) fn partition<'a>(
             cells.push(Cell {
                 polygon,
                 depth: owner.map_or(base, |i| regions[i].depth.as_vec3()),
-                face: owner.map(|i| faces[regions[i].face]),
+                face: owner.map(|i| regions[i].face),
             });
         }
     };

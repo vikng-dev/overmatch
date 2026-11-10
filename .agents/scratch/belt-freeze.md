@@ -46,23 +46,19 @@ required to trigger this defect.
 Build finite visible boundaries of the upper envelope before choosing integration cells.
 Clip faces to the column half and field plane. Discard a face wholly covered by one higher
 face. Keep face-boundary and pairwise depth-crossing segments only where no surface is higher.
-A vertical sweep integrates bands between those segments. A band's owner stays fixed until its
-boundaries change; unrelated edge events neither split it nor repeat its ownership search.
+A vertical sweep integrates bands between those segments. A band's owner is selected at emission from its interior centroid. Lateral edges close every band
+they span, even when the side-edge keys remain unchanged.
 Geometry discovery uses double precision; the existing pressure integration consumes its polygons.
 
 The support at each point remains the highest covering triangle or field plane. Its positive
 covered area, pressure integral and first moment retain their geometric meaning. No cap,
-alternate path, physical parameter or per-vehicle branch is added. Per-collider aggregation was
-not chosen: normal, point motion, damping and grip are still sampled on each integration region.
+alternate path, physical parameter or per-vehicle branch is added. Bands belonging to one visible owner triangle are summed per half, including disconnected parts.
+Engagement uses the maximum depth of that visible face region. Per-collider aggregation was not
+chosen: it would combine distinct normals and point-motion, damping and grip samples.
 
-DERIVED: with E visible finite edges and X proper segment crossings, endpoints and crossings
-close at most `1 + 4E + 4X` bands per half. Hidden boundaries do not enter this sweep. Visibility
-discovery still compares input faces and their occluders; this is not a linear-in-face-count cost
-claim. Hosted pricing must assess that remaining work.
-
-Reusing an unchanged band's owner was checked once against the captured fixture: forward counts,
-pressure and moments above were unchanged. There is no retained alternate implementation or test
-pinning the earlier output.
+The current patch bound lives in `src/track/world_contact/convex.rs`. Internal decomposition
+bands do not each create a contact. Discovery cost still depends on the input geometry;
+counts alone establish no hosted speedup.
 
 ## Rehearsal counts
 
@@ -118,7 +114,7 @@ existing `scripts/perf` per-tick counters remain its production instrument.
 
 ## Player-visible limits and validation
 
-Engagement still reads each integration region's maximum depth. Changing regions can change
+Engagement reads each visible face region's maximum depth. Changing regions can change
 shallow support, damping samples and grip quadrature. Those are emergent observations to judge
 in play, not stored outcomes to preserve. No new tuned number changes that law.
 

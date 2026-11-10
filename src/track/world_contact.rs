@@ -15,7 +15,7 @@ mod terrain;
 pub(crate) use admission::{plugin, solid};
 
 /// A column holds one sampled grid plane through its integration. Analytic terrain remains
-/// directional and solids retain their footprint overlay. No integration sample re-queries the
+/// directional and solids retain their upper envelope. No integration sample re-queries the
 /// grid; creases within a column are the quadrature's approximation.
 pub(crate) struct ColumnOracle<'a, O> {
     field: &'a O,

@@ -2,15 +2,34 @@
 //! Coordinates are `(along, lateral, 1)`; depth planes map them to metres inward from the
 //! resting face. Each triangle supplies its own plane; only faces reached from the probe origin
 //! enter the support envelope.
-//! Integration regions come from finite visible edges of the upper envelope, not insertion
-//! history. See `.agents/scratch/belt-freeze.md` for the captured freeze and representation choice.
+//! Each visible owner triangle and the field have at most one positive-pressure patch per
+//! column half: at most F+1 patches for F admitted faces. Area, pressure integral and first
+//! moment sum over that owner's entire visible region, including disconnected parts. Engagement
+//! uses that region's maximum depth. Each point still uses its highest covering triangle's plane.
+//! See `.agents/scratch/belt-freeze.md` for the captured freeze and representation choice.
 
 use super::{SupportPatch, sample_halves};
 use crate::track::rubble::{RubbleBodies, Slab};
 use bevy::prelude::*;
 
 mod envelope;
-use envelope::partition;
+#[cfg(test)]
+fn partition(
+    a: f32,
+    b: f32,
+    strip: (f32, f32),
+    base: Vec3,
+    free: Vec3,
+    faces: &[(usize, &ClippedFace)],
+) -> Vec<Cell> {
+    let cells = envelope::partition(a, b, strip, base, free, faces);
+    let regions = integrated_regions(cells.clone(), faces.len(), strip.1 - strip.0);
+    assert!(
+        regions.len() <= faces.len() + 1,
+        "patches exceed the module's per-half owner bound"
+    );
+    cells
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ClippedFace {
@@ -232,26 +251,44 @@ pub(super) struct Integral {
     pub(super) length: f32,
     pub(super) centroid: Vec3,
     pub(super) max_depth: f32,
-    polygon: Vec<Vec3>,
+    polygons: Vec<Vec<Vec3>>,
     depth: Vec3,
     width: f32,
 }
 
 impl Integral {
     fn rebase(&mut self, start: f32) {
-        for p in &mut self.polygon {
+        for p in self.polygons.iter_mut().flatten() {
             p.x -= start;
         }
         self.depth.z += self.depth.x * start;
         self.centroid.x -= start;
     }
 
+    fn add(&mut self, other: Self) {
+        let area = self.area + other.area;
+        self.centroid = (self.centroid * self.area + other.centroid * other.area) / area;
+        self.area = area;
+        self.length += other.length;
+        self.max_depth = self.max_depth.max(other.max_depth);
+        self.polygons.extend(other.polygons);
+    }
+
     pub(super) fn slice(&self, start: f32, len: f32) -> Option<Self> {
-        let polygon = clip(
-            &clip(&self.polygon, Vec3::new(1.0, 0.0, -start)),
-            Vec3::new(-1.0, 0.0, start + len),
-        );
-        let mut result = integrate(&polygon, self.depth, self.width)?;
+        let mut result: Option<Self> = None;
+        for polygon in &self.polygons {
+            let polygon = clip(
+                &clip(polygon, Vec3::new(1.0, 0.0, -start)),
+                Vec3::new(-1.0, 0.0, start + len),
+            );
+            if let Some(part) = integrate(&polygon, self.depth, self.width) {
+                match &mut result {
+                    Some(result) => result.add(part),
+                    None => result = Some(part),
+                }
+            } // This polygon may have no positive pressure in the slice.
+        }
+        let mut result = result?;
         result.rebase(start);
         Some(result)
     }
@@ -287,16 +324,53 @@ fn integrate(polygon: &[Vec3], depth: Vec3, width: f32) -> Option<Integral> {
         length: area / width,
         centroid: moment / volume,
         max_depth,
-        polygon: polygon.to_vec(),
+        polygons: vec![polygon.to_vec()],
         depth,
         width,
     })
 }
 
-struct Cell<'a> {
+#[derive(Clone)]
+struct Cell {
     polygon: Vec<Vec3>,
     depth: Vec3,
-    face: Option<(usize, &'a ClippedFace)>,
+    face: Option<usize>,
+}
+
+/// Group decomposition bands before sampling support: a face's disconnected visible parts
+/// share exact integrals and one engagement maximum.
+fn integrated_regions(
+    cells: Vec<Cell>,
+    faces: usize,
+    width: f32,
+) -> Vec<(Option<usize>, Integral, f32, f32)> {
+    let mut regions: Vec<Option<(Integral, f32, f32)>> =
+        std::iter::repeat_with(|| None).take(faces + 1).collect();
+    for cell in cells {
+        let polygon = clip(&cell.polygon, cell.depth);
+        let Some(integral) = integrate(&polygon, cell.depth, width) else {
+            continue; // No positive pressure remains in this band.
+        };
+        let lo = polygon.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        let hi = polygon
+            .iter()
+            .map(|p| p.x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let slot = &mut regions[cell.face.map_or(0, |i| i + 1)];
+        match slot {
+            Some((sum, start, end)) => {
+                sum.add(integral);
+                *start = start.min(lo);
+                *end = end.max(hi);
+            }
+            None => *slot = Some((integral, lo, hi)),
+        }
+    }
+    regions
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.map(|(integral, lo, hi)| (i.checked_sub(1), integral, lo, hi)))
+        .collect()
 }
 
 /// Integrate the entry faces' upper envelope over each field half-profile. Each cell owns the deepest
@@ -317,37 +391,32 @@ pub(super) fn patches(
             (half + 1) as f32 * slab.len / 2.0,
         );
         let free = half_plane(slab.len, travel, half);
-        let cells = partition(a, b, strip, half_plane(slab.len, pen, half), free, faces);
+        let cells = envelope::partition(a, b, strip, half_plane(slab.len, pen, half), free, faces);
         pieces.count(crate::cost::stages::Work::BeltPartitionCells, cells.len());
-        for cell in cells {
-            let polygon = clip(&cell.polygon, cell.depth);
-            let Some(mut integral) =
-                integrate(&polygon, cell.depth, slab.lateral.1 - slab.lateral.0)
-            else {
-                continue; // No positive covered pressure remains in this cell.
-            };
-            let lo = polygon.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
-            let hi = polygon
-                .iter()
-                .map(|p| p.x)
-                .fold(f32::NEG_INFINITY, f32::max);
-            let face = cell.face.map(|(piece, face)| ContactFace {
-                collider: pieces.collider(piece),
-                normal: face.normal,
-                // Use the projected pressure integral directly. Reintegrating world triangles
-                // squares a tiny sliver's area in the vector norm and can underflow to zero.
-                point: slab.origin
-                    + slab.axis * integral.centroid.x
-                    + slab.lat * integral.centroid.y
-                    + slab.out * (slab.face - face.depth.dot(integral.centroid)),
+        let regions = integrated_regions(cells, faces.len(), slab.lateral.1 - slab.lateral.0);
+        pieces.count(
+            crate::cost::stages::Work::BeltPartitionPatches,
+            regions.len(),
+        );
+        for (owner, mut integral, lo, hi) in regions {
+            let depth = owner.map_or(half_plane(slab.len, pen, half), |i| faces[i].1.depth + free);
+            let face = owner.map(|i| {
+                let (piece, face) = faces[i];
+                ContactFace {
+                    collider: pieces.collider(piece),
+                    normal: face.normal,
+                    point: slab.origin
+                        + slab.axis * integral.centroid.x
+                        + slab.lat * integral.centroid.y
+                        + slab.out * (slab.face - face.depth.dot(integral.centroid)),
+                }
             });
             integral.rebase(lo);
             result.push(SupportPatch {
                 origin: slab.origin + slab.axis * lo + slab.lat * field_offset,
                 len: hi - lo,
                 weight: 1.0,
-                pen: [lo, (lo + hi) / 2.0, hi]
-                    .map(|x| cell.depth.dot(Vec3::new(x, field_offset, 1.0))),
+                pen: [lo, (lo + hi) / 2.0, hi].map(|x| depth.dot(Vec3::new(x, field_offset, 1.0))),
                 travel: [lo, (lo + hi) / 2.0, hi].map(|x| sample_halves(x, slab.len, travel)),
                 face,
                 integral: Some(integral),
@@ -435,7 +504,7 @@ mod tests {
             assert!((moment - Vec3::new(7.0 / 8.0, 7.0 / 8.0, 7.0 / 4.0)).length() < 1e-6);
             for cell in cells {
                 let p = cell.polygon.iter().sum::<Vec3>() / cell.polygon.len() as f32;
-                assert_eq!(cell.face.unwrap().0, usize::from(p.x < 0.5));
+                assert_eq!(refs[cell.face.unwrap()].0, usize::from(p.x < 0.5));
             }
         }
     }
@@ -447,6 +516,66 @@ mod tests {
         let face = unit_face(Vec3::Z);
         let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::Z, Vec3::ZERO, &[(0, &face)]);
         assert!(cells.iter().all(|c| c.face.is_none()));
+    }
+
+    /// Sampling and engagement operate once per visible face region. A partly hidden face
+    /// and its cover each contribute one patch, regardless of decomposition or input order.
+    #[test]
+    fn partly_hidden_face_has_one_patch_for_each_visible_owner() {
+        let lower = unit_face(Vec3::Z);
+        let mut upper = unit_face(Vec3::Z * 2.0);
+        upper.planes.push(Vec3::new(1.0, 0.0, -0.5));
+        for refs in [
+            vec![(0, &lower), (1, &upper)],
+            vec![(1, &upper), (0, &lower)],
+        ] {
+            let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
+            let regions = integrated_regions(cells, refs.len(), 1.0);
+            // DERIVED: each plane wins one half-square; the field is completely covered.
+            assert_eq!(regions.len(), 2);
+            let pressure: f32 = regions.iter().map(|(_, i, _, _)| i.area).sum();
+            let moment: Vec3 = regions.iter().map(|(_, i, _, _)| i.centroid * i.area).sum();
+            // Resolution: unit-scale f32 moment accumulation.
+            assert!((pressure - 1.5).abs() < 1e-6);
+            assert!((moment - Vec3::new(0.875, 0.75, 1.5)).length() < 1e-6);
+            for (owner, i, _, _) in regions {
+                assert_eq!(i.max_depth, refs[owner.unwrap()].1.depth.z);
+            }
+        }
+    }
+
+    /// Curved-field quadrature must slice a disconnected owner region without filling its gap.
+    /// Keeping only one polygon or replacing the union with a bounding box loses this invariant.
+    #[test]
+    fn disconnected_region_slicing_preserves_pressure_and_moment() {
+        let face = unit_face(Vec3::new(1.0, 0.0, 1.0));
+        let mut integral = integrate(
+            &clip(&face.polygon, Vec3::new(-1.0, 0.0, 0.25)),
+            face.depth,
+            1.0,
+        )
+        .unwrap();
+        integral.add(
+            integrate(
+                &clip(&face.polygon, Vec3::new(1.0, 0.0, -0.75)),
+                face.depth,
+                1.0,
+            )
+            .unwrap(),
+        );
+        assert_eq!(integral.max_depth, 2.0);
+        let left = integral.slice(0.0, 0.5).unwrap();
+        let right = integral.slice(0.5, 0.5).unwrap();
+        // DERIVED: integral of 1+x on [0,1/4] union [3/4,1] is 3/4;
+        // integral of x(1+x) is 43/96. Slicing rebases the right centroid by 1/2.
+        // Resolution: unit-scale f32 integration roundoff.
+        assert!((left.area + right.area - 0.75).abs() < 1e-6);
+        assert!(
+            (left.centroid.x * left.area + (right.centroid.x + 0.5) * right.area - 43.0 / 96.0)
+                .abs()
+                < 1e-6
+        );
+        assert!((left.length + right.length - 0.5).abs() < 1e-6);
     }
 
     /// Suspension's integration regions depend on the upper envelope, never on hidden solids.
@@ -597,10 +726,6 @@ mod tests {
                     )
                 })
                 .collect();
-            assert!(
-                cells.iter().any(|cell| cell.face.is_some()),
-                "the captured placement exercises solid support"
-            );
             let actual = moments(&cells, width);
             // Resolution: accumulated f32 polygon and pressure-moment roundoff in this column.
             if let Some((area, pressure, moment)) = expected {
@@ -717,7 +842,7 @@ mod tests {
             .collect()
     }
 
-    fn column_cells<'a>(slab: &Slab, faces: &'a [ClippedFace]) -> Vec<Cell<'a>> {
+    fn column_cells(slab: &Slab, faces: &[ClippedFace]) -> Vec<Cell> {
         let refs: Vec<_> = faces.iter().map(|f| (0, f)).collect();
         (0..2)
             .flat_map(|half| {
@@ -733,7 +858,7 @@ mod tests {
             .collect()
     }
 
-    fn moments(cells: &[Cell<'_>], width: f32) -> (f32, f32, Vec3) {
+    fn moments(cells: &[Cell], width: f32) -> (f32, f32, Vec3) {
         cells
             .iter()
             .filter_map(|c| integrate(&clip(&c.polygon, c.depth), c.depth, width))
@@ -866,7 +991,7 @@ mod tests {
         inside
     }
 
-    fn assert_depth_envelope(slab: &Slab, faces: &[ClippedFace], cells: &[Cell<'_>]) {
+    fn assert_depth_envelope(slab: &Slab, faces: &[ClippedFace], cells: &[Cell]) {
         let width = slab.lateral.1 - slab.lateral.0;
         // Resolution: point containment allows f32 shared-edge roundoff in footprint metres.
         let distance_epsilon = 1e-6 * slab.len.max(width);
