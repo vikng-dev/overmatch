@@ -13,6 +13,8 @@ use avian3d::prelude::{
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 
+use super::armour_set::ArmourPart;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Pose {
     pub position: Vec3,
@@ -47,6 +49,8 @@ pub(super) struct ColliderMotion {
     seeded_enabled: HashSet<Entity>,
 }
 
+/// Every collider the history keeps: all but a tank's armour parts, which its armour set poses
+/// ([`super::armour_set`]).
 type Colliders<'w, 's> = Query<
     'w,
     's,
@@ -58,6 +62,7 @@ type Colliders<'w, 's> = Query<
         Option<&'static ColliderOf>,
         Option<&'static ColliderTransform>,
     ),
+    Without<ArmourPart>,
 >;
 
 fn composed_pose(
@@ -111,7 +116,7 @@ fn admitted(
 pub(super) fn seed_births(
     mut history: ResMut<ColliderMotion>,
     colliders: Colliders,
-    changed: Query<Entity, Changed<Collider>>,
+    changed: Query<Entity, (Changed<Collider>, Without<ArmourPart>)>,
     bodies: Query<(&Position, &Rotation)>,
     roots: Query<(Entity, &Position, &Rotation), With<RigidBody>>,
     added: Query<Entity, Added<RigidBody>>,
@@ -147,8 +152,8 @@ pub(super) fn seed_births(
         .iter()
         .chain(admitted.iter().copied().filter(|&e| !changed.contains(e)))
     {
-        // An admitted entity may be no collider, despawning, or still disabled by another
-        // component.
+        // An admitted entity may be no collider, an armour part, despawning, or still disabled by
+        // another component.
         let Ok((_, position, rotation, _, owner, local)) = colliders.get(entity) else {
             continue;
         };
@@ -208,6 +213,7 @@ pub(super) fn snapshot(
         Entity,
         (
             With<Collider>,
+            Without<ArmourPart>,
             Or<(
                 Changed<Position>,
                 Changed<Rotation>,
@@ -316,11 +322,20 @@ pub(super) fn snapshot(
 /// `sin(theta / 2)` from above. Thus `2 r min(d, 1)` bounds every rotational chord, without
 /// an inverse cosine whose rounded dot product can erase a small but real turn.
 fn point_motion_bound(poses: Poses, collider: &Collider) -> f32 {
+    let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
+    outward(chord_bound(poses, box_radius(bounds.min, bounds.max)))
+}
+
+/// The distance from the origin of the farthest point of the box `min` to `max`.
+pub(super) fn box_radius(min: Vec3, max: Vec3) -> f64 {
+    min.abs().max(max.abs()).as_dvec3().length()
+}
+
+/// [`point_motion_bound`] for points within `radius` of the poses' origin, unrounded.
+pub(super) fn chord_bound(poses: Poses, radius: f64) -> f64 {
     if poses.from == poses.to {
         return 0.0;
     }
-    let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
-    let radius = bounds.min.abs().max(bounds.max.abs()).as_dvec3().length();
     let from = poses.from.rotation.to_array().map(f64::from);
     let to = poses.to.rotation.to_array().map(f64::from);
     let difference = from
@@ -339,8 +354,13 @@ fn point_motion_bound(poses: Poses, collider: &Collider) -> f32 {
         .position
         .as_dvec3()
         .distance(poses.to.position.as_dvec3());
-    let bound = (linear + angular) as f32;
-    // Round the geometric bound outward; an equivalent signed quaternion at rest stays exact zero.
+    linear + angular
+}
+
+/// A geometric bound rounded outward to f32; an equivalent signed quaternion at rest stays exact
+/// zero.
+pub(super) fn outward(bound: f64) -> f32 {
+    let bound = bound as f32;
     if bound == 0.0 { 0.0 } else { bound.next_up() }
 }
 
@@ -395,6 +415,40 @@ impl Poses {
     }
 }
 
+/// The game's damage model: a collider's motion over the interval, as the walk reads it.
+#[derive(Clone, Copy)]
+pub(super) enum Interval<'a> {
+    /// Its own composed endpoint poses, lerped and slerped.
+    Own(Poses),
+    /// A tank's armour part, composed from its base body's and its frames' endpoint poses.
+    Part(super::armour_set::Composed<'a>),
+}
+
+impl Interval<'_> {
+    pub(super) fn at(self, fraction: f32) -> Pose {
+        match self {
+            Self::Own(poses) => poses.at(fraction),
+            Self::Part(part) => part.at(fraction),
+        }
+    }
+
+    /// The velocity of the collider-local point `local` at `fraction`.
+    pub(super) fn velocity_at(self, fraction: f32, local: Vec3, dt: f32) -> Vec3 {
+        match self {
+            Self::Own(poses) => poses.velocity_at(fraction, local, dt),
+            Self::Part(part) => part.velocity_at(fraction, local, dt),
+        }
+    }
+
+    /// Its pose, when it does not move over the interval.
+    pub(super) fn still(self) -> Option<Pose> {
+        match self {
+            Self::Own(poses) => (poses.from == poses.to).then_some(poses.to),
+            Self::Part(part) => part.still(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Sweep {
     pub from: f32,
@@ -419,7 +473,7 @@ pub(super) struct ContactMotion {
     reason = "one moving candidate and one world segment"
 )]
 pub(super) fn sweep_collider(
-    poses: Poses,
+    poses: Interval<'_>,
     sweep: Sweep,
     node: Entity,
     primitive: Entity,
@@ -517,7 +571,7 @@ mod tests {
             },
         };
         let (contact, normal) = sweep_collider(
-            poses,
+            Interval::Own(poses),
             Sweep {
                 from: 0.0,
                 to: 1.0,
@@ -546,10 +600,10 @@ mod tests {
             rotation: Quat::IDENTITY,
         };
         let (contact, _) = sweep_collider(
-            Poses {
+            Interval::Own(Poses {
                 from: pose,
                 to: pose,
-            },
+            }),
             Sweep {
                 from: 0.0,
                 to: 1.0,

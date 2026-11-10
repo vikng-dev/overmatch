@@ -124,6 +124,8 @@ labelled!(
         // crew box colliders and of every other.
         PoseInsertsArmour = "pose_inserts_armour",
         PoseInsertsOther = "pose_inserts_other",
+        // Armour-set frame poses written, one per frame whose node's local pose was written.
+        FramePoseWrites = "frame_pose_writes",
     }
 );
 

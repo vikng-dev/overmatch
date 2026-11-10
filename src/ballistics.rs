@@ -798,31 +798,21 @@ fn cast_disc_segment(
                     .geometry
                     .get(entity)
                     .expect("game's damage model: every tree candidate has resolved geometry");
-                let poses = if world.sweep.get().is_some() {
-                    match world.motion.as_ref() {
-                        Some(history) => *history.colliders.get(&entity).expect(
-                            "game's damage model: every tree candidate has captured endpoint poses",
-                        ),
-                        None => {
-                            let pose = motion::Pose {
-                                position: position.0,
-                                rotation: rotation.0,
-                            };
-                            motion::Poses {
-                                from: pose,
-                                to: pose,
-                            } // Standalone static fixtures.
-                        }
-                    }
-                } else {
-                    let pose = world.pose(entity).unwrap_or(motion::Pose {
-                        position: position.0,
-                        rotation: rotation.0,
-                    });
-                    motion::Poses {
+                let still = |pose: motion::Pose| {
+                    motion::Interval::Own(motion::Poses {
                         from: pose,
                         to: pose,
-                    }
+                    })
+                };
+                let here = motion::Pose {
+                    position: position.0,
+                    rotation: rotation.0,
+                };
+                let poses = if world.sweep.get().is_some() {
+                    // Standalone static fixtures carry no interval history.
+                    world.interval(entity).unwrap_or_else(|| still(here))
+                } else {
+                    still(world.pose(entity).unwrap_or(here))
                 };
                 let mut tested = 0;
                 for &offset in offsets {
@@ -837,15 +827,15 @@ fn cast_disc_segment(
                         origin + offset + dir * max,
                         &mut tested,
                     );
-                    let (mut contact, hit) = if poses.from == poses.to
+                    let (mut contact, hit) = if let Some(rest) = poses.still()
                         && !swept.as_ref().is_some_and(|(motion, _)| motion.contained)
                     {
                         if max == 0.0 {
                             continue;
                         } // A stationary point has no static entering face.
                         let Some((distance, normal)) = collider.cast_ray(
-                            poses.to.position,
-                            poses.to.rotation,
+                            rest.position,
+                            rest.rotation,
                             origin + offset,
                             *dir,
                             max,
@@ -1922,6 +1912,7 @@ fn mount_collider_motion(app: &mut App) {
                 avian3d::collider_tree::update_moved_collider_aabbs::<Collider>
                     .run_if(resource_exists::<avian3d::collider_tree::ColliderTrees>),
                 motion::snapshot,
+                armour_set::snapshot,
             )
                 .chain()
                 .run_if(not(resource_exists::<ClientReplica>))
@@ -2115,8 +2106,9 @@ struct ProjectileMarchWorld<'w, 's> {
     body_colliders: Query<'w, 's, &'static avian3d::prelude::RigidBodyColliders>,
     // A body's pose where no interval history poses it (static fixtures): [`Self::tank_box`].
     body_poses: Query<'w, 's, (&'static Position, &'static Rotation)>,
-    // Each tank's armour volumes and crew boxes by rigid frame.
+    // Each tank's armour volumes and crew boxes by rigid frame, and each part's place in its set.
     sets: Query<'w, 's, &'static armour_set::ArmourSet>,
+    parts: Query<'w, 's, &'static armour_set::ArmourPart>,
     layers: Query<'w, 's, &'static avian3d::prelude::CollisionLayers>,
     rigs: Query<'w, 's, (Entity, &'static crate::tank::Rig)>,
     locals: Query<'w, 's, &'static Transform, Without<Projectile>>,
@@ -2179,7 +2171,7 @@ impl ProjectileMarchWorld<'_, '_> {
             .bodies
             .get(&tank)
             .expect("a source rigid body has captured endpoint poses before projectile march");
-        let bounds = set.body_box(&|frame| self.frame_in_carrier(set, frame))?;
+        let bounds = set.swept_box()?;
         Some(SourceBox {
             min: bounds.min,
             max: bounds.max,
@@ -2192,29 +2184,35 @@ impl ProjectileMarchWorld<'_, '_> {
     /// with no set (a fixture's bare owner) or none of whose parts its body carries.
     fn tank_box(&self, tank: Entity) -> Option<resolve::TankBox> {
         let set = self.sets.get(tank).ok()?;
-        let body = match (self.moment.get(), self.motion.as_ref()) {
-            (Some(fraction), Some(history)) => history
-                .bodies
-                .get(&tank)
-                .expect("game's damage model: a struck rigid body has captured endpoint poses")
-                .at(fraction),
+        let (body, bounds) = match (self.moment.get(), self.motion.as_ref()) {
+            (Some(fraction), Some(history)) => (
+                history
+                    .bodies
+                    .get(&tank)
+                    .expect("game's damage model: a struck rigid body has captured endpoint poses")
+                    .at(fraction),
+                set.body_box(&|frame| set.frames()[frame].poses.at(fraction)),
+            ),
             _ => {
                 let (position, rotation) = self
                     .body_poses
                     .get(tank)
                     .expect("a rigid body carries the Position and Rotation it requires");
-                motion::Pose {
-                    position: position.0,
-                    rotation: rotation.0,
-                }
+                (
+                    motion::Pose {
+                        position: position.0,
+                        rotation: rotation.0,
+                    },
+                    set.body_box(&|frame| self.frame_in_carrier(set, frame)),
+                )
             }
         };
-        let bounds = set.body_box(&|frame| self.frame_in_carrier(set, frame))?;
+        let bounds = bounds?;
         Some(resolve::TankBox::new(tank, bounds.min, bounds.max, body))
     }
 
-    /// The game's damage model: armour frame `frame`'s pose in its carrier, from its node's
-    /// present local pose.
+    /// The game's damage model: armour frame `frame`'s pose in its carrier from its node's
+    /// present local pose, where no interval history poses it (static fixtures).
     fn frame_in_carrier(&self, set: &armour_set::ArmourSet, frame: usize) -> motion::Pose {
         let frame = &set.frames()[frame];
         let local = self
@@ -2237,10 +2235,27 @@ impl ProjectileMarchWorld<'_, '_> {
 
     fn pose(&self, entity: Entity) -> Option<motion::Pose> {
         let fraction = self.moment.get()?;
-        let motion = self.motion.as_ref()?; // Static query fixtures carry no interval history.
-        Some(motion.colliders.get(&entity).expect(
-            "game's damage model: a frozen-scene candidate belongs to the captured collider interval"
-        ).at(fraction))
+        Some(self.interval(entity)?.at(fraction))
+    }
+
+    /// The game's damage model: `entity`'s motion over the interval: an armour part's composed
+    /// from its set, any other collider's from its own captured endpoints. `None` without interval
+    /// history (static query fixtures).
+    fn interval(&self, entity: Entity) -> Option<motion::Interval<'_>> {
+        let history = self.motion.as_ref()?;
+        // A collider that is no tank's armour part (a construction, a fixture plate) keeps its own.
+        Some(match self.parts.get(entity) {
+            Ok(part) => motion::Interval::Part(
+                self.sets
+                    .get(part.tank())
+                    .expect("game's damage model: an armour part's tank carries its set")
+                    .composed(part, &history.bodies),
+            ),
+            Err(_) => motion::Interval::Own(*history.colliders.get(&entity).expect(
+                "game's damage model: a frozen-scene candidate belongs to the captured collider \
+                 interval",
+            )),
+        })
     }
 
     fn hull_frames(&self) -> Vec<(Entity, crate::damage_cam::record::HullFrame)> {
