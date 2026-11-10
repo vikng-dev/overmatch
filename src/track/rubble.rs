@@ -27,9 +27,9 @@
 //!   solid across the true shoe width. Six support points reject separated shapes; the convex
 //!   adapter then clips entry faces to that envelope. Narrow pieces and empty corners are
 //!   resolved by their actual projected coverage, independently of the probe columns.
-//! - **One support law**: `forces::contact_side` partitions overlapping footprints; the deepest
-//!   surface in each cell enters the field's own support law at its covered share of the shoe.
-//!   Stacked pieces cannot multiply the hull's support.
+//! - **One support law**: `super::world_contact::convex` partitions overlapping footprints into
+//!   their visible upper envelope; each visible face region enters the field's own support law at
+//!   its covered share of the shoe. Stacked pieces cannot multiply the hull's support.
 //! - **Work while held against rubble** (DERIVED from the loops): one AABB query per tank
 //!   ([`RubbleQuery::near`], [`footprint_radius`]) selects its N candidates. Each side rejects N
 //!   candidates against its slabs' union bounds. For L stations and P survivors this means
@@ -37,7 +37,7 @@
 //!   six support-map queries; only a positive-volume pass prepares the boundary triangles, once
 //!   per surface in the shared tick-start snapshot. Support-map and clipping work also depend on
 //!   the shape's complexity. `forces::collect_column_contacts` partitions the covered faces
-//!   only where a face wins positive covered area; each cell owns one surface depth plane.
+//!   only where a face rises above the field; each visible face region keeps its own depth plane.
 //!   With no nearby collider no shape is read, and field-only driving retains its force arithmetic.
 //! - **Tick truth**: avian refits dynamic bodies' AABBs at the end of its physics step
 //!   (`update_solver_body_aabbs`) and writes each collider's `Position`/`Rotation`, so a snapshot

@@ -873,6 +873,7 @@ fn collect_column_contacts<O: TerrainOracle>(
         links.push((i, travel, tan2, wb));
     }
     let overlaps = pieces.in_slabs(&slabs);
+    let mut partition = super::world_contact::convex::PartitionScratch::default();
     for ((slab, (i, travel, tan2, wb)), overlaps) in slabs.iter().zip(links).zip(overlaps) {
         let (wa, axis, out) = (slab.origin, slab.axis, slab.out);
         // A global facet-gradient bound can reject terrain without sampling it. Solids still
@@ -961,6 +962,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                 params,
                 oracle,
                 pieces,
+                &mut partition,
             ) {
                 let weight = patch.weight;
                 let pen_max = patch.max_depth();

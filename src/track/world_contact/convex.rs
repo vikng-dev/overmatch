@@ -17,13 +17,14 @@ use bevy::prelude::*;
 
 macro_rules! polygon_ops {
     ($vector:ty, $scalar:ty) => {
-        /// Keep the nonnegative side of an affine half-plane. Homogeneous footprint coordinates keep
-        /// clipping, depth comparison and surface interpolation in the same frame.
-        fn clip(polygon: &[$vector], plane: $vector) -> Vec<$vector> {
+        /// Replace `result` with the nonnegative side of an affine half-plane. Homogeneous
+        /// footprint coordinates keep clipping, depth comparison and surface interpolation in the
+        /// same frame.
+        fn clip_into(polygon: &[$vector], plane: $vector, result: &mut Vec<$vector>) {
+            result.clear();
             let Some(&last) = polygon.last() else {
-                return Vec::new(); // An empty intersection remains empty.
+                return; // An empty intersection remains empty.
             };
-            let mut result = Vec::with_capacity(polygon.len() + 1);
             let mut a = last;
             let mut da = plane.dot(a);
             for &b in polygon {
@@ -36,7 +37,6 @@ macro_rules! polygon_ops {
                 }
                 (a, da) = (b, db);
             }
-            result
         }
 
         fn signed_area(polygon: &[$vector]) -> $scalar {
@@ -58,7 +58,21 @@ macro_rules! polygon_ops {
 
 polygon_ops!(Vec3, f32);
 
+fn clip(polygon: &[Vec3], plane: Vec3) -> Vec<Vec3> {
+    let mut result = Vec::with_capacity(polygon.len() + 1);
+    clip_into(polygon, plane, &mut result);
+    result
+}
+
 mod envelope;
+
+/// Partition buffers for one side's columns, reused across columns and halves.
+#[derive(Default)]
+pub(crate) struct PartitionScratch {
+    envelope: envelope::Scratch,
+    cells: Vec<Cell>,
+    clipped: Vec<Vec3>,
+}
 
 #[cfg(test)]
 fn partition(
@@ -69,22 +83,27 @@ fn partition(
     free: Vec3,
     faces: &[(usize, &ClippedFace)],
 ) -> Vec<Cell> {
-    let cells = envelope::partition(
-        a,
-        b,
+    let mut cells = Vec::new();
+    envelope::partition(
+        (a, b),
         strip,
         base,
         free,
         faces,
         &mut envelope::Scratch::default(),
+        &mut cells,
     );
-
-    let regions = integrated_regions(cells.clone(), faces.len(), strip.1 - strip.0, &mut 0);
+    let regions = owners(&cells, faces.len(), strip.1 - strip.0);
     assert!(
         regions.len() <= faces.len() + 1,
         "patches exceed the module's per-half owner bound"
     );
     cells
+}
+
+#[cfg(test)]
+fn owners(cells: &[Cell], faces: usize, width: f32) -> Vec<(Option<usize>, Integral, f32, f32)> {
+    integrated_regions(cells, faces, width, &mut Vec::new(), &mut 0)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -270,6 +289,8 @@ pub(super) struct Integral {
     pub(super) length: f32,
     pub(super) centroid: Vec3,
     pub(super) max_depth: f32,
+    /// The field region's visible polygons, for curved-field slicing. A face region holds none:
+    /// its patch keeps its own plane and is never sliced (`super::terrain_surface_patches`).
     polygons: Vec<Vec<Vec3>>,
     depth: Vec3,
     width: f32,
@@ -294,13 +315,17 @@ impl Integral {
     }
 
     pub(super) fn slice(&self, start: f32, len: f32) -> Option<Self> {
+        assert!(
+            !self.polygons.is_empty(),
+            "only a field region is sliced; a face patch keeps its own plane"
+        );
         let mut result: Option<Self> = None;
         for polygon in &self.polygons {
             let polygon = clip(
                 &clip(polygon, Vec3::new(1.0, 0.0, -start)),
                 Vec3::new(-1.0, 0.0, start + len),
             );
-            if let Some(part) = integrate(&polygon, self.depth, self.width) {
+            if let Some(part) = integrate_field(&polygon, self.depth, self.width) {
                 match &mut result {
                     Some(result) => result.add(part),
                     None => result = Some(part),
@@ -343,37 +368,50 @@ fn integrate(polygon: &[Vec3], depth: Vec3, width: f32) -> Option<Integral> {
         length: area / width,
         centroid: moment / volume,
         max_depth,
-        polygons: vec![polygon.to_vec()],
+        polygons: Vec::new(),
         depth,
         width,
     })
 }
 
-#[derive(Clone)]
+/// [`integrate`], keeping the polygon for slicing.
+fn integrate_field(polygon: &[Vec3], depth: Vec3, width: f32) -> Option<Integral> {
+    integrate(polygon, depth, width).map(|mut integral| {
+        integral.polygons.push(polygon.to_vec());
+        integral
+    })
+}
+
+/// One sweep band: a quadrilateral between two boundaries, owned by a face or the field.
+#[derive(Clone, Copy)]
 struct Cell {
-    polygon: Vec<Vec3>,
+    polygon: [Vec3; 4],
     depth: Vec3,
     face: Option<usize>,
 }
 
 /// Group decomposition bands before sampling support: a face's disconnected visible parts
 /// share exact integrals and one engagement maximum.
-/// `allocs` counts the buffers allocated per band.
+/// `polygon` is a reused clipping buffer; `allocs` counts the field polygons kept per band.
 fn integrated_regions(
-    cells: Vec<Cell>,
+    cells: &[Cell],
     faces: usize,
     width: f32,
+    polygon: &mut Vec<Vec3>,
     allocs: &mut usize,
 ) -> Vec<(Option<usize>, Integral, f32, f32)> {
     let mut regions: Vec<Option<(Integral, f32, f32)>> =
         std::iter::repeat_with(|| None).take(faces + 1).collect();
     for cell in cells {
-        *allocs += 1;
-        let polygon = clip(&cell.polygon, cell.depth);
-        let Some(integral) = integrate(&polygon, cell.depth, width) else {
+        clip_into(&cell.polygon, cell.depth, polygon);
+        let integral = match cell.face {
+            Some(_) => integrate(polygon, cell.depth, width),
+            None => integrate_field(polygon, cell.depth, width),
+        };
+        let Some(integral) = integral else {
             continue; // No positive pressure remains in this band.
         };
-        *allocs += 2;
+        *allocs += usize::from(cell.face.is_none());
         let lo = polygon.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
         let hi = polygon
             .iter()
@@ -396,19 +434,23 @@ fn integrated_regions(
         .collect()
 }
 
-/// Integrate the entry faces' upper envelope over each field half-profile. Each cell owns the deepest
+/// Integrate the entry faces' upper envelope over each field half-profile. Each band owns the deepest
 /// surface; clipping at face edges and depth crossings prevents both holes and double support.
 pub(super) fn patches(
-    slab: &Slab,
-    strip: (f32, f32),
-    field_offset: f32,
-    pen: [f32; 3],
-    travel: [f32; 3],
+    query: &super::PatchQuery,
     faces: &[(usize, &ClippedFace)],
     pieces: &RubbleBodies,
+    scratch: &mut PartitionScratch,
 ) -> Vec<SupportPatch> {
+    let super::PatchQuery {
+        slab,
+        strip,
+        field_offset,
+        pen,
+        travel,
+        ..
+    } = *query;
     let mut result = Vec::new();
-    let mut scratch = envelope::Scratch::default();
     for half in 0..2 {
         let (a, b) = (
             half as f32 * slab.len / 2.0,
@@ -416,22 +458,23 @@ pub(super) fn patches(
         );
         let free = half_plane(slab.len, travel, half);
         let bracket = Stages::detail(pieces.stages.as_ref(), Detail::BeltPartition);
-        let cells = envelope::partition(
-            a,
-            b,
+        envelope::partition(
+            (a, b),
             strip,
             half_plane(slab.len, pen, half),
             free,
             faces,
-            &mut scratch,
+            &mut scratch.envelope,
+            &mut scratch.cells,
         );
         drop(bracket);
-        pieces.count(Work::BeltPartitionCells, cells.len());
+        pieces.count(Work::BeltPartitionCells, scratch.cells.len());
         let regions = integrated_regions(
-            cells,
+            &scratch.cells,
             faces.len(),
             slab.lateral.1 - slab.lateral.0,
-            &mut scratch.counts.allocs,
+            &mut scratch.clipped,
+            &mut scratch.envelope.counts.allocs,
         );
         pieces.count(Work::BeltPartitionPatches, regions.len());
         for (owner, mut integral, lo, hi) in regions {
@@ -441,6 +484,8 @@ pub(super) fn patches(
                 ContactFace {
                     collider: pieces.collider(piece),
                     normal: face.normal,
+                    // The projected pressure centroid on the face's plane. Reintegrating world
+                    // triangles would square a sliver's area in a vector norm, which can underflow.
                     point: slab.origin
                         + slab.axis * integral.centroid.x
                         + slab.lat * integral.centroid.y
@@ -459,7 +504,7 @@ pub(super) fn patches(
             });
         }
     }
-    let counts = &scratch.counts;
+    let counts = std::mem::take(&mut scratch.envelope.counts);
     for (work, count) in [
         (Work::BeltDiscoveryTests, counts.tests),
         (Work::BeltPartitionEdges, counts.edges),
@@ -508,35 +553,43 @@ mod tests {
     }
 
     /// Suspension reads the envelope's own pressure moments. Removing the interior oblique
-    /// crossing assigns one plane across a region where the other is higher.
+    /// crossing assigns one plane across a region where the other is higher. On one collider
+    /// the faces stand for a fanned, non-planar outline folded over itself: a mutant skipping
+    /// every crossing within a collider, not just across a shared edge, fails that case.
     #[test]
     fn interior_oblique_crossing_has_analytic_moments() {
-        let faces = [
-            unit_face(Vec3::new(1.0, 1.0, 1.0)),
-            unit_face(Vec3::new(-1.0, -1.0, 2.0)),
-        ];
-        for refs in [
-            vec![(0, &faces[0]), (1, &faces[1])],
-            vec![(1, &faces[1]), (0, &faces[0])],
-        ] {
-            let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
-            let (area, pressure, moment) = moments(&cells, 1.0);
-            // DERIVED: integrate 1+x+y over the square, then add 1-2x-2y over x+y<1/2.
-            // Resolution: unit-scale f32 integration roundoff.
-            assert!((area - 1.0).abs() < 1e-6);
-            assert!((pressure - 49.0 / 24.0).abs() < 1e-6);
-            assert!(
-                (moment - Vec3::new(209.0 / 192.0, 209.0 / 192.0, 49.0 / 24.0)).length() < 1e-6
-            );
+        for pieces in [(0, 1), (0, 0)] {
+            let faces = [
+                unit_face(Vec3::new(1.0, 1.0, 1.0)),
+                unit_face(Vec3::new(-1.0, -1.0, 2.0)),
+            ];
+            for refs in [
+                vec![(pieces.0, &faces[0]), (pieces.1, &faces[1])],
+                vec![(pieces.1, &faces[1]), (pieces.0, &faces[0])],
+            ] {
+                let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
+                let (area, pressure, moment) = moments(&cells, 1.0);
+                // DERIVED: integrate 1+x+y over the square, then add 1-2x-2y over x+y<1/2.
+                // Resolution: unit-scale f32 integration roundoff.
+                assert!((area - 1.0).abs() < 1e-6);
+                assert!((pressure - 49.0 / 24.0).abs() < 1e-6);
+                assert!(
+                    (moment - Vec3::new(209.0 / 192.0, 209.0 / 192.0, 49.0 / 24.0)).length() < 1e-6
+                );
+            }
         }
     }
 
     /// Loose-piece shadows must replace each other inside a half. Sampling must not carry
-    /// an owner chosen on their tie boundary across the other shadow's visible region.
+    /// an owner chosen on their tie boundary across the other shadow's visible region. Shadows
+    /// of one loose piece overlap too: a mutant skipping crossings within a collider loses theirs.
     #[test]
     fn crossing_shoe_shadows_close_lateral_bands_in_both_orders() {
         // Fixture: dyadic and oblique f32 crossings, with exact and non-dyadic shoe edges.
-        for intercept in [2.0, 1.74, 1.26] {
+        for (intercept, pieces) in [2.0, 1.74, 1.26]
+            .into_iter()
+            .flat_map(|intercept| [(intercept, (0, 1)), (intercept, (0, 0))])
+        {
             for strip in [(0.0, 1.0), (-0.34611118, 0.3786031)] {
                 let (mut slab, _, _) = partition_fixture(false);
                 slab.len = 2.0;
@@ -551,8 +604,8 @@ mod tests {
                 .collect();
                 let crossing = (intercept - 1.0) / 2.0;
                 for refs in [
-                    vec![(0, &faces[0]), (1, &faces[1])],
-                    vec![(1, &faces[1]), (0, &faces[0])],
+                    vec![(pieces.0, &faces[0]), (pieces.1, &faces[1])],
+                    vec![(pieces.1, &faces[1]), (pieces.0, &faces[0])],
                 ] {
                     let cells = partition(0.0, 1.0, strip, Vec3::ZERO, Vec3::ZERO, &refs);
                     let (area, pressure, moment) = moments(&cells, strip.1 - strip.0);
@@ -573,7 +626,7 @@ mod tests {
                             .iter()
                             .find(|c| contains_point(&c.polygon, p, 0.0))
                             .unwrap();
-                        assert_eq!(refs[cell.face.unwrap()].0, owner);
+                        assert!(std::ptr::eq(refs[cell.face.unwrap()].1, &faces[owner]));
                     }
                 }
             }
@@ -608,7 +661,7 @@ mod tests {
                 vec![(0, &faces[1]), (0, &faces[0])],
             ] {
                 let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
-                let regions = integrated_regions(cells, refs.len(), 1.0, &mut 0);
+                let regions = owners(&cells, refs.len(), 1.0);
                 // DERIVED: both triangles have positive visible area; no field remains.
                 assert_eq!(regions.len(), 2);
                 let pressure: f32 = regions.iter().map(|(_, i, _, _)| i.area).sum();
@@ -637,7 +690,7 @@ mod tests {
                 vec![(outer_piece, &outer), (0, &inner)],
             ] {
                 let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
-                let regions = integrated_regions(cells, refs.len(), 1.0, &mut 0);
+                let regions = owners(&cells, refs.len(), 1.0);
                 // DERIVED: the inner face owns 1/4; the outer face owns the remaining 3/4.
                 assert_eq!(regions.len(), 2);
                 for (owner, integral, _, _) in regions {
@@ -662,7 +715,7 @@ mod tests {
             vec![(1, &upper), (0, &lower)],
         ] {
             let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
-            let regions = integrated_regions(cells, refs.len(), 1.0, &mut 0);
+            let regions = owners(&cells, refs.len(), 1.0);
             // DERIVED: each plane wins one half-square; the field is completely covered.
             assert_eq!(regions.len(), 2);
             let pressure: f32 = regions.iter().map(|(_, i, _, _)| i.area).sum();
@@ -681,14 +734,14 @@ mod tests {
     #[test]
     fn disconnected_region_slicing_preserves_pressure_and_moment() {
         let face = unit_face(Vec3::new(1.0, 0.0, 1.0));
-        let mut integral = integrate(
+        let mut integral = integrate_field(
             &clip(&face.polygon, Vec3::new(-1.0, 0.0, 0.25)),
             face.depth,
             1.0,
         )
         .unwrap();
         integral.add(
-            integrate(
+            integrate_field(
                 &clip(&face.polygon, Vec3::new(1.0, 0.0, -0.75)),
                 face.depth,
                 1.0,
@@ -780,10 +833,18 @@ mod tests {
         }
     }
 
-    /// Suspension must integrate the captured upper surface independently of face order.
-    /// A mutant retaining hidden crossings or assigning a remote plane breaks coverage or moments.
-    #[test]
-    fn captured_running_gear_envelope() {
+    /// One column's slab, shoe strip, field and travel profiles, and admitted faces.
+    struct Column {
+        slab: Slab,
+        strip: (f32, f32),
+        pen: [f32; 3],
+        travel: [f32; 3],
+        faces: Vec<(usize, ClippedFace)>,
+    }
+
+    /// The first threshold capture in the 30-tank rest-3 rehearsal: one tank's running gear
+    /// under another's belt, rebuilt through the production collider constructor.
+    fn captured_column() -> Column {
         use crate::track::bump_stop::{TrackColliders, spawn_replica_track_colliders};
         let spec: crate::spec::TankSpec = crate::provenance::from_shipped_str(
             crate::tank::TANK_SPEC_PATH,
@@ -842,7 +903,31 @@ mod tests {
             slab.len,
             pen,
             travel,
-        );
+        )
+        .into_iter()
+        .map(|(piece, face)| (piece, face.clone()))
+        .collect();
+        Column {
+            slab,
+            strip,
+            pen,
+            travel,
+            faces,
+        }
+    }
+
+    /// Suspension must integrate the captured upper surface independently of face order.
+    /// A mutant retaining hidden crossings or assigning a remote plane breaks coverage or moments.
+    #[test]
+    fn captured_running_gear_envelope() {
+        let Column {
+            slab,
+            strip,
+            pen,
+            travel,
+            faces,
+        } = captured_column();
+        let faces: Vec<_> = faces.iter().map(|(piece, face)| (*piece, face)).collect();
         let width = slab.lateral.1 - slab.lateral.0;
         let mut expected_patches = None;
         let mut expected: Option<(f32, f32, Vec3)> = None;
@@ -858,8 +943,7 @@ mod tests {
                         half_plane(slab.len, travel, half),
                         &ordered,
                     );
-                    patches +=
-                        integrated_regions(cells.clone(), ordered.len(), width, &mut 0).len();
+                    patches += owners(&cells, ordered.len(), width).len();
                     cells
                 })
                 .collect();
@@ -909,15 +993,6 @@ mod tests {
                     );
                 }
             }
-            let contacts = cells
-                .iter()
-                .filter(|c| integrate(&clip(&c.polygon, c.depth), c.depth, width).is_some())
-                .count();
-            println!(
-                "capture faces={} cells={} band_contacts={contacts} patches={patches} moments={actual:?}",
-                ordered.len(),
-                cells.len()
-            );
         }
     }
 
@@ -1251,7 +1326,7 @@ mod tests {
     #[test]
     fn triangular_pressure_has_its_own_coverage_and_centroid() {
         let polygon = [Vec3::Z, Vec3::new(1.0, 0.0, 1.0), Vec3::new(0.0, 1.0, 1.0)];
-        let integral = integrate(&polygon, Vec3::X, 1.0).unwrap();
+        let integral = integrate_field(&polygon, Vec3::X, 1.0).unwrap();
         assert!((integral.length - 0.5).abs() < 1e-6);
         assert!((integral.area - 1.0 / 6.0).abs() < 1e-6);
         assert!((integral.centroid - Vec3::new(0.5, 0.25, 1.0)).length() < 1e-6);
@@ -1306,5 +1381,222 @@ mod tests {
             clip_faces(&triangles, &slab).is_empty(),
             "surface beyond free travel"
         );
+    }
+
+    /// Fixture: 512 shipped construction chunks, smallest first, rotated and scattered under one
+    /// shoe column as separate solid colliders, so their entry faces cover each other densely.
+    fn chunk_pile() -> Column {
+        fn files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(root).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    files(&path, out);
+                } else if path.to_string_lossy().ends_with(".construction.ron") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        files(
+            &crate::assets::asset_root().join("constructions"),
+            &mut paths,
+        );
+        paths.sort();
+        let mut chunks = Vec::new();
+        for path in paths {
+            let text = std::fs::read_to_string(path).unwrap();
+            chunks.extend(
+                crate::construction::schema::ConstructionAsset::from_ron(&text)
+                    .unwrap()
+                    .chunks,
+            );
+        }
+        chunks.sort_by(|a, b| a.volume_m3.total_cmp(&b.volume_m3));
+        // Fixture: a captured shoe's length and width, its probe reach and free travel.
+        let (length, width) = (0.13042593, 0.7247143);
+        let slab = Slab {
+            origin: Vec3::ZERO,
+            axis: Vec3::X,
+            lat: Vec3::Y,
+            out: Vec3::NEG_Z,
+            len: length,
+            lateral: (-width / 2.0, width / 2.0),
+            face: 0.0,
+            reach: 0.5,
+            travel: 0.17256261,
+        };
+        let mut faces = Vec::new();
+        for (i, chunk) in chunks.into_iter().take(512).enumerate() {
+            let t = i as f32;
+            let rotation = Quat::from_euler(EulerRot::XYZ, 0.71 * t, 1.13 * t, 2.39 * t);
+            let centre = Vec3::from_array(chunk.centroid);
+            let collider = avian3d::prelude::Collider::convex_hull(
+                chunk
+                    .hull
+                    .into_iter()
+                    .map(|p| Vec3::from_array(p) - centre)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let at = Vec3::new(
+                length * (0.1 + 0.8 * (0.618 * t).fract()),
+                width * ((0.414 * t).fract() - 0.5),
+                0.05 + 0.04 * (i % 3) as f32,
+            );
+            let triangles: Vec<_> = triangles(&collider, rotation)
+                .into_iter()
+                .map(|tri| tri.map(|p| p + at))
+                .collect();
+            faces.extend(clip_faces(&triangles, &slab).into_iter().map(|f| (i, f)));
+        }
+        Column {
+            strip: slab.lateral,
+            pen: [0.0; 3],
+            travel: [slab.travel; 3],
+            slab,
+            faces,
+        }
+    }
+
+    /// Fixture: a box whose top corners on one diagonal rise 5 mm over its 1 m width. DERIVED:
+    /// the top's two hull triangles differ by about 0.8 degrees, inside Parry's 1.5 degree face
+    /// merge, so Parry stores one non-planar outline and fans it.
+    fn fanned_hull() -> Column {
+        let points: Vec<_> = [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)]
+            .into_iter()
+            .flat_map(|(x, y)| {
+                let top = if x == y { 0.505 } else { 0.5 };
+                [Vec3::new(x, y, -0.5), Vec3::new(x, y, top)]
+            })
+            .collect();
+        let collider = avian3d::prelude::Collider::convex_hull(points).unwrap();
+        let hull = collider.shape_scaled();
+        assert_eq!(
+            hull.as_convex_polyhedron().unwrap().faces().len(),
+            6,
+            "the raised top merges into one Parry face"
+        );
+        let (slab, _, rotation) = partition_fixture(false);
+        let faces = clip_faces(&triangles(&collider, rotation), &slab)
+            .into_iter()
+            .map(|f| (0, f))
+            .collect();
+        Column {
+            strip: slab.lateral,
+            pen: [0.0; 3],
+            travel: [1.0; 3],
+            slab,
+            faces,
+        }
+    }
+
+    /// Each half's patches: half, owner, pressure integral, contact length, first moment of
+    /// pressure and maximum depth.
+    fn column_patches(
+        column: &Column,
+        mut scratch: envelope::Scratch,
+    ) -> Vec<(usize, Option<usize>, f32, f32, Vec3, f32)> {
+        let refs: Vec<_> = column
+            .faces
+            .iter()
+            .map(|(piece, face)| (*piece, face))
+            .collect();
+        let len = column.slab.len;
+        let width = column.slab.lateral.1 - column.slab.lateral.0;
+        (0..2)
+            .flat_map(|half| {
+                let mut cells = Vec::new();
+                envelope::partition(
+                    (half as f32 * len / 2.0, (half + 1) as f32 * len / 2.0),
+                    column.strip,
+                    half_plane(len, column.pen, half),
+                    half_plane(len, column.travel, half),
+                    &refs,
+                    &mut scratch,
+                    &mut cells,
+                );
+                owners(&cells, refs.len(), width)
+                    .into_iter()
+                    .map(move |(owner, i, _, _)| {
+                        (
+                            half,
+                            owner,
+                            i.area,
+                            i.length,
+                            i.centroid * i.area,
+                            i.max_depth,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn fixtures() -> Vec<(&'static str, Column)> {
+        let solid = |many| {
+            let (slab, collider, rotation) = partition_fixture(many);
+            let faces = clip_faces(&triangles(&collider, rotation), &slab)
+                .into_iter()
+                .map(|f| (0, f))
+                .collect();
+            Column {
+                strip: slab.lateral,
+                pen: [0.0; 3],
+                travel: [1.0; 3],
+                slab,
+                faces,
+            }
+        };
+        vec![
+            ("captured column", captured_column()),
+            ("chunk pile", chunk_pile()),
+            ("fanned hull", fanned_hull()),
+            ("rotated box", solid(false)),
+            ("ring hull", solid(true)),
+        ]
+    }
+
+    /// Faces across a shared edge are never crossed (`envelope`). Suspension must read the same
+    /// owners and moments as when every pair is crossed. Fixtures: the captured tank-on-tank
+    /// column, the 512-chunk pile and its shoe shadows, a fanned non-planar hull, the rotated
+    /// box and the ring hull. A mutant that also skips a pair sharing no edge, or matches a line
+    /// by its points rather than its orientation, changes an owner or a moment here.
+    #[test]
+    fn skipping_shared_edge_crossings_keeps_every_owner_and_moment() {
+        let mut fixtures = fixtures();
+        let pile = &fixtures[1].1;
+        let shadows = Column {
+            slab: Slab { ..pile.slab },
+            faces: pile
+                .faces
+                .iter()
+                .flat_map(|(piece, face)| {
+                    face.clone()
+                        .across_shoe(&pile.slab)
+                        .into_iter()
+                        .map(|face| (*piece, face))
+                })
+                .collect(),
+            ..*pile
+        };
+        fixtures.push(("pile shadows", shadows));
+        for (name, column) in fixtures {
+            let [skipped, crossed] = [
+                envelope::Scratch::default(),
+                envelope::Scratch::crossing_shared_edges(),
+            ]
+            .map(|scratch| column_patches(&column, scratch));
+            assert!(!crossed.is_empty(), "{name}: the fixture has support");
+            assert_eq!(skipped.len(), crossed.len(), "{name}: patch count");
+            for (a, b) in skipped.iter().zip(&crossed) {
+                assert_eq!((a.0, a.1), (b.0, b.1), "{name}: owner");
+                // Resolution: f32 accumulation over a column's bands, far below any patch.
+                let epsilon = 1e-6;
+                assert!((a.2 - b.2).abs() < epsilon, "{name}: pressure {a:?} {b:?}");
+                assert!((a.3 - b.3).abs() < epsilon, "{name}: length {a:?} {b:?}");
+                assert!((a.4 - b.4).length() < epsilon, "{name}: moment {a:?} {b:?}");
+                assert!((a.5 - b.5).abs() < epsilon, "{name}: depth {a:?} {b:?}");
+            }
+        }
     }
 }

@@ -75,6 +75,7 @@ impl<O: TerrainOracle> ContactOracle for ColumnOracle<'_, O> {
 }
 
 /// One shoe column's world-contact envelope and sampled free-travel profile, in metres.
+#[derive(Clone, Copy)]
 pub(crate) struct PatchQuery<'a> {
     pub(crate) slab: &'a Slab,
     pub(crate) overlaps: &'a [SlabOverlap],
@@ -90,6 +91,7 @@ pub(crate) fn patches<O: TerrainOracle>(
     params: &ForceParams,
     oracle: &O,
     pieces: &RubbleBodies,
+    scratch: &mut convex::PartitionScratch,
 ) -> Vec<SupportPatch> {
     let PatchQuery {
         slab,
@@ -121,7 +123,7 @@ pub(crate) fn patches<O: TerrainOracle>(
             crate::cost::stages::Work::BeltPartitionFaces,
             affected.len(),
         );
-        split = convex::patches(slab, strip, field_offset, pen, travel, &affected, pieces);
+        split = convex::patches(&query, &affected, pieces, scratch);
         &split
     };
     terrain_surface_patches(patches, slab.axis, slab.out, params, oracle)
