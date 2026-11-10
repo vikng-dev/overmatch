@@ -322,3 +322,29 @@ unaffected: it only stores pairs with no manifold from the geometry query, and r
 on pairs with manifolds after that query.
 
 Guards: `src/tests/avian_contact_reduction.rs`.
+
+## Rest energy (`src/dynamics/solver/islands/sleeping.rs`, `src/dynamics/solver/solver_body/mod.rs`, `src/dynamics/rigid_body/sleeping.rs`)
+
+Subject: the game's rigid-body rest, server physics and scenery, game state only.
+
+Sleep eligibility compares twice kinetic energy per mass, `v² + ω·I·ω/m`, with the squared
+`SleepThreshold::linear` rest speed, scaled by `PhysicsLengthUnit`. The half in kinetic energy
+cancels. Physical computed inertia is rotated to world space; no hull extent or object kind is
+needed. Each body updates its timer independently on the compute pool; island wake bits and the
+split candidate commit afterward. Equal split timers choose the lower island id.
+
+`SleepThreshold::angular` is removed, including serialization/reflection and its default. Code
+setting that field must migrate to the linear rest speed; an angular-only setting no longer
+exists. Negative linear thresholds still disable sleep, and equality still prevents sleep.
+`TimeToSleep` and whole-island eligibility are unchanged. The contact census retains a fixed
+angular diagnostic reference solely for the collapse instrument's before/after counts.
+
+Computed zero/infinite mass has inverse zero, and infinite/singular inertia's tensor is zero,
+following the engine's existing reciprocal conventions; neither introduces a division by zero.
+Use physical inertia rather than the solver's effective, lock-masked inverse tensor: locked axes
+mask force increments, while `integrate_positions` still integrates prescribed velocities.
+Those velocities therefore still contribute to rest energy.
+
+Guards: `src/tests/avian_island_sleep.rs` (spin axis, equal specific energy, frame invariance and
+degenerate properties), and the shipped-house hull-motion witness in
+`src/construction/breakage/tests.rs`. Counts and scope: `.agents/scratch/rest-energy.md`.

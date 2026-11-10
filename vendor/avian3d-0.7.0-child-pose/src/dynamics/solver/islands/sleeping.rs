@@ -194,6 +194,9 @@ fn update_sleeping_states(
             &mut SleepTimer,
             &SleepThreshold,
             &SolverBody,
+            &ComputedMass,
+            &ComputedAngularInertia,
+            &Rotation,
             &BodyIslandNode,
         ),
         (Without<Sleeping>, Without<SleepingDisabled>),
@@ -201,45 +204,46 @@ fn update_sleeping_states(
     length_unit: Res<PhysicsLengthUnit>,
     time_to_sleep: Res<TimeToSleep>,
     time: Res<Time>,
+    mut eligibility: Local<bevy::utils::Parallel<Vec<(IslandId, f32)>>>,
 ) {
     let length_unit_squared = length_unit.0 * length_unit.0;
     let delta_secs = time.delta_secs();
 
     islands.split_candidate_sleep_timer = 0.0;
 
-    // TODO: This would be nice to do in parallel.
-    for (mut sleep_timer, sleep_threshold, solver_body, island_data) in query.iter_mut() {
-        let lin_vel_squared = solver_body.linear_velocity.length_squared();
-        #[cfg(feature = "2d")]
-        let ang_vel_squared = solver_body.angular_velocity * solver_body.angular_velocity;
-        #[cfg(feature = "3d")]
-        let ang_vel_squared = solver_body.angular_velocity.length_squared();
+    query.par_iter_mut().for_each(
+        |(mut sleep_timer, sleep_threshold, solver_body, mass, inertia, rotation, island_data)| {
+            // Keep the sign: a negative threshold disables sleep, even at zero energy.
+            let threshold_squared = sleep_threshold.linear * sleep_threshold.linear.abs();
+            if solver_body.kinetic_speed_squared(*mass, *inertia, *rotation)
+                < length_unit_squared * threshold_squared as Scalar
+            {
+                sleep_timer.0 += delta_secs;
+            } else {
+                sleep_timer.0 = 0.0;
+            }
+            eligibility.scope(|out| out.push((island_data.island_id, sleep_timer.0)));
+        },
+    );
 
-        // Keep signs.
-        let lin_threshold_squared = sleep_threshold.linear * sleep_threshold.linear.abs();
-        let ang_threshold_squared = sleep_threshold.angular * sleep_threshold.angular.abs();
-
-        if lin_vel_squared < length_unit_squared * lin_threshold_squared as Scalar
-            && ang_vel_squared < ang_threshold_squared as Scalar
-        {
-            // Increment the sleep timer.
-            sleep_timer.0 += delta_secs;
-        } else {
-            // Reset the sleep timer if the body is moving.
-            sleep_timer.0 = 0.0;
-        }
-
-        if sleep_timer.0 < time_to_sleep.0 {
+    // Timers are body-owned; only their whole-island eligibility and split selection commit here.
+    for (island_id, rested) in eligibility.drain() {
+        if rested < time_to_sleep.0 {
             // Keep the island awake.
-            awake_island_bit_vec.set_and_grow(island_data.island_id.0 as usize);
-        } else if let Some(island) = islands.get(island_data.island_id)
+            awake_island_bit_vec.set_and_grow(island_id.0 as usize);
+        } else if let Some(island) = islands.get(island_id)
             && island.constraints_removed > 0
         {
             // The body wants to sleep, but its island needs splitting first.
-            if sleep_timer.0 > islands.split_candidate_sleep_timer {
+            if rested > islands.split_candidate_sleep_timer
+                || (rested == islands.split_candidate_sleep_timer
+                    && islands
+                        .split_candidate
+                        .is_none_or(|current| island_id.0 < current.0))
+            {
                 // This island is now the sleepiest candidate for splitting.
-                islands.split_candidate = Some(island_data.island_id);
-                islands.split_candidate_sleep_timer = sleep_timer.0;
+                islands.split_candidate = Some(island_id);
+                islands.split_candidate_sleep_timer = rested;
             }
         }
     }

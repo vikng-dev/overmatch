@@ -11,7 +11,7 @@ use bevy::prelude::*;
 /// Simulating a large number of bodies can be expensive. To reduce CPU overhead, bodies that come to rest
 /// enter a low-cost "sleeping" state where they are not simulated until woken up again.
 ///
-/// To start sleeping, the [`LinearVelocity`] and [`AngularVelocity`] of a body must remain below the [`SleepThreshold`]
+/// To start sleeping, twice the kinetic energy per mass must remain below the squared rest speed in [`SleepThreshold`]
 /// for a time specified by the [`TimeToSleep`] resource. All bodies that are either directly or indirectly connected
 /// to the body through contacts or joints must also be allowed to sleep.
 ///
@@ -69,8 +69,8 @@ pub struct Sleeping;
 #[reflect(Component, Debug, Default)]
 pub struct SleepingDisabled;
 
-/// A component for the maximum [`LinearVelocity`] and [`AngularVelocity`]
-/// for a body to be allowed to be [`Sleeping`].
+/// The rest speed whose kinetic energy per mass bounds a body allowed to be [`Sleeping`].
+/// Translation and rotation contribute together: v² + ω·I·ω/m < linear², with length-unit scaling.
 ///
 /// Setting a negative sleeping threshold disables sleeping entirely,
 /// similar to [`SleepingDisabled`].
@@ -90,10 +90,6 @@ pub struct SleepThreshold {
     ///
     /// [`PhysicsLengthUnit`]: crate::dynamics::solver::PhysicsLengthUnit
     pub linear: f32,
-    /// The maximum angular velocity for the body to be allowed to be [`Sleeping`].
-    ///
-    /// Default: `0.15`
-    pub angular: f32,
 }
 
 /// Deprecated alias for [`SleepThreshold`].
@@ -102,15 +98,12 @@ pub type SleepingThreshold = SleepThreshold;
 
 impl Default for SleepThreshold {
     fn default() -> Self {
-        Self {
-            linear: 0.15,
-            angular: 0.15,
-        }
+        Self { linear: 0.15 }
     }
 }
 
 /// A component storing the time in seconds that a [`RigidBody`] has been resting
-/// with its [`LinearVelocity`] and [`AngularVelocity`] below the [`SleepThreshold`].
+/// with its kinetic energy per mass below the [`SleepThreshold`].
 ///
 /// When this time exceeds the [`TimeToSleep`], the body is allowed to be [`Sleeping`].
 ///
@@ -128,7 +121,7 @@ pub struct SleepTimer(pub f32);
 pub type TimeSleeping = SleepTimer;
 
 /// A resource that specifies the time in seconds that a [`RigidBody`] must rest
-/// with its [`LinearVelocity`] and [`AngularVelocity`] below the [`SleepThreshold`]
+/// with its kinetic energy per mass below the [`SleepThreshold`]
 /// before it is allowed to be [`Sleeping`].
 ///
 /// Default: `0.5`

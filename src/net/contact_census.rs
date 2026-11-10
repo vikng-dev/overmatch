@@ -8,7 +8,7 @@
 //! Only awake touching pairs count (the active set); a sleeping pair is outside the solver.
 //! Sensors are excluded: only pairs that generate constraints count.
 
-use avian3d::dynamics::solver::islands::BodyIslandNode;
+use avian3d::dynamics::solver::{islands::BodyIslandNode, solver_body::SolverBody};
 use avian3d::prelude::{
     AngularVelocity, Collider, ColliderTransform, ComputedAngularInertia, ComputedMass,
     ContactGraph, ContactPair, LinearVelocity, PhysicsLengthUnit, Position, RigidBody,
@@ -227,7 +227,11 @@ pub(crate) struct ContactTick {
     motion: MotionCounts,
 }
 
-/// Piece-ticks crossing the separate Avian thresholds, and the angular-only subset whose
+/// Resolution: fixed diagnostic reference, rad/s, from Avian 0.7's retired angular default.
+/// `scripts/perf/collapse.sh` uses it only to compare blocker counts across the sleep-law change.
+const CENSUS_ANGULAR_REFERENCE_RAD_S: f32 = 0.15;
+
+/// Piece-ticks crossing the diagnostic speed references, and the angular-only subset whose
 /// kinetic energy per mass is below the linear rest-speed energy.
 #[derive(Clone, Copy, Default, Serialize)]
 struct MotionCounts {
@@ -264,7 +268,7 @@ struct PieceRecord {
     episode_born: u32,
     #[serde(skip)]
     motion: (f32, f32),
-    /// Last tick its speed was not under the sleep thresholds (Avian's own comparison).
+    /// Last tick its kinetic energy per mass reached the rest-speed energy (Avian's comparison).
     last_fast: Option<u32>,
     /// The latest tick it went to sleep, the island it slept in and its speeds then (m/s, rad/s).
     sleep: Option<u32>,
@@ -281,11 +285,11 @@ struct PieceRecord {
     changed: bool,
 }
 
-/// The sleep thresholds pieces were compared with: linear in m/s, angular in rad/s.
+/// The rest speed and fixed angular diagnostic reference, with the observation resolutions.
 #[derive(Clone, Copy, Serialize)]
 struct Thresholds {
     linear: f32,
-    angular: f32,
+    angular_reference_rad_s: f32,
     time_to_sleep_s: f32,
     visible_motion_m: f32,
 }
@@ -606,6 +610,7 @@ pub(super) struct ContactCensus<'w, 's> {
             &'static ComputedMass,
             &'static ComputedAngularInertia,
             &'static Rotation,
+            &'static SolverBody,
         ),
     >,
     island_motion: Query<
@@ -716,13 +721,12 @@ impl ContactCensus<'_, '_> {
         for (entity, velocity, spin, rest, island) in &self.island_motion {
             let linear_limit = self.length_unit.0.powi(2) * rest.linear * rest.linear.abs();
             let linear = velocity.length_squared() >= linear_limit;
-            let angular = spin.length_squared() >= rest.angular * rest.angular.abs();
-            let (mass, inertia, rotation) = self
+            let angular = spin.length_squared() >= CENSUS_ANGULAR_REFERENCE_RAD_S.powi(2);
+            let (mass, inertia, rotation, body) = self
                 .mass_properties
                 .get(entity)
                 .expect("every rigid body has computed mass properties and rotation");
-            let energy_speed_squared = velocity.length_squared()
-                + spin.dot(inertia.rotated(rotation.0).tensor() * spin.0) * mass.inverse();
+            let energy_speed_squared = body.kinetic_speed_squared(*mass, *inertia, *rotation);
             let low_energy = energy_speed_squared < linear_limit;
             let entry = self.motion_islands.entry(island.island_id().0).or_default();
             if linear || angular {
@@ -749,7 +753,7 @@ impl ContactCensus<'_, '_> {
         for (entity, velocity, spin, rest, _, sleeping, piece) in &self.pieces {
             records.thresholds = Some(Thresholds {
                 linear: rest.linear * unit,
-                angular: rest.angular,
+                angular_reference_rad_s: CENSUS_ANGULAR_REFERENCE_RAD_S,
                 time_to_sleep_s: time_to_sleep,
                 visible_motion_m: VISIBLE_MOTION_M,
             });
@@ -793,8 +797,11 @@ impl ContactCensus<'_, '_> {
                 record.awake_ticks += 1;
                 record.changed = true;
                 let linear_limit = unit * unit * rest.linear * rest.linear.abs();
-                let angular_limit = rest.angular * rest.angular.abs();
-                if linear * linear >= linear_limit || angular * angular >= angular_limit {
+                let (mass, inertia, rotation, body) = self
+                    .mass_properties
+                    .get(entity)
+                    .expect("every simulated piece retains computed mass and solver state");
+                if body.kinetic_speed_squared(*mass, *inertia, *rotation) >= linear_limit {
                     record.last_fast = Some(tick);
                 }
             }

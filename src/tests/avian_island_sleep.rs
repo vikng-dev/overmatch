@@ -292,3 +292,96 @@ fn stationary_contacts_keep_the_configured_minimum_speculative_margin() {
         "zero relative velocity must not extend the contact band"
     );
 }
+
+/// Scenery and vehicles share one rest law: the same angular speed can be negligible roll
+/// energy or visible transverse motion. Equal kinetic energy per mass must give equal verdicts.
+#[test]
+fn rest_depends_on_energy_per_mass_and_spin_axis() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    // Fixture: a slender bar and a small cube; rotation is about each body's principal axes.
+    let bar = Vec3::new(6.6, 0.2, 0.05);
+    let chunk = Vec3::splat(0.2);
+    let rest = SleepThreshold::default().linear;
+    let mut bodies = Vec::new();
+    for (size, spin, sleeps) in [(bar, Vec3::X * 0.45, true), (bar, Vec3::Z * 0.45, false)] {
+        bodies.push((
+            app.world_mut()
+                .spawn((
+                    RigidBody::Dynamic,
+                    Position(Vec3::X * bodies.len() as f32 * 20.0),
+                    Collider::cuboid(size.x, size.y, size.z),
+                    AngularVelocity(spin),
+                ))
+                .id(),
+            sleeps,
+        ));
+    }
+    for fraction in [0.5, 2.0] {
+        // Fixture: either side of the resource-owned rest energy.
+        for size in [chunk, bar] {
+            // DERIVED: I_z/m = (x²+y²)/12 for a uniform box; the factor 1/2 cancels from E/m.
+            let spin = rest * fraction / ((size.x * size.x + size.y * size.y) / 12.0).sqrt();
+            bodies.push((
+                app.world_mut()
+                    .spawn((
+                        RigidBody::Dynamic,
+                        Position(Vec3::X * bodies.len() as f32 * 20.0),
+                        Collider::cuboid(size.x, size.y, size.z),
+                        AngularVelocity(Vec3::Z * spin),
+                    ))
+                    .id(),
+                fraction < 1.0,
+            ));
+        }
+    }
+    app.update();
+    let dt = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let ticks = (app.world().resource::<TimeToSleep>().0 / dt).ceil() as usize + 2;
+    for _ in 0..ticks {
+        app.update();
+    }
+    for (body, sleeps) in bodies {
+        assert_eq!(
+            app.world().get::<Sleeping>(body).is_some(),
+            sleeps,
+            "body {body}: rest must measure energy per mass, including the spin axis"
+        );
+    }
+}
+
+/// Rest uses physical world-frame inertia, including prescribed motion on locked force axes.
+/// Degenerate mass properties use Avian's reciprocal convention without NaNs.
+#[test]
+fn rest_energy_is_frame_invariant_and_handles_degenerate_mass() {
+    use avian3d::dynamics::solver::solver_body::{SolverBody, SolverBodyFlags};
+    // Fixture: anisotropic inertia, a unit translation and principal-axis spin.
+    let mut body = SolverBody {
+        linear_velocity: Vec3::X,
+        angular_velocity: Vec3::X * 3.0,
+        ..default()
+    };
+    let mass = ComputedMass::new(12.0);
+    let inertia = ComputedAngularInertia::new(Vec3::new(2.0, 6.0, 12.0));
+    // DERIVED: 1² + 3² * 2/12 = 2.5 m²/s².
+    assert!((body.kinetic_speed_squared(mass, inertia, Rotation::IDENTITY) - 2.5).abs() < 1e-5);
+    body.angular_velocity = Vec3::Y * 3.0;
+    let rotation = Rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
+    assert!((body.kinetic_speed_squared(mass, inertia, rotation) - 2.5).abs() < 1e-5);
+    body.flags.insert(SolverBodyFlags::ALL_LOCKED);
+    assert!(
+        (body.kinetic_speed_squared(mass, inertia, rotation) - 2.5).abs() < 1e-5,
+        "locks constrain acceleration, not prescribed velocities integrated into the pose"
+    );
+    for mass in [ComputedMass::new(0.0), ComputedMass::INFINITY] {
+        assert_eq!(body.kinetic_speed_squared(mass, inertia, rotation), 1.0);
+    }
+    assert_eq!(
+        body.kinetic_speed_squared(mass, ComputedAngularInertia::INFINITY, rotation),
+        1.0
+    );
+}

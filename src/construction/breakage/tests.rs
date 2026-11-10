@@ -1004,16 +1004,20 @@ fn settled_freed_matter_sleeps_within_avians_rest_window() {
             .collect();
         let resting = !pieces.is_empty()
             && pieces.iter().all(|&piece| {
-                let threshold = app.world().get::<SleepThreshold>(piece).unwrap();
-                app.world().get::<LinearVelocity>(piece).unwrap().0.length()
-                    < threshold.linear * length_unit
-                    && app
-                        .world()
-                        .get::<AngularVelocity>(piece)
-                        .unwrap()
-                        .0
-                        .length()
-                        < threshold.angular
+                let world = app.world();
+                let threshold = world.get::<SleepThreshold>(piece).unwrap();
+                if world.get::<Sleeping>(piece).is_some() {
+                    return true;
+                }
+                world
+                    .get::<avian3d::dynamics::solver::solver_body::SolverBody>(piece)
+                    .unwrap()
+                    .kinetic_speed_squared(
+                        *world.get::<ComputedMass>(piece).unwrap(),
+                        *world.get::<ComputedAngularInertia>(piece).unwrap(),
+                        *world.get::<Rotation>(piece).unwrap(),
+                    )
+                    < (threshold.linear * length_unit).powi(2)
             });
         quiet = if resting { quiet + dt } else { 0.0 };
         if quiet >= rest + allowance {
