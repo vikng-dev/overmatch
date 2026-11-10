@@ -45,6 +45,16 @@ labelled!(Stage, NAMES, COUNT {
     LinePass = "line_pass_us",
     // A burst's blast rays cast through avian, apart from the intake around them.
     Blast = "blast_us",
+    // Structural commits of a construction change, each with the hooks, observers and nested
+    // commands it runs: a departing group's body, its fresh colliders, the colliders it takes
+    // from its former owner, a split parent's retirement, a standing owner's collider changes,
+    // and the bounds refit of the colliders a change moved.
+    PieceBody = "piece_body_us",
+    ColliderSpawn = "collider_spawn_us",
+    ColliderRehome = "collider_rehome_us",
+    PieceRetire = "piece_retire_us",
+    RefitCommit = "refit_commit_us",
+    MovedBounds = "moved_bounds_us",
 });
 
 labelled!(Detail, DETAIL_NAMES, DETAIL_COUNT {
@@ -144,6 +154,7 @@ pub(crate) struct Stages(
     Arc<[AtomicU64; DETAIL_COUNT]>,
     Arc<[Mutex<DetailReaders>; DETAIL_COUNT]>,
     Arc<[AtomicU64; COUNT]>,
+    Arc<Mutex<Option<Bracket>>>,
 );
 
 // WORK_COUNT exceeds the standard library's array Default implementations (lengths 0..=32).
@@ -156,6 +167,7 @@ impl Default for Stages {
             Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
             Arc::new(std::array::from_fn(|_| Mutex::default())),
             Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
+            Arc::default(),
         )
     }
 }
@@ -254,12 +266,19 @@ impl Stages {
                 .then(|| stages.2.lock().expect("belt timing lock is not poisoned"));
             let start = Edge::now();
             stages.add(Work::ProcessCpuReads, 1);
-            let debit = matches!(stage, Stage::Sweep).then(|| {
+            // A leaf another leaf runs inside is debited from it: the sweep's census, and the
+            // piece census a body's spawn or retirement observer records.
+            let nested = match stage {
+                Stage::Sweep => Some(Stage::SweepCensus),
+                Stage::PieceBody | Stage::PieceRetire => Some(Stage::ContactCensus),
+                _ => None,
+            };
+            let debit = nested.map(|nested| {
                 (
-                    Stage::SweepCensus,
+                    nested,
                     [
-                        stages.0[Stage::SweepCensus as usize].load(Ordering::Relaxed),
-                        stages.5[Stage::SweepCensus as usize].load(Ordering::Relaxed),
+                        stages.0[nested as usize].load(Ordering::Relaxed),
+                        stages.5[nested as usize].load(Ordering::Relaxed),
                     ],
                 )
             });
@@ -281,6 +300,32 @@ impl Stages {
                 debit,
             }
         })
+    }
+
+    /// Open `stage` until [`Stages::release`], for a leaf no one scope encloses: a run of queued
+    /// commands, or a system another crate owns. One leaf is held at a time.
+    pub(crate) fn hold(stages: Option<&Self>, stage: Stage) {
+        let Some(stages) = stages else {
+            return; // No cost instrument is mounted.
+        };
+        let held = Self::start(Some(stages), stage);
+        let previous = std::mem::replace(
+            &mut *stages.6.lock().expect("held leaf lock is not poisoned"),
+            held,
+        );
+        assert!(previous.is_none(), "the previous held leaf was released");
+    }
+
+    pub(crate) fn release(stages: Option<&Self>) {
+        let Some(stages) = stages else {
+            return; // No cost instrument is mounted.
+        };
+        let held = stages
+            .6
+            .lock()
+            .expect("held leaf lock is not poisoned")
+            .take();
+        assert!(held.is_some(), "a released leaf was held");
     }
 
     pub(crate) fn take_us(&self) -> [f64; COUNT] {
@@ -382,7 +427,7 @@ impl Bracket {
             totals[self.stage as usize].fetch_add(
                 ns[i]
                     .checked_sub(nested)
-                    .expect("sweep census is contained by sweep"),
+                    .expect("a nested leaf is contained by the leaf it is debited from"),
                 Ordering::Relaxed,
             );
         }

@@ -2828,10 +2828,17 @@ where
     }
 
     fn apply(self, world: &mut World) {
-        if let Some(stages) = world.get_resource::<Stages>() {
+        let stages = world.get_resource::<Stages>().cloned();
+        if let Some(stages) = &stages {
             stages.add(Work::RehomedColliders, self.retained.len() as u64);
         }
-        drop(world.spawn_batch(self.fresh));
+        // An empty batch reads no clock.
+        let leaf = |stage, work: bool| work.then(|| Stages::start(stages.as_ref(), stage));
+        {
+            let _spawn = leaf(Stage::ColliderSpawn, !self.fresh.is_empty());
+            drop(world.spawn_batch(self.fresh));
+        }
+        let _rehome = leaf(Stage::ColliderRehome, !self.retained.is_empty());
         world.insert_batch(self.retained);
     }
 }
@@ -3086,7 +3093,10 @@ fn spawn_prepared_as(commands: &mut Commands, piece: Entity, prepared: PreparedD
     // Only structural effects hold exclusive world access. The two archetypes share one
     // command, with complete body state visible to every collider hook in the same flush.
     commands.queue(move |world: &mut World| {
-        world.entity_mut(piece).insert(body);
+        {
+            let _body = Stages::start(world.get_resource::<Stages>(), Stage::PieceBody);
+            world.entity_mut(piece).insert(body);
+        }
         occupied_batch.apply(world);
         contact_batch.apply(world);
     });
@@ -3209,8 +3219,12 @@ fn split_groups(
         for child in children {
             spawn_prepared(&mut commands, child);
         }
+        commands.queue(|world: &mut World| {
+            Stages::hold(world.get_resource::<Stages>(), Stage::PieceRetire);
+        });
         commands.trigger(RetirePiece { entity, tick });
         commands.entity(entity).despawn();
+        commands.queue(|world: &mut World| Stages::release(world.get_resource::<Stages>()));
     }
 }
 
@@ -3419,12 +3433,21 @@ fn reconcile(
     let mut built = BTreeMap::new();
     // Direct scoped submissions collect in query order. All hulls are ready before this flush,
     // and refit_systems exposes every new collider to spatial queries in the same update.
+    let changes = effects.iter().any(|(_, effects)| !effects.is_empty());
+    if changes {
+        commands.queue(|world: &mut World| {
+            Stages::hold(world.get_resource::<Stages>(), Stage::RefitCommit);
+        });
+    }
     for (root, effects) in effects {
         for effect in effects {
             if let Some((c, entity)) = effect.apply(&mut commands) {
                 built.insert((root, c), entity);
             }
         }
+    }
+    if changes {
+        commands.queue(|world: &mut World| Stages::release(world.get_resource::<Stages>()));
     }
     let moves = std::mem::take(&mut swapped.0).into_iter();
     transfers.readdress(moves.map(|(index, root, chunk)| {
@@ -3446,7 +3469,12 @@ fn refit_systems() -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::Sc
             );
         },
         reconcile,
-        update_moved_collider_aabbs::<Collider>
+        (
+            |stages: Option<Res<Stages>>| Stages::hold(stages.as_deref(), Stage::MovedBounds),
+            update_moved_collider_aabbs::<Collider>,
+            |stages: Option<Res<Stages>>| Stages::release(stages.as_deref()),
+        )
+            .chain()
             .run_if(resource_exists::<ColliderTrees>)
             .run_if(any_match_filter::<Changed<Breakage>>),
     )
