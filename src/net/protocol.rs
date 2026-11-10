@@ -39,7 +39,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// The game's environment destruction model carries shared causes and chunk-addressed groups;
 /// replacement and departure derive from the admitted graph on each peer; a crumble's light
 /// fragments reach players as decoration events.
-pub const PROTOCOL_REV: u32 = 91;
+pub const PROTOCOL_REV: u32 = 92;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -904,7 +904,7 @@ const WIRE_SURFACE_HASH: u64 = 0x71ba39380c57d0bd;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x0f25208f6dc71445;
+const WIRE_TYPES_HASH: u64 = 0xc4175ed803f35ed5;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
