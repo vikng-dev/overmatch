@@ -41,7 +41,7 @@
 //! the violated invariant and structured diagnostic. Only an incomplete intermediate corridor
 //! is retried, by extending it; no error becomes a stopped round or a skipped dose.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 
 use avian3d::parry::shape::TypedShape;
 use avian3d::prelude::{Collider, ColliderAabb, Forces, Position, Rotation, SimpleCollider};
@@ -782,6 +782,16 @@ pub(crate) struct FieldReach {
     /// The union of the pose bounds of the hard colliders within [`FIELD_REACH`] of the throw
     /// point ([`horizon`]), read on first use: it does not depend on the direction.
     union: OnceCell<(Vec3, Vec3)>,
+    /// What [`field_stop`] fills per direction, kept so a throw's directions share its storage.
+    scratch: RefCell<StopScratch>,
+}
+
+/// One direction's candidates in the order its line enters their bounds, and their crossings.
+#[derive(Default)]
+struct StopScratch {
+    near: Vec<(f32, (Entity, Entity))>,
+    order: Vec<(Entity, Entity)>,
+    hits: Vec<walk::FaceHit>,
 }
 
 /// One armour collider of a [`FieldReach`].
@@ -880,6 +890,7 @@ impl FieldReach {
             hard,
             witnesses,
             union: OnceCell::new(),
+            scratch: RefCell::default(),
         }
     }
 
@@ -914,29 +925,42 @@ pub(crate) struct FieldRay {
     pub doses: Vec<Dose>,
 }
 
-/// One direction's candidates and the one walk every one of them is read on ([`field_probe`]).
+/// Resolution: how many f32 spacings, at the largest coordinate involved, a collider's posed
+/// bounds may sit inside its faces ([`field_probe`]'s entry). DERIVED: parry forms the bounds in
+/// world f32 as a rounded centre plus and minus rounded half extents, one spacing in all, while
+/// the collector reads faces in the collider's own frame, exact to that frame's far finer
+/// spacing; [`PROBE_MARGIN`] covers the small terms. Four leaves room and sets work, never an
+/// outcome.
+const BOUNDS_SPACINGS: f32 = 4.0;
+
+/// The one walk every candidate of a direction is read on ([`field_probe`]).
+#[derive(Clone, Copy)]
 struct FieldProbe {
-    /// `(enter, node, collider)`: a candidate, and the metres from `at` at which the line enters
-    /// its bounds grown by [`PROBE_MARGIN`], not positive when they hold `at`.
-    near: Vec<(f32, Entity, Entity)>,
     /// Metres the walk starts behind `at`.
     behind: f32,
     /// The walk's whole length (m).
     length: f32,
 }
 
-/// The candidates of one direction of a field thrown from the world point `at`: the admitted
-/// volumes (its [`FieldReach`]) whose bounds, grown by [`PROBE_MARGIN`], the forward ray meets
-/// within [`FIELD_REACH`]. Their walk starts and ends outside the union of those grown bounds, so
-/// no candidate's face lies within the collector's sitting reach of either end. It reaches back
-/// from `at` the way [`certified`] does ([`Corridor::behind`]): the line is formed at `at` itself.
-/// `None` when there is no candidate.
+/// The candidates of one direction of a field thrown from the world point `at`, replacing `near`:
+/// the admitted volumes (its [`FieldReach`]) whose bounds, grown by [`PROBE_MARGIN`], the forward
+/// ray meets within [`FIELD_REACH`]. Their walk starts and ends outside the union of those grown
+/// bounds, so no candidate's face lies within the collector's sitting reach of either end. It
+/// reaches back from `at` the way [`certified`] does ([`Corridor::behind`]): the line is formed at
+/// `at` itself. `None` when there is no candidate.
+///
+/// Each candidate carries its entry: the metres ahead of `at`, never negative, at which the line
+/// enters its bounds grown further by [`BOUNDS_SPACINGS`] spacings of the largest coordinate among
+/// them and `at`. No face of the candidate lies short of its entry, at any distance from the
+/// world's origin: the growth scales with the rounding it covers.
 fn field_probe(
     context: &ResolveContext<'_, '_, '_>,
     field: &FieldReach,
     at: Vec3,
     dir: Dir3,
+    near: &mut Vec<(f32, (Entity, Entity))>,
 ) -> Result<Option<FieldProbe>, WalkError> {
+    near.clear();
     let axis = Vec3::from(dir);
     let margin = Vec3::splat(PROBE_MARGIN);
     // Where the line `at + t·axis` lies inside the box `[min, max]` (relative to `at`): the
@@ -956,7 +980,6 @@ fn field_probe(
         }
         (enter <= leave).then_some((enter, leave))
     };
-    let mut near = Vec::new();
     let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
     for reached in field.hard_meeting(collect::swept_aabb(at, axis, FIELD_REACH, 0.0)) {
         let Some(bounds) = reached.bounds(context) else {
@@ -966,12 +989,22 @@ fn field_probe(
             });
         };
         let (min, max) = (bounds.min - at - margin, bounds.max - at + margin);
-        let Some((enter, _)) = meets(min, max).filter(|&(_, leave)| leave >= 0.0) else {
+        if meets(min, max).is_none_or(|(_, leave)| leave < 0.0) {
             continue;
-        };
+        }
         lo = lo.min(min);
         hi = hi.max(max);
-        near.push((enter, reached.node, reached.collider));
+        let largest = bounds
+            .min
+            .abs()
+            .max(bounds.max.abs())
+            .max(at.abs())
+            .max_element();
+        let rounding = Vec3::splat(BOUNDS_SPACINGS * f32::EPSILON * largest);
+        let (entry, _) = meets(min - rounding, max + rounding).expect(
+            "the game's damage model grew bounds the line already meets, so it meets them still",
+        );
+        near.push((entry.max(0.0), (reached.node, reached.collider)));
     }
     if near.is_empty() {
         return Ok(None);
@@ -985,11 +1018,7 @@ fn field_probe(
         length.is_finite(),
         "game's damage model: finite loaded bounds yield a finite field probe"
     );
-    Ok(Some(FieldProbe {
-        near,
-        behind,
-        length,
-    }))
+    Ok(Some(FieldProbe { behind, length }))
 }
 
 impl FieldProbe {
@@ -1069,15 +1098,12 @@ pub(crate) fn field_presence(
     at: Vec3,
     dir: Dir3,
 ) -> Result<Option<(f64, walk::RayWalk)>, WalkError> {
-    let Some(probe) = field_probe(context, field, at, dir)? else {
+    let mut near = Vec::new();
+    let Some(probe) = field_probe(context, field, at, dir, &mut near)? else {
         return Ok(None);
     };
     let axis = Vec3::from(dir);
-    let all: Vec<(Entity, Entity)> = probe
-        .near
-        .iter()
-        .map(|&(_, node, collider)| (node, collider))
-        .collect();
+    let all: Vec<(Entity, Entity)> = near.into_iter().map(|(_, candidate)| candidate).collect();
     let mut hits = Vec::new();
     probe.collect(context, at, axis, &all, &mut hits)?;
     let (walked, _) = probe.walk(context, at, axis, hits)?;
@@ -1088,16 +1114,19 @@ pub(crate) fn field_presence(
 /// [`first_solid`] of its ordered presence. Both are exactly those of the whole presence
 /// ([`field_presence`]), read from only the candidates that can decide them.
 ///
-/// Every candidate is read on the probe's one walk, so its crossings are the same numbers whichever
-/// others are read with it. A candidate's faces lie inside its grown bounds, so one the line enters
-/// past a stop is absent at and before that stop and cannot move it. The candidates whose bounds
-/// hold `at` are always read: the parity of their crossings behind `at` says what the direction
-/// starts inside. The rest are read in the order the line enters their bounds, until a stop lies
-/// short of the next one's; a candidate read later can still move the stop nearer, since bounds
-/// entered early can hold geometry met late.
+/// INVARIANT: no face of a candidate lies short of its entry ([`field_probe`]), so a candidate
+/// entered past a stop is absent at and before that stop and cannot move it. Every candidate is
+/// read on the probe's one walk, so its crossings are the same numbers whichever others are read
+/// with it. Candidates are read in order of entry, those whose bounds hold `at` first and always:
+/// the parity of their crossings behind `at` says what the direction starts inside. Reading ends
+/// when a stop lies short of the next entry; a candidate read later can still move the stop
+/// nearer, since bounds entered early can hold a face met late.
 ///
-/// A candidate left unread is not paired either, so a contradiction in geometry no direction
-/// reaches is not raised.
+/// A stop is an entry, so the walk is taken again only when crossings it has not seen lie short of
+/// the next entry and no further than the stop it has. One candidate costs one walk.
+///
+/// Only the candidates read are paired. Geometry valid along the line gives the whole presence's
+/// stop; a contradiction in a candidate left unread lies past the stop and is not raised.
 fn field_stop(
     context: &ResolveContext<'_, '_, '_>,
     field: &FieldReach,
@@ -1107,37 +1136,47 @@ fn field_stop(
     dir: Dir3,
 ) -> Result<(f64, Option<(f64, Option<Entity>)>), WalkError> {
     use crate::cost::stages::Work;
-    let Some(mut probe) = field_probe(context, field, at, dir)? else {
+    let scratch = &mut *field.scratch.borrow_mut();
+    let Some(probe) = field_probe(context, field, at, dir, &mut scratch.near)? else {
         return Ok((0.0, None));
     };
     let axis = Vec3::from(dir);
     let start = f64::from(probe.behind);
-    // Metres ahead of `at` at which the line enters a candidate's bounds. The sort is stable:
-    // candidates entered together keep the reach's order.
-    let ahead = |candidate: &(f32, Entity, Entity)| f64::from(candidate.0.max(0.0));
-    probe.near.sort_by(|a, b| ahead(a).total_cmp(&ahead(b)));
-    let (mut hits, mut stop, mut read) = (Vec::new(), None, 0);
-    while let Some(next) = probe.near.get(read) {
-        let limit = stop.map_or(ahead(next), |(t, _): (f64, _)| t - start);
-        let group: Vec<(Entity, Entity)> = probe.near[read..]
+    // Stable: candidates entered together keep the reach's order.
+    scratch.near.sort_by(|a, b| a.0.total_cmp(&b.0));
+    scratch.order.clear();
+    scratch
+        .order
+        .extend(scratch.near.iter().map(|&(_, candidate)| candidate));
+    scratch.hits.clear();
+    // `walked`: how many of the crossings the last walk saw.
+    let (mut read, mut walked, mut stop) = (0, 0, None);
+    loop {
+        let next = scratch
+            .near
+            .get(read)
+            .map_or(f64::INFINITY, |&(entry, _)| f64::from(entry));
+        let reached = stop.map_or(f64::INFINITY, |(t, _): (f64, _)| t - start);
+        let unseen = scratch.hits[walked..]
             .iter()
-            .take_while(|candidate| ahead(candidate) <= limit)
-            .map(|&(_, node, collider)| (node, collider))
-            .collect();
-        if group.is_empty() {
+            .map(|hit| hit.t - start)
+            .fold(f64::INFINITY, f64::min);
+        if unseen < next && unseen <= reached {
+            let hits = std::mem::take(&mut scratch.hits);
+            let presence;
+            (presence, scratch.hits) = probe.walk(context, at, axis, hits)?;
+            walked = scratch.hits.len();
+            stop = first_solid(&presence.layers, start, exited, is_box);
+        } else if next <= reached && read < scratch.order.len() {
+            let candidate = &scratch.order[read..=read];
+            probe.collect(context, at, axis, candidate, &mut scratch.hits)?;
+            read += 1;
+        } else {
             break;
-        }
-        read += group.len();
-        let before = hits.len();
-        probe.collect(context, at, axis, &group, &mut hits)?;
-        if hits.len() > before {
-            let walked;
-            (walked, hits) = probe.walk(context, at, axis, hits)?;
-            stop = first_solid(&walked.layers, start, exited, is_box);
         }
     }
     context.world.count(Work::FieldNear, read);
-    context.world.count(Work::FieldHits, hits.len());
+    context.world.count(Work::FieldHits, scratch.hits.len());
     Ok((start, stop))
 }
 

@@ -2802,10 +2802,11 @@ fn turned(app: &mut App, size: Vec3, at: Vec3, hp: bool) -> Entity {
 /// A direction reads only the candidates that can decide its stop ([`field_stop`]), and
 /// [`field_direction`] takes its end and every dose from that stop, so it must be the whole
 /// presence's: the same progress of the throw point and the same first volume entered at the same
-/// progress, bit for bit. A reading that skips a volume holding the throw point, that takes the
-/// first candidate returning a crossing as the stop, or that ends at a candidate whose bounds the
-/// line pierces and whose faces it misses fails it. Fixture boxes; each case names the volume its
-/// direction must stop in.
+/// progress, bit for bit. A reading that skips a volume holding the throw point (the second of
+/// two as much as the only one), that takes the first candidate returning a crossing as the stop,
+/// that ends at a candidate whose bounds the line pierces and whose faces it misses, or that
+/// trusts rounded bounds to hold their faces fails it. Fixture boxes; each case names the volume
+/// its direction must stop in.
 #[test]
 fn a_direction_stops_where_its_whole_presence_does() {
     let diagonal = Dir3::new(Vec3::new(1.0, -1.0, 0.0)).expect("a fixture direction");
@@ -2827,6 +2828,16 @@ fn a_direction_stops_where_its_whole_presence_does() {
         ]
     });
     check(&mut app, Vec3::ZERO, Dir3::NEG_Y, &[], boxes[0]);
+    check(&mut app, Vec3::ZERO, Dir3::NEG_Y, &[boxes[0]], boxes[1]);
+
+    // Two volumes hold the throw point: armour the throw leaves, read first, and a box within it
+    // the throw does not leave, entered at the throw point.
+    let (mut app, boxes) = field_world(|app| {
+        vec![
+            volume(app, Vec3::splat(4.0), Transform::IDENTITY, 1.0, None),
+            slab_below(app, 0.5, 1.0, 1.0, true),
+        ]
+    });
     check(&mut app, Vec3::ZERO, Dir3::NEG_Y, &[boxes[0]], boxes[1]);
 
     // Nested: inside armour the throw leaves, the box within it stops the direction, not the box
@@ -2884,6 +2895,29 @@ fn a_direction_stops_where_its_whole_presence_does() {
         )]
     });
     check(&mut app, Vec3::ZERO, diagonal, &[], boxes[0]);
+
+    // Far from the world's origin posed bounds round coarser than faces are read: at 65,536 m
+    // the f32 spacing is 7.8 mm. The box's face is entered 28.1 mm out, its bounds round to
+    // 31.25 mm, and the turned armour, whose bounds hold the throw point, is entered 29 mm out
+    // (DERIVED: centre 1 m out and 0.5 m aside, half-diagonal 1.471 m).
+    let far = Vec3::new(65_536.0, 0.0, 0.0);
+    let (mut app, boxes) = field_world(|app| {
+        let side = 1.471 * std::f32::consts::SQRT_2;
+        turned(
+            app,
+            Vec3::new(side, side, 1.0),
+            far + Vec3::new(1.0, 0.5, 0.0),
+            false,
+        );
+        vec![volume(
+            app,
+            Vec3::splat(0.022),
+            Transform::from_translation(far + Vec3::new(0.039_062_5, 0.0, 0.0)),
+            1.0,
+            Some(FIELD_HP),
+        )]
+    });
+    check(&mut app, far, Dir3::X, &[], boxes[0]);
 
     // Every direction of a cone thrown from inside nested, overlapping and turned volumes.
     let (mut app, boxes) = field_world(|app| {
