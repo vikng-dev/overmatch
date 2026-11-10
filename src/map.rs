@@ -973,7 +973,8 @@ pub(crate) mod tests {
 
     /// CI checks the default map through the production loader and terrain decoder, refusing
     /// missing manifests, missing heightmaps, undecodable images and a placement whose solids
-    /// interpenetrate on the decoded terrain before boot.
+    /// interpenetrate on the decoded terrain before boot, with the clearance gate's authoring
+    /// margin so no platform's rounding decides the shipped map.
     #[test]
     fn shipped_map_ships_a_valid_manifest() {
         let manifest = shipped_manifest();
@@ -992,7 +993,7 @@ pub(crate) mod tests {
         });
         let grid = crate::terrain_grid::grid_from_png(&bytes, manifest.extent, manifest.rows)
             .expect("the declared heightmap must pass the production terrain decoder");
-        crate::scatter::clearance::check(&manifest, &grid);
+        crate::scatter::clearance::check_with_authoring_margin(&manifest, &grid);
         assert!(
             manifest.extent.world_size_m > 0.0 && !manifest.instances.is_empty(),
             "the shipped map declares a world and objects on it",

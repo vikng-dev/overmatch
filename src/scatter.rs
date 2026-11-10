@@ -448,6 +448,28 @@ mod tests {
         (app, obstacles)
     }
 
+    /// Spawn is the gate every map passes before play, preset or decoded terrain alike: a placement
+    /// whose solids interpenetrate ([`clearance`]) never spawns. A spawn without the check would
+    /// stand two firs in one trunk, and their pieces would never come to rest once they break.
+    #[test]
+    fn spawn_refuses_a_placement_whose_solids_interpenetrate() {
+        let mut manifest = construction_fixture_manifest();
+        let mut twin = manifest
+            .instances
+            .iter()
+            .find(|instance| instance.id == "fir_0001")
+            .expect("the fixture places a fir")
+            .clone();
+        twin.id = "fir_0002".to_owned();
+        manifest.instances.push(twin);
+        let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            spawned(&manifest, false, false).1
+        }))
+        .expect_err("a spawn must refuse interpenetrating solids");
+        let reason = refusal.downcast_ref::<String>().unwrap();
+        assert!(reason.contains("fir_0001 and fir_0002"), "{reason}");
+    }
+
     /// EVERY CONSTRUCTION WEARS THE ONE MATERIAL, the draw-count invariant the brick-and-timber surface
     /// rides on: a second house — another id and position (fixture data) — draws with the first
     /// one's mesh and material handles, and the world holds one construction material in all. A view
