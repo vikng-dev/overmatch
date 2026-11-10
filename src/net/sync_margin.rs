@@ -8,7 +8,7 @@
 //! tick — nominally 64 samples/s of the actual replication stream, where the ping path samples 10/s, assumes
 //! a symmetric Gaussian, and CLAMPS outliers (`lightyear` ping estimator.rs) — the exact samples a
 //! dejitter sizer must not discard. One sample per TICK, not per packet: every constant below
-//! ([`quantile_p`], [`ring_cap`], the warmup floor) is derived per tick, and the transport's packets
+//! ([`quantile_p`], [`RING_CAP`], the warmup floor) is derived per tick, and the transport's packets
 //! per tick is not ours to fix (MEASURED on the scripted 80/10 ms loopback run: ~1.24 under
 //! lightyear 0.28, ~5 under 0.30 — per-packet sampling shrank the ring's 60 s retention to ~13 s).
 //! A packet that brings no new tick carries content already superseded, so it is not a sample.
@@ -21,7 +21,7 @@
 //! - `min{d_i}` over the [`SPIKE_WINDOW`] — the fastest recent packet, the anchor that absorbs
 //!   path shifts and clock skew (NetEQ's ~2 s spike window precedent; tracks the measured 0.52 s
 //!   burst period with margin), and `min{l_i}` beside it for the uplink's deadband;
-//! - an eviction ring of [`ring_cap`] `l_i` samples exposing the empirical quantile `Q_p` and the
+//! - an eviction ring of [`RING_CAP`] `l_i` samples exposing the empirical quantile `Q_p` and the
 //!   median.
 //!
 //! Relative-arrival delay, not inter-arrival: an EWMA of gaps reads a slowly accumulating delay as
@@ -56,14 +56,21 @@
 //! every ~0.52 s, sessions of 2026-08-15) was observed in BOTH directions.
 //! The objective's terms:
 //!
-//! - `jitter_margin` (coverage) = the half-tick content-phase floor + `(Q_p − Q_50)/tick` — the
-//!   burst tail above the median;
-//! - `error_margin` (deadband) = `(Q_50 − min)/tick` — a deadband need only exceed the error
+//! - `jitter_margin` (coverage) = the half-tick content-phase floor +
+//!   `max(Q_p − max(Q_50, min{l_i}), 0)/tick`;
+//! - `error_margin` (deadband) = `max(Q_50 − min, 0)/tick` — a deadband need only exceed the error
 //!   signal's own noise, whose scale is the bulk spread; the tail belongs to coverage;
 //! - `jitter_multiple` = 0 — the ping EWMA leaves the law entirely.
 //!
-//! Together the objective pays the floor plus exactly the measured spread `Q_p − min`, split at the
-//! median between coverage and deadband.
+//! Together the objective pays the floor plus the nonnegative spread `Q_p − min{l_i}`, split at
+//! the median when it lies above that minimum. A sustained delay increase (including discarded
+//! server wall time) becomes the baseline within [`SPIKE_WINDOW`] of resumed arrivals, rather
+//! than inflating input lead until the ring median catches up. While the minimum exceeds the old
+//! median, input coverage gives up the part of the burst tail below that new baseline; bursts
+//! above it remain covered. Old burst history is not translated onto the new baseline, so input
+//! coverage can briefly reach zero until a fresh burst is sampled.
+//! The announcement recovery deadline still reads [`ArrivalStats::coverage`]'s long-ring tail:
+//! it bounds announcement/state skew, not the client's input lead.
 //!
 //! Research basis: `.agents/scratch/adaptive-cursor-frontier-2026-08-15.md` §1;
 //! uplink failure-mode inventory: `.agents/scratch/input-lead-budget-2026-08-14.md`.
@@ -88,30 +95,24 @@ use crate::state::AppState;
 /// structure, not a tuned number: it moves only if content stops advancing once per tick.
 const CONTENT_PHASE_MEAN_TICKS: f32 = 0.5;
 
-/// The certified freeze budget B: one perceptible starvation event per minute, ceiling. The
-/// initial product contract behind the quantile; every other estimator constant derives from it.
-const FREEZE_BUDGET_PER_HOUR: f64 = 60.0;
+/// Resolution: the smallest tail mass resolved by the empirical quantile. DERIVED from the
+/// product ceiling of one starvation per minute at the authority's tick rate: ceil(60 s / tick).
+/// DERIVED nominal retention is 60 s at 64 samples/s; skipped remote ticks lengthen it.
+const RING_CAP: usize = Duration::from_secs(60)
+    .as_nanos()
+    .div_ceil(super::server::TICK.as_nanos()) as usize;
 
-/// The fixed tick rate the budget is stated against (`ClientPlugins { tick_duration }`).
-const TICK_RATE_HZ: f64 = 64.0;
+/// DERIVED from the authority's timestep; sampling and warmup count remote ticks.
+const TICK_RATE_HZ: f64 = 1.0 / super::server::TICK.as_secs_f64();
 
 /// `p = 1 − B/(64 × 3600)`: the fraction of per-tick arrivals the delay target must cover so that
 /// at most B starvation events/hour escape it.
 fn quantile_p() -> f64 {
-    1.0 - FREEZE_BUDGET_PER_HOUR / (TICK_RATE_HZ * 3600.0)
+    1.0 - 1.0 / RING_CAP as f64
 }
 
-/// Ring capacity `1/(1 − p)` = 3840: the minimum sample count that resolves tail mass `1 − p`.
-/// DERIVED nominal retention is 60 s at 64 samples/s. Eviction counts samples, not elapsed time:
-/// skipped remote ticks lengthen wall-clock retention.
-fn ring_cap() -> usize {
-    // `1/(1−p)` written from the budget directly: the subtraction form re-rounds an exact ratio.
-    (TICK_RATE_HZ * 3600.0 / FREEZE_BUDGET_PER_HOUR).ceil() as usize
-}
-
-/// The min-anchor spike window T (NetEQ's ~2 s precedent): long enough to hold the fastest packet
-/// across the measured 0.52 s burst period, short enough that a path shift or clock skew re-anchors
-/// within seconds.
+/// Resolution: the min-anchor spike window T (NetEQ's ~2 s precedent). It retains the fastest
+/// packet across the MEASURED 0.52 s burst period, while re-anchoring path shifts within seconds.
 const SPIKE_WINDOW: Duration = Duration::from_secs(2);
 
 /// Warmup ring floor: one full spike window of per-tick samples (2 s × 64 Hz = 128). The
@@ -127,7 +128,7 @@ fn warmup_ring_floor() -> usize {
 pub(super) struct ArrivalStats {
     /// `min{d_i}`: the drain-stamped anchor, the downlink spread's reference.
     anchor_s: f64,
-    /// `min{l_i}`: the uplink deadband's reference, on the ring's own stamp.
+    /// `min{l_i}`: the uplink margins' reference, on the ring's own stamp.
     min_s: f64,
     q50_s: f64,
     qp_s: f64,
@@ -144,15 +145,20 @@ impl ArrivalStats {
         Duration::from_secs_f64((self.qp_s - self.anchor_s).max(0.0))
     }
 
-    /// `Q_p − Q_50`: the burst tail above the median — the uplink coverage term, and the
-    /// announcement-vs-state skew bound `net::fire_presentation`'s recovery wait reads.
+    /// `Q_p − Q_50`: the long-ring burst tail above the median, bounding announcement/state
+    /// skew for `net::fire_presentation`'s recovery wait.
     pub(super) fn coverage(&self) -> Duration {
         Duration::from_secs_f64((self.qp_s - self.q50_s).max(0.0))
     }
 
+    /// Input lead excludes a sustained level increase once the short-window minimum has risen.
+    fn input_coverage(&self) -> Duration {
+        Duration::from_secs_f64((self.qp_s - self.q50_s.max(self.min_s)).max(0.0))
+    }
+
     /// `Q_50 − min`: the bulk spread — the error signal's own noise scale, the uplink deadband.
-    /// Clamped at zero: during a worsening path shift the 2 s min outruns the 60 s median and the
-    /// bulk term collapses while the coverage term carries the shift.
+    /// Clamped at zero when a worsening path shift lifts the short-window minimum above the
+    /// ring median; neither input margin then carries the baseline shift.
     fn bulk(&self) -> Duration {
         Duration::from_secs_f64((self.q50_s - self.min_s).max(0.0))
     }
@@ -194,7 +200,7 @@ pub(super) struct ArrivalDelay {
     epoch: Option<(f64, Tick)>,
     /// `(arrival_secs, d_i, l_i)` pruned to [`SPIKE_WINDOW`] — the min anchors.
     window: VecDeque<(f64, f64, f64)>,
-    /// `l_i` eviction ring of [`ring_cap`] samples — the quantile distribution.
+    /// `l_i` eviction ring of [`RING_CAP`] samples — the quantile distribution.
     ring: VecDeque<f64>,
     /// Newest remote tick seen on any packet (numeric max) — the "server has simulated through
     /// here" bound `net::fire_presentation`'s heal deadlines read.
@@ -230,7 +236,7 @@ impl ArrivalDelay {
             self.window.pop_front();
         }
         self.ring.push_back(late);
-        if self.ring.len() > ring_cap() {
+        if self.ring.len() > RING_CAP {
             self.ring.pop_front();
         }
         self.newest_remote = Some(remote_tick);
@@ -369,7 +375,7 @@ struct InputSyncBase {
 fn derived_input_sync(installed: SyncConfig, stats: &ArrivalStats, tick: Duration) -> SyncConfig {
     SyncConfig {
         jitter_multiple: 0,
-        jitter_margin: CONTENT_PHASE_MEAN_TICKS + in_ticks(stats.coverage(), tick),
+        jitter_margin: CONTENT_PHASE_MEAN_TICKS + in_ticks(stats.input_coverage(), tick),
         error_margin: in_ticks(stats.bulk(), tick),
         ..installed
     }
@@ -472,10 +478,9 @@ mod tests {
     };
     use crate::state::AppState;
 
-    /// The game's fixed tick (64 Hz), spelled out: these tests pin the arithmetic independently of
-    /// any runtime binding.
-    const TICK: Duration = Duration::from_nanos(1_000_000_000 / 64);
-    const TICK_SECS: f64 = 1.0 / 64.0;
+    /// Read the authority's tick so a permitted rate change preserves the timing invariants.
+    const TICK: Duration = crate::net::server::TICK;
+    const TICK_SECS: f64 = TICK.as_secs_f64();
 
     /// The shipped uplink config shape: controller bounds off defaults, so carry-over is visible.
     fn installed() -> SyncConfig {
@@ -638,7 +643,7 @@ mod tests {
     /// delay controllers rely on that freeze budget; calling the quantile a maximum overstates it.
     #[test]
     fn the_full_ring_quantile_excludes_exactly_one_sample() {
-        let n = super::ring_cap();
+        let n = super::RING_CAP;
         let one = fed(std::iter::repeat_n(0.0, n - 1).chain([80.0]));
         assert_eq!(one.stats.spread(), Duration::ZERO);
         let two = fed(std::iter::repeat_n(0.0, n - 2).chain([80.0, 80.0]));
@@ -832,22 +837,91 @@ mod tests {
         );
     }
 
-    /// THE UPLINK LAW SPLITS THE MEASURED SPREAD AT THE MEDIAN: coverage = floor + (Qp−Q50)/tick,
-    /// deadband = (Q50−min)/tick, ping term off, controller bounds carried over. Fails if either
+    /// The uplink law splits the spread at max(median, minimum): coverage above it plus the
+    /// structural floor, nonnegative bulk below it, ping off, controller bounds carried over. Fails if either
     /// term reads the wrong spread, the floor is dropped or absorbed, the ping multiple survives,
     /// or the law rebuilds from `SyncConfig::default()`.
     #[test]
     fn the_uplink_law_splits_the_spread_at_the_median() {
-        // min 0, Q50 = 7.8125 ms (0.5 t), Qp = 23.4375 ms (1.5 t): coverage 1 t, deadband 0.5 t.
-        let sync = derived_input_sync(installed(), &stats(0.0, 7.8125, 23.4375), TICK);
+        // Fixture: median half a tick above min, tail one tick above median.
+        let tick_ms = TICK.as_secs_f64() * 1000.0;
+        let sync = derived_input_sync(installed(), &stats(0.0, tick_ms / 2.0, tick_ms * 1.5), TICK);
         assert_eq!(sync.jitter_multiple, 0, "the ping EWMA leaves the law");
         assert_close(sync.jitter_margin, 1.5, "floor 0.5 + coverage 1.0");
         assert_close(sync.error_margin, 0.5, "deadband = bulk spread");
         assert_close(sync.max_error_margin, 12.5, "resync bound must carry over");
+        // Fixture: a risen minimum above the old median, with one tick of tail still above it.
+        let shifted = derived_input_sync(
+            installed(),
+            &stats(tick_ms * 2.0, tick_ms / 2.0, tick_ms * 3.0),
+            TICK,
+        );
+        assert_close(
+            shifted.jitter_margin,
+            1.5,
+            "tail above the new baseline stays covered",
+        );
+        assert_close(
+            shifted.error_margin,
+            0.0,
+            "the old bulk is below the new baseline",
+        );
         // An empty estimator degenerates to the structural floor alone.
         let cold = derived_input_sync(installed(), &ArrivalStats::default(), TICK);
         assert_close(cold.jitter_margin, 0.5, "cold-start floor");
         assert_close(cold.error_margin, 0.0, "cold-start deadband");
+    }
+
+    /// The input sender relies on a server stall never leaving its coverage objective outside
+    /// the server's acceptance window for longer than W = SPIKE_WINDOW + one arrival tick.
+    /// Keeping the ring median as the sole reference leaves this five-second step there for
+    /// half a ring. This tests the margin law, not the clock controller's convergence or RTT.
+    #[test]
+    fn a_server_stall_cannot_leave_input_coverage_outside_acceptance_past_the_spike_window() {
+        // Fixture: a full steady ring, then five seconds discarded by the server. The
+        // client's ordinary drain frames continue; consecutive server ticks resume later.
+        let step = Duration::from_secs(5);
+        let mut estimator = fed(std::iter::repeat_n(0.0, super::RING_CAP));
+        let mut scratch = Vec::new();
+        let recovery_ticks = (super::SPIKE_WINDOW.as_nanos() / TICK.as_nanos()) as u32 + 1;
+        let start = super::RING_CAP as u32;
+        for after in 0..=recovery_ticks {
+            let i = start + after;
+            estimator.record(
+                f64::from(i) * TICK_SECS + step.as_secs_f64(),
+                TICK_SECS,
+                Tick(1_000 + i),
+                TICK_SECS,
+            );
+            estimator.refresh(&mut scratch);
+        }
+        let sync = derived_input_sync(installed(), &estimator.stats, TICK);
+        // Fixture: zero RTT/jitter and input delay isolate the stall's margin contribution.
+        // Use the library's objective so its pipeline and deadband terms count toward the gate.
+        use lightyear::prelude::{InputTimelineConfig, PingManager};
+        use lightyear_sync::prelude::client::RemoteTimeline;
+        use lightyear_sync::timeline::input::{InputDelayConfig, LocalTimelineSync};
+        use lightyear_sync::timeline::sync::{SyncTargetTimeline, TimelineSync};
+        let remote = RemoteTimeline::default();
+        let config = InputTimelineConfig::new(sync, InputDelayConfig::no_input_delay());
+        let objective = LocalTimelineSync::default().sync_objective(
+            &remote,
+            &config,
+            &PingManager::default(),
+            TICK,
+        );
+        let lead = (objective - remote.current_estimate()).to_f32();
+        eprintln!(
+            "DERIVED five-second stall replay at W={:?}: coverage={} ticks, input objective lead={lead} ticks",
+            super::SPIKE_WINDOW + TICK,
+            sync.jitter_margin
+        );
+        assert!(
+            lead < super::super::server_stats::MAX_INPUT_LOOKAHEAD_TICKS as f32,
+            "a server stall must stop putting the input objective beyond the library gate \
+             within {:?}; got {lead} ticks",
+            super::SPIKE_WINDOW + TICK,
+        );
     }
 
     /// The downlink margins: the Gaussian chain zeroed (the quantile subsumes it), the half-tick

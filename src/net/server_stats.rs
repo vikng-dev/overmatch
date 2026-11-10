@@ -20,6 +20,10 @@
 //!   outside `frame_us`. Every reading is an `Ok` value or an `Err` with a named
 //!   typed absence. The host's THP mode and CPU topology log once when this recorder starts;
 //! - `overruns`: ticks longer than the fixed timestep, `budget_us`;
+//! - `inputs`: per link, `tick_exact` and `held` counts of the input snapshots the bridge reads,
+//!   `last_for_tick_offset` (`for_tick - server_tick`), `lookahead_rejected` messages beyond
+//!   Lightyear's lookahead gate, and `max_message_lookahead` observed before its gate. Offsets
+//!   are signed ticks; null means no matching tick/message in this period. Counts reset per row;
 //! - `clients` (connected links), `tanks`, `projectiles`, `entities`, sampled at the line;
 //! - `cpu_pct`: the process's user + system CPU over the period, as % of one core;
 //! - `rss_mb`: resident memory at the line;
@@ -91,10 +95,17 @@ use bevy::prelude::*;
 use bevy::utils::Parallel;
 use bevy_replicon::prelude::ServerSystems;
 use bevy_replicon::server::server_tick::ServerTick;
+use lightyear::input::input_message::InputMessage;
 use lightyear::link::LinkSystems;
+use lightyear::prelude::input::native::{ActionState, NativeStateSequence};
+use lightyear::prelude::input::server::InputSystems;
 use lightyear::prelude::server::ClientOf;
-use lightyear::prelude::{Connected, ConnectionSystems, Link};
+use lightyear::prelude::{
+    Connected, ConnectionSystems, ControlledBy, Link, LocalTimeline, MessageReceiver, Tick,
+};
 use serde_json::{Value, json};
+
+use crate::command::{ParsedTankCommand, TankCommand};
 
 use super::contact_census::PieceRecords;
 use super::debris_stress::DebrisCensus;
@@ -120,6 +131,88 @@ const LEVER: &str = "OVERMATCH_SERVER_STATS_S";
 
 /// The line's grep anchor.
 const PREFIX: &str = "server_stats";
+
+/// Sourced fact: lightyear_inputs 0.30.1 src/server.rs:59, checked at its receive gate
+/// (:370). Private upstream; diagnostics mirror it without changing acceptance behavior.
+/// Recheck this fact when upgrading Lightyear.
+pub(super) const MAX_INPUT_LOOKAHEAD_TICKS: i32 = 64;
+
+#[derive(Default, serde::Serialize)]
+struct InputCounts {
+    tick_exact: u64,
+    held: u64,
+    last_for_tick_offset: Option<i32>,
+    lookahead_rejected: u64,
+    max_message_lookahead: Option<i32>,
+}
+
+/// Census reduction only: independent input evaluation stays in the bridge. FixedPreUpdate
+/// has applied Lightyear's snapshot; no ActionState writer intervenes before InputBridge.
+fn count_input_use(
+    timeline: Res<LocalTimeline>,
+    tanks: Query<
+        (&ActionState<TankCommand>, &ControlledBy),
+        (With<TankCommand>, With<ParsedTankCommand>),
+    >,
+    mut stats: ResMut<ServerStats>,
+) {
+    for (action, owner) in &tanks {
+        let counts = stats.input_by_client.entry(owner.owner).or_default();
+        let offset = Tick(action.0.for_tick) - timeline.tick();
+        if offset == 0 {
+            counts.tick_exact += 1;
+        } else {
+            counts.held += 1;
+        }
+        counts.last_for_tick_offset = Some(offset);
+    }
+}
+
+/// Lightyear drains these messages in ReceiveInputs. Retaining every message observes the gate
+/// without consuming, rewriting or refusing anything here (0.30.1 receive.rs:171).
+fn count_input_lookahead(
+    timeline: Res<LocalTimeline>,
+    mut receivers: Query<
+        (
+            Entity,
+            &mut MessageReceiver<InputMessage<NativeStateSequence<TankCommand>>>,
+        ),
+        (With<ClientOf>, With<Connected>),
+    >,
+    mut stats: ResMut<ServerStats>,
+    mut worker_counts: Local<Parallel<Vec<(Entity, u64, i32)>>>,
+) {
+    let tick = timeline.tick();
+    let worker_counts = &mut *worker_counts;
+    // Each link owns its queue; integer sums and maxima commute at the census boundary.
+    receivers.par_iter_mut().for_each(|(link, mut receiver)| {
+        let mut rejected = 0;
+        let mut largest: Option<i32> = None;
+        receiver.retain_messages(|message| {
+            let offset = message.end_tick - tick;
+            largest = Some(largest.map_or(offset, |max| max.max(offset)));
+            if offset > MAX_INPUT_LOOKAHEAD_TICKS {
+                rejected += 1;
+            }
+            true
+        });
+        // A link with no ready message contributes no reading this frame.
+        if let Some(largest) = largest {
+            worker_counts.scope(|counts| counts.push((link, rejected, largest)));
+        }
+    });
+    for counts in worker_counts.iter_mut() {
+        for (link, rejected, largest) in counts.drain(..) {
+            let counts = stats.input_by_client.entry(link).or_default();
+            counts.lookahead_rejected += rejected;
+            counts.max_message_lookahead = Some(
+                counts
+                    .max_message_lookahead
+                    .map_or(largest, |max| max.max(largest)),
+            );
+        }
+    }
+}
 
 /// Arm the stats line when the lever is set.
 pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
@@ -155,7 +248,16 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         sequence: 0,
         send_bytes: 0,
         send_by_client: BTreeMap::new(),
+        input_by_client: BTreeMap::new(),
     });
+    app.add_systems(
+        PreUpdate,
+        count_input_lookahead.in_set(InputSystems::ValidateInputs),
+    );
+    app.add_systems(
+        FixedUpdate,
+        count_input_use.before(super::protocol::InputBridge),
+    );
     app.init_resource::<PhaseStarts>();
     super::contact_census::install(app);
     phases::install(app);
@@ -305,6 +407,7 @@ struct ServerStats {
     sequence: u64,
     send_bytes: u64,
     send_by_client: BTreeMap<Entity, u64>,
+    input_by_client: BTreeMap<Entity, InputCounts>,
 }
 
 /// The open phase brackets' starts.
@@ -413,6 +516,7 @@ struct Snapshot {
     send_census: Option<TickSummary>,
     send_bytes: u64,
     send_clients: Value,
+    inputs: Value,
     debris: Value,
     clients: usize,
     tanks: usize,
@@ -475,6 +579,7 @@ fn stats_line(snapshot: &Snapshot) -> String {
         "send_census_us": percentiles(snapshot.send_census.as_ref()),
         "send_bytes": snapshot.send_bytes,
         "send_clients": snapshot.send_clients,
+        "inputs": snapshot.inputs,
         // Amortized shared send work, not a separately timed per-link path.
         "send_us_per_client_s": snapshot.send.as_ref().filter(|_| snapshot.clients > 0).map(|s| tenth(s.total / period_s / snapshot.clients as f64)),
         "throttled_usec": snapshot.throttled.map(|t| t.throttled_usec),
@@ -705,6 +810,10 @@ fn emit_line(
         let bytes = send_by_client.get(&link).copied().unwrap_or(0);
         json!({"link": link.to_string(), "bytes": bytes, "bytes_per_s": bytes as f64 / elapsed.as_secs_f64()})
     }).collect();
+    let inputs: Vec<_> = std::mem::take(&mut stats.input_by_client)
+        .into_iter()
+        .map(|(link, counts)| json!({"link": link.to_string(), "counts": counts}))
+        .collect();
     let workload = load.map(|mut load| {
         let mut value = load.json(&record, &census.constructions, &census.loose, now, elapsed);
         value["pieces"] = pieces.clone();
@@ -779,6 +888,7 @@ fn emit_line(
         send_census: stats.send_census.drain(budget_us),
         send_bytes,
         send_clients: json!(send_clients),
+        inputs: json!(inputs),
         debris: debris.json(),
         clients: census.clients.iter().count(),
         tanks: census.tanks.iter().count(),
@@ -890,7 +1000,106 @@ mod tests {
             sequence: 0,
             send_bytes: 0,
             send_by_client: BTreeMap::new(),
+            input_by_client: BTreeMap::new(),
         }
+    }
+
+    /// Operators must distinguish a missing tick's held command from a tick-exact input, and
+    /// attribute it to its client. Counting buffers or post-attestation commands loses that fact.
+    #[test]
+    fn input_counts_follow_the_bridge_snapshot_and_keep_clients_separate() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let mut timeline = LocalTimeline::default();
+        // Fixture: consecutive server ticks and two clients with different input provenance.
+        timeline.apply_delta(100);
+        world.insert_resource(timeline);
+        world.insert_resource(fixture_stats());
+        let first = world.spawn_empty().id();
+        let second = world.spawn_empty().id();
+        for (owner, for_tick) in [(first, 100), (second, 99)] {
+            world.spawn((
+                ActionState(TankCommand {
+                    for_tick,
+                    ..default()
+                }),
+                TankCommand::default(),
+                ControlledBy {
+                    owner,
+                    lifetime: default(),
+                },
+            ));
+        }
+        world.run_system_once(count_input_use).unwrap();
+        world.resource_mut::<LocalTimeline>().apply_delta(1);
+        world.run_system_once(count_input_use).unwrap();
+        let counts = &world.resource::<ServerStats>().input_by_client;
+        assert_eq!(counts[&first].tick_exact, 1);
+        assert_eq!(counts[&first].held, 1);
+        assert_eq!(counts[&first].last_for_tick_offset, Some(-1));
+        assert_eq!(counts[&second].tick_exact, 0);
+        assert_eq!(counts[&second].held, 2);
+        assert_eq!(counts[&second].last_for_tick_offset, Some(-2));
+    }
+
+    /// The observer must count messages beyond the private gate while preserving every message
+    /// for Lightyear to accept or refuse. Exercise its typed receiver through local delivery.
+    #[test]
+    fn the_lookahead_census_preserves_messages_on_both_sides_of_the_gate() {
+        use bevy::ecs::system::RunSystemOnce;
+        use lightyear::prelude::*;
+        type Inputs = InputMessage<NativeStateSequence<TankCommand>>;
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .add_plugins(lightyear::prelude::client::ClientPlugins {
+                tick_duration: super::super::server::TICK,
+            });
+        app.register_message::<Inputs>();
+        app.add_channel::<super::super::protocol::SpawnChannel>(ChannelSettings::default());
+        app.insert_resource(fixture_stats());
+        app.finish();
+        app.cleanup();
+        app.world_mut().resource_mut::<Time<Virtual>>().pause();
+        // Fixture: two messages adjacent to the gate, delivered without a socket or a clock step.
+        let link = app
+            .world_mut()
+            .spawn((
+                ClientOf,
+                Connected,
+                RemoteId(PeerId::Netcode(1)),
+                lightyear::connection::host::HostClient { buffer: Vec::new() },
+                MessageSender::<Inputs>::default(),
+                MessageReceiver::<Inputs>::default(),
+            ))
+            .id();
+        let tick = app.world().resource::<LocalTimeline>().tick();
+        for offset in [MAX_INPUT_LOOKAHEAD_TICKS, MAX_INPUT_LOOKAHEAD_TICKS + 1] {
+            app.world_mut()
+                .get_mut::<MessageSender<Inputs>>(link)
+                .unwrap()
+                .send::<super::super::protocol::SpawnChannel>(Inputs::new(tick + offset));
+        }
+        app.update(); // Local delivery fills the receiver in Last.
+        app.world_mut()
+            .run_system_once(count_input_lookahead)
+            .unwrap();
+        let counts = &app.world().resource::<ServerStats>().input_by_client[&link];
+        assert_eq!(counts.lookahead_rejected, 1);
+        assert_eq!(
+            counts.max_message_lookahead,
+            Some(MAX_INPUT_LOOKAHEAD_TICKS + 1)
+        );
+        let received: Vec<_> = app
+            .world_mut()
+            .get_mut::<MessageReceiver<Inputs>>(link)
+            .unwrap()
+            .receive()
+            .map(|message| message.end_tick - tick)
+            .collect();
+        assert_eq!(
+            received,
+            [MAX_INPUT_LOOKAHEAD_TICKS, MAX_INPUT_LOOKAHEAD_TICKS + 1]
+        );
     }
 
     fn bracket_world() -> World {
@@ -1164,6 +1373,7 @@ mod tests {
             send_census: None,
             send_bytes: 6000,
             send_clients: json!([{"link": "fixture", "bytes": 6000, "bytes_per_s": 600.0}]),
+            inputs: json!([]),
             sleep: None,
             collector: None,
             stages: std::array::from_fn(|_| None),
@@ -1214,6 +1424,7 @@ mod tests {
             "send_census_us": null,
             "send_bytes": 6000,
             "send_clients": [{"link": "fixture", "bytes": 6000, "bytes_per_s": 600.0}],
+            "inputs": [],
             "send_us_per_client_s": 4000.0,
             "send_us": {"p50": 120.0, "p95": 180.1, "p99": 200.0, "total": 80000.0, "max": 250.0},
             "throttled_usec": 45000,
