@@ -1086,6 +1086,26 @@ fn engine_sound(spec: &TankSpec) -> Option<EngineSound> {
     })
 }
 
+/// The game's damage model: the turret assembly's mass centre in its node's frame (m), DERIVED as
+/// [`ArmourSet::mass_centre`] of its frame at the bake's rest pose. The tank file states the
+/// assembly's mass and inertia box but no centre, and `materials.ron` states few substances'
+/// densities, so the law reads the hard volumes' shapes alone.
+fn turret_mass_centre(
+    set: &ArmourSet,
+    geometry: &TankGeometry,
+    entities: &[Option<Entity>],
+    turret: Entity,
+) -> Vec3 {
+    // Each spawned node's rest pose; a node the body does not need is not spawned.
+    let rest: HashMap<Entity, Transform> = entities
+        .iter()
+        .zip(&geometry.nodes)
+        .filter_map(|(entity, node)| Some(((*entity)?, node.transform)))
+        .collect();
+    set.mass_centre(turret, &|node| rest[&node])
+        .expect("the turret node is a frame of the tank's armour set")
+}
+
 /// Assemble only simulation-relevant geometry under `root`. Declared nodes resolve fail-fast, and
 /// all index-bearing collections are sorted before entity creation. The GLB scene is not consulted.
 fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankContent) {
@@ -1100,7 +1120,9 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     insert_servos(commands, geometry, root, &nodes, entity_at);
     insert_weapons(commands, geometry, root, &nodes, entity_at);
     let parts = insert_ballistic_volumes(commands, geometry, root, &nodes, entity_at);
-    armour_set(geometry, &nodes, &entities, root, &parts).insert(commands, root);
+    let set = armour_set(geometry, &nodes, &entities, root, &parts);
+    let turret_centre = turret_mass_centre(&set, geometry, &entities, entity_at(nodes.turret));
+    set.insert(commands, root);
     insert_collision_proxies(commands, geometry, spec, entity_at);
 
     // --- Wheels: rig stations in name-sorted order (the track view reads their side/pose; the
@@ -1136,6 +1158,7 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
         TurretBody {
             mass: spec.turret.mass.0,
             inertia_extents: Vec3::new(tx, ty, tz),
+            centre_of_mass: turret_centre,
         },
     ));
 

@@ -503,6 +503,49 @@ impl ArmourSet {
         frame.offset * link(local(frame.node), &frame.node)
     }
 
+    /// The game's damage model: the mass centre, in frame node `node`'s coordinates, of the armour
+    /// volume parts (no crew box) on that frame and on every frame it carries taken as one uniform
+    /// solid, each frame posed in its carrier from the node poses `local` gives
+    /// ([`Self::live_in_carrier`]). `None` for a node that is no frame of the set.
+    pub(crate) fn mass_centre(
+        &self,
+        node: Entity,
+        local: &dyn Fn(Entity) -> Transform,
+    ) -> Option<Vec3> {
+        use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
+        let top = self.frames.iter().position(|frame| frame.node == node)?;
+        // Each frame's pose in `top`'s, for `top` and the frames it carries; a carrier precedes
+        // the frames it carries.
+        let mut in_top: Vec<Option<Pose>> = vec![None; self.frames.len()];
+        in_top[top] = Some(Pose::IDENTITY);
+        // Volume, m³, and its first moment: unit density.
+        let (mut volume, mut moment) = (0.0, Vec3::ZERO);
+        for index in top..self.frames.len() {
+            if index != top {
+                in_top[index] = self.frames[index]
+                    .carrier
+                    .and_then(|carrier| in_top[carrier])
+                    .map(|carrier| carrier * self.live_in_carrier(index, local));
+            }
+            let Some(pose) = in_top[index] else {
+                continue; // A frame `top` does not carry.
+            };
+            for part in &self.frames[index].parts {
+                if let Role::Armour(_) = part.role {
+                    let solid = part.shape.mass_properties(1.0);
+                    let at = pose * part.pose;
+                    volume += solid.mass;
+                    moment += solid.mass * (at.position + at.rotation * solid.center_of_mass);
+                }
+            }
+        }
+        assert!(
+            volume > 0.0,
+            "game's damage model: armour frame {node} and the frames it carries hold armour"
+        );
+        Some(moment / volume)
+    }
+
     /// The nearest armour volume part (no crew box) the ray from `origin` along `direction` meets
     /// within `max`, each frame posed as [`Self::in_world`] poses it: its distance, its normal and
     /// the part. A frame's box, then a part's, grown by [`super::SET_BOX_MARGIN`], gates the part's
@@ -1132,6 +1175,44 @@ mod tests {
             rotation: Quat::from_rotation_y(motion.spin * DT) * from.rotation,
         };
         HashMap::from_iter([(root, Poses { from, to })])
+    }
+
+    /// The game's damage model: a frame's mass centre is the uniform-solid centroid of the armour on
+    /// it and on every frame it carries, in its node's coordinates, at the frames' present poses.
+    /// A launched turret's body takes it (`tank::TurretBody`); a carried frame's parts left out, a
+    /// carrier's parts counted, or a frame read at its rest pose moves it. Fixture: the synthetic
+    /// tank with its servos and recoil off rest; every part one box centred on its origin, so the
+    /// centroid is the mean of their origins.
+    #[test]
+    fn a_frames_mass_centre_is_its_assemblys_armour_centroid() {
+        let Synthetic {
+            mut world,
+            root,
+            nodes,
+            set,
+        } = synthetic();
+        world.get_mut::<Transform>(nodes[TURRET]).unwrap().rotation = Quat::from_rotation_y(1.1);
+        world.get_mut::<Transform>(nodes[PITCH]).unwrap().rotation = Quat::from_rotation_x(0.2);
+        world
+            .get_mut::<Transform>(nodes[BARREL])
+            .unwrap()
+            .translation
+            .z = 0.2;
+        let centre = set
+            .mass_centre(nodes[TURRET], &|node| {
+                *world.get::<Transform>(node).unwrap()
+            })
+            .expect("the turret node is a frame");
+        // Every frame but the root rides the turret.
+        let carried: Vec<Vec3> = set.frames()[1..]
+            .iter()
+            .flat_map(|frame| &frame.parts)
+            .map(|part| chain(&world, root, part.entity).position)
+            .collect();
+        let mean = carried.iter().sum::<Vec3>() / carried.len() as f32;
+        let turret = chain(&world, root, nodes[TURRET]);
+        let at = turret.position + turret.rotation * centre;
+        assert!(at.distance(mean) < 1.0e-5, "{at} against {mean}");
     }
 
     /// The game's damage model: a frame's box holds its parts however the frames move, and the
