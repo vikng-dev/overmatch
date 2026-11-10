@@ -2623,11 +2623,11 @@ impl ProjectileMarchWorld<'_, '_> {
         }
     }
 
-    /// The armour volume a collider belongs to ([`Self::role`]). `None` for terrain and for a
-    /// crew box, whatever node it is parented under — a crew box is never a layer of the walk
-    /// (ADR-0040).
-    fn armour(&self, collider: Entity) -> Option<(Entity, &BallisticVolume)> {
-        match self.role(collider)? {
+    /// The armour volume collider or part `entity` belongs to ([`Self::role`]). `None` for terrain
+    /// and for a crew box, whatever node it is parented under — a crew box is never a layer of the
+    /// walk (ADR-0040).
+    fn armour(&self, entity: Entity) -> Option<(Entity, &BallisticVolume)> {
+        match self.role(entity)? {
             armour_set::Role::Armour(volume) => Some((
                 volume,
                 self.volumes
@@ -2638,10 +2638,10 @@ impl ProjectileMarchWorld<'_, '_> {
         }
     }
 
-    /// The volume node a collider belongs to, of either kind ([`Self::role`]). A field admits
-    /// matter independently of ownership.
-    fn volume_of(&self, collider: Entity) -> Option<Entity> {
-        self.role(collider).map(armour_set::Role::volume)
+    /// The volume node collider or part `entity` belongs to, of either kind ([`Self::role`]). A
+    /// field admits matter independently of ownership.
+    fn volume_of(&self, entity: Entity) -> Option<Entity> {
+        self.role(entity).map(armour_set::Role::volume)
     }
 
     /// The game's damage model: one step's seconds under this world's crossing ceiling.

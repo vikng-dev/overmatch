@@ -505,8 +505,9 @@ impl ArmourSet {
 
     /// The game's damage model: the mass centre, in frame node `node`'s coordinates, of the armour
     /// volume parts (no crew box) on that frame and on every frame it carries taken as one uniform
-    /// solid, each frame posed in its carrier from the node poses `local` gives
-    /// ([`Self::live_in_carrier`]). `None` for a node that is no frame of the set.
+    /// solid, each part's volume counted whole where parts overlap, each frame posed in its carrier
+    /// from the node poses `local` gives ([`Self::live_in_carrier`]). `None` for a node that is no
+    /// frame of the set.
     pub(crate) fn mass_centre(
         &self,
         node: Entity,
@@ -875,6 +876,21 @@ pub(crate) fn fixture(world: &mut World, root: Entity) {
     world.flush();
 }
 
+/// Test support: each frame's node, root first, and each part's role.
+#[cfg(test)]
+impl ArmourSet {
+    pub(crate) fn frame_nodes(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.frames.iter().map(|frame| frame.node)
+    }
+
+    pub(crate) fn roles(&self) -> impl Iterator<Item = Role> + '_ {
+        self.frames
+            .iter()
+            .flat_map(|frame| &frame.parts)
+            .map(|part| part.role)
+    }
+}
+
 /// Test support: the role of collider `entity` as a fixture authors it, `None` for one off the
 /// armour layer: its nearest volume at or above it, a `WitnessVolume`'s crew box or a
 /// `BallisticVolume`'s armour.
@@ -1173,42 +1189,95 @@ mod tests {
         HashMap::from_iter([(root, Poses { from, to })])
     }
 
-    /// The game's damage model: a frame's mass centre is the uniform-solid centroid of the armour on
-    /// it and on every frame it carries, in its node's coordinates, at the frames' present poses.
-    /// A launched turret's body takes it (`tank::TurretBody`); a carried frame's parts left out, a
-    /// carrier's parts counted, or a frame read at its rest pose moves it. Fixture: the synthetic
-    /// tank with its servos and recoil off rest; every part one box centred on its origin, so the
-    /// centroid is the mean of their origins.
+    /// The game's damage model: a frame's mass centre is the volume-weighted centroid of the armour
+    /// shapes on it and on every frame it carries, in its node's coordinates, at the frames'
+    /// present poses; a crew box and the carrier's armour weigh nothing. A launched turret's body
+    /// takes it (`tank::TurretBody`). Volumes left unweighted, a shape's centroid taken at its
+    /// origin, a crew box counted or a carried frame read at rest each move it. Fixture: a turret
+    /// frame on the root, turned, and a barrel frame on it, recoiled 0.2 m; on the turret a 2 x 1 x
+    /// 2 m box and a crew box, on the barrel a 1 m cube whose shape sits 0.5 m off its origin,
+    /// turned a quarter about y, and a box on the root; the centre worked by hand.
     #[test]
     fn a_frames_mass_centre_is_its_assemblys_armour_centroid() {
-        let Synthetic {
-            mut world,
-            root,
-            nodes,
-            set,
-        } = synthetic();
-        world.get_mut::<Transform>(nodes[TURRET]).unwrap().rotation = Quat::from_rotation_y(1.1);
-        world.get_mut::<Transform>(nodes[PITCH]).unwrap().rotation = Quat::from_rotation_x(0.2);
-        world
-            .get_mut::<Transform>(nodes[BARREL])
-            .unwrap()
-            .translation
-            .z = 0.2;
-        let centre = set
-            .mass_centre(nodes[TURRET], &|node| {
-                *world.get::<Transform>(node).unwrap()
+        let mut world = World::new();
+        let root = world.spawn(Transform::IDENTITY).id();
+        let turret_rest = Transform::from_xyz(0.0, 1.0, 0.0);
+        let barrel_rest = Transform::from_xyz(0.0, 0.0, 1.0);
+        let turret = world
+            .spawn((
+                turret_rest.with_rotation(Quat::from_rotation_y(1.1)),
+                ChildOf(root),
+            ))
+            .id();
+        let barrel = world
+            .spawn((Transform::from_xyz(0.0, 0.0, 0.8), ChildOf(turret)))
+            .id();
+        let nodes = [
+            Node {
+                name: "turret",
+                entity: turret,
+                parent: None,
+                transform: turret_rest,
+                frame: true,
+            },
+            Node {
+                name: "barrel",
+                entity: barrel,
+                parent: Some(0),
+                transform: barrel_rest,
+                frame: true,
+            },
+        ];
+        let hull = Collider::cuboid(4.0, 1.0, 6.0);
+        let plate = Collider::cuboid(2.0, 1.0, 2.0);
+        let crew = Collider::cuboid(1.0, 1.0, 1.0);
+        let cube = Collider::convex_hull(
+            corners(Bounds {
+                min: Vec3::new(0.0, -0.5, -0.5),
+                max: Vec3::new(1.0, 0.5, 0.5),
             })
+            .to_vec(),
+        )
+        .expect("a cube's corners span a hull");
+        let parts = [
+            (None, Transform::IDENTITY, &hull, false),
+            (Some(0), Transform::from_xyz(0.0, 0.5, -1.0), &plate, false),
+            (Some(0), Transform::from_xyz(3.0, 0.0, 0.0), &crew, true),
+            (
+                Some(1),
+                Transform::from_xyz(0.0, 0.0, 1.0)
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+                &cube,
+                false,
+            ),
+        ]
+        .map(|(node, pose, shape, crew)| {
+            let entity = world.spawn_empty().id();
+            PartSource {
+                entity,
+                node,
+                pose,
+                shape,
+                surfaces: None,
+                role: if crew {
+                    Role::CrewBox(entity)
+                } else {
+                    Role::Armour(entity)
+                },
+            }
+        });
+        let set = ArmourSet::build(root, &nodes, parts);
+        let centre = set
+            .mass_centre(turret, &|node| *world.get::<Transform>(node).unwrap())
             .expect("the turret node is a frame");
-        // Every frame but the root rides the turret.
-        let carried: Vec<Vec3> = set.frames()[1..]
-            .iter()
-            .flat_map(|frame| &frame.parts)
-            .map(|part| chain(&world, root, part.entity).position)
-            .collect();
-        let mean = carried.iter().sum::<Vec3>() / carried.len() as f32;
-        let turret = chain(&world, root, nodes[TURRET]);
-        let at = turret.position + turret.rotation * centre;
-        assert!(at.distance(mean) < 1.0e-5, "{at} against {mean}");
+        // In the turret's coordinates: the plate, 4 m³ centred at (0, 0.5, -1); the cube, 1 m³,
+        // its shape's centre (0.5, 0, 0) turned to (0, 0, -0.5), its pose's (0, 0, 1) and the
+        // recoiled barrel's (0, 0, 0.8) putting it at (0, 0, 1.3).
+        let expected = (4.0 * Vec3::new(0.0, 0.5, -1.0) + Vec3::new(0.0, 0.0, 1.3)) / 5.0;
+        assert!(
+            centre.distance(expected) < 1.0e-5,
+            "{centre} against {expected}"
+        );
     }
 
     /// The game's damage model: a frame's box holds its parts however the frames move, and the

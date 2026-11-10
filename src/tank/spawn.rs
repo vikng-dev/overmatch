@@ -1086,10 +1086,8 @@ fn engine_sound(spec: &TankSpec) -> Option<EngineSound> {
     })
 }
 
-/// The game's damage model: the turret assembly's mass centre in its node's frame (m), DERIVED as
-/// [`ArmourSet::mass_centre`] of its frame at the bake's rest pose. The tank file states the
-/// assembly's mass and inertia box but no centre, and `materials.ron` states few substances'
-/// densities, so the law reads the hard volumes' shapes alone.
+/// The game's damage model: the turret assembly's [`TurretBody::centre_of_mass`], a StandIn:
+/// [`ArmourSet::mass_centre`] of its frame at the bake's rest pose.
 fn turret_mass_centre(
     set: &ArmourSet,
     geometry: &TankGeometry,
@@ -1347,6 +1345,102 @@ mod proxy_tests {
             .expect("the aim probe runs")
     }
 
+    /// A lookup of the entity under `tank` that model node `name` names; each name names one.
+    fn named(world: &World, tank: Entity) -> impl Fn(&str) -> Entity {
+        let mut by_name: HashMap<String, Vec<Entity>> = HashMap::new();
+        let mut walk = vec![tank];
+        while let Some(entity) = walk.pop() {
+            for &child in world.get::<Children>(entity).into_iter().flatten() {
+                if let Some(name) = world.get::<Name>(child) {
+                    by_name
+                        .entry(name.as_str().to_owned())
+                        .or_default()
+                        .push(child);
+                }
+                walk.push(child);
+            }
+        }
+        move |name| {
+            let [entity] = by_name[name][..] else {
+                panic!("one entity under the tank is named `{name}`");
+            };
+            entity
+        }
+    }
+
+    /// The game's damage model: a spawned tank's set holds one crew box part per witness primitive
+    /// of its geometry, each naming its witness volume's node, and one frame per node that moves
+    /// its armour: the root, each servo, each recoiling barrel and the turret assembly a launch
+    /// detaches. A witness primitive left out leaves its crew HP pool taking no dose; a frame left
+    /// out holds its armour at rest while its node moves. Every spawned tank relies on it; the
+    /// march's fixtures build their sets another way (`armour_set::fixture`). Fixture: the shipped
+    /// tank as authority.
+    #[test]
+    fn a_spawned_tanks_set_holds_its_crew_boxes_and_moving_frames() {
+        use std::collections::BTreeSet;
+        let mut world = World::new();
+        let (tank, _) = authority_and_replica(&mut world);
+        let (blueprint, _) = shipped();
+        let (geometry, spec) = (&blueprint.geometry, &blueprint.spec);
+        let node = named(&world, tank);
+        let set = world
+            .get::<ArmourSet>(tank)
+            .expect("a spawned tank carries its armour set");
+
+        let mut crew: Vec<Entity> = set
+            .roles()
+            .filter_map(|role| match role {
+                Role::CrewBox(volume) => Some(volume),
+                Role::Armour(_) => None,
+            })
+            .collect();
+        let mut witnesses: Vec<Entity> = geometry
+            .nodes
+            .iter()
+            .flat_map(|authored| {
+                authored
+                    .primitives
+                    .iter()
+                    .filter(|primitive| {
+                        primitive
+                            .substance
+                            .as_ref()
+                            .is_some_and(|substance| substance.matter == Matter::Witness)
+                    })
+                    .map(|_| node(&authored.name))
+            })
+            .collect();
+        crew.sort_unstable();
+        witnesses.sort_unstable();
+        assert!(!witnesses.is_empty(), "the fixture tank has crew boxes");
+        assert_eq!(
+            crew, witnesses,
+            "one crew box part per witness primitive, under its node"
+        );
+        assert!(
+            crew.iter()
+                .all(|&volume| world.get::<WitnessVolume>(volume).is_some()),
+            "each crew box part names a witness volume"
+        );
+
+        let frames: BTreeSet<Entity> = set.frame_nodes().collect();
+        let moving: BTreeSet<Entity> = std::iter::once(tank)
+            .chain(spec.servos.keys().map(|name| node(name)))
+            .chain(
+                spec.weapons
+                    .values()
+                    .filter(|weapon| weapon.recoil.is_some())
+                    .filter_map(|weapon| weapon.barrel.as_deref())
+                    .map(&node),
+            )
+            .chain([node(&spec.turret.node)])
+            .collect();
+        assert_eq!(
+            frames, moving,
+            "a frame for exactly the root and each servo, recoiling barrel and turret assembly"
+        );
+    }
+
     /// `tank`'s hard armour primitives from the authored geometry, each shaped by its bake and
     /// posed at its node's world pose composed from the hierarchy: the root's `Position` and
     /// `Rotation`, then every local `Transform` down to the node. Independent of the armour set,
@@ -1361,25 +1455,11 @@ mod proxy_tests {
         const LOCAL: &str = "every node carries its local pose";
         let root = Transform::from_translation(world.get::<Position>(tank).expect(BODY).0)
             .with_rotation(world.get::<Rotation>(tank).expect(BODY).0);
-        let mut named: HashMap<String, Vec<Entity>> = HashMap::new();
-        let mut walk = vec![tank];
-        while let Some(entity) = walk.pop() {
-            for &child in world.get::<Children>(entity).into_iter().flatten() {
-                if let Some(name) = world.get::<Name>(child) {
-                    named
-                        .entry(name.as_str().to_owned())
-                        .or_default()
-                        .push(child);
-                }
-                walk.push(child);
-            }
-        }
+        let named = named(world, tank);
         let mut armour = Vec::new();
         for &index in &geometry.ballistic_volumes {
             let node = &geometry.nodes[index];
-            let [entity] = named[&node.name][..] else {
-                panic!("one entity under the tank is named `{}`", node.name);
-            };
+            let entity = named(&node.name);
             let mut pose = *world.get::<Transform>(entity).expect(LOCAL);
             let mut above = entity;
             loop {

@@ -795,7 +795,7 @@ struct StopScratch {
 /// One armour collider or part of a [`FieldReach`].
 struct Reached {
     node: Entity,
-    collider: Entity,
+    primitive: Entity,
     broad: ColliderAabb,
     /// Its bounds at its pose; read on first use.
     bounds: OnceCell<ColliderAabb>,
@@ -804,7 +804,7 @@ struct Reached {
 impl Reached {
     fn bounds(&self, context: &ResolveContext<'_, '_, '_>) -> ColliderAabb {
         *self.bounds.get_or_init(|| {
-            let (pose, collider, _) = context.world.geometry(self.collider);
+            let (pose, collider, _) = context.world.geometry(self.primitive);
             collider.aabb(pose.position, pose.rotation)
         })
     }
@@ -956,7 +956,7 @@ impl FieldReach {
             if admit(entity) {
                 self.hard.push(Reached {
                     node,
-                    collider: entity,
+                    primitive: entity,
                     broad,
                     bounds: OnceCell::new(),
                 });
@@ -970,7 +970,7 @@ impl FieldReach {
 
     fn sorted(mut self) -> Self {
         self.hard
-            .sort_unstable_by_key(|reached| (reached.node, reached.collider));
+            .sort_unstable_by_key(|reached| (reached.node, reached.primitive));
         self.witnesses
             .sort_unstable_by_key(|&(node, collider, _)| (node, collider));
         self
@@ -1081,7 +1081,7 @@ fn field_probe(
         let (entry, _) = meets(min - rounding, max + rounding).expect(
             "the game's damage model grew bounds the line already meets, so it meets them still",
         );
-        near.push((entry.max(0.0), (reached.node, reached.collider)));
+        near.push((entry.max(0.0), (reached.node, reached.primitive)));
     }
     if near.is_empty() {
         return Ok(None);

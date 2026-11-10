@@ -19,9 +19,11 @@ pub struct TurretBody {
     pub mass: f32,
     /// Full box dimensions (m) standing in for the angular-inertia distribution.
     pub inertia_extents: Vec3,
-    /// The assembly's mass centre in its node's frame (m), DERIVED at spawn: the centroid of its
-    /// hard volumes at rest as one uniform solid
-    /// ([`crate::ballistics::armour_set::ArmourSet::mass_centre`]). The sheet states none.
+    /// The assembly's mass centre in its node's frame (m), a StandIn for its substances' densities:
+    /// the centroid of its hard volumes at rest, every volume one density and an overlap counted
+    /// twice ([`crate::ballistics::armour_set::ArmourSet::mass_centre`]). The sheet states no
+    /// centre and `materials.ron` no density for most of its substances; per-substance densities,
+    /// or an authored centre node as the hull has, replace it.
     pub centre_of_mass: Vec3,
 }
 
