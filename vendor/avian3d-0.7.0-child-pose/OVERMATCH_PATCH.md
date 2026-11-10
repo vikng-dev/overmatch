@@ -117,8 +117,7 @@ cannot retire a requested wake's destination.
 
 `WakeIslands` preserves the rest timers of already-awake merge participants. Newly woken bodies
 restart their rest interval; explicit removal of `Sleeping` resets its initiating body's timer
-in the removal hook. The library's thresholds, time to sleep and whole-island eligibility rule
-are unchanged.
+in the removal hook. Waking does not change configured rest thresholds, time to sleep or whole-island eligibility.
 
 Every linked island body retains `BodyIslandNode` and `SleepTimer` until it is unlinked.
 `WakeIslands` refuses a failed body query with an invariant panic instead of silently ending
@@ -322,3 +321,26 @@ unaffected: it only stores pairs with no manifold from the geometry query, and r
 on pairs with manifolds after that query.
 
 Guards: `src/tests/avian_contact_reduction.rs`.
+
+## Rest energy (`src/dynamics/solver/islands/sleeping.rs`, `src/dynamics/solver/solver_body/mod.rs`, `src/dynamics/rigid_body/sleeping.rs`)
+
+Subject: the game's rigid-body rest, server physics and scenery, game state only.
+
+A body rests when either the engine's original separate linear/angular velocity test passes or
+`v² + ω·I_world·ω/m < (SleepThreshold::linear * PhysicsLengthUnit)²`: the original test misreads a
+slender body's roll, the energy test does not, and the engine's own test stays because it is more
+permissive for large bodies. Both comparisons remain strict and preserve threshold signs.
+The original angular setting, default, reflection and serialization remain available.
+`TimeToSleep` and whole-island eligibility are unchanged.
+
+The energy expression is twice kinetic energy per mass; its half cancels against the rest-speed
+energy. Computed inertia is rotated to world space. Physical inertia is used because locks mask
+force increments while prescribed velocities still move in `integrate_positions`. Zero/infinite
+mass and singular/infinite inertia follow the engine's zero-reciprocal convention.
+
+Body-owned timers update on the compute pool; island wake bits and the split candidate commit
+afterward. Equal split timers choose the lower island id.
+
+Guards: `src/tests/avian_island_sleep.rs` (spin axis, independent local-frame energy calculation,
+degenerate properties, original-test rest, transverse see-saw, supported periodic roll).
+Counts and scope: `.agents/scratch/rest-energy.md`.

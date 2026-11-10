@@ -558,7 +558,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
         let unit = self.length_unit.0;
         let bodies = &self.body_query;
         // A landing is any point closing past the slower of the two bodies' rest speeds, the
-        // comparison a contact reader makes per side (`Sleeping` compares the same threshold).
+        // point-speed comparison a contact reader makes per side; sleep also accounts for rotation.
         let rest = |body: Entity| {
             bodies
                 .get(body)

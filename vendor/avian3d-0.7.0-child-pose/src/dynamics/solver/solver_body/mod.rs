@@ -14,9 +14,13 @@ pub use plugin::SolverBodyPlugin;
 use bevy::prelude::*;
 
 use super::{Rotation, Vector};
-use crate::{SymmetricTensor, math::Scalar, prelude::LockedAxes};
 #[cfg(feature = "3d")]
-use crate::{math::Quaternion, prelude::ComputedAngularInertia};
+use crate::math::Quaternion;
+use crate::{
+    SymmetricTensor,
+    math::Scalar,
+    prelude::{ComputedAngularInertia, ComputedMass, LockedAxes},
+};
 
 // The `SolverBody` layout is inspired by `b2BodyState` in Box2D v3.
 
@@ -113,6 +117,29 @@ impl SolverBody {
         {
             self.linear_velocity + self.angular_velocity.cross(point)
         }
+    }
+
+    /// Twice kinetic energy per mass, in squared speed units: v² + ω·I·ω/m.
+    /// The factor 1/2 cancels when comparing with the energy of a rest speed.
+    ///
+    /// Physical inertia is used rather than lock-masked solver inertia: axis locks prevent
+    /// acceleration, while prescribed velocities still move in `integrate_positions`.
+    /// Zero/infinite mass and inertia follow the computed properties' zero-reciprocal convention.
+    pub fn kinetic_speed_squared(
+        &self,
+        mass: ComputedMass,
+        angular_inertia: ComputedAngularInertia,
+        rotation: Rotation,
+    ) -> Scalar {
+        #[cfg(feature = "2d")]
+        let _ = rotation;
+        #[cfg(feature = "2d")]
+        let rotational = self.angular_velocity * self.angular_velocity * angular_inertia.value();
+        #[cfg(feature = "3d")]
+        let rotational = self
+            .angular_velocity
+            .dot(angular_inertia.rotated(rotation.0).tensor() * self.angular_velocity);
+        self.linear_velocity.length_squared() + rotational * mass.inverse()
     }
 
     /// Returns `true` if gyroscopic motion is enabled for this body.
