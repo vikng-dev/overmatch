@@ -49,6 +49,7 @@ struct Region {
     planes: Vec<DVec3>,
     depth: DVec3,
     face: usize,
+    collider_order: usize,
     bounds: Bounds,
 }
 
@@ -364,12 +365,59 @@ fn events(edges: &[Edge], events: &mut Vec<f64>) {
     events.dedup();
 }
 
+// Field ties are handled by `owner`; solid ties use snapshot identity and canonical geometry.
+fn owner_order(a: &Region, b: &Region) -> std::cmp::Ordering {
+    fn point(a: DVec3, b: DVec3) -> std::cmp::Ordering {
+        a.x.total_cmp(&b.x)
+            .then(a.y.total_cmp(&b.y))
+            .then(a.z.total_cmp(&b.z))
+    }
+    fn first(polygon: &[DVec3]) -> usize {
+        polygon
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| point(**a, **b))
+            .expect("positive-area regions have vertices")
+            .0
+    }
+    let order = a
+        .collider_order
+        .cmp(&b.collider_order)
+        .then(point(a.depth, b.depth));
+    if !order.is_eq() {
+        return order;
+    }
+    for (a, b) in a
+        .polygon
+        .iter()
+        .cycle()
+        .skip(first(&a.polygon))
+        .take(a.polygon.len())
+        .zip(
+            b.polygon
+                .iter()
+                .cycle()
+                .skip(first(&b.polygon))
+                .take(b.polygon.len()),
+        )
+    {
+        let order = point(*a, *b);
+        if !order.is_eq() {
+            return order;
+        }
+    }
+    a.polygon.len().cmp(&b.polygon.len())
+}
+
 fn owner(point: DVec3, base: DVec3, regions: &[Region]) -> Option<usize> {
     let mut best = base.dot(point);
     let mut owner = None;
     for (i, region) in regions.iter().enumerate() {
         let depth = region.depth.dot(point);
-        if depth > best && region.planes.iter().all(|p| p.dot(point) >= 0.0) {
+        if (depth > best
+            || (depth == best && owner.is_some_and(|j| owner_order(region, &regions[j]).is_lt())))
+            && region.planes.iter().all(|p| p.dot(point) >= 0.0)
+        {
             best = depth;
             owner = Some(i);
         }
@@ -397,7 +445,7 @@ fn remove_buried(regions: Vec<Region>, tests: &mut usize) -> Vec<Region> {
                     .polygon
                     .iter()
                     .any(|p| (other.depth - r.depth).dot(*p) > 0.0)
-                    || (other.depth == r.depth && j < i));
+                    || (other.depth == r.depth && owner_order(other, r).then(j.cmp(&i)).is_lt()));
                 !buried
             });
             buried
@@ -467,7 +515,7 @@ pub(super) fn partition(
     let regions = faces
         .iter()
         .enumerate()
-        .filter_map(|(i, (_, face))| {
+        .filter_map(|(i, (collider_order, face))| {
             let depth = (face.depth + free).as_dvec3();
             let planes: Vec<_> = face
                 .planes
@@ -484,6 +532,7 @@ pub(super) fn partition(
                 planes,
                 depth,
                 face: i,
+                collider_order: *collider_order,
             })
         })
         .collect();
@@ -603,6 +652,7 @@ mod tests {
             planes,
             depth: DVec3::Z * depth,
             face,
+            collider_order: face,
         }
     }
 

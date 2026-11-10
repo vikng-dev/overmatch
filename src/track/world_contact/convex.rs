@@ -6,6 +6,8 @@
 //! column half: at most F+1 patches for F admitted faces. Area, pressure integral and first
 //! moment sum over that owner's entire visible region, including disconnected parts. Engagement
 //! uses that region's maximum depth. Each point still uses its highest covering triangle's plane.
+//! The field wins equal depths; solid ties use snapshot collider order then canonical geometry,
+//! independently of face insertion order.
 //! See `.agents/scratch/belt-freeze.md` for the captured freeze and representation choice.
 
 use super::{SupportPatch, sample_halves};
@@ -588,6 +590,33 @@ mod tests {
                 // Resolution: unit-scale f32 moment accumulation.
                 assert!((pressure - 1.0).abs() < 1e-6);
                 assert!((moment - Vec3::new(0.5, 0.5, 1.0)).length() < 1e-6);
+            }
+        }
+    }
+
+    /// The same coplanar solids must expose the same owner regions under input reversal.
+    /// Snapshot collider order breaks equal-depth solid ties; the field retains priority.
+    #[test]
+    fn coplanar_nested_faces_keep_their_owner_under_reversal() {
+        // Fixture: collider 0 covers the lower-left quarter of collider 1's unit square.
+        let outer = unit_face(Vec3::Z);
+        let mut inner = unit_face(Vec3::Z);
+        inner
+            .planes
+            .extend([Vec3::new(-1.0, 0.0, 0.5), Vec3::new(0.0, -1.0, 0.5)]);
+        for refs in [
+            vec![(0, &inner), (1, &outer)],
+            vec![(1, &outer), (0, &inner)],
+        ] {
+            let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
+            let regions = integrated_regions(cells, refs.len(), 1.0);
+            // DERIVED: the inner collider owns 1/4; the outer collider owns the remaining 3/4.
+            assert_eq!(regions.len(), 2);
+            for (owner, integral, _, _) in regions {
+                let piece = refs[owner.unwrap()].0;
+                let expected = if piece == 0 { 0.25 } else { 0.75 };
+                // Resolution: unit-scale f32 area accumulation.
+                assert!((integral.length - expected).abs() < 1e-6);
             }
         }
     }
