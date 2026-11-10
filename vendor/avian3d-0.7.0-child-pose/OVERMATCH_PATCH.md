@@ -117,8 +117,7 @@ cannot retire a requested wake's destination.
 
 `WakeIslands` preserves the rest timers of already-awake merge participants. Newly woken bodies
 restart their rest interval; explicit removal of `Sleeping` resets its initiating body's timer
-in the removal hook. The library's thresholds, time to sleep and whole-island eligibility rule
-are unchanged.
+in the removal hook. Waking does not change configured rest thresholds, time to sleep or whole-island eligibility.
 
 Every linked island body retains `BodyIslandNode` and `SleepTimer` until it is unlinked.
 `WakeIslands` refuses a failed body query with an invariant panic instead of silently ending

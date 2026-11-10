@@ -238,7 +238,7 @@ struct MotionCounts {
     linear: u32,
     angular_only: u32,
     angular_only_low_energy: u32,
-    /// Awake islands with at least one threshold crossing, all crossings angular-only and
+    /// Islands with an awake piece and at least one threshold crossing, all angular-only and
     /// low-energy. Non-piece members participate, so a moving tank cannot qualify its island.
     islands_angular_only_low_energy: u32,
 }
@@ -625,7 +625,7 @@ pub(super) struct ContactCensus<'w, 's> {
         ),
         (Without<Sleeping>, With<RigidBody>),
     >,
-    motion_islands: Local<'s, HashMap<u32, (u32, u32)>>,
+    motion_islands: Local<'s, HashMap<u32, (u32, u32, bool)>>,
     length_unit: Res<'w, PhysicsLengthUnit>,
     time_to_sleep: Res<'w, TimeToSleep>,
     records: ResMut<'w, PieceRecords>,
@@ -728,7 +728,9 @@ impl ContactCensus<'_, '_> {
                 .expect("every rigid body has computed mass properties and rotation");
             let energy_speed_squared = body.kinetic_speed_squared(*mass, *inertia, *rotation);
             let low_energy = energy_speed_squared < linear_limit;
+            let is_piece = self.piece_marks.contains(entity);
             let entry = self.motion_islands.entry(island.island_id().0).or_default();
+            entry.2 |= is_piece;
             if linear || angular {
                 entry.0 += 1;
                 entry.1 += u32::from(linear || !low_energy);
@@ -736,7 +738,7 @@ impl ContactCensus<'_, '_> {
                 // Combined energy can exceed rest even with both old tests below threshold.
                 entry.1 += 1;
             }
-            if self.piece_marks.contains(entity) {
+            if is_piece {
                 counts.linear += u32::from(linear);
                 counts.angular_only += u32::from(!linear && angular);
                 counts.angular_only_low_energy += u32::from(!linear && angular && low_energy);
@@ -745,7 +747,9 @@ impl ContactCensus<'_, '_> {
         counts.islands_angular_only_low_energy = self
             .motion_islands
             .values()
-            .filter(|&&(crossings, blockers)| crossings > 0 && blockers == 0)
+            .filter(|&&(crossings, blockers, has_piece)| {
+                has_piece && crossings > 0 && blockers == 0
+            })
             .count() as u32;
         let unit = self.length_unit.0;
         let time_to_sleep = self.time_to_sleep.0;
