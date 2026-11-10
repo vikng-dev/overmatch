@@ -47,11 +47,13 @@ labelled!(Stage, NAMES, COUNT {
     Blast = "blast_us",
     // Structural commits of a construction change, each with the hooks, observers and nested
     // commands it runs: a departing group's body, its fresh colliders, the colliders it takes
-    // from its former owner, a split parent's retirement, a standing owner's collider changes,
-    // and the bounds refit of the colliders a change moved.
+    // from its former owner and the commands their hooks deferred (child lists, stale-pair
+    // toggles), a split parent's retirement, a standing owner's collider changes, and the bounds
+    // refit of the colliders a change moved.
     PieceBody = "piece_body_us",
     ColliderSpawn = "collider_spawn_us",
     ColliderRehome = "collider_rehome_us",
+    RehomeDeferred = "rehome_deferred_us",
     PieceRetire = "piece_retire_us",
     RefitCommit = "refit_commit_us",
     MovedBounds = "moved_bounds_us",

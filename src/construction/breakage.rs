@@ -2835,7 +2835,13 @@ where
         // An empty batch reads no clock.
         let leaf = |stage, work: bool| work.then(|| Stages::start(stages.as_ref(), stage));
         {
+            // The spawn's closing flush applies what the previous batch's rehome deferred: with
+            // nothing to spawn, that is all it does.
             let _spawn = leaf(Stage::ColliderSpawn, !self.fresh.is_empty());
+            let _deferred = leaf(
+                Stage::RehomeDeferred,
+                self.fresh.is_empty() && !self.retained.is_empty(),
+            );
             drop(world.spawn_batch(self.fresh));
         }
         let _rehome = leaf(Stage::ColliderRehome, !self.retained.is_empty());
@@ -3092,6 +3098,7 @@ fn spawn_prepared_as(commands: &mut Commands, piece: Entity, prepared: PreparedD
     }
     // Only structural effects hold exclusive world access. The two archetypes share one
     // command, with complete body state visible to every collider hook in the same flush.
+    let rehomes = !occupied_batch.retained.is_empty() || !contact_batch.retained.is_empty();
     commands.queue(move |world: &mut World| {
         {
             let _body = Stages::start(world.get_resource::<Stages>(), Stage::PieceBody);
@@ -3099,7 +3106,15 @@ fn spawn_prepared_as(commands: &mut Commands, piece: Entity, prepared: PreparedD
         }
         occupied_batch.apply(world);
         contact_batch.apply(world);
+        if rehomes {
+            // Held over the flush that follows this command, which applies what the last
+            // rehome deferred.
+            Stages::hold(world.get_resource::<Stages>(), Stage::RehomeDeferred);
+        }
     });
+    if rehomes {
+        commands.queue(|world: &mut World| Stages::release(world.get_resource::<Stages>()));
+    }
 }
 
 /// A construction group retiring at `tick`: its carrier keeps the final pose and retirement
