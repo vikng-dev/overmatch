@@ -50,6 +50,7 @@ labelled!(Stage, NAMES, COUNT {
 labelled!(Detail, DETAIL_NAMES, DETAIL_COUNT {
     CrumbleSolve = "solve_us",
     CrumbleSplit = "split_us",
+    BeltPartition = "belt_partition_us",
 });
 
 labelled!(
@@ -91,6 +92,15 @@ labelled!(
         BeltPartitionCells = "belt_partition_cells",
         BeltPartitionPatches = "belt_partition_patches",
         BeltDiscoveryTests = "belt_discovery_tests",
+        // Envelope partition internals: boundary edges, sweep intervals, edge pairs tested for a
+        // crossing, edges visited to build intervals, owner region tests, and buffers allocated
+        // per admitted face and per band.
+        BeltPartitionEdges = "belt_partition_edges",
+        BeltSweepIntervals = "belt_sweep_intervals",
+        BeltSweepPairs = "belt_sweep_pairs",
+        BeltSweepEdgeVisits = "belt_sweep_edge_visits",
+        BeltOwnerTests = "belt_owner_tests",
+        BeltPartitionAllocs = "belt_partition_allocs",
         BeltTerrainSamples = "belt_terrain_samples",
         // The game's damage model: one planned crossing, one field throw, and per throw the
         // armour colliders its reach holds; per direction the candidates whose geometry was read
@@ -173,7 +183,8 @@ pub(crate) fn install_lifecycle_counts(app: &mut App) {
 
 impl Stages {
     /// Nested wall unions across owner tasks. Solve and split can overlap on different owners;
-    /// they are detail inside Crumble, never additive leaves debited by the phase clock.
+    /// they are detail inside Crumble, as the partition is inside BeltContacts, never additive
+    /// leaves debited by the phase clock.
     pub(crate) fn detail(stages: Option<&Self>, detail: Detail) -> Option<DetailBracket> {
         stages.map(|stages| {
             let readers = stages.4.clone();
@@ -436,7 +447,9 @@ mod tests {
         assert_eq!(stages.take_details().values, [0.0; DETAIL_COUNT]);
         drop(second);
         drop(split);
-        assert!(stages.take_details().values.iter().all(|&us| us > 0.0));
+        let values = stages.take_details().values;
+        assert!(values[Detail::CrumbleSolve as usize] > 0.0);
+        assert!(values[Detail::CrumbleSplit as usize] > 0.0);
         assert_eq!(stages.totals_ns()[0], 0);
         assert_eq!(stages.take_details().values, [0.0; DETAIL_COUNT]);
         assert!(Stages::detail(None, Detail::CrumbleSolve).is_none());

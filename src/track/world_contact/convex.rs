@@ -11,6 +11,7 @@
 //! See `.agents/scratch/belt-freeze.md` for the captured freeze and representation choice.
 
 use super::{SupportPatch, sample_halves};
+use crate::cost::stages::{Detail, Stages, Work};
 use crate::track::rubble::{RubbleBodies, Slab};
 use bevy::prelude::*;
 
@@ -78,7 +79,7 @@ fn partition(
         &mut envelope::Scratch::default(),
     );
 
-    let regions = integrated_regions(cells.clone(), faces.len(), strip.1 - strip.0);
+    let regions = integrated_regions(cells.clone(), faces.len(), strip.1 - strip.0, &mut 0);
     assert!(
         regions.len() <= faces.len() + 1,
         "patches exceed the module's per-half owner bound"
@@ -357,18 +358,22 @@ struct Cell {
 
 /// Group decomposition bands before sampling support: a face's disconnected visible parts
 /// share exact integrals and one engagement maximum.
+/// `allocs` counts the buffers allocated per band.
 fn integrated_regions(
     cells: Vec<Cell>,
     faces: usize,
     width: f32,
+    allocs: &mut usize,
 ) -> Vec<(Option<usize>, Integral, f32, f32)> {
     let mut regions: Vec<Option<(Integral, f32, f32)>> =
         std::iter::repeat_with(|| None).take(faces + 1).collect();
     for cell in cells {
+        *allocs += 1;
         let polygon = clip(&cell.polygon, cell.depth);
         let Some(integral) = integrate(&polygon, cell.depth, width) else {
             continue; // No positive pressure remains in this band.
         };
+        *allocs += 2;
         let lo = polygon.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
         let hi = polygon
             .iter()
@@ -410,6 +415,7 @@ pub(super) fn patches(
             (half + 1) as f32 * slab.len / 2.0,
         );
         let free = half_plane(slab.len, travel, half);
+        let bracket = Stages::detail(pieces.stages.as_ref(), Detail::BeltPartition);
         let cells = envelope::partition(
             a,
             b,
@@ -419,12 +425,15 @@ pub(super) fn patches(
             faces,
             &mut scratch,
         );
-        pieces.count(crate::cost::stages::Work::BeltPartitionCells, cells.len());
-        let regions = integrated_regions(cells, faces.len(), slab.lateral.1 - slab.lateral.0);
-        pieces.count(
-            crate::cost::stages::Work::BeltPartitionPatches,
-            regions.len(),
+        drop(bracket);
+        pieces.count(Work::BeltPartitionCells, cells.len());
+        let regions = integrated_regions(
+            cells,
+            faces.len(),
+            slab.lateral.1 - slab.lateral.0,
+            &mut scratch.counts.allocs,
         );
+        pieces.count(Work::BeltPartitionPatches, regions.len());
         for (owner, mut integral, lo, hi) in regions {
             let depth = owner.map_or(half_plane(slab.len, pen, half), |i| faces[i].1.depth + free);
             let face = owner.map(|i| {
@@ -450,7 +459,18 @@ pub(super) fn patches(
             });
         }
     }
-    pieces.count(crate::cost::stages::Work::BeltDiscoveryTests, scratch.tests);
+    let counts = &scratch.counts;
+    for (work, count) in [
+        (Work::BeltDiscoveryTests, counts.tests),
+        (Work::BeltPartitionEdges, counts.edges),
+        (Work::BeltSweepIntervals, counts.intervals),
+        (Work::BeltSweepPairs, counts.pairs),
+        (Work::BeltSweepEdgeVisits, counts.edge_visits),
+        (Work::BeltOwnerTests, counts.owner_tests),
+        (Work::BeltPartitionAllocs, counts.allocs),
+    ] {
+        pieces.count(work, count);
+    }
     result
 }
 
@@ -588,7 +608,7 @@ mod tests {
                 vec![(0, &faces[1]), (0, &faces[0])],
             ] {
                 let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
-                let regions = integrated_regions(cells, refs.len(), 1.0);
+                let regions = integrated_regions(cells, refs.len(), 1.0, &mut 0);
                 // DERIVED: both triangles have positive visible area; no field remains.
                 assert_eq!(regions.len(), 2);
                 let pressure: f32 = regions.iter().map(|(_, i, _, _)| i.area).sum();
@@ -617,7 +637,7 @@ mod tests {
                 vec![(outer_piece, &outer), (0, &inner)],
             ] {
                 let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
-                let regions = integrated_regions(cells, refs.len(), 1.0);
+                let regions = integrated_regions(cells, refs.len(), 1.0, &mut 0);
                 // DERIVED: the inner face owns 1/4; the outer face owns the remaining 3/4.
                 assert_eq!(regions.len(), 2);
                 for (owner, integral, _, _) in regions {
@@ -642,7 +662,7 @@ mod tests {
             vec![(1, &upper), (0, &lower)],
         ] {
             let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
-            let regions = integrated_regions(cells, refs.len(), 1.0);
+            let regions = integrated_regions(cells, refs.len(), 1.0, &mut 0);
             // DERIVED: each plane wins one half-square; the field is completely covered.
             assert_eq!(regions.len(), 2);
             let pressure: f32 = regions.iter().map(|(_, i, _, _)| i.area).sum();
@@ -838,7 +858,8 @@ mod tests {
                         half_plane(slab.len, travel, half),
                         &ordered,
                     );
-                    patches += integrated_regions(cells.clone(), ordered.len(), width).len();
+                    patches +=
+                        integrated_regions(cells.clone(), ordered.len(), width, &mut 0).len();
                     cells
                 })
                 .collect();

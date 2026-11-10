@@ -200,10 +200,27 @@ struct Band {
     start: f64,
 }
 
+/// Partition work, drained into the tick's counters by `super::patches`.
 #[derive(Default)]
-pub(super) struct Scratch {
+pub(super) struct Counts {
     /// Exact region burial/edge-cover tests, after bounds pruning (not index node visits).
     pub(super) tests: usize,
+    /// Distinct boundary edges entering the sweep.
+    pub(super) edges: usize,
+    pub(super) intervals: usize,
+    /// Edge pairs examined for a crossing event.
+    pub(super) pairs: usize,
+    /// Edges visited to build each interval's active and lateral lists.
+    pub(super) edge_visits: usize,
+    /// Regions examined to choose band owners.
+    pub(super) owner_tests: usize,
+    /// Buffers allocated per admitted face (plane list, clip chain) and per band (polygon).
+    pub(super) allocs: usize,
+}
+
+#[derive(Default)]
+pub(super) struct Scratch {
+    pub(super) counts: Counts,
     intervals: Vec<(f64, f64)>,
     next_intervals: Vec<(f64, f64)>,
     edges: Vec<Edge>,
@@ -231,7 +248,7 @@ fn visible(
         if i == owners.0 || i == owners.1 {
             return true;
         }
-        scratch.tests += 1;
+        scratch.counts.tests += 1;
         let Some((lo, hi)) = hidden(edge, depth, &regions[i]) else {
             return true;
         };
@@ -346,10 +363,11 @@ fn boundaries(regions: &[Region], rectangle: &[DVec3], index: &Index, scratch: &
     scratch.edges.dedup_by(|a, b| a.a == b.a && a.b == b.b);
 }
 
-fn events(edges: &[Edge], events: &mut Vec<f64>) {
+fn events(edges: &[Edge], events: &mut Vec<f64>, counts: &mut Counts) {
     events.clear();
     events.extend(edges.iter().flat_map(|e| [e.a.x, e.b.x]));
     for (i, a) in edges.iter().enumerate() {
+        counts.pairs += i;
         for b in &edges[..i] {
             let (lo, hi) = (a.a.x.max(b.a.x), a.b.x.min(b.b.x));
             if lo >= hi || !a.bounds().overlaps(b.bounds()) {
@@ -409,7 +427,8 @@ fn owner_order(a: &Region, b: &Region) -> std::cmp::Ordering {
     a.polygon.len().cmp(&b.polygon.len())
 }
 
-fn owner(point: DVec3, base: DVec3, regions: &[Region]) -> Option<usize> {
+fn owner(point: DVec3, base: DVec3, regions: &[Region], counts: &mut Counts) -> Option<usize> {
+    counts.owner_tests += regions.len();
     let mut best = base.dot(point);
     let mut owner = None;
     for (i, region) in regions.iter().enumerate() {
@@ -459,14 +478,15 @@ fn remove_buried(regions: Vec<Region>, tests: &mut usize) -> Vec<Region> {
 }
 
 fn emit(
-    key: (usize, usize),
-    start: f64,
+    Band { key, start }: Band,
     end: f64,
     edges: &[Edge],
     base: Vec3,
     regions: &[Region],
     cells: &mut Vec<Cell>,
+    counts: &mut Counts,
 ) {
+    counts.allocs += 1;
     let (lower, upper) = (edges[key.0], edges[key.1]);
     let corners = [
         lower.at(start),
@@ -484,7 +504,7 @@ fn emit(
     let polygon: Vec<_> = corners.into_iter().map(|p| p.as_vec3()).collect();
     if area > 0.0 && super::signed_area(&polygon) > 0.0 {
         // A convex band's centroid is interior, away from depth ties at its apex.
-        let owner = owner(moment / area, base.as_dvec3(), regions);
+        let owner = owner(moment / area, base.as_dvec3(), regions, counts);
         cells.push(Cell {
             polygon,
             depth: owner.map_or(base, |i| regions[i].depth.as_vec3()),
@@ -517,6 +537,7 @@ pub(super) fn partition(
         .enumerate()
         .filter_map(|(i, (collider_order, face))| {
             let depth = (face.depth + free).as_dvec3();
+            scratch.counts.allocs += 3 + face.planes.len();
             let planes: Vec<_> = face
                 .planes
                 .iter()
@@ -536,15 +557,18 @@ pub(super) fn partition(
             })
         })
         .collect();
-    let regions = remove_buried(regions, &mut scratch.tests);
+    let regions = remove_buried(regions, &mut scratch.counts.tests);
     let index = Index::new(&regions);
     boundaries(&regions, &rectangle, &index, scratch);
-    events(&scratch.edges, &mut scratch.events);
+    events(&scratch.edges, &mut scratch.events, &mut scratch.counts);
+    scratch.counts.edges += scratch.edges.len();
+    scratch.counts.intervals += scratch.events.len().saturating_sub(1);
     scratch.open.clear();
     let mut cells = Vec::new();
     for xs in scratch.events.windows(2) {
         let (x, end) = (xs[0], xs[1]);
         let mid = (x + end) / 2.0;
+        scratch.counts.edge_visits += 2 * scratch.edges.len();
         scratch.active.clear();
         scratch.active.extend(
             scratch
@@ -580,13 +604,13 @@ pub(super) fn partition(
                 });
                 if interrupted {
                     emit(
-                        key,
-                        band.start,
+                        band,
                         x,
                         &scratch.edges,
                         base,
                         &regions,
                         &mut cells,
+                        &mut scratch.counts,
                     );
                 } else {
                     start = band.start;
@@ -602,13 +626,13 @@ pub(super) fn partition(
                 .is_err()
             {
                 emit(
-                    band.key,
-                    band.start,
+                    *band,
                     x,
                     &scratch.edges,
                     base,
                     &regions,
                     &mut cells,
+                    &mut scratch.counts,
                 );
             }
         }
@@ -616,13 +640,13 @@ pub(super) fn partition(
     }
     for band in &scratch.open {
         emit(
-            band.key,
-            band.start,
+            *band,
             b.into(),
             &scratch.edges,
             base,
             &regions,
             &mut cells,
+            &mut scratch.counts,
         );
     }
     cells

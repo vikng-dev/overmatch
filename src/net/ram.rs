@@ -430,7 +430,7 @@ impl Census<'_, '_> {
                 .iter()
                 .chain(&phases.cpu_times().values)
                 .sum(),
-            crumble_detail: NamedTimes::new(&stages::DETAIL_NAMES, [0.0; stages::DETAIL_COUNT]),
+            detail: NamedTimes::new(&stages::DETAIL_NAMES, [0.0; stages::DETAIL_COUNT]),
             sweep_sources: self.sweep.sources,
             sweep_casts: self.sweep.work.casts,
             awake: self.pieces.iter().len(),

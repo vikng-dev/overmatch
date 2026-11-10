@@ -40,8 +40,9 @@ pub(crate) struct TickSample {
     /// Nested diagnostics for `scripts/perf/collapse.py`; the key lacks `_us` so its
     /// additive tick parts do not count these timers again.
     pub(crate) avian: AvianStep,
-    /// Nested wall unions inside crumble; different owners' solve and split work may overlap.
-    pub(crate) crumble_detail: NamedTimes<{ stages::DETAIL_COUNT }>,
+    /// Nested wall unions inside a leaf: crumble's solve and split, the belt's envelope
+    /// partition. Different owners' work may overlap.
+    pub(crate) detail: NamedTimes<{ stages::DETAIL_COUNT }>,
 }
 
 /// Avian's work counters and timers since the physics-step reset, in microseconds, plus
@@ -117,7 +118,7 @@ impl TickSample {
             awake: 0,
             tanks: 0,
             dt_s: 0.0,
-            crumble_detail: NamedTimes::new(&stages::DETAIL_NAMES, [0.0; stages::DETAIL_COUNT]),
+            detail: NamedTimes::new(&stages::DETAIL_NAMES, [0.0; stages::DETAIL_COUNT]),
             avian: AvianStep {
                 collider_tree_update_us: 0.0,
                 collider_tree_optimize_us: 0.0,

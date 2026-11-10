@@ -39,9 +39,9 @@
 //! - `sweep_us`: the hull sweep before physics: its shape casts, cuts, holds and plastic
 //!   exchanges, and the departures it routes. The refit it triggers is `refit_us`.
 //! - `crumble_us`: the landing crumble after the deposits: each moving group's landing read,
-//!   judged by its kernel and routed. Per-tick `crumble_detail` carries the solve and split
-//!   wall unions inside this leaf. Different owners can overlap those spans; never add them
-//!   to the tick's phases or leaves.
+//!   judged by its kernel and routed. Per-tick `detail` carries the solve and split wall unions
+//!   inside this leaf, and `belt_partition_us` inside `belt_contacts_us`. Different owners can
+//!   overlap those spans; never add them to the tick's phases or leaves.
 //! - `phases_us`: complete schedule/phase intervals after debiting the leaf brackets above.
 //!   ECS application, synchronous hooks and dispatch stay in their phase; `physics_step_us`
 //!   includes sleep. Add phases and leaves once; `physics_us` and `sleep_us` are nested detail.
@@ -691,7 +691,7 @@ fn record_tick(
             &phases,
             fixed.timestep().as_secs_f64(),
         );
-        sample.crumble_detail = stages.take_details();
+        sample.detail = stages.take_details();
         let recording = census.recording() || load.as_deref().is_some_and(Loadtest::recording);
         let rows = match recording.then(|| census.contact_tick()) {
             Some(contacts) => [
