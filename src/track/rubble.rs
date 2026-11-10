@@ -34,12 +34,12 @@
 //!   ([`RubbleQuery::near`], [`footprint_radius`]) selects its N candidates. Each side rejects N
 //!   candidates against its slabs' union bounds. For L stations and P survivors this means
 //!   N + L × P bounds checks, with one station dispatch when P > 0. Every slab AABB pass makes
-//!   six support-map queries; only a positive-volume pass builds the boundary triangles, once
+//!   six support-map queries; only a positive-volume pass prepares the boundary polygons, once
 //!   per surface in the shared tick-start snapshot. Support-map and clipping work also depend on
 //!   the shape's complexity. `forces::collect_column_contacts` partitions the covered faces
-//!   without a contact cap, so face arrangements and their emitted patches still cost work on
-//!   every held tick. With no nearby collider no shape is read, and field-only driving retains
-//!   its force arithmetic.
+//!   only where a face covers and wins a cell; polygon faces omit triangulation diagonals.
+//!   Disjoint cells retain their owner and depth without being fragmented by remote face lines.
+//!   With no nearby collider no shape is read, and field-only driving retains its force arithmetic.
 //! - **Tick truth**: avian refits dynamic bodies' AABBs at the end of its physics step
 //!   (`update_solver_body_aabbs`) and writes each collider's `Position`/`Rotation`, so a snapshot
 //!   in `FixedUpdate` reads the poses the last step wrote.
@@ -169,8 +169,8 @@ struct Surface {
     position: Vec3,
     rotation: Quat,
     aabb: ColliderAabb,
-    /// Outward-wound convex boundary at the tick-start pose.
-    triangles: OnceLock<Vec<[Vec3; 3]>>,
+    /// Convex boundary polygons with outward normals at the tick-start pose.
+    faces: OnceLock<Vec<super::world_contact::convex::BoundaryFace>>,
     dynamic: bool,
     friction: Friction,
     structure: Option<Entity>,
@@ -188,27 +188,6 @@ struct SurfaceMotion {
 }
 
 impl Surface {
-    fn triangles(shape: &Collider, position: Vec3, rotation: Quat) -> Vec<[Vec3; 3]> {
-        let shape = shape.shape_scaled();
-        let (vertices, indices) = if let Some(cuboid) = shape.as_cuboid() {
-            cuboid.to_trimesh()
-        } else if let Some(hull) = shape.as_convex_polyhedron() {
-            hull.to_trimesh()
-        } else {
-            panic!(
-                "belt support shapes are boxes or convex polyhedra; fix the collider constructor"
-            );
-        };
-        let world: Vec<_> = vertices
-            .into_iter()
-            .map(|v| position + rotation * v)
-            .collect();
-        indices
-            .into_iter()
-            .map(|tri| tri.map(|i| world[i as usize]))
-            .collect()
-    }
-
     /// The shape's farthest world point along unit `dir`.
     fn support(&self, dir: Vec3) -> Vec3 {
         let map = self
@@ -342,7 +321,7 @@ impl RubbleBodies<'_> {
                             position: position.0,
                             rotation: rotation.0,
                             aabb: *aabb,
-                            triangles: OnceLock::new(),
+                            faces: OnceLock::new(),
                             dynamic: kind.is_dynamic(),
                             friction: rubble.friction(collider),
                             structure: rubble.structures.contains(body).then_some(body),
@@ -395,7 +374,7 @@ impl RubbleBodies<'_> {
         self.count(Work::BeltCandidates, self.active.len());
     }
 
-    fn count(&self, work: Work, count: usize) {
+    pub(crate) fn count(&self, work: Work, count: usize) {
         if let Some(stages) = &self.stages {
             stages.add(work, count as u64);
         }
@@ -551,11 +530,11 @@ impl RubbleBodies<'_> {
         if u.1 <= u.0 || l.1 <= l.0 || outer <= radial.0 || inner >= radial.1 {
             return None; // No positive volume reaches the probe envelope.
         }
-        let triangles = s.triangles.get_or_init(|| {
-            self.count(Work::BeltTriangulations, 1);
-            Surface::triangles(&s.shape, s.position, s.rotation)
+        let boundary = s.faces.get_or_init(|| {
+            self.count(Work::BeltBoundaryBuilds, 1);
+            super::world_contact::convex::boundary_faces(&s.shape, s.position, s.rotation)
         });
-        let mut faces = super::world_contact::convex::clip_faces(triangles, slab);
+        let mut faces = super::world_contact::convex::clip_faces(boundary, slab);
         if s.loose {
             faces = faces
                 .into_iter()
@@ -816,7 +795,7 @@ mod tests {
                             (a.position, a.rotation, a.aabb),
                             (b.position, b.rotation, b.aabb)
                         );
-                        assert_eq!(a.triangles, b.triangles);
+                        assert_eq!(a.faces, b.faces);
                         assert_eq!(a.friction, b.friction);
                         let motion = |m: &SurfaceMotion| (m.com, m.linear, m.angular);
                         assert_eq!(a.motion.as_ref().map(motion), b.motion.as_ref().map(motion));
@@ -1883,10 +1862,10 @@ mod tests {
                 let full = pieces.in_slab(&slab);
                 assert_eq!(full.len(), 1);
                 assert_eq!(pieces.surface_checks.swap(0, Ordering::Relaxed), 2);
-                assert!(pieces.surface(local).triangles.get().is_some());
+                assert!(pieces.surface(local).faces.get().is_some());
                 assert!(
-                    pieces.surface(remote).triangles.get().is_none(),
-                    "coarse-query neighbours outside the side must not be triangulated"
+                    pieces.surface(remote).faces.get().is_none(),
+                    "coarse-query neighbours outside the side must not prepare boundary polygons"
                 );
                 {
                     let local_view = pieces.for_source(Entity::PLACEHOLDER, &[local]);

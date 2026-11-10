@@ -14,6 +14,52 @@ pub(crate) struct ClippedFace {
     planes: Vec<Vec3>,
 }
 
+/// A convex boundary polygon and its outward unit normal at the tick-start world pose.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BoundaryFace {
+    pub(crate) polygon: Vec<Vec3>,
+    pub(crate) normal: Vec3,
+}
+
+/// Parry 0.27.0: `Cuboid::support_face` returns a quad; `ConvexPolyhedron::faces` and
+/// `vertices_adj_to_face` retain the complete polygon, including faces with more than four edges.
+/// The manifold's `local_support_feature` truncates hull faces to four vertices and cannot be used.
+pub(crate) fn boundary_faces(
+    collider: &avian3d::prelude::Collider,
+    position: Vec3,
+    rotation: Quat,
+) -> Vec<BoundaryFace> {
+    let shape = collider.shape_scaled();
+    let world = |p| position + rotation * p;
+    if let Some(cuboid) = shape.as_cuboid() {
+        [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z]
+            .into_iter()
+            .map(|normal| BoundaryFace {
+                polygon: cuboid.support_face(normal).vertices.map(world).into(),
+                normal: rotation * normal,
+            })
+            .collect()
+    } else if let Some(hull) = shape.as_convex_polyhedron() {
+        let points: Vec<_> = hull.points().iter().copied().map(world).collect();
+        hull.faces()
+            .iter()
+            .map(|face| {
+                let start = face.first_vertex_or_edge as usize;
+                let end = start + face.num_vertices_or_edges as usize;
+                BoundaryFace {
+                    polygon: hull.vertices_adj_to_face()[start..end]
+                        .iter()
+                        .map(|&i| points[i as usize])
+                        .collect(),
+                    normal: rotation * face.normal,
+                }
+            })
+            .collect()
+    } else {
+        panic!("belt support shapes are boxes or convex polyhedra; fix the collider constructor");
+    }
+}
+
 /// Keep the nonnegative side of an affine half-plane. Homogeneous footprint coordinates keep
 /// clipping, depth comparison and surface interpolation in the same frame.
 fn clip(polygon: &[Vec3], plane: Vec3) -> Vec<Vec3> {
@@ -104,34 +150,35 @@ impl ClippedFace {
     }
 }
 
-pub(crate) fn clip_faces(triangles: &[[Vec3; 3]], slab: &Slab) -> Vec<ClippedFace> {
+pub(crate) fn clip_faces(boundary: &[BoundaryFace], slab: &Slab) -> Vec<ClippedFace> {
     let mut faces = Vec::new();
-    for &[a, b, c] in triangles {
-        let cross = (b - a).cross(c - a);
-        let radial = cross.dot(slab.out);
+    for face in boundary {
+        let normal = face.normal;
+        let radial = normal.dot(slab.out);
         if radial >= 0.0 {
             continue; // Back faces and grazing faces cannot be entered along this probe direction.
         }
-        let normal = cross.normalize();
         let depth = Vec3::new(
-            cross.dot(slab.axis) / radial,
-            cross.dot(slab.lat) / radial,
-            slab.face - cross.dot(a - slab.origin) / radial,
+            normal.dot(slab.axis) / radial,
+            normal.dot(slab.lat) / radial,
+            slab.face - normal.dot(face.polygon[0] - slab.origin) / radial,
         );
         assert!(
             normal.is_finite() && depth.is_finite(),
             "a finite convex entry face must define a finite unit normal and depth plane"
         );
-        let mut polygon: Vec<_> = [a, b, c]
+        let mut polygon: Vec<_> = face
+            .polygon
+            .iter()
             .map(|p| {
-                let r = p - slab.origin;
+                let r = *p - slab.origin;
                 Vec3::new(r.dot(slab.axis), r.dot(slab.lat), 1.0)
             })
-            .into();
+            .collect();
         if signed_area(&polygon) < 0.0 {
             polygon.reverse();
         }
-        // Original triangle edges remain valid half-planes even when clipping creates nearly
+        // Original face edges remain valid half-planes even when clipping creates nearly
         // coincident vertices. Reconstructing edges from that polygon can cut away real area.
         let mut planes: Vec<_> = polygon
             .iter()
@@ -293,6 +340,71 @@ struct Cell<'a> {
     face: Option<(usize, &'a ClippedFace)>,
 }
 
+fn partition<'a>(
+    a: f32,
+    b: f32,
+    strip: (f32, f32),
+    base: Vec3,
+    free: Vec3,
+    faces: &[(usize, &'a ClippedFace)],
+) -> Vec<Cell<'a>> {
+    let mut cells = vec![Cell {
+        polygon: vec![
+            Vec3::new(a, strip.0, 1.0),
+            Vec3::new(b, strip.0, 1.0),
+            Vec3::new(b, strip.1, 1.0),
+            Vec3::new(a, strip.1, 1.0),
+        ],
+        depth: base,
+        face: None,
+    }];
+    for &(piece, face) in faces {
+        let depth = face.depth + free;
+        let mut next = Vec::new();
+        for cell in cells {
+            // A face may replace only its covered, deeper intersection. Its infinite boundary
+            // lines must not subdivide cells outside that intersection: those retain one owner.
+            let winning = face
+                .planes
+                .iter()
+                .copied()
+                .chain([depth - cell.depth])
+                .fold(cell.polygon.clone(), |polygon, plane| clip(&polygon, plane));
+            if signed_area(&winning).abs() == 0.0 {
+                next.push(cell);
+                continue;
+            }
+            let mut remaining = cell.polygon;
+            for plane in face.planes.iter().copied().chain([depth - cell.depth]) {
+                if plane == Vec3::ZERO {
+                    continue;
+                } // Coincident planes have one owner, never two.
+                let outside = clip(&remaining, -plane);
+                if signed_area(&outside).abs() > 0.0 {
+                    next.push(Cell {
+                        polygon: outside,
+                        depth: cell.depth,
+                        face: cell.face,
+                    });
+                }
+                remaining = clip(&remaining, plane);
+                if remaining.is_empty() {
+                    break;
+                }
+            }
+            if signed_area(&remaining).abs() > 0.0 {
+                next.push(Cell {
+                    polygon: remaining,
+                    depth,
+                    face: Some((piece, face)),
+                });
+            }
+        }
+        cells = next;
+    }
+    cells
+}
+
 /// Overlay convex entry faces onto each field half-profile. Each disjoint cell owns the deepest
 /// surface; clipping at face edges and depth crossings prevents both holes and double support.
 pub(super) fn patches(
@@ -311,48 +423,8 @@ pub(super) fn patches(
             (half + 1) as f32 * slab.len / 2.0,
         );
         let free = half_plane(slab.len, travel, half);
-        let mut cells = vec![Cell {
-            polygon: vec![
-                Vec3::new(a, strip.0, 1.0),
-                Vec3::new(b, strip.0, 1.0),
-                Vec3::new(b, strip.1, 1.0),
-                Vec3::new(a, strip.1, 1.0),
-            ],
-            depth: half_plane(slab.len, pen, half),
-            face: None,
-        }];
-        for &(piece, face) in faces {
-            let depth = face.depth + free;
-            let mut next = Vec::new();
-            for cell in cells {
-                let mut remaining = cell.polygon;
-                for plane in face.planes.iter().copied().chain([depth - cell.depth]) {
-                    if plane == Vec3::ZERO {
-                        continue;
-                    } // Coincident planes have one owner, never two.
-                    let outside = clip(&remaining, -plane);
-                    if signed_area(&outside).abs() > 0.0 {
-                        next.push(Cell {
-                            polygon: outside,
-                            depth: cell.depth,
-                            face: cell.face,
-                        });
-                    }
-                    remaining = clip(&remaining, plane);
-                    if remaining.is_empty() {
-                        break;
-                    }
-                }
-                if signed_area(&remaining).abs() > 0.0 {
-                    next.push(Cell {
-                        polygon: remaining,
-                        depth,
-                        face: Some((piece, face)),
-                    });
-                }
-            }
-            cells = next;
-        }
+        let cells = partition(a, b, strip, half_plane(slab.len, pen, half), free, faces);
+        pieces.count(crate::cost::stages::Work::BeltPartitionCells, cells.len());
         for cell in cells {
             let polygon = clip(&cell.polygon, cell.depth);
             let Some(mut integral) =
@@ -394,6 +466,319 @@ pub(super) fn patches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn triangle_boundary(triangles: &[[Vec3; 3]]) -> Vec<BoundaryFace> {
+        triangles
+            .iter()
+            .map(|&[a, b, c]| BoundaryFace {
+                polygon: vec![a, b, c],
+                normal: (b - a).cross(c - a).normalize(),
+            })
+            .collect()
+    }
+
+    // Fixture: a rotated box and a convex ring-sampled sphere, both inside a broad column.
+    fn partition_fixture(many: bool) -> (Slab, avian3d::prelude::Collider, Quat) {
+        use avian3d::prelude::Collider;
+        let collider = if many {
+            let mut points = vec![Vec3::Z, -Vec3::Z];
+            for ring in 1..8 {
+                let elevation = std::f32::consts::PI * ring as f32 / 8.0;
+                for sector in 0..16 {
+                    let angle = std::f32::consts::TAU * sector as f32 / 16.0;
+                    points.push(Vec3::new(
+                        elevation.sin() * angle.cos(),
+                        elevation.sin() * angle.sin(),
+                        elevation.cos(),
+                    ));
+                }
+            }
+            Collider::convex_hull(points).unwrap()
+        } else {
+            Collider::cuboid(1.0, 1.0, 1.0)
+        };
+        let rotation = Quat::from_rotation_x(0.31) * Quat::from_rotation_y(0.47);
+        (
+            Slab {
+                origin: Vec3::new(-2.0, 0.0, 0.0),
+                axis: Vec3::X,
+                lat: Vec3::Y,
+                out: -Vec3::Z,
+                len: 4.0,
+                lateral: (-2.0, 2.0),
+                face: 0.0,
+                reach: 2.0,
+                travel: 2.0,
+            },
+            collider,
+            rotation,
+        )
+    }
+
+    fn triangulate(boundary: &[BoundaryFace], offset: usize) -> Vec<BoundaryFace> {
+        boundary
+            .iter()
+            .flat_map(|face| {
+                let mut points = face.polygon.clone();
+                let count = points.len();
+                points.rotate_left(offset % count);
+                points[1..]
+                    .windows(2)
+                    .map(|edge| BoundaryFace {
+                        polygon: vec![points[0], edge[0], edge[1]],
+                        normal: face.normal,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn column_cells<'a>(slab: &Slab, faces: &'a [ClippedFace]) -> Vec<Cell<'a>> {
+        let refs: Vec<_> = faces.iter().map(|f| (0, f)).collect();
+        (0..2)
+            .flat_map(|half| {
+                partition(
+                    half as f32 * slab.len / 2.0,
+                    (half + 1) as f32 * slab.len / 2.0,
+                    slab.lateral,
+                    Vec3::ZERO,
+                    Vec3::Z,
+                    &refs,
+                )
+            })
+            .collect()
+    }
+
+    fn moments(cells: &[Cell<'_>], width: f32) -> (f32, f32, Vec3) {
+        cells
+            .iter()
+            .filter_map(|c| integrate(&clip(&c.polygon, c.depth), c.depth, width))
+            .fold((0.0, 0.0, Vec3::ZERO), |(area, pressure, moment), i| {
+                (
+                    area + i.length,
+                    pressure + i.area,
+                    moment + i.centroid * i.area,
+                )
+            })
+    }
+
+    /// A face admitted for the left half must not fragment the right half. Belt contacts rely
+    /// on remote edge lines leaving the uncovered field cell whole.
+    #[test]
+    fn a_disjoint_face_keeps_the_cell_whole() {
+        // Fixture: a triangle confined to along < 1; its horizontal edge crosses the other half.
+        let (mut slab, _, _) = partition_fixture(false);
+        slab.len = 2.0;
+        slab.lateral = (0.0, 1.0);
+        let face = BoundaryFace {
+            polygon: vec![
+                Vec3::new(-2.0, 0.25, 0.5),
+                Vec3::new(-1.6, 0.25, 0.5),
+                Vec3::new(-1.8, 0.75, 0.5),
+            ],
+            normal: Vec3::Z,
+        };
+        let faces = clip_faces(&[face], &slab);
+        let refs: Vec<_> = faces.iter().map(|f| (0, f)).collect();
+        let cells = partition(1.0, 2.0, (0.0, 1.0), Vec3::ZERO, Vec3::Z, &refs);
+        assert_eq!(cells.len(), 1);
+    }
+
+    /// Belt coverage needs every polygon vertex; Parry's manifold feature truncates at four.
+    #[test]
+    fn boundary_preparation_retains_many_sided_faces() {
+        // Fixture: a regular prism with eight-sided caps, generated from its vertices.
+        let sides = 8;
+        let points = (0..sides)
+            .flat_map(|i| {
+                let angle = std::f32::consts::TAU * i as f32 / sides as f32;
+                [-1.0, 1.0].map(|z| Vec3::new(angle.cos(), angle.sin(), z))
+            })
+            .collect();
+        let collider = avian3d::prelude::Collider::convex_hull(points).unwrap();
+        let faces = boundary_faces(&collider, Vec3::ZERO, Quat::IDENTITY);
+        assert_eq!(
+            faces.len(),
+            sides + 2,
+            "a prism has one face per side and two caps"
+        );
+        let cap = faces.iter().find(|f| f.normal.dot(Vec3::Z) > 0.0).unwrap();
+        assert_eq!(
+            cap.polygon.len(),
+            sides,
+            "the cap must retain its complete boundary"
+        );
+    }
+
+    /// The field and overlapping solid planes must exchange ownership only at their depth
+    /// crossings, independently of order and fan diagonals; the suspension reads that envelope.
+    #[test]
+    fn crossing_faces_preserve_the_positive_depth_envelope() {
+        let (slab, _, _) = partition_fixture(false);
+        // Fixture: planes with free depths along-2.5 and 1.5-along across the 4 m column.
+        // DERIVED: two right triangular profiles, each base/height 1.5; covered length 3,
+        // pressure 2 * 1.5^2 / 2 = 2.25, symmetric pressure centroid at along=2, lateral=0.
+        let boundary: Vec<_> = [-1.0, 1.0]
+            .into_iter()
+            .map(|slope| BoundaryFace {
+                polygon: [(-2.0, -2.0), (2.0, -2.0), (2.0, 2.0), (-2.0, 2.0)]
+                    .map(|(x, y)| Vec3::new(x, y, slope * x - 1.5))
+                    .into(),
+                normal: Vec3::new(-slope, 0.0, 1.0).normalize(),
+            })
+            .collect();
+        for boundary in [
+            boundary.clone(),
+            triangulate(&boundary, 0),
+            triangulate(&boundary, 1),
+        ] {
+            let mut faces = clip_faces(&boundary, &slab);
+            for reverse in [false, true] {
+                if reverse {
+                    faces.reverse();
+                }
+                let cells = column_cells(&slab, &faces);
+                let (area, pressure, moment) = moments(&cells, 4.0);
+                // Resolution: f32 clipping and moment accumulation roundoff for this fixture.
+                let epsilon = 1e-5;
+                assert!((area - 3.0).abs() < epsilon);
+                assert!((pressure - 2.25).abs() < epsilon);
+                assert!((moment - Vec3::new(4.5, 0.0, 2.25)).length() < epsilon);
+            }
+        }
+    }
+
+    // Clipping can leave nearly collapsed edges with unreliable half-plane directions. A finite
+    // polygon winding check tests coverage independently, with f64 evaluation of its f32 vertices.
+    fn contains_point(polygon: &[Vec3], p: Vec3, epsilon: f32) -> bool {
+        let (px, py) = (f64::from(p.x), f64::from(p.y));
+        let epsilon = f64::from(epsilon);
+        let mut inside = false;
+        for (a, b) in polygon
+            .iter()
+            .zip(polygon.iter().cycle().skip(1))
+            .take(polygon.len())
+        {
+            let (ax, ay) = (f64::from(a.x), f64::from(a.y));
+            let (bx, by) = (f64::from(b.x), f64::from(b.y));
+            let (dx, dy) = (bx - ax, by - ay);
+            let length_squared = dx * dx + dy * dy;
+            if length_squared > 0.0 {
+                let t = (((px - ax) * dx + (py - ay) * dy) / length_squared).clamp(0.0, 1.0);
+                let (x, y) = (px - ax - t * dx, py - ay - t * dy);
+                if x * x + y * y <= epsilon * epsilon {
+                    return true;
+                }
+            }
+            if (ay > py) != (by > py) && px < ax + (py - ay) * dx / dy {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
+    fn assert_depth_envelope(slab: &Slab, faces: &[ClippedFace], cells: &[Cell<'_>]) {
+        let width = slab.lateral.1 - slab.lateral.0;
+        // Resolution: point containment allows f32 shared-edge roundoff in footprint metres.
+        let distance_epsilon = 1e-6 * slab.len.max(width);
+        // Fixture: offset grid samples avoid shared surface edges and half boundaries.
+        for x in 0..13 {
+            for y in 0..11 {
+                let p = Vec3::new(
+                    (x as f32 + 0.37) * slab.len / 13.0,
+                    slab.lateral.0 + (y as f32 + 0.29) * width / 11.0,
+                    1.0,
+                );
+                let expected = faces
+                    .iter()
+                    .filter(|f| f.planes.iter().all(|plane| plane.dot(p) >= 0.0))
+                    .map(|f| (f.depth + Vec3::Z).dot(p))
+                    .fold(0.0, f32::max);
+                let actual = cells
+                    .iter()
+                    .filter(|c| contains_point(&c.polygon, p, distance_epsilon))
+                    .map(|c| c.depth.dot(p))
+                    .fold(f32::NEG_INFINITY, f32::max);
+                // Resolution: depth-plane evaluation roundoff for the unit-scale fixture.
+                assert!(
+                    (actual - expected).abs() < 2e-4,
+                    "{p:?}: {actual} != {expected}"
+                );
+            }
+        }
+    }
+
+    /// Suspension relies on the same covered area and depth envelope regardless of face order
+    /// or polygon triangulation. Integrals and interior samples detect holes, double coverage,
+    /// and assigning a remote face's depth to uncovered ground.
+    #[test]
+    fn convex_partition_preserves_coverage_and_depth_under_order_and_triangulation() {
+        for many in [false, true] {
+            let (slab, collider, rotation) = partition_fixture(many);
+            let boundary = boundary_faces(&collider, Vec3::ZERO, rotation);
+            let canonical = clip_faces(&boundary, &slab);
+            let width = slab.lateral.1 - slab.lateral.0;
+            let expected = canonical
+                .iter()
+                .filter_map(|f| integrate(&f.polygon, f.depth + Vec3::Z, width))
+                .fold((0.0, 0.0, Vec3::ZERO), |(area, pressure, moment), i| {
+                    (
+                        area + i.length,
+                        pressure + i.area,
+                        moment + i.centroid * i.area,
+                    )
+                });
+            for boundary in [
+                boundary.clone(),
+                triangulate(&boundary, 0),
+                triangulate(&boundary, 1),
+            ] {
+                let mut faces = clip_faces(&boundary, &slab);
+                for reverse in [false, true] {
+                    if reverse {
+                        faces.reverse();
+                    }
+                    let cells = column_cells(&slab, &faces);
+                    let (area, pressure, moment) = moments(&cells, width);
+                    // Resolution: accumulated f32 clipping/integration roundoff, relative to
+                    // the column's area and depth moments, not a permitted geometric gap.
+                    let epsilon = 2e-4;
+                    assert!((area - expected.0).abs() < epsilon);
+                    assert!((pressure - expected.1).abs() < epsilon);
+                    assert!((moment - expected.2).length() < epsilon);
+                    let total: f32 = cells.iter().map(|c| signed_area(&c.polygon).abs()).sum();
+                    assert!((total - slab.len * width).abs() < epsilon);
+                    assert_depth_envelope(&slab, &canonical, &cells);
+                }
+            }
+        }
+    }
+
+    /// Belt work must follow the covered boundary, not the arrangement of infinite face lines.
+    /// Resolution contract for these convex fixtures: at most one cell per covering face
+    /// boundary per half, plus its seed. Read the budget from the fixture, so detail can grow.
+    #[test]
+    fn convex_partition_work_follows_covering_faces() {
+        for many in [false, true] {
+            let (slab, collider, rotation) = partition_fixture(many);
+            let boundary = boundary_faces(&collider, Vec3::ZERO, rotation);
+            let faces = clip_faces(&boundary, &slab);
+            let cells = column_cells(&slab, &faces);
+            eprintln!(
+                "MEASURED many={many} polygons={} faces={} cells={}",
+                boundary.len(),
+                faces.len(),
+                cells.len()
+            );
+            let boundary_count: usize = faces.iter().map(|f| f.planes.len()).sum();
+            assert!(
+                cells.len() <= 2 * (1 + boundary_count),
+                "{} cells from {} face boundaries",
+                cells.len(),
+                boundary_count
+            );
+        }
+    }
 
     /// The ground partition must keep ground exposed where a loose piece is lower. Fixture:
     /// projected triangle (0,0), (1,0), (1,1), depth = lateral. DERIVED: its cross-width
@@ -465,7 +850,8 @@ mod tests {
             Vec3::new(-1.0, 0.0, 4.0),
             Vec3::new(4.0, 0.0, -1.0),
         ]];
-        let faces = clip_faces(&triangles, &slab);
+        let boundary = triangle_boundary(&triangles);
+        let faces = clip_faces(&boundary, &slab);
         assert!(!faces.is_empty());
         for face in faces {
             assert_eq!(face.normal, Vec3::Y);
@@ -481,12 +867,12 @@ mod tests {
         }
         slab.origin.y = -2.0;
         assert!(
-            clip_faces(&triangles, &slab).is_empty(),
+            clip_faces(&boundary, &slab).is_empty(),
             "surface behind the probe origin"
         );
         slab.origin.y = 2.0;
         assert!(
-            clip_faces(&triangles, &slab).is_empty(),
+            clip_faces(&boundary, &slab).is_empty(),
             "surface beyond free travel"
         );
     }

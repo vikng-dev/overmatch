@@ -1727,7 +1727,7 @@ fn work_row(case: &str, work: &std::collections::BTreeMap<String, f64>, ticks: u
 }
 
 /// The work columns: the production counts the belt adds, its contacts, and the solver's.
-const WORK_COLUMNS: [&str; 14] = [
+const WORK_COLUMNS: [&str; 16] = [
     "belt_near_colliders",
     "belt_candidates",
     "belt_slab_checks",
@@ -1735,7 +1735,9 @@ const WORK_COLUMNS: [&str; 14] = [
     "belt_overlaps",
     "belt_dynamic_contacts",
     "belt_dispatches",
-    "belt_triangulations",
+    "belt_boundary_builds",
+    "belt_partition_faces",
+    "belt_partition_cells",
     "belt_contacts",
     "belt_force_applications",
     "solver_pairs",

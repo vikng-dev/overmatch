@@ -77,12 +77,14 @@ labelled!(
         BeltOverlaps = "belt_overlaps",
         BeltDynamicContacts = "belt_dynamic_contacts",
         BeltDispatches = "belt_dispatches",
-        BeltTriangulations = "belt_triangulations",
+        BeltBoundaryBuilds = "belt_boundary_builds",
+        BeltPartitionFaces = "belt_partition_faces",
+        BeltPartitionCells = "belt_partition_cells",
         BeltTerrainSamples = "belt_terrain_samples",
     }
 );
 
-#[derive(Resource, Default, Clone)]
+#[derive(Resource, Clone)]
 pub(crate) struct Stages(
     Arc<[AtomicU64; COUNT]>,
     Arc<[AtomicU64; WORK_COUNT]>,
@@ -90,6 +92,18 @@ pub(crate) struct Stages(
     Arc<[AtomicU64; DETAIL_COUNT]>,
     Arc<[Mutex<BeltReaders>; DETAIL_COUNT]>,
 );
+
+impl Default for Stages {
+    fn default() -> Self {
+        Self(
+            Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
+            Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
+            Arc::default(),
+            Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
+            Arc::new(std::array::from_fn(|_| Mutex::default())),
+        )
+    }
+}
 
 /// An existing ram or scheduled capture keeps this tick. Sim instruments need no net dependency.
 #[derive(Resource, Default)]
