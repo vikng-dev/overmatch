@@ -253,6 +253,7 @@ TankSpec(
                     reverse_radii: [(4.0, 12.0)],
                     capacity: 1.0,
                     recirculation: 0.9,
+                    neutral_mean: (Free, Fixture(\"fixture steering family\")),
                 ),
                 brake_force: 1.0,
                 brake_static_factor: 1.5,

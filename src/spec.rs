@@ -984,6 +984,7 @@ impl TransmissionSpec {
             steer_radii_m: &steering.radii,
             reverse_steer_radii_m: &steering.reverse_radii,
             steer_capacity_n: steering.capacity,
+            neutral_mean: steering.neutral_mean.0,
             recirculation: steering.recirculation,
             brake_capacity_n: *brake_force,
             brake_static_factor: *brake_static_factor,
@@ -1077,6 +1078,8 @@ pub struct SteeringSpec {
     pub capacity: f32,
     /// Inner→outer recirculation efficiency η.
     pub recirculation: f32,
+    /// Whether the mean track speed is held in a neutral turn (`track::transmission::NeutralMean`).
+    pub(crate) neutral_mean: Sourced<crate::track::transmission::NeutralMean>,
     // Neutral differential speed derives from first-gear construction:
     // `neutral_d_full = κ_tight(F1) × v1_governed`. An authored share would replace
     // the radii/speed relationship with an unprovenanced feel scalar.
@@ -2290,6 +2293,7 @@ TankSpec(
                     reverse_radii: [(4.0, 12.0), (6.0, 18.0)],
                     capacity: 100_000.0,
                     recirculation: 0.9,
+                    neutral_mean: (Free, Fixture("fixture steering family")),
                 ),
                 brake_force: 50_000.0,
                 brake_static_factor: 1.5,

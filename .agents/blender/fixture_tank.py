@@ -100,6 +100,7 @@ TankSpec(
                     reverse_radii: [(4.0, 12.0)],
                     capacity: 1.0,
                     recirculation: 0.9,
+                    neutral_mean: (Free, Derived("nominal steering design: the box forces only the speed difference and nothing holds the mean path")),
                 ),
                 brake_force: 1.0,
                 // Static breakaway multiplier for the at-rest parking lever.

@@ -157,6 +157,11 @@ TankSpec(
                     // replace this radii/speed relationship with an unprovenanced feel scalar.
                     // Mechanical recirculation efficiency ~0.9 — INFERRED.
                     recirculation: 0.9,
+                    // The L 600 C forces only the speed difference; the period pivot drill holds
+                    // the mean as well. StandIn: the hold's capacity is the two-sided brake_force
+                    // below until the holding brake's own torque through the engaged gear is
+                    // sourced, so a held pivot keeps the slopes the parked tank keeps.
+                    neutral_mean: (Held, Derived("Tigerfibel D 656/27 (1943) pp. 40-41, 'Wenden auf der Stelle': shift down to 1st-3rd, press the clutch, pull right or left, press the large button on the gearbox. D 656/30 p. 58 labels a 'Druckknopf fuer Haltebremse' on the gearbox controls. Inferred, named by neither manual: the button is that holding brake, and holding the gearbox through the engaged low gear holds the mean of the two tracks")),
                 ),
                 // Per-side brake capacity at the sprocket, with two DERIVED anchors:
                 //   (1) the settled 20° park-hold capability (ADR-0026 records 20°
@@ -171,6 +176,7 @@ TankSpec(
                 // DERIVED 2.9 MW through two 1940s Argus discs at speed: energy-impossible.
                 // The dynamic datum still governs every moving slide and service-brake stop;
                 // static breakaway is authored separately below.
+                // StandIn: twice this also bounds the held mean in a neutral turn (neutral_mean).
                 brake_force: 96_000.0,
                 // INFERRED provisional — static breakaway vs dynamic dissipation are different
                 // physical limits (static hold does no work; sourced material ratios span

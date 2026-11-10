@@ -63,6 +63,7 @@ fn lab_tp() -> TransmissionParams {
         ],
         reverse_steer_radii_m: &[(3.0, 8.9)],
         steer_capacity_n: 240_000.0,
+        neutral_mean: NeutralMean::Free,
         recirculation: 0.9,
         brake_capacity_n: 120_000.0,
         brake_static_factor: 1.6,
@@ -120,6 +121,7 @@ fn tiger_authoring() -> TransmissionAuthoring<'static> {
         ],
         reverse_steer_radii_m: &[(3.44, 10.2), (5.28, 15.6), (7.62, 22.5), (11.30, 33.4)],
         steer_capacity_n: 250_000.0,
+        neutral_mean: NeutralMean::Held,
         recirculation: 0.9,
         brake_capacity_n: 96_000.0,
         brake_static_factor: 1.5,
@@ -359,6 +361,96 @@ fn steer_release_arrests_pivot() {
         previous = difference;
     }
     panic!("released pivot must reach rest");
+}
+
+/// A neutral pivot on a slope: with the mean path held (`NeutralMean::Held`) the belts run equal
+/// and opposite, the mean at rest while the difference reaches `neutral_d_full`; with it free the
+/// grade sets the mean. A pivot that turns in place on a slope relies on the held fact, and a
+/// held mean must not cost the difference its target.
+#[test]
+fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
+    let fp = lab_fp();
+    for mean in [NeutralMean::Held, NeutralMean::Free] {
+        let tp = TransmissionParams {
+            neutral_mean: mean,
+            ..lab_tp()
+        };
+        // Fixture: a grade pull on each belt totalling half the hold's breached capacity.
+        let pull = -0.5 * tp.brake_capacity_n;
+        let mut st = fresh(&tp);
+        let mut speeds = [0.0f32; 2];
+        let mut peak_mean = 0.0f32;
+        // Fixture observation budget: two simulated seconds.
+        for _ in 0..128 {
+            speeds = step(&fp, &tp, &mut st, &input(0.0, 1.0, speeds, [pull, pull])).next_speeds;
+            peak_mean = peak_mean.max(((speeds[0] + speeds[1]) * 0.5).abs());
+        }
+        let difference = (speeds[0] - speeds[1]) * 0.5;
+        match mean {
+            NeutralMean::Held => {
+                assert!(
+                    peak_mean < PARK_ENGAGE_SPEED,
+                    "a held mean stays at rest on the slope, peaked at {peak_mean} m/s"
+                );
+                assert!(
+                    (difference - tp.neutral_d_full).abs() < PARK_ENGAGE_SPEED,
+                    "a held pivot's difference reaches {} m/s, got {difference}",
+                    tp.neutral_d_full
+                );
+            }
+            NeutralMean::Free => assert!(
+                peak_mean >= PARK_ENGAGE_SPEED,
+                "a free mean is set by the grade, peaked at {peak_mean} m/s"
+            ),
+        }
+    }
+}
+
+/// A held mean is bounded by the parking hold's two-sided capacity, static while the mean is at
+/// rest and dynamic once breached (`brake_capacity_for_regime`). A grade between the two holds a
+/// resting pivot but keeps a breached one sliding; a grade beyond the static capacity moves a
+/// resting one. A pivot on a slope the parked tank cannot hold relies on this to slide too.
+#[test]
+fn a_held_mean_gives_way_beyond_its_capacity_and_slides_once_breached() {
+    let fp = lab_fp();
+    let tp = TransmissionParams {
+        neutral_mean: NeutralMean::Held,
+        ..lab_tp()
+    };
+    let at_rest = 2.0 * brake_capacity_for_regime(&tp, true, false, 0.0);
+    let breached = 2.0 * brake_capacity_for_regime(&tp, true, false, PARK_ENGAGE_SPEED);
+    // The final and the peak mean speed over `ticks` of a full-lever pivot under a total grade
+    // pull (N).
+    let pivot = |pull: f32, mean: f32, ticks: usize| {
+        let mut st = fresh(&tp);
+        let mut speeds = [mean; 2];
+        let side = [-0.5 * pull; 2];
+        let mut peak = 0.0f32;
+        for _ in 0..ticks {
+            speeds = step(&fp, &tp, &mut st, &input(0.0, 1.0, speeds, side)).next_speeds;
+            peak = peak.max(((speeds[0] + speeds[1]) * 0.5).abs());
+        }
+        ((speeds[0] + speeds[1]) * 0.5, peak)
+    };
+    // Fixture: a pull halfway between the two capacities, observed for one simulated second.
+    let between = 0.5 * (at_rest + breached);
+    let (_, rest) = pivot(between, 0.0, 64);
+    assert!(
+        rest < PARK_ENGAGE_SPEED,
+        "the static capacity holds a resting mean, peaked at {rest} m/s"
+    );
+    // One tick from the first breached mean speed.
+    let (sliding, _) = pivot(between, PARK_ENGAGE_SPEED, 1);
+    assert!(
+        sliding > PARK_ENGAGE_SPEED,
+        "a breached hold has only its dynamic capacity, so the mean keeps sliding: {sliding} m/s"
+    );
+    // Fixture: a pull a quarter beyond the static capacity, one tick from rest.
+    let (beyond, _) = pivot(1.25 * at_rest, 0.0, 1);
+    assert!(
+        beyond >= PARK_ENGAGE_SPEED,
+        "the hold is bounded: a pull beyond it moves the mean, got {beyond} m/s"
+    );
 }
 
 /// The L600 constraint converges to the geared ratio: under sustained throttle + tight

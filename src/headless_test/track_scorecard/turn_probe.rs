@@ -49,7 +49,7 @@ enum Ground {
     /// One level cell: two triangles under the whole world.
     FlatOneCell,
     /// The card's grid tilted by this angle (rad): rising to the hull's right at the start, or
-    /// (`along`) rising ahead of it.
+    /// (`along`) rising ahead of it. A negative angle falls that way.
     Slope { angle: f32, along: bool },
     /// The shipped height map, hull dropped at this (x, z).
     Shipped(Vec2),
@@ -274,7 +274,7 @@ fn alternation(x: &[f32]) -> Option<f32> {
     })
 }
 
-fn run(case: &Case) {
+fn run(case: &Case, hold_s: usize) {
     let ground = base_ground();
     let mut bed = settled(&case.ground);
 
@@ -337,9 +337,9 @@ fn run(case: &Case) {
     for col in series.cols.values_mut() {
         col.drain(..col.len() - LEAD_S * TICKS);
     }
-    for tick in 0..HOLD_S * TICKS {
+    for tick in 0..hold_s * TICKS {
         bed.tick(case.throttle, case.steer);
-        let windowed = tick >= (HOLD_S - WINDOW_S) * TICKS;
+        let windowed = tick >= (hold_s - WINDOW_S) * TICKS;
         record(&bed, z_c, &mut series, windowed.then_some(&mut bins));
     }
     for _ in 0..RELEASE_S * TICKS {
@@ -347,7 +347,7 @@ fn run(case: &Case) {
         record(&bed, z_c, &mut series, None);
     }
 
-    let hold_end = (LEAD_S + HOLD_S) * TICKS;
+    let hold_end = (LEAD_S + hold_s) * TICKS;
     let belt_alternation = ["belt_l", "belt_r"].map(|key| {
         alternation(&series.cols[key][hold_end - WINDOW_S * TICKS..hold_end])
             .expect("the window spans many ticks")
@@ -373,7 +373,7 @@ fn run(case: &Case) {
         "run_up_ticks": run_up_ticks,
         "belt_alternation_mm_s": belt_alternation,
         "lead_ticks": LEAD_S * TICKS,
-        "hold_ticks": HOLD_S * TICKS,
+        "hold_ticks": hold_s * TICKS,
         "release_ticks": RELEASE_S * TICKS,
         "window_ticks": WINDOW_S * TICKS,
         "tick_hz": TICKS,
@@ -745,7 +745,7 @@ fn turn_probe() {
     }
 
     for case in cases.iter().filter(|case| selected(&case.label)) {
-        run(case);
+        run(case, HOLD_S);
     }
     if selected("straight run-up") {
         straight_run_up();
@@ -761,5 +761,41 @@ fn turn_probe() {
     }
     if selected(&format!("brake g{BRAKE_GEAR}")) {
         brake_stop(BRAKE_GEAR);
+    }
+}
+
+/// Fixture: a full-steer neutral pivot's hold, long enough for one full turn (s).
+const PIVOT_TURN_S: usize = 64;
+
+/// Full-steer neutral pivots for one full turn, level and on slopes facing up, down and across.
+/// `TURN_PROBE_ONLY` narrows these too.
+#[test]
+#[ignore = "the turn probe, run on demand"]
+fn pivot_probe() {
+    let mut cases = vec![Case {
+        label: "pivot flat".into(),
+        ..flat_case(None, 1.0, "neutral pivot")
+    }];
+    // Fixture: slopes in degrees; the steepest exceed the hull's longitudinal holds.
+    for degrees in [5.0_f32, 10.0, 15.0, 25.0, 35.0] {
+        for (angle, along, facing) in [
+            (degrees, true, "uphill"),
+            (-degrees, true, "downhill"),
+            (degrees, false, "across"),
+        ] {
+            cases.push(Case {
+                label: format!("pivot slope{degrees} {facing}"),
+                ground: Ground::Slope {
+                    angle: angle.to_radians(),
+                    along,
+                },
+                gear: None,
+                steer: 1.0,
+                throttle: 0.0,
+            });
+        }
+    }
+    for case in cases.iter().filter(|case| selected(&case.label)) {
+        run(case, PIVOT_TURN_S);
     }
 }

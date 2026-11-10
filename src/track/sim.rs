@@ -450,6 +450,10 @@ impl TrackGear {
         }
         out.f32("transmission.steer_capacity_n", tp.steer_capacity_n);
         out.f32("transmission.neutral_d_full", tp.neutral_d_full);
+        out.u32(
+            "transmission.neutral_mean_held",
+            u32::from(tp.neutral_mean == super::transmission::NeutralMean::Held),
+        );
         out.f32("transmission.recirculation", tp.recirculation);
         out.f32("transmission.brake_capacity_n", tp.brake_capacity_n);
         out.f32("transmission.brake_static_factor", tp.brake_static_factor);

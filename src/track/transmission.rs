@@ -158,6 +158,15 @@ struct TorqueSpan {
     torque: [f64; 3],
 }
 
+/// What holds the mean track speed in a neutral turn, a construction fact. A box that forces only
+/// the speed difference leaves the mean to the load (`Free`); one whose mean path is held in a
+/// neutral turn ties the mean at rest (`Held`), within the two-sided brake capacity.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize)]
+pub enum NeutralMean {
+    Free,
+    Held,
+}
+
 /// The joint transmission's declared data — everything vehicle spec, nothing tuned-to-feel.
 /// Built from authored tables via [`TransmissionParams::from_authoring`].
 #[derive(Clone, Debug)]
@@ -190,6 +199,7 @@ pub struct TransmissionParams {
     /// DERIVED neutral-turn belt-speed half-difference (m/s):
     /// `κ_tight(F1) × v(F1 @ governed)`, from construction's fixed-radius steering.
     pub neutral_d_full: f32,
+    pub neutral_mean: NeutralMean,
     /// Inner-to-outer recirculation efficiency, a share in [0, 1].
     pub recirculation: f32,
     /// Per-side service/parking brake capacity at the sprocket (N).
@@ -242,6 +252,7 @@ pub struct TransmissionAuthoring<'a> {
     /// [`TransmissionParams::steer_capacity_n`] for the convention (the difference axis
     /// carries 2× this).
     pub steer_capacity_n: f32,
+    pub neutral_mean: NeutralMean,
     pub recirculation: f32,
     pub brake_capacity_n: f32,
     pub brake_static_factor: f32,
@@ -437,6 +448,7 @@ impl TransmissionParams {
             reverse_steer_radii_m: a.reverse_steer_radii_m.to_vec(),
             steer_capacity_n: a.steer_capacity_n,
             neutral_d_full,
+            neutral_mean: a.neutral_mean,
             recirculation: a.recirculation,
             brake_capacity_n: a.brake_capacity_n,
             brake_static_factor: a.brake_static_factor,
@@ -1352,6 +1364,8 @@ struct Controls {
     one_way: bool,
     ceiling: bool,
     shifting: bool,
+    /// A held mean path ties the mean belt speed at rest during this tick's neutral pivot.
+    mean_hold: bool,
 }
 
 /// The game's driving and damage model: policy reads the requested action, staffing and served work.
@@ -1431,6 +1445,13 @@ fn driver(
         };
     }
     let one_way = !brake && st.clutch != ClutchState::Out && command.abs() >= DEAD && work;
+    // The pivot's own clutch clause, not every open clutch: a shift window is no pivot. A tick
+    // whose per-side brakes act (park lever, service or Brake intent) keeps their capacity whole.
+    let mean_hold = tp.neutral_mean == NeutralMean::Held
+        && propulsive < DEAD
+        && neutral_pivot(&input, mean)
+        && !st.park
+        && !service;
     Controls {
         input,
         command,
@@ -1440,6 +1461,7 @@ fn driver(
         one_way,
         ceiling: staffed,
         shifting,
+        mean_hold,
     }
 }
 
@@ -1489,6 +1511,11 @@ fn neutral_turn(inp: &TransmissionInput, mean: f32) -> bool {
         && mean.abs() < driver_actuation().neutral_speed_m_s.value
 }
 
+/// Steering applied in the neutral regime: the pivot that opens the main clutch.
+fn neutral_pivot(inp: &TransmissionInput, mean: f32) -> bool {
+    inp.steer.abs() >= DEAD && neutral_turn(inp, mean)
+}
+
 /// Shift windows, a two-sided parked hold and neutral turns open
 /// the clutch. Intent at rest below idle starts Slip regardless of the prior regime,
 /// retaining it until the shaft reaches its commanded launch speed.
@@ -1504,9 +1531,7 @@ fn update_clutch_state(
     let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
     st.clutch = if shifting
         || (st.park && (brake || propulsive < DEAD))
-        || (propulsive < DEAD
-            && (mean.abs() < PARK_ENGAGE_SPEED
-                || (inp.steer.abs() >= DEAD && neutral_turn(inp, mean))))
+        || (propulsive < DEAD && (mean.abs() < PARK_ENGAGE_SPEED || neutral_pivot(inp, mean)))
     {
         ClutchState::Out
     } else if propulsive >= DEAD
@@ -1801,6 +1826,32 @@ fn apply_brake_stop_forces(
     held
 }
 
+/// A held mean path supplies the mean-axis stop force `ΣR − ΣQ − 2·m·I/dt`, split evenly so the
+/// steering member's difference is untouched, within twice the per-side brake capacity at the
+/// mean speed (static while the mean is at rest, dynamic once breached). The hold is passive, so
+/// it is not charged to the engine. Beyond capacity the mean slides and the neutral regime may end.
+/// StandIn: the parking hold's capacity stands for the holding element's own (a gearbox brake
+/// through the engaged gear), which construction does not author.
+fn apply_mean_hold(
+    q: &mut [f32; 2],
+    tp: &TransmissionParams,
+    fp: &DriveConstruction,
+    controls: &Controls,
+) {
+    if !controls.mean_hold {
+        return;
+    }
+    let inp = &controls.input;
+    let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
+    let cap = 2.0 * brake_capacity_for_regime(tp, true, false, mean);
+    let stop =
+        inp.reactions[0] + inp.reactions[1] - q[0] - q[1] - 2.0 * mean * fp.belt_inertia / inp.dt;
+    let hold = stop.clamp(-cap, cap) * 0.5;
+    for force in q {
+        *force += hold;
+    }
+}
+
 /// The Driver holds the crank ceiling with service brakes. Below it no brake acts; beyond
 /// capacity the clutch's independent slip guard still bounds the crank. No gear change is paid.
 fn apply_ceiling_brakes(
@@ -2083,6 +2134,7 @@ pub(crate) fn step(
 
     apply_ceiling_brakes(&mut q, tp, fp, st, &controls, crank);
     let held = apply_brake_stop_forces(&mut q, tp, fp, st, &controls);
+    apply_mean_hold(&mut q, tp, fp, &controls);
 
     // --- Integrate both sides simultaneously: I·v̇ = Q − R (the reaction ALWAYS applies).
     let next = [
