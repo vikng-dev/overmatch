@@ -7,8 +7,9 @@
 //!
 //! REST IS AVIAN'S ISLAND SLEEP. A piece is a dynamic body all match; nothing here changes its
 //! body type. Avian 0.7 links dynamic bodies through touching contacts into islands and puts an
-//! island to sleep once every member has stayed under its `SleepThreshold` for `TimeToSleep`
-//! (0.15 m/s, 0.15 rad/s and 0.5 s, avian's defaults, ASSUMED to suit a piece). A sleeping body
+//! island to sleep once every member has passed its rest test for `TimeToSleep`: either both
+//! velocity thresholds pass or kinetic energy per mass is below the linear rest-speed energy
+//! (see the vendor's `OVERMATCH_PATCH.md`). A sleeping body
 //! leaves the solver and keeps its mass, so what touches it next meets finite mass. Only its
 //! touching contact pairs move to the sleeping set the narrow phase skips
 //! (`collision/contact_types/contact_graph.rs:797`); a pair that overlaps in bounds without

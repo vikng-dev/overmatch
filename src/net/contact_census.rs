@@ -8,11 +8,11 @@
 //! Only awake touching pairs count (the active set); a sleeping pair is outside the solver.
 //! Sensors are excluded: only pairs that generate constraints count.
 
-use avian3d::dynamics::solver::islands::BodyIslandNode;
+use avian3d::dynamics::solver::{islands::BodyIslandNode, solver_body::SolverBody};
 use avian3d::prelude::{
-    AngularVelocity, Collider, ColliderTransform, ContactGraph, ContactPair, LinearVelocity,
-    PhysicsLengthUnit, Position, RigidBody, RigidBodyColliders, Rotation, SimpleCollider,
-    SleepThreshold, Sleeping, TimeToSleep,
+    AngularVelocity, Collider, ColliderTransform, ComputedAngularInertia, ComputedMass,
+    ContactGraph, ContactPair, LinearVelocity, PhysicsLengthUnit, Position, RigidBody,
+    RigidBodyColliders, Rotation, SimpleCollider, SleepThreshold, Sleeping, TimeToSleep,
 };
 use bevy::ecs::entity::EntityHashMap;
 use bevy::platform::collections::{HashMap, HashSet};
@@ -251,7 +251,7 @@ struct PieceRecord {
     episode_born: u32,
     #[serde(skip)]
     motion: (f32, f32),
-    /// Last tick its speed was not under the sleep thresholds (Avian's own comparison).
+    /// Last tick neither Avian rest test passed in this awake episode.
     last_fast: Option<u32>,
     /// The latest tick it went to sleep, the island it slept in and its speeds then (m/s, rad/s).
     sleep: Option<u32>,
@@ -268,7 +268,7 @@ struct PieceRecord {
     changed: bool,
 }
 
-/// The sleep thresholds pieces were compared with: linear in m/s, angular in rad/s.
+/// The engine's rest thresholds and the pose observation resolution.
 #[derive(Clone, Copy, Serialize)]
 struct Thresholds {
     linear: f32,
@@ -586,6 +586,16 @@ pub(super) struct ContactCensus<'w, 's> {
         ),
     >,
     colliders: Query<'w, 's, (&'static Collider, &'static ColliderTransform)>,
+    mass_properties: Query<
+        'w,
+        's,
+        (
+            &'static ComputedMass,
+            &'static ComputedAngularInertia,
+            &'static Rotation,
+            &'static SolverBody,
+        ),
+    >,
     length_unit: Res<'w, PhysicsLengthUnit>,
     time_to_sleep: Res<'w, TimeToSleep>,
     records: ResMut<'w, PieceRecords>,
@@ -725,8 +735,16 @@ impl ContactCensus<'_, '_> {
                 record.awake_ticks += 1;
                 record.changed = true;
                 let linear_limit = unit * unit * rest.linear * rest.linear.abs();
+                let (mass, inertia, rotation, body) = self
+                    .mass_properties
+                    .get(entity)
+                    .expect("every simulated piece retains computed mass and solver state");
                 let angular_limit = rest.angular * rest.angular.abs();
-                if linear * linear >= linear_limit || angular * angular >= angular_limit {
+                let original_rest = velocity.length_squared() < linear_limit
+                    && spin.length_squared() < angular_limit;
+                let energy_rest =
+                    body.kinetic_speed_squared(*mass, *inertia, *rotation) < linear_limit;
+                if !(original_rest || energy_rest) {
                     record.last_fast = Some(tick);
                 }
             }
