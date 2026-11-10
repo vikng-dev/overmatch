@@ -919,32 +919,29 @@ fn a_fallen_piece_comes_to_rest_asleep_a_dynamic_body_still() {
     );
 }
 
-/// The game's environment destruction: freed matter at rest must sleep within Avian's configured
-/// rest window. The server relies on that eligibility surviving small contact gaps. Fixture: an
-/// admitted construction loses its ground supports on triangulated terrain, without a mover.
+/// The game's environment destruction: freed groups with stable support sleep within Avian's
+/// configured rest window and remain dynamic for later wakes. The server's rubble lifecycle
+/// relies on both. Fixture: a column loses its base and lands on a level triangulated bed;
+/// its flat footprint supplies stable support. Disabling sleep on spawned groups must fail.
 #[test]
 fn settled_freed_matter_sleeps_within_avians_rest_window() {
-    let kind = shipped_house();
+    let kind = column_construction();
     let (mut app, root) = composed_kind(false, &kind);
     crate::debris::crumble::sim_plugin(&mut app);
     crate::headless_test::start_fixed_clock(&mut app);
     app.insert_resource(Gravity(Vec3::NEG_Y * crate::physical_laws::gravity_mps2()));
-    let manifest = crate::map::tests::shipped_manifest();
-    let grid = crate::terrain_grid::tests::shipped_grid();
-    // Fixture: the second matching placement includes an oblique contact patch.
-    let instance = manifest
-        .instances
-        .iter()
-        .filter(|i| {
-            matches!(
-                manifest.prototypes[&i.prototype],
-                crate::map::Prototype::Construction { ref asset } if *asset == kind.asset.id
-            )
-        })
-        .nth(1)
-        .unwrap();
-    let xz = instance.pose.xz();
-    let pose = Transform::from_isometry(instance.pose.at_height(grid.height_at(xz.x, xz.y)));
+    // Fixture: a level triangulated bed and an off-origin, yawed column clear of its edges.
+    let grid = crate::terrain_grid::HeightGrid::new(
+        vec![0.0; 9].into(),
+        3,
+        crate::terrain_grid::TerrainExtent {
+            world_size_m: 40.0,
+            ..crate::terrain_grid::FIXTURE_EXTENT
+        },
+    );
+    let bed = Vec3::new(512.0, 32.0, 128.0);
+    let pose = Transform::from_translation(bed + Vec3::new(0.3, 0.0, 0.7))
+        .with_rotation(Quat::from_rotation_y(0.3));
     app.world_mut().entity_mut(root).insert((
         pose,
         Position(pose.translation),
@@ -952,7 +949,7 @@ fn settled_freed_matter_sleeps_within_avians_rest_window() {
     ));
     app.world_mut().spawn((
         RigidBody::Static,
-        Position(Vec3::ZERO),
+        Position(bed),
         crate::terrain_grid::heightfield_collider(&grid),
         crate::ground_types::GroundTypes::load_shipped().terrain_friction(),
         CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
@@ -1026,6 +1023,18 @@ fn settled_freed_matter_sleeps_within_avians_rest_window() {
                     .all(|&piece| app.world().get::<Sleeping>(piece).is_some()),
                 "every piece rested for {quiet} s without a mover, exceeding Avian's {rest} s rest window"
             );
+            for piece in pieces {
+                assert_eq!(
+                    app.world().get::<RigidBody>(piece),
+                    Some(&RigidBody::Dynamic)
+                );
+                let source = app.world().get::<Breakage>(piece).unwrap().origin;
+                assert!(
+                    app.world().get::<Position>(piece).unwrap().0.y
+                        < pose.translation.y + (pose.rotation * source).y,
+                    "freed matter must fall onto the bed before sleeping"
+                );
+            }
             return;
         }
     }
