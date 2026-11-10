@@ -827,19 +827,46 @@ impl Reached {
     }
 }
 
+/// Resolution: how many f32 spacings, at the largest coordinate a [`TankBox`] reads (its body's
+/// position or its own extent), the box is grown by, so a point on its tank's outer face is held
+/// whatever the rounding. DERIVED: such a point reaches the box through at most a handful of
+/// roundings at that magnitude, each within one spacing (the walk's corridor-to-world sum and the
+/// mean of a cone's member exits, parry's rounded bounds centre and half extents, and the
+/// world-to-body subtraction and turn); sixteen leaves room, and moves where an unstopped
+/// direction ends by those spacings alone.
+const BOX_SPACINGS: f32 = 16.0;
+
 /// The game's damage model: a tank's box, the bounds of its armour volumes in its body's frame at
-/// the field's moment ([`super::ProjectileMarchWorld::tank_box`]), the box the pen cam ends a
-/// direction that meets no hard body at (its picture's horizon, `damage_cam::pen_cam::picture`).
-/// A field thrown from inside it ends at it ([`FieldReach::of_box`]).
+/// the field's moment ([`super::ProjectileMarchWorld::tank_box`]), grown by [`BOX_SPACINGS`]: the
+/// box the pen cam ends a direction that meets no hard body at (its picture's horizon,
+/// `damage_cam::pen_cam::picture`). A field thrown from inside it ends at it
+/// ([`FieldReach::of_box`]).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TankBox {
-    pub(super) tank: Entity,
-    pub(super) min: Vec3,
-    pub(super) max: Vec3,
-    pub(super) body: super::motion::Pose,
+    tank: Entity,
+    min: Vec3,
+    max: Vec3,
+    body: super::motion::Pose,
 }
 
 impl TankBox {
+    /// The box of `tank` whose armour spans `min` to `max` in the frame of its body at `body`.
+    pub(super) fn new(tank: Entity, min: Vec3, max: Vec3, body: super::motion::Pose) -> Self {
+        let largest = body
+            .position
+            .abs()
+            .max(min.abs())
+            .max(max.abs())
+            .max_element();
+        let grow = Vec3::splat(BOX_SPACINGS * f32::EPSILON * largest);
+        Self {
+            tank,
+            min: min - grow,
+            max: max + grow,
+            body,
+        }
+    }
+
     pub(crate) fn tank(&self) -> Entity {
         self.tank
     }
@@ -915,13 +942,10 @@ impl FieldReach {
     }
 
     /// The reach of a field thrown from inside `bounds`: the colliders of its tank's body that
-    /// `admit` keeps, and nothing else.
-    ///
-    /// The game's damage model: a field thrown from inside a tank's box ends at that box. Its
-    /// armour shadows its HP boxes as anywhere; a direction that leaves the armour without a stop
-    /// ends where it leaves the box ([`horizon`]) and doses nothing beyond it, so no other body,
-    /// no construction and no other tank is loaded. What a field does past the box is a law the
-    /// game does not have yet; it would enter here, as further colliders admitted.
+    /// `admit` keeps, and nothing else, so a direction no armour stops ends at the box
+    /// ([`horizon`]). The game's damage model's rule: design doc §5, "Containment"
+    /// (`.agents/docs/design/armor-penetration-and-damage.md`). A law for what a field does past
+    /// the box would enter here, as further colliders admitted.
     pub(crate) fn of_box(
         context: &ResolveContext<'_, '_, '_>,
         admit: &dyn Fn(Entity) -> bool,

@@ -528,8 +528,8 @@ cone's `μ_k`, `sin θ_k` and `f_k` are built from its `λ` with IEEE arithmetic
 their bits match on every shipped target and a decoder rebuilds them from the descriptor.
 
 **Shadowing and reach.** A direction's strength is constant in air — no drag, no range —
-and ownership does not restrict its receivers: neighbouring tanks and environment matter take
-part in the same walk. Full shadowing means the first hard body entered stops the direction:
+and, for a field thrown in the open, ownership does not restrict its receivers: neighbouring tanks
+and environment matter take part in the same walk. Full shadowing means the first hard body entered stops the direction:
 armour takes no HP dose, a hard box takes its whole weighted strength, and either shields what
 lies behind. A direction still leaving the emitting body has not entered it; after departure,
 genuine re-entry transfers the returning debris energy to that body, including its far wall.
@@ -538,6 +538,21 @@ same energy twice. A direction entering no hard body ends at the field's candida
 A witness (§6) never stops a direction: each one entered before the stop takes its strength,
 so crew stations never shield other crew stations. The `1/r²` fall-off is geometric: a farther
 box covers fewer directions.
+
+**Containment.** A field thrown from inside a tank's box ends at that box. The box is the bounds
+of the tank's armour volumes in its body's frame at the field's moment (every ballistic volume's
+collider on the tank's rigid body, turret and gun groups included; never a witness or a collision
+proxy), grown by a few f32 spacings at its coordinates (`BOX_SPACINGS`) so a point on the tank's
+own outer face is inside whatever the rounding. The walk then reads that tank's volumes alone: its
+armour shadows its HP boxes and crew stations exactly as above, and a direction that leaves the
+armour without a stop ends where it leaves the box, its horizon, and doses nothing beyond it. So
+no other tank, construction or body is loaded, and a burst inside the box casts no blast and no
+construction takes its rays or a contained cone's. The tank is the throw's own: for a cone, the
+body its exit leaves; for a burst, the body the round last met (crossed, bounced off, or met at
+a functioning contact), never the tank its fuze is attributed to. Overlapping boxes resolve to
+that body, and a point inside only another tank's box is in the open. A throw outside its tank's
+box walks every spatially reached volume. What a field does past the box is a law the game does
+not have yet.
 
 **Walk.** A direction is walked like the line's corridors: the collector and the pairing walk along
 the ray through spatially reached volumes, from outside every candidate's bounds through the throw

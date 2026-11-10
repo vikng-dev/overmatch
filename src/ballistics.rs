@@ -1248,6 +1248,11 @@ pub(crate) struct Projectile {
     contacted: Vec<Entity>,
     /// The game's damage model: source clearance ends permanently at the first box exit.
     source_cleared: bool,
+    /// The game's damage model: the tank owning the body the round last met (crossed, bounced
+    /// off, or met at a functioning contact); `None` before any, or after a body of no tank. The
+    /// box a burst's field is tested against ([`ProjectileMarchWorld::holding_box`]), apart from
+    /// the fuze's attribution.
+    met: Option<Entity>,
 }
 
 impl Projectile {
@@ -1313,6 +1318,7 @@ impl Projectile {
             replica: None,
             contacted: Vec::new(),
             source_cleared: false,
+            met: None,
         }
     }
 }
@@ -2009,6 +2015,7 @@ fn on_fire_shell(
             path_sequence: 0,
             contacted: Vec::new(),
             source_cleared: false,
+            met: None,
             replica: replica.is_some().then(|| {
                 path::Replica::born(
                     fire.shot
@@ -2244,12 +2251,9 @@ impl ProjectileMarchWorld<'_, '_> {
             min = min.min(aabb.min);
             max = max.max(aabb.max);
         }
-        min.cmple(max).all().then_some(resolve::TankBox {
-            tank,
-            min,
-            max,
-            body,
-        })
+        min.cmple(max)
+            .all()
+            .then(|| resolve::TankBox::new(tank, min, max, body))
     }
 
     /// The box of `tank` when it holds the world point `at` ([`Self::tank_box`]); `None` for a
@@ -3425,6 +3429,7 @@ fn function_on_contact(
         .fuze
         .entered(force, flight.speed, owner, contact);
     shell.projectile.fuze.due_within(contact)?;
+    shell.projectile.met = owner;
     Some(burst_ahead(
         shell, context, not_own, flight, budget, contact, moving, health,
     ))
@@ -3496,6 +3501,11 @@ fn follow_crossing(
     decision: resolve::Decision,
     health: &mut Query<&mut ComponentHealth>,
 ) -> (bool, u64) {
+    match &decision {
+        resolve::Decision::Bite(bite) => shell.projectile.met = bite.owner,
+        resolve::Decision::Bounce(bounce) => shell.projectile.met = bounce.owner,
+        resolve::Decision::Clear { .. } => {}
+    }
     if follow_fuzed(&mut shell.projectile.fuze, flight, decision) {
         return (true, 0);
     }
@@ -3565,7 +3575,9 @@ fn burst_here(
     };
     shell.projectile.fuze = burst::Fuze::Inert;
     let nose = burst.nose;
-    let inside = context.world.holding_box(tank, flight.position);
+    let inside = context
+        .world
+        .holding_box(shell.projectile.met, flight.position);
     shell.marks.log.push(ArmourMark::Burst {
         at: flight.position,
         field_origin: burst.filler_center(flight.position, flight.direction),
@@ -3734,8 +3746,10 @@ struct FieldThrow<'a> {
 /// strength `S·f_k`, standing for `1/N` of the field, through every spatially reached volume
 /// ([`resolve::field_direction`]), adding its doses to `dose`; returns the rays in stratum order.
 /// Every contribution reaches the shot tally before its accumulated total rounds to pool units.
-/// Ownership is attribution only: neighboring tanks and unowned environment matter resist and
-/// receive the same field. Material presence and occlusion decide where each direction stops.
+/// Thrown in the open, ownership is attribution only: neighboring tanks and unowned environment
+/// matter resist and receive the same field. Thrown inside a tank's box, it reads that tank alone
+/// and ends at the box (design doc §5, "Containment"). Material presence and occlusion decide where
+/// each direction stops.
 /// The game's damage model requires every direction and witness pass to pair; a contradiction
 /// panics in every build.
 fn walk_field(
@@ -4778,6 +4792,7 @@ pub(crate) mod march_tests {
             replica: None,
             contacted: Vec::new(),
             source_cleared: false,
+            met: None,
         }
     }
 

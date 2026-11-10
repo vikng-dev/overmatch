@@ -1168,9 +1168,8 @@ fn read_shell(
         .log
         .get(marched.marks_from..)
         .expect("ShellMarched's mark cursor is its log's length before the step; logs only grow");
-    // The game's damage model: a field or burst thrown from inside a tank's box loads nothing
-    // outside that box (`ballistics::resolve::FieldReach::of_box`), so a construction takes none
-    // of its rays and no blast.
+    // The game's damage model: a burst or cone the march marks inside a tank's box loads no
+    // construction (design doc §5, "Containment", `.agents/docs/design/armor-penetration-and-damage.md`).
     let mut in_open = true;
     for mark in marks {
         if let ArmourMark::Burst {
@@ -2201,8 +2200,7 @@ fn reduce_geometry(
 /// Each chunk and body collider takes the share of its rays' cones its silhouette intercepts
 /// ([`fracture::intercepted`]): a chunk's from its faces, a collider's from its bounds, the
 /// silhouette of the box that holds it. A collider holding `origin` shades nothing and takes
-/// nothing. A burst inside a tank's box loads nothing outside that box, so it is never cast
-/// ([`read_shell`]).
+/// nothing. A burst inside a tank's box is never cast ([`read_shell`]).
 fn cast_blast(
     p: &mut DepositParam,
     stops: Vec<Option<BlastStop>>,

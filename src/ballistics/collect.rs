@@ -352,7 +352,15 @@ struct NodePrune {
 }
 
 impl NodePrune {
+    /// The prune of the corridor along `axis` from `origin`. A non-finite term would leave NaN in
+    /// both tests, and a NaN comparison keeps a node, so a corridor that is no finite line is a
+    /// bug here, refused rather than collected over every node.
     fn of(origin: Vec3, axis: Vec3, length: f32, behind: f32, reach: f32) -> Self {
+        assert!(
+            origin.is_finite() && axis.is_finite() && length.is_finite() && behind.is_finite(),
+            "game's damage model: a corridor is a finite line ({origin}, {axis}, {length} m, \
+             {behind} m behind)"
+        );
         let near = origin - axis * behind;
         let far = origin + axis * (length - behind);
         Self {
