@@ -34,9 +34,7 @@
 
 use std::collections::BTreeMap;
 
-use avian3d::prelude::{
-    ColliderAabb, ColliderTransform, Position, RigidBody, RigidBodyColliders, Rotation,
-};
+use avian3d::prelude::{Position, Rotation};
 use bevy::ecs::system::{SystemParam, SystemState};
 use bevy::prelude::*;
 
@@ -56,8 +54,8 @@ use crate::state::{GameplaySet, SimPhase};
 use crate::tank::{Rig, Weapon, rig_world_pose};
 use crate::{ClientReplica, CombatantId, CombatantLife, ShotClock, ShotId};
 
-/// How far (m) a shell must be outside the union of a struck tank's collider bounds before its
-/// record is finished: DERIVED to cover the tank's travel in a tick (~0.17 m at 11 m/s and 64 Hz)
+/// How far (m) a shell must be outside a struck tank's armour set's live box before its record is
+/// finished: DERIVED to cover the tank's travel in a tick (~0.17 m at 11 m/s and 64 Hz)
 /// and the round's own radius, so a shell that ended a tick between two of the tank's plates is
 /// still inside.
 const CLEAR_MARGIN: f32 = 0.5;
@@ -422,34 +420,15 @@ fn pose_struck(world: &mut World) {
     }
 }
 
-/// The game's damage model: the hull frame of `tank` at completed collider placement, before
-/// consequences can detach its parts. The body pose is read back from a composed child collider,
-/// or from the body itself when its volumes are bodies of their own.
+/// The game's damage model: the hull frame of `tank` where the march's live clock posed its armour
+/// set (a standalone static fixture, with no interval history): from its body's pose, before
+/// consequences can detach its parts.
 fn hull_frame(world: &mut World, tank: Entity) -> Option<HullFrame> {
     let hull = world.get::<Rig>(tank)?.hull;
-    let child = world.get::<RigidBodyColliders>(tank).and_then(|colliders| {
-        colliders.iter().find_map(|collider| {
-            let entity = world.get_entity(collider).ok()?;
-            if entity.contains::<RigidBody>() {
-                return None;
-            }
-            Some((
-                entity.get::<Position>()?.0,
-                entity.get::<Rotation>()?.0,
-                *entity.get::<ColliderTransform>()?,
-            ))
-        })
-    });
-    let (position, rotation) = match child {
-        Some((position, rotation, local)) => {
-            let body = rotation * local.rotation.0.inverse();
-            (position - body * local.translation, body)
-        }
-        None => (
-            world.get::<Position>(tank)?.0,
-            world.get::<Rotation>(tank)?.0,
-        ),
-    };
+    let (position, rotation) = (
+        world.get::<Position>(tank)?.0,
+        world.get::<Rotation>(tank)?.0,
+    );
     let mut state = SystemState::<(Query<&ChildOf>, Query<&Transform>)>::new(world);
     let (parents, locals) = state.get(world).ok()?;
     let (at, turn) = rig_world_pose(hull, tank, position, rotation, &parents, &locals)?;
@@ -663,27 +642,10 @@ pub(crate) fn round_inside(world: &World, tank: Entity, shell: Entity) -> bool {
     })
 }
 
-/// Whether `point` (WORLD) is clear of `tank`'s colliders by [`CLEAR_MARGIN`]; a tank with none
-/// is clear of everything.
+/// Whether `point` (WORLD) is clear of `tank`'s armour set, posed live, by [`CLEAR_MARGIN`]; a tank
+/// with no set, or none of whose parts remain, is clear of everything.
 fn clear_of(world: &World, tank: Entity, point: Vec3) -> bool {
-    let colliders = world
-        .get::<RigidBodyColliders>(tank)
-        .into_iter()
-        .flat_map(|colliders| colliders.iter());
-    let volumes = world
-        .get::<TankVolumes>(tank)
-        .into_iter()
-        .flat_map(|volumes| volumes.iter());
-    let mut bounds: Option<(Vec3, Vec3)> = None;
-    for entity in colliders.chain(volumes) {
-        if let Some(aabb) = world.get::<ColliderAabb>(entity) {
-            bounds = Some(match bounds {
-                Some((min, max)) => (min.min(aabb.min), max.max(aabb.max)),
-                None => (aabb.min, aabb.max),
-            });
-        }
-    }
-    bounds.is_none_or(|(min, max)| {
+    crate::ballistics::armour_set::live_box(world, tank).is_none_or(|(min, max)| {
         point.cmplt(min - CLEAR_MARGIN).any() || point.cmpgt(max + CLEAR_MARGIN).any()
     })
 }

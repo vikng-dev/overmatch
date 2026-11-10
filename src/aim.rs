@@ -19,9 +19,9 @@ use bevy::prelude::*;
 use bevy::ui::UiSystems;
 
 use crate::Layer;
+use crate::ballistics::armour_set::LiveArmour;
 use crate::camera::GunnerCameraPlaced;
 use crate::command::{AimIntent, ParsedTankCommand, TankCommand, TankDeviceSet};
-use crate::damage::{VolumeOf, hit_ancestor};
 use crate::firecontrol::{RangeTable, lob};
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::sight::{SightMode, SightToggled, in_third_person};
@@ -37,41 +37,44 @@ use crate::view::PlayerView;
 pub(crate) static AIM_LIMIT: LazyLock<f32> =
     LazyLock::new(|| crate::world::VIEW_CAST_MAX_M + *MAX_RANGE);
 
-/// Distance along an aim ray to the first surface a shell would meet: terrain or a tank's ballistic
-/// volumes — the same `Terrain | Armor` mask the live shell marches against
-/// (`ballistics::integrate_projectiles`), so the dots predict the shell's truth, tanks included.
-/// `own` tank's volumes are excluded: every aim ray legitimately starts inside or behind them (the
-/// optic resolve at the gun pivot inside the mantlet, the third-person pick behind own turret, the
-/// bore ray at the muzzle inside the barrel's exposed-component volume), and a self-hit would weld
-/// the aim to the tank itself. Falls back to `max` on a miss (sky / above the horizon); the CAST
-/// itself is clamped to [`crate::world::VIEW_CAST_MAX_M`] — nothing exists between the world
-/// diagonal and [`MAX_RANGE`] for a ray to hit, so behavior is identical at a fraction of the
-/// parry traversal.
+/// Distance along an aim ray to the first surface a shell would meet: terrain and scenery on the
+/// `Terrain | Armor` mask the live shell marches against (`ballistics::integrate_projectiles`), and
+/// every tank's armour volumes from its armour set posed live ([`LiveArmour`]), so the dots predict
+/// the shell's truth, tanks included. `own` tank's set is excluded: every aim ray legitimately
+/// starts inside or behind its armour (the optic resolve at the gun pivot inside the mantlet, the
+/// third-person pick behind own turret, the bore ray at the muzzle inside the barrel's
+/// exposed-component volume), and a self-hit would weld the aim to the tank itself. Falls back to
+/// `max` on a miss (sky / above the horizon); the CAST itself is clamped to
+/// [`crate::world::VIEW_CAST_MAX_M`] — nothing exists between the world diagonal and [`MAX_RANGE`]
+/// for a ray to hit, so behavior is identical at a fraction of the parry traversal.
 pub(crate) fn aim_distance(
     spatial: &SpatialQuery,
+    armour: &LiveArmour,
     ray: Ray3d,
     max: f32,
     own: Entity,
-    volumes: &Query<&VolumeOf>,
-    parents: &Query<&ChildOf>,
 ) -> f32 {
-    // Ownership sits on the hit's ancestry (`hit_ancestor`, the shared hierarchy-resolution rule).
-    // No volume in the ancestry ⇒ terrain ⇒ never "own".
-    let not_own = |entity: Entity| {
-        hit_ancestor(entity, volumes, parents).is_none_or(|(_, owner)| owner.tank() != own)
-    };
-    spatial
+    let reach = max.min(crate::world::VIEW_CAST_MAX_M);
+    // A tank's armour parts answer from their set; the tree's entries for them are never read.
+    let scenery = spatial
         .cast_ray_predicate(
             ray.origin,
             ray.direction,
-            max.min(crate::world::VIEW_CAST_MAX_M),
+            reach,
             true,
             &SpatialQueryFilter::from_mask(
                 LayerMask::from(Layer::Terrain) | LayerMask::from(Layer::Armor),
             ),
-            &not_own,
+            &|entity| !armour.holds(entity),
         )
-        .map(|hit| hit.distance)
+        .map(|hit| hit.distance);
+    let tank = armour
+        .cast_ray(ray, reach, |tank| tank != own)
+        .map(|hit| hit.distance);
+    scenery
+        .into_iter()
+        .chain(tank)
+        .reduce(f32::min)
         .unwrap_or(max)
 }
 
@@ -298,11 +301,11 @@ fn hull_frame(
 fn commit_aim(
     mouse: Res<ButtonInput<MouseButton>>,
     spatial: SpatialQuery,
+    armour: LiveArmour,
     camera_query: Query<(&Camera, &GlobalTransform), With<PlayerView>>,
     window: Query<&Window>,
     controlled: Query<(Entity, &Rig), With<Controlled>>,
     poses: Query<(&Position, &Rotation)>,
-    volumes: Query<&VolumeOf>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
     mut tank_commands: Query<&mut TankCommand>,
@@ -351,9 +354,7 @@ fn commit_aim(
         "an active aim camera has a finite ray origin"
     );
 
-    let point = ray.get_point(aim_distance(
-        &spatial, ray, *MAX_RANGE, tank, &volumes, &parents,
-    ));
+    let point = ray.get_point(aim_distance(&spatial, &armour, ray, *MAX_RANGE, tank));
 
     // Store raw sight-line intent; servo-time lob raises the bore above its amber HUD point.
     let aim = Some(AimIntent::World(point));
@@ -477,18 +478,13 @@ fn place_indicator(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a system spanning the player camera, the controlled rig's muzzle, aim-ray geometry and one UI node"
-)]
 fn update_bore_indicator(
     spatial: SpatialQuery,
+    armour: LiveArmour,
     camera_query: Query<(&Camera, &GlobalTransform), With<PlayerView>>,
     controlled: Query<(Entity, &Rig), With<Controlled>>,
     view_nodes: Query<&ViewNode>,
     muzzle: Query<&GlobalTransform>,
-    volumes: Query<&VolumeOf>,
-    parents: Query<&ChildOf>,
     mut indicator: Query<
         (&mut Node, &mut Visibility, &ComputedUiRenderTargetInfo),
         With<BoreIndicator>,
@@ -520,9 +516,7 @@ fn update_bore_indicator(
         return;
     };
     let ray = Ray3d::new(muzzle.translation(), direction);
-    let point = ray.get_point(aim_distance(
-        &spatial, ray, *MAX_RANGE, tank, &volumes, &parents,
-    ));
+    let point = ray.get_point(aim_distance(&spatial, &armour, ray, *MAX_RANGE, tank));
 
     place_indicator(
         &mut node,
@@ -655,6 +649,7 @@ pub(crate) mod tests {
     use bevy::input::mouse::AccumulatedMouseMotion;
 
     use super::*;
+    use crate::damage::VolumeOf;
     use crate::firecontrol::{RangeTable, Ranging};
     use crate::sight::drive_gunner_aim;
     use crate::tank::{ServoIndex, ServoRest, ServoSpec, TankServos, drive_servos};

@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use crate::aim::{AimCommit, CommittedAim, MAX_RANGE, aim_distance};
 use crate::camera::view_fov;
 use crate::command::{AimIntent, TankCommand, TankDeviceSet, gather_commands};
-use crate::damage::{ControlledTank, VolumeOf};
+use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::flow::MatchResourceExt;
 use crate::render_policy::{CameraProfile, VisualScope};
@@ -377,6 +377,7 @@ impl LiveServos<'_, '_> {
 pub(crate) fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
     spatial: SpatialQuery,
+    armour: crate::ballistics::armour_set::LiveArmour,
     mut committed: ResMut<CommittedAim>,
     controlled: ControlledTank,
     views: Query<Option<&TankViews>, With<Controlled>>,
@@ -388,7 +389,6 @@ pub(crate) fn drive_gunner_aim(
     poses: Query<(&Position, &Rotation)>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
-    volumes: Query<&VolumeOf>,
     mut tank_commands: Query<&mut TankCommand>,
 ) {
     let (Some(tank), Some(rig)) = (controlled.entity(), controlled.rig()) else {
@@ -578,11 +578,10 @@ pub(crate) fn drive_gunner_aim(
         .expect("finite rig rotation and bounded intent define a nonzero world direction");
     let distance = aim_distance(
         &spatial,
+        &armour,
         Ray3d::new(mount_world, dir_world),
         *MAX_RANGE,
         tank,
-        &volumes,
-        &parents,
     );
     let resolved = mount_local + hull_to_aim.inverse() * dir_local * distance;
 

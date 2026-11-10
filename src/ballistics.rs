@@ -2202,16 +2202,11 @@ impl ProjectileMarchWorld<'_, '_> {
     /// The game's damage model: armour frame `frame`'s pose in its carrier from its node's
     /// present local pose, where no interval history poses it (static fixtures).
     fn frame_in_carrier(&self, set: &armour_set::ArmourSet, frame: usize) -> motion::Pose {
-        let frame = &set.frames()[frame];
         let local = self
             .locals
-            .get(frame.node)
+            .get(set.frames()[frame].node)
             .expect("game's damage model: an armour frame's node carries its local pose");
-        frame.offset
-            * motion::Pose {
-                position: local.translation,
-                rotation: local.rotation,
-            }
+        set.live_in_carrier(frame, *local)
     }
 
     /// The box of `tank` when it holds the world point `at` ([`Self::tank_box`]); `None` for a
@@ -7997,65 +7992,72 @@ pub(crate) mod march_tests {
         use avian3d::prelude::SimpleCollider;
         use bevy::ecs::system::RunSystemOnce;
         app.world_mut()
-            .run_system_once(move |world: ProjectileMarchWorld| {
-                let (pose, collider, _) = world.geometry(volume);
-                let bounds = collider.aabb(pose.position, pose.rotation);
-                let centre = (bounds.min + bounds.max) * 0.5;
-                // Fixture query margin, m: start outside the convex solid and finish beyond it.
-                let margin = 1.0;
-                let origin = centre + Vec3::Z * ((bounds.max.z - bounds.min.z) * 0.5 + margin);
-                let length = bounds.max.z - bounds.min.z + 2.0 * margin;
-                let admits = |entity| entity == volume;
-                let hit =
-                    cast_disc_segment(&world, &[Vec3::ZERO], origin, Dir3::NEG_Z, length, &admits);
-                assert!(
-                    matches!(hit, Some(SegmentHit::Armor(hit)) if hit.entity == volume),
-                    "flight must meet occupied matter"
-                );
-                let context = resolve::ResolveContext {
-                    world: &world,
-                    laws: walk::WalkLaws::default(),
-                };
-                let corridor = resolve::build_corridor(
-                    &context,
-                    &admits,
-                    origin,
-                    Vec3::ZERO,
-                    Vec3::NEG_Z,
-                    length,
-                    walk::DiscFrame::anchored(Vec3::NEG_Z).unwrap(),
-                    0.0,
-                    &[],
-                )
-                .unwrap();
-                assert!(
-                    corridor.samples[0]
-                        .hits
-                        .iter()
-                        .any(|hit| hit.volume == volume),
-                    "corridor must meet occupied matter"
-                );
-                let reach = resolve::FieldReach::of_throw(&context, &admits, origin);
-                let (_, field) = resolve::field_presence(&context, &reach, origin, Dir3::NEG_Z)
-                    .unwrap()
+            .run_system_once(
+                move |world: ProjectileMarchWorld, armour: armour_set::LiveArmour| {
+                    let (pose, collider, _) = world.geometry(volume);
+                    let bounds = collider.aabb(pose.position, pose.rotation);
+                    let centre = (bounds.min + bounds.max) * 0.5;
+                    // Fixture query margin, m: start outside the convex solid and finish beyond it.
+                    let margin = 1.0;
+                    let origin = centre + Vec3::Z * ((bounds.max.z - bounds.min.z) * 0.5 + margin);
+                    let length = bounds.max.z - bounds.min.z + 2.0 * margin;
+                    let admits = |entity| entity == volume;
+                    let hit = cast_disc_segment(
+                        &world,
+                        &[Vec3::ZERO],
+                        origin,
+                        Dir3::NEG_Z,
+                        length,
+                        &admits,
+                    );
+                    assert!(
+                        matches!(hit, Some(SegmentHit::Armor(hit)) if hit.entity == volume),
+                        "flight must meet occupied matter"
+                    );
+                    let context = resolve::ResolveContext {
+                        world: &world,
+                        laws: walk::WalkLaws::default(),
+                    };
+                    let corridor = resolve::build_corridor(
+                        &context,
+                        &admits,
+                        origin,
+                        Vec3::ZERO,
+                        Vec3::NEG_Z,
+                        length,
+                        walk::DiscFrame::anchored(Vec3::NEG_Z).unwrap(),
+                        0.0,
+                        &[],
+                    )
                     .unwrap();
-                assert!(
-                    field
-                        .layers
-                        .iter()
-                        .any(|layer| layer.present.iter().any(|present| present.volume == volume)),
-                    "field must meet occupied matter"
-                );
-                let aimed = crate::aim::aim_distance(
-                    &world.spatial,
-                    Ray3d::new(origin, Dir3::NEG_Z),
-                    length,
-                    Entity::PLACEHOLDER,
-                    &world.owners,
-                    &world.parents,
-                );
-                assert!(aimed < length, "aim must meet occupied matter");
-            })
+                    assert!(
+                        corridor.samples[0]
+                            .hits
+                            .iter()
+                            .any(|hit| hit.volume == volume),
+                        "corridor must meet occupied matter"
+                    );
+                    let reach = resolve::FieldReach::of_throw(&context, &admits, origin);
+                    let (_, field) = resolve::field_presence(&context, &reach, origin, Dir3::NEG_Z)
+                        .unwrap()
+                        .unwrap();
+                    assert!(
+                        field.layers.iter().any(|layer| layer
+                            .present
+                            .iter()
+                            .any(|present| present.volume == volume)),
+                        "field must meet occupied matter"
+                    );
+                    let aimed = crate::aim::aim_distance(
+                        &world.spatial,
+                        &armour,
+                        Ray3d::new(origin, Dir3::NEG_Z),
+                        length,
+                        Entity::PLACEHOLDER,
+                    );
+                    assert!(aimed < length, "aim must meet occupied matter");
+                },
+            )
             .unwrap();
     }
 

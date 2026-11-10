@@ -16,7 +16,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use avian3d::prelude::{Collider, RigidBody, SimpleCollider};
+use avian3d::prelude::{Collider, Position, RigidBody, Rotation, SimpleCollider};
+use bevy::ecs::system::SystemParam;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
@@ -489,6 +490,65 @@ impl ArmourSet {
         super::motion::outward(largest)
     }
 
+    /// Frame `frame`'s pose in its carrier from `local`, its node's present local pose: how a set
+    /// with no pose history (a replica's, a static fixture's) is posed.
+    pub(super) fn live_in_carrier(&self, frame: usize, local: Transform) -> Pose {
+        let frame = &self.frames[frame];
+        frame.offset * link(local, &frame.node)
+    }
+
+    /// The nearest armour volume part (no crew box) the ray from `origin` along `direction` meets
+    /// within `max`, each frame posed as [`Self::in_world`] poses it: its distance, its normal and
+    /// the part. A frame's box, then a part's, grown by [`super::SET_BOX_MARGIN`], gates the part's
+    /// shape.
+    pub(super) fn cast_ray(
+        &self,
+        body: &impl Fn(Entity) -> Pose,
+        in_carrier: &impl Fn(usize) -> Pose,
+        origin: Vec3,
+        direction: Dir3,
+        max: f32,
+    ) -> Option<(f32, Vec3, &Part)> {
+        let meets = |bounds: Bounds, length: f32| {
+            super::collect::Probe::Segment {
+                origin,
+                axis: direction.into(),
+                length,
+                radius: super::SET_BOX_MARGIN,
+            }
+            .meets(bounds.min, bounds.max)
+        };
+        let mut nearest: Option<(f32, Vec3, &Part)> = None;
+        for (index, frame) in self.frames.iter().enumerate() {
+            let Some(bounds) = frame.bounds else {
+                continue; // A frame carrying no part.
+            };
+            let pose = self.in_world(index, body, in_carrier);
+            if !meets(bounds.posed(pose), nearest.map_or(max, |(at, ..)| at)) {
+                continue;
+            }
+            for part in &frame.parts {
+                let reach = nearest.map_or(max, |(at, ..)| at);
+                if !matches!(part.role, Role::Armour(_)) || !meets(part.bounds.posed(pose), reach) {
+                    continue;
+                }
+                let at = pose * part.pose;
+                if let Some((distance, normal)) = part.shape.cast_ray(
+                    at.position,
+                    at.rotation,
+                    origin,
+                    direction.into(),
+                    reach,
+                    true,
+                ) && nearest.is_none_or(|(best, ..)| distance < best)
+                {
+                    nearest = Some((distance, normal, part));
+                }
+            }
+        }
+        nearest
+    }
+
     /// Frame `frame`'s world pose, its base body's given by `body` and each frame's pose in its
     /// carrier by `in_carrier`.
     pub(super) fn in_world(
@@ -580,6 +640,97 @@ pub(crate) fn rebase(
     sets.get_mut(tank)
         .expect("game's damage model: an armour frame's tank carries its set")
         .rebase(added.entity);
+}
+
+/// The game's damage model: every tank's armour set posed live: each base body at its `Position`
+/// and `Rotation`, each frame from its node's present local pose ([`ArmourSet::live_in_carrier`]),
+/// as the march's live clock poses it. A replica's sets keep no pose history ([`snapshot`] runs on
+/// the authority alone), so its readers (the aim and sight rays) read them here.
+#[derive(SystemParam)]
+pub(crate) struct LiveArmour<'w, 's> {
+    sets: Query<'w, 's, &'static ArmourSet>,
+    parts: Query<'w, 's, (), With<ArmourPart>>,
+    bodies: Query<'w, 's, (&'static Position, &'static Rotation)>,
+    locals: Query<'w, 's, &'static Transform>,
+}
+
+/// The game's damage model: the first armour part a ray meets ([`LiveArmour::cast_ray`]).
+pub(crate) struct ArmourHit {
+    pub distance: f32,
+    pub normal: Vec3,
+    pub tank: Entity,
+    /// The armour volume the part belongs to ([`Role::Armour`]).
+    pub volume: Entity,
+}
+
+impl LiveArmour<'_, '_> {
+    /// Whether collider `entity` is an armour set's part: a tree query drops it, its set answers
+    /// for it.
+    pub(crate) fn holds(&self, entity: Entity) -> bool {
+        self.parts.contains(entity)
+    }
+
+    /// The first armour volume part (no crew box) of a tank `admit` takes that `ray` meets within
+    /// `max`.
+    pub(crate) fn cast_ray(
+        &self,
+        ray: Ray3d,
+        max: f32,
+        admit: impl Fn(Entity) -> bool,
+    ) -> Option<ArmourHit> {
+        let body = |base: Entity| {
+            let (position, rotation) = self
+                .bodies
+                .get(base)
+                .expect("game's damage model: an armour frame's base body carries its pose");
+            Pose {
+                position: position.0,
+                rotation: rotation.0,
+            }
+        };
+        self.sets
+            .iter()
+            .filter(|set| admit(set.root()))
+            .filter_map(|set| {
+                let in_carrier = |frame: usize| {
+                    let node = set.frames[frame].node;
+                    set.live_in_carrier(frame, *self.locals.get(node).expect(LIVE_FRAME_NODE))
+                };
+                let (distance, normal, part) =
+                    set.cast_ray(&body, &in_carrier, ray.origin, ray.direction, max)?;
+                Some(ArmourHit {
+                    distance,
+                    normal,
+                    tank: set.root(),
+                    volume: part.role.volume(),
+                })
+            })
+            .min_by(|a, b| a.distance.total_cmp(&b.distance))
+    }
+}
+
+const LIVE_FRAME_NODE: &str = "game's damage model: an armour frame's node carries its local pose";
+
+/// The game's damage model: the world box of every part of `tank`'s set posed live from `world`
+/// ([`LiveArmour`]); `None` for an entity with no set or a set with no part.
+pub(crate) fn live_box(world: &World, tank: Entity) -> Option<(Vec3, Vec3)> {
+    let set = world.get::<ArmourSet>(tank)?;
+    let body = |base: Entity| Pose {
+        position: world
+            .get::<Position>(base)
+            .expect("game's damage model: an armour frame's base body carries its pose")
+            .0,
+        rotation: world
+            .get::<Rotation>(base)
+            .expect("game's damage model: an armour frame's base body carries its pose")
+            .0,
+    };
+    let in_carrier = |frame: usize| {
+        let node = set.frames[frame].node;
+        set.live_in_carrier(frame, *world.get::<Transform>(node).expect(LIVE_FRAME_NODE))
+    };
+    set.world_box(&body, &in_carrier)
+        .map(|bounds| (bounds.min, bounds.max))
 }
 
 /// The game's damage model: advance every tank's frame poses for the tick just stepped, and record

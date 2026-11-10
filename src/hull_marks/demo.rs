@@ -26,7 +26,6 @@ use bevy::prelude::*;
 
 use crate::ballistics::{ShellStrike, Verdict};
 use crate::camera::{CameraCaptive, CaptiveCameraPlaced};
-use crate::damage::VolumeOf;
 use crate::tank::{Controlled, SimParts, Tank, ViewNode, Weapon};
 use crate::view::PlayerView;
 use crate::{CombatantId, Layer, ShotId};
@@ -83,10 +82,9 @@ fn strike_target(
     target: Query<(Entity, &GlobalTransform, &SimParts), (With<Tank>, Without<Controlled>)>,
     bound: Query<(), With<ViewNode>>,
     weapons: Query<(&Weapon, &crate::tank::TankRoot)>,
-    volumes: Query<&VolumeOf>,
     materials: Query<&crate::ballistics::BallisticVolume>,
-    parents: Query<&ChildOf>,
     spatial: SpatialQuery,
+    armour: crate::ballistics::armour_set::LiveArmour,
     mut commands: Commands,
 ) {
     if time.elapsed_secs() < STRIKE_FROM_S {
@@ -128,12 +126,34 @@ fn strike_target(
     .enumerate()
     {
         let origin = aim + right * offset - forward * 4.0;
-        let hit = spatial.cast_ray(origin, Dir3::new(forward).expect("the inspection ray has a finite nonzero bearing"), 10.0, true, &filter)
-            .unwrap_or_else(|| panic!("hull marks demo: ray {index} met no armour — reposition the inspection ray on the declared target"));
-        let volume = std::iter::once(hit.entity)
-            .chain(parents.get(hit.entity).ok().map(ChildOf::parent))
-            .find(|&entity| volumes.get(entity).is_ok_and(|of| of.tank() == target));
-        let volume = volume.unwrap_or_else(|| panic!("hull marks demo: ray {index} met armour outside the declared target — reposition the inspection ray"));
+        let ray = Ray3d::new(
+            origin,
+            Dir3::new(forward).expect("the inspection ray has a finite nonzero bearing"),
+        );
+        let hit = armour.cast_ray(ray, 10.0, |_| true).unwrap_or_else(|| {
+            panic!(
+                "hull marks demo: ray {index} met no armour — reposition the inspection ray on \
+                 the declared target"
+            )
+        });
+        // Armour outside every tank's set (a construction) comes from the tree.
+        let nearer = spatial
+            .cast_ray_predicate(
+                ray.origin,
+                ray.direction,
+                hit.distance,
+                true,
+                &filter,
+                &|entity| !armour.holds(entity),
+            )
+            .is_some();
+        if nearer || hit.tank != target {
+            panic!(
+                "hull marks demo: ray {index} met armour outside the declared target — \
+                 reposition the inspection ray"
+            );
+        }
+        let volume = hit.volume;
         let at = origin + forward * hit.distance;
         let normal = hit.normal.normalize();
         let incoming = if verdict == Verdict::Ricochet {

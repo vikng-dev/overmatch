@@ -2519,21 +2519,10 @@ fn a_range_round_on_the_target_is_explained_and_opens_no_corner() {
         gun.rounds[0].key.clone()
     };
 
-    // Broadside through the centre of the target's colliders, from outside them: the line crosses
+    // Broadside through the centre of the target's armour set, from outside it: the line crosses
     // the tank's side, clear of the plates downrange of the camera's spawn.
-    let mut colliders = world.query::<(Entity, &avian3d::prelude::ColliderAabb)>();
-    let (min, max) = colliders
-        .iter(world)
-        .filter(|&(entity, _)| {
-            std::iter::successors(Some(entity), |&node| {
-                world.get::<ChildOf>(node).map(ChildOf::parent)
-            })
-            .any(|node| node == target)
-        })
-        .fold((Vec3::MAX, Vec3::MIN), |(min, max), (_, aabb)| {
-            (min.min(aabb.min), max.max(aabb.max))
-        });
-    assert!(min.cmple(max).all(), "the target has colliders");
+    let (min, max) = crate::ballistics::armour_set::live_box(world, target)
+        .expect("the target carries its armour set");
     let aim = (min + max) / 2.0;
     let side = world
         .get::<GlobalTransform>(target)
