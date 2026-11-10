@@ -1,6 +1,5 @@
 //! Vertical decomposition of the visible upper envelope over a positive column rectangle.
-//! Noncoincident pins and nonzero collocation shares supply its dimensions. Hidden edges never
-//! enter the sweep.
+//! `partition` refuses nonpositive dimensions. Hidden edges never enter the sweep.
 //! Work to discover visibility depends on the input faces; integration cells depend only on
 //! visible finite edges. With E edges and X proper crossings, at most 1 + 4E + 4X bands close:
 //! each endpoint changes at most two neighbouring bands, and each crossing at most four.
@@ -132,7 +131,10 @@ fn visible(
         }
     }
     for (a, b) in intervals {
-        edges.push(Edge::new(edge.a.lerp(edge.b, a), edge.a.lerp(edge.b, b)));
+        edges.push(Edge::new(
+            edge.a + (edge.b - edge.a) * a,
+            edge.a + (edge.b - edge.a) * b,
+        ));
     }
 }
 
@@ -192,7 +194,6 @@ fn boundaries(regions: &[Region], rectangle: &[DVec3]) -> Vec<Edge> {
             }
         }
     }
-    edges.retain(|e| e.a.x < e.b.x);
     edges
 }
 
@@ -236,6 +237,10 @@ pub(super) fn partition<'a>(
     free: Vec3,
     faces: &[(usize, &'a ClippedFace)],
 ) -> Vec<Cell<'a>> {
+    assert!(
+        a < b && strip.0 < strip.1,
+        "a support half has positive length and width"
+    );
     let rectangle = [
         DVec3::new(a.into(), strip.0.into(), 1.0),
         DVec3::new(b.into(), strip.0.into(), 1.0),
@@ -291,24 +296,28 @@ pub(super) fn partition<'a>(
         .collect();
     let edges = boundaries(&regions, &rectangle);
     let events = events(&edges);
-    let mut open: BTreeMap<(usize, usize), (f64, Option<usize>)> = BTreeMap::new();
+    let mut open: BTreeMap<(usize, usize), f64> = BTreeMap::new();
     let mut cells = Vec::new();
-    let emit = |key: (usize, usize),
-                start: f64,
-                end: f64,
-                owner: Option<usize>,
-                cells: &mut Vec<Cell<'a>>| {
+    let emit = |key: (usize, usize), start: f64, end: f64, cells: &mut Vec<Cell<'a>>| {
         let (lower, upper) = (edges[key.0], edges[key.1]);
-        let polygon: Vec<_> = [
+        let corners = [
             lower.at(start),
             lower.at(end),
             upper.at(end),
             upper.at(start),
-        ]
-        .into_iter()
-        .map(|p| p.as_vec3())
-        .collect();
-        if super::signed_area(&polygon) > 0.0 {
+        ];
+        // A convex band's area centroid lies inside it, away from depth ties at its apex.
+        let mut moment = DVec3::ZERO;
+        let mut area = 0.0;
+        for pair in corners[1..].windows(2) {
+            let (a, b) = (pair[0] - corners[0], pair[1] - corners[0]);
+            let cross = a.x * b.y - a.y * b.x;
+            area += cross;
+            moment += (corners[0] + pair[0] + pair[1]) * cross / 3.0;
+        }
+        let polygon: Vec<_> = corners.into_iter().map(|p| p.as_vec3()).collect();
+        if area > 0.0 && super::signed_area(&polygon) > 0.0 {
+            let owner = owner(moment / area, base64, &regions);
             cells.push(Cell {
                 polygon,
                 depth: owner.map_or(base, |i| regions[i].depth.as_vec3()),
@@ -322,7 +331,7 @@ pub(super) fn partition<'a>(
         let mut active: Vec<_> = edges
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.a.x <= x && e.b.x >= end)
+            .filter(|(_, e)| e.a.x < e.b.x && e.a.x <= x && e.b.x >= end)
             .map(|(i, e)| (i, e.at(mid).y))
             .collect();
         active.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
@@ -333,22 +342,30 @@ pub(super) fn partition<'a>(
                 continue;
             } // Coincident boundaries enclose no area.
             let key = (lower, upper);
-            // Ownership cannot change inside a band without a visible boundary entering it.
-            let band = open.remove(&key).unwrap_or_else(|| {
-                (
-                    x,
-                    owner(DVec3::new(mid, (lo + hi) / 2.0, 1.0), base64, &regions),
-                )
+            // A lateral boundary changes ownership without changing the band's side keys.
+            let interrupted = edges.iter().any(|e| {
+                e.a.x == x
+                    && e.b.x == x
+                    && e.a.y.min(e.b.y) < edges[upper].at(x).y
+                    && e.a.y.max(e.b.y) > edges[lower].at(x).y
             });
+            let band = if interrupted {
+                if let Some(start) = open.remove(&key) {
+                    emit(key, start, x, &mut cells);
+                }
+                x
+            } else {
+                open.remove(&key).unwrap_or(x)
+            };
             next.insert(key, band);
         }
-        for (key, (start, owner)) in open {
-            emit(key, start, x, owner, &mut cells);
+        for (key, start) in open {
+            emit(key, start, x, &mut cells);
         }
         open = next;
     }
-    for (key, (start, owner)) in open {
-        emit(key, start, b.into(), owner, &mut cells);
+    for (key, start) in open {
+        emit(key, start, b.into(), &mut cells);
     }
     cells
 }

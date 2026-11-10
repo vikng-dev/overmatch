@@ -361,6 +361,94 @@ pub(super) fn patches(
 mod tests {
     use super::*;
 
+    // Fixture: affine surfaces over the unit footprint, in homogeneous coordinates.
+    fn unit_face(depth: Vec3) -> ClippedFace {
+        let polygon = vec![
+            Vec3::Z,
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::ONE,
+            Vec3::new(0.0, 1.0, 1.0),
+        ];
+        let planes = polygon
+            .iter()
+            .zip(polygon.iter().cycle().skip(1))
+            .take(4)
+            .map(|(a, b)| a.cross(*b))
+            .collect();
+        ClippedFace {
+            polygon,
+            planes,
+            depth,
+            normal: Vec3::Y,
+        }
+    }
+
+    /// Suspension reads the envelope's own pressure moments. Removing the interior oblique
+    /// crossing assigns one plane across a region where the other is higher.
+    #[test]
+    fn interior_oblique_crossing_has_analytic_moments() {
+        let faces = [
+            unit_face(Vec3::new(1.0, 1.0, 1.0)),
+            unit_face(Vec3::new(-1.0, -1.0, 2.0)),
+        ];
+        for refs in [
+            vec![(0, &faces[0]), (1, &faces[1])],
+            vec![(1, &faces[1]), (0, &faces[0])],
+        ] {
+            let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
+            let (area, pressure, moment) = moments(&cells, 1.0);
+            // DERIVED: integrate 1+x+y over the square, then add 1-2x-2y over x+y<1/2.
+            // Resolution: unit-scale f32 integration roundoff.
+            assert!((area - 1.0).abs() < 1e-6);
+            assert!((pressure - 49.0 / 24.0).abs() < 1e-6);
+            assert!(
+                (moment - Vec3::new(209.0 / 192.0, 209.0 / 192.0, 49.0 / 24.0)).length() < 1e-6
+            );
+        }
+    }
+
+    /// Loose-piece shadows must replace each other inside a half. The suspension must not
+    /// carry an owner chosen on their tie boundary across the other shadow's visible region.
+    #[test]
+    fn crossing_shoe_shadows_close_lateral_bands_in_both_orders() {
+        let (mut slab, _, _) = partition_fixture(false);
+        slab.len = 2.0;
+        slab.lateral = (0.0, 1.0);
+        slab.reach = 4.0;
+        let faces: Vec<_> = [
+            unit_face(Vec3::new(1.0, 0.0, 1.0)),
+            unit_face(Vec3::new(-1.0, 0.0, 2.0)),
+        ]
+        .into_iter()
+        .flat_map(|f| f.across_shoe(&slab))
+        .collect();
+        for refs in [
+            vec![(0, &faces[0]), (1, &faces[1])],
+            vec![(1, &faces[1]), (0, &faces[0])],
+        ] {
+            let cells = partition(0.0, 1.0, slab.lateral, Vec3::ZERO, Vec3::ZERO, &refs);
+            let (area, pressure, moment) = moments(&cells, 1.0);
+            // DERIVED: max(1+x,2-x), symmetric about x=1/2, has integral 7/4.
+            // Resolution: unit-scale f32 integration roundoff.
+            assert!((area - 1.0).abs() < 1e-6);
+            assert!((pressure - 7.0 / 4.0).abs() < 1e-6);
+            assert!((moment - Vec3::new(7.0 / 8.0, 7.0 / 8.0, 7.0 / 4.0)).length() < 1e-6);
+            for cell in cells {
+                let p = cell.polygon.iter().sum::<Vec3>() / cell.polygon.len() as f32;
+                assert_eq!(cell.face.unwrap().0, usize::from(p.x < 0.5));
+            }
+        }
+    }
+
+    /// A solid tied with the field contributes no raised support. Choosing the solid on equality
+    /// would make the reaction recipient depend on an otherwise invisible coincident face.
+    #[test]
+    fn field_wins_an_equal_depth_tie() {
+        let face = unit_face(Vec3::Z);
+        let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::Z, Vec3::ZERO, &[(0, &face)]);
+        assert!(cells.iter().all(|c| c.face.is_none()));
+    }
+
     /// Suspension's integration regions depend on the upper envelope, never on hidden solids.
     /// A mutant retaining an overwritten cell's seams produces more than one rectangle per half.
     #[test]
