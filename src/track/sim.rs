@@ -279,6 +279,12 @@ impl TrackGear {
         &self.trans
     }
 
+    /// The grip law's spawn construction.
+    #[cfg(test)]
+    pub(crate) fn grip(&self) -> GripParams {
+        self.construction.grip()
+    }
+
     /// Coupled translation mass for a torque-cut landing: hull plus both belt inertias (kg).
     #[cfg(all(test, feature = "bitprobe"))]
     pub(crate) fn landing_mass(&self) -> f32 {
@@ -398,6 +404,7 @@ impl TrackGear {
         out.f32("force.grip.track", grip.track.dynamic_coefficient);
         out.f32("force.grip.nominal_pressure_kpa", grip.nominal_pressure_kpa);
         out.f32("force.grip.side_weight", grip.side_weight);
+        out.f32("force.grip.hull_coupling", grip.hull_coupling);
 
         let tp = &self.trans;
         out.f32("transmission.engine.idle_rpm", tp.engine.idle_rpm);
@@ -641,6 +648,12 @@ impl TrackGear {
         let grip = GripParams::of(
             &blueprint.spec,
             crate::track::rig_geom::tank_ground_pressure_kpa(geom),
+            crate::track::rig_geom::com_rest_height_m(&blueprint.geometry, geom),
+        );
+        info!(
+            "grip law: hull coupling {:.3}, shortest shear length {:.2} mm per unit grip at the fixed step",
+            grip.hull_coupling,
+            grip.step_shear_per_grip_m(crate::sim_tick::sim_timestep().as_secs_f32()) * 1e3,
         );
         let construction = transmission::DriveConstruction::new(grip, inertia);
         Self {
@@ -2804,6 +2817,7 @@ mod tests {
             let ground = crate::ground_field::ContactGround {
                 grip: mu,
                 rolling_resistance: 1.0,
+                shear_length_m: 0.010,
             };
             let mut spec = super::super::drive_fixture::compact_spec();
             if case == "engine" {
@@ -3041,13 +3055,14 @@ mod tests {
         );
     }
 
-    /// Diagnostics distinguish recoverable shear states within the solver floor.
+    /// Diagnostics distinguish recoverable shear states within one ground's shear length.
     #[test]
     fn diagnostic_digest_distinguishes_recoverable_shear() {
+        let shear = super::super::drive_fixture::ground().shear_length_m;
         let mut elements = TrackGripElements::for_links(1, 3);
-        elements.sides[0].strain[0] = Vec3::X * super::super::forces::GRIP_SHEAR_FLOOR_M * 0.2; // FIXTURE capacity shares.
+        elements.sides[0].strain[0] = Vec3::X * shear * 0.2; // FIXTURE capacity shares.
         let first = coarse_grip_digest(&elements);
-        elements.sides[0].strain[0] = Vec3::X * super::super::forces::GRIP_SHEAR_FLOOR_M * 0.4;
+        elements.sides[0].strain[0] = Vec3::X * shear * 0.4;
         assert_ne!(first, coarse_grip_digest(&elements));
     }
 

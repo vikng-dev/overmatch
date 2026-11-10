@@ -229,8 +229,9 @@ mod tests {
             &std::fs::read_to_string(&path).unwrap(),
         )
         .unwrap();
-        // Fixture nominal pressure is unused by pair mixing; the track friction comes from data.
-        let grip = crate::track::forces::GripParams::of(&spec, 1.0);
+        // Fixture nominal pressure and centre-of-mass height are unused by pair mixing; the
+        // track friction comes from data.
+        let grip = crate::track::forces::GripParams::of(&spec, 1.0, 1.0);
         no_grip(grip.track);
         assert_eq!(grip.pair(wall), 0.0);
         println!(

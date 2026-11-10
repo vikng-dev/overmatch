@@ -18,6 +18,7 @@ fn lab_fp() -> FixtureConstruction {
             track: crate::substances::contact_friction(0.9),
             nominal_pressure_kpa: forces::rolling_reference_kpa(),
             side_weight: 26_500.0 * 9.81 / 2.0,
+            hull_coupling: 1.0, // Fixture point-mass hull.
         },
     }
 }
@@ -153,6 +154,7 @@ fn compact_drivetrain() -> (FixtureConstruction, TransmissionParams) {
 
         nominal_pressure_kpa: forces::rolling_reference_kpa(),
         side_weight: spec.mass * super::super::derive::G / 2.0,
+        hull_coupling: 1.0, // Fixture point-mass hull.
     };
     let tp = spec
         .track

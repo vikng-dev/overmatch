@@ -999,6 +999,7 @@ fn build_rig(
         grip: crate::track::forces::GripParams::of(
             spec,
             crate::track::rig_geom::tank_ground_pressure_kpa(&geom),
+            crate::track::rig_geom::com_rest_height_m(&blueprint.geometry, &geom),
         ),
     });
 

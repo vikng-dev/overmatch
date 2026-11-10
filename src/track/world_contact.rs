@@ -138,6 +138,8 @@ pub(crate) struct SurfaceSample {
     pub(crate) collider: Option<Entity>,
     pub(crate) mu: f32,
     pub(crate) rolling: f32,
+    /// [`SurfaceGrip::shear_length_m`].
+    pub(crate) shear_length_m: f32,
 }
 
 pub(crate) fn sample<O: TerrainOracle>(
@@ -159,6 +161,7 @@ pub(crate) fn sample<O: TerrainOracle>(
         collider,
         mu: surface.mu,
         rolling: surface.rolling,
+        shear_length_m: surface.shear_length_m,
     })
 }
 
@@ -331,6 +334,9 @@ fn patch_contact<O: TerrainOracle>(
 pub(crate) struct SurfaceGrip {
     pub(crate) mu: f32,
     pub(crate) rolling: f32,
+    /// The surface's own shear length (m); the contact law floors it at the step's resolved
+    /// length ([`GripParams::step_shear_per_grip_m`]).
+    pub(crate) shear_length_m: f32,
 }
 
 pub(crate) fn surface_under<O: TerrainOracle>(
@@ -341,26 +347,33 @@ pub(crate) fn surface_under<O: TerrainOracle>(
     pieces: &RubbleBodies,
 ) -> SurfaceGrip {
     match (grip, collider) {
+        // Support only: no grip reads any of these.
         (None, _) => SurfaceGrip {
             mu: 0.0,
             rolling: 0.0,
+            shear_length_m: 0.0,
         },
+        // A solid recipient is no soil: it stores no shear of its own.
         (Some(grip), Some(collider)) => SurfaceGrip {
             mu: grip.pair(pieces.friction(collider)),
             rolling: rigid_rolling_resistance(),
+            shear_length_m: 0.0,
         },
         (Some(grip), None) => match oracle.ground_at(p) {
             Some(ground) => SurfaceGrip {
                 mu: ground.grip,
                 rolling: ground.rolling_at(grip.nominal_pressure_kpa),
+                shear_length_m: ground.shear_length_m,
             },
             None => {
                 #[cfg(test)]
                 {
-                    // Fixture: no-field calibration pads have effective grip 0.9 and no rolling load.
+                    // Fixture: no-field calibration pads have effective grip 0.9, no rolling load
+                    // and a 10 mm shear length.
                     SurfaceGrip {
                         mu: 0.9,
                         rolling: 0.0,
+                        shear_length_m: 0.010,
                     }
                 }
                 #[cfg(not(test))]

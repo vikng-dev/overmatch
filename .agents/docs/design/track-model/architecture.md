@@ -352,13 +352,45 @@ substance is not yet a ground the belt reads).
   shares this immutable field. The renderer uploads its decoded texels in the manifest row order,
   rather than loading or decoding the mask again; the row-fold test checks upload bytes too.
 
-**One grip number per ground.** Every required ground row holds effective grip `μ` and
-reference-pressure rolling resistance `r_ground`, both labelled facts or `Unknown`. Terrain
-capacity is `μ N`, where `N` remains the existing elastic normal load. It has no area term,
-soil/rigid selection, terrain material-pair multiplier or ground-specific compliance.
-`TrackSteel.friction` still supplies solid-recipient pairs (rubble and structures), using
-`sqrt(mu_track * mu_recipient)`. The passive terrain collider's `terrain_solver_friction`
+**Grip strength and shear length per ground.** Every required ground row holds effective grip
+`μ`, shear length `K_ground` (the ground slip that builds the full grip) and reference-pressure
+rolling resistance `r_ground`, each a labelled fact or `Unknown`; a missing field is refused at
+load, naming the file and the field. Terrain capacity is `μ N`, where `N` remains the existing
+elastic normal load. It has no area term, soil/rigid selection or terrain material-pair
+multiplier. `TrackSteel.friction` still supplies solid-recipient pairs (rubble and structures),
+using `sqrt(mu_track * mu_recipient)`. The passive terrain collider's `terrain_solver_friction`
 remains the independent Avian stand-in for solid-body contacts without a track footprint.
+
+**The shear length the law reads.** A patch reads `K = max(K_ground, μ·k_step)`. A solid
+recipient (rubble, a structure, a hull) has no ground row and stores no shear of its own, so it
+reads `K_ground = 0` and the floor governs. `k_step` (`GripParams::step_shear_per_grip_m`) is a
+`Resolution` length per unit grip, derived at spawn from the vehicle's own data:
+
+- The tick reads slip at its start, sets force from this tick's strain and lets Avian integrate
+  after. For the hull riding an element's grip spring, with `x = √(μ g / K)·dt`, `a = κx²` and
+  `b = 2ζκx`, one tick steps by `λ² − (2 − a − b)λ + (1 − b) = 0` (DERIVED). Both the spring and
+  the damper act through `κ = 1 + m h² / I`: `h` the centre of mass's rest height over the
+  footprint, `I` the softer of the pitch and roll moments of the hull's inertia box.
+- It is stable while `a + 2b < 4`. The floor takes the largest `x` with `b ≤ 1` and
+  `a + b ≤ 2`, where no root has a negative real part, so the grip mode never reverses from one
+  tick to the next. At the shipped `ζ = 0.5` and any `κ ≥ 1` the first binds:
+  `k_step = g·dt²·κ²`.
+- The margin to the stable bound absorbs a footprint loaded at one end, where a lateral force
+  also turns the hull in yaw and adds `m z² / I_yaw` to `κ`. For the shipped hull (DERIVED
+  `κ` 1.62 at `h` 0.82 m; 2.42 with all load at a footprint end, `z` 1.8 m), the floor still
+  gives `a + 2b` 3.9 there. A hull-on-hull contact adds the other hull's mobility, which the
+  floor does not count.
+- An element spanning several patches shares one displacement across them, so their stiffnesses
+  `μN/K` add: it reads `K = Σ μN / Σ(μN/K)`. No patch is stiffer than its load at the floor, so
+  neither is the element; a frictionless patch (the map's edge wall) adds nothing, and an element
+  with no capacity holds no strain.
+
+DERIVED for the shipped hull at 64 Hz (the spawn log prints `κ` and `k_step`): `k_step` 6.31 mm
+per unit grip; floors of gravel 4.49 mm, concrete 3.79, sand 3.43, dirt 2.64 and mud 1.75.
+Ground data governs every soil, and the floor governs concrete and solid recipients. An earlier
+derivation, `3a + 2b < 4` with `b = 2ζ√a`, overstated the spring term and left the coupling out
+of the damper; it put the gravel bound at 3.67 mm. The corrected bare bound on gravel, 2.30 mm,
+sits between the MEASURED hold at 3 mm and slide at 2 mm on a 20° park.
 
 The seeds below are DERIVED from the previous shipped proxies at 89.5 kPa, rounded to three
 decimal places. They remain `Unknown`: none measures this map's representative ground/track
@@ -366,13 +398,21 @@ pair. A track-pull and holding-limit test on each representative ground would se
 pressure-varied declutched coast-down tests would settle rolling. Preserving a previous run's
 output is not their justification. The proxy limitations are explicit pending better facts.
 
-| Ground | Grip μ (DERIVED, Unknown) | Grip proxy derivation at 89.5 kPa | Rolling seed at 89.5 kPa (CLAIMED, Unknown) | Rolling at Unit 100 kPa (DERIVED, Unknown) |
-|---|---:|---|---:|---:|
-| concrete | .600 | sqrt(.6 × .6) | .04 | .040000000 |
-| dirt | .418 | tan(20°) + 4830 / 89500 | .06 | .062346369 |
-| mud | .277 | tan(13°) + 4140 / 89500 | .15 | .162905028 |
-| gravel | .712 | tan(35°) + 1040 / 89500 | .05 | .051173184 |
-| sand | .543 | tan(28°) + 1040 / 89500 | .12 | .129385475 |
+| Ground | Grip μ (DERIVED, Unknown) | Grip proxy derivation at 89.5 kPa | Rolling seed at 89.5 kPa (CLAIMED, Unknown) | Rolling at Unit 100 kPa (DERIVED, Unknown) | Shear length `K_ground`, mm (Unknown) |
+|---|---:|---|---:|---:|---:|
+| concrete | .600 | sqrt(.6 × .6) | .04 | .040000000 | 0 |
+| dirt | .418 | tan(20°) + 4830 / 89500 | .06 | .062346369 | 10 |
+| mud | .277 | tan(13°) + 4140 / 89500 | .15 | .162905028 | 25 |
+| gravel | .712 | tan(35°) + 1040 / 89500 | .05 | .051173184 | 10 |
+| sand | .543 | tan(28°) + 1040 / 89500 | .12 | .129385475 | 25 |
+
+The shear lengths are Wong (2001, *Theory of Ground Vehicles*, 3rd ed., §2.4.3) MEASURED values
+standing as proxies: 10 mm for firm sandy terrain carries dirt and gravel, 25 mm for loose sand
+carries sand, and mud borrows loose sand's 25 mm because Wong gives no wet-clay value (clay at
+maximum compaction is about 6 mm). Concrete stores no soil shear; the steel link's own shear on
+paving is unsourced (Wong's 75 mm, §6.4.3, is a fit for a rubber-padded track on paved road), so
+the floor governs there. A shear-plate or track-segment shear-displacement test on each
+representative ground would settle them.
 
 The soil proxies were CLAIMED specimen fits reproduced in the stamping note, not measured map
 soils: sandy loam for dirt, clayey soil for mud, dry loose sand for sand; gravel's angle and
@@ -382,15 +422,16 @@ survives the conversion. At half pressure, grip per weight no longer gains a coh
 the model gives up the prior DERIVED 11.4/14.3/1.6/2.1% capacity on dirt/mud/gravel/sand
 (rounded proxy comparison), until construction and ground facts justify a sinking model.
 
-**Capacity-preserving arithmetic mixing.** Painted weights mix `μ` and `r_ground` directly.
-Both capacity and the pressure-drag law are linear in these coefficients, so a mixture's
-capacity and drag equal the same weighted sum of its constituents at any common pressure.
-There is one rule across every ground; angles, cohesion, rigid shares and soil K have no
-readers or schema fields. Every patch still projects the shared recoverable state into its
-own surface plane. `GRIP_SHEAR_FLOOR_M` is unchanged at 0.075 m: the deleted ground-specific
-K proxies (10/6/10/25 mm) all lay below it and never selected effective compliance.
-The retained shear law, damping, membership, dwell, breakaway and belt stepping are unchanged.
-Their decisions and measured bounds are recorded under “Bounded recoverable shear”.
+**Capacity-preserving arithmetic mixing.** Painted weights mix `μ`, `r_ground` and `K_ground`
+directly. Capacity and the pressure-drag law are linear in the first two, so a mixture's
+capacity and drag equal the same weighted sum of its constituents at any common pressure. The
+shear length mixes by the same weights; the blend spans one 1.46 m mask texel, where no player
+can tell one mixing rule from another. There is one rule across every ground; angles, cohesion
+and rigid shares have no readers or schema fields. Every patch still projects the shared
+recoverable state into its own surface plane. The shear law, damping, membership, dwell and
+breakaway are otherwise those recorded under “Bounded recoverable shear”, which ran at a common
+75 mm length; that length was a solver floor mislabelled as the hull's stability limit, and it
+overrode every ground's own `K`.
 
 **A surface normal carries its own pressure share.** Where the station or pressure-centroid hit normals differ,
 `terrain_surface_patches` subdivides the profile to half `FIELD_ROUNDING` (DERIVED 0.015 m),
@@ -1261,7 +1302,9 @@ ships. (Grip and support have since settled further: per-element strain grip
 
 ### Bounded recoverable shear (#146)
 
-Subject: the game's driving model; game state only. The before tree is the lane's starting
+Subject: the game's driving model; game state only. Every measurement here ran at the common
+75 mm shear length that section 5a's per-ground `K` replaced; rollbacks are now bounded by each
+ground's resolved `K` (mud 25 mm, dirt 10 mm). The before tree is the lane's starting
 main. These are unattended headless measurements, with no captures or pricing. The force-law
 A/B used identical fixtures: baseline accumulated displacement, A plain Dahl on soil, B the
 shared elastic-zone return. B is the sole shipped path.

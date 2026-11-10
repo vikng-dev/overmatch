@@ -2,7 +2,7 @@
 //! as data (`assets/terrain/ground_types.ron`). Each terrain pack names the type it is
 //! (`terrain_blend::BlendLayer::ground`, `terrain_blend::BASE_GROUND`).
 //!
-//! Required, labelled `grip` and reference-pressure `rolling_resistance` become a
+//! Required, labelled `grip`, `shear_length_m` and reference-pressure `rolling_resistance` become a
 //! [`crate::ground_field::ContactGround`]. `GroundTypes::parse` refuses malformed or incomplete
 //! rows and values outside their domains before publication. `terrain_solver_friction` is
 //! separate: Avian solid-body contacts have no track footprint and read that explicit stand-in.
@@ -110,6 +110,9 @@ pub(crate) struct StrikeSource {
 pub(crate) struct GroundType {
     /// Effective track grip: capacity divided by normal load.
     pub(crate) grip: Labelled<f32>,
+    /// Ground slip (m) that builds the full grip: the soil's shear deformation length. Zero is
+    /// a ground that stores no shear of its own.
+    pub(crate) shear_length_m: Labelled<f32>,
     pub(crate) print: PrintResponse,
     /// Total motion resistance quoted at the global reference pressure.
     pub(crate) rolling_resistance: Labelled<f32>,
@@ -123,6 +126,7 @@ impl GroundType {
         crate::ground_field::ContactGround {
             grip: self.grip.value,
             rolling_resistance: self.rolling_resistance.value,
+            shear_length_m: self.shear_length_m.value,
         }
     }
 }
@@ -155,6 +159,7 @@ const FILE_HEADER: &str = "\
 //   darkening            the share of albedo a print takes away, 0..1
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
 //   grip                 effective track capacity / normal load, labelled
+//   shear_length_m       ground slip, m, that builds the full grip, labelled
 //   rolling_resistance   total motion resistance at grip.ron rolling_reference_kpa, labelled
 //   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
 //   dust.colour_srgb     the lifted soil's albedo, sRGB, each channel 0..1
@@ -215,8 +220,8 @@ impl GroundTypes {
     }
 
     /// The table `text` holds, or why it is refused: a malformed file, a missing field or one the
-    /// table does not know, a value outside its domain (grip must be finite and nonnegative;
-    /// a darkening outside 0..=1 is an albedo
+    /// table does not know, a value outside its domain (grip and shear length must be finite and
+    /// nonnegative; a darkening outside 0..=1 is an albedo
     /// gain no material holds; a negative depth or softness prints upward), or a table lacking a
     /// ground a terrain pack names ([`crate::terrain_blend::BASE_GROUND`],
     /// [`crate::terrain_blend::BLEND_LAYERS`]).
@@ -244,13 +249,26 @@ impl GroundTypes {
             )
         };
         for (name, ground) in &table.types {
-            for (field, number) in [
-                ("grip", &ground.grip),
-                ("rolling_resistance", &ground.rolling_resistance),
+            for (field, number, settle) in [
+                (
+                    "grip",
+                    &ground.grip,
+                    "measure track pull at a stated pressure",
+                ),
+                (
+                    "shear_length_m",
+                    &ground.shear_length_m,
+                    "measure shear against slip on this ground",
+                ),
+                (
+                    "rolling_resistance",
+                    &ground.rolling_resistance,
+                    "measure coast-down at a stated pressure",
+                ),
             ] {
                 if !fact(number) {
                     return Err(GroundTableError::Refused(format!(
-                        "{GROUND_TYPES_PATH}: ground {name:?}: {field} must state a fact or Unknown; measure track pull or coast-down at a stated pressure"
+                        "{GROUND_TYPES_PATH}: ground {name:?}: {field} must state a fact or Unknown; {settle}"
                     )));
                 }
             }
@@ -261,6 +279,12 @@ impl GroundTypes {
                     ground.grip.value,
                     ground.grip.value.is_finite() && ground.grip.value >= 0.0,
                     "a finite coefficient of 0 or more",
+                ),
+                (
+                    "shear_length_m",
+                    ground.shear_length_m.value,
+                    ground.shear_length_m.value.is_finite() && ground.shear_length_m.value >= 0.0,
+                    "a finite length of 0 m or more",
                 ),
                 (
                     "rolling_resistance",
@@ -428,7 +452,8 @@ mod tests {
     fn table_text(gravel: &str) -> String {
         let hard = crate::track::forces::rigid_rolling_resistance();
         let block = format!(
-            "grip: (0.5, Fixture(\"fixture\")), print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
+            "grip: (0.5, Fixture(\"fixture\")), shear_length_m: (0.01, Fixture(\"fixture\")), \
+                     print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
                      roughness_gain: 1.0), rolling_resistance: ({hard}, \
                      Fixture(\"fixture\")), dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3)), \
                      strike: (lifted: (0.5, Fixture(\"fixture\")), sparks: (false, \
@@ -502,7 +527,8 @@ mod tests {
     }
 
     /// A GROUND THAT STATES TOO LITTLE IS REFUSED AT LOAD: a ground with no `print` block would
-    /// take no print, a row with no `grip` would lack a capacity fact,
+    /// take no print, a row with no `grip` would lack a capacity fact, a row with no
+    /// `shear_length_m` would build its grip over a length nobody stated,
     /// a ground with no `rolling_resistance` (or one with no label) would roll on a
     /// coefficient nobody stated, a ground with no `dust` would lift a cloud nobody stated, a ground
     /// with no `strike` would answer a round with a muzzle number or nothing, and a
@@ -512,8 +538,11 @@ mod tests {
     /// of these. The terrain collider reads the table's explicit solid-body solver stand-in.
     #[test]
     fn a_ground_that_states_too_little_is_refused_at_load() {
-        let block = "grip: (0.5, Fixture(\"fixture\")), print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
-                     roughness_gain: 1.0)";
+        let shear = "shear_length_m: (0.01, Fixture(\"fixture\")), ";
+        let block = format!(
+            "grip: (0.5, Fixture(\"fixture\")), {shear}print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
+                     roughness_gain: 1.0)"
+        );
         let dust = "dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3)), strike: (lifted: (0.5, \
                     Fixture(\"fixture\")), sparks: (false, Fixture(\"fixture\")))";
         let bare_dust = "dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3))";
@@ -524,7 +553,15 @@ mod tests {
         for (missing, gravel) in [
             (
                 "print",
-                format!("grip: (0.5, Fixture(\"fixture\")), {rolling}, {dust}"),
+                format!("grip: (0.5, Fixture(\"fixture\")), {shear}{rolling}, {dust}"),
+            ),
+            (
+                "shear_length_m",
+                format!("{block}, {rolling}, {dust}").replace(shear, ""),
+            ),
+            (
+                "provenance",
+                format!("{block}, {rolling}, {dust}").replace(shear, "shear_length_m: 0.01, "),
             ),
             ("strike", format!("{block}, {rolling}, {bare_dust}")),
             (
@@ -589,13 +626,13 @@ mod tests {
     fn ground_coefficients_require_fact_provenance() {
         let table = GroundTypes::load_shipped();
         let text = table.to_file_text().unwrap();
-        for field in ["grip", "rolling_resistance"] {
+        for field in ["grip", "shear_length_m", "rolling_resistance"] {
             let mut invalid = table.clone();
             let ground = invalid.types.get_mut("gravel").unwrap();
-            let number = if field == "grip" {
-                &mut ground.grip
-            } else {
-                &mut ground.rolling_resistance
+            let number = match field {
+                "grip" => &mut ground.grip,
+                "shear_length_m" => &mut ground.shear_length_m,
+                _ => &mut ground.rolling_resistance,
             };
             number.label = crate::provenance::Provenance::Taste("fixture invalid job".into());
             let error = GroundTypes::parse(&invalid.to_file_text().unwrap())
@@ -608,13 +645,14 @@ mod tests {
 
     /// A VALUE OUT OF DOMAIN IS REFUSED AT LOAD, NAMING THE GROUND AND THE FIELD: a negative
     /// grip is a negative capacity and an infinite one an
-    /// unbounded grip; a darkening outside 0..=1 is an albedo gain no material holds; a negative
+    /// unbounded grip; a negative shear length stores slip backwards and an infinite one never
+    /// builds grip; a darkening outside 0..=1 is an albedo gain no material holds; a negative
     /// softness or cap prints upward, and a roughness gain of 0 or less is no surface. Every
     /// terrain collider and the prints read the table through [`GroundTypes::parse`]. Mutant: a
     /// parse that skips a field's check, or checks only one of sign and finiteness, loads one of
     /// these. Every soil colour channel is checked independently: lifting dust relies on all of
-    /// them. A zero grip is in domain and loads, and a misspelt field is refused rather than
-    /// read as a ground that states none.
+    /// them. A zero grip and a zero shear length are in domain and load, and a misspelt field is
+    /// refused rather than read as a ground that states none.
     #[test]
     fn a_value_out_of_domain_is_refused_at_load_naming_the_ground() {
         let gravel = |[
@@ -629,9 +667,11 @@ mod tests {
             green,
             blue,
             lifted,
-        ]: [&str; 11]| {
+            shear,
+        ]: [&str; 12]| {
             format!(
-                "grip: ({friction}, Fixture(\"fixture\")), print: (softness_mm_per_kpa: {softness}, depth_cap_mm: {cap}, darkening: \
+                "grip: ({friction}, Fixture(\"fixture\")), shear_length_m: ({shear}, Fixture(\"fixture\")), \
+                 print: (softness_mm_per_kpa: {softness}, depth_cap_mm: {cap}, darkening: \
                  {darkening}, roughness_gain: {roughness}), \
                  rolling_resistance: ({rolling}, Fixture(\"fixture\")), \
                  dust: (erodibility: {erodibility}, colour_srgb: ({red}, {green}, {blue})), \
@@ -654,6 +694,7 @@ mod tests {
             "0.4",
             "0.3",
             "0.5",
+            "0.01",
         ];
         let fields = [
             "print.softness_mm_per_kpa",
@@ -667,8 +708,9 @@ mod tests {
             "dust.colour_srgb",
             "dust.colour_srgb",
             "strike.lifted",
+            "shear_length_m",
         ];
-        let bad: [&[&str]; 11] = [
+        let bad: [&[&str]; 12] = [
             &["-0.1", "inf", "NaN"],
             &["-1.0", "inf", "NaN"],
             &["-0.1", "1.1", "NaN"],
@@ -680,6 +722,7 @@ mod tests {
             &["-0.1", "1.1", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["-0.1", "1.1", "NaN"],
+            &["-0.001", "inf", "NaN"],
         ];
         for (index, field) in fields.iter().enumerate() {
             for value in bad[index] {
@@ -695,8 +738,11 @@ mod tests {
         }
         let mut zero = ok;
         zero[4] = "0.0";
-        let zero = GroundTypes::parse(&table_text(&gravel(zero))).expect("zero grip is in domain");
+        zero[11] = "0.0";
+        let zero = GroundTypes::parse(&table_text(&gravel(zero)))
+            .expect("zero grip and zero shear length are in domain");
         assert_eq!(zero.get("gravel").contact().grip, 0.0);
+        assert_eq!(zero.get("gravel").contact().shear_length_m, 0.0);
         let misspelt = table_text(&gravel(ok)).replacen("grip:", "gripp:", 1);
         assert!(GroundTypes::parse(&misspelt).is_err());
     }

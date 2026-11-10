@@ -38,5 +38,6 @@ pub(crate) fn ground() -> crate::ground_field::ContactGround {
     crate::ground_field::ContactGround {
         grip: 0.65,
         rolling_resistance: 0.04,
+        shear_length_m: 0.010,
     }
 }

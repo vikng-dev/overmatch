@@ -286,6 +286,11 @@ fn run(case: &Case, hold_s: usize) {
         .resource::<crate::track::sim::TrackGear>()
         .trans()
         .clone();
+    let grip = bed
+        .app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .grip();
     let com_local = bed
         .app
         .world()
@@ -384,7 +389,9 @@ fn run(case: &Case, hold_s: usize) {
             "plane_x": [geom.side_plane_x(Side::Left), geom.side_plane_x(Side::Right)],
             "com_local": com_local.to_array(),
             "turret_local": turret_local.to_array(),
-            "shear_floor_m": crate::track::forces::GRIP_SHEAR_FLOOR_M,
+            "shear_length_m": ground.shear_length_m,
+            "step_shear_m": ground.grip * grip.step_shear_per_grip_m(DT),
+            "hull_coupling": grip.hull_coupling,
             "loop_z": [loop_z.0, loop_z.1],
             "mass_kg": bed.mass(),
             "grip": ground.grip,

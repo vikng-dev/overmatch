@@ -38,7 +38,7 @@ use super::route::{polyline_len, resample};
 use crate::bitprobe::{ContactInputProbe, ElementOutputProbe};
 
 /// Effective bristle constitutive data, admitted before contact construction.
-/// The measurement history and stability bounds live in ADR-0026.
+/// The measurement history lives in ADR-0026, the shear-length floor in architecture section 5a.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GripLaw {
@@ -108,14 +108,6 @@ pub(crate) fn ground_rolling_resistance(reference: f32, nominal_pressure_kpa: f3
     hard + (reference - hard) * nominal_pressure_kpa / rolling_reference_kpa()
 }
 
-/// Resolution floor (m) on shear compliance.
-/// DERIVED: ADR-0026's coupled mode has omega*dt about 0.27 at 75 mm and 64 Hz;
-/// stiffness varies as 1/K, so 5 mm raises omega*dt to about 1.05, where the coupled
-/// experiment rang at half the tick rate. This is a conservative measured-mode floor,
-/// not a proof of the sharp coupled-system stability boundary.
-/// Architecture section 5a owns the shared compliance and its player-visible recoverable travel.
-pub(crate) const GRIP_SHEAR_FLOOR_M: f32 = 0.075;
-
 /// Hull contact-point speed (m/s, relative to support) below which rolling fades to zero.
 /// Resolution: regularize the sign change of Coulomb drag in the explicit hull step.
 /// DERIVED for uniform support: c*dt/M = rolling*g*dt/band, monotone below one and stable
@@ -144,21 +136,55 @@ pub struct GripParams {
     /// Nominal weight on one side (N), half the vehicle's: the scale of the element membership
     /// bounds and the vehicle share of the transmission's shift-landing inertia.
     pub side_weight: f32,
+    /// How much faster the footprint moves under a tangent force than the centre of mass alone
+    /// does: κ = 1 + m·h²/I, h the centre of mass's rest height over the footprint, I the softer
+    /// of the hull's pitch and roll moments. Dimensionless, at least 1; DERIVED at spawn.
+    pub hull_coupling: f32,
 }
 
 impl GripParams {
-    /// Solid-recipient track friction, nominal pressure and half-weight from spawn data.
-    pub(crate) fn of(spec: &crate::spec::TankSpec, nominal_pressure_kpa: f32) -> Self {
+    /// Solid-recipient track friction, nominal pressure, half-weight and the hull's coupling at
+    /// a footprint `com_height_m` below the centre of mass, from spawn data.
+    pub(crate) fn of(
+        spec: &crate::spec::TankSpec,
+        nominal_pressure_kpa: f32,
+        com_height_m: f32,
+    ) -> Self {
         assert!(
             nominal_pressure_kpa.is_finite() && nominal_pressure_kpa > 0.0,
             "admitted spawn construction supplies positive finite nominal ground pressure"
         );
         grip_law();
+        let inertia = spec.hull_angular_inertia().principal;
+        // Hull-local x is lateral and z longitudinal: pitch turns about x, roll about z.
+        let hull_coupling =
+            1.0 + spec.mass * com_height_m * com_height_m / inertia.x.min(inertia.z);
+        assert!(
+            hull_coupling.is_finite(),
+            "admitted spawn construction yields a finite hull coupling (centre of mass {com_height_m} m over the footprint)"
+        );
         Self {
             track: spec.track.friction(),
             nominal_pressure_kpa,
             side_weight: spec.mass * super::derive::G / 2.0,
+            hull_coupling,
         }
+    }
+
+    /// The shortest shear length (m) per unit grip coefficient that one explicit tick of `dt`
+    /// resolves on this hull; a patch's shear length is at least its μ times this.
+    ///
+    /// Resolution. The tick reads slip at its start, sets force from this tick's strain, and
+    /// Avian integrates after. With x = √(μ·g/K)·dt, a = κ·x² and b = 2ζ·κ·x (stiffness and
+    /// damping both act through the coupling), the hull's grip mode steps by
+    /// λ² − (2 − a − b)·λ + (1 − b) = 0. It is stable while a + 2b < 4 and never reverses
+    /// from one tick to the next (no root with negative real part) while b ≤ 1 and a + b ≤ 2;
+    /// this takes the largest x the second pair allows. The margin to the stable bound is what
+    /// absorbs the yaw term a footprint loaded at one end adds to κ (architecture section 5a).
+    pub(crate) fn step_shear_per_grip_m(&self, dt: f32) -> f32 {
+        let (zeta, kappa) = (GRIP_ELEMENT_DAMPING_RATIO, self.hull_coupling);
+        let x = (1.0 / (2.0 * zeta * kappa)).min(-zeta + (zeta * zeta + 2.0 / kappa).sqrt());
+        super::derive::G * (dt / x).powi(2)
     }
 
     /// The coefficient the belt slides at on a surface carrying `surface`: the one pair rule
@@ -282,9 +308,9 @@ pub struct ForceParams {
 }
 
 /// Recoverable shear state, one WORLD-space vector (m) per advected force station × lateral column
-/// (flat index `station * lateral_points + column`). Force reads this vector divided by contact compliance,
-/// capped at that contact's capacity. Sliding returns the state within one shear distance;
-/// skid travel beyond it is plastic. Architecture section 5a owns the constitutive decision.
+/// (flat index `station * lateral_points + column`). Force reads this vector divided by the
+/// element's shear length, capped at that contact's capacity. Sliding returns the state within
+/// one shear length; skid travel beyond it is plastic. Architecture section 5a owns the constitutive decision.
 /// Material identity advects with belt phase. Elastic-load hysteresis and contact-loss dwell
 /// preserve a parked pad's state through support flicker; definitive departure forgets it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -632,9 +658,7 @@ pub fn contact_side<O: TerrainOracle>(
         &mut report,
     );
     let grips = match &params.grip {
-        Some(grip) => {
-            update_grip_elements(&cols, &held, elements, grip.side_weight, dt, element_len)
-        }
+        Some(grip) => update_grip_elements(&cols, &held, elements, grip, dt, element_len),
         None => Vec::new(),
     };
     #[cfg(feature = "bitprobe")]
@@ -683,6 +707,8 @@ struct ColumnContact {
     collider: Option<Entity>,
     /// [`BeltContact::mu`].
     mu: f32,
+    /// The surface's own shear length (m); zero for a solid recipient.
+    shear_length_m: f32,
     travel_speed: f32,
     /// Motion resistance coefficient: ground total or undeforming-support running-gear loss.
     rolling: f32,
@@ -1052,6 +1078,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                     belt_velocity,
                     collider,
                     mu: surface.mu,
+                    shear_length_m: surface.shear_length_m,
                     travel_speed: vel.dot(long_dir),
                     rolling: surface.rolling,
                     #[cfg(feature = "bitprobe")]
@@ -1080,14 +1107,17 @@ fn column_strip(lateral: (f32, f32), (share, weight): (f32, f32), ascending: boo
     }
 }
 
-/// Dupont elastic zone with Dahl return, shared by every surface. Below breakaway and
-/// during unloading the state is elastic; plastic flow bounds recoverable shear to
-/// [`GRIP_SHEAR_FLOOR_M`]. Each patch projects this vector into its own plane when reading force.
+/// Dupont elastic zone with Dahl return at the element's shear length `shear_m`. Below
+/// breakaway and during unloading the state is elastic; plastic flow bounds recoverable shear to
+/// `shear_m`. Each patch projects this vector into its own plane when reading force.
 ///
 /// Returns the strain and its derivative against `sdot` (s). The derivative leaves out the Dahl
 /// return's own dependence on `sdot`, which only softens loading: it overstates the slope.
-fn advance_element_strain(j0: Vec3, sdot: Vec3, dt: f32) -> (Vec3, Mat3) {
-    let shear_m = GRIP_SHEAR_FLOOR_M;
+fn advance_element_strain(j0: Vec3, sdot: Vec3, dt: f32, shear_m: f32) -> (Vec3, Mat3) {
+    if shear_m == 0.0 {
+        // An element with no grip capacity holds no strain.
+        return (Vec3::ZERO, Mat3::ZERO);
+    }
     let speed = sdot.length();
     let alpha = if j0.dot(sdot) < 0.0 {
         0.0
@@ -1117,6 +1147,9 @@ struct ElementWork {
     load: f32,
     membership_load: f32,
     slip: Vec3,
+    /// Its patches' summed capacity, Σ μN (N), and summed stiffness, Σ μN/K (N/m).
+    capacity: f32,
+    stiffness: f32,
     count: usize,
     advanced: bool,
     kept: bool,
@@ -1154,18 +1187,24 @@ fn forget_departed_elements(work: &[ElementWork], elements: &mut GripElements) {
 /// left to emerge from footprint geometry.
 ///
 /// Advances `elements` in place and returns each contact's [`ContactGrip`] — pass 2 scales it by
-/// that contact's μ × its elastic load. Membership bounds scale with `side_weight`
-/// ([`GripParams::side_weight`]).
+/// that contact's μ × its elastic load. Membership bounds scale with
+/// [`GripParams::side_weight`]. A patch's shear length is its surface's, floored at its μ times
+/// [`GripParams::step_shear_per_grip_m`]. An element's patches share one displacement, so their
+/// stiffnesses μN/K add: the element reads K = Σ μN / Σ(μN/K). Each patch's K is at least μ times
+/// the floor, so the element is never stiffer than its load at the floor, the case the floor
+/// resolves; a frictionless patch adds nothing, and an element with no capacity holds no strain.
 fn update_grip_elements(
     cols: &[ColumnContact],
     held: &[(usize, f32)],
     elements: &mut GripElements,
-    side_weight: f32,
+    grip: &GripParams,
     dt: f32,
     element_len: usize,
 ) -> Vec<ContactGrip> {
-    let enter = side_weight * GRIP_ELEMENT_ENTER_FRACTION;
-    let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
+    let enter = grip.side_weight * GRIP_ELEMENT_ENTER_FRACTION;
+    let leave = grip.side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
+    let step_shear = grip.step_shear_per_grip_m(dt);
+    let patch_shear = |c: &ColumnContact| c.shear_length_m.max(c.mu * step_shear);
     let mut work = vec![ElementWork::default(); element_len];
     // An element that does not advance holds its strain: no slope.
     let mut strain_slope = vec![Mat3::ZERO; element_len];
@@ -1175,6 +1214,11 @@ fn update_grip_elements(
         let element = &mut work[c.element];
         element.load += c.load_elastic;
         element.slip += (c.long_dir * c.slip_long - c.lat_dir * c.slip_lat) * c.load_elastic;
+        let capacity = c.mu * c.load_elastic;
+        if capacity > 0.0 {
+            element.capacity += capacity;
+            element.stiffness += capacity / patch_shear(c);
+        }
         element.count += 1;
     }
     for element in &mut work {
@@ -1201,6 +1245,13 @@ fn update_grip_elements(
         // hull (+slip_long along long_dir, −slip_lat along lat_dir — the kinetic law's
         // signs, vectorized).
         let sdot = c.long_dir * c.slip_long - c.lat_dir * c.slip_lat;
+        let shear_m = if element.capacity == 0.0 {
+            0.0
+        } else if element.count == 1 {
+            patch_shear(c)
+        } else {
+            element.capacity / element.stiffness
+        };
         if !element.advanced {
             if element.load >= enter {
                 let mean_slip = if element.count == 1 {
@@ -1209,7 +1260,7 @@ fn update_grip_elements(
                     element.slip / element.load
                 };
                 (elements.strain[c.element], strain_slope[c.element]) =
-                    advance_element_strain(elements.strain[c.element], mean_slip, dt);
+                    advance_element_strain(elements.strain[c.element], mean_slip, dt, shear_m);
             }
             // Below the enter bound the existing strain holds; each patch's force still scales
             // with its own current elastic load, including its own local damping slip.
@@ -1224,9 +1275,8 @@ fn update_grip_elements(
         // The damping partner, normalized per unit budget: σ1 = 2ζ√(σ0·m) with the element's
         // stiffness σ0 = μN/K and mass share m = N/g, at the LuGre-canonical ζ and this
         // contact's equivalent capacity/load coefficient μ.
-        let d_coef = 2.0 * GRIP_ELEMENT_DAMPING_RATIO
-            / (GRIP_SHEAR_FLOOR_M * c.mu * super::derive::G).sqrt();
-        let mut g = (j1 / GRIP_SHEAR_FLOOR_M).clamp_length_max(1.0) + sdot * d_coef;
+        let d_coef = 2.0 * GRIP_ELEMENT_DAMPING_RATIO / (shear_m * c.mu * super::derive::G).sqrt();
+        let mut g = (j1 / shear_m).clamp_length_max(1.0) + sdot * d_coef;
         let g_len = g.length();
         // `pull` is ∂(g·long)/∂g through the cap; the slope carries it back through
         // ∂g/∂sdot = P_n·S/K + d, P_n the patch-plane projection and S the strain's derivative
@@ -1239,8 +1289,7 @@ fn update_grip_elements(
         let in_plane = pull - c.normal * pull.dot(c.normal);
         grips[idx] = ContactGrip {
             g: Vec2::new(g.dot(c.long_dir), g.dot(c.lat_dir)),
-            slope: strain_slope[c.element].transpose() * in_plane / GRIP_SHEAR_FLOOR_M
-                + pull * d_coef,
+            slope: strain_slope[c.element].transpose() * in_plane / shear_m + pull * d_coef,
         };
     }
     // Columns the damped support clipped out this tick but whose elastic penetration
@@ -1481,6 +1530,8 @@ mod tests {
                 track: crate::substances::contact_friction(0.9),
                 nominal_pressure_kpa: rolling_reference_kpa(),
                 side_weight: 30_000.0 * 9.81 / 2.0,
+                // Fixture: a point-mass hull, no pitch or roll coupling.
+                hull_coupling: 1.0,
             }),
         }
     }
@@ -2548,6 +2599,7 @@ mod tests {
                 ground: crate::ground_field::ContactGround {
                     grip: 0.9,
                     rolling_resistance: c_rr,
+                    shear_length_m: 0.010,
                 },
             };
             let dt = 1.0 / 64.0;
@@ -2578,8 +2630,14 @@ mod tests {
                     .iter()
                     .map(|c| -c.tangential_force().z)
                     .sum();
-                hull += push / mass * dt;
-                state.speed -= report.belt_reaction / inertia * dt;
+                let hull_step = push / mass * dt;
+                hull += hull_step;
+                // The game's belt step (`sim::belt_reactions`): the reaction at the hull's
+                // stepped velocity, solved against its own slope in belt speed.
+                let slope = report.reaction_slope;
+                let reaction =
+                    report.belt_reaction - slope.under((Vec3::NEG_Z * hull_step, Vec3::ZERO));
+                state.speed -= reaction * dt / (inertia + slope.belt * dt);
                 state.phase += f64::from(state.speed * dt);
                 distance += hull * dt;
                 if hull.abs() < 1e-4 && state.speed.abs() < 1e-4 {
@@ -2614,10 +2672,11 @@ mod tests {
     }
 
     /// A skid may yield the ground, but cannot store its entire travel as a spring.
-    /// Drivers stopping or being pushed rely on recoverable travel being bounded by K.
-    /// FIXTURE: locked 2 m pad on shipped mud, 4 m/s entry; dirt shoved 1.2 m sideways.
+    /// Drivers stopping or being pushed rely on recoverable travel being bounded by the
+    /// ground's resolved shear length. FIXTURE: locked 2 m pad on shipped mud, 4 m/s entry;
+    /// dirt shoved 1.2 m sideways.
     #[test]
-    fn ground_reversal_returns_at_most_one_shear_distance() {
+    fn ground_reversal_returns_at_most_one_shear_length() {
         for sideways in [false, true] {
             let ground = crate::ground_types::GroundTypes::load_shipped()
                 .get(if sideways { "dirt" } else { "mud" })
@@ -2687,7 +2746,11 @@ mod tests {
             println!(
                 "MEASURED fixed pad sideways={sideways}: peak={peak:.6} m rollback={rollback:.6} m reverse={reverse:.6} m/s"
             );
-            let k = GRIP_SHEAR_FLOOR_M;
+            let step = rig_params()
+                .grip
+                .expect("the rig runs grip")
+                .step_shear_per_grip_m(1.0 / 64.0);
+            let k = ground.shear_length_m.max(ground.grip * step);
             // FIXTURE observation precision: f32 position accumulation permits 0.01% of K.
             assert!(
                 rollback <= k * 1.0001,
@@ -2700,13 +2763,13 @@ mod tests {
     /// Drivers rely on zero plastic drift under the support solver's half-tick-rate wobble.
     #[test]
     fn ground_holding_force_survives_32_hz_dither() {
-        let k = GRIP_SHEAR_FLOOR_M;
+        let k = super::super::drive_fixture::ground().shear_length_m;
         let initial = Vec3::X * k * grip_law().breakaway_share.value / 2.0;
         let mut state = initial;
         // FIXTURE: 1 mm/s alternating slip, 64 Hz, 60 simulated seconds.
         for tick in 0..64 * 60 {
             let slip = Vec3::X * if tick % 2 == 0 { 0.001 } else { -0.001 };
-            state = advance_element_strain(state, slip, 1.0 / 64.0).0;
+            state = advance_element_strain(state, slip, 1.0 / 64.0, k).0;
         }
         println!(
             "MEASURED closed-dither holding share {} -> {}",
@@ -2723,11 +2786,11 @@ mod tests {
     /// The monotonic knee may change with its owned breakaway share; linear force readout stays.
     #[test]
     fn ground_loading_is_elastic_before_breakaway_and_bounded_after() {
-        let k = GRIP_SHEAR_FLOOR_M;
+        let k = super::super::drive_fixture::ground().shear_length_m;
         let mut state = Vec3::ZERO;
         for quarter in 1..=8 {
             for _ in 0..1024 {
-                state = advance_element_strain(state, Vec3::X * k, 1.0 / 4096.0).0;
+                state = advance_element_strain(state, Vec3::X * k, 1.0 / 4096.0, k).0;
             }
             let travel = quarter as f32 / 4.0;
             assert!(state.x > 0.0 && state.x <= k);
@@ -2924,13 +2987,16 @@ mod tests {
                     grip.side_weight = mass * super::super::derive::G;
                     grip.nominal_pressure_kpa =
                         2.0 * grip.side_weight / (2.0 * width * length) / 1000.0;
+                    let shear = oracle
+                        .ground
+                        .shear_length_m
+                        .max(ground.grip.value * grip.step_shear_per_grip_m(dt));
                     let pull = mass * super::super::derive::G * angle.sin();
                     let capacity = ground.grip.value * normal;
                     assert_eq!(pull > capacity, sign > 0.0);
                     // Fixture: nonzero entry energy mu*m*g*K/32 exercises arrest before parking.
                     let (mut velocity, mut distance, mut late_distance) = (
-                        0.25 * (ground.grip.value * super::super::derive::G * GRIP_SHEAR_FLOOR_M)
-                            .sqrt(),
+                        0.25 * (ground.grip.value * super::super::derive::G * shear).sqrt(),
                         0.0_f32,
                         0.0_f32,
                     );
@@ -2988,6 +3054,7 @@ mod tests {
         let ground = crate::ground_field::ContactGround {
             grip: 0.9,
             rolling_resistance: 0.1,
+            shear_length_m: 0.010,
         };
         let oracle = GroundedFlat {
             surface_y: 0.0,
@@ -3103,19 +3170,28 @@ mod tests {
         assert!(ground_rolling_resistance(rolling, threshold * 2.0) > mu);
     }
 
-    /// The retained shear law reads its common compliance linearly below breakaway.
-    /// Fixture displacements stay inside the elastic zone, so the readout cannot saturate.
+    /// The shear law reads strain against the ground's shear length, floored at μ times the
+    /// step's resolved length, linearly below breakaway. Drivers rely on it for where sticking
+    /// ends on each ground and for the shortest length the tick resolves on rigid ground.
+    /// Fixture displacements stay inside the elastic zone, so the readout cannot saturate;
+    /// fixture grounds store 10 mm and none.
     #[test]
     fn recoverable_shear_reads_effective_compliance_in_the_force_pass() {
-        for fraction in [0.25, 0.5] {
+        for (fraction, shear_length_m) in [(0.25, 0.010), (0.5, 0.010), (0.5, 0.0)] {
             let share = grip_law().breakaway_share.value * fraction;
             let oracle = GroundedFlat {
                 surface_y: 0.0,
                 ground: crate::ground_field::ContactGround {
                     grip: 0.5,
                     rolling_resistance: rigid_rolling_resistance(),
+                    shear_length_m,
                 },
             };
+            let step = rig_params()
+                .grip
+                .expect("the rig runs grip")
+                .step_shear_per_grip_m(1.0 / 64.0);
+            let shear = shear_length_m.max(oracle.ground.grip * step);
             let loop_pts = spring_pad(0.02);
             let input = SideInput {
                 loop_pts: &loop_pts,
@@ -3125,7 +3201,7 @@ mod tests {
                 travel: TravelField { knots: &PAD_TRAVEL },
             };
             let mut elements = GripElements::for_stations(input.count, 3);
-            elements.strain.fill(Vec3::X * (GRIP_SHEAR_FLOOR_M * share));
+            elements.strain.fill(Vec3::X * (shear * share));
             let report = contact_side(
                 &input,
                 SideState::default(),
@@ -3143,6 +3219,75 @@ mod tests {
                     (c.f_lat.abs() / (c.load_elastic * oracle.ground.grip) - share).abs() < 1e-6
                 );
             }
+        }
+    }
+
+    /// At the step's resolved shear length the hull's grip mode never reverses from one tick to
+    /// the next. A tank parked on ground that stores no shear (paving, a structure) relies on
+    /// it: a shorter floor, or one that leaves out the hull's coupling, rings at half the tick
+    /// rate. FIXTURE: the rig pad on rigid ground under a hull of coupling 2 (its footprint
+    /// moves at twice a point mass's rate), kicked sideways at a tenth of the elastic speed
+    /// scale so the strain stays below breakaway.
+    #[test]
+    fn the_step_shear_length_never_reverses_the_hull_tick_to_tick() {
+        let dt = 1.0 / 64.0;
+        for mu in [0.3, 0.9] {
+            let oracle = GroundedFlat {
+                surface_y: 0.0,
+                ground: crate::ground_field::ContactGround {
+                    grip: mu,
+                    rolling_resistance: 0.0,
+                    shear_length_m: 0.0,
+                },
+            };
+            let mut params = rig_params();
+            let grip = params.grip.as_mut().expect("the rig runs grip");
+            grip.hull_coupling = 2.0;
+            let coupling = grip.hull_coupling;
+            let shear = mu * grip.step_shear_per_grip_m(dt);
+            let points = spring_pad(0.02);
+            let input = SideInput {
+                loop_pts: &points,
+                count: 25,
+                plane_x: 0.0,
+                columns: TEST_COLUMNS.into(),
+                travel: TravelField { knots: &PAD_TRAVEL },
+            };
+            let mut elements = GripElements::for_stations(input.count, 3);
+            let kick = 0.1 * (mu * super::super::derive::G * shear).sqrt();
+            let (mut velocity, mut mass, mut history) = (kick, 0.0, Vec::new());
+            for tick in 0..64 {
+                let report = contact_side(
+                    &input,
+                    SideState::default(),
+                    Affine3A::IDENTITY,
+                    dt,
+                    &params,
+                    &oracle,
+                    &RubbleBodies::default(),
+                    |_| Vec3::X * velocity,
+                    &mut elements,
+                );
+                if tick == 0 {
+                    mass = report.contacts.iter().map(|c| c.load_elastic).sum::<f32>()
+                        / super::super::derive::G;
+                }
+                let force: f32 = report.contacts.iter().map(|c| c.tangential_force().x).sum();
+                velocity += coupling * force / mass * dt;
+                history.push(velocity);
+            }
+            // FIXTURE observation floor: f32 residue far below the kick is not motion.
+            let moving = |v: f32| v.abs() > kick * 1e-4;
+            let reversals = history
+                .windows(3)
+                .filter(|w| w.iter().all(|v| moving(*v)) && w[0] * w[1] < 0.0 && w[1] * w[2] < 0.0)
+                .count();
+            println!("MEASURED step-floor kick mu={mu}: velocity {history:?}");
+            assert_eq!(
+                reversals, 0,
+                "mu={mu}: the grip mode alternates tick to tick"
+            );
+            assert!(!moving(velocity), "mu={mu}: the grip mode does not settle");
         }
     }
 
@@ -3222,10 +3367,15 @@ mod tests {
             belt_velocity: Vec3::ZERO,
             collider: None,
             mu: 0.5,
+            shear_length_m: 0.025, // FIXTURE ground shear length.
             travel_speed: 0.0,
             rolling: 0.0,
             #[cfg(feature = "bitprobe")]
             probe_index: 0,
+        };
+        let grip = GripParams {
+            side_weight: 1000.0,
+            ..rig_params().grip.expect("the rig runs grip")
         };
         let mut results = Vec::new();
         for normals in [
@@ -3235,7 +3385,7 @@ mod tests {
             let cols = normals.map(|(normal, load)| patch(normal, load));
             let mut elements = GripElements::for_stations(1, 3);
             elements.strain[0] = Vec3::Z * 0.02; // FIXTURE elastic displacement.
-            let g = update_grip_elements(&cols, &[], &mut elements, 1000.0, 1.0 / 64.0, 3);
+            let g = update_grip_elements(&cols, &[], &mut elements, &grip, 1.0 / 64.0, 3);
             let flat = normals.iter().position(|(n, _)| *n == Vec3::Y).unwrap();
             results.push(g[flat].g);
         }

@@ -1135,8 +1135,13 @@ fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
         "MEASURED full-app mud service stop: capacity={capacity:.3} N peak={peak:.6} m rollback={:.6} m reverse={reverse:.6} m/s",
         peak - last
     );
+    let step = app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .grip()
+        .step_shear_per_grip_m(crate::sim_tick::sim_timestep().as_secs_f32());
     assert!(
-        peak - last <= crate::track::forces::GRIP_SHEAR_FLOOR_M,
+        peak - last <= ground.shear_length_m.max(ground.grip * step),
         "a stop must not return the skid as a spring: {} m",
         peak - last
     );
@@ -1276,6 +1281,7 @@ fn a_tank_leaves_first_gear_from_rest_on_a_soft_ground() {
                 crate::ground_field::ContactGround {
                     grip: 0.4,
                     rolling_resistance: 0.12,
+                    shear_length_m: 0.010,
                 },
             ))),
         );
