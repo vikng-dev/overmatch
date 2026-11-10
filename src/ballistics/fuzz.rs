@@ -1061,24 +1061,24 @@ impl Pass<'_, '_, '_> {
     }
 }
 
-/// The tank's world bounding sphere and its local box, from the bound colliders themselves.
+/// The tank's world bounding sphere and its local box, from the boxes the march's broad query
+/// holds its armour in ([`ProjectileMarchWorld::near`]): its armour set's parts.
 fn tank_bounds(
     world: &ProjectileMarchWorld,
-    aabbs: &Query<&ColliderAabb>,
     to_local: bevy::math::Affine3A,
 ) -> Option<(Vec3, f32, Vec3, Vec3)> {
     let (mut wmin, mut wmax) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
     let (mut lmin, mut lmax) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
     let mut any = false;
-    world.spatial.aabb_intersections_with_aabb_callback(
-        ColliderAabb::from_min_max(Vec3::splat(-1.0e5), Vec3::splat(1.0e5)),
-        |entity| {
+    world.near(
+        super::collect::Probe::Region(ColliderAabb::from_min_max(
+            Vec3::splat(-1.0e5),
+            Vec3::splat(1.0e5),
+        )),
+        &mut |entity, aabb| {
             if world.armour(entity).is_none() {
-                return true;
+                return;
             }
-            let Ok(aabb) = aabbs.get(entity) else {
-                return true;
-            };
             any = true;
             wmin = wmin.min(aabb.min);
             wmax = wmax.max(aabb.max);
@@ -1094,7 +1094,6 @@ fn tank_bounds(
                 lmin = lmin.min(local);
                 lmax = lmax.max(local);
             }
-            true
         },
     );
     any.then(|| {
@@ -1118,10 +1117,6 @@ fn run_fuzz(
     tank: Res<ProbeTank>,
     spares: Res<Spares>,
     world: ProjectileMarchWorld,
-    // `'static` spelled out because `ResolveContext` (the march's own borrow group) names the
-    // query that way: `Query`'s data parameter is invariant, so an elided lifetime here will not
-    // coerce into it.
-    aabbs: Query<&ColliderAabb>,
     facets: Query<(Entity, &Name, Option<&CrewStation>, Has<Ammo>)>,
     names: Query<(Entity, &Name)>,
     roots: Query<&GlobalTransform>,
@@ -1138,8 +1133,8 @@ fn run_fuzz(
         world: &world,
         laws: walk::WalkLaws::default(),
     };
-    let Some((center, radius, local_min, local_max)) = tank_bounds(&world, &aabbs, to_local) else {
-        panic!("the probe tank presented no ballistic collider to fuzz");
+    let Some((center, radius, local_min, local_max)) = tank_bounds(&world, to_local) else {
+        panic!("the probe tank presented no armour part to fuzz");
     };
 
     let targets: BTreeMap<Entity, Target> = facets
@@ -1509,7 +1504,6 @@ fn run_replay(
     tank: Res<ProbeTank>,
     spares: Res<Spares>,
     world: ProjectileMarchWorld,
-    aabbs: Query<&ColliderAabb>,
     names: Query<(Entity, &Name)>,
     roots: Query<&GlobalTransform>,
     mut commands: Commands,
@@ -1523,8 +1517,8 @@ fn run_replay(
         world: &world,
         laws: walk::WalkLaws::default(),
     };
-    let Some((center, radius, local_min, local_max)) = tank_bounds(&world, &aabbs, to_local) else {
-        panic!("the probe tank presented no ballistic collider to fuzz");
+    let Some((center, radius, local_min, local_max)) = tank_bounds(&world, to_local) else {
+        panic!("the probe tank presented no armour part to fuzz");
     };
     let pass = Pass {
         context,

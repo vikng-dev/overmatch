@@ -1304,6 +1304,70 @@ mod proxy_tests {
         }
     }
 
+    /// The game's damage model: a replica's aim and sight rays read every tank's armour from its set
+    /// alone, posed live (a replica keeps no pose history). With no collider in avian's tree and
+    /// every part's collider garbled (a millimetre ball for its shape, terrain's layers, no surfaces,
+    /// crew-box marker or parent, a pose and bounds a kilometre off), rays at a replica tank stop
+    /// where they stop against its intact parts. A reader still taking a tank's armour from the tree
+    /// misses it; one reading a part's collider places it elsewhere. The player's aim dots and gun
+    /// lay on a net client rely on it, and so does the lane deleting those colliders. Fixture: the
+    /// shipped tank as authority and replica, overlapping at the origin; the authority aims, so its
+    /// own armour is excluded.
+    #[test]
+    fn a_replica_aims_at_a_tank_from_its_armour_set_alone() {
+        use crate::ballistics::armour_set::{ArmourPart, LiveArmour, live_box};
+        use avian3d::prelude::{Collider, ColliderAabb, Position, Rotation, SpatialQuery};
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let (authority, replica) = authority_and_replica(&mut world);
+        world.init_resource::<avian3d::collider_tree::ColliderTrees>();
+        let (min, max) = live_box(&world, replica).expect("the replica carries its armour set");
+        let centre = (min + max) * 0.5;
+        // Fixture standoff beyond the set's box, m.
+        let reach = (max - min).length() + 10.0;
+        let rays: Vec<Ray3d> = [Dir3::NEG_X, Dir3::Z, Dir3::NEG_Y]
+            .map(|direction| Ray3d::new(centre - direction * reach, direction))
+            .to_vec();
+        let aim = |world: &mut World| {
+            let rays = rays.clone();
+            world
+                .run_system_once(move |spatial: SpatialQuery, armour: LiveArmour| {
+                    rays.iter()
+                        .map(|&ray| {
+                            crate::aim::aim_distance(&spatial, &armour, ray, 2.0 * reach, authority)
+                        })
+                        .collect::<Vec<f32>>()
+                })
+                .expect("the aim probe runs")
+        };
+        let intact = aim(&mut world);
+        assert!(
+            intact.iter().all(|&distance| distance < reach),
+            "every ray stops on the replica's armour: {intact:?}"
+        );
+        let parts: Vec<Entity> = world
+            .query_filtered::<Entity, With<ArmourPart>>()
+            .iter(&world)
+            .collect();
+        for part in parts {
+            world
+                .entity_mut(part)
+                .remove::<(BallisticSurfaces, WitnessSurface, ChildOf)>()
+                .insert((
+                    Collider::sphere(1.0e-3),
+                    CollisionLayers::new([Layer::Terrain], LayerMask::NONE),
+                    Position(Vec3::splat(1000.0)),
+                    Rotation(Quat::from_rotation_x(1.0)),
+                    ColliderAabb::from_min_max(Vec3::splat(1000.0), Vec3::splat(1001.0)),
+                ));
+        }
+        assert_eq!(
+            aim(&mut world),
+            intact,
+            "each ray stops at the same armour with the parts' colliders garbled"
+        );
+    }
+
     /// A structural node and a yaw actuator are distinct roles. Complete construction
     /// must resolve the sheet's handles separately even when the shipped fixture shares them.
     #[test]

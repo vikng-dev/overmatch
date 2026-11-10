@@ -168,32 +168,30 @@ fn rays(layout: &Layout, pose: Pose) -> Vec<WorldRay> {
     out
 }
 
-/// The bounds the layout is built from: armour colliders and damageable boxes, at spawn pose.
+/// The bounds the layout is built from: the armour set's parts and damageable boxes, at spawn
+/// pose, as the march's broad query boxes them ([`ProjectileMarchWorld::near`]).
 fn layout(app: &mut App) -> Layout {
     let layout = app
         .world_mut()
         .run_system_once(
-            |aabbs: Query<(Entity, &ColliderAabb)>,
-             volumes: Query<&BallisticVolume>,
-             witnesses: Query<(), With<WitnessSurface>>,
-             health: Query<&ComponentHealth>,
-             names: Query<&Name>,
-             parents: Query<&ChildOf>| {
+            |world: ProjectileMarchWorld, health: Query<&ComponentHealth>, names: Query<&Name>| {
                 let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
                 let mut boxes: Vec<(String, Vec3, Vec3)> = Vec::new();
-                // The query's own order is archetype order; sorting by name below makes the
+                // The broad query's visit order is unspecified; sorting by name below makes the
                 // layout independent of it, and min/max is order-free.
-                for (entity, aabb) in &aabbs {
-                    if !witnesses.contains(entity)
-                        && hit_ancestor(entity, &volumes, &parents).is_none()
-                    {
-                        continue;
-                    }
+                let everywhere = collect::Probe::Region(ColliderAabb::from_min_max(
+                    Vec3::splat(-1.0e5),
+                    Vec3::splat(1.0e5),
+                ));
+                world.near(everywhere, &mut |entity, aabb| {
+                    let Some(volume) = world.volume_of(entity) else {
+                        return; // Terrain and other bodies' colliders.
+                    };
                     lo = lo.min(aabb.min - PROBE_TANK_AT);
                     hi = hi.max(aabb.max - PROBE_TANK_AT);
-                    if let Some((owner, _)) = hit_ancestor(entity, &health, &parents) {
+                    if health.contains(volume) {
                         let name = names
-                            .get(owner)
+                            .get(volume)
                             .expect("the fixture's damageable volumes have diagnostic names")
                             .as_str()
                             .to_owned();
@@ -206,7 +204,7 @@ fn layout(app: &mut App) -> Layout {
                             None => boxes.push((name, min, max)),
                         }
                     }
-                }
+                });
                 boxes.sort_by(|a, b| a.0.cmp(&b.0));
                 Layout {
                     lo,

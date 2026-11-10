@@ -369,14 +369,17 @@ fn overlapping_shots_each_record_only_their_own_loss() {
     }
 }
 
-/// The game's damage model: a round resolves a tank from its armour set alone. Its discovery,
-/// crossings, fields and crew lines depend on no armour or crew-box collider's tree entry, pose or
-/// broad-phase bounds (avian's tree query still visits the entries until the colliders go), which
-/// the lane deleting those colliders relies on: with every part out of
-/// avian's tree and its `Position`, `Rotation` and `ColliderAabb` moved a kilometre off before each
-/// march, a round through a plate into two crew boxes doses each HP pool exactly as it does against
-/// intact colliders. A reader still taking a part from the tree misses it; one still reading its
-/// pose or bounds places it elsewhere. Fixture: a turned tank driving across the line of fire.
+/// The game's damage model: a round resolves a tank from its armour set alone, on the authority.
+/// Its discovery, crossings, fields and crew lines, and the recorder that finishes its record,
+/// depend on no armour or crew-box collider's tree entry, pose, bounds, shape, layers, surfaces or
+/// crew-box marker, which the lane deleting those colliders relies on: with every part out of
+/// avian's tree, its `Position`, `Rotation` and `ColliderAabb` moved a kilometre off before each
+/// march, its shape a millimetre ball, its layers terrain's, its surfaces empty and its
+/// `WitnessSurface` gone, a round through a plate into two crew boxes doses each HP pool exactly as
+/// it does against intact colliders. A reader still taking a part from the tree misses it; one
+/// still reading its pose, bounds or shape places it elsewhere; one reading its layers or marker
+/// takes the plate for terrain or a crew box for armour. Fixture: a turned tank driving across the
+/// line of fire.
 #[test]
 fn a_round_resolves_a_tank_from_its_armour_set_alone() {
     use avian3d::prelude::{ColliderAabb, ColliderDisabled, Position, Rotation};
@@ -407,6 +410,19 @@ fn a_round_resolves_a_tank_from_its_armour_set_alone() {
             for &volume in &volumes {
                 app.world_mut().entity_mut(volume).insert(ColliderDisabled);
             }
+            for &volume in &volumes {
+                app.world_mut()
+                    .entity_mut(volume)
+                    .remove::<WitnessSurface>()
+                    .insert((
+                        Collider::sphere(1.0e-3),
+                        CollisionLayers::new([Layer::Terrain], LayerMask::NONE),
+                        BallisticSurfaces {
+                            shells: Vec::new().into(),
+                            corners: Vec::new().into(),
+                        },
+                    ));
+            }
             app.add_systems(
                 FixedPostUpdate,
                 scramble
@@ -430,7 +446,7 @@ fn a_round_resolves_a_tank_from_its_armour_set_alone() {
     assert_eq!(
         held(true),
         intact,
-        "each HP pool holds the same with the parts' colliders detached"
+        "each HP pool holds the same with the parts' colliders detached and garbled"
     );
 }
 
