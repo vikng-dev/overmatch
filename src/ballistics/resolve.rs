@@ -914,26 +914,29 @@ pub(crate) struct FieldRay {
     pub doses: Vec<Dose>,
 }
 
-/// The ordered presence along one direction of a field thrown from the world point `at`: the
-/// spatially reached volumes (its [`FieldReach`]), walked from outside all of
-/// their bounds through `at` to the far side of them, with nothing declared. Returns the walk and
-/// the progress of `at` along it.
-///
-/// The same collector and pairing walk as any corridor ([`walk::walk_ray`]), so its layers carry
-/// every volume present along the ray in order, nested and overlapping ones included, and what the
-/// direction starts inside is the parity of oriented crossings behind `at`, never assumed. It reaches
-/// back from `at` the way [`certified`] does ([`Corridor::behind`]): the line is formed at `at`
-/// itself. Candidates are the admitted volumes whose bounds, grown by [`PROBE_MARGIN`], the
-/// forward ray meets within [`FIELD_REACH`]; the walk starts and ends outside the union of those
-/// grown bounds, so no candidate's face lies within the collector's sitting reach of either end.
-/// Its containment probe spans the finite loaded bounds; it does not truncate their geometry.
-pub(crate) fn field_presence(
+/// One direction's candidates and the one walk every one of them is read on ([`field_probe`]).
+struct FieldProbe {
+    /// `(enter, node, collider)`: a candidate, and the metres from `at` at which the line enters
+    /// its bounds grown by [`PROBE_MARGIN`], not positive when they hold `at`.
+    near: Vec<(f32, Entity, Entity)>,
+    /// Metres the walk starts behind `at`.
+    behind: f32,
+    /// The walk's whole length (m).
+    length: f32,
+}
+
+/// The candidates of one direction of a field thrown from the world point `at`: the admitted
+/// volumes (its [`FieldReach`]) whose bounds, grown by [`PROBE_MARGIN`], the forward ray meets
+/// within [`FIELD_REACH`]. Their walk starts and ends outside the union of those grown bounds, so
+/// no candidate's face lies within the collector's sitting reach of either end. It reaches back
+/// from `at` the way [`certified`] does ([`Corridor::behind`]): the line is formed at `at` itself.
+/// `None` when there is no candidate.
+fn field_probe(
     context: &ResolveContext<'_, '_, '_>,
     field: &FieldReach,
     at: Vec3,
     dir: Dir3,
-) -> Result<Option<(f64, walk::RayWalk)>, WalkError> {
-    use crate::cost::stages::Work;
+) -> Result<Option<FieldProbe>, WalkError> {
     let axis = Vec3::from(dir);
     let margin = Vec3::splat(PROBE_MARGIN);
     // Where the line `at + t·axis` lies inside the box `[min, max]` (relative to `at`): the
@@ -963,14 +966,13 @@ pub(crate) fn field_presence(
             });
         };
         let (min, max) = (bounds.min - at - margin, bounds.max - at + margin);
-        if meets(min, max).is_none_or(|(_, leave)| leave < 0.0) {
+        let Some((enter, _)) = meets(min, max).filter(|&(_, leave)| leave >= 0.0) else {
             continue;
-        }
+        };
         lo = lo.min(min);
         hi = hi.max(max);
-        near.push((reached.node, reached.collider));
+        near.push((enter, reached.node, reached.collider));
     }
-    context.world.count(Work::FieldNear, near.len());
     if near.is_empty() {
         return Ok(None);
     }
@@ -983,55 +985,165 @@ pub(crate) fn field_presence(
         length.is_finite(),
         "game's damage model: finite loaded bounds yield a finite field probe"
     );
-    let mut hits = Vec::new();
-    collect::collect(
-        &Corridor {
-            anchor: at,
-            origin: Vec3::ZERO,
-            axis,
-            length,
-            behind,
-            seeded: &[],
-            handoff: None,
-            laws: &context.laws,
-        },
-        &near,
-        context.colliders,
-        &mut hits,
-        &|entity| context.world.pose(entity),
-    )?;
-    context.world.count(Work::FieldHits, hits.len());
-    let mut entries: Vec<(Entity, walk::VolumeMaterial)> = Vec::new();
-    for hit in &hits {
-        if !entries.iter().any(|(volume, _)| *volume == hit.volume) {
-            let material = context
-                .world
-                .volumes
-                .get(hit.volume)
-                .map(|found| found.material)
-                .map_err(|_| WalkError::UnknownVolume { volume: hit.volume })?;
-            entries.push((hit.volume, material));
-        }
+    Ok(Some(FieldProbe {
+        near,
+        behind,
+        length,
+    }))
+}
+
+impl FieldProbe {
+    /// Append every face crossing of `candidates` along the walk. A candidate's crossings do not
+    /// depend on which others are read with it: the corridor is the probe's.
+    fn collect(
+        &self,
+        context: &ResolveContext<'_, '_, '_>,
+        at: Vec3,
+        axis: Vec3,
+        candidates: &[(Entity, Entity)],
+        hits: &mut Vec<walk::FaceHit>,
+    ) -> Result<(), WalkError> {
+        collect::collect(
+            &Corridor {
+                anchor: at,
+                origin: Vec3::ZERO,
+                axis,
+                length: self.length,
+                behind: self.behind,
+                seeded: &[],
+                handoff: None,
+                laws: &context.laws,
+            },
+            candidates,
+            context.colliders,
+            hits,
+            &|entity| context.world.pose(entity),
+        )
     }
-    let walked = walk::walk_ray(
-        0,
-        &RayCorridor {
+
+    /// The pairing walk over `hits`, with nothing declared; hands `hits` back.
+    fn walk(
+        &self,
+        context: &ResolveContext<'_, '_, '_>,
+        at: Vec3,
+        axis: Vec3,
+        hits: Vec<walk::FaceHit>,
+    ) -> Result<(walk::RayWalk, Vec<walk::FaceHit>), WalkError> {
+        let mut entries: Vec<(Entity, walk::VolumeMaterial)> = Vec::new();
+        for hit in &hits {
+            if !entries.iter().any(|(volume, _)| *volume == hit.volume) {
+                let material = context
+                    .world
+                    .volumes
+                    .get(hit.volume)
+                    .map(|found| found.material)
+                    .map_err(|_| WalkError::UnknownVolume { volume: hit.volume })?;
+                entries.push((hit.volume, material));
+            }
+        }
+        let corridor = RayCorridor {
             anchor: at,
-            origin: -axis * behind,
+            origin: -axis * self.behind,
             axis,
-            length,
+            length: self.length,
             initial_presence: Vec::new(),
             hits,
-        },
-        &VolumeTable::new(entries),
-        &context.laws,
-    )?;
-    Ok(Some((behind as f64, walked)))
+        };
+        let walked = walk::walk_ray(0, &corridor, &VolumeTable::new(entries), &context.laws)?;
+        Ok((walked, corridor.hits))
+    }
+}
+
+/// The ordered presence along one direction of a field thrown from the world point `at`: every
+/// candidate of the direction ([`field_probe`]), walked from outside all of their bounds through
+/// `at` to the far side of them, with nothing declared. Returns the walk and the progress of `at`
+/// along it.
+///
+/// The same collector and pairing walk as any corridor ([`walk::walk_ray`]), so its layers carry
+/// every volume present along the ray in order, nested and overlapping ones included, and what the
+/// direction starts inside is the parity of oriented crossings behind `at`, never assumed. Its
+/// containment probe spans the finite loaded bounds; it does not truncate their geometry.
+pub(crate) fn field_presence(
+    context: &ResolveContext<'_, '_, '_>,
+    field: &FieldReach,
+    at: Vec3,
+    dir: Dir3,
+) -> Result<Option<(f64, walk::RayWalk)>, WalkError> {
+    let Some(probe) = field_probe(context, field, at, dir)? else {
+        return Ok(None);
+    };
+    let axis = Vec3::from(dir);
+    let all: Vec<(Entity, Entity)> = probe
+        .near
+        .iter()
+        .map(|&(_, node, collider)| (node, collider))
+        .collect();
+    let mut hits = Vec::new();
+    probe.collect(context, at, axis, &all, &mut hits)?;
+    let (walked, _) = probe.walk(context, at, axis, hits)?;
+    Ok(Some((f64::from(probe.behind), walked)))
+}
+
+/// Where one direction of a field thrown from `at` stops: the progress of `at` along its walk and
+/// [`first_solid`] of its ordered presence. Both are exactly those of the whole presence
+/// ([`field_presence`]), read from only the candidates that can decide them.
+///
+/// Every candidate is read on the probe's one walk, so its crossings are the same numbers whichever
+/// others are read with it. A candidate's faces lie inside its grown bounds, so one the line enters
+/// past a stop is absent at and before that stop and cannot move it. The candidates whose bounds
+/// hold `at` are always read: the parity of their crossings behind `at` says what the direction
+/// starts inside. The rest are read in the order the line enters their bounds, until a stop lies
+/// short of the next one's; a candidate read later can still move the stop nearer, since bounds
+/// entered early can hold geometry met late.
+///
+/// A candidate left unread is not paired either, so a contradiction in geometry no direction
+/// reaches is not raised.
+fn field_stop(
+    context: &ResolveContext<'_, '_, '_>,
+    field: &FieldReach,
+    is_box: &dyn Fn(Entity) -> bool,
+    exited: &[Entity],
+    at: Vec3,
+    dir: Dir3,
+) -> Result<(f64, Option<(f64, Option<Entity>)>), WalkError> {
+    use crate::cost::stages::Work;
+    let Some(mut probe) = field_probe(context, field, at, dir)? else {
+        return Ok((0.0, None));
+    };
+    let axis = Vec3::from(dir);
+    let start = f64::from(probe.behind);
+    // Metres ahead of `at` at which the line enters a candidate's bounds. The sort is stable:
+    // candidates entered together keep the reach's order.
+    let ahead = |candidate: &(f32, Entity, Entity)| f64::from(candidate.0.max(0.0));
+    probe.near.sort_by(|a, b| ahead(a).total_cmp(&ahead(b)));
+    let (mut hits, mut stop, mut read) = (Vec::new(), None, 0);
+    while let Some(next) = probe.near.get(read) {
+        let limit = stop.map_or(ahead(next), |(t, _): (f64, _)| t - start);
+        let group: Vec<(Entity, Entity)> = probe.near[read..]
+            .iter()
+            .take_while(|candidate| ahead(candidate) <= limit)
+            .map(|&(_, node, collider)| (node, collider))
+            .collect();
+        if group.is_empty() {
+            break;
+        }
+        read += group.len();
+        let before = hits.len();
+        probe.collect(context, at, axis, &group, &mut hits)?;
+        if hits.len() > before {
+            let walked;
+            (walked, hits) = probe.walk(context, at, axis, hits)?;
+            stop = first_solid(&walked.layers, start, exited, is_box);
+        }
+    }
+    context.world.count(Work::FieldNear, read);
+    context.world.count(Work::FieldHits, hits.len());
+    Ok((start, stop))
 }
 
 /// March one direction of a field thrown from the world point `at` through the volumes its throw
-/// admits (the struck tank's, `field`), from its ordered presence ([`field_presence`]): where the
-/// hard world stops it ([`first_solid`]), then the witnesses along it
+/// admits (the struck tank's, `field`): where the hard world stops it ([`field_stop`]), then the
+/// witnesses along it
 /// ([`super::wound::entries_in`]).
 ///
 /// `strength` (J) is constant along the direction. It stops where it enters the first
@@ -1069,10 +1181,7 @@ pub(crate) fn field_direction(
     strength: f32,
     weight: f32,
 ) -> Result<FieldRay, WalkError> {
-    let (start, stop) = match field_presence(context, field, at, dir)? {
-        None => (0.0, None),
-        Some((start, walked)) => (start, first_solid(&walked.layers, start, exited, is_box)),
-    };
+    let (start, stop) = field_stop(context, field, is_box, exited, at, dir)?;
 
     let dose = |address: Entity| Dose {
         address,

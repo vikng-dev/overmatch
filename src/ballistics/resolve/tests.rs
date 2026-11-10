@@ -2745,6 +2745,183 @@ fn a_direction_does_not_dose_the_volume_its_throw_leaves() {
     assert_eq!(end, Vec3::ZERO, "stopped at the throw point");
 }
 
+/// Where a direction stops: the progress of its throw point along the walk, and the progress and
+/// box of the first volume it enters.
+type Stop = (f64, Option<(f64, Option<Entity>)>);
+
+/// Each direction of `dirs` thrown from `origin` leaving `exited`, through every volume of the
+/// world: its stop as [`field_stop`] reads it, and as the whole presence gives it
+/// ([`field_presence`], then [`first_solid`]).
+fn stops(app: &mut App, origin: Vec3, dirs: Vec<Dir3>, exited: Vec<Entity>) -> Vec<(Stop, Stop)> {
+    app.world_mut()
+        .run_system_once(
+            move |world: ProjectileMarchWorld,
+                  colliders: Colliders,
+                  health: Query<&mut ComponentHealth>| {
+                let context = ResolveContext {
+                    world: &world,
+                    colliders: &colliders,
+                    laws: WalkLaws::default(),
+                };
+                let within = |collider: Entity| world.volume_of(collider).is_some();
+                let is_box = |volume: Entity| health.contains(volume);
+                let reach = FieldReach::of_throw(&context, &within, origin);
+                dirs.iter()
+                    .map(|&dir| {
+                        let read = field_stop(&context, &reach, &is_box, &exited, origin, dir)
+                            .expect("a fixture direction walks");
+                        let whole = match field_presence(&context, &reach, origin, dir)
+                            .expect("a fixture direction walks")
+                        {
+                            None => (0.0, None),
+                            Some((start, walked)) => {
+                                (start, first_solid(&walked.layers, start, &exited, &is_box))
+                            }
+                        };
+                        (read, whole)
+                    })
+                    .collect::<Vec<(Stop, Stop)>>()
+            },
+        )
+        .expect("the field system runs")
+}
+
+/// A fixture box of `size` at `at`, turned an eighth of a turn about `Z`; `hp` makes it a box,
+/// `None` armour.
+fn turned(app: &mut App, size: Vec3, at: Vec3, hp: bool) -> Entity {
+    volume(
+        app,
+        size,
+        Transform::from_translation(at)
+            .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)),
+        1.0,
+        hp.then_some(FIELD_HP),
+    )
+}
+
+/// A direction reads only the candidates that can decide its stop ([`field_stop`]), and
+/// [`field_direction`] takes its end and every dose from that stop, so it must be the whole
+/// presence's: the same progress of the throw point and the same first volume entered at the same
+/// progress, bit for bit. A reading that skips a volume holding the throw point, that takes the
+/// first candidate returning a crossing as the stop, or that ends at a candidate whose bounds the
+/// line pierces and whose faces it misses fails it. Fixture boxes; each case names the volume its
+/// direction must stop in.
+#[test]
+fn a_direction_stops_where_its_whole_presence_does() {
+    let diagonal = Dir3::new(Vec3::new(1.0, -1.0, 0.0)).expect("a fixture direction");
+    let check = |app: &mut App, origin: Vec3, dir: Dir3, exited: &[Entity], entered: Entity| {
+        let (read, whole) = stops(app, origin, vec![dir], exited.to_vec()).remove(0);
+        assert_eq!(read, whole, "the stop read is the whole presence's");
+        assert_eq!(
+            read.1.and_then(|(_, dosed)| dosed),
+            Some(entered),
+            "the fixture's direction stops in the box it names"
+        );
+    };
+
+    // The throw point inside a box: entered there unless the throw leaves it, then the box ahead.
+    let (mut app, boxes) = field_world(|app| {
+        vec![
+            slab_below(app, 0.5, 1.0, 1.0, true),
+            slab_below(app, -1.0, 0.2, 1.0, true),
+        ]
+    });
+    check(&mut app, Vec3::ZERO, Dir3::NEG_Y, &[], boxes[0]);
+    check(&mut app, Vec3::ZERO, Dir3::NEG_Y, &[boxes[0]], boxes[1]);
+
+    // Nested: inside armour the throw leaves, the box within it stops the direction, not the box
+    // past the armour's far face.
+    let (mut app, boxes) = field_world(|app| {
+        vec![
+            volume(app, Vec3::splat(4.0), Transform::IDENTITY, 1.0, None),
+            slab_below(app, -1.0, 0.2, 1.0, true),
+            slab_below(app, -3.0, 0.2, 1.0, true),
+        ]
+    });
+    check(&mut app, Vec3::ZERO, Dir3::NEG_Y, &[boxes[0]], boxes[1]);
+
+    // Bounds entered early holding a face met late: the line enters the turned armour's bounds
+    // 1.59 m out and its face 2.79 m out, and the small box between them at 2.1 m (DERIVED from
+    // the 2 m square's 1.414 m half-diagonal).
+    let (mut app, boxes) = field_world(|app| {
+        turned(
+            app,
+            Vec3::new(2.0, 2.0, 1.0),
+            Vec3::new(0.0, -3.0, 0.0),
+            false,
+        );
+        vec![volume(
+            app,
+            Vec3::splat(0.2),
+            Transform::from_translation(Vec3::new(1.2, -2.2, 0.0)),
+            1.0,
+            Some(FIELD_HP),
+        )]
+    });
+    check(
+        &mut app,
+        Vec3::new(1.2, 0.0, 0.0),
+        Dir3::NEG_Y,
+        &[],
+        boxes[0],
+    );
+
+    // Bounds pierced, faces missed: the diagonal runs 1.414 m off the turned armour's centre
+    // plane, outside its 1 m half-width and inside its 1.414 m bounds (DERIVED), to the box behind.
+    let (mut app, boxes) = field_world(|app| {
+        turned(
+            app,
+            Vec3::new(2.0, 2.0, 1.0),
+            Vec3::new(2.0, -4.0, 0.0),
+            false,
+        );
+        vec![volume(
+            app,
+            Vec3::splat(0.5),
+            Transform::from_translation(Vec3::new(5.0, -5.0, 0.0)),
+            1.0,
+            Some(FIELD_HP),
+        )]
+    });
+    check(&mut app, Vec3::ZERO, diagonal, &[], boxes[0]);
+
+    // Every direction of a cone thrown from inside nested, overlapping and turned volumes.
+    let (mut app, boxes) = field_world(|app| {
+        let outer = volume(app, Vec3::splat(4.0), Transform::IDENTITY, 1.0, None);
+        slab_below(app, -1.0, 0.2, 1.0, true);
+        slab_below(app, -1.1, 0.4, 1.0, false);
+        turned(
+            app,
+            Vec3::new(2.0, 2.0, 1.0),
+            Vec3::new(1.5, -3.5, 0.0),
+            true,
+        );
+        turned(
+            app,
+            Vec3::new(1.0, 3.0, 1.0),
+            Vec3::new(-1.0, -2.5, 0.3),
+            false,
+        );
+        below(app, Vec3::new(6.0, 0.3, 6.0), 6.0, 0.0, 1.0, true);
+        vec![outer]
+    });
+    let dirs: Vec<Dir3> = ConeShape::new(AxisRule::ExitDirection, FIELD_N)
+        .unwrap()
+        .spread(FieldDescriptor::ball(0.0))
+        .unwrap()
+        .directions(Dir3::NEG_Y)
+        .map(|(dir, _)| dir)
+        .collect();
+    for exited in [vec![], boxes] {
+        for (k, (read, whole)) in stops(&mut app, Vec3::ZERO, dirs.clone(), exited)
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(read, whole, "direction {k}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // A certified convex body is crossed or missed, never a walk failure
 // ---------------------------------------------------------------------------------------------

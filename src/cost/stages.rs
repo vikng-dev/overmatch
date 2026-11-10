@@ -85,7 +85,8 @@ labelled!(
         BeltPartitionCells = "belt_partition_cells",
         BeltTerrainSamples = "belt_terrain_samples",
         // The game's damage model: one planned crossing, one field throw, and per throw the
-        // armour colliders its reach holds; per direction the candidates and face crossings read.
+        // armour colliders its reach holds; per direction the candidates whose geometry was read
+        // and their face crossings.
         MarchCrossings = "march_crossings",
         FieldThrows = "field_throws",
         FieldReached = "field_reached",
