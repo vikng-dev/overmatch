@@ -45,7 +45,13 @@ impl Lists {
             },
         );
         self.stock_tree.push(id);
-        if self.moved.insert(key(id)) {
+        let absent = !self.stock_moved.contains(&key(id));
+        assert_eq!(
+            self.moved.insert(key(id)),
+            absent,
+            "insert accepts a key exactly when the stock list lacks it"
+        );
+        if absent {
             self.stock_moved.push(key(id));
         }
         self.live.push(id);
@@ -73,7 +79,13 @@ impl Lists {
     /// As Avian's `update_tree`: a live proxy whose bounds moved, listed once.
     fn mark(&mut self, index: usize) {
         let id = self.live[index];
-        if self.moved.insert(key(id)) {
+        let absent = !self.stock_moved.contains(&key(id));
+        assert_eq!(
+            self.moved.insert(key(id)),
+            absent,
+            "insert accepts a key exactly when the stock list lacks it"
+        );
+        if absent {
             self.tree.mark_moved(id);
             self.stock_tree.push(id);
             self.stock_moved.push(key(id));
