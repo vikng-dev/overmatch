@@ -15,6 +15,7 @@ mod avian_collider_of_removal;
 mod avian_contact_reduction;
 mod avian_island_sleep;
 mod avian_moved_aabb_prune;
+mod avian_moved_lists;
 mod avian_spawn_batch;
 mod avian_warm_start;
 mod bevy_ktx2_uastc_fallback;

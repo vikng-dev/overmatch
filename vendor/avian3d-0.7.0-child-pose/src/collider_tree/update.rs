@@ -20,7 +20,7 @@ use bevy::{
         query::QueryFilter,
         system::{StaticSystemParam, SystemChangeTick},
     },
-    platform::collections::HashSet,
+    platform::collections::HashMap,
     prelude::*,
 };
 use obvhs::aabb::Aabb;
@@ -521,8 +521,9 @@ struct LastDynamicKinematicAabbUpdate(Tick);
 pub struct MovedProxies {
     /// A vector of moved proxy keys.
     proxies: Vec<ColliderTreeProxyKey>,
-    /// A set of moved proxy keys for quick lookup.
-    set: HashSet<ColliderTreeProxyKey>,
+    /// OVERMATCH PATCH: each moved proxy key's position in `proxies`, where stock Avian kept a
+    /// set of the keys and found a removed key's position by scanning `proxies`.
+    positions: HashMap<ColliderTreeProxyKey, usize>,
 }
 
 impl MovedProxies {
@@ -537,7 +538,7 @@ impl MovedProxies {
     /// Returns `true` if the proxy with the given key has moved.
     #[inline]
     pub fn contains(&self, proxy_key: ColliderTreeProxyKey) -> bool {
-        self.set.contains(&proxy_key)
+        self.positions.contains_key(&proxy_key)
     }
 
     /// Inserts a moved proxy key.
@@ -545,24 +546,26 @@ impl MovedProxies {
     /// Returns `true` if the proxy key was not already present.
     #[inline]
     pub fn insert(&mut self, proxy_key: ColliderTreeProxyKey) -> bool {
-        if self.set.insert(proxy_key) {
-            self.proxies.push(proxy_key);
-            true
-        } else {
-            false
+        if self.positions.contains_key(&proxy_key) {
+            return false;
         }
+        self.positions.insert(proxy_key, self.proxies.len());
+        self.proxies.push(proxy_key);
+        true
     }
 
-    /// Removes a moved proxy key. This uses a linear search,
-    /// and may change the order of the remaining keys.
+    /// Removes a moved proxy key, moving the last key into its place.
     ///
     /// If the proxy key is not present, nothing happens.
     #[inline]
     pub fn remove(&mut self, proxy_key: &ColliderTreeProxyKey) {
-        if self.set.remove(proxy_key)
-            && let Some(pos) = self.proxies.iter().position(|k| k == proxy_key)
-        {
-            self.proxies.swap_remove(pos);
+        // OVERMATCH PATCH: a key is listed once (`insert`), so its recorded position is the one
+        // the scan found, and the keys left are in the scanning form's order.
+        if let Some(position) = self.positions.remove(proxy_key) {
+            self.proxies.swap_remove(position);
+            if let Some(filler) = self.proxies.get(position) {
+                self.positions.insert(*filler, position);
+            }
         }
     }
 
@@ -570,7 +573,7 @@ impl MovedProxies {
     #[inline]
     pub fn clear(&mut self) {
         self.proxies.clear();
-        self.set.clear();
+        self.positions.clear();
     }
 }
 
@@ -1071,7 +1074,7 @@ fn update_tree(
             // Record the moved proxy.
             let proxy_key = ColliderTreeProxyKey::new(proxy_id, tree_type);
             if moved_proxies.insert(proxy_key) {
-                tree.moved_proxies.push(proxy_id);
+                tree.mark_moved(proxy_id);
             }
 
             // Clear the least significant set bit
@@ -1082,5 +1085,5 @@ fn update_tree(
 
 fn clear_moved_proxies(mut moved_proxies: ResMut<MovedProxies>, mut trees: ResMut<ColliderTrees>) {
     moved_proxies.clear();
-    trees.iter_trees_mut().for_each(|t| t.moved_proxies.clear());
+    trees.iter_trees_mut().for_each(|t| t.clear_moved());
 }

@@ -66,14 +66,14 @@ impl ColliderTreeSnapshot {
         Self {
             bvh: tree.bvh.clone(),
             proxies: tree.proxies.clone(),
-            moved_proxies: tree.moved_proxies.clone(),
+            moved_proxies: tree.moved_proxies().to_vec(),
         }
     }
 
     fn restore_into(&self, tree: &mut ColliderTree) {
         tree.bvh.clone_from(&self.bvh);
         tree.proxies.clone_from(&self.proxies);
-        tree.moved_proxies.clone_from(&self.moved_proxies);
+        tree.set_moved(&self.moved_proxies);
     }
 }
 
@@ -401,7 +401,7 @@ mod tests {
                 layers: CollisionLayers::default(),
                 flags: Default::default(),
             }) as u32);
-            tree.moved_proxies.push(proxy_id);
+            tree.mark_moved(proxy_id);
             proxy_id
         };
         let proxy_key = ColliderTreeProxyKey::new(proxy_id, ColliderTreeType::Dynamic);
@@ -418,7 +418,7 @@ mod tests {
             let tree = &mut trees.dynamic_tree;
             tree.bvh.primitive_indices.clear();
             tree.proxies.clear();
-            tree.moved_proxies.clear();
+            tree.clear_moved();
             tree.workspace.insertion_stack.reserve(8_192);
         }
         app.world_mut().resource_mut::<MovedProxies>().clear();
@@ -434,7 +434,7 @@ mod tests {
             tree.proxies.get(proxy_id.index()).unwrap().collider,
             collider
         );
-        assert_eq!(tree.moved_proxies, [proxy_id]);
+        assert_eq!(tree.moved_proxies(), [proxy_id]);
         assert_eq!(tree.workspace.insertion_stack.cap(), 8_192);
         assert!(app.world().resource::<MovedProxies>().contains(proxy_key));
     }

@@ -30,7 +30,12 @@ pub struct ColliderTree {
     ///
     /// This is used during tree optimization to determine
     /// which proxies need to be reinserted or rebuilt.
-    pub moved_proxies: Vec<ProxyId>,
+    ///
+    /// OVERMATCH PATCH: private, with `moved_slots` its index; see [`ColliderTree::mark_moved`].
+    moved_proxies: Vec<ProxyId>,
+    /// OVERMATCH PATCH: by proxy index, the proxy's position in `moved_proxies`, or
+    /// [`NOT_MOVED`]. Indices past its end are not moved.
+    moved_slots: Vec<u32>,
     /// A workspace for reusing allocations across tree operations.
     pub workspace: ColliderTreeWorkspace,
 }
@@ -159,6 +164,103 @@ impl Default for ColliderTreeWorkspace {
     }
 }
 
+/// OVERMATCH PATCH: the `moved_slots` value of a proxy that is not in `moved_proxies`.
+const NOT_MOVED: u32 = u32::MAX;
+
+// OVERMATCH PATCH: the moved list has one owner. Every write goes through these methods, which
+// keep `moved_slots` naming each listed proxy's position, so a removal neither scans the list
+// nor has to learn by a full scan that the proxy is not in it. The list's contents and order
+// are those of the scanning form: a proxy is listed at most once, so the position the scan
+// found is the position the index holds, and both `swap_remove` it.
+impl ColliderTree {
+    /// The proxies moved since the last update, in the order they were marked, except that a
+    /// removal moves the last into the removed proxy's place.
+    #[inline]
+    pub fn moved_proxies(&self) -> &[ProxyId] {
+        &self.moved_proxies
+    }
+
+    /// Appends `proxy_id` to the moved list.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the proxy is already listed: a second entry would outlive the proxy's removal.
+    #[inline]
+    pub fn mark_moved(&mut self, proxy_id: ProxyId) {
+        let index = proxy_id.index();
+        if self.moved_slots.len() <= index {
+            self.moved_slots.resize(index + 1, NOT_MOVED);
+        }
+        assert!(
+            self.moved_slots[index] == NOT_MOVED,
+            "proxy {proxy_id:?} is marked moved twice: a collider tree lists a moved proxy once"
+        );
+        self.moved_slots[index] = self.moved_proxies.len() as u32;
+        self.moved_proxies.push(proxy_id);
+    }
+
+    /// Takes `proxy_id` out of the moved list, if it is listed, moving the last listed proxy
+    /// into its place.
+    #[inline]
+    fn unmark_moved(&mut self, proxy_id: ProxyId) {
+        let Some(slot) = self.moved_slots.get_mut(proxy_id.index()) else {
+            return;
+        };
+        let position = core::mem::replace(slot, NOT_MOVED);
+        if position == NOT_MOVED {
+            return;
+        }
+        self.moved_proxies.swap_remove(position as usize);
+        if let Some(filler) = self.moved_proxies.get(position as usize) {
+            self.moved_slots[filler.index()] = position;
+        }
+    }
+
+    /// Empties the moved list and returns it.
+    #[inline]
+    pub fn take_moved(&mut self) -> Vec<ProxyId> {
+        for proxy_id in &self.moved_proxies {
+            self.moved_slots[proxy_id.index()] = NOT_MOVED;
+        }
+        core::mem::take(&mut self.moved_proxies)
+    }
+
+    /// Empties the moved list, keeping its allocation.
+    #[inline]
+    pub fn clear_moved(&mut self) {
+        for proxy_id in &self.moved_proxies {
+            self.moved_slots[proxy_id.index()] = NOT_MOVED;
+        }
+        self.moved_proxies.clear();
+    }
+
+    /// A tree of `bvh` alone for an optimization task, which reads the moved list `moved` and
+    /// neither adds nor removes a proxy.
+    pub(crate) fn for_optimization(
+        bvh: Bvh2,
+        moved: Vec<ProxyId>,
+        workspace: ColliderTreeWorkspace,
+    ) -> Self {
+        let mut tree = Self {
+            bvh,
+            proxies: StableVec::new(),
+            moved_proxies: Vec::new(),
+            moved_slots: Vec::new(),
+            workspace,
+        };
+        tree.set_moved(&moved);
+        tree
+    }
+
+    /// Replaces the moved list with `moved`, in order.
+    pub fn set_moved(&mut self, moved: &[ProxyId]) {
+        self.clear_moved();
+        for &proxy_id in moved {
+            self.mark_moved(proxy_id);
+        }
+    }
+}
+
 impl ColliderTree {
     /// Adds a proxy to the tree, returning its index.
     #[inline]
@@ -170,7 +272,7 @@ impl ColliderTree {
             .insert_primitive(aabb, id, &mut self.workspace.insertion_stack);
 
         // Add to moved proxies.
-        self.moved_proxies.push(ProxyId::new(id));
+        self.mark_moved(ProxyId::new(id));
 
         ProxyId::new(id)
     }
@@ -185,12 +287,8 @@ impl ColliderTree {
             self.bvh.remove_primitive(proxy_id.id());
 
             // Remove from moved proxies.
-            for i in 0..self.moved_proxies.len() {
-                if self.moved_proxies[i] == proxy_id {
-                    self.moved_proxies.swap_remove(i);
-                    break;
-                }
-            }
+            // OVERMATCH PATCH: by index, where stock Avian scanned the list from the front.
+            self.unmark_moved(proxy_id);
 
             Some(proxy)
         } else {

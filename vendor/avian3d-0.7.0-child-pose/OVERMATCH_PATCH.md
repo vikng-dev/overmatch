@@ -344,3 +344,47 @@ afterward. Equal split timers choose the lower island id.
 Guards: `src/tests/avian_island_sleep.rs` (spin axis, independent local-frame energy calculation,
 degenerate properties, original-test rest, transverse see-saw, supported periodic roll).
 Counts and scope: `.agents/scratch/rest-energy.md`.
+
+## Moved-list removal by index (`src/collider_tree/tree.rs`, `src/collider_tree/update.rs`, `src/collider_tree/optimization.rs`)
+
+Avian keeps two lists of the proxies moved since the last physics step: each tree's
+`moved_proxies`, which tree optimization reinserts, and the `MovedProxies` resource, whose order
+the broad phase makes its pairs in. Stock 0.7.0 took a proxy out of either by a scan from the
+front: `ColliderTree::remove_proxy` scanned the tree's whole list, also to learn that the proxy
+was not in it, and `MovedProxies::remove` scanned its vector for a key its set held. Avian's own
+observers call both: `add_to_tree_on` on every `ColliderOf` insert (a collider moved to another
+body leaves the tree and joins it again) and `remove_from_tree_on` on every `ColliderDisabled`.
+Both lists grow through a tick with every proxy added, so a tick that rehomes N colliders compares
+on the order of N² entries, counted over every construction breaking in that tick together.
+
+MEASURED (scheduled-collapse recipes, the tick after the break, construction phase): one house,
+1,924 colliders rehomed and 962 disabled and re-enabled, compared 4.26 M tree-list entries and
+1.70 M `MovedProxies` entries; six houses, 11,544 and 5,772, compared 109.7 M and 40.0 M
+(149.6 M together, 25 times one house's for six times the colliders). The patch compares none:
+one slot read per tree removal (2,886 and 17,316) and one map lookup per `MovedProxies` removal
+(976 and 7,424).
+
+Why the game cannot avoid the scans: they run inside Avian's observers, between the game's
+`ColliderOf` insert and its return, with no setting that skips or batches them. Moving a collider
+to another body requires that insert, and dropping its stale contact pairs requires the disable
+(`src/collider_rehome.rs`). The lists cannot be emptied first: the next step's broad phase and
+optimization read them.
+
+The patch gives each list an index. `ColliderTree::moved_proxies` is private beside `moved_slots`
+(by proxy index, the proxy's position in the list); every write goes through `mark_moved`,
+`remove_proxy`, `take_moved`, `clear_moved` and `set_moved`, and readers take
+`moved_proxies()`. `MovedProxies` keeps each key's position in a map where it kept a set. A
+removal `swap_remove`s the recorded position and re-records the entry that took its place.
+
+That leaves the lists stock Avian leaves, entry for entry, because a list never holds a proxy
+twice: the position the scan found is the only one. For `MovedProxies` its own `insert` refuses a
+held key. For a tree's list: `add_proxy` lists a new id, and an id is reused only after
+`remove_proxy` unlisted it; `update_tree` lists a proxy only when `MovedProxies::insert` accepted
+its key, and a listed proxy's key is held, since every site that removes a key removes the proxy
+from its tree first and the two are cleared, and restored by lightyear, together. Stock Avian
+relied on this silently (a second entry would have outlived its proxy's removal); `mark_moved`
+panics on it.
+
+Guard: `src/tests/avian_moved_lists.rs` (both lists equal the scanning form after every step of
+a tick of 2,000 rehomes and 1,000 toggles, and of 20,000 generated adds, removals, marks and
+clears with reused ids; a second mark is refused).

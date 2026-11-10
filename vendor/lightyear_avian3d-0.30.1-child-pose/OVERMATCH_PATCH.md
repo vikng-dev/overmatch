@@ -27,3 +27,11 @@ Guards: `src/tests/avian_child_pose_churn.rs`, including unchanged-input witness
 input, re-enabling and manual attachment. Inspection:
 `.agents/scratch/perf-2026-11-01/server-tick.md`. Earlier local upstream drafts:
 `upstream/avian-child-collider-pose-churn.md`, `upstream/lightyear-avian-child-pass-visits.md`.
+
+## Moved list through its owner (`src/rollback.rs`)
+
+The patched Avian's `ColliderTree` owns its moved list with an index
+(`vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`, moved-list removal by index), so the
+broad-phase snapshot reads it with `moved_proxies()` and restores it with `set_moved`, which
+rebuilds the index. The stored list and its order are unchanged. This crate's own rollback test
+is not built by the workspace; it was edited to the same methods and not run.

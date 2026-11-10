@@ -2,7 +2,6 @@ use crate::{
     collider_tree::{
         ColliderTree, ColliderTreeDiagnostics, ColliderTreeSystems, ColliderTreeType, ColliderTrees,
     },
-    data_structures::stable_vec::StableVec,
     prelude::*,
 };
 use bevy::{
@@ -186,7 +185,7 @@ fn optimize_trees(
     for tree_type in ColliderTreeType::ALL {
         let tree = collider_trees.tree_for_type_mut(tree_type);
 
-        let moved_ratio = tree.moved_proxies.len() as f32 / tree.proxies.len() as f32;
+        let moved_ratio = tree.moved_proxies().len() as f32 / tree.proxies.len() as f32;
         let optimization_strategy = optimization_settings.optimization_mode.resolve(moved_ratio);
 
         if moved_ratio == 0.0 && optimization_strategy != TreeOptimizationMode::FullRebuild {
@@ -207,13 +206,13 @@ fn optimize_trees(
             };
 
             // Create a new tree for the optimization task.
-            let new_tree = ColliderTree {
+            // OVERMATCH PATCH: the moved list moves through its owner's methods.
+            let new_tree = ColliderTree::for_optimization(
                 bvh,
-                proxies: StableVec::new(),
                 // These are not needed during the simulation step.
-                moved_proxies: core::mem::take(&mut tree.moved_proxies),
-                workspace: core::mem::take(&mut tree.workspace),
-            };
+                tree.take_moved(),
+                core::mem::take(&mut tree.workspace),
+            );
 
             let task = spawn_optimization_task(task_pool, new_tree, tree_type, move |tree| {
                 optimize_tree_in_place(tree, optimization_strategy);
@@ -235,7 +234,7 @@ fn optimize_tree_in_place(tree: &mut ColliderTree, optimization_strategy: TreeOp
     match optimization_strategy {
         TreeOptimizationMode::Reinsert => {
             let moved_leaves = tree
-                .moved_proxies
+                .moved_proxies()
                 .iter()
                 .map(|key| tree.bvh.primitives_to_nodes[key.index()])
                 .collect::<Vec<u32>>();
@@ -244,7 +243,7 @@ fn optimize_tree_in_place(tree: &mut ColliderTree, optimization_strategy: TreeOp
         }
         TreeOptimizationMode::PartialRebuild => {
             let moved_leaves = tree
-                .moved_proxies
+                .moved_proxies()
                 .iter()
                 .map(|key| tree.bvh.primitives_to_nodes[key.index()])
                 .collect::<Vec<u32>>();
