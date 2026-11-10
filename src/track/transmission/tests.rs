@@ -1205,6 +1205,40 @@ fn braking_never_teleports_crank_past_clutch_capacity() {
     );
 }
 
+/// The lock torque that slows the crank is the torque the belts receive: in a geared turn inside
+/// clutch and steering capacity, the crank's own integration lands on the belts' mean, so the
+/// re-anchor moves nothing. A lock solved on the untied mean lands above it, and the re-anchor
+/// then discards crank work no sprocket received; the engine's work budget relies on this.
+/// Fixture: second gear, tight detent, three quarters of governed speed, the difference off its
+/// geared value, unequal reactions.
+#[cfg(feature = "bitprobe")]
+#[test]
+fn a_geared_turn_integrates_the_crank_onto_the_steered_belts() {
+    for (fp, tp) in class_drivetrains() {
+        let k = tp.gears_fwd[1] / tp.sprocket_radius;
+        let m = 0.75 * tp.engine.governed_rpm * RPM_TO_RAD / k;
+        let d = 0.8 * tp.steer_kappa[1].0 * m;
+        let mut st = TransmissionState {
+            gear: 2,
+            steer_step: 2,
+            clutch: ClutchState::In,
+            omega_e: k * m,
+            ..fresh(&tp)
+        };
+        let weight = fp.grip.side_weight;
+        let inp = input(1.0, 1.0, [m + d, m - d], [0.2 * weight, -0.1 * weight]);
+        let probe = step(&fp, &tp, &mut st, &inp).bitprobe;
+        assert_eq!(probe.j[0] - probe.j[1], 1.0, "the geared constraint acts");
+        assert!(probe.reanchor_feasible, "the lock is inside capacity");
+        assert!(
+            (probe.omega_integrated - probe.reanchor_locked).abs() <= 1e-4 * probe.reanchor_locked,
+            "the crank integrated to {} rad/s against belts locked at {}",
+            probe.omega_integrated,
+            probe.reanchor_locked
+        );
+    }
+}
+
 /// Driver state, not belt-speed hysteresis, controls clutch regimes. The launch retains
 /// Slip above idle until it reaches its target, and a shift always interrupts mean-axis drive.
 #[test]

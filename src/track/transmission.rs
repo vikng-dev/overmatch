@@ -1251,8 +1251,10 @@ struct CrankTick {
 /// The game's driving model: capacity-limited clutch torque, solved semi-implicitly.
 /// The lock torque makes the crank and mean belt integration agree:
 /// `tau* = [(omega_e-k*dir*m)/dt + tau_free/J - k*dir*F_other/I_m] / [1/J+k^2/I_m]`.
-/// F_other includes ground reactions. Brakes and steering act later, so `settle_crank`
-/// independently checks the final lock's feasibility rather than trusting this predictor.
+/// The caller passes `m`'s inertia and `F_other` as the steering member ties the belts, ground
+/// reactions included. Brakes, a steering member past its capacity and the work scale act later,
+/// so `settle_crank` independently checks the final lock's feasibility rather than trusting this
+/// predictor.
 ///
 /// The lower guard reduces transmission to preserve a freely reachable crank floor;
 /// the upper guard raises it to bound over-rev. Both stay inside clutch capacity.
@@ -1604,13 +1606,49 @@ fn crank_free_torque(
     (tau_free, p_avail)
 }
 
-/// The steering member's contribution to this tick: the difference-axis force `F_s`, the L600
-/// constraint force λ, and λ's per-output Jacobian `j`. Returned as `(f_s, lambda, j)`; a tick
-/// that commands neither leaves all three at zero.
+/// The geared steering member's signed ratio `s·κ` of belt half-difference to |mean| this tick;
+/// zero when straight.
 ///
 /// κ is indexed by the active gear on its own forward or reverse ladder; `d` follows the
 /// steer SIGN regardless of travel direction — the superimposed steering shaft is independent of
-/// the gear's direction, historically and mechanically.
+/// the gear's direction, historically and mechanically. The detent (`st.steer_step`) was updated
+/// for this tick before gear selection: one detent truth per tick.
+fn steer_ratio(tp: &TransmissionParams, st: &TransmissionState, inp: &TransmissionInput) -> f32 {
+    let table = if st.reverse {
+        &tp.reverse_steer_kappa
+    } else {
+        &tp.steer_kappa
+    };
+    let (k_tight, k_wide) = table[usize::from(st.gear - 1)];
+    let s = if inp.steer > 0.0 {
+        1.0
+    } else if inp.steer < 0.0 {
+        -1.0
+    } else {
+        0.0
+    };
+    s * match st.steer_step {
+        0 => 0.0,
+        1 => k_wide,
+        2 => k_tight,
+        _ => panic!("the transmission admits only straight, wide and tight detents"),
+    }
+}
+
+/// The sign of `x`, zero at zero: the |m| branch a geared steering solve linearizes on.
+fn branch(x: f32) -> f32 {
+    if x > 0.0 {
+        1.0
+    } else if x < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// The steering member's contribution to this tick: the difference-axis force `F_s`, the L600
+/// constraint force λ, and λ's per-output Jacobian `j`. Returned as `(f_s, lambda, j)`; a tick
+/// that commands neither leaves all three at zero.
 ///
 /// The servo is a capacity-limited KINEMATIC one, semi-implicit like the brakes and λ: the `F_s`
 /// that lands `d` exactly on target after this tick's integration (`d` dynamics:
@@ -1630,12 +1668,6 @@ fn steering_force(
 ) -> (f32, f32, [f32; 2]) {
     let dt = inp.dt;
     let [vl, vr] = inp.speeds;
-    let table = if st.reverse {
-        &tp.reverse_steer_kappa
-    } else {
-        &tp.steer_kappa
-    };
-    let (k_tight, k_wide) = table[usize::from(st.gear - 1)];
     let mut f_s = 0.0;
     let mut lambda = 0.0;
     let mut j = [0.0f32; 2];
@@ -1645,11 +1677,7 @@ fn steering_force(
     let servo = |target_d: f32| {
         (2.0 * ((target_d - d) * fp.belt_inertia / dt + r_d)).clamp(-f_s_max, f_s_max)
     };
-    // The steering detent (`st.steer_step`) was already updated for THIS tick
-    // before gear selection — one detent truth per tick; this law only
-    // consumes it.
-    let neutral = neutral_turn(inp, m);
-    if neutral {
+    if neutral_turn(inp, m) {
         // The neutral target is construction's `neutral_d_full` half-difference.
         f_s = servo(inp.steer * tp.neutral_d_full);
     } else {
@@ -1658,27 +1686,15 @@ fn steering_force(
         // so each output's share stays inside the per-output capacity (beyond it the
         // constraint slips). Zero ideal work: Q_c·v = λ·g, which the solve drives to
         // zero.
-        let s = if inp.steer > 0.0 {
-            1.0
-        } else if inp.steer < 0.0 {
-            -1.0
-        } else {
-            0.0
-        };
-        let kappa = match st.steer_step {
-            0 => 0.0,
-            1 => k_wide,
-            2 => k_tight,
-            _ => panic!("the transmission admits only straight, wide and tight detents"),
-        };
+        let ratio = steer_ratio(tp, st, inp);
         let a_l = f_c / 2.0 - inp.reactions[0];
         let a_r = f_c / 2.0 - inp.reactions[1];
         // One |m| branch of the solve: on branch b, |m| linearizes as `b·m`, so
         // `g = jl·v_L + jr·v_R` with the branch's Jacobian. Returns λ (per-output
         // capacity clamp — straight-gear `max|j| = 1/2` gives the same 2× bound
         // the servo uses), the Jacobian, and the pre-brake landing m. Brakes act later.
-        let solve = |branch: f32| -> (f32, [f32; 2], f32) {
-            let e = s * kappa * branch;
+        let solve = |side: f32| -> (f32, [f32; 2], f32) {
+            let e = ratio * side;
             let jl = (1.0 - e) / 2.0;
             let jr = -(1.0 + e) / 2.0;
             let g_now = jl * vl + jr * vr;
@@ -1689,13 +1705,7 @@ fn steering_force(
             let m_next = m + (a_l + l * jl + a_r + l * jr) / (2.0 * fp.belt_inertia) * dt;
             (l, [jl, jr], m_next)
         };
-        let b0 = if m > 0.0 {
-            1.0
-        } else if m < 0.0 {
-            -1.0
-        } else {
-            0.0
-        };
+        let b0 = branch(m);
         let (l0, j0, m_next) = solve(b0);
         if b0 != 0.0 && m_next * b0 < 0.0 {
             // The tick crosses m = 0: the pre-tick branch would project onto
@@ -1885,8 +1895,9 @@ fn apply_ceiling_brakes(
 }
 
 /// Re-anchor only when the final belt speed implies a within-capacity clutch torque,
-/// `tau = tau_free - (k*dir*m_next - omega_e)*J/dt`, inside both guards. Brakes and
-/// steering act after the coupling predictor, so its earlier clamp cannot certify this snap.
+/// `tau = tau_free - (k*dir*m_next - omega_e)*J/dt`, inside both guards. Brakes and a steering
+/// member past its capacity act after the coupling predictor, so its earlier clamp cannot certify
+/// this snap.
 /// An infeasible snap leaves the integrated slipping crank. The caller then caps its energy
 /// by the source budget left after sprocket work; a feasible clutch cannot create energy.
 /// `None` names an open clutch; without a Driver catch the crank may turn backward.
@@ -2084,14 +2095,27 @@ pub(crate) fn step(
         omega_over,
         dt,
     };
+    // A geared steering member ties the belts to `d = e·m`, so the clutch drives them as one
+    // motion. DERIVED by eliminating the constraint force λ from both belt equations: the mean
+    // carries inertia `I_m·(1 + e²)`, each reaction reaches it through its own belt's share
+    // `1 ± e`, and λ's correction of the pre-tick drift `d − e·m` lands on it as `e` times that
+    // correction. `e = 0` when straight or in the neutral regime.
+    let e = if neutral_turn(inp, m) {
+        0.0
+    } else {
+        steer_ratio(tp, st, inp) * branch(m)
+    };
+    let tied_inertia = i_m * (1.0 + e * e);
+    let tied_force =
+        -(1.0 + e) * inp.reactions[0] - (1.0 - e) * inp.reactions[1] + e * (d - e * m) * i_m / dt;
     let tau_c = if engaged {
         clutch_coupling(
             crank,
             tp.engine_inertia,
             inp.supply.transmission_condition * tp.clutch_capacity,
             m,
-            i_m,
-            -(inp.reactions[0] + inp.reactions[1]),
+            tied_inertia,
+            tied_force,
             #[cfg(feature = "bitprobe")]
             &mut bitprobe,
         )
@@ -2173,8 +2197,8 @@ pub(crate) fn step(
         omega_floor,
         shifting,
         engaged,
-        i_mean: i_m,
-        f_other: -(inp.reactions[0] + inp.reactions[1]),
+        i_mean: tied_inertia,
+        f_other: tied_force,
         f_c_pre_scale,
         f_s_pre_scale,
         lambda,
