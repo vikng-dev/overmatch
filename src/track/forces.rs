@@ -17,7 +17,7 @@
 
 use avian3d::prelude::Friction;
 use bevy::ecs::entity::Entity;
-use bevy::math::{Affine3A, Vec2, Vec3};
+use bevy::math::{Affine3A, Mat3, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 use super::load::SupportFact;
@@ -171,7 +171,7 @@ impl GripParams {
 /// Resolution: LuGre bristle damping at half critical damping, sized from each patch's
 /// initial stiffness and supported mass. ADR-0026 records the coupled stability experiment;
 /// this ratio is solver damping, never a material loss factor.
-const GRIP_ELEMENT_DAMPING_RATIO: f32 = 0.5;
+pub(crate) const GRIP_ELEMENT_DAMPING_RATIO: f32 = 0.5;
 
 /// Resolution: element membership bounds, as fractions of the side's nominal weight: a pad ENTERS the
 /// grip population above the high bound and STAYS down to the low bound (hysteresis).
@@ -475,6 +475,27 @@ impl BeltContact {
     }
 }
 
+/// One side's belt reaction, linearized over the tick (the game's driving model): it rises
+/// `belt` per m/s of belt speed and falls by `linear·Δv + angular·Δω` when the hull's velocity
+/// field changes by `Δv` at the hull's origin and `Δω` in angular velocity. Both come from the
+/// same per-patch gradient, so a belt that keeps pace with its hull meets an unchanged reaction.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct ReactionSlope {
+    /// N s/m.
+    pub belt: f32,
+    /// N s/m: the gradient against the hull's velocity, each patch's in its contact plane.
+    pub linear: Vec3,
+    /// N s: its moment about the hull's origin.
+    pub angular: Vec3,
+}
+
+impl ReactionSlope {
+    /// The reaction's fall (N) when the hull's velocity field changes by `(Δv, Δω)`.
+    pub fn under(&self, (linear, angular): (Vec3, Vec3)) -> f32 {
+        self.linear.dot(linear) + self.angular.dot(angular)
+    }
+}
+
 /// What one side's tick produced.
 #[derive(Default)]
 pub struct SideReport {
@@ -483,6 +504,8 @@ pub struct SideReport {
     pub contacts: Vec<BeltContact>,
     /// Longitudinal grip reaction summed into belt dynamics (N): sum of f_long.
     pub belt_reaction: f32,
+    /// How `belt_reaction` moves within the tick, for the belt's implicit solve.
+    pub reaction_slope: ReactionSlope,
     /// Terrain/construction facts before dynamic support damping; Driver observation only.
     pub perceived_support: Vec<super::load::SupportFact>,
     /// Material-station depth probes; surface quadrature casts are not recorded.
@@ -608,7 +631,7 @@ pub fn contact_side<O: TerrainOracle>(
         elements_mode,
         &mut report,
     );
-    let elem_g = match &params.grip {
+    let grips = match &params.grip {
         Some(grip) => {
             update_grip_elements(&cols, &held, elements, grip.side_weight, dt, element_len)
         }
@@ -621,7 +644,13 @@ pub fn contact_side<O: TerrainOracle>(
         output.strain = elements.strain[element];
         output.dwell = u32::from(elements.dwell[element]);
     }
-    let (elem_sum, belt_reaction) = emit_contact_forces(&mut report, &cols, &elem_g, elements_mode);
+    let (elem_sum, belt_reaction) = emit_contact_forces(
+        &mut report,
+        &cols,
+        &grips,
+        elements_mode,
+        affine.translation.into(),
+    );
 
     // The grip slot carries the summed element force (long, lat) — telemetry only (the
     // element state is authoritative and lives with the caller). Belt dynamics (the joint
@@ -1054,7 +1083,10 @@ fn column_strip(lateral: (f32, f32), (share, weight): (f32, f32), ascending: boo
 /// Dupont elastic zone with Dahl return, shared by every surface. Below breakaway and
 /// during unloading the state is elastic; plastic flow bounds recoverable shear to
 /// [`GRIP_SHEAR_FLOOR_M`]. Each patch projects this vector into its own plane when reading force.
-fn advance_element_strain(j0: Vec3, sdot: Vec3, dt: f32) -> Vec3 {
+///
+/// Returns the strain and its derivative against `sdot` (s). The derivative leaves out the Dahl
+/// return's own dependence on `sdot`, which only softens loading: it overstates the slope.
+fn advance_element_strain(j0: Vec3, sdot: Vec3, dt: f32) -> (Vec3, Mat3) {
     let shear_m = GRIP_SHEAR_FLOOR_M;
     let speed = sdot.length();
     let alpha = if j0.dot(sdot) < 0.0 {
@@ -1065,12 +1097,18 @@ fn advance_element_strain(j0: Vec3, sdot: Vec3, dt: f32) -> Vec3 {
             .clamp(0.0, 1.0);
         m * m * (3.0 - 2.0 * m)
     };
-    let mut j1 = (j0 + sdot * dt) / (1.0 + alpha * (dt / shear_m) * speed);
+    let dahl = 1.0 + alpha * (dt / shear_m) * speed;
+    let mut j1 = (j0 + sdot * dt) / dahl;
+    let mut slope = Mat3::from_diagonal(Vec3::splat(dt / dahl));
     let j_len = j1.length();
     if j_len > shear_m {
+        // Plastic flow: only the strain's direction still follows the slip.
+        let dir = j1 / j_len;
+        let across = Mat3::IDENTITY - Mat3::from_cols(dir * dir.x, dir * dir.y, dir * dir.z);
+        slope = across * slope * (shear_m / j_len);
         j1 *= shear_m / j_len;
     }
-    j1
+    (j1, slope)
 }
 
 /// Tick-local accumulation for one material element, shared by all its surface patches.
@@ -1115,9 +1153,8 @@ fn forget_departed_elements(work: &[ElementWork], elements: &mut GripElements) {
 /// itself — isotropic, NO ellipse: lateral-vs-longitudinal asymmetry and turning resistance are
 /// left to emerge from footprint geometry.
 ///
-/// Advances `elements` in place and returns each contact's capped grip direction as
-/// `(longitudinal, lateral)` components of a unit-bounded vector — pass 2 scales it by that
-/// contact's μ × its elastic load. Membership bounds scale with `side_weight`
+/// Advances `elements` in place and returns each contact's [`ContactGrip`] — pass 2 scales it by
+/// that contact's μ × its elastic load. Membership bounds scale with `side_weight`
 /// ([`GripParams::side_weight`]).
 fn update_grip_elements(
     cols: &[ColumnContact],
@@ -1126,11 +1163,13 @@ fn update_grip_elements(
     side_weight: f32,
     dt: f32,
     element_len: usize,
-) -> Vec<Vec2> {
+) -> Vec<ContactGrip> {
     let enter = side_weight * GRIP_ELEMENT_ENTER_FRACTION;
     let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
     let mut work = vec![ElementWork::default(); element_len];
-    let mut elem_g = vec![Vec2::ZERO; cols.len()];
+    // An element that does not advance holds its strain: no slope.
+    let mut strain_slope = vec![Mat3::ZERO; element_len];
+    let mut grips = vec![ContactGrip::default(); cols.len()];
     // Split footprints advance their material element once, from its load-weighted slip.
     for c in cols {
         let element = &mut work[c.element];
@@ -1169,7 +1208,7 @@ fn update_grip_elements(
                 } else {
                     element.slip / element.load
                 };
-                elements.strain[c.element] =
+                (elements.strain[c.element], strain_slope[c.element]) =
                     advance_element_strain(elements.strain[c.element], mean_slip, dt);
             }
             // Below the enter bound the existing strain holds; each patch's force still scales
@@ -1189,10 +1228,20 @@ fn update_grip_elements(
             / (GRIP_SHEAR_FLOOR_M * c.mu * super::derive::G).sqrt();
         let mut g = (j1 / GRIP_SHEAR_FLOOR_M).clamp_length_max(1.0) + sdot * d_coef;
         let g_len = g.length();
+        // `pull` is ∂(g·long)/∂g through the cap; the slope carries it back through
+        // ∂g/∂sdot = P_n·S/K + d, P_n the patch-plane projection and S the strain's derivative
+        // against the element's mean slip, which every patch's slip moves alike.
+        let mut pull = c.long_dir;
         if g_len > 1.0 {
             g /= g_len;
+            pull = (pull - g * g.dot(pull)) / g_len;
         }
-        elem_g[idx] = Vec2::new(g.dot(c.long_dir), g.dot(c.lat_dir));
+        let in_plane = pull - c.normal * pull.dot(c.normal);
+        grips[idx] = ContactGrip {
+            g: Vec2::new(g.dot(c.long_dir), g.dot(c.lat_dir)),
+            slope: strain_slope[c.element].transpose() * in_plane / GRIP_SHEAR_FLOOR_M
+                + pull * d_coef,
+        };
     }
     // Columns the damped support clipped out this tick but whose elastic penetration
     // remains: still on the ground — membership continues, stored strain holds, no force
@@ -1206,16 +1255,26 @@ fn update_grip_elements(
         }
     }
     forget_departed_elements(&work, elements);
-    elem_g
+    grips
 }
 
-/// Emit support then total tangent force per contact. Returns summed grip and longitudinal
-/// belt reaction, each in N.
+/// One contact's grip per unit budget (μ × elastic load): the capped force direction as
+/// `(longitudinal, lateral)` components of a unit-bounded vector, and the gradient of its
+/// longitudinal component against the patch's sliding velocity in force convention (s/m).
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct ContactGrip {
+    g: Vec2,
+    slope: Vec3,
+}
+
+/// Emit support then total tangent force per contact, and sum the reaction's slope with moments
+/// about `origin`. Returns summed grip and longitudinal belt reaction, each in N.
 fn emit_contact_forces(
     report: &mut SideReport,
     cols: &[ColumnContact],
-    elem_g: &[Vec2],
+    grips: &[ContactGrip],
     elements_mode: bool,
+    origin: Vec3,
 ) -> (Vec2, f32) {
     let mut elem_sum = Vec2::ZERO;
     let mut belt_reaction = 0.0;
@@ -1234,12 +1293,18 @@ fn emit_contact_forces(
             // No velocity-regularized kinetic term is added: its former near-zero slope was
             // MEASURED about 270 kN s/m per side, marginal at the fixed step (ADR-0026).
             let grip_el = c.mu * c.load_elastic;
-            let g = elem_g[idx];
+            let ContactGrip { g, slope } = grips[idx];
             f_long = grip_el * g.x;
             f_lat = grip_el * g.y;
             elem_sum += Vec2::new(f_long, f_lat);
             traction = c.long_dir * f_long + c.lat_dir * f_lat;
             belt_reaction += f_long;
+            // Sliding velocity is `long·belt speed − (hull velocity in the contact plane)`.
+            let gradient = slope * grip_el;
+            let hull = gradient - c.normal * gradient.dot(c.normal);
+            report.reaction_slope.belt += gradient.dot(c.long_dir);
+            report.reaction_slope.linear += hull;
+            report.reaction_slope.angular += (c.p - origin).cross(hull);
         }
         let rolling = if c.has_plane {
             rolling_resistance(c.rolling * c.load, c.travel_speed)
@@ -2641,7 +2706,7 @@ mod tests {
         // FIXTURE: 1 mm/s alternating slip, 64 Hz, 60 simulated seconds.
         for tick in 0..64 * 60 {
             let slip = Vec3::X * if tick % 2 == 0 { 0.001 } else { -0.001 };
-            state = advance_element_strain(state, slip, 1.0 / 64.0);
+            state = advance_element_strain(state, slip, 1.0 / 64.0).0;
         }
         println!(
             "MEASURED closed-dither holding share {} -> {}",
@@ -2662,7 +2727,7 @@ mod tests {
         let mut state = Vec3::ZERO;
         for quarter in 1..=8 {
             for _ in 0..1024 {
-                state = advance_element_strain(state, Vec3::X * k, 1.0 / 4096.0);
+                state = advance_element_strain(state, Vec3::X * k, 1.0 / 4096.0).0;
             }
             let travel = quarter as f32 / 4.0;
             assert!(state.x > 0.0 && state.x <= k);
@@ -3172,7 +3237,7 @@ mod tests {
             elements.strain[0] = Vec3::Z * 0.02; // FIXTURE elastic displacement.
             let g = update_grip_elements(&cols, &[], &mut elements, 1000.0, 1.0 / 64.0, 3);
             let flat = normals.iter().position(|(n, _)| *n == Vec3::Y).unwrap();
-            results.push(g[flat]);
+            results.push(g[flat].g);
         }
         assert_eq!(results[0], results[1]);
         assert!(results[0].length() > 0.0);

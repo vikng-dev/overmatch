@@ -541,10 +541,11 @@ stage-A regression surface, and the REV-13 boundary all held; four findings fixe
    clutch). Replaced by an END-OF-STEP feasibility check on the final belt state:
    `τ_impl = τ_free − (k·s·m_next − ω_e)·J/dt`; snap only if `|τ_impl| ≤ capacity` (and
    ≥ the stall floor), else the honestly integrated slipping crank stands. The pre-solve
-   is a PREDICTOR. It solves the lock on the belts as the steering member ties them, the
-   member's force eliminated (mean inertia `I_m·(1 + e²)`, each reaction through its own
-   belt's share `1 ± e`, plus `e` times the drift correction), so a member inside its
-   capacity lands the predicted mean. Brakes, a member past its capacity and the work scale
+   is a PREDICTOR. It solves the lock on the belts as the steering member ties them and
+   each belt's implicit ground reaction lands them, the member's force eliminated
+   (`BeltTick::tied_mean`; on equal belt mobilities the mean inertia is `I_m·(1 + e²)`, each
+   reaction reaches it through its own belt's share `1 ± e`, plus `e` times the drift
+   correction), so a member inside its capacity lands the predicted mean. Brakes, a member past its capacity and the work scale
    still act after it — exact pre-accounting of the brakes is circular (the brake law reads
    the q that needs F_c) — and this check keeps them safe. The reactions-only `F_other` it
    replaced left λ's mean-axis share out, and the snap discarded the crank work behind it:
@@ -899,9 +900,14 @@ Whether the mean is held is construction data, `steering.neutral_mean: Free | He
 force only the difference with nothing on the mean path (Merritt-Brown's balance shaft, cross-drive
 in neutral) are `Free`. The Tiger is `Held`, DERIVED from its period drill (Tigerfibel pp. 40–41,
 D 656/30 p. 58; the button-is-holding-brake reading is an inference). Held, `apply_mean_hold` adds
-the mean-axis stop force after the engine and brake forces, split evenly so `d` is untouched, within
-twice `brake_capacity_for_regime` at the mean speed: the two-sided capacity that holds the parked
-tank, static at rest and dynamic once breached. It is passive and not charged to the engine.
+the mean-axis stop force after the engine and brake forces, split evenly, within twice
+`brake_capacity_for_regime` at the mean speed: the two-sided capacity that holds the parked tank,
+static at rest and dynamic once breached. It is passive and not charged to the engine. Where the two
+belts' implicit mobilities differ an even split moves `d` too, so the servo solves `d` with that
+split alongside it (`BeltTick::held_mean_force`) and `d` still lands; the parked brakes' two-sided
+stop is solved the same way, so they carry the mean evenly as on equal mobilities. Without it, a
+pivot on a slope missed its `d` target every tick, and a tank parked out of a 25° pivot broke one
+brake past its static capacity and slid (MEASURED, `pivot_probe`, 2026-11-11).
 
 Rejected: the steering member's per-output capacity, because the member carries only the difference
 and the grade load is common mode; an ideal, unbounded hold, a claim no source makes; a holding-brake
