@@ -14,8 +14,8 @@
 //! the turret; that hook triggers off `CookedOff` directly.
 
 use avian3d::prelude::{
-    AngularInertia, AngularVelocity, LinearVelocity, Mass, NoAutoAngularInertia, NoAutoMass,
-    Position, Rotation,
+    AngularInertia, AngularVelocity, CenterOfMass, LinearVelocity, Mass, NoAutoAngularInertia,
+    NoAutoCenterOfMass, NoAutoMass, Position, Rotation,
 };
 use bevy::ecs::query::QueryData;
 use bevy::ecs::system::SystemParam;
@@ -768,6 +768,7 @@ fn launch_turrets_on_cookoff(
                     pose,
                     crate::eased_dynamic_body(),
                     Mass(body.mass),
+                    CenterOfMass(body.centre_of_mass),
                     AngularInertia::from_shape(
                         &Cuboid::new(
                             body.inertia_extents.x,
@@ -777,6 +778,7 @@ fn launch_turrets_on_cookoff(
                         body.mass,
                     ),
                     NoAutoMass,
+                    NoAutoCenterOfMass,
                     NoAutoAngularInertia,
                     LinearVelocity(up * 14.0 + forward * 3.0),
                     AngularVelocity(right * 3.0 + up * 1.2),
@@ -1133,9 +1135,9 @@ mod tests {
         assert!((evaluate(&req, &q(&[(Part::Loader, 0.6)])) - 0.6).abs() < 1e-6);
     }
 
-    /// The launched turret's rigid body is whatever its own `TurretBody` says: mass and the box
-    /// its inertia is taken over. A launch that carried a constant would hand the second tank the
-    /// first one's turret.
+    /// The launched turret's rigid body is whatever its own `TurretBody` says: mass, mass centre
+    /// and the box its inertia is taken over. A launch that carried a constant would hand the
+    /// second tank the first one's turret. Fixture body data.
     #[test]
     fn a_launched_turret_takes_its_mass_and_inertia_from_its_body_data() {
         use super::*;
@@ -1151,6 +1153,7 @@ mod tests {
                 TurretBody {
                     mass: 1234.0,
                     inertia_extents: extents,
+                    centre_of_mass: Vec3::new(0.1, 0.4, -0.2),
                 },
                 ChildOf(tank),
                 GlobalTransform::default(),
@@ -1160,6 +1163,10 @@ mod tests {
         let world = app.world();
         assert!(world.get::<LaunchedTurret>(turret).is_some());
         assert_eq!(world.get::<Mass>(turret).unwrap().0, 1234.0);
+        assert_eq!(
+            world.get::<CenterOfMass>(turret).unwrap().0,
+            Vec3::new(0.1, 0.4, -0.2)
+        );
         let expected = AngularInertia::from_shape(&Cuboid::new(2.0, 1.5, 3.0), 1234.0);
         assert_eq!(
             world.get::<AngularInertia>(turret).unwrap().tensor(),
@@ -1234,6 +1241,7 @@ mod tests {
                     TurretBody {
                         mass: 1000.0,
                         inertia_extents: Vec3::new(2.0, 1.0, 2.0),
+                        centre_of_mass: Vec3::ZERO,
                     },
                     Transform::from_xyz(0.0, 0.5, 0.0),
                     ChildOf(tank),
@@ -1337,6 +1345,7 @@ mod tests {
                     TurretBody {
                         mass: 1000.0,
                         inertia_extents: Vec3::ONE,
+                        centre_of_mass: Vec3::ZERO,
                     },
                     ring,
                     ChildOf(tank),

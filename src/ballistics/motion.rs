@@ -13,8 +13,6 @@ use avian3d::prelude::{
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 
-use super::armour_set::ArmourPart;
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Pose {
     pub position: Vec3,
@@ -40,8 +38,8 @@ pub(super) struct Poses {
 pub(super) struct ColliderMotion {
     pub colliders: HashMap<Entity, Poses>,
     pub bodies: HashMap<Entity, Poses>,
-    /// DERIVED conservative displacement of any point of a collider outside an armour set, used to
-    /// grow a tree query; a set bounds its own parts ([`super::armour_set::Reach`]).
+    /// DERIVED conservative displacement of any point of a collider, used to grow a tree query; a
+    /// set bounds its own parts, which are no colliders ([`super::armour_set::Reach`]).
     pub largest_motion: f32,
     /// The entries whose endpoints differ, so the next boundary can close them.
     moving_colliders: Vec<Entity>,
@@ -50,7 +48,7 @@ pub(super) struct ColliderMotion {
     seeded_enabled: HashSet<Entity>,
 }
 
-/// Every collider the history keeps: all but a tank's armour parts, which its armour set poses
+/// Every collider the history keeps. A tank's armour parts are none: its armour set poses them
 /// ([`super::armour_set`]).
 type Colliders<'w, 's> = Query<
     'w,
@@ -63,7 +61,6 @@ type Colliders<'w, 's> = Query<
         Option<&'static ColliderOf>,
         Option<&'static ColliderTransform>,
     ),
-    Without<ArmourPart>,
 >;
 
 fn composed_pose(
@@ -117,7 +114,7 @@ fn admitted(
 pub(super) fn seed_births(
     mut history: ResMut<ColliderMotion>,
     colliders: Colliders,
-    changed: Query<Entity, (Changed<Collider>, Without<ArmourPart>)>,
+    changed: Query<Entity, Changed<Collider>>,
     bodies: Query<(&Position, &Rotation)>,
     roots: Query<(Entity, &Position, &Rotation), With<RigidBody>>,
     added: Query<Entity, Added<RigidBody>>,
@@ -153,8 +150,8 @@ pub(super) fn seed_births(
         .iter()
         .chain(admitted.iter().copied().filter(|&e| !changed.contains(e)))
     {
-        // An admitted entity may be no collider, an armour part, despawning, or still disabled by
-        // another component.
+        // An admitted entity may be no collider, despawning, or still disabled by another
+        // component.
         let Ok((_, position, rotation, _, owner, local)) = colliders.get(entity) else {
             continue;
         };
@@ -214,7 +211,6 @@ pub(super) fn snapshot(
         Entity,
         (
             With<Collider>,
-            Without<ArmourPart>,
             Or<(
                 Changed<Position>,
                 Changed<Rotation>,
@@ -280,10 +276,9 @@ pub(super) fn snapshot(
         }
         history.colliders.insert(entity, poses);
         if stages.is_some() {
-            let armour = layers.get(entity).is_ok_and(|layers| {
-                layers.memberships.has_all(crate::Layer::Armor)
-                    || layers.memberships.has_all(crate::Layer::Witness)
-            });
+            let armour = layers
+                .get(entity)
+                .is_ok_and(|layers| layers.memberships.has_all(crate::Layer::Armor));
             inserts[usize::from(armour)] += 1;
         }
     }

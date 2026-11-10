@@ -40,8 +40,12 @@ const ONE_UNITS: u32 = ONE * POOL_UNITS_PER_HP;
 #[derive(Clone, Copy)]
 enum Kind {
     Plate,
+    /// A crew box of a soft hard substance with this HP pool: a layer of the walk.
     Crew(u32),
     Ammo(u32),
+    /// A crew box as the shipped crew representation (ADR-0040) with this HP pool: dosed at the
+    /// round's crew line rate, no layer of the walk.
+    Witness(u32),
 }
 
 /// One fixture volume: name, full extents and centre in the tank's frame (m), kind.
@@ -131,30 +135,36 @@ fn tank(
     let spawned = volumes
         .iter()
         .map(|&(name, size, centre, kind)| {
-            let factor = if matches!(kind, Kind::Plate) {
-                STEEL
-            } else {
-                SOFT
-            };
             let mut volume = app.world_mut().spawn((
                 Name::new(name),
                 Transform::from_translation(centre),
                 ChildOf(root),
                 Collider::cuboid(size.x, size.y, size.z),
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
-                BallisticVolume {
-                    material: walk::VolumeMaterial::fixture(factor),
-                    substance: "fixture".to_owned(),
-                },
                 VolumeOf(root),
             ));
+            let hard = |factor| BallisticVolume {
+                material: walk::VolumeMaterial::fixture(factor),
+                substance: "fixture".to_owned(),
+            };
             match kind {
-                Kind::Plate => {}
+                Kind::Plate => {
+                    volume.insert(hard(STEEL));
+                }
                 Kind::Crew(hp) => {
-                    volume.insert((ComponentHealth::full(hp), CrewStation::Gunner));
+                    volume.insert((hard(SOFT), ComponentHealth::full(hp), CrewStation::Gunner));
                 }
                 Kind::Ammo(hp) => {
-                    volume.insert((ComponentHealth::full(hp), Ammo));
+                    volume.insert((hard(SOFT), ComponentHealth::full(hp), Ammo));
+                }
+                Kind::Witness(hp) => {
+                    volume.insert((
+                        WitnessVolume {
+                            substance: "fixture".to_owned(),
+                        },
+                        ComponentHealth::full(hp),
+                        CrewStation::Gunner,
+                    ));
                 }
             }
             volume.id()
@@ -167,7 +177,7 @@ fn tank(
     // a cook-off empties every pool, seats included.
     let listed = volumes
         .iter()
-        .filter(|&&(.., kind)| matches!(kind, Kind::Crew(_)))
+        .filter(|&&(.., kind)| matches!(kind, Kind::Crew(_) | Kind::Witness(_)))
         .count();
     for seat in 0..if listed == 0 { 2 } else { 1 } {
         app.world_mut().spawn((
@@ -369,84 +379,43 @@ fn overlapping_shots_each_record_only_their_own_loss() {
     }
 }
 
-/// The game's damage model: a round resolves a tank from its armour set alone, on the authority.
-/// Its discovery, crossings, fields and crew lines, and the recorder that finishes its record,
-/// depend on no armour or crew-box collider's tree entry, pose, bounds, shape, layers, surfaces or
-/// crew-box marker, which the lane deleting those colliders relies on: with every part out of
-/// avian's tree, its `Position`, `Rotation` and `ColliderAabb` moved a kilometre off before each
-/// march, its shape a millimetre ball, its layers terrain's, its surfaces empty and its
-/// `WitnessSurface` gone, a round through a plate into two crew boxes doses each HP pool exactly as
-/// it does against intact colliders. A reader still taking a part from the tree misses it; one
-/// still reading its pose, bounds or shape places it elsewhere; one reading its layers or marker
-/// takes the plate for terrain or a crew box for armour. Fixture: a turned tank driving across the
-/// line of fire.
+/// The game's damage model: a round resolves a tank from its armour set alone, on the authority:
+/// its parts are no colliders, so avian's tree holds none, and a round through a plate into two
+/// crew boxes doses each HP pool. A reader still taking a part from the tree, or from a collider's
+/// pose, shape, layers or marker, misses the tank. Fixture: a turned tank driving across the line
+/// of fire.
 #[test]
 fn a_round_resolves_a_tank_from_its_armour_set_alone() {
-    use avian3d::prelude::{ColliderAabb, ColliderDisabled, Position, Rotation};
-    fn scramble(
-        mut parts: Query<
-            (&mut Position, &mut Rotation, &mut ColliderAabb),
-            With<crate::ballistics::armour_set::ArmourPart>,
-        >,
-    ) {
-        for (mut position, mut rotation, mut bounds) in &mut parts {
-            position.0 += Vec3::splat(1000.0);
-            rotation.0 = Quat::from_rotation_x(1.0) * rotation.0;
-            *bounds = ColliderAabb::from_min_max(Vec3::splat(1000.0), Vec3::splat(1001.0));
-        }
-    }
-    let held = |detached: bool| {
-        let mut app = recording_world(false);
-        let (_, volumes) = tank(
-            &mut app,
-            Vec3::ZERO,
-            0.3,
-            Vec3::new(1.0, 0.0, 0.0),
-            &plated(DEEP, Kind::Crew(DEEP)),
-        );
-        scoring_witnesses(&mut app, &volumes);
-        settle(&mut app);
-        if detached {
-            for &volume in &volumes {
-                app.world_mut().entity_mut(volume).insert(ColliderDisabled);
-            }
-            for &volume in &volumes {
-                app.world_mut()
-                    .entity_mut(volume)
-                    .remove::<WitnessSurface>()
-                    .insert((
-                        Collider::sphere(1.0e-3),
-                        CollisionLayers::new([Layer::Terrain], LayerMask::NONE),
-                        BallisticSurfaces {
-                            shells: Vec::new().into(),
-                            corners: Vec::new().into(),
-                        },
-                    ));
-            }
-            app.add_systems(
-                FixedPostUpdate,
-                scramble
-                    .after(SimPhase::ColliderPoses)
-                    .before(SimPhase::ProjectileMarch),
-            );
-        }
-        fire(&mut app, Vec3::new(0.0, 0.0, 30.0), FireMechanism::Single);
-        run(&mut app, 8);
-        // The plate has no HP pool; the two crew boxes follow it.
-        volumes[1..]
-            .iter()
-            .map(|&volume| hp(&app, volume))
-            .collect::<Vec<_>>()
-    };
-    let intact = held(false);
-    assert!(
-        intact.iter().all(|&held| held < DEEP_UNITS),
-        "the round doses both crew boxes: {intact:?}"
+    let mut app = recording_world(false);
+    let mut volumes = plated(DEEP, Kind::Witness(DEEP));
+    volumes[1].3 = Kind::Witness(DEEP);
+    let (_, volumes) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.3,
+        Vec3::new(1.0, 0.0, 0.0),
+        &volumes,
     );
-    assert_eq!(
-        held(true),
-        intact,
-        "each HP pool holds the same with the parts' colliders detached and garbled"
+    settle(&mut app);
+    let colliders = app
+        .world_mut()
+        .query_filtered::<(), (
+            With<crate::ballistics::armour_set::ArmourPart>,
+            With<Collider>,
+        )>()
+        .iter(app.world())
+        .count();
+    assert_eq!(colliders, 0, "no armour part is a collider");
+    fire(&mut app, Vec3::new(0.0, 0.0, 30.0), FireMechanism::Single);
+    run(&mut app, 8);
+    // The plate has no HP pool; the two crew boxes follow it.
+    let held: Vec<u32> = volumes[1..]
+        .iter()
+        .map(|&volume| hp(&app, volume))
+        .collect();
+    assert!(
+        held.iter().all(|&held| held < DEEP_UNITS),
+        "the round doses both crew boxes: {held:?}"
     );
 }
 
@@ -995,32 +964,6 @@ fn scoring_world() -> (App, Entity, Entity) {
     (app, board, shooter)
 }
 
-/// The game's damage model: scoring fixtures use the shipped crew representation (ADR-0040),
-/// so a round's crew line rate decides their dose independently of hard-body energy loss.
-fn scoring_witnesses(app: &mut App, boxes: &[Entity]) {
-    for &volume in boxes {
-        if app.world().get::<CrewStation>(volume).is_some() {
-            app.world_mut()
-                .entity_mut(volume)
-                .remove::<BallisticVolume>()
-                .insert((
-                    WitnessVolume {
-                        substance: "fixture".to_owned(),
-                    },
-                    WitnessSurface,
-                    CollisionLayers::new([Layer::Witness], LayerMask::NONE),
-                ));
-        }
-    }
-    // The set is built from the tank's data, which now names these boxes crew boxes.
-    let root = boxes
-        .first()
-        .and_then(|&volume| app.world().get::<VolumeOf>(volume))
-        .expect("a fixture tank lists its boxes")
-        .tank();
-    crate::ballistics::armour_set::fixture(app.world_mut(), root);
-}
-
 /// The game's damage model: the scoreboard must credit automatic fire even though the pen cam
 /// records none of it. A fixture machine-gun round crosses an unarmoured crew box; the round's
 /// own dose decides the knockout through the production march and consequence chain.
@@ -1030,17 +973,16 @@ fn an_unrecorded_machine_gun_round_credits_its_shooter() {
     use crate::{CombatantId, CombatantLife, ShotId};
 
     let (mut app, board, _) = scoring_world();
-    let (root, boxes) = tank(
+    let (root, _) = tank(
         &mut app,
         Vec3::ZERO,
         0.0,
         Vec3::ZERO,
-        &[("crew", Vec3::ONE, Vec3::ZERO, Kind::Crew(ONE))],
+        &[("crew", Vec3::ONE, Vec3::ZERO, Kind::Witness(ONE))],
     );
     app.world_mut()
         .entity_mut(root)
         .insert((CombatantId(2), CombatantLife(0)));
-    scoring_witnesses(&mut app, &boxes);
     settle(&mut app);
     let shot = ShotId {
         combatant: CombatantId(1),
@@ -1163,12 +1105,12 @@ fn a_later_cookoff_on_a_crew_loss_husk_cannot_credit_a_second_knockout() {
 
     let (mut app, board, _) = scoring_world();
     let mut volumes = plated(ONE, Kind::Ammo(ONE));
+    volumes[1].3 = Kind::Witness(ONE);
     volumes[2].2.x = 4.0;
     let (root, boxes) = tank(&mut app, Vec3::ZERO, 0.0, Vec3::ZERO, &volumes);
     app.world_mut()
         .entity_mut(root)
         .insert((CombatantId(2), CombatantLife(0)));
-    scoring_witnesses(&mut app, &boxes);
     settle(&mut app);
     let shot = ShotId {
         combatant: CombatantId(1),
@@ -1234,17 +1176,16 @@ fn respawns_preserve_in_flight_and_earlier_credits() {
 
     let (mut app, board, shooter) = scoring_world();
     let target = |app: &mut App, life| {
-        let (root, boxes) = tank(
+        let (root, _) = tank(
             app,
             Vec3::ZERO,
             0.0,
             Vec3::ZERO,
-            &[("crew", Vec3::ONE, Vec3::ZERO, Kind::Crew(ONE))],
+            &[("crew", Vec3::ONE, Vec3::ZERO, Kind::Witness(ONE))],
         );
         app.world_mut()
             .entity_mut(root)
             .insert((CombatantId(2), CombatantLife(life)));
-        scoring_witnesses(app, &boxes);
         root
     };
     let root = target(&mut app, 0);
@@ -1432,13 +1373,12 @@ struct TickReads {
 }
 
 /// Fire the fixture 88 along `-Z` from `from` and run `ticks` fixed ticks, reading each. A tank's
-/// pose is read after the physics interval off its front plate (each of `fronts`, square to the
-/// hull at [`hull`]'s front centre): the completed collider pose the game's damage-model walk reads.
+/// pose is read after the physics interval off the body carrying its front plate (each of
+/// `fronts`): the completed body pose the game's damage-model walk composes its set from.
 fn fire_and_read(app: &mut App, fronts: &[Entity], from: Vec3, ticks: usize) -> Vec<TickReads> {
     app.insert_resource(RetainSpentShells(true));
     let mut seen = 0;
     fire(app, from, FireMechanism::Single);
-    let centre = hull()[0].2;
     (0..ticks)
         .map(|_| {
             app.update();
@@ -1446,10 +1386,10 @@ fn fire_and_read(app: &mut App, fronts: &[Entity], from: Vec3, ticks: usize) -> 
                 .iter()
                 .map(|&front| {
                     let world = app.world();
-                    let turn = world.get::<Rotation>(front).unwrap().0;
+                    let body = world.get::<ChildOf>(front).unwrap().parent();
                     (
-                        world.get::<Position>(front).unwrap().0 - turn * centre,
-                        turn,
+                        world.get::<Position>(body).unwrap().0,
+                        world.get::<Rotation>(body).unwrap().0,
                     )
                 })
                 .collect();
@@ -2331,7 +2271,8 @@ fn a_third_body_arriving_at_contact_uses_the_same_sampled_scene() {
     let from = Vec3::new(0.0, 0.0, 0.025 - stepped.z * TICK.as_secs_f32() * 0.5);
     fire(&mut app, from, FireMechanism::Single);
     app.update();
-    let at_end = app.world().get::<Position>(third[0]).unwrap().x;
+    // The arriving plate sits at its body's origin.
+    let at_end = app.world().get::<Position>(lateral).unwrap().x;
     assert!(at_end > 0.4, "the end snapshot misses the round's disc");
     assert!(
         hp(&app, third[0]) < DEEP_UNITS,

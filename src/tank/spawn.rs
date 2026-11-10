@@ -21,7 +21,7 @@ use crate::bake::{TankBlueprint, TankGeometry};
 use crate::ballistics::armour_set::{ArmourSet, Node, PartSource, Role};
 use crate::ballistics::{
     ArmorVolume, BallisticSurfaces, BallisticVolume, ComponentHealth, ComponentVolume,
-    ExternalArmour, VolumeMaterial, WitnessSurface, WitnessVolume,
+    ExternalArmour, VolumeMaterial, WitnessVolume,
 };
 use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
 use crate::firecontrol::RangeTable;
@@ -646,17 +646,16 @@ fn insert_weapons(
 
 /// Ballistic volumes: the volume bundle (design `armor-penetration-and-damage.md` §12; composition,
 /// not a `kind` enum — the substance carries resistance, optional facets layer roles on top) + a
-/// query-only trimesh collider per captured primitive, built once from the extracted buffers and
+/// query-only trimesh shape per captured primitive, built once from the extracted buffers and
 /// shared by every spawn ([`crate::bake::MeshGeometry::trimesh_collider`]: the exact parry
-/// construction avian's `TrimeshFromMesh` performs, design §7.1), on the `Armor` layer with NO
-/// collision response (`filters = NONE`) so it never perturbs the body — watertight solids may be
-/// concave, fine for the march's raycast (ADR-0008).
+/// construction avian's `TrimeshFromMesh` performs, design §7.1). The shape lives in the tank's
+/// armour set, never in physics, so it never perturbs the body — watertight solids may be concave,
+/// fine for the march's raycast (ADR-0008).
 ///
-/// The extracted buffers are node-LOCAL, and each collider is spawned as a child of its volume's
-/// node entity with an IDENTITY local transform: avian's `ColliderTransform` composes the ancestor
-/// `Transform` scales onto the shape, and a ballistic volume's chain is unit-scale by contract
-/// (`bake::manifold_gate`), so the shape parry gets is the buffer the gate certified. `collect`
-/// re-checks the live scale before it walks one.
+/// The extracted buffers are node-LOCAL, and each primitive's entity sits under its volume's node
+/// at an IDENTITY local transform. The set composes the node's chain rigidly, and a ballistic
+/// volume's chain is unit-scale by contract (`bake::manifold_gate`, asserted again where the set
+/// links it), so the shape the walk meets is the buffer the gate certified.
 ///
 /// # Where the factor lands, and why it is not always the node
 ///
@@ -667,13 +666,13 @@ fn insert_weapons(
 /// substance region, and the wheel is `MildSteel` bodies + `Rubber` rims in a single object.
 ///
 /// So: a single-substance node carries `BallisticVolume` itself (unchanged). A mixed-substance node
-/// hands the role down to its per-primitive collider entities — one glTF primitive is one material
-/// by construction, so each is a volume of exactly one substance, and the walk (which already tracks
+/// hands the role down to its per-primitive part entities — one glTF primitive is one material by
+/// construction, so each is a volume of exactly one substance, and the walk (which already tracks
 /// presence per primitive) sees two honest volumes instead of one averaged lie.
 ///
-/// A witness node (ADR-0040) carries `WitnessVolume` instead of `BallisticVolume`, and its colliders
-/// `WitnessSurface` on [`Layer::Witness`]: no walk reads it, and the witness pass finds it by that
-/// marker. It is never split — L2.WITNESS_ROLE certifies a witness node one substance and crew.
+/// A witness node (ADR-0040) carries `WitnessVolume` instead of `BallisticVolume`, and its
+/// primitives are its set's crew box parts: no walk reads them; the witness pass does. It is never
+/// split — L2.WITNESS_ROLE certifies a witness node one substance and crew.
 ///
 /// The cost is that a mixed node cannot address damage: `hp` lives on the node, the deposits name
 /// the shard. That is REFUSED here rather than silently dropped. Lifting it means keying the walk's
@@ -797,43 +796,32 @@ fn insert_ballistic_volumes(
                     "ballistic volume `{name}` has {triangles} triangles and {} certified faces",
                     certificate.shells.len(),
                 );
-                let shape = primitive.trimesh_collider();
                 let surfaces = BallisticSurfaces {
                     shells: certificate.shells.clone(),
                     corners: certificate.corners.clone(),
                 };
-                let mut collider = commands.spawn((
-                    ChildOf(entity),
-                    // ADR-0015 shields this authored local pose from position sync.
-                    authored_attachment(Transform::IDENTITY),
-                    shape.clone(),
-                    surfaces.clone(),
-                    CollisionLayers::new(
-                        [if witness {
-                            Layer::Witness
-                        } else {
-                            Layer::Armor
-                        }],
-                        LayerMask::NONE,
-                    ),
-                ));
-                if witness {
-                    collider.insert(WitnessSurface);
-                }
+                // The primitive's identity; its shape and surfaces live in the set alone.
+                let mut part = commands.spawn((ChildOf(entity), Transform::IDENTITY));
                 // The volume a part belongs to: the witness node, the node, or (split) the
                 // primitive itself.
                 let role = if witness {
                     Role::CrewBox(entity)
                 } else if split {
-                    Role::Armour(collider.id())
+                    Role::Armour(part.id())
                 } else {
                     Role::Armour(entity)
                 };
-                parts.push((collider.id(), index, shape, surfaces, role));
+                parts.push((
+                    part.id(),
+                    index,
+                    primitive.trimesh_collider(),
+                    surfaces,
+                    role,
+                ));
                 if split {
                     // The primitive IS the volume here (see the doc above): it carries the factor
                     // the walk reads and the ownership the impulse path resolves.
-                    collider.insert((
+                    part.insert((
                         BallisticVolume {
                             material: {
                                 let resolved =
@@ -861,7 +849,7 @@ fn insert_ballistic_volumes(
                         VolumeOf(root),
                     ));
                     if external {
-                        collider.insert(ExternalArmour);
+                        part.insert(ExternalArmour);
                     }
                 }
             }
@@ -931,8 +919,8 @@ fn armour_set(
         &armour_nodes,
         parts
             .iter()
-            .map(|(collider, index, shape, surfaces, role)| PartSource {
-                collider: *collider,
+            .map(|(entity, index, shape, surfaces, role)| PartSource {
+                entity: *entity,
                 node: Some(listed[*index].expect("a ballistic volume's node was spawned")),
                 pose: Transform::IDENTITY,
                 shape,
@@ -1098,6 +1086,24 @@ fn engine_sound(spec: &TankSpec) -> Option<EngineSound> {
     })
 }
 
+/// The game's damage model: the turret assembly's [`TurretBody::centre_of_mass`], a StandIn:
+/// [`ArmourSet::mass_centre`] of its frame at the bake's rest pose.
+fn turret_mass_centre(
+    set: &ArmourSet,
+    geometry: &TankGeometry,
+    entities: &[Option<Entity>],
+    turret: Entity,
+) -> Vec3 {
+    // Each spawned node's rest pose; a node the body does not need is not spawned.
+    let rest: HashMap<Entity, Transform> = entities
+        .iter()
+        .zip(&geometry.nodes)
+        .filter_map(|(entity, node)| Some(((*entity)?, node.transform)))
+        .collect();
+    set.mass_centre(turret, &|node| rest[&node])
+        .expect("the turret node is a frame of the tank's armour set")
+}
+
 /// Assemble only simulation-relevant geometry under `root`. Declared nodes resolve fail-fast, and
 /// all index-bearing collections are sorted before entity creation. The GLB scene is not consulted.
 fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankContent) {
@@ -1112,7 +1118,9 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     insert_servos(commands, geometry, root, &nodes, entity_at);
     insert_weapons(commands, geometry, root, &nodes, entity_at);
     let parts = insert_ballistic_volumes(commands, geometry, root, &nodes, entity_at);
-    armour_set(geometry, &nodes, &entities, root, &parts).insert(commands, root);
+    let set = armour_set(geometry, &nodes, &entities, root, &parts);
+    let turret_centre = turret_mass_centre(&set, geometry, &entities, entity_at(nodes.turret));
+    set.insert(commands, root);
     insert_collision_proxies(commands, geometry, spec, entity_at);
 
     // --- Wheels: rig stations in name-sorted order (the track view reads their side/pose; the
@@ -1148,6 +1156,7 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
         TurretBody {
             mass: spec.turret.mass.0,
             inertia_extents: Vec3::new(tx, ty, tz),
+            centre_of_mass: turret_centre,
         },
     ));
 
@@ -1255,7 +1264,7 @@ mod proxy_tests {
         let (authority, replica) = authority_and_replica(&mut world);
 
         let collider_counts = |world: &mut World, root| {
-            let mut counts = [0; 5];
+            let mut counts = [0; 3];
             for (mut entity, layers) in world.query::<(Entity, &CollisionLayers)>().iter(world) {
                 while let Some(parent) = world.get::<ChildOf>(entity) {
                     entity = parent.parent();
@@ -1263,8 +1272,6 @@ mod proxy_tests {
                         for (count, layer) in counts.iter_mut().zip([
                             Layer::Vehicle,
                             Layer::TrackSide,
-                            Layer::Armor,
-                            Layer::Witness,
                             Layer::TrackBelt,
                         ]) {
                             *count += usize::from(layers.memberships.has_all(layer));
@@ -1277,51 +1284,36 @@ mod proxy_tests {
         };
         let authority_counts = collider_counts(&mut world, authority);
         let replica_counts = collider_counts(&mut world, replica);
-        assert!(authority_counts[4] > 0);
+        assert!(authority_counts[2] > 0);
         assert_eq!(
-            replica_counts[4], 0,
+            replica_counts[2], 0,
             "replicas have no consumer for sprung belt support colliders"
         );
-        assert_eq!(replica_counts[..4], authority_counts[..4]);
+        assert_eq!(replica_counts[..2], authority_counts[..2]);
     }
 
-    /// The game's damage model: a spawned tank's armour set holds every armour and crew box
-    /// collider once, each in its nearest moving node (a servo, a recoiling barrel or the turret
-    /// assembly a launch detaches) at the pose its rest chain gives it, on the authority and on a
-    /// replica alike, whose spawn is shared. Field containment and source clearance read only the
-    /// set; a part left out, or put in a frame that does not carry it, is bounded at the wrong
-    /// pose once that node moves. Fixture: the shipped tank; class invariants only.
-    #[test]
-    fn a_spawned_tank_sets_each_armour_and_crew_box_collider_in_its_nearest_frame() {
-        let mut world = World::new();
-        let (authority, replica) = authority_and_replica(&mut world);
-        let moving = |world: &World, node: Entity| {
-            world.get::<ServoSpec>(node).is_some()
-                || world.get::<RecoilParams>(node).is_some()
-                || world.get::<Turret>(node).is_some()
-        };
-        for root in [authority, replica] {
-            crate::ballistics::armour_set::assert_matches(&world, root, moving);
-        }
-    }
-
-    /// The game's damage model: a replica's aim and sight rays read every tank's armour from its set
-    /// alone, posed live (a replica keeps no pose history). With no collider in avian's tree and
-    /// every part's collider garbled (a millimetre ball for its shape, terrain's layers, no surfaces,
-    /// crew-box marker or parent, a pose and bounds a kilometre off), rays at a replica tank stop
-    /// where they stop against its intact parts. A reader still taking a tank's armour from the tree
-    /// misses it; one reading a part's collider places it elsewhere. The player's aim dots and gun
-    /// lay on a net client rely on it, and so does the lane deleting those colliders. Fixture: the
-    /// shipped tank as authority and replica, overlapping at the origin; the authority aims, so its
-    /// own armour is excluded.
+    /// The game's damage model: a tank's armour volumes and crew boxes are no colliders, and a
+    /// replica's aim and sight rays still meet its armour, from its set posed live (a replica keeps
+    /// no pose history). A part given a collider again costs every tree, broad phase and pose sync
+    /// a body per primitive for nothing; a reader still taking a tank's armour from avian's tree
+    /// misses it. The player's aim dots and gun lay on a net client rely on it. Fixture: the shipped
+    /// tank as authority and replica, overlapping at the origin; the authority aims, so its own
+    /// armour is excluded; avian's tree is empty.
     #[test]
     fn a_replica_aims_at_a_tank_from_its_armour_set_alone() {
-        use crate::ballistics::armour_set::{ArmourPart, LiveArmour, live_box};
-        use avian3d::prelude::{ColliderAabb, Position, Rotation, SpatialQuery};
-        use bevy::ecs::system::RunSystemOnce;
+        use crate::ballistics::armour_set::{ArmourPart, live_box};
         let mut world = World::new();
         let (authority, replica) = authority_and_replica(&mut world);
-        world.init_resource::<avian3d::collider_tree::ColliderTrees>();
+        let parts = world
+            .query_filtered::<(), With<ArmourPart>>()
+            .iter(&world)
+            .count();
+        let colliders = world
+            .query_filtered::<(), (With<ArmourPart>, With<Collider>)>()
+            .iter(&world)
+            .count();
+        assert!(parts > 0, "the tanks carry armour parts");
+        assert_eq!(colliders, 0, "no armour part is a collider");
         let (min, max) = live_box(&world, replica).expect("the replica carries its armour set");
         let centre = (min + max) * 0.5;
         // Fixture standoff beyond the set's box, m.
@@ -1329,43 +1321,10 @@ mod proxy_tests {
         let rays: Vec<Ray3d> = [Dir3::NEG_X, Dir3::Z, Dir3::NEG_Y]
             .map(|direction| Ray3d::new(centre - direction * reach, direction))
             .to_vec();
-        let aim = |world: &mut World| {
-            let rays = rays.clone();
-            world
-                .run_system_once(move |spatial: SpatialQuery, armour: LiveArmour| {
-                    rays.iter()
-                        .map(|&ray| {
-                            crate::aim::aim_distance(&spatial, &armour, ray, 2.0 * reach, authority)
-                        })
-                        .collect::<Vec<f32>>()
-                })
-                .expect("the aim probe runs")
-        };
-        let intact = aim(&mut world);
+        let aims = aimed(&mut world, &rays, 2.0 * reach, authority);
         assert!(
-            intact.iter().all(|&distance| distance < reach),
-            "every ray stops on the replica's armour: {intact:?}"
-        );
-        let parts: Vec<Entity> = world
-            .query_filtered::<Entity, With<ArmourPart>>()
-            .iter(&world)
-            .collect();
-        for part in parts {
-            world
-                .entity_mut(part)
-                .remove::<(BallisticSurfaces, WitnessSurface, ChildOf)>()
-                .insert((
-                    Collider::sphere(1.0e-3),
-                    CollisionLayers::new([Layer::Terrain], LayerMask::NONE),
-                    Position(Vec3::splat(1000.0)),
-                    Rotation(Quat::from_rotation_x(1.0)),
-                    ColliderAabb::from_min_max(Vec3::splat(1000.0), Vec3::splat(1001.0)),
-                ));
-        }
-        assert_eq!(
-            aim(&mut world),
-            intact,
-            "each ray stops at the same armour with the parts' colliders garbled"
+            aims.iter().all(|&distance| distance < reach),
+            "every ray stops on the replica's armour: {aims:?}"
         );
     }
 
@@ -1386,38 +1345,148 @@ mod proxy_tests {
             .expect("the aim probe runs")
     }
 
-    /// `tank`'s armour colliders (on [`Layer::Armor`]), each with its world pose composed from the
-    /// hierarchy: the root's `Position` and `Rotation`, then every local `Transform` down to the
-    /// collider. Independent of the armour set, so a set posing a part elsewhere disagrees with it.
-    fn hierarchy_armour(world: &mut World, tank: Entity) -> Vec<(Entity, Collider, Transform)> {
+    /// A lookup of the entity under `tank` that model node `name` names; each name names one.
+    fn named(world: &World, tank: Entity) -> impl Fn(&str) -> Entity {
+        let mut by_name: HashMap<String, Vec<Entity>> = HashMap::new();
+        let mut walk = vec![tank];
+        while let Some(entity) = walk.pop() {
+            for &child in world.get::<Children>(entity).into_iter().flatten() {
+                if let Some(name) = world.get::<Name>(child) {
+                    by_name
+                        .entry(name.as_str().to_owned())
+                        .or_default()
+                        .push(child);
+                }
+                walk.push(child);
+            }
+        }
+        move |name| {
+            let [entity] = by_name[name][..] else {
+                panic!("one entity under the tank is named `{name}`");
+            };
+            entity
+        }
+    }
+
+    /// The game's damage model: a spawned tank's set holds one crew box part per witness primitive
+    /// of its geometry, each naming its witness volume's node, and one frame per node that moves
+    /// its armour: the root, each servo, each recoiling barrel and the turret assembly a launch
+    /// detaches. A witness primitive left out leaves its crew HP pool taking no dose; a frame left
+    /// out holds its armour at rest while its node moves. Every spawned tank relies on it; the
+    /// march's fixtures build their sets another way (`armour_set::fixture`). Fixture: the shipped
+    /// tank as authority.
+    #[test]
+    fn a_spawned_tanks_set_holds_its_crew_boxes_and_moving_frames() {
+        use std::collections::BTreeSet;
+        let mut world = World::new();
+        let (tank, _) = authority_and_replica(&mut world);
+        let (blueprint, _) = shipped();
+        let (geometry, spec) = (&blueprint.geometry, &blueprint.spec);
+        let node = named(&world, tank);
+        let set = world
+            .get::<ArmourSet>(tank)
+            .expect("a spawned tank carries its armour set");
+
+        let mut crew: Vec<Entity> = set
+            .roles()
+            .filter_map(|role| match role {
+                Role::CrewBox(volume) => Some(volume),
+                Role::Armour(_) => None,
+            })
+            .collect();
+        let mut witnesses: Vec<Entity> = geometry
+            .nodes
+            .iter()
+            .flat_map(|authored| {
+                authored
+                    .primitives
+                    .iter()
+                    .filter(|primitive| {
+                        primitive
+                            .substance
+                            .as_ref()
+                            .is_some_and(|substance| substance.matter == Matter::Witness)
+                    })
+                    .map(|_| node(&authored.name))
+            })
+            .collect();
+        crew.sort_unstable();
+        witnesses.sort_unstable();
+        assert!(!witnesses.is_empty(), "the fixture tank has crew boxes");
+        assert_eq!(
+            crew, witnesses,
+            "one crew box part per witness primitive, under its node"
+        );
+        assert!(
+            crew.iter()
+                .all(|&volume| world.get::<WitnessVolume>(volume).is_some()),
+            "each crew box part names a witness volume"
+        );
+
+        let frames: BTreeSet<Entity> = set.frame_nodes().collect();
+        let moving: BTreeSet<Entity> = std::iter::once(tank)
+            .chain(spec.servos.keys().map(|name| node(name)))
+            .chain(
+                spec.weapons
+                    .values()
+                    .filter(|weapon| weapon.recoil.is_some())
+                    .filter_map(|weapon| weapon.barrel.as_deref())
+                    .map(&node),
+            )
+            .chain([node(&spec.turret.node)])
+            .collect();
+        assert_eq!(
+            frames, moving,
+            "a frame for exactly the root and each servo, recoiling barrel and turret assembly"
+        );
+    }
+
+    /// `tank`'s hard armour primitives from the authored geometry, each shaped by its bake and
+    /// posed at its node's world pose composed from the hierarchy: the root's `Position` and
+    /// `Rotation`, then every local `Transform` down to the node. Independent of the armour set,
+    /// so a set posing a part elsewhere disagrees with it. Each comes with its node's entity.
+    fn hierarchy_armour(
+        world: &mut World,
+        tank: Entity,
+        geometry: &TankGeometry,
+    ) -> Vec<(Entity, Collider, Transform)> {
         use avian3d::prelude::{Position, Rotation};
         const BODY: &str = "the tank root is a body with a pose";
-        const LOCAL: &str = "every node down to a collider carries its local pose";
+        const LOCAL: &str = "every node carries its local pose";
         let root = Transform::from_translation(world.get::<Position>(tank).expect(BODY).0)
             .with_rotation(world.get::<Rotation>(tank).expect(BODY).0);
-        let colliders: Vec<(Entity, Collider, CollisionLayers)> = world
-            .query::<(Entity, &Collider, &CollisionLayers)>()
-            .iter(world)
-            .map(|(entity, collider, layers)| (entity, collider.clone(), *layers))
-            .collect();
-        colliders
-            .into_iter()
-            .filter(|(_, _, layers)| layers.memberships.has_all(Layer::Armor))
-            .filter_map(|(entity, collider, _)| {
-                let mut pose = *world.get::<Transform>(entity).expect(LOCAL);
-                let mut node = entity;
-                loop {
-                    node = world.get::<ChildOf>(node)?.parent();
-                    if node == tank {
-                        return Some((entity, collider, root.mul_transform(pose)));
-                    }
-                    pose = world
-                        .get::<Transform>(node)
-                        .expect(LOCAL)
-                        .mul_transform(pose);
+        let named = named(world, tank);
+        let mut armour = Vec::new();
+        for &index in &geometry.ballistic_volumes {
+            let node = &geometry.nodes[index];
+            let entity = named(&node.name);
+            let mut pose = *world.get::<Transform>(entity).expect(LOCAL);
+            let mut above = entity;
+            loop {
+                above = world.get::<ChildOf>(above).expect(LOCAL).parent();
+                if above == tank {
+                    break;
                 }
-            })
-            .collect()
+                pose = world
+                    .get::<Transform>(above)
+                    .expect(LOCAL)
+                    .mul_transform(pose);
+            }
+            for primitive in &node.primitives {
+                if primitive
+                    .substance
+                    .as_ref()
+                    .is_some_and(|substance| !matches!(substance.matter, Matter::Witness))
+                {
+                    armour.push((
+                        entity,
+                        primitive.trimesh_collider(),
+                        root.mul_transform(pose),
+                    ));
+                }
+            }
+        }
+        armour
     }
 
     /// The nearest of `armour` (posed as [`hierarchy_armour`] poses it) `ray` meets within `max`.
@@ -1496,22 +1565,20 @@ mod proxy_tests {
         use avian3d::prelude::SimpleCollider;
         let mut world = World::new();
         let (authority, replica) = authority_and_replica(&mut world);
+        let (blueprint, _) = shipped();
         let rig = world
             .get::<Rig>(replica)
             .expect("the replica carries its rig");
         let (yaw, gun) = (rig.gunner_yaw, rig.gun);
-        // Whether `part` rides the yaw servo.
-        let turret = |world: &World, mut part: Entity| {
-            while let Some(parent) = world.get::<ChildOf>(part) {
-                part = parent.parent();
-                if part == yaw {
-                    return true;
-                }
-            }
-            false
+        // Whether `node` rides the yaw servo.
+        let turret = |world: &World, node: Entity| {
+            std::iter::successors(Some(node), |&node| {
+                world.get::<ChildOf>(node).map(ChildOf::parent)
+            })
+            .any(|node| node == yaw)
         };
         let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
-        for (entity, collider, at) in hierarchy_armour(&mut world, replica) {
+        for (entity, collider, at) in hierarchy_armour(&mut world, replica, &blueprint.geometry) {
             if turret(&world, entity) {
                 let bounds = collider.aabb(at.translation, at.rotation);
                 lo = lo.min(bounds.min);
@@ -1541,7 +1608,7 @@ mod proxy_tests {
         };
         let read = |world: &mut World| {
             let set = aimed(world, &rays, reach, authority);
-            let armour = hierarchy_armour(world, replica);
+            let armour = hierarchy_armour(world, replica, &blueprint.geometry);
             let hierarchy: Vec<_> = rays
                 .iter()
                 .map(|&ray| nearest(&armour, ray, reach))

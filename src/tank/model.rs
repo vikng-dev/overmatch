@@ -11,14 +11,20 @@ use crate::track::sim::{TrackContacts, TrackDrive, TrackGrip};
 #[derive(Component)]
 pub struct Turret;
 
-/// The turret's rigid-body data, built at spawn from the sheet's `turret` block, so the launch
-/// reads it from the entity rather than from the asset.
+/// The turret's rigid-body data, built at spawn from the sheet's `turret` block and the tank's
+/// geometry, so the launch reads it from the entity rather than from the asset.
 #[derive(Component, Clone, Copy)]
 pub struct TurretBody {
     /// Mass (kg).
     pub mass: f32,
     /// Full box dimensions (m) standing in for the angular-inertia distribution.
     pub inertia_extents: Vec3,
+    /// The assembly's mass centre in its node's frame (m), a StandIn for its substances' densities:
+    /// the centroid of its hard volumes at rest, every volume one density and an overlap counted
+    /// twice ([`crate::ballistics::armour_set::ArmourSet::mass_centre`]). The sheet states no
+    /// centre and `materials.ron` no density for most of its substances; per-substance densities,
+    /// or an authored centre node as the hull has, replace it.
+    pub centre_of_mass: Vec3,
 }
 
 #[derive(Component)]

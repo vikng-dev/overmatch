@@ -136,16 +136,9 @@ fn strike_target(
                  ray on the declared target"
             )
         });
-        // Armour outside every tank's set (a construction) comes from the tree.
+        // Armour outside every tank (a construction) is a collider in the tree.
         let nearer = spatial
-            .cast_ray_predicate(
-                ray.origin,
-                ray.direction,
-                hit.distance,
-                true,
-                &filter,
-                &|entity| !armour.holds(entity),
-            )
+            .cast_ray(ray.origin, ray.direction, hit.distance, true, &filter)
             .is_some();
         if nearer || hit.tank != target {
             panic!(

@@ -1357,8 +1357,8 @@ pub struct BallisticVolume {
 }
 
 /// Crew HP pool at a station (ADR-0040), dosed by what the hard world sends through it ([`wound`]).
-/// It supplies no armour layer, resistance, shadowing or spall. Colliders carry [`WitnessSurface`]
-/// on [`crate::Layer::Witness`]; the node carries [`ComponentHealth`].
+/// It supplies no armour layer, resistance, shadowing or spall. Its primitives are crew box parts of
+/// its tank's armour set ([`armour_set::Role::CrewBox`]); the node carries [`ComponentHealth`].
 #[derive(Component)]
 pub struct WitnessVolume {
     /// The substance's registry name — identity, for diagnostics and inspection.
@@ -1369,13 +1369,9 @@ pub struct WitnessVolume {
     pub substance: String,
 }
 
-/// A witness volume's collider: excluded from every armour broad phase, read by the witness pass.
-#[derive(Component)]
-pub struct WitnessSurface;
-
-/// The bake's manifold certificate, carried onto the collider entity so the corridor collector can
-/// name the surface and the welded feature a crossing came from (`walk::ShellKey`,
-/// `walk::Contact`).
+/// The bake's manifold certificate, carried with an armour part's shape in its set (or on a test
+/// fixture's collider) so the corridor collector can name the surface and the welded feature a
+/// crossing came from (`walk::ShellKey`, `walk::Contact`).
 ///
 /// Both tables are index-aligned with the trimesh's own triangle order, which is the order the
 /// buffers were handed to `Collider::trimesh_with_config`: `MERGE_DUPLICATE_VERTICES` re-indexes
@@ -2104,28 +2100,20 @@ struct ProjectileMarchWorld<'w, 's> {
     // Each tank's armour volumes and crew boxes by rigid frame, and each part's place in its set.
     sets: Query<'w, 's, &'static armour_set::ArmourSet>,
     parts: Query<'w, 's, &'static armour_set::ArmourPart>,
-    // The layers, shapes and surfaces of colliders outside an armour set; a set's parts carry
-    // their own ([`Self::role`], [`Self::geometry`]).
-    layers:
-        Query<'w, 's, &'static avian3d::prelude::CollisionLayers, Without<armour_set::ArmourPart>>,
+    // The layers, shapes and surfaces of colliders; a set's parts are none, and carry theirs in the
+    // set ([`Self::role`], [`Self::geometry`]).
+    layers: Query<'w, 's, &'static avian3d::prelude::CollisionLayers>,
     rigs: Query<'w, 's, (Entity, &'static crate::tank::Rig)>,
     locals: Query<'w, 's, &'static Transform, Without<Projectile>>,
     moment: Local<'s, std::cell::Cell<Option<f32>>>,
     sweep: Local<'s, std::cell::Cell<Option<motion::Sweep>>>,
     contact_motion: Local<'s, std::cell::Cell<Option<motion::ContactMotion>>>,
-    shapes: Query<
-        'w,
-        's,
-        (&'static Collider, Option<&'static BallisticSurfaces>),
-        Without<armour_set::ArmourPart>,
-    >,
-    // The tree holds every collider, a set's parts included: a broad query still traverses their
-    // entries and tests their `ColliderAabb`s, but keeps only colliders outside an armour set and
-    // takes each set's parts from the set ([`Self::near`]).
+    shapes: Query<'w, 's, (&'static Collider, Option<&'static BallisticSurfaces>)>,
+    // Avian's tree: every collider, none of them a set's part ([`Self::near`]).
     spatial: SpatialQuery<'w, 's>,
-    // The broad-phase bounds of each collider outside an armour set, the ones `spatial`'s AABB
-    // queries test a reached leaf against.
-    aabbs: Query<'w, 's, &'static ColliderAabb, Without<armour_set::ArmourPart>>,
+    // Each collider's broad-phase bounds, the ones `spatial`'s AABB queries test a reached leaf
+    // against.
+    aabbs: Query<'w, 's, &'static ColliderAabb>,
     volumes: Query<'w, 's, &'static BallisticVolume>,
     owners: Query<'w, 's, &'static VolumeOf>,
     parents: Query<'w, 's, &'static ChildOf>,
@@ -2142,10 +2130,6 @@ struct ProjectileMarchWorld<'w, 's> {
     step_crossings: Option<Res<'w, resolve::StepCrossings>>,
     #[cfg(test)]
     contact_log: Option<Res<'w, contact_classes::ContactLog>>,
-    // Witness volumes (ADR-0040) and their colliders: read by the witness pass, excluded from every
-    // armour classification.
-    witnesses: Query<'w, 's, &'static WitnessVolume>,
-    witness_surfaces: Query<'w, 's, (), (With<WitnessSurface>, Without<armour_set::ArmourPart>)>,
     // Present only where the authority stats consumer installed it.
     stages: Option<Res<'w, crate::cost::stages::Stages>>,
 }
@@ -2305,17 +2289,13 @@ impl ProjectileMarchWorld<'_, '_> {
         Some(set.located(part).1)
     }
 
-    /// The game's damage model: what collider `entity` is to a round. An armour part's role is its
-    /// set's; any other collider's is a crew box's when it is a [`WitnessSurface`] under a
-    /// [`WitnessVolume`], armour under its nearest [`BallisticVolume`], and `None` otherwise
-    /// (terrain, a body's proxy).
+    /// The game's damage model: what collider or part `entity` is to a round. An armour part's
+    /// role is its set's, a crew box's among them (crew boxes are parts alone); any other
+    /// collider's is armour under its nearest [`BallisticVolume`], and `None` otherwise (terrain, a
+    /// body's proxy).
     fn role(&self, entity: Entity) -> Option<armour_set::Role> {
         if let Some(part) = self.part(entity) {
             return Some(part.role);
-        }
-        if self.witness_surfaces.contains(entity) {
-            return hit_ancestor(entity, &self.witnesses, &self.parents)
-                .map(|(node, _)| armour_set::Role::CrewBox(node));
         }
         let (volume, _) = hit_ancestor(entity, &self.volumes, &self.parents)?;
         assert!(
@@ -2407,26 +2387,20 @@ impl ProjectileMarchWorld<'_, '_> {
         }
     }
 
-    /// The game's damage model: every collider this world's clock may place within `probe`, with
-    /// a box holding it there. A collider outside an armour set comes from avian's tree, its
-    /// broad-phase bounds grown by the tick's motion; a set's parts come from the set, tested by
-    /// tank box, then frame box, then part box ([`Self::set_near`]). Avian's traversal still
-    /// reaches each part's tree entry and tests its `ColliderAabb` before the callback drops it;
-    /// the result depends on neither. Visit order is unspecified. Returns the set boxes tested at
-    /// each level.
+    /// The game's damage model: every collider or armour part this world's clock may place within
+    /// `probe`, with a box holding it there. A collider comes from avian's tree, its broad-phase
+    /// bounds grown by the tick's motion; a set's parts, which are no colliders, come from the set,
+    /// tested by tank box, then frame box, then part box ([`Self::set_near`]). Visit order is
+    /// unspecified. Returns the set boxes tested at each level.
     fn near(&self, probe: collect::Probe, visit: &mut dyn FnMut(Entity, ColliderAabb)) -> Tested {
         let pad = self.motion_padding();
         self.spatial
             .aabb_intersections_with_aabb_callback(probe.aabb(pad), |entity| {
-                // A part's entry was reached and its bounds tested inside avian's query; its set
-                // decides it instead.
-                if !self.parts.contains(entity) {
-                    let bounds = self.aabbs.get(entity).expect(
-                        "a collider the broad phase names carries the ColliderAabb its Collider \
-                         requires (avian3d 0.7)",
-                    );
-                    visit(entity, collect::Probe::Region(*bounds).aabb(pad));
-                }
+                let bounds = self.aabbs.get(entity).expect(
+                    "a collider the broad phase names carries the ColliderAabb its Collider \
+                     requires (avian3d 0.7)",
+                );
+                visit(entity, collect::Probe::Region(*bounds).aabb(pad));
                 true
             });
         let clock = self.set_clock();
@@ -2513,10 +2487,7 @@ impl ProjectileMarchWorld<'_, '_> {
                 tested.parts += 1;
                 let held = part.bounds.posed(pose).grown(grow);
                 if meets(held) {
-                    visit(
-                        part.collider,
-                        ColliderAabb::from_min_max(held.min, held.max),
-                    );
+                    visit(part.entity, ColliderAabb::from_min_max(held.min, held.max));
                 }
             }
         }
@@ -2619,7 +2590,7 @@ impl ProjectileMarchWorld<'_, '_> {
                     .iter()
                     .filter(|frame| frame.base == base)
                     .flat_map(|frame| frame.parts.iter())
-                    .filter_map(|part| armour(part.collider))
+                    .filter_map(|part| armour(part.entity))
                     .collect()
             }
             Err(_) => {
@@ -2652,11 +2623,11 @@ impl ProjectileMarchWorld<'_, '_> {
         }
     }
 
-    /// The armour volume a collider belongs to ([`Self::role`]). `None` for terrain and for a
-    /// crew box, whatever node it is parented under — a crew box is never a layer of the walk
-    /// (ADR-0040).
-    fn armour(&self, collider: Entity) -> Option<(Entity, &BallisticVolume)> {
-        match self.role(collider)? {
+    /// The armour volume collider or part `entity` belongs to ([`Self::role`]). `None` for terrain
+    /// and for a crew box, whatever node it is parented under — a crew box is never a layer of the
+    /// walk (ADR-0040).
+    fn armour(&self, entity: Entity) -> Option<(Entity, &BallisticVolume)> {
+        match self.role(entity)? {
             armour_set::Role::Armour(volume) => Some((
                 volume,
                 self.volumes
@@ -2667,10 +2638,10 @@ impl ProjectileMarchWorld<'_, '_> {
         }
     }
 
-    /// The volume node a collider belongs to, of either kind ([`Self::role`]). A field admits
-    /// matter independently of ownership.
-    fn volume_of(&self, collider: Entity) -> Option<Entity> {
-        self.role(collider).map(armour_set::Role::volume)
+    /// The volume node collider or part `entity` belongs to, of either kind ([`Self::role`]). A
+    /// field admits matter independently of ownership.
+    fn volume_of(&self, entity: Entity) -> Option<Entity> {
+        self.role(entity).map(armour_set::Role::volume)
     }
 
     /// The game's damage model: one step's seconds under this world's crossing ceiling.

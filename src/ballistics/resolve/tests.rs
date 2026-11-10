@@ -1926,11 +1926,10 @@ fn boxed_tank(pose: Transform) -> (App, BoxedTank) {
                 Transform::from_xyz(0.0, -0.2, -0.6),
                 ChildOf(body),
                 Collider::cuboid(0.3, 0.3, 0.3),
-                CollisionLayers::new([crate::Layer::Witness], LayerMask::ALL),
+                CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
                 crate::ballistics::WitnessVolume {
                     substance: "fixture".to_owned(),
                 },
-                crate::ballistics::WitnessSurface,
                 crate::damage::VolumeOf(body),
                 ComponentHealth::full(FIELD_HP),
             ))
@@ -2042,11 +2041,7 @@ fn boxed_throw(app: &mut App, tank: &BoxedTank, origin: Vec3) -> BoxedThrow {
                 let within = |collider: Entity| world.volume_of(collider).is_some();
                 let open = walk(&within);
                 let own = walk(&|collider: Entity| {
-                    within(collider)
-                        && world
-                            .collider_bodies
-                            .get(collider)
-                            .is_ok_and(|of| of.body == body)
+                    within(collider) && world.owner(collider) == Some(body)
                 });
                 BoxedThrow { cone, open, own }
             },
@@ -3717,7 +3712,7 @@ fn hard_volume_records_use_only_exposed_contacts() {
 /// binding errors instead of reporting the already-resolved open chord.
 #[test]
 fn witness_lines_reuse_the_resolved_hard_presence() {
-    use crate::ballistics::{WitnessSurface, WitnessVolume};
+    use crate::ballistics::WitnessVolume;
     let mut app = world_with_trimesh_plates(&[]);
     let hard = app
         .world_mut()
@@ -3732,19 +3727,24 @@ fn witness_lines_reuse_the_resolved_hard_presence() {
             },
         ))
         .id();
+    // A crew box is a part of its body's armour set alone.
+    let body = app
+        .world_mut()
+        .spawn((Transform::IDENTITY, RigidBody::Static))
+        .id();
     let witness = app
         .world_mut()
         .spawn((
             Transform::from_translation(Vec3::Z),
-            RigidBody::Static,
+            ChildOf(body),
             Collider::cuboid(0.25, 0.25, 1.5),
-            CollisionLayers::new([crate::Layer::Witness], LayerMask::ALL),
+            CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
             WitnessVolume {
                 substance: "fixture".to_owned(),
             },
-            WitnessSurface,
         ))
         .id();
+    crate::ballistics::armour_set::fixture(app.world_mut(), body);
     for _ in 0..8 {
         app.update();
     }

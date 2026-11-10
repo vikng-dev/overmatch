@@ -614,10 +614,13 @@ const SOFT: f32 = 10.0;
 /// One fixture volume: name, full extents and centre (m), kind.
 pub(super) type FixtureVolume = (&'static str, Vec3, Vec3, Kind);
 
-/// Static fixture tanks, each volume its own static cuboid turned by its rotation, on the `Armor`
-/// layer (a witness on the `Witness` layer) and owned by the tank its index names, and the real
-/// march driven on [`STEP`] with spent shells kept.
-pub(super) fn fixture_tanks(volumes: &[(FixtureVolume, usize, Quat)]) -> (App, Vec<Entity>) {
+/// Static fixture tanks at the origin, each volume a cuboid turned by its rotation and a part of
+/// the armour set of the tank its index names ([`armour_set::fixture`]), built once `setup` has
+/// edited the volumes, and the real march driven on [`STEP`] with spent shells kept.
+pub(super) fn fixture_tanks(
+    volumes: &[(FixtureVolume, usize, Quat)],
+    setup: impl FnOnce(&mut App),
+) -> (App, Vec<Entity>) {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
@@ -657,48 +660,44 @@ pub(super) fn fixture_tanks(volumes: &[(FixtureVolume, usize, Quat)]) -> (App, V
         })
         .collect();
     for &((name, size, at, kind), owner, turn) in volumes {
-        if let Kind::Witness(hp) = kind {
-            app.world_mut().spawn((
-                Name::new(name),
-                Transform::from_translation(at).with_rotation(turn),
-                RigidBody::Static,
-                Collider::cuboid(size.x, size.y, size.z),
-                CollisionLayers::new([crate::Layer::Witness], LayerMask::ALL),
-                WitnessVolume {
-                    substance: "fixture".to_owned(),
-                },
-                WitnessSurface,
-                VolumeOf(tanks[owner]),
-                ComponentHealth::full(hp),
-            ));
-            continue;
-        }
-        let factor = if matches!(kind, Kind::Box(_)) {
-            SOFT
-        } else {
-            STEEL
-        };
         let mut volume = app.world_mut().spawn((
             Name::new(name),
             Transform::from_translation(at).with_rotation(turn),
-            RigidBody::Static,
+            ChildOf(tanks[owner]),
             Collider::cuboid(size.x, size.y, size.z),
             CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
-            BallisticVolume {
-                material: walk::VolumeMaterial::fixture(factor),
-                substance: "fixture".to_owned(),
-            },
             VolumeOf(tanks[owner]),
         ));
+        let hard = |factor| BallisticVolume {
+            material: walk::VolumeMaterial::fixture(factor),
+            substance: "fixture".to_owned(),
+        };
         match kind {
-            Kind::Main | Kind::Witness(_) => {}
-            Kind::External => {
-                volume.insert(ExternalArmour);
+            Kind::Main => {
+                volume.insert(hard(STEEL));
             }
-            Kind::Box(hp) | Kind::SteelBox(hp) => {
-                volume.insert(ComponentHealth::full(hp));
+            Kind::External => {
+                volume.insert((hard(STEEL), ExternalArmour));
+            }
+            Kind::Box(hp) => {
+                volume.insert((hard(SOFT), ComponentHealth::full(hp)));
+            }
+            Kind::SteelBox(hp) => {
+                volume.insert((hard(STEEL), ComponentHealth::full(hp)));
+            }
+            Kind::Witness(hp) => {
+                volume.insert((
+                    WitnessVolume {
+                        substance: "fixture".to_owned(),
+                    },
+                    ComponentHealth::full(hp),
+                ));
             }
         }
+    }
+    setup(&mut app);
+    for &tank in &tanks {
+        armour_set::fixture(app.world_mut(), tank);
     }
     for _ in 0..8 {
         app.update();
@@ -768,7 +767,8 @@ pub(super) fn fixture_fire(
 }
 
 /// [`fixture_fire`] of a round of `body` fired at `velocity`, its flight state edited by `round`,
-/// into the fixture world as `setup` leaves it. The round leaves the muzzle at `from`.
+/// into the fixture world as `setup` leaves it before the tanks' sets are built. The round leaves
+/// the muzzle at `from`.
 pub(super) fn fixture_fire_with(
     volumes: &[(FixtureVolume, usize, Quat)],
     from: Vec3,
@@ -778,8 +778,7 @@ pub(super) fn fixture_fire_with(
     round: impl FnOnce(&mut Projectile),
     setup: impl FnOnce(&mut App),
 ) -> FixtureFired {
-    let (mut app, tanks) = fixture_tanks(volumes);
-    setup(&mut app);
+    let (mut app, tanks) = fixture_tanks(volumes, setup);
     let direction = velocity.normalize();
     let tank = tanks[struck];
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the fixture has a rig");
