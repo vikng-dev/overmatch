@@ -215,6 +215,16 @@ pub(crate) fn tank_ground_pressure_kpa(geom: &RigGeom) -> f32 {
     ground_pressure_kpa(geom.model.mass, geom.model.width, length)
 }
 
+/// The centre of mass's height (m) over flat ground at rest: the `Center_Of_Mass` node over the
+/// rest belt's outer face, which sits [`RigGeom::hull_rest_y`] below the model origin.
+pub(crate) fn com_rest_height_m(geometry: &crate::bake::TankGeometry, geom: &RigGeom) -> f32 {
+    let com = geometry
+        .by_name
+        .get("Center_Of_Mass")
+        .expect("playable-sheet admission requires the Center_Of_Mass node");
+    geom.hull_rest_y + geometry.nodes[*com].root_position.y
+}
+
 /// An empty or coincident station set has no longitudinal footprint and fails rig admission.
 fn road_wheel_span(wheels: &[Vec3]) -> f32 {
     let (low, high) = wheels

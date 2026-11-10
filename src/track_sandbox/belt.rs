@@ -105,7 +105,12 @@ pub(super) fn apply_belt_support_field(
             Entity,
             &avian3d::prelude::Position,
             &avian3d::prelude::Rotation,
-            Forces,
+            (
+                Forces,
+                &avian3d::prelude::ComputedMass,
+                &avian3d::prelude::ComputedAngularInertia,
+                &avian3d::prelude::ComputedCenterOfMass,
+            ),
             &'static mut crate::track::sim::TrackDrive,
         ),
         With<Hull>,
@@ -113,7 +118,7 @@ pub(super) fn apply_belt_support_field(
     field: Res<TerrainField>,
     raw: Res<RawDriveInput>,
     mut shaped: ResMut<ShapedDrive>,
-    time: Res<Time>,
+    (time, gravity): (Res<Time>, Res<avian3d::prelude::Gravity>),
     mut belt: ResMut<BeltSpeed>,
     mut phase: ResMut<BeltPhase>,
     mut contacts: ResMut<BeltContacts>,
@@ -143,10 +148,19 @@ pub(super) fn apply_belt_support_field(
 ) {
     let (transmission, mut trans_state, mut telemetry) = transmission_params;
     let (geom, rig_spec, envelope) = rig;
-    let (hull_entity, hull_pos, hull_rot, mut forces, mut motion) = hull
+    let (hull_entity, hull_pos, hull_rot, (mut forces, mass, inertia, com), mut motion) = hull
         .single_mut()
         .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let affine = bevy::math::Affine3A::from_rotation_translation(hull_rot.0, hull_pos.0);
+    // The game adapter's hull body (`track::sim::apply_track_forces`).
+    let hull_body = crate::track::sim::HullBody {
+        linear: forces.linear_velocity(),
+        angular: forces.angular_velocity(),
+        center_of_mass: hull_pos.0 + hull_rot.0 * com.0,
+        inverse_mass: mass.inverse(),
+        inverse_inertia: inertia.rotated(hull_rot.0).inverse().to_mat3(),
+        gravity: gravity.0,
+    };
     let to_local = affine.inverse();
     for cs in contacts.0.values_mut() {
         cs.clear(); // the sole contact system this tick
@@ -215,7 +229,7 @@ pub(super) fn apply_belt_support_field(
             &params,
             oracle,
             &pieces,
-            |p| forces.velocity_at_point(p),
+            |p| hull_body.velocity_at(p),
             elements,
         );
         reports[side.index()] = report;
@@ -235,6 +249,8 @@ pub(super) fn apply_belt_support_field(
             report.belt_reaction += reaction;
         }
     }
+    let (reactions, reaction_slopes) =
+        crate::track::sim::belt_reactions(&reports, &hull_body, hull_pos.0, dt);
     let perceived_load = crate::track::load::observe_rig(
         reports
             .iter()
@@ -257,8 +273,8 @@ pub(super) fn apply_belt_support_field(
             steer: shaped.0.steer,
             side_commands,
             speeds: [belt.get(Side::Left), belt.get(Side::Right)],
-            reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
-
+            reactions,
+            reaction_slopes,
             perceived_load,
             dt,
         },

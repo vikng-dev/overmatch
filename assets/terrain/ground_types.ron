@@ -6,6 +6,7 @@
 //   darkening            the share of albedo a print takes away, 0..1
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
 //   grip                 effective track capacity / normal load, labelled
+//   shear_length_m       ground slip, m, that builds the full grip, labelled
 //   rolling_resistance   total motion resistance at grip.ron rolling_reference_kpa, labelled
 //   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
 //   dust.colour_srgb     the lifted soil's albedo, sRGB, each channel 0..1
@@ -26,6 +27,7 @@
     types: {
         "concrete": (
             grip: (0.600, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED sqrt(0.6*0.6) = 0.600; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
+            shear_length_m: (0.0, Unknown("rigid paving stores no soil shear, so the step's resolved length governs (track::forces::GripParams::step_shear_per_grip_m); the steel link's own shear on paving is unsourced (Wong's 75 mm, section 6.4.3, is a fit for a rubber-padded track on paved road); settle with a link-on-paving shear-displacement test")),
             print: (
                 softness_mm_per_kpa: 0.0,
                 depth_cap_mm: 0.0,
@@ -44,6 +46,7 @@
         ),
         "dirt": (
             grip: (0.418, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED tan(20 deg) + 4830/89500, rounded to .418; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
+            shear_length_m: (0.010, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3: MEASURED 10 mm for firm sandy terrain, a proxy for this map's firm dirt; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
             print: (
                 softness_mm_per_kpa: 0.5,
                 depth_cap_mm: 70.0,
@@ -62,6 +65,7 @@
         ),
         "gravel": (
             grip: (0.712, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED tan(35 deg) + 1040/89500, rounded to .712; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
+            shear_length_m: (0.010, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3: MEASURED 10 mm for firm sandy terrain, a proxy for this map's gravel; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
             print: (
                 softness_mm_per_kpa: 0.45,
                 depth_cap_mm: 60.0,
@@ -80,6 +84,7 @@
         ),
         "mud": (
             grip: (0.277, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED tan(13 deg) + 4140/89500, rounded to .277; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
+            shear_length_m: (0.025, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3 gives no wet-clay value (clay at maximum compaction MEASURED about 6 mm); loose sand's MEASURED 25 mm stands as a proxy for soft wet ground; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
             print: (
                 softness_mm_per_kpa: 1.6,
                 depth_cap_mm: 150.0,
@@ -98,6 +103,7 @@
         ),
         "sand": (
             grip: (0.543, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED tan(28 deg) + 1040/89500, rounded to .543; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
+            shear_length_m: (0.025, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3: MEASURED 25 mm for loose sand; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
             print: (
                 softness_mm_per_kpa: 0.8,
                 depth_cap_mm: 120.0,

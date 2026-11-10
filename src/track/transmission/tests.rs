@@ -18,6 +18,7 @@ fn lab_fp() -> FixtureConstruction {
             track: crate::substances::contact_friction(0.9),
             nominal_pressure_kpa: forces::rolling_reference_kpa(),
             side_weight: 26_500.0 * 9.81 / 2.0,
+            hull_coupling: 1.0, // Fixture point-mass hull.
         },
     }
 }
@@ -153,6 +154,7 @@ fn compact_drivetrain() -> (FixtureConstruction, TransmissionParams) {
 
         nominal_pressure_kpa: forces::rolling_reference_kpa(),
         side_weight: spec.mass * super::super::derive::G / 2.0,
+        hull_coupling: 1.0, // Fixture point-mass hull.
     };
     let tp = spec
         .track
@@ -183,7 +185,8 @@ fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> Tr
         ],
         speeds,
         reactions,
-
+        // Fixture: reactions that do not move with belt speed.
+        reaction_slopes: [0.0; 2],
         perceived_load: super::super::load::PerceivedLoad::default(),
         dt: 1.0 / 64.0,
     }
@@ -366,7 +369,10 @@ fn steer_release_arrests_pivot() {
 /// A neutral pivot on a slope: with the mean path held (`NeutralMean::Held`) the belts run equal
 /// and opposite, the mean at rest while the difference reaches `neutral_d_full`; with it free the
 /// grade sets the mean. A pivot that turns in place on a slope relies on the held fact, and a
-/// held mean must not cost the difference its target.
+/// held mean must not cost the difference its target: the servo is kinematic inside its
+/// capacity, so the difference lands exactly even where the two belts' grounds answer unequally
+/// and the hold's even split would move it.
+/// Fixture: unequal reaction slopes, a fraction of each belt's inertia per tick.
 #[test]
 fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
     let fp = lab_fp();
@@ -382,7 +388,9 @@ fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
         let mut peak_mean = 0.0f32;
         // Fixture observation budget: two simulated seconds.
         for _ in 0..128 {
-            speeds = step(&fp, &tp, &mut st, &input(0.0, 1.0, speeds, [pull, pull])).next_speeds;
+            let mut inp = input(0.0, 1.0, speeds, [pull, pull]);
+            inp.reaction_slopes = [0.8, 0.3].map(|share| share * fp.inertia / inp.dt);
+            speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
             peak_mean = peak_mean.max(((speeds[0] + speeds[1]) * 0.5).abs());
         }
         let difference = (speeds[0] - speeds[1]) * 0.5;
@@ -392,8 +400,9 @@ fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
                     peak_mean < PARK_ENGAGE_SPEED,
                     "a held mean stays at rest on the slope, peaked at {peak_mean} m/s"
                 );
+                // Resolution: f32 rounding of a sub-metre-per-second landing.
                 assert!(
-                    (difference - tp.neutral_d_full).abs() < PARK_ENGAGE_SPEED,
+                    (difference - tp.neutral_d_full).abs() < 1e-4,
                     "a held pivot's difference reaches {} m/s, got {difference}",
                     tp.neutral_d_full
                 );
@@ -404,6 +413,40 @@ fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
             ),
         }
     }
+}
+
+/// The park lever's two brakes carry a neutral stop's mean evenly while the steering member
+/// carries the difference, as on equal mobilities. Where the belts' grounds answer unequally, a
+/// servo transfer weighted by mobility alone leaves one brake past its static capacity while the
+/// other has margin; a tank parked out of a pivot on a steep slope relies on the even share to
+/// hold. Fixture: one parking tick of the grade construction, belts creeping apart at a third of
+/// the engage speed, unequal reactions and reaction slopes, the even share inside the static
+/// capacity and the larger per-side need past it.
+#[test]
+fn two_parked_brakes_share_a_neutral_stop_evenly() {
+    let (fp, tp) = (grade_fixture_fp(), tiger_tp());
+    let mut st = TransmissionState {
+        park: true,
+        ..fresh(&tp)
+    };
+    let static_cap = tp.brake_capacity_n * tp.brake_static_factor;
+    let creep = PARK_ENGAGE_SPEED / 3.0;
+    let mut inp = input(
+        0.0,
+        0.0,
+        [creep, -creep],
+        [1.15 * static_cap, 0.65 * static_cap],
+    );
+    inp.reaction_slopes = [0.05, 0.8].map(|share| share * fp.inertia / inp.dt);
+    let need = [0, 1].map(|i| {
+        inp.reactions[i] - inp.speeds[i] * (fp.inertia + inp.reaction_slopes[i] * inp.dt) / inp.dt
+    });
+    assert!(
+        (need[0] + need[1]) / 2.0 < static_cap && need[0].max(need[1]) > static_cap,
+        "the fixture holds only on an even share: {need:?} against {static_cap}"
+    );
+    let report = step(&fp, &tp, &mut st, &inp);
+    assert_eq!(report.held, [true; 2], "a parked brake broke away");
 }
 
 /// A held mean is bounded by the parking hold's two-sided capacity, static while the mean is at
@@ -769,7 +812,8 @@ fn brake_is_discretely_passive() {
                 let controls = driver(&construction(&fp), &tp, &mut state, &inp);
                 state.park = park;
                 let mut q = [0.0; 2];
-                apply_brake_stop_forces(&mut q, &tp, &construction(&fp), &state, &controls);
+                let belts = BeltTick::new(&construction(&fp), &controls.input);
+                apply_brake_stop_forces(&mut q, &tp, &belts, &state, &controls);
                 let free = v - r * inp.dt / fp.inertia;
                 for force in q {
                     let (b, f) = (v + (force - r) * inp.dt / fp.inertia, free);
@@ -1203,6 +1247,83 @@ fn braking_never_teleports_crank_past_clutch_capacity() {
         st.omega_e >= floor,
         "the crank must end above the hard floor"
     );
+}
+
+/// The lock torque that slows the crank is the torque the belts receive: in a geared turn inside
+/// clutch and steering capacity, the crank's own integration lands on the belts' mean, so the
+/// re-anchor moves nothing. A lock solved on the untied mean lands above it, and the re-anchor
+/// then discards crank work no sprocket received; the engine's work budget relies on this.
+/// Fixture: second gear, tight detent, three quarters of governed speed, the difference off its
+/// geared value, unequal reactions and unequal reaction slopes.
+#[cfg(feature = "bitprobe")]
+#[test]
+fn a_geared_turn_integrates_the_crank_onto_the_steered_belts() {
+    for (fp, tp) in class_drivetrains() {
+        let k = tp.gears_fwd[1] / tp.sprocket_radius;
+        let m = 0.75 * tp.engine.governed_rpm * RPM_TO_RAD / k;
+        let d = 0.8 * tp.steer_kappa[1].0 * m;
+        let mut st = TransmissionState {
+            gear: 2,
+            steer_step: 2,
+            clutch: ClutchState::In,
+            omega_e: k * m,
+            ..fresh(&tp)
+        };
+        let weight = fp.grip.side_weight;
+        let mut inp = input(1.0, 1.0, [m + d, m - d], [0.2 * weight, -0.1 * weight]);
+        inp.reaction_slopes = [0.8, 0.3].map(|share| share * fp.inertia / inp.dt);
+        let probe = step(&fp, &tp, &mut st, &inp).bitprobe;
+        assert_eq!(probe.j[0] - probe.j[1], 1.0, "the geared constraint acts");
+        assert!(probe.reanchor_feasible, "the lock is inside capacity");
+        assert!(
+            (probe.omega_integrated - probe.reanchor_locked).abs() <= 1e-4 * probe.reanchor_locked,
+            "the crank integrated to {} rad/s against belts locked at {}",
+            probe.omega_integrated,
+            probe.reanchor_locked
+        );
+    }
+}
+
+/// A belt solves its ground reaction implicitly: on a ground stiff enough that the explicit belt
+/// update reverses its step every tick, the coupled update does not. The grip law's shear length
+/// relies on this to be a ground fact rather than the fixed step's stability bound.
+/// Fixture: one belt of the grade construction pushing at half its grip, from rest, into an
+/// elastic share over a 10 mm shear length with the grip law's damper.
+#[test]
+fn the_coupled_belt_settles_where_the_explicit_one_alternates() {
+    let fp = grade_fixture_fp();
+    let dt = 1.0 / TICK_HZ;
+    let grip = fp.ground_grip * fp.grip.side_weight;
+    let shear = 0.010;
+    let damper = 2.0 * forces::GRIP_ELEMENT_DAMPING_RATIO
+        / (shear * fp.ground_grip * super::super::derive::G).sqrt();
+    let reversals = |coupled: bool| {
+        let (mut speed, mut strain) = (0.0_f32, 0.0_f32);
+        let mut steps = Vec::new();
+        for _ in 0..TICK_HZ as usize {
+            strain = (strain + speed * dt).clamp(-shear, shear);
+            let share = strain / shear + speed * damper;
+            let (reaction, slope) = if share.abs() < 1.0 {
+                (grip * share, grip * (dt / shear + damper))
+            } else {
+                (grip * share.signum(), 0.0)
+            };
+            let mut inp = input(0.0, 0.0, [speed; 2], [reaction; 2]);
+            inp.reaction_slopes = [if coupled { slope } else { 0.0 }; 2];
+            let next = BeltTick::new(&construction(&fp), &inp).land(0, 0.5 * grip);
+            steps.push(next - speed);
+            speed = next;
+        }
+        steps
+            .windows(3)
+            .filter(|w| w[0] * w[1] < 0.0 && w[1] * w[2] < 0.0)
+            .count()
+    };
+    assert!(
+        reversals(false) > 0,
+        "the fixture ground is one the explicit update cannot resolve"
+    );
+    assert_eq!(reversals(true), 0, "the coupled belt alternated");
 }
 
 /// Driver state, not belt-speed hysteresis, controls clutch regimes. The launch retains
@@ -2759,7 +2880,8 @@ fn released_motion_coasts_without_brake_force() {
     };
     let controls = driver(&construction(&fp), &tp, &mut state, &inp);
     let mut q = [0.0; 2];
-    apply_brake_stop_forces(&mut q, &tp, &construction(&fp), &state, &controls);
+    let belts = BeltTick::new(&construction(&fp), &controls.input);
+    apply_brake_stop_forces(&mut q, &tp, &belts, &state, &controls);
     assert_eq!(q, [0.0; 2]);
 }
 
@@ -3458,8 +3580,7 @@ fn virtual_free_crank_energy_does_not_cap_curve_power() {
         let mut probe = TransmissionProbe::default();
         let work = engine_work(
             &tp,
-            &construction(&fp),
-            &inp,
+            &BeltTick::new(&construction(&fp), &inp),
             crank,
             [force * 0.5; 2],
             #[cfg(feature = "bitprobe")]
@@ -3496,7 +3617,15 @@ fn reverse_radii_belong_to_the_reverse_gear() {
     let fp = grade_fixture_fp();
     let mut inp = input(0.0, 1.0, [-1.0; 2], [0.0; 2]); // Fixture: reverse travel.
     inp.dt = 1.0 / TICK_HZ;
-    let (_, _, jacobian) = steering_force(&tp, &construction(&fp), &state, &inp, -1.0, 0.0, 0.0);
+    let (_, _, jacobian) = steering_force(
+        &tp,
+        &BeltTick::new(&construction(&fp), &inp),
+        &state,
+        &inp,
+        -1.0,
+        0.0,
+        None,
+    );
     let kappa = a.half_tread_m / 6.0; // DERIVED from the Fixture reverse radius.
     assert_eq!(jacobian, [(1.0 + kappa) / 2.0, -(1.0 - kappa) / 2.0]);
     assert_eq!(
@@ -3633,7 +3762,8 @@ fn a_curve_tail_does_not_move_the_crank_envelope() {
     };
     let brake_forces = |tp: &TransmissionParams| {
         let mut q = [10_000.0; 2]; // Fixture: force that would accelerate past the limit.
-        apply_ceiling_brakes(&mut q, tp, &construction, &state, &controls, crank);
+        let belts = BeltTick::new(&construction, &controls.input);
+        apply_ceiling_brakes(&mut q, tp, &belts, &state, &controls, crank);
         q
     };
     assert_eq!(brake_forces(&base), brake_forces(&extended));

@@ -34,6 +34,8 @@ use crate::terrain_grid::RowOrder;
 pub struct ContactGround {
     pub grip: f32,
     pub rolling_resistance: f32,
+    /// Slip (m) that builds the full grip ([`crate::ground_types::GroundType::shear_length_m`]).
+    pub shear_length_m: f32,
 }
 
 impl ContactGround {
@@ -273,10 +275,13 @@ impl GroundField {
         let blend = |of: fn(&ContactGround) -> f32| {
             weights.dot(Vec4::from_array(self.slots.each_ref().map(of)))
         };
-        // Capacity-preserving arithmetic mixing: both laws are linear in these coefficients.
+        // Capacity-preserving arithmetic mixing: both laws are linear in these coefficients. The
+        // shear length mixes the same way: the blend spans one mask texel, where no player can
+        // tell one mixing rule for it from another.
         ContactGround {
             grip: blend(|g| g.grip),
             rolling_resistance: blend(|g| g.rolling_resistance),
+            shear_length_m: blend(|g| g.shear_length_m),
         }
     }
 }
@@ -334,19 +339,28 @@ mod tests {
         assert_eq!(flat.ground_at(Vec2::new(15.0, 15.0)), row(BASE_GROUND));
     }
 
-    /// Arithmetic mixtures preserve both grip capacity and pressure-dependent drag.
-    /// Drivers crossing a painted boundary rely on the same law on either side. Fixture rows.
+    /// Arithmetic mixtures preserve grip capacity and pressure-dependent drag, and mix the shear
+    /// length by the same weights. Drivers crossing a painted boundary rely on the same law on
+    /// either side. Fixture rows.
     #[test]
     fn painted_boundaries_preserve_capacity_and_pressure_drag() {
         let mut field = fixture(2, 1.0, |_, _| [0, 0, 0]);
         field.slots = [0.2, 0.4, 0.6, 0.8].map(|grip| ContactGround {
             grip,
             rolling_resistance: grip / 2.0,
+            shear_length_m: grip / 20.0,
         });
         field.paint = GroundField::fixture_mask(UVec2::ONE, 1.0, vec![Vec3::splat(0.2)]).paint;
         let weights = field.weights_at(Vec2::ZERO).to_array();
         assert!(weights.iter().all(|w| *w > 0.0));
         let mixed = field.ground_at(Vec2::ZERO);
+        let expected_shear: f32 = field
+            .slots
+            .iter()
+            .zip(weights)
+            .map(|(g, w)| g.shear_length_m * w)
+            .sum();
+        assert!((mixed.shear_length_m - expected_shear).abs() < 1e-6);
         for pressure in [50.0, 100.0, 200.0] {
             let expected_grip: f32 = field
                 .slots

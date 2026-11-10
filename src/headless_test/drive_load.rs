@@ -418,7 +418,15 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
                     start,
                 ),
                 1.0 / FIXED_TICKS_PER_SECOND as f32,
-                |_| Vec3::ZERO,
+                // The frozen fixture holds the hull still.
+                crate::track::sim::HullBody {
+                    linear: Vec3::ZERO,
+                    angular: Vec3::ZERO,
+                    center_of_mass: start,
+                    inverse_mass: 0.0,
+                    inverse_inertia: Mat3::ZERO,
+                    gravity: Vec3::ZERO,
+                },
                 crate::track::sim::BeltRig {
                     drive: &mut drive,
                     signal: &mut signal,

@@ -882,7 +882,12 @@ pub struct TransmissionInput {
     pub steer: f32,
     pub side_commands: [f32; 2],
     pub speeds: [f32; 2],
+    /// The ground reaction each belt meets if it holds its speed through the tick, the hull's own
+    /// motion over the tick included (N).
     pub reactions: [f32; 2],
+    /// Each reaction's slope against its own belt's speed over the tick (N s/m); the belt solves
+    /// against it implicitly.
+    pub reaction_slopes: [f32; 2],
     /// Unfiltered support load and grip seen by the Driver.
     pub perceived_load: super::load::PerceivedLoad,
     pub dt: f32,
@@ -1233,6 +1238,81 @@ fn choose_gear(
     }
 }
 
+/// Both belts over one tick. A belt lands at `speed + (force − reaction)·mobility`, its ground
+/// reaction solved implicitly: the mobility `dt/(I + G·dt)` carries the reaction's slope `G`
+/// against belt speed beside the belt's inertia `I`, so a stiff ground cannot ring a belt lighter
+/// than the hull at the fixed step. Every force this tick solves lands through it.
+#[derive(Clone, Copy)]
+struct BeltTick {
+    speeds: [f32; 2],
+    reactions: [f32; 2],
+    /// Speed per newton of net force over the tick (s/kg).
+    mobility: [f32; 2],
+}
+
+impl BeltTick {
+    fn new(fp: &DriveConstruction, inp: &TransmissionInput) -> Self {
+        let mobility = [0, 1].map(|i| {
+            let inertia = fp.belt_inertia + inp.reaction_slopes[i] * inp.dt;
+            assert!(
+                inertia.is_finite() && inertia > 0.0,
+                "a ground reaction's slope never cancels its belt's inertia within a tick"
+            );
+            inp.dt / inertia
+        });
+        Self {
+            speeds: inp.speeds,
+            reactions: inp.reactions,
+            mobility,
+        }
+    }
+
+    /// Side `i`'s speed after the tick under sprocket force `force` (N).
+    fn land(&self, i: usize, force: f32) -> f32 {
+        self.speeds[i] + (force - self.reactions[i]) * self.mobility[i]
+    }
+
+    /// The force along per-side weights `j` that, added to sprocket forces `base`, lands
+    /// `j·speeds` at `target`.
+    fn constraint_force(&self, j: [f32; 2], base: [f32; 2], target: f32) -> f32 {
+        let free = j[0] * self.land(0, base[0]) + j[1] * self.land(1, base[1]) - target;
+        -free / (j[0] * j[0] * self.mobility[0] + j[1] * j[1] * self.mobility[1])
+    }
+
+    /// The mean axis as the tie `j·v = target` holds the belts under an even clutch split, in the
+    /// form [`clutch_coupling`] reads: its inertia (kg) and the force on it besides the clutch's
+    /// (N), so that `m_next = m + (f_c + f_other)·dt/i_m`. DERIVED by eliminating the tie's force:
+    /// the tied mean lands affine in `f_c`, and `per_newton` is that line's slope. With equal
+    /// mobilities `dt/I` the geared tie gives `i_m = 2I·(1 + e²)` and
+    /// `f_other = −(1 + e)·R_l − (1 − e)·R_r + e·(d − e·m)·2I/dt`.
+    fn tied_mean(&self, j: [f32; 2], target: f32, dt: f32) -> (f32, f32) {
+        let [w0, w1] = self.mobility;
+        let tie = self.constraint_force(j, [0.0; 2], target);
+        let landed = (self.land(0, tie * j[0]) + self.land(1, tie * j[1])) / 2.0;
+        let pull = j[0] * w0 + j[1] * w1;
+        let per_newton =
+            (w0 + w1) / 4.0 - pull * pull / (4.0 * (j[0] * j[0] * w0 + j[1] * j[1] * w1));
+        let mean = (self.speeds[0] + self.speeds[1]) / 2.0;
+        (dt / per_newton, (landed - mean) / per_newton)
+    }
+
+    /// The even-split force (N) that lands the mean at rest while the tie `j·v = target`'s own
+    /// force lands the tie, the two solved together on top of sprocket forces `base`. With equal
+    /// mobilities an even split leaves an antisymmetric tie alone and this is the plain stop
+    /// force; with unequal ones the split moves the tie, and its force answers.
+    fn held_mean_force(&self, j: [f32; 2], target: f32, base: [f32; 2]) -> f32 {
+        let even = [0.5; 2];
+        let landed = [self.land(0, base[0]), self.land(1, base[1])];
+        let dot = |a: [f32; 2], b: [f32; 2]| a[0] * b[0] + a[1] * b[1];
+        let weigh = |a: [f32; 2], b: [f32; 2]| {
+            a[0] * self.mobility[0] * b[0] + a[1] * self.mobility[1] * b[1]
+        };
+        let (jj, je, ee) = (weigh(j, j), weigh(j, even), weigh(even, even));
+        let (tie_gap, mean_gap) = (target - dot(j, landed), -dot(even, landed));
+        (jj * mean_gap - je * tie_gap) / (jj * ee - je * je)
+    }
+}
+
 /// The crank's side of one tick, fixed before the coupling solve and shared by
 /// [`clutch_coupling`] and [`settle_crank`]: the pre-tick crank speed `omega_e` and free torque
 /// `tau_free` (rad/s, N·m), the crank-to-belt ratio `k` (gear / sprocket radius) and direction sign
@@ -1251,8 +1331,10 @@ struct CrankTick {
 /// The game's driving model: capacity-limited clutch torque, solved semi-implicitly.
 /// The lock torque makes the crank and mean belt integration agree:
 /// `tau* = [(omega_e-k*dir*m)/dt + tau_free/J - k*dir*F_other/I_m] / [1/J+k^2/I_m]`.
-/// F_other includes ground reactions. Brakes and steering act later, so `settle_crank`
-/// independently checks the final lock's feasibility rather than trusting this predictor.
+/// The caller passes `m`'s inertia and `F_other` as the steering member's tie and each belt's
+/// implicit ground reaction land the belts ([`BeltTick::tied_mean`]). Brakes, a steering member
+/// past its capacity and the work scale act later, so `settle_crank` independently checks the
+/// final lock's feasibility rather than trusting this predictor.
 ///
 /// The lower guard reduces transmission to preserve a freely reachable crank floor;
 /// the upper guard raises it to bound over-rev. Both stay inside clutch capacity.
@@ -1604,97 +1686,126 @@ fn crank_free_torque(
     (tau_free, p_avail)
 }
 
-/// The steering member's contribution to this tick: the difference-axis force `F_s`, the L600
-/// constraint force λ, and λ's per-output Jacobian `j`. Returned as `(f_s, lambda, j)`; a tick
-/// that commands neither leaves all three at zero.
+/// The geared steering member's signed ratio `s·κ` of belt half-difference to |mean| this tick;
+/// zero when straight.
 ///
 /// κ is indexed by the active gear on its own forward or reverse ladder; `d` follows the
 /// steer SIGN regardless of travel direction — the superimposed steering shaft is independent of
-/// the gear's direction, historically and mechanically.
-///
-/// The servo is a capacity-limited KINEMATIC one, semi-implicit like the brakes and λ: the `F_s`
-/// that lands `d` exactly on target after this tick's integration (`d` dynamics:
-/// `d_next = d + (F_s/2 − R_d)/I·dt`), reaction-compensated, clamped to the per-output
-/// convention's bound. Exact inside capacity, honest slip beyond it — and no proportional band:
-/// a proportional band permits steady droop when the target lies inside that band.
-/// The difference-axis bound is twice the per-output capacity because each output receives
-/// half of `F_s`; see [`TransmissionParams::steer_capacity_n`].
-fn steering_force(
-    tp: &TransmissionParams,
-    fp: &DriveConstruction,
-    st: &TransmissionState,
-    inp: &TransmissionInput,
-    m: f32,
-    d: f32,
-    f_c: f32,
-) -> (f32, f32, [f32; 2]) {
-    let dt = inp.dt;
-    let [vl, vr] = inp.speeds;
+/// the gear's direction, historically and mechanically. The detent (`st.steer_step`) was updated
+/// for this tick before gear selection: one detent truth per tick.
+fn steer_ratio(tp: &TransmissionParams, st: &TransmissionState, inp: &TransmissionInput) -> f32 {
     let table = if st.reverse {
         &tp.reverse_steer_kappa
     } else {
         &tp.steer_kappa
     };
     let (k_tight, k_wide) = table[usize::from(st.gear - 1)];
+    let s = if inp.steer > 0.0 {
+        1.0
+    } else if inp.steer < 0.0 {
+        -1.0
+    } else {
+        0.0
+    };
+    s * match st.steer_step {
+        0 => 0.0,
+        1 => k_wide,
+        2 => k_tight,
+        _ => panic!("the transmission admits only straight, wide and tight detents"),
+    }
+}
+
+/// The sign of `x`, zero at zero: the |m| branch a geared steering solve linearizes on.
+fn branch(x: f32) -> f32 {
+    if x > 0.0 {
+        1.0
+    } else if x < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// The steering member's tie this tick on the |m| branch `side`: per-belt weights `j` and the
+/// value `j·v` it lands the belts on. The neutral servo lands the half-difference on
+/// construction's `neutral_d_full` share of the steer; a geared detent lands `d − e·m` at zero
+/// with `e = s·κ·side` (straight: `e = 0`, the locked differential). The clutch solve and the
+/// steering solve read this one tie.
+fn steering_tie(
+    tp: &TransmissionParams,
+    st: &TransmissionState,
+    inp: &TransmissionInput,
+    m: f32,
+    side: f32,
+) -> ([f32; 2], f32) {
+    if neutral_turn(inp, m) {
+        ([0.5, -0.5], inp.steer * tp.neutral_d_full)
+    } else {
+        let e = steer_ratio(tp, st, inp) * side;
+        ([(1.0 - e) / 2.0, -(1.0 + e) / 2.0], 0.0)
+    }
+}
+
+/// The steering member's contribution to this tick: the difference-axis force `F_s`, the L600
+/// constraint force λ, and λ's per-output Jacobian `j`. Returned as `(f_s, lambda, j)`; a tick
+/// that commands neither leaves all three at zero.
+///
+/// The servo is a capacity-limited KINEMATIC one, semi-implicit like the brakes and λ: the `F_s`
+/// that lands `d` exactly on target after this tick's integration (each side landing through
+/// [`BeltTick`], `F_s/2` on the left and `−F_s/2` on the right), clamped to the per-output
+/// convention's bound. Exact inside capacity, honest slip beyond it — and no proportional band:
+/// a proportional band permits steady droop when the target lies inside that band.
+/// The difference-axis bound is twice the per-output capacity because each output receives
+/// half of `F_s`; see [`TransmissionParams::steer_capacity_n`]. `even_stop` is the capacity of
+/// the even mean-axis stop that acts after this solve ([`even_stop_capacity`]): its split moves
+/// the difference when the belts' mobilities differ, so the servo lands the difference with that
+/// stop's force solved alongside it, and the stop carries the mean evenly as it does on equal
+/// mobilities.
+fn steering_force(
+    tp: &TransmissionParams,
+    belts: &BeltTick,
+    st: &TransmissionState,
+    inp: &TransmissionInput,
+    m: f32,
+    f_c: f32,
+    even_stop: Option<f32>,
+) -> (f32, f32, [f32; 2]) {
     let mut f_s = 0.0;
     let mut lambda = 0.0;
     let mut j = [0.0f32; 2];
     let steer_capacity = inp.supply.transmission_condition * tp.steer_capacity_n;
-    let f_s_max = 2.0 * steer_capacity;
-    let r_d = (inp.reactions[0] - inp.reactions[1]) / 2.0;
-    let servo = |target_d: f32| {
-        (2.0 * ((target_d - d) * fp.belt_inertia / dt + r_d)).clamp(-f_s_max, f_s_max)
-    };
-    // The steering detent (`st.steer_step`) was already updated for THIS tick
-    // before gear selection — one detent truth per tick; this law only
-    // consumes it.
-    let neutral = neutral_turn(inp, m);
-    if neutral {
-        // The neutral target is construction's `neutral_d_full` half-difference.
-        f_s = servo(inp.steer * tp.neutral_d_full);
+    let clutch = [f_c / 2.0; 2];
+    let b0 = branch(m);
+    if neutral_turn(inp, m) {
+        let (tie, target) = steering_tie(tp, st, inp, m, b0);
+        let base = even_stop.map_or(clutch, |cap| {
+            let held = belts.held_mean_force(tie, target, clutch).clamp(-cap, cap);
+            clutch.map(|force| force + held / 2.0)
+        });
+        f_s = belts
+            .constraint_force(tie, base, target)
+            .clamp(-2.0 * steer_capacity, 2.0 * steer_capacity);
     } else {
         // The geared-radius constraint g = d − s·κ·|m| = 0, solved semi-implicitly:
         // λ is the force that lands g at zero after this tick's integration, clamped
         // so each output's share stays inside the per-output capacity (beyond it the
         // constraint slips). Zero ideal work: Q_c·v = λ·g, which the solve drives to
         // zero.
-        let s = if inp.steer > 0.0 {
-            1.0
-        } else if inp.steer < 0.0 {
-            -1.0
-        } else {
-            0.0
-        };
-        let kappa = match st.steer_step {
-            0 => 0.0,
-            1 => k_wide,
-            2 => k_tight,
-            _ => panic!("the transmission admits only straight, wide and tight detents"),
-        };
-        let a_l = f_c / 2.0 - inp.reactions[0];
-        let a_r = f_c / 2.0 - inp.reactions[1];
+        //
         // One |m| branch of the solve: on branch b, |m| linearizes as `b·m`, so
         // `g = jl·v_L + jr·v_R` with the branch's Jacobian. Returns λ (per-output
         // capacity clamp — straight-gear `max|j| = 1/2` gives the same 2× bound
         // the servo uses), the Jacobian, and the pre-brake landing m. Brakes act later.
-        let solve = |branch: f32| -> (f32, [f32; 2], f32) {
-            let e = s * kappa * branch;
-            let jl = (1.0 - e) / 2.0;
-            let jr = -(1.0 + e) / 2.0;
-            let g_now = jl * vl + jr * vr;
-            let denom = jl * jl + jr * jr;
-            let lambda_max = steer_capacity / jl.abs().max(jr.abs());
-            let l = (-(g_now * fp.belt_inertia / dt + jl * a_l + jr * a_r) / denom)
+        let solve = |side: f32| -> (f32, [f32; 2], f32) {
+            let (tie, target) = steering_tie(tp, st, inp, m, side);
+            let lambda_max = steer_capacity / tie[0].abs().max(tie[1].abs());
+            let l = belts
+                .constraint_force(tie, clutch, target)
                 .clamp(-lambda_max, lambda_max);
-            let m_next = m + (a_l + l * jl + a_r + l * jr) / (2.0 * fp.belt_inertia) * dt;
-            (l, [jl, jr], m_next)
-        };
-        let b0 = if m > 0.0 {
-            1.0
-        } else if m < 0.0 {
-            -1.0
-        } else {
-            0.0
+            let m_next = (belts.land(0, clutch[0] + l * tie[0])
+                + belts.land(1, clutch[1] + l * tie[1]))
+                / 2.0;
+            (l, tie, m_next)
         };
         let (l0, j0, m_next) = solve(b0);
         if b0 != 0.0 && m_next * b0 < 0.0 {
@@ -1741,8 +1852,7 @@ struct EngineWork {
 
 fn engine_work(
     tp: &TransmissionParams,
-    fp: &DriveConstruction,
-    inp: &TransmissionInput,
+    belts: &BeltTick,
     crank: CrankTick,
     motor: [f32; 2],
     #[cfg(feature = "bitprobe")] probe: &mut TransmissionProbe,
@@ -1757,8 +1867,7 @@ fn engine_work(
     let sides_at = |scale: f32| {
         [0, 1].map(|i| {
             let force = motor[i] * scale;
-            let next = inp.speeds[i] + (force - inp.reactions[i]) * inp.dt / fp.belt_inertia;
-            force * (inp.speeds[i] + next) * 0.5 * inp.dt
+            force * (belts.speeds[i] + belts.land(i, force)) * 0.5 * crank.dt
         })
     };
     let work = |scale| recirculated_work(tp, sides_at(scale));
@@ -1780,12 +1889,12 @@ fn engine_work(
     };
     #[cfg(feature = "bitprobe")]
     {
-        let [left, right] = sides_at(scale).map(|joules| joules / inp.dt);
+        let [left, right] = sides_at(scale).map(|joules| joules / crank.dt);
         probe.power_left = left;
         probe.power_right = right;
         probe.power_positive = left.max(0.0) + right.max(0.0);
         probe.power_negative = (-left).max(0.0) + (-right).max(0.0);
-        probe.power_net = work(scale) / inp.dt;
+        probe.power_net = work(scale) / crank.dt;
         probe.power_scale = scale;
     }
     EngineWork {
@@ -1794,17 +1903,17 @@ fn engine_work(
     }
 }
 
-/// The capacity-limited stop force is R-Q-vI/dt. Under intent the lever takes only its
-/// rollback-opposing half after the reversal pause and cut, so useful launch motion is free.
+/// The capacity-limited stop force lands the belt at rest through [`BeltTick`]: R-Q-v/mobility.
+/// Under intent the lever takes only its rollback-opposing half after the reversal pause and cut,
+/// so useful launch motion is free.
 /// No temporal release decision or command/speed blend participates in that balance.
 fn apply_brake_stop_forces(
     q: &mut [f32; 2],
     tp: &TransmissionParams,
-    fp: &DriveConstruction,
+    belts: &BeltTick,
     st: &TransmissionState,
     controls: &Controls,
 ) -> [bool; 2] {
-    let inp = &controls.input;
     let service = controls.service;
     let one_way = controls.one_way;
     let lever = st.park || one_way;
@@ -1813,8 +1922,8 @@ fn apply_brake_stop_forces(
         if !lever && !service {
             continue;
         }
-        let cap = brake_capacity_for_regime(tp, lever, service, inp.speeds[i]);
-        let stop = inp.reactions[i] - *qi - inp.speeds[i] * fp.belt_inertia / inp.dt;
+        let cap = brake_capacity_for_regime(tp, lever, service, belts.speeds[i]);
+        let stop = belts.reactions[i] - *qi - belts.speeds[i] / belts.mobility[i];
         let brake = if one_way && !service {
             controls.command.signum() * (stop * controls.command.signum()).clamp(0.0, cap)
         } else {
@@ -1826,26 +1935,56 @@ fn apply_brake_stop_forces(
     held
 }
 
-/// A held mean path supplies the mean-axis stop force `ΣR − ΣQ − 2·m·I/dt`, split evenly so the
-/// steering member's difference is untouched, within twice the per-side brake capacity at the
-/// mean speed (static while the mean is at rest, dynamic once breached). The hold is passive, so
-/// it is not charged to the engine. Beyond capacity the mean slides and the neutral regime may end.
+/// The held mean path's capacity this tick when it acts (N): twice the per-side brake capacity
+/// at the mean speed (static while the mean is at rest, dynamic once breached).
 /// StandIn: the parking hold's capacity stands for the holding element's own (a gearbox brake
 /// through the engaged gear), which construction does not author.
-fn apply_mean_hold(
-    q: &mut [f32; 2],
+fn mean_hold_capacity(
     tp: &TransmissionParams,
-    fp: &DriveConstruction,
+    belts: &BeltTick,
     controls: &Controls,
-) {
-    if !controls.mean_hold {
-        return;
-    }
-    let inp = &controls.input;
-    let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
-    let cap = 2.0 * brake_capacity_for_regime(tp, true, false, mean);
-    let stop =
-        inp.reactions[0] + inp.reactions[1] - q[0] - q[1] - 2.0 * mean * fp.belt_inertia / inp.dt;
+) -> Option<f32> {
+    let mean = (belts.speeds[0] + belts.speeds[1]) * 0.5;
+    controls
+        .mean_hold
+        .then(|| 2.0 * brake_capacity_for_regime(tp, true, false, mean))
+}
+
+/// The even mean-axis stop acting after the steering solve this tick, which the neutral servo
+/// solves alongside ([`steering_force`]): its capacity (N, both belts together), or `None` when
+/// nothing stops both belts. The held mean path is one; both belts' two-sided stop brakes (the
+/// park lever or service) are the other, their even share bounded by the weaker side's capacity.
+fn even_stop_capacity(
+    tp: &TransmissionParams,
+    belts: &BeltTick,
+    st: &TransmissionState,
+    controls: &Controls,
+    hold: Option<f32>,
+) -> Option<f32> {
+    let two_sided = controls.service || (st.park && !controls.one_way);
+    hold.or_else(|| {
+        two_sided.then(|| {
+            let lever = st.park || controls.one_way;
+            let [left, right] = belts
+                .speeds
+                .map(|speed| brake_capacity_for_regime(tp, lever, controls.service, speed));
+            2.0 * left.min(right)
+        })
+    })
+}
+
+/// A held mean path supplies the mean-axis stop force that lands the mean at rest through
+/// [`BeltTick`], split evenly, within its capacity `hold`; the neutral servo has solved alongside
+/// the split ([`steering_force`]), so the steering member's difference still lands. The hold is
+/// passive, so it is not charged to the engine. Beyond capacity the mean slides and the neutral
+/// regime may end.
+fn apply_mean_hold(q: &mut [f32; 2], belts: &BeltTick, hold: Option<f32>) {
+    let Some(cap) = hold else {
+        return; // No held mean path this tick.
+    };
+    // A total force split evenly moves the mean by `force·(w_l + w_r)/4`.
+    let [w0, w1] = belts.mobility;
+    let stop = -2.0 * (belts.land(0, q[0]) + belts.land(1, q[1])) / (w0 + w1);
     let hold = stop.clamp(-cap, cap) * 0.5;
     for force in q {
         *force += hold;
@@ -1857,12 +1996,11 @@ fn apply_mean_hold(
 fn apply_ceiling_brakes(
     q: &mut [f32; 2],
     tp: &TransmissionParams,
-    fp: &DriveConstruction,
+    belts: &BeltTick,
     st: &TransmissionState,
     controls: &Controls,
     crank: CrankTick,
 ) {
-    let inp = &controls.input;
     if !controls.ceiling
         || controls.shifting
         || st.clutch == ClutchState::Out
@@ -1872,21 +2010,22 @@ fn apply_ceiling_brakes(
     {
         return;
     }
-    let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
     let direction = if st.reverse { -1.0 } else { 1.0 };
-    let next = mean
-        + (q[0] + q[1] - inp.reactions[0] - inp.reactions[1]) * inp.dt / (2.0 * fp.belt_inertia);
+    let next = (belts.land(0, q[0]) + belts.land(1, q[1])) * 0.5;
     let ceiling = tp.engine.crank_limit_rpm * RPM_TO_RAD / crank.k;
     let overspeed = (next * direction - ceiling).max(0.0);
-    let brake = (overspeed * fp.belt_inertia / inp.dt).min(tp.brake_capacity_n);
+    // One brake force on both sides lowers the mean by force·(w_l + w_r)/2.
+    let brake =
+        (2.0 * overspeed / (belts.mobility[0] + belts.mobility[1])).min(tp.brake_capacity_n);
     for force in q {
         *force -= direction * brake;
     }
 }
 
 /// Re-anchor only when the final belt speed implies a within-capacity clutch torque,
-/// `tau = tau_free - (k*dir*m_next - omega_e)*J/dt`, inside both guards. Brakes and
-/// steering act after the coupling predictor, so its earlier clamp cannot certify this snap.
+/// `tau = tau_free - (k*dir*m_next - omega_e)*J/dt`, inside both guards. Brakes and a steering
+/// member past its capacity act after the coupling predictor, so its earlier clamp cannot certify
+/// this snap.
 /// An infeasible snap leaves the integrated slipping crank. The caller then caps its energy
 /// by the source budget left after sprocket work; a feasible clutch cannot create energy.
 /// `None` names an open clutch; without a Driver catch the crank may turn backward.
@@ -2031,9 +2170,8 @@ pub(crate) fn step(
     let dt = inp.dt;
     let [vl, vr] = inp.speeds;
     let m = (vl + vr) / 2.0;
-    let d = (vl - vr) / 2.0;
     #[cfg(feature = "bitprobe")]
-    let mut bitprobe = input_probe(st, inp, m, d);
+    let mut bitprobe = input_probe(st, inp, m, (vl - vr) / 2.0);
 
     let controls = driver(fp, tp, st, inp);
     let inp = &controls.input;
@@ -2073,7 +2211,7 @@ pub(crate) fn step(
 
     // Mean-axis force is clutch torque reflected through the gear. An open main clutch
     // transmits neither propulsion nor engine drag; steering work is charged separately.
-    let i_m = 2.0 * fp.belt_inertia;
+    let belts = BeltTick::new(fp, inp);
     let (omega_floor, omega_over) = crank_guards(tp, inp, st, propulsive, tau_free);
     let crank = CrankTick {
         omega_e,
@@ -2084,14 +2222,19 @@ pub(crate) fn step(
         omega_over,
         dt,
     };
+    // The steering member ties the belts, so the clutch drives them as one motion: the lock is
+    // solved on the mean that tie and each belt's implicit ground reaction land, on the pre-tick
+    // |m| branch the steering solve starts from.
+    let (tie, target) = steering_tie(tp, st, inp, m, branch(m));
+    let (tied_inertia, tied_force) = belts.tied_mean(tie, target, dt);
     let tau_c = if engaged {
         clutch_coupling(
             crank,
             tp.engine_inertia,
             inp.supply.transmission_condition * tp.clutch_capacity,
             m,
-            i_m,
-            -(inp.reactions[0] + inp.reactions[1]),
+            tied_inertia,
+            tied_force,
             #[cfg(feature = "bitprobe")]
             &mut bitprobe,
         )
@@ -2100,12 +2243,14 @@ pub(crate) fn step(
     };
     let f_c_pre_scale = k * dir * tau_c;
 
-    let (f_s_pre_scale, lambda, j) = steering_force(tp, fp, st, inp, m, d, f_c_pre_scale);
+    let hold = mean_hold_capacity(tp, &belts, &controls);
+    let even_stop = even_stop_capacity(tp, &belts, st, &controls, hold);
+    let (f_s_pre_scale, lambda, j) =
+        steering_force(tp, &belts, st, inp, m, f_c_pre_scale, even_stop);
 
     let work = engine_work(
         tp,
-        fp,
-        inp,
+        &belts,
         crank,
         [
             (f_c_pre_scale + f_s_pre_scale) * 0.5 + lambda * j[0],
@@ -2132,15 +2277,12 @@ pub(crate) fn step(
         f_c / 2.0 - f_s / 2.0 + lambda * j[1],
     ];
 
-    apply_ceiling_brakes(&mut q, tp, fp, st, &controls, crank);
-    let held = apply_brake_stop_forces(&mut q, tp, fp, st, &controls);
-    apply_mean_hold(&mut q, tp, fp, &controls);
+    apply_ceiling_brakes(&mut q, tp, &belts, st, &controls, crank);
+    let held = apply_brake_stop_forces(&mut q, tp, &belts, st, &controls);
+    apply_mean_hold(&mut q, &belts, hold);
 
-    // --- Integrate both sides simultaneously: I·v̇ = Q − R (the reaction ALWAYS applies).
-    let next = [
-        inp.speeds[0] + (q[0] - inp.reactions[0]) / fp.belt_inertia * dt,
-        inp.speeds[1] + (q[1] - inp.reactions[1]) / fp.belt_inertia * dt,
-    ];
+    // --- Integrate both sides simultaneously against their implicit reactions.
+    let next = [belts.land(0, q[0]), belts.land(1, q[1])];
 
     settle_crank(
         st,
@@ -2173,8 +2315,8 @@ pub(crate) fn step(
         omega_floor,
         shifting,
         engaged,
-        i_mean: i_m,
-        f_other: -(inp.reactions[0] + inp.reactions[1]),
+        i_mean: tied_inertia,
+        f_other: tied_force,
         f_c_pre_scale,
         f_s_pre_scale,
         lambda,

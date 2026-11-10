@@ -21,8 +21,8 @@
 
 use avian3d::dynamics::rigid_body::forces::ForcesItem;
 use avian3d::prelude::{
-    ComputedCenterOfMass, Forces, Position, ReadRigidBodyForces, RigidBody, Rotation, SleepTimer,
-    WriteRigidBodyForces,
+    ComputedAngularInertia, ComputedCenterOfMass, ComputedMass, Forces, Gravity, Position,
+    ReadRigidBodyForces, RigidBody, Rotation, SleepTimer, WriteRigidBodyForces,
 };
 use bevy::ecs::query::QueryData;
 use bevy::ecs::schedule::ScheduleConfigs;
@@ -279,6 +279,12 @@ impl TrackGear {
         &self.trans
     }
 
+    /// The grip law's spawn construction.
+    #[cfg(test)]
+    pub(crate) fn grip(&self) -> GripParams {
+        self.construction.grip()
+    }
+
     /// Coupled translation mass for a torque-cut landing: hull plus both belt inertias (kg).
     #[cfg(all(test, feature = "bitprobe"))]
     pub(crate) fn landing_mass(&self) -> f32 {
@@ -306,6 +312,8 @@ impl TrackGear {
                 side_commands: [1.0; 2],
                 speeds: probe.speeds,
                 reactions: probe.reactions,
+                // Pricing reads neither the reactions nor their slopes.
+                reaction_slopes: [0.0; 2],
 
                 perceived_load: super::load::PerceivedLoad {
                     grade_n: probe.perceived_load_n,
@@ -396,6 +404,7 @@ impl TrackGear {
         out.f32("force.grip.track", grip.track.dynamic_coefficient);
         out.f32("force.grip.nominal_pressure_kpa", grip.nominal_pressure_kpa);
         out.f32("force.grip.side_weight", grip.side_weight);
+        out.f32("force.grip.hull_coupling", grip.hull_coupling);
 
         let tp = &self.trans;
         out.f32("transmission.engine.idle_rpm", tp.engine.idle_rpm);
@@ -639,6 +648,12 @@ impl TrackGear {
         let grip = GripParams::of(
             &blueprint.spec,
             crate::track::rig_geom::tank_ground_pressure_kpa(geom),
+            crate::track::rig_geom::com_rest_height_m(&blueprint.geometry, geom),
+        );
+        info!(
+            "grip law: hull coupling {:.3}, shortest shear length {:.2} mm per unit grip at the fixed step",
+            grip.hull_coupling,
+            grip.step_shear_per_grip_m(crate::sim_tick::sim_timestep().as_secs_f32()) * 1e3,
         );
         let construction = transmission::DriveConstruction::new(grip, inertia);
         Self {
@@ -666,6 +681,66 @@ impl TrackGear {
             },
         }
     }
+}
+
+/// The hull as one driving tick reads it (the game's driving model): its velocity field at the
+/// tick's start and its explicit response to the forces the tick applies.
+#[derive(Clone, Copy)]
+pub(crate) struct HullBody {
+    /// The centre of mass's velocity (m/s).
+    pub linear: Vec3,
+    /// rad/s.
+    pub angular: Vec3,
+    pub center_of_mass: Vec3,
+    /// 1/kg, and the world-frame inverse inertia (1/(kg m²)); zero for a hull held still.
+    pub inverse_mass: f32,
+    pub inverse_inertia: Mat3,
+    /// The acceleration the world adds to the applied forces (m/s²).
+    pub gravity: Vec3,
+}
+
+impl HullBody {
+    pub(crate) fn velocity_at(&self, point: Vec3) -> Vec3 {
+        self.linear + self.angular.cross(point - self.center_of_mass)
+    }
+
+    /// The change over `dt`, under `apps`, of the hull's velocity field as the hull sees it: at
+    /// `origin`, and in angular velocity. The hull turning under its own velocity is part of the
+    /// frame, so a steady turn reads no change.
+    fn step<'a>(
+        &self,
+        apps: impl Iterator<Item = &'a super::forces::ForceApp>,
+        origin: Vec3,
+        dt: f32,
+    ) -> (Vec3, Vec3) {
+        let (force, torque) = apps.fold((Vec3::ZERO, Vec3::ZERO), |(f, t), app| {
+            (
+                f + app.force,
+                t + (app.point - self.center_of_mass).cross(app.force),
+            )
+        });
+        let spin = self.inverse_inertia * torque * dt;
+        let accel = force * self.inverse_mass + self.gravity - self.angular.cross(self.linear);
+        (accel * dt + spin.cross(origin - self.center_of_mass), spin)
+    }
+}
+
+/// What the transmission integrates each belt against: the reaction it meets if it holds its
+/// speed while the hull moves under every force `reports` apply this tick, and that reaction's
+/// slope against its own speed.
+pub(crate) fn belt_reactions(
+    reports: &[SideReport; 2],
+    hull: &HullBody,
+    origin: Vec3,
+    dt: f32,
+) -> ([f32; 2], [f32; 2]) {
+    let motion = hull.step(reports.iter().flat_map(|r| &r.apps), origin, dt);
+    (
+        reports
+            .each_ref()
+            .map(|r| r.belt_reaction - r.reaction_slope.under(motion)),
+        reports.each_ref().map(|r| r.reaction_slope.belt),
+    )
 }
 
 /// One tank's mutable belt/drivetrain state for [`belt_tick`] — the caller owns the storage
@@ -700,7 +775,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     target: DriveTarget,
     affine: Affine3A,
     dt: f32,
-    vel_at: impl Fn(Vec3) -> Vec3,
+    hull: HullBody,
     rig: BeltRig<'_>,
 ) -> ([SideReport; 2], TransmissionReport) {
     let DriveTarget { intent, supply } = target;
@@ -756,7 +831,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             &gear.params,
             oracle,
             pieces,
-            &vel_at,
+            |p| hull.velocity_at(p),
             &mut rig.elements.sides[si],
         );
         reports[si] = report;
@@ -764,6 +839,8 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             reports[si].belt_reaction += reaction;
         }
     }
+    let (reactions, reaction_slopes) =
+        belt_reactions(&reports, &hull, affine.translation.into(), dt);
     let tr = transmission::step(
         &gear.construction,
         &gear.trans,
@@ -774,8 +851,8 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             steer: rig.signal.steer,
             side_commands,
             speeds: [rig.drive.sides[0].speed, rig.drive.sides[1].speed],
-            reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
-
+            reactions,
+            reaction_slopes,
             perceived_load: super::load::observe_rig(
                 reports
                     .iter()
@@ -871,6 +948,8 @@ struct DriveTank {
     position: &'static Position,
     rotation: &'static Rotation,
     center_of_mass: &'static ComputedCenterOfMass,
+    mass: &'static ComputedMass,
+    angular_inertia: &'static ComputedAngularInertia,
     body: &'static RigidBody,
     command: &'static ParsedTankCommand,
     drive: &'static mut TrackDrive,
@@ -992,6 +1071,7 @@ fn gather_drive_supports(
 )]
 fn apply_track_forces(
     time: Res<Time>,
+    gravity: Res<Gravity>,
     field: Res<TrackField>,
     gear: Option<Res<TrackGear>>,
     #[cfg(feature = "bitprobe")] mut bitprobe: Option<ResMut<BitprobeCapture>>,
@@ -1054,8 +1134,21 @@ fn apply_track_forces(
         let affine = Affine3A::from_rotation_translation(tank.rotation.0, tank.position.0);
         // avian3d 0.7 ForcesItem's global COM expression in query_data.rs.
         let center_of_mass = tank.position.0 + tank.rotation.0 * tank.center_of_mass.0;
-        let linear = forces.linear_velocity();
-        let angular = forces.angular_velocity();
+        // avian3d 0.7 dynamics/integrator/mod.rs: the increments are inverse mass times force
+        // plus gravity, and the rotated inverse inertia times torque. A tank locks no axis and
+        // carries no damping; the solver's gyroscopic term is left out.
+        let hull = HullBody {
+            linear: forces.linear_velocity(),
+            angular: forces.angular_velocity(),
+            center_of_mass,
+            inverse_mass: tank.mass.inverse(),
+            inverse_inertia: tank
+                .angular_inertia
+                .rotated(tank.rotation.0)
+                .inverse()
+                .to_mat3(),
+            gravity: gravity.0,
+        };
         #[cfg_attr(
             not(feature = "bitprobe"),
             expect(
@@ -1071,7 +1164,7 @@ fn apply_track_forces(
             target,
             affine,
             dt,
-            |p| linear + angular.cross(p - center_of_mass),
+            hull,
             BeltRig {
                 drive: &mut tank.drive,
                 signal: &mut tank.signal,
@@ -2623,7 +2716,14 @@ mod tests {
                     rotation * Vec3::Y * rest + forward * distance,
                 ),
                 dt,
-                |_| forward * speed,
+                HullBody {
+                    linear: forward * speed,
+                    angular: Vec3::ZERO,
+                    center_of_mass: rotation * Vec3::Y * rest + forward * distance,
+                    inverse_mass: 1.0 / mass,
+                    inverse_inertia: Mat3::ZERO,
+                    gravity: Vec3::NEG_Y * super::super::derive::G,
+                },
                 BeltRig {
                     drive: &mut drive,
                     signal: &mut signal,
@@ -2717,6 +2817,7 @@ mod tests {
             let ground = crate::ground_field::ContactGround {
                 grip: mu,
                 rolling_resistance: 1.0,
+                shear_length_m: 0.010,
             };
             let mut spec = super::super::drive_fixture::compact_spec();
             if case == "engine" {
@@ -2771,7 +2872,14 @@ mod tests {
                     },
                     Affine3A::from_translation(Vec3::Y * rest + Vec3::NEG_Z * distance),
                     dt,
-                    |_| Vec3::NEG_Z * speed,
+                    HullBody {
+                        linear: Vec3::NEG_Z * speed,
+                        angular: Vec3::ZERO,
+                        center_of_mass: Vec3::Y * rest + Vec3::NEG_Z * distance,
+                        inverse_mass: 1.0 / mass,
+                        inverse_inertia: Mat3::ZERO,
+                        gravity: Vec3::NEG_Y * super::super::derive::G,
+                    },
                     BeltRig {
                         drive: &mut drive,
                         signal: &mut signal,
@@ -2947,13 +3055,14 @@ mod tests {
         );
     }
 
-    /// Diagnostics distinguish recoverable shear states within the solver floor.
+    /// Diagnostics distinguish recoverable shear states within one ground's shear length.
     #[test]
     fn diagnostic_digest_distinguishes_recoverable_shear() {
+        let shear = super::super::drive_fixture::ground().shear_length_m;
         let mut elements = TrackGripElements::for_links(1, 3);
-        elements.sides[0].strain[0] = Vec3::X * super::super::forces::GRIP_SHEAR_FLOOR_M * 0.2; // FIXTURE capacity shares.
+        elements.sides[0].strain[0] = Vec3::X * shear * 0.2; // FIXTURE capacity shares.
         let first = coarse_grip_digest(&elements);
-        elements.sides[0].strain[0] = Vec3::X * super::super::forces::GRIP_SHEAR_FLOOR_M * 0.4;
+        elements.sides[0].strain[0] = Vec3::X * shear * 0.4;
         assert_ne!(first, coarse_grip_digest(&elements));
     }
 

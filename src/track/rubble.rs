@@ -867,6 +867,7 @@ mod tests {
             let ground = ContactGround {
                 grip: grip.pair(pieces.friction(solid)),
                 rolling_resistance: super::super::forces::rigid_rolling_resistance(),
+                shear_length_m: 0.0, // The solid's: it stores no shear of its own.
             };
             let pose = Affine3A::from_translation(Vec3::Y * 0.1);
             let tangent = Vec3::new(0.4, 0.03 * 0.4 + 0.02 * 0.3, 0.3);
@@ -1439,6 +1440,7 @@ mod tests {
             track,
             nominal_pressure_kpa: super::super::forces::rolling_reference_kpa(),
             side_weight: 30_000.0 * 9.81 / 2.0,
+            hull_coupling: 1.0, // Fixture point-mass hull.
         }
     }
 

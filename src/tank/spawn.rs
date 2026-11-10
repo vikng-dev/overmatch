@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use avian3d::prelude::{
-    AngularInertia, CenterOfMass, CollisionLayers, Friction, LayerMask, Mass, NoAutoAngularInertia,
+    CenterOfMass, CollisionLayers, Friction, LayerMask, Mass, NoAutoAngularInertia,
     NoAutoCenterOfMass, NoAutoMass,
 };
 use bevy::asset::LoadState;
@@ -1029,7 +1029,6 @@ fn insert_root_components(
     weapon_count: usize,
     rig: Rig,
 ) {
-    let (ex, ey, ez) = spec.inertia_extents;
     let parts: HashMap<String, Entity> = entities
         .iter()
         .enumerate()
@@ -1037,7 +1036,7 @@ fn insert_root_components(
         .collect();
     commands.entity(root).insert((
         Mass(spec.mass),
-        AngularInertia::from_shape(&Cuboid::new(ex, ey, ez), spec.mass),
+        spec.hull_angular_inertia(),
         NoAutoMass,
         NoAutoAngularInertia,
         NoAutoCenterOfMass,

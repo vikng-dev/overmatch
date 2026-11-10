@@ -1342,6 +1342,12 @@ impl NodeRole {
 }
 
 impl TankSpec {
+    /// The hull body's angular inertia: a uniform box of `inertia_extents` carrying `mass`.
+    pub(crate) fn hull_angular_inertia(&self) -> avian3d::prelude::AngularInertia {
+        let (x, y, z) = self.inertia_extents;
+        avian3d::prelude::AngularInertia::from_shape(&Cuboid::new(x, y, z), self.mass)
+    }
+
     /// Every contact consumer receives authored finite dimensions and a finite tooth frame.
     fn check_running_gear_contacts(&self) -> Result<(), BevyError> {
         for (index, wheel) in self.roadwheels.iter().enumerate() {

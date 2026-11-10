@@ -582,6 +582,7 @@ mod tests {
                         track,
                         nominal_pressure_kpa: rolling_reference_kpa(),
                         side_weight: 100_000.0,
+                        hull_coupling: 1.0, // Fixture point-mass hull.
                     }),
                 };
                 let pair = track.combine(expected).dynamic_coefficient;
@@ -593,6 +594,7 @@ mod tests {
                             crate::ground_field::ContactGround {
                                 grip: soil,
                                 rolling_resistance: soil,
+                                shear_length_m: 0.010,
                             },
                         )));
                     let report = contact_side(

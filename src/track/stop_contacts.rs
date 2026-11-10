@@ -299,6 +299,7 @@ mod tests {
                                 crate::ground_field::ContactGround {
                                     grip: 0.37,
                                     rolling_resistance: 0.0, // Fixture ground.
+                                    shear_length_m: 0.010,
                                 },
                             )),
                         )),
