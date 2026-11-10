@@ -326,24 +326,21 @@ Guards: `src/tests/avian_contact_reduction.rs`.
 
 Subject: the game's rigid-body rest, server physics and scenery, game state only.
 
-Sleep eligibility compares twice kinetic energy per mass, `v² + ω·I·ω/m`, with the squared
-`SleepThreshold::linear` rest speed, scaled by `PhysicsLengthUnit`. The half in kinetic energy
-cancels. Physical computed inertia is rotated to world space; no hull extent or object kind is
-needed. Each body updates its timer independently on the compute pool; island wake bits and the
-split candidate commit afterward. Equal split timers choose the lower island id.
+A body rests when either the engine's original separate linear/angular velocity test passes or
+`v² + ω·I_world·ω/m < (SleepThreshold::linear * PhysicsLengthUnit)²`: the original test misreads a
+slender body's roll, the energy test does not, and the engine's own test stays because it is more
+permissive for large bodies. Both comparisons remain strict and preserve threshold signs.
+The original angular setting, default, reflection and serialization remain available.
+`TimeToSleep` and whole-island eligibility are unchanged.
 
-`SleepThreshold::angular` is removed, including serialization/reflection and its default. Code
-setting that field must migrate to the linear rest speed; an angular-only setting no longer
-exists. Negative linear thresholds still disable sleep, and equality still prevents sleep.
-`TimeToSleep` and whole-island eligibility are unchanged. The contact census retains a fixed
-angular diagnostic reference solely for the collapse instrument's before/after counts.
+The energy expression is twice kinetic energy per mass; its half cancels against the rest-speed
+energy. Computed inertia is rotated to world space. Physical inertia is used because locks mask
+force increments while prescribed velocities still move in `integrate_positions`. Zero/infinite
+mass and singular/infinite inertia follow the engine's zero-reciprocal convention.
 
-Computed zero/infinite mass has inverse zero, and infinite/singular inertia's tensor is zero,
-following the engine's existing reciprocal conventions; neither introduces a division by zero.
-Use physical inertia rather than the solver's effective, lock-masked inverse tensor: locked axes
-mask force increments, while `integrate_positions` still integrates prescribed velocities.
-Those velocities therefore still contribute to rest energy.
+Body-owned timers update on the compute pool; island wake bits and the split candidate commit
+afterward. Equal split timers choose the lower island id.
 
-Guards: `src/tests/avian_island_sleep.rs` (spin axis, equal specific energy, frame invariance and
-degenerate properties), and the shipped-house hull-motion witness in
-`src/construction/breakage/tests.rs`. Counts and scope: `.agents/scratch/rest-energy.md`.
+Guards: `src/tests/avian_island_sleep.rs` (spin axis, independent local-frame energy calculation,
+degenerate properties, original-test rest, transverse see-saw, supported periodic roll).
+Counts and scope: `.agents/scratch/rest-energy.md`.

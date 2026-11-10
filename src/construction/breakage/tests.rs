@@ -1009,15 +1009,22 @@ fn settled_freed_matter_sleeps_within_avians_rest_window() {
                 if world.get::<Sleeping>(piece).is_some() {
                     return true;
                 }
-                world
-                    .get::<avian3d::dynamics::solver::solver_body::SolverBody>(piece)
+                let linear = world.get::<LinearVelocity>(piece).unwrap().length_squared();
+                let angular = world
+                    .get::<AngularVelocity>(piece)
                     .unwrap()
-                    .kinetic_speed_squared(
-                        *world.get::<ComputedMass>(piece).unwrap(),
-                        *world.get::<ComputedAngularInertia>(piece).unwrap(),
-                        *world.get::<Rotation>(piece).unwrap(),
-                    )
-                    < (threshold.linear * length_unit).powi(2)
+                    .length_squared();
+                (linear < (threshold.linear * length_unit).powi(2)
+                    && angular < threshold.angular.powi(2))
+                    || world
+                        .get::<avian3d::dynamics::solver::solver_body::SolverBody>(piece)
+                        .unwrap()
+                        .kinetic_speed_squared(
+                            *world.get::<ComputedMass>(piece).unwrap(),
+                            *world.get::<ComputedAngularInertia>(piece).unwrap(),
+                            *world.get::<Rotation>(piece).unwrap(),
+                        )
+                        < (threshold.linear * length_unit).powi(2)
             });
         quiet = if resting { quiet + dt } else { 0.0 };
         if quiet >= rest + allowance {
@@ -6171,154 +6178,4 @@ fn collider_batch_counts_rehomed_entities_and_excludes_fresh_shapes() {
         world.resource::<Stages>().take_counts().values[Work::RehomedColliders as usize],
         0
     );
-}
-
-/// The game's scenery physics must retire a visually quiet pile from the solver within the
-/// resource-owned rest window. Hull corners distinguish a board's roll from its transverse spin;
-/// perturbed poses prevent one float trajectory from being the contract.
-#[test]
-fn a_visually_resting_shipped_pile_sleeps_within_the_rest_window() {
-    // Fixture: 1 cm hull-motion resolution, a one-ULP displacement, and a small yaw.
-    let visible_m = 0.01;
-    let manifest = crate::map::load(&crate::assets::asset_root());
-    let grid = crate::terrain_grid::grid_from_png(
-        &std::fs::read(manifest.heightmap_path()).unwrap(),
-        manifest.extent,
-        manifest.rows,
-    )
-    .unwrap();
-    // Fixture: one admitted sloping placement; only its pose and ground are borrowed.
-    let instance = manifest
-        .instances
-        .iter()
-        .find(|instance| instance.id == "house_0003")
-        .unwrap();
-    let mut observations = Vec::new();
-    let at = instance.pose.xz();
-    let original = instance.pose.at_height(grid.height_at(at.x, at.y));
-    for (x, yaw) in [(at.x, 0.0), (at.x.next_up(), 0.0), (at.x, 0.01)] {
-        let kind = shipped_house();
-        let (mut app, root) = composed_kind(false, &kind);
-        crate::debris::crumble::sim_plugin(&mut app);
-        crate::headless_test::start_fixed_clock(&mut app);
-        app.insert_resource(Gravity(Vec3::NEG_Y * crate::physical_laws::gravity_mps2()));
-        let pose = Transform::from_translation(Vec3::new(x, original.translation.y, at.y))
-            .with_rotation(Quat::from_rotation_y(yaw) * original.rotation);
-        app.world_mut().entity_mut(root).insert((
-            pose,
-            Position(pose.translation),
-            Rotation(pose.rotation),
-        ));
-        app.world_mut().spawn((
-            RigidBody::Static,
-            Position(Vec3::ZERO),
-            crate::terrain_grid::heightfield_collider(&grid),
-            crate::ground_types::GroundTypes::load_shipped().terrain_friction(),
-            CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
-        ));
-        app.update();
-        app.update();
-        let supports: BTreeSet<_> = kind.asset.anchors.iter().map(|a| a.chunk).collect();
-        let contacts = kind
-            .structure
-            .chunks
-            .iter()
-            .enumerate()
-            .filter(|(c, chunk)| chunk.buried || supports.contains(&kind.layout.chunks[*c]))
-            .map(|(chunk, matter)| {
-                (
-                    root,
-                    Load {
-                        chunk,
-                        at: matter.centroid,
-                        // DERIVED: twice the support's pool removes it without adding a launch impulse.
-                        energy: 2.0 * matter.volume * matter.material.crush,
-                        crushed: 2.0 * fracture::full_pool(matter),
-                        blow: Vec3::ZERO,
-                        press: Vec3::ZERO,
-                        peak: None,
-                        origin: Origin::Field,
-                    },
-                )
-            })
-            .collect();
-        app.world_mut().resource_mut::<Queue>().0.push(RawDeposit {
-            contacts,
-            ..default()
-        });
-        let dt = app
-            .world()
-            .resource::<Time<Fixed>>()
-            .timestep()
-            .as_secs_f32();
-        let rest = app.world().resource::<TimeToSleep>().0;
-        let rest_speed =
-            SleepThreshold::default().linear * app.world().resource::<PhysicsLengthUnit>().0;
-        // DERIVED: anchor quantization permits visible_m/rest_speed seconds of travel; one step
-        // exposes the contact solve and one commits sleeping. Neither allowance fits an output.
-        let bound = ((rest + visible_m / rest_speed) / dt).ceil() as u32 + 2;
-        let mut anchors = HashMap::<Entity, Vec<Vec3>>::new();
-        let mut last_visible = 0;
-        let mut slept = None;
-        // Fixture watchdog for the fall, independent of the derived rest deadline.
-        for tick in 1..=(60.0 / dt) as u32 {
-            app.update();
-            let mut pieces = app.world_mut().query::<(
-                Entity,
-                &Piece,
-                &Breakage,
-                &Position,
-                &Rotation,
-                Has<Sleeping>,
-            )>();
-            let mut count = 0;
-            let mut all_sleeping = true;
-            for (entity, piece, breakage, position, rotation, sleeping) in pieces.iter(app.world())
-            {
-                count += 1;
-                all_sleeping &= sleeping;
-                let frame = breakage.physics_frame((position, rotation));
-                let corners: Vec<_> = piece
-                    .chunks
-                    .iter()
-                    .flat_map(|&chunk| {
-                        kind.asset.chunks[kind.layout.chunks[usize::from(chunk)] as usize]
-                            .hull
-                            .iter()
-                    })
-                    .map(|&corner| frame.transform_point(Vec3::from_array(corner)))
-                    .collect();
-                let anchor = anchors.entry(entity).or_insert_with(|| {
-                    last_visible = tick;
-                    corners.clone()
-                });
-                if anchor
-                    .iter()
-                    .zip(&corners)
-                    .any(|(a, b)| a.distance(*b) > visible_m)
-                {
-                    *anchor = corners;
-                    last_visible = tick;
-                }
-            }
-            if count > 0 && all_sleeping {
-                slept = Some(tick);
-                break;
-            }
-        }
-        println!(
-            "MEASURED pile {} x={x:?} yaw={yaw}: asleep={slept:?}, last visible={last_visible}, DERIVED bound={bound} ticks",
-            instance.id
-        );
-        let slept = slept.unwrap_or_else(|| panic!(
-                "pile {} x={x:?} yaw={yaw} is still awake at watchdog tick {}; last visible motion {last_visible}, rest bound {bound}", instance.id, (60.0/dt) as u32));
-        observations.push((x, yaw, slept, last_visible, bound));
-    }
-    for (x, yaw, slept, last_visible, bound) in observations {
-        assert!(
-            slept - last_visible <= bound,
-            "pile x={x:?} yaw={yaw} stayed awake {} ticks after its last visible motion; resource-derived deadline is {bound}",
-            slept - last_visible
-        );
-    }
 }

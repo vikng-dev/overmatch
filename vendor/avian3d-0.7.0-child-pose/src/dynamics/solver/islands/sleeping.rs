@@ -213,10 +213,23 @@ fn update_sleeping_states(
 
     query.par_iter_mut().for_each(
         |(mut sleep_timer, sleep_threshold, solver_body, mass, inertia, rotation, island_data)| {
-            // Keep the sign: a negative threshold disables sleep, even at zero energy.
-            let threshold_squared = sleep_threshold.linear * sleep_threshold.linear.abs();
-            if solver_body.kinetic_speed_squared(*mass, *inertia, *rotation)
-                < length_unit_squared * threshold_squared as Scalar
+            let lin_vel_squared = solver_body.linear_velocity.length_squared();
+            #[cfg(feature = "2d")]
+            let ang_vel_squared = solver_body.angular_velocity * solver_body.angular_velocity;
+            #[cfg(feature = "3d")]
+            let ang_vel_squared = solver_body.angular_velocity.length_squared();
+
+            // Keep signs.
+            let lin_threshold_squared = sleep_threshold.linear * sleep_threshold.linear.abs();
+            let ang_threshold_squared = sleep_threshold.angular * sleep_threshold.angular.abs();
+
+            // Rest passes the original velocity test OR the energy-per-mass test: the original
+            // misreads slender-body roll, energy does not; the engine's own test stays because
+            // it is more permissive for large bodies.
+            if (lin_vel_squared < length_unit_squared * lin_threshold_squared as Scalar
+                && ang_vel_squared < ang_threshold_squared as Scalar)
+                || solver_body.kinetic_speed_squared(*mass, *inertia, *rotation)
+                    < length_unit_squared * lin_threshold_squared as Scalar
             {
                 sleep_timer.0 += delta_secs;
             } else {

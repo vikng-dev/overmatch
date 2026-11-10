@@ -129,14 +129,16 @@ impl SolverBody {
         &self,
         mass: ComputedMass,
         angular_inertia: ComputedAngularInertia,
-        _rotation: Rotation,
+        rotation: Rotation,
     ) -> Scalar {
+        #[cfg(feature = "2d")]
+        let _ = rotation;
         #[cfg(feature = "2d")]
         let rotational = self.angular_velocity * self.angular_velocity * angular_inertia.value();
         #[cfg(feature = "3d")]
         let rotational = self
             .angular_velocity
-            .dot(angular_inertia.rotated(_rotation.0).tensor() * self.angular_velocity);
+            .dot(angular_inertia.rotated(rotation.0).tensor() * self.angular_velocity);
         self.linear_velocity.length_squared() + rotational * mass.inverse()
     }
 

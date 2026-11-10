@@ -294,7 +294,7 @@ fn stationary_contacts_keep_the_configured_minimum_speculative_margin() {
 }
 
 /// Scenery and vehicles share one rest law: the same angular speed can be negligible roll
-/// energy or visible transverse motion. Equal kinetic energy per mass must give equal verdicts.
+/// energy or visible transverse motion. Energy extends the engine's original velocity test.
 #[test]
 fn rest_depends_on_energy_per_mass_and_spin_axis() {
     let mut app = physics_app();
@@ -354,34 +354,157 @@ fn rest_depends_on_energy_per_mass_and_spin_axis() {
     }
 }
 
-/// Rest uses physical world-frame inertia, including prescribed motion on locked force axes.
+/// Rest uses physical world-frame inertia; the local principal-frame calculation is independent.
 /// Degenerate mass properties use Avian's reciprocal convention without NaNs.
 #[test]
 fn rest_energy_is_frame_invariant_and_handles_degenerate_mass() {
-    use avian3d::dynamics::solver::solver_body::{SolverBody, SolverBodyFlags};
-    // Fixture: anisotropic inertia, a unit translation and principal-axis spin.
-    let mut body = SolverBody {
+    use avian3d::dynamics::solver::solver_body::SolverBody;
+    // Fixture: anisotropic inertia, a generic rotation and an off-axis world spin.
+    let body = SolverBody {
         linear_velocity: Vec3::X,
-        angular_velocity: Vec3::X * 3.0,
+        angular_velocity: Vec3::new(0.7, -1.3, 2.1),
         ..default()
     };
     let mass = ComputedMass::new(12.0);
-    let inertia = ComputedAngularInertia::new(Vec3::new(2.0, 6.0, 12.0));
-    // DERIVED: 1² + 3² * 2/12 = 2.5 m²/s².
-    assert!((body.kinetic_speed_squared(mass, inertia, Rotation::IDENTITY) - 2.5).abs() < 1e-5);
-    body.angular_velocity = Vec3::Y * 3.0;
-    let rotation = Rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
-    assert!((body.kinetic_speed_squared(mass, inertia, rotation) - 2.5).abs() < 1e-5);
-    body.flags.insert(SolverBodyFlags::ALL_LOCKED);
-    assert!(
-        (body.kinetic_speed_squared(mass, inertia, rotation) - 2.5).abs() < 1e-5,
-        "locks constrain acceleration, not prescribed velocities integrated into the pose"
-    );
+    let principal = Vec3::new(2.0, 6.0, 12.0);
+    let inertia = ComputedAngularInertia::new(principal);
+    let rotation = Rotation(Quat::from_euler(EulerRot::XYZ, 0.37, -0.61, 0.83));
+    // DERIVED independently in the local principal frame: sum(I_i * omega_i²)/m + v².
+    let local_spin = rotation.0.inverse() * body.angular_velocity;
+    let expected = 1.0
+        + (principal.x * local_spin.x.powi(2)
+            + principal.y * local_spin.y.powi(2)
+            + principal.z * local_spin.z.powi(2))
+            / 12.0;
+    assert!((body.kinetic_speed_squared(mass, inertia, rotation) - expected).abs() < 1e-5);
     for mass in [ComputedMass::new(0.0), ComputedMass::INFINITY] {
         assert_eq!(body.kinetic_speed_squared(mass, inertia, rotation), 1.0);
     }
     assert_eq!(
         body.kinetic_speed_squared(mass, ComputedAngularInertia::INFINITY, rotation),
         1.0
+    );
+}
+
+/// Server rest eligibility retains every state accepted by the original velocity test,
+/// even when combined translation/rotation exceeds the energy limit.
+#[test]
+fn the_original_velocity_test_still_allows_rest() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let threshold = SleepThreshold::default();
+    // Fixture: large radius of gyration and both velocities just below their original limits.
+    let resting = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Collider::cuboid(20.0, 0.2, 0.2),
+            LinearVelocity(Vec3::X * threshold.linear * 0.9),
+            AngularVelocity(Vec3::Z * threshold.angular * 0.9),
+        ))
+        .id();
+    app.update();
+    let dt = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let ticks = (app.world().resource::<TimeToSleep>().0 / dt).ceil() as usize;
+    // Allow one step to expose the first fixed tick and one to commit sleeping.
+    for _ in 0..ticks + 2 {
+        app.update();
+    }
+    assert!(app.world().get::<Sleeping>(resting).is_some());
+}
+
+/// The engine's angular limit must retain the resting see-saw case for large scenery pieces;
+/// energy alone would reject this transverse motion despite both original limits passing.
+#[test]
+fn a_long_bar_see_sawing_below_the_angular_limit_still_rests() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    // Fixture: uniform long bar; transverse spin is below the resource-owned original limit.
+    let bar = app
+        .world_mut()
+        .spawn((RigidBody::Dynamic, Collider::cuboid(6.6, 0.2, 0.05)))
+        .id();
+    app.update();
+    let dt = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let ticks = (app.world().resource::<TimeToSleep>().0 / dt).ceil() as usize;
+    let spin = SleepThreshold::default().angular * 0.9;
+    for tick in 0..ticks + 2 {
+        if app.world().get::<Sleeping>(bar).is_some() {
+            break;
+        }
+        app.world_mut().get_mut::<AngularVelocity>(bar).unwrap().0 =
+            Vec3::Z * if tick.is_multiple_of(2) { spin } else { -spin };
+        app.update();
+    }
+    assert!(app.world().get::<Sleeping>(bar).is_some());
+}
+
+/// A supported scenery bar must accumulate rest through low-energy long-axis roll pulses.
+/// The original angular limit resets the timer at every pulse, before TimeToSleep.
+#[test]
+fn a_supported_bar_rests_through_periodic_one_tick_roll_pulses() {
+    use avian3d::dynamics::solver::solver_body::SolverBody;
+    #[derive(Component)]
+    struct PulsedBar;
+    fn pulse(
+        mut bars: Query<(&mut SolverBody, &mut AngularVelocity, &Rotation), With<PulsedBar>>,
+        mut tick: Local<usize>,
+    ) {
+        // Fixture: one-tick roll at 0.4 rad/s every ten ticks (MEASURED pile blocker scale).
+        for (mut body, mut spin, rotation) in &mut bars {
+            let velocity = if tick.is_multiple_of(10) { 0.4 } else { 0.0 };
+            body.angular_velocity = rotation.0 * Vec3::X * velocity;
+            spin.0 = body.angular_velocity;
+        }
+        *tick += 1;
+    }
+    let mut app = physics_app();
+    app.insert_resource(Gravity(Vec3::NEG_Y * crate::physical_laws::gravity_mps2()));
+    // Fixture: level support, initially supported bar, no collapse or launch trajectory.
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Position(Vec3::NEG_Y * 0.5),
+        Collider::cuboid(20.0, 1.0, 20.0),
+    ));
+    let bar = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            PulsedBar,
+            Position(Vec3::Y * 0.1),
+            Collider::cuboid(6.6, 0.2, 0.05),
+        ))
+        .id();
+    app.add_systems(
+        PhysicsSchedule,
+        pulse
+            .after(PhysicsStepSystems::Solver)
+            .before(PhysicsStepSystems::Sleeping),
+    );
+    app.update();
+    let dt = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let ticks = (app.world().resource::<TimeToSleep>().0 / dt).ceil() as usize;
+    // DERIVED allowance: one initial fixed tick and one deferred sleeping commit.
+    for _ in 0..ticks + 2 {
+        if app.world().get::<Sleeping>(bar).is_some() {
+            break;
+        }
+        app.update();
+    }
+    assert!(
+        app.world().get::<Sleeping>(bar).is_some(),
+        "low-energy roll pulses must not reset the supported bar's rest timer"
     );
 }
