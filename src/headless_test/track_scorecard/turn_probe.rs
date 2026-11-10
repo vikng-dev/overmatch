@@ -5,11 +5,14 @@
 //!
 //! `TURN_PROBE_ONLY=<text>` runs only the cases whose label contains the text.
 //!
-//! Each case prints one `TURNPROBE {json}` line: the rig's constants, the per-tick series of the
-//! run-up's last second, the steer hold and the release, and the per-station force sums over the
-//! hold's closing seconds. Every series is MEASURED from Avian body state, `TrackDrive`,
-//! `TankTransmission`, `TrackGripEffect` and `TrackContacts`; the `rig` block is read from the
-//! rig, its transmission table and the shipped data. Every line is an observation.
+//! Each turn case prints one `TURNPROBE {json}` line: the rig's constants, the per-tick series of
+//! the run-up's last second, the steer hold and the release, the per-station force sums and each
+//! belt's tick-to-tick alternation over the hold's closing seconds. Every series is MEASURED from
+//! Avian body state, `TrackDrive`, `TankTransmission`, `TrackGripEffect` and `TrackContacts`; the
+//! `rig` block is read from the rig, its transmission table and the shipped data. A straight
+//! run-up (`TURNPROBE-RUNUP`: the first tick in each gear, each gear's belt alternation), parks on
+//! slopes (`TURNPROBE-PARK`: hull travel) and a brake stop (`TURNPROBE-BRAKE`: stopping travel and
+//! the rock-back after it) print one line each. Every line is an observation.
 //!
 //! Frames: `ahead` is metres forward of the contact centre (the midpoint of the road-wheel span
 //! on the hull's long axis), `right` metres to the hull's right. The rotation centre follows from
@@ -28,6 +31,13 @@ const LEAD_S: usize = 1;
 const WINDOW_S: usize = 3;
 /// Fixture: the longest full-throttle run-up waited for a gear (s).
 const RUN_UP_CAP_S: usize = 70;
+/// Fixture: seconds the straight run-up continues in the top gear.
+const CRUISE_S: usize = 5;
+/// Fixture: a parked hull's settle and drift windows after the bed's own settle (s).
+const PARK_SETTLE_S: usize = 3;
+const PARK_DRIFT_S: usize = 10;
+/// Fixture: the gear the brake stop runs up to.
+const BRAKE_GEAR: u8 = 3;
 /// Fixture: station bins along the hull's long axis, about the contact centre (m).
 const BIN_M: f32 = 0.5;
 const BINS: usize = 12;
@@ -195,9 +205,9 @@ fn record(bed: &Bed, z_c: f32, series: &mut Series, bins: Option<&mut [[f32; 4];
     series.push("solver_points", solver_points);
 }
 
-fn run(case: &Case) {
-    let ground = base_ground();
-    let grid = match &case.ground {
+/// The shipped tank placed on `ground` and left two seconds at rest.
+fn settled(ground: &Ground) -> Bed {
+    let grid = match ground {
         Ground::Flat | Ground::Pieces => flat(),
         Ground::FlatOneCell => driving_plane(0.0),
         Ground::Slope { angle, along } => {
@@ -206,19 +216,19 @@ fn run(case: &Case) {
         }
         Ground::Shipped(_) => crate::terrain_grid::tests::shipped_grid(),
     };
-    let start = match &case.ground {
+    let start = match ground {
         Ground::Shipped(at) => Vec3::new(at.x, grid.height_at(at.x, at.y) + 0.3, at.y),
         Ground::Slope { .. } => Vec3::ZERO,
         // Fixture: a corner of the level world, so a long run-up and a wide circle stay on it.
         Ground::Flat | Ground::FlatOneCell => Vec3::new(-150.0, 0.0, 330.0),
         Ground::Pieces => Vec3::ZERO,
     };
-    let mut bed = Bed::on_ground(Some(ground), grid);
+    let mut bed = Bed::on_ground(Some(base_ground()), grid);
     let mut lift = 0.0;
-    if matches!(case.ground, Ground::Pieces) {
+    if matches!(ground, Ground::Pieces) {
         lift = pile_under(&mut bed);
     }
-    let normal = match &case.ground {
+    let normal = match ground {
         Ground::Slope { angle, along: true } => Vec3::new(0.0, 1.0, angle.tan()),
         Ground::Slope {
             angle,
@@ -234,6 +244,39 @@ fn run(case: &Case) {
     for _ in 0..2 * TICKS {
         bed.tick(0.0, 0.0);
     }
+    bed
+}
+
+/// Full throttle from rest until `gear` holds while moving, capped; returns the ticks taken.
+fn run_up_to(bed: &mut Bed, gear: u8, mut each_tick: impl FnMut(&Bed)) -> usize {
+    let mut ticks = 0;
+    loop {
+        bed.tick(1.0, 0.0);
+        each_tick(bed);
+        ticks += 1;
+        let state = transmission(bed);
+        if (state.gear >= gear && !state.reverse && bed.hull().speed() > 0.3)
+            || ticks >= RUN_UP_CAP_S * TICKS
+        {
+            return ticks;
+        }
+    }
+}
+
+/// Mean tick-to-tick alternation of a series, in its units: a wave at half the tick rate with
+/// amplitude A reads A, a ramp reads zero. `None` below three samples.
+fn alternation(x: &[f32]) -> Option<f32> {
+    (x.len() >= 3).then(|| {
+        x.windows(3)
+            .map(|w| (w[2] - 2.0 * w[1] + w[0]).abs())
+            .sum::<f32>()
+            / (4.0 * (x.len() - 2) as f32)
+    })
+}
+
+fn run(case: &Case) {
+    let ground = base_ground();
+    let mut bed = settled(&case.ground);
 
     let geom = bed.geom().clone();
     let (z_c, span) = contact_center_z(&geom);
@@ -281,17 +324,9 @@ fn run(case: &Case) {
     if let Some(gear) = case.gear {
         // The scheduler holds a gear only briefly at full throttle, so the hold starts on the
         // first moving tick in the target gear.
-        loop {
-            bed.tick(1.0, 0.0);
-            record(&bed, z_c, &mut series, None);
-            run_up_ticks += 1;
-            let state = transmission(&bed);
-            if (state.gear >= gear && !state.reverse && bed.hull().speed() > 0.3)
-                || run_up_ticks >= RUN_UP_CAP_S * TICKS
-            {
-                break;
-            }
-        }
+        run_up_ticks = run_up_to(&mut bed, gear, |bed| {
+            record(bed, z_c, &mut series, None);
+        });
     }
     let lead_throttle = if case.gear.is_some() { 1.0 } else { 0.0 };
     while run_up_ticks < LEAD_S * TICKS {
@@ -312,6 +347,12 @@ fn run(case: &Case) {
         record(&bed, z_c, &mut series, None);
     }
 
+    let hold_end = (LEAD_S + HOLD_S) * TICKS;
+    let belt_alternation = ["belt_l", "belt_r"].map(|key| {
+        alternation(&series.cols[key][hold_end - WINDOW_S * TICKS..hold_end])
+            .expect("the window spans many ticks")
+            * 1e3
+    });
     let window = (WINDOW_S * TICKS) as f32;
     let bins: Vec<Value> = (0..BINS)
         .map(|bin| {
@@ -330,6 +371,7 @@ fn run(case: &Case) {
         "throttle": case.throttle,
         "target_gear": case.gear,
         "run_up_ticks": run_up_ticks,
+        "belt_alternation_mm_s": belt_alternation,
         "lead_ticks": LEAD_S * TICKS,
         "hold_ticks": HOLD_S * TICKS,
         "release_ticks": RELEASE_S * TICKS,
@@ -358,6 +400,146 @@ fn run(case: &Case) {
         "series": series.cols,
     });
     println!("TURNPROBE {line}");
+}
+
+/// Straight full throttle from rest on the level grid until the top gear has held `CRUISE_S`:
+/// the first tick each forward gear holds while moving (as a turn case's run-up counts it), and
+/// each gear's belt alternation over its ticks outside a shift.
+fn straight_run_up() {
+    let mut bed = settled(&Ground::Flat);
+    let gears = bed
+        .app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .trans()
+        .gears_fwd
+        .len();
+    let mut first = vec![None; gears];
+    let mut ticks: Vec<(u8, bool, [f32; 2])> = Vec::new();
+    let mut top_since = None;
+    while ticks.len() < RUN_UP_CAP_S * TICKS
+        && top_since.is_none_or(|t| ticks.len() - t < CRUISE_S * TICKS)
+    {
+        bed.tick(1.0, 0.0);
+        let state = transmission(&bed);
+        let drive = bed
+            .app
+            .world()
+            .get::<crate::track::sim::TrackDrive>(bed.tank)
+            .expect("a tank carries its belts");
+        ticks.push((
+            state.gear,
+            state.shift_ticks > 0,
+            [drive.sides[0].speed, drive.sides[1].speed],
+        ));
+        if !state.reverse && bed.hull().speed() > 0.3 {
+            for slot in &mut first[..usize::from(state.gear)] {
+                slot.get_or_insert(ticks.len());
+            }
+        }
+        if usize::from(state.gear) == gears && top_since.is_none() {
+            top_since = Some(ticks.len());
+        }
+    }
+    let per_gear: Vec<Value> = (1..=gears as u8)
+        .map(|gear| {
+            let engaged = ticks
+                .iter()
+                .filter(|(g, shifting, _)| *g == gear && !shifting)
+                .count();
+            // Second differences only across consecutive engaged ticks.
+            let runs: Vec<[f32; 2]> = ticks
+                .windows(3)
+                .filter(|w| w.iter().all(|(g, shifting, _)| *g == gear && !shifting))
+                .map(|w| [0, 1].map(|s| (w[2].2[s] - 2.0 * w[1].2[s] + w[0].2[s]).abs() / 4.0))
+                .collect();
+            let alternation = (!runs.is_empty()).then(|| {
+                [0, 1].map(|s| runs.iter().map(|r| r[s]).sum::<f32>() / runs.len() as f32 * 1e3)
+            });
+            json!({
+                "gear": gear,
+                "first_tick": first[usize::from(gear - 1)],
+                "engaged_ticks": engaged,
+                "belt_alternation_mm_s": alternation,
+            })
+        })
+        .collect();
+    let line = json!({
+        "label": "straight run-up",
+        "ticks": ticks.len(),
+        "tick_hz": TICKS,
+        "speed_m_s": bed.hull().speed(),
+        "gears": per_gear,
+    });
+    println!("TURNPROBE-RUNUP {line}");
+}
+
+/// Zero input on a slope after the settle: the hull's travel over the next `PARK_SETTLE_S`, then
+/// over the `PARK_DRIFT_S` after it, and its speed over that window's last second.
+fn park(label: &str, ground: &Ground) {
+    let mut bed = settled(ground);
+    let mut at = vec![bed.hull().position];
+    for _ in 0..(PARK_SETTLE_S + PARK_DRIFT_S) * TICKS {
+        bed.tick(0.0, 0.0);
+        at.push(bed.hull().position);
+    }
+    let (settle, end) = (PARK_SETTLE_S * TICKS, at.len() - 1);
+    let line = json!({
+        "label": label,
+        "settle_s": PARK_SETTLE_S,
+        "drift_s": PARK_DRIFT_S,
+        "settle_mm": at[0].distance(at[settle]) * 1e3,
+        "drift_mm": at[settle].distance(at[end]) * 1e3,
+        "last_second_mm_s": at[end - TICKS].distance(at[end]) * 1e3,
+        "park": transmission(&bed).park,
+    });
+    println!("TURNPROBE-PARK {line}");
+}
+
+/// The run-up to `gear` and the lead second at full throttle, then the lever pulled back until the
+/// park latch holds, then released for `RELEASE_S`. Travel is along the heading at the pull.
+fn brake_stop(gear: u8) {
+    let mut bed = settled(&Ground::Flat);
+    run_up_to(&mut bed, gear, |_| {});
+    for _ in 0..LEAD_S * TICKS {
+        bed.tick(1.0, 0.0);
+    }
+    let hull = bed.hull();
+    let (origin, heading) = (hull.position, hull.forward());
+    let along = |bed: &Bed| (bed.hull().position - origin).dot(heading);
+    let state = transmission(&bed);
+    let (pull_gear, pull_speed) = (state.gear, hull.speed());
+    let (mut peak, mut peak_tick, mut reverse_speed) = (0.0_f32, 0, 0.0_f32);
+    let mut brake_ticks = 0;
+    let mut track = |bed: &Bed, tick: usize| {
+        let s = along(bed);
+        if s > peak {
+            (peak, peak_tick) = (s, tick);
+        }
+        reverse_speed = reverse_speed.min(bed.hull().velocity.dot(heading));
+    };
+    while !transmission(&bed).park && brake_ticks < RUN_UP_CAP_S * TICKS {
+        bed.tick(-1.0, 0.0);
+        brake_ticks += 1;
+        track(&bed, brake_ticks);
+    }
+    let latch_at = along(&bed);
+    for tick in 1..=RELEASE_S * TICKS {
+        bed.tick(0.0, 0.0);
+        track(&bed, brake_ticks + tick);
+    }
+    let line = json!({
+        "label": format!("brake g{gear}"),
+        "pull_gear": pull_gear,
+        "pull_speed_m_s": pull_speed,
+        "latch_ticks": brake_ticks,
+        "latch_travel_m": latch_at,
+        "stop_travel_m": peak,
+        "stop_ticks": peak_tick,
+        "rock_back_mm": (peak - along(&bed)) * 1e3,
+        "peak_reverse_mm_s": -reverse_speed * 1e3,
+    });
+    println!("TURNPROBE-BRAKE {line}");
 }
 
 /// The shipped map's ground under candidate drops: (x, z, mean slope rad, roughness m), where
@@ -564,5 +746,20 @@ fn turn_probe() {
 
     for case in cases.iter().filter(|case| selected(&case.label)) {
         run(case);
+    }
+    if selected("straight run-up") {
+        straight_run_up();
+    }
+    for degrees in [10.0_f32, 20.0] {
+        for (along, name) in [(false, "across"), (true, "uphill")] {
+            let label = format!("park{degrees} {name}");
+            if selected(&label) {
+                let angle = degrees.to_radians();
+                park(&label, &Ground::Slope { angle, along });
+            }
+        }
+    }
+    if selected(&format!("brake g{BRAKE_GEAR}")) {
+        brake_stop(BRAKE_GEAR);
     }
 }
