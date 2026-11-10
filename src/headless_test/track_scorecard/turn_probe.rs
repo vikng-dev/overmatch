@@ -39,7 +39,7 @@ enum Ground {
     /// One level cell: two triangles under the whole world.
     FlatOneCell,
     /// The card's grid tilted by this angle (rad): rising to the hull's right at the start, or
-    /// (`along`) rising ahead of it.
+    /// (`along`) rising ahead of it. A negative angle falls that way.
     Slope { angle: f32, along: bool },
     /// The shipped height map, hull dropped at this (x, z).
     Shipped(Vec2),
@@ -195,7 +195,7 @@ fn record(bed: &Bed, z_c: f32, series: &mut Series, bins: Option<&mut [[f32; 4];
     series.push("solver_points", solver_points);
 }
 
-fn run(case: &Case) {
+fn run(case: &Case, hold_s: usize) {
     let ground = base_ground();
     let grid = match &case.ground {
         Ground::Flat | Ground::Pieces => flat(),
@@ -302,9 +302,9 @@ fn run(case: &Case) {
     for col in series.cols.values_mut() {
         col.drain(..col.len() - LEAD_S * TICKS);
     }
-    for tick in 0..HOLD_S * TICKS {
+    for tick in 0..hold_s * TICKS {
         bed.tick(case.throttle, case.steer);
-        let windowed = tick >= (HOLD_S - WINDOW_S) * TICKS;
+        let windowed = tick >= (hold_s - WINDOW_S) * TICKS;
         record(&bed, z_c, &mut series, windowed.then_some(&mut bins));
     }
     for _ in 0..RELEASE_S * TICKS {
@@ -331,7 +331,7 @@ fn run(case: &Case) {
         "target_gear": case.gear,
         "run_up_ticks": run_up_ticks,
         "lead_ticks": LEAD_S * TICKS,
-        "hold_ticks": HOLD_S * TICKS,
+        "hold_ticks": hold_s * TICKS,
         "release_ticks": RELEASE_S * TICKS,
         "window_ticks": WINDOW_S * TICKS,
         "tick_hz": TICKS,
@@ -563,6 +563,42 @@ fn turn_probe() {
     }
 
     for case in cases.iter().filter(|case| selected(&case.label)) {
-        run(case);
+        run(case, HOLD_S);
+    }
+}
+
+/// Fixture: a full-steer neutral pivot's hold, long enough for one full turn (s).
+const PIVOT_TURN_S: usize = 64;
+
+/// Full-steer neutral pivots for one full turn, level and on slopes facing up, down and across.
+/// `TURN_PROBE_ONLY` narrows these too.
+#[test]
+#[ignore = "the turn probe, run on demand"]
+fn pivot_probe() {
+    let mut cases = vec![Case {
+        label: "pivot flat".into(),
+        ..flat_case(None, 1.0, "neutral pivot")
+    }];
+    // Fixture: slopes in degrees; the steepest exceed the hull's longitudinal holds.
+    for degrees in [5.0_f32, 10.0, 15.0, 25.0, 35.0] {
+        for (angle, along, facing) in [
+            (degrees, true, "uphill"),
+            (-degrees, true, "downhill"),
+            (degrees, false, "across"),
+        ] {
+            cases.push(Case {
+                label: format!("pivot slope{degrees} {facing}"),
+                ground: Ground::Slope {
+                    angle: angle.to_radians(),
+                    along,
+                },
+                gear: None,
+                steer: 1.0,
+                throttle: 0.0,
+            });
+        }
+    }
+    for case in cases.iter().filter(|case| selected(&case.label)) {
+        run(case, PIVOT_TURN_S);
     }
 }
