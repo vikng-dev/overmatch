@@ -2118,8 +2118,9 @@ struct ProjectileMarchWorld<'w, 's> {
     sweep: Local<'s, std::cell::Cell<Option<motion::Sweep>>>,
     contact_motion: Local<'s, std::cell::Cell<Option<motion::ContactMotion>>>,
     shapes: Query<'w, 's, (&'static Collider, Option<&'static BallisticSurfaces>)>,
-    // The tree holds every collider; a broad query reads from it only those outside an armour
-    // set, whose parts it reads from their set ([`Self::near`]).
+    // The tree holds every collider, a set's parts included: a broad query still traverses their
+    // entries and tests their `ColliderAabb`s, but keeps only colliders outside an armour set and
+    // takes each set's parts from the set ([`Self::near`]).
     spatial: SpatialQuery<'w, 's>,
     // The broad-phase bounds of each collider outside an armour set, the ones `spatial`'s AABB
     // queries test a reached leaf against.
@@ -2307,13 +2308,16 @@ impl ProjectileMarchWorld<'_, '_> {
     /// The game's damage model: every collider this world's clock may place within `probe`, with
     /// a box holding it there. A collider outside an armour set comes from avian's tree, its
     /// broad-phase bounds grown by the tick's motion; a set's parts come from the set, tested by
-    /// tank box, then frame box, then part box ([`Self::set_near`]). Visit order is unspecified.
-    /// Returns the set boxes tested at each level.
+    /// tank box, then frame box, then part box ([`Self::set_near`]). Avian's traversal still
+    /// reaches each part's tree entry and tests its `ColliderAabb` before the callback drops it;
+    /// the result depends on neither. Visit order is unspecified. Returns the set boxes tested at
+    /// each level.
     fn near(&self, probe: collect::Probe, visit: &mut dyn FnMut(Entity, ColliderAabb)) -> Tested {
         let pad = self.motion_padding();
         self.spatial
             .aabb_intersections_with_aabb_callback(probe.aabb(pad), |entity| {
-                // Its set holds every armour part; the tree's entry for one is never read.
+                // A part's entry was reached and its bounds tested inside avian's query; its set
+                // decides it instead.
                 if !self.parts.contains(entity) {
                     let bounds = self.aabbs.get(entity).expect(
                         "a collider the broad phase names carries the ColliderAabb its Collider \
@@ -2347,6 +2351,11 @@ impl ProjectileMarchWorld<'_, '_> {
         let meets = |bounds: armour_set::Bounds| {
             probe.is_none_or(|probe| probe.meets(bounds.min, bounds.max))
         };
+        // Over a sweep the gate is conservative against the true path: a round's sample inside a
+        // part at a fraction of it lies within the probe's radius of its segment and within the
+        // set's motion of the part's end-pose box, so the box grown by that motion holds it. It is
+        // deliberately not conservative against `motion::sweep_collider`'s collider-local endpoint
+        // chord: a chord crossing off that path is an artefact the gate drops.
         let grow = match clock {
             SetClock::Live => {
                 let held = set.world_box(&|base| self.live_pose(base), &|frame| {

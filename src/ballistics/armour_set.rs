@@ -1225,6 +1225,97 @@ mod tests {
         app
     }
 
+    /// `root`'s physics pose and each of `tracked`'s local poses, at a tick end.
+    struct End {
+        body: Pose,
+        locals: HashMap<Entity, Transform>,
+    }
+
+    fn tick_end(world: &World, root: Entity, tracked: &[Entity]) -> End {
+        use avian3d::prelude::{Position, Rotation};
+        End {
+            body: Pose {
+                position: world.get::<Position>(root).unwrap().0,
+                rotation: world.get::<Rotation>(root).unwrap().0,
+            },
+            locals: tracked
+                .iter()
+                .map(|&entity| (entity, *world.get::<Transform>(entity).unwrap()))
+                .collect(),
+        }
+    }
+
+    /// Where the point `local` of part `part`, under `root`, is at `fraction` of the tick from
+    /// `start` to `finish`: the body's pose and each link's local pose lerped and slerped on its
+    /// own, read from avian and the hierarchy rather than from the set (fixture derivation).
+    fn derived(
+        world: &World,
+        root: Entity,
+        (start, finish): (&End, &End),
+        part: Entity,
+        local: Vec3,
+        fraction: f32,
+    ) -> Vec3 {
+        let lerp = |a: Pose, b: Pose| Pose {
+            position: a.position.lerp(b.position, fraction),
+            rotation: a.rotation.slerp(b.rotation, fraction),
+        };
+        let pose = |transform: &Transform| Pose {
+            position: transform.translation,
+            rotation: transform.rotation,
+        };
+        let (mut point, mut entity) = (local, part);
+        while entity != root {
+            let link = lerp(pose(&start.locals[&entity]), pose(&finish.locals[&entity]));
+            point = link.position + link.rotation * point;
+            entity = world.get::<ChildOf>(entity).unwrap().parent();
+        }
+        let body = lerp(start.body, finish.body);
+        body.position + body.rotation * point
+    }
+
+    /// For each `(part, point, fraction)`: whether a broad query of a 0.1 mm box about the world
+    /// `point` returns `part` at the moment `fraction` and over the tick's sweep, and whether
+    /// `point` lies outside the box of `part`'s frame at the tick's end.
+    fn found(app: &mut App, root: Entity, queries: Vec<(Entity, Vec3, f32)>) -> Vec<[bool; 3]> {
+        use bevy::ecs::system::RunSystemOnce;
+        app.world_mut()
+            .run_system_once(move |world: super::super::ProjectileMarchWorld| {
+                let set = world.sets.get(root).unwrap();
+                let sweep = super::super::motion::Sweep {
+                    from: 0.0,
+                    to: 1.0,
+                    dt: 1.0,
+                };
+                queries
+                    .iter()
+                    .map(|&(part, point, fraction)| {
+                        let probe = super::super::collect::Probe::Region(
+                            avian3d::prelude::ColliderAabb::from_min_max(
+                                point - Vec3::splat(1.0e-4),
+                                point + Vec3::splat(1.0e-4),
+                            ),
+                        );
+                        world.moment.set(Some(fraction));
+                        let mut returned = [false; 2];
+                        for (clock, sweep) in [None, Some(sweep)].into_iter().enumerate() {
+                            world.sweep.set(sweep);
+                            world.near(probe, &mut |entity, _| returned[clock] |= entity == part);
+                        }
+                        let frame = set.located(world.parts.get(part).unwrap()).0;
+                        let held = set.frames()[frame].bounds.unwrap().posed(world.frame_pose(
+                            set,
+                            frame,
+                            super::super::SetClock::Swept,
+                        ));
+                        let outside = point.cmplt(held.min).any() || point.cmpgt(held.max).any();
+                        [returned[0], returned[1], outside]
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap()
+    }
+
     /// Whether `root`'s held box, and each of its `parts`' boxes from a broad query over a sweep
     /// and at the moment `fraction`, hold the part's `inner` points at `fraction`.
     fn boxed(app: &mut App, root: Entity, parts: &[Entity], inner: &[Vec3], fraction: f32) -> bool {
@@ -1277,11 +1368,14 @@ mod tests {
     /// tick end a part's composed pose is the physics pose its collider holds, the start of the
     /// tick the pose it held at the last one, the tank box at either end holds every part, and a
     /// broad query's boxes (the set's held box, each part's box over a sweep and at a moment) hold
-    /// every part at every fraction, before and after a launch rebases its frame, while the
-    /// collider history keeps no entry for any part. The walk reads parts only through the set; a
-    /// birth swept from the blueprint rest, a frame left at an old pose or read at the wrong end, a
-    /// carrier's motion dropped, a box not grown by the set's motion, or a part kept in the history
-    /// fails it. Fixture: the synthetic tank on a kinematic body driving and
+    /// every part at every fraction, before and after a launch rebases its frame, and until it a
+    /// 0.1 mm query about a point of a turret, gun or barrel part, its path derived from avian and
+    /// the hierarchy, returns that part at the start, middle and end of the tick, at the moment and
+    /// over the sweep, one such point lying outside its frame's end-pose box; while the collider
+    /// history keeps no entry for any part. The walk reads parts only through the set; a birth
+    /// swept from the blueprint rest, a frame left at an old pose or read at the wrong end, a
+    /// carrier's motion dropped, a box not grown by the set's motion, a frame or tank box rejecting
+    /// at the end pose alone, or a part kept in the history fails it. Fixture: the synthetic tank on a kinematic body driving and
     /// turning, its turret and pitch servos turning and its barrel moving every tick at fixture
     /// rates, its turret launched as a kinematic body midway.
     #[test]
@@ -1304,6 +1398,13 @@ mod tests {
             .iter()
             .flat_map(|frame| frame.parts.iter().map(|part| part.collider))
             .collect();
+        // The parts the servos and the recoil move against the hull.
+        let articulated: Vec<Entity> = set.frames[1..]
+            .iter()
+            .flat_map(|frame| frame.parts.iter().map(|part| part.collider))
+            .collect();
+        let tracked: Vec<Entity> = entities.iter().chain(&colliders).copied().collect();
+        let mut outside = false;
         set.insert(&mut app.world_mut().commands(), root);
         app.world_mut().flush();
         // Every fixture part has one shape; its corners are taken 0.1 % inside its box, clear of
@@ -1395,6 +1496,7 @@ mod tests {
         }
         let mut last = physics(app.world());
         for tick in 0..24 {
+            let start_end = tick_end(app.world(), root, &tracked);
             if tick == 12 {
                 // A launch, as `damage::launch_turrets_on_cookoff` makes one: the assembly leaves
                 // the hierarchy as its own body at its world pose.
@@ -1437,6 +1539,30 @@ mod tests {
                     start.iter().chain(&end).all(|&(_, inside)| inside),
                     "tick {tick}: the tank box at each end holds every part"
                 );
+                let (world, finish) = (app.world(), tick_end(app.world(), root, &tracked));
+                let mut queries = Vec::new();
+                for (&part, fraction) in articulated
+                    .iter()
+                    .flat_map(|part| [(part, 0.0), (part, 0.5), (part, 1.0)])
+                {
+                    for &local in &inner {
+                        let ends = (&start_end, &finish);
+                        queries.push((
+                            part,
+                            derived(world, root, ends, part, local, fraction),
+                            fraction,
+                        ));
+                    }
+                }
+                for (query, [moment, swept, beyond]) in
+                    queries.iter().zip(found(&mut app, root, queries.clone()))
+                {
+                    assert!(
+                        moment && swept,
+                        "tick {tick}: a query about {query:?} returns its part"
+                    );
+                    outside |= beyond;
+                }
             }
             last = now;
             let history = app
@@ -1449,6 +1575,10 @@ mod tests {
                 "the collider history keeps no armour part"
             );
         }
+        assert!(
+            outside,
+            "an articulated part's point lies outside its frame's box at the tick's end"
+        );
         let set = app.world().get::<ArmourSet>(root).unwrap();
         assert_eq!(
             set.frames[1].base, turret,

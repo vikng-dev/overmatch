@@ -370,8 +370,9 @@ fn overlapping_shots_each_record_only_their_own_loss() {
 }
 
 /// The game's damage model: a round resolves a tank from its armour set alone. Its discovery,
-/// crossings, fields and crew lines read no armour or crew-box collider's tree entry, pose or
-/// broad-phase bounds, which the lane deleting those colliders relies on: with every part out of
+/// crossings, fields and crew lines depend on no armour or crew-box collider's tree entry, pose or
+/// broad-phase bounds (avian's tree query still visits the entries until the colliders go), which
+/// the lane deleting those colliders relies on: with every part out of
 /// avian's tree and its `Position`, `Rotation` and `ColliderAabb` moved a kilometre off before each
 /// march, a round through a plate into two crew boxes doses each HP pool exactly as it does against
 /// intact colliders. A reader still taking a part from the tree misses it; one still reading its
