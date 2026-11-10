@@ -879,3 +879,50 @@ non-engage tick is unchanged.
 | Transient band excursion | refused (`upshift_confirmation_rejects_transient_band_excursions`); overrun shaft without crank corroboration refused (`upshift_arms_refuse_overrun_shaft_without_crank`) |
 | Detent race | engage on the committing tick resets confirmation (`detent_engage_on_the_committing_tick_resets_confirmation`) |
 | Deficit split | shallow defers through the post-upshift dwell (`confirmed_deficit_defers_through_post_upshift_dwell`); deep overrides it (`steep_grade_after_upshift_corrects_before_lug`) |
+
+## Neutral mean hold (2026-11-11)
+
+The game's tank driving physics, game state only. The steering member forces only the belt speed
+difference `d`. In a neutral pivot the main clutch is open and the park lever released, so nothing
+acted on the mean `m`: symmetric brakes and rolling resistance cancel on `m` while the belts
+counter-rotate, so any grade along the hull drove `m` past `neutral_speed_m_s`. The law then flipped
+into the geared regime, whose clutch closed onto a crank spun up for steering and pushed `m` to
+about 1.25 m/s, then back into neutral: one track stalled and the pivot became a drive.
+
+Whether the mean is held is construction data, `steering.neutral_mean: Free | Held`. Families that
+force only the difference with nothing on the mean path (Merritt-Brown's balance shaft, cross-drive
+in neutral) are `Free`. The Tiger is `Held`, DERIVED from its period drill (Tigerfibel pp. 40–41,
+D 656/30 p. 58; the button-is-holding-brake reading is an inference). Held, `apply_mean_hold` adds
+the mean-axis stop force after the engine and brake forces, split evenly so `d` is untouched, within
+twice `brake_capacity_for_regime` at the mean speed: the two-sided capacity that holds the parked
+tank, static at rest and dynamic once breached. It is passive and not charged to the engine.
+
+Rejected: the steering member's per-output capacity, because the member carries only the difference
+and the grade load is common mode; an ideal, unbounded hold, a claim no source makes; a holding-brake
+torque times the engaged gear ratio, because the Tiger's figure is Unknown and the owner asked not to
+model the brake, its torque or its gear. The reuse of `brake_force` is a stand-in: the Tiger's
+Haltebremse acts in the gearbox, not on the per-side Argus discs, but the game folds the parking hold
+into one brake datum and the hold reads it.
+
+MEASURED with `turn_probe::pivot_probe` (full lever from rest, one full turn, shipped Tiger, base
+ground), `Free` against `Held`. Belt speeds are each side's mean; "regime changes" counts main-clutch
+transitions during the turn.
+
+| ground | belts free (m/s) | belts held (m/s) | mean held (m/s) | yaw held (rad/s) | drift free → held (m) | regime changes free → held |
+|---|---|---|---|---|---|---|
+| level | +0.287 / −0.287 | +0.287 / −0.287 | 0.000 | −0.129 | 0.00 → 0.00 | 0 → 0 |
+| 5° | +0.32 / −0.17 | +0.287 / −0.287 | 0.000 | −0.128 | 17.8 → 1.7 | 1156–1278 → 0 |
+| 10° | +0.35 / −0.08 | +0.287 / −0.287 | 0.000 | −0.125 | 22.9 → 3.4 | 2175–2220 → 0 |
+| 15° | +0.20…0.42 / −0.16…+0.10 | +0.287 / −0.287 | 0.000 | −0.120 | 25–27 (0.8 turn) → 5.4 | 2049–2214 → 0 |
+| 25° | runaway to −5.3 | +0.287 / −0.287 | 0.000 | −0.100 | 42–61 (0.7–1.0 turn) → 10.5 | 431–936 → 0 |
+| 35° | runaway | runaway | to −4.8 | — | 90–113 → 74–110 | 102–1016 → 85–317 |
+
+Each slope row spans the three starting headings (up, down, across), which agree within 0.1 m once
+the turn completes. The held drift runs down the fall line: the sliding footprint yields to the
+grade while `m` stays at zero. The 35° row exceeds the DERIVED static capacity (2 × 96 kN × 1.5 =
+288 kN against 57 t × g × sin 35° = 321 kN facing the fall line, saturating at about 31°). Breached,
+the dynamic 192 kN holds only about 20°, so the tank runs downhill and the law leaves the neutral
+regime; the parked tank's lever has the same capacity and would slide there too (DERIVED). Every
+geared probe row is bit-identical. Of the rows that enter a neutral pivot while rolling,
+`flat g3 lifted tight` goes from nine neutral/geared flips at the threshold to one entry, stopping
+its mean at a MEASURED peak 3.5 m/s² hull deceleration where the free mean reached 2.8.

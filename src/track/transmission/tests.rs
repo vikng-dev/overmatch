@@ -63,6 +63,7 @@ fn lab_tp() -> TransmissionParams {
         ],
         reverse_steer_radii_m: &[(3.0, 8.9)],
         steer_capacity_n: 240_000.0,
+        neutral_mean: NeutralMean::Free,
         recirculation: 0.9,
         brake_capacity_n: 120_000.0,
         brake_static_factor: 1.6,
@@ -120,6 +121,7 @@ fn tiger_authoring() -> TransmissionAuthoring<'static> {
         ],
         reverse_steer_radii_m: &[(3.44, 10.2), (5.28, 15.6), (7.62, 22.5), (11.30, 33.4)],
         steer_capacity_n: 250_000.0,
+        neutral_mean: NeutralMean::Held,
         recirculation: 0.9,
         brake_capacity_n: 96_000.0,
         brake_static_factor: 1.5,
@@ -359,6 +361,49 @@ fn steer_release_arrests_pivot() {
         previous = difference;
     }
     panic!("released pivot must reach rest");
+}
+
+/// A neutral pivot on a slope: with the mean path held (`NeutralMean::Held`) the belts run equal
+/// and opposite, the mean at rest while the difference reaches `neutral_d_full`; with it free the
+/// grade sets the mean. A pivot that turns in place on a slope relies on the held fact, and a
+/// held mean must not cost the difference its target.
+#[test]
+fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
+    let fp = lab_fp();
+    for mean in [NeutralMean::Held, NeutralMean::Free] {
+        let tp = TransmissionParams {
+            neutral_mean: mean,
+            ..lab_tp()
+        };
+        // Fixture: a grade pull on each belt totalling half the hold's breached capacity.
+        let pull = -0.5 * tp.brake_capacity_n;
+        let mut st = fresh(&tp);
+        let mut speeds = [0.0f32; 2];
+        let mut peak_mean = 0.0f32;
+        // Fixture observation budget: two simulated seconds.
+        for _ in 0..128 {
+            speeds = step(&fp, &tp, &mut st, &input(0.0, 1.0, speeds, [pull, pull])).next_speeds;
+            peak_mean = peak_mean.max(((speeds[0] + speeds[1]) * 0.5).abs());
+        }
+        let difference = (speeds[0] - speeds[1]) * 0.5;
+        match mean {
+            NeutralMean::Held => {
+                assert!(
+                    peak_mean < PARK_ENGAGE_SPEED,
+                    "a held mean stays at rest on the slope, peaked at {peak_mean} m/s"
+                );
+                assert!(
+                    (difference - tp.neutral_d_full).abs() < PARK_ENGAGE_SPEED,
+                    "a held pivot's difference reaches {} m/s, got {difference}",
+                    tp.neutral_d_full
+                );
+            }
+            NeutralMean::Free => assert!(
+                peak_mean >= PARK_ENGAGE_SPEED,
+                "a free mean is set by the grade, peaked at {peak_mean} m/s"
+            ),
+        }
+    }
 }
 
 /// The L600 constraint converges to the geared ratio: under sustained throttle + tight
