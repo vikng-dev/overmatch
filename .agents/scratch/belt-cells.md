@@ -112,10 +112,9 @@ the corresponding loose-piece path gives **65**. This does not show a settled lo
 still grows with all admitted faces. The former fixture inequality is not a bound: at 64 chunks,
 3,466 solid cells exceed `2*(1+5*311) = 3,112` (DERIVED).
 
-The next root fix, if the pile remains expensive, is a finite-segment upper-envelope representation
-that discards buried boundaries and interior seams before choosing integration cells. Its
-quadrature needs an explicit feel decision because the existing engagement law reads each cell's
-maximum depth. A numerical cap would silently change coverage and is not the fix.
+The live freeze capture and finite-segment upper-envelope replacement are recorded in
+[`belt-freeze.md`](belt-freeze.md). That follow-up supersedes this lane's overlay representation;
+the fixture counts above remain observations of that earlier implementation.
 
 ## Player-visible limits
 

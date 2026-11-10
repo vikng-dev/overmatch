@@ -2,20 +2,15 @@
 //! Coordinates are `(along, lateral, 1)`; depth planes map them to metres inward from the
 //! resting face. Each triangle supplies its own plane; only faces reached from the probe origin
 //! enter the support envelope.
-//!
-//! DERIVED in exact arithmetic: F entry faces give at most L = 5F + F(F+1)/2 lines per half
-//! (coverage/envelope boundaries and pairwise depth crossings), hence at most 1 + L(L+1)/2
-//! arrangement regions. Winning-area rejection does not give a linear cell bound or bound F;
-//! retained seams and floating-point slivers remain, and there is no runtime cap. Each face
-//! visits every existing cell because its depth may replace that cell's current owner.
-//! MEASURED adversarial overlap of 512 unscaled shipped chunks under one link: 16,227 cells
-//! with solid coverage, 65 with loose-piece shoe shadows, across both halves of one column.
-//! The pile is an intersecting partition stress input, not a settled physical packing. See
-//! `.agents/scratch/belt-cells.md` for the inputs, counts and remaining root fix.
+//! Integration regions come from finite visible edges of the upper envelope, not insertion
+//! history. See `.agents/scratch/belt-freeze.md` for the captured freeze and representation choice.
 
 use super::{SupportPatch, sample_halves};
 use crate::track::rubble::{RubbleBodies, Slab};
 use bevy::prelude::*;
+
+mod envelope;
+use envelope::partition;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ClippedFace {
@@ -304,71 +299,7 @@ struct Cell<'a> {
     face: Option<(usize, &'a ClippedFace)>,
 }
 
-fn partition<'a>(
-    a: f32,
-    b: f32,
-    strip: (f32, f32),
-    base: Vec3,
-    free: Vec3,
-    faces: &[(usize, &'a ClippedFace)],
-) -> Vec<Cell<'a>> {
-    let mut cells = vec![Cell {
-        polygon: vec![
-            Vec3::new(a, strip.0, 1.0),
-            Vec3::new(b, strip.0, 1.0),
-            Vec3::new(b, strip.1, 1.0),
-            Vec3::new(a, strip.1, 1.0),
-        ],
-        depth: base,
-        face: None,
-    }];
-    for &(piece, face) in faces {
-        let depth = face.depth + free;
-        let mut next = Vec::new();
-        for cell in cells {
-            // Cells outside the face's covered, deeper region retain one polygon and owner.
-            let winning = face
-                .planes
-                .iter()
-                .copied()
-                .chain([depth - cell.depth])
-                .fold(cell.polygon.clone(), |polygon, plane| clip(&polygon, plane));
-            if signed_area(&winning).abs() == 0.0 {
-                next.push(cell);
-                continue;
-            }
-            let mut remaining = cell.polygon;
-            for plane in face.planes.iter().copied().chain([depth - cell.depth]) {
-                if plane == Vec3::ZERO {
-                    continue;
-                } // Coincident planes have one owner, never two.
-                let outside = clip(&remaining, -plane);
-                if signed_area(&outside).abs() > 0.0 {
-                    next.push(Cell {
-                        polygon: outside,
-                        depth: cell.depth,
-                        face: cell.face,
-                    });
-                }
-                remaining = clip(&remaining, plane);
-                if remaining.is_empty() {
-                    break;
-                }
-            }
-            if signed_area(&remaining).abs() > 0.0 {
-                next.push(Cell {
-                    polygon: remaining,
-                    depth,
-                    face: Some((piece, face)),
-                });
-            }
-        }
-        cells = next;
-    }
-    cells
-}
-
-/// Overlay convex entry faces onto each field half-profile. Each disjoint cell owns the deepest
+/// Integrate the entry faces' upper envelope over each field half-profile. Each cell owns the deepest
 /// surface; clipping at face edges and depth crossings prevents both holes and double support.
 pub(super) fn patches(
     slab: &Slab,
@@ -429,6 +360,208 @@ pub(super) fn patches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Suspension's integration regions depend on the upper envelope, never on hidden solids.
+    /// A mutant retaining an overwritten cell's seams produces more than one rectangle per half.
+    #[test]
+    fn buried_faces_cannot_fragment_the_upper_envelope() {
+        fn face(polygon: Vec<Vec3>, depth: f32) -> ClippedFace {
+            let planes = polygon
+                .iter()
+                .zip(polygon.iter().cycle().skip(1))
+                .take(polygon.len())
+                .map(|(a, b)| a.cross(*b))
+                .collect();
+            ClippedFace {
+                polygon,
+                depth: Vec3::Z * depth,
+                normal: Vec3::Y,
+                planes,
+            }
+        }
+        // Fixture: a flat rectangular upper face covers many smaller triangular solids.
+        let upper = face(
+            vec![
+                Vec3::Z,
+                Vec3::new(2.0, 0.0, 1.0),
+                Vec3::new(2.0, 1.0, 1.0),
+                Vec3::new(0.0, 1.0, 1.0),
+            ],
+            0.5,
+        );
+        let mut faces: Vec<_> = (0..32)
+            .map(|i| {
+                let x = 0.05 + (i % 8) as f32 * 0.23;
+                let y = 0.05 + (i / 8) as f32 * 0.22;
+                face(
+                    vec![
+                        Vec3::new(x, y, 1.0),
+                        Vec3::new(x + 0.16, y, 1.0),
+                        Vec3::new(x + 0.08, y + 0.15, 1.0),
+                    ],
+                    0.25,
+                )
+            })
+            .collect();
+        faces.push(upper);
+        for reverse in [false, true] {
+            if reverse {
+                faces.reverse();
+            }
+            let refs: Vec<_> = faces.iter().map(|face| (0, face)).collect();
+            let cells: Vec<_> = (0..2)
+                .flat_map(|half| {
+                    partition(
+                        half as f32,
+                        (half + 1) as f32,
+                        (0.0, 1.0),
+                        Vec3::ZERO,
+                        Vec3::ZERO,
+                        &refs,
+                    )
+                })
+                .collect();
+            // DERIVED: a rectangular upper envelope has one integration region per half.
+            assert_eq!(cells.len(), 2, "buried boundaries became integration cells");
+            let (area, pressure, moment) = moments(&cells, 1.0);
+            // Resolution: f32 area and moment accumulation roundoff on this unit-scale plane.
+            assert!((area - 2.0).abs() < 1e-6);
+            assert!((pressure - 1.0).abs() < 1e-6);
+            assert!((moment - Vec3::new(1.0, 0.5, 1.0)).length() < 1e-6);
+        }
+    }
+
+    /// Suspension must integrate the captured upper surface independently of face order.
+    /// A mutant retaining hidden crossings or assigning a remote plane breaks coverage or moments.
+    #[test]
+    fn captured_running_gear_envelope() {
+        use crate::track::bump_stop::{TrackColliders, spawn_replica_track_colliders};
+        let spec: crate::spec::TankSpec = crate::provenance::from_shipped_str(
+            crate::tank::TANK_SPEC_PATH,
+            &std::fs::read_to_string(crate::assets::asset_root().join(crate::tank::TANK_SPEC_PATH))
+                .unwrap(),
+        )
+        .unwrap();
+        let glb = crate::assets::asset_root().join(crate::tank::TANK_SIM_GLB_PATH);
+        let geometry = crate::bake::extract_tank_geometry(
+            &glb,
+            &spec,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .unwrap();
+        let blueprint =
+            crate::bake::TankBlueprint::new(crate::tank::TANK_SPEC_PATH.into(), geometry, spec);
+        let shapes = TrackColliders::of_blueprint(&blueprint, &glb);
+        let mut world = World::new();
+        let body = world.spawn_empty().id();
+        spawn_replica_track_colliders(&mut world.commands(), body, &shapes);
+        world.flush();
+        // Fixture: first threshold capture in the 30-tank rest-3 rehearsal. Coordinates and
+        // profiles are captured f32 values; shapes come from the production data constructor.
+        let slab = Slab {
+            origin: Vec3::new(31.904072, 33.64055, -0.7934673),
+            axis: Vec3::new(-0.9512535, -0.02233869, -0.30760053),
+            lat: Vec3::new(-0.30487394, 0.21876416, 0.9269272),
+            out: Vec3::new(-0.046576746, -0.9755218, 0.21491349),
+            len: 0.2636633,
+            lateral: (-0.34611118, 0.3786031),
+            face: 0.02463995,
+            reach: 0.5,
+            travel: 0.17256261,
+        };
+        let strip = (-0.22532547, 0.2578174);
+        let pen = [-0.5257142, -0.5189536, -0.5121931];
+        let travel = [0.17256261; 3];
+        let position = Vec3::new(30.766592, 32.89622, 2.4966617);
+        let rotation = Quat::from_xyzw(-0.044458035, -0.41336578, -0.019702647, 0.90926576);
+        let mut faces = Vec::new();
+        for (index, collider) in world
+            .query::<&avian3d::prelude::Collider>()
+            .iter(&world)
+            .enumerate()
+        {
+            let triangles: Vec<_> = triangles(collider, rotation)
+                .into_iter()
+                .map(|tri| tri.map(|p| p + position))
+                .collect();
+            let clipped = clip_faces(&triangles, &slab);
+            faces.extend(clipped.into_iter().map(|face| (index, face)));
+        }
+        let faces = raised_faces(
+            faces.iter().map(|(piece, face)| (*piece, face)),
+            strip,
+            slab.len,
+            pen,
+            travel,
+        );
+        let width = slab.lateral.1 - slab.lateral.0;
+        let mut expected: Option<(f32, f32, Vec3)> = None;
+        for ordered in [faces.clone(), faces.iter().rev().copied().collect()] {
+            let cells: Vec<_> = (0..2)
+                .flat_map(|half| {
+                    partition(
+                        half as f32 * slab.len / 2.0,
+                        (half + 1) as f32 * slab.len / 2.0,
+                        strip,
+                        half_plane(slab.len, pen, half),
+                        half_plane(slab.len, travel, half),
+                        &ordered,
+                    )
+                })
+                .collect();
+            assert!(
+                cells.iter().any(|cell| cell.face.is_some()),
+                "the captured placement exercises solid support"
+            );
+            let actual = moments(&cells, width);
+            // Resolution: accumulated f32 polygon and pressure-moment roundoff in this column.
+            if let Some((area, pressure, moment)) = expected {
+                assert!((actual.0 - area).abs() < 1e-5);
+                assert!((actual.1 - pressure).abs() < 1e-5);
+                assert!((actual.2 - moment).length() < 1e-5);
+            } else {
+                expected = Some(actual);
+            }
+            let coverage: f32 = cells.iter().map(|c| signed_area(&c.polygon)).sum();
+            assert!((coverage - slab.len * (strip.1 - strip.0)).abs() < 1e-5);
+            // Fixture: interior samples avoid the authored half boundary and shared edge ties.
+            for x in 0..13 {
+                for y in 0..11 {
+                    let p = Vec3::new(
+                        (x as f32 + 0.37) * slab.len / 13.0,
+                        strip.0 + (y as f32 + 0.29) * (strip.1 - strip.0) / 11.0,
+                        1.0,
+                    );
+                    let half = usize::from(p.x > slab.len / 2.0);
+                    let free = half_plane(slab.len, travel, half);
+                    let expected = ordered
+                        .iter()
+                        .filter(|(_, f)| f.planes.iter().all(|plane| plane.dot(p) >= 0.0))
+                        .map(|(_, f)| (f.depth + free).dot(p))
+                        .fold(half_plane(slab.len, pen, half).dot(p), f32::max);
+                    let actual = cells
+                        .iter()
+                        .filter(|c| contains_point(&c.polygon, p, 1e-6))
+                        .map(|c| c.depth.dot(p))
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    // Resolution: f32 plane evaluation and projected shared-edge roundoff.
+                    assert!(
+                        (actual - expected).abs() < 2e-4,
+                        "{p:?}: {actual} != {expected}"
+                    );
+                }
+            }
+            let contacts = cells
+                .iter()
+                .filter(|c| integrate(&clip(&c.polygon, c.depth), c.depth, width).is_some())
+                .count();
+            println!(
+                "capture faces={} cells={} contacts={contacts} moments={actual:?}",
+                ordered.len(),
+                cells.len()
+            );
+        }
+    }
 
     fn triangles(collider: &avian3d::prelude::Collider, rotation: Quat) -> Vec<[Vec3; 3]> {
         let shape = collider.shape_scaled();
