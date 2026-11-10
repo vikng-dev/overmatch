@@ -789,19 +789,21 @@ mod tests {
         let mut expected_patches = None;
         let mut expected: Option<(f32, f32, Vec3)> = None;
         for ordered in [faces.clone(), faces.iter().rev().copied().collect()] {
+            let mut patches = 0;
             let cells: Vec<_> = (0..2)
                 .flat_map(|half| {
-                    partition(
+                    let cells = partition(
                         half as f32 * slab.len / 2.0,
                         (half + 1) as f32 * slab.len / 2.0,
                         strip,
                         half_plane(slab.len, pen, half),
                         half_plane(slab.len, travel, half),
                         &ordered,
-                    )
+                    );
+                    patches += integrated_regions(cells.clone(), ordered.len(), width).len();
+                    cells
                 })
                 .collect();
-            let patches = integrated_regions(cells.clone(), ordered.len(), width).len();
             if let Some(expected) = expected_patches {
                 assert_eq!(
                     patches, expected,
