@@ -168,7 +168,7 @@ fn side_plate_layers() -> CollisionLayers {
             Layer::Default,
             Layer::Vehicle,
             Layer::Debris,
-            // Standing structures also belong to Armor. Tank armour volumes have empty filters.
+            // Standing structures also belong to Armor; tank armour volumes are no colliders.
             Layer::Armor,
             Layer::TrackSide,
         ],

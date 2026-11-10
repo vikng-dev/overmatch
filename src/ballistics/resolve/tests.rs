@@ -2042,11 +2042,7 @@ fn boxed_throw(app: &mut App, tank: &BoxedTank, origin: Vec3) -> BoxedThrow {
                 let within = |collider: Entity| world.volume_of(collider).is_some();
                 let open = walk(&within);
                 let own = walk(&|collider: Entity| {
-                    within(collider)
-                        && world
-                            .collider_bodies
-                            .get(collider)
-                            .is_ok_and(|of| of.body == body)
+                    within(collider) && world.owner(collider) == Some(body)
                 });
                 BoxedThrow { cone, open, own }
             },

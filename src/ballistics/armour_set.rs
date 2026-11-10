@@ -1,6 +1,6 @@
 //! The game's damage model: a tank's armour set. Its armour volumes and crew boxes (HP pools at
 //! stations) are grouped by the rigid frame that carries them, built at spawn from the tank's data
-//! (ADR-0014), so the damage model bounds and poses them per frame instead of per collider.
+//! (ADR-0014), so the damage model bounds and poses them per frame instead of per primitive.
 //!
 //! A frame is the tank root, or a node that moves against its parent: a servo, a recoiling barrel,
 //! or the assembly a launch detaches. A part belongs to its nearest frame at or above its node, at
@@ -11,8 +11,11 @@
 //!
 //! Each frame keeps its pose in its carrier at both ends of the tick ([`snapshot`]), rewritten only
 //! when its node's local pose is written. A part's pose at a fraction of the tick is body × frames
-//! × fixed pose, each link lerped and slerped on its own ([`Composed`]); the collider history keeps
-//! no part ([`super::motion`]).
+//! × fixed pose, each link lerped and slerped on its own ([`Composed`]).
+//!
+//! A part is an entity under its node with no collider: physics, avian's tree and the collider
+//! history ([`super::motion`]) never meet it, and every reader takes its shape, surfaces and role
+//! from its set.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -67,7 +70,7 @@ impl Bounds {
 pub(super) struct Part {
     /// The primitive's entity: its identity for keys (the walk's `ShellKey`, the march's contact
     /// order and resting list), which every reader takes from here.
-    pub collider: Entity,
+    pub entity: Entity,
     /// Its pose in its frame, fixed.
     pub pose: Pose,
     /// The box of its shape in its frame's coordinates.
@@ -143,8 +146,7 @@ pub(crate) struct ArmourFrame {
     tank: Entity,
 }
 
-/// Marks an armour part's collider with its place in its tank's set: the walk poses it from the
-/// set, and the collider history keeps no entry for it.
+/// Marks an armour part's entity with its place in its tank's set, where the walk reads it.
 #[derive(Component)]
 pub(crate) struct ArmourPart {
     tank: Entity,
@@ -225,7 +227,7 @@ pub(crate) struct Node<'a> {
 /// One armour volume or crew box primitive: its entity, the node it hangs under (`None`: the root)
 /// and its pose there, its shape and surfaces, and its role.
 pub(crate) struct PartSource<'a> {
-    pub collider: Entity,
+    pub entity: Entity,
     pub node: Option<usize>,
     pub pose: Transform,
     pub shape: &'a Collider,
@@ -336,7 +338,7 @@ impl ArmourSet {
             let frame = &mut frames[frame];
             frame.bounds = Some(frame.bounds.map_or(posed, |held| held.union(posed)));
             frame.parts.push(Part {
-                collider: part.collider,
+                entity: part.entity,
                 pose,
                 bounds: posed,
                 shape: part.shape.clone(),
@@ -350,7 +352,7 @@ impl ArmourSet {
         }
     }
 
-    /// Insert the set on `root` and mark its frame nodes and part colliders, in one command batch.
+    /// Insert the set on `root` and mark its frame nodes and part entities, in one command batch.
     pub(crate) fn insert(self, commands: &mut Commands, root: Entity) {
         for (index, frame) in self.frames.iter().enumerate() {
             if index > 0 {
@@ -359,7 +361,7 @@ impl ArmourSet {
                     .insert(ArmourFrame { tank: root });
             }
             for (part, held) in frame.parts.iter().enumerate() {
-                commands.entity(held.collider).insert(ArmourPart {
+                commands.entity(held.entity).insert(ArmourPart {
                     tank: root,
                     frame: index,
                     part,
@@ -653,7 +655,6 @@ pub(crate) fn rebase(
 #[derive(SystemParam)]
 pub(crate) struct LiveArmour<'w, 's> {
     sets: Query<'w, 's, &'static ArmourSet>,
-    parts: Query<'w, 's, (), With<ArmourPart>>,
     bodies: Query<'w, 's, (&'static Position, &'static Rotation)>,
     locals: Query<'w, 's, &'static Transform>,
 }
@@ -668,12 +669,6 @@ pub(crate) struct ArmourHit {
 }
 
 impl LiveArmour<'_, '_> {
-    /// Whether collider `entity` is an armour set's part: a tree query drops it, its set answers
-    /// for it.
-    pub(crate) fn holds(&self, entity: Entity) -> bool {
-        self.parts.contains(entity)
-    }
-
     /// The first armour volume part (no crew box) of a tank `admit` takes that `ray` meets within
     /// `max`.
     pub(crate) fn cast_ray(
@@ -781,7 +776,7 @@ pub(super) fn snapshot(
 
 /// The set of a fixture body from its live hierarchy: every descendant collider on the armour or
 /// crew box layer is a part, its role its nearest volume of that layer's kind, and the body its
-/// only frame.
+/// only frame. Each part then stops being a collider, as a spawned tank's part is none.
 #[cfg(test)]
 pub(crate) fn fixture(world: &mut World, root: Entity) {
     let mut nodes = Vec::new();
@@ -819,8 +814,8 @@ pub(crate) fn fixture(world: &mut World, root: Entity) {
         &nodes,
         parts
             .iter()
-            .map(|(collider, node, pose, shape, surfaces, role)| PartSource {
-                collider: *collider,
+            .map(|(entity, node, pose, shape, surfaces, role)| PartSource {
+                entity: *entity,
                 node: *node,
                 pose: *pose,
                 shape,
@@ -828,6 +823,11 @@ pub(crate) fn fixture(world: &mut World, root: Entity) {
                 role: *role,
             }),
     );
+    for &(entity, ..) in &parts {
+        world
+            .entity_mut(entity)
+            .remove_with_requires::<(Collider, super::BallisticSurfaces, super::WitnessSurface)>();
+    }
     set.insert(&mut world.commands(), root);
     world.flush();
 }
@@ -862,125 +862,18 @@ fn layered_role(world: &World, entity: Entity) -> Option<Role> {
     })
 }
 
-/// Test support: `root`'s set against its live hierarchy. Its parts are every descendant collider
-/// on the armour or crew box layer, once each; its frames the root and every descendant node
-/// `is_frame` names; each part sits in its nearest frame above it, at the pose its rest chain of
-/// `Transform`s gives it; and each frame's box holds its parts. Class invariants only.
-#[cfg(test)]
-pub(crate) fn assert_matches(
-    world: &World,
-    root: Entity,
-    is_frame: impl Fn(&World, Entity) -> bool,
-) {
-    use avian3d::prelude::CollisionLayers;
-    let mut layered = Vec::new();
-    let mut framed = vec![root];
-    let mut walk = vec![root];
-    while let Some(entity) = walk.pop() {
-        for &child in world.get::<Children>(entity).into_iter().flatten() {
-            let on = |layer| {
-                world
-                    .get::<CollisionLayers>(child)
-                    .is_some_and(|layers| layers.memberships.has_all(layer))
-            };
-            if on(crate::Layer::Armor) || on(crate::Layer::Witness) {
-                layered.push(child);
-            }
-            if is_frame(world, child) {
-                framed.push(child);
-            }
-            walk.push(child);
-        }
-    }
-    let set = world
-        .get::<ArmourSet>(root)
-        .expect("the tank carries its armour set");
-    let mut nodes: Vec<Entity> = set.frames().iter().map(|frame| frame.node).collect();
-    let mut parts: Vec<Entity> = set
-        .frames()
-        .iter()
-        .flat_map(|frame| frame.parts.iter().map(|part| part.collider))
-        .collect();
-    nodes.sort();
-    framed.sort();
-    parts.sort();
-    layered.sort();
-    assert_eq!(
-        nodes, framed,
-        "the frames are the root and every moving node"
-    );
-    assert_eq!(
-        parts, layered,
-        "every armour and crew box collider is one part"
-    );
-    // A pose through the live `Transform` chain, from `entity` up to (excluding) `top`.
-    let chain = |top: Entity, mut entity: Entity| {
-        let mut pose = Pose::IDENTITY;
-        while entity != top {
-            pose = link(*world.get::<Transform>(entity).unwrap(), &entity) * pose;
-            entity = world.get::<ChildOf>(entity).unwrap().parent();
-        }
-        pose
-    };
-    for (index, frame) in set.frames().iter().enumerate() {
-        let bounds = frame.bounds;
-        for part in &frame.parts {
-            let mut above = world.get::<ChildOf>(part.collider).unwrap().parent();
-            while above != root && !is_frame(world, above) {
-                above = world.get::<ChildOf>(above).unwrap().parent();
-            }
-            assert_eq!(
-                frame.node, above,
-                "part {} is in its nearest frame",
-                part.collider
-            );
-            let live = |frame: usize| {
-                let frame = &set.frames()[frame];
-                frame.offset * link(*world.get::<Transform>(frame.node).unwrap(), &frame.node)
-            };
-            let (composed, rest) = (
-                set.in_base(index, &live) * part.pose,
-                chain(root, part.collider),
-            );
-            assert!(
-                composed.position.distance(rest.position) < 1.0e-4
-                    && composed.rotation.angle_between(rest.rotation) < 1.0e-4,
-                "part {} composes to its rest pose: {composed:?} against {rest:?}",
-                part.collider
-            );
-            assert_eq!(
-                Some(part.role),
-                layered_role(world, part.collider),
-                "part {} names the volume it belongs to",
-                part.collider
-            );
-            let held = bounds.expect("a frame carrying a part has a box");
-            let posed = local_box(world, part.collider).posed(part.pose);
-            assert!(
-                posed.min.cmpge(held.min).all() && posed.max.cmple(held.max).all(),
-                "frame {index}'s box holds part {}",
-                part.collider
-            );
-        }
-    }
-}
-
-/// Test support: the box of part collider `part`'s shape in its own coordinates.
-#[cfg(test)]
-fn local_box(world: &World, part: Entity) -> Bounds {
-    let local = world
-        .get::<Collider>(part)
-        .expect("a part is a collider")
-        .aabb(Vec3::ZERO, Quat::IDENTITY);
-    Bounds {
-        min: local.min,
-        max: local.max,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The box of `part`'s shape in its own coordinates.
+    fn local_box(part: &Part) -> Bounds {
+        let local = part.shape.aabb(Vec3::ZERO, Quat::IDENTITY);
+        Bounds {
+            min: local.min,
+            max: local.max,
+        }
+    }
 
     /// A synthetic tank (fixture data): a hull plate on the root, a hull node carrying a turret
     /// servo, a pitch servo on the turret, a recoiling barrel on the pitch servo, a fixed mantlet
@@ -1074,33 +967,28 @@ mod tests {
         let mut parts = Vec::new();
         for (node, pose) in part_rest() {
             let above = node.map_or(root, |index| entities[index]);
-            let collider = world
+            let entity = world
                 .spawn((
                     pose,
                     ChildOf(above),
-                    shape.clone(),
-                    avian3d::prelude::CollisionLayers::new(
-                        [crate::Layer::Armor],
-                        avian3d::prelude::LayerMask::NONE,
-                    ),
                     super::super::BallisticVolume {
                         material: super::super::walk::VolumeMaterial::fixture(1000.0),
                         substance: "fixture".to_owned(),
                     },
                 ))
                 .id();
-            parts.push((collider, node, pose));
+            parts.push((entity, node, pose));
         }
         let set = ArmourSet::build(
             root,
             &nodes,
-            parts.iter().map(|&(collider, node, pose)| PartSource {
-                collider,
+            parts.iter().map(|&(entity, node, pose)| PartSource {
+                entity,
                 node,
                 pose,
                 shape: &shape,
                 surfaces: None,
-                role: Role::Armour(collider),
+                role: Role::Armour(entity),
             }),
         );
         (entities, set)
@@ -1246,25 +1134,6 @@ mod tests {
         HashMap::from_iter([(root, Poses { from, to })])
     }
 
-    /// The game's damage model: the set's frames are the root and exactly the moving nodes, and
-    /// every part sits in its nearest frame at or above its node, at the pose its rest chain gives
-    /// it, a scaled node no part composes through included. Every reader composes a part's pose
-    /// from them (body, frames, fixed pose); a part put in a farther frame, or a fixed pose missing
-    /// a link, poses it wrongly once that frame moves.
-    #[test]
-    fn parts_sit_in_their_nearest_frame_at_their_rest_pose() {
-        let Synthetic {
-            mut world,
-            root,
-            nodes,
-            set,
-        } = synthetic();
-        set.insert(&mut world.commands(), root);
-        world.flush();
-        let moving = [nodes[TURRET], nodes[PITCH], nodes[BARREL]];
-        assert_matches(&world, root, |_, node| moving.contains(&node));
-    }
-
     /// The game's damage model: a frame's box holds its parts however the frames move, and the
     /// body box holds them all. Field containment and source clearance read only these boxes; a
     /// box built from the rest pose instead of the frame's own, or a carrier's motion left out,
@@ -1291,15 +1160,15 @@ mod tests {
             for (index, frame) in set.frames().iter().enumerate() {
                 let posed = frame.bounds.unwrap().posed(set.in_base(index, &in_carrier));
                 for part in &frame.parts {
-                    let pose = chain(&world, root, part.collider);
-                    for local in corners(local_box(&world, part.collider)) {
+                    let pose = chain(&world, root, part.entity);
+                    for local in corners(local_box(part)) {
                         let at = pose.position + pose.rotation * local;
                         for (what, held) in [("frame", posed), ("body", body)] {
                             assert!(
                                 at.cmpge(held.min - 1.0e-5).all()
                                     && at.cmple(held.max + 1.0e-5).all(),
                                 "{what} box holds part {} at {yaw}, {pitch}, {recoil}",
-                                part.collider
+                                part.entity
                             );
                         }
                     }
@@ -1317,12 +1186,7 @@ mod tests {
     fn a_parts_motion_stays_within_the_sets_bound_and_swept_box() {
         // Resolution: f32 rounding of metre-scale pose compositions, m.
         const ROUNDING: f32 = 1.0e-5;
-        let Synthetic {
-            world,
-            root,
-            mut set,
-            ..
-        } = synthetic();
+        let Synthetic { root, mut set, .. } = synthetic();
         for motion in motions() {
             let bodies = moved(&mut set, root, motion);
             let bound = set.motion_bound(&bodies);
@@ -1342,9 +1206,9 @@ mod tests {
                         composed.still(),
                         (start == end).then_some(end),
                         "part {} is still exactly when its chain is",
-                        part.collider
+                        part.entity
                     );
-                    for local in corners(local_box(&world, part.collider)) {
+                    for local in corners(local_box(part)) {
                         let at = |fraction: f32| {
                             let pose = composed.at(fraction);
                             pose.position + pose.rotation * local
@@ -1355,7 +1219,7 @@ mod tests {
                             assert!(
                                 travel <= bound + ROUNDING,
                                 "part {} at {fraction}: {travel} m past the bound {bound} m",
-                                part.collider
+                                part.entity
                             );
                         }
                         for fraction in [0.0, 1.0] {
@@ -1366,7 +1230,7 @@ mod tests {
                                 at.cmpge(swept.min - ROUNDING).all()
                                     && at.cmple(swept.max + ROUNDING).all(),
                                 "the swept box holds part {} at {fraction}",
-                                part.collider
+                                part.entity
                             );
                         }
                     }
@@ -1385,12 +1249,7 @@ mod tests {
         // at metre scale over that step, m/s (its truncation error is below a micrometre per s).
         const STEP: f32 = 1.0 / 32.0;
         const SPEED_ROUNDING: f32 = 1.0e-2;
-        let Synthetic {
-            world,
-            root,
-            mut set,
-            ..
-        } = synthetic();
+        let Synthetic { root, mut set, .. } = synthetic();
         for motion in motions() {
             let bodies = moved(&mut set, root, motion);
             for (index, frame) in set.frames.iter().enumerate() {
@@ -1403,7 +1262,7 @@ mod tests {
                         },
                         &bodies,
                     );
-                    for local in corners(local_box(&world, part.collider)) {
+                    for local in corners(local_box(part)) {
                         let at = |fraction: f32| {
                             let pose = composed.at(fraction);
                             pose.position + pose.rotation * local
@@ -1416,7 +1275,7 @@ mod tests {
                             assert!(
                                 velocity.distance(difference) < SPEED_ROUNDING,
                                 "part {} at {fraction}: velocity {velocity} against {difference}",
-                                part.collider
+                                part.entity
                             );
                         }
                     }
@@ -1595,21 +1454,20 @@ mod tests {
     }
 
     /// The game's damage model: a set is born with identical endpoints at its live pose; at every
-    /// tick end a part's composed pose is the physics pose its collider holds, the start of the
-    /// tick the pose it held at the last one, the tank box at either end holds every part, and a
+    /// tick end a part's composed pose is the one avian's pose of its base body and the hierarchy's
+    /// local poses below it give, the start of the tick the pose it held at the last one, the tank box at either end holds every part, and a
     /// broad query's boxes (the set's held box, each part's box over a sweep and at a moment) hold
     /// every part at every fraction, before and after a launch rebases its frame, and until it a
     /// 0.1 mm query about a point of a turret, gun or barrel part, its path derived from avian and
     /// the hierarchy, returns that part at the start, middle and end of the tick, at the moment and
-    /// over the sweep, one such point lying outside its frame's end-pose box; while the collider
-    /// history keeps no entry for any part. The walk reads parts only through the set; a birth
-    /// swept from the blueprint rest, a frame left at an old pose or read at the wrong end, a
-    /// carrier's motion dropped, a box not grown by the set's motion, a frame or tank box rejecting
-    /// at the end pose alone, or a part kept in the history fails it. Fixture: the synthetic tank on a kinematic body driving and
-    /// turning, its turret and pitch servos turning and its barrel moving every tick at fixture
-    /// rates, its turret launched as a kinematic body midway.
+    /// over the sweep, one such point lying outside its frame's end-pose box. The walk reads parts
+    /// only through the set; a birth swept from the blueprint rest, a frame left at an old pose or
+    /// read at the wrong end, a carrier's motion dropped, a box not grown by the set's motion, or a
+    /// frame or tank box rejecting at the end pose alone fails it. Fixture: the synthetic tank on a
+    /// kinematic body driving and turning, its turret and pitch servos turning and its barrel
+    /// moving every tick at fixture rates, its turret launched as a kinematic body midway.
     #[test]
-    fn a_parts_composed_pose_meets_its_colliders_physics_pose_at_every_tick_end() {
+    fn a_parts_composed_pose_meets_its_bodys_and_hierarchys_pose_at_every_tick_end() {
         use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
         use bevy::ecs::system::RunSystemOnce;
         let mut app = physics_app();
@@ -1623,30 +1481,30 @@ mod tests {
             ))
             .id();
         let (entities, set) = spawn(app.world_mut(), root);
-        let colliders: Vec<Entity> = set
+        let parts: Vec<Entity> = set
             .frames
             .iter()
-            .flat_map(|frame| frame.parts.iter().map(|part| part.collider))
+            .flat_map(|frame| frame.parts.iter().map(|part| part.entity))
             .collect();
         // The parts the servos and the recoil move against the hull.
         let articulated: Vec<Entity> = set.frames[1..]
             .iter()
-            .flat_map(|frame| frame.parts.iter().map(|part| part.collider))
+            .flat_map(|frame| frame.parts.iter().map(|part| part.entity))
             .collect();
-        let tracked: Vec<Entity> = entities.iter().chain(&colliders).copied().collect();
+        let tracked: Vec<Entity> = entities.iter().chain(&parts).copied().collect();
         let mut outside = false;
-        set.insert(&mut app.world_mut().commands(), root);
-        app.world_mut().flush();
         // Every fixture part has one shape; its corners are taken 0.1 % inside its box, clear of
         // f32 rounding in the box test (Resolution).
         let inner = {
-            let held = local_box(app.world(), colliders[0]);
+            let held = local_box(&set.frames[0].parts[0]);
             let (centre, half) = ((held.min + held.max) * 0.5, (held.max - held.min) * 0.4995);
             corners(Bounds {
                 min: centre - half,
                 max: centre + half,
             })
         };
+        set.insert(&mut app.world_mut().commands(), root);
+        app.world_mut().flush();
         let (turret, pitch, barrel) = (entities[TURRET], entities[PITCH], entities[BARREL]);
         app.add_systems(
             FixedUpdate,
@@ -1662,18 +1520,26 @@ mod tests {
                 locals.get_mut(barrel).unwrap().translation.z = 0.5 - 0.2 * (0.7 * t).sin().abs();
             },
         );
+        // Each part's pose from avian's pose of its base body and the local poses below it.
         let physics = |world: &World| -> Vec<Pose> {
-            colliders
+            parts
                 .iter()
-                .map(|&collider| Pose {
-                    position: world.get::<Position>(collider).unwrap().0,
-                    rotation: world.get::<Rotation>(collider).unwrap().0,
+                .map(|&part| {
+                    let (mut pose, mut entity) = (Pose::IDENTITY, part);
+                    while world.get::<RigidBody>(entity).is_none() {
+                        pose = link(*world.get::<Transform>(entity).unwrap(), &entity) * pose;
+                        entity = world.get::<ChildOf>(entity).unwrap().parent();
+                    }
+                    Pose {
+                        position: world.get::<Position>(entity).unwrap().0,
+                        rotation: world.get::<Rotation>(entity).unwrap().0,
+                    } * pose
                 })
                 .collect()
         };
         // Each part's composed pose at `fraction`, and whether its tank's box then holds it.
         let composed = |app: &mut App, fraction: f32| -> Vec<(Pose, bool)> {
-            let parts = colliders.clone();
+            let parts = parts.clone();
             app.world_mut()
                 .run_system_once(move |world: super::super::ProjectileMarchWorld| {
                     world.moment.set(Some(fraction));
@@ -1693,11 +1559,14 @@ mod tests {
                 })
                 .unwrap()
         };
+        // Resolution: f32 rounding of metre-scale compositions, m and quaternion components (an
+        // angle between near-equal f32 quaternions rounds to 0 or 7e-4 rad).
         let near = |a: &[(Pose, bool)], b: &[Pose], what: &str| {
             for (index, ((a, _), b)) in a.iter().zip(b).enumerate() {
                 assert!(
                     a.position.distance(b.position) < 1.0e-4
-                        && a.rotation.angle_between(b.rotation) < 1.0e-4,
+                        && (a.rotation.abs_diff_eq(b.rotation, 1.0e-5)
+                            || a.rotation.abs_diff_eq(-b.rotation, 1.0e-5)),
                     "{what}, part {index}: {a:?} against {b:?}"
                 );
             }
@@ -1755,7 +1624,7 @@ mod tests {
             near(&end, &now, &format!("tick {tick} end"));
             for fraction in [0.0, 0.5, 1.0] {
                 assert!(
-                    boxed(&mut app, root, &colliders, &inner, fraction),
+                    boxed(&mut app, root, &parts, &inner, fraction),
                     "tick {tick}: the set's boxes hold every part at fraction {fraction}"
                 );
             }
@@ -1795,15 +1664,6 @@ mod tests {
                 }
             }
             last = now;
-            let history = app
-                .world()
-                .resource::<super::super::motion::ColliderMotion>();
-            assert!(
-                colliders
-                    .iter()
-                    .all(|collider| !history.colliders.contains_key(collider)),
-                "the collider history keeps no armour part"
-            );
         }
         assert!(
             outside,

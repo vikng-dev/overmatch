@@ -55,9 +55,10 @@ pub(crate) fn aim_distance(
     own: Entity,
 ) -> f32 {
     let reach = max.min(crate::world::VIEW_CAST_MAX_M);
-    // A tank's armour parts answer from their set; the tree's entries for them are never read.
+    // Terrain and armour outside every tank (a construction) are colliders; a tank's armour parts
+    // are not, and answer from their set.
     let scenery = spatial
-        .cast_ray_predicate(
+        .cast_ray(
             ray.origin,
             ray.direction,
             reach,
@@ -65,7 +66,6 @@ pub(crate) fn aim_distance(
             &SpatialQueryFilter::from_mask(
                 LayerMask::from(Layer::Terrain) | LayerMask::from(Layer::Armor),
             ),
-            &|entity| !armour.holds(entity),
         )
         .map(|hit| hit.distance);
     let tank = armour

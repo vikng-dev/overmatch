@@ -2736,8 +2736,7 @@ fn heightfield_drive_bed() {
 #[test]
 fn shipped_terrain_does_not_hide_armour_from_a_round() {
     use crate::ballistics::{FireShell, FireShellOrigin, Impact, ShotSource};
-    use crate::damage::VolumeOf;
-    use avian3d::prelude::{Collider, Position, Rotation, SimpleCollider};
+    use avian3d::prelude::Position;
 
     #[derive(Resource, Default)]
     struct ArmorImpacts(usize);
@@ -2772,26 +2771,11 @@ fn shipped_terrain_does_not_hide_armour_from_a_round() {
     let (shooter, shooter_pos) = tanks[0];
     let (target, _) = tanks[1];
 
-    // Aim at the target's OWN armour, read off its bound colliders rather than guessed from the
-    // hull origin: a hand-picked offset drifts the moment the rig or the spawn pose changes, and a
-    // shot that sails over the turret roof would pass this test for the wrong reason.
-    let mut lo = Vec3::splat(f32::INFINITY);
-    let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    let world = app.world_mut();
-    for (owner, pos, rot, collider) in world
-        .query::<(&VolumeOf, &Position, &Rotation, &Collider)>()
-        .iter(world)
-    {
-        if owner.tank() == target {
-            let aabb = collider.aabb(pos.0, rot.0);
-            lo = lo.min(aabb.min);
-            hi = hi.max(aabb.max);
-        }
-    }
-    assert!(
-        lo.x.is_finite(),
-        "the target tank bound no armour colliders"
-    );
+    // Aim at the target's OWN armour, read off its armour set posed live rather than guessed from
+    // the hull origin: a hand-picked offset drifts the moment the rig or the spawn pose changes,
+    // and a shot that sails over the turret roof would pass this test for the wrong reason.
+    let (lo, hi) = crate::ballistics::armour_set::live_box(app.world(), target)
+        .expect("the target tank carries its armour set");
     let aim = (lo + hi) * 0.5;
 
     // Above the shooter's own hull, so the round leaves its own geometry the way a bore round does.
