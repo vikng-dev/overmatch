@@ -44,7 +44,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use avian3d::prelude::{Collider, ColliderAabb, Position, RigidBody, Rotation};
+use avian3d::prelude::{ColliderAabb, RigidBody};
 use bevy::prelude::*;
 
 use super::resolve::{self, Decision, Flight, ResolveContext};
@@ -1121,12 +1121,6 @@ fn run_fuzz(
     // `'static` spelled out because `ResolveContext` (the march's own borrow group) names the
     // query that way: `Query`'s data parameter is invariant, so an elided lifetime here will not
     // coerce into it.
-    colliders: Query<(
-        &'static Position,
-        &'static Rotation,
-        &'static Collider,
-        Option<&'static super::BallisticSurfaces>,
-    )>,
     aabbs: Query<&ColliderAabb>,
     facets: Query<(Entity, &Name, Option<&CrewStation>, Has<Ammo>)>,
     names: Query<(Entity, &Name)>,
@@ -1142,7 +1136,6 @@ fn run_fuzz(
 
     let pass_context = ResolveContext {
         world: &world,
-        colliders: &colliders,
         laws: walk::WalkLaws::default(),
     };
     let Some((center, radius, local_min, local_max)) = tank_bounds(&world, &aabbs, to_local) else {
@@ -1516,12 +1509,6 @@ fn run_replay(
     tank: Res<ProbeTank>,
     spares: Res<Spares>,
     world: ProjectileMarchWorld,
-    colliders: Query<(
-        &'static Position,
-        &'static Rotation,
-        &'static Collider,
-        Option<&'static super::BallisticSurfaces>,
-    )>,
     aabbs: Query<&ColliderAabb>,
     names: Query<(Entity, &Name)>,
     roots: Query<&GlobalTransform>,
@@ -1534,7 +1521,6 @@ fn run_replay(
     let to_local = root.affine().inverse();
     let context = ResolveContext {
         world: &world,
-        colliders: &colliders,
         laws: walk::WalkLaws::default(),
     };
     let Some((center, radius, local_min, local_max)) = tank_bounds(&world, &aabbs, to_local) else {

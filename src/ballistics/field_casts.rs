@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use avian3d::prelude::{Collider, ColliderAabb, Position, Rotation};
+use avian3d::prelude::{ColliderAabb, Position, Rotation};
 use bevy::ecs::system::RunSystemOnce;
 use bevy::time::TimeUpdateStrategy;
 
@@ -246,17 +246,9 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) {
 fn cast_rays(app: &mut App, tank: Entity, rays: Vec<WorldRay>) -> bool {
     app.world_mut()
         .run_system_once(
-            move |world: ProjectileMarchWorld,
-                  colliders: Query<(
-                &'static Position,
-                &'static Rotation,
-                &'static Collider,
-                Option<&'static BallisticSurfaces>,
-            )>,
-                  health: Query<&ComponentHealth>| {
+            move |world: ProjectileMarchWorld, health: Query<&ComponentHealth>| {
                 let context = resolve::ResolveContext {
                     world: &world,
-                    colliders: &colliders,
                     laws: walk::WalkLaws::default(),
                 };
                 let within = |collider: Entity| {
@@ -396,17 +388,9 @@ fn the_shipped_cone_sampler_priced_per_cone() {
         let priced = app
             .world_mut()
             .run_system_once(
-                move |world: ProjectileMarchWorld,
-                      colliders: Query<(
-                    &'static Position,
-                    &'static Rotation,
-                    &'static Collider,
-                    Option<&'static BallisticSurfaces>,
-                )>,
-                      health: Query<&ComponentHealth>| {
+                move |world: ProjectileMarchWorld, health: Query<&ComponentHealth>| {
                     let context = resolve::ResolveContext {
                         world: &world,
-                        colliders: &colliders,
                         laws: walk::WalkLaws::default(),
                     };
                     let within = |collider: Entity| {

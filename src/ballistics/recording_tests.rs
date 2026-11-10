@@ -369,6 +369,70 @@ fn overlapping_shots_each_record_only_their_own_loss() {
     }
 }
 
+/// The game's damage model: a round resolves a tank from its armour set alone. Its discovery,
+/// crossings, fields and crew lines read no armour or crew-box collider's tree entry, pose or
+/// broad-phase bounds, which the lane deleting those colliders relies on: with every part out of
+/// avian's tree and its `Position`, `Rotation` and `ColliderAabb` moved a kilometre off before each
+/// march, a round through a plate into two crew boxes doses each HP pool exactly as it does against
+/// intact colliders. A reader still taking a part from the tree misses it; one still reading its
+/// pose or bounds places it elsewhere. Fixture: a turned tank driving across the line of fire.
+#[test]
+fn a_round_resolves_a_tank_from_its_armour_set_alone() {
+    use avian3d::prelude::{ColliderAabb, ColliderDisabled, Position, Rotation};
+    fn scramble(
+        mut parts: Query<
+            (&mut Position, &mut Rotation, &mut ColliderAabb),
+            With<crate::ballistics::armour_set::ArmourPart>,
+        >,
+    ) {
+        for (mut position, mut rotation, mut bounds) in &mut parts {
+            position.0 += Vec3::splat(1000.0);
+            rotation.0 = Quat::from_rotation_x(1.0) * rotation.0;
+            *bounds = ColliderAabb::from_min_max(Vec3::splat(1000.0), Vec3::splat(1001.0));
+        }
+    }
+    let held = |detached: bool| {
+        let mut app = recording_world(false);
+        let (_, volumes) = tank(
+            &mut app,
+            Vec3::ZERO,
+            0.3,
+            Vec3::new(1.0, 0.0, 0.0),
+            &plated(DEEP, Kind::Crew(DEEP)),
+        );
+        scoring_witnesses(&mut app, &volumes);
+        settle(&mut app);
+        if detached {
+            for &volume in &volumes {
+                app.world_mut().entity_mut(volume).insert(ColliderDisabled);
+            }
+            app.add_systems(
+                FixedPostUpdate,
+                scramble
+                    .after(SimPhase::ColliderPoses)
+                    .before(SimPhase::ProjectileMarch),
+            );
+        }
+        fire(&mut app, Vec3::new(0.0, 0.0, 30.0), FireMechanism::Single);
+        run(&mut app, 8);
+        // The plate has no HP pool; the two crew boxes follow it.
+        volumes[1..]
+            .iter()
+            .map(|&volume| hp(&app, volume))
+            .collect::<Vec<_>>()
+    };
+    let intact = held(false);
+    assert!(
+        intact.iter().all(|&held| held < DEEP_UNITS),
+        "the round doses both crew boxes: {intact:?}"
+    );
+    assert_eq!(
+        held(true),
+        intact,
+        "each HP pool holds the same with the parts' colliders detached"
+    );
+}
+
 /// A round through two tanks writes one record per tank, each with that tank's own components and
 /// losses.
 #[test]
@@ -2331,57 +2395,48 @@ fn a_zero_world_speed_waits_or_meets_a_moving_body_on_its_clock() {
         app.world_mut().flush();
         let playing = app
             .world_mut()
-            .run_system_once(
-                move |world: ProjectileMarchWorld,
-                      colliders: Query<(
-                    &'static Position,
-                    &'static Rotation,
-                    &'static Collider,
-                    Option<&'static BallisticSurfaces>,
-                )>| {
-                    let context = resolve::ResolveContext {
-                        world: &world,
-                        colliders: &colliders,
-                        laws: walk::WalkLaws::default(),
-                    };
-                    let frame = walk::DiscFrame::anchored(Vec3::Z).unwrap();
-                    let interior = resolve::Interior::laid(
-                        from,
-                        resolve::layout(&frame, resolve::disc_radius(FIXTURE_88.caliber)),
-                    );
-                    let flight = resolve::Flight {
-                        position: from,
-                        direction: Dir3::Z,
-                        speed: SPEED,
-                        frame,
-                        continuation: Some(interior.clone()),
-                        membership: resolve::Membership::Established,
-                    };
-                    // Fixture: the completed relative path's carrier exactly cancels its world velocity.
-                    let mut playing = resolve::Playback::new(
-                        resolve::Decision::Clear {
-                            resume: from,
-                            travel: 0.0,
-                            continuation: interior,
-                            leg: resolve::Leg::new(from, Dir3::Z, 0.0, &[Vec3::ZERO]),
-                        },
-                        &flight,
-                        bound(FIXTURE_88),
-                        FlyingBody {
-                            mass: FIXTURE_88.mass,
-                            caliber: FIXTURE_88.caliber,
-                            drag_k: 0.0,
-                        },
-                        &context,
-                        &|_| true,
-                        0.0,
-                        &|_| false,
-                    );
-                    playing.in_moving_frame(Vec3::NEG_Z * SPEED);
-                    assert_eq!(playing.flight().speed, 0.0, "the fixture leaves world rest");
-                    playing
-                },
-            )
+            .run_system_once(move |world: ProjectileMarchWorld| {
+                let context = resolve::ResolveContext {
+                    world: &world,
+                    laws: walk::WalkLaws::default(),
+                };
+                let frame = walk::DiscFrame::anchored(Vec3::Z).unwrap();
+                let interior = resolve::Interior::laid(
+                    from,
+                    resolve::layout(&frame, resolve::disc_radius(FIXTURE_88.caliber)),
+                );
+                let flight = resolve::Flight {
+                    position: from,
+                    direction: Dir3::Z,
+                    speed: SPEED,
+                    frame,
+                    continuation: Some(interior.clone()),
+                    membership: resolve::Membership::Established,
+                };
+                // Fixture: the completed relative path's carrier exactly cancels its world velocity.
+                let mut playing = resolve::Playback::new(
+                    resolve::Decision::Clear {
+                        resume: from,
+                        travel: 0.0,
+                        continuation: interior,
+                        leg: resolve::Leg::new(from, Dir3::Z, 0.0, &[Vec3::ZERO]),
+                    },
+                    &flight,
+                    bound(FIXTURE_88),
+                    FlyingBody {
+                        mass: FIXTURE_88.mass,
+                        caliber: FIXTURE_88.caliber,
+                        drag_k: 0.0,
+                    },
+                    &context,
+                    &|_| true,
+                    0.0,
+                    &|_| false,
+                );
+                playing.in_moving_frame(Vec3::NEG_Z * SPEED);
+                assert_eq!(playing.flight().speed, 0.0, "the fixture leaves world rest");
+                playing
+            })
             .unwrap();
         let mut shells = app.world_mut().query::<&mut Projectile>();
         shells

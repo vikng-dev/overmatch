@@ -18,7 +18,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use avian3d::prelude::{Rotation, SimpleCollider};
+use avian3d::prelude::SimpleCollider;
 use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
@@ -39,17 +39,20 @@ fn candidates(
 ) -> Vec<(Entity, Entity)> {
     let world = context.world;
     let mut out = Vec::new();
-    world.spatial.aabb_intersections_with_aabb_callback(
-        collect::swept_aabb(from, axis, length, radius + world.motion_padding()),
-        |entity| {
+    world.near(
+        collect::Probe::Segment {
+            origin: from,
+            axis,
+            length,
+            radius,
+        },
+        &mut |entity, _| {
             if world.witness_surfaces.contains(entity)
                 && admit(entity)
                 && let Some((node, _)) = hit_ancestor(entity, &world.witnesses, &world.parents)
             {
                 out.push((node, entity));
             }
-            // Every tree is walked whatever this returns; `true` walks this one whole.
-            true
         },
     );
     out.sort();
@@ -114,17 +117,8 @@ fn presence(
     let mut kept = Vec::new();
     let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
     for &(node, primitive) in run {
-        let Ok((position, rotation, collider, _)) = context.colliders.get(primitive) else {
-            return Err(WalkError::CollectorFailed {
-                volume: node,
-                reason: "a witness collider has no resolved pose",
-            });
-        };
-        let pose = context.world.pose(primitive);
-        let bounds = collider.aabb(
-            pose.map_or(position.0, |pose| pose.position),
-            pose.map_or(*rotation, |pose| Rotation(pose.rotation)),
-        );
+        let (pose, collider, _) = context.world.geometry(primitive);
+        let bounds = collider.aabb(pose.position, pose.rotation);
         let (min, max) = (bounds.min - at - margin, bounds.max - at + margin);
         if line_in_box(axis, min, max).is_none_or(|(enter, leave)| leave < 0.0 || enter > length) {
             continue;
@@ -157,9 +151,8 @@ fn presence(
             laws: &context.laws,
         },
         &kept,
-        context.colliders,
+        context.world,
         &mut hits,
-        &|entity| context.world.pose(entity),
     )?;
     context.world.count(Work::MarchTriTests, tested);
     let (behind, length) = (behind as f64, length as f64);

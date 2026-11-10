@@ -139,25 +139,21 @@ pub(crate) struct Corridor<'a> {
 pub(super) fn collect(
     corridor: &Corridor<'_>,
     candidates: &[(Entity, Entity)],
-    colliders: &Query<(&Position, &Rotation, &Collider, Option<&BallisticSurfaces>)>,
+    world: &super::ProjectileMarchWorld,
     out: &mut Vec<FaceHit>,
-    pose: &dyn Fn(Entity) -> Option<super::motion::Pose>,
 ) -> Result<usize, WalkError> {
     let mut tested = 0;
     for &(node, primitive) in candidates {
-        let Ok((position, rotation, collider, surfaces)) = colliders.get(primitive) else {
-            // A candidate the broad phase named but whose pose is not available cannot be probed,
-            // and guessing that it is empty is exactly the silent-zero this module refuses.
-            return Err(WalkError::CollectorFailed {
-                volume: node,
-                reason: "a candidate collider has no resolved pose",
-            });
-        };
-        let sampled = pose(primitive);
-        let position = sampled.map_or(*position, |pose| Position(pose.position));
-        let rotation = sampled.map_or(*rotation, |pose| Rotation(pose.rotation));
+        let (pose, collider, surfaces) = world.geometry(primitive);
         tested += collect_collider(
-            corridor, node, primitive, collider, surfaces, position, rotation, out,
+            corridor,
+            node,
+            primitive,
+            collider,
+            surfaces,
+            Position(pose.position),
+            Rotation(pose.rotation),
+            out,
         )?;
     }
     Ok(tested)
@@ -1408,6 +1404,68 @@ fn contact_of(
     }
 }
 
+/// The game's damage model: what a broad query asks for, every collider whose bounds may meet a
+/// segment grown by a radius, or a box.
+#[derive(Clone, Copy)]
+pub(super) enum Probe {
+    /// The points within `radius` of `origin + axis · t` for `t ∈ [0, length]`.
+    Segment {
+        origin: Vec3,
+        axis: Vec3,
+        length: f32,
+        radius: f32,
+    },
+    Region(ColliderAabb),
+}
+
+impl Probe {
+    /// A box holding the probe grown by `pad`: what a collider tree query tests.
+    pub(super) fn aabb(self, pad: f32) -> ColliderAabb {
+        match self {
+            Self::Segment {
+                origin,
+                axis,
+                length,
+                radius,
+            } => swept_aabb(origin, axis, length, radius + pad),
+            Self::Region(region) => ColliderAabb::from_min_max(
+                region.min - Vec3::splat(pad),
+                region.max + Vec3::splat(pad),
+            ),
+        }
+    }
+
+    /// Whether the probe meets the box `[min, max]`, faces included: the segment's slab interval
+    /// against the box grown by the radius (a cube holds the radius's ball), or the region's
+    /// overlap.
+    pub(super) fn meets(self, min: Vec3, max: Vec3) -> bool {
+        match self {
+            Self::Segment {
+                origin,
+                axis,
+                length,
+                radius,
+            } => {
+                let (lo, hi) = (min - radius - origin, max + radius - origin);
+                let (mut enter, mut leave) = (0.0f32, length);
+                for i in 0..3 {
+                    if axis[i] == 0.0 {
+                        if lo[i] > 0.0 || hi[i] < 0.0 {
+                            return false;
+                        }
+                    } else {
+                        let (a, b) = (lo[i] / axis[i], hi[i] / axis[i]);
+                        enter = enter.max(a.min(b));
+                        leave = leave.min(a.max(b));
+                    }
+                }
+                enter <= leave
+            }
+            Self::Region(region) => region.min.cmple(max).all() && region.max.cmpge(min).all(),
+        }
+    }
+}
+
 /// The corridor's swept bounding box, for the broad phase.
 pub(crate) fn swept_aabb(origin: Vec3, axis: Vec3, length: f32, radius: f32) -> ColliderAabb {
     let far = origin + axis * length;
@@ -1420,6 +1478,68 @@ mod tests {
     use bevy::math::DVec3;
 
     use super::*;
+
+    /// The game's damage model: a broad query's segment meets a box exactly when it comes within
+    /// its radius of it, over its own length only; a region meets a box it overlaps, faces
+    /// included. Every candidate reader relies on the first half (a box wrongly rejected hides its
+    /// armour part from discovery, corridors and crew lines); the march's cost on the second. A
+    /// segment read as a line, its length or radius dropped, or a region test inverted fails it.
+    /// Fixture box and segments.
+    #[test]
+    fn a_probe_meets_exactly_the_boxes_within_its_reach() {
+        let (min, max) = (Vec3::splat(-1.0), Vec3::splat(1.0));
+        let segment = |origin: Vec3, axis: Vec3, length: f32, radius: f32| Probe::Segment {
+            origin,
+            axis,
+            length,
+            radius,
+        };
+        let down = Vec3::NEG_Z;
+        let met = [
+            ("through", segment(Vec3::Z * 5.0, down, 10.0, 0.0)),
+            ("ending inside", segment(Vec3::Z * 5.0, down, 4.5, 0.0)),
+            ("starting inside", segment(Vec3::ZERO, Vec3::X, 3.0, 0.0)),
+            ("a point inside", segment(Vec3::ZERO, Vec3::X, 0.0, 0.0)),
+            (
+                "passing within its radius",
+                segment(Vec3::new(1.05, 0.0, 5.0), down, 10.0, 0.1),
+            ),
+            (
+                "a region on a face",
+                Probe::Region(ColliderAabb::from_min_max(Vec3::X, Vec3::splat(2.0))),
+            ),
+        ];
+        let missed = [
+            ("short of it", segment(Vec3::Z * 5.0, down, 3.5, 0.0)),
+            ("past it", segment(Vec3::Z * -2.0, down, 10.0, 0.0)),
+            (
+                "beside it beyond its radius",
+                segment(Vec3::new(1.2, 0.0, 5.0), down, 10.0, 0.1),
+            ),
+            (
+                "across a corner its swept box holds",
+                segment(
+                    Vec3::X * 3.0,
+                    Vec3::new(-1.0, 0.0, 1.0).normalize(),
+                    10.0,
+                    0.0,
+                ),
+            ),
+            (
+                "a region beside it",
+                Probe::Region(ColliderAabb::from_min_max(
+                    Vec3::splat(1.5),
+                    Vec3::splat(2.0),
+                )),
+            ),
+        ];
+        for (what, probe) in met {
+            assert!(probe.meets(min, max), "{what} meets the box");
+        }
+        for (what, probe) in missed {
+            assert!(!probe.meets(min, max), "{what} misses the box");
+        }
+    }
 
     fn tri(o: Vec3, d: Vec3) -> Option<TriangleClaim> {
         // A unit triangle in the z = 1 plane, wound so its normal points +Z.

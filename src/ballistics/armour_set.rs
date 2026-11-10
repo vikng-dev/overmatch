@@ -14,7 +14,7 @@
 //! × fixed pose, each link lerped and slerped on its own ([`Composed`]); the collider history keeps
 //! no part ([`super::motion`]).
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use avian3d::prelude::{Collider, RigidBody, SimpleCollider};
 use bevy::platform::collections::HashMap;
@@ -34,6 +34,14 @@ impl Bounds {
         Self {
             min: self.min.min(other.min),
             max: self.max.max(other.max),
+        }
+    }
+
+    /// The box grown by `by` on every side.
+    pub(super) fn grown(self, by: f32) -> Self {
+        Self {
+            min: self.min - Vec3::splat(by),
+            max: self.max + Vec3::splat(by),
         }
     }
 
@@ -59,6 +67,8 @@ pub(super) struct Part {
     pub collider: Entity,
     /// Its pose in its frame, fixed.
     pub pose: Pose,
+    /// The box of its shape in its frame's coordinates.
+    pub bounds: Bounds,
 }
 
 /// The game's damage model: one rigid frame of a tank and the parts it carries.
@@ -85,6 +95,19 @@ pub(super) struct Frame {
 #[derive(Component, Debug)]
 pub(crate) struct ArmourSet {
     frames: Vec<Frame>,
+    /// Where its parts can be over the last tick ([`snapshot`]); `None` for a set no tick boundary
+    /// has closed yet, which is not in the scene the march reads, or one with no part.
+    reach: Option<Reach>,
+}
+
+/// The game's damage model: where a set's parts can be over the last tick. `held` is a world box
+/// holding every part point at every fraction of it: their box at the tick's end grown by
+/// `motion`, the DERIVED bound on any part point's displacement over the tick
+/// ([`ArmourSet::motion_bound`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Reach {
+    pub held: Bounds,
+    pub motion: f32,
 }
 
 /// Marks a frame node other than the root with the tank whose set holds its frame ([`rebase`]).
@@ -286,9 +309,13 @@ impl ArmourSet {
             frame.parts.push(Part {
                 collider: part.collider,
                 pose,
+                bounds: posed,
             });
         }
-        Self { frames }
+        Self {
+            frames,
+            reach: None,
+        }
     }
 
     /// Insert the set on `root` and mark its frame nodes and part colliders, in one command batch.
@@ -315,8 +342,17 @@ impl ArmourSet {
     }
 
     /// The root, the body the set's own frames are based on.
-    fn root(&self) -> Entity {
+    pub(super) fn root(&self) -> Entity {
         self.frames[0].node
+    }
+
+    pub(super) fn reach(&self) -> Option<Reach> {
+        self.reach
+    }
+
+    /// The frame index and part `part`, whose set this is, names.
+    pub(super) fn located(&self, part: &ArmourPart) -> (usize, &Part) {
+        (part.frame, &self.frames[part.frame].parts[part.part])
     }
 
     /// Frame `frame`'s pose in its carrier at `fraction` of the tick.
@@ -422,6 +458,33 @@ impl ArmourSet {
         super::motion::outward(largest)
     }
 
+    /// Frame `frame`'s world pose, its base body's given by `body` and each frame's pose in its
+    /// carrier by `in_carrier`.
+    pub(super) fn in_world(
+        &self,
+        frame: usize,
+        body: &impl Fn(Entity) -> Pose,
+        in_carrier: &impl Fn(usize) -> Pose,
+    ) -> Pose {
+        body(self.frames[frame].base) * self.in_base(frame, in_carrier)
+    }
+
+    /// The world box of every part, posed as [`Self::in_world`] poses its frame; `None` for a set
+    /// with no part.
+    pub(super) fn world_box(
+        &self,
+        body: &impl Fn(Entity) -> Pose,
+        in_carrier: &impl Fn(usize) -> Pose,
+    ) -> Option<Bounds> {
+        self.frames
+            .iter()
+            .enumerate()
+            .filter_map(|(index, frame)| {
+                Some(frame.bounds?.posed(self.in_world(index, body, in_carrier)))
+            })
+            .reduce(Bounds::union)
+    }
+
     /// Frame `frame`'s pose in its base's frame, each frame's pose in its carrier given by
     /// `in_carrier`.
     pub(super) fn in_base(&self, frame: usize, in_carrier: &impl Fn(usize) -> Pose) -> Pose {
@@ -488,25 +551,37 @@ pub(crate) fn rebase(
         .rebase(added.entity);
 }
 
-/// The game's damage model: advance every tank's frame poses for the tick just stepped, and widen
-/// the tree-query padding [`super::motion::snapshot`] set by the sets' motion. Each tank's set is
-/// its own: they advance in parallel and meet only at the padding's maximum.
+/// The game's damage model: advance every tank's frame poses for the tick just stepped, and record
+/// where its parts can be over it ([`Reach`]). Each tank's set is its own: they advance in
+/// parallel, sharing only the count of frames written.
 pub(super) fn snapshot(
     mut sets: Query<&mut ArmourSet>,
     nodes: Query<Ref<Transform>>,
-    mut history: ResMut<ColliderMotion>,
+    history: Res<ColliderMotion>,
     stages: Option<Res<crate::cost::stages::Stages>>,
 ) {
-    // Non-negative f32 bounds order as their bit patterns.
-    let largest = AtomicU32::new(history.largest_motion.to_bits());
     let writes = AtomicU64::new(0);
     let bodies = &history.bodies;
     sets.par_iter_mut().for_each(|mut set| {
         let born = set.is_added();
         writes.fetch_add(set.advance(&nodes, born), Ordering::Relaxed);
-        largest.fetch_max(set.motion_bound(bodies).to_bits(), Ordering::Relaxed);
+        let motion = set.motion_bound(bodies);
+        let end = set.world_box(
+            &|base| {
+                bodies
+                    .get(&base)
+                    .expect(
+                        "game's damage model: an armour frame's base body has captured endpoints",
+                    )
+                    .to
+            },
+            &|frame| set.frames[frame].poses.to,
+        );
+        set.reach = end.map(|end| Reach {
+            held: end.grown(motion),
+            motion,
+        });
     });
-    history.largest_motion = f32::from_bits(largest.into_inner());
     if let Some(stages) = stages {
         stages.add(
             crate::cost::stages::Work::FramePoseWrites,
@@ -1005,9 +1080,9 @@ mod tests {
 
     /// The game's damage model: over a tick a part point moves at most the set's motion bound and
     /// lies in the swept box at both ends, and its part is still exactly when no link of its chain
-    /// moves. The tree query pads by the bound, source clearance reads the swept box, and
-    /// discovery casts a still part as a static ray; a link left out of any of them misses a
-    /// moving part. Fixture motions: each link alone, then every link at once.
+    /// moves. A broad query grows the set's boxes by the bound, source clearance reads the swept
+    /// box, and discovery casts a still part as a static ray; a link left out of any of them misses
+    /// a moving part. Fixture motions: each link alone, then every link at once.
     #[test]
     fn a_parts_motion_stays_within_the_sets_bound_and_swept_box() {
         // Resolution: f32 rounding of metre-scale pose compositions, m.
@@ -1150,13 +1225,63 @@ mod tests {
         app
     }
 
+    /// Whether `root`'s held box, and each of its `parts`' boxes from a broad query over a sweep
+    /// and at the moment `fraction`, hold the part's `inner` points at `fraction`.
+    fn boxed(app: &mut App, root: Entity, parts: &[Entity], inner: &[Vec3], fraction: f32) -> bool {
+        use bevy::ecs::system::RunSystemOnce;
+        let (parts, inner) = (parts.to_vec(), inner.to_vec());
+        app.world_mut()
+            .run_system_once(move |world: super::super::ProjectileMarchWorld| {
+                let everywhere = super::super::collect::Probe::Region(
+                    avian3d::prelude::ColliderAabb::from_min_max(
+                        Vec3::splat(-1.0e4),
+                        Vec3::splat(1.0e4),
+                    ),
+                );
+                let holds = |min: Vec3, max: Vec3, pose: Pose| {
+                    inner.iter().all(|&local| {
+                        let at = pose.position + pose.rotation * local;
+                        at.cmpge(min).all() && at.cmple(max).all()
+                    })
+                };
+                world.moment.set(Some(fraction));
+                let poses: Vec<Pose> = parts
+                    .iter()
+                    .map(|&part| world.pose(part).unwrap())
+                    .collect();
+                let held = world.sets.get(root).unwrap().reach().unwrap().held;
+                let mut ok = poses.iter().all(|&pose| holds(held.min, held.max, pose));
+                let sweep = super::super::motion::Sweep {
+                    from: 0.0,
+                    to: 1.0,
+                    dt: 1.0,
+                };
+                for clock in [Some(sweep), None] {
+                    world.sweep.set(clock);
+                    let mut found = Vec::new();
+                    world.near(everywhere, &mut |entity, bounds| {
+                        found.push((entity, bounds))
+                    });
+                    ok &= parts.iter().zip(&poses).all(|(part, &pose)| {
+                        found.iter().any(|(entity, bounds)| {
+                            entity == part && holds(bounds.min, bounds.max, pose)
+                        })
+                    });
+                }
+                ok
+            })
+            .unwrap()
+    }
+
     /// The game's damage model: a set is born with identical endpoints at its live pose; at every
     /// tick end a part's composed pose is the physics pose its collider holds, the start of the
-    /// tick the pose it held at the last one, and the tank box at either end holds every part,
-    /// before and after a launch rebases its frame, while the collider history keeps no entry for
-    /// any part. The walk reads parts only through the set; a birth swept from the blueprint rest,
-    /// a frame left at an old pose or read at the wrong end, a carrier's motion dropped, or a part
-    /// kept in the history fails it. Fixture: the synthetic tank on a kinematic body driving and
+    /// tick the pose it held at the last one, the tank box at either end holds every part, and a
+    /// broad query's boxes (the set's held box, each part's box over a sweep and at a moment) hold
+    /// every part at every fraction, before and after a launch rebases its frame, while the
+    /// collider history keeps no entry for any part. The walk reads parts only through the set; a
+    /// birth swept from the blueprint rest, a frame left at an old pose or read at the wrong end, a
+    /// carrier's motion dropped, a box not grown by the set's motion, or a part kept in the history
+    /// fails it. Fixture: the synthetic tank on a kinematic body driving and
     /// turning, its turret and pitch servos turning and its barrel moving every tick at fixture
     /// rates, its turret launched as a kinematic body midway.
     #[test]
@@ -1296,6 +1421,12 @@ mod tests {
             let now = physics(app.world());
             let (start, end) = (composed(&mut app, 0.0), composed(&mut app, 1.0));
             near(&end, &now, &format!("tick {tick} end"));
+            for fraction in [0.0, 0.5, 1.0] {
+                assert!(
+                    boxed(&mut app, root, &colliders, &inner, fraction),
+                    "tick {tick}: the set's boxes hold every part at fraction {fraction}"
+                );
+            }
             if tick != 12 {
                 // The launch tick's turret parts start on a body born that tick.
                 near(&start, &last, &format!("tick {tick} start"));

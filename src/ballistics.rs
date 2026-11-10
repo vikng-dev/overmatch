@@ -754,7 +754,8 @@ enum SegmentHit {
 /// First contact tests armour as a caliber-wide disc (§13.5): a rim clipping a plate must resolve
 /// even when the axis threads a gap, or η never grades grazes. Terrain stays axis-only through
 /// deterministic [`HeightGrid::cast_ray`]: continuous ground stops the round, with no η or union.
-/// One broad-phase AABB traversal is the entire armour cost in open air, cheaper than a ray cast.
+/// One broad-phase traversal and one box test per tank ([`ProjectileMarchWorld::near`]) is the
+/// entire armour cost in open air, cheaper than a ray cast.
 /// Ring casts run only near geometry at or above `resolve::DISC_MIN_CALIBER`.
 fn cast_disc_segment(
     world: &ProjectileMarchWorld,
@@ -778,114 +779,114 @@ fn cast_disc_segment(
             dt: 1.0,
         }); // Standalone static queries have no interval clock.
         let mut nearest: Option<(avian3d::prelude::RayHitData, motion::ContactMotion)> = None;
-        world.spatial.aabb_intersections_with_aabb_callback(
-            collect::swept_aabb(origin, *dir, max, reach + world.motion_padding()),
-            |entity| {
-                if !world
-                    .layers
-                    .get(entity)
-                    .is_ok_and(|layers| layers.memberships.has_all(Layer::Armor))
-                {
-                    return true;
-                }
-                let (node, _) = world.armour(entity).expect(
-                    "game's damage model: an Armor collider requires BallisticVolume ancestry",
+        let probe = collect::Probe::Segment {
+            origin,
+            axis: Vec3::from(dir),
+            length: max,
+            radius: reach,
+        };
+        let boxes = world.near(probe, &mut |entity, _| {
+            if !world
+                .layers
+                .get(entity)
+                .is_ok_and(|layers| layers.memberships.has_all(Layer::Armor))
+            {
+                return;
+            }
+            let (node, _) = world
+                .armour(entity)
+                .expect("game's damage model: an Armor collider requires BallisticVolume ancestry");
+            if !not_own(entity) {
+                return;
+            }
+            if world.parts.contains(entity) {
+                world.count(crate::cost::stages::Work::MarchArmourShapes, 1);
+            }
+            let (here, collider, surfaces) = world.geometry(entity);
+            // Over a sweep, its motion through the interval; at a moment, or in a standalone
+            // static fixture with no interval history, its pose there.
+            let poses = world
+                .sweep
+                .get()
+                .and_then(|_| world.interval(entity))
+                .unwrap_or(motion::Interval::Own(motion::Poses {
+                    from: here,
+                    to: here,
+                }));
+            let mut tested = 0;
+            for &offset in offsets {
+                let swept = motion::sweep_collider(
+                    poses,
+                    sweep,
+                    node,
+                    entity,
+                    collider,
+                    surfaces,
+                    origin + offset,
+                    origin + offset + dir * max,
+                    &mut tested,
                 );
-                if !not_own(entity) {
-                    return true;
-                }
-                let (position, rotation, collider, surfaces) = world
-                    .geometry
-                    .get(entity)
-                    .expect("game's damage model: every tree candidate has resolved geometry");
-                let still = |pose: motion::Pose| {
-                    motion::Interval::Own(motion::Poses {
-                        from: pose,
-                        to: pose,
-                    })
-                };
-                let here = motion::Pose {
-                    position: position.0,
-                    rotation: rotation.0,
-                };
-                let poses = if world.sweep.get().is_some() {
-                    // Standalone static fixtures carry no interval history.
-                    world.interval(entity).unwrap_or_else(|| still(here))
-                } else {
-                    still(world.pose(entity).unwrap_or(here))
-                };
-                let mut tested = 0;
-                for &offset in offsets {
-                    let swept = motion::sweep_collider(
-                        poses,
-                        sweep,
-                        node,
-                        entity,
-                        collider,
-                        surfaces,
+                let (mut contact, hit) = if let Some(rest) = poses.still()
+                    && !swept.as_ref().is_some_and(|(motion, _)| motion.contained)
+                {
+                    if max == 0.0 {
+                        continue;
+                    } // A stationary point has no static entering face.
+                    let Some((distance, normal)) = collider.cast_ray(
+                        rest.position,
+                        rest.rotation,
                         origin + offset,
-                        origin + offset + dir * max,
-                        &mut tested,
-                    );
-                    let (mut contact, hit) = if let Some(rest) = poses.still()
-                        && !swept.as_ref().is_some_and(|(motion, _)| motion.contained)
-                    {
-                        if max == 0.0 {
-                            continue;
-                        } // A stationary point has no static entering face.
-                        let Some((distance, normal)) = collider.cast_ray(
-                            rest.position,
-                            rest.rotation,
-                            origin + offset,
-                            *dir,
-                            max,
-                            true,
-                        ) else {
-                            continue;
-                        };
-                        (
-                            motion::ContactMotion {
-                                fraction: sweep.from + (sweep.to - sweep.from) * distance / max,
-                                point: origin + offset + dir * distance,
-                                velocity: Vec3::ZERO,
-                                contained: false,
-                            },
-                            avian3d::prelude::RayHitData {
-                                entity,
-                                distance,
-                                normal,
-                            },
-                        )
-                    } else {
-                        let Some((contact, normal)) = swept else {
-                            continue;
-                        };
-                        let part = if contact.contained {
-                            0.0
-                        } else {
-                            (contact.fraction - sweep.from) / (sweep.to - sweep.from)
-                        };
-                        (
-                            contact,
-                            avian3d::prelude::RayHitData {
-                                entity,
-                                distance: part * max,
-                                normal: normal.normalize(),
-                            },
-                        )
+                        *dir,
+                        max,
+                        true,
+                    ) else {
+                        continue;
                     };
-                    contact.point -= offset;
-                    if nearest.as_ref().is_none_or(|(best, _)| {
-                        hit.distance < best.distance
-                            || (hit.distance == best.distance && entity < best.entity)
-                    }) {
-                        nearest = Some((hit, contact));
-                    }
+                    (
+                        motion::ContactMotion {
+                            fraction: sweep.from + (sweep.to - sweep.from) * distance / max,
+                            point: origin + offset + dir * distance,
+                            velocity: Vec3::ZERO,
+                            contained: false,
+                        },
+                        avian3d::prelude::RayHitData {
+                            entity,
+                            distance,
+                            normal,
+                        },
+                    )
+                } else {
+                    let Some((contact, normal)) = swept else {
+                        continue;
+                    };
+                    let part = if contact.contained {
+                        0.0
+                    } else {
+                        (contact.fraction - sweep.from) / (sweep.to - sweep.from)
+                    };
+                    (
+                        contact,
+                        avian3d::prelude::RayHitData {
+                            entity,
+                            distance: part * max,
+                            normal: normal.normalize(),
+                        },
+                    )
+                };
+                contact.point -= offset;
+                if nearest.as_ref().is_none_or(|(best, _)| {
+                    hit.distance < best.distance
+                        || (hit.distance == best.distance && entity < best.entity)
+                }) {
+                    nearest = Some((hit, contact));
                 }
-                world.count(crate::cost::stages::Work::MarchTriTests, tested);
-                true
-            },
-        );
+            }
+            world.count(crate::cost::stages::Work::MarchTriTests, tested);
+        });
+        world.count(crate::cost::stages::Work::MarchCasts, 1);
+        world.count(crate::cost::stages::Work::MarchTankBoxes, boxes.tanks);
+        world.count(crate::cost::stages::Work::MarchFrameBoxes, boxes.frames);
+        world.count(crate::cost::stages::Work::MarchPartBoxes, boxes.parts);
         world
             .contact_motion
             .set(nearest.as_ref().map(|(_, motion)| *motion));
@@ -2104,8 +2105,9 @@ struct ProjectileMarchWorld<'w, 's> {
     motion: Option<Res<'w, motion::ColliderMotion>>,
     collider_bodies: Query<'w, 's, &'static avian3d::prelude::ColliderOf>,
     body_colliders: Query<'w, 's, &'static avian3d::prelude::RigidBodyColliders>,
-    // A body's pose where no interval history poses it (static fixtures): [`Self::tank_box`].
-    body_poses: Query<'w, 's, (&'static Position, &'static Rotation)>,
+    // A body's or collider's live pose, where no interval history poses it (static fixtures, or
+    // no moment): [`Self::placed`], [`Self::tank_box`].
+    live: Query<'w, 's, (&'static Position, &'static Rotation)>,
     // Each tank's armour volumes and crew boxes by rigid frame, and each part's place in its set.
     sets: Query<'w, 's, &'static armour_set::ArmourSet>,
     parts: Query<'w, 's, &'static armour_set::ArmourPart>,
@@ -2115,20 +2117,13 @@ struct ProjectileMarchWorld<'w, 's> {
     moment: Local<'s, std::cell::Cell<Option<f32>>>,
     sweep: Local<'s, std::cell::Cell<Option<motion::Sweep>>>,
     contact_motion: Local<'s, std::cell::Cell<Option<motion::ContactMotion>>>,
-    geometry: Query<
-        'w,
-        's,
-        (
-            &'static Position,
-            &'static Rotation,
-            &'static Collider,
-            Option<&'static BallisticSurfaces>,
-        ),
-    >,
+    shapes: Query<'w, 's, (&'static Collider, Option<&'static BallisticSurfaces>)>,
+    // The tree holds every collider; a broad query reads from it only those outside an armour
+    // set, whose parts it reads from their set ([`Self::near`]).
     spatial: SpatialQuery<'w, 's>,
-    // Each collider's broad-phase bounds, the ones `spatial`'s AABB queries test a reached leaf
-    // against: a field throw reads its candidates from them ([`resolve::FieldReach`]).
-    aabbs: Query<'w, 's, &'static ColliderAabb>,
+    // The broad-phase bounds of each collider outside an armour set, the ones `spatial`'s AABB
+    // queries test a reached leaf against.
+    aabbs: Query<'w, 's, &'static ColliderAabb, Without<armour_set::ArmourPart>>,
     volumes: Query<'w, 's, &'static BallisticVolume>,
     owners: Query<'w, 's, &'static VolumeOf>,
     parents: Query<'w, 's, &'static ChildOf>,
@@ -2193,19 +2188,10 @@ impl ProjectileMarchWorld<'_, '_> {
                     .at(fraction),
                 set.body_box(&|frame| set.frames()[frame].poses.at(fraction)),
             ),
-            _ => {
-                let (position, rotation) = self
-                    .body_poses
-                    .get(tank)
-                    .expect("a rigid body carries the Position and Rotation it requires");
-                (
-                    motion::Pose {
-                        position: position.0,
-                        rotation: rotation.0,
-                    },
-                    set.body_box(&|frame| self.frame_in_carrier(set, frame)),
-                )
-            }
+            _ => (
+                self.live_pose(tank),
+                set.body_box(&|frame| self.frame_in_carrier(set, frame)),
+            ),
         };
         let bounds = bounds?;
         Some(resolve::TankBox::new(tank, bounds.min, bounds.max, body))
@@ -2236,6 +2222,218 @@ impl ProjectileMarchWorld<'_, '_> {
     fn pose(&self, entity: Entity) -> Option<motion::Pose> {
         let fraction = self.moment.get()?;
         Some(self.interval(entity)?.at(fraction))
+    }
+
+    /// The game's damage model: `entity`'s pose at this world's moment ([`Self::pose`]), or where
+    /// no interval history poses it there, its live pose: an armour part's composed from its set's
+    /// live frames, any other collider's own.
+    fn placed(&self, entity: Entity) -> motion::Pose {
+        if let Some(pose) = self.pose(entity) {
+            return pose;
+        }
+        match self.parts.get(entity) {
+            Ok(part) => {
+                let set = self
+                    .sets
+                    .get(part.tank())
+                    .expect("game's damage model: an armour part's tank carries its set");
+                let (frame, held) = set.located(part);
+                self.frame_pose(set, frame, SetClock::Live) * held.pose
+            }
+            Err(_) => self.live_pose(entity),
+        }
+    }
+
+    fn live_pose(&self, entity: Entity) -> motion::Pose {
+        let (position, rotation) = self
+            .live
+            .get(entity)
+            .expect("a rigid body or collider carries the Position and Rotation it requires");
+        motion::Pose {
+            position: position.0,
+            rotation: rotation.0,
+        }
+    }
+
+    /// A broad-query candidate's pose ([`Self::placed`]) and shape.
+    fn geometry(&self, entity: Entity) -> (motion::Pose, &Collider, Option<&BallisticSurfaces>) {
+        let (collider, surfaces) = self
+            .shapes
+            .get(entity)
+            .expect("game's damage model: a broad-query candidate is a collider");
+        (self.placed(entity), collider, surfaces)
+    }
+
+    /// How a broad query poses an armour set's frames here.
+    fn set_clock(&self) -> SetClock {
+        match (self.motion.is_some(), self.sweep.get(), self.moment.get()) {
+            (true, Some(_), _) => SetClock::Swept,
+            (true, None, Some(fraction)) => SetClock::At(fraction),
+            _ => SetClock::Live,
+        }
+    }
+
+    /// Frame `frame` of `set`'s world pose under `clock`.
+    fn frame_pose(
+        &self,
+        set: &armour_set::ArmourSet,
+        frame: usize,
+        clock: SetClock,
+    ) -> motion::Pose {
+        let body = |base: Entity| {
+            *self
+                .motion
+                .as_ref()
+                .expect("game's damage model: a swept or timed set reads the interval history")
+                .bodies
+                .get(&base)
+                .expect("game's damage model: an armour frame's base body has captured endpoints")
+        };
+        match clock {
+            SetClock::Swept => set.in_world(frame, &|base| body(base).to, &|frame| {
+                set.frames()[frame].poses.to
+            }),
+            SetClock::At(fraction) => {
+                set.in_world(frame, &|base| body(base).at(fraction), &|frame| {
+                    set.frames()[frame].poses.at(fraction)
+                })
+            }
+            SetClock::Live => set.in_world(frame, &|base| self.live_pose(base), &|frame| {
+                self.frame_in_carrier(set, frame)
+            }),
+        }
+    }
+
+    /// The game's damage model: every collider this world's clock may place within `probe`, with
+    /// a box holding it there. A collider outside an armour set comes from avian's tree, its
+    /// broad-phase bounds grown by the tick's motion; a set's parts come from the set, tested by
+    /// tank box, then frame box, then part box ([`Self::set_near`]). Visit order is unspecified.
+    /// Returns the set boxes tested at each level.
+    fn near(&self, probe: collect::Probe, visit: &mut dyn FnMut(Entity, ColliderAabb)) -> Tested {
+        let pad = self.motion_padding();
+        self.spatial
+            .aabb_intersections_with_aabb_callback(probe.aabb(pad), |entity| {
+                // Its set holds every armour part; the tree's entry for one is never read.
+                if !self.parts.contains(entity) {
+                    let bounds = self.aabbs.get(entity).expect(
+                        "a collider the broad phase names carries the ColliderAabb its Collider \
+                         requires (avian3d 0.7)",
+                    );
+                    visit(entity, collect::Probe::Region(*bounds).aabb(pad));
+                }
+                true
+            });
+        let clock = self.set_clock();
+        let mut tested = Tested::default();
+        for set in &self.sets {
+            self.set_near(set, clock, Some(probe), false, visit, &mut tested);
+        }
+        tested
+    }
+
+    /// The parts of `set` `probe` may meet, each with its box under `clock`: every part for no
+    /// probe, and only those of frames based on its tank's own body when `carried`. A box holds
+    /// its part at the clock grown by [`SET_BOX_MARGIN`], and over a sweep by the set's motion too
+    /// ([`armour_set::Reach`]). A set no boundary has closed is not in the scene.
+    fn set_near(
+        &self,
+        set: &armour_set::ArmourSet,
+        clock: SetClock,
+        probe: Option<collect::Probe>,
+        carried: bool,
+        visit: &mut dyn FnMut(Entity, ColliderAabb),
+        tested: &mut Tested,
+    ) {
+        let meets = |bounds: armour_set::Bounds| {
+            probe.is_none_or(|probe| probe.meets(bounds.min, bounds.max))
+        };
+        let grow = match clock {
+            SetClock::Live => {
+                let held = set.world_box(&|base| self.live_pose(base), &|frame| {
+                    self.frame_in_carrier(set, frame)
+                });
+                let Some(held) = held else {
+                    return; // A set with no part.
+                };
+                tested.tanks += 1;
+                if !meets(held.grown(SET_BOX_MARGIN)) {
+                    return;
+                }
+                SET_BOX_MARGIN
+            }
+            SetClock::Swept | SetClock::At(_) => {
+                let Some(reach) = set.reach() else {
+                    return; // Not yet in the scene the march reads.
+                };
+                tested.tanks += 1;
+                if !meets(reach.held.grown(SET_BOX_MARGIN)) {
+                    return;
+                }
+                match clock {
+                    SetClock::Swept => reach.motion + SET_BOX_MARGIN,
+                    _ => SET_BOX_MARGIN,
+                }
+            }
+        };
+        for (index, frame) in set.frames().iter().enumerate() {
+            let Some(bounds) = frame.bounds else {
+                continue; // A frame carrying no part.
+            };
+            if carried && frame.base != set.root() {
+                continue;
+            }
+            let pose = self.frame_pose(set, index, clock);
+            tested.frames += 1;
+            if !meets(bounds.posed(pose).grown(grow)) {
+                continue;
+            }
+            for part in &frame.parts {
+                tested.parts += 1;
+                let held = part.bounds.posed(pose).grown(grow);
+                if meets(held) {
+                    visit(
+                        part.collider,
+                        ColliderAabb::from_min_max(held.min, held.max),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every part of `tank`'s set its own body carries, with its box at this world's clock
+    /// ([`Self::set_near`]).
+    fn carried(&self, tank: Entity, visit: &mut dyn FnMut(Entity, ColliderAabb)) {
+        let set = self
+            .sets
+            .get(tank)
+            .expect("game's damage model: a tank box is built only for a tank carrying its set");
+        self.set_near(
+            set,
+            self.set_clock(),
+            None,
+            true,
+            visit,
+            &mut Tested::default(),
+        );
+    }
+
+    /// Every collider's box at this world's clock: each outside an armour set its broad-phase
+    /// bounds, each set's parts as [`Self::near`] boxes them; the scene's finite extent.
+    fn every_box(&self, visit: &mut dyn FnMut(ColliderAabb)) {
+        for bounds in &self.aabbs {
+            visit(*bounds);
+        }
+        let clock = self.set_clock();
+        for set in &self.sets {
+            self.set_near(
+                set,
+                clock,
+                None,
+                false,
+                &mut |_, bounds| visit(bounds),
+                &mut Tested::default(),
+            );
+        }
     }
 
     /// The game's damage model: `entity`'s motion over the interval: an armour part's composed
@@ -2284,20 +2482,40 @@ impl ProjectileMarchWorld<'_, '_> {
             .collect()
     }
 
+    /// The armour primitives of the body carrying `primitive`, as `(volume node, collider)` in
+    /// that order: an armour part's from its set, the parts of every frame on the same base.
     fn body_primitives(&self, primitive: Entity) -> Vec<(Entity, Entity)> {
-        let body = self
-            .collider_bodies
-            .get(primitive)
-            .expect("game's damage model: a prepared collider belongs to a physics body")
-            .body;
-        let parts = self
-            .body_colliders
-            .get(body)
-            .expect("game's damage model: ColliderOf populates its body's collider relationship");
-        let mut parts: Vec<_> = parts
-            .iter()
-            .filter_map(|part| self.armour(part).map(|(node, _)| (node, part)))
-            .collect();
+        let armour = |part: Entity| self.armour(part).map(|(node, _)| (node, part));
+        let mut parts: Vec<_> = match self.parts.get(primitive) {
+            Ok(part) => {
+                let set = self
+                    .sets
+                    .get(part.tank())
+                    .expect("game's damage model: an armour part's tank carries its set");
+                let base = set.frames()[set.located(part).0].base;
+                set.frames()
+                    .iter()
+                    .filter(|frame| frame.base == base)
+                    .flat_map(|frame| frame.parts.iter())
+                    .filter_map(|part| armour(part.collider))
+                    .collect()
+            }
+            Err(_) => {
+                let body = self
+                    .collider_bodies
+                    .get(primitive)
+                    .expect("game's damage model: a prepared collider belongs to a physics body")
+                    .body;
+                self.body_colliders
+                    .get(body)
+                    .expect(
+                        "game's damage model: ColliderOf populates its body's collider relationship",
+                    )
+                    .iter()
+                    .filter_map(armour)
+                    .collect()
+            }
+        };
         parts.sort();
         parts
     }
@@ -2353,6 +2571,31 @@ impl ProjectileMarchWorld<'_, '_> {
     }
 }
 
+/// How a broad query poses an armour set's frames ([`ProjectileMarchWorld::near`]): at the tick's
+/// end with its boxes grown by the set's motion, over a sweep; at the moment a field or corridor
+/// reads; live, where no interval history poses them.
+#[derive(Clone, Copy)]
+enum SetClock {
+    Swept,
+    At(f32),
+    Live,
+}
+
+/// The armour-set boxes a broad query tested, by level: a cost count.
+#[derive(Default)]
+struct Tested {
+    tanks: usize,
+    frames: usize,
+    parts: usize,
+}
+
+/// Resolution: how far an armour-set box is grown before a broad query tests it (m). A candidate's
+/// readers grow its bounds by up to [`resolve::PROBE_MARGIN`] before deciding it lies off their
+/// line or start, so the broad box must hold that margin, and its own world-f32 rounding (DERIVED:
+/// under 1e-4 m within 1 km of the origin, where the f32 spacing is 6.1e-5 m). Twice the margin
+/// holds both.
+const SET_BOX_MARGIN: f32 = 2.0 * resolve::PROBE_MARGIN;
+
 /// One march phase's shell pose, flight state and records. [`Mut`] wrappers preserve change
 /// detection: a phase that writes nothing marks nothing changed.
 struct MarchingShell<'a, 'w> {
@@ -2390,7 +2633,7 @@ struct MarchStep {
 /// The game's damage model: the authority's post-physics march and consequences.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the march system: shells, march world, colliders, bodies, health, net state, two recorders and a cost sink"
+    reason = "the march system: shells, march world, bodies, health, net state, two recorders and a cost sink"
 )]
 fn integrate_projectiles(
     mut projectiles: Query<(
@@ -2416,14 +2659,6 @@ fn integrate_projectiles(
     world: ProjectileMarchWorld,
     map: Res<crate::map::MapManifest>,
     mut recorder: MarchRecorder,
-    // Collider poses + shapes, for the §13 corridor collector: it walks each candidate's geometry
-    // itself rather than asking Avian for a nearest hit (see `ballistics::collect`).
-    colliders: Query<(
-        &'static Position,
-        &'static Rotation,
-        &'static Collider,
-        Option<&'static BallisticSurfaces>,
-    )>,
     mut bodies: Query<Forces>,
     mut health: Query<&mut ComponentHealth>,
     retain: Res<RetainSpentShells>,
@@ -2497,14 +2732,7 @@ fn integrate_projectiles(
         let (cones_from, burst_before) = (shell.spall.cones.len(), shell.projectile.fuze.burst());
         let shooter = shell.source.map(|source| source.tank);
         let owned_before = owned_losses(shell.dose, &world.owners, shooter);
-        let step = march_shell_step(
-            &mut shell,
-            &world,
-            &colliders,
-            &mut health,
-            &mut bodies,
-            &mut tick,
-        );
+        let step = march_shell_step(&mut shell, &world, &mut health, &mut bodies, &mut tick);
         recorder.note(
             entity,
             &mut shell.projectile.contacted,
@@ -2643,12 +2871,6 @@ fn wound_legs(
 fn march_shell_step(
     shell: &mut MarchingShell,
     world: &ProjectileMarchWorld,
-    colliders: &Query<(
-        &'static Position,
-        &'static Rotation,
-        &'static Collider,
-        Option<&'static BallisticSurfaces>,
-    )>,
     health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<Forces>,
     tick: &mut MarchTick,
@@ -2750,7 +2972,6 @@ fn march_shell_step(
     // state that must not read a view detail.
     let context = resolve::ResolveContext {
         world,
-        colliders,
         laws: walk::WalkLaws::default(),
     };
     // The game's damage model discovers only outside a pending crossing. A carried result
@@ -7700,8 +7921,8 @@ pub(crate) mod march_tests {
         use bevy::ecs::system::RunSystemOnce;
         app.world_mut()
             .run_system_once(move |world: ProjectileMarchWorld| {
-                let (position, rotation, collider, _) = world.geometry.get(volume).unwrap();
-                let bounds = collider.aabb(position.0, *rotation);
+                let (pose, collider, _) = world.geometry(volume);
+                let bounds = collider.aabb(pose.position, pose.rotation);
                 let centre = (bounds.min + bounds.max) * 0.5;
                 // Fixture query margin, m: start outside the convex solid and finish beyond it.
                 let margin = 1.0;
@@ -7716,7 +7937,6 @@ pub(crate) mod march_tests {
                 );
                 let context = resolve::ResolveContext {
                     world: &world,
-                    colliders: &world.geometry,
                     laws: walk::WalkLaws::default(),
                 };
                 let corridor = resolve::build_corridor(

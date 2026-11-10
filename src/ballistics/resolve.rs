@@ -44,7 +44,7 @@
 use std::cell::{OnceCell, RefCell};
 
 use avian3d::parry::shape::TypedShape;
-use avian3d::prelude::{Collider, ColliderAabb, Forces, Position, Rotation, SimpleCollider};
+use avian3d::prelude::{ColliderAabb, Forces, SimpleCollider};
 use bevy::prelude::*;
 
 #[cfg(any(feature = "dev_ui", test))]
@@ -56,9 +56,9 @@ use super::walk::{
     SampleSeed, ShellKey, Shot, SpallSource, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
-    ArmourMark, BallisticSurfaces, ComponentHealth, CrossingEnd, Impact, ImpactOutcome,
-    ImpactSurface, MARCH_EPS, MarchingShell, ProjectileMarchWorld, ShellRicochet, ShellStrike,
-    ShellTerminal, TerminalVerdict, Verdict, VolumeCrossing, apply_hit_impulse,
+    ArmourMark, ComponentHealth, CrossingEnd, Impact, ImpactOutcome, ImpactSurface, MARCH_EPS,
+    MarchingShell, ProjectileMarchWorld, ShellRicochet, ShellStrike, ShellTerminal,
+    TerminalVerdict, Verdict, VolumeCrossing, apply_hit_impulse,
 };
 use crate::cost::stages::{Stage, Stages, Work};
 
@@ -618,17 +618,8 @@ pub(crate) fn certified_samples(
     let mut near = Vec::new();
     let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
     for (node, primitive) in candidates(context, not_own, at + origin, axis, 0.0, reach) {
-        let Ok((position, rotation, collider, _)) = context.colliders.get(primitive) else {
-            return Err(WalkError::CollectorFailed {
-                volume: node,
-                reason: "a candidate collider has no resolved pose",
-            });
-        };
-        let pose = context.world.pose(primitive);
-        let bounds = collider.aabb(
-            pose.map_or(position.0, |pose| pose.position),
-            pose.map_or(*rotation, |pose| Rotation(pose.rotation)),
-        );
+        let (pose, collider, _) = context.world.geometry(primitive);
+        let bounds = collider.aabb(pose.position, pose.rotation);
         let (min, max) = (bounds.min - at, bounds.max - at);
         let margin = Vec3::splat(PROBE_MARGIN);
         if !offsets
@@ -675,9 +666,8 @@ pub(crate) fn certified_samples(
                 laws: &context.laws,
             },
             &near,
-            context.colliders,
+            context.world,
             &mut hits,
-            &|entity| context.world.pose(entity),
         )?;
         context.world.count(Work::MarchTriTests, tested);
         samples.push(SampleCorridor {
@@ -764,19 +754,21 @@ fn next_starts(
     Ok(next)
 }
 
-/// The colliders one field throw can reach, read from the broad phase once for all of its
-/// directions ([`field_direction`]): every collider the throw admits whose broad-phase bounds
-/// ([`ColliderAabb`]) meet a region holding every box a direction's queries sweep, kept in the
-/// order a query sorts its candidates in.
+/// The colliders one field throw can reach, read once for all of its directions
+/// ([`field_direction`]): every collider the throw admits whose broad box meets a region holding
+/// every box a direction's queries sweep, kept in the order a query sorts its candidates in. A
+/// broad box is a collider's broad-phase bounds ([`ColliderAabb`]), or an armour part's box at the
+/// field's moment ([`ProjectileMarchWorld::near`]).
 ///
-/// A direction's candidates are the kept colliders whose bounds meet its own swept box: the test
-/// avian's AABB query applies to each collider of a tree leaf it reaches. The query of the region
-/// reaches every collider a query of a box inside it reaches, and a query of that box reaches
-/// every collider whose bounds meet it, because a collider tree's node bounds hold its leaves'
-/// (enlarged) bounds and a leaf's hold its colliders' [`ColliderAabb`]s (avian's
-/// `EnlargedAabb::update` keeps the enlarged bounds around the tight ones). So each direction reads
-/// exactly the colliders, in the order, that a query of its own box returns. A throw from inside a
-/// tank's box reads that tank's colliders alone, the same way ([`Self::of_box`]).
+/// A direction's candidates are the kept colliders whose broad boxes meet its own swept box: the
+/// test avian's AABB query applies to each collider of a tree leaf it reaches, and the one a set's
+/// part box takes. The query of the region reaches every collider a query of a box inside it
+/// reaches, and a query of that box reaches every collider whose broad box meets it, because a
+/// collider tree's node bounds hold its leaves' (enlarged) bounds and a leaf's hold its colliders'
+/// [`ColliderAabb`]s (avian's `EnlargedAabb::update` keeps the enlarged bounds around the tight
+/// ones), and a set's tank and frame boxes hold its part boxes. So each direction reads exactly the
+/// colliders, in the order, that a query of its own box returns. A throw from inside a tank's box
+/// reads that tank's colliders alone, the same way ([`Self::of_box`]).
 pub(crate) struct FieldReach {
     /// Armour colliders (a [`ProjectileMarchWorld::armour`] ancestor) the throw admits.
     hard: Vec<Reached>,
@@ -805,24 +797,15 @@ struct Reached {
     node: Entity,
     collider: Entity,
     broad: ColliderAabb,
-    /// Its bounds at its pose, `None` when it has no resolved pose; read on first use.
-    bounds: OnceCell<Option<ColliderAabb>>,
+    /// Its bounds at its pose; read on first use.
+    bounds: OnceCell<ColliderAabb>,
 }
 
 impl Reached {
-    fn bounds(&self, context: &ResolveContext<'_, '_, '_>) -> Option<ColliderAabb> {
+    fn bounds(&self, context: &ResolveContext<'_, '_, '_>) -> ColliderAabb {
         *self.bounds.get_or_init(|| {
-            context
-                .colliders
-                .get(self.collider)
-                .ok()
-                .map(|(position, rotation, collider, _)| {
-                    let pose = context.world.pose(self.collider);
-                    collider.aabb(
-                        pose.map_or(position.0, |pose| pose.position),
-                        pose.map_or(*rotation, |pose| Rotation(pose.rotation)),
-                    )
-                })
+            let (pose, collider, _) = context.world.geometry(self.collider);
+            collider.aabb(pose.position, pose.rotation)
         })
     }
 }
@@ -918,23 +901,16 @@ impl FieldReach {
         )
     }
 
-    /// The colliders `admit` keeps whose broad-phase bounds meet `region`.
+    /// The colliders `admit` keeps whose broad boxes meet `region`.
     pub(crate) fn within(
         context: &ResolveContext<'_, '_, '_>,
         admit: &dyn Fn(Entity) -> bool,
         region: ColliderAabb,
     ) -> Self {
-        let world = context.world;
         let mut reach = Self::empty(None);
-        world.spatial.aabb_intersections_with_aabb_callback(
-            ColliderAabb::from_min_max(
-                region.min - Vec3::splat(world.motion_padding()),
-                region.max + Vec3::splat(world.motion_padding()),
-            ),
-            |entity| {
-                reach.take(context, admit, entity);
-                true
-            },
+        context.world.near(
+            super::collect::Probe::Region(region),
+            &mut |entity, broad| reach.take(context, admit, entity, broad),
         );
         reach.sorted()
     }
@@ -949,14 +925,10 @@ impl FieldReach {
         admit: &dyn Fn(Entity) -> bool,
         bounds: TankBox,
     ) -> Self {
-        let colliders =
-            context.world.body_colliders.get(bounds.tank).expect(
-                "a tank box is built only for a body carrying armour parts, which lists them",
-            );
         let mut reach = Self::empty(Some(bounds));
-        for entity in colliders.iter() {
-            reach.take(context, admit, entity);
-        }
+        context.world.carried(bounds.tank, &mut |entity, broad| {
+            reach.take(context, admit, entity, broad)
+        });
         reach.sorted()
     }
 
@@ -970,22 +942,16 @@ impl FieldReach {
         }
     }
 
-    /// Keep the collider `entity` if `admit` does and it is armour or a witness's.
+    /// Keep the collider `entity`, whose broad box is `broad`, if `admit` does and it is armour or
+    /// a witness's.
     fn take(
         &mut self,
         context: &ResolveContext<'_, '_, '_>,
         admit: &dyn Fn(Entity) -> bool,
         entity: Entity,
+        broad: ColliderAabb,
     ) {
         let world = context.world;
-        let &broad = world.aabbs.get(entity).expect(
-            "a collider the broad phase or a body names carries the ColliderAabb its Collider \
-             requires (avian3d 0.7)",
-        );
-        let broad = ColliderAabb::from_min_max(
-            broad.min - Vec3::splat(world.motion_padding()),
-            broad.max + Vec3::splat(world.motion_padding()),
-        );
         if let Some((node, _)) = world.armour(entity) {
             if admit(entity) {
                 self.hard.push(Reached {
@@ -1015,14 +981,14 @@ impl FieldReach {
         self.hard.len()
     }
 
-    /// The armour colliders whose broad-phase bounds meet `swept`.
+    /// The armour colliders whose broad boxes meet `swept`.
     fn hard_meeting(&self, swept: ColliderAabb) -> impl Iterator<Item = &Reached> {
         self.hard
             .iter()
             .filter(move |reached| reached.broad.intersects(&swept))
     }
 
-    /// The witness colliders whose broad-phase bounds meet `swept`, as `(witness, collider)`.
+    /// The witness colliders whose broad boxes meet `swept`, as `(witness, collider)`.
     pub(super) fn witnesses_meeting(&self, swept: ColliderAabb) -> Vec<(Entity, Entity)> {
         self.witnesses
             .iter()
@@ -1099,12 +1065,7 @@ fn field_probe(
     };
     let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
     for reached in field.hard_meeting(collect::swept_aabb(at, axis, FIELD_REACH, 0.0)) {
-        let Some(bounds) = reached.bounds(context) else {
-            return Err(WalkError::CollectorFailed {
-                volume: reached.node,
-                reason: "a candidate collider has no resolved pose",
-            });
-        };
+        let bounds = reached.bounds(context);
         let (min, max) = (bounds.min - at - margin, bounds.max - at + margin);
         if meets(min, max).is_none_or(|(_, leave)| leave < 0.0) {
             continue;
@@ -1161,9 +1122,8 @@ impl FieldProbe {
                 laws: &context.laws,
             },
             candidates,
-            context.colliders,
+            context.world,
             hits,
-            &|entity| context.world.pose(entity),
         )
     }
 
@@ -1393,7 +1353,7 @@ fn horizon(context: &ResolveContext<'_, '_, '_>, field: &FieldReach, at: Vec3, d
         let cube = collect::swept_aabb(at, Vec3::from(dir), 0.0, FIELD_REACH);
         for bounds in field
             .hard_meeting(cube)
-            .filter_map(|reached| reached.bounds(context))
+            .map(|reached| reached.bounds(context))
         {
             lo = lo.min(bounds.min);
             hi = hi.max(bounds.max);
@@ -1941,16 +1901,6 @@ pub(crate) enum BiteEnd {
 /// than nine, exactly as [`ProjectileMarchWorld`] groups the queries.
 pub(crate) struct ResolveContext<'a, 'w, 's> {
     pub world: &'a ProjectileMarchWorld<'w, 's>,
-    pub colliders: &'a Query<
-        'w,
-        's,
-        (
-            &'static Position,
-            &'static Rotation,
-            &'static Collider,
-            Option<&'static BallisticSurfaces>,
-        ),
-    >,
     pub laws: WalkLaws,
 }
 
@@ -2580,18 +2530,14 @@ pub(super) fn closing_walk(
         let horizon = *horizon.get_or_init(|| {
             let direction = axis.as_dvec3();
             let norm_squared = direction.length_squared();
-            let far = context
-                .world
-                .aabbs
-                .iter()
-                .map(|bounds| {
-                    let a = ((bounds.min.as_dvec3() - anchor.as_dvec3()) - origin.as_dvec3())
-                        * direction;
-                    let b = ((bounds.max.as_dvec3() - anchor.as_dvec3()) - origin.as_dvec3())
-                        * direction;
-                    a.max(b).element_sum() / norm_squared
-                })
-                .fold(f64::from(length), f64::max);
+            let mut far = f64::from(length);
+            context.world.every_box(&mut |bounds| {
+                let a =
+                    ((bounds.min.as_dvec3() - anchor.as_dvec3()) - origin.as_dvec3()) * direction;
+                let b =
+                    ((bounds.max.as_dvec3() - anchor.as_dvec3()) - origin.as_dvec3()) * direction;
+                far = far.max(a.max(b).element_sum() / norm_squared);
+            });
             // Staggered sample starts can lie behind the axis start; include their axial reach.
             let stagger = seeds
                 .iter()
@@ -2644,15 +2590,8 @@ pub(crate) fn body_completion(
     let far = parts
         .iter()
         .map(|&(_, primitive)| {
-            let (position, rotation, collider, _) = context
-                .colliders
-                .get(primitive)
-                .expect("game's damage model: body membership names prepared collider geometry");
-            let pose = context.world.pose(primitive);
-            let bounds = collider.aabb(
-                pose.map_or(position.0, |pose| pose.position),
-                pose.map_or(*rotation, |pose| Rotation(pose.rotation)),
-            );
+            let (pose, collider, _) = context.world.geometry(primitive);
+            let bounds = collider.aabb(pose.position, pose.rotation);
             let a =
                 ((bounds.min.as_dvec3() - anchor.as_dvec3()) - origin.as_dvec3()) * axis.as_dvec3();
             let b =
@@ -2685,9 +2624,8 @@ pub(crate) fn body_completion(
                 laws: &context.laws,
             },
             &parts,
-            context.colliders,
+            context.world,
             &mut hits,
-            &|entity| context.world.pose(entity),
         )?;
         context.world.count(Work::MarchTriTests, tested);
         if let Some(exit) = walk::last_exit(&hits) {
@@ -2701,7 +2639,8 @@ pub(crate) fn body_completion(
     })
 }
 
-/// The candidate colliders whose AABB the corridor's swept box touches, as `(volume node, collider)`.
+/// The candidate colliders whose broad box the corridor's swept segment meets, as `(volume node,
+/// collider)`.
 ///
 /// Broad phase by AABB rather than by ray so a volume that CONTAINS the whole corridor is still a
 /// candidate — a ray query would report nothing for it, and "nothing" is the answer that must never
@@ -2715,14 +2654,14 @@ pub(super) fn candidates(
     radius: f32,
 ) -> Vec<(Entity, Entity)> {
     let mut out = Vec::new();
-    context.world.spatial.aabb_intersections_with_aabb_callback(
-        collect::swept_aabb(
+    context.world.near(
+        collect::Probe::Segment {
             origin,
             axis,
             length,
-            radius + context.world.motion_padding(),
-        ),
-        |entity| {
+            radius,
+        },
+        &mut |entity, _| {
             // Ancestry IS the armour test: only a collider under a `BallisticVolume` node resolves,
             // which is the same rule the march has always used to tell armour from terrain; a
             // witness's collider never does (ADR-0040).
@@ -2731,7 +2670,6 @@ pub(super) fn candidates(
             {
                 out.push((node, entity));
             }
-            true
         },
     );
     out.sort();
@@ -2789,9 +2727,8 @@ pub(super) fn build_corridor(
                 laws: &context.laws,
             },
             &candidates,
-            context.colliders,
+            context.world,
             &mut hits,
-            &|entity| context.world.pose(entity),
         )?;
         context.world.count(Work::MarchTriTests, tested);
         samples.push(SampleCorridor {
