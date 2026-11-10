@@ -82,6 +82,7 @@ use avian3d::prelude::{
     SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces,
 };
 
+use bevy::ecs::entity::EntityHashMap;
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy::tasks::{ComputeTaskPool, TaskPool};
@@ -2026,6 +2027,7 @@ fn apply_deposits(mut p: DepositParam) {
                 if let Some(split) = effect.split {
                     p.commands.entity(effect.root).insert(split);
                 }
+                stage_rehomes(&mut p.commands, effect.root, &effect.departures);
                 departures.extend(effect.departures);
             }
         }
@@ -2861,6 +2863,63 @@ struct PreparedDeparture {
     source: super::sweep::SourceShape,
 }
 
+/// Move `owner`'s members named in `leaving` to the back of its list, the first to leave last.
+///
+/// A relationship's discard hook (Bevy's for `ChildOf`, Avian's for `ColliderOf`) takes a leaving
+/// member out of its owner's list by a scan from the back and `Vec::remove`, which shifts every
+/// later member down: a list whose members leave front to back costs its length squared. Staged,
+/// each member is the last when its turn comes: found at once, removed without a shift. The
+/// members that stay keep their order, so the hooks leave the list they leave unstaged.
+fn stage_leaving<T>(world: &mut World, owner: Entity, leaving: &EntityHashMap<usize>)
+where
+    T: RelationshipTarget<Collection = Vec<Entity>>
+        + Component<Mutability = bevy::ecs::component::Mutable>,
+{
+    let Some(mut list) = world.get_mut::<T>(owner) else {
+        return; // The owner holds no member of this relationship.
+    };
+    let members = list.collection_mut_risky();
+    let mut tail = Vec::new();
+    members.retain(|member| match leaving.get(member) {
+        Some(&turn) => {
+            tail.push((turn, *member));
+            false
+        }
+        None => true,
+    });
+    tail.sort_unstable_by_key(|&(turn, _)| std::cmp::Reverse(turn));
+    members.extend(tail.into_iter().map(|(_, member)| member));
+}
+
+/// Queue [`stage_leaving`] for the colliders `departures` take from `owner`, in the order their
+/// commits replace each one's `ChildOf` and `ColliderOf`: per departure, its occupied colliders
+/// and then its contact colliders. Queued before those commits.
+fn stage_rehomes(commands: &mut Commands, owner: Entity, departures: &[PreparedDeparture]) {
+    fn rehomed<T>(source: &ColliderSource<T>) -> Option<Entity> {
+        match source {
+            ColliderSource::Rehome(entity) => Some(*entity),
+            ColliderSource::Fresh(_) => None,
+        }
+    }
+    let leaving: EntityHashMap<usize> = departures
+        .iter()
+        .flat_map(|departure| {
+            let occupied = departure.chunks.iter().filter_map(|c| rehomed(&c.occupied));
+            occupied.chain(departure.chunks.iter().filter_map(|c| rehomed(&c.contact)))
+        })
+        .enumerate()
+        .map(|(turn, entity)| (entity, turn))
+        .collect();
+    if leaving.len() < 2 {
+        return; // One member's own scan costs what staging it would.
+    }
+    commands.queue(move |world: &mut World| {
+        let _rehome = Stages::start(world.get_resource::<Stages>(), Stage::ColliderRehome);
+        stage_leaving::<Children>(world, owner, &leaving);
+        stage_leaving::<avian3d::prelude::RigidBodyColliders>(world, owner, &leaving);
+    });
+}
+
 /// Count the departures' bodies and the colliders they build fresh.
 fn count_prepared(stages: Option<&Stages>, departures: &[PreparedDeparture]) {
     let Some(stages) = stages else {
@@ -3231,6 +3290,7 @@ fn split_groups(
     let mut effects: Vec<_> = effects.drain().collect();
     effects.sort_unstable_by_key(|(entity, ..)| *entity);
     for (entity, tick, children) in effects {
+        stage_rehomes(&mut commands, entity, &children);
         for child in children {
             spawn_prepared(&mut commands, child);
         }

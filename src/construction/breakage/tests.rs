@@ -6179,3 +6179,33 @@ fn collider_batch_counts_rehomed_entities_and_excludes_fresh_shapes() {
         0
     );
 }
+
+/// Staging is invisible to what follows a rehome: the members that stay keep their order, the
+/// new owner lists the leaving members in leaving order, and each leaving member is its former
+/// owner's last when its hook runs, which is what makes that hook's scan and remove constant.
+/// Split determinism relies on both orders: Avian walks them and despawns follow them.
+#[test]
+fn staged_members_leave_from_the_back_and_the_rest_keep_their_order() {
+    let rehome = |staged: bool| {
+        let mut world = World::new();
+        let [old, new] = [(); 2].map(|()| world.spawn_empty().id());
+        // Fixture: six members, three leaving out of list order.
+        let members: Vec<_> = (0..6).map(|_| world.spawn(ChildOf(old)).id()).collect();
+        let leaving = [members[1], members[4], members[0]];
+        if staged {
+            let turns = leaving.iter().copied().zip(0..).collect();
+            stage_leaving::<Children>(&mut world, old, &turns);
+        }
+        for member in leaving {
+            if staged {
+                assert_eq!(world.get::<Children>(old).unwrap().last(), Some(&member));
+            }
+            world.entity_mut(member).insert(ChildOf(new));
+        }
+        let list = |owner| world.get::<Children>(owner).unwrap().to_vec();
+        assert_eq!(list(new), leaving);
+        assert_eq!(list(old), [members[2], members[3], members[5]]);
+        (list(old), list(new))
+    };
+    assert_eq!(rehome(true), rehome(false));
+}
