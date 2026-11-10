@@ -1,27 +1,18 @@
-//! OVERMATCH PATCH: the interior contacts between two bodies, removed.
+//! OVERMATCH PATCH: the interior contacts between two bodies, removed. `OVERMATCH_PATCH.md`
+//! ("Body-pair contact reduction") owns the account: why, what was measured and what reduction
+//! does not preserve. This states what the code holds.
 //!
-//! Each collider pair of a compound body yields its own manifolds, so two bodies touching along a
-//! seam of many hulls carry a manifold per hull pair and up to four points in each. Normal forces
-//! along one support direction hold any load whose line falls inside the convex hull of their
-//! points, projected along that direction, so a point inside the hull adds no support its vertices
-//! lack. Contacts between the same two bodies are clustered by support normal; each normal keeps
-//! the hull vertices of the points that bear. A kept point stays in its own manifold and collider
-//! pair, attributed to the chunk it touches.
-//!
-//! DERIVED: each normal's support polygon is preserved to within [`HULL_TOLERANCE`]. A cluster
-//! admits normals within about 20 degrees of its seed, so its members can differ by about 40; across
-//! unequal normals this is an approximation.
+//! Contacts between the same two bodies cluster by support normal; a cluster admits normals within
+//! about 20 degrees of its seed. Normal forces along one direction hold any load whose line falls
+//! inside the projected convex hull of their points, so an interior point adds no support. Each
+//! normal keeps the vertices of two such hulls, each to within [`HULL_TOLERANCE`]: that of the
+//! points that bear, and that of the points that carried load last step. A loaded point is
+//! therefore removed only when other loaded points enclose it, never for one that only nears
+//! contact. A kept point stays in its own manifold and collider pair.
 //!
 //! A group is left whole for the step when any point lands (closes faster than the rest speed),
 //! when it spans more than [`MAX_NORMALS`], or when a point it would remove overlaps deeper than
-//! the deepest kept point of its normal by more than the overlap slop: the kept corners would not
-//! correct that overlap. A removed interior point's overlap is therefore within the slop of a kept
-//! one's.
-//!
-//! Three things reduction does not preserve. A removed point's share of the solved impulses goes
-//! to the points that remain. A removed point loses its warm start, and one reselected later starts
-//! cold; a loaded preference only makes that rarer. A landing pair's blows can still move, since
-//! another pair sharing either body may be reduced and the solve couples them.
+//! the deepest kept point of its normal by more than [`ReductionStep::overlap_slop`].
 
 use core::borrow::BorrowMut;
 
@@ -56,8 +47,7 @@ pub const BEARING_GAP: Scalar = 0.002;
 /// Resolution: metres, in the length unit. A hull vertex closer than this to the segment between
 /// its kept neighbours is removed, so every point that bears lies within this of the kept outline.
 /// A vertex that carried load last step leaves only at half of it, so noise about the limit does
-/// not reselect it. MEASURED, one twelve-house run each with a rule that also kept the deepest
-/// point: piece-piece points per awake piece-tick 11.4 at 0, 7.9 at 1 cm, 7.9 at 3 cm.
+/// not reselect it.
 pub const HULL_TOLERANCE: Scalar = 0.01;
 
 /// One collider pair's manifolds, taken out for reduction with its neighbours of the same two
@@ -82,8 +72,9 @@ pub struct ReductionStep {
     /// [`PhysicsLengthUnit`], which the reduction's own `Resolution` lengths scale by.
     pub length_unit: Scalar,
     /// A removed point overlapping deeper than this beyond the deepest kept point of its normal
-    /// leaves the group whole: [`NarrowPhaseConfig::contact_tolerance`] in world units, the
-    /// engine's bound on solver jitter between bodies in continuous contact.
+    /// leaves the group whole. The caller passes [`NarrowPhaseConfig::contact_tolerance`] in world
+    /// units: the separation inside which the narrow phase reports a contact, borrowed as the
+    /// overlap reduction may leave uncorrected.
     pub overlap_slop: Scalar,
 }
 
@@ -263,7 +254,9 @@ pub fn reduce_body_pair<T: BorrowMut<PairManifolds>>(
 }
 
 /// Marks what `normal_index`'s cluster keeps: the vertices of the projected hull of the points
-/// that bear.
+/// that bear, and those of the points that carried load. The second hull is what stops a point
+/// that only nears contact from making a loaded vertex interior: the body would drop onto the
+/// newcomer, up to [`BEARING_GAP`] away, with the support it stood on gone.
 fn select(
     candidates: &mut [Candidate],
     normal_index: usize,
@@ -289,6 +282,13 @@ fn select(
 
     for i in kept_vertices(candidates, &bearing, at, tolerance) {
         candidates[i].keep = true;
+    }
+    let all = bearing.len();
+    bearing.retain(|i| candidates[*i].carried);
+    if (1..all).contains(&bearing.len()) {
+        for i in kept_vertices(candidates, &bearing, at, tolerance) {
+            candidates[i].keep = true;
+        }
     }
 }
 

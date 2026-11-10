@@ -320,6 +320,38 @@ fn a_loaded_vertex_holds_inside_the_tolerance_a_cold_one_cannot_pass() {
     );
 }
 
+/// A point that only nears contact carries nothing yet: it may widen the footprint, and must not
+/// take a loaded vertex out of it, or the solver loses the support the body stands on and the body
+/// drops onto the newcomer; the sleep rule relies on a resting piece staying at rest. Loaded
+/// points enclosed by loaded points still go. A mutant taking one hull of every bearing point
+/// removes the loaded corners; one keeping every loaded point keeps the enclosed four.
+#[test]
+fn an_unloaded_point_does_not_evict_a_loaded_vertex() {
+    let near = -0.5 * BEARING_GAP;
+    let outer = || {
+        [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
+            .into_iter()
+            .map(|(x, z)| Vec3::new(x, 0.0, z) * 2.0)
+    };
+    let mut pairs = pairs_of(
+        corners(1.0)
+            .map(carried)
+            .chain(outer().map(|at| lone(at, near))),
+    );
+    let counts = reduce_body_pair(&mut pairs, REST, step());
+    assert_eq!(counts.warm_removed, 0, "a loaded vertex was evicted");
+    assert_eq!(count(&pairs), 8, "the near points bear and stay too");
+
+    let mut pairs = pairs_of(
+        corners(1.0)
+            .map(carried)
+            .chain(outer().map(|at| carried(lone(at, 0.0)))),
+    );
+    let counts = reduce_body_pair(&mut pairs, REST, step());
+    assert_eq!(counts.warm_removed, 4, "an enclosed loaded point stayed");
+    assert!(outer().all(|at| kept_at(&pairs, at)));
+}
+
 /// A selection is a function of the contacts, never of the order the solver happened to hand
 /// them over: two collider pairs reporting one corner resolve by collider identity, so an active
 /// pair order that changes does not trade the point and lose its warm start. A mutant taking
@@ -718,6 +750,85 @@ fn a_body_held_by_its_fifth_corner_stays_up() {
         ));
     }
     stays_over_its_outline(&mut world, body, extra, 40);
+}
+
+/// A body that has come to rest on reduced contacts stays where its loaded supports hold it and
+/// falls asleep there: the game's rubble cost ends only when a pile sleeps. Four legs carry the
+/// body; four more, outside them, stop short of the base by less than [`BEARING_GAP`], so their
+/// points bear without load. A selection that lets those evict the loaded legs drops the body onto
+/// the short ones.
+#[test]
+fn a_reduced_body_rests_on_its_loaded_supports_and_sleeps() {
+    let short = 0.75 * BEARING_GAP;
+    let mut world = app();
+    floor_of(&mut world, 14);
+    let base = wide_base(&mut world);
+    // Fixture: released 2 cm up, so the landing loads the long legs before reduction selects.
+    let body = body_at(&mut world, Vec3::new(0.3, 1.52, 0.3), true, Vec3::ZERO);
+    for (reach, height) in [(1.0, 1.0), (2.0, 1.0 - 2.0 * short)] {
+        for (x, z) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+            world.world_mut().spawn((
+                ChildOf(body),
+                Collider::cuboid(0.1, height, 0.1),
+                Transform::from_xyz(x * reach, 0.0, z * reach),
+            ));
+        }
+    }
+    let seconds = |s: f32| (s / STEP_SECS) as usize;
+    let settle = seconds(1.0);
+    steps(&mut world, settle);
+    let height = |world: &App| {
+        world.world().get::<Position>(body).unwrap().0.y
+            - world.world().get::<Position>(base).unwrap().0.y
+    };
+    // The long legs' ends sit half a metre under the body's origin, the base's top half a metre
+    // over its own.
+    let sunk = 1.0 - height(&world);
+    assert!(
+        sunk < 0.5 * short,
+        "the body sank {sunk} m toward its short legs"
+    );
+    let rest = seconds(2.0 * world.world().resource::<TimeToSleep>().0);
+    steps(&mut world, rest);
+    assert!(
+        world.world().get::<Sleeping>(body).is_some(),
+        "the resting body stayed awake, {} m/s",
+        world.world().get::<LinearVelocity>(body).unwrap().length()
+    );
+    let sunk = 1.0 - height(&world);
+    assert!(sunk < 0.5 * short, "the body sank {sunk} m before it slept");
+}
+
+/// A kept point keeps its warm start from step to step, which is what lets a few corners hold a
+/// load many times the body's own weight: solved cold each step, they give way and the stack
+/// sinks. Fixture: a slab under twenty times its mass, each interface reduced to its corners.
+/// Both must sleep with the slab sunk less than a player could see. Fixture: 1 cm, the motion
+/// the contact census counts as visible.
+#[test]
+fn reduced_corners_hold_a_heavy_load_at_rest() {
+    let mut world = app();
+    floor_of(&mut world, 14);
+    let (base, body) = stack(&mut world, true, Vec3::ZERO, false);
+    let load = slab_at(
+        &mut world,
+        Vec3::new(0.3, 2.5, 0.3),
+        true,
+        Vec3::ZERO,
+        false,
+    );
+    world.world_mut().entity_mut(load).insert(Mass(20_000.0));
+    let rest = world.world().resource::<TimeToSleep>().0;
+    steps(&mut world, ((1.0 + 2.0 * rest) / STEP_SECS) as usize);
+    let at = |entity| world.world().get::<Position>(entity).unwrap().0.y;
+    // The slab's origin rests a metre over the base's: half of each one's height.
+    let sunk = 1.0 - (at(body) - at(base));
+    assert!(sunk < 0.01, "the loaded slab sank {sunk} m");
+    for entity in [body, load] {
+        assert!(
+            world.world().get::<Sleeping>(entity).is_some(),
+            "the stack stayed awake"
+        );
+    }
 }
 
 /// Two bodies resting reduced touch through pairs left with no manifold; those pairs stay in the

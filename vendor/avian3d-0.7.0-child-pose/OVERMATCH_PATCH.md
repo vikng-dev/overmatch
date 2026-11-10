@@ -270,9 +270,16 @@ Two bodies touching through many collider pairs (a broken piece's chunk hulls al
 one manifold per hull pair. `NarrowPhase::reduce_body_pair_contacts` runs after the pair update and
 before status bits are read: it groups the touching pairs of each two bodies and clusters their
 contacts by support normal; a cluster admits normals within about 20 degrees of its seed, so its
-members can differ by about 40. Each normal keeps the vertices of the projected convex hull of the
-points that bear, less those within `HULL_TOLERANCE` of the segment between their kept neighbours,
-so every bearing point lies within that tolerance of the kept outline. A point bears when its
+members can differ by about 40; across unequal normals the hull argument is an approximation. Normal
+forces along one direction hold any load whose line falls inside the projected convex hull of their
+points, so each normal keeps the vertices of the hull of the points that bear, less those within
+`HULL_TOLERANCE` of the segment between their kept neighbours: every bearing point lies within that
+tolerance of the kept outline. It keeps the hull of the points that carried load last step the same
+way, so a loaded point leaves only when other loaded points enclose it. Without that second hull a
+point up to `BEARING_GAP` open became a vertex, made a loaded corner interior and removed it, and
+the body dropped onto the newcomer (DERIVED: 2 mm of free fall ends at 0.2 m/s, above the 0.15 m/s
+rest speed; MEASURED on the local ram recipe, 35 to 200 loaded vertices a second left that way while
+its pile settled). A point bears when its
 separation, less what its closing speed covers in the physics step, is within `BEARING_GAP`, or when
 it carried load last step; a point dropped as not bearing can overlap by the end of the step only by
 what the step's change in relative velocity adds beyond that margin, and bears on the next step.
@@ -283,8 +290,10 @@ times longer in each of six runs, its piles sliding and breaking for seconds aft
 A group is left whole for the step when any point closes faster than the slower body's
 `SleepThreshold` (a landing, every press of it kept), when it spans more than `MAX_NORMALS`, or when
 a point it would remove overlaps deeper than the deepest kept point of its normal by more than the
-overlap slop, `NarrowPhaseConfig::contact_tolerance` (the engine's bound on solver jitter between
-bodies in continuous contact): the kept corners would not correct that overlap. A landing pair's
+overlap slop: the kept corners would not correct that overlap. The slop is
+`NarrowPhaseConfig::contact_tolerance`, the separation inside which the narrow phase reports a
+contact, borrowed as a length; the solver itself tolerates no overlap, so a point reinstated past the
+slop is pushed out from a cold start (MEASURED: 0 to 6 groups in a ram run of 7,000 to 35,000). A landing pair's
 blows can still move, since another pair sharing either body may be reduced and the solve couples
 them. A removed point's share of the solved impulses goes to the points that remain.
 
