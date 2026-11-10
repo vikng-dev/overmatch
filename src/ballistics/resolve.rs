@@ -775,12 +775,16 @@ fn next_starts(
 /// every collider whose bounds meet it, because a collider tree's node bounds hold its leaves'
 /// (enlarged) bounds and a leaf's hold its colliders' [`ColliderAabb`]s (avian's
 /// `EnlargedAabb::update` keeps the enlarged bounds around the tight ones). So each direction reads
-/// exactly the colliders, in the order, that a query of its own box returns.
+/// exactly the colliders, in the order, that a query of its own box returns. A throw from inside a
+/// tank's box reads that tank's colliders alone, the same way ([`Self::of_box`]).
 pub(crate) struct FieldReach {
     /// Armour colliders (a [`ProjectileMarchWorld::armour`] ancestor) the throw admits.
     hard: Vec<Reached>,
     /// Witness colliders the throw admits, with their witness node.
     witnesses: Vec<(Entity, Entity, ColliderAabb)>,
+    /// The box of the tank the throw was made inside ([`Self::of_box`]), where its directions
+    /// end; `None` for a throw in the open, whose directions end at `union`.
+    bound: Option<TankBox>,
     /// The union of the pose bounds of the hard colliders within [`FIELD_REACH`] of the throw
     /// point ([`horizon`]), read on first use: it does not depend on the direction.
     union: OnceCell<(Vec3, Vec3)>,
@@ -823,6 +827,50 @@ impl Reached {
     }
 }
 
+/// The game's damage model: a tank's box, the bounds of its armour volumes in its body's frame at
+/// the field's moment ([`super::ProjectileMarchWorld::tank_box`]), the box the pen cam ends a
+/// direction that meets no hard body at (its picture's horizon, `damage_cam::pen_cam::picture`).
+/// A field thrown from inside it ends at it ([`FieldReach::of_box`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TankBox {
+    pub(super) tank: Entity,
+    pub(super) min: Vec3,
+    pub(super) max: Vec3,
+    pub(super) body: super::motion::Pose,
+}
+
+impl TankBox {
+    pub(crate) fn tank(&self) -> Entity {
+        self.tank
+    }
+
+    /// Whether the world point `point` lies in the box, its faces included.
+    pub(crate) fn holds(&self, point: Vec3) -> bool {
+        let local = self.body.local(point);
+        local.cmpge(self.min).all() && local.cmple(self.max).all()
+    }
+
+    /// Metres from `at`, a point it holds, along `dir` to where the line leaves the box.
+    fn exit(&self, at: Vec3, dir: Dir3) -> f32 {
+        let (from, along) = (
+            self.body.local(at),
+            self.body.rotation.inverse() * Vec3::from(dir),
+        );
+        let mut exit = f32::INFINITY;
+        for i in 0..3 {
+            if along[i] != 0.0 {
+                let face = if along[i] > 0.0 {
+                    self.max[i]
+                } else {
+                    self.min[i]
+                };
+                exit = exit.min((face - from[i]) / along[i]);
+            }
+        }
+        exit.max(0.0)
+    }
+}
+
 impl FieldReach {
     /// The reach of a field thrown from `at`. Every box a direction queries spans `at` to `at +
     /// axis × L` with `L ≤` [`FIELD_REACH`] (the presence corridor's, or the witness pass's to a
@@ -852,48 +900,94 @@ impl FieldReach {
         region: ColliderAabb,
     ) -> Self {
         let world = context.world;
-        let (mut hard, mut witnesses) = (Vec::new(), Vec::new());
+        let mut reach = Self::empty(None);
         world.spatial.aabb_intersections_with_aabb_callback(
             ColliderAabb::from_min_max(
                 region.min - Vec3::splat(world.motion_padding()),
                 region.max + Vec3::splat(world.motion_padding()),
             ),
             |entity| {
-                let &broad = world.aabbs.get(entity).expect(
-                    "a collider the broad phase names carries the ColliderAabb its Collider \
-                     requires (avian3d 0.7)",
-                );
-                let broad = ColliderAabb::from_min_max(
-                    broad.min - Vec3::splat(world.motion_padding()),
-                    broad.max + Vec3::splat(world.motion_padding()),
-                );
-                if let Some((node, _)) = world.armour(entity) {
-                    if admit(entity) {
-                        hard.push(Reached {
-                            node,
-                            collider: entity,
-                            broad,
-                            bounds: OnceCell::new(),
-                        });
-                    }
-                } else if world.witness_surfaces.contains(entity)
-                    && admit(entity)
-                    && let Some((node, _)) =
-                        super::hit_ancestor(entity, &world.witnesses, &world.parents)
-                {
-                    witnesses.push((node, entity, broad));
-                }
+                reach.take(context, admit, entity);
                 true
             },
         );
-        hard.sort_unstable_by_key(|reached| (reached.node, reached.collider));
-        witnesses.sort_unstable_by_key(|&(node, collider, _)| (node, collider));
+        reach.sorted()
+    }
+
+    /// The reach of a field thrown from inside `bounds`: the colliders of its tank's body that
+    /// `admit` keeps, and nothing else.
+    ///
+    /// The game's damage model: a field thrown from inside a tank's box ends at that box. Its
+    /// armour shadows its HP boxes as anywhere; a direction that leaves the armour without a stop
+    /// ends where it leaves the box ([`horizon`]) and doses nothing beyond it, so no other body,
+    /// no construction and no other tank is loaded. What a field does past the box is a law the
+    /// game does not have yet; it would enter here, as further colliders admitted.
+    pub(crate) fn of_box(
+        context: &ResolveContext<'_, '_, '_>,
+        admit: &dyn Fn(Entity) -> bool,
+        bounds: TankBox,
+    ) -> Self {
+        let colliders = context
+            .world
+            .body_colliders
+            .get(bounds.tank)
+            .expect("a tank box is built from its body's colliders");
+        let mut reach = Self::empty(Some(bounds));
+        for entity in colliders.iter() {
+            reach.take(context, admit, entity);
+        }
+        reach.sorted()
+    }
+
+    fn empty(bound: Option<TankBox>) -> Self {
         Self {
-            hard,
-            witnesses,
+            hard: Vec::new(),
+            witnesses: Vec::new(),
+            bound,
             union: OnceCell::new(),
             scratch: RefCell::default(),
         }
+    }
+
+    /// Keep the collider `entity` if `admit` does and it is armour or a witness's.
+    fn take(
+        &mut self,
+        context: &ResolveContext<'_, '_, '_>,
+        admit: &dyn Fn(Entity) -> bool,
+        entity: Entity,
+    ) {
+        let world = context.world;
+        let &broad = world.aabbs.get(entity).expect(
+            "a collider the broad phase or a body names carries the ColliderAabb its Collider \
+             requires (avian3d 0.7)",
+        );
+        let broad = ColliderAabb::from_min_max(
+            broad.min - Vec3::splat(world.motion_padding()),
+            broad.max + Vec3::splat(world.motion_padding()),
+        );
+        if let Some((node, _)) = world.armour(entity) {
+            if admit(entity) {
+                self.hard.push(Reached {
+                    node,
+                    collider: entity,
+                    broad,
+                    bounds: OnceCell::new(),
+                });
+            }
+        } else if world.witness_surfaces.contains(entity)
+            && admit(entity)
+            && let Some((node, _)) = super::hit_ancestor(entity, &world.witnesses, &world.parents)
+        {
+            self.witnesses.push((node, entity, broad));
+        }
+    }
+
+    fn sorted(mut self) -> Self {
+        self.hard
+            .sort_unstable_by_key(|reached| (reached.node, reached.collider));
+        self.witnesses
+            .sort_unstable_by_key(|&(node, collider, _)| (node, collider));
+        self
     }
 
     pub(crate) fn hard_count(&self) -> usize {
@@ -1246,7 +1340,9 @@ pub(crate) fn field_direction(
     let ahead = if reach.is_finite() {
         (reach - start) as f32
     } else {
-        FIELD_REACH
+        field
+            .bound
+            .map_or(FIELD_REACH, |bounds| bounds.exit(at, dir))
     };
     for (witness, t) in super::wound::entries_in(context, field, at, dir, ahead)? {
         let t = start + t;
@@ -1262,11 +1358,15 @@ pub(crate) fn field_direction(
 }
 
 /// The reached material horizon along a field direction thrown from `at`: where the line leaves the
-/// union of the bounds of every hard collider the throw admits within [`FIELD_REACH`] of `at`
-/// (its [`FieldReach`], built for `at`); `at` itself where there is none or the union lies behind
-/// it. Witnesses take no part. The union does not depend on the direction, so a throw reads it
-/// once.
+/// box of the tank it was thrown inside ([`FieldReach::of_box`]); for a throw in the open, where it
+/// leaves the union of the bounds of every hard collider the throw admits within [`FIELD_REACH`]
+/// of `at` (its [`FieldReach`], built for `at`), or `at` itself where there is none or the union
+/// lies behind it. Witnesses take no part. The union does not depend on the direction, so a throw
+/// reads it once.
 fn horizon(context: &ResolveContext<'_, '_, '_>, field: &FieldReach, at: Vec3, dir: Dir3) -> Vec3 {
+    if let Some(bounds) = field.bound {
+        return at + Vec3::from(dir) * bounds.exit(at, dir);
+    }
     let (lo, hi) = *field.union.get_or_init(|| {
         let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
         let cube = collect::swept_aabb(at, Vec3::from(dir), 0.0, FIELD_REACH);

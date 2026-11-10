@@ -237,6 +237,7 @@ fn a_shot_met_a_tank_by_its_log() {
         sideways: 0.0,
         nose: 0.0,
         tank,
+        inside: None,
     };
     let wound = ArmourMark::Wound {
         incoming: Vec3::NEG_Z,

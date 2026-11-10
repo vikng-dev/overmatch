@@ -1905,6 +1905,233 @@ fn two_subquantum_fields_reach_one_pool_unit_together() {
     assert_eq!(health.capacity() - health.held(), 1);
 }
 
+/// Fixture data: a tank's yaw (rad), and its box, the bounds of its armour in its body's frame.
+const TANK_YAW: f32 = 0.5;
+const TANK_BOX: (Vec3, Vec3) = (Vec3::new(-1.0, -1.2, -1.0), Vec3::new(1.0, 1.2, 1.0));
+
+/// A tank's volumes as the field walks them, and an HP box of another body beside it.
+struct BoxedTank {
+    body: Entity,
+    floor: Entity,
+    /// Its own HP boxes: one in the open from the floor's centre, one behind an armour plate.
+    open: Entity,
+    shadowed: Entity,
+    other: Entity,
+}
+
+/// [`BoxedTank`] (fixture data): a static body at the origin yawed [`TANK_YAW`], its armour a
+/// floor and a roof 2 m square and 0.2 m thick spanning [`TANK_BOX`], two 0.4 m HP boxes 0.6 m
+/// either side of its centre and 0.5 m above the floor, a plate standing between the floor's
+/// centre and the second, and another body's HP box 1.5 m beyond the tank's side.
+fn boxed_tank() -> (App, BoxedTank) {
+    let turn = Quat::from_rotation_y(TANK_YAW);
+    let mut tank = None;
+    let (app, _) = field_world(|app| {
+        let body = app
+            .world_mut()
+            .spawn((Transform::from_rotation(turn), RigidBody::Static))
+            .id();
+        let mut part = |size: Vec3, centre: Vec3, factor: f32, hp: bool| {
+            let mut part = app.world_mut().spawn((
+                Transform::from_translation(centre),
+                ChildOf(body),
+                box_trimesh(size),
+                CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
+                BallisticVolume {
+                    material: walk::VolumeMaterial::fixture(factor),
+                    substance: "fixture".to_string(),
+                },
+                crate::damage::VolumeOf(body),
+            ));
+            if hp {
+                part.insert(ComponentHealth::full(FIELD_HP));
+            }
+            part.id()
+        };
+        let slab = Vec3::new(2.0, 0.2, 2.0);
+        let floor = part(slab, Vec3::new(0.0, -1.1, 0.0), STEEL, false);
+        part(slab, Vec3::new(0.0, 1.1, 0.0), STEEL, false);
+        let crew = Vec3::splat(0.4);
+        let open = part(crew, Vec3::new(-0.6, -0.5, 0.0), 0.0, true);
+        let shadowed = part(crew, Vec3::new(0.6, -0.5, 0.0), 0.0, true);
+        part(
+            Vec3::new(0.05, 0.8, 0.8),
+            Vec3::new(0.3, -0.5, 0.0),
+            STEEL,
+            false,
+        );
+        let other = volume(
+            app,
+            Vec3::new(1.0, 2.4, 2.0),
+            Transform::from_translation(turn * Vec3::new(3.0, 0.0, 0.0)).with_rotation(turn),
+            0.0,
+            Some(FIELD_HP),
+        );
+        tank = Some(BoxedTank {
+            body,
+            floor,
+            open,
+            shadowed,
+            other,
+        });
+        Vec::new()
+    });
+    (app, tank.expect("the fixture builds its tank"))
+}
+
+/// A whole-sphere cone of [`FIELD_N`] directions thrown from `origin` (tank frame) of the
+/// [`boxed_tank`], leaving its floor, as thrown ([`throw_spall_cone`]), and each of its
+/// directions walked in the open ([`FieldReach::of_throw`]), the walk every throw took before a
+/// throw inside a tank's box ended at it.
+fn boxed_throw(
+    app: &mut App,
+    tank: &BoxedTank,
+    origin: Vec3,
+) -> (crate::ballistics::SpallCone, Vec<FieldRay>) {
+    use crate::ballistics::{ShotDose, SpallMarks};
+    app.insert_resource(crate::ballistics::spall_cone::SpallLaw(
+        ConeShape::new(AxisRule::ExitDirection, FIELD_N).unwrap(),
+    ));
+    let turn = Quat::from_rotation_y(TANK_YAW);
+    let source = SpallSource {
+        t: 0.0,
+        position: turn * origin,
+        face: None,
+        direction: turn * Vec3::X,
+        exited: vec![tank.floor],
+        plate_met: 0.0,
+        emitted: 10.0,
+        debris_ratio: 0.0,
+        strength_ratio: 1.0,
+        exit_speed: 0.0,
+    };
+    app.world_mut()
+        .run_system_once(
+            move |world: ProjectileMarchWorld,
+                  colliders: Colliders,
+                  health: Query<&mut ComponentHealth>| {
+                let context = ResolveContext {
+                    world: &world,
+                    colliders: &colliders,
+                    laws: WalkLaws::default(),
+                };
+                let is_box = |volume: Entity| health.contains(volume);
+                let (mut spall, mut dose) = (SpallMarks::default(), ShotDose::default());
+                assert!(crate::ballistics::throw_spall_cone(
+                    &mut spall, &mut dose, &source, &context, &is_box
+                ));
+                let cone = spall.cones.pop().expect("the cone was thrown");
+                let within = |collider: Entity| world.volume_of(collider).is_some();
+                let open = FieldReach::of_throw(&context, &within, source.position);
+                let weight = 1.0 / cone.rays.len() as f32;
+                let walked = cone
+                    .rays
+                    .iter()
+                    .map(|ray| {
+                        field_direction(
+                            &context,
+                            &open,
+                            &is_box,
+                            &source.exited,
+                            source.position,
+                            ray.direction,
+                            ray.strength,
+                            weight,
+                        )
+                        .expect("a fixture direction walks")
+                    })
+                    .collect();
+                (cone, walked)
+            },
+        )
+        .expect("the field system runs")
+}
+
+/// The game's damage model: a field thrown from inside a tank's box ends at that box. Every
+/// direction that stops on the tank's armour inside stops and doses exactly as the open walk's
+/// (armour shadows the tank's HP boxes as anywhere: the plate keeps the second box from every
+/// direction); every other direction ends where its line leaves the box, the point the pen cam
+/// draws a direction that meets no hard body to, dosing nothing beyond it, so another body's HP box
+/// the open walk doses takes nothing. A walk that reads past the box, ends an open direction
+/// elsewhere or moves a stop inside fails it; construction relies on the cone naming the tank
+/// (`construction::breakage::read_shell`).
+#[test]
+fn a_field_thrown_inside_a_tank_box_ends_at_the_box() {
+    let (mut app, tank) = boxed_tank();
+    let origin = Vec3::new(0.0, -1.0, 0.0);
+    let (cone, open) = boxed_throw(&mut app, &tank, origin);
+    assert_eq!(cone.inside, Some(tank.body));
+    let turn = Quat::from_rotation_y(TANK_YAW);
+    let (lo, hi) = TANK_BOX;
+    let dosed = |doses: &[(Entity, f32)], target: Entity| dose_to(doses, target);
+    let (mut stopped, mut ended, mut beyond) = (0, 0, 0.0);
+    for (ray, walked) in cone.rays.iter().zip(&open) {
+        let doses: Vec<(Entity, f32)> = walked
+            .doses
+            .iter()
+            .map(|dose| (dose.address, dose.amount))
+            .collect();
+        beyond += dosed(&doses, tank.other);
+        assert_eq!(dosed(&ray.doses, tank.other), 0.0, "{:?}", ray.direction);
+        assert_eq!(dosed(&ray.doses, tank.shadowed), 0.0, "{:?}", ray.direction);
+        let local = turn.inverse() * walked.end;
+        if local.cmpgt(lo + 1.0e-3).all() && local.cmplt(hi - 1.0e-3).all() {
+            assert_eq!(ray.end, walked.end, "a stop inside the box moved");
+            assert_eq!(ray.doses, doses, "a stop inside the box doses differently");
+            stopped += 1;
+        } else {
+            let along = turn.inverse() * Vec3::from(ray.direction);
+            let exit = (0..3)
+                .filter(|&i| along[i] != 0.0)
+                .map(|i| ((if along[i] > 0.0 { hi[i] } else { lo[i] }) - origin[i]) / along[i])
+                .fold(f32::INFINITY, f32::min);
+            let want = turn * (origin + along * exit);
+            assert!(
+                ray.end.distance(want) < 1.0e-4,
+                "{:?} ends at {} against the box's {want}",
+                ray.direction,
+                ray.end
+            );
+            ended += 1;
+        }
+    }
+    let open_dose: f32 = cone
+        .rays
+        .iter()
+        .map(|ray| dosed(&ray.doses, tank.open))
+        .sum();
+    assert!(
+        stopped > 0 && ended > 0 && beyond > 0.0 && open_dose > 0.0,
+        "the fixture stops directions inside ({stopped}), ends others at the box ({ended}), and \
+         the open walk doses the other body ({beyond}) and the open box ({open_dose})"
+    );
+}
+
+/// The game's damage model: a field thrown outside every tank's box walks the open as before,
+/// ray for ray. A throw that takes a tank's box from outside it fails it. Fixture: the
+/// [`boxed_tank`]'s cone, its origin moved 0.8 m out of the box's side.
+#[test]
+fn a_field_thrown_outside_a_tank_box_walks_the_open() {
+    let (mut app, tank) = boxed_tank();
+    let (cone, open) = boxed_throw(&mut app, &tank, Vec3::new(1.8, -1.0, 0.0));
+    assert_eq!(cone.inside, None);
+    for (ray, walked) in cone.rays.iter().zip(&open) {
+        assert_eq!(ray.end, walked.end);
+        let doses: Vec<(Entity, f32)> = walked
+            .doses
+            .iter()
+            .map(|dose| (dose.address, dose.amount))
+            .collect();
+        assert_eq!(ray.doses, doses);
+    }
+    assert!(
+        cone.rays
+            .iter()
+            .any(|ray| dose_to(&ray.doses, tank.other) > 0.0),
+        "the fixture's other body lies in the cone"
+    );
+}
+
 /// The game's damage model records every nonzero cone's receiver dose, including below the
 /// pool quantum. Environment energy and later shot contributions rely on the same field walk.
 /// Fixture: thin soft slabs and a steel slab, with an HP-bearing receiver below every source.

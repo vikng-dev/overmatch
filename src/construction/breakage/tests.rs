@@ -2425,6 +2425,7 @@ fn a_burst_touching_a_face_crushes_it_from_its_filler_center() {
                 sideways: burst.sideways_speed,
                 nose: burst.nose.mass,
                 tank: None,
+                inside: None,
             }],
             ..default()
         })
@@ -2447,6 +2448,100 @@ fn a_burst_touching_a_face_crushes_it_from_its_filler_center() {
         "a contacting burst crushes the face above its material threshold"
     );
     app.world_mut().despawn(shell);
+}
+
+/// A BURST OR CONE THROWN INSIDE A TANK'S BOX LOADS NO CONSTRUCTION (the game's damage model): its
+/// blast is never cast and no construction takes its rays, so nothing outside the box is loaded
+/// (`ballistics::resolve::FieldReach::of_box`). The same burst and cone thrown in the open queue
+/// the blast, the casing's rays and the cone's. A mutant reading the blast or a ray of a field the
+/// march marked inside a tank fails it. The round and the ray ends are fixture data.
+#[test]
+fn a_burst_or_cone_inside_a_tank_box_loads_no_construction() {
+    use crate::ballistics::spall_cone::FieldDescriptor;
+    use crate::ballistics::{BurstField, SpallCone, SpallMarks, SpallRay};
+    let (mut app, _) = composed(false);
+    let burst = crate::tank::WeaponRound::resolve("88mm_HE")
+        .unwrap()
+        .round
+        .burst
+        .unwrap();
+    let tank = app.world_mut().spawn_empty().id();
+    let ray = SpallRay {
+        direction: Dir3::X,
+        end: Vec3::X,
+        strength: 1.0,
+        doses: Vec::new(),
+    };
+    for inside in [Some(tank), None] {
+        let shell = app
+            .world_mut()
+            .spawn((
+                PenetrationMarks {
+                    log: vec![ArmourMark::Burst {
+                        at: Vec3::ZERO,
+                        field_origin: Vec3::ZERO,
+                        speed: 0.0,
+                        after: 0.0,
+                        sideways: burst.sideways_speed,
+                        nose: burst.nose.mass,
+                        tank: Some(tank),
+                        inside,
+                    }],
+                    ..default()
+                },
+                SpallMarks {
+                    cones: vec![SpallCone {
+                        exited: Vec::new(),
+                        inside,
+                        origin: Vec3::ZERO,
+                        axis: Dir3::X,
+                        field: FieldDescriptor::ball(0.0),
+                        strength: 1.0,
+                        rays: vec![ray.clone()],
+                    }],
+                    burst: Some(BurstField {
+                        origin: Vec3::ZERO,
+                        axis: Dir3::X,
+                        field: FieldDescriptor::ball(0.0),
+                        strength: 1.0,
+                        rays: vec![ray.clone()],
+                    }),
+                },
+            ))
+            .id();
+        app.world_mut().trigger(ShellMarched {
+            shell,
+            marks_from: 0,
+            cones_from: 0,
+            lines: Vec::new(),
+            burst: Some(burst),
+        });
+        let queued = std::mem::take(&mut app.world_mut().resource_mut::<Queue>().0);
+        let (blasts, rays) = (
+            queued
+                .iter()
+                .filter(|deposit| deposit.blast.is_some())
+                .count(),
+            queued
+                .iter()
+                .map(|deposit| deposit.rays.len())
+                .sum::<usize>(),
+        );
+        if inside.is_some() {
+            assert_eq!(
+                (blasts, rays),
+                (0, 0),
+                "a field inside a tank's box loads nothing"
+            );
+        } else {
+            assert_eq!(
+                (blasts, rays),
+                (1, 2),
+                "the blast, the casing's ray and the cone's"
+            );
+        }
+        app.world_mut().despawn(shell);
+    }
 }
 
 /// A LAUNCH SUMS THE MASS BAKED AT LOAD AS THE CHUNKS' OWN HULLS WOULD GIVE IT. A collapse must
@@ -3068,6 +3163,7 @@ fn a_wall_crushes_with_the_energy_a_cone_carries() {
         .collect();
     let cone = SpallCone {
         exited: Vec::new(),
+        inside: None,
         origin: Vec3::ZERO,
         axis: Dir3::NEG_Z,
         field: spread.field(),
@@ -3877,6 +3973,7 @@ fn construction_refuses_a_recorded_cone_without_its_direction_set() {
             crate::ballistics::SpallMarks {
                 cones: vec![crate::ballistics::SpallCone {
                     exited: Vec::new(),
+                    inside: None,
                     origin: Vec3::ZERO,
                     axis: Dir3::Z,
                     field: crate::ballistics::spall_cone::FieldDescriptor::ball(0.0),

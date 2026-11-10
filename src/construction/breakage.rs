@@ -1168,14 +1168,25 @@ fn read_shell(
         .log
         .get(marched.marks_from..)
         .expect("ShellMarched's mark cursor is its log's length before the step; logs only grow");
+    // The game's damage model: a field or burst thrown from inside a tank's box loads nothing
+    // outside that box (`ballistics::resolve::FieldReach::of_box`), so a construction takes none
+    // of its rays and no blast.
+    let mut in_open = true;
     for mark in marks {
-        if let ArmourMark::Burst { field_origin, .. } = mark
+        if let ArmourMark::Burst {
+            field_origin,
+            inside,
+            ..
+        } = mark
             && let Some(burst) = marched.burst
         {
-            deposit.blast = Some((
-                *field_origin,
-                Blast::of(burst.blast, burst.charge_radius, burst.products_momentum()),
-            ));
+            in_open = inside.is_none();
+            deposit.blast = in_open.then(|| {
+                (
+                    *field_origin,
+                    Blast::of(burst.blast, burst.charge_radius, burst.products_momentum()),
+                )
+            });
         }
     }
     // The game's damage model exposes only lines whose path moments fell in this tick. A
@@ -1185,7 +1196,7 @@ fn read_shell(
         let cones = spall.cones.get(marched.cones_from..).expect(
             "ShellMarched's cone cursor is its cone list's length before the step; lists only grow",
         );
-        for cone in cones {
+        for cone in cones.iter().filter(|cone| cone.inside.is_none()) {
             let share = cone.ray_share();
             deposit.rays.extend(cone.rays.iter().map(|ray| RayDeposit {
                 end: ray.end,
@@ -1197,7 +1208,7 @@ fn read_shell(
             }));
         }
         // A source carrying no field energy emits no recorded field.
-        if let (Some(burst), Some(field)) = (marched.burst, spall.burst.as_ref()) {
+        if let (Some(burst), Some(field), true) = (marched.burst, spall.burst.as_ref(), in_open) {
             deposit.rays.extend(RayDeposit::casing(field, &burst));
         }
     }
@@ -2190,7 +2201,8 @@ fn reduce_geometry(
 /// Each chunk and body collider takes the share of its rays' cones its silhouette intercepts
 /// ([`fracture::intercepted`]): a chunk's from its faces, a collider's from its bounds, the
 /// silhouette of the box that holds it. A collider holding `origin` shades nothing and takes
-/// nothing: what a burst inside a body does to it is no law here.
+/// nothing. A burst inside a tank's box loads nothing outside that box, so it is never cast
+/// ([`read_shell`]).
 fn cast_blast(
     p: &mut DepositParam,
     stops: Vec<Option<BlastStop>>,
