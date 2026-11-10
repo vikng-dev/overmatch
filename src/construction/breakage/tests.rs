@@ -6178,7 +6178,7 @@ fn collider_batch_counts_rehomed_entities_and_excludes_fresh_shapes() {
 /// perturbed poses prevent one float trajectory from being the contract.
 #[test]
 fn a_visually_resting_shipped_pile_sleeps_within_the_rest_window() {
-    // Fixture: sub-pixel observation resolution, a one-ULP displacement, and a small yaw.
+    // Fixture: 1 cm hull-motion resolution, a one-ULP displacement, and a small yaw.
     let visible_m = 0.01;
     let manifest = crate::map::load(&crate::assets::asset_root());
     let grid = crate::terrain_grid::grid_from_png(
