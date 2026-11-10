@@ -104,10 +104,6 @@ pub(crate) fn patches<O: TerrainOracle>(
         .iter()
         .flat_map(|hit| hit.faces.iter().map(move |face| (hit.piece, face)));
     let affected = convex::raised_faces(faces, strip, slab.len, pen, travel);
-    pieces.count(
-        crate::cost::stages::Work::BeltPartitionFaces,
-        affected.len(),
-    );
     let field_patch = SupportPatch {
         origin: slab.origin + slab.lat * field_offset,
         len: slab.len,
@@ -121,6 +117,10 @@ pub(crate) fn patches<O: TerrainOracle>(
     let patches = if affected.is_empty() {
         std::slice::from_ref(&field_patch)
     } else {
+        pieces.count(
+            crate::cost::stages::Work::BeltPartitionFaces,
+            affected.len(),
+        );
         split = convex::patches(slab, strip, field_offset, pen, travel, &affected, pieces);
         &split
     };

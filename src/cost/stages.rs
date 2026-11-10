@@ -93,6 +93,7 @@ pub(crate) struct Stages(
     Arc<[Mutex<BeltReaders>; DETAIL_COUNT]>,
 );
 
+// WORK_COUNT exceeds the standard library's array Default implementations (lengths 0..=32).
 impl Default for Stages {
     fn default() -> Self {
         Self(

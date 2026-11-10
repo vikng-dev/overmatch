@@ -3720,6 +3720,8 @@ fn loose_pieces_priced_per_tick() {
 }
 
 #[cfg(feature = "bitprobe")]
+mod belt_cells;
+#[cfg(feature = "bitprobe")]
 mod boundary;
 mod contact_account;
 #[cfg(feature = "bitprobe")]

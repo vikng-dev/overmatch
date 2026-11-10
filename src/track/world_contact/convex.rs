@@ -1,6 +1,17 @@
 //! Convex entry faces and their exact projected coverage in a belt element's frame.
 //! Coordinates are `(along, lateral, 1)`; depth planes map them to metres inward from the
-//! resting face. Only faces reached from the probe origin enter the support envelope.
+//! resting face. Each triangle supplies its own plane; only faces reached from the probe origin
+//! enter the support envelope.
+//!
+//! DERIVED in exact arithmetic: F entry faces give at most L = 5F + F(F+1)/2 lines per half
+//! (coverage/envelope boundaries and pairwise depth crossings), hence at most 1 + L(L+1)/2
+//! arrangement regions. Winning-area rejection does not give a linear cell bound or bound F;
+//! retained seams and floating-point slivers remain, and there is no runtime cap. Each face
+//! visits every existing cell because its depth may replace that cell's current owner.
+//! MEASURED adversarial overlap of 512 unscaled shipped chunks under one link: 16,227 cells
+//! with solid coverage, 65 with loose-piece shoe shadows, across both halves of one column.
+//! The pile is an intersecting partition stress input, not a settled physical packing. See
+//! `.agents/scratch/belt-cells.md` for the inputs, counts and remaining root fix.
 
 use super::{SupportPatch, sample_halves};
 use crate::track::rubble::{RubbleBodies, Slab};
@@ -12,52 +23,6 @@ pub(crate) struct ClippedFace {
     pub(crate) depth: Vec3,
     pub(crate) normal: Vec3,
     planes: Vec<Vec3>,
-}
-
-/// A convex boundary polygon and its outward unit normal at the tick-start world pose.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct BoundaryFace {
-    pub(crate) polygon: Vec<Vec3>,
-    pub(crate) normal: Vec3,
-}
-
-/// Parry 0.27.0: `Cuboid::support_face` returns a quad; `ConvexPolyhedron::faces` and
-/// `vertices_adj_to_face` retain the complete polygon, including faces with more than four edges.
-/// The manifold's `local_support_feature` truncates hull faces to four vertices and cannot be used.
-pub(crate) fn boundary_faces(
-    collider: &avian3d::prelude::Collider,
-    position: Vec3,
-    rotation: Quat,
-) -> Vec<BoundaryFace> {
-    let shape = collider.shape_scaled();
-    let world = |p| position + rotation * p;
-    if let Some(cuboid) = shape.as_cuboid() {
-        [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z]
-            .into_iter()
-            .map(|normal| BoundaryFace {
-                polygon: cuboid.support_face(normal).vertices.map(world).into(),
-                normal: rotation * normal,
-            })
-            .collect()
-    } else if let Some(hull) = shape.as_convex_polyhedron() {
-        let points: Vec<_> = hull.points().iter().copied().map(world).collect();
-        hull.faces()
-            .iter()
-            .map(|face| {
-                let start = face.first_vertex_or_edge as usize;
-                let end = start + face.num_vertices_or_edges as usize;
-                BoundaryFace {
-                    polygon: hull.vertices_adj_to_face()[start..end]
-                        .iter()
-                        .map(|&i| points[i as usize])
-                        .collect(),
-                    normal: rotation * face.normal,
-                }
-            })
-            .collect()
-    } else {
-        panic!("belt support shapes are boxes or convex polyhedra; fix the collider constructor");
-    }
 }
 
 /// Keep the nonnegative side of an affine half-plane. Homogeneous footprint coordinates keep
@@ -150,35 +115,34 @@ impl ClippedFace {
     }
 }
 
-pub(crate) fn clip_faces(boundary: &[BoundaryFace], slab: &Slab) -> Vec<ClippedFace> {
+pub(crate) fn clip_faces(triangles: &[[Vec3; 3]], slab: &Slab) -> Vec<ClippedFace> {
     let mut faces = Vec::new();
-    for face in boundary {
-        let normal = face.normal;
-        let radial = normal.dot(slab.out);
+    for &[a, b, c] in triangles {
+        let cross = (b - a).cross(c - a);
+        let radial = cross.dot(slab.out);
         if radial >= 0.0 {
             continue; // Back faces and grazing faces cannot be entered along this probe direction.
         }
+        let normal = cross.normalize();
         let depth = Vec3::new(
-            normal.dot(slab.axis) / radial,
-            normal.dot(slab.lat) / radial,
-            slab.face - normal.dot(face.polygon[0] - slab.origin) / radial,
+            cross.dot(slab.axis) / radial,
+            cross.dot(slab.lat) / radial,
+            slab.face - cross.dot(a - slab.origin) / radial,
         );
         assert!(
             normal.is_finite() && depth.is_finite(),
             "a finite convex entry face must define a finite unit normal and depth plane"
         );
-        let mut polygon: Vec<_> = face
-            .polygon
-            .iter()
+        let mut polygon: Vec<_> = [a, b, c]
             .map(|p| {
-                let r = *p - slab.origin;
+                let r = p - slab.origin;
                 Vec3::new(r.dot(slab.axis), r.dot(slab.lat), 1.0)
             })
-            .collect();
+            .into();
         if signed_area(&polygon) < 0.0 {
             polygon.reverse();
         }
-        // Original face edges remain valid half-planes even when clipping creates nearly
+        // Original triangle edges remain valid half-planes even when clipping creates nearly
         // coincident vertices. Reconstructing edges from that polygon can cut away real area.
         let mut planes: Vec<_> = polygon
             .iter()
@@ -362,8 +326,7 @@ fn partition<'a>(
         let depth = face.depth + free;
         let mut next = Vec::new();
         for cell in cells {
-            // A face may replace only its covered, deeper intersection. Its infinite boundary
-            // lines must not subdivide cells outside that intersection: those retain one owner.
+            // Cells outside the face's covered, deeper region retain one polygon and owner.
             let winning = face
                 .planes
                 .iter()
@@ -467,13 +430,16 @@ pub(super) fn patches(
 mod tests {
     use super::*;
 
-    fn triangle_boundary(triangles: &[[Vec3; 3]]) -> Vec<BoundaryFace> {
-        triangles
-            .iter()
-            .map(|&[a, b, c]| BoundaryFace {
-                polygon: vec![a, b, c],
-                normal: (b - a).cross(c - a).normalize(),
-            })
+    fn triangles(collider: &avian3d::prelude::Collider, rotation: Quat) -> Vec<[Vec3; 3]> {
+        let shape = collider.shape_scaled();
+        let (points, indices) = if let Some(cuboid) = shape.as_cuboid() {
+            cuboid.to_trimesh()
+        } else {
+            shape.as_convex_polyhedron().unwrap().to_trimesh()
+        };
+        indices
+            .into_iter()
+            .map(|tri| tri.map(|i| rotation * points[i as usize]))
             .collect()
     }
 
@@ -515,19 +481,16 @@ mod tests {
         )
     }
 
-    fn triangulate(boundary: &[BoundaryFace], offset: usize) -> Vec<BoundaryFace> {
+    fn triangulate(boundary: &[Vec<Vec3>], offset: usize) -> Vec<[Vec3; 3]> {
         boundary
             .iter()
             .flat_map(|face| {
-                let mut points = face.polygon.clone();
+                let mut points = face.clone();
                 let count = points.len();
                 points.rotate_left(offset % count);
                 points[1..]
                     .windows(2)
-                    .map(|edge| BoundaryFace {
-                        polygon: vec![points[0], edge[0], edge[1]],
-                        normal: face.normal,
-                    })
+                    .map(|edge| [points[0], edge[0], edge[1]])
                     .collect::<Vec<_>>()
             })
             .collect()
@@ -570,44 +533,54 @@ mod tests {
         let (mut slab, _, _) = partition_fixture(false);
         slab.len = 2.0;
         slab.lateral = (0.0, 1.0);
-        let face = BoundaryFace {
-            polygon: vec![
-                Vec3::new(-2.0, 0.25, 0.5),
-                Vec3::new(-1.6, 0.25, 0.5),
-                Vec3::new(-1.8, 0.75, 0.5),
-            ],
-            normal: Vec3::Z,
-        };
+        let face = [
+            Vec3::new(-2.0, 0.25, 0.5),
+            Vec3::new(-1.6, 0.25, 0.5),
+            Vec3::new(-1.8, 0.75, 0.5),
+        ];
         let faces = clip_faces(&[face], &slab);
         let refs: Vec<_> = faces.iter().map(|f| (0, f)).collect();
         let cells = partition(1.0, 2.0, (0.0, 1.0), Vec3::ZERO, Vec3::Z, &refs);
         assert_eq!(cells.len(), 1);
     }
 
-    /// Belt coverage needs every polygon vertex; Parry's manifold feature truncates at four.
+    /// Suspension depth belongs to each triangle, including adjacent facets within Parry's
+    /// face-merge tolerance. A shared normal would move the second facet's interior sample.
     #[test]
-    fn boundary_preparation_retains_many_sided_faces() {
-        // Fixture: a regular prism with eight-sided caps, generated from its vertices.
-        let sides = 8;
-        let points = (0..sides)
-            .flat_map(|i| {
-                let angle = std::f32::consts::TAU * i as f32 / sides as f32;
-                [-1.0, 1.0].map(|z| Vec3::new(angle.cos(), angle.sin(), z))
-            })
-            .collect();
-        let collider = avian3d::prelude::Collider::convex_hull(points).unwrap();
-        let faces = boundary_faces(&collider, Vec3::ZERO, Quat::IDENTITY);
-        assert_eq!(
-            faces.len(),
-            sides + 2,
-            "a prism has one face per side and two caps"
-        );
-        let cap = faces.iter().find(|f| f.normal.dot(Vec3::Z) > 0.0).unwrap();
-        assert_eq!(
-            cap.polygon.len(),
-            sides,
-            "the cap must retain its complete boundary"
-        );
+    fn each_triangle_owns_its_depth_plane() {
+        let (slab, _, _) = partition_fixture(false);
+        // Fixture: adjacent facets one degree apart, rotated away from the probe axes.
+        let tilt = 1.0_f32.to_radians().tan() / 2.0_f32.sqrt();
+        let rotation = Quat::from_rotation_x(0.13) * Quat::from_rotation_y(0.21);
+        let boundary = [
+            [
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(-1.0, 1.0, 0.0),
+            ],
+            [
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(1.0, 1.0, -2.0 * tilt),
+                Vec3::new(-1.0, 1.0, 0.0),
+            ],
+        ]
+        .map(|tri| tri.map(|p| rotation * p));
+        let faces = clip_faces(&boundary, &slab);
+        assert_eq!(faces.len(), boundary.len());
+        for (triangle, face) in boundary.iter().zip(&faces) {
+            let expected = triangle.iter().sum::<Vec3>() / 3.0;
+            let relative = expected - slab.origin;
+            let p = Vec3::new(relative.dot(slab.axis), relative.dot(slab.lat), 1.0);
+            let actual = slab.origin
+                + slab.axis * p.x
+                + slab.lat * p.y
+                + slab.out * (slab.face - face.depth.dot(p));
+            // Resolution: unit-scale f32 projection roundoff; much smaller than the facet offset.
+            assert!(
+                (actual - expected).length() < 1e-6,
+                "{actual} left triangle interior {expected}"
+            );
+        }
     }
 
     /// The field and overlapping solid planes must exchange ownership only at their depth
@@ -620,18 +593,13 @@ mod tests {
         // pressure 2 * 1.5^2 / 2 = 2.25, symmetric pressure centroid at along=2, lateral=0.
         let boundary: Vec<_> = [-1.0, 1.0]
             .into_iter()
-            .map(|slope| BoundaryFace {
-                polygon: [(-2.0, -2.0), (2.0, -2.0), (2.0, 2.0), (-2.0, 2.0)]
+            .map(|slope| {
+                [(-2.0, -2.0), (2.0, -2.0), (2.0, 2.0), (-2.0, 2.0)]
                     .map(|(x, y)| Vec3::new(x, y, slope * x - 1.5))
-                    .into(),
-                normal: Vec3::new(-slope, 0.0, 1.0).normalize(),
+                    .to_vec()
             })
             .collect();
-        for boundary in [
-            boundary.clone(),
-            triangulate(&boundary, 0),
-            triangulate(&boundary, 1),
-        ] {
+        for boundary in [triangulate(&boundary, 0), triangulate(&boundary, 1)] {
             let mut faces = clip_faces(&boundary, &slab);
             for reverse in [false, true] {
                 if reverse {
@@ -709,13 +677,13 @@ mod tests {
     }
 
     /// Suspension relies on the same covered area and depth envelope regardless of face order
-    /// or polygon triangulation. Integrals and interior samples detect holes, double coverage,
+    /// or triangle vertex order. Integrals and interior samples detect holes, double coverage,
     /// and assigning a remote face's depth to uncovered ground.
     #[test]
-    fn convex_partition_preserves_coverage_and_depth_under_order_and_triangulation() {
+    fn convex_partition_preserves_coverage_and_depth_under_order() {
         for many in [false, true] {
             let (slab, collider, rotation) = partition_fixture(many);
-            let boundary = boundary_faces(&collider, Vec3::ZERO, rotation);
+            let boundary = triangles(&collider, rotation);
             let canonical = clip_faces(&boundary, &slab);
             let width = slab.lateral.1 - slab.lateral.0;
             let expected = canonical
@@ -730,8 +698,7 @@ mod tests {
                 });
             for boundary in [
                 boundary.clone(),
-                triangulate(&boundary, 0),
-                triangulate(&boundary, 1),
+                boundary.iter().map(|[a, b, c]| [*b, *c, *a]).collect(),
             ] {
                 let mut faces = clip_faces(&boundary, &slab);
                 for reverse in [false, true] {
@@ -751,32 +718,6 @@ mod tests {
                     assert_depth_envelope(&slab, &canonical, &cells);
                 }
             }
-        }
-    }
-
-    /// Belt work must follow the covered boundary, not the arrangement of infinite face lines.
-    /// Resolution contract for these convex fixtures: at most one cell per covering face
-    /// boundary per half, plus its seed. Read the budget from the fixture, so detail can grow.
-    #[test]
-    fn convex_partition_work_follows_covering_faces() {
-        for many in [false, true] {
-            let (slab, collider, rotation) = partition_fixture(many);
-            let boundary = boundary_faces(&collider, Vec3::ZERO, rotation);
-            let faces = clip_faces(&boundary, &slab);
-            let cells = column_cells(&slab, &faces);
-            eprintln!(
-                "MEASURED many={many} polygons={} faces={} cells={}",
-                boundary.len(),
-                faces.len(),
-                cells.len()
-            );
-            let boundary_count: usize = faces.iter().map(|f| f.planes.len()).sum();
-            assert!(
-                cells.len() <= 2 * (1 + boundary_count),
-                "{} cells from {} face boundaries",
-                cells.len(),
-                boundary_count
-            );
         }
     }
 
@@ -850,8 +791,7 @@ mod tests {
             Vec3::new(-1.0, 0.0, 4.0),
             Vec3::new(4.0, 0.0, -1.0),
         ]];
-        let boundary = triangle_boundary(&triangles);
-        let faces = clip_faces(&boundary, &slab);
+        let faces = clip_faces(&triangles, &slab);
         assert!(!faces.is_empty());
         for face in faces {
             assert_eq!(face.normal, Vec3::Y);
@@ -867,12 +807,12 @@ mod tests {
         }
         slab.origin.y = -2.0;
         assert!(
-            clip_faces(&boundary, &slab).is_empty(),
+            clip_faces(&triangles, &slab).is_empty(),
             "surface behind the probe origin"
         );
         slab.origin.y = 2.0;
         assert!(
-            clip_faces(&boundary, &slab).is_empty(),
+            clip_faces(&triangles, &slab).is_empty(),
             "surface beyond free travel"
         );
     }
