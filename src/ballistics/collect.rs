@@ -36,6 +36,7 @@
 //! indistinguishable from armour that is not there — and armour that is not there is what §13 exists
 //! to stop happening silently.
 
+use avian3d::parry::partitioning::BvhNode;
 use avian3d::parry::shape::TypedShape;
 use avian3d::prelude::{Collider, ColliderAabb, Position, Rotation};
 use bevy::math::DVec3;
@@ -230,6 +231,13 @@ pub(super) fn collect_collider(
                     reason: "a collider reached the world at a scale other than 1",
                 });
             }
+            let prune = NodePrune::of(
+                local_origin,
+                local_axis,
+                corridor.length,
+                corridor.behind,
+                reach,
+            );
             collect_trimesh(
                 mesh,
                 local_origin,
@@ -242,6 +250,7 @@ pub(super) fn collect_collider(
                 &seeded,
                 rotation,
                 reach,
+                |node| prune.keeps(node),
                 out,
             )?
         }
@@ -313,7 +322,75 @@ fn sitting_reach(handoff: Option<f64>, origin: Vec3, local_origin: Vec3, laws: &
 /// share of THAT constant is the honest way to state it.
 const SITTING_REACH_SHARE: f32 = 0.25;
 
-/// Every triangle the ray crosses, with the winding normal. Returns how many triangles it tested.
+/// Which BVH nodes of a trimesh can hold a crossing of one corridor ([`collect_trimesh`]), in the
+/// collider's local frame.
+///
+/// Two tests, both grown by [`sitting_reach`], because a box tested with a bare inequality has its
+/// own exact boundary, and an origin one ULP past a face lands on the wrong side of it:
+///
+/// - BOX OVERLAP against the corridor's own extent, which keeps the corridor's window. A ray cast
+///   against each node is the obvious prune and it is subtly wrong here: an axis-aligned face's
+///   AABB is DEGENERATE (zero thickness in one axis), and a corridor origin sitting exactly on such
+///   a face — which the transit corridor's does, every time, because it IS that face's position —
+///   can miss it entirely. The entry then vanishes and the walk reports an exit it never entered.
+/// - THE LINE ITSELF: the box must lie within the reach of the corridor's line, slab by slab in
+///   f64. A diagonal corridor's extent holds nearly a whole mesh; its line passes a few nodes.
+///
+/// INVARIANT: neither test decides whether a crossing exists. A claim is the line through `origin`
+/// along `axis` crossing a stored triangle, decided on the stored vertices to within the f64
+/// projection's rounding ([`RayShear::project_exact`], ~1e-15 of a vertex's offset), so the line
+/// meets that triangle's leaf box and every ancestor's. The reach, at least
+/// [`WalkLaws::topology_abs`], exceeds that rounding and the slab arithmetic's by orders of
+/// magnitude (DERIVED), so a node the line test drops holds no claim, and the crossings are the
+/// overlap test's alone.
+struct NodePrune {
+    lo: Vec3,
+    hi: Vec3,
+    origin: DVec3,
+    axis: DVec3,
+    grow: f64,
+}
+
+impl NodePrune {
+    fn of(origin: Vec3, axis: Vec3, length: f32, behind: f32, reach: f32) -> Self {
+        let near = origin - axis * behind;
+        let far = origin + axis * (length - behind);
+        Self {
+            lo: near.min(far) - Vec3::splat(reach),
+            hi: near.max(far) + Vec3::splat(reach),
+            origin: origin.as_dvec3(),
+            axis: axis.as_dvec3(),
+            grow: f64::from(reach),
+        }
+    }
+
+    fn keeps(&self, node: &BvhNode) -> bool {
+        let aabb = node.aabb();
+        let (mins, maxs) = (aabb.mins, aabb.maxs);
+        if maxs.cmplt(self.lo).any() || mins.cmpgt(self.hi).any() {
+            return false;
+        }
+        let (mut enter, mut leave) = (f64::NEG_INFINITY, f64::INFINITY);
+        for k in 0..3 {
+            let lo = f64::from(mins[k]) - self.grow;
+            let hi = f64::from(maxs[k]) + self.grow;
+            let (o, a) = (self.origin[k], self.axis[k]);
+            if a == 0.0 {
+                if o < lo || o > hi {
+                    return false;
+                }
+            } else {
+                let (s, t) = ((lo - o) / a, (hi - o) / a);
+                enter = enter.max(s.min(t));
+                leave = leave.min(s.max(t));
+            }
+        }
+        enter <= leave
+    }
+}
+
+/// Every triangle the ray crosses, with the winding normal, over the BVH nodes `keep` admits
+/// ([`NodePrune`]). Returns how many triangles it tested.
 #[expect(
     clippy::too_many_arguments,
     reason = "private kernel of `collect`; the alternative is a struct used exactly once"
@@ -332,35 +409,14 @@ fn collect_trimesh(
     seeded: &dyn Fn(u32) -> bool,
     rotation: Rotation,
     reach: f32,
+    keep: impl Fn(&BvhNode) -> bool,
     out: &mut Vec<FaceHit>,
 ) -> Result<usize, WalkError> {
-    // Prune by BOX OVERLAP against the corridor's own extent, not by a ray cast against each node.
-    //
-    // A ray cast is the obvious prune and it is subtly wrong here: an axis-aligned face's AABB is
-    // DEGENERATE (zero thickness in one axis), and a corridor origin sitting exactly on such a face
-    // — which the transit corridor's does, every time, because it IS that face's position — can miss
-    // it entirely. The entry then vanishes and the walk reports an exit it never entered. Overlap
-    // prunes nearly as well, and every surviving leaf still gets an exact intersection test, so the
-    // prune cannot change WHICH crossings exist either way — PROVIDED it is grown by
-    // [`sitting_reach`], because a box tested with a bare inequality has its own exact boundary, and
-    // an origin one ULP past the face lands on the wrong side of it.
-    let near = origin - axis * behind;
-    let far = origin + axis * (length - behind);
-    let lo = near.min(far) - Vec3::splat(reach);
-    let hi = near.max(far) + Vec3::splat(reach);
     let shear = RayShear::new(origin, axis);
     // Every claim at its RAW `t`; the seed contract is applied per shell once all are in.
     let mut claims: Vec<(FaceHit, bool)> = Vec::new();
     let mut tested = 0;
-    for index in mesh.bvh().leaves(|node| {
-        let aabb = node.aabb();
-        aabb.maxs.x >= lo.x
-            && aabb.mins.x <= hi.x
-            && aabb.maxs.y >= lo.y
-            && aabb.mins.y <= hi.y
-            && aabb.maxs.z >= lo.z
-            && aabb.mins.z <= hi.z
-    }) {
+    for index in mesh.bvh().leaves(keep) {
         tested += 1;
         let triangle = mesh.triangle(index);
         let corners = [triangle.a, triangle.b, triangle.c];
@@ -1471,6 +1527,7 @@ mod tests {
                 .as_slice()
                 .into(),
         };
+        let prune = NodePrune::of(origin, axis, length, 0.0, reach);
         collect_trimesh(
             mesh,
             origin,
@@ -1483,6 +1540,7 @@ mod tests {
             &|_| seeded,
             Rotation::default(),
             reach,
+            |node| prune.keeps(node),
             &mut out,
         )
         .expect("the fixture collects cleanly");
@@ -1555,6 +1613,145 @@ mod tests {
             hits.is_empty(),
             "the plate behind the resumed corridor is gone, not re-entered: {hits:?}",
         );
+    }
+
+    /// A box of `size` centred on the origin, each face cut into `n × n` quads of two triangles,
+    /// welded and wound outwards, every corner turned by `turn`.
+    fn tessellated_box(size: Vec3, n: i32, turn: Quat) -> Collider {
+        let mut index = std::collections::HashMap::new();
+        let mut vertices = Vec::new();
+        let mut vertex = |g: IVec3| {
+            *index.entry(g).or_insert_with(|| {
+                vertices.push(turn * ((g.as_vec3() / n as f32 - 0.5) * size));
+                vertices.len() as u32 - 1
+            })
+        };
+        let mut indices = Vec::new();
+        for k in 0..3 {
+            let (u, v) = ((k + 1) % 3, (k + 2) % 3);
+            for side in [0, n] {
+                for (i, j) in (0..n).flat_map(|i| (0..n).map(move |j| (i, j))) {
+                    let mut at = |di: i32, dj: i32| {
+                        let mut g = IVec3::ZERO;
+                        (g[k], g[u], g[v]) = (side, i + di, j + dj);
+                        vertex(g)
+                    };
+                    let (a, b, c, d) = (at(0, 0), at(1, 0), at(1, 1), at(0, 1));
+                    // `e_u × e_v = e_k`, so `a b c` faces `+k`: outward on the far side.
+                    if side == n {
+                        indices.extend([[a, b, c], [a, c, d]]);
+                    } else {
+                        indices.extend([[a, c, b], [a, d, c]]);
+                    }
+                }
+            }
+        }
+        Collider::trimesh(vertices, indices)
+    }
+
+    /// One trimesh corridor through `collider`'s own frame, at the live sitting reach, over the
+    /// nodes `keep` admits: its crossings and how many triangles it tested.
+    fn trimesh_over(
+        collider: &Collider,
+        (origin, axis, length, behind): (Vec3, Vec3, f32, f32),
+        seeded: bool,
+        keep: impl Fn(&BvhNode) -> bool,
+    ) -> (Vec<FaceHit>, usize) {
+        let node = Entity::from_raw_u32(1).expect("a test entity index");
+        let TypedShape::TriMesh(mesh) = collider.shape_scaled().as_typed_shape() else {
+            panic!("`Collider::trimesh` builds a trimesh");
+        };
+        let surfaces = BallisticSurfaces {
+            shells: vec![0u32; mesh.num_triangles()].into(),
+            corners: mesh.indices().to_vec().as_slice().into(),
+        };
+        let reach = sitting_reach(None, origin, origin, &WalkLaws::default());
+        let mut out = Vec::new();
+        let tested = collect_trimesh(
+            mesh,
+            origin,
+            axis,
+            length,
+            behind,
+            node,
+            node,
+            &surfaces,
+            &|_| seeded,
+            Rotation::default(),
+            reach,
+            keep,
+            &mut out,
+        )
+        .expect("the fixture collects cleanly");
+        (out, tested)
+    }
+
+    /// THE LINE PRUNE DECIDES NO CROSSING: every corridor collects bit for bit the crossings it
+    /// collects over every node, on the cases the line test is most likely to cut short. ASSUMED
+    /// fixtures: a thin tessellated plate, square and turned (each axis-aligned face's leaf box is
+    /// degenerate), and corridors that run diagonally through it, probe back through it, lie in a
+    /// face's plane, run parallel to a face one ULP off it, graze a face, run along an edge, and
+    /// sit on a face a few ULP past it. A prune grown short of the sitting reach, or one that
+    /// reads the corridor's window instead of its line, drops a crossing here; every armour walk
+    /// relies on it.
+    #[test]
+    fn the_line_prune_keeps_every_crossing() {
+        let size = Vec3::new(2.0, 1.5, 0.05);
+        let top = size.z / 2.0;
+        let ulp = f32::from_bits(top.to_bits() + 1) - top;
+        let corridors = [
+            (
+                Vec3::new(-3.0, -2.0, -0.5),
+                Vec3::new(1.0, 0.8, 0.12).normalize(),
+                8.0,
+                0.0,
+            ),
+            (
+                Vec3::new(0.2, 0.1, 0.0),
+                Vec3::new(0.3, -0.2, 1.0).normalize(),
+                4.0,
+                2.0,
+            ),
+            (Vec3::new(-3.0, 0.1, top), Vec3::X, 6.0, 0.0),
+            (Vec3::new(-3.0, 0.1, top + ulp), Vec3::X, 6.0, 0.0),
+            (
+                Vec3::new(-3.0, 0.2, top - 3.0e-4),
+                Vec3::new(1.0, 0.0, 1.0e-4).normalize(),
+                6.0,
+                0.0,
+            ),
+            (Vec3::new(-3.0, size.y / 2.0, top), Vec3::X, 6.0, 0.0),
+            (
+                Vec3::new(0.1, -0.0003, top - 8.0 * ulp),
+                Vec3::NEG_Z,
+                0.5,
+                0.0,
+            ),
+            (
+                Vec3::new(0.1, -0.0003, top + 8.0 * ulp),
+                Vec3::NEG_Z,
+                0.5,
+                0.3,
+            ),
+        ];
+        let turned = Quat::from_axis_angle(Vec3::new(1.0, 2.0, 3.0).normalize(), 0.7);
+        let (mut pruned, mut whole) = (0, 0);
+        for turn in [Quat::IDENTITY, turned] {
+            let collider = tessellated_box(size, 6, turn);
+            for (origin, axis, length, behind) in corridors {
+                let corridor = (turn * origin, turn * axis, length, behind);
+                for seeded in [false, true] {
+                    let reach = sitting_reach(None, corridor.0, corridor.0, &WalkLaws::default());
+                    let prune = NodePrune::of(corridor.0, corridor.1, length, behind, reach);
+                    let kept = trimesh_over(&collider, corridor, seeded, |node| prune.keeps(node));
+                    let all = trimesh_over(&collider, corridor, seeded, |_| true);
+                    assert_eq!(kept.0, all.0, "{corridor:?}, seeded {seeded}");
+                    pruned += kept.1;
+                    whole += all.1;
+                }
+            }
+        }
+        assert!(pruned < whole, "the prune drops nodes: {pruned} of {whole}");
     }
 
     #[test]
