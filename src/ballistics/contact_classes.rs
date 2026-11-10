@@ -922,17 +922,10 @@ fn enclosed(context: &resolve::ResolveContext<'_, '_, '_>, point: Vec3) -> bool 
 fn classify_batch(
     In((batch, group, theta_at)): In<(Vec<Candidate>, usize, usize)>,
     world: ProjectileMarchWorld,
-    colliders: Query<(
-        &'static Position,
-        &'static Rotation,
-        &'static Collider,
-        Option<&'static BallisticSurfaces>,
-    )>,
 ) -> Vec<Option<Aim>> {
     world.moment.set(Some(0.0));
     let context = resolve::ResolveContext {
         world: &world,
-        colliders: &colliders,
         laws: walk::WalkLaws::default(),
     };
     batch

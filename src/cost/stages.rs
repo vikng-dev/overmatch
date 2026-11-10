@@ -127,6 +127,13 @@ labelled!(
         PoseInsertsOther = "pose_inserts_other",
         // Armour-set frame poses written, one per frame whose node's local pose was written.
         FramePoseWrites = "frame_pose_writes",
+        // A round's first-contact casts, and per cast the armour-set boxes it tested by level
+        // (tank, frame, part) and the tank armour parts whose shape it swept.
+        MarchCasts = "march_casts",
+        MarchTankBoxes = "march_tank_boxes",
+        MarchFrameBoxes = "march_frame_boxes",
+        MarchPartBoxes = "march_part_boxes",
+        MarchArmourShapes = "march_armour_shapes",
     }
 );
 

@@ -2,13 +2,15 @@
 //! corridor counts every entry exactly once — and the one mechanism: the runtime march and the
 //! §13.6 gate's driver decide the same crossings.
 
-use avian3d::prelude::{CollisionLayers, LayerMask, Position, RigidBody, Rotation};
+use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody};
 use bevy::ecs::system::RunSystemOnce;
 
 use super::*;
 use crate::ballistics::march_tests::{box_trimesh, world_with_trimesh_plates};
 use crate::ballistics::walk::FaceHit;
-use crate::ballistics::{BallisticVolume, RoundBody, VolumeMaterial, bound, capability};
+use crate::ballistics::{
+    BallisticSurfaces, BallisticVolume, RoundBody, VolumeMaterial, bound, capability,
+};
 
 /// Fixture round and plate: an 88-class disc against 50 mm of steel. Fixture data; nothing below
 /// depends on whether it perforates.
@@ -153,95 +155,86 @@ fn handed_off(
     direction: Vec3,
 ) -> Result<Option<DiscCorridor>, WalkError> {
     app.world_mut()
-        .run_system_once(
-            move |world: ProjectileMarchWorld,
-                  colliders: Query<(
-                &'static Position,
-                &'static Rotation,
-                &'static Collider,
-                Option<&'static BallisticSurfaces>,
-            )>| {
-                let context = ResolveContext {
-                    world: &world,
-                    colliders: &colliders,
-                    laws: WalkLaws::default(),
-                };
-                // The game's damage model: exercise the production driver and inspect ownership.
-                // Membership belongs to each reached start, not to the incoming corridor origin.
-                let mut flight = Flight {
-                    position: origin,
-                    direction: Dir3::new(direction).expect("a real direction"),
-                    speed: SPEED,
-                    frame: DiscFrame::anchored(direction).expect("a real direction"),
-                    continuation: None,
-                    membership: Membership::Required,
-                };
-                flight.settle(&context, &|_| true, disc_radius(ROUND.caliber))?;
-                decide(
-                    &context,
-                    &|_| true,
-                    &bound(ROUND),
-                    ROUND.mass,
-                    crate::rounds::ContactPreset::fixture(),
-                    &flight,
-                    STANDOFF,
-                )?;
-                let frame = DiscFrame::anchored(direction).expect("a real direction");
-                let radius = ROUND.caliber * 0.5;
-                let entrance = closing_walk(
-                    &context,
-                    &|_| true,
-                    origin,
-                    Vec3::ZERO,
-                    direction,
-                    frame,
-                    radius,
-                    &[],
-                    STANDOFF + ENTRANCE_SPAN,
-                )?;
-                let shot = Shot {
-                    caliber: ROUND.caliber,
-                    speed: SPEED,
-                    contact: crate::rounds::ContactPreset::fixture(),
-                };
-                let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws)? else {
-                    return Ok(None);
-                };
-                let starts = transit_starts(&context, &|_| true, &request)?;
-                let corridor = build_corridor(
-                    &context,
-                    &|_| true,
-                    request.anchor,
-                    request.origin,
-                    *request.axis,
-                    ENTRANCE_SPAN,
-                    request.frame,
-                    request.radius,
-                    &starts.seeds,
-                )?;
-                let transit = closing_walk(
-                    &context,
-                    &|_| true,
-                    request.anchor,
-                    request.origin,
-                    *request.axis,
-                    request.frame,
-                    request.radius,
-                    &starts.seeds,
-                    ENTRANCE_SPAN,
-                )?;
-                let round = bound(ROUND);
-                walk::finish(
-                    &transit,
-                    &request,
-                    &round,
-                    round.at(SPEED),
-                    &LIMITS,
-                    round.body().mass,
-                )?;
-                Ok::<_, WalkError>(Some(corridor))
-            },
-        )
+        .run_system_once(move |world: ProjectileMarchWorld| {
+            let context = ResolveContext {
+                world: &world,
+                laws: WalkLaws::default(),
+            };
+            // The game's damage model: exercise the production driver and inspect ownership.
+            // Membership belongs to each reached start, not to the incoming corridor origin.
+            let mut flight = Flight {
+                position: origin,
+                direction: Dir3::new(direction).expect("a real direction"),
+                speed: SPEED,
+                frame: DiscFrame::anchored(direction).expect("a real direction"),
+                continuation: None,
+                membership: Membership::Required,
+            };
+            flight.settle(&context, &|_| true, disc_radius(ROUND.caliber))?;
+            decide(
+                &context,
+                &|_| true,
+                &bound(ROUND),
+                ROUND.mass,
+                crate::rounds::ContactPreset::fixture(),
+                &flight,
+                STANDOFF,
+            )?;
+            let frame = DiscFrame::anchored(direction).expect("a real direction");
+            let radius = ROUND.caliber * 0.5;
+            let entrance = closing_walk(
+                &context,
+                &|_| true,
+                origin,
+                Vec3::ZERO,
+                direction,
+                frame,
+                radius,
+                &[],
+                STANDOFF + ENTRANCE_SPAN,
+            )?;
+            let shot = Shot {
+                caliber: ROUND.caliber,
+                speed: SPEED,
+                contact: crate::rounds::ContactPreset::fixture(),
+            };
+            let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws)? else {
+                return Ok(None);
+            };
+            let starts = transit_starts(&context, &|_| true, &request)?;
+            let corridor = build_corridor(
+                &context,
+                &|_| true,
+                request.anchor,
+                request.origin,
+                *request.axis,
+                ENTRANCE_SPAN,
+                request.frame,
+                request.radius,
+                &starts.seeds,
+            )?;
+            let transit = closing_walk(
+                &context,
+                &|_| true,
+                request.anchor,
+                request.origin,
+                *request.axis,
+                request.frame,
+                request.radius,
+                &starts.seeds,
+                ENTRANCE_SPAN,
+            )?;
+            let round = bound(ROUND);
+            walk::finish(
+                &transit,
+                &request,
+                &round,
+                round.at(SPEED),
+                &LIMITS,
+                round.body().mass,
+            )?;
+            Ok::<_, WalkError>(Some(corridor))
+        })
         .expect("the probe system runs")
 }
 
@@ -332,30 +325,21 @@ fn try_driven_with_contact(
 ) -> Result<Drive, fuzz::DriveFailure> {
     let (speed, budget) = first_tick(body, speed);
     app.world_mut()
-        .run_system_once(
-            move |world: ProjectileMarchWorld,
-                  colliders: Query<(
-                &'static Position,
-                &'static Rotation,
-                &'static Collider,
-                Option<&'static BallisticSurfaces>,
-            )>| {
-                let context = ResolveContext {
-                    world: &world,
-                    colliders: &colliders,
-                    laws: WalkLaws::default(),
-                };
-                fuzz::drive(
-                    &context,
-                    body,
-                    preset,
-                    speed,
-                    DROP_FROM,
-                    Vec3::NEG_Y,
-                    budget,
-                )
-            },
-        )
+        .run_system_once(move |world: ProjectileMarchWorld| {
+            let context = ResolveContext {
+                world: &world,
+                laws: WalkLaws::default(),
+            };
+            fuzz::drive(
+                &context,
+                body,
+                preset,
+                speed,
+                DROP_FROM,
+                Vec3::NEG_Y,
+                budget,
+            )
+        })
         .expect("the driver system runs")
 }
 
@@ -1064,53 +1048,44 @@ fn certified_then_resumed(
     radius: f32,
 ) -> Result<(Interior, Result<DiscWalk, WalkError>), WalkError> {
     app.world_mut()
-        .run_system_once(
-            move |world: ProjectileMarchWorld,
-                  colliders: Query<(
-                &'static Position,
-                &'static Rotation,
-                &'static Collider,
-                Option<&'static BallisticSurfaces>,
-            )>| {
-                let context = ResolveContext {
-                    world: &world,
-                    colliders: &colliders,
-                    laws: WalkLaws::default(),
-                };
-                let frame = DiscFrame::anchored(swept).expect("a real direction");
-                let mut flight = Flight::launched(
-                    Dir3::new(swept).expect("a direction"),
-                    Dir3::new(launch).expect("a direction"),
-                    SPEED,
-                    frame,
-                    Interior::laid(at, layout(&frame, radius)),
-                );
-                flight.continuation = Some(certified(
-                    &context,
-                    &|_| true,
-                    at,
-                    Dir3::new(swept).expect("a direction"),
-                    frame,
-                    radius,
-                )?);
-                let starts = flight
-                    .continuation
-                    .clone()
-                    .expect("a launched flight carries its starts");
-                let walked = closing_walk(
-                    &context,
-                    &|_| true,
-                    starts.anchor,
-                    starts.origin,
-                    Vec3::from(flight.direction),
-                    flight.frame,
-                    radius,
-                    &starts.seeds,
-                    ENTRANCE_SPAN,
-                );
-                Ok((starts, walked))
-            },
-        )
+        .run_system_once(move |world: ProjectileMarchWorld| {
+            let context = ResolveContext {
+                world: &world,
+                laws: WalkLaws::default(),
+            };
+            let frame = DiscFrame::anchored(swept).expect("a real direction");
+            let mut flight = Flight::launched(
+                Dir3::new(swept).expect("a direction"),
+                Dir3::new(launch).expect("a direction"),
+                SPEED,
+                frame,
+                Interior::laid(at, layout(&frame, radius)),
+            );
+            flight.continuation = Some(certified(
+                &context,
+                &|_| true,
+                at,
+                Dir3::new(swept).expect("a direction"),
+                frame,
+                radius,
+            )?);
+            let starts = flight
+                .continuation
+                .clone()
+                .expect("a launched flight carries its starts");
+            let walked = closing_walk(
+                &context,
+                &|_| true,
+                starts.anchor,
+                starts.origin,
+                Vec3::from(flight.direction),
+                flight.frame,
+                radius,
+                &starts.seeds,
+                ENTRANCE_SPAN,
+            );
+            Ok((starts, walked))
+        })
         .expect("the probe system runs")
 }
 
@@ -1289,29 +1264,20 @@ fn a_start_inside_nested_volumes_is_inside_each() {
 /// [`certified`] for a disc of `radius` laid at `at` along `axis`, on the frame anchored there.
 fn certify(app: &mut App, at: Vec3, axis: Vec3, radius: f32) -> Result<Interior, WalkError> {
     app.world_mut()
-        .run_system_once(
-            move |world: ProjectileMarchWorld,
-                  colliders: Query<(
-                &'static Position,
-                &'static Rotation,
-                &'static Collider,
-                Option<&'static BallisticSurfaces>,
-            )>| {
-                let context = ResolveContext {
-                    world: &world,
-                    colliders: &colliders,
-                    laws: WalkLaws::default(),
-                };
-                certified(
-                    &context,
-                    &|_| true,
-                    at,
-                    Dir3::new(axis).expect("a direction"),
-                    DiscFrame::anchored(axis).expect("a real direction"),
-                    radius,
-                )
-            },
-        )
+        .run_system_once(move |world: ProjectileMarchWorld| {
+            let context = ResolveContext {
+                world: &world,
+                laws: WalkLaws::default(),
+            };
+            certified(
+                &context,
+                &|_| true,
+                at,
+                Dir3::new(axis).expect("a direction"),
+                DiscFrame::anchored(axis).expect("a real direction"),
+                radius,
+            )
+        })
         .expect("the probe system runs")
 }
 
@@ -1412,10 +1378,9 @@ fn a_probe_reads_every_samples_finite_faces() {
     let (mut app, _) = settled(|app| vec![mesh_volume(app, stack, Transform::IDENTITY)]);
     let face_count = app
         .world_mut()
-        .run_system_once(|world: ProjectileMarchWorld, colliders: Colliders| {
+        .run_system_once(|world: ProjectileMarchWorld| {
             let context = ResolveContext {
                 world: &world,
-                colliders: &colliders,
                 laws: WalkLaws::default(),
             };
             build_corridor(
@@ -1450,18 +1415,6 @@ fn a_probe_reads_every_samples_finite_faces() {
 use crate::ballistics::ProjectileMarchWorld;
 use crate::ballistics::spall_cone::{AxisRule, ConeShape, FieldDescriptor};
 
-/// The colliders a fixture's field walk reads, as the runtime's systems hold them.
-type Colliders<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static Position,
-        &'static Rotation,
-        &'static Collider,
-        Option<&'static BallisticSurfaces>,
-    ),
->;
-
 /// Walk every `(origin, direction, strength)` of `rays` with weight `weight` through every volume
 /// of the world (volumes of no tank: one tank), each throw leaving `exited`, each walk failing the
 /// test.
@@ -1473,12 +1426,9 @@ fn field_rays(
 ) -> Vec<FieldRay> {
     app.world_mut()
         .run_system_once(
-            move |world: ProjectileMarchWorld,
-                  colliders: Colliders,
-                  health: Query<&mut ComponentHealth>| {
+            move |world: ProjectileMarchWorld, health: Query<&mut ComponentHealth>| {
                 let context = ResolveContext {
                     world: &world,
-                    colliders: &colliders,
                     laws: WalkLaws::default(),
                 };
                 let within = |collider: Entity| world.volume_of(collider).is_some();
@@ -1858,12 +1808,9 @@ fn two_subquantum_fields_reach_one_pool_unit_together() {
     let lost = app
         .world_mut()
         .run_system_once(
-            move |world: ProjectileMarchWorld,
-                  colliders: Colliders,
-                  mut health: Query<&mut ComponentHealth>| {
+            move |world: ProjectileMarchWorld, mut health: Query<&mut ComponentHealth>| {
                 let context = ResolveContext {
                     world: &world,
-                    colliders: &colliders,
                     laws: WalkLaws::default(),
                 };
                 let source = SpallSource {
@@ -2061,12 +2008,9 @@ fn boxed_throw(app: &mut App, tank: &BoxedTank, origin: Vec3) -> BoxedThrow {
     };
     app.world_mut()
         .run_system_once(
-            move |world: ProjectileMarchWorld,
-                  colliders: Colliders,
-                  health: Query<&mut ComponentHealth>| {
+            move |world: ProjectileMarchWorld, health: Query<&mut ComponentHealth>| {
                 let context = ResolveContext {
                     world: &world,
-                    colliders: &colliders,
                     laws: WalkLaws::default(),
                 };
                 let is_box = |volume: Entity| health.contains(volume);
@@ -3126,12 +3070,9 @@ type Stop = (f64, Option<(f64, Option<Entity>)>);
 fn stops(app: &mut App, origin: Vec3, dirs: Vec<Dir3>, exited: Vec<Entity>) -> Vec<(Stop, Stop)> {
     app.world_mut()
         .run_system_once(
-            move |world: ProjectileMarchWorld,
-                  colliders: Colliders,
-                  health: Query<&mut ComponentHealth>| {
+            move |world: ProjectileMarchWorld, health: Query<&mut ComponentHealth>| {
                 let context = ResolveContext {
                     world: &world,
-                    colliders: &colliders,
                     laws: WalkLaws::default(),
                 };
                 let within = |collider: Entity| world.volume_of(collider).is_some();
@@ -3398,71 +3339,60 @@ fn a_convex_solid_is_crossed_with_a_chord_at_any_offset_and_incidence() {
             let origin = Vec3::new(x, CONVEX_SHOT_HEIGHT, standoff);
             let chord = app
                 .world_mut()
-                .run_system_once(
-                    move |world: ProjectileMarchWorld,
-                          colliders: Query<(
-                        &'static Position,
-                        &'static Rotation,
-                        &'static Collider,
-                        Option<&'static BallisticSurfaces>,
-                    )>| {
-                        let context = ResolveContext {
-                            world: &world,
-                            colliders: &colliders,
-                            laws: WalkLaws::default(),
-                        };
-                        let frame = DiscFrame::anchored(direction).expect("a real direction");
-                        let entrance = closing_walk(
-                            &context,
-                            &|_| true,
-                            origin,
-                            Vec3::ZERO,
-                            direction,
-                            frame,
-                            radius,
-                            &[],
-                            standoff + ENTRANCE_SPAN,
-                        )?;
-                        let shot = Shot {
-                            caliber: ROUND.caliber,
-                            speed: SPEED,
-                            contact: crate::rounds::ContactPreset::fixture(),
-                        };
-                        let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws)?
-                        else {
-                            return Ok(None);
-                        };
-                        let starts = transit_starts(&context, &|_| true, &request)?;
-                        let transit = closing_walk(
-                            &context,
-                            &|_| true,
-                            request.anchor,
-                            request.origin,
-                            *request.axis,
-                            request.frame,
-                            request.radius,
-                            &starts.seeds,
-                            ENTRANCE_SPAN,
-                        )?;
-                        let round = bound(ROUND);
-                        let plan = walk::finish(
-                            &transit,
-                            &request,
-                            &round,
-                            round.at(SPEED),
-                            &LIMITS,
-                            round.body().mass,
-                        )?;
-                        Ok::<_, WalkError>(plan.deposits.iter().map(|line| &line.dose).find_map(
-                            |dose| match dose.source {
-                                DoseSource::Line { chord, .. } if dose.address == volume => {
-                                    Some(chord)
-                                }
-                                _ => None,
-                            },
-                        ))
-                    },
-                )
+                .run_system_once(move |world: ProjectileMarchWorld| {
+                    let context = ResolveContext {
+                        world: &world,
+                        laws: WalkLaws::default(),
+                    };
+                    let frame = DiscFrame::anchored(direction).expect("a real direction");
+                    let entrance = closing_walk(
+                        &context,
+                        &|_| true,
+                        origin,
+                        Vec3::ZERO,
+                        direction,
+                        frame,
+                        radius,
+                        &[],
+                        standoff + ENTRANCE_SPAN,
+                    )?;
+                    let shot = Shot {
+                        caliber: ROUND.caliber,
+                        speed: SPEED,
+                        contact: crate::rounds::ContactPreset::fixture(),
+                    };
+                    let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws)?
+                    else {
+                        return Ok(None);
+                    };
+                    let starts = transit_starts(&context, &|_| true, &request)?;
+                    let transit = closing_walk(
+                        &context,
+                        &|_| true,
+                        request.anchor,
+                        request.origin,
+                        *request.axis,
+                        request.frame,
+                        request.radius,
+                        &starts.seeds,
+                        ENTRANCE_SPAN,
+                    )?;
+                    let round = bound(ROUND);
+                    let plan = walk::finish(
+                        &transit,
+                        &request,
+                        &round,
+                        round.at(SPEED),
+                        &LIMITS,
+                        round.body().mass,
+                    )?;
+                    Ok::<_, WalkError>(plan.deposits.iter().map(|line| &line.dose).find_map(
+                        |dose| match dose.source {
+                            DoseSource::Line { chord, .. } if dose.address == volume => Some(chord),
+                            _ => None,
+                        },
+                    ))
+                })
                 .expect("the probe system runs");
             match chord {
                 Ok(Some(chord)) if chord > 0.0 => {}
@@ -3822,24 +3752,15 @@ fn witness_lines_reuse_the_resolved_hard_presence() {
     let leg = Leg::new(Vec3::ZERO, Dir3::Z, 2.0, &[Vec3::ZERO]).with_presence(&walked);
     let crossed = app
         .world_mut()
-        .run_system_once(
-            move |world: ProjectileMarchWorld,
-                  colliders: Query<(
-                &'static Position,
-                &'static Rotation,
-                &'static Collider,
-                Option<&'static BallisticSurfaces>,
-            )>| {
-                let context = ResolveContext {
-                    world: &world,
-                    colliders: &colliders,
-                    laws: WalkLaws::default(),
-                };
-                super::super::wound::line(&context, &|_| true, std::slice::from_ref(&leg), 1.0)
-                    .expect("resolved hard presence is reused")
-                    .0
-            },
-        )
+        .run_system_once(move |world: ProjectileMarchWorld| {
+            let context = ResolveContext {
+                world: &world,
+                laws: WalkLaws::default(),
+            };
+            super::super::wound::line(&context, &|_| true, std::slice::from_ref(&leg), 1.0)
+                .expect("resolved hard presence is reused")
+                .0
+        })
         .expect("the witness system runs");
     assert_eq!(crossed.len(), 1);
     assert_eq!(crossed[0].volume, witness);
@@ -3862,10 +3783,9 @@ fn a_finite_material_crossing_longer_than_fifty_metres_closes() {
     });
     let walked = app
         .world_mut()
-        .run_system_once(|world: ProjectileMarchWorld, colliders: Colliders| {
+        .run_system_once(|world: ProjectileMarchWorld| {
             let context = ResolveContext {
                 world: &world,
-                colliders: &colliders,
                 laws: WalkLaws::default(),
             };
             closing_walk(
@@ -3973,44 +3893,35 @@ fn a_kept_carrier_skid_reads_one_body_for_work_and_impulse() {
     let mass = ROUND.mass * 4.0;
     let decision = app
         .world_mut()
-        .run_system_once(
-            move |world: ProjectileMarchWorld,
-                  colliders: Query<(
-                &'static Position,
-                &'static Rotation,
-                &'static Collider,
-                Option<&'static BallisticSurfaces>,
-            )>| {
-                let context = ResolveContext {
-                    world: &world,
-                    colliders: &colliders,
-                    laws: WalkLaws::default(),
-                };
-                let direction = Dir3::NEG_Y;
-                let frame = DiscFrame::anchored(*direction).unwrap();
-                let flight = Flight::born(
-                    &context,
-                    &|_| true,
-                    DROP_FROM,
-                    direction,
-                    direction,
-                    SPEED,
-                    frame,
-                    disc_radius(ROUND.caliber),
-                )
-                .unwrap();
-                decide(
-                    &context,
-                    &|_| true,
-                    &bound(ROUND),
-                    mass,
-                    crate::rounds::ContactPreset::fixture(),
-                    &flight,
-                    DROP_FROM.y - 1.0,
-                )
-                .unwrap()
-            },
-        )
+        .run_system_once(move |world: ProjectileMarchWorld| {
+            let context = ResolveContext {
+                world: &world,
+                laws: WalkLaws::default(),
+            };
+            let direction = Dir3::NEG_Y;
+            let frame = DiscFrame::anchored(*direction).unwrap();
+            let flight = Flight::born(
+                &context,
+                &|_| true,
+                DROP_FROM,
+                direction,
+                direction,
+                SPEED,
+                frame,
+                disc_radius(ROUND.caliber),
+            )
+            .unwrap();
+            decide(
+                &context,
+                &|_| true,
+                &bound(ROUND),
+                mass,
+                crate::rounds::ContactPreset::fixture(),
+                &flight,
+                DROP_FROM.y - 1.0,
+            )
+            .unwrap()
+        })
         .unwrap();
     let Decision::Bounce(bounce) = decision else {
         panic!("the fixture assembly skids");
@@ -4048,10 +3959,9 @@ fn impact_fuze_reads_the_charged_entry_force() {
     }
     let (force, uncharged) = app
         .world_mut()
-        .run_system_once(|world: ProjectileMarchWorld, colliders: Colliders| {
+        .run_system_once(|world: ProjectileMarchWorld| {
             let context = ResolveContext {
                 world: &world,
-                colliders: &colliders,
                 laws: WalkLaws::default(),
             };
             let mut flight = Flight {

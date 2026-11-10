@@ -40,7 +40,8 @@ pub(super) struct Poses {
 pub(super) struct ColliderMotion {
     pub colliders: HashMap<Entity, Poses>,
     pub bodies: HashMap<Entity, Poses>,
-    /// DERIVED conservative displacement of any collider point, used to grow a tree query.
+    /// DERIVED conservative displacement of any point of a collider outside an armour set, used to
+    /// grow a tree query; a set bounds its own parts ([`super::armour_set::Reach`]).
     pub largest_motion: f32,
     /// The entries whose endpoints differ, so the next boundary can close them.
     moving_colliders: Vec<Entity>,
