@@ -9,7 +9,10 @@ use bevy::app::FixedMainScheduleOrder;
 use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
 use bevy::prelude::*;
 
-use super::stages::{NamedTimes, Stages};
+use super::{
+    clock::Edge,
+    stages::{NamedTimes, Stages},
+};
 use crate::construction::breakage::{LawSet, SplitSet, SweepSet};
 use crate::state::SimPhase;
 
@@ -72,38 +75,44 @@ pub(crate) const COUNT: usize = NAMES.len();
 
 #[derive(Resource, Default)]
 pub(crate) struct Phases {
-    active: Option<(Phase, Instant, u64)>,
+    active: Option<(Phase, Edge, [u64; 2])>,
     us: [f64; COUNT],
+    cpu_us: [f64; COUNT],
 }
 
 impl Phases {
     pub(super) fn open(&mut self, now: Instant, stages: &Stages) {
         assert!(self.active.is_none(), "the previous tick closes its phase");
         self.us.fill(0.0);
-        self.active = Some((Phase::FixedFirst, now, stages.total_ns()));
+        self.cpu_us.fill(0.0);
+        self.active = Some((Phase::FixedFirst, Edge::at(now), stages.totals_ns()));
     }
 
     pub(super) fn close(&mut self, now: Instant, stages: &Stages) {
-        self.finish(now, stages.total_ns());
+        self.finish(Edge::at(now), stages.totals_ns());
     }
 
-    fn finish(&mut self, now: Instant, leaf_end: u64) {
+    fn finish(&mut self, now: Edge, leaf_end: [u64; 2]) {
         let (phase, start, leaf_start) =
             self.active.take().expect("the tick opens its first phase");
-        let elapsed = u64::try_from(now.duration_since(start).as_nanos())
-            .expect("a tick phase fits in the u64 nanosecond span");
-        let leaves = leaf_end - leaf_start;
-        let remaining = elapsed
-            .checked_sub(leaves)
-            .expect("leaf brackets finish inside their phase and do not overlap each other");
-        self.us[phase as usize] += remaining as f64 / 1000.0;
+        let elapsed = now.since(start);
+        for (i, output) in [&mut self.us, &mut self.cpu_us].into_iter().enumerate() {
+            let remaining = elapsed[i]
+                .checked_sub(leaf_end[i] - leaf_start[i])
+                .expect("leaf brackets finish inside their phase and do not overlap each other");
+            output[phase as usize] += remaining as f64 / 1000.0;
+        }
     }
 
     fn advance(&mut self, next: Phase, stages: &Stages) {
-        let now = Instant::now();
-        let leaves = stages.total_ns();
+        let now = Edge::now();
+        let leaves = stages.totals_ns();
         self.finish(now, leaves);
         self.active = Some((next, now, leaves));
+    }
+
+    pub(crate) fn cpu_times(&self) -> NamedTimes<COUNT> {
+        NamedTimes::new(&NAMES, self.cpu_us)
     }
 
     pub(crate) fn times(&self) -> NamedTimes<COUNT> {
@@ -201,6 +210,41 @@ mod tests {
     use crate::cost::{TickClock, arm_tick_clock, stages::Stage};
     use bevy::app::FixedMain;
     use bevy::ecs::{lifecycle::HookContext, world::DeferredWorld};
+
+    /// Stats consumers divide matching exclusive CPU/wall intervals, so leaf debits must
+    /// conserve both clocks and the serialized maps must expose the same phase keys.
+    #[test]
+    fn leaf_debits_conserve_both_clocks_and_phase_keys() {
+        use std::time::Duration;
+        // Fixture: unrelated wall and CPU advances, with earlier leaf totals already present.
+        let start = Instant::now();
+        let mut phases = Phases {
+            active: Some((
+                Phase::FixedFirst,
+                Edge {
+                    wall: start,
+                    cpu: Duration::from_nanos(100),
+                },
+                [20, 30],
+            )),
+            ..default()
+        };
+        phases.finish(
+            Edge {
+                wall: start + Duration::from_nanos(1000),
+                cpu: Duration::from_nanos(1600),
+            },
+            [220, 530],
+        );
+        assert_eq!(phases.times().values[0], 0.8);
+        assert_eq!(phases.cpu_times().values[0], 1.0);
+        let wall = serde_json::to_value(phases.times()).unwrap();
+        let cpu = serde_json::to_value(phases.cpu_times()).unwrap();
+        assert_eq!(
+            wall.as_object().unwrap().keys().collect::<Vec<_>>(),
+            cpu.as_object().unwrap().keys().collect::<Vec<_>>()
+        );
+    }
 
     #[derive(Resource, Default)]
     struct Witness(Vec<(Phase, Phase)>);

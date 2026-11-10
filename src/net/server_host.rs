@@ -66,10 +66,9 @@ fn task_pool_options(cores: NonZero<usize>) -> TaskPoolOptions {
     options
 }
 
-/// The task pools [`task_pool_options`] gives this host. An unreadable core count is 1, as it is
-/// in Bevy's own sizing.
+/// The task pools [`task_pool_options`] gives this host; an OS failure refuses startup.
 pub(crate) fn host_task_pools() -> TaskPoolPlugin {
-    let cores = std::thread::available_parallelism().unwrap_or(NonZero::<usize>::MIN);
+    let cores = std::thread::available_parallelism().unwrap_or_else(crate::refuse_start);
     TaskPoolPlugin {
         task_pool_options: task_pool_options(cores),
     }
@@ -174,6 +173,28 @@ fn cpu_max() -> Option<CpuMax> {
                 &read("/sys/fs/cgroup/cpu/cpu.cfs_period_us")?,
             )
         })
+}
+
+/// A quota fraction has no denominator off Linux, with no readable quota, or without a cap.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "absence", rename_all = "snake_case")]
+pub(super) enum QuotaAbsence {
+    NotLinux,
+    Unavailable,
+    Unlimited,
+    InvalidQuota,
+}
+
+pub(super) fn quota_cpus() -> Result<f64, QuotaAbsence> {
+    if !cfg!(target_os = "linux") {
+        return Err(QuotaAbsence::NotLinux);
+    }
+    let max = cpu_max().ok_or(QuotaAbsence::Unavailable)?;
+    let quota = max.quota_us.ok_or(QuotaAbsence::Unlimited)?;
+    if quota == 0 || max.period_us == 0 {
+        return Err(QuotaAbsence::InvalidQuota);
+    }
+    Ok(quota as f64 / max.period_us as f64)
 }
 
 fn cpuset() -> Option<String> {

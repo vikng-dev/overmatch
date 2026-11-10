@@ -1,12 +1,12 @@
-//! Wall brackets and work counts for the game's authority simulation (game state only).
+//! Wall/process CPU brackets and work counts for the game's authority simulation (game state only).
 //! Only the authority stats consumer installs this resource. No lock is held during work,
 //! including owner-parallel evaluation; overlapping belt brackets publish one wall interval.
 
+use super::clock::Edge;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::Instant;
 
 use bevy::prelude::{Add, App, On, Remove, Res, Resource};
 use serde::{Serialize, Serializer, ser::SerializeMap};
@@ -55,6 +55,7 @@ labelled!(Detail, DETAIL_NAMES, DETAIL_COUNT {
 labelled!(
     /// Counts accompany wall brackets; they do not add time or change law decisions.
     Work, WORK_NAMES, WORK_COUNT {
+        ProcessCpuReads = "process_cpu_reads",
         AssessedOwners = "assessed_owners",
         StructureSolveColumns = "structure_solve_columns",
         PreparedBodies = "prepared_bodies",
@@ -116,7 +117,8 @@ pub(crate) struct Stages(
     Arc<[AtomicU64; WORK_COUNT]>,
     Arc<Mutex<BeltReaders>>,
     Arc<[AtomicU64; DETAIL_COUNT]>,
-    Arc<[Mutex<BeltReaders>; DETAIL_COUNT]>,
+    Arc<[Mutex<DetailReaders>; DETAIL_COUNT]>,
+    Arc<[AtomicU64; COUNT]>,
 );
 
 // WORK_COUNT exceeds the standard library's array Default implementations (lengths 0..=32).
@@ -128,6 +130,7 @@ impl Default for Stages {
             Arc::default(),
             Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
             Arc::new(std::array::from_fn(|_| Mutex::default())),
+            Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
         )
     }
 }
@@ -138,11 +141,16 @@ pub(crate) struct Capture {
     pub(crate) active: bool,
 }
 
-/// Belt reads from different tank owners can overlap; the phase consumer needs their wall union.
+/// Belt reads from different owners can overlap; both clocks need one union interval.
 #[derive(Default)]
 struct BeltReaders {
     readers: usize,
-    since: Option<Instant>,
+    since: Option<Edge>,
+}
+#[derive(Default)]
+struct DetailReaders {
+    readers: usize,
+    since: Option<std::time::Instant>,
 }
 pub(crate) type NamedCounts = NamedValues<WORK_COUNT, u64>;
 pub(crate) type NamedTimes<const N: usize> = NamedValues<N, f64>;
@@ -171,7 +179,7 @@ impl Stages {
                 .lock()
                 .expect("detail timing lock is not poisoned");
             if active.readers == 0 {
-                active.since = Some(Instant::now());
+                active.since = Some(std::time::Instant::now());
             }
             active.readers += 1;
             drop(active);
@@ -201,29 +209,46 @@ impl Stages {
         )
     }
 
-    pub(super) fn total_ns(&self) -> u64 {
-        self.0.iter().map(|ns| ns.load(Ordering::Relaxed)).sum()
+    pub(super) fn totals_ns(&self) -> [u64; 2] {
+        [&self.0, &self.5].map(|totals| totals.iter().map(|ns| ns.load(Ordering::Relaxed)).sum())
+    }
+
+    pub(crate) fn take_cpu_us(&self) -> NamedTimes<COUNT> {
+        NamedTimes::new(
+            &NAMES,
+            std::array::from_fn(|i| self.5[i].swap(0, Ordering::Relaxed) as f64 / 1000.0),
+        )
     }
     /// An absent resource means instrumentation is off, without reading the clock.
     pub(crate) fn start(stages: Option<&Self>, stage: Stage) -> Option<Bracket> {
         stages.map(|stages| {
-            let start = Instant::now();
+            // Only the union edges need atomic visibility: a new opening must follow the
+            // previous union's close even if its worker was waiting for this lock.
+            let mut belt_active = matches!(stage, Stage::BeltContacts)
+                .then(|| stages.2.lock().expect("belt timing lock is not poisoned"));
+            let start = Edge::now();
+            stages.add(Work::ProcessCpuReads, 1);
             let debit = matches!(stage, Stage::Sweep).then(|| {
                 (
                     Stage::SweepCensus,
-                    stages.0[Stage::SweepCensus as usize].load(Ordering::Relaxed),
+                    [
+                        stages.0[Stage::SweepCensus as usize].load(Ordering::Relaxed),
+                        stages.5[Stage::SweepCensus as usize].load(Ordering::Relaxed),
+                    ],
                 )
             });
-            let belt = matches!(stage, Stage::BeltContacts).then(|| {
-                let mut active = stages.2.lock().expect("belt timing lock is not poisoned");
+            let belt = belt_active.as_mut().map(|active| {
                 if active.readers == 0 {
-                    active.since = Some(Instant::now());
+                    active.since = Some(start);
                 }
                 active.readers += 1;
                 stages.2.clone()
             });
+            drop(belt_active);
             Bracket {
                 totals: stages.0.clone(),
+                cpu_totals: stages.5.clone(),
+                counts: stages.1.clone(),
                 stage,
                 start,
                 belt,
@@ -262,7 +287,7 @@ impl<const N: usize, T: Serialize> Serialize for NamedValues<N, T> {
 
 pub(crate) struct DetailBracket {
     totals: Arc<[AtomicU64; DETAIL_COUNT]>,
-    readers: Arc<[Mutex<BeltReaders>; DETAIL_COUNT]>,
+    readers: Arc<[Mutex<DetailReaders>; DETAIL_COUNT]>,
     detail: Detail,
 }
 
@@ -291,15 +316,22 @@ impl Drop for DetailBracket {
 pub(crate) struct Bracket {
     totals: Arc<[AtomicU64; COUNT]>,
     stage: Stage,
-    start: Instant,
+    start: Edge,
     belt: Option<Arc<Mutex<BeltReaders>>>,
-    debit: Option<(Stage, u64)>,
+    debit: Option<(Stage, [u64; 2])>,
+    cpu_totals: Arc<[AtomicU64; COUNT]>,
+    counts: Arc<[AtomicU64; WORK_COUNT]>,
 }
 
 impl Drop for Bracket {
     fn drop(&mut self) {
-        let elapsed = if let Some(belt) = &self.belt {
-            let mut active = belt.lock().expect("belt timing lock is not poisoned");
+        let mut belt_active = self
+            .belt
+            .as_ref()
+            .map(|belt| belt.lock().expect("belt timing lock is not poisoned"));
+        let now = Edge::now();
+        self.counts[Work::ProcessCpuReads as usize].fetch_add(1, Ordering::Relaxed);
+        let start = if let Some(active) = belt_active.as_mut() {
             active.readers -= 1;
             if active.readers != 0 {
                 return;
@@ -308,32 +340,33 @@ impl Drop for Bracket {
                 .since
                 .take()
                 .expect("the first belt reader opens its interval")
-                .elapsed()
         } else {
-            self.start.elapsed()
+            self.start
         };
-        let ns = u64::try_from(elapsed.as_nanos())
-            .expect("one simulation stage cannot run for the u64 nanosecond span");
-        self.record_ns(ns);
+        self.record_ns(now.since(start));
     }
 }
 
 impl Bracket {
-    fn record_ns(&self, ns: u64) {
-        let nested = self.debit.map_or(0, |(stage, before)| {
-            self.totals[stage as usize].load(Ordering::Relaxed) - before
-        });
-        self.totals[self.stage as usize].fetch_add(
-            ns.checked_sub(nested)
-                .expect("sweep census is contained by sweep"),
-            Ordering::Relaxed,
-        );
+    fn record_ns(&self, ns: [u64; 2]) {
+        for (i, totals) in [&self.totals, &self.cpu_totals].into_iter().enumerate() {
+            let nested = self.debit.map_or(0, |(stage, before)| {
+                totals[stage as usize].load(Ordering::Relaxed) - before[i]
+            });
+            totals[self.stage as usize].fetch_add(
+                ns[i]
+                    .checked_sub(nested)
+                    .expect("sweep census is contained by sweep"),
+                Ordering::Relaxed,
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     /// The census reader must be subtractable exactly once even though collection runs inside
     /// the gameplay sweep. A parent bracket that retains the nested leaf double-counts it.
@@ -342,13 +375,24 @@ mod tests {
         let stages = Stages::default();
         // Fixture: an earlier census consumed 11 ns; this sweep's census consumes 30 of 100 ns.
         stages.0[Stage::SweepCensus as usize].store(11, Ordering::Relaxed);
+        stages.5[Stage::SweepCensus as usize].store(13, Ordering::Relaxed);
         let parent = Stages::start(Some(&stages), Stage::Sweep).unwrap();
+        stages.5[Stage::SweepCensus as usize].fetch_add(60, Ordering::Relaxed);
         stages.0[Stage::SweepCensus as usize].fetch_add(30, Ordering::Relaxed);
-        parent.record_ns(100);
+        parent.record_ns([100, 200]);
         std::mem::forget(parent); // The fixture supplied the elapsed time; do not sample it again.
         let values = stages.take_us();
         assert_eq!(values[Stage::Sweep as usize], 0.070);
         assert_eq!(values[Stage::SweepCensus as usize], 0.041);
+        let cpu = stages.take_cpu_us().values;
+        assert_eq!(cpu[Stage::Sweep as usize], 0.140);
+        assert_eq!(cpu[Stage::SweepCensus as usize], 0.073);
+        let wall = serde_json::to_value(NamedTimes::new(&NAMES, values)).unwrap();
+        let cpu = serde_json::to_value(NamedTimes::new(&NAMES, cpu)).unwrap();
+        assert_eq!(
+            wall.as_object().unwrap().keys().collect::<Vec<_>>(),
+            cpu.as_object().unwrap().keys().collect::<Vec<_>>()
+        );
     }
 
     /// Parallel tank reads share one wall interval: publishing the first reader's span would
@@ -359,11 +403,23 @@ mod tests {
         let first = Stages::start(Some(&stages), Stage::BeltContacts);
         let second = Stages::start(Some(&stages), Stage::BeltContacts);
         drop(first);
-        assert_eq!(stages.total_ns(), 0, "the interval still has a live reader");
+        assert_eq!(
+            stages.totals_ns(),
+            [0, 0],
+            "the interval still has a live reader"
+        );
         drop(second);
         let completed = stages.take_us();
         assert!(completed[Stage::BeltContacts as usize] > 0.0);
         assert_eq!(stages.take_us(), [0.0; COUNT]);
+        let cpu = stages.take_cpu_us();
+        assert!(
+            cpu.values
+                .iter()
+                .enumerate()
+                .all(|(i, &us)| i == Stage::BeltContacts as usize || us == 0.0)
+        );
+        assert_eq!(stages.take_cpu_us().values, [0.0; COUNT]);
     }
 
     /// Nested crumble details can overlap between owners, but must never debit additive phases.
@@ -379,7 +435,7 @@ mod tests {
         drop(second);
         drop(split);
         assert!(stages.take_details().values.iter().all(|&us| us > 0.0));
-        assert_eq!(stages.total_ns(), 0);
+        assert_eq!(stages.totals_ns()[0], 0);
         assert_eq!(stages.take_details().values, [0.0; DETAIL_COUNT]);
         assert!(Stages::detail(None, Detail::CrumbleSolve).is_none());
     }
@@ -416,7 +472,7 @@ mod tests {
                 scope.spawn(move || stages.add(Work::Landings, count));
             }
         });
-        assert_eq!(stages.total_ns(), 0);
+        assert_eq!(stages.totals_ns()[0], 0);
         let value = serde_json::to_value(stages.take_counts()).unwrap();
         assert_eq!(value["landings"], 5);
         assert_eq!(value["landing_passes"], 0);
@@ -435,6 +491,10 @@ mod tests {
         expected[Stage::Refit as usize] = 5.0;
         assert_eq!(stages.take_us(), expected);
         assert_eq!(stages.take_us(), [0.0; COUNT]);
+        stages.5[Stage::Intake as usize].store(7000, Ordering::Relaxed); // Fixture: CPU ns.
+        let cpu = stages.take_cpu_us();
+        assert_eq!(cpu.values[Stage::Intake as usize], 7.0);
+        assert_eq!(stages.take_cpu_us().values, [0.0; COUNT]);
         assert!(Stages::start(None, Stage::Intake).is_none());
         let started = Instant::now();
         // Resolution: enough iterations to amortize the observation clock's own edges.
