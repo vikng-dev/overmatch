@@ -540,13 +540,19 @@ stage-A regression surface, and the REV-13 boundary all held; four findings fixe
    a full-opposing-throttle F1 brake tick implied τ_c ≈ 9.7 kN·m through the 2.4 kN·m
    clutch). Replaced by an END-OF-STEP feasibility check on the final belt state:
    `τ_impl = τ_free − (k·s·m_next − ω_e)·J/dt`; snap only if `|τ_impl| ≤ capacity` (and
-   ≥ the stall floor), else the honestly integrated slipping crank stands. The
-   pre-solve's reactions-only `F_other` is now documented as a PREDICTOR approximation —
-   exact pre-accounting is circular (the brake law reads the q that needs F_c) — made
-   safe by exactly this check. The power_scale condition dropped (any within-capacity
-   landing is a legitimate clutch outcome). Regression (proven to bite against the
-   eager flag): `braking_never_teleports_crank_past_clutch_capacity` — per-tick crank
-   slew bounded by `(capacity + drag)/J·dt` through a closed-loop brake stop.
+   ≥ the stall floor), else the honestly integrated slipping crank stands. The pre-solve
+   is a PREDICTOR. It solves the lock on the belts as the steering member ties them, the
+   member's force eliminated (mean inertia `I_m·(1 + e²)`, each reaction through its own
+   belt's share `1 ± e`, plus `e` times the drift correction), so a member inside its
+   capacity lands the predicted mean. Brakes, a member past its capacity and the work scale
+   still act after it — exact pre-accounting of the brakes is circular (the brake law reads
+   the q that needs F_c) — and this check keeps them safe. The reactions-only `F_other` it
+   replaced left λ's mean-axis share out, and the snap discarded the crank work behind it:
+   MEASURED up to 293 kW in tight low-gear turns (energy ledger, 2026-11-11; regression
+   `a_geared_turn_integrates_the_crank_onto_the_steered_belts`). The power_scale condition
+   dropped (any within-capacity landing is a legitimate clutch outcome). Regression (proven
+   to bite against the eager flag): `braking_never_teleports_crank_past_clutch_capacity` —
+   per-tick crank slew bounded by `(capacity + drag)/J·dt` through a closed-loop brake stop.
 2. **Stall guard + sentinel not spec-robust (High).** The guard's ±capacity clamp meant
    a legal strongly-negative τ_free (big drag fraction over a weak idle curve) could
    carry ω_e below the floor and negative, where the old `≤ 0` sentinel teleported it
