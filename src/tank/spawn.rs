@@ -1189,6 +1189,7 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
 mod proxy_tests {
     use super::*;
     use crate::bake::MeshGeometry;
+    use avian3d::prelude::Collider;
 
     /// The shipped tank's construction data, a fixture: its blueprint and track shapes.
     fn shipped() -> (TankBlueprint, TrackColliders) {
@@ -1316,7 +1317,7 @@ mod proxy_tests {
     #[test]
     fn a_replica_aims_at_a_tank_from_its_armour_set_alone() {
         use crate::ballistics::armour_set::{ArmourPart, LiveArmour, live_box};
-        use avian3d::prelude::{Collider, ColliderAabb, Position, Rotation, SpatialQuery};
+        use avian3d::prelude::{ColliderAabb, Position, Rotation, SpatialQuery};
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         let (authority, replica) = authority_and_replica(&mut world);
@@ -1365,6 +1366,217 @@ mod proxy_tests {
             aim(&mut world),
             intact,
             "each ray stops at the same armour with the parts' colliders garbled"
+        );
+    }
+
+    /// Each ray's [`crate::aim::aim_distance`] out to `max`, aimed by `own`, with avian's tree
+    /// empty: tanks answer from their sets alone.
+    fn aimed(world: &mut World, rays: &[Ray3d], max: f32, own: Entity) -> Vec<f32> {
+        use crate::ballistics::armour_set::LiveArmour;
+        use avian3d::prelude::SpatialQuery;
+        use bevy::ecs::system::RunSystemOnce;
+        world.init_resource::<avian3d::collider_tree::ColliderTrees>();
+        let rays = rays.to_vec();
+        world
+            .run_system_once(move |spatial: SpatialQuery, armour: LiveArmour| {
+                rays.iter()
+                    .map(|&ray| crate::aim::aim_distance(&spatial, &armour, ray, max, own))
+                    .collect::<Vec<f32>>()
+            })
+            .expect("the aim probe runs")
+    }
+
+    /// `tank`'s armour colliders (on [`Layer::Armor`]), each with its world pose composed from the
+    /// hierarchy: the root's `Position` and `Rotation`, then every local `Transform` down to the
+    /// collider. Independent of the armour set, so a set posing a part elsewhere disagrees with it.
+    fn hierarchy_armour(world: &mut World, tank: Entity) -> Vec<(Entity, Collider, Transform)> {
+        use avian3d::prelude::{Position, Rotation};
+        const BODY: &str = "the tank root is a body with a pose";
+        const LOCAL: &str = "every node down to a collider carries its local pose";
+        let root = Transform::from_translation(world.get::<Position>(tank).expect(BODY).0)
+            .with_rotation(world.get::<Rotation>(tank).expect(BODY).0);
+        let colliders: Vec<(Entity, Collider, CollisionLayers)> = world
+            .query::<(Entity, &Collider, &CollisionLayers)>()
+            .iter(world)
+            .map(|(entity, collider, layers)| (entity, collider.clone(), *layers))
+            .collect();
+        colliders
+            .into_iter()
+            .filter(|(_, _, layers)| layers.memberships.has_all(Layer::Armor))
+            .filter_map(|(entity, collider, _)| {
+                let mut pose = *world.get::<Transform>(entity).expect(LOCAL);
+                let mut node = entity;
+                loop {
+                    node = world.get::<ChildOf>(node)?.parent();
+                    if node == tank {
+                        return Some((entity, collider, root.mul_transform(pose)));
+                    }
+                    pose = world
+                        .get::<Transform>(node)
+                        .expect(LOCAL)
+                        .mul_transform(pose);
+                }
+            })
+            .collect()
+    }
+
+    /// The nearest of `armour` (posed as [`hierarchy_armour`] poses it) `ray` meets within `max`.
+    fn nearest(
+        armour: &[(Entity, Collider, Transform)],
+        ray: Ray3d,
+        max: f32,
+    ) -> Option<(f32, Entity)> {
+        armour
+            .iter()
+            .filter_map(|(entity, collider, at)| {
+                collider
+                    .cast_ray(
+                        at.translation,
+                        at.rotation,
+                        ray.origin,
+                        *ray.direction,
+                        max,
+                        true,
+                    )
+                    .map(|(distance, _)| (distance, *entity))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
+    /// The game's damage model: an aim ray passes its own tank and meets another. Every aim ray
+    /// starts inside or behind its own armour, so dropping the exclusion welds the player's aim
+    /// dots to their own tank, and inverting it makes every other tank transparent to them.
+    /// Fixture: the shipped tank as replica at the origin, aiming, and as authority two box
+    /// diagonals off along +X, yawed a quarter turn; avian's tree is empty.
+    #[test]
+    fn an_aim_ray_passes_its_own_tank_and_meets_another() {
+        use crate::ballistics::armour_set::live_box;
+        use avian3d::prelude::{Position, Rotation};
+        let mut world = World::new();
+        let (authority, replica) = authority_and_replica(&mut world);
+        let (min, max) = live_box(&world, replica).expect("the replica carries its armour set");
+        let centre = (min + max) * 0.5;
+        let span = (max - min).length();
+        let turn = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        // The authority's box centred two diagonals along +X: the two boxes cannot overlap.
+        let beside = centre + Vec3::X * 2.0 * span;
+        world
+            .entity_mut(authority)
+            .insert((Position(beside - turn * centre), Rotation(turn)));
+        let (other_min, other_max) =
+            live_box(&world, authority).expect("the authority carries its armour set");
+        let reach = 4.0 * span;
+        let [away, toward] = [Dir3::NEG_X, Dir3::X].map(|direction| Ray3d::new(centre, direction));
+        let aims = aimed(&mut world, &[away, toward], reach, replica);
+        assert_eq!(
+            aims[0], reach,
+            "a ray from inside its own tank meets nothing of it"
+        );
+        let at = toward.get_point(aims[1]);
+        // Resolution: a surface point's f32 rounding against the box it bounds, m.
+        let slack = Vec3::splat(1.0e-3);
+        assert!(
+            aims[1] < reach
+                && at.cmpge(other_min - slack).all()
+                && at.cmple(other_max + slack).all(),
+            "a ray from inside its own tank meets the other tank: met {at} at {}",
+            aims[1]
+        );
+    }
+
+    /// The game's damage model: a replica's aim rays meet its turret, turned, and its gun, pitched,
+    /// where the hierarchy poses them. A replica's set keeps no pose history, so each frame is
+    /// posed from its node's present local `Transform`; a set posing frames at rest, or ignoring
+    /// that local pose, puts the turret where it is not. The player's aim dots on a net client
+    /// rely on it. Fixture: the shipped tank as replica, aimed at by the authority (excluded) from
+    /// the front with a 3×3 grid across its turret's box; the yaw servo turned and the gun pitched
+    /// by fixture angles; avian's tree is empty.
+    #[test]
+    fn a_replica_aims_at_its_turned_turret_where_the_hierarchy_poses_it() {
+        use avian3d::prelude::SimpleCollider;
+        let mut world = World::new();
+        let (authority, replica) = authority_and_replica(&mut world);
+        let rig = world
+            .get::<Rig>(replica)
+            .expect("the replica carries its rig");
+        let (yaw, gun) = (rig.gunner_yaw, rig.gun);
+        // Whether `part` rides the yaw servo.
+        let turret = |world: &World, mut part: Entity| {
+            while let Some(parent) = world.get::<ChildOf>(part) {
+                part = parent.parent();
+                if part == yaw {
+                    return true;
+                }
+            }
+            false
+        };
+        let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+        for (entity, collider, at) in hierarchy_armour(&mut world, replica) {
+            if turret(&world, entity) {
+                let bounds = collider.aabb(at.translation, at.rotation);
+                lo = lo.min(bounds.min);
+                hi = hi.max(bounds.max);
+            }
+        }
+        assert!(lo.x < hi.x, "the replica's yaw servo carries armour");
+        // Fixture standoff in front of the turret's box (the front is -Z), m.
+        let standoff = (hi - lo).length() + 5.0;
+        let reach = 3.0 * standoff;
+        let rays: Vec<Ray3d> = (0..9)
+            .map(|cell| {
+                let [u, v] = [cell % 3, cell / 3].map(|step| 0.25 + 0.25 * step as f32);
+                let origin = Vec3::new(
+                    lo.x + (hi.x - lo.x) * u,
+                    lo.y + (hi.y - lo.y) * v,
+                    lo.z - standoff,
+                );
+                Ray3d::new(origin, Dir3::Z)
+            })
+            .collect();
+        // Resolution: f32 rounding of one rigid chain composed in two orders (the set's frame
+        // offsets, the hierarchy's links), m.
+        let close = |a: f32, b: f32| (a - b).abs() < 1.0e-4;
+        let agree = |set: f32, hierarchy: Option<(f32, Entity)>| {
+            close(set, hierarchy.map_or(reach, |(distance, _)| distance))
+        };
+        let read = |world: &mut World| {
+            let set = aimed(world, &rays, reach, authority);
+            let armour = hierarchy_armour(world, replica);
+            let hierarchy: Vec<_> = rays
+                .iter()
+                .map(|&ray| nearest(&armour, ray, reach))
+                .collect();
+            for (index, (&set, &hierarchy)) in set.iter().zip(&hierarchy).enumerate() {
+                assert!(
+                    agree(set, hierarchy),
+                    "ray {index} meets the set at {set}, the hierarchy's armour at {hierarchy:?}"
+                );
+            }
+            (set, hierarchy)
+        };
+        let (rest, at_rest) = read(&mut world);
+        assert!(
+            at_rest
+                .iter()
+                .flatten()
+                .any(|&(_, part)| turret(&world, part)),
+            "a fixture ray meets the turret at rest: {at_rest:?}"
+        );
+        // Fixture angles, rad: the turret a radian round, the gun pitched a tenth.
+        world.get_mut::<Transform>(yaw).unwrap().rotate_local_y(1.0);
+        world
+            .get_mut::<Transform>(gun)
+            .unwrap()
+            .rotate_local_x(-0.1);
+        let (turned, _) = read(&mut world);
+        assert!(
+            at_rest
+                .iter()
+                .zip(rest.iter().zip(&turned))
+                .any(|(hit, (&rest, &turned))| {
+                    hit.is_some_and(|(_, part)| turret(&world, part)) && !close(turned, rest)
+                }),
+            "a ray that met the turret at rest meets it elsewhere once turned: {rest:?} → {turned:?}"
         );
     }
 

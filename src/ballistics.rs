@@ -2202,11 +2202,9 @@ impl ProjectileMarchWorld<'_, '_> {
     /// The game's damage model: armour frame `frame`'s pose in its carrier from its node's
     /// present local pose, where no interval history poses it (static fixtures).
     fn frame_in_carrier(&self, set: &armour_set::ArmourSet, frame: usize) -> motion::Pose {
-        let local = self
-            .locals
-            .get(set.frames()[frame].node)
-            .expect("game's damage model: an armour frame's node carries its local pose");
-        set.live_in_carrier(frame, *local)
+        set.live_in_carrier(frame, &|node| {
+            *self.locals.get(node).expect(armour_set::LIVE_FRAME_NODE)
+        })
     }
 
     /// The box of `tank` when it holds the world point `at` ([`Self::tank_box`]); `None` for a

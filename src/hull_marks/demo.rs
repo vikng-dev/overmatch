@@ -132,8 +132,8 @@ fn strike_target(
         );
         let hit = armour.cast_ray(ray, 10.0, |_| true).unwrap_or_else(|| {
             panic!(
-                "hull marks demo: ray {index} met no armour — reposition the inspection ray on \
-                 the declared target"
+                "hull marks demo: ray {index} met no tank's armour — reposition the inspection \
+                 ray on the declared target"
             )
         });
         // Armour outside every tank's set (a construction) comes from the tree.

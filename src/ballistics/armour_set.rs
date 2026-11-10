@@ -490,11 +490,15 @@ impl ArmourSet {
         super::motion::outward(largest)
     }
 
-    /// Frame `frame`'s pose in its carrier from `local`, its node's present local pose: how a set
-    /// with no pose history (a replica's, a static fixture's) is posed.
-    pub(super) fn live_in_carrier(&self, frame: usize, local: Transform) -> Pose {
+    /// Frame `frame`'s pose in its carrier from its node's present local pose, read by `local`: how
+    /// a set with no pose history (a replica's, a static fixture's) is posed.
+    pub(super) fn live_in_carrier(
+        &self,
+        frame: usize,
+        local: &dyn Fn(Entity) -> Transform,
+    ) -> Pose {
         let frame = &self.frames[frame];
-        frame.offset * link(local, &frame.node)
+        frame.offset * link(local(frame.node), &frame.node)
     }
 
     /// The nearest armour volume part (no crew box) the ray from `origin` along `direction` meets
@@ -692,9 +696,10 @@ impl LiveArmour<'_, '_> {
             .iter()
             .filter(|set| admit(set.root()))
             .filter_map(|set| {
-                let in_carrier = |frame: usize| {
-                    let node = set.frames[frame].node;
-                    set.live_in_carrier(frame, *self.locals.get(node).expect(LIVE_FRAME_NODE))
+                let in_carrier = |frame| {
+                    set.live_in_carrier(frame, &|node| {
+                        *self.locals.get(node).expect(LIVE_FRAME_NODE)
+                    })
                 };
                 let (distance, normal, part) =
                     set.cast_ray(&body, &in_carrier, ray.origin, ray.direction, max)?;
@@ -709,7 +714,8 @@ impl LiveArmour<'_, '_> {
     }
 }
 
-const LIVE_FRAME_NODE: &str = "game's damage model: an armour frame's node carries its local pose";
+pub(super) const LIVE_FRAME_NODE: &str =
+    "game's damage model: an armour frame's node carries its local pose";
 
 /// The game's damage model: the world box of every part of `tank`'s set posed live from `world`
 /// ([`LiveArmour`]); `None` for an entity with no set or a set with no part.
@@ -725,9 +731,10 @@ pub(crate) fn live_box(world: &World, tank: Entity) -> Option<(Vec3, Vec3)> {
             .expect("game's damage model: an armour frame's base body carries its pose")
             .0,
     };
-    let in_carrier = |frame: usize| {
-        let node = set.frames[frame].node;
-        set.live_in_carrier(frame, *world.get::<Transform>(node).expect(LIVE_FRAME_NODE))
+    let in_carrier = |frame| {
+        set.live_in_carrier(frame, &|node| {
+            *world.get::<Transform>(node).expect(LIVE_FRAME_NODE)
+        })
     };
     set.world_box(&body, &in_carrier)
         .map(|bounds| (bounds.min, bounds.max))
