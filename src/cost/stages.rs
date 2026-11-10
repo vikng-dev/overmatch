@@ -37,6 +37,9 @@ labelled!(Stage, NAMES, COUNT {
     Crumble = "crumble_us",
     ChildColliderWriteback = "child_collider_writeback_us",
     BeltContacts = "belt_contacts_us",
+    // The game's damage model, per field throw: reading its reach, then walking its directions.
+    FieldReach = "field_reach_us",
+    FieldWalk = "field_walk_us",
 });
 
 labelled!(Detail, DETAIL_NAMES, DETAIL_COUNT {
@@ -81,6 +84,13 @@ labelled!(
         BeltPartitionFaces = "belt_partition_faces",
         BeltPartitionCells = "belt_partition_cells",
         BeltTerrainSamples = "belt_terrain_samples",
+        // The game's damage model: one planned crossing, one field throw, and per throw the
+        // armour colliders its reach holds; per direction the candidates and face crossings read.
+        MarchCrossings = "march_crossings",
+        FieldThrows = "field_throws",
+        FieldReached = "field_reached",
+        FieldNear = "field_near",
+        FieldHits = "field_hits",
     }
 );
 

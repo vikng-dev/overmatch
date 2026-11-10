@@ -883,6 +883,10 @@ impl FieldReach {
         }
     }
 
+    pub(crate) fn hard_count(&self) -> usize {
+        self.hard.len()
+    }
+
     /// The armour colliders whose broad-phase bounds meet `swept`.
     fn hard_meeting(&self, swept: ColliderAabb) -> impl Iterator<Item = &Reached> {
         self.hard
@@ -929,6 +933,7 @@ pub(crate) fn field_presence(
     at: Vec3,
     dir: Dir3,
 ) -> Result<Option<(f64, walk::RayWalk)>, WalkError> {
+    use crate::cost::stages::Work;
     let axis = Vec3::from(dir);
     let margin = Vec3::splat(PROBE_MARGIN);
     // Where the line `at + t·axis` lies inside the box `[min, max]` (relative to `at`): the
@@ -965,6 +970,7 @@ pub(crate) fn field_presence(
         hi = hi.max(max);
         near.push((reached.node, reached.collider));
     }
+    context.world.count(Work::FieldNear, near.len());
     if near.is_empty() {
         return Ok(None);
     }
@@ -994,6 +1000,7 @@ pub(crate) fn field_presence(
         &mut hits,
         &|entity| context.world.pose(entity),
     )?;
+    context.world.count(Work::FieldHits, hits.len());
     let mut entries: Vec<(Entity, walk::VolumeMaterial)> = Vec::new();
     for hit in &hits {
         if !entries.iter().any(|(volume, _)| *volume == hit.volume) {
@@ -1066,6 +1073,7 @@ pub(crate) fn field_direction(
         None => (0.0, None),
         Some((start, walked)) => (start, first_solid(&walked.layers, start, exited, is_box)),
     };
+
     let dose = |address: Entity| Dose {
         address,
         amount: strength * weight,

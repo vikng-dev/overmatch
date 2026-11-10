@@ -2136,9 +2136,17 @@ struct ProjectileMarchWorld<'w, 's> {
     // armour classification.
     witnesses: Query<'w, 's, &'static WitnessVolume>,
     witness_surfaces: Query<'w, 's, (), With<WitnessSurface>>,
+    // Present only where the authority stats consumer installed it.
+    stages: Option<Res<'w, crate::cost::stages::Stages>>,
 }
 
 impl ProjectileMarchWorld<'_, '_> {
+    fn count(&self, work: crate::cost::stages::Work, count: usize) {
+        if let Some(stages) = &self.stages {
+            stages.add(work, count as u64);
+        }
+    }
+
     fn source_box(&self, tank: Entity) -> Option<SourceBox> {
         // Tank-less tool fire and a despawned shooter have no source body to clear.
         let colliders = self.body_colliders.get(tank).ok()?;
@@ -3266,6 +3274,9 @@ fn decide_playback(
             }
         };
         budget.charge().unwrap_or_else(|error| error.panic());
+        context
+            .world
+            .count(crate::cost::stages::Work::MarchCrossings, 1);
         let mut playing = resolve::Playback::new(
             decision.clone(),
             &flight,
@@ -3661,10 +3672,17 @@ fn walk_field(
     context: &resolve::ResolveContext<'_, '_, '_>,
     is_box: &dyn Fn(Entity) -> bool,
 ) -> Vec<SpallRay> {
+    use crate::cost::stages::{Stage, Stages, Work};
     let world = context.world;
     let weight = 1.0 / spread.directions_count() as f32;
     let within = |collider: Entity| world.volume_of(collider).is_some();
-    let reach = resolve::FieldReach::of_throw(context, &within, throw.origin);
+    let reach = {
+        let _leaf = Stages::start(world.stages.as_deref(), Stage::FieldReach);
+        resolve::FieldReach::of_throw(context, &within, throw.origin)
+    };
+    let _leaf = Stages::start(world.stages.as_deref(), Stage::FieldWalk);
+    world.count(Work::FieldThrows, 1);
+    world.count(Work::FieldReached, reach.hard_count());
     let mut rays = Vec::with_capacity(spread.directions_count());
     for (ray_dir, profile) in spread.directions(throw.axis) {
         let thrown = throw.strength * profile;
