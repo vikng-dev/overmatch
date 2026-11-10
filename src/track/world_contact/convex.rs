@@ -12,7 +12,51 @@ use super::{SupportPatch, sample_halves};
 use crate::track::rubble::{RubbleBodies, Slab};
 use bevy::prelude::*;
 
+macro_rules! polygon_ops {
+    ($vector:ty, $scalar:ty) => {
+        /// Keep the nonnegative side of an affine half-plane. Homogeneous footprint coordinates keep
+        /// clipping, depth comparison and surface interpolation in the same frame.
+        fn clip(polygon: &[$vector], plane: $vector) -> Vec<$vector> {
+            let Some(&last) = polygon.last() else {
+                return Vec::new(); // An empty intersection remains empty.
+            };
+            let mut result = Vec::with_capacity(polygon.len() + 1);
+            let mut a = last;
+            let mut da = plane.dot(a);
+            for &b in polygon {
+                let db = plane.dot(b);
+                if (da < 0.0 && db >= 0.0) || (da >= 0.0 && db < 0.0) {
+                    result.push(a + (b - a) * (da / (da - db)));
+                }
+                if db >= 0.0 {
+                    result.push(b);
+                }
+                (a, da) = (b, db);
+            }
+            result
+        }
+
+        fn signed_area(polygon: &[$vector]) -> $scalar {
+            if polygon.len() < 3 {
+                return 0.0;
+            } // A point or edge has no projected area.
+            polygon[1..]
+                .windows(2)
+                .map(|edge| {
+                    let a = edge[0] - polygon[0];
+                    let b = edge[1] - polygon[0];
+                    a.x * b.y - a.y * b.x
+                })
+                .sum::<$scalar>()
+                / 2.0
+        }
+    };
+}
+
+polygon_ops!(Vec3, f32);
+
 mod envelope;
+
 #[cfg(test)]
 fn partition(
     a: f32,
@@ -22,7 +66,16 @@ fn partition(
     free: Vec3,
     faces: &[(usize, &ClippedFace)],
 ) -> Vec<Cell> {
-    let cells = envelope::partition(a, b, strip, base, free, faces);
+    let cells = envelope::partition(
+        a,
+        b,
+        strip,
+        base,
+        free,
+        faces,
+        &mut envelope::Scratch::default(),
+    );
+
     let regions = integrated_regions(cells.clone(), faces.len(), strip.1 - strip.0);
     assert!(
         regions.len() <= faces.len() + 1,
@@ -37,43 +90,6 @@ pub(crate) struct ClippedFace {
     pub(crate) depth: Vec3,
     pub(crate) normal: Vec3,
     planes: Vec<Vec3>,
-}
-
-/// Keep the nonnegative side of an affine half-plane. Homogeneous footprint coordinates keep
-/// clipping, depth comparison and surface interpolation in the same frame.
-fn clip(polygon: &[Vec3], plane: Vec3) -> Vec<Vec3> {
-    let Some(&last) = polygon.last() else {
-        return Vec::new(); // An empty intersection remains empty.
-    };
-    let mut result = Vec::with_capacity(polygon.len() + 1);
-    let mut a = last;
-    let mut da = plane.dot(a);
-    for &b in polygon {
-        let db = plane.dot(b);
-        if (da < 0.0 && db >= 0.0) || (da >= 0.0 && db < 0.0) {
-            result.push(a + (b - a) * (da / (da - db)));
-        }
-        if db >= 0.0 {
-            result.push(b);
-        }
-        (a, da) = (b, db);
-    }
-    result
-}
-
-fn signed_area(polygon: &[Vec3]) -> f32 {
-    if polygon.len() < 3 {
-        return 0.0;
-    } // A point or edge has no projected area.
-    polygon[1..]
-        .windows(2)
-        .map(|edge| {
-            let a = edge[0] - polygon[0];
-            let b = edge[1] - polygon[0];
-            a.x * b.y - a.y * b.x
-        })
-        .sum::<f32>()
-        / 2.0
 }
 
 impl ClippedFace {
@@ -385,13 +401,22 @@ pub(super) fn patches(
     pieces: &RubbleBodies,
 ) -> Vec<SupportPatch> {
     let mut result = Vec::new();
+    let mut scratch = envelope::Scratch::default();
     for half in 0..2 {
         let (a, b) = (
             half as f32 * slab.len / 2.0,
             (half + 1) as f32 * slab.len / 2.0,
         );
         let free = half_plane(slab.len, travel, half);
-        let cells = envelope::partition(a, b, strip, half_plane(slab.len, pen, half), free, faces);
+        let cells = envelope::partition(
+            a,
+            b,
+            strip,
+            half_plane(slab.len, pen, half),
+            free,
+            faces,
+            &mut scratch,
+        );
         pieces.count(crate::cost::stages::Work::BeltPartitionCells, cells.len());
         let regions = integrated_regions(cells, faces.len(), slab.lateral.1 - slab.lateral.0);
         pieces.count(
@@ -423,11 +448,13 @@ pub(super) fn patches(
             });
         }
     }
+    pieces.count(crate::cost::stages::Work::BeltDiscoveryTests, scratch.tests);
     result
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     // Fixture: affine surfaces over the unit footprint, in homogeneous coordinates.
@@ -476,35 +503,51 @@ mod tests {
         }
     }
 
-    /// Loose-piece shadows must replace each other inside a half. The suspension must not
-    /// carry an owner chosen on their tie boundary across the other shadow's visible region.
+    /// Loose-piece shadows must replace each other inside a half. Sampling must not carry
+    /// an owner chosen on their tie boundary across the other shadow's visible region.
     #[test]
     fn crossing_shoe_shadows_close_lateral_bands_in_both_orders() {
-        let (mut slab, _, _) = partition_fixture(false);
-        slab.len = 2.0;
-        slab.lateral = (0.0, 1.0);
-        slab.reach = 4.0;
-        let faces: Vec<_> = [
-            unit_face(Vec3::new(1.0, 0.0, 1.0)),
-            unit_face(Vec3::new(-1.0, 0.0, 2.0)),
-        ]
-        .into_iter()
-        .flat_map(|f| f.across_shoe(&slab))
-        .collect();
-        for refs in [
-            vec![(0, &faces[0]), (1, &faces[1])],
-            vec![(1, &faces[1]), (0, &faces[0])],
-        ] {
-            let cells = partition(0.0, 1.0, slab.lateral, Vec3::ZERO, Vec3::ZERO, &refs);
-            let (area, pressure, moment) = moments(&cells, 1.0);
-            // DERIVED: max(1+x,2-x), symmetric about x=1/2, has integral 7/4.
-            // Resolution: unit-scale f32 integration roundoff.
-            assert!((area - 1.0).abs() < 1e-6);
-            assert!((pressure - 7.0 / 4.0).abs() < 1e-6);
-            assert!((moment - Vec3::new(7.0 / 8.0, 7.0 / 8.0, 7.0 / 4.0)).length() < 1e-6);
-            for cell in cells {
-                let p = cell.polygon.iter().sum::<Vec3>() / cell.polygon.len() as f32;
-                assert_eq!(refs[cell.face.unwrap()].0, usize::from(p.x < 0.5));
+        // Fixture: dyadic and oblique f32 crossings, with exact and non-dyadic shoe edges.
+        for intercept in [2.0, 1.74, 1.26] {
+            for strip in [(0.0, 1.0), (-0.34611118, 0.3786031)] {
+                let (mut slab, _, _) = partition_fixture(false);
+                slab.len = 2.0;
+                slab.lateral = strip;
+                slab.reach = 4.0;
+                let faces: Vec<_> = [
+                    unit_face(Vec3::new(1.0, 0.0, 1.0)),
+                    unit_face(Vec3::new(-1.0, 0.0, intercept)),
+                ]
+                .into_iter()
+                .flat_map(|f| f.across_shoe(&slab))
+                .collect();
+                let crossing = (intercept - 1.0) / 2.0;
+                for refs in [
+                    vec![(0, &faces[0]), (1, &faces[1])],
+                    vec![(1, &faces[1]), (0, &faces[0])],
+                ] {
+                    let cells = partition(0.0, 1.0, strip, Vec3::ZERO, Vec3::ZERO, &refs);
+                    let (area, pressure, moment) = moments(&cells, strip.1 - strip.0);
+                    // DERIVED: integrate 1+x, then add 2(c-x) on [0,c].
+                    let expected = 1.5 + crossing * crossing;
+                    let mx = 5.0 / 6.0 + crossing * crossing * crossing / 3.0;
+                    // Resolution: unit-scale f32 integration roundoff.
+                    assert!((area - 1.0).abs() < 1e-6);
+                    assert!((pressure - expected).abs() < 1e-6);
+                    assert!(
+                        (moment - Vec3::new(mx, expected * (strip.0 + strip.1) / 2.0, expected))
+                            .length()
+                            < 1e-6
+                    );
+                    for (x, owner) in [(crossing / 2.0, 1), ((1.0 + crossing) / 2.0, 0)] {
+                        let p = Vec3::new(x, (strip.0 + strip.1) / 2.0, 1.0);
+                        let cell = cells
+                            .iter()
+                            .find(|c| contains_point(&c.polygon, p, 0.0))
+                            .unwrap();
+                        assert_eq!(refs[cell.face.unwrap()].0, owner);
+                    }
+                }
             }
         }
     }
@@ -516,6 +559,37 @@ mod tests {
         let face = unit_face(Vec3::Z);
         let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::Z, Vec3::ZERO, &[(0, &face)]);
         assert!(cells.iter().all(|c| c.face.is_none()));
+    }
+
+    /// A triangulated surface supplies the shared edge twice. Contact sampling must still
+    /// visit each visible triangle once; duplicated clipping planes cannot multiply contacts.
+    #[test]
+    fn shared_triangle_edges_do_not_multiply_patches() {
+        // Fixture: two flat triangles tiling the unit square along x+y=1.
+        let mut faces = [unit_face(Vec3::Z), unit_face(Vec3::Z)];
+        faces[0].planes.push(Vec3::new(-1.0, -1.0, 1.0));
+        faces[1].planes.push(Vec3::new(1.0, 1.0, -1.0));
+        for duplicate in [false, true] {
+            if duplicate {
+                for f in &mut faces {
+                    f.planes.extend(f.planes.clone());
+                }
+            }
+            for refs in [
+                vec![(0, &faces[0]), (0, &faces[1])],
+                vec![(0, &faces[1]), (0, &faces[0])],
+            ] {
+                let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
+                let regions = integrated_regions(cells, refs.len(), 1.0);
+                // DERIVED: both triangles have positive visible area; no field remains.
+                assert_eq!(regions.len(), 2);
+                let pressure: f32 = regions.iter().map(|(_, i, _, _)| i.area).sum();
+                let moment: Vec3 = regions.iter().map(|(_, i, _, _)| i.centroid * i.area).sum();
+                // Resolution: unit-scale f32 moment accumulation.
+                assert!((pressure - 1.0).abs() < 1e-6);
+                assert!((moment - Vec3::new(0.5, 0.5, 1.0)).length() < 1e-6);
+            }
+        }
     }
 
     /// Sampling and engagement operate once per visible face region. A partly hidden face
@@ -712,6 +786,7 @@ mod tests {
             travel,
         );
         let width = slab.lateral.1 - slab.lateral.0;
+        let mut expected_patches = None;
         let mut expected: Option<(f32, f32, Vec3)> = None;
         for ordered in [faces.clone(), faces.iter().rev().copied().collect()] {
             let cells: Vec<_> = (0..2)
@@ -726,6 +801,15 @@ mod tests {
                     )
                 })
                 .collect();
+            let patches = integrated_regions(cells.clone(), ordered.len(), width).len();
+            if let Some(expected) = expected_patches {
+                assert_eq!(
+                    patches, expected,
+                    "visible owner count depends on face order"
+                );
+            } else {
+                expected_patches = Some(patches);
+            }
             let actual = moments(&cells, width);
             // Resolution: accumulated f32 polygon and pressure-moment roundoff in this column.
             if let Some((area, pressure, moment)) = expected {
@@ -769,7 +853,7 @@ mod tests {
                 .filter(|c| integrate(&clip(&c.polygon, c.depth), c.depth, width).is_some())
                 .count();
             println!(
-                "capture faces={} cells={} contacts={contacts} moments={actual:?}",
+                "capture faces={} cells={} band_contacts={contacts} patches={patches} moments={actual:?}",
                 ordered.len(),
                 cells.len()
             );

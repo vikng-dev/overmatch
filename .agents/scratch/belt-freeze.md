@@ -139,3 +139,103 @@ with target and deployment supplied by the operator:
 ```sh
 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 scripts/perf/collapse.sh --target "$TIMING_TARGET" --deployment "$TIMING_DEPLOYMENT" --schedule scripts/perf/rest-3.json --tanks 30 --clients 1 --duration 150 --out target/belt-freeze-priced
 ```
+
+## Visible-face regions and discovery: second pass
+
+Subject: support contacts in the game's authoritative driving simulation. Game state only.
+Baseline for every causal comparison below: `89e8970b`. Ownership and aggregation landed as
+`59a8113d` and `de83a15e`; the discovery change follows them on `lane/belt-freeze`.
+
+Verified in source: owners were cached when bands opened, lateral edges were discarded, crossing
+visibility scanned every region, and every interval allocated active-edge and band-map storage.
+The old tests let hiding and burial mask each other; the analytic crossing lay on the half boundary.
+The review's float-frequency estimates were not measured and are not used here.
+
+A band now chooses its owner at emission, at its f64 area centroid. Lateral events close the bands
+they span even when those bands retain the same side keys. Each footprint point still belongs to
+the highest covering triangle, using that triangle's depth. Bands of one owner face sum their area,
+pressure integral and first moment before any support sampling. Engagement uses the maximum depth
+of the entire visible face region in that half, including disconnected parts. Field regions retain
+all their polygons so curved-terrain slicing preserves holes. The module owns the contact bound.
+
+Discovery uses a balanced index of projected along/lateral bounds for burial, boundary cover and
+pair-crossing queries. Crossings are clipped as finite segments against the other region; empty
+intersections avoid visibility work. Rectangle boundaries and exact duplicate edges enter once.
+Sweep and visibility buffers retain capacity across intervals and both halves. Emitted polygons
+still own their storage; this is no claim of allocation-free integration or a universal quadratic
+worst-case bound. The unconditional pair-by-all-regions scan is gone; dense overlapping input can
+still require substantial discovery work. No cap or new authored physical number was added.
+
+`belt_discovery_tests` counts exact burial and edge-cover tests after bounds pruning. It excludes
+bounds-index node visits and pair-crossing/segment-event arithmetic. `belt_partition_patches`
+counts the positive-pressure owner regions emitted by convex integration, before terrain refinement.
+The existing cell counter continues to expose internal bands; bands are not contacts.
+
+MEASURED on identical inputs, both halves of one column. The pile reproduces the recipe in
+`belt-cells.md`: 512 unscaled chunks from the 1,159-chunk shipped pool, with 2,492 solid faces or
+3,259 shoe-shadow faces. The rehearsal peak is the largest captured face count across the two new
+runs, not a reconstruction of the historical 69-face column whose geometry was never retained.
+Each paired entry is baseline / new.
+
+| Input | Faces | Bands | Patches | Discovery tests | Per-collider alternative |
+|---|---:|---:|---:|---:|---:|
+| Captured column | 65 | 576 / 589 | 559 / 79 | 19,328 / 3,795 | 4 |
+| New rehearsal column peak | 94 | 1,269 / 1,053 | 1,212 / 107 | 39,397 / 15,683 | 4 |
+| 512-chunk solid pile | 2,492 | 1,286 / 1,311 | 1,286 / 196 | 11,007,411 / 2,240,907 | 77 |
+| Same pile, shoe shadows | 3,259 | 24 / 22 | 24 / 19 | 391,482 / 241,685 | 6 |
+
+The last column counts distinct support colliders (and the field) per half, over the same visible
+regions. Decision: implement per-face aggregation as requested. The coarser alternative would
+combine different normals and point-motion, damping and grip samples; only its potential count
+is reported. It is not implemented or retained behind a switch.
+
+MEASURED two independent local rehearsals, each running:
+
+```sh
+OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 scripts/perf/collapse.sh --rehearsal --schedule scripts/perf/rest-3.json --tanks 30 --clients 1 --duration 150
+```
+
+Both runners exited zero. The following are independent per-tick maxima, not one simultaneous row.
+All retained ticks, including collection tails, are in each run's `belt-ticks.csv` under
+`target/belt-freeze2/rest3-1/` and `target/belt-freeze2/rest3-2/`. Each row includes faces, bands,
+patches, dynamic contacts, discovery tests and the names of belt counters exceeding 2,000.
+`target/belt-freeze2/counts.json` records maximum ticks and threshold counts for every belt counter.
+
+| Run | Ticks | Faces | Bands | Patches | Dynamic contacts | Discovery tests |
+|---|---:|---:|---:|---:|---:|---:|
+| rest-3 / 1 | 9,407 | 729 | 5,116 | 869 | 821 | 57,891 |
+| rest-3 / 2 | 8,994 | 1,045 | 4,147 | 1,777 | 1,709 | 53,256 |
+
+MEASURED threshold result: no tick exceeded 2,000 faces, patches or dynamic contacts. Bands exceeded
+2,000 on 1,309 / 476 ticks; discovery tests did so on 2,269 / 2,088 ticks. Of the other belt counters,
+slab checks crossed it on 678 / 0 ticks and terrain samples on every tick. These are observations,
+not caps or acceptance conditions. The trajectories are unpaired; they establish neither a speedup
+nor hosted budget compliance. Temporary input capture only logged increasing column face counts;
+it and all comparison/mutant modules were removed after measurement.
+
+The analytic oblique crossing lies inside one half and independently derives area, pressure and
+both first moments. Crossing shoe shadows cover both input orders, non-dyadic crossing positions
+and non-dyadic lateral edges. Partly hidden faces and shared triangle edges have derived patch
+counts; every partition fixture checks the module's generic contact bound. Disconnected-region
+slicing checks the independently derived pressure and first moment. The captured placement no
+longer has a data-specific positive-contact requirement and compares owner counts under reversal.
+
+MEASURED mutation evidence: a `visible` implementation retaining the whole edge fails the visibility
+trimming test; returning all regions from burial fails its prefilter test. Returning `None` from
+`crossing` fails the interior analytic pressure assertion. Replacing the strict winner comparison
+with `>=` fails the field-tie recipient assertion. Evidence is in `target/belt-freeze2/mutant-*.log`
+and `discovery-tests.log`; none of these alternate implementations is compiled by the final tree.
+
+Validation uses the required format check, workspace/all-target CI clippy and targeted tests for
+world contact, forces, rubble, the shipped belt-on-hull witness, stage counters, server stats and
+all four whole-tree guards. Final output is in `target/belt-freeze2/final-gates.log`. Local review
+covered all six lenses; no backlog row names an edited file. There are no collider/body constructor
+changes, external writes, rebases, merges or pushes in this pass.
+
+Player-visible limits: grouping can change shallow engagement, damping, grip and the resulting
+trajectory. Those outputs are observations for play judgment, not pinned obligations. Hosted
+pricing and that judgment remain with the orchestrator. Exact timing command:
+
+```sh
+OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 scripts/perf/collapse.sh --target "$TIMING_TARGET" --deployment "$TIMING_DEPLOYMENT" --schedule scripts/perf/rest-3.json --tanks 30 --clients 1 --duration 150 --out target/belt-freeze-priced
+```
