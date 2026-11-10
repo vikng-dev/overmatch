@@ -1198,7 +1198,7 @@ fn piece_rays(count: usize) -> impl Iterator<Item = usize> {
 }
 
 /// The corner time at which the piece on direction `ray` of cone `index` stops: its front reaches
-/// the direction's recorded end.
+/// the direction's drawn reach.
 fn piece_stop(plan: &Plan, kind: CornerKind, index: usize, ray: usize) -> f32 {
     let cone = &plan.cones[index];
     cone_start(plan, kind, index, false)
@@ -1320,7 +1320,7 @@ impl<'a> Playing<'a> {
     /// A piece's pose in the record's frame, or `None` while it is not drawn: from its field's
     /// throw (the burst), on its direction from the field's origin at the field's front
     /// ([`front_radius`]), so the pieces are where the field's volume ends; stopped at the
-    /// direction's recorded end and shrunk away over [`PIECE_FADE_S`] from the moment it stops
+    /// direction's drawn reach and shrunk away over [`PIECE_FADE_S`] from the moment it stops
     /// ([`piece_stop`]). A shard of [`PIECE_CALIBRES`] at the record's calibre, its length along
     /// the direction. Never under reduce motion, nor on the eye's side of the slice plane.
     fn piece_pose(&self, piece: &Piece) -> Option<Transform> {
@@ -2818,9 +2818,10 @@ mod tests {
     }
 
     /// A burst's pieces ride its field: each on a recorded direction
-    /// ([`crate::damage_cam::Fragment::end`]) from the field's origin, at the front the record
-    /// gives — the burst's sideways speed over the record time since the field was thrown
-    /// ([`crate::damage_cam::Burst::sideways_mps`]) — and never past the direction's end, where it
+    /// ([`crate::damage_cam::Fragment::end`]) from the field's origin, through its recorded end, at
+    /// the front the record gives — the burst's sideways speed over the record time since the field
+    /// was thrown ([`crate::damage_cam::Burst::sideways_mps`]) — and never past the direction's
+    /// drawn reach (`plan::Ray::reach`), where it
     /// stops and then shrinks away within [`PIECE_FADE_S`]; none before the burst, and every one
     /// gone by the settle, so the hold never freezes one mid-flight. A record's sideways speed
     /// differs from the round's carried speed (fixture data), so a piece run at the shell's pace
@@ -2858,12 +2859,14 @@ mod tests {
                     };
                     let direction = cone.rays[ray].direction;
                     let reach = cone.rays[ray].reach;
-                    let end = origin + direction * reach;
+                    let rides = |f: &crate::damage_cam::Fragment| {
+                        let recorded = Vec3::from(f.end).distance(origin);
+                        recorded <= reach + POSITION_TOL_M
+                            && Vec3::from(f.end).distance(origin + direction * recorded)
+                                < POSITION_TOL_M
+                    };
                     assert!(
-                        field
-                            .fragments
-                            .iter()
-                            .any(|f| Vec3::from(f.end).distance(end) < POSITION_TOL_M),
+                        field.fragments.iter().any(rides),
                         "{name}: piece {ray} rides no recorded direction"
                     );
                     let pose = |c: f32| Playing::new(plan, kind, c, false).piece_pose(&piece);

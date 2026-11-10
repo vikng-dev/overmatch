@@ -837,10 +837,8 @@ impl Reached {
 const BOX_SPACINGS: f32 = 16.0;
 
 /// The game's damage model: a tank's box, the bounds of its armour volumes in its body's frame at
-/// the field's moment ([`super::ProjectileMarchWorld::tank_box`]), grown by [`BOX_SPACINGS`]: the
-/// box the pen cam ends a direction that meets no hard body at (its picture's horizon,
-/// `damage_cam::pen_cam::picture`). A field thrown from inside it ends at it
-/// ([`FieldReach::of_box`]).
+/// the field's moment ([`super::ProjectileMarchWorld::tank_box`]), grown by [`BOX_SPACINGS`]. A
+/// field thrown from inside it ends at it ([`FieldReach::of_box`]).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TankBox {
     tank: Entity,

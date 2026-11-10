@@ -5,7 +5,8 @@
 //!
 //! The casters ([`Casters`]) are the struck tank's hard bodies ([`HardBodies`], every non-witness
 //! ballistic primitive, posed as the record has the tank) and the horizon: the world-axis box
-//! about them, where a direction that meets no body ends. A crew station is a witness and never a
+//! about them and the fields' volume, where a direction that meets no body ends, past every point
+//! a field is drawn at. A crew station is a witness and never a
 //! caster (ADR-0040). A texel holds the radial distance (record m) from the origin to the nearest
 //! caster face its centre direction meets head-on ([`CASTER_CULL`]), as a line enters a hard
 //! body ([`HardBodies`]), so a line from inside a body leaves it.
@@ -33,7 +34,6 @@ use std::f32::consts::{PI, SQRT_2};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-#[cfg(test)]
 use avian3d::parry::query::RayCullingMode;
 use bevy::asset::{RenderAssetUsages, StrongHandle};
 use bevy::mesh::VertexBufferLayout;
@@ -92,6 +92,26 @@ pub const NEAR_M: f32 = 1.0e-4;
 /// wound outward (the manifold gate's certificate) and the horizon inward, as a line enters a hard
 /// body ([`HardBodies`]).
 pub const CASTER_CULL: Option<Face> = Some(Face::Back);
+
+/// [`CASTER_CULL`] as a cast against the hard bodies keeps faces.
+fn caster_culling() -> Option<RayCullingMode> {
+    CASTER_CULL.map(|face| match face {
+        Face::Back => RayCullingMode::IgnoreBackfaces,
+        Face::Front => RayCullingMode::IgnoreFrontfaces,
+    })
+}
+
+/// Whether the line from `origin` along unit `direction` (record frame) meets a face of `bodies`
+/// the picture keeps ([`CASTER_CULL`]) within `reach` (m): where it does, the picture ends the
+/// direction on a hard body, and where it does not, on the horizon. The GPU's near plane
+/// (`pen_cam_picture.wgsl`) is not applied: that differs only for a face nearer the origin than
+/// the plane, 10⁻⁴ m along a cube face's forward.
+pub fn meets_a_body(bodies: &HardBodies, origin: Vec3, direction: Vec3, reach: f32) -> bool {
+    bodies
+        .cast(origin, direction, reach, caster_culling())
+        .is_some()
+}
+
 /// How far past a texel's own reach the look counts a point within it, at most: this many texel
 /// diagonals of turn (`√2` pitches: a texel turns a direction by at most its pitch, the turn per
 /// tangent unit of a cube face being at most 1, DERIVED) times the point's distance from the
@@ -272,8 +292,8 @@ impl Crop {
 
 /// One field's picture: its origin and frame (record frame; `u`, `v` across the unit axis,
 /// `u × v = axis`), its support's half-angle and inner edge (rad), its pitch (rad a texel), each
-/// face's crop, and the longest reach the record gives it (m), past which the look draws none of
-/// it.
+/// face's crop, and its longest drawn reach (m, `plan::Cone::max_reach`), past which the look
+/// draws none of it.
 #[derive(Clone, Debug)]
 pub struct Picture {
     pub origin: Vec3,
@@ -419,8 +439,10 @@ pub struct Seen<'a> {
 }
 
 /// What a record's pictures are rendered from: the struck tank's hard bodies, and the horizon,
-/// the world-axis box about them (record frame, low and high corners), where a direction that
-/// meets no body ends.
+/// the world-axis box (record frame, low and high corners) about them and the fields' volume box
+/// ([`super::look::field_bounds`]), where a direction that meets no body ends: past every point a
+/// field is drawn at, so the horizon ends no drawing, and a direction no body stops is drawn out to
+/// its drawn reach (`plan::drawn_reach`).
 #[derive(Debug)]
 pub struct Casters {
     bodies: Arc<HardBodies>,
@@ -429,11 +451,13 @@ pub struct Casters {
 }
 
 impl Casters {
-    /// The casters of `bodies`; `None` for bodies with no vertex.
-    pub fn of(bodies: &Arc<HardBodies>) -> Option<Self> {
+    /// The casters of `bodies`, the horizon holding `fields` (low and high corners) too; `None`
+    /// for bodies with no vertex.
+    pub fn of(bodies: &Arc<HardBodies>, fields: Option<(Vec3, Vec3)>) -> Option<Self> {
         let (lo, hi) = bodies.vertices().iter().fold(None, |bounds, &p| {
             Some(bounds.map_or((p, p), |(lo, hi): (Vec3, Vec3)| (lo.min(p), hi.max(p))))
         })?;
+        let (lo, hi) = fields.map_or((lo, hi), |(a, b)| (lo.min(a), hi.max(b)));
         Some(Self {
             bodies: bodies.clone(),
             lo,
@@ -498,13 +522,9 @@ impl Casters {
         if !leave.is_finite() || leave < enter.max(0.0) {
             return 0.0;
         }
-        let culling = CASTER_CULL.map(|face| match face {
-            Face::Back => RayCullingMode::IgnoreBackfaces,
-            Face::Front => RayCullingMode::IgnoreFrontfaces,
-        });
         let hit = self
             .bodies
-            .cast(start, direction, leave, culling)
+            .cast(start, direction, leave, caster_culling())
             .unwrap_or(leave);
         hit.min(leave) + near
     }
@@ -649,6 +669,7 @@ impl Pictures {
         details: &[UVec2],
     ) -> Self {
         let indices = pictured_fields(cones);
+        let reached = super::look::field_bounds(cones);
         let cones: Vec<_> = indices.iter().map(|&index| &cones[index]).collect();
         let cells: Vec<Cells> = cones.iter().map(|cone| Picture::cells(cone)).collect();
         let mut pitches: Vec<f32> = cones
@@ -687,7 +708,7 @@ impl Pictures {
                     fields,
                     size,
                     details,
-                    casters: bodies.and_then(Casters::of),
+                    casters: bodies.and_then(|bodies| Casters::of(bodies, reached)),
                     image: Mutex::default(),
                 };
             }
@@ -1359,7 +1380,8 @@ pub(super) mod tests {
             Vec3::new(5.0, 5.0, -1.0),
             &mut parts,
         );
-        Casters::of(&Arc::new(HardBodies::new(parts.0, parts.1))).expect("the fixture has vertices")
+        Casters::of(&Arc::new(HardBodies::new(parts.0, parts.1)), None)
+            .expect("the fixture has vertices")
     }
 
     /// Each face's frame is the one [`face_of`] reads: a direction built at tangent `(a, b)` on face
@@ -1474,46 +1496,83 @@ pub(super) mod tests {
         assert!((up - 0.01).abs() < 1e-4, "{up}: the horizon's top");
     }
 
-    /// The pictures' CPU mirror agrees with every recorded direction of every shipped record:
-    /// along each direction a fragment ended off its field's origin, the reach the casters give
-    /// ([`Casters::reach`], the GPU's clip and cull rule computed on the CPU) is the fragment's
-    /// distance from the origin, within 10⁻⁴ m. A field whose every fragment ended at its origin
-    /// is the record-wins case and is skipped here
-    /// (`a_field_the_record_stops_at_its_origin_draws_nothing`). Casters other than the record's
-    /// hard bodies (crew stations cast as hard bodies stop the fields that run through them) fail
-    /// here. This holds the mirror alone: no test reads the GPU's pictures back.
+    /// The pictures' CPU mirror ends every recorded direction of every shipped record where the
+    /// pen cam draws it. Along each direction a fragment ended off its field's origin, where the
+    /// casters ([`Casters::reach`], the GPU's clip and cull rule computed on the CPU, about the
+    /// record's bodies and fields) end it within 10⁻⁴ m of the fragment's end, a hard body stopped
+    /// it, and the plan draws it to that end. Everywhere else it met no hard body of the struck
+    /// tank, and the plan draws it on, never short of the record, to where its own intensity
+    /// (`I = e / r²`, `e` its emission from its recorded strength, [`Potency::emission`]) falls to
+    /// the floor band, or not past the record where it is under the floor there; the casters run
+    /// at least that far. A field whose every fragment ended at its origin is the record-wins case
+    /// and is skipped here (`a_field_the_record_stops_at_its_origin_draws_nothing`). Casters other
+    /// than the record's hard bodies (crew stations cast as hard bodies stop the fields that run
+    /// through them), a stopped direction drawn on, an unstopped one ended at the record, a reach
+    /// off the field's own floor, or a horizon that ends a drawing fail here. This holds the mirror
+    /// alone: no test reads the GPU's pictures back.
     #[test]
-    fn the_cpu_mirror_agrees_with_every_recorded_direction() {
-        let (mut checked, mut fields) = (0, 0);
+    fn the_cpu_mirror_ends_every_recorded_direction_where_it_is_drawn() {
+        use crate::ballistics::spall_cone::{self, BurstFields};
+        let units = (spall_cone::cone_unit(), BurstFields::shipped().unit());
+        let (mut stopped, mut open, mut fields) = (0, 0, 0);
         for (name, report) in super::super::plan::tests::records() {
             let shapes = super::super::plan::tests::shapes(&report);
             let Some(bodies) = shapes.hard() else {
                 continue;
             };
-            let casters = Casters::of(bodies).expect("the bodies have vertices");
-            for (k, field) in report.fields().enumerate() {
+            let plan = super::super::plan::Plan::new(&report, &shapes);
+            let potency = plan.potency.expect("the shipped tank has crew stations");
+            let reached = super::super::look::field_bounds(&plan.cones);
+            let casters = Casters::of(bodies, reached).expect("the bodies have vertices");
+            for (k, (field, cone)) in report.fields().zip(&plan.cones).enumerate() {
+                let unit = if k < report.spall.len() {
+                    units.0
+                } else {
+                    units.1
+                };
                 let origin = Vec3::from(field.origin);
-                let mut ended = 0;
-                for fragment in &field.fragments {
+                let left = field.fragments.iter().filter_map(|fragment| {
                     let span = Vec3::from(fragment.end) - origin;
-                    let Some(d) = span.try_normalize() else {
-                        continue;
-                    };
-                    let axis = Vec3::from(field.axis).normalize_or(Vec3::NEG_Z);
-                    let (want, got) = (span.length(), casters.reach(origin, axis, d));
-                    assert!(
-                        (got - want).abs() <= 1e-4,
-                        "{name} field {k}: {got} m against the record's {want} m along {d}"
-                    );
+                    Some((fragment, span.try_normalize()?, span.length()))
+                });
+                let mut ended = 0;
+                for ((fragment, d, recorded), ray) in left.zip(&cone.rays) {
+                    let got = casters.reach(origin, cone.axis, d);
+                    let at = format!("{name} field {k} along {d}: {got} m, {recorded} recorded");
+                    if (got - recorded).abs() <= 1e-4 {
+                        assert_eq!(ray.reach, recorded, "{at}");
+                        stopped += 1;
+                    } else {
+                        let strength = (f64::from(fragment.strength) * unit.hp_per_joule()) as f32;
+                        let emission = potency.emission(strength, cone.inner(), cone.half_angle());
+                        let floor = potency.floor;
+                        let there = super::super::potency::intensity(emission, ray.reach);
+                        assert!(ray.reach >= recorded, "{at}: drawn to {}", ray.reach);
+                        assert!(
+                            if ray.reach > recorded {
+                                (there - floor).abs() <= 1e-5 * floor
+                            } else {
+                                there <= floor * (1.0 + 1e-5)
+                            },
+                            "{at}: drawn to {} m at {there} against the floor's {floor}",
+                            ray.reach
+                        );
+                        assert!(got >= ray.reach - 1e-4, "{at}: drawn to {}", ray.reach);
+                        open += 1;
+                    }
                     ended += 1;
                 }
-                checked += ended;
+                assert_eq!(ended, cone.rays.len(), "{name} field {k}");
                 fields += usize::from(ended > 0);
             }
         }
-        // The shipped library checks 1408 directions over 19 fields (MEASURED): a floor under that,
-        // so a library that stops reaching the mirror fails here.
-        assert!(checked > 1300 && fields > 17, "{checked} {fields}");
+        // The shipped library checks 1,792 directions over 22 fields, 152 of them in 3 fields met no
+        // hard body (MEASURED): floors under that, so a library that stops reaching the mirror, or
+        // holds no direction drawn on, fails here.
+        assert!(
+            stopped + open > 1700 && fields > 20 && open > 100,
+            "{stopped} {open} {fields}"
+        );
     }
 
     /// The near plane lies [`NEAR_M`] along each face's forward, as `pen_cam_picture.wgsl` clips:
@@ -1539,7 +1598,7 @@ pub(super) mod tests {
                 &mut parts,
             );
             let bodies = Arc::new(HardBodies::new(parts.0, parts.1));
-            let casters = Casters::of(&bodies).expect("the fixture has vertices");
+            let casters = Casters::of(&bodies, None).expect("the fixture has vertices");
             let want = if stopped { near_side } else { 3.0 } / depth;
             let got = casters.reach(Vec3::ZERO, AXIS, d);
             assert!(

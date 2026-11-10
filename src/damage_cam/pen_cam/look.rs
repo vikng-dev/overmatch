@@ -2468,7 +2468,7 @@ mod tests {
                 }
                 let casters = shapes
                     .hard()
-                    .and_then(Casters::of)
+                    .and_then(|bodies| Casters::of(bodies, field_bounds(&plan.cones)))
                     .expect("the shipped records have their hard bodies");
                 let reach = |d: Vec3| casters.reach(cone.origin, cone.axis, d);
                 let seen = [Seen {
