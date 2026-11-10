@@ -24,6 +24,7 @@
 // The sandbox's rubble yard builds line 8c's heap; the sandbox builds with `dev_ui`.
 #[cfg(feature = "dev_ui")]
 mod heap;
+mod turn_probe;
 
 use super::*;
 use avian3d::prelude::*;
