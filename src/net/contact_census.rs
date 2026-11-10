@@ -10,9 +10,9 @@
 
 use avian3d::dynamics::solver::islands::BodyIslandNode;
 use avian3d::prelude::{
-    AngularVelocity, Collider, ColliderTransform, ContactGraph, ContactPair, LinearVelocity,
-    PhysicsLengthUnit, Position, RigidBody, RigidBodyColliders, Rotation, SimpleCollider,
-    SleepThreshold, Sleeping, TimeToSleep,
+    AngularVelocity, Collider, ColliderTransform, ComputedAngularInertia, ComputedMass,
+    ContactGraph, ContactPair, LinearVelocity, PhysicsLengthUnit, Position, RigidBody,
+    RigidBodyColliders, Rotation, SimpleCollider, SleepThreshold, Sleeping, TimeToSleep,
 };
 use bevy::ecs::entity::EntityHashMap;
 use bevy::platform::collections::{HashMap, HashSet};
@@ -224,6 +224,19 @@ pub(crate) struct ContactTick {
     airborne: Airborne,
     islands: Islands,
     sweep: SweepSplit,
+    motion: MotionCounts,
+}
+
+/// Piece-ticks crossing the separate Avian thresholds, and the angular-only subset whose
+/// kinetic energy per mass is below the linear rest-speed energy.
+#[derive(Clone, Copy, Default, Serialize)]
+struct MotionCounts {
+    linear: u32,
+    angular_only: u32,
+    angular_only_low_energy: u32,
+    /// Awake islands with at least one threshold crossing, all crossings angular-only and
+    /// low-energy. Non-piece members participate, so a moving tank cannot qualify its island.
+    islands_angular_only_low_energy: u32,
 }
 
 /// One piece's rest history, on the census's tick numbers (the trace's row numbers).
@@ -586,6 +599,28 @@ pub(super) struct ContactCensus<'w, 's> {
         ),
     >,
     colliders: Query<'w, 's, (&'static Collider, &'static ColliderTransform)>,
+    mass_properties: Query<
+        'w,
+        's,
+        (
+            &'static ComputedMass,
+            &'static ComputedAngularInertia,
+            &'static Rotation,
+        ),
+    >,
+    island_motion: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static LinearVelocity,
+            &'static AngularVelocity,
+            &'static SleepThreshold,
+            &'static BodyIslandNode,
+        ),
+        (Without<Sleeping>, With<RigidBody>),
+    >,
+    motion_islands: Local<'s, HashMap<u32, (u32, u32)>>,
     length_unit: Res<'w, PhysicsLengthUnit>,
     time_to_sleep: Res<'w, TimeToSleep>,
     records: ResMut<'w, PieceRecords>,
@@ -674,7 +709,40 @@ impl ContactCensus<'_, '_> {
     }
 
     /// Every piece's motion this tick, before any of its contacts are read.
-    fn record_motion(&mut self, tick: u32) {
+    fn record_motion(&mut self, tick: u32) -> MotionCounts {
+        let mut counts = MotionCounts::default();
+        self.motion_islands.clear();
+        // Island eligibility is a keyed reduction: every member must agree before it qualifies.
+        for (entity, velocity, spin, rest, island) in &self.island_motion {
+            let linear_limit = self.length_unit.0.powi(2) * rest.linear * rest.linear.abs();
+            let linear = velocity.length_squared() >= linear_limit;
+            let angular = spin.length_squared() >= rest.angular * rest.angular.abs();
+            let (mass, inertia, rotation) = self
+                .mass_properties
+                .get(entity)
+                .expect("every rigid body has computed mass properties and rotation");
+            let energy_speed_squared = velocity.length_squared()
+                + spin.dot(inertia.rotated(rotation.0).tensor() * spin.0) * mass.inverse();
+            let low_energy = energy_speed_squared < linear_limit;
+            let entry = self.motion_islands.entry(island.island_id().0).or_default();
+            if linear || angular {
+                entry.0 += 1;
+                entry.1 += u32::from(linear || !low_energy);
+            } else if !low_energy {
+                // Combined energy can exceed rest even with both old tests below threshold.
+                entry.1 += 1;
+            }
+            if self.piece_marks.contains(entity) {
+                counts.linear += u32::from(linear);
+                counts.angular_only += u32::from(!linear && angular);
+                counts.angular_only_low_energy += u32::from(!linear && angular && low_energy);
+            }
+        }
+        counts.islands_angular_only_low_energy = self
+            .motion_islands
+            .values()
+            .filter(|&&(crossings, blockers)| crossings > 0 && blockers == 0)
+            .count() as u32;
         let unit = self.length_unit.0;
         let time_to_sleep = self.time_to_sleep.0;
         let records = &mut *self.records;
@@ -732,13 +800,14 @@ impl ContactCensus<'_, '_> {
             }
             record.awake = !sleeping;
         }
+        counts
     }
 
     /// This tick's solver census, updating every piece's record before sleeping.
     fn tick(&mut self) -> ContactTick {
         let started = std::time::Instant::now();
         let tick = self.records.tick;
-        self.record_motion(tick);
+        let motion = self.record_motion(tick);
         self.normal_transfers.clear();
         for point in self.transfers.solver_groups().flatten() {
             let other = point
@@ -785,7 +854,10 @@ impl ContactCensus<'_, '_> {
             }
         });
 
-        let mut row = ContactTick::default();
+        let mut row = ContactTick {
+            motion,
+            ..default()
+        };
         let body_pairs = &mut *self.body_pairs;
         body_pairs.clear();
         for work in &mut workers {
