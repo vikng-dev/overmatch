@@ -961,9 +961,8 @@ impl FieldReach {
                     bounds: OnceCell::new(),
                 });
             }
-        } else if world.witness_surfaces.contains(entity)
+        } else if let Some(node) = world.witness(entity)
             && admit(entity)
-            && let Some((node, _)) = super::hit_ancestor(entity, &world.witnesses, &world.parents)
         {
             self.witnesses.push((node, entity, broad));
         }

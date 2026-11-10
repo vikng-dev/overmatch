@@ -18,7 +18,7 @@ use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoMechanism, Servo
 use super::view::{SimParts, bind_tank_view};
 use crate::Layer;
 use crate::bake::{TankBlueprint, TankGeometry};
-use crate::ballistics::armour_set::{ArmourSet, Node, PartSource};
+use crate::ballistics::armour_set::{ArmourSet, Node, PartSource, Role};
 use crate::ballistics::{
     ArmorVolume, BallisticSurfaces, BallisticVolume, ComponentHealth, ComponentVolume,
     ExternalArmour, VolumeMaterial, WitnessSurface, WitnessVolume,
@@ -680,15 +680,15 @@ fn insert_weapons(
 /// factor table per primitive instead of per volume — a §13 core change, deliberately not smuggled
 /// into this slice.
 ///
-/// Returns each primitive's collider entity, its node's index and its shape: the armour set's
-/// parts ([`armour_set`]).
+/// Returns each primitive's armour set part ([`armour_set`]): its entity, its node's index, its
+/// shape and surfaces, and its role, the volume it belongs to.
 fn insert_ballistic_volumes(
     commands: &mut Commands,
     geometry: &TankGeometry,
     root: Entity,
     nodes: &RigNodes,
     entity_at: impl Fn(usize) -> Entity,
-) -> Vec<(Entity, usize, avian3d::prelude::Collider)> {
+) -> Vec<SpawnedPart> {
     let mut parts = Vec::new();
     for &(name, facets, index) in &nodes.volume_nodes {
         let node = &geometry.nodes[index];
@@ -798,15 +798,16 @@ fn insert_ballistic_volumes(
                     certificate.shells.len(),
                 );
                 let shape = primitive.trimesh_collider();
+                let surfaces = BallisticSurfaces {
+                    shells: certificate.shells.clone(),
+                    corners: certificate.corners.clone(),
+                };
                 let mut collider = commands.spawn((
                     ChildOf(entity),
                     // ADR-0015 shields this authored local pose from position sync.
                     authored_attachment(Transform::IDENTITY),
                     shape.clone(),
-                    BallisticSurfaces {
-                        shells: certificate.shells.clone(),
-                        corners: certificate.corners.clone(),
-                    },
+                    surfaces.clone(),
                     CollisionLayers::new(
                         [if witness {
                             Layer::Witness
@@ -819,7 +820,16 @@ fn insert_ballistic_volumes(
                 if witness {
                     collider.insert(WitnessSurface);
                 }
-                parts.push((collider.id(), index, shape));
+                // The volume a part belongs to: the witness node, the node, or (split) the
+                // primitive itself.
+                let role = if witness {
+                    Role::CrewBox(entity)
+                } else if split {
+                    Role::Armour(collider.id())
+                } else {
+                    Role::Armour(entity)
+                };
+                parts.push((collider.id(), index, shape, surfaces, role));
                 if split {
                     // The primitive IS the volume here (see the doc above): it carries the factor
                     // the walk reads and the ownership the impulse path resolves.
@@ -860,6 +870,16 @@ fn insert_ballistic_volumes(
     parts
 }
 
+/// One spawned armour volume or crew box primitive: its entity, its node's geometry index, its
+/// shape and surfaces, and its role.
+type SpawnedPart = (
+    Entity,
+    usize,
+    avian3d::prelude::Collider,
+    BallisticSurfaces,
+    Role,
+);
+
 /// The tank's armour set ([`ArmourSet`]): its spawned nodes, the frames among them (each servo,
 /// each recoiling barrel, and the turret assembly a launch detaches) and its volumes' primitives.
 fn armour_set(
@@ -867,7 +887,7 @@ fn armour_set(
     nodes: &RigNodes,
     entities: &[Option<Entity>],
     root: Entity,
-    parts: &[(Entity, usize, avian3d::prelude::Collider)],
+    parts: &[SpawnedPart],
 ) -> ArmourSet {
     let frames: HashSet<usize> = nodes
         .servo_nodes
@@ -909,12 +929,16 @@ fn armour_set(
     ArmourSet::build(
         root,
         &armour_nodes,
-        parts.iter().map(|(collider, index, shape)| PartSource {
-            collider: *collider,
-            node: Some(listed[*index].expect("a ballistic volume's node was spawned")),
-            pose: Transform::IDENTITY,
-            shape,
-        }),
+        parts
+            .iter()
+            .map(|(collider, index, shape, surfaces, role)| PartSource {
+                collider: *collider,
+                node: Some(listed[*index].expect("a ballistic volume's node was spawned")),
+                pose: Transform::IDENTITY,
+                shape,
+                surfaces: Some(surfaces),
+                role: *role,
+            }),
     )
 }
 

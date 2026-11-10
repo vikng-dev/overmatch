@@ -60,15 +60,41 @@ impl Bounds {
     }
 }
 
-/// The game's damage model: one armour volume or crew box primitive of a tank.
+/// The game's damage model: one armour volume or crew box primitive of a tank, built at spawn from
+/// the tank's data. Ballistics reads its shape, surfaces and role here, never from the entity.
 #[derive(Debug)]
 pub(super) struct Part {
-    /// The primitive's entity: its identity for keys, HP pools and records.
+    /// The primitive's entity: its identity for keys (the walk's `ShellKey`, the march's contact
+    /// order and resting list), which every reader takes from here.
     pub collider: Entity,
     /// Its pose in its frame, fixed.
     pub pose: Pose,
     /// The box of its shape in its frame's coordinates.
     pub bounds: Bounds,
+    /// Its shape in its own coordinates.
+    pub shape: Collider,
+    /// The bake's manifold certificate for a trimesh part; `None` for a fixture's convex part.
+    pub surfaces: Option<super::BallisticSurfaces>,
+    pub role: Role,
+}
+
+/// The game's damage model: what a part is to a round, and the volume it belongs to: the entity
+/// that carries the volume's material and, where it has one, its HP pool (`ComponentHealth`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Role {
+    /// A primitive of an armour volume (`BallisticVolume`): the walk reads its material.
+    Armour(Entity),
+    /// A crew box (`WitnessVolume`, ADR-0040): an HP pool at a station, dosed by what the hard
+    /// world sends through it; never a layer of the walk.
+    CrewBox(Entity),
+}
+
+impl Role {
+    pub(crate) fn volume(self) -> Entity {
+        match self {
+            Self::Armour(volume) | Self::CrewBox(volume) => volume,
+        }
+    }
 }
 
 /// The game's damage model: one rigid frame of a tank and the parts it carries.
@@ -195,13 +221,15 @@ pub(crate) struct Node<'a> {
     pub frame: bool,
 }
 
-/// One armour volume or crew box primitive: its collider entity, the node it hangs under (`None`:
-/// the root) and its pose there, and its shape.
+/// One armour volume or crew box primitive: its entity, the node it hangs under (`None`: the root)
+/// and its pose there, its shape and surfaces, and its role.
 pub(crate) struct PartSource<'a> {
     pub collider: Entity,
     pub node: Option<usize>,
     pub pose: Transform,
     pub shape: &'a Collider,
+    pub surfaces: Option<&'a super::BallisticSurfaces>,
+    pub role: Role,
 }
 
 /// A link a frame or part composes through, as a pose. The set composes rigidly, so each such link
@@ -310,6 +338,9 @@ impl ArmourSet {
                 collider: part.collider,
                 pose,
                 bounds: posed,
+                shape: part.shape.clone(),
+                surfaces: part.surfaces.cloned(),
+                role: part.role,
             });
         }
         Self {
@@ -591,10 +622,10 @@ pub(super) fn snapshot(
 }
 
 /// The set of a fixture body from its live hierarchy: every descendant collider on the armour or
-/// crew box layer is a part, and the body its only frame.
+/// crew box layer is a part, its role its nearest volume of that layer's kind, and the body its
+/// only frame.
 #[cfg(test)]
 pub(crate) fn fixture(world: &mut World, root: Entity) {
-    use avian3d::prelude::CollisionLayers;
     let mut nodes = Vec::new();
     let mut parts = Vec::new();
     let mut walk = vec![(root, None)];
@@ -606,16 +637,13 @@ pub(crate) fn fixture(world: &mut World, root: Entity) {
             let transform = *world
                 .get::<Transform>(child)
                 .expect("a fixture child is placed");
-            let part = world.get::<CollisionLayers>(child).is_some_and(|layers| {
-                layers.memberships.has_all(crate::Layer::Armor)
-                    || layers.memberships.has_all(crate::Layer::Witness)
-            });
-            if part {
+            if let Some(role) = layered_role(world, child) {
                 let shape = world
                     .get::<Collider>(child)
                     .expect("a layered fixture child is a collider")
                     .clone();
-                parts.push((child, node, transform, shape));
+                let surfaces = world.get::<super::BallisticSurfaces>(child).cloned();
+                parts.push((child, node, transform, shape, surfaces, role));
             } else {
                 nodes.push(Node {
                     name: "a fixture node",
@@ -633,15 +661,47 @@ pub(crate) fn fixture(world: &mut World, root: Entity) {
         &nodes,
         parts
             .iter()
-            .map(|(collider, node, pose, shape)| PartSource {
+            .map(|(collider, node, pose, shape, surfaces, role)| PartSource {
                 collider: *collider,
                 node: *node,
                 pose: *pose,
                 shape,
+                surfaces: surfaces.as_ref(),
+                role: *role,
             }),
     );
     set.insert(&mut world.commands(), root);
     world.flush();
+}
+
+/// Test support: the role of collider `entity` as a fixture authors it, `None` for one on neither
+/// the armour nor the crew box layer: a `WitnessSurface` is its nearest `WitnessVolume`'s crew box,
+/// any other its nearest `BallisticVolume`'s armour.
+#[cfg(test)]
+fn layered_role(world: &World, entity: Entity) -> Option<Role> {
+    use avian3d::prelude::CollisionLayers;
+    let layers = world.get::<CollisionLayers>(entity)?;
+    if !(layers.memberships.has_all(crate::Layer::Armor)
+        || layers.memberships.has_all(crate::Layer::Witness))
+    {
+        return None;
+    }
+    let nearest = |has: &dyn Fn(Entity) -> bool| {
+        std::iter::successors(Some(entity), |&node| {
+            world.get::<ChildOf>(node).map(ChildOf::parent)
+        })
+        .find(|&node| has(node))
+        .expect("a fixture part hangs under the volume its role names")
+    };
+    Some(if world.get::<super::WitnessSurface>(entity).is_some() {
+        Role::CrewBox(nearest(&|node| {
+            world.get::<super::WitnessVolume>(node).is_some()
+        }))
+    } else {
+        Role::Armour(nearest(&|node| {
+            world.get::<super::BallisticVolume>(node).is_some()
+        }))
+    })
 }
 
 /// Test support: `root`'s set against its live hierarchy. Its parts are every descendant collider
@@ -728,6 +788,12 @@ pub(crate) fn assert_matches(
                 composed.position.distance(rest.position) < 1.0e-4
                     && composed.rotation.angle_between(rest.rotation) < 1.0e-4,
                 "part {} composes to its rest pose: {composed:?} against {rest:?}",
+                part.collider
+            );
+            assert_eq!(
+                Some(part.role),
+                layered_role(world, part.collider),
+                "part {} names the volume it belongs to",
                 part.collider
             );
             let held = bounds.expect("a frame carrying a part has a box");
@@ -859,6 +925,10 @@ mod tests {
                         [crate::Layer::Armor],
                         avian3d::prelude::LayerMask::NONE,
                     ),
+                    super::super::BallisticVolume {
+                        material: super::super::walk::VolumeMaterial::fixture(1000.0),
+                        substance: "fixture".to_owned(),
+                    },
                 ))
                 .id();
             parts.push((collider, node, pose));
@@ -871,6 +941,8 @@ mod tests {
                 node,
                 pose,
                 shape: &shape,
+                surfaces: None,
+                role: Role::Armour(collider),
             }),
         );
         (entities, set)

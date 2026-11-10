@@ -786,16 +786,9 @@ fn cast_disc_segment(
             radius: reach,
         };
         let boxes = world.near(probe, &mut |entity, _| {
-            if !world
-                .layers
-                .get(entity)
-                .is_ok_and(|layers| layers.memberships.has_all(Layer::Armor))
-            {
-                return;
-            }
-            let (node, _) = world
-                .armour(entity)
-                .expect("game's damage model: an Armor collider requires BallisticVolume ancestry");
+            let Some(node) = world.struck(entity) else {
+                return; // Terrain, a body's proxy or a crew box: no first contact.
+            };
             if !not_own(entity) {
                 return;
             }
@@ -1387,7 +1380,7 @@ pub struct WitnessSurface;
 /// Both tables are index-aligned with the trimesh's own triangle order, which is the order the
 /// buffers were handed to `Collider::trimesh_with_config`: `MERGE_DUPLICATE_VERTICES` re-indexes
 /// vertices and never reorders or drops a face. `Arc` because every spawned tank shares one bake.
-#[derive(Component)]
+#[derive(Component, Clone, Debug)]
 pub struct BallisticSurfaces {
     /// Closed shell per triangle.
     pub shells: Arc<[u32]>,
@@ -2111,13 +2104,21 @@ struct ProjectileMarchWorld<'w, 's> {
     // Each tank's armour volumes and crew boxes by rigid frame, and each part's place in its set.
     sets: Query<'w, 's, &'static armour_set::ArmourSet>,
     parts: Query<'w, 's, &'static armour_set::ArmourPart>,
-    layers: Query<'w, 's, &'static avian3d::prelude::CollisionLayers>,
+    // The layers, shapes and surfaces of colliders outside an armour set; a set's parts carry
+    // their own ([`Self::role`], [`Self::geometry`]).
+    layers:
+        Query<'w, 's, &'static avian3d::prelude::CollisionLayers, Without<armour_set::ArmourPart>>,
     rigs: Query<'w, 's, (Entity, &'static crate::tank::Rig)>,
     locals: Query<'w, 's, &'static Transform, Without<Projectile>>,
     moment: Local<'s, std::cell::Cell<Option<f32>>>,
     sweep: Local<'s, std::cell::Cell<Option<motion::Sweep>>>,
     contact_motion: Local<'s, std::cell::Cell<Option<motion::ContactMotion>>>,
-    shapes: Query<'w, 's, (&'static Collider, Option<&'static BallisticSurfaces>)>,
+    shapes: Query<
+        'w,
+        's,
+        (&'static Collider, Option<&'static BallisticSurfaces>),
+        Without<armour_set::ArmourPart>,
+    >,
     // The tree holds every collider, a set's parts included: a broad query still traverses their
     // entries and tests their `ColliderAabb`s, but keeps only colliders outside an armour set and
     // takes each set's parts from the set ([`Self::near`]).
@@ -2144,7 +2145,7 @@ struct ProjectileMarchWorld<'w, 's> {
     // Witness volumes (ADR-0040) and their colliders: read by the witness pass, excluded from every
     // armour classification.
     witnesses: Query<'w, 's, &'static WitnessVolume>,
-    witness_surfaces: Query<'w, 's, (), With<WitnessSurface>>,
+    witness_surfaces: Query<'w, 's, (), (With<WitnessSurface>, Without<armour_set::ArmourPart>)>,
     // Present only where the authority stats consumer installed it.
     stages: Option<Res<'w, crate::cost::stages::Stages>>,
 }
@@ -2256,13 +2257,89 @@ impl ProjectileMarchWorld<'_, '_> {
         }
     }
 
-    /// A broad-query candidate's pose ([`Self::placed`]) and shape.
+    /// A broad-query candidate's pose ([`Self::placed`]) and shape: an armour part's from its set,
+    /// any other collider's own.
     fn geometry(&self, entity: Entity) -> (motion::Pose, &Collider, Option<&BallisticSurfaces>) {
-        let (collider, surfaces) = self
-            .shapes
-            .get(entity)
-            .expect("game's damage model: a broad-query candidate is a collider");
+        let (collider, surfaces) = match self.part(entity) {
+            Some(part) => (&part.shape, part.surfaces.as_ref()),
+            None => self
+                .shapes
+                .get(entity)
+                .expect("game's damage model: a broad-query candidate is a collider"),
+        };
         (self.placed(entity), collider, surfaces)
+    }
+
+    /// `entity`'s part in its tank's armour set; `None` for a collider outside every set.
+    fn part(&self, entity: Entity) -> Option<&armour_set::Part> {
+        let part = self.parts.get(entity).ok()?;
+        let set = self
+            .sets
+            .get(part.tank())
+            .expect("game's damage model: an armour part's tank carries its set");
+        Some(set.located(part).1)
+    }
+
+    /// The game's damage model: what collider `entity` is to a round. An armour part's role is its
+    /// set's; any other collider's is a crew box's when it is a [`WitnessSurface`] under a
+    /// [`WitnessVolume`], armour under its nearest [`BallisticVolume`], and `None` otherwise
+    /// (terrain, a body's proxy).
+    fn role(&self, entity: Entity) -> Option<armour_set::Role> {
+        if let Some(part) = self.part(entity) {
+            return Some(part.role);
+        }
+        if self.witness_surfaces.contains(entity) {
+            return hit_ancestor(entity, &self.witnesses, &self.parents)
+                .map(|(node, _)| armour_set::Role::CrewBox(node));
+        }
+        let (volume, _) = hit_ancestor(entity, &self.volumes, &self.parents)?;
+        assert!(
+            self.layers
+                .get(entity)
+                .is_ok_and(|layers| layers.memberships.has_all(Layer::Armor)),
+            "game's damage model: a BallisticVolume collider requires Armor membership"
+        );
+        Some(armour_set::Role::Armour(volume))
+    }
+
+    /// The armour volume a first contact with collider `entity` strikes: an armour part's from its
+    /// set; any other collider's on the Armor layer, under its nearest [`BallisticVolume`]. `None`
+    /// for a crew box and for every other layer.
+    fn struck(&self, entity: Entity) -> Option<Entity> {
+        if self.part(entity).is_none()
+            && !self
+                .layers
+                .get(entity)
+                .is_ok_and(|layers| layers.memberships.has_all(Layer::Armor))
+        {
+            return None;
+        }
+        match self.role(entity) {
+            Some(armour_set::Role::Armour(volume)) => Some(volume),
+            Some(armour_set::Role::CrewBox(_)) => None,
+            None => {
+                panic!("game's damage model: an Armor collider requires BallisticVolume ancestry")
+            }
+        }
+    }
+
+    /// The crew box (witness node, ADR-0040) collider `entity` belongs to; `None` for any other.
+    fn witness(&self, entity: Entity) -> Option<Entity> {
+        match self.role(entity)? {
+            armour_set::Role::CrewBox(node) => Some(node),
+            armour_set::Role::Armour(_) => None,
+        }
+    }
+
+    /// The tank owning collider `entity`: an armour part's set's, any other collider's nearest
+    /// [`VolumeOf`]; `None` for terrain and scenery.
+    fn owner(&self, entity: Entity) -> Option<Entity> {
+        match self.parts.get(entity) {
+            Ok(part) => Some(part.tank()),
+            Err(_) => {
+                hit_ancestor(entity, &self.owners, &self.parents).map(|(_, owner)| owner.tank())
+            }
+        }
     }
 
     /// How a broad query poses an armour set's frames here.
@@ -2539,33 +2616,25 @@ impl ProjectileMarchWorld<'_, '_> {
         }
     }
 
-    /// The armour volume a collider belongs to: its nearest [`BallisticVolume`] ancestor. `None`
-    /// for terrain and for a witness's collider, whatever node a witness is parented under — a
-    /// witness is never a layer of the walk (ADR-0040).
+    /// The armour volume a collider belongs to ([`Self::role`]). `None` for terrain and for a
+    /// crew box, whatever node it is parented under — a crew box is never a layer of the walk
+    /// (ADR-0040).
     fn armour(&self, collider: Entity) -> Option<(Entity, &BallisticVolume)> {
-        if self.witness_surfaces.contains(collider) {
-            return None;
+        match self.role(collider)? {
+            armour_set::Role::Armour(volume) => Some((
+                volume,
+                self.volumes
+                    .get(volume)
+                    .expect("game's damage model: an armour part's volume carries its material"),
+            )),
+            armour_set::Role::CrewBox(_) => None,
         }
-        let volume = hit_ancestor(collider, &self.volumes, &self.parents);
-        if volume.is_some() {
-            assert!(
-                self.layers
-                    .get(collider)
-                    .is_ok_and(|layers| layers.memberships.has_all(Layer::Armor)),
-                "game's damage model: a BallisticVolume collider requires Armor membership"
-            );
-        }
-        volume
     }
 
-    /// The volume node a collider belongs to, of either kind: a witness's own node for a witness
-    /// collider, the armour volume otherwise. A field admits matter independently of ownership.
+    /// The volume node a collider belongs to, of either kind ([`Self::role`]). A field admits
+    /// matter independently of ownership.
     fn volume_of(&self, collider: Entity) -> Option<Entity> {
-        if self.witness_surfaces.contains(collider) {
-            hit_ancestor(collider, &self.witnesses, &self.parents).map(|(node, _)| node)
-        } else {
-            self.armour(collider).map(|(node, _)| node)
-        }
+        self.role(collider).map(armour_set::Role::volume)
     }
 
     /// The game's damage model: one step's seconds under this world's crossing ceiling.
@@ -2915,10 +2984,9 @@ fn march_shell_step(
     let resting = std::cell::RefCell::new(Vec::new());
     let not_own = |entity: Entity| {
         !resting.borrow().contains(&entity)
-            && ignored_source.get().is_none_or(|source| {
-                hit_ancestor(entity, &world.owners, &world.parents)
-                    .is_none_or(|(_, owner)| owner.tank() != source)
-            })
+            && ignored_source
+                .get()
+                .is_none_or(|source| world.owner(entity) != Some(source))
     };
     // Gravity and drag on the velocity through the free-flight kernel the FireEvent catch-up folds
     // ([`fast_forward_shell`]). An unbent open-air step flies exactly `stepped × dt`. The march may

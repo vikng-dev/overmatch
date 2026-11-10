@@ -21,10 +21,10 @@ use std::collections::BTreeSet;
 use avian3d::prelude::SimpleCollider;
 use bevy::prelude::*;
 
+use super::VolumeCrossing;
 use super::collect::{self, Corridor};
 use super::resolve::{FieldReach, Leg, PROBE_MARGIN, ResolveContext, field_presence};
 use super::walk::{self, WalkError, WitnessSpans};
-use super::{VolumeCrossing, hit_ancestor};
 use crate::cost::stages::{Stage, Stages, Work};
 
 /// The witness colliders `admit` keeps whose bounds meet the stretch from `from` along `axis` for
@@ -47,9 +47,8 @@ fn candidates(
             radius,
         },
         &mut |entity, _| {
-            if world.witness_surfaces.contains(entity)
+            if let Some(node) = world.witness(entity)
                 && admit(entity)
-                && let Some((node, _)) = hit_ancestor(entity, &world.witnesses, &world.parents)
             {
                 out.push((node, entity));
             }

@@ -996,6 +996,13 @@ fn scoring_witnesses(app: &mut App, boxes: &[Entity]) {
                 ));
         }
     }
+    // The set is built from the tank's data, which now names these boxes crew boxes.
+    let root = boxes
+        .first()
+        .and_then(|&volume| app.world().get::<VolumeOf>(volume))
+        .expect("a fixture tank lists its boxes")
+        .tank();
+    crate::ballistics::armour_set::fixture(app.world_mut(), root);
 }
 
 /// The game's damage model: the scoreboard must credit automatic fire even though the pen cam
