@@ -5,9 +5,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use avian3d::prelude::{
-    Collider, ColliderAabb, Forces, Position, Rotation, SimpleCollider, SpatialQuery,
-};
+use avian3d::prelude::{Collider, ColliderAabb, Forces, Position, Rotation, SpatialQuery};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 // `shot_trace::record` only evaluates its closure when tracing is armed.
@@ -67,6 +65,8 @@ mod wound;
 mod collect;
 pub(crate) use collect::convex_interval;
 
+/// A tank's armour volumes and crew boxes by the rigid frame that carries them.
+pub(crate) mod armour_set;
 mod motion;
 pub(crate) mod plate_capacity;
 
@@ -1889,6 +1889,7 @@ pub fn sim_plugin(app: &mut App) {
     )
     .init_resource::<RetainSpentShells>()
     .add_observer(on_fire_shell)
+    .add_observer(armour_set::rebase)
     // The game's damage model walks the completed physics interval. Its impulses affect
     // the next physics step; all consequences and publications follow in the phase chain.
     .add_systems(
@@ -2114,6 +2115,8 @@ struct ProjectileMarchWorld<'w, 's> {
     body_colliders: Query<'w, 's, &'static avian3d::prelude::RigidBodyColliders>,
     // A body's pose where no interval history poses it (static fixtures): [`Self::tank_box`].
     body_poses: Query<'w, 's, (&'static Position, &'static Rotation)>,
+    // Each tank's armour volumes and crew boxes by rigid frame.
+    sets: Query<'w, 's, &'static armour_set::ArmourSet>,
     layers: Query<'w, 's, &'static avian3d::prelude::CollisionLayers>,
     rigs: Query<'w, 's, (Entity, &'static crate::tank::Rig)>,
     locals: Query<'w, 's, &'static Transform, Without<Projectile>>,
@@ -2166,8 +2169,8 @@ impl ProjectileMarchWorld<'_, '_> {
     }
 
     fn source_box(&self, tank: Entity) -> Option<SourceBox> {
-        // Tank-less tool fire and a despawned shooter have no source body to clear.
-        let colliders = self.body_colliders.get(tank).ok()?;
+        // Tank-less tool fire and a despawned shooter carry no armour set to clear.
+        let set = self.sets.get(tank).ok()?;
         let history = self
             .motion
             .as_ref()
@@ -2176,44 +2179,19 @@ impl ProjectileMarchWorld<'_, '_> {
             .bodies
             .get(&tank)
             .expect("a source rigid body has captured endpoint poses before projectile march");
-        let mut bounds: Option<SourceBox> = None;
-        for entity in colliders.iter() {
-            let (_, _, shape, _) = self.geometry.get(entity).expect(
-                "a source body's registered collider has prepared geometry before the march",
-            );
-            let poses = *history
-                .colliders
-                .get(&entity)
-                .expect("a source body's registered collider has captured endpoint poses");
-            for fraction in [0.0, 1.0] {
-                let root = body.at(fraction);
-                let part = poses.at(fraction);
-                let aabb = shape.aabb(
-                    root.local(part.position),
-                    root.rotation.inverse() * part.rotation,
-                );
-                bounds = Some(match bounds {
-                    None => SourceBox {
-                        min: aabb.min,
-                        max: aabb.max,
-                        body,
-                    },
-                    Some(bounds) => SourceBox {
-                        min: bounds.min.min(aabb.min),
-                        max: bounds.max.max(aabb.max),
-                        body,
-                    },
-                });
-            }
-        }
-        bounds
+        let bounds = set.body_box(&|frame| self.frame_in_carrier(set, frame))?;
+        Some(SourceBox {
+            min: bounds.min,
+            max: bounds.max,
+            body,
+        })
     }
 
     /// The game's damage model: `tank`'s box at the field moment ([`resolve::TankBox`]), the
-    /// bounds of its body's armour colliders in that body's frame. `None` for an entity with no
-    /// body (a fixture's bare owner) or no armour.
+    /// box of its armour set's frames on its own body, in that body's frame. `None` for an entity
+    /// with no set (a fixture's bare owner) or none of whose parts its body carries.
     fn tank_box(&self, tank: Entity) -> Option<resolve::TankBox> {
-        let colliders = self.body_colliders.get(tank).ok()?;
+        let set = self.sets.get(tank).ok()?;
         let body = match (self.moment.get(), self.motion.as_ref()) {
             (Some(fraction), Some(history)) => history
                 .bodies
@@ -2231,29 +2209,23 @@ impl ProjectileMarchWorld<'_, '_> {
                 }
             }
         };
-        let (mut min, mut max) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
-        for entity in colliders
-            .iter()
-            .filter(|&entity| self.armour(entity).is_some())
-        {
-            let (position, rotation, shape, _) = self
-                .geometry
-                .get(entity)
-                .expect("an armour collider has prepared geometry before the march");
-            let part = self.pose(entity).unwrap_or(motion::Pose {
-                position: position.0,
-                rotation: rotation.0,
-            });
-            let aabb = shape.aabb(
-                body.local(part.position),
-                body.rotation.inverse() * part.rotation,
-            );
-            min = min.min(aabb.min);
-            max = max.max(aabb.max);
-        }
-        min.cmple(max)
-            .all()
-            .then(|| resolve::TankBox::new(tank, min, max, body))
+        let bounds = set.body_box(&|frame| self.frame_in_carrier(set, frame))?;
+        Some(resolve::TankBox::new(tank, bounds.min, bounds.max, body))
+    }
+
+    /// The game's damage model: armour frame `frame`'s pose in its carrier, from its node's
+    /// present local pose.
+    fn frame_in_carrier(&self, set: &armour_set::ArmourSet, frame: usize) -> motion::Pose {
+        let frame = &set.frames()[frame];
+        let local = self
+            .locals
+            .get(frame.node)
+            .expect("game's damage model: an armour frame's node carries its local pose");
+        frame.offset
+            * motion::Pose {
+                position: local.translation,
+                rotation: local.rotation,
+            }
     }
 
     /// The box of `tank` when it holds the world point `at` ([`Self::tank_box`]); `None` for a
@@ -7709,6 +7681,7 @@ pub(crate) mod march_tests {
     /// corridor, field and aim queries at its current pose. Callers supply isolated fixture matter
     /// whose AABB centre is inside its solid, so the test ray crosses it independently of a view.
     pub(crate) fn assert_occupied_matter_queries(app: &mut App, volume: Entity) {
+        use avian3d::prelude::SimpleCollider;
         use bevy::ecs::system::RunSystemOnce;
         app.world_mut()
             .run_system_once(move |world: ProjectileMarchWorld| {

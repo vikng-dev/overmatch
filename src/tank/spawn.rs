@@ -18,6 +18,7 @@ use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoMechanism, Servo
 use super::view::{SimParts, bind_tank_view};
 use crate::Layer;
 use crate::bake::{TankBlueprint, TankGeometry};
+use crate::ballistics::armour_set::{ArmourSet, Node, PartSource};
 use crate::ballistics::{
     ArmorVolume, BallisticSurfaces, BallisticVolume, ComponentHealth, ComponentVolume,
     ExternalArmour, VolumeMaterial, WitnessSurface, WitnessVolume,
@@ -678,13 +679,17 @@ fn insert_weapons(
 /// the shard. That is REFUSED here rather than silently dropped. Lifting it means keying the walk's
 /// factor table per primitive instead of per volume — a §13 core change, deliberately not smuggled
 /// into this slice.
+///
+/// Returns each primitive's collider entity, its node's index and its shape: the armour set's
+/// parts ([`armour_set`]).
 fn insert_ballistic_volumes(
     commands: &mut Commands,
     geometry: &TankGeometry,
     root: Entity,
     nodes: &RigNodes,
     entity_at: impl Fn(usize) -> Entity,
-) {
+) -> Vec<(Entity, usize, avian3d::prelude::Collider)> {
+    let mut parts = Vec::new();
     for &(name, facets, index) in &nodes.volume_nodes {
         let node = &geometry.nodes[index];
         let entity = entity_at(index);
@@ -792,11 +797,12 @@ fn insert_ballistic_volumes(
                     "ballistic volume `{name}` has {triangles} triangles and {} certified faces",
                     certificate.shells.len(),
                 );
+                let shape = primitive.trimesh_collider();
                 let mut collider = commands.spawn((
                     ChildOf(entity),
                     // ADR-0015 shields this authored local pose from position sync.
                     authored_attachment(Transform::IDENTITY),
-                    primitive.trimesh_collider(),
+                    shape.clone(),
                     BallisticSurfaces {
                         shells: certificate.shells.clone(),
                         corners: certificate.corners.clone(),
@@ -813,6 +819,7 @@ fn insert_ballistic_volumes(
                 if witness {
                     collider.insert(WitnessSurface);
                 }
+                parts.push((collider.id(), index, shape));
                 if split {
                     // The primitive IS the volume here (see the doc above): it carries the factor
                     // the walk reads and the ownership the impulse path resolves.
@@ -850,6 +857,64 @@ fn insert_ballistic_volumes(
             }
         }
     }
+    parts
+}
+
+/// The tank's armour set ([`ArmourSet`]): its spawned nodes, the frames among them (each servo,
+/// each recoiling barrel, and the turret assembly a launch detaches) and its volumes' primitives.
+fn armour_set(
+    geometry: &TankGeometry,
+    nodes: &RigNodes,
+    entities: &[Option<Entity>],
+    root: Entity,
+    parts: &[(Entity, usize, avian3d::prelude::Collider)],
+) -> ArmourSet {
+    let frames: HashSet<usize> = nodes
+        .servo_nodes
+        .iter()
+        .copied()
+        .chain(
+            nodes
+                .weapon_entries
+                .iter()
+                .zip(&nodes.weapon_nodes)
+                .filter_map(|((_, weapon), &(_, barrel))| {
+                    barrel.filter(|_| weapon.recoil.is_some())
+                }),
+        )
+        .chain([nodes.turret])
+        .collect();
+    // Geometry index to armour-node index, over the spawned nodes in extraction (parent-first)
+    // order; node 0, the loader's scene wrapper, folds into the root as at spawn.
+    let mut listed: Vec<Option<usize>> = vec![None; geometry.nodes.len()];
+    let mut armour_nodes = Vec::new();
+    for (index, node) in geometry.nodes.iter().enumerate().skip(1) {
+        let Some(entity) = entities[index] else {
+            continue; // A node the body does not need.
+        };
+        listed[index] = Some(armour_nodes.len());
+        armour_nodes.push(Node {
+            entity,
+            parent: match node.parent {
+                Some(0) | None => None,
+                Some(parent) => {
+                    Some(listed[parent].expect("a spawned node's ancestors were spawned before it"))
+                }
+            },
+            transform: node.transform,
+            frame: frames.contains(&index),
+        });
+    }
+    ArmourSet::build(
+        root,
+        &armour_nodes,
+        parts.iter().map(|(collider, index, shape)| PartSource {
+            collider: *collider,
+            node: Some(listed[*index].expect("a ballistic volume's node was spawned")),
+            pose: Transform::IDENTITY,
+            shape,
+        }),
+    )
 }
 
 /// Collision proxies: one convex hull per loose part of each captured primitive, on the Vehicle
@@ -1021,7 +1086,8 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
 
     insert_servos(commands, geometry, root, &nodes, entity_at);
     insert_weapons(commands, geometry, root, &nodes, entity_at);
-    insert_ballistic_volumes(commands, geometry, root, &nodes, entity_at);
+    let parts = insert_ballistic_volumes(commands, geometry, root, &nodes, entity_at);
+    armour_set(geometry, &nodes, &entities, root, &parts).insert(commands, root);
     insert_collision_proxies(commands, geometry, spec, entity_at);
 
     // --- Wheels: rig stations in name-sorted order (the track view reads their side/pose; the
@@ -1099,13 +1165,8 @@ mod proxy_tests {
     use super::*;
     use crate::bake::MeshGeometry;
 
-    /// Replica tanks retain every queried collider layer while only authority bodies receive
-    /// sprung belt segments. Clients render the server stream and run no belt support solve.
-    #[test]
-    fn replica_tanks_keep_queried_surfaces_without_sprung_belt_segments() {
-        use avian3d::prelude::{Position, RigidBody, Rotation};
-
-        // Fixture: the selected tank supplies construction data, not a collider-count oracle.
+    /// The shipped tank's construction data, a fixture: its blueprint and track shapes.
+    fn shipped() -> (TankBlueprint, TrackColliders) {
         let spec: TankSpec = crate::provenance::from_shipped_str(
             TANK_SPEC_PATH,
             include_str!(concat!(
@@ -1123,12 +1184,18 @@ mod proxy_tests {
         .unwrap();
         let blueprint = TankBlueprint::new(TANK_SPEC_PATH.into(), geometry, spec);
         let shapes = TrackColliders::of_blueprint(&blueprint, &glb);
+        (blueprint, shapes)
+    }
+
+    /// An authority tank and a replica of the shipped fixture, spawned into one world.
+    fn authority_and_replica(world: &mut World) -> (Entity, Entity) {
+        use avian3d::prelude::{Position, RigidBody, Rotation};
+        let (blueprint, shapes) = shipped();
         let content = TankContent {
             geometry: &blueprint.geometry,
             spec: &blueprint.spec,
             track_colliders: &shapes,
         };
-        let mut world = World::new();
         let mut commands = world.commands();
         let authority = spawn_headless_tank(
             &mut commands,
@@ -1150,6 +1217,16 @@ mod proxy_tests {
             (RigidBody::Static, Transform::IDENTITY),
         );
         world.flush();
+        (authority, replica)
+    }
+
+    /// Replica tanks retain every queried collider layer while only authority bodies receive
+    /// sprung belt segments. Clients render the server stream and run no belt support solve.
+    #[test]
+    fn replica_tanks_keep_queried_surfaces_without_sprung_belt_segments() {
+        // Fixture: the selected tank supplies construction data, not a collider-count oracle.
+        let mut world = World::new();
+        let (authority, replica) = authority_and_replica(&mut world);
 
         let collider_counts = |world: &mut World, root| {
             let mut counts = [0; 5];
@@ -1180,6 +1257,26 @@ mod proxy_tests {
             "replicas have no consumer for sprung belt support colliders"
         );
         assert_eq!(replica_counts[..4], authority_counts[..4]);
+    }
+
+    /// The game's damage model: a spawned tank's armour set holds every armour and crew box
+    /// collider once, each in its nearest moving node (a servo, a recoiling barrel or the turret
+    /// assembly a launch detaches) at the pose its rest chain gives it, on the authority and on a
+    /// replica alike, whose spawn is shared. Field containment and source clearance read only the
+    /// set; a part left out, or put in a frame that does not carry it, is bounded at the wrong
+    /// pose once that node moves. Fixture: the shipped tank; class invariants only.
+    #[test]
+    fn a_spawned_tank_sets_each_armour_and_crew_box_collider_in_its_nearest_frame() {
+        let mut world = World::new();
+        let (authority, replica) = authority_and_replica(&mut world);
+        let moving = |world: &World, node: Entity| {
+            world.get::<ServoSpec>(node).is_some()
+                || world.get::<RecoilParams>(node).is_some()
+                || world.get::<Turret>(node).is_some()
+        };
+        for root in [authority, replica] {
+            crate::ballistics::armour_set::assert_matches(&world, root, moving);
+        }
     }
 
     /// A structural node and a yaw actuator are distinct roles. Complete construction

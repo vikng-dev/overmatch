@@ -1994,6 +1994,7 @@ fn boxed_tank(pose: Transform) -> (App, BoxedTank) {
             Collider::cuboid(6.0, 0.5, 0.5),
             CollisionLayers::new([crate::Layer::Vehicle], LayerMask::ALL),
         ));
+        crate::ballistics::armour_set::fixture(app.world_mut(), body);
         let placed = |at: Vec3| pose * Transform::from_translation(at);
         let neighbour = volume(
             app,

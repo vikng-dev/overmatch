@@ -160,6 +160,7 @@ fn tank(
             volume.id()
         })
         .collect();
+    crate::ballistics::armour_set::fixture(app.world_mut(), root);
     // The one knockout rule wants two crew members in action (`damage::knockout_from_counts`).
     // Seats no round reaches make up the count: one beside listed crew boxes, two with none, so a
     // fixture tank is knocked out exactly when every crew box it lists has its HP pool emptied, or

@@ -298,6 +298,7 @@ fn tank_behind_the_wall(app: &mut App) -> Entity {
             crate::damage::VolumeOf(body),
         ));
     }
+    crate::ballistics::armour_set::fixture(app.world_mut(), body);
     for _ in 0..8 {
         app.update();
     }

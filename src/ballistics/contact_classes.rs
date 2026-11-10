@@ -2701,6 +2701,7 @@ impl Reach {
 
 /// The bounds of every armour volume in the world.
 fn armour_bounds(world: &mut World) -> (Vec3, Vec3) {
+    use avian3d::prelude::SimpleCollider;
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
     for (_, position, rotation, collider) in world

@@ -226,7 +226,12 @@ pub(super) fn snapshot(
             Or<(Changed<Position>, Changed<Rotation>, Added<RigidBody>)>,
         ),
     >,
-    (mut reenabled, attached): (MessageReader<Reenabled>, Query<&RigidBodyColliders>),
+    (mut reenabled, attached, stages, layers): (
+        MessageReader<Reenabled>,
+        Query<&RigidBodyColliders>,
+        Option<Res<crate::cost::stages::Stages>>,
+        Query<&avian3d::prelude::CollisionLayers>,
+    ),
 ) {
     let enabled = admitted(&mut reenabled, &attached);
     let history = &mut *history;
@@ -243,6 +248,8 @@ pub(super) fn snapshot(
         }
     }
     let mut largest_motion = 0.0f32;
+    // Entries written, of other colliders and of armour and crew box colliders: a cost count.
+    let mut inserts = [0u64; 2];
     for entity in written.iter().chain(
         enabled
             .iter()
@@ -265,6 +272,17 @@ pub(super) fn snapshot(
             history.moving_colliders.push(entity);
         }
         history.colliders.insert(entity, poses);
+        if stages.is_some() {
+            let armour = layers.get(entity).is_ok_and(|layers| {
+                layers.memberships.has_all(crate::Layer::Armor)
+                    || layers.memberships.has_all(crate::Layer::Witness)
+            });
+            inserts[usize::from(armour)] += 1;
+        }
+    }
+    if let Some(stages) = stages {
+        stages.add(crate::cost::stages::Work::PoseInsertsOther, inserts[0]);
+        stages.add(crate::cost::stages::Work::PoseInsertsArmour, inserts[1]);
     }
     for entity in written_roots.iter().chain(
         enabled
@@ -327,8 +345,26 @@ fn point_motion_bound(poses: Poses, collider: &Collider) -> f32 {
 }
 
 impl Pose {
+    pub(super) const IDENTITY: Self = Self {
+        position: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+    };
+
     pub(super) fn local(self, point: Vec3) -> Vec3 {
         self.rotation.inverse() * (point - self.position)
+    }
+}
+
+/// `parent * child`: the child's pose, given in the parent's frame, in the frame the parent is
+/// given in. The rotation is renormalized as [`composed_pose`] renormalizes it.
+impl std::ops::Mul for Pose {
+    type Output = Self;
+
+    fn mul(self, child: Self) -> Self {
+        Self {
+            position: self.position + self.rotation * child.position,
+            rotation: (self.rotation * child.rotation).normalize(),
+        }
     }
 }
 
