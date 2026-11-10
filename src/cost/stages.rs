@@ -120,8 +120,9 @@ labelled!(
         BlastCasts = "blast_casts",
         BlastOwnerRays = "blast_owner_rays",
         BlastPieceRays = "blast_piece_rays",
-        // The game's damage model's pose history: per-collider entries written, of armour and
-        // crew box colliders and of every other.
+        // The game's damage model's pose history: per-collider entries written, of colliders on
+        // the armour or crew box layer (construction pieces share the armour layer) and of every
+        // other.
         PoseInsertsArmour = "pose_inserts_armour",
         PoseInsertsOther = "pose_inserts_other",
         // Armour-set frame poses written, one per frame whose node's local pose was written.

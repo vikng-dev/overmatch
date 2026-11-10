@@ -254,7 +254,7 @@ pub(super) fn snapshot(
         }
     }
     let mut largest_motion = 0.0f32;
-    // Entries written, of other colliders and of armour and crew box colliders: a cost count.
+    // Entries written, of other colliders and of armour- or crew-box-layer ones: a cost count.
     let mut inserts = [0u64; 2];
     for entity in written.iter().chain(
         enabled
