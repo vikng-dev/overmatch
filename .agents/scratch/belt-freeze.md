@@ -144,7 +144,8 @@ OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 scripts/perf/c
 
 Subject: support contacts in the game's authoritative driving simulation. Game state only.
 Baseline for every causal comparison below: `89e8970b`. Ownership and aggregation landed as
-`59a8113d` and `de83a15e`; the discovery change follows them on `lane/belt-freeze`.
+`59a8113d` and `de83a15e`; discovery is `42b37280`, the captured half-scope correction is
+`8887f72d`, and stable coplanar ownership is `77cd4656`, all on `lane/belt-freeze`.
 
 Verified in source: owners were cached when bands opened, lateral edges were discarded, crossing
 visibility scanned every region, and every interval allocated active-edge and band-map storage.
@@ -156,7 +157,10 @@ they span even when those bands retain the same side keys. Each footprint point 
 the highest covering triangle, using that triangle's depth. Bands of one owner face sum their area,
 pressure integral and first moment before any support sampling. Engagement uses the maximum depth
 of the entire visible face region in that half, including disconnected parts. Field regions retain
-all their polygons so curved-terrain slicing preserves holes. The module owns the contact bound.
+all their polygons so curved-terrain slicing preserves holes. The module owns the contact bound. Equal-depth field support keeps priority. Solid ties use
+snapshot collider order then canonical geometry, consistently in burial and centroid ownership.
+The nested-coplanar witness failed with one region instead of the derived two before this rule;
+it now covers both one collider and distinct colliders under reversal.
 
 Discovery uses a balanced index of projected along/lateral bounds for burial, boundary cover and
 pair-crossing queries. Crossings are clipped as finite segments against the other region; empty
@@ -180,7 +184,7 @@ Each paired entry is baseline / new.
 | Input | Faces | Bands | Patches | Discovery tests | Per-collider alternative |
 |---|---:|---:|---:|---:|---:|
 | Captured column | 65 | 576 / 589 | 559 / 79 | 19,328 / 3,795 | 4 |
-| New rehearsal column peak | 94 | 1,269 / 1,053 | 1,212 / 107 | 39,397 / 15,683 | 4 |
+| New rehearsal column peak | 85 | 563 / 552 | 555 / 91 | 30,685 / 9,681 | 4 |
 | 512-chunk solid pile | 2,492 | 1,286 / 1,311 | 1,286 / 196 | 11,007,411 / 2,240,907 | 77 |
 | Same pile, shoe shadows | 3,259 | 24 / 22 | 24 / 19 | 391,482 / 241,685 | 6 |
 
@@ -195,20 +199,20 @@ MEASURED two independent local rehearsals, each running:
 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 scripts/perf/collapse.sh --rehearsal --schedule scripts/perf/rest-3.json --tanks 30 --clients 1 --duration 150
 ```
 
-Both runners exited zero. The following are independent per-tick maxima, not one simultaneous row.
+Both final runners exited zero. Earlier pre-canonical-tie rehearsals remain under `rest3-1/`
+and `rest3-2/` in the same artifact root; the table below uses the final stable-tie pair. The following are independent per-tick maxima, not one simultaneous row.
 All retained ticks, including collection tails, are in each run's `belt-ticks.csv` under
-`target/belt-freeze2/rest3-1/` and `target/belt-freeze2/rest3-2/`. Each row includes faces, bands,
+`target/belt-freeze2/stable-rest3-1/` and `target/belt-freeze2/stable-rest3-2/`. Each row includes faces, bands,
 patches, dynamic contacts, discovery tests and the names of belt counters exceeding 2,000.
 `target/belt-freeze2/counts.json` records maximum ticks and threshold counts for every belt counter.
 
 | Run | Ticks | Faces | Bands | Patches | Dynamic contacts | Discovery tests |
 |---|---:|---:|---:|---:|---:|---:|
-| rest-3 / 1 | 9,407 | 729 | 5,116 | 869 | 821 | 57,891 |
-| rest-3 / 2 | 8,994 | 1,045 | 4,147 | 1,777 | 1,709 | 53,256 |
+| rest-3 / 1 | 9,621 | 1,045 | 4,147 | 1,777 | 1,709 | 55,783 |
+| rest-3 / 2 | 8,873 | 1,112 | 4,188 | 1,901 | 1,828 | 59,803 |
 
-MEASURED threshold result: no tick exceeded 2,000 faces, patches or dynamic contacts. Bands exceeded
-2,000 on 1,309 / 476 ticks; discovery tests did so on 2,269 / 2,088 ticks. Of the other belt counters,
-slab checks crossed it on 678 / 0 ticks and terrain samples on every tick. These are observations,
+MEASURED threshold result: belt_partition_faces exceeded 2,000 on 0 / 0 ticks; belt_partition_patches exceeded 2,000 on 0 / 0 ticks; belt_dynamic_contacts exceeded 2,000 on 0 / 0 ticks; belt_partition_cells exceeded 2,000 on 912 / 862 ticks; belt_discovery_tests exceeded 2,000 on 2,775 / 3,183 ticks.
+Of the other belt counters, belt_terrain_samples crossed it on 9,621 / 8,873 ticks. These are observations,
 not caps or acceptance conditions. The trajectories are unpaired; they establish neither a speedup
 nor hosted budget compliance. Temporary input capture only logged increasing column face counts;
 it and all comparison/mutant modules were removed after measurement.
@@ -223,12 +227,12 @@ longer has a data-specific positive-contact requirement and compares owner count
 MEASURED mutation evidence: a `visible` implementation retaining the whole edge fails the visibility
 trimming test; returning all regions from burial fails its prefilter test. Returning `None` from
 `crossing` fails the interior analytic pressure assertion. Replacing the strict winner comparison
-with `>=` fails the field-tie recipient assertion. Evidence is in `target/belt-freeze2/mutant-*.log`
-and `discovery-tests.log`; none of these alternate implementations is compiled by the final tree.
+with `>=` fails the field-tie recipient assertion. Evidence is in `target/belt-freeze2/stable-mutant-*.log`,
+`stable-discovery-tests.log` and `coplanar-red.log`; none of these alternate implementations is compiled by the final tree.
 
 Validation uses the required format check, workspace/all-target CI clippy and targeted tests for
 world contact, forces, rubble, the shipped belt-on-hull witness, stage counters, server stats and
-all four whole-tree guards. Final output is in `target/belt-freeze2/final-gates.log`. Local review
+all four whole-tree guards. Final output is in `target/belt-freeze2/stable-final-gates.log`. Local review
 covered all six lenses; no backlog row names an edited file. There are no collider/body constructor
 changes, external writes, rebases, merges or pushes in this pass.
 

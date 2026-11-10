@@ -481,6 +481,12 @@ mod tests {
         }
     }
 
+    // Keep a fixture's polygon and constraints consistent, as the production constructor does.
+    fn restrict(face: &mut ClippedFace, plane: Vec3) {
+        face.polygon = clip(&face.polygon, plane);
+        face.planes.push(plane);
+    }
+
     /// Suspension reads the envelope's own pressure moments. Removing the interior oblique
     /// crossing assigns one plane across a region where the other is higher.
     #[test]
@@ -569,8 +575,8 @@ mod tests {
     fn shared_triangle_edges_do_not_multiply_patches() {
         // Fixture: two flat triangles tiling the unit square along x+y=1.
         let mut faces = [unit_face(Vec3::Z), unit_face(Vec3::Z)];
-        faces[0].planes.push(Vec3::new(-1.0, -1.0, 1.0));
-        faces[1].planes.push(Vec3::new(1.0, 1.0, -1.0));
+        restrict(&mut faces[0], Vec3::new(-1.0, -1.0, 1.0));
+        restrict(&mut faces[1], Vec3::new(1.0, 1.0, -1.0));
         for duplicate in [false, true] {
             if duplicate {
                 for f in &mut faces {
@@ -595,28 +601,31 @@ mod tests {
     }
 
     /// The same coplanar solids must expose the same owner regions under input reversal.
-    /// Snapshot collider order breaks equal-depth solid ties; the field retains priority.
+    /// Snapshot collider and geometry order break solid ties; the field retains priority.
     #[test]
     fn coplanar_nested_faces_keep_their_owner_under_reversal() {
-        // Fixture: collider 0 covers the lower-left quarter of collider 1's unit square.
+        // Fixture: an inner face covers the lower-left quarter, on the same or an earlier collider.
+        // Its canonical geometry also sorts before the outer square.
         let outer = unit_face(Vec3::Z);
         let mut inner = unit_face(Vec3::Z);
-        inner
-            .planes
-            .extend([Vec3::new(-1.0, 0.0, 0.5), Vec3::new(0.0, -1.0, 0.5)]);
-        for refs in [
-            vec![(0, &inner), (1, &outer)],
-            vec![(1, &outer), (0, &inner)],
-        ] {
-            let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
-            let regions = integrated_regions(cells, refs.len(), 1.0);
-            // DERIVED: the inner collider owns 1/4; the outer collider owns the remaining 3/4.
-            assert_eq!(regions.len(), 2);
-            for (owner, integral, _, _) in regions {
-                let piece = refs[owner.unwrap()].0;
-                let expected = if piece == 0 { 0.25 } else { 0.75 };
-                // Resolution: unit-scale f32 area accumulation.
-                assert!((integral.length - expected).abs() < 1e-6);
+        for plane in [Vec3::new(-1.0, 0.0, 0.5), Vec3::new(0.0, -1.0, 0.5)] {
+            restrict(&mut inner, plane);
+        }
+        for outer_piece in [0, 1] {
+            for refs in [
+                vec![(0, &inner), (outer_piece, &outer)],
+                vec![(outer_piece, &outer), (0, &inner)],
+            ] {
+                let cells = partition(0.0, 1.0, (0.0, 1.0), Vec3::ZERO, Vec3::ZERO, &refs);
+                let regions = integrated_regions(cells, refs.len(), 1.0);
+                // DERIVED: the inner face owns 1/4; the outer face owns the remaining 3/4.
+                assert_eq!(regions.len(), 2);
+                for (owner, integral, _, _) in regions {
+                    let is_inner = std::ptr::eq(refs[owner.unwrap()].1, &inner);
+                    let expected = if is_inner { 0.25 } else { 0.75 };
+                    // Resolution: unit-scale f32 area accumulation.
+                    assert!((integral.length - expected).abs() < 1e-6);
+                }
             }
         }
     }
@@ -627,7 +636,7 @@ mod tests {
     fn partly_hidden_face_has_one_patch_for_each_visible_owner() {
         let lower = unit_face(Vec3::Z);
         let mut upper = unit_face(Vec3::Z * 2.0);
-        upper.planes.push(Vec3::new(1.0, 0.0, -0.5));
+        restrict(&mut upper, Vec3::new(1.0, 0.0, -0.5));
         for refs in [
             vec![(0, &lower), (1, &upper)],
             vec![(1, &upper), (0, &lower)],
