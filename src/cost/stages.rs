@@ -40,6 +40,11 @@ labelled!(Stage, NAMES, COUNT {
     // The game's damage model, per field throw: reading its reach, then walking its directions.
     FieldReach = "field_reach_us",
     FieldWalk = "field_walk_us",
+    // Per planned crossing: the struck body's completion read, and the crew-box line pass.
+    Completion = "completion_us",
+    LinePass = "line_pass_us",
+    // A burst's blast rays cast through avian, apart from the intake around them.
+    Blast = "blast_us",
 });
 
 labelled!(Detail, DETAIL_NAMES, DETAIL_COUNT {
@@ -92,6 +97,16 @@ labelled!(
         FieldReached = "field_reached",
         FieldNear = "field_near",
         FieldHits = "field_hits",
+        FieldDirections = "field_directions",
+        // Triangles handed to the crossing test: by a field direction's hard walk, and by every
+        // other ballistic corridor (contact sweeps, the crossing chain, witness walks).
+        FieldTriTests = "field_tri_tests",
+        MarchTriTests = "march_tri_tests",
+        // A burst's blast: rays cast through avian, and (owner, ray) pairs walked over an
+        // owner's chunks, of which a moving group's.
+        BlastCasts = "blast_casts",
+        BlastOwnerRays = "blast_owner_rays",
+        BlastPieceRays = "blast_piece_rays",
     }
 );
 

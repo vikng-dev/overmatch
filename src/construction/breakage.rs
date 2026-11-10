@@ -1860,17 +1860,24 @@ fn apply_deposits(mut p: DepositParam) {
     let step = p.fixed.timestep().as_secs_f32();
     let mut taken: BTreeMap<Entity, Taken> = BTreeMap::new();
     for deposit in std::mem::take(&mut p.queue.0) {
-        let intake = Stages::start(p.stages.as_deref(), Stage::Intake);
+        let mut intake = Stages::start(p.stages.as_deref(), Stage::Intake);
         take_lines(ComputeTaskPool::get(), &p, &frames, &deposit, &mut taken);
         // All deposits read the tick's intake geometry. Each owner keeps ray order;
         // nearest-stop reduction keeps source-entity order, independent of worker completion.
         if !deposit.rays.is_empty() || deposit.blast.is_some() {
             let mut geometry = bevy::utils::Parallel::<Vec<OwnerGeometry>>::default();
+            let stages = p.stages.as_deref();
             p.constructions
                 .par_iter()
                 .for_each(|(root, _, breakage, piece)| {
-                    let result =
-                        owner_geometry(root, frames[&root], breakage, piece.is_none(), &deposit);
+                    let result = owner_geometry(
+                        root,
+                        frames[&root],
+                        breakage,
+                        piece.is_none(),
+                        &deposit,
+                        stages,
+                    );
                     geometry.scope(|results| results.push(result));
                 });
             let (fields, stops) =
@@ -1879,7 +1886,13 @@ fn apply_deposits(mut p: DepositParam) {
                 taken.entry(root).or_default().field.extend(field);
             }
             if let Some((origin, blast)) = deposit.blast {
-                cast_blast(&mut p, stops, &mut taken, origin, blast);
+                // Leaf brackets never overlap: the blast's casts leave the intake interval.
+                drop(intake);
+                {
+                    let _blast = Stages::start(p.stages.as_deref(), Stage::Blast);
+                    cast_blast(&mut p, stops, &mut taken, origin, blast);
+                }
+                intake = Stages::start(p.stages.as_deref(), Stage::Intake);
             }
         }
         for root in deposit.changed {
@@ -2051,6 +2064,7 @@ fn owner_geometry(
     breakage: &Breakage,
     placed: bool,
     deposit: &RawDeposit,
+    stages: Option<&Stages>,
 ) -> OwnerGeometry {
     if !deposit
         .rays
@@ -2090,6 +2104,7 @@ fn owner_geometry(
         }
     }
     let mut faces = BTreeMap::new();
+    let mut walked = 0;
     let blast = deposit.blast.map_or_else(Vec::new, |(origin, blast)| {
         let reach = blast.reach();
         let local = frame.local(origin);
@@ -2103,6 +2118,7 @@ fn owner_geometry(
                 }
                 let turned = frame.turn(dir);
                 bounds.span(local, turned)?;
+                walked += 1;
                 let (chunk, t) = first_chunk(&kind.layout, &shape, placed, local, turned)?;
                 let distance = t;
                 if distance > reach {
@@ -2131,6 +2147,12 @@ fn owner_geometry(
             })
             .collect()
     });
+    if let Some(stages) = stages {
+        stages.add(Work::BlastOwnerRays, walked);
+        if !placed {
+            stages.add(Work::BlastPieceRays, walked);
+        }
+    }
     OwnerGeometry { root, field, blast }
 }
 
@@ -2190,10 +2212,12 @@ fn cast_blast(
                 .is_ok_and(|of| p.constructions.contains(of.body))
     };
     let mut stops = stops.into_iter();
+    let mut casts = 0;
     let hits = fracture::trace_blast(blast, fracture::blast_directions(), |dir| {
         let stop = stops
             .next()
             .expect("geometry supplies one stop per declared blast ray");
+        casts += 1;
         let surface = p.spatial.cast_ray_predicate(
             origin,
             Dir3::new(dir).expect("the blast field's directions are unit"),
@@ -2226,6 +2250,9 @@ fn cast_blast(
         }
         stop?.surface
     });
+    if let Some(stages) = p.stages.as_deref() {
+        stages.add(Work::BlastCasts, casts);
+    }
     for (target, hit) in hits {
         match target {
             Stop::Chunk(root, c) => taken.entry(root).or_default().blast.push((c, hit)),

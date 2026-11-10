@@ -824,6 +824,7 @@ fn cast_disc_segment(
                         to: pose,
                     }
                 };
+                let mut tested = 0;
                 for &offset in offsets {
                     let swept = motion::sweep_collider(
                         poses,
@@ -834,6 +835,7 @@ fn cast_disc_segment(
                         surfaces,
                         origin + offset,
                         origin + offset + dir * max,
+                        &mut tested,
                     );
                     let (mut contact, hit) = if poses.from == poses.to
                         && !swept.as_ref().is_some_and(|(motion, _)| motion.contained)
@@ -890,6 +892,7 @@ fn cast_disc_segment(
                         nearest = Some((hit, contact));
                     }
                 }
+                world.count(crate::cost::stages::Work::MarchTriTests, tested);
                 true
             },
         );
@@ -3710,6 +3713,7 @@ fn walk_field(
             doses,
         });
     }
+    world.count(Work::FieldDirections, rays.len());
     rays
 }
 

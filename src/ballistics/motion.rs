@@ -377,6 +377,7 @@ pub(super) struct ContactMotion {
 
 /// The game's damage model: one collider's local endpoint chord. The collector keeps a unit
 /// local axis; its distance is converted back to a shared tick fraction before candidates compete.
+/// `tested` accumulates the triangles the collector tested, a cost count.
 #[expect(
     clippy::too_many_arguments,
     reason = "one moving candidate and one world segment"
@@ -390,6 +391,7 @@ pub(super) fn sweep_collider(
     surfaces: Option<&super::BallisticSurfaces>,
     start: Vec3,
     end: Vec3,
+    tested: &mut usize,
 ) -> Option<(ContactMotion, Vec3)> {
     let from = poses.at(sweep.from);
     let to = poses.at(sweep.to);
@@ -406,7 +408,7 @@ pub(super) fn sweep_collider(
     let length = (behind + distance.max(behind)).next_up();
     let laws = super::walk::WalkLaws::default();
     let mut hits = Vec::new();
-    super::collect::collect_collider(
+    *tested += super::collect::collect_collider(
         &super::collect::Corridor {
             anchor: Vec3::ZERO,
             origin: a,
@@ -491,6 +493,7 @@ mod tests {
             None,
             Vec3::ZERO,
             Vec3::Z * 12.5,
+            &mut 0,
         )
         .expect("overtaking contact");
         assert!((contact.fraction - 0.95 / 7.5).abs() < 1e-6);
@@ -522,6 +525,7 @@ mod tests {
             None,
             Vec3::new(0.0, 0.0, 0.4999),
             Vec3::NEG_Z,
+            &mut 0,
         )
         .expect("material holds the start");
         assert_eq!(contact.fraction, 0.0);

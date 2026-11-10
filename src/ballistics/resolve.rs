@@ -60,6 +60,7 @@ use super::{
     ImpactSurface, MARCH_EPS, MarchingShell, ProjectileMarchWorld, ShellRicochet, ShellStrike,
     ShellTerminal, TerminalVerdict, Verdict, VolumeCrossing, apply_hit_impulse,
 };
+use crate::cost::stages::{Stage, Stages, Work};
 
 mod playback;
 pub(crate) use playback::Playback;
@@ -662,7 +663,7 @@ pub(crate) fn certified_samples(
     let mut samples = Vec::with_capacity(offsets.len());
     for offset in offsets {
         let mut hits = Vec::new();
-        collect::collect(
+        let tested = collect::collect(
             &Corridor {
                 anchor: at,
                 origin: offset,
@@ -678,6 +679,7 @@ pub(crate) fn certified_samples(
             &mut hits,
             &|entity| context.world.pose(entity),
         )?;
+        context.world.count(Work::MarchTriTests, tested);
         samples.push(SampleCorridor {
             offset,
             initial_presence: Vec::new(),
@@ -1031,7 +1033,7 @@ impl FieldProbe {
         axis: Vec3,
         candidates: &[(Entity, Entity)],
         hits: &mut Vec<walk::FaceHit>,
-    ) -> Result<(), WalkError> {
+    ) -> Result<usize, WalkError> {
         collect::collect(
             &Corridor {
                 anchor: at,
@@ -1105,7 +1107,8 @@ pub(crate) fn field_presence(
     let axis = Vec3::from(dir);
     let all: Vec<(Entity, Entity)> = near.into_iter().map(|(_, candidate)| candidate).collect();
     let mut hits = Vec::new();
-    probe.collect(context, at, axis, &all, &mut hits)?;
+    let tested = probe.collect(context, at, axis, &all, &mut hits)?;
+    context.world.count(Work::MarchTriTests, tested);
     let (walked, _) = probe.walk(context, at, axis, hits)?;
     Ok(Some((f64::from(probe.behind), walked)))
 }
@@ -1135,7 +1138,6 @@ fn field_stop(
     at: Vec3,
     dir: Dir3,
 ) -> Result<(f64, Option<(f64, Option<Entity>)>), WalkError> {
-    use crate::cost::stages::Work;
     let scratch = &mut *field.scratch.borrow_mut();
     let Some(probe) = field_probe(context, field, at, dir, &mut scratch.near)? else {
         return Ok((0.0, None));
@@ -1169,7 +1171,8 @@ fn field_stop(
             stop = first_solid(&presence.layers, start, exited, is_box);
         } else if next <= reached && read < scratch.order.len() {
             let candidate = &scratch.order[read..=read];
-            probe.collect(context, at, axis, candidate, &mut scratch.hits)?;
+            let tested = probe.collect(context, at, axis, candidate, &mut scratch.hits)?;
+            context.world.count(Work::FieldTriTests, tested);
             read += 1;
         } else {
             break;
@@ -2504,6 +2507,7 @@ pub(crate) fn body_completion(
     flight: &Flight,
     radius: f32,
 ) -> Result<f32, WalkError> {
+    let _leaf = Stages::start(context.world.stages.as_deref(), Stage::Completion);
     let parts: Vec<_> = context
         .world
         .body_primitives(struck)
@@ -2548,7 +2552,7 @@ pub(crate) fn body_completion(
     for (sample, offset) in offsets.into_iter().enumerate() {
         let seed = seeds.get(sample);
         let mut hits = Vec::new();
-        collect::collect(
+        let tested = collect::collect(
             &Corridor {
                 anchor,
                 origin: origin + offset,
@@ -2564,6 +2568,7 @@ pub(crate) fn body_completion(
             &mut hits,
             &|entity| context.world.pose(entity),
         )?;
+        context.world.count(Work::MarchTriTests, tested);
         if let Some(exit) = walk::last_exit(&hits) {
             end = end.max(exit);
         }
@@ -2651,7 +2656,7 @@ pub(super) fn build_corridor(
         let seed = seeds.get(index);
         let seeded: &[ShellKey] = seed.map_or(&[], |seed| &seed.inside);
         let mut hits = Vec::new();
-        collect::collect(
+        let tested = collect::collect(
             &Corridor {
                 anchor,
                 origin: origin + offset,
@@ -2667,6 +2672,7 @@ pub(super) fn build_corridor(
             &mut hits,
             &|entity| context.world.pose(entity),
         )?;
+        context.world.count(Work::MarchTriTests, tested);
         samples.push(SampleCorridor {
             offset,
             initial_presence: seeded.to_vec(),

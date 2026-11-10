@@ -25,6 +25,7 @@ use super::collect::{self, Corridor};
 use super::resolve::{FieldReach, Leg, PROBE_MARGIN, ResolveContext, field_presence};
 use super::walk::{self, WalkError, WitnessSpans};
 use super::{VolumeCrossing, hit_ancestor};
+use crate::cost::stages::{Stage, Stages, Work};
 
 /// The witness colliders `admit` keeps whose bounds meet the stretch from `from` along `axis` for
 /// `length` m, grown by `radius`: `(witness, collider)` pairs in entity order.
@@ -144,7 +145,7 @@ fn presence(
         "game's damage model: finite loaded witness bounds yield a finite probe"
     );
     let mut hits = Vec::new();
-    collect::collect(
+    let tested = collect::collect(
         &Corridor {
             anchor: at,
             origin: Vec3::ZERO,
@@ -160,6 +161,7 @@ fn presence(
         &mut hits,
         &|entity| context.world.pose(entity),
     )?;
+    context.world.count(Work::MarchTriTests, tested);
     let (behind, length) = (behind as f64, length as f64);
     let spans: Vec<(f64, f64)> = walk::witness_spans(0, total as f64, &hits)?
         .into_iter()
@@ -244,6 +246,7 @@ pub(crate) fn line(
     legs: &[Leg],
     wound: f32,
 ) -> Result<(Vec<VolumeCrossing>, Option<Dir3>), WalkError> {
+    let _leaf = Stages::start(context.world.stages.as_deref(), Stage::LinePass);
     let mut out: Vec<VolumeCrossing> = Vec::new();
     let mut incoming = None;
     for leg in legs {

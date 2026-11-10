@@ -134,13 +134,15 @@ pub(crate) struct Corridor<'a> {
 /// `(t, volume, primitive, triangle)`, so the broad phase's traversal order cannot reach the result.
 /// What IS this function's job is completeness — every crossing, or an error.
 /// The game's damage model: all collectors in one crossing read the same sampled scene.
+/// Returns how many triangles it handed the crossing test, a cost count.
 pub(super) fn collect(
     corridor: &Corridor<'_>,
     candidates: &[(Entity, Entity)],
     colliders: &Query<(&Position, &Rotation, &Collider, Option<&BallisticSurfaces>)>,
     out: &mut Vec<FaceHit>,
     pose: &dyn Fn(Entity) -> Option<super::motion::Pose>,
-) -> Result<(), WalkError> {
+) -> Result<usize, WalkError> {
+    let mut tested = 0;
     for &(node, primitive) in candidates {
         let Ok((position, rotation, collider, surfaces)) = colliders.get(primitive) else {
             // A candidate the broad phase named but whose pose is not available cannot be probed,
@@ -153,11 +155,11 @@ pub(super) fn collect(
         let sampled = pose(primitive);
         let position = sampled.map_or(*position, |pose| Position(pose.position));
         let rotation = sampled.map_or(*rotation, |pose| Rotation(pose.rotation));
-        collect_collider(
+        tested += collect_collider(
             corridor, node, primitive, collider, surfaces, position, rotation, out,
         )?;
     }
-    Ok(())
+    Ok(tested)
 }
 
 #[expect(
@@ -173,7 +175,7 @@ pub(super) fn collect_collider(
     position: Position,
     rotation: Rotation,
     out: &mut Vec<FaceHit>,
-) -> Result<(), WalkError> {
+) -> Result<usize, WalkError> {
     // Into the collider's local frame: one inverse rotation, rather than transforming every
     // triangle out to world space.
     let inverse = rotation.inverse();
@@ -200,7 +202,7 @@ pub(super) fn collect_collider(
     };
 
     let shape = collider.shape_scaled().as_typed_shape();
-    match shape {
+    Ok(match shape {
         TypedShape::TriMesh(mesh) => {
             // SURFACE IDENTITY IS NOT OPTIONAL FOR ARMOUR. Without it the walk cannot tell two
             // shells closing at one `t` from one shell claimed twice, and it must not guess —
@@ -244,20 +246,22 @@ pub(super) fn collect_collider(
             )?
         }
         // A convex solid is one closed surface, so its shell id is `0`.
-        _ => collect_convex(
-            shape,
-            local_origin,
-            local_axis,
-            rotation,
-            corridor,
-            node,
-            primitive,
-            seeded(0),
-            reach,
-            out,
-        )?,
-    }
-    Ok(())
+        _ => {
+            collect_convex(
+                shape,
+                local_origin,
+                local_axis,
+                rotation,
+                corridor,
+                node,
+                primitive,
+                seeded(0),
+                reach,
+                out,
+            )?;
+            0
+        }
+    })
 }
 
 /// How far behind the corridor origin an UNSEEDED face may sit and still be the face the ray is
@@ -309,7 +313,7 @@ fn sitting_reach(handoff: Option<f64>, origin: Vec3, local_origin: Vec3, laws: &
 /// share of THAT constant is the honest way to state it.
 const SITTING_REACH_SHARE: f32 = 0.25;
 
-/// Every triangle the ray crosses, with the winding normal.
+/// Every triangle the ray crosses, with the winding normal. Returns how many triangles it tested.
 #[expect(
     clippy::too_many_arguments,
     reason = "private kernel of `collect`; the alternative is a struct used exactly once"
@@ -329,7 +333,7 @@ fn collect_trimesh(
     rotation: Rotation,
     reach: f32,
     out: &mut Vec<FaceHit>,
-) -> Result<(), WalkError> {
+) -> Result<usize, WalkError> {
     // Prune by BOX OVERLAP against the corridor's own extent, not by a ray cast against each node.
     //
     // A ray cast is the obvious prune and it is subtly wrong here: an axis-aligned face's AABB is
@@ -347,6 +351,7 @@ fn collect_trimesh(
     let shear = RayShear::new(origin, axis);
     // Every claim at its RAW `t`; the seed contract is applied per shell once all are in.
     let mut claims: Vec<(FaceHit, bool)> = Vec::new();
+    let mut tested = 0;
     for index in mesh.bvh().leaves(|node| {
         let aabb = node.aabb();
         aabb.maxs.x >= lo.x
@@ -356,6 +361,7 @@ fn collect_trimesh(
             && aabb.maxs.z >= lo.z
             && aabb.mins.z <= hi.z
     }) {
+        tested += 1;
         let triangle = mesh.triangle(index);
         let corners = [triangle.a, triangle.b, triangle.c];
         let Some(claim) = cross_triangle(&shear, axis, triangle.a, triangle.b, triangle.c) else {
@@ -442,7 +448,7 @@ fn collect_trimesh(
             }
         }
     }
-    Ok(())
+    Ok(tested)
 }
 
 /// The one interval a convex solid presents, read exactly.

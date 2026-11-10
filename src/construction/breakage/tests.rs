@@ -3953,7 +3953,9 @@ fn field_geometry_is_independent_of_workers_and_owner_iteration() {
     let expected = observe(
         owners
             .iter()
-            .map(|(root, frame, breakage)| owner_geometry(*root, *frame, breakage, true, &deposit))
+            .map(|(root, frame, breakage)| {
+                owner_geometry(*root, *frame, breakage, true, &deposit, None)
+            })
             .collect(),
     );
     let first = *roots[..2].iter().min().unwrap();
@@ -3975,7 +3977,7 @@ fn field_geometry_is_independent_of_workers_and_owner_iteration() {
                     owners
                         .iter()
                         .map(|(root, frame, breakage)| {
-                            owner_geometry(*root, *frame, breakage, true, &deposit)
+                            owner_geometry(*root, *frame, breakage, true, &deposit, None)
                         })
                         .collect::<Vec<_>>()
                 })
