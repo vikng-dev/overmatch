@@ -119,7 +119,7 @@ fn restore_controller_rate(
 /// the degenerate `src/net/tests/net_interp_delay.rs` pins), so the gap to the next keyframe is
 /// one tick.
 /// The whole measured receipt spread is covered; unknown impulses permit no projection discount.
-fn derived_min_delay(rtt: Duration, stats: &ArrivalStats, tick: Duration) -> Duration {
+pub(super) fn derived_min_delay(rtt: Duration, stats: &ArrivalStats, tick: Duration) -> Duration {
     rtt / 2 + stats.spread() + tick
 }
 

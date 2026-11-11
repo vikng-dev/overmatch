@@ -571,8 +571,9 @@ pub fn run() {
     // timeline below is built with, so its rebuilds cannot change the delay's shape.
     let interpolation =
         super::sync_margin::install(&mut app, sync_config, input_delay, interpolation);
-    // Read-only buffer-edge starvation and timeline-resync instruments.
+    // Read-only timeline-resync instrument and the per-second `client_jitter` line.
     super::frontier::install(&mut app);
+    super::frontier::install_jitter_line(&mut app);
     // App-global configs follow `ClientPlugins`: its `On<Insert, InputTimelineConfig>` observer
     // seeds delay immediately, before stamping/sending, rather than at the first timeline shift.
     app.insert_resource(InputTimelineConfig::new(sync_config, input_delay));

@@ -21,9 +21,15 @@
 //!   typed absence. The host's THP mode and CPU topology log once when this recorder starts;
 //! - `overruns`: ticks longer than the fixed timestep, `budget_us`;
 //! - `inputs`: per link, `tick_exact` and `held` counts of the input snapshots the bridge reads,
-//!   `last_for_tick_offset` (`for_tick - server_tick`), `lookahead_rejected` messages beyond
-//!   Lightyear's lookahead gate, and `max_message_lookahead` observed before its gate. Offsets
-//!   are signed ticks; null means no matching tick/message in this period. Counts reset per row;
+//!   `last_for_tick_offset` (`for_tick - server_tick`), `min_buffer_lookahead` and
+//!   `max_buffer_lookahead` (the input buffer's newest remote tick − server tick at those reads),
+//!   the ready messages Lightyear's receive gate `accepted` or dropped (`lookahead_rejected` past
+//!   its future bound, `past_rejected` past its past bound), and `min_message_lookahead` and
+//!   `max_message_lookahead` (`end_tick - server_tick`) observed before the gate. Offsets are
+//!   signed ticks; null means no matching tick/message in this period. Counts reset per row;
+//! - `wall`: the runner's `discarded_ms` (wall time past the admission cap dropped this period)
+//!   and `discarding_batches` (admitted batches that dropped any), and `drift_ms`, how far
+//!   simulated time trails wall time since startup (`server_runner::WallLedger`);
 //! - `clients` (connected links), `tanks`, `projectiles`, `entities`, sampled at the line;
 //! - `cpu_pct`: the process's user + system CPU over the period, as % of one core;
 //! - `rss_mb`: resident memory at the line;
@@ -79,7 +85,8 @@
 //! attempted encrypted send bytes. Its `ticks` use the ram schema plus admission-relative
 //! `elapsed_s`, `events_fired` and work counts; `sends` remain outside the fixed ticks.
 //! `send_bytes` and `send_clients` also appear without a loadtest. Each connected link carries its
-//! period bytes and bytes/s; `send_us_per_client_s` amortizes shared send work over links and wall
+//! period bytes, bytes/s and `max_packets`, the most datagrams one frame's send pass queued for it;
+//! `send_us_per_client_s` amortizes shared send work over links and wall
 //! seconds. `send_census_us` times the byte collector separately and is excluded from `send_us`.
 //! Bytes exclude IP/UDP headers and do not attest delivery.
 //!
@@ -104,7 +111,7 @@ use bevy_replicon::prelude::ServerSystems;
 use bevy_replicon::server::server_tick::ServerTick;
 use lightyear::input::input_message::InputMessage;
 use lightyear::link::LinkSystems;
-use lightyear::prelude::input::native::{ActionState, NativeStateSequence};
+use lightyear::prelude::input::native::{ActionState, NativeBuffer, NativeStateSequence};
 use lightyear::prelude::input::server::InputSystems;
 use lightyear::prelude::server::ClientOf;
 use lightyear::prelude::{
@@ -141,13 +148,28 @@ const LEVER: &str = "OVERMATCH_SERVER_STATS_S";
 /// The line's grep anchor.
 const PREFIX: &str = "server_stats";
 
+/// Fact: lightyear_inputs 0.30.1 src/server.rs:68 sets its private past-input gate to 64;
+/// receive_input_message applies it at :370 beside the lookahead gate, before any buffer write.
+const MAX_INPUT_PAST_TICKS: i32 = 64;
+
 #[derive(Default, serde::Serialize)]
 struct InputCounts {
     tick_exact: u64,
     held: u64,
     last_for_tick_offset: Option<i32>,
+    min_buffer_lookahead: Option<i32>,
+    max_buffer_lookahead: Option<i32>,
+    accepted: u64,
     lookahead_rejected: u64,
+    past_rejected: u64,
+    min_message_lookahead: Option<i32>,
     max_message_lookahead: Option<i32>,
+}
+
+/// Fold `value` into a period's signed minimum and maximum.
+fn widen(min: &mut Option<i32>, max: &mut Option<i32>, value: i32) {
+    *min = Some(min.map_or(value, |min| min.min(value)));
+    *max = Some(max.map_or(value, |max| max.max(value)));
 }
 
 /// Census reduction only: independent input evaluation stays in the bridge. FixedPreUpdate
@@ -155,12 +177,16 @@ struct InputCounts {
 fn count_input_use(
     timeline: Res<LocalTimeline>,
     tanks: Query<
-        (&ActionState<TankCommand>, &ControlledBy),
+        (
+            &ActionState<TankCommand>,
+            &ControlledBy,
+            Option<&NativeBuffer<TankCommand>>,
+        ),
         (With<TankCommand>, With<ParsedTankCommand>),
     >,
     mut stats: ResMut<ServerStats>,
 ) {
-    for (action, owner) in &tanks {
+    for (action, owner, buffer) in &tanks {
         let counts = stats.input_by_client.entry(owner.owner).or_default();
         let offset = Tick(action.0.for_tick) - timeline.tick();
         if offset == 0 {
@@ -169,7 +195,26 @@ fn count_input_use(
             counts.held += 1;
         }
         counts.last_for_tick_offset = Some(offset);
+        // Lightyear inserts the buffer with the client's first input message, which also sets
+        // its newest remote tick; until then the tank has no buffer to read.
+        if let Some(newest) = buffer.and_then(|buffer| buffer.last_remote_tick) {
+            widen(
+                &mut counts.min_buffer_lookahead,
+                &mut counts.max_buffer_lookahead,
+                newest - timeline.tick(),
+            );
+        }
     }
+}
+
+/// One link's ready input messages this frame, against Lightyear's receive gate.
+#[derive(Default)]
+struct MessageCensus {
+    accepted: u64,
+    lookahead_rejected: u64,
+    past_rejected: u64,
+    min: Option<i32>,
+    max: Option<i32>,
 }
 
 /// Lightyear drains these messages in ReceiveInputs. Retaining every message observes the gate
@@ -184,36 +229,43 @@ fn count_input_lookahead(
         (With<ClientOf>, With<Connected>),
     >,
     mut stats: ResMut<ServerStats>,
-    mut worker_counts: Local<Parallel<Vec<(Entity, u64, i32)>>>,
+    mut worker_counts: Local<Parallel<Vec<(Entity, MessageCensus)>>>,
 ) {
     let tick = timeline.tick();
     let worker_counts = &mut *worker_counts;
-    // Each link owns its queue; integer sums and maxima commute at the census boundary.
+    // Each link owns its queue; integer sums and extrema commute at the census boundary.
     receivers.par_iter_mut().for_each(|(link, mut receiver)| {
-        let mut rejected = 0;
-        let mut largest: Option<i32> = None;
+        let mut census = MessageCensus::default();
         receiver.retain_messages(|message| {
             let offset = message.end_tick - tick;
-            largest = Some(largest.map_or(offset, |max| max.max(offset)));
+            widen(&mut census.min, &mut census.max, offset);
             if offset > MAX_INPUT_LOOKAHEAD_TICKS {
-                rejected += 1;
+                census.lookahead_rejected += 1;
+            } else if offset < -MAX_INPUT_PAST_TICKS {
+                census.past_rejected += 1;
+            } else {
+                census.accepted += 1;
             }
             true
         });
         // A link with no ready message contributes no reading this frame.
-        if let Some(largest) = largest {
-            worker_counts.scope(|counts| counts.push((link, rejected, largest)));
+        if census.max.is_some() {
+            worker_counts.scope(|counts| counts.push((link, census)));
         }
     });
     for counts in worker_counts.iter_mut() {
-        for (link, rejected, largest) in counts.drain(..) {
+        for (link, census) in counts.drain(..) {
             let counts = stats.input_by_client.entry(link).or_default();
-            counts.lookahead_rejected += rejected;
-            counts.max_message_lookahead = Some(
-                counts
-                    .max_message_lookahead
-                    .map_or(largest, |max| max.max(largest)),
-            );
+            counts.accepted += census.accepted;
+            counts.lookahead_rejected += census.lookahead_rejected;
+            counts.past_rejected += census.past_rejected;
+            for offset in census.min.into_iter().chain(census.max) {
+                widen(
+                    &mut counts.min_message_lookahead,
+                    &mut counts.max_message_lookahead,
+                    offset,
+                );
+            }
         }
     }
 }
@@ -253,6 +305,7 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         cpu_at_start: Some(process_cpu().unwrap_or_else(crate::refuse_start)),
         throttle_at_start: read_throttle(),
         husk_strikes_at_start: 0,
+        discarded_at_start: (Duration::ZERO, 0),
         sequence: 0,
         send_bytes: 0,
         send_by_client: BTreeMap::new(),
@@ -416,10 +469,20 @@ struct ServerStats {
     throttle_at_start: Option<Throttle>,
     /// The recorder's husk-strike count when the current period opened.
     husk_strikes_at_start: u64,
+    /// The runner's dropped wall time and batches when the current period opened.
+    discarded_at_start: (Duration, u64),
     sequence: u64,
     send_bytes: u64,
-    send_by_client: BTreeMap<Entity, u64>,
+    send_by_client: BTreeMap<Entity, SendCounts>,
     input_by_client: BTreeMap<Entity, InputCounts>,
+}
+
+/// One link's queued sends over a period.
+#[derive(Default)]
+struct SendCounts {
+    bytes: u64,
+    /// The most datagrams one frame's send pass queued for the link.
+    max_packets: u64,
 }
 
 /// The open phase brackets' starts.
@@ -510,6 +573,15 @@ impl TickWindow {
     }
 }
 
+/// The runner's wall-time accounts at the line ([`super::server_runner::WallLedger`]).
+struct WallReading {
+    /// Dropped in this period.
+    discarded: Duration,
+    discarding_batches: u64,
+    /// Since startup.
+    drift: Duration,
+}
+
 /// Everything one line reports.
 struct Snapshot {
     elapsed: Duration,
@@ -546,6 +618,7 @@ struct Snapshot {
     /// The period's rounds that struck a knocked-out tank (`ShotRecorder::husk_strikes`): a
     /// counter, never a line per strike, so automatic fire into husks cannot flood the log.
     husk_strikes: u64,
+    wall: WallReading,
     workload: Option<Value>,
     construction: Value,
     ram: Option<Value>,
@@ -605,6 +678,11 @@ fn stats_line(snapshot: &Snapshot) -> String {
         "throttled_usec": snapshot.throttled.map(|t| t.throttled_usec),
         "nr_throttled": snapshot.throttled.map(|t| t.nr_throttled),
         "husk_strikes": snapshot.husk_strikes,
+        "wall": {
+            "discarded_ms": tenth(snapshot.wall.discarded.as_secs_f64() * 1e3),
+            "discarding_batches": snapshot.wall.discarding_batches,
+            "drift_ms": tenth(snapshot.wall.drift.as_secs_f64() * 1e3),
+        },
     });
     for (name, summary) in NAMES.into_iter().zip(&snapshot.stages) {
         body[name] = percentiles(summary.as_ref());
@@ -774,18 +852,21 @@ fn count_send_bytes(
     mut stats: ResMut<ServerStats>,
     mut starts: ResMut<PhaseStarts>,
     mut links: Query<(Entity, &mut Link)>,
-    mut worker_bytes: Local<Parallel<Vec<(Entity, u64)>>>,
+    mut worker_bytes: Local<Parallel<Vec<(Entity, u64, u64)>>>,
 ) {
     let started = Instant::now();
-    // Each link owns its FIFO. Integer subtotals commit once, before the transport flush.
+    // Each link owns its FIFO. Subtotals and maxima commit once, before the transport flush.
     let worker_bytes = &mut *worker_bytes;
     links.par_iter_mut().for_each(|(entity, mut link)| {
-        worker_bytes.scope(|bytes| bytes.push((entity, queued_bytes(&mut link))));
+        let packets = link.send.len() as u64;
+        worker_bytes.scope(|bytes| bytes.push((entity, queued_bytes(&mut link), packets)));
     });
     for bytes in worker_bytes.iter_mut() {
-        for (entity, bytes) in bytes.drain(..) {
+        for (entity, bytes, packets) in bytes.drain(..) {
             stats.send_bytes += bytes;
-            *stats.send_by_client.entry(entity).or_default() += bytes;
+            let link = stats.send_by_client.entry(entity).or_default();
+            link.bytes += bytes;
+            link.max_packets = link.max_packets.max(packets);
         }
     }
     starts.send_census_us = started.elapsed().as_secs_f64() * 1.0e6;
@@ -827,7 +908,7 @@ fn emit_line(
     fixed: Res<Time<Fixed>>,
     mut census: Census,
     debris: DebrisCensus,
-    recorder: Res<ShotRecorder>,
+    (recorder, wall): (Res<ShotRecorder>, super::server_runner::WallLedger),
     load: Option<ResMut<Loadtest>>,
     record: Res<Record>,
 ) {
@@ -848,14 +929,22 @@ fn emit_line(
     stats.throttle_at_start = throttle;
     let husk_strikes = recorder.husk_strikes() - stats.husk_strikes_at_start;
     stats.husk_strikes_at_start = recorder.husk_strikes();
+    let discarded = wall.discarded();
+    let (discarded_then, batches_then) =
+        std::mem::replace(&mut stats.discarded_at_start, discarded);
+    let wall = WallReading {
+        discarded: discarded.0 - discarded_then,
+        discarding_batches: discarded.1 - batches_then,
+        drift: wall.drift(),
+    };
     stats.sequence += 1;
     let pieces = census.piece_records.drain();
     let send_bytes = std::mem::take(&mut stats.send_bytes);
     let send_by_client = std::mem::take(&mut stats.send_by_client);
     let send_clients: Vec<_> = census.clients.iter().map(|link| {
         // A connected link may queue no packet in this period.
-        let bytes = send_by_client.get(&link).copied().unwrap_or(0);
-        json!({"link": link.to_string(), "bytes": bytes, "bytes_per_s": bytes as f64 / elapsed.as_secs_f64()})
+        let (bytes, max_packets) = send_by_client.get(&link).map_or((0, 0), |sent| (sent.bytes, sent.max_packets));
+        json!({"link": link.to_string(), "bytes": bytes, "bytes_per_s": bytes as f64 / elapsed.as_secs_f64(), "max_packets": max_packets})
     }).collect();
     let inputs: Vec<_> = std::mem::take(&mut stats.input_by_client)
         .into_iter()
@@ -951,6 +1040,7 @@ fn emit_line(
         rss_bytes: resident_bytes(),
         throttled,
         husk_strikes,
+        wall,
         workload,
         construction,
         ram: census.ram.as_deref_mut().map(|ram| {
@@ -1054,6 +1144,7 @@ mod tests {
             cpu_at_start: None,
             throttle_at_start: None,
             husk_strikes_at_start: 0,
+            discarded_at_start: (Duration::ZERO, 0),
             sequence: 0,
             send_bytes: 0,
             send_by_client: BTreeMap::new(),
@@ -1063,6 +1154,8 @@ mod tests {
 
     /// Operators must distinguish a missing tick's held command from a tick-exact input, and
     /// attribute it to its client. Counting buffers or post-attestation commands loses that fact.
+    /// The buffer's reach is the newest input past the simulated tick, signed so a clock running
+    /// ahead reads positive; a client that has sent nothing yet has no reach, not a zero one.
     #[test]
     fn input_counts_follow_the_bridge_snapshot_and_keep_clients_separate() {
         use bevy::ecs::system::RunSystemOnce;
@@ -1074,8 +1167,9 @@ mod tests {
         world.insert_resource(fixture_stats());
         let first = world.spawn_empty().id();
         let second = world.spawn_empty().id();
-        for (owner, for_tick) in [(first, 100), (second, 99)] {
-            world.spawn((
+        // Only the first client has sent an input yet, for tick 103.
+        for (owner, for_tick, newest) in [(first, 100, Some(103)), (second, 99, None)] {
+            let mut tank = world.spawn((
                 ActionState(TankCommand {
                     for_tick,
                     ..default()
@@ -1086,6 +1180,11 @@ mod tests {
                     lifetime: default(),
                 },
             ));
+            if let Some(newest) = newest {
+                let mut buffer = NativeBuffer::<TankCommand>::default();
+                buffer.last_remote_tick = Some(Tick(newest));
+                tank.insert(buffer);
+            }
         }
         world.run_system_once(count_input_use).unwrap();
         world.resource_mut::<LocalTimeline>().apply_delta(1);
@@ -1097,17 +1196,25 @@ mod tests {
         assert_eq!(counts[&second].tick_exact, 0);
         assert_eq!(counts[&second].held, 2);
         assert_eq!(counts[&second].last_for_tick_offset, Some(-2));
+        assert_eq!(
+            (
+                counts[&first].min_buffer_lookahead,
+                counts[&first].max_buffer_lookahead
+            ),
+            (Some(2), Some(3))
+        );
+        assert_eq!(counts[&second].max_buffer_lookahead, None);
     }
 
-    /// The clamp and census mirror a private library gate. Drive its actual receive path:
-    /// gate is accepted, gate+1 is dropped, and the census leaves both messages available.
-    /// Changing upstream's private bound in either direction must fail this tripwire.
+    /// The clamp and census mirror both private library gates. Drive its actual receive path:
+    /// each gate is accepted, one past it is dropped, every message lands in exactly one count,
+    /// and the census leaves all of them available. Changing either upstream bound in either
+    /// direction must fail this tripwire.
     #[test]
     fn the_lookahead_census_matches_lightyears_receive_gate_without_consuming_messages() {
         use bevy::ecs::system::RunSystemOnce;
         use lightyear::prelude::*;
         use lightyear_inputs::input_message::{ActionStateSequence, InputTarget, PerTargetData};
-        use lightyear_inputs_native::prelude::NativeBuffer;
         type Inputs = InputMessage<NativeStateSequence<TankCommand>>;
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
@@ -1122,7 +1229,8 @@ mod tests {
         app.finish();
         app.cleanup();
         app.world_mut().resource_mut::<Time<Virtual>>().pause();
-        // Fixture: two messages adjacent to the gate, delivered without a socket or a clock step.
+        // Fixture: messages adjacent to each gate, delivered without a socket or a clock step, at
+        // a server tick far enough from zero that the past gate is not hidden by tick saturation.
         let link = app
             .world_mut()
             .spawn((
@@ -1134,9 +1242,20 @@ mod tests {
                 MessageReceiver::<Inputs>::default(),
             ))
             .id();
+        app.world_mut()
+            .resource_mut::<LocalTimeline>()
+            .apply_delta(1_000);
         let tick = app.world().resource::<LocalTimeline>().tick();
+        let offsets = [
+            -MAX_INPUT_PAST_TICKS - 1,
+            -MAX_INPUT_PAST_TICKS,
+            MAX_INPUT_LOOKAHEAD_TICKS,
+            MAX_INPUT_LOOKAHEAD_TICKS + 1,
+        ];
+        let accepted =
+            |offset: i32| (-MAX_INPUT_PAST_TICKS..=MAX_INPUT_LOOKAHEAD_TICKS).contains(&offset);
         let mut targets = Vec::new();
-        for offset in [MAX_INPUT_LOOKAHEAD_TICKS, MAX_INPUT_LOOKAHEAD_TICKS + 1] {
+        for offset in offsets {
             let target = app
                 .world_mut()
                 .spawn(NativeBuffer::<TankCommand>::default())
@@ -1163,10 +1282,17 @@ mod tests {
             .run_system_once(count_input_lookahead)
             .unwrap();
         let counts = &app.world().resource::<ServerStats>().input_by_client[&link];
-        assert_eq!(counts.lookahead_rejected, 1);
         assert_eq!(
-            counts.max_message_lookahead,
-            Some(MAX_INPUT_LOOKAHEAD_TICKS + 1)
+            (
+                counts.accepted,
+                counts.lookahead_rejected,
+                counts.past_rejected
+            ),
+            (2, 1, 1)
+        );
+        assert_eq!(
+            (counts.min_message_lookahead, counts.max_message_lookahead),
+            (Some(offsets[0]), Some(offsets[3]))
         );
         let mut received = Vec::new();
         app.world_mut()
@@ -1176,10 +1302,7 @@ mod tests {
                 received.push(message.end_tick - tick);
                 true
             });
-        assert_eq!(
-            received,
-            [MAX_INPUT_LOOKAHEAD_TICKS, MAX_INPUT_LOOKAHEAD_TICKS + 1]
-        );
+        assert_eq!(received, offsets);
         // The missing server relationship kept delivery pending for the census. Attach it now
         // and let the plugin's private receive_input_message system drain the real receiver.
         let server = app.world_mut().spawn_empty().id();
@@ -1194,12 +1317,8 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 buffer.last_remote_tick,
-                if offset == MAX_INPUT_LOOKAHEAD_TICKS {
-                    Some(tick + offset)
-                } else {
-                    None
-                },
-                "the real receive path must accept at the mirrored gate and drop gate+1",
+                accepted(offset).then_some(tick + offset),
+                "the real receive path must accept at each mirrored gate and drop one past it",
             );
         }
     }
@@ -1336,7 +1455,12 @@ mod tests {
         assert_eq!(app.world().resource::<ServerStats>().send_bytes, expected);
         let per_link = &app.world().resource::<ServerStats>().send_by_client;
         assert_eq!(per_link.len(), links as usize);
-        assert!(per_link.values().all(|&bytes| bytes == expected / links));
+        assert!(
+            per_link
+                .values()
+                .all(|sent| sent.bytes == expected / links
+                    && sent.max_packets == packets.len() as u64)
+        );
         for mut link in app
             .world_mut()
             .query::<&mut Link>()
@@ -1497,6 +1621,11 @@ mod tests {
                 throttled_usec: 45_000,
             }),
             husk_strikes: 4,
+            wall: WallReading {
+                discarded: Duration::from_micros(250_049),
+                discarding_batches: 1,
+                drift: Duration::from_millis(1_500),
+            },
             workload: None,
             construction: json!({"cracked_joints": 0, "separated_joints": 0, "departed_chunks": 0}),
             ram: None,
@@ -1542,6 +1671,7 @@ mod tests {
             "throttled_usec": 45000,
             "nr_throttled": 3,
             "husk_strikes": 4,
+            "wall": {"discarded_ms": 250.0, "discarding_batches": 1, "drift_ms": 1500.0},
             "debris": {"live": 35, "sleeping": 140},
             "construction": {"cracked_joints": 0, "separated_joints": 0, "departed_chunks": 0},
         });

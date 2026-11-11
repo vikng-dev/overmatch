@@ -36,6 +36,36 @@ impl Clock for WallClock {
 #[derive(Resource, Default)]
 struct UnadmittedWall(Duration);
 
+/// Wall time past the admission cap that a batch dropped, summed since startup, and the batches
+/// that dropped any. The stats line reads it; nothing in the runner does.
+#[derive(Resource, Default)]
+struct DiscardedWall {
+    total: Duration,
+    batches: u64,
+}
+
+/// The runner's wall-time accounts, for `net::server_stats`. INVARIANT: the `Time<Real>` deltas
+/// since the runner primed sum to `Time<Fixed>::elapsed` plus [`Self::drift`], because each delta
+/// enters [`UnadmittedWall`] and leaves it only as admitted overstep or discard.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct WallLedger<'w> {
+    discarded: Res<'w, DiscardedWall>,
+    unadmitted: Res<'w, UnadmittedWall>,
+    fixed: Res<'w, Time<Fixed>>,
+}
+
+impl WallLedger<'_> {
+    /// Wall time dropped since startup, and the batches that dropped it.
+    pub(super) fn discarded(&self) -> (Duration, u64) {
+        (self.discarded.total, self.discarded.batches)
+    }
+
+    /// How far simulated time trails wall time: dropped for good, plus the debt still owed.
+    pub(super) fn drift(&self) -> Duration {
+        self.discarded.total + self.fixed.overstep() + self.unadmitted.0
+    }
+}
+
 /// Bevy's `run_fixed_main_schedule`, spending one admitted tick per frame so each is sent. A new
 /// batch is admitted only once the last is spent, under the same cap Bevy's virtual clock applies
 /// to one frame. `Time<Real>` stays wall time, because networking counts its deltas.
@@ -59,6 +89,12 @@ fn run_one_admitted_tick(world: &mut World) {
     fixed.advance_by(timestep);
     if admits {
         world.resource_mut::<UnadmittedWall>().0 = Duration::ZERO;
+        let dropped = pending.saturating_sub(cap);
+        if !dropped.is_zero() {
+            let mut discarded = world.resource_mut::<DiscardedWall>();
+            discarded.total += dropped;
+            discarded.batches += 1;
+        }
     }
 
     *world.resource_mut::<Time>() = world.resource::<Time<Fixed>>().as_generic();
@@ -73,7 +109,8 @@ impl<C: Clock> Plugin for TickRunner<C> {
         app.add_plugins(ServerPlugins {
             tick_duration: super::server::TICK,
         })
-        .init_resource::<UnadmittedWall>();
+        .init_resource::<UnadmittedWall>()
+        .init_resource::<DiscardedWall>();
         let clock = self.0.clone();
         app.set_runner(move |mut app| {
             if app.plugins_state() != PluginsState::Cleaned {
@@ -178,6 +215,8 @@ mod tests {
         elapsed: Duration,
         fixed_elapsed: Duration,
         overstep: Duration,
+        drift: Duration,
+        discarded: (Duration, u64),
         stages: Vec<&'static str>,
     }
 
@@ -217,6 +256,7 @@ mod tests {
                 Last,
                 move |frames: Res<Frames>,
                       fixed: Res<Time<Fixed>>,
+                      ledger: WallLedger,
                       mut exit: MessageWriter<bevy::app::AppExit>| {
                     let mut frames = frames.0.lock().unwrap();
                     let count = frames.len();
@@ -224,6 +264,8 @@ mod tests {
                     frame.stages.push("last");
                     frame.fixed_elapsed = fixed.elapsed();
                     frame.overstep = fixed.overstep();
+                    frame.drift = ledger.drift();
+                    frame.discarded = ledger.discarded();
                     *clock.now.lock().unwrap() += work[count - 1];
                     if count == work.len() {
                         exit.write(bevy::app::AppExit::Success);
@@ -301,6 +343,19 @@ mod tests {
         assert!(frames.iter().all(|frame| frame.ticks == 1), "{frames:?}");
         let deepest = frames.iter().map(|frame| frame.overstep).max().unwrap();
         assert!(deepest + tick <= admitted, "{deepest:?}");
+        assert_wall_accounted(&frames);
+    }
+
+    /// The stats line's drift reading: every wall delta is simulated, owed or dropped, exactly
+    /// once. Dropping the cap instead of the excess, or not counting the drop, breaks it.
+    fn assert_wall_accounted(frames: &[Frame]) {
+        for frame in frames {
+            assert_eq!(
+                frame.elapsed,
+                frame.fixed_elapsed + frame.drift,
+                "{frame:?}"
+            );
+        }
     }
 
     /// Netcode counts `Time<Real>` deltas: a stall must reach its timeout whole, not one tick's
@@ -479,5 +534,8 @@ mod tests {
         // Wall time past the bound never reached the simulation.
         let settled = &frames[cap_ticks];
         assert_eq!(settled.elapsed - settled.fixed_elapsed, admitted * 3);
+        let last = frames.last().unwrap();
+        assert_eq!(last.discarded, (admitted * 3, 1), "one batch dropped it");
+        assert_wall_accounted(&frames);
     }
 }
