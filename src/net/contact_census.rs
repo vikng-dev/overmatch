@@ -1260,6 +1260,7 @@ mod tests {
                     impulse: Vec3::Y * impulse,
                     effective_mass: 1.0,
                     closing_speed: 0.0,
+                    friction: 0.0,
                 }]],
                 1.0 / 64.0,
             ));
@@ -1369,6 +1370,7 @@ mod tests {
                     impulse: Vec3::Y,
                     effective_mass: 1.0,
                     closing_speed: rest * factor,
+                    friction: 0.0,
                 }]],
                 1.0 / 64.0,
             ));

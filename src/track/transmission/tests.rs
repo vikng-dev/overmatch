@@ -205,7 +205,7 @@ fn felt_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
         push_difference: 0.0,
         drive: 0.0,
         drive_gain: 0.0,
-        grip: Some(f32::INFINITY),
+        grip: f32::INFINITY,
         stall: None,
         failed: None,
         stalled: false,
@@ -218,7 +218,7 @@ fn felt_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
 /// pull, so no gear offers more than the gear engaged.
 fn felt_free_at_rest(inp: TransmissionInput) -> TransmissionInput {
     let mut inp = felt_at_rest(inp);
-    inp.sensed.as_mut().expect("the fixture feels").grip = Some(0.0);
+    inp.sensed.as_mut().expect("the fixture feels").grip = 0.0;
     inp
 }
 
@@ -1114,7 +1114,7 @@ fn stall_guard_holds_crank_under_grade_lug() {
             push_difference: reactions[0] - reactions[1],
             drive: reactions[0] + reactions[1],
             drive_gain: 0.0,
-            grip: Some(f32::INFINITY),
+            grip: f32::INFINITY,
             stall: None,
             failed: None,
             stalled: false,
@@ -2189,7 +2189,7 @@ fn driver_input(speed: f32, load: f32, command: f32) -> TransmissionInput {
         push_difference: 0.0,
         drive: load,
         drive_gain: 0.0,
-        grip: Some(f32::INFINITY),
+        grip: f32::INFINITY,
         stall: None,
         failed: None,
         stalled: false,
@@ -2495,7 +2495,7 @@ fn belts_at_their_grip_limit_change_no_gear() {
                     choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
                     changed += usize::from(st.gear != gear);
                     let sliding = inp.sensed.as_mut().expect("a Driver-policy reading");
-                    sliding.grip = Some(resistance);
+                    sliding.grip = resistance;
                     let mut st = engaged;
                     choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
                     assert_eq!(
@@ -2615,6 +2615,7 @@ fn a_stalled_full_clutch_push_steps_down() {
                 Some(super::super::stop_contacts::HardReaction {
                     belt: push,
                     friction: forward * push,
+                    grip: f32::INFINITY, // Fixture: an obstacle gripping beyond any gear's pull.
                 })
             });
             inp.sensed = sense.tick(

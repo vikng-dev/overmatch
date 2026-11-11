@@ -1152,7 +1152,7 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// `R` plus its detent's share of the belt push difference, `s·κ·ΔR` ([`BeltTick::tied_mean`]),
 /// and *holds* when its pull exceeds that load by M ([`force_margin`]). Its pull is [`gear_force`]
 /// as delivery engages it ([`engagement`]) where the cut lands, `v − R·t_cut/M_c` and no lower
-/// than rest, its clutch closing from out, capped by the patches' grip budget
+/// than rest, its clutch closing from out, capped by the contacts' grip budget
 /// ([`super::sense::Sensed::grip`]). The engaged gear is observed, never priced: its drive and
 /// drivetrain gain over a window its clutch held whole ([`super::sense::Sensed::observed`]). A gear
 /// left failing caps the candidates below it while `R` is at least what it sustained and delivery
@@ -1160,7 +1160,7 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
 ///    current gear nor at or above the stall's gear, none the memory caps; else first where it
 ///    offers more spare than the current gear. Free.
-/// 2. A window that stalled whole ([`super::sense::Sensed::stalled`]): the lowest gear within
+/// 2. The hull stalls now ([`super::sense::Sensed::stalled`]): the lowest gear within
 ///    `max_step`. A held window losing more than M with the crank below its peak-torque speed: the
 ///    highest lower gear within `max_step` that holds where it lands, else none.
 /// 3. Straight, clutch in, a held window and the hull moving where the cut lands: of the higher
@@ -1210,11 +1210,7 @@ fn choose_gear(
             at * ratio / tp.sprocket_radius,
             command,
         );
-        let pull = gear_force(tp, fp, inp.supply, at, ratio, command, load(gear), clutch);
-        match sensed.grip {
-            Some(grip) => pull.min(grip),
-            None => pull, // A solver contact's grip limit is unmeasured.
-        }
+        gear_force(tp, fp, inp.supply, at, ratio, command, load(gear), clutch).min(sensed.grip)
     };
     let spare = |gear: u8, at: f32, prior: ClutchState| pull(gear, at, prior) - load(gear);
     let stall = sensed.stall.filter(|stall| stall.dir == dir);

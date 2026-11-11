@@ -1894,6 +1894,7 @@ mod tests {
             impulse,
             effective_mass: 1.0,
             closing_speed: 0.0,
+            friction: 0.0,
         };
         let transfers = ContactTransfers::fixture(
             vec![

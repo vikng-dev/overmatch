@@ -106,6 +106,7 @@ impl Part {
             impulse: Vec3::NEG_Y * moved,
             effective_mass: mass,
             closing_speed: speed,
+            friction: 0.0,
         }
     }
 
@@ -359,6 +360,7 @@ fn two_groups_colliding_spend_one_collisions_energy() {
         impulse: normal * mass * speed,
         effective_mass: mass,
         closing_speed: speed,
+        friction: 0.0,
     };
     let transfers = ContactTransfers::fixture(
         vec![

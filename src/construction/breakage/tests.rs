@@ -4562,6 +4562,7 @@ fn contact_preparation_preserves_source_order_across_workers() {
                     impulse: Vec3::ZERO,
                     effective_mass: 7.0,
                     closing_speed: 2.0,
+                    friction: 0.0,
                 },
                 press: Vec3::Y * (sequence + 1) as f32,
                 step: STEP,

@@ -90,6 +90,10 @@ pub(crate) struct ContactTransfer {
     /// How fast the other closed on the reference along the normal before the solve (m/s);
     /// negative when the two were parting.
     pub(crate) closing_speed: f32,
+    /// The solver's dynamic friction coefficient here, combined from both colliders: the most
+    /// tangential impulse it moves per unit of normal impulse. An implicit belt contact has no
+    /// solver row, so none; its grip is the belt contact law's, which the patches report.
+    pub(crate) friction: f32,
 }
 
 /// A structural side's allocation-free view of a canonical solver manifold.
@@ -421,6 +425,7 @@ fn prepare_constraint(
             impulse: Vec3::ZERO,
             effective_mass: point.normal_part.effective_mass,
             closing_speed: -point.normal_speed,
+            friction: constraint.friction,
         });
         last.push((point.normal_part.impulse, friction(point)));
     }
@@ -620,6 +625,7 @@ fn keep(
                 impulse: contact.force * step,
                 effective_mass: if inverse > 0.0 { inverse.recip() } else { 0.0 },
                 closing_speed: contact.closing_speed,
+                friction: 0.0,
             })
         }).collect::<Vec<_>>()
     });

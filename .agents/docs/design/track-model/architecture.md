@@ -509,9 +509,9 @@ nothing engages no gear from rest. Nothing modelled enters `R`: on a rolling inc
 drive (`headless_test::drive_load`). Parked, the contact law's rolling fade leaves the grade alone.
 Beside `R` the ledger carries the engaged gear's drive (both sprockets' mean force over the
 window), the drivetrain's gain over the window as a force (`M_hull` times the belts' mean
-acceleration), the patches' mean grip budget `sum mu N_elastic`, a stall's bound, the gear the
+acceleration), the contacts' mean grip budget (the patches' and the solver's), a stall's bound, the gear the
 Driver last left downward with what it sustained there and the crank speed it failed at, and two
-counts of the engaged gear's run: the ticks it stalled the hull under its drive, and the ticks its
+counts of the engaged gear's run: the ticks it drove with the hull at rest, and the ticks its
 clutch held the crank to the belts.
 
 **What the Driver infers.** Each fact is read from the force balance or the drivetrain's own
@@ -541,8 +541,10 @@ state, none from a timer or a band:
   rest for 1226 ticks). A crank spooling to its launch rpm sends no drive, so its ticks fail no
   gear. A bound is a floor: every weaker gear holds against it on paper, so a stall takes the
   lowest gear in reach. The bound outlives the stall, so the step down reads whether the hull
-  stalls now: a window whose every sample stalled under the gear's drive. Belts that start gaining
-  under a hull still at rest keep the bound and step nothing down.
+  stalls now: a window the gear drove whole with the hull at rest, over which its belts came to
+  rest or did not gain. The window establishes it, not each tick (MEASURED on the rubble battery:
+  a test of every tick fired no stall step on the heap rams and tripled the stalled ticks). Belts
+  that start gaining under a hull still at rest keep the bound and step nothing down.
 - *Falling revs fail a gear only below its torque peak.* Below the crank's peak-torque speed a
   slowing crank loses torque and the gear does not recover; above it the torque rises and the gear
   settles where it holds (MEASURED on a 20° grade: fourth settled at 1.93 m/s with its drivetrain
@@ -565,9 +567,11 @@ state, none from a timer or a band:
   700 N over `R` from a crawl, stalled where the cut landed, and the Driver cycled first and second
   five times). A detent's steering takes its own share of the gear's work, so a push delivered in a
   turn says nothing of the gear straight.
-- *Grip caps push.* No gear puts more traction into the ground along the belts than the patches'
-  grip budget, which they carry when every patch slides along the belt. The solver's friction
-  coefficient is not read back, so a window in which a solver contact pushed prices no cap.
+- *Grip caps push.* No gear puts more traction into the ground along the belts than its
+  contacts' grip budget, which they carry when every contact slides along the belt: the patches'
+  `sum mu N_elastic` and the solver contacts' Coulomb limit, the solver's combined coefficient
+  times each point's normal force, which `ContactTransfer` carries from the constraint. Every
+  window has a cap.
 
 `transmission::choose_gear` prices a candidate with `gear_force`, engaged as delivery engages it
 (`engagement`): it pays the cut and lands at the hull's `v - R t_cut / M_c`, no lower than rest,
@@ -583,7 +587,7 @@ difference, exceeds M. The clauses:
 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
    current gear nor at or above one that failed there, and none the memory holds back; else
    first where it offers more spare than the current gear. Free.
-2. A window that stalled whole under the gear's drive: the lowest gear within `max_step`. Or
+2. The hull stalls now under the gear's drive: the lowest gear within `max_step`. Or
    the drivetrain loses more than M over a held window with the crank below its peak-torque
    speed: the highest lower gear within `max_step` that holds where it lands; with none the gear
    stays.

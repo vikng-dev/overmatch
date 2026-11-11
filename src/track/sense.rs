@@ -27,13 +27,13 @@ use super::stop_contacts::HardReaction;
 use super::transmission::{PARK_ENGAGE_SPEED, RPM_TO_RAD, TransmissionReport};
 
 /// One driven tick of the ledger: the belts' traction on the hull along its heading through it,
-/// `[left, right]` (N), its patches' grip budget (N; `None` where a solver contact pushed), the
+/// `[left, right]` (N), its contacts' grip budget (N), the
 /// hull's gain in speed along its heading over it and the belts' mean gain in speed (m/s), and
 /// both sprockets' force as the tick's step applied it (N).
 #[derive(Clone, Copy, Debug)]
 struct Sample {
     push: [f32; 2],
-    grip: Option<f32>,
+    grip: f32,
     gain: f32,
     belt_gain: f32,
     drive: f32,
@@ -131,11 +131,11 @@ pub struct Sensed {
     /// third of the pedal, 4th to 5th: the hull's speed swung 2.235 to 2.201 m/s over six ticks
     /// while the belts rose 2.212 to 2.227 m/s).
     pub drive_gain: f32,
-    /// The sampled patches' mean grip budget over the window (N): the most traction any gear can
-    /// put into the ground along the belts, which they carry when every patch slides along them.
-    /// `None` when a solver contact pushed within the window: the solver's friction is Coulomb
-    /// too, but its coefficient is not read back, so its grip limit is unmeasured.
-    pub grip: Option<f32>,
+    /// The contacts' mean grip budget over the window (N): the most traction any gear can put into
+    /// the ground along the belts, which they carry when every contact slides along them. The
+    /// sampled patches' budget and the solver contacts' Coulomb limit, its coefficient times each
+    /// point's normal force ([`HardReaction::grip`]).
+    pub grip: f32,
     /// The bound a stall gives: `None` once the hull moves or no pull is asked. It is a floor on
     /// what the hull meets, and outlives the stall: whether the hull stalls now is [`Self::stalled`].
     pub stall: Option<Stall>,
@@ -243,7 +243,7 @@ impl DriverSense {
                     *push += hard.friction.dot(open.heading);
                 }
             }
-            let grip = hard.iter().all(Option::is_none).then_some(open.grip);
+            let grip = open.grip + hard.iter().flatten().map(|hard| hard.grip).sum::<f32>();
             let gain = (velocity - open.velocity).dot(open.heading);
             let at_rest = |velocity: Vec3| velocity.dot(open.heading).abs() < PARK_ENGAGE_SPEED;
             // The pull this sample stalled under, and the gear that drove it.
@@ -318,14 +318,14 @@ impl DriverSense {
                         d + s.drive,
                     ]
                 });
-            let grip = self.samples.iter().map(|s| s.grip).sum::<Option<f32>>();
+            let grip = self.samples.iter().map(|s| s.grip).sum::<f32>();
             Sensed {
                 speed: velocity.dot(heading),
                 resistance: (left + right) / count - mass * gain / (count * dt),
                 push_difference: (left - right) / count,
                 drive: drive / count,
                 drive_gain: mass * belt_gain / (count * dt),
-                grip: grip.map(|grip| grip / count),
+                grip: grip / count,
                 stall: self.stall,
                 failed: self.failed,
                 // The window's belts at rest or not gaining under the stall's pull.
@@ -482,6 +482,7 @@ mod tests {
                     Some(HardReaction {
                         belt: push * 0.25,
                         friction: forward * push * 0.25,
+                        grip: f32::INFINITY, // Fixture: ground that grips beyond any push.
                     }),
                     None,
                 ];

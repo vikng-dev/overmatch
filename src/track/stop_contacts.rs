@@ -162,6 +162,7 @@ pub(crate) struct BeltImpulse {
     point: Vec3,
     outward: Vec3,
     impulse: Vec3,
+    friction: f32,
 }
 
 /// Index the last step by owner in solver emission order. This boundary assigns ownership only;
@@ -189,6 +190,7 @@ pub(crate) fn by_owner(
                 point: point.point,
                 outward: -sign * point.normal,
                 impulse: sign * point.impulse,
+                friction: point.friction,
             });
         }
     }
@@ -196,11 +198,13 @@ pub(crate) fn by_owner(
 }
 
 /// One side's solver contact over the last physics step (N): the friction it delivered to the
-/// hull, in the world frame, and that friction's reaction along the belt's travel.
+/// hull, in the world frame, that friction's reaction along the belt's travel, and its grip limit,
+/// the solver's coefficient times the normal force at each point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct HardReaction {
     pub(crate) belt: f32,
     pub(crate) friction: Vec3,
+    pub(crate) grip: f32,
 }
 
 pub(crate) fn reactions(
@@ -228,9 +232,11 @@ pub(crate) fn reactions(
         let reaction = reactions[face.side.index()].get_or_insert(HardReaction {
             belt: 0.0,
             friction: Vec3::ZERO,
+            grip: 0.0,
         });
         reaction.belt -= friction.dot(direction) / dt;
         reaction.friction += friction / dt;
+        reaction.grip += point.friction * point.impulse.dot(point.outward).abs() / dt;
     }
     reactions
 }
@@ -409,6 +415,7 @@ mod tests {
                 impulse: Vec3::new(0.0, -10.0, 3.0), // Fixture N s into the other body.
                 effective_mass: 1.0,
                 closing_speed: 0.0,
+                friction: 0.5, // Fixture solver coefficient.,
             };
             if reverse {
                 point = ContactTransfer {
@@ -433,10 +440,12 @@ mod tests {
                         Quat::IDENTITY,
                         &faces,
                     );
-                    // DERIVED 3 N s / 0.25 s, driving the hull forward (-Z).
+                    // DERIVED 3 N s / 0.25 s, driving the hull forward (-Z); the grip limit
+                    // 0.5 × 10 N s / 0.25 s.
                     let right = HardReaction {
                         belt: 12.0,
                         friction: Vec3::new(0.0, 0.0, -12.0),
+                        grip: 20.0,
                     };
                     assert_eq!(reaction, [None, Some(right)]);
                 })

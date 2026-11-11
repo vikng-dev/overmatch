@@ -1414,6 +1414,7 @@ mod tests {
                     impulse: Vec3::Z * impulse,
                     effective_mass: 1.0,
                     closing_speed: 0.0,
+                    friction: 0.0,
                 }]],
                 1.0 / 64.0,
             ));
