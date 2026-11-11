@@ -221,6 +221,8 @@ pub(crate) fn sim_plugin(app: &mut App) {
         .add_observer(collider_left)
         .add_observer(collider_disabled)
         .add_observer(collider_sensed)
+        // Serial, both: settled, they visit only the awake movers (MEASURED on rest-3 and rest-12:
+        // one body and 45 spatial queries a tick) and the changes and pushes queued since the step.
         .add_systems(
             PhysicsSchedule,
             thaw.after(super::wake_on_static_moved)
