@@ -11,24 +11,26 @@
 //! that nothing has woken since the step, turns static whole in one tick: rubble interlocks, so the
 //! island is the unit, and a whole island leaves no piece resting on a dynamic one. A piece's pose
 //! or velocity written since the step wakes its island at the next one (`wake_on_changed`), so the
-//! freeze leaves it to that wake rather than zero a push. An island holding any other body (a tank, a launched
-//! turret) stays asleep, and so does one touching nothing (a piece asleep in zero gravity). Each
-//! piece takes [`RigidBody::Static`], zero velocity and [`Frozen`], and loses `Sleeping`. The
-//! island depends on its pieces' colliders and on every collider they touched as it froze
-//! ([`FrozenIslands`]): Avian's sleep under gravity is the evidence that those held it.
+//! freeze leaves it to that wake rather than zero a push. An island holding any other body (a
+//! tank, a launched turret) stays asleep, and so does one touching nothing (a piece asleep in zero
+//! gravity). Each piece takes [`RigidBody::Static`], zero velocity and [`Frozen`], and loses
+//! `Sleeping`. The island depends on its pieces' colliders and on every collider they touched as it
+//! froze ([`FrozenIslands`]): Avian's sleep under gravity is the evidence that those held it.
 //!
-//! FROZEN ISLANDS NEVER TOUCH (the freeze asserts it). Touching bodies that are not static share an
-//! Avian island, and Avian makes a contact only in the narrow phase, from the poses and velocities
-//! the thaw has just read: a body that comes to touch a frozen piece is a mover whose reach met it,
-//! and thawed it, before the step that made the contact. So what an island touches as it freezes
-//! is fixed matter.
+//! NO MOVER MEETS A FROZEN PIECE. Touching bodies that are not static share an Avian island, and
+//! Avian makes a contact only in the narrow phase, from the poses and velocities the thaw has just
+//! read: a body that comes to touch a frozen piece is a mover whose reach met it, and thawed it,
+//! before the step that made the contact. A sleeping island can still come to touch a frozen one
+//! without moving, as Avian's rescale grows a frozen piece's collider by a float step (support,
+//! below); the freeze leaves that island unfrozen and thaws the frozen one ([`freeze`]). So what
+//! an island touches as it freezes is fixed matter.
 //!
 //! THAW ([`thaw`], in Avian's step after it places child colliders and before its broad phase: the
 //! last system before the narrow phase reads poses and velocities, after everything else a tick
 //! changes, the sweep included). A frozen island turns dynamic whole. Avian zeroes a body's rest
 //! timer as it rejoins an island (`dynamics/solver/islands/sleeping.rs`,
 //! `wake_on_enable_rigid_body`), so the island rests a full `TimeToSleep` again before it can sleep
-//! and freeze. Three causes:
+//! and freeze. Four causes:
 //! - reach: a mover (an awake body that is not static, and each piece this thaw frees) with a
 //!   collider that could make a contact with a frozen piece in this step. Avian makes contacts
 //!   once per step, in the narrow phase, from the poses and linear velocities the step starts
@@ -43,6 +45,11 @@
 //! - load: game code pushed a frozen piece (Avian's `Forces` writes a static body's velocity as any
 //!   other's) and said so where it pushed ([`Loads`]), as a velocity written onto a sleeping body
 //!   wakes its island (`dynamics/solver/islands/sleeping.rs`, `wake_on_changed`);
+//! - met: the freeze found a sleeping island touching it. Turned dynamic, its pieces lose their
+//!   contacts (`collision/narrow_phase/mod.rs`, `remove_body_on`), and each touch made anew with an
+//!   awake body that is not static links and wakes the island touched
+//!   (`collision/narrow_phase/system_param.rs`, `link_contact_to_island`), so the two rest and
+//!   freeze as one;
 //! - support: a collider the island depends on goes, leaves its body, is disabled, turns sensor,
 //!   or is re-posed, reshaped or re-layered in place (`super::wake_on_static_moved` notes those);
 //!   or its body goes, is disabled or stops being static. A collider with no body is never a
@@ -51,8 +58,8 @@
 //!   bits it froze at ([`Frozen`]): Avian rewrites a pose with the value it holds (placing child
 //!   colliders, syncing transforms) and rescales a body's colliders by the rounding of its pose
 //!   whenever it re-derives their transforms (`update_collider_scale`, at each body type switch
-//!   among others), no game code reshapes or re-layers a piece's collider in place, and anything
-//!   else that writes a pose moves the piece.
+//!   among others), no game code edits a loose piece's collider in place, and anything else that
+//!   writes a pose moves the piece.
 //!
 //! A frozen piece's press on standing construction stays as its sleeping press did
 //! (`contact_transfer`, resting contacts).
@@ -142,6 +149,8 @@ pub(crate) struct FrozenIslands {
     changed: Vec<(Entity, Change)>,
     /// Islands game code pushed a piece of ([`Loads`]).
     loaded: Vec<u64>,
+    /// Islands a sleeping island was found touching ([`freeze`]).
+    met: Vec<u64>,
 }
 
 impl FrozenIslands {
@@ -398,7 +407,7 @@ struct Freeze<'w, 's> {
         ),
         (With<DebrisPiece>, With<Sleeping>, Without<Frozen>),
     >,
-    frozen: Query<'w, 's, (), With<Frozen>>,
+    frozen: Query<'w, 's, &'static Frozen>,
     physics: Res<'w, PhysicsIslands>,
     graph: Res<'w, ContactGraph>,
     islands: ResMut<'w, FrozenIslands>,
@@ -463,13 +472,13 @@ fn freeze(p: Freeze, mut commands: Commands) {
             members.remove(&candidates[&piece]);
         }
     }
-    let mut froze = 0;
+    let (mut froze, mut met) = (0, 0);
     for mut pieces in members.into_values() {
         if froze > 0 && froze + pieces.len() > FREEZE_PIECE_BUDGET {
             break;
         }
         pieces.sort_unstable();
-        let (mut own, mut touched) = (Vec::new(), Vec::new());
+        let (mut own, mut touched, mut frozen_touched) = (Vec::new(), Vec::new(), BTreeSet::new());
         for &piece in &pieces {
             let (_, _, colliders, ..) = sleeping.get(piece).expect("a sleeping island's piece");
             for collider in colliders.iter() {
@@ -484,14 +493,29 @@ fn freeze(p: Freeze, mut commands: Commands) {
                         (pair.collider1, pair.body1)
                     };
                     if body.is_none_or(|body| pieces.binary_search(&body).is_err()) {
-                        assert!(
-                            body.is_none_or(|body| !frozen.contains(body)),
-                            "frozen islands never touch (module doc)"
-                        );
-                        touched.push(other);
+                        match body.map(|body| frozen.get(body)) {
+                            Some(Ok(piece)) => {
+                                frozen_touched.insert(piece.island);
+                            }
+                            Some(Err(_)) | None => touched.push(other), // Not a frozen piece.
+                        }
                     }
                 }
             }
+        }
+        // A SLEEPING ISLAND MEETS A FROZEN ONE. As a body switches type, Avian re-derives its
+        // colliders' transforms (`collision/collider/collider_hierarchy/plugin.rs:109-110` and
+        // `mod.rs:107-111`, through Bevy's `GlobalTransform::reparented_to`) and rescales them to
+        // the rounded scale (`collision/collider/backend.rs:487-491`), which no propagation
+        // rewrites while the body stays put. So a piece's collider can grow by a float step as it
+        // freezes (MEASURED on the frozen-rubble bed: about half of frozen pieces' rescales grew an
+        // axis from 1 to 1 + 2^-23), into a sleeping neighbour, with no awake body to wake either
+        // (`collision/narrow_phase/system_param.rs:482-500`). This island waits; the one it
+        // touches thaws at the next step (module doc, met).
+        if !frozen_touched.is_empty() {
+            met += 1;
+            islands.met.extend(frozen_touched);
+            continue;
         }
         if touched.is_empty() {
             continue; // Nothing held it: no evidence of support.
@@ -532,6 +556,7 @@ fn freeze(p: Freeze, mut commands: Commands) {
     }
     if let Some(stages) = stages.as_deref() {
         stages.add(Work::FrozePieces, froze as u64);
+        stages.add(Work::FreezeMet, met);
         stages.add(Work::FreezeVisits, visits);
         stages.add(Work::ReachQueries, queries);
     }
@@ -564,10 +589,11 @@ fn thaw(p: Thaw, mut commands: Commands) {
     } = p;
     let changed = std::mem::take(&mut islands.changed);
     let loaded = std::mem::take(&mut islands.loaded);
+    let met = std::mem::take(&mut islands.met);
     if islands.islands.is_empty() {
         return;
     }
-    let (mut visits, mut queries) = ((changed.len() + loaded.len()) as u64, 0);
+    let (mut visits, mut queries) = ((changed.len() + loaded.len() + met.len()) as u64, 0);
     let holds = |collider: Entity, change: Change| match change {
         Change::Lost => false,
         Change::Attachment(body) => {
@@ -575,7 +601,8 @@ fn thaw(p: Thaw, mut commands: Commands) {
                 && bodies.get(body).is_ok_and(RigidBody::is_static)
                 && !disabled.contains(collider)
         }
-        // A frozen piece's own collider holds while the piece's pose bits do (module doc).
+        // A frozen piece's own collider holds while the piece's pose bits do (module doc): no game
+        // code edits a loose piece's collider in place.
         Change::InPlace => attached.get(collider).is_ok_and(|of| {
             frozen
                 .get(of.body)
@@ -596,6 +623,7 @@ fn thaw(p: Thaw, mut commands: Commands) {
             by_load += 1;
         }
     }
+    thawing.extend(met); // Counted where the freeze met them.
     let island_of = |piece: Entity| frozen.get(piece).expect("a reached frozen piece").0.island;
     let mut reached = BTreeSet::new();
     for mover in reach.movers() {
@@ -1136,6 +1164,89 @@ mod tests {
             app.world().get::<Position>(rubble).unwrap().0.x - start.x > 0.05,
             "the push moved it"
         );
+    }
+
+    /// A SLEEPING ISLAND THAT MEETS A FROZEN ONE WAITS FOR ITS THAW: a hovering piece asleep beside
+    /// a piece frozen on a slab, touching nothing, comes to touch it as the frozen piece's collider
+    /// grows in place, with no body awake. The sleeping island waits; the frozen piece thaws at
+    /// the next step, and from then on no update holds one of the two frozen and the other asleep against
+    /// it; they end frozen as one island or both dynamic. A freeze that took the frozen piece for
+    /// support would freeze the hovering piece as an island of its own; one that only passed over
+    /// it would leave the pair static against asleep for good.
+    #[test]
+    fn a_sleeping_island_that_meets_a_frozen_one_waits_for_its_thaw() {
+        let mut app = settling(GRAVITY);
+        slab(&mut app, 0.0);
+        let frozen = piece(&mut app, Vec3::Y * (SIDE / 2.0));
+        until_frozen(&mut app, &[frozen]);
+        // Fixture: 2 cm off the frozen piece's +x face and 0.1 m off the slab, between Avian's
+        // 5 mm contact tolerance and its 5 cm tree margin.
+        let gap = 0.02;
+        let hovering = piece(&mut app, Vec3::new(SIDE + gap, SIDE / 2.0 + 0.1, 0.0));
+        app.world_mut()
+            .entity_mut(hovering)
+            .insert(GravityScale(0.0));
+        (0..640)
+            .find(|_| {
+                app.update();
+                app.world().get::<Sleeping>(hovering).is_some()
+            })
+            .expect("the hovering piece fell asleep within 10 s");
+        assert!(
+            is_frozen(&app, frozen),
+            "a body at rest beside it reaches nothing"
+        );
+        assert!(
+            !is_frozen(&app, hovering),
+            "a piece touching nothing stays asleep"
+        );
+        // Fixture: the frozen piece 9 % wider along x, closing the gap to 2 mm, inside the contact
+        // tolerance. A stand-in for Avian's rescale of a frozen piece's collider (module doc):
+        // Avian applies a root collider's `Transform` scale as it applies a child collider's
+        // re-derived scale (`update_collider_scale`).
+        app.world_mut()
+            .get_mut::<Transform>(frozen)
+            .unwrap()
+            .scale
+            .x = 1.09;
+        let touching = |app: &App| {
+            app.world()
+                .resource::<ContactGraph>()
+                .get(frozen, hovering)
+                .is_some_and(|(edge, _)| edge.is_touching())
+        };
+        app.update();
+        assert!(!is_frozen(&app, hovering), "the sleeping island waits");
+        assert!(
+            touching(&app),
+            "the grown collider touches the sleeping piece"
+        );
+        assert!(
+            app.world().get::<Sleeping>(hovering).is_some(),
+            "no awake body woke it"
+        );
+        app.update();
+        assert!(!is_frozen(&app, frozen), "the frozen piece it met thawed");
+        for update in 0..640 {
+            let world = app.world();
+            let stuck = [(frozen, hovering), (hovering, frozen)]
+                .into_iter()
+                .any(|(a, b)| is_frozen(&app, a) && world.get::<Sleeping>(b).is_some());
+            assert!(
+                !(stuck && touching(&app)),
+                "update {update}: a frozen piece against a sleeping one"
+            );
+            if is_frozen(&app, frozen) && is_frozen(&app, hovering) {
+                break;
+            }
+            app.update();
+        }
+        let island = |piece| app.world().get::<Frozen>(piece).map(|piece| piece.island);
+        match (island(frozen), island(hovering)) {
+            (Some(a), Some(b)) => assert_eq!(a, b, "the two froze as one island"),
+            (None, None) => {}
+            ends => panic!("one froze without the other: {ends:?}"),
+        }
     }
 
     /// Three stacks of three side by side, frozen on a slab as one island, then a mover sliding

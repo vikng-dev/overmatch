@@ -74,6 +74,7 @@ struct Log {
     by_reach: u64,
     by_load: u64,
     by_support: u64,
+    met: u64,
     touched_frozen: u32,
     first_touched_frozen: Option<String>,
     belt_on_frozen: u32,
@@ -187,6 +188,7 @@ fn observe(app: &mut App, tank: Entity, stages: &Stages, log: &mut Log) -> Censu
     log.by_reach += work(Work::ThawReach);
     log.by_load += work(Work::ThawLoad);
     log.by_support += work(Work::ThawSupport);
+    log.met += work(Work::FreezeMet);
     if let Some(digests) = &mut log.digests {
         let tank_pose = pose_bits(
             world.get::<Position>(tank).unwrap(),
@@ -394,8 +396,8 @@ fn report(name: &str, outcome: &Result<Log, String>) {
         "MEASURED frozen rubble, {name}: rested {:?} with {} frozen, {} sleeping, {} awake; \
          first contact {:?} (tick, speed m/s, tank z, frozen then); first thaw {:?} with {} \
          frozen the tick before; froze {} pieces, thawed {} pieces (islands: {} by reach, {} by \
-         load, {} by support), refroze {} after the first thaw; ticks a moving body touched a \
-         frozen piece: {} ({:?}); ticks the belt stood on one: {}; ticks an island lacked \
+         load, {} by support), refroze {} after the first thaw; sleeping islands that met a \
+         frozen one: {}; ticks a moving body touched a frozen piece: {} ({:?}); ticks the belt stood on one: {}; ticks an island lacked \
          support: {} ({:?}); at the end {} frozen, {} sleeping, {} awake",
         seconds(log.rested),
         log.at_rest.frozen,
@@ -410,6 +412,7 @@ fn report(name: &str, outcome: &Result<Log, String>) {
         log.by_load,
         log.by_support,
         log.refroze,
+        log.met,
         log.touched_frozen,
         log.first_touched_frozen,
         log.belt_on_frozen,

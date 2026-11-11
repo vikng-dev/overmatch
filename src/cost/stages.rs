@@ -152,6 +152,8 @@ labelled!(
         ThawReach = "thaw_reach",
         ThawLoad = "thaw_load",
         ThawSupport = "thaw_support",
+        // Sleeping islands the freeze found touching a frozen one, and left for its thaw.
+        FreezeMet = "freeze_met",
         // Entities the freeze and the thaw visit, and the spatial queries their reach casts.
         FreezeVisits = "freeze_visits",
         ReachQueries = "reach_queries",
