@@ -1149,8 +1149,8 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// the pull now, so no gear offers more spare than the current one and the gear stays. A pull is
 /// then priced as the push it delivers, scaled by the share of the belts' ground reaction that
 /// reached the hull ([`super::sense::Sensed::push`] over [`super::sense::Sensed::reaction`]):
-/// resistance and a stall's bound are pushes on the hull. While no load is delivered no loss is
-/// seen, and the pull is priced whole.
+/// resistance and a stall's bound are pushes on the hull. While no push is delivered along the
+/// drive no loss is seen, and the pull is priced whole.
 /// 1. Clutch out at hull rest: the highest launch gear that holds, else first where it offers more
 ///    spare than the current gear; free.
 /// 2. The current gear does not hold, judged at no more than its torque-peak belt speed: the

@@ -507,16 +507,50 @@ ticks are not felt. The reading is `None` until one tick closes, and a Driver th
 nothing engages no gear from rest. Nothing modelled enters `R`: on a rolling incline it closes on
 `(W sin(theta) + c_rr W cos(theta)) cos(delta)`, `delta` the heading's pitch off the plane under
 drive (`headless_test::drive_load`). Parked, the contact law's rolling fade leaves the grade alone.
+Beside `R` the ledger carries the mean push, the belts' mean ground reaction along their travel
+(soft and solver contacts together), the patches' mean grip budget `sum mu N_elastic`, and a
+stall's bound.
 
-`transmission::choose_gear` prices a gear's pull with `free_driver_force` at the crank speed that
-gear has at hull speed, engaged as delivery engages it (`engagement`): a candidate closes after its
-cut, so below its launch speed it slips at the launch rpm, and the current gear keeps its regime. A
-coupled gear adds reflected crank inertia, and the clutch caps the pull. A gear *holds* when its
-pull, less `R` and its detent's share of the belt push difference, exceeds M. The clauses:
+**What the Driver infers.** Four facts, each read from the force balance, none from a timer or
+a band:
 
-1. Clutch out at hull rest: the highest launch gear that holds, else first. Free.
-2. The current gear does not hold, judged at no more than its torque-peak speed: the highest
-   lower gear within `max_step` that holds where it lands, `v - R t_cut / M_c`.
+- *A gear runs in the state it is in.* The engaged gear's crank turns with its belts, not with
+  the hull: belts slipping on the ground turn it faster than the hull's speed implies (MEASURED
+  on rubble: 2100 rpm under a hull at a crawl).
+- *A stall gives a bound, not a value.* At rest under a push that did not move it, the world
+  returned at least that push; how much more it would return is unknown. The ledger holds the
+  largest such push along the drive (a sample at rest at both ends that gained no speed) until
+  the hull moves or the pull is withdrawn, and `R` is at least that bound.
+- *Price and resistance share one currency.* `R` and the bound are pushes on the hull, so a
+  gear's pull is priced as the push it delivers: times the share of the belts' ground reaction
+  that reached the hull as push over the window. The ground reaction is the sprocket's force less
+  what turned the belts' own inertia, so a spinning-up belt does not read as a loss; the hull's
+  load meets the reflected crank inertia at the sprocket, divided by the same share. No
+  efficiency is authored; while no push is delivered along the drive no loss is seen and the
+  pull is priced whole.
+- *Grip caps push.* No gear puts more traction into the ground along the belts than the patches'
+  grip budget, which they carry when every patch slides along the belt; there the pull now is
+  the most any gear delivers. A patch sliding sideways in a turn has budget a harder pull can
+  turn along the belt, so the cap is the budget, not the unspent share (MEASURED: the unspent
+  share held third-throttle tight turns in fourth at 0.48 m/s where the downshift ran 1.24 m/s).
+  The solver's friction coefficient is not read back, so a window in which a solver contact
+  pushed prices no cap.
+
+`transmission::choose_gear` prices each gear with `free_driver_force`, engaged as delivery
+engages it (`engagement`), in the state it would be in. A candidate pays the cut and lands at
+the hull's `v - R t_cut / M_c`, its clutch closing from out, so below its launch speed it slips
+at the launch rpm. The current gear pays no cut and is priced as it runs: its shaft at the
+belts' mean speed, in the regime delivery engages there this tick. A coupled gear adds reflected
+crank inertia, and the clutch caps the pull; the grip budget caps it next, and the delivery
+share prices it on the hull. A gear *holds* when that push, less `R` (at a stall, at least the
+bound) and its detent's share of the belt push difference, exceeds M. The clauses:
+
+1. Clutch out at hull rest: the highest launch gear that holds, else first where it offers more
+   spare than the current gear. Free.
+2. The current gear does not hold, judged at no more than its torque-peak belt speed: the
+   highest lower gear within `max_step` that holds where it lands, `v - R t_cut / M_c`. A gear
+   that holds has more spare than the current gear, which does not; with none the gear stays,
+   so in first gear with a stall's bound unbeaten the Driver stays there.
 3. A straight gear that holds: the highest higher gear within `max_step` that holds where it
    lands and has more spare there than the current gear has now.
 
