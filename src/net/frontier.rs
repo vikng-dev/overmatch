@@ -9,15 +9,17 @@
 //! line per wall second, `client_jitter {json}`:
 //! - `period_s`: the wall time the line covers, which can exceed the period by one frame;
 //! - `ticks`: `received`, new server ticks the estimator sampled; `frontier`, how far the newest
-//!   received tick advanced, so `frontier − received` ticks never arrived; `estimate`, how far
-//!   lightyear's estimate of the server clock advanced. All over `period_s`;
+//!   received tick advanced, so `frontier − received` ticks were not sampled as advancing the
+//!   frontier (lost, or arriving after a newer tick); `estimate`, how far lightyear's estimate of
+//!   the server clock advanced. All over `period_s`;
 //! - `arrival_ms`: the interval before each received tick, on the drain-frame stamp the estimator
-//!   uses, so ticks drained by one frame after the first read 0;
+//!   uses, so ticks drained by one frame after the first read 0; a stream's first interval runs
+//!   from its opening frame;
 //! - `headroom_ticks`: per frame, the newest received tick − the cursor that frame presented;
 //! - `starved`: frames whose presented cursor passed the newest received tick, so every replica
 //!   held its newest sample: `events` (runs begun this period), `ms` (their frame time this
-//!   period) and `longest_ms` (the longest run this period, a run spanning lines at its length so
-//!   far);
+//!   period) and `longest_ms` (the longest run starved in this period, a run spanning lines at
+//!   its whole length so far);
 //! - `snaps`: each steady-state resync's cursor jump, in signed ticks;
 //! - `estimate_error_ticks`: per frame, the estimate − (newest received tick + rtt/2);
 //! - `min_delay_ms`: at the line, the `min_delay` applied and the delay law's target from the
@@ -123,7 +125,8 @@ const LINE_PERIOD_S: f64 = 1.0;
 #[derive(Resource, Default)]
 struct JitterRecord {
     stream: Option<Stream>,
-    /// The open period's samples, emptied by each line and when a stream opens, and reused.
+    /// The open period's samples, emptied by each line and when a stream opens. Their capacity is
+    /// reused, growing to the largest period's count.
     arrivals_ms: Vec<f64>,
     headroom_ticks: Vec<f64>,
     snaps: Vec<f64>,
@@ -133,12 +136,33 @@ struct JitterRecord {
 struct Stream {
     /// The estimator's link ([`ArrivalDelay::link`]); a new link opens a new stream.
     link: u64,
-    /// Estimator samples as of the previous frame.
-    samples: u64,
-    /// The drain-frame stamp of the newest received tick, `Time<Real>` seconds.
-    last_arrival_s: Option<f64>,
+    arrivals: Arrivals,
     starvation: Starvation,
     period: Period,
+}
+
+/// Received ticks as intervals on the estimator's drain-frame stamp.
+struct Arrivals {
+    /// Estimator samples as of the previous frame.
+    samples: u64,
+    /// The drain-frame stamp of the newest received tick, or of the stream's opening frame
+    /// before any, `Time<Real>` seconds.
+    last_s: f64,
+}
+
+impl Arrivals {
+    /// Push this frame's intervals: the wait since the last receipt, then 0 for each further tick
+    /// the same frame drained.
+    fn frame(&mut self, now_s: f64, samples: u64, intervals_ms: &mut Vec<f64>) {
+        let received = samples - self.samples;
+        self.samples = samples;
+        if received == 0 {
+            return;
+        }
+        intervals_ms.push((now_s - self.last_s) * 1e3);
+        intervals_ms.extend(std::iter::repeat_n(0.0, received as usize - 1));
+        self.last_s = now_s;
+    }
 }
 
 /// The stream's readings when the open period began, and its per-frame extrema.
@@ -187,7 +211,8 @@ impl Starvation {
         self.longest_ms = self.longest_ms.max(*run);
     }
 
-    /// The period's reading; the next period opens with only the ongoing run.
+    /// The period's reading; the next period opens with only the ongoing run, whose whole length
+    /// counts toward that period's longest once it starves a frame there.
     fn take_line(&mut self) -> Value {
         let line = json!({
             "events": self.events,
@@ -196,7 +221,6 @@ impl Starvation {
         });
         *self = Self {
             run_ms: self.run_ms,
-            longest_ms: self.run_ms.unwrap_or(0.0),
             ..Self::default()
         };
         line
@@ -276,24 +300,15 @@ fn record_jitter(
     }
     let stream = record.stream.get_or_insert_with(|| Stream {
         link: estimator.link(),
-        samples,
-        last_arrival_s: None,
+        arrivals: Arrivals {
+            samples,
+            last_s: now,
+        },
         starvation: Starvation::default(),
         period: Period::open(now, samples, frontier, estimate),
     });
 
-    let received = samples - stream.samples;
-    stream.samples = samples;
-    if received > 0 {
-        if let Some(last) = stream.last_arrival_s {
-            record.arrivals_ms.push((now - last) * 1e3);
-        }
-        // The rest of this frame's ticks drained with the first.
-        record
-            .arrivals_ms
-            .extend(std::iter::repeat_n(0.0, received as usize - 1));
-        stream.last_arrival_s = Some(now);
-    }
+    stream.arrivals.frame(now, samples, &mut record.arrivals_ms);
     let headroom = f64::from((TickInstant::from(frontier) - cursor).to_f32());
     record.headroom_ticks.push(headroom);
     stream
@@ -364,8 +379,9 @@ mod tests {
     }
 
     /// A starvation event is a run of starved frames, counted once in the line where it begins;
-    /// a run that spans lines keeps growing its length. Counting frames as events, or restarting
-    /// the run at each line, would misreport the jitter a fix is judged on.
+    /// a run that spans lines keeps growing its length, and a line with no starved frame reports
+    /// none. Counting frames as events, restarting the run at each line, or carrying a run that
+    /// ended at the boundary into a healthy line would misreport the jitter a fix is judged on.
     #[test]
     fn a_starved_run_is_one_event_across_lines() {
         let mut starvation = Starvation::default();
@@ -384,5 +400,35 @@ mod tests {
             starvation.take_line(),
             json!({"events": 0, "ms": 20.0, "longest_ms": 30.0})
         );
+        // A run that reaches the boundary, then a healthy line.
+        starvation.frame(true, 10.0);
+        assert_eq!(
+            starvation.take_line(),
+            json!({"events": 1, "ms": 10.0, "longest_ms": 10.0})
+        );
+        starvation.frame(false, 10.0);
+        assert_eq!(
+            starvation.take_line(),
+            json!({"events": 0, "ms": 0.0, "longest_ms": 0.0})
+        );
+    }
+
+    /// Every received tick has an interval, the first after a stream opens included: a stall
+    /// right after the opening is jitter like any other. Starting from no stamp drops it; ticks
+    /// one frame drains after the first waited nothing more.
+    #[test]
+    fn a_streams_first_receipt_measures_from_its_opening() {
+        // Fixture: a stream opened at 1.0 s with 10 samples, then 200 ms without a receipt.
+        let mut arrivals = Arrivals {
+            samples: 10,
+            last_s: 1.0,
+        };
+        let mut intervals = Vec::new();
+        arrivals.frame(1.1, 10, &mut intervals);
+        assert!(intervals.is_empty(), "a frame without a receipt adds none");
+        arrivals.frame(1.2, 12, &mut intervals);
+        arrivals.frame(1.25, 13, &mut intervals);
+        let ms: Vec<f64> = intervals.iter().map(|ms| rounded(*ms, MS_PLACES)).collect();
+        assert_eq!(ms, [200.0, 0.0, 50.0]);
     }
 }
