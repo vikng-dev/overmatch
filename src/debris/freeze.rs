@@ -18,7 +18,9 @@
 //! before the two touch, so what an island touches as it freezes is fixed matter (the freeze
 //! asserts it).
 //!
-//! THAW ([`thaw`], before the sweep and physics). A frozen island turns dynamic whole. Avian
+//! THAW ([`thaw`], in Avian's step after it places child colliders and before its broad phase: the
+//! last system before the narrow phase reads poses and velocities, after everything else a tick
+//! changes, the sweep included). A frozen island turns dynamic whole. Avian
 //! zeroes a body's rest timer as it rejoins an island (`dynamics/solver/islands/sleeping.rs`,
 //! `wake_on_enable_rigid_body`), so the island rests a full `TimeToSleep` again before it can
 //! sleep and freeze. Three causes:
@@ -144,9 +146,9 @@ pub(crate) fn sim_plugin(app: &mut App) {
         .add_observer(collider_left)
         .add_observer(collider_disabled)
         .add_systems(
-            FixedPostUpdate,
-            thaw.before(crate::construction::breakage::SweepSet)
-                .before(PhysicsSystems::Prepare)
+            PhysicsSchedule,
+            thaw.after(super::wake_on_static_moved)
+                .before(PhysicsStepSystems::BroadPhase)
                 .run_if(not(resource_exists::<crate::ClientReplica>)),
         )
         .add_systems(
@@ -395,15 +397,9 @@ struct Thaw<'w, 's> {
         ),
         Or<(Changed<LinearVelocity>, Changed<AngularVelocity>)>,
     >,
-    /// Colliders and bodies re-posed since the last thaw: a child collider's own pose follows its
-    /// body's only inside the step.
+    /// Colliders re-posed since the last thaw: Avian places a child collider at its body's pose in
+    /// its step's first set, before this.
     moved: Query<'w, 's, (Entity, &'static ColliderOf), Or<(Changed<Position>, Changed<Rotation>)>>,
-    moved_bodies: Query<
-        'w,
-        's,
-        (&'static RigidBody, &'static RigidBodyColliders),
-        (Without<Frozen>, Or<(Changed<Position>, Changed<Rotation>)>),
-    >,
     attached: Query<'w, 's, &'static ColliderOf>,
     disabled: Query<'w, 's, (), With<ColliderDisabled>>,
     bodies: Query<'w, 's, (&'static RigidBody, Has<Frozen>)>,
@@ -418,7 +414,6 @@ fn thaw(p: Thaw, mut commands: Commands) {
         frozen,
         pushed,
         moved,
-        moved_bodies,
         attached,
         disabled,
         bodies,
@@ -450,13 +445,6 @@ fn thaw(p: Thaw, mut commands: Commands) {
             .iter()
             .filter(|&(collider, of)| islands.depends_on(collider) && fixed_unfrozen(of.body))
             .map(|(collider, _)| collider),
-    );
-    lost.extend(
-        moved_bodies
-            .iter()
-            .filter(|(kind, _)| kind.is_static())
-            .flat_map(|(_, colliders)| colliders.iter())
-            .filter(|&collider| islands.depends_on(collider)),
     );
     let mut thawing = BTreeSet::new();
     for collider in &lost {

@@ -5031,6 +5031,84 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     }
 }
 
+/// The game's environment destruction: what the sweep does to a frozen piece's support reaches the
+/// thaw inside the same update, before the step makes its contacts (`debris::freeze` module doc).
+/// A loose piece frozen on a column's top chunk is dynamic at the end of the update whose sweep
+/// takes that chunk from under it. A thaw that ran before the sweep would leave it static through
+/// that step, holding its press on a collider the sweep despawned (`contact_transfer`, resting
+/// contacts), which the contact reading refuses; the hull is too slow to reach it meanwhile.
+#[test]
+fn a_sweep_that_takes_a_frozen_pieces_support_thaws_it_in_the_same_update() {
+    let kind = resolved_column();
+    let (mut app, _) = composed_kind(false, &kind);
+    app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
+    for _ in 0..3 {
+        app.update();
+    }
+    let [_, middle, top] = [0, 1, 2].map(|c| kind.structure.chunks[c].centroid);
+    let half = (top.y - middle.y) / 2.0;
+    // Fixture: a 0.5 m loose cube on the column's top face.
+    let side = 0.5;
+    let piece = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Position(top + Vec3::Y * (half + side / 2.0)),
+            Rotation::default(),
+            Collider::cuboid(side, side, side),
+            ColliderDensity(1845.0),
+            piece_layers(),
+            crate::debris::DebrisPiece,
+        ))
+        .id();
+    let frozen = |app: &App| {
+        app.world()
+            .get::<crate::debris::freeze::Frozen>(piece)
+            .is_some()
+    };
+    (0..1280)
+        .find(|_| {
+            app.update();
+            frozen(&app)
+        })
+        .expect("the piece came to rest and froze within 20 s");
+    // Fixture: a 1e7 kg hull cube at the top chunk's centre height, 5 cm short of its face,
+    // entering it at 12 m/s: 0.19 m a tick, 0.8 m below the piece.
+    let mass = 1e7;
+    let source = app
+        .world_mut()
+        .spawn(cube(
+            top - Vec3::X * (half + CUBE_SIDE_M / 2.0 + 0.05),
+            mass,
+        ))
+        .insert(GravityScale(0.0))
+        .id();
+    // First preparation creates the collider hierarchy; start outside this tick's sweep.
+    app.update();
+    assert!(
+        frozen(&app),
+        "the hull at rest beside the column reaches nothing"
+    );
+    app.world_mut().get_mut::<LinearVelocity>(source).unwrap().0 = Vec3::X * 12.0;
+    app.update();
+    assert!(
+        app.world()
+            .resource::<SweepAccount>()
+            .chunks
+            .iter()
+            .any(|&(ordinal, chunk, _)| ordinal == 3 && chunk == 2),
+        "the sweep took the top chunk"
+    );
+    assert!(
+        !frozen(&app),
+        "the piece thawed in the update its support went"
+    );
+    assert_eq!(
+        app.world().get::<RigidBody>(piece),
+        Some(&RigidBody::Dynamic)
+    );
+}
+
 /// The game's environment destruction: the collision hook keeps Avian's contact for a body the
 /// sweep did not cast this tick, and drops look-ahead only where a cast says its body does not
 /// reach. Read as a cast that missed, no cast would take every look-ahead point on standing
