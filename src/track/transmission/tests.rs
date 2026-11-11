@@ -195,14 +195,16 @@ fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> Tr
     }
 }
 
-/// Fixture: the Driver has felt a hull at rest meeting nothing. From an open clutch it launches
-/// in its highest launch gear; once engaged, no gear launches with more than the one it holds,
-/// so no gear changes.
+/// Fixture: the Driver has felt a hull at rest meeting nothing, on ground that grips beyond any
+/// gear's pull. From an open clutch it launches in its highest launch gear; once engaged, no gear
+/// launches with more than the one it holds, so no gear changes.
 fn felt_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
     inp.sensed = Some(Sensed {
         speed: 0.0,
         resistance: 0.0,
         push_difference: 0.0,
+        push: 0.0,
+        headroom: Some(f32::INFINITY),
     });
     inp
 }
@@ -1092,10 +1094,13 @@ fn stall_guard_holds_crank_under_grade_lug() {
     ] {
         let mut st = fresh(&tp);
         let mut inp = input(throttle, 0.0, speeds, reactions);
+        // Fixture: ground that grips beyond any gear's pull.
         inp.sensed = Some(Sensed {
             speed: speeds[0],
             resistance: reactions[0] + reactions[1],
             push_difference: reactions[0] - reactions[1],
+            push: reactions[0] + reactions[1],
+            headroom: Some(f32::INFINITY),
         });
         #[cfg(feature = "bitprobe")]
         let (roundoff, mut settled) = (
@@ -2156,13 +2161,15 @@ fn part_pedal_preserves_the_net_curve_blend() {
 
 /// Fixture Driver reading for Driver-policy tests: a hull riding its belts at `speed` and
 /// meeting `load` along its heading (forward positive), independent of dynamic belt reactions,
-/// so acceleration cannot manufacture a gear change.
+/// so acceleration cannot manufacture a gear change, on ground that grips beyond any gear's pull.
 fn driver_input(speed: f32, load: f32, command: f32) -> TransmissionInput {
     let mut inp = input(command, 0.0, [speed; 2], [0.0; 2]);
     inp.sensed = Some(Sensed {
         speed,
         resistance: load,
         push_difference: 0.0,
+        push: load,
+        headroom: Some(f32::INFINITY),
     });
     inp
 }
@@ -2392,6 +2399,49 @@ fn an_accepted_gear_holds_as_delivery_lands_it() {
     }
 }
 
+/// No gear is priced above what the ground grants: belts sliding at their grip limit, the push
+/// they deliver meeting the whole resistance, change no gear, where the same reading on ample
+/// grip changes gears. A Driver that shifted on an ungranted pull would cut the drive for nothing.
+/// Fixture: each class drivetrain moving in each forward gear with the clutch in, the crank from
+/// idle to governed and resistance up to first gear's launch pull, every patch at its limit.
+#[test]
+fn belts_at_their_grip_limit_change_no_gear() {
+    for (fp, tp) in class_drivetrains() {
+        let construction = construction(&fp);
+        let mut changed = 0;
+        for gear in 1..=tp.gears_fwd.len() as u8 {
+            let ratio = tp.gears_fwd[usize::from(gear - 1)];
+            for step in 0..=24 {
+                let span = tp.engine.governed_rpm - tp.engine.idle_rpm;
+                let rpm = tp.engine.idle_rpm + span * step as f32 / 24.0;
+                let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / ratio;
+                for share in 0..=20 {
+                    let resistance = launch_force(&tp, 1) * share as f32 / 20.0;
+                    let mut inp = driver_input(speed, resistance, 1.0);
+                    let engaged = TransmissionState {
+                        gear,
+                        clutch: ClutchState::In,
+                        omega_e: rpm * RPM_TO_RAD,
+                        ..fresh(&tp)
+                    };
+                    let mut st = engaged;
+                    choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
+                    changed += usize::from(st.gear != gear);
+                    let sliding = inp.sensed.as_mut().expect("a Driver-policy reading");
+                    sliding.headroom = Some(0.0);
+                    let mut st = engaged;
+                    choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
+                    assert_eq!(
+                        st.gear, gear,
+                        "gear {gear} at {rpm} rpm against {resistance} N, sliding"
+                    );
+                }
+            }
+        }
+        assert!(changed > 0, "the fixture's ample grip changes gears");
+    }
+}
+
 /// A Driver that has felt nothing has chosen no gear, so it engages none from rest: the launch's
 /// free choice relies on the clutch still being open once the first reading arrives.
 #[test]
@@ -2499,8 +2549,11 @@ fn a_stalled_full_clutch_push_steps_down() {
                 bevy::math::Vec3::ZERO,
                 forward,
                 mass,
-                [bevy::math::Vec3::ZERO; 2],
-                hard,
+                super::super::sense::Contacts {
+                    soft: [bevy::math::Vec3::ZERO; 2],
+                    headroom: 0.0,
+                    hard,
+                },
                 inp.dt,
             );
             let report = step(&fp, &tp, &mut state, &inp);

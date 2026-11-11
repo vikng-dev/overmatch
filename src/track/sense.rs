@@ -23,20 +23,23 @@ use std::collections::VecDeque;
 use bevy::prelude::*;
 
 /// One driven tick of the ledger: the belts' traction on the hull along its heading through it,
-/// `[left, right]` (N), and the hull's gain in speed along its heading over it (m/s).
+/// `[left, right]` (N), the grip its patches left unspent (N; `None` where a solver contact
+/// pushed), and the hull's gain in speed along its heading over it (m/s).
 #[derive(Clone, Copy, Debug)]
 struct Sample {
     push: [f32; 2],
+    headroom: Option<f32>,
     gain: f32,
 }
 
-/// This tick's opened sample: the hull's start velocity (m/s, world) and heading, and the
-/// sampled-contact push along that heading (N).
+/// This tick's opened sample: the hull's start velocity (m/s, world) and heading, the
+/// sampled-contact push along that heading and the grip those contacts left unspent (N).
 #[derive(Clone, Copy, Debug)]
 struct Open {
     velocity: Vec3,
     heading: Vec3,
     push: [f32; 2],
+    headroom: f32,
 }
 
 /// The Driver's reading for one tick.
@@ -49,6 +52,26 @@ pub struct Sensed {
     pub resistance: f32,
     /// The left belt's mean push less the right's over the window (N).
     pub push_difference: f32,
+    /// Both belts' mean push over the window (N).
+    pub push: f32,
+    /// The grip the sampled patches left unspent over the window, on mean (N): the most push any
+    /// gear can add to `push`, none where every patch slides at its grip limit. `None` when a
+    /// solver contact pushed within the window: the solver's friction is Coulomb too, but its
+    /// coefficient is not read back, so its grip limit is unmeasured.
+    pub headroom: Option<f32>,
+}
+
+/// The belts' contacts on the hull at one driving tick (N, world frame).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Contacts {
+    /// The traction this tick's sampled contacts apply to the hull, `[left, right]`.
+    pub(crate) soft: [Vec3; 2],
+    /// The grip those contacts left unspent, both sides
+    /// ([`super::forces::SideReport::grip_headroom`]).
+    pub(crate) headroom: f32,
+    /// The solver contacts' friction on the hull over the physics step that just ran, `None`
+    /// where a side had no solver contact.
+    pub(crate) hard: [Option<Vec3>; 2],
 }
 
 /// The Driver's ledger: server-side driving state, built empty at spawn from the tank's cut
@@ -76,32 +99,36 @@ impl DriverSense {
     }
 
     /// One driving tick. `velocity` is the hull's velocity now (m/s, world), `heading` its unit
-    /// forward axis, `mass` its mass (kg), `soft` the traction this tick's sampled contacts apply
-    /// to the hull and `hard` the solver contacts' friction on it over the physics step that just
-    /// ran (N, world frame, `None` where a side had no solver contact). Each counts as push only
-    /// along the sample's heading: a contact's support, and its traction's other components, are
-    /// what the hull meets. The step that just ran carried last tick's sampled push and this
-    /// `hard` push from last tick's velocity to `velocity`, so that sample closes here.
+    /// forward axis and `mass` its mass (kg). A contact's traction counts as push only along the
+    /// sample's heading: a contact's support, and its traction's other components, are what the
+    /// hull meets. The step that just ran carried last tick's sampled push and this tick's `hard`
+    /// push from last tick's velocity to `velocity`, so that sample closes here.
     pub(crate) fn tick(
         &mut self,
         velocity: Vec3,
         heading: Vec3,
         mass: f32,
-        soft: [Vec3; 2],
-        hard: [Option<Vec3>; 2],
+        contacts: Contacts,
         dt: f32,
     ) -> Option<Sensed> {
+        let Contacts {
+            soft,
+            headroom,
+            hard,
+        } = contacts;
         if let Some(open) = self.open.take() {
             let mut push = open.push;
             for (push, hard) in push.iter_mut().zip(hard) {
                 // No solver contact pushed a side without one.
                 *push += hard.map_or(0.0, |hard| hard.dot(open.heading));
             }
+            let headroom = hard.iter().all(Option::is_none).then_some(open.headroom);
             if self.samples.len() == self.window {
                 self.samples.pop_front();
             }
             self.samples.push_back(Sample {
                 push,
+                headroom,
                 gain: (velocity - open.velocity).dot(open.heading),
             });
         }
@@ -109,6 +136,7 @@ impl DriverSense {
             velocity,
             heading,
             push: soft.map(|soft| soft.dot(heading)),
+            headroom,
         });
         self.reading = (!self.samples.is_empty()).then(|| {
             assert!(
@@ -119,10 +147,13 @@ impl DriverSense {
             let [left, right, gain] = self.samples.iter().fold([0.0; 3], |[l, r, g], s| {
                 [l + s.push[0], r + s.push[1], g + s.gain]
             });
+            let headroom = self.samples.iter().map(|s| s.headroom).sum::<Option<f32>>();
             Sensed {
                 speed: velocity.dot(heading),
                 resistance: (left + right) / count - mass * gain / (count * dt),
                 push_difference: (left - right) / count,
+                push: (left + right) / count,
+                headroom: headroom.map(|headroom| headroom / count),
             }
         });
         self.reading
@@ -166,7 +197,12 @@ mod tests {
             .map(|tick| {
                 let push = push(tick);
                 let soft = [push * 0.25, push * 0.5].map(|push| forward * push);
-                let reading = sense.tick(forward * speed, forward, MASS, soft, reported, DT);
+                let contacts = Contacts {
+                    soft,
+                    headroom: 0.0,
+                    hard: reported,
+                };
+                let reading = sense.tick(forward * speed, forward, MASS, contacts, DT);
                 if push == 0.0 {
                     sense.cut();
                 }
@@ -217,7 +253,12 @@ mod tests {
         let axis = Vec3::new(1.0, 1.0, 0.0).normalize();
         for tick in 0..200 {
             let heading = Quat::from_axis_angle(axis, 0.5 * DT * tick as f32) * Vec3::NEG_Z;
-            let reading = sense.tick(velocity, heading, MASS, [Vec3::ZERO; 2], [None; 2], DT);
+            let contacts = Contacts {
+                soft: [Vec3::ZERO; 2],
+                headroom: 0.0,
+                hard: [None; 2],
+            };
+            let reading = sense.tick(velocity, heading, MASS, contacts, DT);
             if let Some(reading) = reading {
                 // DERIVED: no push and no change of velocity close every sample at zero.
                 assert_eq!(reading.resistance, 0.0, "tick {tick}");

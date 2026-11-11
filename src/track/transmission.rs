@@ -1136,8 +1136,11 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// catch's whole torque and outbids a part-pedal launch, which then stops in the cut (MEASURED in
 /// `part_pedal_launches_and_sustains_ordered_speed`: a quarter-pedal launch cycling between its
 /// launch gear and a lug three gears up). A candidate lands at `v − R·t_cut/M_c`; the current gear
-/// pays no cut.
-/// 1. Clutch out at hull rest: the highest launch gear that holds, else first; free.
+/// pays no cut. No gear's pull is priced above what the ground grants, the push felt plus the grip
+/// its patches left unspent ([`super::sense::Sensed::headroom`]): where every patch slides at its grip limit that
+/// is the push now, so no gear offers more spare than the current one and the gear stays.
+/// 1. Clutch out at hull rest: the highest launch gear that holds, else first where it offers more
+///    spare than the current gear; free.
 /// 2. The current gear does not hold, judged at no more than its torque-peak speed: the highest
 ///    lower gear within `max_step` that holds where it lands; with none the gear stays.
 /// 3. The current gear holds, straight: the highest higher gear within `max_step` that holds
@@ -1169,6 +1172,8 @@ fn choose_gear(
     let speed = (dir * sensed.speed).max(0.0);
     let resistance = dir * sensed.resistance;
     let margin = force_margin(tp);
+    // The most push the ground grants along the drive; a solver contact's grip limit is unmeasured.
+    let grant = sensed.headroom.map(|headroom| dir * sensed.push + headroom);
     let spare = |gear: u8, at: f32, prior: ClutchState| {
         let load =
             resistance + branch(inp.steer) * detent_kappa(tp, st, gear) * sensed.push_difference;
@@ -1180,13 +1185,25 @@ fn choose_gear(
             at * ratio / tp.sprocket_radius,
             command,
         );
-        gear_force(tp, fp, inp.supply, at, ratio, command, load, clutch) - load
+        let pull = gear_force(tp, fp, inp.supply, at, ratio, command, load, clutch);
+        match grant {
+            Some(grant) => pull.min(grant) - load,
+            None => pull - load,
+        }
     };
     if st.clutch == ClutchState::Out && speed < PARK_ENGAGE_SPEED {
         st.gear = (1..=tp.launch_gears.min(top))
             .rev()
             .find(|&gear| spare(gear, speed, st.clutch) > margin)
-            .unwrap_or(1); // No launch gear holds: first gear is the most the ladder has.
+            .unwrap_or_else(|| {
+                // No launch gear holds: first gear is the most the ladder has, unless the ground
+                // grants it no more than the current gear.
+                if spare(1, speed, st.clutch) > spare(st.gear, speed, st.clutch) {
+                    1
+                } else {
+                    st.gear
+                }
+            });
         return;
     }
     let landing = speed - resistance * f32::from(tp.shift_ticks) / TICK_HZ / coupled_mass(fp);
@@ -1206,6 +1223,7 @@ fn choose_gear(
             })
             .flatten()
     } else {
+        // A lower gear that holds has more spare than the current gear, which does not.
         (st.gear.saturating_sub(tp.max_step).max(1)..st.gear)
             .rev()
             .find(|&gear| spare(gear, landing, ClutchState::Out) > margin)

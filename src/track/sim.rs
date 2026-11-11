@@ -722,10 +722,13 @@ pub(crate) fn feel_tick(
         hull.linear,
         forward,
         1.0 / hull.inverse_mass,
-        reports
-            .each_ref()
-            .map(|report| report.contacts.iter().map(|c| c.traction).sum()),
-        hard.map(|side| side.map(|hard| hard.friction)),
+        super::sense::Contacts {
+            soft: reports
+                .each_ref()
+                .map(|report| report.contacts.iter().map(|c| c.traction).sum()),
+            headroom: reports.iter().map(|report| report.grip_headroom).sum(),
+            hard: hard.map(|side| side.map(|hard| hard.friction)),
+        },
         dt,
     );
     for (report, hard) in reports.iter_mut().zip(hard) {

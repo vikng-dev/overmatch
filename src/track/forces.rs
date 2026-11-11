@@ -544,6 +544,9 @@ pub struct SideReport {
     pub belt_reaction: f32,
     /// How `belt_reaction` moves within the tick, for the belt's implicit solve.
     pub reaction_slope: ReactionSlope,
+    /// The grip the gripping patches left unspent (N): each patch's budget μ·N_elastic less the
+    /// traction it carries. A patch at its grip limit, sliding, has none.
+    pub grip_headroom: f32,
     /// Material-station depth probes; surface quadrature casts are not recorded.
     #[cfg(feature = "bitprobe")]
     pub(crate) bitprobe_contacts: Vec<ContactInputProbe>,
@@ -1334,6 +1337,7 @@ fn emit_contact_forces(
             let ContactGrip { g, slope } = grips[idx];
             f_long = grip_el * g.x;
             f_lat = grip_el * g.y;
+            report.grip_headroom += grip_el * (1.0 - g.length());
             elem_sum += Vec2::new(f_long, f_lat);
             traction = c.long_dir * f_long + c.lat_dir * f_lat;
             belt_reaction += f_long;
