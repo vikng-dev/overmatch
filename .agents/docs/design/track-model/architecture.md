@@ -556,9 +556,10 @@ state, none from a timer or a band:
   hull meets; it is not the hull's traction in that window, which the ring separates from it by
   `M_hull (a_hull - a_belt)`. It counts the slowing at hull mass alone: the belts' and crank's
   share, inertia released while slowing that the gear does not hold steady, is not subtracted.
-  The crank speed is where its clutch first drove or held, for an attempt that never held a locked
-  window, else the speed it lugged down to, and never below what a failed earlier attempt of it
-  recorded. Below the torque peak a slower crank pulls less, so the memory holds back that gear and
+  The crank speed is where its clutch landed it, read as the Driver predicts a landing (a slipping
+  clutch at its launch speed, which a crank still spooling has not reached), for an attempt that
+  never held a locked window, else the speed it lugged down to, and never below what a failed
+  earlier attempt of it recorded. Below the torque peak a slower crank pulls less, so the memory holds back that gear and
   every one above it while `R` is at least what it sustained and delivery would engage it at a
   crank no faster: the launch rpm where it lands slipping, else its shaft's. Under one resistance a
   retry needs a strictly faster crank and records it if it fails, so the retries are finite. The

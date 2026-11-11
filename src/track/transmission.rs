@@ -927,6 +927,9 @@ pub struct TransmissionReport {
     /// The clutch held the crank to the belts at the tick's end, so the engaged gear set the
     /// drive. A slipping clutch sends its capacity, or the crank's stored speed, whatever the gear.
     pub locked: bool,
+    /// The crank speed a slipping clutch holds under this tick's pedal (rad/s): where delivery
+    /// lands a gear engaged with its shaft below it.
+    pub launch_omega: f32,
     /// Power-conservation scale applied to the drive/steer forces this tick (1 = unconstrained).
     pub power_scale: f32,
     /// Combustion power capacity at the pre-tick operating point (W). The work gate also
@@ -2428,6 +2431,7 @@ pub(crate) fn step(
         command: controls.command.abs(),
         driving: tau_c > 0.0,
         locked,
+        launch_omega: tp.launch_omega(propulsive),
         power_scale,
         power_available: p_avail,
         #[cfg(feature = "bitprobe")]

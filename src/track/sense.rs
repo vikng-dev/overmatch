@@ -98,7 +98,8 @@ pub struct Failed {
     /// differs from the belts' by its ring on its patches ([`Sensed::drive_gain`]), so it is not
     /// the hull's traction in that window.
     pub push: f32,
-    /// The crank speed the gear failed at (rad/s): the speed its clutch first drove or held at
+    /// The crank speed the gear failed at (rad/s): the speed its clutch landed it at, as the
+    /// Driver predicts a landing (a slipping clutch's launch speed, a held one's shaft speed),
     /// where no whole locked window of it held or gained, else the speed it lugged down to; never
     /// below what a failed earlier attempt of it recorded. A retry is admitted under the same
     /// resistance only faster, and a retry that fails records that faster speed, so the retries
@@ -169,8 +170,9 @@ pub(crate) struct Contacts {
     pub(crate) hard: [Option<HardReaction>; 2],
 }
 
-/// The engaged gear since its clutch first drove or held under the pedal: the crank speed then and
-/// on its latest such tick (rad/s), and whether a whole locked window of it held or gained.
+/// The engaged gear since its clutch first drove or held under the pedal: the crank speed its
+/// clutch landed it at and on its latest such tick (rad/s), and whether a whole locked window of it
+/// held or gained.
 #[derive(Clone, Copy, Debug)]
 struct Attempt {
     gear: Engaged,
@@ -417,7 +419,13 @@ impl DriverSense {
                 },
                 _ => Attempt {
                     gear: engaged,
-                    first: crank,
+                    // The Driver predicts a slipping clutch's landing at the launch speed; a crank
+                    // still spooling to it, or held under it by the load, reads slower.
+                    first: if report.locked {
+                        crank
+                    } else {
+                        crank.max(report.launch_omega)
+                    },
                     latest: crank,
                     gained,
                 },
@@ -695,21 +703,28 @@ mod tests {
         }
     }
 
-    /// A retry that fails records no slower crank than the failure it retried: under one
-    /// resistance the Driver admits a retry only faster than the record, so the record must rise
-    /// with each failed retry for the retries to end. Fixture: third failing as a fresh attempt at
-    /// 1500 rpm, then retried at 1200 rpm and failing again, at rest under a steady push.
+    /// A failed attempt records the crank speed its clutch landed it at, and a failed retry no
+    /// slower than the failure it retried: under one resistance the Driver admits a retry only
+    /// landing faster than the record, predicting a slipping clutch's landing at the launch speed,
+    /// so the record must read the landing that way and rise with each failed retry for the
+    /// retries to end. Fixture: third slipping at rest at half the pedal, its crank spooling at 900
+    /// rpm toward a 1500 rpm launch, failing; then retried at 0.3 of the pedal, landing at a 1200
+    /// rpm launch, and failing again, under a steady push.
     #[test]
-    fn a_failed_retry_records_no_slower_crank() {
+    fn a_failed_attempt_records_its_landing_and_a_retry_no_slower() {
         let forward = Vec3::NEG_Z;
-        let pull = |gear: u8, rpm: f32, shifting: bool| TransmissionReport {
+        let pull = |gear: u8, rpm: f32, command: f32, launch_rpm: f32| TransmissionReport {
             gear,
             rpm,
-            shifting,
-            command: 0.5,
+            command,
+            launch_omega: launch_rpm * RPM_TO_RAD,
             pulling: true,
             driving: true,
             ..Default::default()
+        };
+        let cut = |report: TransmissionReport| TransmissionReport {
+            shifting: true,
+            ..report
         };
         let mut sense = DriverSense::for_cut(CUT);
         let contacts = Contacts {
@@ -719,14 +734,14 @@ mod tests {
         };
         let mut failed = None;
         for report in [
-            pull(3, 1500.0, false),
-            pull(3, 1400.0, false),
-            pull(2, 1400.0, true),
-            pull(2, 1400.0, false),
-            pull(3, 1200.0, false),
-            pull(3, 1100.0, false),
-            pull(2, 1100.0, true),
-            pull(2, 1100.0, false),
+            pull(3, 900.0, 0.5, 1500.0),
+            pull(3, 1400.0, 0.5, 1500.0),
+            cut(pull(2, 1400.0, 0.5, 1500.0)),
+            pull(2, 1400.0, 0.5, 1500.0),
+            pull(3, 1100.0, 0.3, 1200.0),
+            pull(3, 1100.0, 0.3, 1200.0),
+            cut(pull(2, 1100.0, 0.3, 1200.0)),
+            pull(2, 1100.0, 0.3, 1200.0),
         ] {
             failed = sense
                 .tick(Vec3::ZERO, forward, 0.0, MASS, contacts, DT)
