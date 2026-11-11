@@ -24,6 +24,8 @@
 // The sandbox's rubble yard builds line 8c's heap; the sandbox builds with `dev_ui`.
 #[cfg(feature = "dev_ui")]
 mod heap;
+#[cfg(feature = "dev_ui")]
+mod rubble_climb;
 mod turn_probe;
 
 use super::*;
