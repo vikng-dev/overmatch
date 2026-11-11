@@ -679,8 +679,17 @@ impl TransmissionParams {
             * RPM_TO_RAD
     }
 
-    /// Force scale of the crank-acceleration subtraction, J*omega/dt times the largest
-    /// admitted crank-to-belt ratio. Its f32 roundoff follows construction, not hull weight.
+    /// Torque scale of the crank-acceleration subtraction, J*omega/dt at the over-rev bound. Its
+    /// f32 roundoff follows construction, not hull weight.
+    pub(crate) fn roundoff_torque_scale(&self) -> f32 {
+        self.engine_inertia
+            * (self.engine.crank_limit_rpm + overrev_margin_rpm())
+            * RPM_TO_RAD
+            * TICK_HZ
+    }
+
+    /// [`Self::roundoff_torque_scale`] at the belt, through the largest admitted crank-to-belt
+    /// ratio.
     pub(crate) fn roundoff_force_scale(&self) -> f32 {
         let ratio = self
             .gears_fwd
@@ -688,12 +697,7 @@ impl TransmissionParams {
             .chain(&self.gears_rev)
             .copied()
             .fold(0.0, f32::max);
-        self.engine_inertia
-            * (self.engine.crank_limit_rpm + overrev_margin_rpm())
-            * RPM_TO_RAD
-            * TICK_HZ
-            * ratio
-            / self.sprocket_radius
+        self.roundoff_torque_scale() * ratio / self.sprocket_radius
     }
 }
 

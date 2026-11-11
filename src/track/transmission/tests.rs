@@ -1065,24 +1065,50 @@ fn steady_launch_slip_transmits_the_bounded_free_torque() {
 }
 
 /// The game's driving model bounds a healthy crank under both a loaded launch and a
-/// back-driven coast. The clutch's floor cannot create energy or reverse propulsive force.
+/// back-driven coast. The clutch's floor cannot create energy or reverse propulsive force: the
+/// torque it transmits stays within capacity and never turns backward beyond the crank
+/// arithmetic's roundoff, and once the crank has spooled it drives forward. Fixture: first gear, the Driver feeling the hull ride its belts
+/// against the fixture's reactions; a full-weight lug at rest (the launch slips) and a 2 m/s
+/// back-driven coast (the clutch is in).
 #[test]
 fn stall_guard_holds_crank_under_grade_lug() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let floor = (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value) * RPM_TO_RAD;
-    for (throttle, speeds, reactions, label) in [
+    for (throttle, speeds, reactions, regime, label) in [
         (
             1.0f32,
             [0.0f32, 0.0],
             [200_000.0f32, 200_000.0],
+            ClutchState::Slip,
             "full-W lug",
         ),
-        (0.0, [-2.0, -2.0], [-40_000.0, -40_000.0], "coast backslide"),
+        (
+            0.0,
+            [-2.0, -2.0],
+            [-40_000.0, -40_000.0],
+            ClutchState::In,
+            "coast backslide",
+        ),
     ] {
         let mut st = fresh(&tp);
-        let mut saw_forward = false;
+        let mut inp = input(throttle, 0.0, speeds, reactions);
+        inp.sensed = Some(Sensed {
+            speed: speeds[0],
+            resistance: reactions[0] + reactions[1],
+            push_difference: reactions[0] - reactions[1],
+        });
+        #[cfg(feature = "bitprobe")]
+        let (roundoff, mut settled) = (
+            DriverResolution::load().crank_roundoff_share * tp.roundoff_torque_scale(),
+            0.0,
+        );
         for tick in 0..128 {
-            let rep = step(&fp, &tp, &mut st, &input(throttle, 0.0, speeds, reactions));
+            let rep = step(&fp, &tp, &mut st, &inp);
+            assert_eq!(
+                st.gear, 1,
+                "{label} tick {tick}: the fixture's first gear holds"
+            );
+            assert_eq!(st.clutch, regime, "{label} tick {tick}");
             assert!(
                 st.omega_e >= floor - 1e-3,
                 "{label} tick {tick}: ω_e {:.0} rpm fell below the stall-guard floor \
@@ -1090,7 +1116,15 @@ fn stall_guard_holds_crank_under_grade_lug() {
                 st.omega_e / RPM_TO_RAD,
                 floor / RPM_TO_RAD
             );
-            saw_forward |= rep.forces.iter().all(|f| *f > 0.0);
+            #[cfg(feature = "bitprobe")]
+            {
+                let torque = rep.bitprobe.tau_c * rep.power_scale;
+                assert!(
+                    (-roundoff..=tp.clutch_capacity).contains(&torque),
+                    "{label} tick {tick}: clutch torque {torque} N m outside [0, capacity]"
+                );
+                settled = torque;
+            }
             assert!(
                 rep.forces[0] >= 0.0 && rep.forces[1] >= 0.0,
                 "{label} tick {tick}: the slipping clutch must keep delivering \
@@ -1098,7 +1132,11 @@ fn stall_guard_holds_crank_under_grade_lug() {
                 rep.forces
             );
         }
-        assert!(saw_forward, "the settled clutch must deliver forward force");
+        #[cfg(feature = "bitprobe")]
+        assert!(
+            settled > roundoff,
+            "{label}: the settled clutch must transmit forward torque"
+        );
     }
 }
 
