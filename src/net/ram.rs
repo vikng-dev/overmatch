@@ -1050,6 +1050,9 @@ mod tests {
     /// belts, gravity and each solver contact pair, and what the remainder leaves unattributed.
     /// `through_chunks` is the target's share through chunk colliders rather than element ones, and
     /// `judged` its share through chunks this tick's cast met, whose cut judged them;
+    /// `ground` is the rest of the solver's stream into the hull, through bodies that are no
+    /// structure: the terrain under its rigid track stops and proxies, which a ramming hull's
+    /// pitch can drive into it;
     /// `held` is what the target moved into the rubble bodies over the same step.
     struct MomentumSources {
         change: Vec3,
@@ -1060,6 +1063,7 @@ mod tests {
         through_chunks: Vec3,
         judged: Vec3,
         rubble: Vec3,
+        ground: Vec3,
         held: Vec3,
         unattributed: Vec3,
     }
@@ -1067,7 +1071,7 @@ mod tests {
     impl MomentumSources {
         fn check(&self, after: usize) {
             println!(
-                "MEASURED hull momentum change at impact +{after}, N s: change {}, sweep {}, belts {}, gravity {}, target {} ({} through chunk colliders: {} judged by a cut, {} unjudged), rubble {}, unattributed {}; target into rubble {}",
+                "MEASURED hull momentum change at impact +{after}, N s: change {}, sweep {}, belts {}, gravity {}, target {} ({} through chunk colliders: {} judged by a cut, {} unjudged), rubble {}, ground {}, unattributed {}; target into rubble {}",
                 self.change,
                 self.sweep,
                 self.belts,
@@ -1077,6 +1081,7 @@ mod tests {
                 self.judged,
                 self.through_chunks - self.judged,
                 self.rubble,
+                self.ground,
                 self.unattributed,
                 self.held
             );
@@ -1087,6 +1092,7 @@ mod tests {
                 self.gravity,
                 self.target,
                 self.rubble,
+                self.ground,
             ];
             let scale: f32 = terms.iter().map(|term| term.length()).sum();
             // Resolution: f32 roundoff over the step's summed contact points.
@@ -1298,6 +1304,19 @@ mod tests {
             .filter(|point| point.reference == target && point.other != tank)
             .map(|point| point.impulse)
             .sum();
+        let solved: Vec3 = transfers
+            .solver_groups()
+            .flatten()
+            .filter_map(|point| {
+                if point.other == tank {
+                    Some(point.impulse)
+                } else if point.reference == tank {
+                    Some(-point.impulse)
+                } else {
+                    None // This constraint moved no momentum into the hull.
+                }
+            })
+            .sum();
         let change = (world.get::<LinearVelocity>(tank).unwrap().0 - before) * mass;
         let (target_impulse, rubble) = (on_tank(true), on_tank(false));
         MomentumSources {
@@ -1309,8 +1328,9 @@ mod tests {
             through_chunks,
             judged,
             rubble,
+            ground: solved - target_impulse - rubble,
             held,
-            unattributed: change - sweep - belts - gravity - target_impulse - rubble,
+            unattributed: change - sweep - belts - gravity - solved,
         }
     }
 }
