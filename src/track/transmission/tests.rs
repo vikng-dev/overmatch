@@ -188,7 +188,6 @@ fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> Tr
         reactions,
         // Fixture: reactions that do not move with belt speed.
         reaction_slopes: [0.0; 2],
-        perceived_load: super::super::load::PerceivedLoad::default(),
         // Fixture: the Driver has felt nothing, so it neither chooses a gear nor engages one from
         // rest; a launch reads `felt_at_rest`, Driver policy `driver_input`.
         sensed: None,
@@ -1915,33 +1914,6 @@ fn reverse_ladder_without_steering_radii_is_refused() {
     assert!(error.contains("steering.reverse_radii"), "{error}");
 }
 
-/// Steering detents read the authored row on either ladder; swapping wide and tight must
-/// change this result. The Driver needs the selected radius before any belt motion.
-#[test]
-fn driver_turn_radius_reads_each_detent_on_both_ladders() {
-    let tp = lab_tp();
-    for reverse in [false, true] {
-        let top = if reverse {
-            tp.gears_rev.len()
-        } else {
-            tp.gears_fwd.len()
-        };
-        for index in 0..top {
-            let mut state = fresh(&tp);
-            state.reverse = reverse;
-            state.gear = index as u8 + 1;
-            for (step, expected) in [
-                (0, None),
-                (1, Some(tp.steering_radii(reverse, state.gear).1)),
-                (2, Some(tp.steering_radii(reverse, state.gear).0)),
-            ] {
-                state.steer_step = step;
-                assert_eq!(super::super::load::turn_radius(&tp, &state), expected);
-            }
-        }
-    }
-}
-
 /// The game's driving and damage model: a shift's interruption must expire even after
 /// control authority leaves. The moving drivetrain must resume transmitting motoring drag.
 #[test]
@@ -2165,12 +2137,7 @@ fn felt(inp: &TransmissionInput) -> Sensed {
 
 /// Fixture oracle: enumerate the declared straight-launch domain using the separately pinned
 /// crank/cap force price against the felt resistance. This never consults the selector.
-fn affordable_launch(
-    fp: &FixtureConstruction,
-    tp: &TransmissionParams,
-    inp: &TransmissionInput,
-    command: f32,
-) -> Option<u8> {
+fn affordable_launch(tp: &TransmissionParams, inp: &TransmissionInput, command: f32) -> Option<u8> {
     (1..=tp.launch_gears.min(tp.gears_fwd.len() as u8))
         .rev()
         .find(|&gear| {
@@ -2182,7 +2149,7 @@ fn affordable_launch(
                 command,
                 ClutchState::Slip,
             ) - felt(inp).resistance
-                > force_margin(&construction(fp), tp)
+                > force_margin(tp)
         })
 }
 
@@ -2264,38 +2231,6 @@ fn driver_force_price_uses_the_current_regime_and_the_clutch_cap() {
             price_driver_force(&tp, DriveSupply::WHOLE, speed, ratio, 0.0, ClutchState::In),
             -ratio / tp.sprocket_radius
         );
-    }
-}
-
-/// Both adapters share the ladder-sign observation; reversing a climb must reverse grade,
-/// while rolling resistance retains its positive cost. Fixture: one inclined finite patch.
-#[test]
-fn driver_observation_uses_the_engaged_ladder_in_both_directions() {
-    let (fp, tp) = (lab_fp(), lab_tp());
-    let angle = 20.0_f32.to_radians();
-    let rotation = bevy::math::Quat::from_rotation_x(angle);
-    let patch = super::super::load::SupportFact {
-        point: bevy::math::Vec3::ZERO,
-        half_span: rotation * bevy::math::Vec3::Z,
-        normal: rotation * bevy::math::Vec3::Y,
-        length_weight: 2.0,
-        mu: 0.7,
-        rolling_coefficient: 0.04,
-    };
-    for reverse in [false, true] {
-        let mut state = fresh(&tp);
-        state.reverse = reverse;
-        let load = super::super::load::observe_rig(
-            [patch].iter(),
-            rotation * bevy::math::Vec3::NEG_Z,
-            &construction(&fp),
-            &tp,
-            &state,
-        );
-        let weight = 2.0 * fp.grip.side_weight;
-        let expected = weight * angle.sin() * if reverse { -1.0 } else { 1.0 };
-        assert!((load.grade_n - expected).abs() < weight * 1e-6);
-        assert!((load.rolling_n - weight * 0.04 * angle.cos()).abs() < weight * 1e-6);
     }
 }
 
@@ -2403,7 +2338,7 @@ fn the_free_choice_at_rest_launches_in_the_highest_launch_gear_that_holds() {
             launch_force(&tp, 1) * 1.5,
         ] {
             let inp = driver_input(0.0, resistance, 1.0);
-            let expected = affordable_launch(&fp, &tp, &inp, 1.0).unwrap_or(1);
+            let expected = affordable_launch(&tp, &inp, 1.0).unwrap_or(1);
             for start in 1..=top {
                 let mut state = TransmissionState {
                     gear: start,
@@ -2609,10 +2544,9 @@ fn landing_resolution_bounds_independent_weight_rigs() {
             println!(
                 "MEASURED independent-weight residual mass_kg={mass} gears={} min_n={lo} max_n={hi} margin_n={}",
                 tp.gears_fwd.len(),
-                force_margin(&construction(&fp), &tp)
+                force_margin(&tp)
             );
-            let crank_margin = super::super::load::DriverResolution::load().crank_roundoff_share
-                * tp.roundoff_force_scale();
+            let crank_margin = force_margin(&tp);
             assert!(residuals.iter().all(|value| value.is_finite()));
             assert!(
                 (hi - lo).max(lo.abs()).max(hi.abs()) < crank_margin,
@@ -2656,7 +2590,7 @@ fn capable_launches_gain_speed_against_a_supported_grade() {
         };
         let mut speeds = [0.0; 2];
         let initial = driver_input(0.0, load, 1.0);
-        assert!(affordable_launch(&fp, &tp, &initial, 1.0).is_some());
+        assert!(affordable_launch(&tp, &initial, 1.0).is_some());
         for _ in 0..64 * 10 {
             // Fixture: ten simulated seconds to include crank spool.
             let mut inp = driver_input((speeds[0] + speeds[1]) * 0.5, load, 1.0);
@@ -2726,7 +2660,7 @@ fn part_pedal_launches_and_sustains_ordered_speed() {
                         command,
                         ClutchState::Slip,
                     ) - felt(&initial).resistance
-                        > force_margin(&construction(&fp), &tp)
+                        > force_margin(&tp)
                 });
                 capable_notches += usize::from(capable);
                 for tick in 0..64 * 60 {
@@ -2899,7 +2833,7 @@ fn one_way_lever_launches_on_grade_without_rollback_or_a_launch_cut() {
     for (fp, tp) in class_drivetrains() {
         let load = fp.grip.side_weight * 2.0 * 20.0_f32.to_radians().sin();
         let initial = driver_input(0.0, load, 1.0);
-        let launch = affordable_launch(&fp, &tp, &initial, 1.0).expect("a supported grade");
+        let launch = affordable_launch(&tp, &initial, 1.0).expect("a supported grade");
         let spare = price_driver_force(
             &tp,
             initial.supply,
@@ -3435,10 +3369,7 @@ fn coast_expectation_includes_the_rolling_fade_for_every_drivetrain() {
                     let drag = engine_drag(&tp, speed * k) * k;
                     let ground = forces::rolling_resistance(weight * rolling * angle.cos(), speed);
                     // Resolution: independent inverse and forward f32 arithmetic at vehicle-force scale.
-                    assert!(
-                        (drag + ground - weight * angle.sin()).abs()
-                            < force_margin(&construction(&fp), &tp)
-                    );
+                    assert!((drag + ground - weight * angle.sin()).abs() < force_margin(&tp));
                     println!(
                         "MEASURED coast gears={} gear={gear} drag_fraction={fraction} speed={speed}",
                         tp.gears_fwd.len()
@@ -3537,7 +3468,7 @@ fn virtual_free_crank_energy_does_not_cap_curve_power() {
 }
 
 /// Reverse steering belongs to reverse construction, even when its ratios differ from forward.
-/// The observer and Driver need that same radius before a belt moves.
+/// The Driver needs that radius before a belt moves.
 #[test]
 fn reverse_radii_belong_to_the_reverse_gear() {
     let mut a = tiger_authoring();
@@ -3551,7 +3482,7 @@ fn reverse_radii_belong_to_the_reverse_gear() {
         steer_step: 2,
         ..fresh(&tp)
     };
-    assert_eq!(super::super::load::turn_radius(&tp, &state), Some(6.0));
+    assert_eq!(tp.steering_radii(true, 1).0, 6.0);
     let kappa = a.half_tread_m / 6.0; // DERIVED from the Fixture reverse radius.
     assert_eq!(detent_kappa(&tp, &state, 1), kappa);
     let fp = grade_fixture_fp();
@@ -3740,7 +3671,7 @@ fn launch_targets_the_peak_available_after_fuel_cut() {
         fp.grip.side_weight = spec.mass * super::super::derive::G / 2.0;
         let tp = tr.params(0.3, 1.0, fp.inertia).unwrap(); // Fixture sprocket radius and half-tread.
         let inp = driver_input(0.0, 0.0, 1.0);
-        let selected = affordable_launch(&fp, &tp, &inp, 1.0)
+        let selected = affordable_launch(&tp, &inp, 1.0)
             .expect("fuel-governed peak must select a capable launch");
         assert!(tp.torque_at(tp.launch_omega(1.0) / RPM_TO_RAD) > 0.0);
         let mut state = TransmissionState {

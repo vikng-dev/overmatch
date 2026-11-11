@@ -1,10 +1,9 @@
 //! The joint drivetrain integrates both belts and the crank from construction data.
 //! `step` owns Driver gear/clutch/brake decisions, then solves clutch and steering torque,
 //! work, belt acceleration and crank settlement. `TransmissionState` is its complete memory.
-//! Gear decisions read support geometry, requested pedal and crank rpm; contact reactions
-//! belong only to the mechanical solve. Forces are N, torques N m, belt speeds m/s and
-//! crank speed rad/s. The design narrative lives in track-model architecture section 5a
-//! and `drive-control-design-2026-11-02.md`.
+//! Gear decisions read what the Driver felt of the hull (`track::sense`: speed over the ground
+//! and resistance), requested pedal and crank rpm. Forces are N, torques N m, belt speeds m/s
+//! and crank speed rad/s. The design narrative lives in track-model architecture section 5a.
 //!
 //! The rejected `STEER_SERVO_BAND` proportional servo loses authority with vehicle scale;
 //! the steering law instead solves its capacity-limited constraint semi-implicitly.
@@ -185,8 +184,8 @@ pub struct TransmissionParams {
     /// Each ladder declares its own radii.
     pub steer_kappa: Vec<(f32, f32)>,
     pub reverse_steer_kappa: Vec<(f32, f32)>,
-    /// Authored per-forward-gear `(R_tight, R_wide)` (m), used by load observation,
-    /// candidate pricing and the HUD. The steering constraint uses [`Self::steer_kappa`].
+    /// Authored per-forward-gear `(R_tight, R_wide)` (m), shown by the HUD. The steering
+    /// constraint and the Driver's turn price use [`Self::steer_kappa`].
     pub steer_radii_m: Vec<(f32, f32)>,
     pub reverse_steer_radii_m: Vec<(f32, f32)>,
     /// Steering-member force capacity PER OUTPUT (N). The steering member drives the two
@@ -888,8 +887,6 @@ pub struct TransmissionInput {
     /// Each reaction's slope against its own belt's speed over the tick (N s/m); the belt solves
     /// against it implicitly.
     pub reaction_slopes: [f32; 2],
-    /// Unfiltered support load and grip seen by the Driver.
-    pub perceived_load: super::load::PerceivedLoad,
     /// What the Driver feels of the hull this tick; `None` until the ledger has closed a tick.
     pub sensed: Option<super::sense::Sensed>,
     pub dt: f32,
@@ -1009,7 +1006,7 @@ fn free_driver_force(
 }
 
 /// Required driving weight and belt inertia. Support-only contact parameters cannot enter
-/// the Driver or observer without grip construction.
+/// the Driver without grip construction.
 #[derive(Clone, Copy)]
 pub(crate) struct DriveConstruction {
     grip: GripParams,
@@ -1036,8 +1033,49 @@ pub(crate) fn coupled_mass(fp: &DriveConstruction) -> f32 {
     hull + 2.0 * fp.belt_inertia
 }
 
-fn force_margin(fp: &DriveConstruction, tp: &TransmissionParams) -> f32 {
-    super::load::DriverResolution::load().margin_n(fp.weight_n(), tp)
+/// The Driver's force comparison resolution: cancellation in the crank acceleration follows
+/// `J·ω/dt` reflected through the gearbox, independently of weight.
+#[derive(bevy::prelude::Resource, Clone, Copy)]
+pub(crate) struct DriverResolution {
+    pub(crate) crank_roundoff_share: f32,
+}
+
+impl DriverResolution {
+    /// The margin `M` a gear's spare must exceed (N).
+    pub(crate) fn margin_n(&self, tp: &TransmissionParams) -> f32 {
+        self.crank_roundoff_share * tp.roundoff_force_scale()
+    }
+
+    pub(crate) fn load() -> Self {
+        static DATA: std::sync::LazyLock<DriverResolution> = std::sync::LazyLock::new(|| {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Source {
+                crank_roundoff_share: crate::provenance::Labelled<f32>,
+            }
+            const PATH: &str = "assets/driving/driver.ron";
+            let source: Source = crate::provenance::from_shipped_str(
+                PATH,
+                include_str!("../../assets/driving/driver.ron"),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            let share = source.crank_roundoff_share;
+            assert!(
+                matches!(share.label, crate::provenance::Provenance::Resolution(_))
+                    && share.value.is_finite()
+                    && share.value > 0.0,
+                "{PATH}: crank_roundoff_share must be finite, positive and Resolution; remeasure the same-instant crank residual"
+            );
+            DriverResolution {
+                crank_roundoff_share: share.value,
+            }
+        });
+        *DATA
+    }
+}
+
+fn force_margin(tp: &TransmissionParams) -> f32 {
+    DriverResolution::load().margin_n(tp)
 }
 
 /// A coupled crank accelerates with the vehicle: J*k^2 adds reflected mass. Solving
@@ -1123,7 +1161,7 @@ fn choose_gear(
     let top = ladder.len() as u8;
     let speed = (dir * sensed.speed).max(0.0);
     let resistance = dir * sensed.resistance;
-    let margin = force_margin(fp, tp);
+    let margin = force_margin(tp);
     let spare = |gear: u8, at: f32| {
         let load =
             resistance + branch(inp.steer) * detent_kappa(tp, st, gear) * sensed.push_difference;
@@ -2049,9 +2087,6 @@ fn input_probe(
         dt: inp.dt,
         mean_speed: m,
         difference_speed: d,
-        perceived_load_n: inp.perceived_load.total_n(),
-        grip_limit_n: inp.perceived_load.grip_n,
-        turn_moment_nm: inp.perceived_load.turn_moment_nm,
         sensed: inp.sensed.is_some(),
         sensed_speed: inp.sensed.map_or(0.0, |s| s.speed),
         sensed_resistance_n: inp.sensed.map_or(0.0, |s| s.resistance),

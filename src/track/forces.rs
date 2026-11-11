@@ -20,7 +20,6 @@ use bevy::ecs::entity::Entity;
 use bevy::math::{Affine3A, Mat3, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
-use super::load::SupportFact;
 #[cfg(test)]
 use super::oracle::ContactOracle;
 #[cfg(test)]
@@ -545,34 +544,12 @@ pub struct SideReport {
     pub belt_reaction: f32,
     /// How `belt_reaction` moves within the tick, for the belt's implicit solve.
     pub reaction_slope: ReactionSlope,
-    /// Terrain/construction facts before dynamic support damping; Driver observation only.
-    pub perceived_support: Vec<super::load::SupportFact>,
     /// Material-station depth probes; surface quadrature casts are not recorded.
     #[cfg(feature = "bitprobe")]
     pub(crate) bitprobe_contacts: Vec<ContactInputProbe>,
     /// Per-station/column post-update load, slip, force, strain, and dwell. Measurement builds only.
     #[cfg(feature = "bitprobe")]
     pub(crate) bitprobe_elements: Vec<ElementOutputProbe>,
-}
-
-impl SideReport {
-    /// The Driver and contact law read the same force-bearing surface.
-    fn observe_support(
-        &mut self,
-        (point, normal): (Vec3, Vec3),
-        half_span: Vec3,
-        length_weight: f32,
-        (mu, rolling_coefficient): (f32, f32),
-    ) {
-        self.perceived_support.push(SupportFact {
-            point,
-            normal,
-            half_span,
-            length_weight,
-            mu,
-            rolling_coefficient,
-        });
-    }
 }
 
 /// Integrate `max(0, pen(x))` over one linear piece of a pressure profile: `pen` runs
@@ -1059,12 +1036,6 @@ fn collect_column_contacts<O: TerrainOracle>(
                     &mut report.bitprobe_elements[probe_index],
                     (p, normal),
                     (load, load_elastic),
-                );
-                report.observe_support(
-                    (p, normal),
-                    axis * (contact_len / 2.0),
-                    weight * contact_len,
-                    (surface.mu, surface.rolling),
                 );
                 if collider.is_some_and(|piece| pieces.loose(piece)) {
                     continue; // A loose piece shadows the ground; `belt_segment` carries it.
@@ -1653,27 +1624,6 @@ mod tests {
                 oracle.calls.get()
             );
         }
-    }
-
-    /// The Driver must still see geometrically supported ground when separating velocity
-    /// unloads the normal damper. A sensor collected only from emitted forces loses that ground.
-    #[test]
-    fn perceived_support_survives_dynamic_load_dropout() {
-        // Fixture: a shallow pad, identical geometry, rest versus a rapid separating velocity.
-        let loop_pts = spring_pad(0.02);
-        let measure = |velocity| {
-            let mut state = SideState::default();
-            let mut elements = GripElements::for_stations(25, 3);
-            rig_tick(&loop_pts, &mut state, &mut elements, 0.0, velocity)
-        };
-        let resting = measure(Vec3::ZERO);
-        let separating = measure(Vec3::Y * 20.0);
-        assert!(!resting.perceived_support.is_empty());
-        assert!(
-            separating.contacts.is_empty(),
-            "fixture must unload the damped support"
-        );
-        assert_eq!(resting.perceived_support, separating.perceived_support);
     }
 
     fn strain_sum(elems: &GripElements) -> f32 {
@@ -2309,32 +2259,44 @@ mod tests {
         );
         let velocity = Vec3::NEG_X * 2.0;
         let params = rig_params();
-        let report = contact_side(
-            &input,
-            SideState::default(),
-            affine,
-            1.0 / 64.0,
-            &params,
-            &field,
-            &RubbleBodies::default(),
-            |_| velocity,
-            &mut GripElements::for_stations(input.count, 3),
-        );
+        let pass = |vel_at: &dyn Fn(Vec3) -> Vec3| {
+            contact_side(
+                &input,
+                SideState::default(),
+                affine,
+                1.0 / 64.0,
+                &params,
+                &field,
+                &RubbleBodies::default(),
+                vel_at,
+                &mut GripElements::for_stations(input.count, 3),
+            )
+        };
+        let report = pass(&|_| velocity);
         assert!(
             !report.contacts.is_empty(),
             "the inside columns must strike the wall"
         );
+        // The same pose bears on the same points; each closes there head-on at the hull's speed,
+        // so its damper force is the damper's rate times that speed.
+        let head_on = pass(&|p| {
+            report
+                .contacts
+                .iter()
+                .find(|contact| contact.point == p)
+                .map_or(velocity, |contact| -contact.normal * velocity.length())
+        });
         let mut max_closing = 0.0_f32;
         for contact in &report.contacts {
-            // The damper's rate from its owners: per-metre damping over the patch's weighted
-            // length. Full engagement: the fixture's 5 mm depth exceeds its 2 mm ramp.
-            let fact = report
-                .perceived_support
+            let twin = head_on
+                .contacts
                 .iter()
-                .find(|fact| fact.point == contact.point)
-                .expect("every applied contact was observed as support");
-            let rate = params.support_damping_per_m * fact.length_weight;
-            max_closing = max_closing.max((contact.load - contact.load_elastic) / rate);
+                .find(|twin| twin.point == contact.point)
+                .expect("a head-on approach keeps every contact a lateral pass bears on");
+            max_closing = max_closing.max(
+                velocity.length() * (contact.load - contact.load_elastic)
+                    / (twin.load - twin.load_elastic),
+            );
         }
         println!("MEASURED vertical corner effective closing {max_closing:.6} m/s for 2 m/s hull");
         assert!(
@@ -2823,8 +2785,7 @@ mod tests {
         }
     }
 
-    /// Advected contact must resist yaw for steering. The Driver's saturated-sliding estimate
-    /// is a comparison observation, not a bound. FIXTURE: 4.27 m pad, 1.4 m half tread.
+    /// Advected contact must resist yaw for steering. FIXTURE: 4.27 m pad, 1.4 m half tread.
     #[test]
     fn ground_turning_moment_with_advected_elements() {
         let ground = crate::ground_types::GroundTypes::load_shipped()
@@ -2849,7 +2810,6 @@ mod tests {
             };
             let mut elements = GripElements::for_stations(50, 3);
             let mut moment = 0.0;
-            let mut price = 0.0;
             let mut samples = 0;
             for tick in 0..64 * 20 {
                 let report = contact_side(
@@ -2877,23 +2837,16 @@ mod tests {
                         .iter()
                         .map(|c| c.point.cross(c.traction).y)
                         .sum::<f32>();
-                    let weight = report.contacts.iter().map(|c| c.load_elastic).sum();
-                    price += super::super::load::observe(
-                        report.perceived_support.iter(),
-                        Vec3::NEG_Z,
-                        weight,
-                        None,
-                    )
-                    .turn_moment_nm;
+                    assert!(
+                        !report.contacts.is_empty(),
+                        "the fixture has a loaded sliding footprint"
+                    );
                 }
             }
             println!(
-                "MEASURED turning yaw={yaw}: moment={:.6} Nm price={:.6} Nm share={:.6}",
-                moment / samples as f32,
-                price / samples as f32,
-                moment / price
+                "MEASURED turning yaw={yaw}: moment={:.6} Nm",
+                moment / samples as f32
             );
-            assert!(price > 0.0, "the fixture has a loaded sliding footprint");
             assert!(moment > 0.0, "advected contact must oppose the fixture yaw");
         }
     }
@@ -3166,14 +3119,6 @@ mod tests {
                     .map(|c| c.normal * c.load + c.tangential_force())
                     .sum();
                 assert!((emitted - reconstructed).length() < normal * 1e-6);
-                let weight = params.grip.unwrap().side_weight * 2.0;
-                let forecast = super::super::load::observe(
-                    report.perceived_support.iter(),
-                    Vec3::NEG_Z,
-                    weight,
-                    None,
-                );
-                assert!((forecast.rolling_n - expected * weight).abs() < weight * 1e-6);
                 previous = surface.rolling;
             }
         }
@@ -3307,64 +3252,6 @@ mod tests {
             );
             assert!(!moving(velocity), "mu={mu}: the grip mode does not settle");
         }
-    }
-
-    /// Driver grip is nominal-pressure strength. Spring stiffness is not a ground fact;
-    /// changing it at fixed footprint must not change a paid gear decision's load.
-    #[test]
-    fn driver_observation_does_not_read_spring_load() {
-        let oracle = GroundedFlat {
-            surface_y: 0.0,
-            ground: crate::ground_types::GroundTypes::load_shipped()
-                .get("dirt")
-                .contact(),
-        };
-        let loop_pts = spring_pad(0.02);
-        let input = SideInput {
-            loop_pts: &loop_pts,
-            count: 25,
-            plane_x: 0.0,
-            columns: TEST_COLUMNS.into(),
-            travel: TravelField { knots: &PAD_TRAVEL },
-        };
-        let mut params = rig_params();
-        let mut observed = Vec::new();
-        for factor in [1.0, 0.5] {
-            params.support_stiffness_per_m = rig_params().support_stiffness_per_m * factor;
-            let report = contact_side(
-                &input,
-                SideState::default(),
-                Affine3A::IDENTITY,
-                1.0 / 64.0,
-                &params,
-                &oracle,
-                &RubbleBodies::default(),
-                |_| Vec3::ZERO,
-                &mut GripElements::for_stations(25, 3),
-            );
-            observed.push(super::super::load::observe(
-                report.perceived_support.iter(),
-                Vec3::NEG_Z,
-                params.grip.unwrap().side_weight * 2.0,
-                Some(10.0),
-            ));
-        }
-        println!(
-            "MEASURED observer grip: {} -> {} N",
-            observed[0].grip_n, observed[1].grip_n
-        );
-        let weight = params.grip.unwrap().side_weight * 2.0;
-        let expected_grip = oracle.ground.grip * weight;
-        let expected_rolling = oracle
-            .ground
-            .rolling_at(params.grip.unwrap().nominal_pressure_kpa)
-            * weight;
-        for observed in &observed {
-            assert!((observed.grip_n - expected_grip).abs() < weight * 1e-6);
-            assert!((observed.rolling_n - expected_rolling).abs() < weight * 1e-6);
-        }
-        assert_eq!(observed[0].grip_n, observed[1].grip_n);
-        assert_eq!(observed[0].turn_n, observed[1].turn_n);
     }
 
     /// A curb patch must not erase the loaded flat patch's longitudinal shear. Contact

@@ -447,7 +447,7 @@ impl TrackGear {
 pub fn sim_plugin(app: &mut App) {
     app.add_plugins((super::world_contact::plugin, super::belt_segment::plugin));
     app.init_resource::<DriveSupports>();
-    app.insert_resource(super::load::DriverResolution::load());
+    app.insert_resource(super::transmission::DriverResolution::load());
     // Lazy one-shot: the blueprint lands at Startup (bake); the gear builds on the first
     // frame after and never again.
     app.add_systems(
@@ -827,15 +827,6 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             speeds: [rig.drive.sides[0].speed, rig.drive.sides[1].speed],
             reactions,
             reaction_slopes,
-            perceived_load: super::load::observe_rig(
-                reports
-                    .iter()
-                    .flat_map(|report| report.perceived_support.iter()),
-                forward,
-                &gear.construction,
-                &gear.trans,
-                rig.transmission,
-            ),
             sensed,
             dt,
             supply,
@@ -2681,7 +2672,7 @@ mod tests {
         let mut distance = 0.0;
         let mut final_lo = f32::INFINITY;
         let mut final_hi = f32::NEG_INFINITY;
-        let mut load = super::super::load::PerceivedLoad::default();
+        let (mut resisted, mut contact_load) = (Vec::new(), Vec::new());
         for tick in 0..64 * 60 {
             let (reports, _) = belt_tick(
                 gear,
@@ -2717,15 +2708,7 @@ mod tests {
                     hard_reactions: [None; 2],
                 },
             );
-            let supports = reports.iter().flat_map(|r| r.perceived_support.iter());
-            load = super::super::load::observe_rig(
-                supports,
-                forward,
-                &gear.construction,
-                &gear.trans,
-                &transmission,
-            );
-            assert!(load.grip_n > 0.0);
+            assert!(reports.iter().any(|r| !r.contacts.is_empty()));
             let expected_mu = ground().grip;
             assert!(
                 reports
@@ -2749,12 +2732,28 @@ mod tests {
             if tick >= 64 * 59 {
                 final_lo = final_lo.min(speed);
                 final_hi = final_hi.max(speed);
+                if let Some(sensed) = sense.reading {
+                    resisted.push(sensed.resistance);
+                }
+                // What the ground resists with: the grade and the contacts' own rolling.
+                let rolling: f32 = reports
+                    .iter()
+                    .flat_map(|r| &r.contacts)
+                    .map(|c| -c.rolling_force.dot(forward))
+                    .sum();
+                contact_load.push(weight * angle.sin() + rolling);
             }
         }
-        assert!((load.grade_n - weight * angle.sin()).abs() < weight * 1e-4);
+        let mean = |values: &[f32]| values.iter().sum::<f32>() / values.len() as f32;
+        let (resistance, expected) = (mean(&resisted), mean(&contact_load));
         assert!(
-            load.rolling_n > 0.0,
+            expected > weight * angle.sin(),
             "the contact field must supply a real rolling load"
+        );
+        // Resolution: the stations' passing ripple on the belt push over one window.
+        assert!(
+            (resistance - expected).abs() < weight * 1e-3,
+            "the ledger must feel the grade and rolling it climbs: {resistance} vs {expected}"
         );
         assert!(final_lo > super::super::transmission::PARK_ENGAGE_SPEED);
         // Resolution: one percent of construction's governed speed permits discrete contact ripple.
@@ -2763,8 +2762,7 @@ mod tests {
             "loaded travel must settle: [{final_lo}, {final_hi}]"
         );
         println!(
-            "MEASURED second-spec grade_n={} rolling_n={} grip_n={} speed_range=[{final_lo},{final_hi}] mass_kg={mass}",
-            load.grade_n, load.rolling_n, load.grip_n
+            "MEASURED second-spec resistance_n={resistance} contact_load_n={expected} speed_range=[{final_lo},{final_hi}] mass_kg={mass}"
         );
     }
     /// A strong engine cannot drive through drag above grip. Inside the numerical fade,
@@ -2838,7 +2836,9 @@ mod tests {
             let dt = 1.0 / 64.0; // Fixture fixed step.
             let (mut speed, mut distance) = (ROLLING_FADE_SPEED, 0.0_f32);
             drive.sides.iter_mut().for_each(|side| side.speed = speed);
-            let mut load = super::super::load::PerceivedLoad::default();
+            // The flat fixture's full potential drag and grip at its own pressure.
+            let weight = mass * super::super::derive::G;
+            let (rolling_n, grip_n) = (ground.rolling_at(pressure) * weight, mu * weight);
             let mut late_min = f32::INFINITY;
             let mut late_max = f32::NEG_INFINITY;
             let mut late_force = 0.0;
@@ -2875,13 +2875,6 @@ mod tests {
                         hard_reactions: [None; 2],
                     },
                 );
-                load = super::super::load::observe_rig(
-                    reports.iter().flat_map(|r| r.perceived_support.iter()),
-                    Vec3::NEG_Z,
-                    &gear.construction,
-                    &gear.trans,
-                    &state,
-                );
                 let force: f32 = reports
                     .iter()
                     .flat_map(|r| &r.apps)
@@ -2898,7 +2891,7 @@ mod tests {
                         .flat_map(|r| &r.contacts)
                         .map(|c| c.rolling_force.z)
                         .sum();
-                    full_drag_force += (force + rolling - load.rolling_n) / 64.0;
+                    full_drag_force += (force + rolling - rolling_n) / 64.0;
                 }
                 speed += force / mass * dt;
                 distance += speed * dt;
@@ -2907,20 +2900,19 @@ mod tests {
                 * gear.trans.gears_fwd.iter().copied().fold(0.0_f32, f32::max)
                 / gear.trans.sprocket_radius;
             // Resolution: f32 support quadrature/force accumulation, 0.1% of the limiting force.
-            let force_precision = engine_pull.min(load.grip_n) * 1e-3;
+            let force_precision = engine_pull.min(grip_n) * 1e-3;
             match case {
                 "grip" | "engine" => {
                     if case == "grip" {
-                        assert!(engine_pull > load.rolling_n && load.rolling_n > load.grip_n);
+                        assert!(engine_pull > rolling_n && rolling_n > grip_n);
                     } else {
-                        assert!(load.grip_n > load.rolling_n && load.rolling_n > engine_pull);
+                        assert!(grip_n > rolling_n && rolling_n > engine_pull);
                     }
                     assert!(
                         full_drag_force < -force_precision,
                         "a refused launch must have no full-drag surplus"
                     );
-                    let expected =
-                        ROLLING_FADE_SPEED * engine_pull.min(load.grip_n) / load.rolling_n;
+                    let expected = ROLLING_FADE_SPEED * engine_pull.min(grip_n) / rolling_n;
                     // Resolution: the stations' passing ripple on the crawl, MEASURED 0.26 % of the
                     // fade speed at 48 stations.
                     assert!(
@@ -2943,7 +2935,7 @@ mod tests {
             }
             println!(
                 "MEASURED pressure case={case} mass_kg={mass:.3} pressure_kpa={pressure:.6} drag_n={:.3} grip_n={:.3} engine_pull_n={engine_pull:.3} late_speed=[{late_min:.8},{late_max:.8}] late_force_n={late_force:.4} full_drag_force_n={full_drag_force:.4}",
-                load.rolling_n, load.grip_n
+                rolling_n, grip_n
             );
         }
     }

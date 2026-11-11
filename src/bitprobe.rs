@@ -117,9 +117,6 @@ const TRANSMISSION_INPUT_FIELDS: &[(&str, &str)] = &[
     ("reaction_right", "f32"),
     ("dt", "f32"),
     ("direction", "f32"),
-    ("perceived_load_n", "f32"),
-    ("grip_limit_n", "f32"),
-    ("turn_moment_nm", "f32"),
     ("sensed", "bool"),
     ("sensed_speed", "f32"),
     ("sensed_resistance_n", "f32"),
@@ -274,9 +271,6 @@ pub(crate) struct TransmissionProbe {
     pub reactions: [f32; 2],
     pub dt: f32,
     pub direction: f32,
-    pub perceived_load_n: f32,
-    pub grip_limit_n: f32,
-    pub turn_moment_nm: f32,
     /// What the Driver felt of the hull this tick (`track::sense`); zeros when nothing was sensed.
     pub sensed: bool,
     pub sensed_speed: f32,
@@ -537,26 +531,14 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
         .expect("fixture readiness checked the field")
         .bitprobe_startup(&mut out);
     world.resource::<TrackGear>().bitprobe_startup(&mut out);
-    out.f32(
-        "driver.observer_weight_share",
-        world
-            .resource::<crate::track::load::DriverResolution>()
-            .observer_weight_share,
-    );
+    let resolution = world.resource::<crate::track::transmission::DriverResolution>();
     out.f32(
         "driver.crank_roundoff_share",
-        world
-            .resource::<crate::track::load::DriverResolution>()
-            .crank_roundoff_share,
+        resolution.crank_roundoff_share,
     );
     out.f32(
         "driver.landing_force_margin_n",
-        world
-            .resource::<crate::track::load::DriverResolution>()
-            .margin_n(
-                world.resource::<TankBlueprint>().spec.mass * crate::track::derive::G,
-                world.resource::<TrackGear>().trans(),
-            ),
+        resolution.margin_n(world.resource::<TrackGear>().trans()),
     );
 
     let spec = &world.resource::<TankBlueprint>().spec;
@@ -789,9 +771,6 @@ fn transmission_input_payload(capture: &BitprobeCapture) -> Vec<u32> {
         probe.reactions[1],
         probe.dt,
         probe.direction,
-        probe.perceived_load_n,
-        probe.grip_limit_n,
-        probe.turn_moment_nm,
     ] {
         f32_word(&mut output, value);
     }

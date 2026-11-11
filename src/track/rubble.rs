@@ -1573,44 +1573,6 @@ mod tests {
         )
     }
 
-    /// The Driver must read the supporting piece's plane when ride pitches the hull.
-    /// Fixture: a level broad slab, a pad pitched by one degree, and nominal weight.
-    #[test]
-    fn perceived_piece_grade_is_independent_of_hull_pitch() {
-        let mut app = physics();
-        piece_box(&mut app, Vec3::Y * 0.1, Vec3::new(4.0, 0.2, 4.0));
-        app.update();
-        app.world_mut()
-            .run_system_once(|rubble: RubbleQuery, bodies: Query<PieceData>| {
-                let near = rubble.near(Vec3::ZERO, 4.0);
-                let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
-                for pitch in [-1.0_f32, 1.0] {
-                    let rotation = Quat::from_rotation_x(pitch.to_radians());
-                    let report = pad_pass(
-                        &ground(),
-                        &pieces,
-                        Affine3A::from_rotation_translation(rotation, Vec3::Y * 0.1),
-                        SideState::default(),
-                        Vec3::ZERO,
-                        &mut GripElements::for_stations(30, 3),
-                    );
-                    assert!(!report.perceived_support.is_empty());
-                    let load = super::super::load::observe(
-                        report.perceived_support.iter(),
-                        rotation * Vec3::NEG_Z,
-                        560_000.0,
-                        None,
-                    );
-                    assert!(
-                        load.grade_n.abs() < 1.0,
-                        "hull pitch entered piece grade: {} N",
-                        load.grade_n
-                    );
-                }
-            })
-            .unwrap();
-    }
-
     /// The normal damper must spend no work on motion tangent to the supporting solid. The
     /// hull and drivetrain rely on this even when the belt element is inclined. Fixture: broad
     /// level solid, inclined pad, and opposite tangential velocities, with no vertical motion.

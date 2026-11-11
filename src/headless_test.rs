@@ -897,7 +897,7 @@ fn full_throttle_reaches_and_holds_the_governed_top_speed() {
 #[cfg(feature = "bitprobe")]
 #[test]
 fn contact_law_shipped_ground_speeds() {
-    use crate::track::sim::{TankTransmission, TrackContacts, TrackGripEffect};
+    use crate::track::sim::{TankTransmission, TrackContacts};
     for (name, ground) in crate::ground_types::GroundTypes::load_shipped().types {
         let mut outcomes = Vec::new();
         for rolling in [false, true] {
@@ -952,17 +952,12 @@ fn contact_law_shipped_ground_speeds() {
                         && position.z.abs() < extent.half_extent() - 10.0,
                     "{name} rolling={rolling} must remain on the uninterrupted plane: {position:?}"
                 );
-                let probe = app
-                    .world()
-                    .get::<TrackGripEffect>(tank)
-                    .unwrap()
-                    .transmission_probe;
+                let contacts = &app.world().get::<TrackContacts>(tank).unwrap().0;
                 assert!(
-                    probe.grip_limit_n > 0.0,
+                    contacts.iter().any(|side| !side.is_empty()),
                     "{name} rolling={rolling} needs geometric support"
                 );
                 if tick >= 89 * FIXED_TICKS_PER_SECOND {
-                    let contacts = &app.world().get::<TrackContacts>(tank).unwrap().0;
                     assert!(
                         contacts
                             .iter()

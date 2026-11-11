@@ -259,15 +259,6 @@ pub(super) fn apply_belt_support_field(
     }
     let (reactions, reaction_slopes) =
         crate::track::sim::belt_reactions(&reports, &hull_body, hull_pos.0, dt);
-    let perceived_load = crate::track::load::observe_rig(
-        reports
-            .iter()
-            .flat_map(|report| report.perceived_support.iter()),
-        forward,
-        &construction,
-        &transmission.0,
-        &trans_state.0,
-    );
 
     // Phase 2 — ONE joint drivetrain solve on the vehicle's declared tables.
     let tr = transmission::step(
@@ -283,7 +274,6 @@ pub(super) fn apply_belt_support_field(
             speeds: [belt.get(Side::Left), belt.get(Side::Right)],
             reactions,
             reaction_slopes,
-            perceived_load,
             sensed,
             dt,
         },
