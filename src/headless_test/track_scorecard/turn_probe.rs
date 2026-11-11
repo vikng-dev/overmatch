@@ -548,15 +548,7 @@ fn pull_table() {
         } else {
             ClutchState::In
         };
-        price_driver_force(
-            &tp,
-            DriveSupply::WHOLE,
-            speed,
-            ratio,
-            command,
-            f32::INFINITY,
-            clutch,
-        )
+        price_driver_force(&tp, DriveSupply::WHOLE, speed, ratio, command, clutch)
     };
     for command in [1.0_f32, 0.3] {
         let rows: Vec<Value> = (0..tp.gears_fwd.len())

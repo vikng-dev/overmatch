@@ -291,44 +291,6 @@ impl TrackGear {
         transmission::coupled_mass(&self.construction)
     }
 
-    #[cfg(all(test, feature = "bitprobe"))]
-    pub(crate) fn landed_spare(
-        &self,
-        state: &TransmissionState,
-        probe: crate::bitprobe::TransmissionProbe,
-        candidate: u8,
-    ) -> f32 {
-        transmission::landed_spare(
-            &self.trans,
-            &self.construction,
-            &TransmissionInput {
-                supply: transmission::DriveSupply::WHOLE,
-                intent: DriveIntent::Axes(DriveAxes {
-                    throttle: 1.0,
-                    steer: 0.0,
-                }),
-                throttle: 1.0,
-                steer: 0.0,
-                side_commands: [1.0; 2],
-                speeds: probe.speeds,
-                reactions: probe.reactions,
-                // Pricing reads neither the reactions nor their slopes.
-                reaction_slopes: [0.0; 2],
-
-                perceived_load: super::load::PerceivedLoad {
-                    grade_n: probe.perceived_load_n,
-                    grip_n: probe.grip_limit_n,
-                    ..Default::default()
-                },
-                sensed: None,
-                dt: probe.dt,
-            },
-            state,
-            candidate,
-            1.0,
-        )
-    }
-
     /// DERIVED full service-brake deceleration along the direction of motion (m/s^2).
     /// Grip is limited by brakes and observed capacity; delivered rolling acts alongside it.
     /// `rolling_braking_n` is the contact law's rolling force projected opposite travel, so
@@ -879,6 +841,9 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             supply,
         },
     );
+    if tr.shifting {
+        rig.sense.cut();
+    }
     for (si, report) in reports.iter().enumerate() {
         let pre_speed = rig.drive.sides[si].speed;
         rig.drive.sides[si] = TrackDriveSide {
@@ -2941,15 +2906,6 @@ mod tests {
             let engine_pull = gear.trans.peak_torque_nm.min(gear.trans.clutch_capacity)
                 * gear.trans.gears_fwd.iter().copied().fold(0.0_f32, f32::max)
                 / gear.trans.sprocket_radius;
-            let pick = transmission::launch_pick(
-                &gear.trans,
-                &gear.construction,
-                DriveSupply::WHOLE,
-                false,
-                load,
-                0,
-                1.0,
-            );
             // Resolution: f32 support quadrature/force accumulation, 0.1% of the limiting force.
             let force_precision = engine_pull.min(load.grip_n) * 1e-3;
             match case {
@@ -2959,7 +2915,6 @@ mod tests {
                     } else {
                         assert!(load.grip_n > load.rolling_n && load.rolling_n > engine_pull);
                     }
-                    assert!(pick.is_none(), "full drag is unaffordable");
                     assert!(
                         full_drag_force < -force_precision,
                         "a refused launch must have no full-drag surplus"
@@ -2979,7 +2934,6 @@ mod tests {
                     );
                 }
                 "launch" => {
-                    assert!(pick.is_some(), "a capable declared gear must exist");
                     assert!(
                         late_min > ROLLING_FADE_SPEED,
                         "an affordable launch must deliver through full drag"
@@ -2988,7 +2942,7 @@ mod tests {
                 _ => unreachable!("all fixture cases are declared inline"),
             }
             println!(
-                "MEASURED pressure case={case} mass_kg={mass:.3} pressure_kpa={pressure:.6} drag_n={:.3} grip_n={:.3} engine_pull_n={engine_pull:.3} late_speed=[{late_min:.8},{late_max:.8}] late_force_n={late_force:.4} full_drag_force_n={full_drag_force:.4} launch={pick:?}",
+                "MEASURED pressure case={case} mass_kg={mass:.3} pressure_kpa={pressure:.6} drag_n={:.3} grip_n={:.3} engine_pull_n={engine_pull:.3} late_speed=[{late_min:.8},{late_max:.8}] late_force_n={late_force:.4} full_drag_force_n={full_drag_force:.4}",
                 load.rolling_n, load.grip_n
             );
         }

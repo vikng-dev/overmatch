@@ -144,8 +144,8 @@ impl Measurements {
         }
         if probe.shifting && (!self.was_shifting || state.gear != self.last_gear) {
             self.finish_landing();
-            let speed = probe.shaft_speed
-                - probe.perceived_load_n * f32::from(gear.trans().shift_ticks) * probe.dt
+            let speed = probe.sensed_speed
+                - probe.sensed_resistance_n * f32::from(gear.trans().shift_ticks) * probe.dt
                     / gear.landing_mass();
             let price = price_driver_force(
                 gear.trans(),
@@ -153,7 +153,6 @@ impl Measurements {
                 speed,
                 probe.gear_reduction,
                 1.0,
-                probe.grip_limit_n,
                 state.clutch,
             );
             self.pending = Some(Landing {
@@ -191,13 +190,11 @@ impl Measurements {
             if (state.omega_e - target).abs() <= crate::track::transmission::RPM_TO_RAD {
                 landing.delivery.push(probe.delivered_force_n);
                 let tick_price = probe.priced_force_n;
-                let crank_price =
-                    (probe.tau_free.min(tp.clutch_capacity) * probe.k).min(probe.grip_limit_n);
+                let crank_price = probe.tau_free.min(tp.clutch_capacity) * probe.k;
                 let acceleration = (probe.omega_integrated - probe.omega_pre) / probe.dt;
-                let inertial_price = ((probe.tau_free - tp.engine_inertia * acceleration)
+                let inertial_price = (probe.tau_free - tp.engine_inertia * acceleration)
                     .min(tp.clutch_capacity)
-                    * probe.k)
-                    .min(probe.grip_limit_n);
+                    * probe.k;
                 println!(
                     "MEASURED instantaneous gear={} forecast_n={:.6} speed_n={:.6} crank_n={:.6} inertia_n={:.6} residual_n={:.6}",
                     landing.gear,
@@ -1003,15 +1000,11 @@ fn shipped_notches_launch_and_sustain_ordered_speed() {
             let z = if degrees == 0.0 { -350.0 } else { 350.0 };
             let position = Vec3::new(100.0, -z * angle.tan(), z) + rotation * Vec3::Y * rest;
             place(&mut app, tank, position, rotation, 0.0, 1);
+            // The launch starts parked: the settle builds the grip strain and the Driver's ledger,
+            // which a placement resets and play never does.
             for _ in 0..128 {
                 drive_tick(&mut app, tank, 0.0, 0.0);
             }
-            let position = app
-                .world()
-                .get::<avian3d::prelude::Position>(tank)
-                .unwrap()
-                .0;
-            place(&mut app, tank, position, rotation, 0.0, 1);
             use bevy::ecs::system::RunSystemOnce;
             let supply = app
                 .world_mut()
@@ -1056,7 +1049,6 @@ fn shipped_notches_launch_and_sustain_ordered_speed() {
                             0.0,
                             tp.gears_fwd[usize::from(g - 1)],
                             pedal,
-                            p.grip_limit_n,
                             crate::track::transmission::ClutchState::Slip,
                         ) > p.perceived_load_n
                     });
