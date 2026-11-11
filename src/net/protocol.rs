@@ -40,7 +40,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// replacement and departure derive from the admitted graph on each peer; a crumble's light
 /// fragments reach players as decoration events. The construction ledger and the hull marks reach
 /// a client as the diffs past its acknowledged cursor (bevy_replicon 0.44.3), a whole copy only
-/// to a client without one or behind the retained history.
+/// to a client without one or behind the retained history; each ledger diff names the position
+/// it lands at.
 pub const PROTOCOL_REV: u32 = 93;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -912,7 +913,7 @@ const WIRE_SURFACE_HASH: u64 = 0x71ba39380c57d0bd;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xc4175ed803f35ed5;
+const WIRE_TYPES_HASH: u64 = 0x899d67b6050ebd70;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol; replicon's
@@ -1869,6 +1870,7 @@ mod tests {
         ("src/net/debris_stress.rs", "DebrisPose"),
         ("src/net/debris_stress/pose.rs", "WirePose"),
         ("src/net/construction.rs", "Ledger"),
+        ("src/net/construction.rs", "Appended"),
         ("src/construction/breakage.rs", "Entry"),
         ("src/construction/breakage.rs", "Event"),
         ("src/construction/breakage.rs", "Hole"),

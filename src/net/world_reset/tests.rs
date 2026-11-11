@@ -144,7 +144,7 @@ fn topology(world: &mut World) -> Vec<Entry> {
 }
 
 fn snapshots(world: &mut World, number: u32, entries: Vec<Entry>) {
-    world.spawn((WorldGeneration(number), Ledger(entries)));
+    world.spawn((WorldGeneration(number), Ledger::from(entries)));
 }
 
 /// NO RECORD IS CONSUMED BEFORE ITS BATTLE, and old/future records cannot cross the transition.
@@ -245,7 +245,7 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
             .iter_mut(app.world_mut())
         {
             if *belongs == WorldGeneration(2) {
-                ledger.0.clone_from(&entries);
+                ledger.entries.clone_from(&entries);
             }
         }
         app.update();

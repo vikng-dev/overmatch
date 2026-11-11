@@ -35,22 +35,82 @@ use std::collections::HashMap;
 
 /// Every change in this world, in authority order. Appended only through replicon's diff path.
 #[derive(Component, Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct Ledger(pub(crate) Vec<Entry>);
+pub(crate) struct Ledger {
+    pub(crate) entries: Vec<Entry>,
+    /// A replica's first refused diff. Never on the wire: a whole copy arrives unrefused.
+    #[serde(skip)]
+    misplaced: Option<Misplaced>,
+}
+
+impl Ledger {
+    /// The first diff this replica refused, for `receive_ledger` to refuse the match on.
+    pub(super) fn misplaced(&self) -> Option<Misplaced> {
+        self.misplaced
+    }
+}
+
+/// A whole list, as a late joiner's copy arrives: unrefused.
+#[cfg(test)]
+impl From<Vec<Entry>> for Ledger {
+    fn from(entries: Vec<Entry>) -> Self {
+        Self {
+            entries,
+            misplaced: None,
+        }
+    }
+}
+
+/// One appended entry and the ledger position it lands at. Replicon places a diff by a wrapping
+/// `u16` index, under which a delayed message can stand in for the diff one index cycle later
+/// (`net::ledger_wire`); the position tells them apart.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Appended {
+    pub(crate) at: u32,
+    pub(crate) entry: Entry,
+}
+
+/// A diff for position `at` reached a replica holding `held` entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Misplaced {
+    at: u32,
+    held: usize,
+}
+
+impl std::fmt::Display for Misplaced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ledger entry for position {} reached a ledger of {} entries",
+            self.at, self.held
+        )
+    }
+}
 
 impl Diffable for Ledger {
-    type Diff = Entry;
+    type Diff = Appended;
     /// Resolution: the entries the authority retains for a client still behind. A client further
     /// behind gets the whole ledger once, the deliberate outcome for that case. A longer history
     /// costs no bytes, since the entries past a cursor are a suffix of the whole ledger, only
-    /// authority memory: 24 B an entry (DERIVED from `Entry`'s layout), 0.8 MB at this length,
+    /// authority memory: 28 B a diff (DERIVED from `Appended`'s layout), 0.9 MB at this length,
     /// the longest the wrapping diff index allows. The largest tick of the 30-tank match recipe,
     /// six houses breaking at once, appended 4224 entries (MEASURED, send census 2026-11-11), so
     /// this holds seven such ticks.
     const HISTORY_LEN: usize = DiffIndex::MAX_NEWER_DISTANCE as usize;
 
-    fn apply_diff(&mut self, diff: &Entry) -> Result<()> {
-        self.0.push(*diff);
-        Ok(())
+    /// Appends at the end only. A replica keeps its first diff for any other position and takes
+    /// nothing after it; on the authority, which numbers each diff from its own length
+    /// (`publish_record`), the error is a broken invariant and the failing command panics.
+    fn apply_diff(&mut self, appended: &Appended) -> Result<()> {
+        let held = self.entries.len();
+        if self.misplaced.is_none() && appended.at as usize == held {
+            self.entries.push(appended.entry);
+            return Ok(());
+        }
+        let misplaced = *self.misplaced.get_or_insert(Misplaced {
+            at: appended.at,
+            held,
+        });
+        Err(misplaced.to_string().into())
     }
 }
 
@@ -226,35 +286,37 @@ fn spawn_ledger(world: &mut World) {
     ));
 }
 
-/// Authority: every record entry not yet on the ledger becomes a diff.
+/// Authority: every record entry past the ledger's length becomes a diff for the position it
+/// lands at.
 fn publish_record(
     stages: Option<Res<crate::cost::stages::Stages>>,
     record: Res<Record>,
-    ledgers: Query<Entity, With<Ledger>>,
-    mut published: Local<(Option<Entity>, usize)>,
+    ledgers: Query<(Entity, &Ledger)>,
     mut commands: Commands,
 ) {
     let _publish =
         crate::cost::stages::Stages::start(stages.as_deref(), crate::cost::stages::Stage::Publish);
-    let ledger = ledgers.single().expect(
+    let (entity, ledger) = ledgers.single().expect(
         "authority startup spawns exactly one construction ledger before publishing construction changes",
     );
-    if published.0 != Some(ledger) {
-        *published = (Some(ledger), 0);
-    }
-    let fresh = record.entries.get(published.1..).expect(
+    let published = ledger.entries.len();
+    let fresh = record.entries.get(published..).expect(
         "the authority's construction record only grows: the laws extend it and nothing on the authority \
          removes an entry",
     );
-    for entry in fresh {
-        commands.entity(ledger).apply_diff::<Ledger>(*entry);
+    for (at, entry) in (published..).zip(fresh) {
+        let at = u32::try_from(at)
+            .expect("a Battle's construction record holds fewer than 2^32 entries");
+        commands
+            .entity(entity)
+            .apply_diff::<Ledger>(Appended { at, entry: *entry });
     }
-    published.1 = record.entries.len();
 }
 
 /// Replica: admit the selected world's new entries as one batch before mutating its record.
 /// Another ledger identity replaces the record and advances its generation. Within one identity
-/// the authority only appends; duplicates, shrinking and malformed entries refuse the match.
+/// the authority only appends; duplicates, shrinking, a misplaced diff and malformed entries
+/// refuse the match.
 fn receive_ledger(
     ledgers: Query<(Entity, Ref<Ledger>, Option<&WorldGeneration>)>,
     generation: Res<CurrentWorld>,
@@ -270,7 +332,7 @@ fn receive_ledger(
     let mut current = ledgers
         .iter()
         .filter(|(_, _, belongs)| belongs.copied() == generation.0);
-    let (ledger, entries, _) = match current.next() {
+    let (ledger, replica, _) = match current.next() {
         Some(ledger) => ledger,
         // Before the first snapshot, or between links, no authority ledger has arrived yet.
         None => return,
@@ -279,16 +341,20 @@ fn receive_ledger(
         refused.write(ConstructionRefusal::DuplicateLedgers);
         return;
     }
+    if let Some(misplaced) = replica.misplaced() {
+        refused.write(ConstructionRefusal::MisplacedEntry(misplaced));
+        return;
+    }
     let replaced = copied.0 != Some(ledger);
     let from = if replaced { 0 } else { copied.1 };
-    let Some(fresh) = entries.0.get(from..) else {
+    let Some(fresh) = replica.entries.get(from..) else {
         refused.write(ConstructionRefusal::ShrunkLedger {
             copied: from,
-            received: entries.0.len(),
+            received: replica.entries.len(),
         });
         return;
     };
-    if !replaced && entries.is_changed() && entries.0[..from] != record.entries {
+    if !replaced && replica.is_changed() && replica.entries[..from] != record.entries {
         refused.write(ConstructionRefusal::RewrittenLedger);
         return;
     }
@@ -315,7 +381,7 @@ fn receive_ledger(
         record.generation = record.generation.wrapping_add(1);
     }
     record.entries.extend(admitted);
-    *copied = (Some(ledger), entries.0.len());
+    *copied = (Some(ledger), replica.entries.len());
 }
 
 #[derive(Message, Debug, Clone, PartialEq)]
@@ -324,6 +390,7 @@ enum ConstructionRefusal {
     UntaggedLedger,
     UntaggedPiece,
     RewrittenLedger,
+    MisplacedEntry(Misplaced),
     ShrunkLedger {
         copied: usize,
         received: usize,
@@ -339,6 +406,7 @@ impl std::fmt::Display for ConstructionRefusal {
         f.write_str("Server construction stream refused: ")?;
         match self {
             Self::RewrittenLedger => f.write_str("ledger rewrote previously admitted entries"),
+            Self::MisplacedEntry(misplaced) => misplaced.fmt(f),
             Self::UntaggedLedger => f.write_str("ledger has no world generation"),
             Self::UntaggedPiece => f.write_str("piece has no world generation"),
             Self::DuplicateLedgers => f.write_str("multiple ledgers for the selected world"),
@@ -526,7 +594,7 @@ mod tests {
         let ledger = app
             .world_mut()
             .spawn((
-                Ledger(vec![entry(Event::Wear(0), 3)]),
+                Ledger::from(vec![entry(Event::Wear(0), 3)]),
                 WorldGeneration::default(),
             ))
             .id();
@@ -579,7 +647,7 @@ mod tests {
             app.world_mut()
                 .get_mut::<Ledger>(ledger)
                 .unwrap()
-                .0
+                .entries
                 .extend([entry(Event::Crack(2), 4), bad, entry(Event::Dust(0), 9)]);
             app.update();
             assert_eq!(
@@ -602,7 +670,7 @@ mod tests {
         let first = app
             .world_mut()
             .spawn((
-                Ledger(vec![entry(Event::Wear(0), 3)]),
+                Ledger::from(vec![entry(Event::Wear(0), 3)]),
                 WorldGeneration::default(),
             ))
             .id();
@@ -610,7 +678,10 @@ mod tests {
         app.world_mut()
             .get_mut::<Ledger>(first)
             .unwrap()
-            .apply_diff(&entry(Event::Dust(4), 5))
+            .apply_diff(&Appended {
+                at: 1,
+                entry: entry(Event::Dust(4), 5),
+            })
             .unwrap();
         app.update();
         let record = app.world().resource::<Record>().clone();
@@ -621,13 +692,61 @@ mod tests {
         let generation = record.generation;
         app.world_mut().entity_mut(first).despawn();
         app.world_mut().spawn((
-            Ledger(vec![entry(Event::Crack(2), 9)]),
+            Ledger::from(vec![entry(Event::Crack(2), 9)]),
             WorldGeneration::default(),
         ));
         app.update();
         let record = app.world().resource::<Record>();
         assert_eq!(record.entries, vec![entry(Event::Crack(2), 9)]);
         assert_ne!(record.generation, generation);
+    }
+
+    /// A DIFF FOR ANOTHER POSITION CLOSES THE MATCH AND ADMITS NOTHING: a replica handed an entry
+    /// for a position other than its ledger's end refuses it and every diff after it, and the
+    /// match closes naming the cause. A replica appending it would derive constructions from an
+    /// entry the authority put elsewhere, the outcome of a delayed message past an index cycle
+    /// (`net::ledger_wire`). Fixture: an admitted one-entry ledger handed position 0 again.
+    #[test]
+    fn a_misplaced_peer_entry_is_visibly_refused() {
+        let (mut app, ledger, before) = admitted_ledger();
+        let mut replica = app.world_mut().get_mut::<Ledger>(ledger).unwrap();
+        for at in [0, 1] {
+            let appended = Appended {
+                at,
+                entry: entry(Event::Dust(4), 5),
+            };
+            assert!(replica.apply_diff(&appended).is_err(), "position {at}");
+        }
+        assert_eq!(replica.entries, before.entries, "nothing is appended");
+        app.update();
+        assert_eq!(*app.world().resource::<Record>(), before);
+        assert_refused(
+            &mut app,
+            ConstructionRefusal::MisplacedEntry(Misplaced { at: 0, held: 1 }),
+        );
+    }
+
+    /// THE AUTHORITY'S LEDGER IS ITS RECORD, EACH DIFF NAMING ITS POSITION: publication numbers
+    /// every new entry from the ledger's length, tick after tick. A diff numbered from anywhere
+    /// else fails its own append on the authority, a panic. Fixture: three entries, then two.
+    #[test]
+    fn publication_numbers_each_entry_from_the_ledgers_length() {
+        let mut app = App::new();
+        app.init_resource::<Record>()
+            .init_resource::<bevy_replicon::shared::replication::storage::ReplicationStorage>()
+            .add_systems(Update, publish_record);
+        let ledger = app.world_mut().spawn(Ledger::default()).id();
+        for batch in [0..3, 3..5] {
+            app.world_mut()
+                .resource_mut::<Record>()
+                .entries
+                .extend(batch.map(|n| entry(Event::Wear(n), u32::from(n))));
+            app.update();
+            assert_eq!(
+                app.world().get::<Ledger>(ledger).unwrap().entries,
+                app.world().resource::<Record>().entries
+            );
+        }
     }
 
     /// Authority publication cannot silently stop without its startup singleton. A mutant that
@@ -659,7 +778,11 @@ mod tests {
     #[test]
     fn a_shrinking_peer_ledger_is_visibly_refused() {
         let (mut app, ledger, before) = admitted_ledger();
-        app.world_mut().get_mut::<Ledger>(ledger).unwrap().0.clear();
+        app.world_mut()
+            .get_mut::<Ledger>(ledger)
+            .unwrap()
+            .entries
+            .clear();
         app.update();
         assert_eq!(*app.world().resource::<Record>(), before);
         assert_refused(
@@ -677,7 +800,7 @@ mod tests {
     fn a_peer_cannot_rewrite_previously_admitted_entries() {
         for event in [Event::Dust(0), Event::Dust(u16::MAX)] {
             let (mut app, ledger, before) = admitted_ledger();
-            app.world_mut().get_mut::<Ledger>(ledger).unwrap().0[0] = entry(event, 3);
+            app.world_mut().get_mut::<Ledger>(ledger).unwrap().entries[0] = entry(event, 3);
             app.update();
             assert_eq!(*app.world().resource::<Record>(), before);
             assert_refused(&mut app, ConstructionRefusal::RewrittenLedger);
@@ -975,10 +1098,10 @@ mod tests {
 
     /// A HOLE CROSSES THE WIRE WHOLE, IN A LATE JOINER'S SNAPSHOT TOO: a ledger holding hole
     /// entries, encoded as replicon encodes it (postcard) and decoded, is the same ledger; so is an
-    /// entry sent alone as a diff. One hole entry costs 20 bytes for the fixture cut (a chunk index
-    /// past 127, millimetres past ±63, a tick past four minutes at 64 Hz) and 33 at most. The
-    /// replicas' holes are these entries, and [`crate::construction::breakage::HOLES_PER_CHUNK`]
-    /// bounds the record by them.
+    /// entry sent alone as a diff, with its position. One hole entry costs 20 bytes for the fixture
+    /// cut (a chunk index past 127, millimetres past ±63, a tick past four minutes at 64 Hz) and 33
+    /// at most; its position adds 3 from 16384 entries to 2097151. The replicas' holes are these
+    /// entries, and [`crate::construction::breakage::HOLES_PER_CHUNK`] bounds the record by them.
     #[test]
     fn a_hole_crosses_the_wire_whole() {
         let typical = Entry {
@@ -1005,12 +1128,17 @@ mod tests {
             ),
             tick: u32::MAX,
         };
-        let ledger = Ledger(vec![typical, widest]);
+        let ledger = Ledger::from(vec![typical, widest]);
         let bytes = postcard::to_allocvec(&ledger).unwrap();
         assert_eq!(postcard::from_bytes::<Ledger>(&bytes).unwrap(), ledger);
-        let sent = postcard::to_allocvec(&typical).unwrap();
-        assert_eq!(postcard::from_bytes::<Entry>(&sent).unwrap(), typical);
-        assert_eq!(sent.len(), 20);
+        let diff = Appended {
+            at: 16_384,
+            entry: typical,
+        };
+        let sent = postcard::to_allocvec(&diff).unwrap();
+        assert_eq!(postcard::from_bytes::<Appended>(&sent).unwrap(), diff);
+        assert_eq!(postcard::to_allocvec(&typical).unwrap().len(), 20);
+        assert_eq!(sent.len(), 23);
         assert_eq!(postcard::to_allocvec(&widest).unwrap().len(), 33);
     }
 }

@@ -1,11 +1,12 @@
 //! Replicon round trips of the diff-replicated lists: the construction ledger (the game's
 //! environment destruction record) and the hull marks (the visual layer of the game's damage
-//! model). The ledger is state each client derives its constructions from (ADR-0037), so every
-//! client must end with the authority's list, entry for entry, however it joined or what it lost;
-//! and a client that is caught up must be sent only what it lacks, or every change resends the
-//! whole list.
+//! model). The ledger is state each client derives its constructions from (ADR-0037), so a client
+//! holds no entry the authority did not put at that position: it ends with the authority's list,
+//! entry for entry, however it joined or what it lost, or refuses the match where replicon offers
+//! an entry for another position. A client that is caught up must be sent only what it lacks, or
+//! every change resends the whole list.
 //!
-//! What guarantees order and completeness (bevy_replicon 0.44.3):
+//! What places every entry (bevy_replicon 0.44.3):
 //! - The authority numbers each diff as it records it, one index after the last
 //!   (`shared/replication/diff.rs:220`, `DiffHistory::record`), and sends a client the contiguous
 //!   run of diffs past its acknowledged cursor, or the whole value when that run is no longer
@@ -18,12 +19,18 @@
 //!   (`diff.rs:482` and `diff.rs:503`, `push_with_tick` and `drain_ready`), ignores duplicates,
 //!   and takes a whole value only when it is newer than what it applied (`diff.rs:439`,
 //!   `apply_snapshot`).
-//! - This game then copies only the new suffix of the replicated ledger into its record, refusing
-//!   a shrunk or rewritten one (`net::construction::receive_ledger`).
-//!
-//! These hold while a client's acknowledged cursor is fewer than 65536 diffs behind the
-//! authority's: the index is a wrapping `u16` (`diff/diff_index.rs:60`, `distance_after`), so a
-//! cursor that never moves for that long reads as near again, at any history length.
+//! - That index is a wrapping `u16` (`diff/diff_index.rs:60`), so it does not place a diff by
+//!   itself. A delayed message whose diffs the list has run more than 32767 past buffers them as
+//!   future diffs (`diff.rs:490`), the first payload buffered for an index keeps it (`diff.rs:492`),
+//!   and a full index cycle later it stands in for the diff the authority put there. A client
+//!   65536 diffs behind its cursor is sent the whole value, the wrapped distance being zero; one
+//!   65537 behind is sent only the last diff (`diff.rs:286`). Netcode's replay window
+//!   (`REPLAY_PROTECTION_BUFFER_SIZE`, 256 packets) bounds how late a packet can arrive, not how
+//!   many diffs the list runs past it meanwhile.
+//! - So each ledger diff names the position it lands at, and a replica refuses one for any other
+//!   position and every diff after it (`Ledger`'s `apply_diff`). This game copies only the new
+//!   suffix into its record and closes the match on a misplaced, shrunk or rewritten ledger
+//!   (`net::construction::receive_ledger`).
 //!
 //! Both endpoints here are bare replicon apps exchanging messages directly (replicon's
 //! `test_app`); each list is registered with replicon's `replicate_diff`, the rule the shipped
@@ -39,7 +46,7 @@ use bevy_replicon::prelude::*;
 use bevy_replicon::shared::backend::channels::ServerChannel;
 use bevy_replicon::test_app::ServerTestAppExt;
 
-use super::construction::Ledger;
+use super::construction::{Appended, Ledger};
 use crate::construction::breakage::{Entry, Event};
 use crate::hull_marks::HullMarks;
 
@@ -59,12 +66,15 @@ fn link<C: Diffable>() -> (App, App) {
     (server, client)
 }
 
-/// Fixture entries, told apart by `n`.
-fn entry(n: u32) -> Entry {
-    Entry {
-        construction: 1,
-        event: Event::Wear((n % 1024) as u16),
-        tick: n,
+/// The fixture entry for ledger position `n`, told apart by its tick.
+fn entry(n: u32) -> Appended {
+    Appended {
+        at: n,
+        entry: Entry {
+            construction: 1,
+            event: Event::Wear((n % 1024) as u16),
+            tick: n,
+        },
     }
 }
 
@@ -95,7 +105,18 @@ fn lose(server: &mut App, client: &mut App) {
     client.update();
 }
 
-/// The bytes of this tick's mutation messages, taken from the authority before delivery.
+/// The bytes of this tick's mutation messages, left queued for delivery.
+fn mutation_bytes(server: &App) -> usize {
+    server
+        .world()
+        .resource::<ServerMessages>()
+        .iter_sent()
+        .filter(|(_, channel, _)| *channel == usize::from(ServerChannel::Mutations))
+        .map(|(_, _, message)| message.len())
+        .sum()
+}
+
+/// This tick's mutation messages, taken from the authority before delivery.
 fn take_mutations(server: &mut App) -> Vec<Bytes> {
     let mut taken = Vec::new();
     server
@@ -145,10 +166,7 @@ fn sent_for_one_more<C: Diffable + Default + Clone + PartialEq + Debug>(
     );
     append::<C>(&mut server, list, [diff(held_diffs)]);
     server.update();
-    let sent = take_mutations(&mut server)
-        .iter()
-        .map(|message| message.len())
-        .sum();
+    let sent = mutation_bytes(&server);
     let whole = postcard::to_allocvec(&held::<C>(&mut server))
         .expect("the list serializes")
         .len();
@@ -226,12 +244,12 @@ fn a_client_that_misses_packets_ends_with_the_authoritys_ledger() {
         append::<Ledger>(
             &mut server,
             ledger,
-            (0..7).map(|n| entry(100 + tick * 7 + n)),
+            (0..7).map(|n| entry(20 + tick * 7 + n)),
         );
         lose(&mut server, &mut client);
     }
     assert_eq!(
-        held::<Ledger>(&mut client).0.len(),
+        held::<Ledger>(&mut client).entries.len(),
         20,
         "nothing lost arrived"
     );
@@ -242,12 +260,12 @@ fn a_client_that_misses_packets_ends_with_the_authoritys_ledger() {
         "the next delivered tick carries every lost entry, in order",
     );
 
-    append::<Ledger>(&mut server, ledger, [entry(500)]);
+    append::<Ledger>(&mut server, ledger, [entry(90)]);
     server.update();
     let late = take_mutations(&mut server);
     server.exchange_with_client(&mut client);
     client.update();
-    append::<Ledger>(&mut server, ledger, [entry(501)]);
+    append::<Ledger>(&mut server, ledger, [entry(91)]);
     deliver(&mut server, &mut client);
     assert_same::<Ledger>(
         &mut server,
@@ -260,6 +278,60 @@ fn a_client_that_misses_packets_ends_with_the_authoritys_ledger() {
     }
     client.update();
     assert_same::<Ledger>(&mut server, &mut client, "a late message changes nothing");
+}
+
+/// A DELAYED PACKET PLACES NO OLD ENTRY ONCE THE INDEX HAS WRAPPED: the original message of an
+/// entry the client already took through a resend arrives after the ledger has run past half the
+/// wrapping index range, so replicon buffers it as a future diff and, a full index cycle later,
+/// offers it in place of the entry the authority put there. The replica refuses it and holds the
+/// authority's entries up to that slot, none after. Taking it left the old entry at that slot
+/// with the length and the prefix unchanged, which the record's checks cannot see. Fixture: 4096
+/// entries a tick, the delayed message delivered at 40960 entries, the ledger run to 69632.
+#[test]
+fn a_delayed_packet_after_the_index_wraps_places_no_old_entry() {
+    let (mut server, mut client) = link::<Ledger>();
+    server.connect_client(&mut client);
+    let ledger = server
+        .world_mut()
+        .spawn((Replicated, Ledger::default()))
+        .id();
+    deliver(&mut server, &mut client);
+    append::<Ledger>(&mut server, ledger, [entry(0)]);
+    server.update();
+    let delayed = take_mutations(&mut server);
+    server.exchange_with_client(&mut client);
+    client.update();
+    deliver(&mut server, &mut client);
+    assert_same::<Ledger>(&mut server, &mut client, "the resend carries the entry");
+
+    let batch = 4096;
+    let mut appended = 1;
+    let mut run_to = |to: u32, server: &mut App, client: &mut App| {
+        while appended < to {
+            append::<Ledger>(server, ledger, (appended..appended + batch).map(entry));
+            appended += batch;
+            deliver(server, client);
+        }
+    };
+    run_to(10 * batch, &mut server, &mut client);
+    let mut messages = client.world_mut().resource_mut::<ClientMessages>();
+    for message in delayed {
+        messages.insert_received(ServerChannel::Mutations, message);
+    }
+    client.update();
+    run_to(17 * batch, &mut server, &mut client);
+    deliver(&mut server, &mut client);
+    let authority = held::<Ledger>(&mut server);
+    let replica = held::<Ledger>(&mut client);
+    assert!(
+        replica.misplaced().is_some(),
+        "the replica refused the stale entry"
+    );
+    assert_eq!(
+        replica.entries[..],
+        authority.entries[..1 << 16],
+        "the authority's entries up to the stale entry's slot, one index cycle, and none after"
+    );
 }
 
 /// A CLIENT FURTHER BEHIND THAN THE HISTORY ENDS WITH THE AUTHORITY'S LEDGER, FROM ONE WHOLE COPY:
@@ -284,18 +356,15 @@ fn a_client_further_behind_than_the_history_gets_one_whole_copy() {
         lose(&mut server, &mut client);
         from = to;
     }
-    assert_eq!(held::<Ledger>(&mut server).0.len(), 10 + behind as usize);
+    assert_eq!(
+        held::<Ledger>(&mut server).entries.len(),
+        10 + behind as usize
+    );
     server.update();
     let whole = postcard::to_allocvec(&held::<Ledger>(&mut server))
         .expect("the ledger serializes")
         .len();
-    let sent: usize = server
-        .world()
-        .resource::<ServerMessages>()
-        .iter_sent()
-        .filter(|(_, channel, _)| *channel == usize::from(ServerChannel::Mutations))
-        .map(|(_, _, message)| message.len())
-        .sum();
+    let sent = mutation_bytes(&server);
     assert!(
         sent >= whole,
         "the whole ledger goes once: {sent} B against {whole} B"
@@ -308,9 +377,12 @@ fn a_client_further_behind_than_the_history_gets_one_whole_copy() {
     let next = 10 + behind;
     append::<Ledger>(&mut server, ledger, [entry(next)]);
     server.update();
-    let sent: usize = take_mutations(&mut server)
-        .iter()
-        .map(|message| message.len())
-        .sum();
-    assert!(sent < whole, "then diffs again: {sent} B against {whole} B");
+    let sent = mutation_bytes(&server);
+    assert!(
+        0 < sent && sent < whole,
+        "then diffs again: {sent} B against {whole} B"
+    );
+    server.exchange_with_client(&mut client);
+    client.update();
+    assert_same::<Ledger>(&mut server, &mut client, "and the diff arrives");
 }
