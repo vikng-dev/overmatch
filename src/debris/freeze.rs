@@ -70,12 +70,12 @@
 //! run's history fixes; a hash set's order follows the entities' bits, which can differ between
 //! runs of the same match.
 //!
-//! COST, OPEN. The reach casts one spatial query for each body it evaluates (`Reach::of`): each
-//! awake body that is not static, and each piece the thaw frees. The freeze and the thaw evaluate
-//! it serially; whether splitting that evaluation over the compute pool pays on the hosted
-//! allocation is unmeasured. The `Changed<…>` filter of `super::wake_on_static_moved` walks every
-//! attached collider each step, about 2 µs per 1,000 colliders on the perf profile (MEASURED), and
-//! stays unindexed.
+//! COST, OPEN. The reach casts at most one spatial query per body it evaluates, and exactly one
+//! when the body has a solid collider (`Reach::of`); it evaluates each awake body that is not
+//! static, and each piece the thaw frees. The freeze and the thaw evaluate it serially; whether
+//! splitting that evaluation over the compute pool pays on the hosted allocation is unmeasured.
+//! The `Changed<…>` filter of `super::wake_on_static_moved` walks every attached collider each
+//! step, about 2 µs per 1,000 colliders on the perf profile (MEASURED), and stays unindexed.
 //!
 //! ADR-0014 EXCEPTION (owner ruling 2026-11-10: settled rubble may rejoin the fixed structure where
 //! that is faster and simpler). A piece's body type and [`Frozen`] change after spawn. Both are
@@ -237,8 +237,8 @@ pub(crate) fn sim_plugin(app: &mut App) {
         .add_observer(collider_left)
         .add_observer(collider_disabled)
         .add_observer(collider_sensed)
-        // Serial, both (module doc, cost): they visit the awake movers, one spatial query each, and
-        // the changes and pushes queued since the step.
+        // Serial, both (module doc, cost): they visit the awake movers, at most one spatial query
+        // each, and the changes and pushes queued since the step.
         .add_systems(
             PhysicsSchedule,
             thaw.after(super::wake_on_static_moved)
@@ -1095,9 +1095,15 @@ mod tests {
             [-1.0, 0.0, 1.0].map(|x| piece(&mut app, Vec3::new(x, SIDE / 2.0, 0.0)));
         let pieces = [under_left, between, under_right];
         until_frozen(&mut app, &pieces);
-        // Fixture: a 3 cm gap over the pieces' tops, past Avian's 5 mm contact tolerance and
-        // inside one step's travel at 4 m/s.
-        let at = Vec3::Y * (SIDE + 0.03 + SIDE / 2.0);
+        // A gap over the pieces' tops of twice Avian's contact tolerance, which a body at rest does
+        // not reach, and a speed that travels twice the gap in one step.
+        let world = app.world();
+        let tolerance = world.resource::<NarrowPhaseConfig>().contact_tolerance
+            * world.resource::<PhysicsLengthUnit>().0;
+        let dt = world.resource::<Time<Fixed>>().timestep().as_secs_f32();
+        let gap = 2.0 * tolerance;
+        let speed = 2.0 * gap / dt;
+        let at = Vec3::Y * (SIDE + gap + SIDE / 2.0);
         let body = app
             .world_mut()
             .spawn((
@@ -1125,7 +1131,7 @@ mod tests {
                 "a body at rest over it reaches nothing"
             );
         }
-        app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = Vec3::NEG_Y * 4.0;
+        app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = Vec3::NEG_Y * speed;
         app.update();
         assert!(
             !is_frozen(&app, under_left),

@@ -155,7 +155,8 @@ labelled!(
         // Sleeping islands the freeze found touching a frozen one, and left for its thaw.
         FreezeMet = "freeze_met",
         // Entities the freeze and the thaw visit; the bodies whose reach they evaluate, the
-        // spatial queries it casts, and those that reach a body no earlier one in that system had.
+        // spatial queries it casts (at most one per body, and exactly one when the body has a
+        // solid collider), and those that reach a body no earlier one in that system had.
         FreezeVisits = "freeze_visits",
         ReachMovers = "reach_movers",
         ReachQueries = "reach_queries",
