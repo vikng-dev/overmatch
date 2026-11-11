@@ -910,6 +910,8 @@ pub struct TransmissionReport {
     pub reverse: bool,
     pub steer_step: u8,
     pub shifting: bool,
+    /// This tick asked the engaged ladder for drive: a propulsive pedal past the dead band.
+    pub pulling: bool,
     /// Power-conservation scale applied to the drive/steer forces this tick (1 = unconstrained).
     pub power_scale: f32,
     /// Combustion power capacity at the pre-tick operating point (W). The work gate also
@@ -1129,7 +1131,10 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// One Driver decision on what it felt, at the requested pedal `command`. Speed `v` and
 /// resistance `R` read along the engaged ladder, `v` floored at rest. A gear carries `R` plus the
 /// turn's share in its own detent radius, `s·κ·ΔR` (the steering tie's load on the mean axis,
-/// [`BeltTick::tied_mean`]), and *holds* when its spare over that load exceeds M. Each gear is
+/// [`BeltTick::tied_mean`]), and *holds* when its spare over that load exceeds M. At a stall `R`
+/// is at least the largest push that failed to move the hull ([`super::sense::Sensed::stall`]): a
+/// gear qualifies there only by pushing harder, the free choice at rest included, and in first
+/// gear with the bound unbeaten the Driver stays. Each gear is
 /// priced engaged as delivery engages it ([`engagement`]), in the state it would be in. A candidate
 /// pays the cut and lands at the hull's `v − R·t_cut/M_c`, its clutch closing from out, so below
 /// its launch speed it slips at the launch rpm. Priced as lugs instead, a candidate at a crawl
@@ -1173,7 +1178,11 @@ fn choose_gear(
     };
     let top = ladder.len() as u8;
     let speed = (dir * sensed.speed).max(0.0);
-    let resistance = dir * sensed.resistance;
+    // A stalled hull meets at least the push that failed to move it.
+    let resistance = match sensed.stall {
+        Some(stall) if stall.dir == dir => (dir * sensed.resistance).max(stall.push),
+        _ => dir * sensed.resistance,
+    };
     let margin = force_margin(tp);
     // A gear's spare with its shaft at `at` (m/s along the ladder), engaged from `prior`.
     let spare = |gear: u8, at: f32, prior: ClutchState| {
@@ -2359,6 +2368,7 @@ pub(crate) fn step(
         reverse: st.reverse,
         steer_step: st.steer_step,
         shifting,
+        pulling: propulsive >= DEAD,
         power_scale,
         power_available: p_avail,
         #[cfg(feature = "bitprobe")]

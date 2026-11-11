@@ -22,6 +22,8 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 
+use super::transmission::{PARK_ENGAGE_SPEED, TransmissionReport};
+
 /// One driven tick of the ledger: the belts' traction on the hull along its heading through it,
 /// `[left, right]` (N), its patches' grip budget (N; `None` where a solver contact pushed), and
 /// the hull's gain in speed along its heading over it (m/s).
@@ -33,13 +35,25 @@ struct Sample {
 }
 
 /// This tick's opened sample: the hull's start velocity (m/s, world) and heading, the
-/// sampled-contact push along that heading and those contacts' grip budget (N).
+/// sampled-contact push along that heading and those contacts' grip budget (N), and the drive
+/// direction this tick's step pulled along (±1 along the heading; `None` when it asked no pull).
 #[derive(Clone, Copy, Debug)]
 struct Open {
     velocity: Vec3,
     heading: Vec3,
     push: [f32; 2],
     grip: f32,
+    pull: Option<f32>,
+}
+
+/// What a stalled hull's force balance bounds: at rest under a push that did not move it, the
+/// world returned at least that push, and how much more it would return is unknown.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stall {
+    /// The drive direction pulled along, ±1 along the heading.
+    pub dir: f32,
+    /// The largest push along `dir` that has failed to move the hull (N).
+    pub push: f32,
 }
 
 /// The Driver's reading for one tick.
@@ -57,6 +71,8 @@ pub struct Sensed {
     /// `None` when a solver contact pushed within the window: the solver's friction is Coulomb
     /// too, but its coefficient is not read back, so its grip limit is unmeasured.
     pub grip: Option<f32>,
+    /// The bound a stall gives: `None` once the hull moves or no pull is asked.
+    pub stall: Option<Stall>,
 }
 
 /// The belts' contacts on the hull at one driving tick (N, world frame).
@@ -79,6 +95,7 @@ pub struct DriverSense {
     samples: VecDeque<Sample>,
     /// The solver's push for this tick is read on the next one, so the sample closes there.
     open: Option<Open>,
+    stall: Option<Stall>,
     /// The reading this tick's choice used: telemetry and probes read it.
     pub(crate) reading: Option<Sensed>,
 }
@@ -91,6 +108,7 @@ impl DriverSense {
             window,
             samples: VecDeque::with_capacity(window),
             open: None,
+            stall: None,
             reading: None,
         }
     }
@@ -116,20 +134,34 @@ impl DriverSense {
                 *push += hard.map_or(0.0, |hard| hard.dot(open.heading));
             }
             let grip = hard.iter().all(Option::is_none).then_some(open.grip);
+            let gain = (velocity - open.velocity).dot(open.heading);
+            let at_rest = |velocity: Vec3| velocity.dot(open.heading).abs() < PARK_ENGAGE_SPEED;
+            if !at_rest(velocity) {
+                self.stall = None; // The hull moves: no push has failed to move it.
+            } else if let Some(dir) = open.pull
+                && at_rest(open.velocity)
+                && dir * gain <= 0.0
+            {
+                let failed = dir * (push[0] + push[1]);
+                self.stall = Some(Stall {
+                    dir,
+                    push: match self.stall {
+                        Some(stall) if stall.dir == dir => stall.push.max(failed),
+                        _ => failed,
+                    },
+                });
+            }
             if self.samples.len() == self.window {
                 self.samples.pop_front();
             }
-            self.samples.push_back(Sample {
-                push,
-                grip,
-                gain: (velocity - open.velocity).dot(open.heading),
-            });
+            self.samples.push_back(Sample { push, grip, gain });
         }
         self.open = Some(Open {
             velocity,
             heading,
             push: soft.map(|soft| soft.dot(heading)),
             grip,
+            pull: None,
         });
         self.reading = (!self.samples.is_empty()).then(|| {
             assert!(
@@ -146,6 +178,7 @@ impl DriverSense {
                 resistance: (left + right) / count - mass * gain / (count * dt),
                 push_difference: (left - right) / count,
                 grip: grip.map(|grip| grip / count),
+                stall: self.stall,
             }
         });
         self.reading
@@ -155,6 +188,21 @@ impl DriverSense {
     /// felt and its sample is dropped.
     pub(crate) fn cut(&mut self) {
         self.open = None;
+    }
+
+    /// This tick's step as delivery ran it: a paid cut is not felt, and a step that asked no pull
+    /// withdraws the push a stall's bound was read from.
+    pub(crate) fn drove(&mut self, report: &TransmissionReport) {
+        let dir = if report.reverse { -1.0 } else { 1.0 };
+        let pull = report.pulling.then_some(dir);
+        if self.stall.is_some_and(|stall| pull != Some(stall.dir)) {
+            self.stall = None;
+        }
+        if report.shifting {
+            self.cut();
+        } else if let Some(open) = &mut self.open {
+            open.pull = pull;
+        }
     }
 }
 
@@ -231,6 +279,46 @@ mod tests {
                 near(read, want),
                 "obstacle, tick {tick}: read {read}, want {want}"
             );
+        }
+    }
+
+    /// A stalled hull bounds what it meets by the largest push that failed to move it, only while
+    /// it stays stalled under that pull: the Driver's choice at a stall relies on the bound, and on
+    /// its dropping the moment the hull moves or the pull is withdrawn. Fixture: a hull held at rest
+    /// under a push of 30, 60 then 15 kN, then moving at 1 m/s, stalled again, and released.
+    #[test]
+    fn a_stall_bounds_resistance_by_its_largest_failed_push() {
+        let forward = Vec3::NEG_Z;
+        let mut sense = DriverSense::for_cut(CUT);
+        let pulling = TransmissionReport {
+            pulling: true,
+            ..Default::default()
+        };
+        let released = TransmissionReport::default();
+        let mut feel = |speed: f32, push: f32, report: &TransmissionReport| {
+            let contacts = Contacts {
+                soft: [forward * push * 0.5; 2],
+                grip: 0.0,
+                hard: [None; 2],
+            };
+            let reading = sense.tick(forward * speed, forward, MASS, contacts, DT);
+            sense.drove(report);
+            reading
+                .and_then(|reading| reading.stall)
+                .map(|stall| stall.push)
+        };
+        let script = [
+            (0.0, 30_000.0, &pulling, None),
+            (0.0, 60_000.0, &pulling, Some(30_000.0)),
+            (0.0, 15_000.0, &pulling, Some(60_000.0)),
+            (0.0, 15_000.0, &pulling, Some(60_000.0)),
+            (1.0, 15_000.0, &pulling, None),
+            (0.0, 15_000.0, &pulling, None),
+            (0.0, 15_000.0, &released, Some(15_000.0)),
+            (0.0, 15_000.0, &pulling, None),
+        ];
+        for (tick, (speed, push, report, want)) in script.into_iter().enumerate() {
+            assert_eq!(feel(speed, push, report), want, "tick {tick}");
         }
     }
 

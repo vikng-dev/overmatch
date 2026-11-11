@@ -860,9 +860,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             supply,
         },
     );
-    if tr.shifting {
-        rig.sense.cut();
-    }
+    rig.sense.drove(&tr);
     for (si, report) in reports.iter().enumerate() {
         let pre_speed = rig.drive.sides[si].speed;
         rig.drive.sides[si] = TrackDriveSide {

@@ -273,9 +273,7 @@ pub(super) fn apply_belt_support_field(
             dt,
         },
     );
-    if tr.shifting {
-        trans_state.1.cut();
-    }
+    trans_state.1.drove(&tr);
     telemetry.0 = Some(tr);
 
     // Phase 3 — apply forces in per-side report order, commit the state.

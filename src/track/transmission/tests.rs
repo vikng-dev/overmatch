@@ -204,6 +204,7 @@ fn felt_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
         resistance: 0.0,
         push_difference: 0.0,
         grip: Some(f32::INFINITY),
+        stall: None,
     });
     inp
 }
@@ -1107,6 +1108,7 @@ fn stall_guard_holds_crank_under_grade_lug() {
             resistance: reactions[0] + reactions[1],
             push_difference: reactions[0] - reactions[1],
             grip: Some(f32::INFINITY),
+            stall: None,
         });
         #[cfg(feature = "bitprobe")]
         let (roundoff, mut settled) = (
@@ -2176,6 +2178,7 @@ fn driver_input(speed: f32, load: f32, command: f32) -> TransmissionInput {
         resistance: load,
         push_difference: 0.0,
         grip: Some(f32::INFINITY),
+        stall: None,
     });
     inp
 }
@@ -2564,9 +2567,7 @@ fn a_stalled_full_clutch_push_steps_down() {
                 inp.dt,
             );
             let report = step(&fp, &tp, &mut state, &inp);
-            if report.shifting {
-                sense.cut();
-            }
+            sense.drove(&report);
             pushed = report.forces;
             if gears.last() != Some(&state.gear) {
                 assert!(
