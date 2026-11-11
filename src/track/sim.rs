@@ -706,6 +706,36 @@ pub(crate) fn belt_reactions(
     )
 }
 
+/// The Driver feels the tick ([`super::sense`]), then each belt takes on its solver contact's
+/// belt reaction. The ledger reads each contact's traction on the hull along the heading; the belt
+/// reaction is the drive's load along each contact's travel, partly vertical around a wrap.
+pub(crate) fn feel_tick(
+    sense: &mut super::sense::DriverSense,
+    reports: &mut [SideReport; 2],
+    hard: [Option<super::stop_contacts::HardReaction>; 2],
+    hull: &HullBody,
+    affine: Affine3A,
+    dt: f32,
+) -> Option<super::sense::Sensed> {
+    let forward = affine.transform_vector3(Vec3::NEG_Z);
+    let sensed = sense.tick(
+        hull.linear.dot(forward),
+        forward,
+        1.0 / hull.inverse_mass,
+        reports
+            .each_ref()
+            .map(|report| report.contacts.iter().map(|c| c.traction).sum()),
+        hard.map(|side| side.map(|hard| hard.friction)),
+        dt,
+    );
+    for (report, hard) in reports.iter_mut().zip(hard) {
+        if let Some(hard) = hard {
+            report.belt_reaction += hard.belt;
+        }
+    }
+    sensed
+}
+
 /// One tank's mutable belt/drivetrain state for [`belt_tick`] — the caller owns the storage
 /// (ECS components for the live sim, plain fields for the recoil microsim).
 pub(crate) struct BeltRig<'a> {
@@ -715,9 +745,9 @@ pub(crate) struct BeltRig<'a> {
     pub elements: &'a mut TrackGripElements,
     pub transmission: &'a mut TransmissionState,
     pub sense: &'a mut super::sense::DriverSense,
-    /// Last physics step's hard-contact reaction, N along each belt's drive direction;
-    /// None means that side had no solver contact, preserving the spring-only tick.
-    pub hard_reactions: [Option<f32>; 2],
+    /// Last physics step's hard-contact reaction; None means that side had no solver contact,
+    /// preserving the spring-only tick.
+    pub hard_reactions: [Option<super::stop_contacts::HardReaction>; 2],
 }
 
 /// ONE tank's complete drivetrain tick: command slew, both contact patches at their pre-tick
@@ -800,19 +830,14 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
         );
         reports[si] = report;
     }
-    let forward = affine.transform_vector3(Vec3::NEG_Z);
-    let sensed = rig.sense.tick(
-        hull.linear.dot(forward),
-        1.0 / hull.inverse_mass,
-        reports.each_ref().map(|report| report.belt_reaction),
+    let sensed = feel_tick(
+        rig.sense,
+        &mut reports,
         rig.hard_reactions,
+        &hull,
+        affine,
         dt,
     );
-    for (report, hard) in reports.iter_mut().zip(rig.hard_reactions) {
-        if let Some(reaction) = hard {
-            report.belt_reaction += reaction;
-        }
-    }
     let (reactions, reaction_slopes) =
         belt_reactions(&reports, &hull, affine.translation.into(), dt);
     let tr = transmission::step(

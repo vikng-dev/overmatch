@@ -195,13 +195,21 @@ pub(crate) fn by_owner(
     owners
 }
 
+/// One side's solver contact over the last physics step (N): the friction it delivered to the
+/// hull, in the world frame, and that friction's reaction along the belt's travel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HardReaction {
+    pub(crate) belt: f32,
+    pub(crate) friction: Vec3,
+}
+
 pub(crate) fn reactions(
     points: &[BeltImpulse],
     dt: f32,
     position: Vec3,
     rotation: Quat,
     faces: &Query<(&BeltFace, &ColliderOf)>,
-) -> [Option<f32>; 2] {
+) -> [Option<HardReaction>; 2] {
     let mut reactions = [None; 2];
     for point in points {
         if point.impulse == Vec3::ZERO {
@@ -217,7 +225,12 @@ pub(crate) fn reactions(
                 rotation.inverse() * (point.point - position),
                 rotation.inverse() * point.outward,
             );
-        *reactions[face.side.index()].get_or_insert(0.0) -= friction.dot(direction) / dt;
+        let reaction = reactions[face.side.index()].get_or_insert(HardReaction {
+            belt: 0.0,
+            friction: Vec3::ZERO,
+        });
+        reaction.belt -= friction.dot(direction) / dt;
+        reaction.friction += friction / dt;
     }
     reactions
 }
@@ -370,8 +383,9 @@ mod tests {
             .unwrap();
     }
 
-    /// The transmission owes only tangential momentum on its own belt. Reversing Avian's
-    /// canonical pair orientation must preserve the reaction and exclude the normal impulse.
+    /// The transmission owes only tangential momentum on its own belt, and the Driver's ledger
+    /// feels that friction as the hull received it. Reversing Avian's canonical pair orientation
+    /// must preserve both and exclude the normal impulse.
     #[test]
     fn solver_reaction_is_signed_friction_per_step_on_the_owning_side() {
         for reverse in [false, true] {
@@ -419,7 +433,12 @@ mod tests {
                         Quat::IDENTITY,
                         &faces,
                     );
-                    assert_eq!(reaction, [None, Some(12.0)]); // DERIVED 3 N s / 0.25 s.
+                    // DERIVED 3 N s / 0.25 s, driving the hull forward (-Z).
+                    let right = HardReaction {
+                        belt: 12.0,
+                        friction: Vec3::new(0.0, 0.0, -12.0),
+                    };
+                    assert_eq!(reaction, [None, Some(right)]);
                 })
                 .unwrap();
         }

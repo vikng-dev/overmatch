@@ -2,9 +2,9 @@
 //! and the resistance it meets, the resistance averaged over one shift cut of driven ticks. Speeds
 //! are m/s and forces N, along the hull's heading with forward positive.
 //!
-//! Resistance closes the hull's force ledger from its own side: the belts' push on the hull, less
-//! hull mass times the hull's gain in speed. Whatever else acts along the heading (grade, rolling,
-//! an obstacle's reaction, a tow, recoil) is in it, so no load model is needed; a gear change does
+//! Resistance closes the hull's force ledger from its own side: the belts' traction on the hull
+//! along its heading, less hull mass times the hull's gain in speed. Whatever else acts along the
+//! heading (grade, rolling, a contact's support, an obstacle's reaction, a tow, recoil) is in it, so no load model is needed; a gear change does
 //! not move it, because the push the hull receives is what the ground returned, whatever gear sent
 //! it. The window is one shift cut because the landing forecast needs exactly the speed the world
 //! takes from the hull in one cut, and a single-tick impulse must not decide alone.
@@ -17,8 +17,8 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 
-/// One driven tick of the ledger: the belts' push on the hull through it, `[left, right]` (N),
-/// and the hull's gain in speed along its heading over it (m/s).
+/// One driven tick of the ledger: the belts' traction on the hull along its heading through it,
+/// `[left, right]` (N), and the hull's gain in speed along its heading over it (m/s).
 #[derive(Clone, Copy, Debug)]
 struct Sample {
     push: [f32; 2],
@@ -68,23 +68,27 @@ impl DriverSense {
         }
     }
 
-    /// One driving tick. `speed` is the hull's speed along its heading now, `mass` its mass (kg),
-    /// `soft` the push this tick's sampled contacts apply and `hard` the solver contact push of the
-    /// physics step that just ran (N, `None` where a side had no solver contact). The step that
-    /// just ran carried last tick's sampled push and this `hard` push from last tick's speed to
-    /// `speed`, so that sample closes here.
+    /// One driving tick. `speed` is the hull's speed along its heading `forward` now, `mass` its
+    /// mass (kg), `soft` the traction this tick's sampled contacts apply to the hull and `hard` the
+    /// solver contacts' friction on it over the physics step that just ran (N, world frame, `None`
+    /// where a side had no solver contact). Each counts as push only along the heading: a
+    /// contact's support, and its traction's other components, are what the hull meets. The step
+    /// that just ran carried last tick's sampled push and this `hard` push from last tick's speed
+    /// to `speed`, so that sample closes here.
     pub(crate) fn tick(
         &mut self,
         speed: f32,
+        forward: Vec3,
         mass: f32,
-        soft: [f32; 2],
-        hard: [Option<f32>; 2],
+        soft: [Vec3; 2],
+        hard: [Option<Vec3>; 2],
         dt: f32,
     ) -> Option<Sensed> {
         if let Some(open) = self.open.take() {
             let mut push = open.push;
             for (push, hard) in push.iter_mut().zip(hard) {
-                *push += hard.unwrap_or(0.0); // No solver contact pushed that side.
+                // No solver contact pushed a side without one.
+                *push += hard.map_or(0.0, |hard| hard.dot(forward));
             }
             if self.samples.len() == self.window {
                 self.samples.pop_front();
@@ -94,7 +98,10 @@ impl DriverSense {
                 gain: speed - open.speed,
             });
         }
-        self.open = Some(Open { speed, push: soft });
+        self.open = Some(Open {
+            speed,
+            push: soft.map(|soft| soft.dot(forward)),
+        });
         self.reading = (!self.samples.is_empty()).then(|| {
             assert!(
                 mass.is_finite() && mass > 0.0 && dt > 0.0,
@@ -146,15 +153,17 @@ mod tests {
     fn readings(resist: impl Fn(f32) -> f32) -> Vec<Option<Sensed>> {
         let mut sense = DriverSense::for_cut(CUT);
         let (mut speed, mut reported) = (3.0_f32, [None; 2]);
+        let forward = Vec3::NEG_Z;
         (0..200)
             .map(|tick| {
                 let push = push(tick);
-                let reading = sense.tick(speed, MASS, [push * 0.25, push * 0.5], reported, DT);
+                let soft = [push * 0.25, push * 0.5].map(|push| forward * push);
+                let reading = sense.tick(speed, forward, MASS, soft, reported, DT);
                 if push == 0.0 {
                     sense.cut();
                 }
                 speed += (push - resist(push)) / MASS * DT;
-                reported = [Some(push * 0.25), None];
+                reported = [Some(forward * push * 0.25), None];
                 reading
             })
             .collect()

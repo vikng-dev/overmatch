@@ -244,19 +244,14 @@ pub(super) fn apply_belt_support_field(
         hull_rot.0,
         &faces,
     );
-    let forward = affine.transform_vector3(Vec3::NEG_Z);
-    let sensed = trans_state.1.tick(
-        hull_body.linear.dot(forward),
-        mass.value(),
-        reports.each_ref().map(|report| report.belt_reaction),
+    let sensed = crate::track::sim::feel_tick(
+        &mut trans_state.1,
+        &mut reports,
         hard_reactions,
+        &hull_body,
+        affine,
         dt,
     );
-    for (si, report) in reports.iter_mut().enumerate() {
-        if let Some(reaction) = hard_reactions[si] {
-            report.belt_reaction += reaction;
-        }
-    }
     let (reactions, reaction_slopes) =
         crate::track::sim::belt_reactions(&reports, &hull_body, hull_pos.0, dt);
 

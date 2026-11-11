@@ -2398,7 +2398,16 @@ fn a_stalled_full_clutch_push_steps_down() {
         // Fixture: ten seconds for every step down.
         for _ in 0..64 * 10 {
             let mut inp = input(1.0, 0.0, [0.0; 2], pushed);
-            inp.sensed = sense.tick(0.0, mass, [0.0; 2], pushed.map(Some), inp.dt);
+            let forward = bevy::math::Vec3::NEG_Z;
+            let hard = pushed.map(|push| Some(forward * push));
+            inp.sensed = sense.tick(
+                0.0,
+                forward,
+                mass,
+                [bevy::math::Vec3::ZERO; 2],
+                hard,
+                inp.dt,
+            );
             let report = step(&fp, &tp, &mut state, &inp);
             if report.shifting {
                 sense.cut();

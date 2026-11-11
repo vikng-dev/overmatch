@@ -400,8 +400,8 @@ fn sensed_resistance_and_landing_gaps_on_declared_grounds() {
     }
 }
 
-/// The ledger closes on an incline: a rolling hull feels `W sin θ + c_rr W cos θ` whether it
-/// gains or loses speed, the gear law's one reading of the world. Parked, the contact law's
+/// The ledger closes on an incline: a rolling hull feels `W sin θ + c_rr W cos θ` along its
+/// heading whether it gains or loses speed, the gear law's one reading of the world. Parked, the contact law's
 /// rolling fade leaves the grade alone. Fixture: uninterrupted 10/20/30 degree ramp planes,
 /// parked then a rolling entry. Extending the faces isolates their support from the flat slab
 /// and short course crests.
@@ -556,22 +556,32 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
         let speed = rpm * crate::track::transmission::RPM_TO_RAD * tp.sprocket_radius
             / tp.gears_fwd[usize::from(gear - 1)];
         place(&mut app, tank, position, rotation, speed, gear);
+        // The ledger reads along the hull's heading, which pitches `δ` off the plane under drive:
+        // DERIVED, grade and support together give `W sin θ cos δ` there and rolling `cos δ` of it.
+        let uphill = rotation * Vec3::NEG_Z;
         let mut rolling_entry = Vec::new();
         for _ in 0..512 {
             drive_tick(&mut app, tank, 1.0, 0.0);
             measurements.tick(&app, tank);
             let p = probe(&app, tank);
             if p.sensed && !p.shifting {
-                rolling_entry.push(p.sensed_resistance_n);
+                let heading = app
+                    .world()
+                    .get::<avian3d::prelude::Rotation>(tank)
+                    .unwrap()
+                    .0
+                    * Vec3::NEG_Z;
+                rolling_entry.push(p.sensed_resistance_n - expected * uphill.dot(heading));
             }
         }
         rolling_entry.sort_by(f32::total_cmp);
         let median = rolling_entry[rolling_entry.len() / 2];
-        // Resolution: the ride's ripple on the median coupled reading, MEASURED within 10 N of
+        println!("MEASURED rolling entry {degrees} degrees: median_offset_n={median}");
+        // Resolution: the ride's ripple on the median coupled reading, MEASURED within 1 N of
         // the derived load at 559 kN on each plane.
         assert!(
-            (median - expected).abs() < weight * 1e-4,
-            "a rolling hull must feel its incline whatever its acceleration: {median} vs {expected}"
+            median.abs() < weight * 1e-4,
+            "a rolling hull must feel its incline whatever its acceleration: off by {median} of {expected}"
         );
         measurements.report(
             &format!("course {degrees} degrees"),
