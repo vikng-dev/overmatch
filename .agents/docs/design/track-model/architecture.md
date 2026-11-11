@@ -507,9 +507,10 @@ nothing engages no gear from rest. Nothing modelled enters `R`: on a rolling inc
 rolling fade leaves the grade alone.
 
 `transmission::choose_gear` prices a gear's pull with `free_driver_force` at the crank speed that
-gear has at hull speed. Below its launch speed a gear is priced as a launch slipping at the launch
-rpm. A coupled gear adds reflected crank inertia, and the clutch caps the pull. A gear *holds*
-when its pull, less `R` and its detent's share of the belt push difference, exceeds M. The clauses:
+gear has at hull speed, engaged as delivery engages it (`engagement`): a candidate closes after its
+cut, so below its launch speed it slips at the launch rpm, and the current gear keeps its regime. A
+coupled gear adds reflected crank inertia, and the clutch caps the pull. A gear *holds* when its
+pull, less `R` and its detent's share of the belt push difference, exceeds M. The clauses:
 
 1. Clutch out at hull rest: the highest launch gear that holds, else first. Free.
 2. The current gear does not hold, judged at no more than its torque-peak speed: the highest

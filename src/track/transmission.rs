@@ -697,8 +697,8 @@ impl TransmissionParams {
     }
 }
 
-/// Physical main-clutch regime. Slip retains a launch until its shaft reaches the command's
-/// launch speed; Out carries no mean-axis torque.
+/// Physical main-clutch regime. Slip holds the crank at the launch rpm until the shaft reaches the
+/// command's launch speed ([`engagement`]); Out carries no mean-axis torque.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ClutchState {
     Out,
@@ -995,7 +995,7 @@ fn free_driver_force(
     let launch_rpm = tp.launch_omega(command) / RPM_TO_RAD;
     let floor = idle_floor(tp, supply, 0.0).unwrap_or(f32::NEG_INFINITY);
     let shaft_rpm = (shaft * gear / tp.sprocket_radius / RPM_TO_RAD).max(floor / RPM_TO_RAD);
-    // A moving In clutch below idle is a lug, not a fresh launch.
+    // Slip holds the crank at the launch rpm; In turns it with the shaft.
     let rpm = if clutch == ClutchState::Slip {
         launch_rpm
     } else {
@@ -1125,11 +1125,14 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// One Driver decision on what it felt, at the requested pedal `command`. Speed `v` and
 /// resistance `R` read along the engaged ladder, `v` floored at rest. A gear carries `R` plus the
 /// turn's share in its own detent radius, `s·κ·ΔR` (the steering tie's load on the mean axis,
-/// [`BeltTick::tied_mean`]), and *holds* when its spare over that load exceeds M. Below its launch
-/// speed a gear is priced as a launch slipping at the launch rpm, so every gear is priced alike:
-/// priced as it would turn locked to the hull, a gear crawling there (or riding belts that slip
-/// on soft ground) reads a lug, and a higher gear's launch from a stopped landing outbids it,
-/// cut after cut. A candidate lands at `v − R·t_cut/M_c`; the current gear pays no cut.
+/// [`BeltTick::tied_mean`]), and *holds* when its spare over that load exceeds M. A gear is priced
+/// engaged as delivery engages it ([`engagement`]): a candidate closes after its cut, so below its
+/// launch speed it slips at the launch rpm, and the current gear keeps its regime, a moving gear
+/// already in pricing its lug. Priced as lugs instead, a candidate at a crawl carries the idle
+/// catch's whole torque and outbids a part-pedal launch, which then stops in the cut (MEASURED in
+/// `part_pedal_launches_and_sustains_ordered_speed`: a quarter-pedal launch cycling between its
+/// launch gear and a lug three gears up). A candidate lands at `v − R·t_cut/M_c`; the current gear
+/// pays no cut.
 /// 1. Clutch out at hull rest: the highest launch gear that holds, else first; free.
 /// 2. The current gear does not hold, judged at no more than its torque-peak speed: the highest
 ///    lower gear within `max_step` that holds where it lands; with none the gear stays.
@@ -1162,36 +1165,38 @@ fn choose_gear(
     let speed = (dir * sensed.speed).max(0.0);
     let resistance = dir * sensed.resistance;
     let margin = force_margin(tp);
-    let spare = |gear: u8, at: f32| {
+    let spare = |gear: u8, at: f32, prior: ClutchState| {
         let load =
             resistance + branch(inp.steer) * detent_kappa(tp, st, gear) * sensed.push_difference;
         let ratio = ladder[usize::from(gear - 1)];
-        let clutch = if at * ratio / tp.sprocket_radius < tp.launch_omega(command) {
-            ClutchState::Slip
-        } else {
-            ClutchState::In
-        };
+        let clutch = engagement(
+            tp,
+            prior,
+            at < PARK_ENGAGE_SPEED,
+            at * ratio / tp.sprocket_radius,
+            command,
+        );
         gear_force(tp, fp, inp.supply, at, ratio, command, load, clutch) - load
     };
     if st.clutch == ClutchState::Out && speed < PARK_ENGAGE_SPEED {
         st.gear = (1..=tp.launch_gears.min(top))
             .rev()
-            .find(|&gear| spare(gear, speed) > margin)
+            .find(|&gear| spare(gear, speed, st.clutch) > margin)
             .unwrap_or(1); // No launch gear holds: first gear is the most the ladder has.
         return;
     }
     let landing = speed - resistance * f32::from(tp.shift_ticks) / TICK_HZ / coupled_mass(fp);
     let peak =
         tp.peak_torque_rpm * RPM_TO_RAD * tp.sprocket_radius / ladder[usize::from(st.gear - 1)];
-    let chosen = if spare(st.gear, speed.min(peak)) > margin {
-        let now = spare(st.gear, speed);
+    let chosen = if spare(st.gear, speed.min(peak), st.clutch) > margin {
+        let now = spare(st.gear, speed, st.clutch);
         // A detent turn's radius belongs to its gear: no upshift changes it.
         (st.steer_step == 0)
             .then(|| {
                 (st.gear + 1..=st.gear.saturating_add(tp.max_step).min(top))
                     .rev()
                     .find(|&gear| {
-                        let landed = spare(gear, landing);
+                        let landed = spare(gear, landing, ClutchState::Out);
                         landed > margin && landed > now + margin
                     })
             })
@@ -1199,7 +1204,7 @@ fn choose_gear(
     } else {
         (st.gear.saturating_sub(tp.max_step).max(1)..st.gear)
             .rev()
-            .find(|&gear| spare(gear, landing) > margin)
+            .find(|&gear| spare(gear, landing, ClutchState::Out) > margin)
     };
     // No gear qualifies: the current one stays.
     if let Some(gear) = chosen {
@@ -1577,8 +1582,7 @@ fn neutral_pivot(inp: &TransmissionInput, mean: f32) -> bool {
 }
 
 /// The Driver holding it `open` (a shift window, or no gear chosen yet), a two-sided parked
-/// hold and neutral turns open the clutch. Intent at rest below idle starts Slip regardless of
-/// the prior regime, retaining it until the shaft reaches its commanded launch speed.
+/// hold and neutral turns open the clutch; otherwise it engages as [`engagement`] states.
 fn update_clutch_state(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1594,23 +1598,50 @@ fn update_clutch_state(
         || (propulsive < DEAD && (mean.abs() < PARK_ENGAGE_SPEED || neutral_pivot(inp, mean)))
     {
         ClutchState::Out
-    } else if propulsive >= DEAD
-        && ((mean.abs() < PARK_ENGAGE_SPEED && shaft_omega < tp.engine.idle_rpm * RPM_TO_RAD)
-            || (st.clutch == ClutchState::Slip && shaft_omega < tp.launch_omega(propulsive)))
+    } else {
+        engagement(
+            tp,
+            st.clutch,
+            mean.abs() < PARK_ENGAGE_SPEED,
+            shaft_omega,
+            propulsive,
+        )
+    };
+}
+
+/// A closed clutch's engagement under pedal `pedal`, from its `prior` regime. Below the pedal's
+/// launch speed a clutch closing at rest or from out (after a cut) slips with the crank held at the
+/// launch rpm, and keeps slipping until the shaft reaches that speed; a moving clutch already in
+/// stays in, lugging through the idle guard rather than spooling another launch. At or above the
+/// launch speed the clutch is in. Gear pricing reads it with each gear's prior regime, so a gear is
+/// delivered as it was priced: a candidate priced slipping but closed in would lug toward idle and
+/// need not hold.
+fn engagement(
+    tp: &TransmissionParams,
+    prior: ClutchState,
+    at_rest: bool,
+    shaft_omega: f32,
+    pedal: f32,
+) -> ClutchState {
+    if pedal >= DEAD
+        && (at_rest || prior != ClutchState::In)
+        && shaft_omega < tp.launch_omega(pedal)
     {
         ClutchState::Slip
     } else {
         ClutchState::In
-    };
+    }
 }
 
 /// Free crank torque is commanded fuel or the Driver catch, less construction drag, all
 /// evaluated at the pre-tick crank speed. Engaged fueling follows propulsive throttle only.
 /// With the clutch open, a paid window or active steering requests a proportional rev
 /// governor. `DriveSupply::served_task_rate` gates throughput for all fueling. A paid window
-/// targets `|m|*k` in the selected landing gear, so the clutch re-engages near-synchronous; without a window that target is idle. Steering targets
-/// `idle + (peak - idle)*|steer|`; the governor takes the larger target. Open rest requests no
-/// fuel. The catch and induced combustion consume task throughput; drag stays unscaled.
+/// targets the crank speed the landing gear's clutch closes at, `|m|*k` or the launch rpm where it
+/// will slip ([`engagement`]), so it re-engages near-synchronous; without a window that target is
+/// idle. Steering targets `idle + (peak - idle)*|steer|`; the governor takes the larger target.
+/// Open rest requests no fuel. The catch and induced combustion consume task throughput; drag stays
+/// unscaled.
 /// `engine_work` charges sprocket work against combustion and stored crank energy, including
 /// steering work with the main clutch open. The governor width lives in assets/driving/engine.ron.
 #[expect(
@@ -1632,7 +1663,15 @@ fn crank_free_torque(
     let u_fuel = if engaged {
         propulsive
     } else if inp.steer.abs() >= DEAD || shifting {
-        let omega_match = if shifting { m.abs() * k } else { omega_idle };
+        let omega_match = if !shifting {
+            omega_idle
+        } else if engagement(tp, ClutchState::Out, false, m.abs() * k, propulsive)
+            == ClutchState::Slip
+        {
+            tp.launch_omega(propulsive)
+        } else {
+            m.abs() * k
+        };
         let omega_steer =
             omega_idle + (tp.peak_torque_rpm * RPM_TO_RAD - omega_idle) * inp.steer.abs().min(1.0);
         let omega_target = omega_match.max(omega_steer);

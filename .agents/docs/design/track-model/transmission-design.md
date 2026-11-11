@@ -163,7 +163,8 @@ not simulate it (ADR-0037). The exhaustive projection owns the hash and trace or
 - `reverse`: the engaged direction ladder.
 - `park`: the persistent parking lever.
 - `omega_e`: crank speed, with raw float bits; constructed at idle from data at spawn.
-- `clutch`: `Out`, `Slip` or `In`; Slip retains a launch until its shaft catches its target.
+- `clutch`: `Out`, `Slip` or `In`; Slip holds the crank at the launch rpm until the shaft catches
+  it.
 - `reversal_hold_ticks`: progress through the stopped reversal pause.
 
 All state is constructed synchronously from data at spawn. Mean/difference speeds, perceived
@@ -459,10 +460,13 @@ finite, positive, J ≤ 100, capacity ≤ 50 000. Spec pin test updated delibera
    zero-rate task can sustain idle through this catch.
 2. `update_clutch_state` opens the main clutch during shift windows, while parked, for staffed
    zero-rate tasks, and at released rest or a neutral pivot. An empty station retains neutral at
-   rest; a moving interruption ends with its window. Launch Slip begins from Out under intent at rest,
-   retains `TransmissionParams::launch_omega(command)` until the shaft reaches it, and transmits
-   bounded free torque there. A moving lug stays In and uses the ordinary idle guard.
-   `clutch_coupling` solves
+   rest; a moving interruption ends with its window. Otherwise `engagement` decides: under intent,
+   a clutch closing at rest or from Out (after a cut) below
+   `TransmissionParams::launch_omega(command)` slips with the crank held there, transmits bounded
+   free torque, and keeps slipping until the shaft reaches it. A moving lug already In stays In
+   and uses the ordinary idle guard. Gear pricing reads the same engagement, a candidate closing
+   after its cut, so a gear is delivered as priced; a paid window rev-matches to the crank speed
+   the landing gear's clutch closes at. `clutch_coupling` solves
    `τ_c* = [(ω_e − k·s·m)/dt + τ_free/J − k·s·F_other/I_m] / (1/J + k²/I_m)`, where
    `k = G/r_s`, `s` is ladder direction, `I_m = 2·belt inertia` and `F_other = −ΣR`.
    The capacity-clamped torque delivers `F_c = k·s·τ_c`, split per belt, and the crank integrates

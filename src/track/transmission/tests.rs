@@ -1342,8 +1342,8 @@ fn the_coupled_belt_settles_where_the_explicit_one_alternates() {
     assert_eq!(reversals(true), 0, "the coupled belt alternated");
 }
 
-/// Driver state, not belt-speed hysteresis, controls clutch regimes. The launch retains
-/// Slip above idle until it reaches its target, and a shift always interrupts mean-axis drive.
+/// Driver state, not belt-speed hysteresis, controls clutch regimes. A launch slips above idle
+/// until its shaft reaches its target, and a shift always interrupts mean-axis drive.
 #[test]
 fn clutch_states_cover_rest_launch_lock_and_shift() {
     let (fp, mut tp) = (lab_fp(), lab_tp());
@@ -2045,14 +2045,14 @@ fn empty_station_at_rest_springs_engaged_and_retains_park() {
 fn moving_lug_does_not_restart_launch_slip() {
     for tp in [lab_tp(), tiger_tp()] {
         let fp = lab_fp();
-        // Fixture: a tall gear below idle on a 20-degree grade, before a gear correction.
+        // Fixture: a tall gear below idle on a 20-degree grade, engaged, before a gear correction.
         let gear = (tp.gears_fwd.len() - 2) as u8;
         let k = tp.gears_fwd[(gear - 1) as usize] / tp.sprocket_radius;
         let speed = 0.8 * tp.engine.idle_rpm * RPM_TO_RAD / k;
         let grade = fp.grip.side_weight * 20.0_f32.to_radians().sin();
         let mut st = TransmissionState {
             gear,
-            clutch: ClutchState::Out,
+            clutch: ClutchState::In,
             ..fresh(&tp)
         };
         let report = step(&fp, &tp, &mut st, &input(1.0, 0.0, [speed; 2], [grade; 2]));
@@ -2295,6 +2295,63 @@ fn launch_force(tp: &TransmissionParams, gear: u8) -> f32 {
         1.0,
         ClutchState::Slip,
     )
+}
+
+/// A gear the Driver accepts holds where it lands, engaged as delivery engages it at the cut's
+/// end: every clause's stability relies on an accepted gear's pull there exceeding the resistance
+/// it was chosen against. Fixture: each class drivetrain moving in each forward gear with the
+/// clutch in, the crank from idle to governed and resistance up to first gear's launch pull.
+#[test]
+fn an_accepted_gear_holds_as_delivery_lands_it() {
+    for (fp, tp) in class_drivetrains() {
+        let construction = construction(&fp);
+        for gear in 1..=tp.gears_fwd.len() as u8 {
+            let ratio = tp.gears_fwd[usize::from(gear - 1)];
+            for step in 0..=24 {
+                let span = tp.engine.governed_rpm - tp.engine.idle_rpm;
+                let rpm = tp.engine.idle_rpm + span * step as f32 / 24.0;
+                let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / ratio;
+                for share in 0..=20 {
+                    let resistance = launch_force(&tp, 1) * share as f32 / 20.0;
+                    let inp = driver_input(speed, resistance, 1.0);
+                    let mut st = TransmissionState {
+                        gear,
+                        clutch: ClutchState::In,
+                        omega_e: rpm * RPM_TO_RAD,
+                        ..fresh(&tp)
+                    };
+                    choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
+                    if st.gear == gear {
+                        continue; // Nothing was accepted.
+                    }
+                    let landing = speed
+                        - resistance * f32::from(tp.shift_ticks)
+                            / TICK_HZ
+                            / coupled_mass(&construction);
+                    let landed = tp.gears_fwd[usize::from(st.gear - 1)];
+                    let shaft = landing * landed / tp.sprocket_radius;
+                    st.clutch = ClutchState::Out;
+                    let end = input(1.0, 0.0, [landing; 2], [0.0; 2]);
+                    update_clutch_state(&mut st, &tp, &end, false, 1.0, shaft, false);
+                    let pull = price_driver_force(
+                        &tp,
+                        DriveSupply::WHOLE,
+                        landing,
+                        landed,
+                        1.0,
+                        st.clutch,
+                    );
+                    assert!(
+                        pull > resistance,
+                        "gear {gear} at {rpm} rpm against {resistance} N accepted gear {}, \
+                         delivered {:?} at {landing} m/s with {pull} N",
+                        st.gear,
+                        st.clutch
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// A Driver that has felt nothing has chosen no gear, so it engages none from rest: the launch's

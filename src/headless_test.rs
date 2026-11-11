@@ -1983,7 +1983,9 @@ fn capture_scripted_determinism_tick(
     run.saw_shot |= sim.weapons.iter().any(|weapon| weapon.rounds_fired > 0);
     run.saw_projectile_spawn |= !projectiles.is_empty();
     run.saw_projectile_march |= projectiles.iter().any(|path| path.points.len() > 1);
-    if matches!(tick, 119 | 299 | 479) {
+    // The steered pose is taken before the hull reaches the duel's other tank, parked in its
+    // path: MEASURED, it meets it near tick 413.
+    if matches!(tick, 119 | 299 | 379) {
         run.checkpoints.push(ScriptedPose {
             tick,
             position,
@@ -2251,7 +2253,7 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
     };
     assert_eq!(
         [settled.tick, powered.tick, steered.tick],
-        [119, 299, 479],
+        [119, 299, 379],
         "{label} driving checkpoint ticks moved",
     );
 
