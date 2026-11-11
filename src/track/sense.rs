@@ -3,11 +3,16 @@
 //! are m/s and forces N, along the hull's heading with forward positive.
 //!
 //! Resistance closes the hull's force ledger from its own side: the belts' traction on the hull
-//! along its heading, less hull mass times the hull's gain in speed. Whatever else acts along the
-//! heading (grade, rolling, a contact's support, an obstacle's reaction, a tow, recoil) is in it, so no load model is needed; a gear change does
-//! not move it, because the push the hull receives is what the ground returned, whatever gear sent
-//! it. The window is one shift cut because the landing forecast needs exactly the speed the world
-//! takes from the hull in one cut, and a single-tick impulse must not decide alone.
+//! along its heading, less hull mass times the hull's gain in velocity along it. Whatever else acts
+//! along the heading (grade, rolling, a contact's support, an obstacle's reaction, a tow, recoil)
+//! is in it, so no load model is needed; a gear change does not move it, because the push the hull
+//! receives is what the ground returned, whatever gear sent it. The window is one shift cut because
+//! the landing forecast needs exactly the speed the world takes from the hull in one cut, and a
+//! single-tick impulse must not decide alone.
+//!
+//! Each tick's sample is taken along the heading that tick opened with, where its sampled contacts
+//! were evaluated: speeds along two headings differ by `V·Δh` besides the gain (DERIVED:
+//! `d(V·h)/dt = a·h + V·dh/dt`), which a pitching or yawing hull would read as resistance.
 //!
 //! A paid cut's ticks are not felt: with the drive interrupted there is nothing for it to meet, and
 //! an obstacle's reaction, which exists only under push, vanishes with it. Sampling the cut would
@@ -25,10 +30,12 @@ struct Sample {
     gain: f32,
 }
 
-/// This tick's opened sample: the hull's start speed (m/s) and the sampled-contact push (N).
+/// This tick's opened sample: the hull's start velocity (m/s, world) and heading, and the
+/// sampled-contact push along that heading (N).
 #[derive(Clone, Copy, Debug)]
 struct Open {
-    speed: f32,
+    velocity: Vec3,
+    heading: Vec3,
     push: [f32; 2],
 }
 
@@ -68,17 +75,17 @@ impl DriverSense {
         }
     }
 
-    /// One driving tick. `speed` is the hull's speed along its heading `forward` now, `mass` its
-    /// mass (kg), `soft` the traction this tick's sampled contacts apply to the hull and `hard` the
-    /// solver contacts' friction on it over the physics step that just ran (N, world frame, `None`
-    /// where a side had no solver contact). Each counts as push only along the heading: a
-    /// contact's support, and its traction's other components, are what the hull meets. The step
-    /// that just ran carried last tick's sampled push and this `hard` push from last tick's speed
-    /// to `speed`, so that sample closes here.
+    /// One driving tick. `velocity` is the hull's velocity now (m/s, world), `heading` its unit
+    /// forward axis, `mass` its mass (kg), `soft` the traction this tick's sampled contacts apply
+    /// to the hull and `hard` the solver contacts' friction on it over the physics step that just
+    /// ran (N, world frame, `None` where a side had no solver contact). Each counts as push only
+    /// along the sample's heading: a contact's support, and its traction's other components, are
+    /// what the hull meets. The step that just ran carried last tick's sampled push and this
+    /// `hard` push from last tick's velocity to `velocity`, so that sample closes here.
     pub(crate) fn tick(
         &mut self,
-        speed: f32,
-        forward: Vec3,
+        velocity: Vec3,
+        heading: Vec3,
         mass: f32,
         soft: [Vec3; 2],
         hard: [Option<Vec3>; 2],
@@ -88,19 +95,20 @@ impl DriverSense {
             let mut push = open.push;
             for (push, hard) in push.iter_mut().zip(hard) {
                 // No solver contact pushed a side without one.
-                *push += hard.map_or(0.0, |hard| hard.dot(forward));
+                *push += hard.map_or(0.0, |hard| hard.dot(open.heading));
             }
             if self.samples.len() == self.window {
                 self.samples.pop_front();
             }
             self.samples.push_back(Sample {
                 push,
-                gain: speed - open.speed,
+                gain: (velocity - open.velocity).dot(open.heading),
             });
         }
         self.open = Some(Open {
-            speed,
-            push: soft.map(|soft| soft.dot(forward)),
+            velocity,
+            heading,
+            push: soft.map(|soft| soft.dot(heading)),
         });
         self.reading = (!self.samples.is_empty()).then(|| {
             assert!(
@@ -112,7 +120,7 @@ impl DriverSense {
                 [l + s.push[0], r + s.push[1], g + s.gain]
             });
             Sensed {
-                speed,
+                speed: velocity.dot(heading),
                 resistance: (left + right) / count - mass * gain / (count * dt),
                 push_difference: (left - right) / count,
             }
@@ -158,7 +166,7 @@ mod tests {
             .map(|tick| {
                 let push = push(tick);
                 let soft = [push * 0.25, push * 0.5].map(|push| forward * push);
-                let reading = sense.tick(speed, forward, MASS, soft, reported, DT);
+                let reading = sense.tick(forward * speed, forward, MASS, soft, reported, DT);
                 if push == 0.0 {
                     sense.cut();
                 }
@@ -195,6 +203,25 @@ mod tests {
                 near(read, want),
                 "obstacle, tick {tick}: read {read}, want {want}"
             );
+        }
+    }
+
+    /// Turning the heading is not acceleration: a hull coasting at constant velocity while it
+    /// pitches and yaws meets nothing and reads no resistance, where speeds along each tick's own
+    /// heading read `m·V·dh/dt`. Fixture: 3 m/s forward and 0.5 m/s up, the heading turning at
+    /// 0.5 rad/s about an axis between pitch and yaw, no force.
+    #[test]
+    fn a_turning_heading_reads_no_resistance() {
+        let mut sense = DriverSense::for_cut(CUT);
+        let velocity = Vec3::new(0.0, 0.5, -3.0);
+        let axis = Vec3::new(1.0, 1.0, 0.0).normalize();
+        for tick in 0..200 {
+            let heading = Quat::from_axis_angle(axis, 0.5 * DT * tick as f32) * Vec3::NEG_Z;
+            let reading = sense.tick(velocity, heading, MASS, [Vec3::ZERO; 2], [None; 2], DT);
+            if let Some(reading) = reading {
+                // DERIVED: no push and no change of velocity close every sample at zero.
+                assert_eq!(reading.resistance, 0.0, "tick {tick}");
+            }
         }
     }
 }

@@ -719,7 +719,7 @@ pub(crate) fn feel_tick(
 ) -> Option<super::sense::Sensed> {
     let forward = affine.transform_vector3(Vec3::NEG_Z);
     let sensed = sense.tick(
-        hull.linear.dot(forward),
+        hull.linear,
         forward,
         1.0 / hull.inverse_mass,
         reports

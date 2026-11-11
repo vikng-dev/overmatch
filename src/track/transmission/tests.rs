@@ -2401,7 +2401,7 @@ fn a_stalled_full_clutch_push_steps_down() {
             let forward = bevy::math::Vec3::NEG_Z;
             let hard = pushed.map(|push| Some(forward * push));
             inp.sensed = sense.tick(
-                0.0,
+                bevy::math::Vec3::ZERO,
                 forward,
                 mass,
                 [bevy::math::Vec3::ZERO; 2],
