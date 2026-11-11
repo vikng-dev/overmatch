@@ -63,6 +63,10 @@
 //! run's history fixes; a hash set's order follows the entities' bits, which can differ between
 //! runs of the same match.
 //!
+//! COST, OPEN. The `Changed<…>` filter of `super::wake_on_static_moved` walks every attached
+//! collider each step; it is priced in the pricing batch before any indexing work. The freeze and
+//! the thaw evaluate serially, to be confirmed by the same pricing.
+//!
 //! ADR-0014 EXCEPTION (owner ruling 2026-11-10: settled rubble may rejoin the fixed structure where
 //! that is faster and simpler). A piece's body type and [`Frozen`] change after spawn. Both are
 //! server state alone: no client receives a piece's body (`net::debris_stress`, carriers), and
