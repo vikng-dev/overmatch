@@ -498,13 +498,15 @@ certificate for every coupled contact mode or arbitrarily large pressure. At mud
 DERIVED `r = .1715` at nominal pressure 107 kPa, the 64 Hz scalar ratio is about .105.
 
 **The Driver reads what it feels.** `track::sense::DriverSense` keeps a ledger of the hull:
-its speed along the hull's forward axis, and resistance `R = mean push - M_c mean gain / dt`
-over the last interruption's worth of driven ticks. Push is the belts' soft ground reaction plus
-the solver's hard reaction; the hard part arrives a tick late and the ledger aligns the two. Cut
+its speed along the hull's forward axis, and resistance `R = mean push - M_hull mean gain / dt`
+over the last interruption's worth of driven ticks, `M_hull` the hull body's mass; the coupled
+mass `M_c` prices only the landing. Push is the soft contacts' traction plus the solver's hard
+friction on the hull, and gain is the change of world velocity, each projected on the heading
+its tick opened with; the hard part arrives a tick late and the ledger aligns the two. Cut
 ticks are not felt. The reading is `None` until one tick closes, and a Driver that has felt
 nothing engages no gear from rest. Nothing modelled enters `R`: on a rolling incline it closes on
-`W sin(theta) + c_rr W cos(theta)` (`headless_test::drive_load`). Parked, the contact law's
-rolling fade leaves the grade alone.
+`(W sin(theta) + c_rr W cos(theta)) cos(delta)`, `delta` the heading's pitch off the plane under
+drive (`headless_test::drive_load`). Parked, the contact law's rolling fade leaves the grade alone.
 
 `transmission::choose_gear` prices a gear's pull with `free_driver_force` at the crank speed that
 gear has at hull speed, engaged as delivery engages it (`engagement`): a candidate closes after its
@@ -521,7 +523,8 @@ pull, less `R` and its detent's share of the belt push difference, exceeds M. Th
 Clauses 2 and 3 pay the cut. No pull asked (released, braking, a request against the engaged
 ladder) or fuel under drag chooses nothing. The Driver uses requested pedal, not its actuator
 ramp. A slipping clutch holds its launch floor, capped at the speed the crank reaches freely, so a
-launch never takes the flywheel's stored energy. M is the crank arithmetic term alone.
+launch takes none of the flywheel's stored energy below that floor; a crank above the floor when
+the clutch closes can spend the excess. M is the crank arithmetic term alone.
 The driver design (2026-11-11) owns the alternatives and predictions.
 The brake lever carries only the stop-force shortfall against intent, without a release latch.
 Opposite input brakes to rest, waits the authored pause, then pays one direction cut;
