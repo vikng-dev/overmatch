@@ -152,6 +152,9 @@ labelled!(
         ThawReach = "thaw_reach",
         ThawLoad = "thaw_load",
         ThawSupport = "thaw_support",
+        // Entities the freeze and the thaw visit, and the spatial queries their reach casts.
+        FreezeVisits = "freeze_visits",
+        ReachQueries = "reach_queries",
     }
 );
 

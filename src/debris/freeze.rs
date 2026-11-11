@@ -7,9 +7,11 @@
 //! two static colliders, so a settled pile turned static leaves the narrow phase nothing to do.
 //!
 //! FREEZE ([`freeze`], after the step's splits). An island Avian has put to sleep whose every body
-//! is a loose piece, that touches something outside itself, and that no mover reaches ([`Reach`]),
-//! turns static whole in one tick: rubble interlocks, so the island is the unit, and a whole island
-//! leaves no piece resting on a dynamic one. An island holding any other body (a tank, a launched
+//! is a loose piece, that touches something outside itself, that no mover reaches ([`Reach`]) and
+//! that nothing has woken since the step, turns static whole in one tick: rubble interlocks, so the
+//! island is the unit, and a whole island leaves no piece resting on a dynamic one. A piece's pose
+//! or velocity written since the step wakes its island at the next one (`wake_on_changed`), so the
+//! freeze leaves it to that wake rather than zero a push. An island holding any other body (a tank, a launched
 //! turret) stays asleep, and so does one touching nothing (a piece asleep in zero gravity). Each
 //! piece takes [`RigidBody::Static`], zero velocity and [`Frozen`], and loses `Sleeping`. The
 //! island depends on its pieces' colliders and on every collider they touched as it froze
@@ -38,9 +40,9 @@
 //!   `dt |v|` and its margin, meet every frozen collider it could touch. Rotation and acceleration
 //!   add nothing: they act in the substeps, after the step's contacts are made, and a body they
 //!   carry into a frozen piece meets it at the next step's thaw, which reads the pose it reached;
-//! - load: a piece whose velocity is not zero, since game code pushed it (Avian's `Forces` writes
-//!   a static body's velocity as any other's), as a velocity written onto a sleeping body wakes
-//!   its island (`dynamics/solver/islands/sleeping.rs`, `wake_on_changed`);
+//! - load: game code pushed a frozen piece (Avian's `Forces` writes a static body's velocity as any
+//!   other's) and said so where it pushed ([`Loads`]), as a velocity written onto a sleeping body
+//!   wakes its island (`dynamics/solver/islands/sleeping.rs`, `wake_on_changed`);
 //! - support: a collider the island depends on goes, leaves its body, is disabled, turns sensor,
 //!   or is re-posed, reshaped or re-layered in place (`super::wake_on_static_moved` notes those);
 //!   or its body goes, is disabled or stops being static. A collider with no body is never a
@@ -65,10 +67,12 @@
 
 use avian3d::dynamics::solver::islands::{BodyIslandNode, IslandId, PhysicsIslands};
 use avian3d::prelude::*;
+use avian3d::schedule::LastPhysicsTick;
+use bevy::ecs::change_detection::Tick;
 use bevy::ecs::entity::EntityHashMap;
 use bevy::ecs::entity_disabling::Disabled;
 use bevy::ecs::query::Allow;
-use bevy::ecs::system::SystemParam;
+use bevy::ecs::system::{SystemChangeTick, SystemParam};
 use bevy::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -129,6 +133,8 @@ pub(crate) struct FrozenIslands {
     islands: BTreeMap<u64, Island>,
     by_collider: EntityHashMap<Vec<u64>>,
     changed: Vec<(Entity, Change)>,
+    /// Islands game code pushed a piece of ([`Loads`]).
+    loaded: Vec<u64>,
 }
 
 impl FrozenIslands {
@@ -178,6 +184,29 @@ impl FrozenIslands {
             }
         }
         lost
+    }
+}
+
+/// Pushes by game code on bodies that may be frozen: the island of a frozen piece pushed thaws at
+/// the next step's thaw. Every game-code velocity write that can meet a frozen piece reports here:
+/// the field and blast impulses (`construction::breakage`). The tank's hit impulses and the belt's
+/// pushes write tanks and dynamic bodies only.
+#[derive(SystemParam)]
+pub(crate) struct Loads<'w, 's> {
+    frozen: Query<'w, 's, &'static Frozen>,
+    islands: ResMut<'w, FrozenIslands>,
+}
+
+impl Loads<'_, '_> {
+    pub(crate) fn is_frozen(&self, body: Entity) -> bool {
+        self.frozen.contains(body)
+    }
+
+    /// Game code just wrote `body`'s velocity.
+    pub(crate) fn pushed(&mut self, body: Entity) {
+        if let Ok(frozen) = self.frozen.get(body) {
+            self.islands.loaded.push(frozen.island);
+        }
     }
 }
 
@@ -312,11 +341,18 @@ impl Reach<'_, '_> {
     }
 
     /// Add to `reached` each body passing `keep` with a solid collider that a solid collider of
-    /// `body` could make a contact with in this step (module doc, reach).
-    fn of(&self, body: Entity, keep: impl Fn(Entity) -> bool, reached: &mut BTreeSet<Entity>) {
+    /// `body` could make a contact with in this step (module doc, reach); the spatial queries it
+    /// cast.
+    fn of(
+        &self,
+        body: Entity,
+        keep: impl Fn(Entity) -> bool,
+        reached: &mut BTreeSet<Entity>,
+    ) -> u64 {
         let Ok((linear, colliders, body_margin)) = self.bodies.get(body) else {
-            return; // A body with no collider touches nothing.
+            return 0; // A body with no collider touches nothing.
         };
+        let mut queries = 0;
         let travel = linear.length() * self.time.delta_secs();
         for collider in colliders.iter() {
             let Ok((shape, at, turn, margin)) = self.solids.get(collider) else {
@@ -324,6 +360,7 @@ impl Reach<'_, '_> {
             };
             let margin = margin.or(body_margin).map_or(0.0, |margin| margin.0);
             let bounds = shape.aabb(at.0, *turn).grow(Vec3::splat(travel + margin));
+            queries += 1;
             self.spatial
                 .aabb_intersections_with_aabb_callback(bounds, |hit| {
                     if self.solids.contains(hit)
@@ -335,6 +372,7 @@ impl Reach<'_, '_> {
                     true
                 });
         }
+        queries
     }
 }
 
@@ -347,7 +385,8 @@ struct Freeze<'w, 's> {
             Entity,
             &'static BodyIslandNode,
             &'static RigidBodyColliders,
-            (&'static Position, &'static Rotation),
+            (Ref<'static, Position>, Ref<'static, Rotation>),
+            (Ref<'static, LinearVelocity>, Ref<'static, AngularVelocity>),
         ),
         (With<DebrisPiece>, With<Sleeping>, Without<Frozen>),
     >,
@@ -356,11 +395,13 @@ struct Freeze<'w, 's> {
     graph: Res<'w, ContactGraph>,
     islands: ResMut<'w, FrozenIslands>,
     reach: Reach<'w, 's>,
+    last_step: Res<'w, LastPhysicsTick>,
+    tick: SystemChangeTick,
     stages: Option<Res<'w, Stages>>,
 }
 
-/// Freeze every sleeping island of loose pieces that touches fixed matter and that no mover
-/// reaches, within the tick's budget (module doc).
+/// Freeze every sleeping island of loose pieces that touches fixed matter, that no mover reaches
+/// and that nothing has woken since the step, within the tick's budget (module doc).
 fn freeze(p: Freeze, mut commands: Commands) {
     let Freeze {
         sleeping,
@@ -369,19 +410,36 @@ fn freeze(p: Freeze, mut commands: Commands) {
         graph,
         mut islands,
         reach,
+        last_step,
+        tick,
         stages,
     } = p;
+    let since_step = |at: Tick| at.is_newer_than(last_step.0, tick.this_run());
     let mut members: BTreeMap<u32, Vec<Entity>> = BTreeMap::new();
-    for (piece, node, ..) in &sleeping {
-        members.entry(node.island_id().0).or_default().push(piece);
+    let mut woken = BTreeSet::new();
+    let mut visits = 0;
+    for (piece, node, _, (at, turn), (linear, angular)) in &sleeping {
+        visits += 1;
+        let id = node.island_id().0;
+        members.entry(id).or_default().push(piece);
+        let written = [
+            at.last_changed(),
+            turn.last_changed(),
+            linear.last_changed(),
+            angular.last_changed(),
+        ];
+        if written.into_iter().any(since_step) {
+            woken.insert(id);
+        }
     }
     // A sleeping island with any other body keeps every piece of it.
     members.retain(|&id, pieces| {
         let island = physics
             .get(IslandId(id))
             .expect("a sleeping body's island exists");
-        island.body_count() as usize == pieces.len()
+        !woken.contains(&id) && island.body_count() as usize == pieces.len()
     });
+    let mut queries = 0;
     if !members.is_empty() {
         let candidates: EntityHashMap<u32> = members
             .iter()
@@ -390,7 +448,8 @@ fn freeze(p: Freeze, mut commands: Commands) {
         // An island a mover reaches would thaw at the next step.
         let mut reached = BTreeSet::new();
         for mover in reach.movers() {
-            reach.of(mover, |body| candidates.contains_key(&body), &mut reached);
+            visits += 1;
+            queries += reach.of(mover, |body| candidates.contains_key(&body), &mut reached);
         }
         for piece in reached {
             members.remove(&candidates[&piece]);
@@ -404,7 +463,7 @@ fn freeze(p: Freeze, mut commands: Commands) {
         pieces.sort_unstable();
         let (mut own, mut touched) = (Vec::new(), Vec::new());
         for &piece in &pieces {
-            let (_, _, colliders, _) = sleeping.get(piece).expect("a sleeping island's piece");
+            let (_, _, colliders, ..) = sleeping.get(piece).expect("a sleeping island's piece");
             for collider in colliders.iter() {
                 own.push(collider);
                 for pair in graph.contact_pairs_with(collider) {
@@ -438,7 +497,7 @@ fn freeze(p: Freeze, mut commands: Commands) {
             islands.by_collider.entry(collider).or_default().push(id);
         }
         for &piece in &pieces {
-            let (.., (at, turn)) = sleeping.get(piece).expect("a sleeping island's piece");
+            let (.., (at, turn), _) = sleeping.get(piece).expect("a sleeping island's piece");
             // ADR-0014 exception (module doc). Static before `Sleeping` goes, so the wake its
             // removal queues finds the piece outside its island.
             commands
@@ -449,7 +508,7 @@ fn freeze(p: Freeze, mut commands: Commands) {
                     AngularVelocity::ZERO,
                     Frozen {
                         island: id,
-                        pose: pose_bits(at, turn),
+                        pose: pose_bits(&at, &turn),
                     },
                 ))
                 .remove::<Sleeping>();
@@ -465,6 +524,8 @@ fn freeze(p: Freeze, mut commands: Commands) {
     }
     if let Some(stages) = stages.as_deref() {
         stages.add(Work::FrozePieces, froze as u64);
+        stages.add(Work::FreezeVisits, visits);
+        stages.add(Work::ReachQueries, queries);
     }
 }
 
@@ -472,16 +533,6 @@ fn freeze(p: Freeze, mut commands: Commands) {
 struct Thaw<'w, 's> {
     islands: ResMut<'w, FrozenIslands>,
     frozen: Query<'w, 's, (&'static Frozen, &'static Position, &'static Rotation)>,
-    pushed: Query<
-        'w,
-        's,
-        (
-            &'static Frozen,
-            &'static LinearVelocity,
-            &'static AngularVelocity,
-        ),
-        Or<(Changed<LinearVelocity>, Changed<AngularVelocity>)>,
-    >,
     attached: Query<'w, 's, &'static ColliderOf>,
     disabled: Query<'w, 's, (), With<ColliderDisabled>>,
     bodies: Query<'w, 's, &'static RigidBody, Without<RigidBodyDisabled>>,
@@ -489,12 +540,11 @@ struct Thaw<'w, 's> {
     stages: Option<Res<'w, Stages>>,
 }
 
-/// Thaw every frozen island reached, pushed or losing support (module doc).
+/// Thaw every frozen island losing support, pushed or reached (module doc).
 fn thaw(p: Thaw, mut commands: Commands) {
     let Thaw {
         mut islands,
         frozen,
-        pushed,
         attached,
         disabled,
         bodies,
@@ -502,9 +552,11 @@ fn thaw(p: Thaw, mut commands: Commands) {
         stages,
     } = p;
     let changed = std::mem::take(&mut islands.changed);
+    let loaded = std::mem::take(&mut islands.loaded);
     if islands.islands.is_empty() {
         return;
     }
+    let (mut visits, mut queries) = ((changed.len() + loaded.len()) as u64, 0);
     let holds = |collider: Entity, change: Change| match change {
         Change::Lost => false,
         Change::Attachment(body) => {
@@ -530,15 +582,17 @@ fn thaw(p: Thaw, mut commands: Commands) {
     }
     let by_support = thawing.len();
     let mut by_load = 0;
-    for (piece, linear, angular) in &pushed {
-        if (linear.0 != Vec3::ZERO || angular.0 != Vec3::ZERO) && thawing.insert(piece.island) {
+    for island in loaded {
+        // A push on an island an earlier cause in this thaw already frees counts once.
+        if thawing.insert(island) {
             by_load += 1;
         }
     }
     let island_of = |piece: Entity| frozen.get(piece).expect("a reached frozen piece").0.island;
     let mut reached = BTreeSet::new();
     for mover in reach.movers() {
-        reach.of(mover, |body| frozen.contains(body), &mut reached);
+        visits += 1;
+        queries += reach.of(mover, |body| frozen.contains(body), &mut reached);
     }
     let mut by_reach = 0;
     for piece in reached {
@@ -572,7 +626,8 @@ fn thaw(p: Thaw, mut commands: Commands) {
             .collect();
         let mut further = BTreeSet::new();
         for &piece in &freed {
-            reach.of(
+            visits += 1;
+            queries += reach.of(
                 piece,
                 |body| {
                     frozen
@@ -603,6 +658,8 @@ fn thaw(p: Thaw, mut commands: Commands) {
         stages.add(Work::ThawSupport, by_support as u64);
         stages.add(Work::ThawLoad, by_load as u64);
         stages.add(Work::ThawReach, by_reach as u64);
+        stages.add(Work::FreezeVisits, visits);
+        stages.add(Work::ReachQueries, queries);
     }
 }
 
@@ -940,12 +997,59 @@ mod tests {
         }
     }
 
+    /// A PUSH ON A PIECE FALLING ASLEEP IS KEPT: a piece pushed in the tick Avian puts it to sleep,
+    /// after the step and before the freeze (where a field's or a blast's impulse lands), stays
+    /// dynamic and moves off, as a push on any sleeping body does. A freeze that took its island
+    /// would zero the push.
+    #[test]
+    fn a_push_on_a_piece_falling_asleep_is_kept() {
+        /// The piece, its push (N s), and whether it was pushed.
+        #[derive(Resource)]
+        struct Push(Entity, Vec3, bool);
+        let mut app = settling(GRAVITY);
+        slab(&mut app, 0.0);
+        let rubble = piece(&mut app, Vec3::Y * (SIDE / 2.0));
+        app.update();
+        let start = app.world().get::<Position>(rubble).unwrap().0;
+        // Fixture: 3 m/s along +x, past what friction stops within the run.
+        let impulse = Vec3::X * 3.0 * app.world().get::<ComputedMass>(rubble).unwrap().value();
+        app.insert_resource(Push(rubble, impulse, false))
+            .add_systems(
+                FixedPostUpdate,
+                (|mut push: ResMut<Push>,
+                  asleep: Query<(), With<Sleeping>>,
+                  mut forces: Query<Forces>| {
+                    if !push.2 && asleep.contains(push.0) {
+                        push.2 = true;
+                        forces.get_mut(push.0).unwrap().apply_linear_impulse(push.1);
+                    }
+                })
+                .after(PhysicsSystems::Writeback)
+                .before(freeze),
+            );
+        (0..640)
+            .find(|_| {
+                app.update();
+                app.world().resource::<Push>().2
+            })
+            .expect("the piece fell asleep within 10 s");
+        assert!(!is_frozen(&app, rubble), "the pushed island stays dynamic");
+        for _ in 0..16 {
+            app.update();
+        }
+        assert!(
+            app.world().get::<Position>(rubble).unwrap().0.x - start.x > 0.05,
+            "the push moved it"
+        );
+    }
+
     /// A THAWED STACK RESUMES WITH THE ENGINE'S REST TIMER RESTARTED: a stack frozen on a slab,
     /// given an impulse through Avian's `Forces` worth a tenth of the rest speed, thaws whole in
     /// the next update and freezes again only after resting a full `TimeToSleep`. The tripwire on
     /// Avian zeroing the timer of a body that rejoins an island (module doc): a timer carried from
     /// before the freeze would let the island sleep and freeze in the next step. A field's push
-    /// on a frozen piece (`construction::breakage`) relies on the impulse reaching its velocity.
+    /// on a frozen piece (`construction::breakage`) relies on the impulse reaching its velocity
+    /// and on its report through [`Loads`].
     #[test]
     fn a_thawed_stack_rests_a_full_window_before_it_freezes_again() {
         let mut app = settling(GRAVITY);
@@ -958,11 +1062,12 @@ mod tests {
         let mass = app.world().get::<ComputedMass>(pushed).unwrap().value();
         let impulse = Vec3::X * 0.1 * rest * mass;
         app.world_mut()
-            .run_system_once(move |mut forces: Query<Forces>| {
+            .run_system_once(move |mut forces: Query<Forces>, mut loads: Loads| {
                 forces
                     .get_mut(pushed)
                     .unwrap()
                     .apply_linear_impulse(impulse);
+                loads.pushed(pushed);
             })
             .unwrap();
         app.update();

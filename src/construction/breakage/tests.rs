@@ -1929,6 +1929,56 @@ fn a_resting_loose_piece_moves_to_a_blast() {
     );
 }
 
+/// The game's environment destruction: a loose piece that is no construction piece, frozen on the
+/// ground, moves to a blast beside it: the burst's rays meet it as they meet a dynamic body and
+/// push it, and the push thaws it (`debris::freeze`, load). A blast that took a frozen body for a
+/// static surface would leave it in place, shading the rays.
+#[test]
+fn a_frozen_loose_piece_moves_to_a_blast() {
+    let (mut app, _) = composed(false);
+    app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
+    // Fixture: a ground slab clear of the house, and a 0.4 m loose cube resting on it.
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Position(Vec3::new(30.0, -8.5, 0.0)),
+        Collider::cuboid(40.0, 1.0, 40.0),
+        CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+    ));
+    let side = 0.4;
+    let piece = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Position(Vec3::new(30.0, -8.0 + side / 2.0, 0.0)),
+            Rotation::default(),
+            Collider::cuboid(side, side, side),
+            ColliderDensity(1845.0),
+            piece_layers(),
+            crate::debris::DebrisPiece,
+        ))
+        .id();
+    (0..1280)
+        .find(|_| {
+            app.update();
+            app.world()
+                .get::<crate::debris::freeze::Frozen>(piece)
+                .is_some()
+        })
+        .expect("the piece came to rest and froze within 20 s");
+    let at = app.world().get::<Position>(piece).unwrap().0;
+    charge(&mut app, at + Vec3::X * 0.8);
+    assert_eq!(
+        app.world().get::<RigidBody>(piece),
+        Some(&RigidBody::Dynamic),
+        "the burst thaws the piece"
+    );
+    let velocity = app.world().get::<LinearVelocity>(piece).unwrap().0;
+    assert!(
+        velocity.x < 0.0,
+        "it leaves away from the burst: {velocity}"
+    );
+}
+
 /// Per update, the contact loads [`read_contacts`] queued in it, each with its construction's root.
 #[derive(Resource, Default)]
 struct QueuedContacts(Vec<Vec<(Entity, Load)>>);

@@ -1352,6 +1352,8 @@ struct DepositParam<'w, 's> {
     aabbs: Query<'w, 's, &'static ColliderAabb>,
     bodies: Query<'w, 's, (Forces, &'static RigidBody)>,
     centres: Query<'w, 's, &'static avian3d::prelude::ComputedCenterOfMass>,
+    /// Every push here on a body that may be frozen reports to the thaw.
+    loads: crate::debris::freeze::Loads<'w, 's>,
 }
 
 /// The layers of the surfaces a blast's rays meet through avian: static surfaces
@@ -1364,9 +1366,10 @@ const SURFACES: [Layer; 4] = [
     Layer::TrackSide,
 ];
 
-/// The colliders of every dynamic body whose bounds meet the cube of half-side `reach` m about
-/// `origin`, ascending: the moving bodies a blast's rays push. Every other collider a ray meets
-/// on [`SURFACES`] stops it with nothing, but a construction's, which its own walk reads.
+/// The colliders of every dynamic or frozen body (`debris::freeze`) whose bounds meet the cube of
+/// half-side `reach` m about `origin`, ascending: the loose bodies a blast's rays push. Every other
+/// collider a ray meets on [`SURFACES`] stops it with nothing, but a construction's, which its own
+/// walk reads.
 fn moving_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
     let mut near = Vec::new();
     p.spatial.aabb_intersections_with_aabb_callback(
@@ -1375,7 +1378,7 @@ fn moving_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
             if p.collider_of.get(collider).is_ok_and(|of| {
                 p.bodies
                     .get(of.body)
-                    .is_ok_and(|(_, body)| body.is_dynamic())
+                    .is_ok_and(|(_, body)| body.is_dynamic() || p.loads.is_frozen(of.body))
                     && !p.constructions.contains(of.body)
             }) {
                 near.push(collider);
@@ -2016,6 +2019,7 @@ fn apply_deposits(mut p: DepositParam) {
                             frame.translation + frame.rotation * load.at,
                         );
                     }
+                    p.loads.pushed(effect.root);
                 }
                 p.record
                     .entries
@@ -2276,8 +2280,9 @@ fn cast_blast(
                 let (mut forces, _) = p
                     .bodies
                     .get_mut(of.body)
-                    .expect("a body in reach is dynamic");
+                    .expect("a body in reach is dynamic or frozen");
                 forces.apply_linear_impulse_at_point(hit.impulse, hit.at);
+                p.loads.pushed(of.body);
             }
         }
     }
