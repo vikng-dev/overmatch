@@ -41,8 +41,11 @@
 //! - load: a piece whose velocity is not zero, since game code pushed it (Avian's `Forces` writes
 //!   a static body's velocity as any other's), as a velocity written onto a sleeping body wakes
 //!   its island (`dynamics/solver/islands/sleeping.rs`, `wake_on_changed`);
-//! - support: a collider the island depends on goes, leaves its body, is disabled or moves, or its
-//!   body goes, moves or stops being static.
+//! - support: a collider the island depends on goes, leaves its body, is disabled, turns sensor,
+//!   or is re-posed, reshaped or re-layered in place (`super::wake_on_static_moved` notes those);
+//!   or its body goes, is disabled or stops being static. A collider with no body is never a
+//!   support: Avian builds it no contact constraint, and the freeze counts only pairs that build
+//!   one.
 //!
 //! A frozen piece's press on standing construction stays as its sleeping press did
 //! (`contact_transfer`, resting contacts).
@@ -61,6 +64,8 @@
 use avian3d::dynamics::solver::islands::{BodyIslandNode, IslandId, PhysicsIslands};
 use avian3d::prelude::*;
 use bevy::ecs::entity::EntityHashMap;
+use bevy::ecs::entity_disabling::Disabled;
+use bevy::ecs::query::Allow;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -94,29 +99,50 @@ struct Island {
     touched: Vec<Entity>,
 }
 
-/// Every frozen island, the colliders each depends on, and the changes to those colliders since
-/// the last thaw.
+/// What became of a collider a frozen island depends on, judged at the next thaw.
+#[derive(Clone, Copy)]
+enum Change {
+    /// It went, was disabled or turned sensor, or its body was disabled.
+    Lost,
+    /// Its attachment, or its body's type, changed from this body.
+    Attachment(Entity),
+    /// It was re-posed in place, and with `reshaped` reshaped or re-layered too.
+    InPlace { reshaped: bool },
+}
+
+/// Every frozen island, the colliders each depends on, and what changed for them since the last
+/// thaw.
 #[derive(Resource, Default)]
 pub(crate) struct FrozenIslands {
     next: u64,
     islands: BTreeMap<u64, Island>,
     by_collider: EntityHashMap<Vec<u64>>,
-    /// A collider a frozen island depends on, with the body it was attached to before a change
-    /// to its attachment or to that body; `None` once it goes or is disabled.
-    changed: Vec<(Entity, Option<Entity>)>,
+    changed: Vec<(Entity, Change)>,
 }
 
 impl FrozenIslands {
-    fn depends_on(&self, collider: Entity) -> bool {
-        self.by_collider.contains_key(&collider)
+    fn note(&mut self, collider: Entity, change: Change) {
+        if self.by_collider.contains_key(&collider) {
+            self.changed.push((collider, change));
+        }
+    }
+
+    /// A static body's collider re-posed, and with `reshaped` reshaped or re-layered too, in
+    /// place since the last step.
+    pub(super) fn moved_in_place(&mut self, collider: Entity, reshaped: bool) {
+        self.note(collider, Change::InPlace { reshaped });
     }
 }
 
 #[cfg(test)]
 impl FrozenIslands {
     /// Each frozen island whose support no longer stands, and why: it touched nothing as it froze,
-    /// or a collider it touched has gone, is disabled or is no fixed body's.
+    /// or a collider it touched has gone, is disabled, is a sensor or is no enabled fixed body's.
     pub(crate) fn unsupported(&self, world: &World) -> Vec<(u64, &'static str)> {
+        let disabled = |entity| {
+            world.get::<Disabled>(entity).is_some()
+                || world.get::<ColliderDisabled>(entity).is_some()
+        };
         let mut lost = Vec::new();
         for (&id, island) in &self.islands {
             if island.touched.is_empty() {
@@ -125,14 +151,18 @@ impl FrozenIslands {
             for &collider in &island.touched {
                 if world.get_entity(collider).is_err() {
                     lost.push((id, "its support is gone"));
-                } else if world.get::<ColliderDisabled>(collider).is_some() {
+                } else if disabled(collider) {
                     lost.push((id, "its support is disabled"));
+                } else if world.get::<Sensor>(collider).is_some() {
+                    lost.push((id, "its support is a sensor"));
                 } else if world.get::<ColliderOf>(collider).is_some_and(|of| {
-                    !world
-                        .get::<RigidBody>(of.body)
-                        .is_some_and(RigidBody::is_static)
+                    disabled(of.body)
+                        || world.get::<RigidBodyDisabled>(of.body).is_some()
+                        || !world
+                            .get::<RigidBody>(of.body)
+                            .is_some_and(RigidBody::is_static)
                 }) {
-                    lost.push((id, "its support is not fixed"));
+                    lost.push((id, "its support is not an enabled fixed body's"));
                 }
             }
         }
@@ -143,9 +173,12 @@ impl FrozenIslands {
 pub(crate) fn sim_plugin(app: &mut App) {
     app.init_resource::<FrozenIslands>()
         .add_observer(body_changed)
+        .add_observer(body_disabled)
+        .add_observer(entity_disabled)
         .add_observer(collider_gone)
         .add_observer(collider_left)
         .add_observer(collider_disabled)
+        .add_observer(collider_sensed)
         .add_systems(
             PhysicsSchedule,
             thaw.after(super::wake_on_static_moved)
@@ -169,21 +202,37 @@ fn body_changed(
     colliders: Query<&RigidBodyColliders>,
     mut islands: ResMut<FrozenIslands>,
 ) {
-    let Ok(colliders) = colliders.get(changed.entity) else {
-        return; // A body with no collider holds nothing up.
-    };
-    for collider in colliders.iter() {
-        if islands.depends_on(collider) {
-            islands.changed.push((collider, Some(changed.entity)));
-        }
+    for collider in colliders.get(changed.entity).into_iter().flatten() {
+        islands.note(collider, Change::Attachment(changed.entity));
+    }
+}
+
+/// A body disabled: none of its colliders holds anything up.
+fn body_disabled(
+    disabled: On<Add, RigidBodyDisabled>,
+    colliders: Query<&RigidBodyColliders>,
+    mut islands: ResMut<FrozenIslands>,
+) {
+    for collider in colliders.get(disabled.entity).into_iter().flatten() {
+        islands.note(collider, Change::Lost);
+    }
+}
+
+/// An entity disabled whole: a collider, or a body with its colliders.
+fn entity_disabled(
+    disabled: On<Add, Disabled>,
+    colliders: Query<&RigidBodyColliders, Allow<Disabled>>,
+    mut islands: ResMut<FrozenIslands>,
+) {
+    islands.note(disabled.entity, Change::Lost);
+    for collider in colliders.get(disabled.entity).into_iter().flatten() {
+        islands.note(collider, Change::Lost);
     }
 }
 
 /// A collider going, with a body or without one.
 fn collider_gone(gone: On<Discard, ColliderMarker>, mut islands: ResMut<FrozenIslands>) {
-    if islands.depends_on(gone.entity) {
-        islands.changed.push((gone.entity, None));
-    }
+    islands.note(gone.entity, Change::Lost);
 }
 
 /// A collider leaving its body, despawned or rehomed. Every `Insert<RigidBody>`, a body type switch
@@ -194,19 +243,20 @@ fn collider_left(
     of: Query<&ColliderOf>,
     mut islands: ResMut<FrozenIslands>,
 ) {
-    if islands.depends_on(left.entity) {
-        let body = of
-            .get(left.entity)
-            .expect("a discarded ColliderOf is on its collider in its own Discard observer")
-            .body;
-        islands.changed.push((left.entity, Some(body)));
-    }
+    let body = of
+        .get(left.entity)
+        .expect("a discarded ColliderOf is on its collider in its own Discard observer")
+        .body;
+    islands.note(left.entity, Change::Attachment(body));
 }
 
 fn collider_disabled(disabled: On<Add, ColliderDisabled>, mut islands: ResMut<FrozenIslands>) {
-    if islands.depends_on(disabled.entity) {
-        islands.changed.push((disabled.entity, None));
-    }
+    islands.note(disabled.entity, Change::Lost);
+}
+
+/// A sensor holds nothing up.
+fn collider_sensed(sensed: On<Add, Sensor>, mut islands: ResMut<FrozenIslands>) {
+    islands.note(sensed.entity, Change::Lost);
 }
 
 /// The bodies that can make contacts in this step, and what their colliders can touch in it
@@ -412,12 +462,9 @@ struct Thaw<'w, 's> {
         ),
         Or<(Changed<LinearVelocity>, Changed<AngularVelocity>)>,
     >,
-    /// Colliders re-posed since the last thaw: Avian places a child collider at its body's pose in
-    /// its step's first set, before this.
-    moved: Query<'w, 's, (Entity, &'static ColliderOf), Or<(Changed<Position>, Changed<Rotation>)>>,
     attached: Query<'w, 's, &'static ColliderOf>,
     disabled: Query<'w, 's, (), With<ColliderDisabled>>,
-    bodies: Query<'w, 's, (&'static RigidBody, Has<Frozen>)>,
+    bodies: Query<'w, 's, &'static RigidBody, Without<RigidBodyDisabled>>,
     reach: Reach<'w, 's>,
     stages: Option<Res<'w, Stages>>,
 }
@@ -428,7 +475,6 @@ fn thaw(p: Thaw, mut commands: Commands) {
         mut islands,
         frozen,
         pushed,
-        moved,
         attached,
         disabled,
         bodies,
@@ -439,31 +485,27 @@ fn thaw(p: Thaw, mut commands: Commands) {
     if islands.islands.is_empty() {
         return;
     }
-    let mut lost: Vec<Entity> = changed
-        .into_iter()
-        .filter(|&(collider, was_on)| {
-            let holds = was_on.is_some_and(|body| {
-                attached.get(collider).is_ok_and(|of| of.body == body)
-                    && bodies.get(body).is_ok_and(|(kind, _)| kind.is_static())
-            }) && !disabled.contains(collider);
-            !holds
-        })
-        .map(|(collider, _)| collider)
-        .collect();
-    let fixed_unfrozen = |body| {
-        bodies
-            .get(body)
-            .is_ok_and(|(kind, frozen)| kind.is_static() && !frozen)
+    let holds = |collider: Entity, change: Change| match change {
+        Change::Lost => false,
+        Change::Attachment(body) => {
+            attached.get(collider).is_ok_and(|of| of.body == body)
+                && bodies.get(body).is_ok_and(RigidBody::is_static)
+                && !disabled.contains(collider)
+        }
+        // A frozen piece's own collider holds: Avian placing its child colliders writes their
+        // poses, not the piece's.
+        Change::InPlace { reshaped } => {
+            !reshaped
+                && attached
+                    .get(collider)
+                    .is_ok_and(|of| frozen.contains(of.body))
+        }
     };
-    lost.extend(
-        moved
-            .iter()
-            .filter(|&(collider, of)| islands.depends_on(collider) && fixed_unfrozen(of.body))
-            .map(|(collider, _)| collider),
-    );
     let mut thawing = BTreeSet::new();
-    for collider in &lost {
-        thawing.extend(islands.by_collider.get(collider).into_iter().flatten());
+    for (collider, change) in changed {
+        if !holds(collider, change) {
+            thawing.extend(islands.by_collider.get(&collider).into_iter().flatten());
+        }
     }
     let by_support = thawing.len();
     let mut by_load = 0;
@@ -603,14 +645,15 @@ mod tests {
 
     /// A FROZEN PIECE ALWAYS HAS SUPPORT: a stack of two frozen on a slab (the child collider of a
     /// static root) thaws whole in the update after the slab goes, goes with its root, is
-    /// disabled, moves with its root, leaves its root for a dynamic body, or its root turns
-    /// dynamic, and falls; every update, every frozen island still rests on what it froze on. A
-    /// mutant that drops any one support check leaves the stack hanging static where the slab
-    /// was. The stack froze as one island: the upper piece, settling, reached the lower one.
+    /// disabled, turns sensor, is reshaped or re-layered in place, moves with its root, leaves its
+    /// root for a dynamic body, or its root turns dynamic or is disabled, and falls; every update,
+    /// every frozen island still rests on what it froze on. A mutant that drops any one support
+    /// check leaves the stack hanging static where the slab was. The stack froze as one island:
+    /// the upper piece, settling, reached the lower one.
     #[test]
     fn a_frozen_piece_always_has_support() {
         type Change = fn(&mut World, Entity, Entity);
-        let changes: [(&str, Change); 6] = [
+        let changes: [(&str, Change); 12] = [
             ("goes", |world, slab, _| {
                 world.despawn(slab);
             }),
@@ -620,7 +663,21 @@ mod tests {
             ("is disabled", |world, slab, _| {
                 world.entity_mut(slab).insert(ColliderDisabled);
             }),
-            ("moves", |world, _, root| {
+            ("is disabled whole", |world, slab, _| {
+                world.entity_mut(slab).insert(Disabled);
+            }),
+            ("turns sensor", |world, slab, _| {
+                world.entity_mut(slab).insert(Sensor);
+            }),
+            ("is reshaped", |world, slab, _| {
+                *world.get_mut::<Collider>(slab).unwrap() = Collider::cuboid(20.0, 0.2, 20.0);
+            }),
+            ("is re-layered", |world, slab, _| {
+                world
+                    .entity_mut(slab)
+                    .insert(CollisionLayers::new([Layer::Terrain], LayerMask::NONE));
+            }),
+            ("moves with its root", |world, _, root| {
                 world.get_mut::<Position>(root).unwrap().0 += Vec3::NEG_Y;
             }),
             ("leaves its root", |world, slab, root| {
@@ -630,8 +687,14 @@ mod tests {
                     .id();
                 world.entity_mut(slab).insert(ChildOf(body));
             }),
-            ("turns dynamic", |world, _, root| {
+            ("its root turns dynamic", |world, _, root| {
                 world.entity_mut(root).insert(RigidBody::Dynamic);
+            }),
+            ("its root is disabled", |world, _, root| {
+                world.entity_mut(root).insert(RigidBodyDisabled);
+            }),
+            ("its root is disabled whole", |world, _, root| {
+                world.entity_mut(root).insert(Disabled);
             }),
         ];
         for (change, apply) in changes {

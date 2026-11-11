@@ -169,19 +169,39 @@ fn wake_on_collider_disabled(
     });
 }
 
-/// Every collider of a static body re-posed since the last step: every sleeping body touching it
-/// wakes (module doc).
+/// Every collider of a static body re-posed, reshaped or re-layered since the last step: every
+/// sleeping body touching a re-posed one wakes (module doc), and each frozen island depending on
+/// any of them is judged at this step's thaw ([`freeze`]).
 fn wake_on_static_moved(
-    moved: Query<(Entity, &ColliderOf), Or<(Changed<Position>, Changed<Rotation>)>>,
+    changed: Query<
+        (
+            Entity,
+            &ColliderOf,
+            (Ref<Position>, Ref<Rotation>),
+            (Ref<Collider>, Option<Ref<CollisionLayers>>),
+        ),
+        Or<(
+            Changed<Position>,
+            Changed<Rotation>,
+            Changed<Collider>,
+            Changed<CollisionLayers>,
+        )>,
+    >,
     bodies: Query<&RigidBody>,
     contacts: Res<ContactGraph>,
     sleeping: Query<(), With<Sleeping>>,
+    mut islands: ResMut<freeze::FrozenIslands>,
     mut commands: Commands,
 ) {
-    for (collider, of) in &moved {
-        if bodies.get(of.body).is_ok_and(RigidBody::is_static) {
+    for (collider, of, (position, rotation), (shape, layers)) in &changed {
+        if !bodies.get(of.body).is_ok_and(RigidBody::is_static) {
+            continue; // A moving body's colliders move with it.
+        }
+        if position.is_changed() || rotation.is_changed() {
             wake_touching(collider, &contacts, &sleeping, &mut commands);
         }
+        let reshaped = shape.is_changed() || layers.is_some_and(|layers| layers.is_changed());
+        islands.moved_in_place(collider, reshaped);
     }
 }
 
