@@ -141,10 +141,13 @@ pub struct Sensed {
     pub stall: Option<Stall>,
     /// The latest gear left downward while its memory holds.
     pub failed: Option<Failed>,
-    /// Every sample in the window stalled under the engaged gear's drive, as [`Stall`] reads one:
-    /// the hull at rest and not gaining, its belts at rest or not gaining. The stall is the gear's
-    /// own only where its clutch sent drive throughout: a crank spooling to its launch rpm sends
-    /// none (MEASURED on flat ground: a window of them read fourth as failed at rest).
+    /// The hull stalls now under the engaged gear: a stall's bound holds, the gear drove every
+    /// sample of the window with the hull at rest, and over the window its belts came to rest or
+    /// did not gain. The window, not each tick, establishes the condition (MEASURED on the rubble
+    /// battery: requiring every tick to stall fired no stall step on the heap rams and tripled the
+    /// stalled ticks, 25216 against 8046). The stall is the gear's own only where its clutch sent
+    /// drive throughout: a crank spooling to its launch rpm sends none (MEASURED on flat ground: a
+    /// window of them read fourth as failed at rest).
     pub stalled: bool,
     /// The engaged gear pulled every sample in the window through a locked clutch: the drive and
     /// the drivetrain's gain are that gear's alone. A paid cut, another gear or a tick without
@@ -189,8 +192,8 @@ pub struct DriverSense {
     /// The failure of the gear engaged again, which a failure of its retry does not undercut.
     retried: Option<Failed>,
     attempt: Option<Attempt>,
-    /// The gear asked to pull the latest samples, and how many of the latest of those stalled the
-    /// hull under its drive and how many its clutch held.
+    /// The gear asked to pull the latest samples, and how many of the latest of those it drove with
+    /// the hull at rest and how many its clutch held.
     run: Option<(Engaged, usize, usize)>,
     /// The reading this tick's choice used: telemetry and probes read it.
     pub(crate) reading: Option<Sensed>,
@@ -268,12 +271,13 @@ impl DriverSense {
                     },
                 });
             }
-            let [stalling, held] = [stalled.is_some(), open.locked].map(usize::from);
+            let resting = open.driving && at_rest(open.velocity) && at_rest(velocity);
+            let [resting, held] = [resting, open.locked].map(usize::from);
             self.run = match (open.pulled_by, self.run) {
-                (Some(by), Some((gear, stalls, locked))) if by == gear => {
-                    Some((gear, (stalls + 1) * stalling, (locked + 1) * held))
+                (Some(by), Some((gear, rested, locked))) if by == gear => {
+                    Some((gear, (rested + 1) * resting, (locked + 1) * held))
                 }
-                (by, _) => by.map(|by| (by, stalling, held)),
+                (by, _) => by.map(|by| (by, resting, held)),
             };
             if self.samples.len() == self.window {
                 self.samples.pop_front();
@@ -324,7 +328,11 @@ impl DriverSense {
                 grip: grip.map(|grip| grip / count),
                 stall: self.stall,
                 failed: self.failed,
-                stalled: self.run.is_some_and(|(_, stalls, _)| stalls >= self.window),
+                // The window's belts at rest or not gaining under the stall's pull.
+                stalled: self.stall.is_some_and(|stall| {
+                    self.run.is_some_and(|(_, rested, _)| rested >= self.window)
+                        && (belts.abs() < PARK_ENGAGE_SPEED || stall.dir * belt_gain <= 0.0)
+                }),
                 observed: self.run.is_some_and(|(_, _, locked)| locked >= self.window),
             }
         });
