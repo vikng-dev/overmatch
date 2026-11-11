@@ -232,7 +232,8 @@ fn install_value(app: &mut App, text: &str) -> Result<(), LeverError> {
     Ok(())
 }
 
-fn supports(body: &Breakage) -> BTreeSet<usize> {
+/// The chunks of `body` that hold it to the ground: buried or anchored.
+pub(crate) fn supports(body: &Breakage) -> BTreeSet<usize> {
     let anchored: BTreeSet<_> = body.kind.asset.anchors.iter().map(|a| a.chunk).collect();
     body.live
         .structure
@@ -242,6 +243,66 @@ fn supports(body: &Breakage) -> BTreeSet<usize> {
         .filter(|(c, chunk)| chunk.buried || anchored.contains(&body.kind.layout.chunks[*c]))
         .map(|(c, _)| c)
         .collect()
+}
+
+/// One zero-length line on each of `supports`, chunks of the standing construction `id` at
+/// `root` posed `pose`, carrying enough energy to remove it through the ordinary deposit path.
+pub(crate) fn felling_lines(
+    id: &str,
+    root: Entity,
+    pose: &Transform,
+    body: &Breakage,
+    supports: &BTreeSet<usize>,
+    volumes: &Query<(Entity, &ChildOf, &Element), With<BallisticVolume>>,
+) -> Vec<DeliveredLine> {
+    supports
+        .iter()
+        .map(|&c| {
+            let chunk = &body.live.structure.chunks[c];
+            assert!(
+                body.live.state.standing(c),
+                "loadtest scheduled support must still stand; instance {id} chunk {c}"
+            );
+            let element = body.kind.layout.element_of[c];
+            let volume = volumes
+                .iter()
+                .find(|(_, parent, e)| parent.parent() == root && e.0 == element)
+                .expect("untouched scheduled support retains its element volume")
+                .0;
+            let at = pose.translation + pose.rotation * chunk.centroid;
+            // DERIVED: twice V * crush exceeds this scaled chunk's complete work pool.
+            // A zero-length line deposits at its centroid, without inventing a projectile.
+            let energy = 2.0 * chunk.volume * chunk.material.crush;
+            DeliveredLine {
+                crossing: VolumeCrossing {
+                    volume,
+                    entry: at,
+                    end: at,
+                    chord: 0.0,
+                    cost: 0.0,
+                    energy,
+                    perforated: true,
+                },
+                contacts: vec![],
+                momentum: Vec3::ZERO,
+                entrance_momentum: Vec3::ZERO,
+                entrance_energy: 0.0,
+            }
+        })
+        .collect()
+}
+
+/// Deliver `lines` as one march step of a shell that leaves no mark.
+pub(crate) fn fell(commands: &mut Commands, lines: Vec<DeliveredLine>) {
+    let shell = commands.spawn(PenetrationMarks::default()).id();
+    commands.trigger(ShellMarched {
+        shell,
+        marks_from: 0,
+        cones_from: 0,
+        burst: None,
+        lines,
+    });
+    commands.entity(shell).despawn();
 }
 
 fn drive(
@@ -285,42 +346,7 @@ fn drive(
                         "a construction whose ground supports are all breakable",
                     ));
                 }
-                let lines = supports
-                    .iter()
-                    .map(|&c| {
-                        let chunk = &body.live.structure.chunks[c];
-                        assert!(
-                            body.live.state.standing(c),
-                            "loadtest scheduled support must still stand; instance {} chunk {c}",
-                            identity.id
-                        );
-                        let element = body.kind.layout.element_of[c];
-                        let volume = volumes
-                            .iter()
-                            .find(|(_, parent, e)| parent.parent() == root && e.0 == element)
-                            .expect("untouched scheduled support retains its element volume")
-                            .0;
-                        let at = pose.translation + pose.rotation * chunk.centroid;
-                        // DERIVED: twice V * crush exceeds this scaled chunk's complete work pool.
-                        // A zero-length line deposits at its centroid, without inventing a projectile.
-                        let energy = 2.0 * chunk.volume * chunk.material.crush;
-                        DeliveredLine {
-                            crossing: VolumeCrossing {
-                                volume,
-                                entry: at,
-                                end: at,
-                                chord: 0.0,
-                                cost: 0.0,
-                                energy,
-                                perforated: true,
-                            },
-                            contacts: vec![],
-                            momentum: Vec3::ZERO,
-                            entrance_momentum: Vec3::ZERO,
-                            entrance_energy: 0.0,
-                        }
-                    })
-                    .collect::<Vec<_>>();
+                let lines = felling_lines(&identity.id, root, pose, body, &supports, &volumes);
                 assert!(
                     !lines.is_empty(),
                     "admitted anchored construction has breakable supports"
@@ -384,15 +410,7 @@ fn drive(
                     "a scheduled target untouched before its event; choose another map ID",
                 ));
             }
-            let shell = commands.spawn(PenetrationMarks::default()).id();
-            commands.trigger(ShellMarched {
-                shell,
-                marks_from: 0,
-                cones_from: 0,
-                burst: None,
-                lines: target.lines,
-            });
-            commands.entity(shell).despawn();
+            fell(&mut commands, target.lines);
         }
         println!(
             "loadtest {}",

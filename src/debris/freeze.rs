@@ -109,6 +109,34 @@ impl FrozenIslands {
     }
 }
 
+#[cfg(test)]
+impl FrozenIslands {
+    /// Each frozen island whose support no longer stands, and why: it touched nothing as it froze,
+    /// or a collider it touched has gone, is disabled or is no fixed body's.
+    pub(crate) fn unsupported(&self, world: &World) -> Vec<(u64, &'static str)> {
+        let mut lost = Vec::new();
+        for (&id, island) in &self.islands {
+            if island.touched.is_empty() {
+                lost.push((id, "it rests on nothing"));
+            }
+            for &collider in &island.touched {
+                if world.get_entity(collider).is_err() {
+                    lost.push((id, "its support is gone"));
+                } else if world.get::<ColliderDisabled>(collider).is_some() {
+                    lost.push((id, "its support is disabled"));
+                } else if world.get::<ColliderOf>(collider).is_some_and(|of| {
+                    !world
+                        .get::<RigidBody>(of.body)
+                        .is_some_and(RigidBody::is_static)
+                }) {
+                    lost.push((id, "its support is not fixed"));
+                }
+            }
+        }
+        lost
+    }
+}
+
 pub(crate) fn sim_plugin(app: &mut App) {
     app.init_resource::<FrozenIslands>()
         .add_observer(body_changed)
@@ -537,25 +565,11 @@ mod tests {
     /// enabled and is fixed.
     fn assert_supported(app: &App) {
         let world = app.world();
-        for island in world.resource::<FrozenIslands>().islands.values() {
-            assert!(
-                !island.touched.is_empty(),
-                "a frozen island rests on something"
-            );
-            for &collider in &island.touched {
-                assert!(world.get_entity(collider).is_ok(), "its support exists");
-                assert!(
-                    world.get::<ColliderDisabled>(collider).is_none(),
-                    "and is enabled"
-                );
-                if let Some(&ColliderOf { body }) = world.get::<ColliderOf>(collider) {
-                    assert!(
-                        world.get::<RigidBody>(body).unwrap().is_static(),
-                        "and fixed"
-                    );
-                }
-            }
-        }
+        let lost = world.resource::<FrozenIslands>().unsupported(world);
+        assert!(
+            lost.is_empty(),
+            "a frozen island lost its support: {lost:?}"
+        );
     }
 
     /// A FROZEN PIECE ALWAYS HAS SUPPORT: a stack of two frozen on a slab (the child collider of a
