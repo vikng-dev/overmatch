@@ -1967,19 +1967,18 @@ fn capture_scripted_determinism_tick(
     run.saw_airborne |= grounded == 0;
     run.saw_grounded |= grounded > 0;
 
-    // Avian 0.7 `Forces::velocity_at_point`: v_point = v_linear + omega × (point − world_COM),
-    // where world_COM = position + rotation * local_COM. Slip is witnessed directly from the
-    // belt model's contact telemetry: a loaded contact whose longitudinal slip is past the
-    // near-rest band while steer is commanded. FIXTURE DATA: the band is half the sim's 0.4 m/s
-    // slip-saturation scale; the script's steer peaks at 0.28 m/s of slip (MEASURED).
+    // Slip is witnessed by the contact law's own measure: a gripping patch carries its whole
+    // budget μ·N_elastic only while it slides. Resolution: a 1e-4 share of that budget absorbs the
+    // capped grip vector's roundoff. The witness closes at the steered checkpoint, before the hull
+    // meets the other tank, whose push would slide the belts without any steer.
     let _ = (position, rotation, linear, angular, local_com);
-    let loaded_contact_is_slipping = contacts
-        .0
-        .iter()
-        .flatten()
-        .any(|c| c.load > 0.0 && c.slip.abs() > 0.2);
-    run.saw_steering_slip |=
-        tick >= 300 && signal.steer.abs() > f32::EPSILON && loaded_contact_is_slipping;
+    let loaded_contact_is_slipping = contacts.0.iter().flatten().any(|c| {
+        let budget = c.mu * c.load_elastic;
+        budget > 0.0 && c.f_long.hypot(c.f_lat) >= budget * (1.0 - 1e-4)
+    });
+    run.saw_steering_slip |= (300..=379).contains(&tick)
+        && signal.steer.abs() > f32::EPSILON
+        && loaded_contact_is_slipping;
     run.saw_shot |= sim.weapons.iter().any(|weapon| weapon.rounds_fired > 0);
     run.saw_projectile_spawn |= !projectiles.is_empty();
     run.saw_projectile_march |= projectiles.iter().any(|path| path.points.len() > 1);
