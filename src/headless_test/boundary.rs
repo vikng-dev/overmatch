@@ -13,6 +13,8 @@ struct Bed {
     hulls: Vec<(Collider, ColliderTransform)>,
     droop_feet: Vec<Vec3>,
     half: f32,
+    /// Where Avian holds a hull: the polygon edge less the walls' contact margin.
+    face: f32,
     tolerance: f32,
     rest: f32,
 }
@@ -82,6 +84,11 @@ impl Bed {
                     })
             })
             .collect();
+        let margin = world
+            .query_filtered::<Option<&CollisionMargin>, With<crate::world::BoundaryWall>>()
+            .iter(world)
+            .map(|margin| margin.map_or(0.0, |margin| margin.0))
+            .fold(0.0_f32, f32::max);
         let tolerance = world.resource::<NarrowPhaseConfig>().contact_tolerance
             * world.resource::<PhysicsLengthUnit>().0;
         Self {
@@ -90,6 +97,7 @@ impl Bed {
             hulls,
             droop_feet,
             half,
+            face: half - margin,
             tolerance,
             rest,
         }
@@ -109,7 +117,7 @@ impl Bed {
             .iter()
             .map(|(shape, local)| {
                 let aabb = shape.aabb(p + r * local.translation, r * local.rotation.0);
-                aabb.min.xz().abs().max(aabb.max.xz().abs()).max_element() - self.half
+                aabb.min.xz().abs().max(aabb.max.xz().abs()).max_element() - self.face
             })
             .fold(f32::NEG_INFINITY, f32::max)
     }

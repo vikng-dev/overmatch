@@ -499,6 +499,35 @@ below. `MapManifest` carries it.
   `src/bitprobe.rs:37`, is 1.6 m).
 - **Corners.** At a convex vertex the two boxes' inner faces meet on the vertex line, leaving no gap
   on the play side. At a reflex vertex their outward parts overlap.
+- **Contact margin** (`world::boundary::CONTACT_MARGIN_M`, 0.5 m, `Resolution`): a `CollisionMargin`
+  on each box, so Avian holds bodies that far off its faces; ray queries and the belt meet the face
+  itself. Parry 0.27's f32 GJK cannot resolve a near touch on a face this large. At touch it takes
+  the rounding residue of the face's far corners for the separating direction, so a manifold runs
+  along the face with depths toward its far end; a few tenths of a metre off, it takes the separated
+  pair for an intersection, EPA fails and the contact drops. MEASURED, bare query, the hull fixture
+  of `world::boundary`'s witness held a separation off a box face, faults (normal more than 26°
+  off, deeper than 0.15 m, or no manifold) in 4,000 poses:
+
+  | face half-diagonal | touch | 0.1 m | 0.2 m | 0.3 m | 0.5 m |
+  |---|---|---|---|---|---|
+  | 131 m (the drive bed) | 182 | 0 | 0 | 0 | 0 |
+  | 572 m | | 66 | 2 | 0 | 0 |
+  | 930 m (shipped) | 887 | 338 | 91 | 2 | 0 |
+  | 1,250 m | | 644 | 339 | 77 | 0 |
+
+  Hulls press into the margin by at most 1.4 cm in the W1d drives (MEASURED). Full-throttle
+  head-on drives, 9 arrival phases at 5 places along the wall, counting drives with a fault
+  (MEASURED; deepest fault 169 m on the bed, 792 m at shipped size, before the margin):
+
+  | bed half-width | no margin | 0.5 m margin |
+  |---|---|---|
+  | 128 m (the drive bed) | 40 of 45 drives, 211 of 40,325 pair-ticks | 0 of 45, 0 of 45,112 |
+  | 750 m (shipped size, 1 km tall) | 45 of 45, 1,638 of 39,192 | 0 of 45, 0 of 45,091 |
+
+  What the margin leaves at shipped size (MEASURED, the witness's 2,000 hulls): every normal
+  within 0.05° of the face's; Parry's unlabelled GJK witness point lands 1 mm to 3.2 cm deeper
+  than the hull's overlap on about 1 % of hulls, short of the solid. A face past 1,250 m
+  half-diagonal is unmeasured: a larger map needs a fresh sweep, and nothing refuses one yet.
 - `RigidBody::Static`, `CollisionLayers::new([Layer::Terrain], LayerMask::ALL)`, like every static
   ground solid (`world::spawn_environment`, `scatter.rs:318`).
 - No `FieldSurface`, no `TerrainMap` block, no spawn obstacle, no mesh.
@@ -540,6 +569,17 @@ Rejected:
   tunnel;
 - raising the heightmap at the edge: it changes the sim terrain, cannot be invisible, and is art's
   to do.
+
+Rejected for the margin's job:
+- a half-space per edge: Parry meets one without GJK (MEASURED 0 faults at touch), but the belt
+  reads finite faces and a support map and admits none, a reflex vertex's half-space would cut the
+  play area, and its unbounded AABB pairs it with every body;
+- coplanar boxes small enough for GJK at touch: the fault follows the face's half-diagonal, so a
+  4 × 1,100 m face fails like a 1,500 × 4 m one (MEASURED), which leaves about 10⁵ boxes per
+  shipped side and a seam for sliding hulls to catch every few metres;
+- a rounded box: the margin's standoff in a shape the belt does not admit;
+- checking GJK's direction in the vendored Avian (`park/manifold-repro`): it fixes every large solid,
+  but its changed normals move other bodies into an EPA fault at exact touch.
 
 **What it stops.** Every row follows from an existing rule, with no case of its own.
 
@@ -609,13 +649,16 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
 - W1c (server body containment and physical queries):
   - a debris piece thrown outward, flat and spinning, stays inside;
   - `ground_distance` toward the edge returns the wall's distance;
+  - a hull resting on a shipped-size face, or pressed into its margin, gets a manifold with the
+    face's normal and no point inside the solid;
   - these witnesses read Avian's configured contact tolerance, never restate it;
   - no grip (invariant: the owner's zero-grip choice holds on every friction path): the wall's
     friction, read from `boundary.ron`, combined with every shipped substance's contact friction,
     with the track's grip friction through `GripParams::pair`, and with `DefaultFriction`, is zero,
     static and dynamic.
-- W1d (server hull containment): overlap with the wall remains within the force-and-arrival bound
-  below throughout the drive, without accumulating outward drift.
+- W1d (server hull containment): overlap past the face Avian holds hulls at (the edge less the
+  contact margin) remains within the force-and-arrival bound below throughout the drive, without
+  accumulating outward drift.
   - Entries: full throttle head-on, at 30° grinding along the wall, into a convex corner, and
     airborne off a ramp through ordinary track support.
   - The oblique drive gains no height: no rearing, climb or perch, and at least a hull width of
