@@ -497,30 +497,38 @@ and stable below two. This replaces the retired belt-inertia slope calculation; 
 certificate for every coupled contact mode or arbitrarily large pressure. At mud's
 DERIVED `r = .1715` at nominal pressure 107 kPa, the 64 Hz scalar ratio is about .105.
 
-**Driver observation and measured force resolution.** `track::load::observe` supplies the
-unfiltered `TransmissionInput::perceived_load`: `L = W sin(theta) + c_rr W cos(theta) +
-mu_t W cos(theta) length / (4 R_g)` along the engaged ladder. Nominal weight is vehicle data; normals,
-effective grip and pressure-evaluated rolling coefficients are the contact pass's own facts,
-collected before the normal damper can unload a patch. Uniform pressure weights patches by
-supported length and collocation-column share. The projected support tangent supplies grade;
-the footprint span and current detent radius supply the turn term. Rolling is the full potential
-resistance even at rest, independently of the physical low-speed fade. Airborne means no terrain
-load. No acceleration, spring/damper force, temporal filter or recoil term enters L. The game and
-sandbox share this implementation. The Driver uses requested pedal, not its actuator ramp,
-and prices each permitted gear at its own landing speed and detent radius. Holding the current
-gear pays no cut; changing gear pays the declared interruption. Coupled crank inertia contributes
-reflected mass to the force price; launch Slip prices the commanded launch rpm.
-C1 admits lower gears only on a deficit beyond M or an engaged crank below the curve floor;
-a spooling launch in Slip is not an engaged lug. C2 preserves overrun, and C3 preselects the
-highest capable declared launch gear at rest, repriced at requested pedal under intent.
-An upshift cannot land in the sub-curve lug that C1 would immediately correct.
+**The Driver reads what it feels.** `track::sense::DriverSense` keeps a ledger of the hull:
+its speed along the hull's forward axis, and resistance `R = mean push - M_c mean gain / dt`
+over the last interruption's worth of driven ticks. Push is the belts' soft ground reaction plus
+the solver's hard reaction; the hard part arrives a tick late and the ledger aligns the two. Cut
+ticks are not felt. The reading is `None` until one tick closes, and a Driver that has felt
+nothing engages no gear from rest. Nothing modelled enters `R`: on a rolling incline it closes on
+`W sin(theta) + c_rr W cos(theta)` (`headless_test::drive_load`). Parked, the contact law's
+rolling fade leaves the grade alone.
+
+`transmission::choose_gear` prices a gear's pull with `free_driver_force` at the crank speed that
+gear has at hull speed. Below its launch speed a gear is priced as a launch slipping at the launch
+rpm. A coupled gear adds reflected crank inertia, and the clutch caps the pull. A gear *holds*
+when its pull, less `R` and its detent's share of the belt push difference, exceeds M. The clauses:
+
+1. Clutch out at hull rest: the highest launch gear that holds, else first. Free.
+2. The current gear does not hold, judged at no more than its torque-peak speed: the highest
+   lower gear within `max_step` that holds where it lands, `v - R t_cut / M_c`.
+3. A straight gear that holds: the highest higher gear within `max_step` that holds where it
+   lands and has more spare there than the current gear has now.
+
+Clauses 2 and 3 pay the cut. No pull asked (released, braking, a request against the engaged
+ladder) or fuel under drag chooses nothing. The Driver uses requested pedal, not its actuator
+ramp. A slipping clutch holds its launch floor, capped at the speed the crank reaches freely, so a
+launch never takes the flywheel's stored energy. M is the crank arithmetic term alone.
+The driver design (2026-11-11) owns the alternatives and predictions.
 The brake lever carries only the stop-force shortfall against intent, without a release latch.
 Opposite input brakes to rest, waits the authored pause, then pays one direction cut;
 release during the pause keeps park held. Zero intent below first gear's idle speed parks.
 The [brake-law record](../../../scratch/research/law-drive-4-brake-2026-11-02.md) owns its proof and decisions.
 The protective upshift is absent: the existing clutch over-rev slip guard bounds crank speed
 and retains motoring drag while the Driver holds overrun gear. Service braking at the ceiling
-belongs to the next ceiling law. The bitprobe records load, price and delivered force.
+belongs to the next ceiling law. The bitprobe records the reading, price and delivered force.
 
 **Historical drivetrain and soil-law measurements.** The following record predates direct
 μ and pressure drag. Its figures are observations of those laws, not acceptance conditions
@@ -601,11 +609,10 @@ homogeneous in W; crank subtraction instead follows `J*omega_over/dt*max(G/r)`.
 
 DERIVED from the 524-sample span: 2.609375 N divided by the calibration rig's approximately
 33,567,936 N crank arithmetic scale is 0.00000007774. Rounding upward to one significant digit
-gives **0.0000001** of that scale. The observer's 0.406250/559170 share rounds upward to
-**0.000001 W**. The production M is the sum of these independently scaled terms. Neither
-coefficient comes from a desired gear. The independent-weight instrument holds each engine
-fixed at 20 and 60 tonnes and checks the same-instant mechanical residual span against the
-crank term; a separate observer witness checks its W term. These are finite fixture bounds,
+gives **0.0000001** of that scale. The production M is this crank term alone: the observer and
+its W share retired with the modelled load. The coefficient does not come from a desired gear.
+The independent-weight instrument holds each engine fixed at 20 and 60 tonnes and checks the
+same-instant mechanical residual span against the crank term. These are finite fixture bounds,
 not a claim that every possible construction has been measured.
 The [gear continuation record](../../../scratch/research/law-drive-3b-gear-2026-11-02.md)
 owns the executed proof and remaining S4 work.
