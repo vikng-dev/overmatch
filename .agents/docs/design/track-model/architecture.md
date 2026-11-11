@@ -553,8 +553,9 @@ state, none from a timer or a band:
   gear left downward, the `R` it failed under over the window it was left in, and its crank speed
   then. The crank speed is where its clutch landed it, read as the Driver predicts a landing (a
   slipping clutch at its launch speed, which a crank still spooling has not reached), for an
-  attempt that never held a locked window, else the speed it lugged down to, and never below what a
-  failed earlier attempt of it recorded. Below the torque peak a slower crank pulls less, so the
+  attempt that never held a locked window, else the speed it lugged down to; a failed retry records
+  no slower than the record it retried or the landing the Driver predicted when it admitted it, so
+  a retry that gains and lugs back still raises the record. Below the torque peak a slower crank pulls less, so the
   memory holds back that gear and every one above it while `R` is at least what it failed under
   less M and delivery would engage it at a crank no faster: the launch rpm where it lands slipping,
   else its shaft's. `R` easing past M reopens it. Under one resistance a retry needs a strictly

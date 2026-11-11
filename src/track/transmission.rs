@@ -930,6 +930,9 @@ pub struct TransmissionReport {
     /// The crank speed a slipping clutch holds under this tick's pedal (rad/s): where delivery
     /// lands a gear engaged with its shaft below it.
     pub launch_omega: f32,
+    /// The crank speed the Driver predicted delivery engages the gear it changed to this tick at
+    /// (rad/s); `None` on a tick it changed no gear.
+    pub landing_omega: Option<f32>,
     /// Power-conservation scale applied to the drive/steer forces this tick (1 = unconstrained).
     pub power_scale: f32,
     /// Combustion power capacity at the pre-tick operating point (W). The work gate also
@@ -1171,7 +1174,7 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 ///    the engaged gear's drive by M, the one that pulls hardest, the higher on a tie.
 ///
 /// Clauses 2 and 3 pay the cut. A cut in flight, no pull asked or fuel that cannot beat drag
-/// choose nothing.
+/// choose nothing. Returns the crank speed it predicts delivery engages a gear it changed to at.
 fn choose_gear(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1179,13 +1182,13 @@ fn choose_gear(
     inp: &TransmissionInput,
     command: f32,
     sensed: super::sense::Sensed,
-) {
+) -> Option<f32> {
     if st.shift_ticks != 0 || command <= 0.0 {
-        return;
+        return None;
     }
     let [fuel, catch, drag] = engine_torques(tp, inp.supply, st.omega_e, command);
     if fuel + catch <= drag.abs() {
-        return;
+        return None;
     }
     let (ladder, dir) = if st.reverse {
         (&tp.gears_rev, -1.0)
@@ -1251,7 +1254,7 @@ fn choose_gear(
                 .min(st.gear)
                 .min(admitted(speed))
         });
-        st.gear = (1..=tp.launch_gears.min(highest))
+        let gear = (1..=tp.launch_gears.min(highest))
             .rev()
             .find(|&gear| spare(gear, speed, st.clutch) > margin)
             .unwrap_or_else(|| {
@@ -1263,7 +1266,9 @@ fn choose_gear(
                     st.gear
                 }
             });
-        return;
+        let changed = gear != st.gear;
+        st.gear = gear;
+        return changed.then(|| engaged_crank(gear, speed));
     }
     // A hull the cut brings to rest is held there by the park latch, so no cut lands below rest.
     let landing = (speed
@@ -1298,10 +1303,11 @@ fn choose_gear(
         None
     };
     // No gear qualifies: the current one stays.
-    if let Some(gear) = chosen {
+    chosen.map(|gear| {
         st.gear = gear;
         st.shift_ticks = tp.shift_ticks.get();
-    }
+        engaged_crank(gear, landing)
+    })
 }
 
 /// Both belts over one tick. A belt lands at `speed + (force − reaction)·mobility`, its ground
@@ -1514,6 +1520,8 @@ struct Controls {
     shifting: bool,
     /// A held mean path ties the mean belt speed at rest during this tick's neutral pivot.
     mean_hold: bool,
+    /// The Driver's predicted landing crank speed for a gear it changed to this tick (rad/s).
+    landing_omega: Option<f32>,
 }
 
 /// The game's driving and damage model: policy reads the requested action, staffing and served work.
@@ -1570,13 +1578,14 @@ fn driver(
     update_steer_detent(st, input.steer);
     // Before the ledger closes its first tick the Driver has felt nothing, so it chooses nothing.
     // A request against the engaged ladder asks no pull of it: it brakes, then waits for the swap.
+    let mut landing_omega = None;
     if work && let Some(sensed) = input.sensed {
         let price_command = if service || opposing {
             0.0
         } else {
             command.abs().min(1.0)
         };
-        choose_gear(st, tp, fp, &input, price_command, sensed);
+        landing_omega = choose_gear(st, tp, fp, &input, price_command, sensed);
     }
     let shifting = advance_shift_window(st);
     if work {
@@ -1618,6 +1627,7 @@ fn driver(
         ceiling: staffed,
         shifting,
         mean_hold,
+        landing_omega,
     }
 }
 
@@ -2432,6 +2442,7 @@ pub(crate) fn step(
         driving: tau_c > 0.0,
         locked,
         launch_omega: tp.launch_omega(propulsive),
+        landing_omega: controls.landing_omega,
         power_scale,
         power_available: p_avail,
         #[cfg(feature = "bitprobe")]

@@ -96,8 +96,9 @@ pub struct Failed {
     pub resistance: f32,
     /// The crank speed the gear failed at (rad/s): the speed its clutch landed it at, as the
     /// Driver predicts a landing (a slipping clutch's launch speed, a held one's shaft speed),
-    /// where no whole locked window of it held or gained, else the speed it lugged down to; never
-    /// below what a failed earlier attempt of it recorded. A retry is admitted under the same
+    /// where no whole locked window of it held or gained, else the speed it lugged down to; for a
+    /// failed retry, never below the record it retried or the landing the Driver predicted when it
+    /// admitted the retry ([`TransmissionReport::landing_omega`]). A retry is admitted under the same
     /// resistance only faster, and a retry that fails records that faster speed, so the retries
     /// under one resistance are finite.
     pub crank: f32,
@@ -189,6 +190,8 @@ pub struct DriverSense {
     failed: Option<Failed>,
     /// The failure of the gear engaged again, which a failure of its retry does not undercut.
     retried: Option<Failed>,
+    /// The gear the Driver changed to last and the crank speed it predicted delivery engages it at.
+    landing: Option<(Engaged, f32)>,
     attempt: Option<Attempt>,
     /// The gear asked to pull the latest samples, and how many of the latest of those it drove with
     /// the hull at rest and how many its clutch held.
@@ -208,6 +211,7 @@ impl DriverSense {
             stall: None,
             failed: None,
             retried: None,
+            landing: None,
             attempt: None,
             run: None,
             reading: None,
@@ -354,6 +358,9 @@ impl DriverSense {
             self.stall = None;
         }
         let engaged = (report.reverse, report.gear);
+        if let Some(omega) = report.landing_omega {
+            self.landing = Some((engaged, omega));
+        }
         // Released, on the other ladder, pressed harder or steered otherwise, a failure says nothing
         // of the gear now.
         let stale = |failed: Failed| {
@@ -369,8 +376,19 @@ impl DriverSense {
             if stale(failed) {
                 self.failed = None;
             } else if failed.gear.1 <= engaged.1 && !report.shifting {
-                // Engaged again: the gear is tried anew.
-                self.retried = Some(failed).filter(|failed| failed.gear == engaged);
+                // Engaged again: the gear is tried anew, and a failed retry records no slower than
+                // the landing the Driver admitted it at.
+                self.retried = Some(failed)
+                    .filter(|failed| failed.gear == engaged)
+                    .map(|failed| {
+                        let (_, landing) = self.landing.filter(|(gear, _)| *gear == engaged).expect(
+                            "a gear engaged again is the Driver's change, which predicts its landing",
+                        );
+                        Failed {
+                            crank: failed.crank.max(landing),
+                            ..failed
+                        }
+                    });
                 self.failed = None;
             }
         }
@@ -647,7 +665,13 @@ mod tests {
         for (report, case) in [
             (pull(1, 0.5, 0), "pressed harder"),
             (pull(1, 0.3, 1), "steered"),
-            (pull(3, 0.3, 0), "third engaged again"),
+            (
+                TransmissionReport {
+                    landing_omega: Some(0.0), // Fixture: the Driver's change back to third.
+                    ..pull(3, 0.3, 0)
+                },
+                "third engaged again",
+            ),
             (TransmissionReport::default(), "released"),
         ] {
             assert_eq!(after(report), None, "{case}");
@@ -734,7 +758,10 @@ mod tests {
             pull(3, 1400.0, 0.5, 1500.0),
             cut(pull(2, 1400.0, 0.5, 1500.0)),
             pull(2, 1400.0, 0.5, 1500.0),
-            pull(3, 1100.0, 0.3, 1200.0),
+            TransmissionReport {
+                landing_omega: Some(1200.0 * RPM_TO_RAD),
+                ..pull(3, 1100.0, 0.3, 1200.0)
+            },
             pull(3, 1100.0, 0.3, 1200.0),
             cut(pull(2, 1100.0, 0.3, 1200.0)),
             pull(2, 1100.0, 0.3, 1200.0),
@@ -747,6 +774,58 @@ mod tests {
         }
         let failed = failed.expect("third is remembered after its second failure");
         assert!((failed - 1500.0).abs() < 1e-2, "remembered at {failed} rpm");
+    }
+
+    /// A failed retry records no slower than the landing the Driver predicted when it admitted the
+    /// retry: a retry that gains and then lugs back to the old record's speed must still raise the
+    /// record, or the Driver admits the same retry again under the same resistance without end.
+    /// Fixture: third failed at 900 rpm, retried with a predicted 1000 rpm landing, holding a whole
+    /// locked window, then lugging back to 900 rpm and left again, at rest under a steady push.
+    #[test]
+    fn a_retry_that_gains_then_lugs_back_still_raises_its_record() {
+        let forward = Vec3::NEG_Z;
+        let pull = |gear: u8, rpm: f32| TransmissionReport {
+            gear,
+            rpm,
+            command: 0.5,
+            pulling: true,
+            driving: true,
+            locked: true,
+            ..Default::default()
+        };
+        let change = |gear: u8, landing_rpm: f32| TransmissionReport {
+            shifting: true,
+            locked: false,
+            landing_omega: Some(landing_rpm * RPM_TO_RAD),
+            ..pull(gear, landing_rpm)
+        };
+        let mut sense = DriverSense::for_cut(CUT);
+        let contacts = Contacts {
+            soft: [forward * 10_000.0; 2],
+            grip: 0.0,
+            hard: [None; 2],
+        };
+        let held = std::iter::repeat_n(pull(3, 1000.0), usize::from(CUT.get()) + 1);
+        let script = [
+            pull(3, 900.0),
+            pull(3, 900.0),
+            change(2, 900.0),
+            pull(2, 900.0),
+        ]
+        .into_iter()
+        .chain([change(3, 1000.0)])
+        .chain(held)
+        .chain([pull(3, 900.0), change(2, 900.0), pull(2, 900.0)]);
+        let mut failed = None;
+        for report in script {
+            failed = sense
+                .tick(Vec3::ZERO, forward, 0.0, MASS, contacts, DT)
+                .and_then(|reading| reading.failed)
+                .map(|failed| failed.crank / RPM_TO_RAD);
+            sense.drove(&report);
+        }
+        let failed = failed.expect("third is remembered after its retry failed");
+        assert!((failed - 1000.0).abs() < 1e-2, "remembered at {failed} rpm");
     }
 
     /// Turning the heading is not acceleration: a hull coasting at constant velocity while it
