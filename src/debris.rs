@@ -309,7 +309,7 @@ mod tests {
     use crate::Layer;
 
     /// The rule on avian, one fixed tick per update at 64 Hz, gravity `gravity`.
-    fn settling(gravity: Vec3) -> App {
+    pub(super) fn settling(gravity: Vec3) -> App {
         let mut app = App::new();
         // Fixture: bounds enclose the analytical bodies independently of the selected map.
         app.insert_resource(crate::map::tests::fixture_manifest(4096.0, -1024.0, 2048.0));
@@ -413,7 +413,7 @@ mod tests {
     }
 
     /// A 0.4 m cube piece at `at`, dynamic (fixture data).
-    fn piece(app: &mut App, at: Vec3) -> Entity {
+    pub(super) fn piece(app: &mut App, at: Vec3) -> Entity {
         app.world_mut()
             .spawn((
                 DebrisPiece,
@@ -436,7 +436,7 @@ mod tests {
     }
 
     /// A static 20 × 1 × 20 m slab whose top is at `top`.
-    fn slab(app: &mut App, top: f32) -> Entity {
+    pub(super) fn slab(app: &mut App, top: f32) -> Entity {
         app.world_mut()
             .spawn((
                 RigidBody::Static,

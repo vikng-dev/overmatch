@@ -485,3 +485,322 @@ fn thaw(p: Thaw, mut commands: Commands) {
         stages.add(Work::ThawReach, by_reach as u64);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
+    use super::*;
+    use crate::Layer;
+    use crate::debris::tests::{piece, settling, slab};
+
+    /// Fixture gravity, m/s².
+    const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
+    /// The side of [`piece`]'s cube, m (fixture data).
+    const SIDE: f32 = 0.4;
+
+    fn is_frozen(app: &App, piece: Entity) -> bool {
+        app.world().get::<Frozen>(piece).is_some()
+    }
+
+    /// Run until every one of `pieces` is frozen, at most 10 s; the updates it took.
+    fn until_frozen(app: &mut App, pieces: &[Entity]) -> u32 {
+        1 + (0..640)
+            .find(|_| {
+                app.update();
+                pieces.iter().all(|&piece| is_frozen(app, piece))
+            })
+            .expect("the pieces came to rest and froze within 10 s")
+    }
+
+    /// `n` pieces stacked on a top at `top`, at `x` (fixture data).
+    fn stack(app: &mut App, x: f32, top: f32, n: usize) -> Vec<Entity> {
+        (0..n)
+            .map(|level| piece(app, Vec3::new(x, top + SIDE * (level as f32 + 0.5), 0.0)))
+            .collect()
+    }
+
+    /// A hovering 0.6 × 0.4 × 0.6 m body at `at`, sliding along +x at `speed` (fixture data).
+    fn mover(app: &mut App, at: Vec3, speed: f32) -> EntityWorldMut<'_> {
+        app.world_mut().spawn((
+            Position(at),
+            Rotation::default(),
+            RigidBody::Dynamic,
+            GravityScale(0.0),
+            Collider::cuboid(0.6, 0.4, 0.6),
+            ColliderDensity(1000.0),
+            LinearVelocity(Vec3::X * speed),
+        ))
+    }
+
+    /// Every frozen island touched something as it froze, and all of it stands: it exists, is
+    /// enabled and is fixed.
+    fn assert_supported(app: &App) {
+        let world = app.world();
+        for island in world.resource::<FrozenIslands>().islands.values() {
+            assert!(
+                !island.touched.is_empty(),
+                "a frozen island rests on something"
+            );
+            for &collider in &island.touched {
+                assert!(world.get_entity(collider).is_ok(), "its support exists");
+                assert!(
+                    world.get::<ColliderDisabled>(collider).is_none(),
+                    "and is enabled"
+                );
+                if let Some(&ColliderOf { body }) = world.get::<ColliderOf>(collider) {
+                    assert!(
+                        world.get::<RigidBody>(body).unwrap().is_static(),
+                        "and fixed"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A FROZEN PIECE ALWAYS HAS SUPPORT: a stack of two frozen on a slab (the child collider of a
+    /// static root) thaws whole in the update after the slab goes, goes with its root, is
+    /// disabled, moves with its root, leaves its root for a dynamic body, or its root turns
+    /// dynamic, and falls; every update, every frozen island still rests on what it froze on. A
+    /// mutant that drops any one support check leaves the stack hanging static where the slab
+    /// was. The stack froze as one island: the upper piece, settling, reached the lower one.
+    #[test]
+    fn a_frozen_piece_always_has_support() {
+        type Change = fn(&mut World, Entity, Entity);
+        let changes: [(&str, Change); 6] = [
+            ("goes", |world, slab, _| {
+                world.despawn(slab);
+            }),
+            ("goes with its root", |world, _, root| {
+                world.despawn(root);
+            }),
+            ("is disabled", |world, slab, _| {
+                world.entity_mut(slab).insert(ColliderDisabled);
+            }),
+            ("moves", |world, _, root| {
+                world.get_mut::<Position>(root).unwrap().0 += Vec3::NEG_Y;
+            }),
+            ("leaves its root", |world, slab, root| {
+                let at = *world.get::<Position>(root).unwrap();
+                let body = world
+                    .spawn((Transform::from_translation(at.0), at, RigidBody::Dynamic))
+                    .id();
+                world.entity_mut(slab).insert(ChildOf(body));
+            }),
+            ("turns dynamic", |world, _, root| {
+                world.entity_mut(root).insert(RigidBody::Dynamic);
+            }),
+        ];
+        for (change, apply) in changes {
+            let mut app = settling(GRAVITY);
+            let at = Vec3::Y * 0.5;
+            let root = app
+                .world_mut()
+                .spawn((
+                    Transform::from_translation(at),
+                    Position(at),
+                    RigidBody::Static,
+                ))
+                .id();
+            let support = app
+                .world_mut()
+                .spawn((
+                    ChildOf(root),
+                    Transform::IDENTITY,
+                    Collider::cuboid(20.0, 1.0, 20.0),
+                    CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+                ))
+                .id();
+            let pieces = stack(&mut app, 0.0, 1.0, 2);
+            until_frozen(&mut app, &pieces);
+            assert_supported(&app);
+            let island = |app: &App, piece| app.world().get::<Frozen>(piece).unwrap().island;
+            assert_eq!(island(&app, pieces[0]), island(&app, pieces[1]));
+            let top = app.world().get::<Position>(pieces[1]).unwrap().0.y;
+            apply(app.world_mut(), support, root);
+            app.update();
+            for &piece in &pieces {
+                assert!(!is_frozen(&app, piece), "thawed as its support {change}");
+                assert!(app.world().get::<RigidBody>(piece).unwrap().is_dynamic());
+            }
+            for _ in 0..16 {
+                app.update();
+                assert_supported(&app);
+            }
+            assert!(
+                app.world().get::<Position>(pieces[1]).unwrap().0.y < top - 0.05,
+                "the stack falls as its support {change}"
+            );
+        }
+    }
+
+    /// A PIECE WITHIN REACH OF A MOVING BODY IS AWAKE BEFORE CONTACT: a hovering body at rest
+    /// beside a piece frozen on the ground, a tank's stand-in (no piece) or a loose piece, pushed
+    /// towards it slow or fast, finds it dynamic in every step that solves a contact between them,
+    /// moving in the first update the two touch, and pushes it. A contact with a static piece
+    /// meets infinite mass. The gap is inside the margin Avian's broad phase pairs bounds by, so
+    /// the step after the push makes speculative contacts at the new speed: a mutant that drops
+    /// the reach thaw, or the reach's travel, reds this.
+    #[test]
+    fn a_piece_within_reach_of_a_moving_body_is_awake_before_contact() {
+        // Fixture: a 3 cm gap, between Avian's 5 mm contact tolerance and its 5 cm tree margin;
+        // a slow push, and one whose step travels past the piece's whole side.
+        let gap = 0.03;
+        for speed in [4.0, 40.0] {
+            for mover_is_a_piece in [false, true] {
+                let case = format!("{speed} m/s, mover a piece: {mover_is_a_piece}");
+                let mut app = settling(GRAVITY);
+                slab(&mut app, 0.0);
+                let rubble = piece(&mut app, Vec3::Y * (SIDE / 2.0));
+                until_frozen(&mut app, &[rubble]);
+                let start = app.world().get::<Position>(rubble).unwrap().0;
+                let at = Vec3::new(-(SIDE / 2.0 + gap + 0.3), 0.45, 0.0);
+                let mut body = mover(&mut app, at, 0.0);
+                if mover_is_a_piece {
+                    body.insert((
+                        DebrisPiece,
+                        CollisionLayers::new([Layer::Debris], LayerMask::ALL),
+                    ));
+                } else {
+                    body.insert(CollisionLayers::new([Layer::Vehicle], LayerMask::ALL));
+                }
+                let body = body.id();
+                app.update();
+                app.update();
+                assert!(
+                    is_frozen(&app, rubble),
+                    "a body at rest beside it reaches nothing"
+                );
+                app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = Vec3::X * speed;
+                let first_touch = (0..64).find(|update| {
+                    app.update();
+                    let world = app.world();
+                    let pair = world.resource::<ContactGraph>().get(body, rubble);
+                    if pair.is_some_and(|(_, pair)| !pair.manifolds.is_empty()) {
+                        assert!(
+                            world.get::<RigidBody>(rubble).unwrap().is_dynamic(),
+                            "update {update}: the step met the rubble static ({case})"
+                        );
+                    }
+                    pair.is_some_and(|(edge, _)| edge.is_touching())
+                });
+                assert!(
+                    first_touch.is_some(),
+                    "the mover reached the rubble ({case})"
+                );
+                assert!(
+                    app.world().get::<LinearVelocity>(rubble).unwrap().0.x > 0.0,
+                    "the first touch moved it ({case})"
+                );
+                for _ in 0..32 {
+                    app.update();
+                }
+                assert!(
+                    app.world().get::<Position>(rubble).unwrap().0.x - start.x > 0.05,
+                    "the rubble was pushed ({case})"
+                );
+            }
+        }
+    }
+
+    /// A THAWED STACK RESUMES WITH THE ENGINE'S REST TIMER RESTARTED: a stack frozen on a slab,
+    /// given an impulse through Avian's `Forces` worth a tenth of the rest speed, thaws whole in
+    /// the next update and freezes again only after resting a full `TimeToSleep`. The tripwire on
+    /// Avian zeroing the timer of a body that rejoins an island (module doc): a timer carried from
+    /// before the freeze would let the island sleep and freeze in the next step. A field's push
+    /// on a frozen piece (`construction::breakage`) relies on the impulse reaching its velocity.
+    #[test]
+    fn a_thawed_stack_rests_a_full_window_before_it_freezes_again() {
+        let mut app = settling(GRAVITY);
+        slab(&mut app, 0.0);
+        let pieces = stack(&mut app, 0.0, 0.0, 2);
+        until_frozen(&mut app, &pieces);
+        let pushed = pieces[1];
+        let rest = app.world().get::<SleepThreshold>(pushed).unwrap().linear
+            * app.world().resource::<PhysicsLengthUnit>().0;
+        let mass = app.world().get::<ComputedMass>(pushed).unwrap().value();
+        let impulse = Vec3::X * 0.1 * rest * mass;
+        app.world_mut()
+            .run_system_once(move |mut forces: Query<Forces>| {
+                forces
+                    .get_mut(pushed)
+                    .unwrap()
+                    .apply_linear_impulse(impulse);
+            })
+            .unwrap();
+        app.update();
+        for &piece in &pieces {
+            assert!(!is_frozen(&app, piece), "the whole island thawed");
+        }
+        let dt = app
+            .world()
+            .resource::<Time<Fixed>>()
+            .timestep()
+            .as_secs_f32();
+        let window = app.world().resource::<TimeToSleep>().0;
+        // The thaw's own update ran the first step of rest.
+        let rested = (1 + until_frozen(&mut app, &pieces)) as f32 * dt;
+        assert!(
+            rested >= window,
+            "froze again after {rested} s, inside Avian's {window} s rest window"
+        );
+    }
+
+    /// Three stacks of three side by side, frozen on a slab as one island, then a mover sliding
+    /// into them: every piece's pose bits and whether it is frozen, every update.
+    fn freeze_thaw_trace(app: &mut App) -> Vec<(Vec<[u32; 7]>, Vec<bool>)> {
+        slab(app, 0.0);
+        let pieces: Vec<_> = [-SIDE, 0.0, SIDE]
+            .into_iter()
+            .flat_map(|x| stack(app, x, 0.0, 3))
+            .collect();
+        until_frozen(app, &pieces);
+        mover(app, Vec3::new(-3.0, SIDE * 0.75, 0.0), 3.0)
+            .insert(CollisionLayers::new([Layer::Vehicle], LayerMask::ALL));
+        (0..320)
+            .map(|_| {
+                app.update();
+                let world = app.world();
+                let poses = pieces
+                    .iter()
+                    .map(|&piece| {
+                        let p = world.get::<Position>(piece).unwrap().0;
+                        let r = world.get::<Rotation>(piece).unwrap().0;
+                        [p.x, p.y, p.z, r.x, r.y, r.z, r.w].map(f32::to_bits)
+                    })
+                    .collect();
+                let frozen = pieces.iter().map(|&piece| is_frozen(app, piece)).collect();
+                (poses, frozen)
+            })
+            .collect()
+    }
+
+    /// FREEZE AND THAW ARE DETERMINISTIC IN ORDER: the same scene, built once as is and again
+    /// after other entities shift every entity's bits while keeping their order, repeats every
+    /// pose bit and every freeze and thaw. Avian's work after a switch follows the order the
+    /// bodies switched (module doc); a thaw that switched pieces in a hash set's order would
+    /// follow the bits.
+    #[test]
+    fn freeze_and_thaw_are_deterministic_in_order() {
+        let trace = |shift: usize| {
+            let mut app = settling(GRAVITY);
+            app.world_mut()
+                .spawn_batch((0..shift).map(|_| Name::new("shift")));
+            freeze_thaw_trace(&mut app)
+        };
+        let plain = trace(0);
+        assert!(
+            plain.iter().any(|(_, frozen)| frozen.contains(&false)),
+            "the mover thawed the fixture"
+        );
+        // Fixture shifts.
+        for shift in [333, 1000] {
+            for (update, (a, b)) in plain.iter().zip(&trace(shift)).enumerate() {
+                assert_eq!(
+                    a, b,
+                    "shift {shift}, update {update} after the mover's spawn"
+                );
+            }
+        }
+    }
+}
