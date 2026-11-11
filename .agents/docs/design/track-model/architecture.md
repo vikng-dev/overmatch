@@ -507,59 +507,92 @@ ticks are not felt. The reading is `None` until one tick closes, and a Driver th
 nothing engages no gear from rest. Nothing modelled enters `R`: on a rolling incline it closes on
 `(W sin(theta) + c_rr W cos(theta)) cos(delta)`, `delta` the heading's pitch off the plane under
 drive (`headless_test::drive_load`). Parked, the contact law's rolling fade leaves the grade alone.
-Beside `R` the ledger carries the mean push, the belts' mean ground reaction along their travel
-(soft and solver contacts together), the patches' mean grip budget `sum mu N_elastic`, and a
-stall's bound.
+Beside `R` the ledger carries the engaged gear's drive (both sprockets' force on the latest
+tick), the drivetrain's gain over the window as a force (`M_hull` times the belts' mean
+acceleration), the patches' mean grip budget `sum mu N_elastic`, a stall's bound, the gear the
+Driver last left downward with what it sustained there, and two counts of the engaged gear's run:
+the ticks its clutch sent drive, and the ticks its clutch held the crank to the belts.
 
-**What the Driver infers.** Four facts, each read from the force balance, none from a timer or
-a band:
+**What the Driver infers.** Each fact is read from the force balance or the drivetrain's own
+state, none from a timer or a band:
 
-- *A gear runs in the state it is in.* The engaged gear's crank turns with its belts, not with
-  the hull: belts slipping on the ground turn it faster than the hull's speed implies (MEASURED
-  on rubble: 2100 rpm under a hull at a crawl).
-- *A stall gives a bound, not a value.* At rest under a push that did not move it, the world
-  returned at least that push; how much more it would return is unknown. The ledger holds the
-  largest such push along the drive (a sample at rest at both ends that gained no speed) until
-  the hull moves or the pull is withdrawn, and `R` is at least that bound.
-- *Price and resistance share one currency.* `R` and the bound are pushes on the hull, so a
-  gear's pull is priced as the push it delivers: times the share of the belts' ground reaction
-  that reached the hull as push over the window. The ground reaction is the sprocket's force less
-  what turned the belts' own inertia, so a spinning-up belt does not read as a loss; the hull's
-  load meets the reflected crank inertia at the sprocket, divided by the same share. No
-  efficiency is authored; while no push is delivered along the drive no loss is seen and the
-  pull is priced whole.
+- *The engaged gear is observed, never priced.* What it delivers is its drive now; whether it
+  holds is whether the drivetrain gains under it. A price models a gear not engaged, and on the
+  engaged gear it reads the model's error (MEASURED on rubble, house stop-go: seventh priced
+  547 N short of `R` while the hull gained, and the Driver shifted down).
+- *The drivetrain, not the hull, tells a gear's verdict.* After a clutch takes up, the hull rings
+  on its patches' elastic shear and the belts, carrying the crank's inertia, do not (MEASURED,
+  flat ground at a third of the pedal, fourth to fifth: the hull's speed swung 2.235 to 2.201 m/s
+  over six ticks while the belts rose 2.212 to 2.227 m/s; a window of the hull's gain read fifth
+  losing, and the Driver hunted). `R` is the one hull window read: a ring or an impact moves the
+  push and the gain together, so their difference holds through it.
+- *Only a held clutch shows the gear.* A clutch at its capacity sends the crank's stored speed,
+  whatever the gear (MEASURED, same shift: four ticks at capacity lifted the push to 214 kN
+  against 35 kN once held), so drive and gain are read only over a window the clutch held whole.
+- *A stall gives a bound, not a value.* At rest under a push that moved neither the hull nor its
+  belts (at rest, or not gaining), the world returned at least that push. The ledger holds the
+  largest such push along the drive until the hull moves or the pull is withdrawn, and `R` is at
+  least that bound. Belts gaining under a stalled hull slide at the ground's limit, which no gear
+  raises (MEASURED, ram into the standing heap: third, second and first each stalled with the
+  drivetrain gaining 185–259 kN); belts turning steadily are held by the gear (MEASURED, standing
+  heap stop-go: fourth spun its belts at a steady 2.175 m/s, its crank governed, under a hull at
+  rest for 1226 ticks). A crank spooling to its launch rpm sends no drive, so its ticks fail no
+  gear. A bound is a floor: every weaker gear holds against it on paper, so a stall takes the
+  lowest gear in reach.
+- *Falling revs fail a gear only below its torque peak.* Below the crank's peak-torque speed a
+  slowing crank loses torque and the gear does not recover; above it the torque rises and the gear
+  settles where it holds (MEASURED on a 20° grade: fourth settled at 1.93 m/s with its drivetrain
+  reading −4 N; stepping down cost a metre per second in the cut, and third settled slower).
+- *A gear left failing stays failed while the hull meets what it sustained.* The memory holds the
+  gear left downward and its resistance plus drivetrain gain then; it holds back that gear and
+  every one above it while `R` is at least that push, and is forgotten when the pedal rises or is
+  released, the ladder or the detent changes, or that gear engages again (MEASURED on the standing
+  heap at a third of the pedal: second priced 700 N over `R` from a crawl, stalled where the cut
+  landed, and the Driver cycled first and second five times). A detent's steering takes its own
+  share of the gear's work, so a push delivered in a turn says nothing of the gear straight.
 - *Grip caps push.* No gear puts more traction into the ground along the belts than the patches'
-  grip budget, which they carry when every patch slides along the belt; there the pull now is
-  the most any gear delivers. A patch sliding sideways in a turn has budget a harder pull can
-  turn along the belt, so the cap is the budget, not the unspent share (MEASURED: the unspent
-  share held third-throttle tight turns in fourth at 0.48 m/s where the downshift ran 1.24 m/s).
-  The solver's friction coefficient is not read back, so a window in which a solver contact
-  pushed prices no cap.
+  grip budget, which they carry when every patch slides along the belt. The solver's friction
+  coefficient is not read back, so a window in which a solver contact pushed prices no cap.
 
-`transmission::choose_gear` prices each gear with `free_driver_force`, engaged as delivery
-engages it (`engagement`), in the state it would be in. A candidate pays the cut and lands at
-the hull's `v - R t_cut / M_c`, its clutch closing from out, so below its launch speed it slips
-at the launch rpm. The current gear pays no cut and is priced as it runs: its shaft at the
-belts' mean speed, in the regime delivery engages there this tick. A coupled gear adds reflected
-crank inertia, and the clutch caps the pull; the grip budget caps it next, and the delivery
-share prices it on the hull. A gear *holds* when that push, less `R` (at a stall, at least the
-bound) and its detent's share of the belt push difference, exceeds M. The clauses:
+`transmission::choose_gear` prices a candidate with `gear_force`, engaged as delivery engages it
+(`engagement`): it pays the cut and lands at the hull's `v - R t_cut / M_c`, no lower than rest,
+where the park latch holds a hull the cut stops; its clutch closes from out, so below its launch
+speed it slips at the launch rpm. A coupled gear adds reflected crank inertia, the clutch caps the
+pull and the grip budget caps it next. A pull is priced whole at the sprocket. A candidate *holds*
+when its pull, less `R` (at a stall, at least the bound) and its detent's share of the belt push
+difference, exceeds M. The clauses:
 
-1. Clutch out at hull rest: the highest launch gear that holds, else first where it offers more
-   spare than the current gear. Free.
-2. The current gear does not hold, judged at no more than its torque-peak belt speed: the
-   highest lower gear within `max_step` that holds where it lands, `v - R t_cut / M_c`. A gear
-   that holds has more spare than the current gear, which does not; with none the gear stays,
-   so in first gear with a stall's bound unbeaten the Driver stays there.
-3. A straight gear that holds: the highest higher gear within `max_step` that holds where it
-   lands and has more spare there than the current gear has now.
+1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
+   current gear nor at or above one that failed there, and none the memory holds back; else
+   first where it offers more spare than the current gear. Free.
+2. The hull stalls under a window the gear drove whole: the lowest gear within `max_step`. Or
+   the drivetrain loses more than M over a held window with the crank below its peak-torque
+   speed: the highest lower gear within `max_step` that holds where it lands; with none the gear
+   stays.
+3. Straight, the clutch in, a held window and the hull moving where the cut lands: of the higher
+   gears within `max_step` the memory admits, those that hold where they land and pull there more
+   than the engaged gear's drive by M, the one that pulls hardest, the higher on a tie. Gears
+   landing below their launch speeds slip at the launch torque, the higher through the smaller
+   ratio, so the highest that qualifies is the weakest (MEASURED on rubble: fourth stepped to
+   sixth at 100 kN past fifth at 148 kN and slipped for 370 ticks). A slipping clutch delivers at
+   most its launch torque, and a higher gear lands slipping at no more. A cut that stops the hull
+   trades a moving gear for a launch priced against what the crawl read, not what stopped it
+   (MEASURED, ram into the standing heap: first crawling at 0.05 m/s stepped to second, the cut
+   stopped the hull, and the free choice launched fourth, which had stalled there, three times).
 
 Clauses 2 and 3 pay the cut. No pull asked (released, braking, a request against the engaged
 ladder) or fuel under drag chooses nothing. The Driver uses requested pedal, not its actuator
 ramp. A slipping clutch holds its launch floor, capped at the speed the crank reaches freely, so a
 launch takes none of the flywheel's stored energy below that floor; a crank above the floor when
 the clutch closes can spend the excess. M is the crank arithmetic term alone.
-The driver design (2026-11-11) owns the alternatives and predictions.
+Rejected forms: pricing the engaged gear (its spare reads model error); pricing a pull as the
+share of the belts' reaction that reaches the hull (the share differs between gears where solver
+contacts load the belts off the heading: 0.92 in sixth against 0.90 in seventh on rubble); a
+slide test on slip distance over the elastic shear length (slip distance is unimodal across it on
+the rubble battery); the hull's own gain as a gear's verdict (the ring above); a stall stepping to
+the highest lower gear that holds against its bound (a floor prices every weaker gear as
+holding); and keeping the park latch off under drive (the one-way lever already carries rollback
+there, and the latch is what holds a hull at rest the tick a cut opens its clutch).
 The brake lever carries only the stop-force shortfall against intent, without a release latch.
 Opposite input brakes to rest, waits the authored pause, then pays one direction cut;
 release during the pause keeps park held. Zero intent below first gear's idle speed parks.
