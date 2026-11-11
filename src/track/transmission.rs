@@ -1129,20 +1129,23 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// One Driver decision on what it felt, at the requested pedal `command`. Speed `v` and
 /// resistance `R` read along the engaged ladder, `v` floored at rest. A gear carries `R` plus the
 /// turn's share in its own detent radius, `s·κ·ΔR` (the steering tie's load on the mean axis,
-/// [`BeltTick::tied_mean`]), and *holds* when its spare over that load exceeds M. A gear is priced
-/// engaged as delivery engages it ([`engagement`]): a candidate closes after its cut, so below its
-/// launch speed it slips at the launch rpm, and the current gear keeps its regime, a moving gear
-/// already in pricing its lug. Priced as lugs instead, a candidate at a crawl carries the idle
-/// catch's whole torque and outbids a part-pedal launch, which then stops in the cut (MEASURED in
-/// `part_pedal_launches_and_sustains_ordered_speed`: a quarter-pedal launch cycling between its
-/// launch gear and a lug three gears up). A candidate lands at `v − R·t_cut/M_c`; the current gear
-/// pays no cut. No gear's pull is priced above the grip its patches can carry along the belts
+/// [`BeltTick::tied_mean`]), and *holds* when its spare over that load exceeds M. Each gear is
+/// priced engaged as delivery engages it ([`engagement`]), in the state it would be in. A candidate
+/// pays the cut and lands at the hull's `v − R·t_cut/M_c`, its clutch closing from out, so below
+/// its launch speed it slips at the launch rpm. Priced as lugs instead, a candidate at a crawl
+/// carries the idle catch's whole torque and outbids a part-pedal launch, which then stops in the
+/// cut (MEASURED in `part_pedal_launches_and_sustains_ordered_speed`: a quarter-pedal launch cycling
+/// between its launch gear and a lug three gears up). The current gear pays no cut and is priced as
+/// it runs: its shaft at the belts' mean speed, in the regime delivery engages there this tick.
+/// Belts slipping on the ground turn the crank faster than the hull's speed implies, and priced at
+/// the hull's crawl the gear reads a lug it is not in (MEASURED on rubble: a gear slipping its
+/// belts at 2100 rpm read a sub-idle lug, then dropped and relaunched cut after cut). No gear's pull is priced above the grip its patches can carry along the belts
 /// ([`super::sense::Sensed::grip`]): where every patch slides along them at its grip limit that is
 /// the pull now, so no gear offers more spare than the current one and the gear stays.
 /// 1. Clutch out at hull rest: the highest launch gear that holds, else first where it offers more
 ///    spare than the current gear; free.
-/// 2. The current gear does not hold, judged at no more than its torque-peak speed: the highest
-///    lower gear within `max_step` that holds where it lands; with none the gear stays.
+/// 2. The current gear does not hold, judged at no more than its torque-peak belt speed: the
+///    highest lower gear within `max_step` that holds where it lands; with none the gear stays.
 /// 3. The current gear holds, straight: the highest higher gear within `max_step` that holds
 ///    where it lands and has more spare there than the current gear has now.
 ///
@@ -1172,6 +1175,7 @@ fn choose_gear(
     let speed = (dir * sensed.speed).max(0.0);
     let resistance = dir * sensed.resistance;
     let margin = force_margin(tp);
+    // A gear's spare with its shaft at `at` (m/s along the ladder), engaged from `prior`.
     let spare = |gear: u8, at: f32, prior: ClutchState| {
         let load =
             resistance + branch(inp.steer) * detent_kappa(tp, st, gear) * sensed.push_difference;
@@ -1179,7 +1183,7 @@ fn choose_gear(
         let clutch = engagement(
             tp,
             prior,
-            at < PARK_ENGAGE_SPEED,
+            at.abs() < PARK_ENGAGE_SPEED,
             at * ratio / tp.sprocket_radius,
             command,
         );
@@ -1205,10 +1209,11 @@ fn choose_gear(
         return;
     }
     let landing = speed - resistance * f32::from(tp.shift_ticks) / TICK_HZ / coupled_mass(fp);
+    let belts = dir * (inp.speeds[0] + inp.speeds[1]) * 0.5;
     let peak =
         tp.peak_torque_rpm * RPM_TO_RAD * tp.sprocket_radius / ladder[usize::from(st.gear - 1)];
-    let chosen = if spare(st.gear, speed.min(peak), st.clutch) > margin {
-        let now = spare(st.gear, speed, st.clutch);
+    let chosen = if spare(st.gear, belts.min(peak), st.clutch) > margin {
+        let now = spare(st.gear, belts, st.clutch);
         // A detent turn's radius belongs to its gear: no upshift changes it.
         (st.steer_step == 0)
             .then(|| {

@@ -208,6 +208,14 @@ fn felt_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
     inp
 }
 
+/// Fixture: `felt_at_rest` with belts that meet no ground, which gives them no grip to carry a
+/// pull, so no gear offers more than the gear engaged.
+fn felt_free_at_rest(inp: TransmissionInput) -> TransmissionInput {
+    let mut inp = felt_at_rest(inp);
+    inp.sensed.as_mut().expect("the fixture feels").grip = Some(0.0);
+    inp
+}
+
 fn fresh(tp: &TransmissionParams) -> TransmissionState {
     TransmissionState {
         park: false,
@@ -1384,7 +1392,8 @@ fn the_coupled_belt_settles_where_the_explicit_one_alternates() {
 }
 
 /// Driver state, not belt-speed hysteresis, controls clutch regimes. A launch slips above idle
-/// until its shaft reaches its target, and a shift always interrupts mean-axis drive.
+/// until its shaft reaches its target, and a shift always interrupts mean-axis drive. Fixture: belts
+/// run free of the ground under a hull at rest.
 #[test]
 fn clutch_states_cover_rest_launch_lock_and_shift() {
     let (fp, mut tp) = (lab_fp(), lab_tp());
@@ -1403,7 +1412,7 @@ fn clutch_states_cover_rest_launch_lock_and_shift() {
             &fp,
             &tp,
             &mut st,
-            &felt_at_rest(input(0.5, 0.0, [speed; 2], [0.0; 2])),
+            &felt_free_at_rest(input(0.5, 0.0, [speed; 2], [0.0; 2])),
         );
         assert_eq!(st.clutch, ClutchState::Slip);
     }
@@ -1412,7 +1421,7 @@ fn clutch_states_cover_rest_launch_lock_and_shift() {
         &fp,
         &tp,
         &mut st,
-        &felt_at_rest(input(0.5, 0.0, [speed; 2], [0.0; 2])),
+        &felt_free_at_rest(input(0.5, 0.0, [speed; 2], [0.0; 2])),
     );
     assert_eq!(st.clutch, ClutchState::In);
     st.shift_ticks = 2;
@@ -1420,7 +1429,7 @@ fn clutch_states_cover_rest_launch_lock_and_shift() {
         &fp,
         &tp,
         &mut st,
-        &felt_at_rest(input(0.5, 0.0, [speed; 2], [0.0; 2])),
+        &felt_free_at_rest(input(0.5, 0.0, [speed; 2], [0.0; 2])),
     );
     assert_eq!(st.clutch, ClutchState::Out);
 }
@@ -2575,8 +2584,9 @@ fn a_stalled_full_clutch_push_steps_down() {
     }
 }
 
-/// Belts spinning free under a hull that does not move change no gear: the Driver reads the
-/// hull, not the belts. Fixture: a hull at rest feeling nothing while its belts meet no ground.
+/// Belts spinning free under a hull that does not move change no gear: grip they do not have
+/// carries no gear's pull, so none offers more than the gear engaged. Fixture: a hull at rest
+/// feeling nothing while its belts meet no ground.
 #[test]
 fn free_spinning_belts_change_no_gear() {
     for (fp, tp) in class_drivetrains() {
@@ -2588,12 +2598,8 @@ fn free_spinning_belts_change_no_gear() {
         };
         let mut speeds = [0.0; 2];
         for _ in 0..64 * 10 {
-            let report = step(
-                &fp,
-                &tp,
-                &mut state,
-                &felt_at_rest(input(1.0, 0.0, speeds, [0.0; 2])),
-            );
+            let inp = felt_free_at_rest(input(1.0, 0.0, speeds, [0.0; 2]));
+            let report = step(&fp, &tp, &mut state, &inp);
             assert!(
                 !report.shifting && state.gear == launch,
                 "belts at {speeds:?} moved the gear"
