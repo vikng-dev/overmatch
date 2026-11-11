@@ -7,32 +7,37 @@
 //! two static colliders, so a settled pile turned static leaves the narrow phase nothing to do.
 //!
 //! FREEZE ([`freeze`], after the step's splits). An island Avian has put to sleep whose every body
-//! is a loose piece, that touches something outside itself, and that no mover reaches, turns
-//! static whole in one tick: rubble interlocks, so the island is the unit, and a whole island
+//! is a loose piece, that touches something outside itself, and that no mover reaches ([`Reach`]),
+//! turns static whole in one tick: rubble interlocks, so the island is the unit, and a whole island
 //! leaves no piece resting on a dynamic one. An island holding any other body (a tank, a launched
 //! turret) stays asleep, and so does one touching nothing (a piece asleep in zero gravity). Each
 //! piece takes [`RigidBody::Static`], zero velocity and [`Frozen`], and loses `Sleeping`. The
 //! island depends on its pieces' colliders and on every collider they touched as it froze
-//! ([`FrozenIslands`]): Avian's sleep under gravity is the evidence that those held it. Frozen
-//! islands never touch each other: a body settling onto a frozen piece reaches it, and thaws it,
-//! before the two touch, so what an island touches as it freezes is fixed matter (the freeze
-//! asserts it).
+//! ([`FrozenIslands`]): Avian's sleep under gravity is the evidence that those held it.
+//!
+//! FROZEN ISLANDS NEVER TOUCH (the freeze asserts it). Touching bodies that are not static share an
+//! Avian island, and Avian makes a contact only in the narrow phase, from the poses and velocities
+//! the thaw has just read: a body that comes to touch a frozen piece is a mover whose reach met it,
+//! and thawed it, before the step that made the contact. So what an island touches as it freezes
+//! is fixed matter.
 //!
 //! THAW ([`thaw`], in Avian's step after it places child colliders and before its broad phase: the
 //! last system before the narrow phase reads poses and velocities, after everything else a tick
-//! changes, the sweep included). A frozen island turns dynamic whole. Avian
-//! zeroes a body's rest timer as it rejoins an island (`dynamics/solver/islands/sleeping.rs`,
-//! `wake_on_enable_rigid_body`), so the island rests a full `TimeToSleep` again before it can
-//! sleep and freeze. Three causes:
-//! - reach: a mover (an awake body that is not static) whose colliders' bounds, grown by
-//!   [`REACH_TICKS`] of its travel at its present speed and by Avian's contact tolerance, meet a
-//!   piece. Avian sweeps a moving body's bounds over its next step at the end of each step
-//!   (`collider_tree/update.rs`, `update_solver_body_aabbs`), at the speed that step ended with; the
-//!   travel covers a speed game code wrote since (a push, a launch), which the next step's
-//!   speculative contacts use while its broad phase still pairs from the stale bounds, up to
-//!   `AABB_MARGIN` apart. So the island is dynamic before any step that solves a contact with the
-//!   mover, and the contact meets finite mass. A body spawned since the last step has no bounds
-//!   yet and reaches nothing until its first step;
+//! changes, the sweep included). A frozen island turns dynamic whole. Avian zeroes a body's rest
+//! timer as it rejoins an island (`dynamics/solver/islands/sleeping.rs`,
+//! `wake_on_enable_rigid_body`), so the island rests a full `TimeToSleep` again before it can sleep
+//! and freeze. Three causes:
+//! - reach: a mover (an awake body that is not static, and each piece this thaw frees) with a
+//!   collider that could make a contact with a frozen piece in this step. Avian makes contacts
+//!   once per step, in the narrow phase, from the poses and linear velocities the step starts
+//!   with, between colliders closer than `max(dt |Δv|, contact tolerance)` plus their collision
+//!   margins (`collision/narrow_phase/system_param.rs`, `update_contacts`). A frozen piece's
+//!   bounds hold its shape grown by the tolerance and its collider's margin
+//!   (`collider_tree/update.rs`, `update_moved_collider_aabbs`; no piece carries a body margin,
+//!   which those bounds would leave out), so a mover collider's shape bounds at its pose, grown by
+//!   `dt |v|` and its margin, meet every frozen collider it could touch. Rotation and acceleration
+//!   add nothing: they act in the substeps, after the step's contacts are made, and a body they
+//!   carry into a frozen piece meets it at the next step's thaw, which reads the pose it reached;
 //! - load: a piece whose velocity is not zero, since game code pushed it (Avian's `Forces` writes
 //!   a static body's velocity as any other's), as a velocity written onto a sleeping body wakes
 //!   its island (`dynamics/solver/islands/sleeping.rs`, `wake_on_changed`);
@@ -55,7 +60,7 @@
 
 use avian3d::dynamics::solver::islands::{BodyIslandNode, IslandId, PhysicsIslands};
 use avian3d::prelude::*;
-use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
+use bevy::ecs::entity::EntityHashMap;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,10 +71,6 @@ use crate::cost::stages::{Stages, Work};
 /// Resolution: whole pieces switched to static per tick, so islands that settle together spread
 /// their switches over ticks; one island of any size passes alone, so none waits on its own size.
 const FREEZE_PIECE_BUDGET: usize = 8;
-
-/// Resolution: steps of a mover's travel at its present speed its reach covers: the step about to
-/// run, and one more for what that step's forces add.
-const REACH_TICKS: f32 = 2.0;
 
 /// A frozen piece, in frozen island `island` of [`FrozenIslands`].
 #[derive(Component, Debug)]
@@ -208,60 +209,71 @@ fn collider_disabled(disabled: On<Add, ColliderDisabled>, mut islands: ResMut<Fr
     }
 }
 
-/// The awake bodies that can push this step, and what their reach meets.
+/// The bodies that can make contacts in this step, and what their colliders can touch in it
+/// (module doc, reach).
 #[derive(SystemParam)]
 struct Reach<'w, 's> {
-    movers: Query<
+    /// Avian keeps an island node on each enabled body that is not static.
+    movers: Query<'w, 's, Entity, (With<BodyIslandNode>, Without<Sleeping>)>,
+    bodies: Query<
         'w,
         's,
         (
-            &'static RigidBody,
             &'static LinearVelocity,
-            &'static AngularVelocity,
             &'static RigidBodyColliders,
+            Option<&'static CollisionMargin>,
         ),
-        (Without<Sleeping>, Without<Frozen>),
     >,
-    aabbs: Query<'w, 's, &'static ColliderAabb>,
+    /// The colliders that make contacts, at their placed poses.
+    solids: Query<
+        'w,
+        's,
+        (
+            &'static Collider,
+            &'static Position,
+            &'static Rotation,
+            Option<&'static CollisionMargin>,
+        ),
+        (Without<Sensor>, Without<ColliderDisabled>),
+    >,
     collider_of: Query<'w, 's, &'static ColliderOf>,
     spatial: SpatialQuery<'w, 's>,
-    narrow: Res<'w, NarrowPhaseConfig>,
-    unit: Res<'w, PhysicsLengthUnit>,
-    fixed: Res<'w, Time<Fixed>>,
+    /// The coming step's: Avian's own clock in its step, the fixed clock after it.
+    time: Res<'w, Time>,
 }
 
 impl Reach<'_, '_> {
-    /// Every body passing `keep` with a collider a mover's reach meets.
-    fn reached(&self, mut keep: impl FnMut(Entity) -> bool) -> EntityHashSet {
-        let dt = self.fixed.timestep().as_secs_f32();
-        let tolerance = self.narrow.contact_tolerance * self.unit.0;
-        let mut reached = EntityHashSet::default();
-        for (body, linear, angular, colliders) in &self.movers {
-            if body.is_static() {
-                continue;
-            }
-            let bounds = colliders
-                .iter()
-                .filter_map(|collider| self.aabbs.get(collider).ok())
-                .fold(ColliderAabb::INVALID, |all, aabb| all.merged(*aabb));
-            if bounds.min.cmpgt(bounds.max).any() {
-                continue; // No collider bounds yet (module doc).
-            }
-            let radius = (bounds.max - bounds.min).length() * 0.5;
-            let travel = (linear.0.length() + angular.0.length() * radius) * dt * REACH_TICKS;
-            self.spatial.aabb_intersections_with_aabb_callback(
-                bounds.grow(Vec3::splat(travel + tolerance)),
-                |collider| {
-                    if let Ok(of) = self.collider_of.get(collider)
+    /// The awake bodies that are not static, in entity order.
+    fn movers(&self) -> Vec<Entity> {
+        let mut movers: Vec<_> = self.movers.iter().collect();
+        movers.sort_unstable();
+        movers
+    }
+
+    /// Add to `reached` each body passing `keep` with a solid collider that a solid collider of
+    /// `body` could make a contact with in this step (module doc, reach).
+    fn of(&self, body: Entity, keep: impl Fn(Entity) -> bool, reached: &mut BTreeSet<Entity>) {
+        let Ok((linear, colliders, body_margin)) = self.bodies.get(body) else {
+            return; // A body with no collider touches nothing.
+        };
+        let travel = linear.length() * self.time.delta_secs();
+        for collider in colliders.iter() {
+            let Ok((shape, at, turn, margin)) = self.solids.get(collider) else {
+                continue; // A sensor or a disabled collider makes no contact.
+            };
+            let margin = margin.or(body_margin).map_or(0.0, |margin| margin.0);
+            let bounds = shape.aabb(at.0, *turn).grow(Vec3::splat(travel + margin));
+            self.spatial
+                .aabb_intersections_with_aabb_callback(bounds, |hit| {
+                    if self.solids.contains(hit)
+                        && let Ok(of) = self.collider_of.get(hit)
                         && keep(of.body)
                     {
                         reached.insert(of.body);
                     }
                     true
-                },
-            );
+                });
         }
-        reached
     }
 }
 
@@ -309,8 +321,12 @@ fn freeze(p: Freeze, mut commands: Commands) {
             .iter()
             .flat_map(|(&id, pieces)| pieces.iter().map(move |&piece| (piece, id)))
             .collect();
-        // An island a mover reaches would thaw before the next step.
-        for piece in reach.reached(|body| candidates.contains_key(&body)) {
+        // An island a mover reaches would thaw at the next step.
+        let mut reached = BTreeSet::new();
+        for mover in reach.movers() {
+            reach.of(mover, |body| candidates.contains_key(&body), &mut reached);
+        }
+        for piece in reached {
             members.remove(&candidates[&piece]);
         }
     }
@@ -337,8 +353,7 @@ fn freeze(p: Freeze, mut commands: Commands) {
                     if body.is_none_or(|body| pieces.binary_search(&body).is_err()) {
                         assert!(
                             body.is_none_or(|body| !frozen.contains(body)),
-                            "frozen islands never touch: a body settling onto a frozen piece \
-                             reaches it, and thaws it, first"
+                            "frozen islands never touch (module doc)"
                         );
                         touched.push(other);
                     }
@@ -457,35 +472,61 @@ fn thaw(p: Thaw, mut commands: Commands) {
             by_load += 1;
         }
     }
+    let island_of = |piece: Entity| frozen.get(piece).expect("a reached frozen piece").island;
+    let mut reached = BTreeSet::new();
+    for mover in reach.movers() {
+        reach.of(mover, |body| frozen.contains(body), &mut reached);
+    }
     let mut by_reach = 0;
-    for piece in reach.reached(|body| frozen.contains(body)) {
-        if thawing.insert(frozen.get(piece).expect("a reached frozen piece").island) {
+    for piece in reached {
+        if thawing.insert(island_of(piece)) {
             by_reach += 1;
         }
     }
+    // Each piece freed is a mover in this step too, with whatever velocity a push gave it.
+    let mut releasing: Vec<u64> = thawing.iter().copied().collect();
     let mut pieces = Vec::new();
-    for id in &thawing {
+    while let Some(id) = releasing.pop() {
         let island = islands
             .islands
-            .remove(id)
+            .remove(&id)
             .expect("a thawing island is frozen");
         for collider in island.own.iter().chain(&island.touched) {
             let ids = islands
                 .by_collider
                 .get_mut(collider)
                 .expect("an island's colliders are indexed");
-            ids.retain(|other| other != id);
+            ids.retain(|other| *other != id);
             if ids.is_empty() {
                 islands.by_collider.remove(collider);
             }
         }
         // A piece gone since it froze has nothing to thaw.
-        pieces.extend(
-            island
-                .pieces
-                .into_iter()
-                .filter(|&piece| frozen.contains(piece)),
-        );
+        let freed: Vec<_> = island
+            .pieces
+            .into_iter()
+            .filter(|&piece| frozen.contains(piece))
+            .collect();
+        let mut further = BTreeSet::new();
+        for &piece in &freed {
+            reach.of(
+                piece,
+                |body| {
+                    frozen
+                        .get(body)
+                        .is_ok_and(|other| !thawing.contains(&other.island))
+                },
+                &mut further,
+            );
+        }
+        for piece in further {
+            let id = island_of(piece);
+            if thawing.insert(id) {
+                by_reach += 1;
+                releasing.push(id);
+            }
+        }
+        pieces.extend(freed);
     }
     pieces.sort_unstable();
     for &piece in &pieces {
@@ -640,9 +681,9 @@ mod tests {
     /// beside a piece frozen on the ground, a tank's stand-in (no piece) or a loose piece, pushed
     /// towards it slow or fast, finds it dynamic in every step that solves a contact between them,
     /// moving in the first update the two touch, and pushes it. A contact with a static piece
-    /// meets infinite mass. The gap is inside the margin Avian's broad phase pairs bounds by, so
-    /// the step after the push makes speculative contacts at the new speed: a mutant that drops
-    /// the reach thaw, or the reach's travel, reds this.
+    /// meets infinite mass. The gap is past Avian's contact tolerance and inside the step's travel
+    /// at either speed, so the step after the push makes a speculative contact at the new speed: a
+    /// mutant that drops the reach thaw, or the reach's travel, reds this.
     #[test]
     fn a_piece_within_reach_of_a_moving_body_is_awake_before_contact() {
         // Fixture: a 3 cm gap, between Avian's 5 mm contact tolerance and its 5 cm tree margin;
@@ -702,6 +743,78 @@ mod tests {
                     "the rubble was pushed ({case})"
                 );
             }
+        }
+    }
+
+    /// A SPINNING OR ACCELERATING BODY MEETS NO FROZEN PIECE: a long hovering bar spinning about
+    /// its centre, its end sweeping through a piece frozen on the ground, and a hovering body
+    /// driven from rest at the piece by a constant acceleration, find it dynamic in every step that
+    /// solves a contact with it, and move it. Neither rotation nor acceleration widens Avian's
+    /// contact margin (module doc, reach): a body they carry into a frozen piece without a contact
+    /// meets it at the next step's thaw, which reads the pose it reached. A reach that passed over
+    /// a body with no linear velocity (the bar spins in place; the other starts at rest) meets
+    /// this static.
+    #[test]
+    fn a_spinning_or_accelerating_body_meets_no_frozen_piece() {
+        // Fixture: a 4 m bar at 15 rad/s, its end 30 m/s across the piece; a 0.6 m body at rest
+        // 0.1 m off under 2000 m/s², which its first step carries into the piece with no contact.
+        let cases: [(&str, fn(&mut App) -> Entity); 2] = [
+            ("a spinning bar", |app| {
+                app.world_mut()
+                    .spawn((
+                        Position(Vec3::new(0.0, SIDE * 0.75, 0.0)),
+                        Rotation::default(),
+                        RigidBody::Dynamic,
+                        GravityScale(0.0),
+                        Collider::cuboid(0.2, 0.2, 4.0),
+                        ColliderDensity(1000.0),
+                        AngularVelocity(Vec3::Y * 15.0),
+                        CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+                    ))
+                    .id()
+            }),
+            ("an accelerating body", |app| {
+                let at = Vec3::new(1.9 - SIDE / 2.0 - 0.1 - 0.3, SIDE * 0.75, 0.0);
+                mover(app, at, 0.0)
+                    .insert((
+                        ConstantLinearAcceleration(Vec3::X * 2000.0),
+                        CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+                    ))
+                    .id()
+            }),
+        ];
+        for (case, spawn) in cases {
+            let mut app = settling(GRAVITY);
+            slab(&mut app, 0.0);
+            let rubble = piece(&mut app, Vec3::new(1.9, SIDE / 2.0, 0.0));
+            until_frozen(&mut app, &[rubble]);
+            let start = app.world().get::<Position>(rubble).unwrap().0;
+            let body = spawn(&mut app);
+            let first_touch = (0..64).find(|update| {
+                app.update();
+                let world = app.world();
+                let pair = world.resource::<ContactGraph>().get(body, rubble);
+                if pair.is_some_and(|(_, pair)| !pair.manifolds.is_empty()) {
+                    assert!(
+                        world.get::<RigidBody>(rubble).unwrap().is_dynamic(),
+                        "update {update}: the step met the rubble static ({case})"
+                    );
+                }
+                pair.is_some_and(|(edge, _)| edge.is_touching())
+            });
+            assert!(first_touch.is_some(), "{case} reached the rubble");
+            for _ in 0..16 {
+                app.update();
+            }
+            assert!(
+                app.world()
+                    .get::<Position>(rubble)
+                    .unwrap()
+                    .0
+                    .distance(start)
+                    > 0.05,
+                "{case} moved the rubble"
+            );
         }
     }
 
