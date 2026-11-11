@@ -363,25 +363,34 @@ remains the independent Avian stand-in for solid-body contacts without a track f
 
 **The shear length the law reads.** A patch reads `K = max(K_ground, μ·k_step)`. A solid
 recipient (rubble, a structure, a hull) has no ground row and stores no shear of its own, so it
-reads `K_ground = 0` and the floor governs. `k_step` (`GripParams::step_shear_per_grip_m`) is a
-`Resolution` length per unit grip, derived at spawn from the vehicle's own data:
+reads `K_ground = 0` and the floor governs. `k_step` (`GripParams::step_shear_on`) is a
+`Resolution` length per unit grip, derived from the vehicle's own data and the support's
+response:
 
 - The tick reads slip at its start, sets force from this tick's strain and lets Avian integrate
-  after. For the hull riding an element's grip spring, with `x = √(μ g / K)·dt`, `a = κx²` and
-  `b = 2ζκx`, one tick steps by `λ² − (2 − a − b)λ + (1 − b) = 0` (DERIVED). Both the spring and
-  the damper act through `κ = 1 + m h² / I`: `h` the centre of mass's rest height over the
-  footprint, `I` the softer of the pitch and roll moments of the hull's inertia box.
+  after. For the hull riding an element's grip spring, with `x = √(μ g / K)·dt`, `a = κc·x²` and
+  `b = 2ζκc·x`, one tick steps by `λ² − (2 − a − b)λ + (1 − b) = 0` (DERIVED). Both the spring and
+  the damper act through the coupling `κc = κ + m·w`. `κ = 1 + m h² / I` is the hull's own:
+  `h` the centre of mass's rest height over the footprint, `I` the softer of the pitch and roll
+  moments of the hull's inertia box. `w` is the recipient's: the largest speed a unit tangent
+  impulse at the patch gives its surface, `1/m_r + (r×t)·I_r⁻¹(r×t)` over the contact plane's
+  tangents, since the patch reads slip relative to that surface and the recipient takes the
+  opposite force. The field and static or kinematic bodies do not yield: `w = 0`.
 - It is stable while `a + 2b < 4`. The floor takes the largest `x` with `b ≤ 1` and
-  `a + b ≤ 2`, where no root has a negative real part, so the grip mode never reverses from one
-  tick to the next. At the shipped `ζ = 0.5` and any `κ ≥ 1` the first binds:
-  `k_step = g·dt²·κ²`.
+  `a + b ≤ 2`, where no root has a negative real part, so the grip mode does not alternate at
+  half the tick rate; a kick can overshoot once (at `b = 1` the first tick leaves `−a` of it).
+  At the shipped `ζ = 0.5` and any `κc ≥ 1` the first binds: `k_step = g·dt²·κc²`.
+- Patches on different supports compose. The hull's response is one shared mode and each
+  recipient's another, so the pair's `a` and `b` are bounded by each patch's own, weighted by its
+  share of the hull's weight; the two bounds are linear, so every mixture meets them. This reads
+  the footprint's load as the hull's weight. Without the recipient term, a hull resting on an
+  equal one sees `κc = 2κ`, and the floor gives `a + 2b = 4 + 2/κ`: unstable.
 - The margin to the stable bound absorbs a footprint loaded at one end, where a lateral force
   also turns the hull in yaw and adds `m z² / I_yaw` to `κ`. For the shipped hull (DERIVED
   `κ` 1.62 at `h` 0.82 m; 2.42 with all load at a footprint end, `z` 1.8 m), the floor still
-  gives `a + 2b` 3.9 there. A hull-on-hull contact adds the other hull's mobility, which the
-  floor does not count.
+  gives `a + 2b` 3.9 there.
 - An element spanning several patches shares one displacement across them, so their stiffnesses
-  `μN/K` add: it reads `K = Σ μN / Σ(μN/K)`. No patch is stiffer than its load at the floor, so
+  `μN/K` add: it reads `K = Σ μN / Σ(μN/K)`. No patch is stiffer than its load at its floor, so
   neither is the element; a frictionless patch (the map's edge wall) adds nothing, and an element
   with no capacity holds no strain.
 

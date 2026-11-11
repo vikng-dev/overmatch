@@ -140,6 +140,8 @@ pub(crate) struct SurfaceSample {
     pub(crate) rolling: f32,
     /// [`SurfaceGrip::shear_length_m`].
     pub(crate) shear_length_m: f32,
+    /// [`RubbleBodies::mobility_at`]; the field does not yield.
+    pub(crate) mobility: f32,
 }
 
 pub(crate) fn sample<O: TerrainOracle>(
@@ -162,6 +164,7 @@ pub(crate) fn sample<O: TerrainOracle>(
         mu: surface.mu,
         rolling: surface.rolling,
         shear_length_m: surface.shear_length_m,
+        mobility: collider.map_or(0.0, |collider| pieces.mobility_at(collider, point, normal)),
     })
 }
 

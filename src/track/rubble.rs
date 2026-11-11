@@ -55,9 +55,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{borrow::Cow, sync::OnceLock};
 
 use avian3d::prelude::{
-    Collider, ColliderAabb, ColliderOf, CollisionLayers, ComputedCenterOfMass, DefaultFriction,
-    Forces, Friction, Position, ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery,
-    WriteRigidBodyForces,
+    Collider, ColliderAabb, ColliderOf, CollisionLayers, ComputedAngularInertia,
+    ComputedCenterOfMass, ComputedMass, DefaultFriction, Forces, Friction, Position,
+    ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery, WriteRigidBodyForces,
 };
 use bevy::ecs::query::{QueryData, QueryFilter};
 use bevy::ecs::system::SystemParam;
@@ -151,8 +151,13 @@ impl RubbleQuery<'_, '_> {
     }
 }
 
-/// What a moving support's motion reads and a hull's reaction writes.
-pub(crate) type PieceData = (Forces, &'static ComputedCenterOfMass);
+/// What a moving support's motion and response read and a hull's reaction writes.
+pub(crate) type PieceData = (
+    Forces,
+    &'static ComputedCenterOfMass,
+    &'static ComputedMass,
+    &'static ComputedAngularInertia,
+);
 
 pub(crate) type PieceReadData = <PieceData as QueryData>::ReadOnly;
 
@@ -184,6 +189,26 @@ struct SurfaceMotion {
     com: Vec3,
     linear: Vec3,
     angular: Vec3,
+    /// The body's response to an impulse: 1/kg, and its world inverse inertia tensor. Zero for a
+    /// kinematic body, which Avian's solver also treats as of infinite mass.
+    inverse_mass: f32,
+    inverse_inertia: Mat3,
+}
+
+impl SurfaceMotion {
+    /// The largest speed (m/s per N·s) a unit tangent impulse at `point`, in the plane normal to
+    /// `normal`, gives the surface there: the top eigenvalue of 1/m + (r×t)·I⁻¹(r×t) over the
+    /// plane's tangents t, r from the centre of mass.
+    fn tangent_mobility(&self, point: Vec3, normal: Vec3) -> f32 {
+        let r = point - self.com;
+        let (t1, t2) = normal.any_orthonormal_pair();
+        let (a1, a2) = (r.cross(t1), r.cross(t2));
+        let (i1, i2) = (self.inverse_inertia * a1, self.inverse_inertia * a2);
+        let w11 = self.inverse_mass + a1.dot(i1);
+        let w22 = self.inverse_mass + a2.dot(i2);
+        let w12 = a1.dot(i2);
+        (w11 + w22) / 2.0 + (((w11 - w22) / 2.0).powi(2) + w12 * w12).sqrt()
+    }
 }
 
 impl Surface {
@@ -314,13 +339,23 @@ impl RubbleBodies<'_> {
                         .copied()
                         .unwrap_or(RigidBody::Static);
                     let motion = if kind.is_kinematic() || kind.is_dynamic() {
-                        let (forces, com) = bodies.get(body).expect(
+                        let (forces, com, mass, inertia) = bodies.get(body).expect(
                             "an admitted moving support body carries Avian force state its caller can read",
                         );
+                        let (inverse_mass, inverse_inertia) = if kind.is_dynamic() {
+                            (
+                                mass.inverse(),
+                                inertia.rotated(forces.rotation().0).inverse().to_mat3(),
+                            )
+                        } else {
+                            (0.0, Mat3::ZERO)
+                        };
                         Some(SurfaceMotion {
                             com: forces.position().0 + forces.rotation().0 * com.0,
                             linear: forces.linear_velocity(),
                             angular: forces.angular_velocity(),
+                            inverse_mass,
+                            inverse_inertia,
                         })
                     } else {
                         None
@@ -440,6 +475,15 @@ impl RubbleBodies<'_> {
             .map_or(Vec3::ZERO, |motion| {
                 motion.linear + motion.angular.cross(point - motion.com)
             })
+    }
+
+    /// How far the surface at `point` yields along its contact plane: its tangent mobility
+    /// (m/s per N·s), zero on fixed construction. Only a collider from this snapshot may be read.
+    pub(crate) fn mobility_at(&self, collider: Entity, point: Vec3, normal: Vec3) -> f32 {
+        self.surface(collider)
+            .motion
+            .as_ref()
+            .map_or(0.0, |motion| motion.tangent_mobility(point, normal))
     }
 
     /// Stage the equal-and-opposite reaction on fixed structural construction. The field has no
@@ -628,7 +672,7 @@ pub(crate) fn reactions<'c>(
 /// Put every push on its body through avian, which wakes a sleeping body for a non-zero impulse.
 pub(crate) fn apply_pushes<F: QueryFilter>(pushes: &[Push], bodies: &mut Query<PieceData, F>) {
     for push in pushes {
-        let (mut forces, _) = bodies
+        let (mut forces, ..) = bodies
             .get_mut(push.body)
             .expect("a gathered dynamic body remains alive during the synchronous force pass");
         forces.apply_linear_impulse_at_point(push.impulse, push.point);
@@ -1113,7 +1157,7 @@ mod tests {
                     );
                     let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
                     pieces.select_source(source, &near);
-                    let (mut forces, _) = bodies.get_mut(source).unwrap();
+                    let (mut forces, ..) = bodies.get_mut(source).unwrap();
                     let mass = masses.get(source).unwrap();
                     let before = forces.linear_velocity();
                     let report = pad_pass(
@@ -1387,21 +1431,25 @@ mod tests {
     }
 
     /// Solid recipients retain track/material pair grip in both belt and recipient reactions.
-    /// Fixture: a 0.7 track sliding sideways over a 0.3 piece; ground grip has its own witness.
+    /// Fixture: a 0.7 track sliding sideways over a 0.3 piece of the pad's 30 t, a hull's weight
+    /// like the channel's dynamic recipients, so the step floor's recipient term leaves one tick
+    /// of slide past breakaway; ground grip has its own witness.
     #[test]
     fn the_belt_grips_solid_recipients_by_the_material_pair() {
         let track = contact_friction(0.7);
         let slide = Vec3::new(5.0, 0.0, 0.0);
         let row = 0.3;
         let mut app = physics();
-        let piece = piece_box(
-            &mut app,
-            Vec3::new(0.0, 0.05, 0.0),
-            Vec3::new(0.4, 0.1, 2.4),
-        );
-        app.world_mut()
-            .entity_mut(piece)
-            .insert(contact_friction(row));
+        let size = Vec3::new(0.4, 0.1, 2.4);
+        let hull_mass = 2.0 * pad_grip(track).side_weight / super::super::derive::G;
+        app.world_mut().spawn((
+            Position(Vec3::new(0.0, 0.05, 0.0)),
+            Rotation::default(),
+            RigidBody::Dynamic,
+            Collider::cuboid(size.x, size.y, size.z),
+            ColliderDensity(hull_mass / (size.x * size.y * size.z)),
+            contact_friction(row),
+        ));
         app.update();
         let grip = pad_grip(track);
         let (report, mus, pushes) = app
@@ -1830,6 +1878,100 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Grip on a dynamic recipient acts on the slip between the belt and that body's surface, and
+    /// a tick of force changes it at the hull's footprint mobility plus the recipient's. A tank
+    /// parked on another, or on a launched turret, relies on the step floor counting both: with
+    /// the hull's alone, the pair's grip mode alternates at half the tick rate and grows.
+    /// FIXTURE: the pad as a point-mass hull of the weight it carries, on a free 4 × 0.4 × 4 m
+    /// slab of that mass, kicked sideways below breakaway. The test integrates both bodies
+    /// itself; the slab's contact line yields 1/m + h²/I to a lateral push at its top face, h its
+    /// half height and I = m(w² + t²)/12 its roll moment, DERIVED from the box.
+    #[test]
+    fn grip_on_a_free_body_settles_without_half_rate_ringing() {
+        use super::super::derive::G;
+        let (width, thickness) = (4.0, 0.4);
+        let at_rest = pad_pass(
+            &ground(),
+            &RubbleBodies::default(),
+            Affine3A::IDENTITY,
+            SideState::default(),
+            Vec3::ZERO,
+            &mut GripElements::for_stations(30, 3),
+        );
+        let mass = at_rest.contacts.iter().map(|c| c.load_elastic).sum::<f32>() / G;
+        let grip = GripParams {
+            side_weight: mass * G / 2.0,
+            ..pad_grip(contact_friction(0.9))
+        };
+        let mut app = physics();
+        let slab = app
+            .world_mut()
+            .spawn((
+                Position(Vec3::NEG_Y * (thickness / 2.0)),
+                Rotation::default(),
+                RigidBody::Dynamic,
+                Collider::cuboid(width, thickness, width),
+                ColliderDensity(mass / (width * thickness * width)),
+                contact_friction(0.9),
+            ))
+            .id();
+        app.update();
+        let computed = app.world().get::<ComputedMass>(slab).unwrap().value();
+        assert!(
+            (computed - mass).abs() < 1e-3 * mass,
+            "the slab weighs {computed} kg"
+        );
+        let roll = mass * (width * width + thickness * thickness) / 12.0;
+        let slab_mobility = 1.0 / mass + (thickness / 2.0).powi(2) / roll;
+        let mu = grip.pair(contact_friction(0.9));
+        let kick = 0.1 * (mu * G * mu * grip.step_shear_per_grip_m(DT)).sqrt();
+        let (mut hull, mut under, mut history) = (kick, 0.0_f32, Vec::new());
+        let mut elements = GripElements::for_stations(30, 3);
+        for _ in 0..64 {
+            app.world_mut().get_mut::<LinearVelocity>(slab).unwrap().0 = Vec3::X * under;
+            let carried = elements.clone();
+            let (force, carried) = app
+                .world_mut()
+                .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                    let near = rubble.near(Vec3::ZERO, width);
+                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                    let mut carried = carried.clone();
+                    let report = pad_pass_gripping(
+                        grip,
+                        &BlockField::default(),
+                        &pieces,
+                        Affine3A::IDENTITY,
+                        SideState::default(),
+                        Vec3::X * hull,
+                        &mut carried,
+                    );
+                    assert!(report.contacts.iter().all(|c| c.collider == Some(slab)));
+                    let force: f32 = report.contacts.iter().map(|c| c.tangential_force().x).sum();
+                    (force, carried)
+                })
+                .unwrap();
+            elements = carried;
+            hull += grip.hull_coupling * force / mass * DT;
+            under -= slab_mobility * force * DT;
+            history.push(hull - under);
+        }
+        // FIXTURE observation floor: f32 residue far below the kick is not motion.
+        let moving = |v: f32| v.abs() > kick * 1e-4;
+        let alternations = history
+            .windows(3)
+            .filter(|w| w.iter().all(|v| moving(*v)) && w[0] * w[1] < 0.0 && w[1] * w[2] < 0.0)
+            .count();
+        println!("MEASURED relative slip after a kick on a free slab: {history:?}");
+        assert_eq!(
+            alternations, 0,
+            "the pair's grip mode alternates tick to tick"
+        );
+        assert!(
+            !moving(*history.last().unwrap()),
+            "the pair's grip mode does not settle"
+        );
     }
 
     /// Every bit of a field-only report's force applications, contacts and belt reaction.

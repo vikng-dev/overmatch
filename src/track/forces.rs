@@ -171,18 +171,31 @@ impl GripParams {
         }
     }
 
+    /// [`Self::step_shear_on`] support that does not yield: the field, static or kinematic bodies.
+    pub(crate) fn step_shear_per_grip_m(&self, dt: f32) -> f32 {
+        self.step_shear_on(dt, 0.0)
+    }
+
     /// The shortest shear length (m) per unit grip coefficient that one explicit tick of `dt`
-    /// resolves on this hull; a patch's shear length is at least its μ times this.
+    /// resolves for a patch on support of tangent mobility `recipient_mobility` (m/s per N·s,
+    /// [`super::rubble::RubbleBodies::mobility_at`]); its shear length is at least μ times this.
     ///
     /// Resolution. The tick reads slip at its start, sets force from this tick's strain, and
-    /// Avian integrates after. With x = √(μ·g/K)·dt, a = κ·x² and b = 2ζ·κ·x (stiffness and
-    /// damping both act through the coupling), the hull's grip mode steps by
-    /// λ² − (2 − a − b)·λ + (1 − b) = 0. It is stable while a + 2b < 4 and never reverses
-    /// from one tick to the next (no root with negative real part) while b ≤ 1 and a + b ≤ 2;
-    /// this takes the largest x the second pair allows. The margin to the stable bound is what
-    /// absorbs the yaw term a footprint loaded at one end adds to κ (architecture section 5a).
-    pub(crate) fn step_shear_per_grip_m(&self, dt: f32) -> f32 {
-        let (zeta, kappa) = (GRIP_ELEMENT_DAMPING_RATIO, self.hull_coupling);
+    /// Avian integrates after. A patch's force moves the footprint at κ/m per N·s (m the hull's
+    /// mass, twice the side weight over g) and the recipient's surface at its mobility w the other
+    /// way, so the slip it reads answers to the coupling κc = κ + m·w. With x = √(μ·g/K)·dt,
+    /// a = κc·x² and b = 2ζ·κc·x (stiffness and damping both act through the coupling), the grip
+    /// mode steps by λ² − (2 − a − b)·λ + (1 − b) = 0. It is stable while a + 2b < 4 and has no
+    /// root with negative real part, so no sustained alternation at half the tick rate, while
+    /// b ≤ 1 and a + b ≤ 2; this takes the largest x the second pair allows. A kick can still
+    /// overshoot once: at b = 1 the first tick leaves −a of it, then the root 1 − a decays it.
+    /// Patches on different supports compose, weighted by their share of the hull's weight, the
+    /// footprint's load read as that weight; the margin to the stable bound absorbs the yaw term
+    /// a footprint loaded at one end adds to κ (architecture section 5a).
+    pub(crate) fn step_shear_on(&self, dt: f32, recipient_mobility: f32) -> f32 {
+        let hull_mass = 2.0 * self.side_weight / super::derive::G;
+        let kappa = self.hull_coupling + hull_mass * recipient_mobility;
+        let zeta = GRIP_ELEMENT_DAMPING_RATIO;
         let x = (1.0 / (2.0 * zeta * kappa)).min(-zeta + (zeta * zeta + 2.0 / kappa).sqrt());
         super::derive::G * (dt / x).powi(2)
     }
@@ -709,6 +722,8 @@ struct ColumnContact {
     mu: f32,
     /// The surface's own shear length (m); zero for a solid recipient.
     shear_length_m: f32,
+    /// How far the surface yields to the patch's force (m/s per N·s); zero on fixed support.
+    recipient_mobility: f32,
     travel_speed: f32,
     /// Motion resistance coefficient: ground total or undeforming-support running-gear loss.
     rolling: f32,
@@ -1079,6 +1094,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                     collider,
                     mu: surface.mu,
                     shear_length_m: surface.shear_length_m,
+                    recipient_mobility: surface.mobility,
                     travel_speed: vel.dot(long_dir),
                     rolling: surface.rolling,
                     #[cfg(feature = "bitprobe")]
@@ -1189,10 +1205,10 @@ fn forget_departed_elements(work: &[ElementWork], elements: &mut GripElements) {
 /// Advances `elements` in place and returns each contact's [`ContactGrip`] — pass 2 scales it by
 /// that contact's μ × its elastic load. Membership bounds scale with
 /// [`GripParams::side_weight`]. A patch's shear length is its surface's, floored at its μ times
-/// [`GripParams::step_shear_per_grip_m`]. An element's patches share one displacement, so their
-/// stiffnesses μN/K add: the element reads K = Σ μN / Σ(μN/K). Each patch's K is at least μ times
-/// the floor, so the element is never stiffer than its load at the floor, the case the floor
-/// resolves; a frictionless patch adds nothing, and an element with no capacity holds no strain.
+/// [`GripParams::step_shear_on`] its support. An element's patches share one displacement, so
+/// their stiffnesses μN/K add: the element reads K = Σ μN / Σ(μN/K). Each patch's K is at least μ
+/// times its floor, so the element is never stiffer than its load at the floors, the case they
+/// resolve; a frictionless patch adds nothing, and an element with no capacity holds no strain.
 fn update_grip_elements(
     cols: &[ColumnContact],
     held: &[(usize, f32)],
@@ -1203,8 +1219,10 @@ fn update_grip_elements(
 ) -> Vec<ContactGrip> {
     let enter = grip.side_weight * GRIP_ELEMENT_ENTER_FRACTION;
     let leave = grip.side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
-    let step_shear = grip.step_shear_per_grip_m(dt);
-    let patch_shear = |c: &ColumnContact| c.shear_length_m.max(c.mu * step_shear);
+    let patch_shear = |c: &ColumnContact| {
+        c.shear_length_m
+            .max(c.mu * grip.step_shear_on(dt, c.recipient_mobility))
+    };
     let mut work = vec![ElementWork::default(); element_len];
     // An element that does not advance holds its strain: no slope.
     let mut strain_slope = vec![Mat3::ZERO; element_len];
@@ -3222,14 +3240,14 @@ mod tests {
         }
     }
 
-    /// At the step's resolved shear length the hull's grip mode never reverses from one tick to
-    /// the next. A tank parked on ground that stores no shear (paving, a structure) relies on
-    /// it: a shorter floor, or one that leaves out the hull's coupling, rings at half the tick
-    /// rate. FIXTURE: the rig pad on rigid ground under a hull of coupling 2 (its footprint
-    /// moves at twice a point mass's rate), kicked sideways at a tenth of the elastic speed
-    /// scale so the strain stays below breakaway.
+    /// At the step's resolved shear length the hull's grip mode settles without alternating
+    /// sign tick after tick (it may overshoot once). A tank parked on ground that stores no shear
+    /// (paving, a structure) relies on it: a shorter floor, or one that leaves out the hull's
+    /// coupling, rings at half the tick rate. FIXTURE: the rig pad on rigid ground under a hull
+    /// of coupling 2 (its footprint moves at twice a point mass's rate), kicked sideways at a
+    /// tenth of the elastic speed scale so the strain stays below breakaway.
     #[test]
-    fn the_step_shear_length_never_reverses_the_hull_tick_to_tick() {
+    fn the_step_shear_length_leaves_no_half_rate_ringing() {
         let dt = 1.0 / 64.0;
         for mu in [0.3, 0.9] {
             let oracle = GroundedFlat {
@@ -3368,6 +3386,7 @@ mod tests {
             collider: None,
             mu: 0.5,
             shear_length_m: 0.025, // FIXTURE ground shear length.
+            recipient_mobility: 0.0,
             travel_speed: 0.0,
             rolling: 0.0,
             #[cfg(feature = "bitprobe")]
