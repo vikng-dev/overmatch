@@ -123,14 +123,16 @@ pub struct Sensed {
     /// `None` when a solver contact pushed within the window: the solver's friction is Coulomb
     /// too, but its coefficient is not read back, so its grip limit is unmeasured.
     pub grip: Option<f32>,
-    /// The bound a stall gives: `None` once the hull moves or no pull is asked.
+    /// The bound a stall gives: `None` once the hull moves or no pull is asked. It is a floor on
+    /// what the hull meets, and outlives the stall: whether the hull stalls now is [`Self::stalled`].
     pub stall: Option<Stall>,
     /// The latest gear left downward while its memory holds.
     pub failed: Option<Failed>,
-    /// The engaged gear's clutch sent drive through every sample in the window: a stall under it
-    /// is the gear's own. A crank spooling to its launch rpm sends none, so its ticks try nothing
-    /// (MEASURED on flat ground: a window of them read fourth as failed at rest).
-    pub tried: bool,
+    /// Every sample in the window stalled under the engaged gear's drive, as [`Stall`] reads one:
+    /// the hull at rest and not gaining, its belts at rest or not gaining. The stall is the gear's
+    /// own only where its clutch sent drive throughout: a crank spooling to its launch rpm sends
+    /// none (MEASURED on flat ground: a window of them read fourth as failed at rest).
+    pub stalled: bool,
     /// The engaged gear pulled every sample in the window through a locked clutch: the drive and
     /// the drivetrain's gain are that gear's alone. A paid cut, another gear or a tick without
     /// pull starts the run again, and a slipping clutch its locked part: a clutch taking up sends
@@ -161,8 +163,8 @@ pub struct DriverSense {
     open: Option<Open>,
     stall: Option<Stall>,
     failed: Option<Failed>,
-    /// The gear asked to pull the latest samples, and how many of the latest of those its clutch
-    /// drove and held.
+    /// The gear asked to pull the latest samples, and how many of the latest of those stalled the
+    /// hull under its drive and how many its clutch held.
     run: Option<(Engaged, usize, usize)>,
     /// The reading this tick's choice used: telemetry and probes read it.
     pub(crate) reading: Option<Sensed>,
@@ -213,14 +215,17 @@ impl DriverSense {
             let grip = hard.iter().all(Option::is_none).then_some(open.grip);
             let gain = (velocity - open.velocity).dot(open.heading);
             let at_rest = |velocity: Vec3| velocity.dot(open.heading).abs() < PARK_ENGAGE_SPEED;
+            // The pull this sample stalled under, and the gear that drove it.
+            let stalled = open.pull.zip(open.pulled_by).filter(|&(dir, _)| {
+                open.driving
+                    && at_rest(open.velocity)
+                    && at_rest(velocity)
+                    && dir * gain <= 0.0
+                    && (belts.abs() < PARK_ENGAGE_SPEED || dir * (belts - open.belts) <= 0.0)
+            });
             if !at_rest(velocity) {
                 self.stall = None; // The hull moves: no push has failed to move it.
-            } else if let (Some(dir), Some((_, gear)), true) =
-                (open.pull, open.pulled_by, open.driving)
-                && at_rest(open.velocity)
-                && dir * gain <= 0.0
-                && (belts.abs() < PARK_ENGAGE_SPEED || dir * (belts - open.belts) <= 0.0)
-            {
+            } else if let Some((dir, (_, gear))) = stalled {
                 let failed = dir * (push[0] + push[1]);
                 self.stall = Some(match self.stall {
                     Some(stall) if stall.dir == dir => Stall {
@@ -235,12 +240,12 @@ impl DriverSense {
                     },
                 });
             }
-            let [driving, held] = [open.driving, open.locked].map(usize::from);
+            let [stalling, held] = [stalled.is_some(), open.locked].map(usize::from);
             self.run = match (open.pulled_by, self.run) {
-                (Some(by), Some((gear, drove, locked))) if by == gear => {
-                    Some((gear, (drove + 1) * driving, (locked + 1) * held))
+                (Some(by), Some((gear, stalls, locked))) if by == gear => {
+                    Some((gear, (stalls + 1) * stalling, (locked + 1) * held))
                 }
-                (by, _) => by.map(|by| (by, driving, held)),
+                (by, _) => by.map(|by| (by, stalling, held)),
             };
             if self.samples.len() == self.window {
                 self.samples.pop_front();
@@ -291,7 +296,7 @@ impl DriverSense {
                 grip: grip.map(|grip| grip / count),
                 stall: self.stall,
                 failed: self.failed,
-                tried: self.run.is_some_and(|(_, drove, _)| drove >= self.window),
+                stalled: self.run.is_some_and(|(_, stalls, _)| stalls >= self.window),
                 observed: self.run.is_some_and(|(_, _, locked)| locked >= self.window),
             }
         });
@@ -472,6 +477,49 @@ mod tests {
         for (tick, (speed, push, report, want)) in script.into_iter().enumerate() {
             assert_eq!(feel(speed, push, report), want, "tick {tick}");
         }
+    }
+
+    /// A stall's bound outlives the stall, but the hull stalls now only under a window whose every
+    /// sample stalled: the Driver steps down under it, and belts gaining under a hull at rest slide
+    /// at the ground's limit, which no lower gear raises. Fixture: a hull held at rest under 30 kN,
+    /// one tick with its belts held, a window with them gaining, then a window with them held.
+    #[test]
+    fn the_hull_stalls_now_only_under_a_window_stalled_whole() {
+        let forward = Vec3::NEG_Z;
+        let window = usize::from(CUT.get());
+        let mut sense = DriverSense::for_cut(CUT);
+        let contacts = Contacts {
+            soft: [forward * 15_000.0; 2],
+            grip: 0.0,
+            hard: [None; 2],
+        };
+        let pulling = TransmissionReport {
+            pulling: true,
+            driving: true,
+            ..Default::default()
+        };
+        let mut feel = |belts: f32| {
+            let reading = sense.tick(Vec3::ZERO, forward, belts, MASS, contacts, DT);
+            sense.drove(&pulling);
+            reading
+        };
+        feel(0.0);
+        let held = feel(0.0).expect("one closed sample");
+        assert!(held.stall.is_some(), "a held tick bounds the stall");
+        let gaining = (1..=window)
+            .map(|tick| feel(0.2 + 0.01 * tick as f32))
+            .last()
+            .flatten()
+            .expect("a closed window");
+        assert!(gaining.stall.is_some(), "the bound outlives the stall");
+        assert!(!gaining.stalled, "belts gaining under a hull at rest");
+        // The first held reading closes the last gaining tick's sample.
+        let stalled = (0..=window)
+            .map(|_| feel(0.5))
+            .last()
+            .flatten()
+            .expect("a closed window");
+        assert!(stalled.stalled, "a window stalled whole");
     }
 
     /// A gear left downward is remembered only while what it failed under holds: the same ladder,

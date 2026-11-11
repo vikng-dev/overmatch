@@ -208,7 +208,7 @@ fn felt_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
         grip: Some(f32::INFINITY),
         stall: None,
         failed: None,
-        tried: true,
+        stalled: false,
         observed: true,
     });
     inp
@@ -1117,7 +1117,7 @@ fn stall_guard_holds_crank_under_grade_lug() {
             grip: Some(f32::INFINITY),
             stall: None,
             failed: None,
-            tried: true,
+            stalled: false,
             observed: true,
         });
         #[cfg(feature = "bitprobe")]
@@ -2192,7 +2192,7 @@ fn driver_input(speed: f32, load: f32, command: f32) -> TransmissionInput {
         grip: Some(f32::INFINITY),
         stall: None,
         failed: None,
-        tried: true,
+        stalled: false,
         observed: true,
     });
     inp
@@ -2207,6 +2207,7 @@ fn stalled(mut inp: TransmissionInput, gear: u8) -> TransmissionInput {
         push: sensed.resistance,
         gear,
     });
+    sensed.stalled = true;
     inp
 }
 

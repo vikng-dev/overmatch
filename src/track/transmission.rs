@@ -1180,7 +1180,7 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
 ///    current gear, and none the memory holds back, else first where it offers more spare than
 ///    the current gear; free.
-/// 2. The hull stalls under a window the gear drove whole ([`super::sense::Sensed::tried`]): the
+/// 2. The hull stalls under every sample of a window the gear drove ([`super::sense::Sensed::stalled`]): the
 ///    lowest gear within `max_step`, since a stall bounds what the hull meets only from below.
 ///    Or the drivetrain loses speed by more than M with the crank lugging below its peak-torque
 ///    speed: the highest lower gear within `max_step` that holds where it lands; with none the
@@ -1287,7 +1287,7 @@ fn choose_gear(
     // recover; above it they raise it, and the gear settles where it holds.
     let lugging = st.omega_e < tp.peak_torque_rpm * RPM_TO_RAD;
     let slowing = sensed.observed && lugging && dir * sensed.drive_gain < -margin;
-    let chosen = if stall.is_some() && sensed.tried {
+    let chosen = if stall.is_some() && sensed.stalled {
         // A stall bounds what the hull meets from below only: the lowest gear in reach pulls most.
         Some(st.gear.saturating_sub(tp.max_step).max(1)).filter(|&gear| gear < st.gear)
     } else if slowing {
