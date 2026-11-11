@@ -1,5 +1,5 @@
 //! A measurement bed for the game's environment destruction (game state only): the shipped house
-//! felled on the flat world the way the scheduled workload fells one (`net::loadtest`), its rubble
+//! felled on the flat world at its ground supports (`construction::breakage::felling`), its rubble
 //! left to rest and freeze (`debris::freeze`), then driven into by the shipped tank or reached by
 //! a fixture charge. Every tick it checks the freeze against the world itself: no touching pair
 //! joins a frozen piece to a body that is not static, the tank's belt never stands on a frozen
@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::ballistics::BallisticVolume;
-use crate::construction::breakage::{Breakage, Charge, Piece};
+use crate::construction::breakage::{Breakage, Charge, Piece, felling};
 use crate::construction::fracture::{Blast, FIT_ONLY_PRODUCTS};
 use crate::construction::{Body, Element};
 use crate::cost::stages::{Stages, Work};
@@ -229,17 +229,11 @@ fn fell_house(app: &mut App, at: Vec3) {
                   volumes: Query<(Entity, &ChildOf, &Element), With<BallisticVolume>>,
                   mut commands: Commands| {
                 let (pose, body) = houses.get(root).expect("the fixture house stands");
-                let supports = crate::net::loadtest::supports(body);
-                let lines = crate::net::loadtest::felling_lines(
-                    "rubble_fixture",
-                    root,
-                    pose,
-                    body,
-                    &supports,
-                    &volumes,
-                );
+                let supports = felling::supports(body);
+                let lines =
+                    felling::felling_lines("rubble_fixture", root, pose, body, &supports, &volumes);
                 assert!(!lines.is_empty(), "the shipped house stands on supports");
-                crate::net::loadtest::fell(&mut commands, lines);
+                felling::fell(&mut commands, lines);
             },
         )
         .expect("the felling runs");

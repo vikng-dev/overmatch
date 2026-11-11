@@ -867,6 +867,7 @@ type Colliders<'w, 's> = Query<
     Or<(With<Element>, With<ChunkCollider>)>,
 >;
 
+pub(crate) mod felling;
 mod sweep_intake;
 #[cfg(test)]
 pub(crate) use sweep_intake::pushes;
