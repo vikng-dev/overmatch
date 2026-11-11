@@ -70,9 +70,12 @@
 //! run's history fixes; a hash set's order follows the entities' bits, which can differ between
 //! runs of the same match.
 //!
-//! COST, OPEN. The `Changed<…>` filter of `super::wake_on_static_moved` walks every attached
-//! collider each step; it is priced in the pricing batch before any indexing work. The freeze and
-//! the thaw evaluate serially, to be confirmed by the same pricing.
+//! COST, OPEN. The reach casts one spatial query for each body it evaluates (`Reach::of`): each
+//! awake body that is not static, and each piece the thaw frees. The freeze and the thaw evaluate
+//! it serially; whether splitting that evaluation over the compute pool pays on the hosted
+//! allocation is unmeasured. The `Changed<…>` filter of `super::wake_on_static_moved` walks every
+//! attached collider each step, about 2 µs per 1,000 colliders on the perf profile (MEASURED), and
+//! stays unindexed.
 //!
 //! ADR-0014 EXCEPTION (owner ruling 2026-11-10: settled rubble may rejoin the fixed structure where
 //! that is faster and simpler). A piece's body type and [`Frozen`] change after spawn. Both are
@@ -234,8 +237,8 @@ pub(crate) fn sim_plugin(app: &mut App) {
         .add_observer(collider_left)
         .add_observer(collider_disabled)
         .add_observer(collider_sensed)
-        // Serial, both: settled, they visit only the awake movers (MEASURED on rest-3 and rest-12:
-        // one body and 45 spatial queries a tick) and the changes and pushes queued since the step.
+        // Serial, both (module doc, cost): they visit the awake movers, one spatial query each, and
+        // the changes and pushes queued since the step.
         .add_systems(
             PhysicsSchedule,
             thaw.after(super::wake_on_static_moved)
@@ -344,9 +347,28 @@ struct Reach<'w, 's> {
         (Without<Sensor>, Without<ColliderDisabled>),
     >,
     collider_of: Query<'w, 's, &'static ColliderOf>,
+    /// The bounds Avian's spatial queries test each collider by.
+    aabbs: Query<'w, 's, &'static ColliderAabb>,
     spatial: SpatialQuery<'w, 's>,
     /// The coming step's: Avian's own clock in its step, the fixed clock after it.
     time: Res<'w, Time>,
+}
+
+/// One system's reach work: the bodies it evaluated, the spatial queries it cast, and the queries
+/// that reached a body no earlier one in the system had.
+#[derive(Default)]
+struct Tally {
+    movers: u64,
+    queries: u64,
+    finds: u64,
+}
+
+impl Tally {
+    fn report(&self, stages: &Stages) {
+        stages.add(Work::ReachMovers, self.movers);
+        stages.add(Work::ReachQueries, self.queries);
+        stages.add(Work::ReachFinds, self.finds);
+    }
 }
 
 impl Reach<'_, '_> {
@@ -358,38 +380,58 @@ impl Reach<'_, '_> {
     }
 
     /// Add to `reached` each body passing `keep` with a solid collider that a solid collider of
-    /// `body` could make a contact with in this step (module doc, reach); the spatial queries it
-    /// cast.
+    /// `body` could make a contact with in this step (module doc, reach).
+    ///
+    /// A BODY'S ONE QUERY FINDS WHAT A QUERY PER COLLIDER WOULD. Avian's AABB query reports a
+    /// collider whose tree box and then whose `ColliderAabb` meet the box asked, both by inclusive
+    /// comparisons (`spatial_query/system_param.rs`, `aabb_intersections_with_aabb_callback`), and
+    /// promises every collider whose `ColliderAabb` meets it. Each collider's box lies inside
+    /// their union, so the union's query reports every collider a query on any one box reports;
+    /// keeping those whose `ColliderAabb` meets one of the boxes by the same test keeps all of
+    /// them and, by that promise, no other.
     fn of(
         &self,
         body: Entity,
         keep: impl Fn(Entity) -> bool,
         reached: &mut BTreeSet<Entity>,
-    ) -> u64 {
+        tally: &mut Tally,
+    ) {
+        tally.movers += 1;
         let Ok((linear, colliders, body_margin)) = self.bodies.get(body) else {
-            return 0; // A disabled body, or one with no collider, touches nothing.
+            return; // A disabled body, or one with no collider, touches nothing.
         };
-        let mut queries = 0;
         let travel = linear.length() * self.time.delta_secs();
+        let mut boxes = Vec::new();
         for collider in colliders.iter() {
             let Ok((shape, at, turn, margin)) = self.solids.get(collider) else {
                 continue; // A sensor or a disabled collider makes no contact.
             };
             let margin = margin.or(body_margin).map_or(0.0, |margin| margin.0);
-            let bounds = shape.aabb(at.0, *turn).grow(Vec3::splat(travel + margin));
-            queries += 1;
-            self.spatial
-                .aabb_intersections_with_aabb_callback(bounds, |hit| {
-                    if self.solids.contains(hit)
-                        && let Ok(of) = self.collider_of.get(hit)
-                        && keep(of.body)
-                    {
+            boxes.push(shape.aabb(at.0, *turn).grow(Vec3::splat(travel + margin)));
+        }
+        let Some(union) = boxes.iter().copied().reduce(ColliderAabb::merged) else {
+            return; // A body with no solid collider touches nothing.
+        };
+        tally.queries += 1;
+        let found = reached.len();
+        self.spatial
+            .aabb_intersections_with_aabb_callback(union, |hit| {
+                if self.solids.contains(hit)
+                    && let Ok(of) = self.collider_of.get(hit)
+                    && keep(of.body)
+                    && !reached.contains(&of.body)
+                {
+                    let bounds = self
+                        .aabbs
+                        .get(hit)
+                        .expect("Avian's AABB query reports only colliders with bounds");
+                    if boxes.iter().any(|b| bounds.intersects(b)) {
                         reached.insert(of.body);
                     }
-                    true
-                });
-        }
-        queries
+                }
+                true
+            });
+        tally.finds += u64::from(reached.len() > found);
     }
 }
 
@@ -456,7 +498,7 @@ fn freeze(p: Freeze, mut commands: Commands) {
             .expect("a sleeping body's island exists");
         !woken.contains(&id) && island.body_count() as usize == pieces.len()
     });
-    let mut queries = 0;
+    let mut tally = Tally::default();
     if !members.is_empty() {
         let candidates: EntityHashMap<u32> = members
             .iter()
@@ -466,7 +508,8 @@ fn freeze(p: Freeze, mut commands: Commands) {
         let mut reached = BTreeSet::new();
         for mover in reach.movers() {
             visits += 1;
-            queries += reach.of(mover, |body| candidates.contains_key(&body), &mut reached);
+            let keep = |body| candidates.contains_key(&body);
+            reach.of(mover, keep, &mut reached, &mut tally);
         }
         for piece in reached {
             members.remove(&candidates[&piece]);
@@ -558,7 +601,7 @@ fn freeze(p: Freeze, mut commands: Commands) {
         stages.add(Work::FrozePieces, froze as u64);
         stages.add(Work::FreezeMet, met);
         stages.add(Work::FreezeVisits, visits);
-        stages.add(Work::ReachQueries, queries);
+        tally.report(stages);
     }
 }
 
@@ -593,7 +636,8 @@ fn thaw(p: Thaw, mut commands: Commands) {
     if islands.islands.is_empty() {
         return;
     }
-    let (mut visits, mut queries) = ((changed.len() + loaded.len() + met.len()) as u64, 0);
+    let mut visits = (changed.len() + loaded.len() + met.len()) as u64;
+    let mut tally = Tally::default();
     let holds = |collider: Entity, change: Change| match change {
         Change::Lost => false,
         Change::Attachment(body) => {
@@ -628,7 +672,8 @@ fn thaw(p: Thaw, mut commands: Commands) {
     let mut reached = BTreeSet::new();
     for mover in reach.movers() {
         visits += 1;
-        queries += reach.of(mover, |body| frozen.contains(body), &mut reached);
+        let keep = |body| frozen.contains(body);
+        reach.of(mover, keep, &mut reached, &mut tally);
     }
     let mut by_reach = 0;
     for piece in reached {
@@ -663,15 +708,12 @@ fn thaw(p: Thaw, mut commands: Commands) {
         let mut further = BTreeSet::new();
         for &piece in &freed {
             visits += 1;
-            queries += reach.of(
-                piece,
-                |body| {
-                    frozen
-                        .get(body)
-                        .is_ok_and(|(other, ..)| !thawing.contains(&other.island))
-                },
-                &mut further,
-            );
+            let keep = |body| {
+                frozen
+                    .get(body)
+                    .is_ok_and(|(other, ..)| !thawing.contains(&other.island))
+            };
+            reach.of(piece, keep, &mut further, &mut tally);
         }
         for piece in further {
             let id = island_of(piece);
@@ -695,7 +737,7 @@ fn thaw(p: Thaw, mut commands: Commands) {
         stages.add(Work::ThawLoad, by_load as u64);
         stages.add(Work::ThawReach, by_reach as u64);
         stages.add(Work::FreezeVisits, visits);
-        stages.add(Work::ReachQueries, queries);
+        tally.report(stages);
     }
 }
 
@@ -1035,6 +1077,68 @@ mod tests {
                 "{case} moved the rubble"
             );
         }
+    }
+
+    /// A BODY REACHES BY EACH OF ITS COLLIDERS, AND NOT BETWEEN THEM: a hovering body with two
+    /// colliders 2 m apart, at rest over two pieces frozen on the ground, then sent down at them,
+    /// thaws both in the step whose travel spans the gap, and leaves frozen a third piece under
+    /// the gap between its colliders, inside their joint bounds but out of either collider's
+    /// reach. A reach that tested one of the colliders leaves the piece under the other static as
+    /// it is struck; one that tested their joint bounds thaws a piece no collider can touch in
+    /// the step, which the freeze's saving relies on staying frozen.
+    #[test]
+    fn a_body_reaches_by_each_of_its_colliders_and_not_between_them() {
+        let mut app = settling(GRAVITY);
+        slab(&mut app, 0.0);
+        // Fixture: pieces under the body's colliders at x = ±1 m, and one under the gap.
+        let [under_left, between, under_right] =
+            [-1.0, 0.0, 1.0].map(|x| piece(&mut app, Vec3::new(x, SIDE / 2.0, 0.0)));
+        let pieces = [under_left, between, under_right];
+        until_frozen(&mut app, &pieces);
+        // Fixture: a 3 cm gap over the pieces' tops, past Avian's 5 mm contact tolerance and
+        // inside one step's travel at 4 m/s.
+        let at = Vec3::Y * (SIDE + 0.03 + SIDE / 2.0);
+        let body = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(at),
+                Position(at),
+                Rotation::default(),
+                RigidBody::Dynamic,
+                GravityScale(0.0),
+            ))
+            .id();
+        for x in [-1.0, 1.0] {
+            app.world_mut().spawn((
+                ChildOf(body),
+                Transform::from_xyz(x, 0.0, 0.0),
+                Collider::cuboid(SIDE, SIDE, SIDE),
+                ColliderDensity(1000.0),
+                CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+            ));
+        }
+        app.update();
+        app.update();
+        for piece in pieces {
+            assert!(
+                is_frozen(&app, piece),
+                "a body at rest over it reaches nothing"
+            );
+        }
+        app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = Vec3::NEG_Y * 4.0;
+        app.update();
+        assert!(
+            !is_frozen(&app, under_left),
+            "the left collider reached its piece"
+        );
+        assert!(
+            !is_frozen(&app, under_right),
+            "the right collider reached its piece"
+        );
+        assert!(
+            is_frozen(&app, between),
+            "no collider reaches the piece under the gap"
+        );
     }
 
     /// A PUSH ON A PIECE FALLING ASLEEP IS KEPT: a piece pushed in the tick Avian puts it to sleep,

@@ -154,9 +154,12 @@ labelled!(
         ThawSupport = "thaw_support",
         // Sleeping islands the freeze found touching a frozen one, and left for its thaw.
         FreezeMet = "freeze_met",
-        // Entities the freeze and the thaw visit, and the spatial queries their reach casts.
+        // Entities the freeze and the thaw visit; the bodies whose reach they evaluate, the
+        // spatial queries it casts, and those that reach a body no earlier one in that system had.
         FreezeVisits = "freeze_visits",
+        ReachMovers = "reach_movers",
         ReachQueries = "reach_queries",
+        ReachFinds = "reach_finds",
     }
 );
 
