@@ -107,8 +107,9 @@ pub struct Sensed {
     pub resistance: f32,
     /// The left belt's mean push less the right's over the window (N).
     pub push_difference: f32,
-    /// Both sprockets' force on the latest driven tick (N, forward positive): what the engaged
-    /// gear delivers now ([`TransmissionReport::forces`]).
+    /// Both sprockets' mean force over the window (N, forward positive): what the engaged gear
+    /// delivers ([`TransmissionReport::forces`]). Under [`Self::observed`] the window is the
+    /// gear's locked run, the samples its drivetrain gain reads, so no single tick decides.
     pub drive: f32,
     /// The drivetrain's gain over the window as a force (N): hull mass times the belts' mean
     /// acceleration. Through a locked clutch the belts turn with the crank, so this is the revs
@@ -270,17 +271,22 @@ impl DriverSense {
                 "a driven hull has finite mass and its tick a positive step"
             );
             let count = self.samples.len() as f32;
-            let [left, right, gain, belt_gain] =
-                self.samples.iter().fold([0.0; 4], |[l, r, g, b], s| {
-                    [l + s.push[0], r + s.push[1], g + s.gain, b + s.belt_gain]
+            let [left, right, gain, belt_gain, drive] =
+                self.samples.iter().fold([0.0; 5], |[l, r, g, b, d], s| {
+                    [
+                        l + s.push[0],
+                        r + s.push[1],
+                        g + s.gain,
+                        b + s.belt_gain,
+                        d + s.drive,
+                    ]
                 });
-            let latest = self.samples.back().expect("the reading has a sample");
             let grip = self.samples.iter().map(|s| s.grip).sum::<Option<f32>>();
             Sensed {
                 speed: velocity.dot(heading),
                 resistance: (left + right) / count - mass * gain / (count * dt),
                 push_difference: (left - right) / count,
-                drive: latest.drive,
+                drive: drive / count,
                 drive_gain: mass * belt_gain / (count * dt),
                 grip: grip.map(|grip| grip / count),
                 stall: self.stall,
@@ -511,6 +517,51 @@ mod tests {
             (TransmissionReport::default(), "released"),
         ] {
             assert_eq!(after(report), None, "{case}");
+        }
+    }
+
+    /// The engaged gear's drive reads its whole window, not its latest tick: the upshift compares a
+    /// candidate against it over the same held window, so one tick's dip must not decide. Fixture:
+    /// two locked windows of the same mean force, 50 kN, one steady and one opening on 65 kN and
+    /// closing on 35 kN.
+    #[test]
+    fn the_engaged_drive_reads_its_whole_window() {
+        let forward = Vec3::NEG_Z;
+        let window = usize::from(CUT.get());
+        let read = |force: &dyn Fn(usize) -> f32| {
+            let mut sense = DriverSense::for_cut(CUT);
+            let contacts = Contacts {
+                soft: [forward * 25_000.0; 2],
+                grip: 0.0,
+                hard: [None; 2],
+            };
+            let mut reading = None;
+            // The reading on tick `window` closes the samples of ticks 0 to `window - 1`.
+            for tick in 0..=window {
+                reading = sense.tick(forward * 3.0, forward, 3.0, MASS, contacts, DT);
+                sense.drove(&TransmissionReport {
+                    pulling: true,
+                    driving: true,
+                    locked: true,
+                    forces: [force(tick) * 0.5; 2],
+                    ..Default::default()
+                });
+            }
+            reading.expect("a window of closed samples")
+        };
+        let steady = read(&|_| 50_000.0);
+        let dipped = read(&|tick| match tick {
+            0 => 65_000.0,
+            tick if tick == window - 1 => 35_000.0,
+            _ => 50_000.0,
+        });
+        for reading in [steady, dipped] {
+            assert!(reading.observed, "the fixture window is locked whole");
+            assert!(
+                (reading.drive - 50_000.0).abs() < 1.0,
+                "drive {} over a 50 kN window",
+                reading.drive
+            );
         }
     }
 

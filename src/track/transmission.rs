@@ -1151,8 +1151,8 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// ([`super::sense::Sensed::stall`]): a gear qualifies there only by pushing harder, the free
 /// choice at rest included, and in first gear with the bound unbeaten the Driver stays.
 ///
-/// The engaged gear is observed, never priced: what it delivers is its sprockets' force on the
-/// latest tick ([`super::sense::Sensed::drive`]), and whether it holds is whether the drivetrain
+/// The engaged gear is observed, never priced: what it delivers is its sprockets' mean force over
+/// the held window ([`super::sense::Sensed::drive`]), and whether it holds is whether the drivetrain
 /// gains under it ([`super::sense::Sensed::drive_gain`]), both read only through a clutch that held
 /// for a whole window ([`super::sense::Sensed::observed`]). A price models a gear not engaged, and
 /// on the engaged gear it reads that model's error (MEASURED on rubble, house stop-go: seventh
