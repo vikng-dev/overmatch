@@ -8,6 +8,8 @@
 //! The rejected `STEER_SERVO_BAND` proportional servo loses authority with vehicle scale;
 //! the steering law instead solves its capacity-limited constraint semi-implicitly.
 
+use std::num::NonZeroU8;
+
 use bevy::ecs::error::BevyError;
 
 use super::drive::DriveIntent;
@@ -218,8 +220,9 @@ pub struct TransmissionParams {
     pub engine_inertia: f32,
     /// Main clutch torque capacity (N·m), the engaged coupling's transmitted-torque clamp.
     pub clutch_capacity: f32,
-    /// DERIVED torque-interruption ticks from authored `shift_secs`.
-    pub shift_ticks: u8,
+    /// DERIVED torque-interruption ticks from authored `shift_secs`: at least one, so every gear
+    /// change opens the clutch and the Driver's ledger records the gear it left.
+    pub shift_ticks: NonZeroU8,
     /// DERIVED rpm of maximum fuel-governed torque: the launch and steering rev target.
     pub peak_torque_rpm: f32,
     /// Raw curve peak torque, the declared motoring-drag anchor.
@@ -381,18 +384,22 @@ impl TransmissionParams {
                 "belt inertia (positive coupling divisor)",
                 a.belt_inertia.is_finite() && a.belt_inertia > 0.0,
             ),
-            (
-                // Representation bound: the rounded countdown must fit its u8 state field.
-                "gearbox.shift_secs",
-                a.shift_secs.is_finite()
-                    && a.shift_secs >= 0.0
-                    && (a.shift_secs * TICK_HZ).round() <= f32::from(u8::MAX),
-            ),
         ] {
             if !ok {
                 return Err(format!("track.powertrain.transmission: invalid {field}").into());
             }
         }
+
+        // A cut of no ticks would change gear with the clutch in, unfelt by the ledger; the
+        // rounded countdown must fit its u8 state field.
+        let shift_ticks = Some(a.shift_secs * TICK_HZ)
+            .filter(|ticks| ticks.is_finite() && ticks.round() <= f32::from(u8::MAX))
+            .and_then(|ticks| NonZeroU8::new(ticks.round() as u8))
+            .ok_or_else(|| -> BevyError {
+                "track.powertrain.transmission: invalid gearbox.shift_secs: author a cut of 1 to \
+                 255 fixed ticks, so every gear change opens the clutch"
+                    .into()
+            })?;
 
         // The curve brackets operation; its end-clamped tail does not define the crank limit.
         if a.idle_rpm >= a.governed_rpm
@@ -454,7 +461,7 @@ impl TransmissionParams {
             drag_fraction: a.drag_fraction,
             engine_inertia: a.engine_inertia_kgm2,
             clutch_capacity: a.clutch_capacity_nm,
-            shift_ticks: (a.shift_secs * TICK_HZ).round() as u8,
+            shift_ticks,
             peak_torque_rpm: a.idle_rpm,
             peak_torque_nm,
         };
@@ -1273,8 +1280,9 @@ fn choose_gear(
         return;
     }
     // A hull the cut brings to rest is held there by the park latch, so no cut lands below rest.
-    let landing =
-        (speed - resistance * f32::from(tp.shift_ticks) / TICK_HZ / coupled_mass(fp)).max(0.0);
+    let landing = (speed
+        - resistance * f32::from(tp.shift_ticks.get()) / TICK_HZ / coupled_mass(fp))
+    .max(0.0);
     // Below the crank's peak-torque speed falling revs lower the torque, so the gear does not
     // recover; above it they raise it, and the gear settles where it holds.
     let lugging = st.omega_e < tp.peak_torque_rpm * RPM_TO_RAD;
@@ -1290,6 +1298,7 @@ fn choose_gear(
         && st.steer_step == 0
         && st.clutch == ClutchState::In
         && landing >= PARK_ENGAGE_SPEED
+        && st.gear < admitted
     {
         // A detent turn's radius belongs to its gear: no upshift changes it.
         // The candidate that pulls hardest where it lands, the higher on a tie.
@@ -1305,7 +1314,7 @@ fn choose_gear(
     // No gear qualifies: the current one stays.
     if let Some(gear) = chosen {
         st.gear = gear;
-        st.shift_ticks = tp.shift_ticks;
+        st.shift_ticks = tp.shift_ticks.get();
     }
 }
 
@@ -1502,7 +1511,7 @@ fn swap_ladder_direction(
     if st.shift_ticks == 0 {
         st.reverse = command < 0.0;
         st.gear = 1;
-        st.shift_ticks = tp.shift_ticks;
+        st.shift_ticks = tp.shift_ticks.get();
     }
 }
 

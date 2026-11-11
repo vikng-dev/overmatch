@@ -144,7 +144,7 @@ impl Measurements {
         if probe.shifting && (!self.was_shifting || state.gear != self.last_gear) {
             self.finish_landing();
             let speed = probe.sensed_speed
-                - probe.sensed_resistance_n * f32::from(gear.trans().shift_ticks) * probe.dt
+                - probe.sensed_resistance_n * f32::from(gear.trans().shift_ticks.get()) * probe.dt
                     / gear.landing_mass();
             let price = price_driver_force(
                 gear.trans(),
@@ -212,7 +212,7 @@ impl Measurements {
                     inertial_price - probe.delivered_force_n,
                 ]);
             }
-            if landing.delivery.len() >= usize::from(tp.shift_ticks).max(1) {
+            if landing.delivery.len() >= usize::from(tp.shift_ticks.get()) {
                 self.finish_landing();
             }
         }

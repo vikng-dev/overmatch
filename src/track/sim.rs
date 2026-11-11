@@ -432,7 +432,7 @@ impl TrackGear {
         out.f32("transmission.drag_fraction", tp.drag_fraction);
         out.f32("transmission.engine_inertia", tp.engine_inertia);
         out.f32("transmission.clutch_capacity", tp.clutch_capacity);
-        out.u32("transmission.shift_ticks", u32::from(tp.shift_ticks));
+        out.u32("transmission.shift_ticks", u32::from(tp.shift_ticks.get()));
         out.f32("transmission.peak_torque_rpm", tp.peak_torque_rpm);
         out.f32("transmission.peak_torque_nm", tp.peak_torque_nm);
     }

@@ -19,6 +19,7 @@
 //! read a stalled hull's obstacle as gone at the cut's end, where the free choice at rest reads it.
 
 use std::collections::VecDeque;
+use std::num::NonZeroU8;
 
 use bevy::prelude::*;
 
@@ -167,9 +168,9 @@ pub struct DriverSense {
 }
 
 impl DriverSense {
-    /// An empty ledger averaging one cut of `shift_ticks`; a cut of no ticks averages one tick.
-    pub fn for_cut(shift_ticks: u8) -> Self {
-        let window = usize::from(shift_ticks).max(1);
+    /// An empty ledger averaging one cut of `shift_ticks`.
+    pub fn for_cut(shift_ticks: NonZeroU8) -> Self {
+        let window = usize::from(shift_ticks.get());
         Self {
             window,
             samples: VecDeque::with_capacity(window),
@@ -350,13 +351,13 @@ mod tests {
     /// 45 kN before it and 60 kN after.
     const MASS: f32 = 40_000.0;
     const DT: f32 = 1.0 / 64.0;
-    const CUT: u8 = 20;
+    const CUT: NonZeroU8 = NonZeroU8::new(20).expect("a fixture cut of twenty ticks");
     const CUT_START: usize = 60;
 
     fn push(tick: usize) -> f32 {
         if tick < CUT_START {
             45_000.0
-        } else if tick < CUT_START + usize::from(CUT) {
+        } else if tick < CUT_START + usize::from(CUT.get()) {
             0.0
         } else {
             60_000.0
@@ -414,7 +415,7 @@ mod tests {
             assert!(near(read, 30_000.0), "grade, tick {tick}: read {read}");
         }
         let obstacle = readings(|push| push);
-        let end = CUT_START + usize::from(CUT);
+        let end = CUT_START + usize::from(CUT.get());
         for (tick, want) in [(CUT_START, 45_000.0), (end, 45_000.0), (end + 20, 60_000.0)] {
             let read = obstacle[tick]
                 .expect("the ledger has closed ticks")

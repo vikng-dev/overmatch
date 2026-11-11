@@ -1188,7 +1188,7 @@ fn rev_match_across_upshift_is_continuous() {
         );
     }
     st.gear = 2;
-    st.shift_ticks = tp.shift_ticks;
+    st.shift_ticks = tp.shift_ticks.get();
     let target_rpm = v_up * g2 / tp.sprocket_radius / RPM_TO_RAD; // ≈ 1121
     let mut prev_rpm = st.omega_e / RPM_TO_RAD;
     let mut window_end_gap = None;
@@ -2367,6 +2367,39 @@ fn driver_respects_the_shift_step_and_turn_contracts() {
     }
 }
 
+/// The top of any admitted ladder chooses no gear above it: the upshift clause relies on a
+/// higher gear existing before it forms the range above the engaged one. Fixture: a ladder of the
+/// most gears the u8 index admits, cruising straight in its top gear on ample grip.
+#[test]
+fn the_top_of_the_longest_admitted_ladder_chooses_nothing_above_it() {
+    let speeds: Vec<f32> = (1..=u8::MAX).map(|gear| f32::from(gear) * 0.5).collect();
+    let radii = vec![(10.0, 30.0); speeds.len()];
+    let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
+        forward_speeds_kmh: &speeds,
+        steer_radii_m: &radii,
+        ..tiger_authoring()
+    })
+    .expect("a ladder of u8::MAX gears is admitted");
+    let top = u8::MAX;
+    let speed = 0.5 * tp.governed_speed(false);
+    let mut state = TransmissionState {
+        gear: top,
+        clutch: ClutchState::In,
+        omega_e: (tp.engine.governed_rpm - 50.0) * RPM_TO_RAD, // Fixture: fuel beats drag.
+        ..fresh(&tp)
+    };
+    let inp = driver_input(speed, 1_000.0, 1.0);
+    choose_gear(
+        &mut state,
+        &tp,
+        &construction(&lab_fp()),
+        &inp,
+        1.0,
+        felt(&inp),
+    );
+    assert_eq!(state.gear, top);
+}
+
 /// Fixture launch price of forward `gear` at full pedal: what a slipping clutch delivers.
 fn launch_force(tp: &TransmissionParams, gear: u8) -> f32 {
     price_driver_force(
@@ -2407,7 +2440,7 @@ fn an_accepted_gear_holds_as_delivery_lands_it() {
                         continue; // Nothing was accepted.
                     }
                     let landing = speed
-                        - resistance * f32::from(tp.shift_ticks)
+                        - resistance * f32::from(tp.shift_ticks.get())
                             / TICK_HZ
                             / coupled_mass(&construction);
                     let landed = tp.gears_fwd[usize::from(st.gear - 1)];
@@ -2681,9 +2714,9 @@ fn overrun_slip_guard_bounds_crank_at_top_gear() {
 fn paid_shift_disconnects_for_exactly_its_declared_window() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let mut state = fresh(&tp);
-    state.shift_ticks = tp.shift_ticks;
+    state.shift_ticks = tp.shift_ticks.get();
     let speed = tp.engine.idle_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[0];
-    for _ in 0..tp.shift_ticks {
+    for _ in 0..tp.shift_ticks.get() {
         let report = step(&fp, &tp, &mut state, &input(1.0, 0.0, [speed; 2], [0.0; 2]));
         assert!(report.shifting);
         assert_eq!(report.forces, [0.0; 2]);
@@ -2996,7 +3029,7 @@ fn held_reversal_waits_at_rest_and_pays_exactly_one_cut() {
             );
             assert!(state.reverse != reverse && speeds[0] * dir < -PARK_ENGAGE_SPEED);
             assert_eq!(cuts, 1);
-            assert_eq!(cut_ticks, usize::from(tp.shift_ticks));
+            assert_eq!(cut_ticks, usize::from(tp.shift_ticks.get()));
         }
     }
 }
@@ -3533,7 +3566,10 @@ fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
         * 1.001;
     a.shift_secs = (f32::from(u8::MAX) + 1.0) / TICK_HZ;
     assert!(TransmissionParams::from_authoring(&a).is_err());
-    a.shift_secs = 0.0;
+    // A cut that rounds to no tick would change gear with the clutch in, unfelt by the ledger.
+    a.shift_secs = 0.4 / TICK_HZ;
+    assert!(TransmissionParams::from_authoring(&a).is_err());
+    a.shift_secs = 3.5;
     a.belt_inertia = f32::MIN_POSITIVE;
     assert!(TransmissionParams::from_authoring(&a).is_err());
 }
