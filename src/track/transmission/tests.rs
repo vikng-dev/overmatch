@@ -2401,10 +2401,11 @@ fn the_top_of_the_longest_admitted_ladder_chooses_nothing_above_it() {
     assert_eq!(state.gear, top);
 }
 
-/// A gear left downward is retried once the hull meets less than it sustained or a retry would
-/// turn its crank faster than it failed at, and not before: the memory must hold a retry back no
-/// further than the operating point it observed, and no less. Fixture: each class drivetrain
-/// cruising in first where second qualifies, with second remembered on each side of both bounds.
+/// A gear left downward is retried once the resistance it failed under eases by more than M or a
+/// retry would turn its crank faster than it failed at, and not before: the memory must hold a
+/// retry back no further than the operating point it observed, and no less. Fixture: each class
+/// drivetrain cruising in first where second qualifies, with second remembered on each side of both
+/// bounds.
 #[test]
 fn a_left_gear_waits_for_less_resistance_or_a_faster_crank() {
     for (fp, tp) in class_drivetrains() {
@@ -2429,15 +2430,16 @@ fn a_left_gear_waits_for_less_resistance_or_a_faster_crank() {
             })
             .expect("a cruise in first where second qualifies");
         let resistance = felt(&inp).resistance;
-        for (push, crank, retried) in [
-            (0.5 * resistance, f32::INFINITY, false),
-            (0.5 * resistance, 0.0, true),
-            (2.0 * resistance, f32::INFINITY, true),
+        let margin = force_margin(&tp);
+        for (failed_under, crank, retried) in [
+            (resistance + 0.5 * margin, f32::INFINITY, false),
+            (resistance + 0.5 * margin, 0.0, true),
+            (resistance + 2.0 * margin, f32::INFINITY, true),
         ] {
             inp.sensed.as_mut().expect("a Driver-policy reading").failed =
                 Some(super::super::sense::Failed {
                     gear: (false, 2),
-                    push,
+                    resistance: failed_under,
                     crank,
                     command: 1.0,
                     steer_step: 0,
@@ -2447,7 +2449,7 @@ fn a_left_gear_waits_for_less_resistance_or_a_faster_crank() {
             assert_eq!(
                 st.gear == 2,
                 retried,
-                "second sustained {push} N against {resistance} N, failed at {crank} rad/s"
+                "second failed under {failed_under} N against {resistance} N, at {crank} rad/s"
             );
         }
     }

@@ -1158,8 +1158,8 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// than rest, its clutch closing from out, capped by the contacts' grip budget
 /// ([`super::sense::Sensed::grip`]). The engaged gear is observed, never priced: its drive and
 /// drivetrain gain over a window its clutch held whole ([`super::sense::Sensed::observed`]). A gear
-/// left failing caps the candidates below it while `R` is at least what it sustained and delivery
-/// would engage it at a crank no faster than it failed at ([`super::sense::Failed`]).
+/// left failing caps the candidates below it while `R` is at least what it failed under less M and
+/// delivery would engage it at a crank no faster than it failed at ([`super::sense::Failed`]).
 /// 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
 ///    current gear nor at or above the stall's gear, none the memory caps; else first where it
 ///    offers more spare than the current gear. Free.
@@ -1229,14 +1229,14 @@ fn choose_gear(
         }
     };
     // A gear left on the way down, and every gear above it, waits for the hull to meet less than
-    // that gear sustained or for a crank faster than it failed at: the highest gear the memory
-    // admits with the hull at `at`.
+    // that gear failed under, by more than M, or for a crank faster than it failed at: the highest
+    // gear the memory admits with the hull at `at`.
     let admitted = |at: f32| {
         sensed
             .failed
             .filter(|failed| {
                 failed.gear.0 == st.reverse
-                    && dir * sensed.resistance >= failed.push
+                    && dir * sensed.resistance >= failed.resistance - margin
                     && engaged_crank(failed.gear.1, at) <= failed.crank
             })
             .map_or(top, |failed| failed.gear.1 - 1)

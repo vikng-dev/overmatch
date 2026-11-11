@@ -510,7 +510,7 @@ drive (`headless_test::drive_load`). Parked, the contact law's rolling fade leav
 Beside `R` the ledger carries the engaged gear's drive (both sprockets' mean force over the
 window), the drivetrain's gain over the window as a force (`M_hull` times the belts' mean
 acceleration), the contacts' mean grip budget (the patches' and the solver's), a stall's bound, the gear the
-Driver last left downward with what it sustained there and the crank speed it failed at, and two
+Driver last left downward with the resistance it failed under and the crank speed it failed at, and two
 counts of the engaged gear's run: the ticks it drove with the hull at rest, and the ticks its
 clutch held the crank to the belts.
 
@@ -550,19 +550,15 @@ state, none from a timer or a band:
   settles where it holds (MEASURED on a 20° grade: fourth settled at 1.93 m/s with its drivetrain
   reading −4 N; stepping down cost a metre per second in the cut, and third settled slower).
 - *A gear left failing stays failed at the operating point it failed at.* The memory holds the
-  gear left downward, what it sustained there and its crank speed then. What it sustained is
-  `R + M_hull a_belt` over the window it was left in: the pull the hull takes from the gear with
-  hull and belts slowing together. It is a force on the hull's side, compared with the `R` the
-  hull meets; it is not the hull's traction in that window, which the ring separates from it by
-  `M_hull (a_hull - a_belt)`. It counts the slowing at hull mass alone: the belts' and crank's
-  share, inertia released while slowing that the gear does not hold steady, is not subtracted.
-  The crank speed is where its clutch landed it, read as the Driver predicts a landing (a slipping
-  clutch at its launch speed, which a crank still spooling has not reached), for an attempt that
-  never held a locked window, else the speed it lugged down to, and never below what a failed
-  earlier attempt of it recorded. Below the torque peak a slower crank pulls less, so the memory holds back that gear and
-  every one above it while `R` is at least what it sustained and delivery would engage it at a
-  crank no faster: the launch rpm where it lands slipping, else its shaft's. Under one resistance a
-  retry needs a strictly faster crank and records it if it fails, so the retries are finite. The
+  gear left downward, the `R` it failed under over the window it was left in, and its crank speed
+  then. The crank speed is where its clutch landed it, read as the Driver predicts a landing (a
+  slipping clutch at its launch speed, which a crank still spooling has not reached), for an
+  attempt that never held a locked window, else the speed it lugged down to, and never below what a
+  failed earlier attempt of it recorded. Below the torque peak a slower crank pulls less, so the
+  memory holds back that gear and every one above it while `R` is at least what it failed under
+  less M and delivery would engage it at a crank no faster: the launch rpm where it lands slipping,
+  else its shaft's. `R` easing past M reopens it. Under one resistance a retry needs a strictly
+  faster crank and records it if it fails, so the retries are finite. The
   memory is forgotten when the pedal rises or is released, the ladder or the detent changes, or
   that gear engages again (MEASURED on the standing heap at a third of the pedal: second priced
   700 N over `R` from a crawl, stalled where the cut landed, and the Driver cycled first and second
@@ -614,7 +610,9 @@ torque and outbids a part-pedal launch, which then stops in the cut: MEASURED in
 `part_pedal_launches_and_sustains_ordered_speed`, a quarter-pedal launch cycling between its
 launch gear and a lug three gears up); a memory of resistance alone (it holds a gear back after an
 operating point the failure does not cover, such as a slower landing that slips at the launch rpm,
-and a recovered lower gear wedges there); pricing a pull as the
+and a recovered lower gear wedges there); a threshold of `R + M_hull a_belt`, the pull the hull
+takes with hull and belts slowing together (it reads negative while a clutch takes up, MEASURED
+−1699 N on the house rubble, and a negative record refuses a recovered gear under any resistance); pricing a pull as the
 share of the belts' reaction that reaches the hull (the share differs between gears where solver
 contacts load the belts off the heading: 0.92 in sixth against 0.90 in seventh on rubble); a
 slide test on slip distance over the elastic shear length (slip distance is unimodal across it on

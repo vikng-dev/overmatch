@@ -80,10 +80,10 @@ pub struct Stall {
 }
 
 /// A gear the Driver left downward, and the operating point it failed at: it is not retried while
-/// the hull meets at least what it sustained there and a retry would turn its crank no faster,
-/// under no more pedal and in the same detent. Below the crank's peak-torque speed a slower crank
-/// pulls less, so a retry no faster fails as it did; a faster one is evidence the failure does not
-/// cover. A detent's steering takes its own share of the gear's work, so a push delivered in a turn
+/// the hull meets at least the resistance it failed under, less M, and a retry would turn its crank
+/// no faster, under no more pedal and in the same detent. Below the crank's peak-torque speed a
+/// slower crank pulls less, so a retry no faster fails as it did; a faster one, or resistance easing
+/// past M, is evidence the failure does not cover. A detent's steering takes its own share of the gear's work, so a push delivered in a turn
 /// says nothing of the gear straight (MEASURED, flat ground at a third of the pedal: fourth left in
 /// a tight turn delivering 22.6 kN against `R` of 29.0 kN, then priced at 53.9 kN straight and held
 /// back).
@@ -91,13 +91,9 @@ pub struct Stall {
 pub struct Failed {
     /// The ladder and gear left.
     pub gear: Engaged,
-    /// What the gear sustained along its ladder where it was left (N): the resistance it met over
-    /// the window it was left in plus hull mass times the belts' acceleration there, the pull the
-    /// hull takes from the gear with hull and belts slowing together. A force on the hull along its
-    /// heading, it is compared with the resistance the hull meets; the hull's own acceleration
-    /// differs from the belts' by its ring on its patches ([`Sensed::drive_gain`]), so it is not
-    /// the hull's traction in that window.
-    pub push: f32,
+    /// The resistance the gear failed under along its ladder (N): [`Sensed::resistance`] over the
+    /// window it was left in.
+    pub resistance: f32,
     /// The crank speed the gear failed at (rad/s): the speed its clutch landed it at, as the
     /// Driver predicts a landing (a slipping clutch's launch speed, a held one's shaft speed),
     /// where no whole locked window of it held or gained, else the speed it lugged down to; never
@@ -396,7 +392,7 @@ impl DriverSense {
                 .map_or(crank, |retried| retried.crank);
             self.failed = Some(Failed {
                 gear: left,
-                push: dir * (reading.resistance + reading.drive_gain),
+                resistance: dir * reading.resistance,
                 crank: crank.max(floor),
                 command: report.command,
                 steer_step: report.steer_step,
