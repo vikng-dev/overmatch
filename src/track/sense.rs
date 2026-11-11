@@ -583,12 +583,13 @@ mod tests {
         }
     }
 
-    /// A stall's bound outlives the stall, but the hull stalls now only under a window whose every
-    /// sample stalled: the Driver steps down under it, and belts gaining under a hull at rest slide
-    /// at the ground's limit, which no lower gear raises. Fixture: a hull held at rest under 30 kN,
-    /// one tick with its belts held, a window with them gaining, then a window with them held.
+    /// A stall's bound outlives the stall, but the hull stalls now only under a window the gear
+    /// drove throughout with the hull at rest and whose belts did not gain over it: the Driver
+    /// steps down under it, and belts gaining under a hull at rest slide at the ground's limit,
+    /// which no lower gear raises. Fixture: a hull held at rest under 30 kN, one tick with its
+    /// belts held, a window with them gaining, then a window with them held.
     #[test]
-    fn the_hull_stalls_now_only_under_a_window_stalled_whole() {
+    fn the_hull_stalls_now_under_drive_at_rest_and_no_belt_gain() {
         let forward = Vec3::NEG_Z;
         let window = usize::from(CUT.get());
         let mut sense = DriverSense::for_cut(CUT);
@@ -623,7 +624,7 @@ mod tests {
             .last()
             .flatten()
             .expect("a closed window");
-        assert!(stalled.stalled, "a window stalled whole");
+        assert!(stalled.stalled, "driven at rest, the belts held");
     }
 
     /// A gear left downward is remembered only while what it failed under holds: the same ladder,
