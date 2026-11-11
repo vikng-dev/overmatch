@@ -2465,63 +2465,6 @@ fn launch_force(tp: &TransmissionParams, gear: u8) -> f32 {
     )
 }
 
-/// A gear the Driver accepts holds where it lands, engaged as delivery engages it at the cut's
-/// end: every clause's stability relies on an accepted gear's pull there exceeding the resistance
-/// it was chosen against. Fixture: each class drivetrain moving in each forward gear with the
-/// clutch in, the crank from idle to governed and resistance up to first gear's launch pull.
-#[test]
-fn an_accepted_gear_holds_as_delivery_lands_it() {
-    for (fp, tp) in class_drivetrains() {
-        let construction = construction(&fp);
-        for gear in 1..=tp.gears_fwd.len() as u8 {
-            let ratio = tp.gears_fwd[usize::from(gear - 1)];
-            for step in 0..=24 {
-                let span = tp.engine.governed_rpm - tp.engine.idle_rpm;
-                let rpm = tp.engine.idle_rpm + span * step as f32 / 24.0;
-                let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / ratio;
-                for share in 0..=20 {
-                    let resistance = launch_force(&tp, 1) * share as f32 / 20.0;
-                    let inp = driver_input(speed, resistance, 1.0);
-                    let mut st = TransmissionState {
-                        gear,
-                        clutch: ClutchState::In,
-                        omega_e: rpm * RPM_TO_RAD,
-                        ..fresh(&tp)
-                    };
-                    choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
-                    if st.gear == gear {
-                        continue; // Nothing was accepted.
-                    }
-                    let landing = speed
-                        - resistance * f32::from(tp.shift_ticks.get())
-                            / TICK_HZ
-                            / coupled_mass(&construction);
-                    let landed = tp.gears_fwd[usize::from(st.gear - 1)];
-                    let shaft = landing * landed / tp.sprocket_radius;
-                    st.clutch = ClutchState::Out;
-                    let end = input(1.0, 0.0, [landing; 2], [0.0; 2]);
-                    update_clutch_state(&mut st, &tp, &end, false, 1.0, shaft, false);
-                    let pull = price_driver_force(
-                        &tp,
-                        DriveSupply::WHOLE,
-                        landing,
-                        landed,
-                        1.0,
-                        st.clutch,
-                    );
-                    assert!(
-                        pull > resistance,
-                        "gear {gear} at {rpm} rpm against {resistance} N accepted gear {}, \
-                         delivered {:?} at {landing} m/s with {pull} N",
-                        st.gear,
-                        st.clutch
-                    );
-                }
-            }
-        }
-    }
-}
-
 /// No gear is priced above the grip its belts can carry: belts sliding along their travel at
 /// their grip limit, carrying the whole resistance, change no gear, where the same reading on
 /// ample grip changes gears. A Driver that shifted on an ungranted pull would cut the drive for

@@ -1143,67 +1143,32 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
     }
 }
 
-/// One Driver decision on what it felt, at the requested pedal `command`. Speed `v` and
-/// resistance `R` read along the engaged ladder, `v` floored at rest. A candidate gear carries `R`
-/// plus the turn's share in its own detent radius, `s·κ·ΔR` (the steering tie's load on the mean
-/// axis, [`BeltTick::tied_mean`]), and *holds* when its priced pull exceeds that load by M. At a
-/// stall `R` is at least the largest push that failed to move the hull
-/// ([`super::sense::Sensed::stall`]): a gear qualifies there only by pushing harder, the free
-/// choice at rest included, and in first gear with the bound unbeaten the Driver stays.
+/// One Driver decision on what it felt, at the requested pedal `command`. The design, the
+/// measurements behind each clause and the rejected forms are
+/// `.agents/docs/design/track-model/architecture.md` section 5a.
 ///
-/// The engaged gear is observed, never priced: what it delivers is its sprockets' mean force over
-/// the held window ([`super::sense::Sensed::drive`]), and whether it holds is whether the drivetrain
-/// gains under it ([`super::sense::Sensed::drive_gain`]), both read only through a clutch that held
-/// for a whole window ([`super::sense::Sensed::observed`]). A price models a gear not engaged, and
-/// on the engaged gear it reads that model's error (MEASURED on rubble, house stop-go: seventh
-/// priced 547 N short of `R` while the hull gained, and the Driver shifted down). The hull's own
-/// gain decides nothing: after a clutch takes up the hull rings on its patches' elastic shear, so
-/// a window of it reads the ring's phase (MEASURED, flat ground at a third of the pedal: fifth
-/// gaining in steady pull read losing over its first locked window, and the Driver hunted 4–5).
-///
-/// A candidate is priced engaged as delivery engages it ([`engagement`]): it pays the cut and
-/// lands at the hull's `v − R·t_cut/M_c`, no lower than rest, where the park latch holds a hull the
-/// cut stops, its clutch closing from out, so below its launch speed it slips at the launch rpm. Priced as lugs instead, a candidate at a crawl carries the idle catch's
-/// whole torque and outbids a part-pedal launch, which then stops in the cut (MEASURED in
-/// `part_pedal_launches_and_sustains_ordered_speed`: a quarter-pedal launch cycling between its
-/// launch gear and a lug three gears up). No candidate's pull is priced above the grip its patches
-/// can carry along the belts ([`super::sense::Sensed::grip`]): where every patch slides along them
-/// at its grip limit that is what the engaged gear delivers, so no candidate pulls harder and the
-/// gear stays. A pull is priced whole at the sprocket: where solver contacts load the belts off
-/// the heading, the share of the belts' solved ground reaction that reaches the hull differs
-/// between gears on the same ground (MEASURED on rubble, house stop-go at 4.9 m/s: 0.92 in sixth
-/// against 0.90 in seventh; 1.00 on clear ground), so the engaged gear's share does not price
-/// another. A gear left on the way down, and every gear above it, is not taken while the hull
-/// meets at least what that gear sustained and a retry would turn its crank no faster than it
-/// failed at ([`super::sense::Failed`]): the retry would fail as it did (MEASURED on the standing heap at a third of the pedal: second priced 700 N over `R` from a
-/// crawl, stalled where the cut landed, and the Driver cycled first and second five times).
+/// Speed `v` (m/s) and resistance `R` (N) read along the engaged ladder, `v` floored at rest; at a
+/// stall `R` is at least the stall's bound ([`super::sense::Sensed::stall`]). A candidate carries
+/// `R` plus its detent's share of the belt push difference, `s·κ·ΔR` ([`BeltTick::tied_mean`]),
+/// and *holds* when its pull exceeds that load by M ([`force_margin`]). Its pull is [`gear_force`]
+/// as delivery engages it ([`engagement`]) where the cut lands, `v − R·t_cut/M_c` and no lower
+/// than rest, its clutch closing from out, capped by the patches' grip budget
+/// ([`super::sense::Sensed::grip`]). The engaged gear is observed, never priced: its drive and
+/// drivetrain gain over a window its clutch held whole ([`super::sense::Sensed::observed`]). A gear
+/// left failing caps the candidates below it while `R` is at least what it sustained and delivery
+/// would engage it at a crank no faster than it failed at ([`super::sense::Failed`]).
 /// 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
-///    current gear, and none the memory holds back, else first where it offers more spare than
-///    the current gear; free.
-/// 2. The hull stalls under every sample of a window the gear drove ([`super::sense::Sensed::stalled`]): the
-///    lowest gear within `max_step`, since a stall bounds what the hull meets only from below.
-///    Or the drivetrain loses speed by more than M with the crank lugging below its peak-torque
-///    speed: the highest lower gear within `max_step` that holds where it lands; with none the
-///    gear stays. Above the peak a slowing crank gains torque and settles where the gear holds
-///    (MEASURED on a 20° grade: fourth settled at 1.93 m/s, its drivetrain reading −4 N; stepping
-///    down cost a metre per second in the cut, and third settled slower).
-/// 3. Otherwise, straight with the clutch in and the hull moving where the cut lands: of the
-///    higher gears within `max_step` the memory admits that hold where they land and pull there
-///    more than the engaged gear's drive by M, the one that pulls hardest, the higher on a tie. A
-///    cut that stops the hull trades a moving gear for a launch, priced against what the crawl
-///    read rather than what stopped it (MEASURED, ram into the standing heap: first crawling at
-///    0.05 m/s stepped to second, the cut stopped the hull, and the free choice launched fourth,
-///    which had stalled there, three times). The highest that qualifies is the weakest: two
-///    gears landing below their launch speeds both slip at the launch torque, the higher through
-///    the smaller ratio (MEASURED on rubble: fourth stepped to sixth at 100 kN past fifth at 148 kN,
-///    and slipped for 370 ticks). A slipping clutch delivers at most its launch torque through
-///    the engaged ratio, and every higher gear lands slipping at no more through a smaller one, so
-///    none pushes harder.
+///    current gear nor at or above the stall's gear, none the memory caps; else first where it
+///    offers more spare than the current gear. Free.
+/// 2. A window that stalled whole ([`super::sense::Sensed::stalled`]): the lowest gear within
+///    `max_step`. A held window losing more than M with the crank below its peak-torque speed: the
+///    highest lower gear within `max_step` that holds where it lands, else none.
+/// 3. Straight, clutch in, a held window and the hull moving where the cut lands: of the higher
+///    gears within `max_step` the memory admits that hold where they land and pull there more than
+///    the engaged gear's drive by M, the one that pulls hardest, the higher on a tie.
 ///
-/// Clauses 2 and 3 pay the cut. `R` is the one hull window the Driver reads: the landing needs the
-/// speed the world takes in a cut, and a ring or an impact moves the hull's push and gain together,
-/// so their difference holds through it. A cut in flight, no pull asked or fuel that cannot beat
-/// drag choose nothing.
+/// Clauses 2 and 3 pay the cut. A cut in flight, no pull asked or fuel that cannot beat drag
+/// choose nothing.
 fn choose_gear(
     st: &mut TransmissionState,
     tp: &TransmissionParams,

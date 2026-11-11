@@ -481,7 +481,7 @@ feels drag through traction; above the fade, steady straight pull is
 grip. Inside the fade a crawl remains possible, with equilibrium speed
 `ROLLING_FADE_SPEED min(engine pull, μ N) / (rolling(p) N)` on uniform flat support.
 A spinning belt on a stationary hull creates no rolling drag. Solid recipients read `hard`.
-The Driver reads the same coefficient, pricing the full drag needed to leave the fade.
+The Driver reads no coefficient: rolling reaches it inside the resistance it feels (below).
 
 The band has a second visible effect on slopes. With locked belts and saturated grip on
 uniform support, `atan(μ) < theta < atan(μ + r)` admits steady downhill creep at
@@ -507,17 +507,19 @@ ticks are not felt. The reading is `None` until one tick closes, and a Driver th
 nothing engages no gear from rest. Nothing modelled enters `R`: on a rolling incline it closes on
 `(W sin(theta) + c_rr W cos(theta)) cos(delta)`, `delta` the heading's pitch off the plane under
 drive (`headless_test::drive_load`). Parked, the contact law's rolling fade leaves the grade alone.
-Beside `R` the ledger carries the engaged gear's drive (both sprockets' force on the latest
-tick), the drivetrain's gain over the window as a force (`M_hull` times the belts' mean
+Beside `R` the ledger carries the engaged gear's drive (both sprockets' mean force over the
+window), the drivetrain's gain over the window as a force (`M_hull` times the belts' mean
 acceleration), the patches' mean grip budget `sum mu N_elastic`, a stall's bound, the gear the
-Driver last left downward with what it sustained there, and two counts of the engaged gear's run:
-the ticks its clutch sent drive, and the ticks its clutch held the crank to the belts.
+Driver last left downward with what it sustained there and the crank speed it failed at, and two
+counts of the engaged gear's run: the ticks it stalled the hull under its drive, and the ticks its
+clutch held the crank to the belts.
 
 **What the Driver infers.** Each fact is read from the force balance or the drivetrain's own
 state, none from a timer or a band:
 
-- *The engaged gear is observed, never priced.* What it delivers is its drive now; whether it
-  holds is whether the drivetrain gains under it. A price models a gear not engaged, and on the
+- *The engaged gear is observed, never priced.* What it delivers is its drive over a held window,
+  the samples its gain reads, so no single tick decides; whether it holds is whether the
+  drivetrain gains under it. A price models a gear not engaged, and on the
   engaged gear it reads the model's error (MEASURED on rubble, house stop-go: seventh priced
   547 N short of `R` while the hull gained, and the Driver shifted down).
 - *The drivetrain, not the hull, tells a gear's verdict.* After a clutch takes up, the hull rings
@@ -538,34 +540,50 @@ state, none from a timer or a band:
   heap stop-go: fourth spun its belts at a steady 2.175 m/s, its crank governed, under a hull at
   rest for 1226 ticks). A crank spooling to its launch rpm sends no drive, so its ticks fail no
   gear. A bound is a floor: every weaker gear holds against it on paper, so a stall takes the
-  lowest gear in reach.
+  lowest gear in reach. The bound outlives the stall, so the step down reads whether the hull
+  stalls now: a window whose every sample stalled under the gear's drive. Belts that start gaining
+  under a hull still at rest keep the bound and step nothing down.
 - *Falling revs fail a gear only below its torque peak.* Below the crank's peak-torque speed a
   slowing crank loses torque and the gear does not recover; above it the torque rises and the gear
   settles where it holds (MEASURED on a 20° grade: fourth settled at 1.93 m/s with its drivetrain
   reading −4 N; stepping down cost a metre per second in the cut, and third settled slower).
-- *A gear left failing stays failed while the hull meets what it sustained.* The memory holds the
-  gear left downward and its resistance plus drivetrain gain then; it holds back that gear and
-  every one above it while `R` is at least that push, and is forgotten when the pedal rises or is
-  released, the ladder or the detent changes, or that gear engages again (MEASURED on the standing
-  heap at a third of the pedal: second priced 700 N over `R` from a crawl, stalled where the cut
-  landed, and the Driver cycled first and second five times). A detent's steering takes its own
-  share of the gear's work, so a push delivered in a turn says nothing of the gear straight.
+- *A gear left failing stays failed at the operating point it failed at.* The memory holds the
+  gear left downward, what it sustained there and its crank speed then. What it sustained is
+  `R + M_hull a_belt` over the window it was left in: the pull the hull takes from the gear with
+  hull and belts slowing together. It is a force on the hull's side, compared with the `R` the
+  hull meets; it is not the hull's traction in that window, which the ring separates from it by
+  `M_hull (a_hull - a_belt)`. It counts the slowing at hull mass alone: the belts' and crank's
+  share, inertia released while slowing that the gear does not hold steady, is not subtracted.
+  The crank speed is where its clutch first drove or held, for an attempt that never held a locked
+  window, else the speed it lugged down to, and never below what a failed earlier attempt of it
+  recorded. Below the torque peak a slower crank pulls less, so the memory holds back that gear and
+  every one above it while `R` is at least what it sustained and delivery would engage it at a
+  crank no faster: the launch rpm where it lands slipping, else its shaft's. Under one resistance a
+  retry needs a strictly faster crank and records it if it fails, so the retries are finite. The
+  memory is forgotten when the pedal rises or is released, the ladder or the detent changes, or
+  that gear engages again (MEASURED on the standing heap at a third of the pedal: second priced
+  700 N over `R` from a crawl, stalled where the cut landed, and the Driver cycled first and second
+  five times). A detent's steering takes its own share of the gear's work, so a push delivered in a
+  turn says nothing of the gear straight.
 - *Grip caps push.* No gear puts more traction into the ground along the belts than the patches'
   grip budget, which they carry when every patch slides along the belt. The solver's friction
   coefficient is not read back, so a window in which a solver contact pushed prices no cap.
 
 `transmission::choose_gear` prices a candidate with `gear_force`, engaged as delivery engages it
 (`engagement`): it pays the cut and lands at the hull's `v - R t_cut / M_c`, no lower than rest,
-where the park latch holds a hull the cut stops; its clutch closes from out, so below its launch
-speed it slips at the launch rpm. A coupled gear adds reflected crank inertia, the clutch caps the
-pull and the grip budget caps it next. A pull is priced whole at the sprocket. A candidate *holds*
+where the park latch holds a hull the cut stops. Admission refuses a cut that rounds to no fixed
+tick, so every gear change opens the clutch and delivery closes it from out, as priced: below its
+launch speed it slips at the launch rpm. The price reads the shaft at the hull's landing speed and
+delivery at the belts' mean speed; they agree where the belts roll with the hull, and the belts'
+slip is not forecast. A coupled gear adds reflected crank inertia, the clutch caps the pull and the
+grip budget caps it next. A pull is priced whole at the sprocket. A candidate *holds*
 when its pull, less `R` (at a stall, at least the bound) and its detent's share of the belt push
 difference, exceeds M. The clauses:
 
 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
    current gear nor at or above one that failed there, and none the memory holds back; else
    first where it offers more spare than the current gear. Free.
-2. The hull stalls under a window the gear drove whole: the lowest gear within `max_step`. Or
+2. A window that stalled whole under the gear's drive: the lowest gear within `max_step`. Or
    the drivetrain loses more than M over a held window with the crank below its peak-torque
    speed: the highest lower gear within `max_step` that holds where it lands; with none the gear
    stays.
@@ -585,7 +603,13 @@ ladder) or fuel under drag chooses nothing. The Driver uses requested pedal, not
 ramp. A slipping clutch holds its launch floor, capped at the speed the crank reaches freely, so a
 launch takes none of the flywheel's stored energy below that floor; a crank above the floor when
 the clutch closes can spend the excess. M is the crank arithmetic term alone.
-Rejected forms: pricing the engaged gear (its spare reads model error); pricing a pull as the
+Rejected forms: pricing the engaged gear (its spare reads model error); pricing a candidate at a
+crawl as a lug rather than the slip its clutch closes into (it carries the idle catch's whole
+torque and outbids a part-pedal launch, which then stops in the cut: MEASURED in
+`part_pedal_launches_and_sustains_ordered_speed`, a quarter-pedal launch cycling between its
+launch gear and a lug three gears up); a memory of resistance alone (it holds a gear back after an
+operating point the failure does not cover, such as a slower landing that slips at the launch rpm,
+and a recovered lower gear wedges there); pricing a pull as the
 share of the belts' reaction that reaches the hull (the share differs between gears where solver
 contacts load the belts off the heading: 0.92 in sixth against 0.90 in seventh on rubble); a
 slide test on slip distance over the elastic shear length (slip distance is unimodal across it on
@@ -599,7 +623,10 @@ release during the pause keeps park held. Zero intent below first gear's idle sp
 The [brake-law record](../../../scratch/research/law-drive-4-brake-2026-11-02.md) owns its proof and decisions.
 The protective upshift is absent: the existing clutch over-rev slip guard bounds crank speed
 and retains motoring drag while the Driver holds overrun gear. Service braking at the ceiling
-belongs to the next ceiling law. The bitprobe records the reading, price and delivered force.
+belongs to the next ceiling law. The bitprobe records the reading, the engaged gear's price and
+the delivered force: `headless_test::drive_load` splits each landing's forecast gap into the
+landing speed's share and the price model's share at the engaged point, and the chooser never
+reads that price.
 
 **Historical drivetrain and soil-law measurements.** The following record predates direct
 μ and pressure drag. Its figures are observations of those laws, not acceptance conditions
