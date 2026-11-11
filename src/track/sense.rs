@@ -23,23 +23,23 @@ use std::collections::VecDeque;
 use bevy::prelude::*;
 
 /// One driven tick of the ledger: the belts' traction on the hull along its heading through it,
-/// `[left, right]` (N), the grip its patches left unspent (N; `None` where a solver contact
-/// pushed), and the hull's gain in speed along its heading over it (m/s).
+/// `[left, right]` (N), its patches' grip budget (N; `None` where a solver contact pushed), and
+/// the hull's gain in speed along its heading over it (m/s).
 #[derive(Clone, Copy, Debug)]
 struct Sample {
     push: [f32; 2],
-    headroom: Option<f32>,
+    grip: Option<f32>,
     gain: f32,
 }
 
 /// This tick's opened sample: the hull's start velocity (m/s, world) and heading, the
-/// sampled-contact push along that heading and the grip those contacts left unspent (N).
+/// sampled-contact push along that heading and those contacts' grip budget (N).
 #[derive(Clone, Copy, Debug)]
 struct Open {
     velocity: Vec3,
     heading: Vec3,
     push: [f32; 2],
-    headroom: f32,
+    grip: f32,
 }
 
 /// The Driver's reading for one tick.
@@ -52,13 +52,11 @@ pub struct Sensed {
     pub resistance: f32,
     /// The left belt's mean push less the right's over the window (N).
     pub push_difference: f32,
-    /// Both belts' mean push over the window (N).
-    pub push: f32,
-    /// The grip the sampled patches left unspent over the window, on mean (N): the most push any
-    /// gear can add to `push`, none where every patch slides at its grip limit. `None` when a
-    /// solver contact pushed within the window: the solver's friction is Coulomb too, but its
-    /// coefficient is not read back, so its grip limit is unmeasured.
-    pub headroom: Option<f32>,
+    /// The sampled patches' mean grip budget over the window (N): the most traction any gear can
+    /// put into the ground along the belts, which they carry when every patch slides along them.
+    /// `None` when a solver contact pushed within the window: the solver's friction is Coulomb
+    /// too, but its coefficient is not read back, so its grip limit is unmeasured.
+    pub grip: Option<f32>,
 }
 
 /// The belts' contacts on the hull at one driving tick (N, world frame).
@@ -66,9 +64,8 @@ pub struct Sensed {
 pub(crate) struct Contacts {
     /// The traction this tick's sampled contacts apply to the hull, `[left, right]`.
     pub(crate) soft: [Vec3; 2],
-    /// The grip those contacts left unspent, both sides
-    /// ([`super::forces::SideReport::grip_headroom`]).
-    pub(crate) headroom: f32,
+    /// Those contacts' grip budget, both sides ([`super::forces::SideReport::grip_budget`]).
+    pub(crate) grip: f32,
     /// The solver contacts' friction on the hull over the physics step that just ran, `None`
     /// where a side had no solver contact.
     pub(crate) hard: [Option<Vec3>; 2],
@@ -111,24 +108,20 @@ impl DriverSense {
         contacts: Contacts,
         dt: f32,
     ) -> Option<Sensed> {
-        let Contacts {
-            soft,
-            headroom,
-            hard,
-        } = contacts;
+        let Contacts { soft, grip, hard } = contacts;
         if let Some(open) = self.open.take() {
             let mut push = open.push;
             for (push, hard) in push.iter_mut().zip(hard) {
                 // No solver contact pushed a side without one.
                 *push += hard.map_or(0.0, |hard| hard.dot(open.heading));
             }
-            let headroom = hard.iter().all(Option::is_none).then_some(open.headroom);
+            let grip = hard.iter().all(Option::is_none).then_some(open.grip);
             if self.samples.len() == self.window {
                 self.samples.pop_front();
             }
             self.samples.push_back(Sample {
                 push,
-                headroom,
+                grip,
                 gain: (velocity - open.velocity).dot(open.heading),
             });
         }
@@ -136,7 +129,7 @@ impl DriverSense {
             velocity,
             heading,
             push: soft.map(|soft| soft.dot(heading)),
-            headroom,
+            grip,
         });
         self.reading = (!self.samples.is_empty()).then(|| {
             assert!(
@@ -147,13 +140,12 @@ impl DriverSense {
             let [left, right, gain] = self.samples.iter().fold([0.0; 3], |[l, r, g], s| {
                 [l + s.push[0], r + s.push[1], g + s.gain]
             });
-            let headroom = self.samples.iter().map(|s| s.headroom).sum::<Option<f32>>();
+            let grip = self.samples.iter().map(|s| s.grip).sum::<Option<f32>>();
             Sensed {
                 speed: velocity.dot(heading),
                 resistance: (left + right) / count - mass * gain / (count * dt),
                 push_difference: (left - right) / count,
-                push: (left + right) / count,
-                headroom: headroom.map(|headroom| headroom / count),
+                grip: grip.map(|grip| grip / count),
             }
         });
         self.reading
@@ -199,7 +191,7 @@ mod tests {
                 let soft = [push * 0.25, push * 0.5].map(|push| forward * push);
                 let contacts = Contacts {
                     soft,
-                    headroom: 0.0,
+                    grip: 0.0,
                     hard: reported,
                 };
                 let reading = sense.tick(forward * speed, forward, MASS, contacts, DT);
@@ -255,7 +247,7 @@ mod tests {
             let heading = Quat::from_axis_angle(axis, 0.5 * DT * tick as f32) * Vec3::NEG_Z;
             let contacts = Contacts {
                 soft: [Vec3::ZERO; 2],
-                headroom: 0.0,
+                grip: 0.0,
                 hard: [None; 2],
             };
             let reading = sense.tick(velocity, heading, MASS, contacts, DT);

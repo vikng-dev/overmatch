@@ -726,7 +726,7 @@ pub(crate) fn feel_tick(
             soft: reports
                 .each_ref()
                 .map(|report| report.contacts.iter().map(|c| c.traction).sum()),
-            headroom: reports.iter().map(|report| report.grip_headroom).sum(),
+            grip: reports.iter().map(|report| report.grip_budget).sum(),
             hard: hard.map(|side| side.map(|hard| hard.friction)),
         },
         dt,

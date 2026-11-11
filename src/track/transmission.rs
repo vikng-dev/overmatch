@@ -1136,9 +1136,9 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// catch's whole torque and outbids a part-pedal launch, which then stops in the cut (MEASURED in
 /// `part_pedal_launches_and_sustains_ordered_speed`: a quarter-pedal launch cycling between its
 /// launch gear and a lug three gears up). A candidate lands at `v − R·t_cut/M_c`; the current gear
-/// pays no cut. No gear's pull is priced above what the ground grants, the push felt plus the grip
-/// its patches left unspent ([`super::sense::Sensed::headroom`]): where every patch slides at its grip limit that
-/// is the push now, so no gear offers more spare than the current one and the gear stays.
+/// pays no cut. No gear's pull is priced above the grip its patches can carry along the belts
+/// ([`super::sense::Sensed::grip`]): where every patch slides along them at its grip limit that is
+/// the pull now, so no gear offers more spare than the current one and the gear stays.
 /// 1. Clutch out at hull rest: the highest launch gear that holds, else first where it offers more
 ///    spare than the current gear; free.
 /// 2. The current gear does not hold, judged at no more than its torque-peak speed: the highest
@@ -1172,8 +1172,6 @@ fn choose_gear(
     let speed = (dir * sensed.speed).max(0.0);
     let resistance = dir * sensed.resistance;
     let margin = force_margin(tp);
-    // The most push the ground grants along the drive; a solver contact's grip limit is unmeasured.
-    let grant = sensed.headroom.map(|headroom| dir * sensed.push + headroom);
     let spare = |gear: u8, at: f32, prior: ClutchState| {
         let load =
             resistance + branch(inp.steer) * detent_kappa(tp, st, gear) * sensed.push_difference;
@@ -1186,9 +1184,9 @@ fn choose_gear(
             command,
         );
         let pull = gear_force(tp, fp, inp.supply, at, ratio, command, load, clutch);
-        match grant {
-            Some(grant) => pull.min(grant) - load,
-            None => pull - load,
+        match sensed.grip {
+            Some(grip) => pull.min(grip) - load,
+            None => pull - load, // A solver contact's grip limit is unmeasured.
         }
     };
     if st.clutch == ClutchState::Out && speed < PARK_ENGAGE_SPEED {

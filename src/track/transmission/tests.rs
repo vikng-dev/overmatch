@@ -203,8 +203,7 @@ fn felt_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
         speed: 0.0,
         resistance: 0.0,
         push_difference: 0.0,
-        push: 0.0,
-        headroom: Some(f32::INFINITY),
+        grip: Some(f32::INFINITY),
     });
     inp
 }
@@ -1099,8 +1098,7 @@ fn stall_guard_holds_crank_under_grade_lug() {
             speed: speeds[0],
             resistance: reactions[0] + reactions[1],
             push_difference: reactions[0] - reactions[1],
-            push: reactions[0] + reactions[1],
-            headroom: Some(f32::INFINITY),
+            grip: Some(f32::INFINITY),
         });
         #[cfg(feature = "bitprobe")]
         let (roundoff, mut settled) = (
@@ -2168,8 +2166,7 @@ fn driver_input(speed: f32, load: f32, command: f32) -> TransmissionInput {
         speed,
         resistance: load,
         push_difference: 0.0,
-        push: load,
-        headroom: Some(f32::INFINITY),
+        grip: Some(f32::INFINITY),
     });
     inp
 }
@@ -2399,11 +2396,12 @@ fn an_accepted_gear_holds_as_delivery_lands_it() {
     }
 }
 
-/// No gear is priced above what the ground grants: belts sliding at their grip limit, the push
-/// they deliver meeting the whole resistance, change no gear, where the same reading on ample
-/// grip changes gears. A Driver that shifted on an ungranted pull would cut the drive for nothing.
-/// Fixture: each class drivetrain moving in each forward gear with the clutch in, the crank from
-/// idle to governed and resistance up to first gear's launch pull, every patch at its limit.
+/// No gear is priced above the grip its belts can carry: belts sliding along their travel at
+/// their grip limit, carrying the whole resistance, change no gear, where the same reading on
+/// ample grip changes gears. A Driver that shifted on an ungranted pull would cut the drive for
+/// nothing. Fixture: each class drivetrain moving in each forward gear with the clutch in, the
+/// crank from idle to governed and resistance up to first gear's launch pull, every patch sliding
+/// along the belt so that its grip budget is the resistance.
 #[test]
 fn belts_at_their_grip_limit_change_no_gear() {
     for (fp, tp) in class_drivetrains() {
@@ -2428,7 +2426,7 @@ fn belts_at_their_grip_limit_change_no_gear() {
                     choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
                     changed += usize::from(st.gear != gear);
                     let sliding = inp.sensed.as_mut().expect("a Driver-policy reading");
-                    sliding.headroom = Some(0.0);
+                    sliding.grip = Some(resistance);
                     let mut st = engaged;
                     choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
                     assert_eq!(
@@ -2551,7 +2549,7 @@ fn a_stalled_full_clutch_push_steps_down() {
                 mass,
                 super::super::sense::Contacts {
                     soft: [bevy::math::Vec3::ZERO; 2],
-                    headroom: 0.0,
+                    grip: 0.0,
                     hard,
                 },
                 inp.dt,
