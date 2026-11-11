@@ -203,6 +203,8 @@ fn felt_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
         speed: 0.0,
         resistance: 0.0,
         push_difference: 0.0,
+        push: 0.0,
+        reaction: 0.0,
         grip: Some(f32::INFINITY),
         stall: None,
     });
@@ -1107,6 +1109,8 @@ fn stall_guard_holds_crank_under_grade_lug() {
             speed: speeds[0],
             resistance: reactions[0] + reactions[1],
             push_difference: reactions[0] - reactions[1],
+            push: reactions[0] + reactions[1],
+            reaction: reactions[0] + reactions[1],
             grip: Some(f32::INFINITY),
             stall: None,
         });
@@ -2177,6 +2181,8 @@ fn driver_input(speed: f32, load: f32, command: f32) -> TransmissionInput {
         speed,
         resistance: load,
         push_difference: 0.0,
+        push: load,
+        reaction: load,
         grip: Some(f32::INFINITY),
         stall: None,
     });
@@ -2452,6 +2458,45 @@ fn belts_at_their_grip_limit_change_no_gear() {
     }
 }
 
+/// A gear is priced as the push its pull delivers: the share of the belts' ground reaction that
+/// reached the hull scales every gear's price, so a launch gear whose pull beats the resistance at
+/// whole delivery does not hold at half. Fixture: each class drivetrain choosing at rest with its
+/// clutch out, the stalled hull meeting three quarters of its highest launch gear's launch pull,
+/// its belts delivering all or half of their reaction.
+#[test]
+fn a_gear_is_priced_as_the_push_it_delivers() {
+    let mut lowered = 0;
+    for (fp, tp) in class_drivetrains() {
+        let highest = tp.launch_gears.min(tp.gears_fwd.len() as u8);
+        let resistance = launch_force(&tp, highest) * 0.75;
+        for share in [1.0, 0.5] {
+            let mut inp = driver_input(0.0, resistance, 1.0);
+            inp.sensed
+                .as_mut()
+                .expect("a Driver-policy reading")
+                .reaction = resistance / share;
+            let mut st = TransmissionState {
+                gear: highest,
+                ..fresh(&tp)
+            };
+            choose_gear(&mut st, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
+            if share == 1.0 {
+                assert_eq!(st.gear, highest, "whole delivery launches in {highest}");
+            } else {
+                assert!(
+                    st.gear < highest || highest == 1,
+                    "half delivery launched in {highest}"
+                );
+                lowered += usize::from(st.gear < highest);
+            }
+        }
+    }
+    assert!(
+        lowered > 0,
+        "a class drivetrain launches lower at half delivery"
+    );
+}
+
 /// A Driver that has felt nothing has chosen no gear, so it engages none from rest: the launch's
 /// free choice relies on the clutch still being open once the first reading arrives.
 #[test]
@@ -2554,13 +2599,19 @@ fn a_stalled_full_clutch_push_steps_down() {
         for _ in 0..64 * 10 {
             let mut inp = input(1.0, 0.0, [0.0; 2], pushed);
             let forward = bevy::math::Vec3::NEG_Z;
-            let hard = pushed.map(|push| Some(forward * push));
+            let hard = pushed.map(|push| {
+                Some(super::super::stop_contacts::HardReaction {
+                    belt: push,
+                    friction: forward * push,
+                })
+            });
             inp.sensed = sense.tick(
                 bevy::math::Vec3::ZERO,
                 forward,
                 mass,
                 super::super::sense::Contacts {
                     soft: [bevy::math::Vec3::ZERO; 2],
+                    reaction: 0.0,
                     grip: 0.0,
                     hard,
                 },

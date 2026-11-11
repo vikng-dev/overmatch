@@ -22,14 +22,17 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 
+use super::stop_contacts::HardReaction;
 use super::transmission::{PARK_ENGAGE_SPEED, TransmissionReport};
 
 /// One driven tick of the ledger: the belts' traction on the hull along its heading through it,
-/// `[left, right]` (N), its patches' grip budget (N; `None` where a solver contact pushed), and
-/// the hull's gain in speed along its heading over it (m/s).
+/// `[left, right]` (N), the belts' ground reaction along their travel (N), its patches' grip
+/// budget (N; `None` where a solver contact pushed), and the hull's gain in speed along its
+/// heading over it (m/s).
 #[derive(Clone, Copy, Debug)]
 struct Sample {
     push: [f32; 2],
+    reaction: f32,
     grip: Option<f32>,
     gain: f32,
 }
@@ -42,6 +45,7 @@ struct Open {
     velocity: Vec3,
     heading: Vec3,
     push: [f32; 2],
+    reaction: f32,
     grip: f32,
     pull: Option<f32>,
 }
@@ -66,6 +70,12 @@ pub struct Sensed {
     pub resistance: f32,
     /// The left belt's mean push less the right's over the window (N).
     pub push_difference: f32,
+    /// Both belts' mean push over the window (N).
+    pub push: f32,
+    /// The belts' mean ground reaction along their travel over the window, soft and solver
+    /// contacts together (N, positive loading forward drive): the sprocket's force less what
+    /// turned the belts' own inertia.
+    pub reaction: f32,
     /// The sampled patches' mean grip budget over the window (N): the most traction any gear can
     /// put into the ground along the belts, which they carry when every patch slides along them.
     /// `None` when a solver contact pushed within the window: the solver's friction is Coulomb
@@ -80,11 +90,13 @@ pub struct Sensed {
 pub(crate) struct Contacts {
     /// The traction this tick's sampled contacts apply to the hull, `[left, right]`.
     pub(crate) soft: [Vec3; 2],
+    /// Those contacts' ground reaction along the belts' travel, both sides
+    /// ([`super::forces::SideReport::belt_reaction`]).
+    pub(crate) reaction: f32,
     /// Those contacts' grip budget, both sides ([`super::forces::SideReport::grip_budget`]).
     pub(crate) grip: f32,
-    /// The solver contacts' friction on the hull over the physics step that just ran, `None`
-    /// where a side had no solver contact.
-    pub(crate) hard: [Option<Vec3>; 2],
+    /// The solver contacts over the physics step that just ran, `None` where a side had none.
+    pub(crate) hard: [Option<HardReaction>; 2],
 }
 
 /// The Driver's ledger: server-side driving state, built empty at spawn from the tank's cut
@@ -126,12 +138,20 @@ impl DriverSense {
         contacts: Contacts,
         dt: f32,
     ) -> Option<Sensed> {
-        let Contacts { soft, grip, hard } = contacts;
+        let Contacts {
+            soft,
+            reaction,
+            grip,
+            hard,
+        } = contacts;
         if let Some(open) = self.open.take() {
-            let mut push = open.push;
+            let (mut push, mut reaction) = (open.push, open.reaction);
+            // No solver contact pushed a side without one.
             for (push, hard) in push.iter_mut().zip(hard) {
-                // No solver contact pushed a side without one.
-                *push += hard.map_or(0.0, |hard| hard.dot(open.heading));
+                if let Some(hard) = hard {
+                    *push += hard.friction.dot(open.heading);
+                    reaction += hard.belt;
+                }
             }
             let grip = hard.iter().all(Option::is_none).then_some(open.grip);
             let gain = (velocity - open.velocity).dot(open.heading);
@@ -154,12 +174,18 @@ impl DriverSense {
             if self.samples.len() == self.window {
                 self.samples.pop_front();
             }
-            self.samples.push_back(Sample { push, grip, gain });
+            self.samples.push_back(Sample {
+                push,
+                reaction,
+                grip,
+                gain,
+            });
         }
         self.open = Some(Open {
             velocity,
             heading,
             push: soft.map(|soft| soft.dot(heading)),
+            reaction,
             grip,
             pull: None,
         });
@@ -169,14 +195,17 @@ impl DriverSense {
                 "a driven hull has finite mass and its tick a positive step"
             );
             let count = self.samples.len() as f32;
-            let [left, right, gain] = self.samples.iter().fold([0.0; 3], |[l, r, g], s| {
-                [l + s.push[0], r + s.push[1], g + s.gain]
-            });
+            let [left, right, reaction, gain] =
+                self.samples.iter().fold([0.0; 4], |[l, r, b, g], s| {
+                    [l + s.push[0], r + s.push[1], b + s.reaction, g + s.gain]
+                });
             let grip = self.samples.iter().map(|s| s.grip).sum::<Option<f32>>();
             Sensed {
                 speed: velocity.dot(heading),
                 resistance: (left + right) / count - mass * gain / (count * dt),
                 push_difference: (left - right) / count,
+                push: (left + right) / count,
+                reaction: reaction / count,
                 grip: grip.map(|grip| grip / count),
                 stall: self.stall,
             }
@@ -239,6 +268,7 @@ mod tests {
                 let soft = [push * 0.25, push * 0.5].map(|push| forward * push);
                 let contacts = Contacts {
                     soft,
+                    reaction: 0.0,
                     grip: 0.0,
                     hard: reported,
                 };
@@ -247,7 +277,13 @@ mod tests {
                     sense.cut();
                 }
                 speed += (push - resist(push)) / MASS * DT;
-                reported = [Some(forward * push * 0.25), None];
+                reported = [
+                    Some(HardReaction {
+                        belt: push * 0.25,
+                        friction: forward * push * 0.25,
+                    }),
+                    None,
+                ];
                 reading
             })
             .collect()
@@ -298,6 +334,7 @@ mod tests {
         let mut feel = |speed: f32, push: f32, report: &TransmissionReport| {
             let contacts = Contacts {
                 soft: [forward * push * 0.5; 2],
+                reaction: 0.0,
                 grip: 0.0,
                 hard: [None; 2],
             };
@@ -335,6 +372,7 @@ mod tests {
             let heading = Quat::from_axis_angle(axis, 0.5 * DT * tick as f32) * Vec3::NEG_Z;
             let contacts = Contacts {
                 soft: [Vec3::ZERO; 2],
+                reaction: 0.0,
                 grip: 0.0,
                 hard: [None; 2],
             };

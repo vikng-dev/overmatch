@@ -1146,7 +1146,11 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// the hull's crawl the gear reads a lug it is not in (MEASURED on rubble: a gear slipping its
 /// belts at 2100 rpm read a sub-idle lug, then dropped and relaunched cut after cut). No gear's pull is priced above the grip its patches can carry along the belts
 /// ([`super::sense::Sensed::grip`]): where every patch slides along them at its grip limit that is
-/// the pull now, so no gear offers more spare than the current one and the gear stays.
+/// the pull now, so no gear offers more spare than the current one and the gear stays. A pull is
+/// then priced as the push it delivers, scaled by the share of the belts' ground reaction that
+/// reached the hull ([`super::sense::Sensed::push`] over [`super::sense::Sensed::reaction`]):
+/// resistance and a stall's bound are pushes on the hull. While no load is delivered no loss is
+/// seen, and the pull is priced whole.
 /// 1. Clutch out at hull rest: the highest launch gear that holds, else first where it offers more
 ///    spare than the current gear; free.
 /// 2. The current gear does not hold, judged at no more than its torque-peak belt speed: the
@@ -1184,7 +1188,15 @@ fn choose_gear(
         _ => dir * sensed.resistance,
     };
     let margin = force_margin(tp);
-    // A gear's spare with its shaft at `at` (m/s along the ladder), engaged from `prior`.
+    // The share of the belts' ground reaction that reached the hull as push, read only where
+    // some did: with none delivered along the drive no loss is seen, and a pull is priced whole.
+    let share = if dir * sensed.reaction > 0.0 && dir * sensed.push > 0.0 {
+        sensed.push / sensed.reaction
+    } else {
+        1.0
+    };
+    // A gear's spare on the hull with its shaft at `at` (m/s along the ladder), engaged from
+    // `prior`; the reflected inertia shares the hull's load as the sprocket meets it.
     let spare = |gear: u8, at: f32, prior: ClutchState| {
         let load =
             resistance + branch(inp.steer) * detent_kappa(tp, st, gear) * sensed.push_difference;
@@ -1196,11 +1208,12 @@ fn choose_gear(
             at * ratio / tp.sprocket_radius,
             command,
         );
-        let pull = gear_force(tp, fp, inp.supply, at, ratio, command, load, clutch);
-        match sensed.grip {
-            Some(grip) => pull.min(grip) - load,
-            None => pull - load, // A solver contact's grip limit is unmeasured.
-        }
+        let pull = gear_force(tp, fp, inp.supply, at, ratio, command, load / share, clutch);
+        let pull = match sensed.grip {
+            Some(grip) => pull.min(grip),
+            None => pull, // A solver contact's grip limit is unmeasured.
+        };
+        share * pull - load
     };
     if st.clutch == ClutchState::Out && speed < PARK_ENGAGE_SPEED {
         st.gear = (1..=tp.launch_gears.min(top))
