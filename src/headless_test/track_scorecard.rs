@@ -551,7 +551,11 @@ impl Bed {
         self.pieces
             .iter()
             .copied()
-            .filter(|&p| self.app.world().get::<Sleeping>(p).is_none())
+            .filter(|&p| {
+                let world = self.app.world();
+                world.get::<Sleeping>(p).is_none()
+                    && world.get::<crate::debris::freeze::Frozen>(p).is_none()
+            })
             .collect()
     }
 

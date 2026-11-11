@@ -145,6 +145,13 @@ labelled!(
         MarchFrameBoxes = "march_frame_boxes",
         MarchPartBoxes = "march_part_boxes",
         MarchArmourShapes = "march_armour_shapes",
+        // Loose pieces switched to static and back (`debris::freeze`), and the frozen islands
+        // each thaw cause woke.
+        FrozePieces = "froze_pieces",
+        ThawedPieces = "thawed_pieces",
+        ThawReach = "thaw_reach",
+        ThawLoad = "thaw_load",
+        ThawSupport = "thaw_support",
     }
 );
 

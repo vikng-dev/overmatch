@@ -815,12 +815,7 @@ struct Census<'w, 's> {
     all: Query<'w, 's, Entity>,
     bodies: Query<'w, 's, &'static RigidBody, Without<Sleeping>>,
     pieces: Query<'w, 's, &'static Piece, With<Breakage>>,
-    loose: Query<
-        'w,
-        's,
-        (&'static Piece, Option<&'static Sleeping>),
-        With<crate::debris::DebrisPiece>,
-    >,
+    loose: super::loadtest::LoosePieces<'w, 's>,
     constructions: Query<'w, 's, (&'static MapInstance, &'static Breakage), With<Body>>,
     battle: Query<'w, 's, &'static super::battle::BattleState>,
     piece_records: ResMut<'w, PieceRecords>,

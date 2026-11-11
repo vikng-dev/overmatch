@@ -438,12 +438,36 @@ fn prepare_constraint(
     }
 }
 
+/// What keeps a press at rest: Avian holding its pair asleep and touching, or its body frozen
+/// (`debris::freeze`), which left Avian's contact graph as it turned static and holds the press
+/// it slept with until it thaws.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Rests<'w, 's> {
+    contacts: Res<'w, ContactGraph>,
+    frozen: Query<'w, 's, (), With<crate::debris::freeze::Frozen>>,
+}
+
+impl Rests<'_, '_> {
+    fn hold(&self, transfer: &ContactTransfer) -> bool {
+        self.frozen.contains(transfer.other)
+            || self
+                .contacts
+                .get(
+                    transfer.reference_collider,
+                    transfer
+                        .other_collider
+                        .expect("only solver contacts enter the sleeping-pair cache"),
+                )
+                .is_some_and(|(edge, pair)| edge.is_sleeping() && pair.is_touching())
+    }
+}
+
 /// Before the substeps: retain static structural rests and record each solver constraint once.
 /// `time` is the physics clock Avian runs its schedule on.
 fn keep(
     stages: Option<Res<crate::cost::stages::Stages>>,
     graph: Res<ConstraintGraph>,
-    contacts: Res<ContactGraph>,
+    rests: Rests,
     structures: Query<&RigidBody, With<StructureBody>>,
     bodies: ContactBodies,
     time: Res<Time>,
@@ -451,34 +475,23 @@ fn keep(
 ) {
     let _contacts =
         crate::cost::stages::Stages::start(stages.as_deref(), crate::cost::stages::Stage::Contacts);
-    let asleep = |transfer: &ContactTransfer| {
-        contacts
-            .get(
-                transfer.reference_collider,
-                transfer
-                    .other_collider
-                    .expect("only solver contacts enter the sleeping-pair cache"),
-            )
-            .is_some_and(|(edge, pair)| edge.is_sleeping() && pair.is_touching())
-    };
-    // Only static structural receivers consume cached presses. Moving groups read awake
-    // landings through debris; their sleeping contacts have no structural load.
+    // Only static structural receivers consume cached presses, and a frozen piece is a moving
+    // group at rest. Moving groups read awake landings through debris; their sleeping contacts
+    // have no structural load.
     let groups: Vec<_> = transfers.structural_solver_groups().collect();
     let newly_resting = groups.par_splat_map(ComputeTaskPool::get(), None, |_, groups| {
         groups
             .iter()
             .filter(|group| {
-                structures
-                    .get(
-                        group
-                            .first()
-                            .expect("solver manifolds are nonempty")
-                            .reference,
-                    )
-                    .is_ok_and(RigidBody::is_static)
+                let reference = group
+                    .first()
+                    .expect("solver manifolds are nonempty")
+                    .reference;
+                structures.get(reference).is_ok_and(RigidBody::is_static)
+                    && !rests.frozen.contains(reference)
             })
             .flat_map(|group| group.iter())
-            .filter(|point| asleep(point))
+            .filter(|point| rests.hold(point))
             .map(|transfer| Resting {
                 transfer,
                 dt: transfers.dt,
@@ -489,10 +502,10 @@ fn keep(
     // and newly sleeping points are disjoint.
     let retained = transfers
         .resting
-        .par_splat_map(ComputeTaskPool::get(), None, |_, rests| {
-            rests
+        .par_splat_map(ComputeTaskPool::get(), None, |_, chunk| {
+            chunk
                 .iter()
-                .filter(|rest| asleep(&rest.transfer))
+                .filter(|rest| rests.hold(&rest.transfer))
                 .copied()
                 .collect::<Vec<_>>()
         });
@@ -543,7 +556,7 @@ fn keep(
                     color,
                     index,
                     constraint,
-                    &contacts,
+                    &rests.contacts,
                     &structures,
                     #[cfg(test)]
                     &bodies,

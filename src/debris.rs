@@ -5,16 +5,17 @@
 //! with [`DebrisPiece`]; its colliders are the body's own ([`RigidBodyColliders`]). Paths below
 //! are under `vendor/avian3d-0.7.0-child-pose/src/`.
 //!
-//! REST IS AVIAN'S ISLAND SLEEP. A piece is a dynamic body all match; nothing here changes its
-//! body type. Avian 0.7 links dynamic bodies through touching contacts into islands and puts an
-//! island to sleep once every member has passed its rest test for `TimeToSleep`: either both
-//! velocity thresholds pass or kinetic energy per mass is below the linear rest-speed energy
-//! (see the vendor's `OVERMATCH_PATCH.md`). A sleeping body
-//! leaves the solver and keeps its mass, so what touches it next meets finite mass. Only its
-//! touching contact pairs move to the sleeping set the narrow phase skips
-//! (`collision/contact_types/contact_graph.rs:797`); a pair that overlaps in bounds without
-//! touching stays active and is recomputed every tick (`collision/narrow_phase/system_param.rs:480`).
-//! An awake body that starts touching a sleeping one wakes its whole island
+//! REST IS AVIAN'S ISLAND SLEEP, THEN A FREEZE. A piece spawns a dynamic body. Avian 0.7 links
+//! dynamic bodies through touching contacts into islands and puts an island to sleep once every
+//! member has passed its rest test for `TimeToSleep`: either both velocity thresholds pass or
+//! kinetic energy per mass is below the linear rest-speed energy (see the vendor's
+//! `OVERMATCH_PATCH.md`). A sleeping body leaves the solver and keeps its mass, so what touches it
+//! next meets finite mass. Only its touching contact pairs move to the sleeping set the narrow
+//! phase skips (`collision/contact_types/contact_graph.rs:797`); a pair that overlaps in bounds
+//! without touching stays active and is recomputed every tick
+//! (`collision/narrow_phase/system_param.rs:480`). A sleeping island of pieces alone that rests on
+//! fixed matter turns static, and turns dynamic again before anything can touch it or as its
+//! support changes ([`freeze`]). An awake body that starts touching a sleeping one wakes its whole island
 //! (`collision/narrow_phase/system_param.rs:247-261`), as does a body or a body's collider of that
 //! island going (`collision/narrow_phase/mod.rs:484,528`). An island sleeps whole: a piece touching
 //! an awake body that is no piece (a driven tank) shares its island and stays awake while it
@@ -51,10 +52,11 @@
 //! and every split partitions its owned chunks, so live construction bodies never exceed the map's
 //! breakable chunks. The construction design owns the retained carriers' bound and the split model.
 //! Awake pieces are the ones in the solver. A sleeping piece's own per-tick cost and an awake pile
-//! held by a tank's island (above) are both unpriced.
+//! held by a tank's island (above) are both unpriced; a frozen piece has no pair with fixed matter.
 
 pub(crate) mod crumble;
 pub(crate) mod decor;
+pub(crate) mod freeze;
 pub(crate) mod launch;
 
 use avian3d::prelude::*;
@@ -277,6 +279,7 @@ fn assert_tanks_above_floor(
 
 /// Mount the rule.
 pub(crate) fn sim_plugin(app: &mut App) {
+    freeze::sim_plugin(app);
     app.init_resource::<crate::map::MapManifest>()
         .add_observer(wake_on_collider_gone)
         .add_observer(wake_on_body_gone)
@@ -444,17 +447,18 @@ mod tests {
             .id()
     }
 
-    /// Run until `piece` sleeps, at most 10 s; the tick it fell asleep.
-    fn until_asleep(app: &mut App, piece: Entity) -> u32 {
+    /// Run until `body` sleeps, at most 10 s.
+    fn until_asleep(app: &mut App, body: Entity) {
         (0..640)
             .find(|_| {
                 app.update();
-                app.world().get::<Sleeping>(piece).is_some()
+                app.world().get::<Sleeping>(body).is_some()
             })
-            .expect("the piece came to rest and slept within 10 s")
+            .expect("the body came to rest and slept within 10 s");
     }
 
-    /// The same cube with no [`DebrisPiece`]: a launched turret's stand-in (fixture data).
+    /// The same cube with no [`DebrisPiece`]: a launched turret's stand-in, which sleeps where a
+    /// piece would freeze (fixture data).
     fn other_body(app: &mut App, at: Vec3) -> Entity {
         let body = piece(app, at);
         app.world_mut().entity_mut(body).remove::<DebrisPiece>();
@@ -475,21 +479,18 @@ mod tests {
         );
     }
 
-    /// A SLEEPING BODY WAKES WHEN WHAT IT RESTS ON GOES, A PIECE OR ANY OTHER: a piece, and a body
-    /// that is no piece (a launched turret), asleep on a static slab wake in the tick after the
-    /// slab despawns (a chunk turned to dust under them) and fall. Avian wakes nothing for a
-    /// static collider's removal, so a mutant that drops [`wake_on_collider_gone`], or wakes only
-    /// pieces, leaves a body hanging where the slab was.
+    /// A SLEEPING BODY WAKES WHEN WHAT IT RESTS ON GOES: a body that is no piece (a launched
+    /// turret) asleep on a static slab wakes in the tick after the slab despawns (a chunk turned to
+    /// dust under it) and falls. Avian wakes nothing for a static collider's removal, so a mutant
+    /// that drops [`wake_on_collider_gone`] leaves the body hanging where the slab was.
     #[test]
     fn a_sleeping_body_wakes_when_its_support_goes() {
-        for spawn in [piece as fn(&mut App, Vec3) -> Entity, other_body] {
-            let mut app = settling(Vec3::NEG_Y * 9.81);
-            let support = slab(&mut app, 1.0);
-            let resting = spawn(&mut app, Vec3::Y * 1.25);
-            until_asleep(&mut app, resting);
-            app.world_mut().entity_mut(support).despawn();
-            wakes_and_falls(&mut app, resting);
-        }
+        let mut app = settling(Vec3::NEG_Y * 9.81);
+        let support = slab(&mut app, 1.0);
+        let resting = other_body(&mut app, Vec3::Y * 1.25);
+        until_asleep(&mut app, resting);
+        app.world_mut().entity_mut(support).despawn();
+        wakes_and_falls(&mut app, resting);
     }
 
     /// A SLEEPING BODY WAKES WHEN ITS SUPPORT'S STATIC ROOT GOES WITH IT: a body asleep on a slab
@@ -514,7 +515,7 @@ mod tests {
             Collider::cuboid(20.0, 1.0, 20.0),
             CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
         ));
-        let resting = piece(&mut app, Vec3::Y * 1.25);
+        let resting = other_body(&mut app, Vec3::Y * 1.25);
         until_asleep(&mut app, resting);
         app.world_mut().entity_mut(root).despawn();
         wakes_and_falls(&mut app, resting);
@@ -528,7 +529,7 @@ mod tests {
     fn a_sleeping_body_wakes_when_its_support_moves() {
         let mut app = settling(Vec3::NEG_Y * 9.81);
         let support = slab(&mut app, 1.0);
-        let resting = piece(&mut app, Vec3::Y * 1.25);
+        let resting = other_body(&mut app, Vec3::Y * 1.25);
         until_asleep(&mut app, resting);
         app.world_mut().get_mut::<Position>(support).unwrap().0 += Vec3::NEG_Y;
         wakes_and_falls(&mut app, resting);
@@ -542,26 +543,24 @@ mod tests {
     fn a_sleeping_body_wakes_when_its_support_is_disabled() {
         let mut app = settling(Vec3::NEG_Y * 9.81);
         let support = slab(&mut app, 1.0);
-        let resting = piece(&mut app, Vec3::Y * 1.25);
+        let resting = other_body(&mut app, Vec3::Y * 1.25);
         until_asleep(&mut app, resting);
         app.world_mut().entity_mut(support).insert(ColliderDisabled);
         wakes_and_falls(&mut app, resting);
     }
 
-    /// A BODY THAT TRULY DISTURBS A SLEEPING PIECE WAKES IT AND MEETS FINITE MASS: a hovering body
-    /// sliding into a piece asleep on the ground, a tank's stand-in (no piece) or a thrown piece,
-    /// finds it awake and moving in the first tick the two touch, and pushes it. A rule that rested
-    /// pieces by making them static would meet the first contact with infinite mass; one that woke
-    /// only for a tank would leave a thrown piece bouncing off a fixed block. No game code runs
+    /// A BODY THAT TRULY DISTURBS A SLEEPING BODY WAKES IT AND MEETS FINITE MASS: a hovering body
+    /// sliding into a body asleep on the ground, a tank's stand-in (no piece) or a thrown piece,
+    /// finds it awake and moving in the first tick the two touch, and pushes it. No game code runs
     /// here: this is the tripwire on avian's wake-on-touch (`collision/narrow_phase/system_param.rs:
-    /// 247-261`, `dynamics/solver/islands/mod.rs:964-966`) the module's rest rule rests on, and
-    /// the one test of it.
+    /// 247-261`, `dynamics/solver/islands/mod.rs:964-966`) that a sleeping piece or launched
+    /// turret rests on, and the one test of it; a frozen piece thaws earlier, by reach ([`freeze`]).
     #[test]
-    fn a_body_that_touches_a_sleeping_piece_wakes_and_pushes_it() {
+    fn a_body_that_touches_a_sleeping_body_wakes_and_pushes_it() {
         for mover_is_a_piece in [false, true] {
             let mut app = settling(Vec3::NEG_Y * 9.81);
             slab(&mut app, 0.0);
-            let rubble = piece(&mut app, Vec3::Y * 0.2);
+            let rubble = other_body(&mut app, Vec3::Y * 0.2);
             until_asleep(&mut app, rubble);
             let start = app.world().get::<Position>(rubble).unwrap().0;
             let mut mover = app.world_mut().spawn((

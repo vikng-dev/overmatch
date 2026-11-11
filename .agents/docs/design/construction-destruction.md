@@ -1257,10 +1257,12 @@ A detailed-body cap does not bound total coarse-solver work.
 Arbitrary persistent, independently moving rubble cannot have both exact behaviour and a fixed total computation bound.
 Measure that worst case and report the resource limit explicitly.
 
-**OWNER DECISION (2026-10-31) — rest by the library's sleep, not a freeze rule.**
-Rubble rests through Avian's island sleep and its wake on contact.
-No resting piece switches to a static body: a switch rebuilt the piece's contacts and woke its island, and the switching undid Avian's own sleep (`.agents/scratch/destruction-2026-10-30-constructions/debris-cost-survey.md`, §2).
-No cap applies until a sleeping piece's per-tick cost is measured.
+**OWNER DECISION (2026-11-10) — settled rubble may rejoin the fixed structure.**
+It supersedes the 2026-10-31 decision to rest by Avian's sleep alone, where performance and simplicity improve.
+Rubble rests through Avian's island sleep. A sleeping island of loose pieces alone, touching fixed matter and reached by no moving body, then turns static whole: the freeze (`src/debris/freeze.rs` owns the mechanism and its invariants).
+It thaws whole, dynamic again, before a moving body can touch it, when game code pushes it, or when anything it rested on goes, moves or stops being fixed.
+The objection of 2026-10-31 was to switching single pieces: a switch drops the piece's contacts and wakes its island, so a piece-by-piece switch undid Avian's own sleep (`.agents/scratch/destruction-2026-10-30-constructions/debris-cost-survey.md`, §2). Switching a whole island in one flush leaves the wake no dynamic body to wake.
+No cap applies until a resting piece's per-tick cost is measured.
 
 What limits the piece count (DERIVED from `src/construction/breakage.rs`): every surviving chunk belongs to exactly one body; splitting partitions that ownership, so live construction bodies never exceed the map's breakable chunks. Splits retain historical pose carriers for the delayed presentation cursor and late joiners; DERIVED carrier bound is `2N - 1` for `N > 0` breakable chunks, since every retirement either partitions a group or removes at least one chunk. Nothing else caps live bodies or carriers. The live-body bound is `N`, summed over every admitted map placement, including wood constructions; neither bound forecasts how many chunks a drive releases. The risk this decision brings is an awake pile held by a tank's island (below), which no measurement prices yet; the pricing lane must price it.
 

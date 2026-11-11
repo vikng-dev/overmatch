@@ -3557,7 +3557,11 @@ fn loose_pieces_priced_per_tick() {
     let asleep = |app: &App, pieces: &[Entity]| {
         pieces
             .iter()
-            .filter(|&&p| app.world().get::<Sleeping>(p).is_some())
+            .filter(|&&p| {
+                let world = app.world();
+                world.get::<Sleeping>(p).is_some()
+                    || world.get::<crate::debris::freeze::Frozen>(p).is_some()
+            })
             .count()
     };
     let settle = |app: &mut App, pieces: &[Entity]| {

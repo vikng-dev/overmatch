@@ -265,7 +265,17 @@ fn sample_speed(mut ram: ResMut<Ram>, tanks: Query<&LinearVelocity, With<Tank>>)
 pub(super) struct Census<'w, 's> {
     ram: Option<ResMut<'w, Ram>>,
     tanks: Query<'w, 's, Entity, With<Tank>>,
-    pieces: Query<'w, 's, (), (With<Piece>, With<Breakage>, Without<Sleeping>)>,
+    pieces: Query<
+        'w,
+        's,
+        (),
+        (
+            With<Piece>,
+            With<Breakage>,
+            Without<Sleeping>,
+            Without<crate::debris::freeze::Frozen>,
+        ),
+    >,
     constructions: Query<'w, 's, (Entity, &'static MapInstance, &'static Breakage), With<Body>>,
     contacts: Res<'w, ContactTransfers>,
     sweep: Res<'w, SweepAccount>,

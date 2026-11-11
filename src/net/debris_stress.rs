@@ -41,7 +41,7 @@ use super::harness::{LeverError, env_text};
 use super::world_reset::AuthorityWorld;
 use crate::Layer;
 use crate::construction::breakage::{Piece, RetirePiece};
-use crate::debris::DebrisPiece;
+use crate::debris::{DebrisPiece, freeze::Frozen};
 use crate::tank::Tank;
 use crate::terrain_grid::HeightGrid;
 
@@ -142,17 +142,19 @@ impl DebrisStress {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct DebrisCensus<'w, 's> {
     stress: Option<Res<'w, DebrisStress>>,
-    live: Query<'w, 's, (), (With<DebrisPiece>, Without<Sleeping>)>,
+    live: Query<'w, 's, (), (With<DebrisPiece>, Without<Sleeping>, Without<Frozen>)>,
     sleeping: Query<'w, 's, (), (With<DebrisPiece>, With<Sleeping>)>,
+    frozen: Query<'w, 's, (), (With<DebrisPiece>, With<Frozen>)>,
 }
 
 impl DebrisCensus<'_, '_> {
-    /// `live` (awake) and `sleeping` pieces now, always; while the lever is armed also its
-    /// cumulative counts since the server started: `breaches` and lever pieces `released`.
+    /// `live` (awake), `sleeping` and `frozen` pieces now, always; while the lever is armed also
+    /// its cumulative counts since the server started: `breaches` and lever pieces `released`.
     pub(super) fn json(&self) -> Value {
         let mut census = json!({
             "live": self.live.iter().count(),
             "sleeping": self.sleeping.iter().count(),
+            "frozen": self.frozen.iter().count(),
         });
         if let Some(stress) = &self.stress {
             census["breaches"] = json!(stress.breaches);
@@ -938,12 +940,13 @@ mod tests {
         app
     }
 
-    /// A RESTING PIECE STOPS PUBLISHING: a piece dropped onto the ground falls asleep, its
-    /// published pose follows the fall, and from then on its carrier's pose stops changing, so
-    /// replicon sends it nothing. A mutant that writes every piece's carrier every tick, or that
-    /// keeps a resting piece awake, reds this.
+    /// A RESTING PIECE STOPS PUBLISHING: a piece dropped onto the ground comes to rest and
+    /// freezes, its published pose follows the fall, and from then on its carrier's pose stops
+    /// changing, so replicon sends it nothing: the freeze moves no piece, and its body is not on
+    /// the wire. A mutant that writes every piece's carrier every tick, or that keeps a resting
+    /// piece awake, reds this.
     #[test]
-    fn a_sleeping_piece_stops_publishing() {
+    fn a_resting_piece_stops_publishing() {
         let mut app = physics_app();
         app.add_systems(
             FixedPostUpdate,
@@ -985,12 +988,12 @@ mod tests {
                 ),
             ))
             .id();
-        let slept_at = (0..640)
+        let frozen_at = (0..640)
             .find(|_| {
                 app.update();
-                app.world().get::<Sleeping>(piece).is_some()
+                app.world().get::<Frozen>(piece).is_some()
             })
-            .expect("the piece came to rest and slept within 10 s");
+            .expect("the piece came to rest and froze within 10 s");
         let landed = app
             .world()
             .get::<DebrisPose>(carrier)
@@ -1003,7 +1006,7 @@ mod tests {
         assert_eq!(
             landed.position,
             app.world().get::<Position>(piece).unwrap().0,
-            "asleep at tick {slept_at}: the carrier holds the pose it fell asleep at"
+            "frozen at tick {frozen_at}: the carrier holds the pose it came to rest at"
         );
         let last_change = app
             .world()
@@ -1014,7 +1017,7 @@ mod tests {
         for _ in 0..64 {
             app.update();
         }
-        assert!(app.world().get::<Sleeping>(piece).is_some(), "still asleep");
+        assert!(app.world().get::<Frozen>(piece).is_some(), "still frozen");
         let carrier_ref = app
             .world()
             .entity(carrier)
@@ -1023,7 +1026,7 @@ mod tests {
         assert_eq!(
             carrier_ref.last_changed(),
             last_change,
-            "a sleeping piece's carrier no longer changes, so it sends nothing"
+            "a frozen piece's carrier no longer changes, so it sends nothing"
         );
     }
 

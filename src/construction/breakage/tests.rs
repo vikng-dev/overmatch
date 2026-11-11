@@ -865,13 +865,14 @@ fn a_round_meets_a_fallen_piece_as_its_substance() {
     assert!(world.get::<Piece>(body).is_some());
 }
 
-/// A FALLEN PIECE COMES TO REST ASLEEP, A DYNAMIC BODY STILL: a group spawned by `spawn_piece`
-/// above a static slab falls, lands and sleeps there (never in the air), and keeps
-/// `RigidBody::Dynamic`. The server's per-tick cost of settled rubble rests on it: a spawn that
-/// disables sleeping on a piece (or makes it static at rest) leaves every one in the solver or
-/// rebuilds its contacts on every wake. Built through `spawn_piece`, so the mutant can go red.
+/// A FALLEN PIECE COMES TO REST FROZEN ON WHAT HOLDS IT: a group spawned by `spawn_piece` above a
+/// static slab falls, lands, sleeps and freezes there (never in the air), a static body. The
+/// server's per-tick cost of settled rubble rests on it: a spawn that disables sleeping on a piece
+/// leaves every one in the solver, and one that leaves out the loose-piece rule's marker keeps
+/// every pair it overlaps in the narrow phase. Built through `spawn_piece`, so the mutant can go
+/// red.
 #[test]
-fn a_fallen_piece_comes_to_rest_asleep_a_dynamic_body_still() {
+fn a_fallen_piece_comes_to_rest_frozen_on_what_holds_it() {
     let (mut app, _) = composed(false);
     app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
     let kind = shipped_house();
@@ -905,26 +906,28 @@ fn a_fallen_piece_comes_to_rest_asleep_a_dynamic_body_still() {
     let tick = (0..1280)
         .find(|_| {
             app.update();
-            app.world().get::<Sleeping>(piece).is_some()
+            app.world()
+                .get::<crate::debris::freeze::Frozen>(piece)
+                .is_some()
         })
-        .expect("the piece fell, came to rest and slept within 20 s");
+        .expect("the piece fell, came to rest and froze within 20 s");
     let height = app.world().get::<Position>(piece).unwrap().0.y;
     assert!(
         height < -7.0,
-        "asleep at tick {tick} at {height} m, on the slab, not in the air"
+        "frozen at tick {tick} at {height} m, on the slab, not in the air"
     );
     assert_eq!(
         app.world().get::<RigidBody>(piece),
-        Some(&RigidBody::Dynamic)
+        Some(&RigidBody::Static)
     );
 }
 
-/// The game's environment destruction: freed groups with stable support sleep within Avian's
-/// configured rest window and remain dynamic for later wakes. The server's rubble lifecycle
-/// relies on both. Fixture: a column loses its base and lands on a level triangulated bed;
-/// its flat footprint supplies stable support. Disabling sleep on spawned groups must fail.
+/// The game's environment destruction: freed groups with stable support come to rest, asleep or
+/// frozen, within Avian's configured rest window. The server's rubble lifecycle relies on it.
+/// Fixture: a column loses its base and lands on a level triangulated bed; its flat footprint
+/// supplies stable support. Disabling sleep on spawned groups must fail.
 #[test]
-fn settled_freed_matter_sleeps_within_avians_rest_window() {
+fn settled_freed_matter_rests_within_avians_rest_window() {
     let kind = column_construction();
     let (mut app, root) = composed_kind(false, &kind);
     crate::debris::crumble::sim_plugin(&mut app);
@@ -1002,11 +1005,16 @@ fn settled_freed_matter_sleeps_within_avians_rest_window() {
             .query_filtered::<Entity, With<Piece>>()
             .iter(app.world())
             .collect();
+        let at_rest = |piece| {
+            let world = app.world();
+            world.get::<Sleeping>(piece).is_some()
+                || world.get::<crate::debris::freeze::Frozen>(piece).is_some()
+        };
         let resting = !pieces.is_empty()
             && pieces.iter().all(|&piece| {
                 let world = app.world();
                 let threshold = world.get::<SleepThreshold>(piece).unwrap();
-                if world.get::<Sleeping>(piece).is_some() {
+                if at_rest(piece) {
                     return true;
                 }
                 let linear = world.get::<LinearVelocity>(piece).unwrap().length_squared();
@@ -1029,16 +1037,10 @@ fn settled_freed_matter_sleeps_within_avians_rest_window() {
         quiet = if resting { quiet + dt } else { 0.0 };
         if quiet >= rest + allowance {
             assert!(
-                pieces
-                    .iter()
-                    .all(|&piece| app.world().get::<Sleeping>(piece).is_some()),
+                pieces.iter().all(|&piece| at_rest(piece)),
                 "every piece rested for {quiet} s without a mover, exceeding Avian's {rest} s rest window"
             );
             for piece in pieces {
-                assert_eq!(
-                    app.world().get::<RigidBody>(piece),
-                    Some(&RigidBody::Dynamic)
-                );
                 let source = app.world().get::<Breakage>(piece).unwrap().origin;
                 assert!(
                     app.world().get::<Position>(piece).unwrap().0.y
@@ -1870,11 +1872,12 @@ fn the_ground_stops_a_blast_and_a_body_holding_the_burst_shades_nothing() {
     );
 }
 
-/// A SLEEPING LOOSE PIECE WAKES TO A BLAST: a construction piece asleep at rest on a slab is woken by a
-/// fixture burst beside it, and leaves away from the burst. An impulse that leaves a sleeping body
-/// asleep, or is held back from one, fails here; rubble settled for most of a match relies on it.
+/// A RESTING LOOSE PIECE MOVES TO A BLAST: a construction piece frozen at rest on a slab is
+/// thawed by a fixture burst beside it, and leaves away from the burst. An impulse that leaves a
+/// frozen body static, or is held back from one, fails here; rubble settled for most of a match
+/// relies on it.
 #[test]
-fn a_sleeping_loose_piece_wakes_to_a_blast() {
+fn a_resting_loose_piece_moves_to_a_blast() {
     let (mut app, _) = composed(false);
     app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
     let kind = shipped_house();
@@ -1907,14 +1910,17 @@ fn a_sleeping_loose_piece_wakes_to_a_blast() {
     (0..1280)
         .find(|_| {
             app.update();
-            app.world().get::<Sleeping>(piece).is_some()
+            app.world()
+                .get::<crate::debris::freeze::Frozen>(piece)
+                .is_some()
         })
-        .expect("the piece came to rest asleep within 20 s");
+        .expect("the piece came to rest and froze within 20 s");
     let at = app.world().get::<Position>(piece).unwrap().0;
     charge(&mut app, at + Vec3::X * 0.8);
-    assert!(
-        app.world().get::<Sleeping>(piece).is_none(),
-        "the burst wakes the piece"
+    assert_eq!(
+        app.world().get::<RigidBody>(piece),
+        Some(&RigidBody::Dynamic),
+        "the burst thaws the piece"
     );
     let velocity = app.world().get::<LinearVelocity>(piece).unwrap().0;
     assert!(
@@ -2147,87 +2153,104 @@ fn no_bodys_kind_enters_a_contacts_loads() {
     }
 }
 
-/// The game's environment destruction: a sleeping cube's 400 N press stays cached, with no
-/// new queued deposit, until its body leaves. The structure law relies on sleeping piles keeping
-/// their supported press without repeating the work each tick. Fixture: loading the column's
+/// The game's environment destruction: a cube's 400 N press, asleep against a construction or,
+/// a loose piece, frozen there, stays cached, with no new queued deposit, until its body leaves.
+/// The structure law relies on resting piles keeping their supported press without repeating the
+/// work each tick; a frozen piece has left Avian's contact graph. Fixture: loading the column's
 /// crown puts every supporting joint in compression, below its bulk capacity.
 #[test]
 fn a_body_at_rest_against_a_construction_presses_it_once_and_starts_no_run() {
-    let kind = column_construction();
-    let block = kind.layout.blocks.last().unwrap();
-    let face = Vec3::new(
-        (block.min.x + block.max.x) / 2.0,
-        block.max.y,
-        (block.min.z + block.max.z) / 2.0,
-    );
-    let w = Vec3::NEG_Y;
-    let (mut app, root) = composed_keeping_contacts(&kind);
-    // Fixture: 400 N normal press and 2 mm approach gap, centred on the crown.
-    let force_n = 400.0;
-    let cube = contact_cube(&mut app, face - w * (CUBE_SIDE / 2.0 + 0.002), Vec3::ZERO);
-    app.world_mut().entity_mut(cube).insert((
-        ConstantForce(w * force_n),
-        crate::contact_transfer::StructureBody,
-    ));
-    (0..640)
-        .find(|_| {
+    for loose in [false, true] {
+        let kind = column_construction();
+        let block = kind.layout.blocks.last().unwrap();
+        let face = Vec3::new(
+            (block.min.x + block.max.x) / 2.0,
+            block.max.y,
+            (block.min.z + block.max.z) / 2.0,
+        );
+        let w = Vec3::NEG_Y;
+        let (mut app, root) = composed_keeping_contacts(&kind);
+        // Fixture: 400 N normal press and 2 mm approach gap, centred on the crown.
+        let force_n = 400.0;
+        let cube = contact_cube(&mut app, face - w * (CUBE_SIDE / 2.0 + 0.002), Vec3::ZERO);
+        app.world_mut().entity_mut(cube).insert((
+            ConstantForce(w * force_n),
+            crate::contact_transfer::StructureBody,
+        ));
+        if loose {
+            app.world_mut()
+                .entity_mut(cube)
+                .insert(crate::debris::DebrisPiece);
+        }
+        let at_rest = |app: &App| {
+            if loose {
+                app.world()
+                    .get::<crate::debris::freeze::Frozen>(cube)
+                    .is_some()
+            } else {
+                app.world().get::<Sleeping>(cube).is_some()
+            }
+        };
+        (0..640)
+            .find(|_| {
+                app.update();
+                at_rest(&app)
+            })
+            .expect("the held cube came to rest within 10 s");
+        app.world_mut().resource_mut::<QueuedContacts>().0.clear();
+        let mut held: Option<Vec<Load>> = None;
+        for tick in 0..40 {
             app.update();
-            app.world().get::<Sleeping>(cube).is_some()
-        })
-        .expect("the held cube came to rest asleep within 10 s");
-    app.world_mut().resource_mut::<QueuedContacts>().0.clear();
-    let mut held: Option<Vec<Load>> = None;
-    for tick in 0..40 {
+            assert!(
+                at_rest(&app),
+                "tick {tick}: the cube rests (loose: {loose})"
+            );
+            let queued = std::mem::take(&mut app.world_mut().resource_mut::<QueuedContacts>().0);
+            assert!(
+                queued.iter().all(Vec::is_empty),
+                "tick {tick}: a resting body's contact queues nothing: {queued:?}"
+            );
+            assert!(
+                app.world()
+                    .resource::<ContactTransfers>()
+                    .resting()
+                    .iter()
+                    .all(|rest| rest.transfer.reference == root),
+                "only the static structural side retains resting points"
+            );
+            let resting = app.world().resource::<RestingLoads>();
+            let loads = resting.0.get(&root).cloned().unwrap_or_default();
+            assert_eq!(
+                resting.0.len(),
+                1,
+                "tick {tick}: one construction holds a press (loose: {loose})"
+            );
+            assert!(!loads.is_empty(), "tick {tick}: the column holds the press");
+            let press: Vec3 = loads.iter().map(|load| load.press).sum();
+            assert!(
+                (press - w * force_n).length() <= 0.005 * force_n,
+                "tick {tick}: the resting press {press} against {force_n} N along {w}"
+            );
+            for load in &loads {
+                assert_eq!(
+                    (load.blow, load.energy),
+                    (Vec3::ZERO, 0.0),
+                    "tick {tick}: a resting load is its body's press alone"
+                );
+                assert!(matches!(load.origin, Origin::Contact { other, .. } if other == cube));
+            }
+            match &held {
+                Some(held) => assert_eq!(held, &loads, "tick {tick}: the press stands unchanged"),
+                None => held = Some(loads),
+            }
+        }
+        app.world_mut().entity_mut(cube).despawn();
         app.update();
         assert!(
-            app.world().get::<Sleeping>(cube).is_some(),
-            "tick {tick}: the cube sleeps"
+            app.world().resource::<RestingLoads>().0.is_empty(),
+            "the press goes with its body (loose: {loose})"
         );
-        let queued = std::mem::take(&mut app.world_mut().resource_mut::<QueuedContacts>().0);
-        assert!(
-            queued.iter().all(Vec::is_empty),
-            "tick {tick}: a sleeping body's contact queues nothing: {queued:?}"
-        );
-        assert!(
-            app.world()
-                .resource::<ContactTransfers>()
-                .resting()
-                .iter()
-                .all(|rest| rest.transfer.reference == root),
-            "only the static structural side retains resting points"
-        );
-        let resting = app.world().resource::<RestingLoads>();
-        let loads = resting.0.get(&root).cloned().unwrap_or_default();
-        assert_eq!(
-            resting.0.len(),
-            1,
-            "tick {tick}: one construction holds a press"
-        );
-        assert!(!loads.is_empty(), "tick {tick}: the column holds the press");
-        let press: Vec3 = loads.iter().map(|load| load.press).sum();
-        assert!(
-            (press - w * force_n).length() <= 0.005 * force_n,
-            "tick {tick}: the resting press {press} against {force_n} N along {w}"
-        );
-        for load in &loads {
-            assert_eq!(
-                (load.blow, load.energy),
-                (Vec3::ZERO, 0.0),
-                "tick {tick}: a resting load is its body's press alone"
-            );
-            assert!(matches!(load.origin, Origin::Contact { other, .. } if other == cube));
-        }
-        match &held {
-            Some(held) => assert_eq!(held, &loads, "tick {tick}: the press stands unchanged"),
-            None => held = Some(loads),
-        }
     }
-    app.world_mut().entity_mut(cube).despawn();
-    app.update();
-    assert!(
-        app.world().resource::<RestingLoads>().0.is_empty(),
-        "the press goes with its body"
-    );
 }
 
 /// The game's damage model delivers each march before its shell despawns. Construction deposits

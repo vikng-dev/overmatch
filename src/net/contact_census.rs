@@ -28,7 +28,7 @@ use crate::construction::{
     Body,
     breakage::{Piece, SweepAccount},
 };
-use crate::debris::DebrisPiece;
+use crate::debris::{DebrisPiece, freeze::Frozen};
 use crate::tank::Tank;
 use crate::track::belt_segment::BeltSegment;
 
@@ -576,6 +576,7 @@ pub(super) struct ContactCensus<'w, 's> {
     belts: Query<'w, 's, (), With<BeltSegment>>,
     pieces: Query<'w, 's, PieceFields, With<DebrisPiece>>,
     piece_marks: Query<'w, 's, (), With<DebrisPiece>>,
+    frozen: Query<'w, 's, (), With<Frozen>>,
     poses: Query<
         'w,
         's,
@@ -767,8 +768,12 @@ impl ContactCensus<'_, '_> {
                 point.reference_collider.max(other),
             );
             *self.normal_transfers.entry(key).or_default() += point.impulse.dot(point.normal);
-            // The two endpoints can have different rest speeds; each owns its impact test.
+            // The two endpoints can have different rest speeds; each owns its impact test. A
+            // frozen piece is static, outside the motion record until it thaws.
             for entity in [point.reference, point.other] {
+                if self.frozen.contains(entity) {
+                    continue;
+                }
                 if let Some(record) = self.records.live.get_mut(&entity) {
                     let rest = self
                         .pieces

@@ -70,16 +70,20 @@ class CollapseTests(unittest.TestCase):
                 frame_ms=181 if i == 0 else 1)) + "\n" for burst in range(50) for i in range(20)))
             self.assertFalse(collapse.client_frames(log, path, 10)["keeping_up"])
 
-    def test_link_bytes_weight_wall_span_and_house_rest_requires_an_unchanged_sleeping_suffix(self):
+    def test_link_bytes_weight_wall_span_and_house_rest_requires_an_unchanged_resting_suffix(self):
         _, rows = self.match_fixture()
         counts = collapse.match_counts(rows)
         self.assertEqual(counts["links"]["fixture"]["bytes_per_s"], 24000 / 3)
         self.assertTrue(counts["links"]["fixture"]["all_windows"])
         self.assertEqual(counts["targets"]["a"]["quiet_s"], 2)
-        for field, value in [("awake", 1), ("dust", 2), ("sleeping", 0)]:
+        for fields in [dict(awake=1), dict(dust=2), dict(sleeping=0), dict(frozen=1)]:
             changed = copy.deepcopy(rows)
-            changed[-1]["loadtest"]["targets"][0][field] = value
+            changed[-1]["loadtest"]["targets"][0].update(fields)
             self.assertEqual(collapse.match_counts(changed)["targets"]["a"]["quiet_s"], 0)
+        # Sleeping pieces freezing keep the rest unchanged.
+        frozen = copy.deepcopy(rows)
+        frozen[-1]["loadtest"]["targets"][0].update(sleeping=0, frozen=2)
+        self.assertEqual(collapse.match_counts(frozen)["targets"]["a"]["quiet_s"], 2)
 
     def test_ram_capacity_omits_startup_and_the_admission_straddling_period(self):
         rows = [dict(ram=dict(ticks=[])), dict(ram=dict(ticks=[1])), dict(ram=dict(ticks=[2, 3]))]
@@ -138,7 +142,7 @@ class CollapseTests(unittest.TestCase):
                    loadtest=dict(recipe=recipe, sequence=1, elapsed_s=1.1, window_start_s=0.1, combat=True,
                                  send_bytes=12000, awake_bodies=12, construction_pieces=20,
                                  constructions=10, events_fired=1,
-                                 targets=[dict(id=i, falls=1, dust=1, chunks=3, awake=0, sleeping=2) for i in ["a", "b"]],
+                                 targets=[dict(id=i, falls=1, dust=1, chunks=3, awake=0, sleeping=2, frozen=0) for i in ["a", "b"]],
                                  ticks=[tick_fixture(1, 2)], sends=[dict(tick=1, us=10)],
                                  pieces=EMPTY_PIECES))
         second = copy.deepcopy(row)
@@ -358,7 +362,7 @@ class CollapseTests(unittest.TestCase):
 
     def test_worst_window_requires_sustained_time_not_one_slow_period(self):
         # Fixture: one stopped period in five is 0.8x sustained, never a 0x window.
-        rows = [dict(wall_s=i + 1, bursts=0, debris=dict(live=0, sleeping=0),
+        rows = [dict(wall_s=i + 1, bursts=0, debris=dict(live=0, sleeping=0, frozen=0),
                      ticks=0 if i == 2 else 64, budget_us=15625, period_s=1,
                      tick_us=None, physics_us=None, send_us=None, rss_mb=None)
                 for i in range(5)]
@@ -377,7 +381,7 @@ class CollapseTests(unittest.TestCase):
                 second = int(clock[0])
                 if second > self.last and (stall_after is None or second <= stall_after):
                     row = dict(ticks=64, budget_us=15625, period_s=1,
-                               debris=dict(live=0, sleeping=0), tick_us=None,
+                               debris=dict(live=0, sleeping=0, frozen=0), tick_us=None,
                                physics_us=None, send_us=None, rss_mb=None)
                     self.log.write("server_stats " + json.dumps(row) + "\n")
                     self.log.flush()

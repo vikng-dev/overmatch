@@ -1,6 +1,6 @@
 The video game's environment-destruction instrument uses real match clients and ordinary server simulation. Run `collapse.sh --help` for the full interface. A rehearsal records counts on the local machine; the hosted server supplies pricing evidence.
 
-`rest-1.json`, `rest-3.json`, and `rest-6.json` each fell their named map houses together at 2 wall seconds after combat admission. They schedule no further breaks. Observe for 65 seconds and check `counts.json`: each target must have `falls > 0`, `awake == 0`, `sleeping > 0`, and at least 30 seconds in its unchanged sleeping suffix. These are sampled per-second observations. `falls` and `dust` count chunks; `awake` and `sleeping` count physical groups. Replicated pose carriers do not count as additional matter.
+`rest-1.json`, `rest-3.json`, and `rest-6.json` each fell their named map houses together at 2 wall seconds after combat admission. They schedule no further breaks. Observe for 65 seconds and check `counts.json`: each target must have `falls > 0`, `awake == 0`, `sleeping + frozen > 0`, and at least 30 seconds in its unchanged resting suffix. These are sampled per-second observations. `falls` and `dust` count chunks; `awake`, `sleeping` and `frozen` count physical groups (`src/debris/freeze.rs`). Replicated pose carriers do not count as additional matter.
 
 ```sh
 scripts/perf/collapse.sh --target local --rehearsal   --schedule scripts/perf/rest-1.json --tanks 30 --clients 2 --duration 65   --out target/harness-spread/clients-2

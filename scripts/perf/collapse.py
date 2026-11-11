@@ -308,9 +308,11 @@ def match_counts(windows):
             sample["seconds"] += span
             sample["periods"] += 1
         for target in row["loadtest"]["targets"]:
-            signature = (target["falls"], target["dust"], target["sleeping"])
+            # A piece moving from asleep to frozen is still at rest (src/debris/freeze.rs).
+            resting = target["sleeping"] + target["frozen"]
+            signature = (target["falls"], target["dust"], resting)
             previous = rest.get(target["id"])
-            quiet = target["falls"] > 0 and target["awake"] == 0 and target["sleeping"] > 0
+            quiet = target["falls"] > 0 and target["awake"] == 0 and resting > 0
             since = None
             if quiet:
                 since = row["loadtest"]["elapsed_s"]
@@ -919,12 +921,12 @@ def display(value, places=2):
 
 def report(rows):
     report_core_balance(rows)
-    print("| time s | bursts | awake | asleep | speed | tick ms | physics ms | send ms | RSS MiB |")
-    print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("| time s | bursts | awake | asleep | frozen | speed | tick ms | physics ms | send ms | RSS MiB |")
+    print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for row in rows:
         print("| " + " | ".join([
             display(row["wall_s"], 1), str(row["bursts"]),
-            str(row["debris"]["live"]), str(row["debris"]["sleeping"]),
+            str(row["debris"]["live"]), str(row["debris"]["sleeping"]), str(row["debris"]["frozen"]),
             display(speed([row])) + "x", display(milliseconds(row, "tick_us")),
             display(milliseconds(row, "physics_us")), display(milliseconds(row, "send_us")),
             display(row["rss_mb"], 1),
