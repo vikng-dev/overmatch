@@ -2,8 +2,8 @@
 //! visible entity per Battle whose component lists every change the authority made to every
 //! construction in that Battle's world (`net::world_reset` replaces it at the next Battle)
 //! ([`Entry`]: wear, dust, a hole or a crack, with its construction's ordinal and tick),
-//! replicated as diffs — a client whose acknowledged ledger is within the last
-//! `Diffable::HISTORY_LEN` (64) appends receives only the entries past it, one further behind and
+//! replicated as diffs — a client whose acknowledged ledger is within the history the authority
+//! retains ([`Ledger`]'s `HISTORY_LEN`) receives only the entries past it, one further behind and
 //! a late joiner the whole list as a snapshot. A client copies it into its [`Record`], from
 //! which `construction::breakage` derives the colliders and `construction::view` the drawn constructions: the
 //! fates, cracks, swaps and holes the clients derive are the authority's, entry for entry. A construction's
@@ -19,7 +19,7 @@ use crate::debris::PresentationClock;
 use crate::debris::crumble::Shed;
 use bevy::ecs::error::Result;
 use bevy::prelude::*;
-use bevy_replicon::prelude::{Diffable, EntityCommandsDiffExt};
+use bevy_replicon::prelude::{DiffIndex, Diffable, EntityCommandsDiffExt};
 use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::server::Server;
 use lightyear::prelude::*;
@@ -33,13 +33,20 @@ use crate::construction::breakage::{
 use crate::world::{CurrentWorld, WorldGeneration};
 use std::collections::HashMap;
 
-/// Every change in this world, in authority order. Appended only through replicon's diff path,
-/// `Diffable::HISTORY_LEN` left at its default (64).
+/// Every change in this world, in authority order. Appended only through replicon's diff path.
 #[derive(Component, Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Ledger(pub(crate) Vec<Entry>);
 
 impl Diffable for Ledger {
     type Diff = Entry;
+    /// Resolution: the entries the authority retains for a client still behind. A client further
+    /// behind gets the whole ledger once, the deliberate outcome for that case. A longer history
+    /// costs no bytes, since the entries past a cursor are a suffix of the whole ledger, only
+    /// authority memory: 24 B an entry (DERIVED from `Entry`'s layout), 0.8 MB at this length,
+    /// the longest the wrapping diff index allows. The largest tick of the 30-tank match recipe,
+    /// six houses breaking at once, appended 4224 entries (MEASURED, send census 2026-11-11), so
+    /// this holds seven such ticks.
+    const HISTORY_LEN: usize = DiffIndex::MAX_NEWER_DISTANCE as usize;
 
     fn apply_diff(&mut self, diff: &Entry) -> Result<()> {
         self.0.push(*diff);

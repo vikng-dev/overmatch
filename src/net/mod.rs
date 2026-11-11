@@ -47,6 +47,10 @@ mod hull_marks;
 mod input_cadence;
 /// The interpolation buffer's size, derived from the measured link instead of pinned.
 mod interp_delay;
+/// Replicon round trips of the construction ledger and the hull marks: late, lossy and far-behind
+/// clients end with the authority's list, and a caught-up one is sent only what it lacks.
+#[cfg(test)]
+mod ledger_wire;
 #[cfg(test)]
 mod link_drop;
 /// `pub(crate)` for the frozen-rubble bed (`headless_test`), which fells a house the same way.

@@ -112,12 +112,6 @@ use std::path::{Path, PathBuf};
 const ALLOWED_IDENTIFIERS: &[(&str, &str, &str)] = &[
     // ---- Owned by another codebase. -------------------------------------------------------
     (
-        "src/net/construction.rs",
-        "HISTORY_LEN",
-        "bevy_replicon 0.44's `Diffable::HISTORY_LEN`, default 64 (`shared/replication/diff.rs`); \
-         the ledger keeps the default.",
-    ),
-    (
         "src/settings/store.rs",
         "ERROR_ACCESS_DENIED",
         "Win32 error code 5. Named as documentation for the numeric literal we actually match.",

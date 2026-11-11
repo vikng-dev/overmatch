@@ -38,8 +38,10 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// Every wire change bumps this revision and re-pins the affected manifest hashes (ADR-0018).
 /// The game's environment destruction model carries shared causes and chunk-addressed groups;
 /// replacement and departure derive from the admitted graph on each peer; a crumble's light
-/// fragments reach players as decoration events.
-pub const PROTOCOL_REV: u32 = 92;
+/// fragments reach players as decoration events. The construction ledger and the hull marks reach
+/// a client as the diffs past its acknowledged cursor (bevy_replicon 0.44.3), a whole copy only
+/// to a client without one or behind the retained history.
+pub const PROTOCOL_REV: u32 = 93;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -48,6 +50,7 @@ pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
     WIRE_TYPES_HASH,
     WIRE_DEP_AVIAN3D,
     WIRE_DEP_LIGHTYEAR,
+    WIRE_DEP_REPLICON,
     PROTOCOL_REV,
     env!("CARGO_PKG_VERSION"),
 );
@@ -128,6 +131,7 @@ const fn wire_manifest_fingerprint(
     wire_types_hash: u64,
     avian_version: &str,
     lightyear_version: &str,
+    replicon_version: &str,
     protocol_rev: u32,
 ) -> u64 {
     let hash = fnv1a_64(
@@ -138,6 +142,7 @@ const fn wire_manifest_fingerprint(
     let hash = fingerprint_field(hash, b"wire_types_hash", &wire_types_hash.to_le_bytes());
     let hash = fingerprint_field(hash, b"avian3d", avian_version.as_bytes());
     let hash = fingerprint_field(hash, b"lightyear", lightyear_version.as_bytes());
+    let hash = fingerprint_field(hash, b"bevy_replicon", replicon_version.as_bytes());
     fingerprint_field(hash, b"protocol_rev", &protocol_rev.to_le_bytes())
 }
 
@@ -148,6 +153,7 @@ const fn protocol_fingerprint_for(
     wire_types_hash: u64,
     avian_version: &str,
     lightyear_version: &str,
+    replicon_version: &str,
     protocol_rev: u32,
     crate_version: &str,
 ) -> u64 {
@@ -156,6 +162,7 @@ const fn protocol_fingerprint_for(
         wire_types_hash,
         avian_version,
         lightyear_version,
+        replicon_version,
         protocol_rev,
     );
     fingerprint_field(hash, b"crate_version", crate_version.as_bytes())
@@ -897,9 +904,10 @@ const WIRE_SURFACE_HASH: u64 = 0x71ba39380c57d0bd;
 // sees field-only changes. `WIRE_TYPES_HASH` therefore pins normalized own-type definitions and
 // embedded types (`WIRE_TYPE_DEFS`), plus whole custom codecs (`WIRE_CODEC_SOURCES`), stripping
 // comments/whitespace. Codec steps, ranges and layouts matter as much as serde fields.
-// External Avian fields and Lightyear framing are covered by resolved Cargo.lock versions
-// (`WIRE_DEP_AVIAN3D` / `WIRE_DEP_LIGHTYEAR`), since their source is not scanned here. Every pin
-// enters the fingerprint directly; compatibility safety does not rely on remembering a REV bump.
+// External Avian fields, Lightyear framing and Replicon's replication messages are covered by
+// resolved Cargo.lock versions (`WIRE_DEP_AVIAN3D` / `WIRE_DEP_LIGHTYEAR` / `WIRE_DEP_REPLICON`),
+// since their source is not scanned here. Every pin enters the fingerprint directly;
+// compatibility safety does not rely on remembering a REV bump.
 
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
@@ -907,11 +915,14 @@ const WIRE_SURFACE_HASH: u64 = 0x71ba39380c57d0bd;
 const WIRE_TYPES_HASH: u64 = 0xc4175ed803f35ed5;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
-/// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
-/// change the on-wire bytes without touching any source in this tree. Re-pinning either version
-/// changes the handshake directly; house process also bumps [`PROTOCOL_REV`].
+/// replicated physics components; lightyear's wire framing / input protocol; replicon's
+/// replication messages and diff delivery, which lightyear 0.30 replicates through). A bump of any
+/// can change the on-wire bytes or what a receiver makes of them without touching any source in
+/// this tree. Re-pinning any version changes the handshake directly; house process also bumps
+/// [`PROTOCOL_REV`].
 const WIRE_DEP_AVIAN3D: &str = "0.7.0";
 const WIRE_DEP_LIGHTYEAR: &str = "0.30.1";
+const WIRE_DEP_REPLICON: &str = "0.44.3";
 
 /// Register the exact shared wire surface represented by [`WIRE_SURFACE`].
 pub(crate) fn plugin(app: &mut App) {
@@ -2133,6 +2144,7 @@ mod tests {
         for (crate_name, pinned) in [
             ("avian3d", WIRE_DEP_AVIAN3D),
             ("lightyear", WIRE_DEP_LIGHTYEAR),
+            ("bevy_replicon", WIRE_DEP_REPLICON),
         ] {
             let locked = locked_version(&lock, crate_name);
             assert_eq!(
@@ -2150,12 +2162,14 @@ mod tests {
     fn fingerprint_couples_every_pinned_wire_manifest_value() {
         let changed_avian = format!("{WIRE_DEP_AVIAN3D}-changed");
         let changed_lightyear = format!("{WIRE_DEP_LIGHTYEAR}-changed");
+        let changed_replicon = format!("{WIRE_DEP_REPLICON}-changed");
         let changed_crate = format!("{}-changed", env!("CARGO_PKG_VERSION"));
         let baseline = protocol_fingerprint_for(
             WIRE_SURFACE_HASH,
             WIRE_TYPES_HASH,
             WIRE_DEP_AVIAN3D,
             WIRE_DEP_LIGHTYEAR,
+            WIRE_DEP_REPLICON,
             PROTOCOL_REV,
             env!("CARGO_PKG_VERSION"),
         );
@@ -2170,6 +2184,7 @@ mod tests {
                 WIRE_TYPES_HASH,
                 WIRE_DEP_AVIAN3D,
                 WIRE_DEP_LIGHTYEAR,
+                WIRE_DEP_REPLICON,
                 PROTOCOL_REV,
                 env!("CARGO_PKG_VERSION"),
             ),
@@ -2182,6 +2197,7 @@ mod tests {
                 WIRE_TYPES_HASH ^ 1,
                 WIRE_DEP_AVIAN3D,
                 WIRE_DEP_LIGHTYEAR,
+                WIRE_DEP_REPLICON,
                 PROTOCOL_REV,
                 env!("CARGO_PKG_VERSION"),
             ),
@@ -2194,6 +2210,7 @@ mod tests {
                 WIRE_TYPES_HASH,
                 &changed_avian,
                 WIRE_DEP_LIGHTYEAR,
+                WIRE_DEP_REPLICON,
                 PROTOCOL_REV,
                 env!("CARGO_PKG_VERSION"),
             ),
@@ -2206,6 +2223,7 @@ mod tests {
                 WIRE_TYPES_HASH,
                 WIRE_DEP_AVIAN3D,
                 &changed_lightyear,
+                WIRE_DEP_REPLICON,
                 PROTOCOL_REV,
                 env!("CARGO_PKG_VERSION"),
             ),
@@ -2218,6 +2236,20 @@ mod tests {
                 WIRE_TYPES_HASH,
                 WIRE_DEP_AVIAN3D,
                 WIRE_DEP_LIGHTYEAR,
+                &changed_replicon,
+                PROTOCOL_REV,
+                env!("CARGO_PKG_VERSION"),
+            ),
+            "the replicon wire dependency pin must change the handshake",
+        );
+        assert_ne!(
+            baseline,
+            protocol_fingerprint_for(
+                WIRE_SURFACE_HASH,
+                WIRE_TYPES_HASH,
+                WIRE_DEP_AVIAN3D,
+                WIRE_DEP_LIGHTYEAR,
+                WIRE_DEP_REPLICON,
                 PROTOCOL_REV + 1,
                 env!("CARGO_PKG_VERSION"),
             ),
@@ -2230,6 +2262,7 @@ mod tests {
                 WIRE_TYPES_HASH,
                 WIRE_DEP_AVIAN3D,
                 WIRE_DEP_LIGHTYEAR,
+                WIRE_DEP_REPLICON,
                 PROTOCOL_REV,
                 &changed_crate,
             ),
@@ -2256,6 +2289,7 @@ mod tests {
                 WIRE_TYPES_HASH,
                 WIRE_DEP_AVIAN3D,
                 WIRE_DEP_LIGHTYEAR,
+                WIRE_DEP_REPLICON,
                 rev,
                 env!("CARGO_PKG_VERSION"),
             );
