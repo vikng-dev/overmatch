@@ -47,9 +47,12 @@
 //!   or is re-posed, reshaped or re-layered in place (`super::wake_on_static_moved` notes those);
 //!   or its body goes, is disabled or stops being static. A collider with no body is never a
 //!   support: Avian builds it no contact constraint, and the freeze counts only pairs that build
-//!   one. A frozen piece's own collider re-posed holds while the piece's pose keeps the bits it
-//!   froze at ([`Frozen`]): Avian rewrites a pose with the value it holds (placing child colliders,
-//!   syncing transforms), and anything else that writes one moves the piece.
+//!   one. A frozen piece's own collider changed in place holds while the piece's pose keeps the
+//!   bits it froze at ([`Frozen`]): Avian rewrites a pose with the value it holds (placing child
+//!   colliders, syncing transforms) and rescales a body's colliders by the rounding of its pose
+//!   whenever it re-derives their transforms (`update_collider_scale`, at each body type switch
+//!   among others), no game code reshapes or re-layers a piece's collider in place, and anything
+//!   else that writes a pose moves the piece.
 //!
 //! A frozen piece's press on standing construction stays as its sleeping press did
 //! (`contact_transfer`, resting contacts).
@@ -121,8 +124,8 @@ enum Change {
     Lost,
     /// Its attachment, or its body's type, changed from this body.
     Attachment(Entity),
-    /// It was re-posed in place, and with `reshaped` reshaped or re-layered too.
-    InPlace { reshaped: bool },
+    /// It was re-posed, reshaped or re-layered in place.
+    InPlace,
 }
 
 /// Every frozen island, the colliders each depends on, and what changed for them since the last
@@ -144,10 +147,9 @@ impl FrozenIslands {
         }
     }
 
-    /// A static body's collider re-posed, and with `reshaped` reshaped or re-layered too, in
-    /// place since the last step.
-    pub(super) fn moved_in_place(&mut self, collider: Entity, reshaped: bool) {
-        self.note(collider, Change::InPlace { reshaped });
+    /// A static body's collider re-posed, reshaped or re-layered in place since the last step.
+    pub(super) fn changed_in_place(&mut self, collider: Entity) {
+        self.note(collider, Change::InPlace);
     }
 }
 
@@ -565,14 +567,11 @@ fn thaw(p: Thaw, mut commands: Commands) {
                 && !disabled.contains(collider)
         }
         // A frozen piece's own collider holds while the piece's pose bits do (module doc).
-        Change::InPlace { reshaped } => {
-            !reshaped
-                && attached.get(collider).is_ok_and(|of| {
-                    frozen
-                        .get(of.body)
-                        .is_ok_and(|(piece, at, turn)| piece.pose == pose_bits(at, turn))
-                })
-        }
+        Change::InPlace => attached.get(collider).is_ok_and(|of| {
+            frozen
+                .get(of.body)
+                .is_ok_and(|(piece, at, turn)| piece.pose == pose_bits(at, turn))
+        }),
     };
     let mut thawing = BTreeSet::new();
     for (collider, change) in changed {
@@ -819,11 +818,12 @@ mod tests {
     }
 
     /// A FROZEN PIECE WHOSE POSE IS WRITTEN THAWS, AND ONE WRITTEN WITH ITS OWN BITS STAYS: a
-    /// stack frozen on a slab keeps frozen through a write of the pose its upper piece holds, as
-    /// Avian's own writes are, and thaws whole in the update after a write that moves that piece
-    /// without velocity; the piece put up falls back. A thaw that ignored a frozen piece's own
-    /// collider would leave it hanging where it was put; one that took every write for a move
-    /// would thaw it on Avian's.
+    /// stack frozen on a slab keeps frozen through a write of the pose its upper piece holds and a
+    /// rescale of that piece's collider to its own scale, as Avian's own writes are, and thaws
+    /// whole in the update after a write that moves that piece without velocity; the piece put up
+    /// falls back. A thaw that ignored a frozen piece's own collider would leave it hanging where
+    /// it was put; one that took every write for a move, or Avian's rescale for a reshape, would
+    /// thaw it on Avian's writes, as each body type switch rescales (module doc).
     #[test]
     fn a_frozen_piece_whose_pose_is_written_thaws() {
         let mut app = settling(GRAVITY);
@@ -833,12 +833,15 @@ mod tests {
         let moved = pieces[1];
         let held = *app.world().get::<Position>(moved).unwrap();
         *app.world_mut().get_mut::<Position>(moved).unwrap() = held;
+        let mut collider = app.world_mut().get_mut::<Collider>(moved).unwrap();
+        let scale = collider.scale();
+        collider.set_scale(scale, 10);
         app.update();
         app.update();
         for &piece in &pieces {
             assert!(
                 is_frozen(&app, piece),
-                "a write of its own pose moves nothing"
+                "a write of its own pose, or Avian's rescale of its collider, moves nothing"
             );
         }
         // Fixture: 0.3 m up, without velocity.

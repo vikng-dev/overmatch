@@ -174,12 +174,7 @@ fn wake_on_collider_disabled(
 /// any of them is judged at this step's thaw ([`freeze`]).
 fn wake_on_static_moved(
     changed: Query<
-        (
-            Entity,
-            &ColliderOf,
-            (Ref<Position>, Ref<Rotation>),
-            (Ref<Collider>, Option<Ref<CollisionLayers>>),
-        ),
+        (Entity, &ColliderOf, Ref<Position>, Ref<Rotation>),
         Or<(
             Changed<Position>,
             Changed<Rotation>,
@@ -193,15 +188,14 @@ fn wake_on_static_moved(
     mut islands: ResMut<freeze::FrozenIslands>,
     mut commands: Commands,
 ) {
-    for (collider, of, (position, rotation), (shape, layers)) in &changed {
+    for (collider, of, position, rotation) in &changed {
         if !bodies.get(of.body).is_ok_and(RigidBody::is_static) {
             continue; // A moving body's colliders move with it.
         }
         if position.is_changed() || rotation.is_changed() {
             wake_touching(collider, &contacts, &sleeping, &mut commands);
         }
-        let reshaped = shape.is_changed() || layers.is_some_and(|layers| layers.is_changed());
-        islands.moved_in_place(collider, reshaped);
+        islands.changed_in_place(collider);
     }
 }
 
