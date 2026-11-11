@@ -354,7 +354,7 @@ impl Reach<'_, '_> {
         reached: &mut BTreeSet<Entity>,
     ) -> u64 {
         let Ok((linear, colliders, body_margin)) = self.bodies.get(body) else {
-            return 0; // A body with no collider touches nothing.
+            return 0; // A disabled body, or one with no collider, touches nothing.
         };
         let mut queries = 0;
         let travel = linear.length() * self.time.delta_secs();
@@ -536,7 +536,10 @@ fn freeze(p: Freeze, mut commands: Commands) {
 #[derive(SystemParam)]
 struct Thaw<'w, 's> {
     islands: ResMut<'w, FrozenIslands>,
-    frozen: Query<'w, 's, (&'static Frozen, &'static Position, &'static Rotation)>,
+    /// Disabled pieces too: a disabled piece thaws with its island, so it comes back enabled as
+    /// the dynamic body Avian returns to an island and the solver as `Disabled` goes
+    /// (`dynamics/solver/islands/mod.rs`, `dynamics/solver/solver_body/plugin.rs`).
+    frozen: Query<'w, 's, (&'static Frozen, &'static Position, &'static Rotation), Allow<Disabled>>,
     attached: Query<'w, 's, &'static ColliderOf>,
     disabled: Query<'w, 's, (), With<ColliderDisabled>>,
     bodies: Query<'w, 's, &'static RigidBody, Without<RigidBodyDisabled>>,
@@ -1090,6 +1093,44 @@ mod tests {
         assert!(
             rested >= window,
             "froze again after {rested} s, inside Avian's {window} s rest window"
+        );
+    }
+
+    /// A FROZEN PIECE DISABLED THAWS, AND ENABLED AGAIN IT TAKES A PUSH: a piece frozen on a slab
+    /// and then disabled whole thaws with its island while disabled, comes back enabled as a
+    /// dynamic body, and a push reported through [`Loads`] moves it. A thaw that passed over a
+    /// disabled piece would leave it static, marked frozen in an island that no longer exists, and
+    /// the push's report would name that island.
+    #[test]
+    fn a_frozen_piece_disabled_and_enabled_again_takes_a_push() {
+        let mut app = settling(GRAVITY);
+        slab(&mut app, 0.0);
+        let rubble = piece(&mut app, Vec3::Y * (SIDE / 2.0));
+        until_frozen(&mut app, &[rubble]);
+        app.world_mut().entity_mut(rubble).insert(Disabled);
+        app.update();
+        assert!(!is_frozen(&app, rubble), "the disabled piece thawed");
+        assert!(app.world().get::<RigidBody>(rubble).unwrap().is_dynamic());
+        app.world_mut().entity_mut(rubble).remove::<Disabled>();
+        app.update();
+        let start = app.world().get::<Position>(rubble).unwrap().0;
+        // Fixture: 3 m/s along +x, past what friction stops within the run.
+        let impulse = Vec3::X * 3.0 * app.world().get::<ComputedMass>(rubble).unwrap().value();
+        app.world_mut()
+            .run_system_once(move |mut forces: Query<Forces>, mut loads: Loads| {
+                forces
+                    .get_mut(rubble)
+                    .unwrap()
+                    .apply_linear_impulse(impulse);
+                loads.pushed(rubble);
+            })
+            .unwrap();
+        for _ in 0..16 {
+            app.update();
+        }
+        assert!(
+            app.world().get::<Position>(rubble).unwrap().0.x - start.x > 0.05,
+            "the push moved it"
         );
     }
 
