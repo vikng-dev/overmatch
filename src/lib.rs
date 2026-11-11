@@ -920,7 +920,7 @@ impl Plugin for GamePlugin {
             // The shot clock, and each pen cam record explained to the player without a hop.
             damage_cam::delivery::offline_plugin,
             // The local sim is the authority: its strikes mark the hulls directly.
-            hull_marks::offline_plugin,
+            hull_marks::plugin,
             // Passive jitter-trace recorder (frame + tick rows; no net extras in this build). Idle
             // unless `SPIKE_TRACE` is set.
             trace::sp_plugin,

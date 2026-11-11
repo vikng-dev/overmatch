@@ -90,11 +90,12 @@ impl Diffable for Ledger {
     type Diff = Appended;
     /// Resolution: the entries the authority retains for a client still behind. A client further
     /// behind gets the whole ledger once, the deliberate outcome for that case. A longer history
-    /// costs no bytes, since the entries past a cursor are a suffix of the whole ledger, only
-    /// authority memory: 28 B a diff (DERIVED from `Appended`'s layout), 0.9 MB at this length,
-    /// the longest the wrapping diff index allows. The largest tick of the 30-tank match recipe,
-    /// six houses breaking at once, appended 4224 entries (MEASURED, send census 2026-11-11), so
-    /// this holds seven such ticks.
+    /// costs authority memory, 28 B a diff (DERIVED from `Appended`'s layout), 0.9 MB at this
+    /// length, the longest the wrapping diff index allows. It costs bytes only to a client with
+    /// most of the ledger past its cursor, whose run of diffs adds each entry's position (up to
+    /// 3 B below 2097152 entries) and can outweigh the whole copy. The largest tick of the
+    /// 30-tank match recipe, six houses breaking at once, appended 4224 entries (MEASURED, send
+    /// census 2026-11-11), so this holds seven such ticks.
     const HISTORY_LEN: usize = DiffIndex::MAX_NEWER_DISTANCE as usize;
 
     /// Appends at the end only. A replica keeps its first diff for any other position and takes
@@ -315,8 +316,8 @@ fn publish_record(
 
 /// Replica: admit the selected world's new entries as one batch before mutating its record.
 /// Another ledger identity replaces the record and advances its generation. Within one identity
-/// the authority only appends; duplicates, shrinking, a misplaced diff and malformed entries
-/// refuse the match.
+/// the authority only appends; duplicates, shrinking and malformed entries refuse the match, as
+/// does a misplaced diff on the selected world's ledger or a later one.
 fn receive_ledger(
     ledgers: Query<(Entity, Ref<Ledger>, Option<&WorldGeneration>)>,
     generation: Res<CurrentWorld>,
@@ -329,6 +330,18 @@ fn receive_ledger(
         refused.write(ConstructionRefusal::UntaggedLedger);
         return;
     }
+    // Before selection: a later world's whole copy would clear its replica's refusal unseen. A
+    // retired world's ledger feeds no record, so its refusal is dropped.
+    let live =
+        |belongs: &WorldGeneration| generation.0.is_none_or(|selected| belongs.0 >= selected.0);
+    if let Some(misplaced) = ledgers
+        .iter()
+        .filter(|(_, _, belongs)| belongs.is_some_and(live))
+        .find_map(|(_, replica, _)| replica.misplaced())
+    {
+        refused.write(ConstructionRefusal::MisplacedEntry(misplaced));
+        return;
+    }
     let mut current = ledgers
         .iter()
         .filter(|(_, _, belongs)| belongs.copied() == generation.0);
@@ -339,10 +352,6 @@ fn receive_ledger(
     };
     if current.next().is_some() {
         refused.write(ConstructionRefusal::DuplicateLedgers);
-        return;
-    }
-    if let Some(misplaced) = replica.misplaced() {
-        refused.write(ConstructionRefusal::MisplacedEntry(misplaced));
         return;
     }
     let replaced = copied.0 != Some(ledger);
@@ -723,6 +732,36 @@ mod tests {
         assert_refused(
             &mut app,
             ConstructionRefusal::MisplacedEntry(Misplaced { at: 0, held: 1 }),
+        );
+    }
+
+    /// A REFUSAL ON A LATER WORLD'S LEDGER CLOSES THE MATCH: a misplaced diff on the next Battle's
+    /// ledger, before world selection reaches it, refuses at once; that ledger's later whole copy,
+    /// which clears the replica's refusal, and the selection of its world change nothing. A
+    /// replica checking only the selected ledger would play on after the refusal. Fixture: world
+    /// 1 selected, the refusal on world 2's empty ledger.
+    #[test]
+    fn a_refusal_on_a_later_worlds_ledger_closes_the_match() {
+        let mut app = replica();
+        app.world_mut().resource_mut::<CurrentWorld>().0 = Some(WorldGeneration(1));
+        let later = app
+            .world_mut()
+            .spawn((Ledger::default(), WorldGeneration(2)))
+            .id();
+        let stale = Appended {
+            at: 3,
+            entry: entry(Event::Wear(0), 3),
+        };
+        let mut ledger = app.world_mut().get_mut::<Ledger>(later).unwrap();
+        assert!(ledger.apply_diff(&stale).is_err());
+        app.update();
+        *app.world_mut().get_mut::<Ledger>(later).unwrap() =
+            Ledger::from(vec![entry(Event::Wear(0), 3)]);
+        app.world_mut().resource_mut::<CurrentWorld>().0 = Some(WorldGeneration(2));
+        app.update();
+        assert_refused(
+            &mut app,
+            ConstructionRefusal::MisplacedEntry(Misplaced { at: 3, held: 0 }),
         );
     }
 

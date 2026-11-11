@@ -801,7 +801,7 @@ pub(super) fn spawn_tank(
             Name::new(name.to_string()),
             crate::eased_dynamic_body(),
             identity(index),
-            // The hull marks the local authority records (`hull_marks::offline_plugin`).
+            // The hull marks the local authority records (`hull_marks::plugin`).
             crate::hull_marks::HullMarks::default(),
         ),
     );

@@ -5,10 +5,9 @@
 //! # The record
 //!
 //! One [`HullMarks`] per vehicle root: server-owned, public to every client (ADR-0039: a mark on a
-//! hull is seen by anyone with eyes on it), born empty in the root's spawn bundle and appended
-//! through replicon's diff path, so a client that is caught up receives each new mark and a late
-//! joiner the whole set at once. It holds at most [`MARK_CAP`] marks; recording one more evicts
-//! the oldest mark with the smallest physical footprint. It lasts the root's life.
+//! hull is seen by anyone with eyes on it), born empty in the root's spawn bundle and replicated
+//! whole on every change. It holds at most [`MARK_CAP`] marks; recording one more evicts the
+//! oldest mark with the smallest physical footprint. It lasts the root's life.
 //!
 //! A [`HullMark`] is packed plain data, built from the authority's [`ShellStrike`]: its kind
 //! ([`MarkKind::of`] the strike's verdict), the struck part (an index into the root's
@@ -19,11 +18,10 @@
 //!
 //! # Who mounts what
 //!
-//! The dedicated server records through replicon's diff path (`net::hull_marks`, the wire half);
-//! the single-player composition, where the local sim is the authority and nothing replicates,
-//! mounts [`offline_plugin`], which writes the component directly. Both build marks with the one
-//! [`MarkBuilder`]. The view — decals, textures, the client's diff — is `vfx::hull_marks`, mounted
-//! by every windowed composition.
+//! Whichever app is the authority, the dedicated server or the single-player composition, mounts
+//! [`plugin`], which builds each mark with the [`MarkBuilder`] and writes it to the component;
+//! replication carries the record to clients. The view — decals, textures, the client's diff — is
+//! `vfx::hull_marks`, mounted by every windowed composition.
 
 pub(crate) mod demo;
 
@@ -446,14 +444,13 @@ fn seed(strike: &ShellStrike) -> u16 {
     (hash ^ (hash >> 16) ^ (hash >> 32) ^ (hash >> 48)) as u16
 }
 
-/// The single-player recorder: the local sim is the authority and nothing replicates, so the mark
-/// is written to the component directly.
-pub(crate) fn offline_plugin(app: &mut App) {
+/// The authority's recorder: each strike's mark is written to the struck root's record.
+pub(crate) fn plugin(app: &mut App) {
     max_stretch();
-    app.add_observer(record_local);
+    app.add_observer(record);
 }
 
-fn record_local(strike: On<ShellStrike>, builder: MarkBuilder, mut records: Query<&mut HullMarks>) {
+fn record(strike: On<ShellStrike>, builder: MarkBuilder, mut records: Query<&mut HullMarks>) {
     if let Some((root, mark)) = builder.mark(&strike) {
         records
             .get_mut(root)
@@ -802,7 +799,7 @@ pub(crate) mod tests {
     #[test]
     fn every_positive_calibre_can_leave_a_surface_mark() {
         let mut app = App::new();
-        app.add_plugins(offline_plugin);
+        app.add_plugins(plugin);
         let fixture = fixture_in(app.world_mut());
         let at = plate_in_world(app.world(), &fixture).transform_point(Vec3::ZERO);
         // Fixture data: three positive sizes, each preserved without a threshold.

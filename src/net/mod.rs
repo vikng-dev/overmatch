@@ -40,15 +40,13 @@ mod contact_census;
 mod hit_feel;
 /// The dedicated server's hosted mode: settings from the Worker, heartbeats, capacity, empty exit.
 mod hosting;
-/// The hull marks' wire half: the record replicates by diff, the authority appends through it.
-mod hull_marks;
 /// Real-UDP probe of the client's one-input-message-per-tick send cadence.
 #[cfg(test)]
 mod input_cadence;
 /// The interpolation buffer's size, derived from the measured link instead of pinned.
 mod interp_delay;
-/// Replicon round trips of the construction ledger and the hull marks: late, lossy and far-behind
-/// clients end with the authority's list, and a caught-up one is sent only what it lacks.
+/// Replicon round trips of the construction ledger: late, lossy and far-behind clients end with
+/// the authority's list or refuse the match, and a caught-up one is sent only what it lacks.
 #[cfg(test)]
 mod ledger_wire;
 #[cfg(test)]

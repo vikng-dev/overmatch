@@ -6086,7 +6086,7 @@ pub(crate) mod march_tests {
             ] {
                 // Fixture data: a thin first face, then a thick face, square or at a ricochet angle.
                 let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
-                crate::hull_marks::offline_plugin(&mut app);
+                crate::hull_marks::plugin(&mut app);
                 app.init_resource::<TerminalLog>()
                     .add_observer(capture_terminal);
                 let first = app

@@ -355,8 +355,8 @@ pub(super) fn spawn_prewarm(commands: &mut Commands, rig: Entity) {
 mod tests {
     use super::*;
     use crate::ballistics::{ComponentHealth, Verdict};
+    use crate::hull_marks::MARK_CAP;
     use crate::hull_marks::tests::{Fixture, fixture_in, numbered, plate_in_world, strike};
-    use crate::hull_marks::{MARK_CAP, offline_plugin};
 
     /// A nonmetal mark must not expose metallic grey. Both responses share their shape maps, but
     /// the resolved surface controls the colour and metallic factor a late joiner will see.
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn marks_never_touch_the_simulation() {
         let mut app = view_app();
-        app.add_plugins(offline_plugin);
+        app.add_plugins(crate::hull_marks::plugin);
         let fixture = fixture_in(app.world_mut());
         let Fixture {
             root,

@@ -38,10 +38,10 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// Every wire change bumps this revision and re-pins the affected manifest hashes (ADR-0018).
 /// The game's environment destruction model carries shared causes and chunk-addressed groups;
 /// replacement and departure derive from the admitted graph on each peer; a crumble's light
-/// fragments reach players as decoration events. The construction ledger and the hull marks reach
-/// a client as the diffs past its acknowledged cursor (bevy_replicon 0.44.3), a whole copy only
-/// to a client without one or behind the retained history; each ledger diff names the position
-/// it lands at.
+/// fragments reach players as decoration events. The construction ledger reaches a client as the
+/// diffs past its acknowledged cursor (bevy_replicon 0.44.3), each naming the position it lands
+/// at, and a whole copy only to a client without one or behind the retained history; the hull
+/// marks replicate whole.
 pub const PROTOCOL_REV: u32 = 93;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -947,10 +947,9 @@ pub(crate) fn plugin(app: &mut App) {
     // Authoritative launched-turret world pose (same plain-replication shape): the client shows the
     // cooked-off toss it does NOT simulate locally, writing the pose onto its own rig turret.
     app.component::<LaunchedTurretPose>().replicate();
-    // Each tank root's hull marks, public (ADR-0039): new marks ride as diffs, a late joiner takes
-    // the held set once.
-    app.component::<crate::hull_marks::HullMarks>()
-        .replicate_diff();
+    // Each tank root's hull marks, public (ADR-0039): the held set, at most `MARK_CAP` marks,
+    // replicates whole.
+    app.component::<crate::hull_marks::HullMarks>().replicate();
     // Carrier publication and presentation policies belong to `debris_stress`.
     app.component::<super::debris_stress::DebrisPose>()
         .replicate_with(super::debris_stress::pose_replication())

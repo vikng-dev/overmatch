@@ -102,8 +102,8 @@ pub fn run() {
     app.add_plugins(crate::shot_trace::server_plugin);
     super::shot_transport::install_server(&mut app);
     super::shot_explanation::install_server(&mut app);
-    // Every strike's hull mark, recorded on the struck root and replicated by diff.
-    super::hull_marks::install_server(&mut app);
+    // Every strike's hull mark, recorded on the struck root and replicated whole.
+    crate::hull_marks::plugin(&mut app);
     // Authority must reject input targets not controlled by their sending client.
     app.add_input_validator(authorize_controlled_targets::<NativeStateSequence<TankCommand>>);
     // Lightyear visibility hooks require `ReplicationSender` on each remote link.
@@ -933,7 +933,7 @@ fn spawn_player_tank(
             ),
             (
                 RespawnState::default(),
-                // Born empty in the spawn bundle, public, appended by diff.
+                // Born empty in the spawn bundle, public, replicated whole.
                 HullMarks::default(),
                 // Clients build their own local skeleton; replicate only root state.
                 DisableReplicateHierarchy,
