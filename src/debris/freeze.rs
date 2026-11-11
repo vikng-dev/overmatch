@@ -45,7 +45,9 @@
 //!   or is re-posed, reshaped or re-layered in place (`super::wake_on_static_moved` notes those);
 //!   or its body goes, is disabled or stops being static. A collider with no body is never a
 //!   support: Avian builds it no contact constraint, and the freeze counts only pairs that build
-//!   one.
+//!   one. A frozen piece's own collider re-posed holds while the piece's pose keeps the bits it
+//!   froze at ([`Frozen`]): Avian rewrites a pose with the value it holds (placing child colliders,
+//!   syncing transforms), and anything else that writes one moves the piece.
 //!
 //! A frozen piece's press on standing construction stays as its sleeping press did
 //! (`contact_transfer`, resting contacts).
@@ -77,18 +79,27 @@ use crate::cost::stages::{Stages, Work};
 /// their switches over ticks; one island of any size passes alone, so none waits on its own size.
 const FREEZE_PIECE_BUDGET: usize = 8;
 
-/// A frozen piece, in frozen island `island` of [`FrozenIslands`].
+/// A frozen piece, in frozen island `island` of [`FrozenIslands`], at the pose bits it froze at.
 #[derive(Component, Debug)]
 pub(crate) struct Frozen {
     island: u64,
+    pose: [u32; 7],
 }
 
 #[cfg(test)]
 impl Frozen {
     /// A marker in no island, for a reader's test that never thaws it.
     pub(crate) fn fixture() -> Self {
-        Self { island: u64::MAX }
+        Self {
+            island: u64::MAX,
+            pose: [0; 7],
+        }
     }
+}
+
+fn pose_bits(position: &Position, rotation: &Rotation) -> [u32; 7] {
+    let (p, r) = (position.0, rotation.0);
+    [p.x, p.y, p.z, r.x, r.y, r.z, r.w].map(f32::to_bits)
 }
 
 /// A frozen island: its pieces, in entity order, their colliders, and the colliders they touched
@@ -332,7 +343,12 @@ struct Freeze<'w, 's> {
     sleeping: Query<
         'w,
         's,
-        (Entity, &'static BodyIslandNode, &'static RigidBodyColliders),
+        (
+            Entity,
+            &'static BodyIslandNode,
+            &'static RigidBodyColliders,
+            (&'static Position, &'static Rotation),
+        ),
         (With<DebrisPiece>, With<Sleeping>, Without<Frozen>),
     >,
     frozen: Query<'w, 's, (), With<Frozen>>,
@@ -356,7 +372,7 @@ fn freeze(p: Freeze, mut commands: Commands) {
         stages,
     } = p;
     let mut members: BTreeMap<u32, Vec<Entity>> = BTreeMap::new();
-    for (piece, node, _) in &sleeping {
+    for (piece, node, ..) in &sleeping {
         members.entry(node.island_id().0).or_default().push(piece);
     }
     // A sleeping island with any other body keeps every piece of it.
@@ -388,7 +404,7 @@ fn freeze(p: Freeze, mut commands: Commands) {
         pieces.sort_unstable();
         let (mut own, mut touched) = (Vec::new(), Vec::new());
         for &piece in &pieces {
-            let (_, _, colliders) = sleeping.get(piece).expect("a sleeping island's piece");
+            let (_, _, colliders, _) = sleeping.get(piece).expect("a sleeping island's piece");
             for collider in colliders.iter() {
                 own.push(collider);
                 for pair in graph.contact_pairs_with(collider) {
@@ -422,6 +438,7 @@ fn freeze(p: Freeze, mut commands: Commands) {
             islands.by_collider.entry(collider).or_default().push(id);
         }
         for &piece in &pieces {
+            let (.., (at, turn)) = sleeping.get(piece).expect("a sleeping island's piece");
             // ADR-0014 exception (module doc). Static before `Sleeping` goes, so the wake its
             // removal queues finds the piece outside its island.
             commands
@@ -430,7 +447,10 @@ fn freeze(p: Freeze, mut commands: Commands) {
                     RigidBody::Static,
                     LinearVelocity::ZERO,
                     AngularVelocity::ZERO,
-                    Frozen { island: id },
+                    Frozen {
+                        island: id,
+                        pose: pose_bits(at, turn),
+                    },
                 ))
                 .remove::<Sleeping>();
         }
@@ -451,7 +471,7 @@ fn freeze(p: Freeze, mut commands: Commands) {
 #[derive(SystemParam)]
 struct Thaw<'w, 's> {
     islands: ResMut<'w, FrozenIslands>,
-    frozen: Query<'w, 's, &'static Frozen>,
+    frozen: Query<'w, 's, (&'static Frozen, &'static Position, &'static Rotation)>,
     pushed: Query<
         'w,
         's,
@@ -492,13 +512,14 @@ fn thaw(p: Thaw, mut commands: Commands) {
                 && bodies.get(body).is_ok_and(RigidBody::is_static)
                 && !disabled.contains(collider)
         }
-        // A frozen piece's own collider holds: Avian placing its child colliders writes their
-        // poses, not the piece's.
+        // A frozen piece's own collider holds while the piece's pose bits do (module doc).
         Change::InPlace { reshaped } => {
             !reshaped
-                && attached
-                    .get(collider)
-                    .is_ok_and(|of| frozen.contains(of.body))
+                && attached.get(collider).is_ok_and(|of| {
+                    frozen
+                        .get(of.body)
+                        .is_ok_and(|(piece, at, turn)| piece.pose == pose_bits(at, turn))
+                })
         }
     };
     let mut thawing = BTreeSet::new();
@@ -514,7 +535,7 @@ fn thaw(p: Thaw, mut commands: Commands) {
             by_load += 1;
         }
     }
-    let island_of = |piece: Entity| frozen.get(piece).expect("a reached frozen piece").island;
+    let island_of = |piece: Entity| frozen.get(piece).expect("a reached frozen piece").0.island;
     let mut reached = BTreeSet::new();
     for mover in reach.movers() {
         reach.of(mover, |body| frozen.contains(body), &mut reached);
@@ -556,7 +577,7 @@ fn thaw(p: Thaw, mut commands: Commands) {
                 |body| {
                     frozen
                         .get(body)
-                        .is_ok_and(|other| !thawing.contains(&other.island))
+                        .is_ok_and(|(other, ..)| !thawing.contains(&other.island))
                 },
                 &mut further,
             );
@@ -738,6 +759,44 @@ mod tests {
                 "the stack falls as its support {change}"
             );
         }
+    }
+
+    /// A FROZEN PIECE WHOSE POSE IS WRITTEN THAWS, AND ONE WRITTEN WITH ITS OWN BITS STAYS: a
+    /// stack frozen on a slab keeps frozen through a write of the pose its upper piece holds, as
+    /// Avian's own writes are, and thaws whole in the update after a write that moves that piece
+    /// without velocity; the piece put up falls back. A thaw that ignored a frozen piece's own
+    /// collider would leave it hanging where it was put; one that took every write for a move
+    /// would thaw it on Avian's.
+    #[test]
+    fn a_frozen_piece_whose_pose_is_written_thaws() {
+        let mut app = settling(GRAVITY);
+        slab(&mut app, 0.0);
+        let pieces = stack(&mut app, 0.0, 0.0, 2);
+        until_frozen(&mut app, &pieces);
+        let moved = pieces[1];
+        let held = *app.world().get::<Position>(moved).unwrap();
+        *app.world_mut().get_mut::<Position>(moved).unwrap() = held;
+        app.update();
+        app.update();
+        for &piece in &pieces {
+            assert!(
+                is_frozen(&app, piece),
+                "a write of its own pose moves nothing"
+            );
+        }
+        // Fixture: 0.3 m up, without velocity.
+        app.world_mut().get_mut::<Position>(moved).unwrap().0 += Vec3::Y * 0.3;
+        app.update();
+        for &piece in &pieces {
+            assert!(!is_frozen(&app, piece), "the whole island thawed");
+        }
+        for _ in 0..32 {
+            app.update();
+        }
+        assert!(
+            app.world().get::<Position>(moved).unwrap().0.y < held.0.y + 0.25,
+            "the piece put up falls back"
+        );
     }
 
     /// A PIECE WITHIN REACH OF A MOVING BODY IS AWAKE BEFORE CONTACT: a hovering body at rest
