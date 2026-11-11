@@ -52,8 +52,8 @@ pub(super) fn install(app: &mut App) {
     );
 }
 
-/// Mount the `client_jitter` line beside [`install`]'s snap detector. It reads the arrival
-/// estimator and the delay law, so `net::sync_margin` and `net::interp_delay` mount first.
+/// Mount the `client_jitter` line on [`install`]'s snap detector. It reads the arrival estimator
+/// (`net::sync_margin`), so it mounts only in a composition that has one.
 pub(super) fn install_jitter_line(app: &mut App) {
     app.init_resource::<JitterRecord>();
     app.add_systems(PostUpdate, record_jitter.after(count_interp_resyncs));
@@ -203,8 +203,8 @@ impl Starvation {
     }
 }
 
-/// Resolution: a tenth of a millisecond and a hundredth of a tick (0.16 ms), below anything the
-/// line's readers compare; the line is read by eye as well as parsed.
+/// Resolution: a tenth of a millisecond and a hundredth of a tick (DERIVED 0.16 ms at 64 Hz),
+/// below anything the line's readers compare; the line is read by eye as well as parsed.
 const MS_PLACES: f64 = 10.0;
 const TICK_PLACES: f64 = 100.0;
 
