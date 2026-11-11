@@ -912,6 +912,14 @@ pub struct TransmissionReport {
     pub shifting: bool,
     /// This tick asked the engaged ladder for drive: a propulsive pedal past the dead band.
     pub pulling: bool,
+    /// The pedal requested this tick, whatever its direction.
+    pub command: f32,
+    /// The clutch sent drive to the belts this tick: torque along the engaged ladder. A crank
+    /// spooling to its launch rpm, an open clutch and overrun send none.
+    pub driving: bool,
+    /// The clutch held the crank to the belts at the tick's end, so the engaged gear set the
+    /// drive. A slipping clutch sends its capacity, or the crank's stored speed, whatever the gear.
+    pub locked: bool,
     /// Power-conservation scale applied to the drive/steer forces this tick (1 = unconstrained).
     pub power_scale: f32,
     /// Combustion power capacity at the pre-tick operating point (W). The work gate also
@@ -1129,37 +1137,66 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 }
 
 /// One Driver decision on what it felt, at the requested pedal `command`. Speed `v` and
-/// resistance `R` read along the engaged ladder, `v` floored at rest. A gear carries `R` plus the
-/// turn's share in its own detent radius, `s·κ·ΔR` (the steering tie's load on the mean axis,
-/// [`BeltTick::tied_mean`]), and *holds* when its spare over that load exceeds M. At a stall `R`
-/// is at least the largest push that failed to move the hull ([`super::sense::Sensed::stall`]): a
-/// gear qualifies there only by pushing harder, the free choice at rest included, and in first
-/// gear with the bound unbeaten the Driver stays. Each gear is
-/// priced engaged as delivery engages it ([`engagement`]), in the state it would be in. A candidate
-/// pays the cut and lands at the hull's `v − R·t_cut/M_c`, its clutch closing from out, so below
-/// its launch speed it slips at the launch rpm. Priced as lugs instead, a candidate at a crawl
-/// carries the idle catch's whole torque and outbids a part-pedal launch, which then stops in the
-/// cut (MEASURED in `part_pedal_launches_and_sustains_ordered_speed`: a quarter-pedal launch cycling
-/// between its launch gear and a lug three gears up). The current gear pays no cut and is priced as
-/// it runs: its shaft at the belts' mean speed, in the regime delivery engages there this tick.
-/// Belts slipping on the ground turn the crank faster than the hull's speed implies, and priced at
-/// the hull's crawl the gear reads a lug it is not in (MEASURED on rubble: a gear slipping its
-/// belts at 2100 rpm read a sub-idle lug, then dropped and relaunched cut after cut). No gear's pull is priced above the grip its patches can carry along the belts
-/// ([`super::sense::Sensed::grip`]): where every patch slides along them at its grip limit that is
-/// the pull now, so no gear offers more spare than the current one and the gear stays. A pull is
-/// priced whole at the sprocket: where solver contacts load the belts off the heading, the share
-/// of the belts' solved ground reaction that reaches the hull differs between gears on the same
-/// ground (MEASURED on rubble, house stop-go at 4.9 m/s: 0.92 in sixth against 0.90 in seventh;
-/// 1.00 on clear ground), so the engaged gear's share does not price another.
-/// 1. Clutch out at hull rest: the highest launch gear that holds, else first where it offers more
-///    spare than the current gear; free.
-/// 2. The current gear does not hold, judged at no more than its torque-peak belt speed: the
-///    highest lower gear within `max_step` that holds where it lands; with none the gear stays.
-/// 3. The current gear holds, straight: the highest higher gear within `max_step` that holds
-///    where it lands and has more spare there than the current gear has now.
+/// resistance `R` read along the engaged ladder, `v` floored at rest. A candidate gear carries `R`
+/// plus the turn's share in its own detent radius, `s·κ·ΔR` (the steering tie's load on the mean
+/// axis, [`BeltTick::tied_mean`]), and *holds* when its priced pull exceeds that load by M. At a
+/// stall `R` is at least the largest push that failed to move the hull
+/// ([`super::sense::Sensed::stall`]): a gear qualifies there only by pushing harder, the free
+/// choice at rest included, and in first gear with the bound unbeaten the Driver stays.
 ///
-/// Clauses 2 and 3 pay the cut. A cut in flight, no pull asked or fuel that cannot beat drag
-/// choose nothing.
+/// The engaged gear is observed, never priced: what it delivers is its sprockets' force on the
+/// latest tick ([`super::sense::Sensed::drive`]), and whether it holds is whether the drivetrain
+/// gains under it ([`super::sense::Sensed::drive_gain`]), both read only through a clutch that held
+/// for a whole window ([`super::sense::Sensed::observed`]). A price models a gear not engaged, and
+/// on the engaged gear it reads that model's error (MEASURED on rubble, house stop-go: seventh
+/// priced 547 N short of `R` while the hull gained, and the Driver shifted down). The hull's own
+/// gain decides nothing: after a clutch takes up the hull rings on its patches' elastic shear, so
+/// a window of it reads the ring's phase (MEASURED, flat ground at a third of the pedal: fifth
+/// gaining in steady pull read losing over its first locked window, and the Driver hunted 4–5).
+///
+/// A candidate is priced engaged as delivery engages it ([`engagement`]): it pays the cut and
+/// lands at the hull's `v − R·t_cut/M_c`, no lower than rest, where the park latch holds a hull the
+/// cut stops, its clutch closing from out, so below its launch speed it slips at the launch rpm. Priced as lugs instead, a candidate at a crawl carries the idle catch's
+/// whole torque and outbids a part-pedal launch, which then stops in the cut (MEASURED in
+/// `part_pedal_launches_and_sustains_ordered_speed`: a quarter-pedal launch cycling between its
+/// launch gear and a lug three gears up). No candidate's pull is priced above the grip its patches
+/// can carry along the belts ([`super::sense::Sensed::grip`]): where every patch slides along them
+/// at its grip limit that is what the engaged gear delivers, so no candidate pulls harder and the
+/// gear stays. A pull is priced whole at the sprocket: where solver contacts load the belts off
+/// the heading, the share of the belts' solved ground reaction that reaches the hull differs
+/// between gears on the same ground (MEASURED on rubble, house stop-go at 4.9 m/s: 0.92 in sixth
+/// against 0.90 in seventh; 1.00 on clear ground), so the engaged gear's share does not price
+/// another. A gear left on the way down, and every gear above it, is not taken while the hull
+/// meets at least what that gear sustained ([`super::sense::Failed`]): the retry would fail as it
+/// did (MEASURED on the standing heap at a third of the pedal: second priced 700 N over `R` from a
+/// crawl, stalled where the cut landed, and the Driver cycled first and second five times).
+/// 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
+///    current gear, and none the memory holds back, else first where it offers more spare than
+///    the current gear; free.
+/// 2. The hull stalls under a window the gear drove whole ([`super::sense::Sensed::tried`]): the
+///    lowest gear within `max_step`, since a stall bounds what the hull meets only from below.
+///    Or the drivetrain loses speed by more than M with the crank lugging below its peak-torque
+///    speed: the highest lower gear within `max_step` that holds where it lands; with none the
+///    gear stays. Above the peak a slowing crank gains torque and settles where the gear holds
+///    (MEASURED on a 20° grade: fourth settled at 1.93 m/s, its drivetrain reading −4 N; stepping
+///    down cost a metre per second in the cut, and third settled slower).
+/// 3. Otherwise, straight with the clutch in and the hull moving where the cut lands: of the
+///    higher gears within `max_step` the memory admits that hold where they land and pull there
+///    more than the engaged gear's drive by M, the one that pulls hardest, the higher on a tie. A
+///    cut that stops the hull trades a moving gear for a launch, priced against what the crawl
+///    read rather than what stopped it (MEASURED, ram into the standing heap: first crawling at
+///    0.05 m/s stepped to second, the cut stopped the hull, and the free choice launched fourth,
+///    which had stalled there, three times). The highest that qualifies is the weakest: two
+///    gears landing below their launch speeds both slip at the launch torque, the higher through
+///    the smaller ratio (MEASURED on rubble: fourth stepped to sixth at 100 kN past fifth at 148 kN,
+///    and slipped for 370 ticks). A slipping clutch delivers at most its launch torque through
+///    the engaged ratio, and every higher gear lands slipping at no more through a smaller one, so
+///    none pushes harder.
+///
+/// Clauses 2 and 3 pay the cut. `R` is the one hull window the Driver reads: the landing needs the
+/// speed the world takes in a cut, and a ring or an impact moves the hull's push and gain together,
+/// so their difference holds through it. A cut in flight, no pull asked or fuel that cannot beat
+/// drag choose nothing.
 fn choose_gear(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1188,10 +1225,11 @@ fn choose_gear(
         _ => dir * sensed.resistance,
     };
     let margin = force_margin(tp);
-    // A gear's spare with its shaft at `at` (m/s along the ladder), engaged from `prior`.
-    let spare = |gear: u8, at: f32, prior: ClutchState| {
-        let load =
-            resistance + branch(inp.steer) * detent_kappa(tp, st, gear) * sensed.push_difference;
+    let load = |gear: u8| {
+        resistance + branch(inp.steer) * detent_kappa(tp, st, gear) * sensed.push_difference
+    };
+    // A candidate's pull with its shaft at `at` (m/s along the ladder), engaged from `prior`.
+    let pull = |gear: u8, at: f32, prior: ClutchState| {
         let ratio = ladder[usize::from(gear - 1)];
         let clutch = engagement(
             tp,
@@ -1200,15 +1238,27 @@ fn choose_gear(
             at * ratio / tp.sprocket_radius,
             command,
         );
-        let pull = gear_force(tp, fp, inp.supply, at, ratio, command, load, clutch);
-        let pull = match sensed.grip {
+        let pull = gear_force(tp, fp, inp.supply, at, ratio, command, load(gear), clutch);
+        match sensed.grip {
             Some(grip) => pull.min(grip),
             None => pull, // A solver contact's grip limit is unmeasured.
-        };
-        pull - load
+        }
     };
+    let spare = |gear: u8, at: f32, prior: ClutchState| pull(gear, at, prior) - load(gear);
+    let stall = sensed.stall.filter(|stall| stall.dir == dir);
+    // A gear left on the way down, and every gear above it, waits for the hull to meet less than
+    // that gear sustained: the highest gear the memory admits.
+    let admitted = sensed
+        .failed
+        .filter(|failed| failed.gear.0 == st.reverse && dir * sensed.resistance >= failed.push)
+        .map_or(top, |failed| failed.gear.1 - 1);
     if st.clutch == ClutchState::Out && speed < PARK_ENGAGE_SPEED {
-        st.gear = (1..=tp.launch_gears.min(top))
+        // A gear observed failing at this stall is not priced again, nor any that pulls less:
+        // the bound is a floor, so no gear weaker than the current one is taken against it.
+        let highest = stall.map_or(admitted, |stall| {
+            stall.gear.saturating_sub(1).min(st.gear).min(admitted)
+        });
+        st.gear = (1..=tp.launch_gears.min(highest))
             .rev()
             .find(|&gear| spare(gear, speed, st.clutch) > margin)
             .unwrap_or_else(|| {
@@ -1222,28 +1272,35 @@ fn choose_gear(
             });
         return;
     }
-    let landing = speed - resistance * f32::from(tp.shift_ticks) / TICK_HZ / coupled_mass(fp);
-    let belts = dir * (inp.speeds[0] + inp.speeds[1]) * 0.5;
-    let peak =
-        tp.peak_torque_rpm * RPM_TO_RAD * tp.sprocket_radius / ladder[usize::from(st.gear - 1)];
-    let chosen = if spare(st.gear, belts.min(peak), st.clutch) > margin {
-        let now = spare(st.gear, belts, st.clutch);
-        // A detent turn's radius belongs to its gear: no upshift changes it.
-        (st.steer_step == 0)
-            .then(|| {
-                (st.gear + 1..=st.gear.saturating_add(tp.max_step).min(top))
-                    .rev()
-                    .find(|&gear| {
-                        let landed = spare(gear, landing, ClutchState::Out);
-                        landed > margin && landed > now + margin
-                    })
-            })
-            .flatten()
-    } else {
-        // A lower gear that holds has more spare than the current gear, which does not.
+    // A hull the cut brings to rest is held there by the park latch, so no cut lands below rest.
+    let landing =
+        (speed - resistance * f32::from(tp.shift_ticks) / TICK_HZ / coupled_mass(fp)).max(0.0);
+    // Below the crank's peak-torque speed falling revs lower the torque, so the gear does not
+    // recover; above it they raise it, and the gear settles where it holds.
+    let lugging = st.omega_e < tp.peak_torque_rpm * RPM_TO_RAD;
+    let slowing = sensed.observed && lugging && dir * sensed.drive_gain < -margin;
+    let chosen = if stall.is_some() && sensed.tried {
+        // A stall bounds what the hull meets from below only: the lowest gear in reach pulls most.
+        Some(st.gear.saturating_sub(tp.max_step).max(1)).filter(|&gear| gear < st.gear)
+    } else if slowing {
         (st.gear.saturating_sub(tp.max_step).max(1)..st.gear)
             .rev()
             .find(|&gear| spare(gear, landing, ClutchState::Out) > margin)
+    } else if sensed.observed
+        && st.steer_step == 0
+        && st.clutch == ClutchState::In
+        && landing >= PARK_ENGAGE_SPEED
+    {
+        // A detent turn's radius belongs to its gear: no upshift changes it.
+        // The candidate that pulls hardest where it lands, the higher on a tie.
+        (st.gear + 1..=st.gear.saturating_add(tp.max_step).min(admitted))
+            .filter(|&gear| spare(gear, landing, ClutchState::Out) > margin)
+            .map(|gear| (gear, pull(gear, landing, ClutchState::Out)))
+            .filter(|&(_, pull)| pull > dir * sensed.drive + margin)
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(gear, _)| gear)
+    } else {
+        None
     };
     // No gear qualifies: the current one stays.
     if let Some(gear) = chosen {
@@ -2067,6 +2124,7 @@ fn apply_ceiling_brakes(
 /// An infeasible snap leaves the integrated slipping crank. The caller then caps its energy
 /// by the source budget left after sprocket work; a feasible clutch cannot create energy.
 /// `None` names an open clutch; without a Driver catch the crank may turn backward.
+/// Returns whether the clutch held the crank to the belts.
 fn settle_crank(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -2074,7 +2132,7 @@ fn settle_crank(
     next: [f32; 2],
     crank: CrankTick,
     #[cfg(feature = "bitprobe")] probe: &mut TransmissionProbe,
-) {
+) -> bool {
     let CrankTick {
         omega_e,
         tau_free,
@@ -2084,29 +2142,30 @@ fn settle_crank(
         omega_over,
         dt,
     } = crank;
-    if let Some(capacity) = engaged {
+    let held = engaged.is_some_and(|capacity| {
         let m_next = (next[0] + next[1]) / 2.0;
         let locked = k * dir * m_next;
         let tau_impl = tau_free - (locked - omega_e) * tp.engine_inertia / dt;
+        let feasible = tau_impl.abs() <= capacity && locked >= omega_floor && locked <= omega_over;
         #[cfg(feature = "bitprobe")]
         {
-            let feasible =
-                tau_impl.abs() <= capacity && locked >= omega_floor && locked <= omega_over;
             probe.reanchor_attempted = true;
             probe.reanchor_locked = locked;
             probe.reanchor_tau_impl = tau_impl;
             probe.reanchor_feasible = feasible;
         }
-        if tau_impl.abs() <= capacity && locked >= omega_floor && locked <= omega_over {
+        if feasible {
             st.omega_e = locked;
         }
-    }
+        feasible
+    });
 
     st.omega_e = st.omega_e.max(omega_floor).min(omega_over);
     #[cfg(feature = "bitprobe")]
     {
         probe.omega_end = st.omega_e;
     }
+    held
 }
 
 /// The crank's two guard points this tick (rad/s): the stall floor and the over-rev bound.
@@ -2320,7 +2379,7 @@ pub(crate) fn step(
     // --- Integrate both sides simultaneously against their implicit reactions.
     let next = [belts.land(0, q[0]), belts.land(1, q[1])];
 
-    settle_crank(
+    let locked = settle_crank(
         st,
         tp,
         engaged.then_some(inp.supply.transmission_condition * tp.clutch_capacity),
@@ -2374,6 +2433,9 @@ pub(crate) fn step(
         steer_step: st.steer_step,
         shifting,
         pulling: propulsive >= DEAD,
+        command: controls.command.abs(),
+        driving: tau_c > 0.0,
+        locked,
         power_scale,
         power_available: p_avail,
         #[cfg(feature = "bitprobe")]

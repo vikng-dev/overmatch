@@ -249,6 +249,7 @@ pub(super) fn apply_belt_support_field(
         &mut reports,
         hard_reactions,
         &hull_body,
+        [belt.get(Side::Left), belt.get(Side::Right)],
         affine,
         dt,
     );

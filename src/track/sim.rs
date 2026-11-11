@@ -706,14 +706,15 @@ pub(crate) fn belt_reactions(
     )
 }
 
-/// The Driver feels the tick ([`super::sense`]), then each belt takes on its solver contact's
-/// belt reaction. The ledger reads each contact's traction on the hull along the heading; the belt
+/// The Driver feels the tick ([`super::sense`]) with the belts at `belts` (m/s, `[left, right]`),
+/// then each belt takes on its solver contact's belt reaction. The ledger reads each contact's traction on the hull along the heading; the belt
 /// reaction is the drive's load along each contact's travel, partly vertical around a wrap.
 pub(crate) fn feel_tick(
     sense: &mut super::sense::DriverSense,
     reports: &mut [SideReport; 2],
     hard: [Option<super::stop_contacts::HardReaction>; 2],
     hull: &HullBody,
+    belts: [f32; 2],
     affine: Affine3A,
     dt: f32,
 ) -> Option<super::sense::Sensed> {
@@ -721,12 +722,12 @@ pub(crate) fn feel_tick(
     let sensed = sense.tick(
         hull.linear,
         forward,
+        (belts[0] + belts[1]) * 0.5,
         1.0 / hull.inverse_mass,
         super::sense::Contacts {
             soft: reports
                 .each_ref()
                 .map(|report| report.contacts.iter().map(|c| c.traction).sum()),
-            reaction: reports.iter().map(|report| report.belt_reaction).sum(),
             grip: reports.iter().map(|report| report.grip_budget).sum(),
             hard,
         },
@@ -839,6 +840,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
         &mut reports,
         rig.hard_reactions,
         &hull,
+        [rig.drive.sides[0].speed, rig.drive.sides[1].speed],
         affine,
         dt,
     );

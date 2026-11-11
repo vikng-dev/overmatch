@@ -203,10 +203,13 @@ fn felt_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
         speed: 0.0,
         resistance: 0.0,
         push_difference: 0.0,
-        push: 0.0,
-        reaction: 0.0,
+        drive: 0.0,
+        drive_gain: 0.0,
         grip: Some(f32::INFINITY),
         stall: None,
+        failed: None,
+        tried: true,
+        observed: true,
     });
     inp
 }
@@ -1109,10 +1112,13 @@ fn stall_guard_holds_crank_under_grade_lug() {
             speed: speeds[0],
             resistance: reactions[0] + reactions[1],
             push_difference: reactions[0] - reactions[1],
-            push: reactions[0] + reactions[1],
-            reaction: reactions[0] + reactions[1],
+            drive: reactions[0] + reactions[1],
+            drive_gain: 0.0,
             grip: Some(f32::INFINITY),
             stall: None,
+            failed: None,
+            tried: true,
+            observed: true,
         });
         #[cfg(feature = "bitprobe")]
         let (roundoff, mut settled) = (
@@ -2181,10 +2187,25 @@ fn driver_input(speed: f32, load: f32, command: f32) -> TransmissionInput {
         speed,
         resistance: load,
         push_difference: 0.0,
-        push: load,
-        reaction: load,
+        drive: load,
+        drive_gain: 0.0,
         grip: Some(f32::INFINITY),
         stall: None,
+        failed: None,
+        tried: true,
+        observed: true,
+    });
+    inp
+}
+
+/// Fixture: `inp`'s hull held at rest under `gear`'s forward pull of the resistance it feels,
+/// which is what the ledger reads of a pull that does not move the hull.
+fn stalled(mut inp: TransmissionInput, gear: u8) -> TransmissionInput {
+    let sensed = inp.sensed.as_mut().expect("a Driver-policy reading");
+    sensed.stall = Some(super::super::sense::Stall {
+        dir: 1.0,
+        push: sensed.resistance,
+        gear,
     });
     inp
 }
@@ -2294,9 +2315,10 @@ fn driver_force_price_uses_the_current_regime_and_the_clutch_cap() {
     }
 }
 
-/// The declared skip limit and the detent prohibition constrain the same choice path. Fixture:
-/// a stalled third gear meeting a resistance only first gear's launch can hold, then a straight
-/// fourth gear past its governor where fifth has more to spare.
+/// The declared skip limit and the detent prohibition constrain the same choice path: a stall
+/// steps to the lowest gear in reach, never past it. Fixture: a stalled third gear meeting a
+/// resistance only first gear's launch can hold, then a straight fourth gear past its governor
+/// where fifth has more to spare.
 #[test]
 fn driver_respects_the_shift_step_and_turn_contracts() {
     let (fp, mut tp) = (lab_fp(), lab_tp());
@@ -2311,14 +2333,14 @@ fn driver_respects_the_shift_step_and_turn_contracts() {
         )
     };
     let resistance = (launch(&tp, 1) + launch(&tp, 2)) * 0.5;
-    for (max_step, landed) in [(1, 3), (2, 1)] {
+    for (max_step, landed) in [(1, 2), (2, 1)] {
         tp.max_step = max_step;
         let mut state = TransmissionState {
             gear: 3,
             clutch: ClutchState::Slip,
             ..fresh(&tp)
         };
-        let inp = driver_input(0.0, resistance, 1.0);
+        let inp = stalled(driver_input(0.0, resistance, 1.0), 3);
         choose_gear(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
         assert_eq!(
             state.gear, landed,
@@ -2569,10 +2591,10 @@ fn a_stalled_full_clutch_push_steps_down() {
             inp.sensed = sense.tick(
                 bevy::math::Vec3::ZERO,
                 forward,
+                0.0,
                 mass,
                 super::super::sense::Contacts {
                     soft: [bevy::math::Vec3::ZERO; 2],
-                    reaction: 0.0,
                     grip: 0.0,
                     hard,
                 },
