@@ -890,6 +890,8 @@ pub struct TransmissionInput {
     pub reaction_slopes: [f32; 2],
     /// Unfiltered support load and grip seen by the Driver.
     pub perceived_load: super::load::PerceivedLoad,
+    /// What the Driver feels of the hull this tick; `None` until the ledger has closed a tick.
+    pub sensed: Option<super::sense::Sensed>,
     pub dt: f32,
 }
 
@@ -2125,6 +2127,10 @@ fn input_probe(
         perceived_load_n: inp.perceived_load.total_n(),
         grip_limit_n: inp.perceived_load.grip_n,
         turn_moment_nm: inp.perceived_load.turn_moment_nm,
+        sensed: inp.sensed.is_some(),
+        sensed_speed: inp.sensed.map_or(0.0, |s| s.speed),
+        sensed_resistance_n: inp.sensed.map_or(0.0, |s| s.resistance),
+        sensed_push_difference_n: inp.sensed.map_or(0.0, |s| s.push_difference),
         omega_pre: st.omega_e,
         ..Default::default()
     }

@@ -320,6 +320,7 @@ impl TrackGear {
                     grip_n: probe.grip_limit_n,
                     ..Default::default()
                 },
+                sensed: None,
                 dt: probe.dt,
             },
             state,
@@ -751,6 +752,7 @@ pub(crate) struct BeltRig<'a> {
     pub grip: &'a mut TrackGrip,
     pub elements: &'a mut TrackGripElements,
     pub transmission: &'a mut TransmissionState,
+    pub sense: &'a mut super::sense::DriverSense,
     /// Last physics step's hard-contact reaction, N along each belt's drive direction;
     /// None means that side had no solver contact, preserving the spring-only tick.
     pub hard_reactions: [Option<f32>; 2],
@@ -835,8 +837,18 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             &mut rig.elements.sides[si],
         );
         reports[si] = report;
-        if let Some(reaction) = rig.hard_reactions[si] {
-            reports[si].belt_reaction += reaction;
+    }
+    let forward = affine.transform_vector3(Vec3::NEG_Z);
+    let sensed = rig.sense.tick(
+        hull.linear.dot(forward),
+        1.0 / hull.inverse_mass,
+        reports.each_ref().map(|report| report.belt_reaction),
+        rig.hard_reactions,
+        dt,
+    );
+    for (report, hard) in reports.iter_mut().zip(rig.hard_reactions) {
+        if let Some(reaction) = hard {
+            report.belt_reaction += reaction;
         }
     }
     let (reactions, reaction_slopes) =
@@ -857,11 +869,12 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
                 reports
                     .iter()
                     .flat_map(|report| report.perceived_support.iter()),
-                affine.transform_vector3(Vec3::NEG_Z),
+                forward,
                 &gear.construction,
                 &gear.trans,
                 rig.transmission,
             ),
+            sensed,
             dt,
             supply,
         },
@@ -958,6 +971,7 @@ struct DriveTank {
     elements: &'static mut TrackGripElements,
     effect: &'static mut TrackGripEffect,
     transmission: &'static mut TankTransmission,
+    sense: &'static mut super::sense::DriverSense,
     contacts: &'static mut TrackContacts,
     forces: Option<Forces>,
     volumes: Option<&'static TankVolumes>,
@@ -1171,6 +1185,7 @@ fn apply_track_forces(
                 grip: &mut tank.grip,
                 elements: &mut tank.elements,
                 transmission: &mut tank.transmission.0,
+                sense: &mut tank.sense,
                 hard_reactions: super::stop_contacts::reactions(
                     supports
                         .hard_contacts
@@ -1334,6 +1349,7 @@ mod tests {
         use avian3d::prelude::*;
         let gear = app.world().resource::<TrackGear>();
         let trans = TankTransmission::from_spec(gear.trans());
+        let sense = super::super::sense::DriverSense::for_cut(gear.trans().shift_ticks);
         let count = gear.count;
         let lateral_points = gear.columns[0].samples().len();
         app.world_mut()
@@ -1352,6 +1368,7 @@ mod tests {
                 TrackGripElements::for_links(count, lateral_points),
                 DriveSignal::default(),
                 trans,
+                sense,
             ))
             .id()
     }
@@ -2691,6 +2708,7 @@ mod tests {
         let mut elements =
             TrackGripElements::for_links(gear.count, gear.columns[0].samples().len());
         let mut transmission = TransmissionState::from_spec(&gear.trans);
+        let mut sense = super::super::sense::DriverSense::for_cut(gear.trans.shift_ticks);
         let pieces = RubbleBodies::default();
         let dt = 1.0 / 64.0; // Fixture tick.
         let weight = mass * super::super::derive::G;
@@ -2730,6 +2748,7 @@ mod tests {
                     grip: &mut grip,
                     elements: &mut elements,
                     transmission: &mut transmission,
+                    sense: &mut sense,
                     hard_reactions: [None; 2],
                 },
             );
@@ -2849,6 +2868,7 @@ mod tests {
             let mut elements =
                 TrackGripElements::for_links(gear.count, gear.columns[0].samples().len());
             let mut state = TransmissionState::from_spec(&gear.trans);
+            let mut sense = super::super::sense::DriverSense::for_cut(gear.trans.shift_ticks);
             let pieces = RubbleBodies::default();
             let dt = 1.0 / 64.0; // Fixture fixed step.
             let (mut speed, mut distance) = (ROLLING_FADE_SPEED, 0.0_f32);
@@ -2886,6 +2906,7 @@ mod tests {
                         grip: &mut grip,
                         elements: &mut elements,
                         transmission: &mut state,
+                        sense: &mut sense,
                         hard_reactions: [None; 2],
                     },
                 );

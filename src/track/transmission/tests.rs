@@ -188,6 +188,7 @@ fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> Tr
         // Fixture: reactions that do not move with belt speed.
         reaction_slopes: [0.0; 2],
         perceived_load: super::super::load::PerceivedLoad::default(),
+        sensed: None,
         dt: 1.0 / 64.0,
     }
 }

@@ -109,6 +109,8 @@ struct Tick {
     asleep_under_tank: usize,
     piece_sleep_changes: usize,
     tank_asleep: bool,
+    /// The Driver's reading this tick (`track::sense`).
+    sensed: Option<crate::track::sense::Sensed>,
 }
 
 const ROLES: [&str; 4] = ["belt segment", "bump stop", "side plate", "hull proxy"];
@@ -263,7 +265,34 @@ fn read(
         asleep_under_tank,
         piece_sleep_changes,
         tank_asleep: world.get::<Sleeping>(bed.tank).is_some(),
+        sensed: world
+            .get::<crate::track::sense::DriverSense>(bed.tank)
+            .expect("a driving tank carries its Driver's ledger")
+            .reading,
     }
+}
+
+/// Mean, standard deviation, minimum and maximum of the sensed resistance over `ticks` that
+/// carry a reading and pay no cut (N).
+fn resistance(ticks: &[&Tick]) -> Value {
+    let x: Vec<f64> = ticks
+        .iter()
+        .filter(|t| t.shift == 0)
+        .filter_map(|t| t.sensed.map(|s| f64::from(s.resistance)))
+        .collect();
+    if x.is_empty() {
+        return Value::Null;
+    }
+    let n = x.len() as f64;
+    let mean = x.iter().sum::<f64>() / n;
+    let sd = (x.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n).sqrt();
+    json!({
+        "ticks": x.len(),
+        "mean_n": mean,
+        "sd_n": sd,
+        "min_n": x.iter().copied().fold(f64::INFINITY, f64::min),
+        "max_n": x.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    })
 }
 
 /// How many times `key` changes from one tick to the next.
@@ -326,6 +355,7 @@ fn carried(ticks: &[&Tick], weight: f32, wheels_per_side: usize) -> Value {
         "pieces_asleep_under_tank": mean(ticks, |t| t.asleep_under_tank as f32),
         "rise_m": mean(ticks, |t| t.rise),
         "pitch_deg": mean(ticks, |t| t.pitch.to_degrees()),
+        "sense_resistance": resistance(ticks),
     })
 }
 
@@ -644,12 +674,12 @@ fn write_series(tag: &str, label: &str, ticks: &[Tick], weight: f32) {
         "tick,throttle,z,rise,speed,pitch_deg,belt_l,belt_r,gear,reverse,park,shift,clutch,rpm,\
          spring_l,spring_r,spring_sat,spring_share,seg_share,stop_share,plate_share,hull_share,\
          seg_pts,stop_pts,plate_pts,hull_pts,hull_pieces,awake,asleep_under,sleep_changes,\
-         tank_asleep\n",
+         tank_asleep,sense_speed,sense_r,sense_dr\n",
     );
     for (i, t) in ticks.iter().enumerate() {
         csv += &format!(
             "{i},{},{:.3},{:.3},{:.3},{:.2},{:.3},{:.3},{},{},{},{},{},{:.0},{},{},{},{:.3},\
-             {:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{},{},{},{}\n",
+             {:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             t.throttle,
             t.z,
             t.rise,
@@ -680,6 +710,12 @@ fn write_series(tag: &str, label: &str, ticks: &[Tick], weight: f32) {
             t.asleep_under_tank,
             t.piece_sleep_changes,
             u8::from(t.tank_asleep),
+            t.sensed
+                .map_or(String::new(), |s| format!("{:.3}", s.speed)),
+            t.sensed
+                .map_or(String::new(), |s| format!("{:.0}", s.resistance)),
+            t.sensed
+                .map_or(String::new(), |s| format!("{:.0}", s.push_difference)),
         );
     }
     std::fs::write(dir.join(format!("{tag}-{}.csv", label)), csv)
@@ -762,6 +798,28 @@ fn run(case: &Case, tag: &str) {
         })
         .1;
     let end = ticks.last().expect("the drive ran");
+    // Gear changes after the first touch, as (tick from the readings' start, gear), the first
+    // stalled driven tick, and the first downshift at or after it: the stall's detection delay.
+    let base = ticks.len() - after.len();
+    let gear_steps: Vec<(usize, u8)> = after
+        .windows(2)
+        .enumerate()
+        .filter(|(_, w)| w[0].gear != w[1].gear)
+        .map(|(i, w)| (base + i + 1, w[1].gear))
+        .collect();
+    let first_stall = after
+        .iter()
+        .position(|t| t.throttle > 0.0 && t.speed.abs() < STALL_M_S)
+        .map(|i| base + i);
+    let downshift_after_stall = first_stall.and_then(|stall| {
+        after
+            .windows(2)
+            .enumerate()
+            .map(|(i, w)| (base + i + 1, w))
+            .find(|(tick, w)| *tick > stall && w[1].gear < w[0].gear)
+            .map(|(tick, _)| tick)
+    });
+    let clutch_out_ticks = after.iter().filter(|t| t.clutch == "Out").count();
     let line = json!({
         "tag": tag,
         "label": case.label,
@@ -800,6 +858,10 @@ fn run(case: &Case, tag: &str) {
             "driven_ticks": driven.len(),
             "stalled_ticks": stalled.len(),
             "longest_stall_ticks": longest_stall,
+            "clutch_out_ticks_after_first_touch": clutch_out_ticks,
+            "gear_steps": gear_steps,
+            "first_stall_tick": first_stall,
+            "first_downshift_after_stall_tick": downshift_after_stall,
         },
         "flips_after_first_touch": flips(after, weight, wheels_per_side),
         "at_rest_before_leg": carried(&at_rest, weight, wheels_per_side),

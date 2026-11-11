@@ -96,6 +96,34 @@ fn transmission(bed: &Bed) -> crate::track::transmission::TransmissionState {
         .0
 }
 
+/// The reading the Driver chose with on the last tick.
+fn sensed(bed: &Bed) -> Option<crate::track::sense::Sensed> {
+    bed.app
+        .world()
+        .get::<crate::track::sense::DriverSense>(bed.tank)
+        .expect("a driving tank carries its Driver's ledger")
+        .reading
+}
+
+/// Mean, standard deviation, minimum and maximum of `x`; `None` when empty.
+fn spread(x: &[f32]) -> Option<[f32; 4]> {
+    (!x.is_empty()).then(|| {
+        let n = x.len() as f64;
+        let mean = x.iter().map(|v| f64::from(*v)).sum::<f64>() / n;
+        let var = x
+            .iter()
+            .map(|v| (f64::from(*v) - mean).powi(2))
+            .sum::<f64>()
+            / n;
+        [
+            mean as f32,
+            var.sqrt() as f32,
+            x.iter().copied().fold(f32::INFINITY, f32::min),
+            x.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+        ]
+    })
+}
+
 /// One tick's readings into `series`; station sums into `bins` when given.
 fn record(bed: &Bed, z_c: f32, series: &mut Series, bins: Option<&mut [[f32; 4]; 2 * BINS]>) {
     let hull = bed.hull();
@@ -146,6 +174,11 @@ fn record(bed: &Bed, z_c: f32, series: &mut Series, bins: Option<&mut [[f32; 4];
         .expect("a tank carries its drive signal");
     series.push("steer_signal", signal.steer);
     series.push("throttle_signal", signal.throttle);
+    // The Driver's reading this tick (`track::sense`); null before the ledger closes a tick.
+    let sensed = sensed(bed);
+    series.push("sense_speed", sensed.map_or(f32::NAN, |s| s.speed));
+    series.push("sense_r", sensed.map_or(f32::NAN, |s| s.resistance));
+    series.push("sense_dr", sensed.map_or(f32::NAN, |s| s.push_difference));
 
     let contacts = &world
         .get::<TrackContacts>(bed.tank)
@@ -423,6 +456,7 @@ fn straight_run_up() {
         .len();
     let mut first = vec![None; gears];
     let mut ticks: Vec<(u8, bool, [f32; 2])> = Vec::new();
+    let mut resistance: Vec<(u8, bool, f32)> = Vec::new();
     let mut top_since = None;
     while ticks.len() < RUN_UP_CAP_S * TICKS
         && top_since.is_none_or(|t| ticks.len() - t < CRUISE_S * TICKS)
@@ -439,6 +473,9 @@ fn straight_run_up() {
             state.shift_ticks > 0,
             [drive.sides[0].speed, drive.sides[1].speed],
         ));
+        if let Some(reading) = sensed(&bed) {
+            resistance.push((state.gear, state.shift_ticks > 0, reading.resistance));
+        }
         if !state.reverse && bed.hull().speed() > 0.3 {
             for slot in &mut first[..usize::from(state.gear)] {
                 slot.get_or_insert(ticks.len());
@@ -463,11 +500,21 @@ fn straight_run_up() {
             let alternation = (!runs.is_empty()).then(|| {
                 [0, 1].map(|s| runs.iter().map(|r| r[s]).sum::<f32>() / runs.len() as f32 * 1e3)
             });
+            let r = |cut: bool| {
+                let x: Vec<f32> = resistance
+                    .iter()
+                    .filter(|(g, shifting, _)| *g == gear && *shifting == cut)
+                    .map(|t| t.2)
+                    .collect();
+                spread(&x)
+            };
             json!({
                 "gear": gear,
                 "first_tick": first[usize::from(gear - 1)],
                 "engaged_ticks": engaged,
                 "belt_alternation_mm_s": alternation,
+                "sense_r_engaged_mean_sd_min_max_n": r(false),
+                "sense_r_cut_mean_sd_min_max_n": r(true),
             })
         })
         .collect();
@@ -479,6 +526,62 @@ fn straight_run_up() {
         "gears": per_gear,
     });
     println!("TURNPROBE-RUNUP {line}");
+}
+
+/// Each forward gear's priced pull (N) at hull rest (the launch-slip price) and at its own
+/// torque-peak and governed speeds, beside the next gear's at the same speed: the gaps a sensed
+/// resistance must resolve to tell neighbouring gears apart. Fixture: full and 0.3 pedal.
+fn pull_table() {
+    use crate::track::transmission::{ClutchState, DriveSupply, RPM_TO_RAD, price_driver_force};
+    let bed = Bed::new(flat());
+    let tp = bed
+        .app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .trans()
+        .clone();
+    let pull = |gear: usize, speed: f32, command: f32| {
+        let ratio = tp.gears_fwd[gear];
+        let slip = speed * ratio / tp.sprocket_radius < tp.launch_omega(command);
+        let clutch = if slip {
+            ClutchState::Slip
+        } else {
+            ClutchState::In
+        };
+        price_driver_force(
+            &tp,
+            DriveSupply::WHOLE,
+            speed,
+            ratio,
+            command,
+            f32::INFINITY,
+            clutch,
+        )
+    };
+    for command in [1.0_f32, 0.3] {
+        let rows: Vec<Value> = (0..tp.gears_fwd.len())
+            .map(|g| {
+                let speed_at = |rpm: f32| rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[g];
+                let row = |speed: f32| {
+                    json!({
+                        "speed_m_s": speed,
+                        "pull_n": pull(g, speed, command),
+                        "next_pull_n": (g + 1 < tp.gears_fwd.len()).then(|| pull(g + 1, speed, command)),
+                    })
+                };
+                json!({
+                    "gear": g + 1,
+                    "rest": row(0.0),
+                    "peak": row(speed_at(tp.peak_torque_rpm)),
+                    "governed": row(speed_at(tp.engine.governed_rpm)),
+                })
+            })
+            .collect();
+        println!(
+            "TURNPROBE-PULL {}",
+            json!({"command": command, "launch_gears": tp.launch_gears, "gears": rows})
+        );
+    }
 }
 
 /// Zero input on a slope after the settle: the hull's travel over the next `PARK_SETTLE_S`, then
@@ -756,6 +859,9 @@ fn turn_probe() {
     }
     if selected("straight run-up") {
         straight_run_up();
+    }
+    if selected("pull table") {
+        pull_table();
     }
     for degrees in [10.0_f32, 20.0] {
         for (along, name) in [(false, "across"), (true, "uphill")] {

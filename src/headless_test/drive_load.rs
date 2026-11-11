@@ -51,9 +51,36 @@ struct Landing {
     terms: Vec<[f32; 4]>,
 }
 
+/// `n`, minimum, median, 95th percentile and maximum of `values`, or `none`.
+fn summary(values: &[f32]) -> String {
+    if values.is_empty() {
+        return String::from("none");
+    }
+    let mut values = values.to_vec();
+    values.sort_by(f32::total_cmp);
+    format!(
+        "n={} min={:.6} median={:.6} p95={:.6} max={:.6}",
+        values.len(),
+        values[0],
+        values[values.len() / 2],
+        values[(values.len() - 1) * 95 / 100],
+        values[values.len() - 1]
+    )
+}
+
+/// The sensed resistance this tick (N), when the Driver has a reading.
+fn sensed_resistance(app: &App, tank: Entity) -> Option<f32> {
+    let p = probe(app, tank);
+    p.sensed.then_some(p.sensed_resistance_n)
+}
+
 #[derive(Default)]
 struct Measurements {
     loads: Vec<f32>,
+    /// Sensed resistance beside each observed load, and over every tick split by cut.
+    resist: Vec<f32>,
+    resist_coupled: Vec<f32>,
+    resist_cut: Vec<f32>,
     gaps: Vec<f32>,
     residuals: Vec<f32>,
     landing_speed_errors: Vec<f32>,
@@ -97,6 +124,14 @@ impl Measurements {
         use crate::track::transmission::ClutchState;
         let probe = probe(app, tank);
         self.loads.push(probe.perceived_load_n);
+        if probe.sensed {
+            self.resist.push(probe.sensed_resistance_n);
+            if probe.shifting {
+                self.resist_cut.push(probe.sensed_resistance_n);
+            } else {
+                self.resist_coupled.push(probe.sensed_resistance_n);
+            }
+        }
         let gear = app.world().resource::<crate::track::sim::TrackGear>();
         let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
         if self
@@ -204,26 +239,17 @@ impl Measurements {
                 .all(|gap| gap.is_finite() && gap.abs() < margin),
             "the measured deadband must cover the same-instant numerical residual"
         );
-        let summary = |values: &[f32]| {
-            if values.is_empty() {
-                return String::from("none");
-            }
-            let mut values = values.to_vec();
-            values.sort_by(f32::total_cmp);
-            format!(
-                "n={} min={:.6} median={:.6} p95={:.6} max={:.6}",
-                values.len(),
-                values[0],
-                values[values.len() / 2],
-                values[(values.len() - 1) * 95 / 100],
-                values[values.len() - 1]
-            )
-        };
         println!(
             "MEASURED load {label}: weight_n={weight:.6} expected_n={expected:.6} L[{}] sustained_gap_n[{}] landing_speed_error_m_s[{}]",
             summary(&self.loads),
             summary(&self.gaps),
             summary(&self.landing_speed_errors)
+        );
+        println!(
+            "MEASURED sensed {label}: expected_n={expected:.6} R[{}] R_coupled[{}] R_cut[{}]",
+            summary(&self.resist),
+            summary(&self.resist_coupled),
+            summary(&self.resist_cut)
         );
     }
 }
@@ -255,6 +281,7 @@ pub(super) fn place(
     transmission.0.omega_e = (speed * params.gears_fwd[(gear - 1) as usize]
         / params.sprocket_radius)
         .max(params.engine.idle_rpm * crate::track::transmission::RPM_TO_RAD);
+    let sense = crate::track::sense::DriverSense::for_cut(params.shift_ticks);
     let mut e = app.world_mut().entity_mut(tank);
     {
         let mut transform = e.get_mut::<Transform>().unwrap();
@@ -266,6 +293,7 @@ pub(super) fn place(
     e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = rotation * Vec3::NEG_Z * speed;
     e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
     *e.get_mut::<TankTransmission>().unwrap() = transmission;
+    *e.get_mut::<crate::track::sense::DriverSense>().unwrap() = sense;
     *e.get_mut::<crate::track::sim::DriveSignal>().unwrap() =
         crate::track::sim::DriveSignal::default();
     for side in &mut e.get_mut::<TrackDrive>().unwrap().sides {
@@ -347,6 +375,7 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
                 }
                 if tick < 39 * FIXED_TICKS_PER_SECOND {
                     measurements.loads.clear();
+                    measurements.resist.clear();
                 }
             }
             if !rolling {
@@ -433,6 +462,9 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
                     grip: &mut grip,
                     elements: &mut elements,
                     transmission: &mut state,
+                    sense: &mut crate::track::sense::DriverSense::for_cut(
+                        construction.trans().shift_ticks,
+                    ),
                     hard_reactions: [None; 2],
                 },
             );
@@ -499,9 +531,11 @@ fn perceived_load_and_landing_gaps_on_the_course() {
             .rolling_at(nominal_pressure(&app));
         let expected = weight * (angle.sin() + rolling * angle.cos());
         let mut measurements = Measurements::default();
+        let mut parked = Vec::new();
         for _ in 0..64 {
             drive_tick(&mut app, tank, 0.0, 0.0);
             measurements.tick(&app, tank);
+            parked.extend(sensed_resistance(&app, tank));
             let load = probe(&app, tank).perceived_load_n;
             assert!(
                 (load - expected).abs() < weight * 1e-4,
@@ -519,6 +553,11 @@ fn perceived_load_and_landing_gaps_on_the_course() {
                     .sum::<usize>()
             );
         }
+        println!(
+            "MEASURED sensed parked {degrees} degrees: grade_n={:.6} R[{}]",
+            weight * angle.sin(),
+            summary(&parked)
+        );
         // Observation on a supported plane does not imply a resting body. The launch proof
         // starts with fresh motion, strain and drivetrain state on that same supported pose.
         let launch_position = app
@@ -551,12 +590,21 @@ fn perceived_load_and_landing_gaps_on_the_course() {
         let mut cuts = 0;
         let mut was_cut = false;
         let mut minimum = 0.0_f32;
+        let (mut launch_coupled, mut launch_cut) = (Vec::new(), Vec::new());
         for tick in 0..30 * FIXED_TICKS_PER_SECOND {
             drive_tick(&mut app, tank, 1.0, 0.0);
             if tick == 0 {
                 launch_gear = app.world().get::<TankTransmission>(tank).unwrap().0.gear;
             }
             let p = probe(&app, tank);
+            // The first second holds the launch's own slip; the rest is the run-up.
+            if p.sensed && tick >= FIXED_TICKS_PER_SECOND {
+                if p.shifting {
+                    launch_cut.push(p.sensed_resistance_n);
+                } else {
+                    launch_coupled.push(p.sensed_resistance_n);
+                }
+            }
             cuts += usize::from(p.shifting && !was_cut);
             was_cut = p.shifting;
             minimum = minimum.min(p.next_speeds[0]).min(p.next_speeds[1]);
@@ -582,6 +630,11 @@ fn perceived_load_and_landing_gaps_on_the_course() {
             .dot(rotation * Vec3::NEG_Z);
         println!(
             "MEASURED grade launch degrees={degrees} gear={launch_gear} distance_m={climb} cuts={cuts} minimum_belt_m_s={minimum}"
+        );
+        println!(
+            "MEASURED sensed launch {degrees} degrees: expected_n={expected:.6} R_coupled[{}] R_cut[{}]",
+            summary(&launch_coupled),
+            summary(&launch_cut)
         );
         if degrees == 20.0 {
             assert!(cuts <= 1, "S2 must not cascade through cuts");
@@ -678,6 +731,7 @@ fn perceived_load_during_a_rearward_shot_uphill() {
         app.world_mut().get_mut::<TankCommand>(tank).unwrap().aim =
             Some(crate::command::AimIntent::HullLocal(Vec3::Z * 1000.0));
         let mut samples = Vec::new();
+        let mut resist = Vec::new();
         let mut gears = Vec::new();
         for tick in 0..128 {
             app.world_mut()
@@ -698,6 +752,7 @@ fn perceived_load_during_a_rearward_shot_uphill() {
                 "the shot fixture must remain on its declared incline: {load} vs {expected}"
             );
             samples.push(load);
+            resist.push(sensed_resistance(&app, tank));
             let state = app.world().get::<TankTransmission>(tank).unwrap().0;
             gears.push((state.gear, state.shift_ticks));
         }
@@ -716,12 +771,30 @@ fn perceived_load_during_a_rearward_shot_uphill() {
         );
         (
             samples,
+            resist,
             gears,
             app.world().resource::<TankBlueprint>().spec.mass * crate::track::derive::G,
         )
     };
-    let (baseline, baseline_gears, weight) = run(false);
-    let (fired, fired_gears, _) = run(true);
+    let (baseline, baseline_resist, baseline_gears, weight) = run(false);
+    let (fired, fired_resist, fired_gears, _) = run(true);
+    let resist_change: Vec<f32> = baseline_resist
+        .iter()
+        .zip(&fired_resist)
+        .skip(64)
+        .filter_map(|(a, b)| Some(b.as_ref()? - a.as_ref()?))
+        .collect();
+    println!(
+        "MEASURED sensed rearward shot uphill: baseline R after the shot[{}] paired R change (fired - baseline)[{}]",
+        summary(
+            &baseline_resist[64..]
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>()
+        ),
+        summary(&resist_change)
+    );
     assert_eq!(
         baseline_gears, fired_gears,
         "a shot must not change the gear decision or interruption timeline"

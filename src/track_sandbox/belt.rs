@@ -244,6 +244,14 @@ pub(super) fn apply_belt_support_field(
         hull_rot.0,
         &faces,
     );
+    let forward = affine.transform_vector3(Vec3::NEG_Z);
+    let sensed = trans_state.1.tick(
+        hull_body.linear.dot(forward),
+        mass.value(),
+        reports.each_ref().map(|report| report.belt_reaction),
+        hard_reactions,
+        dt,
+    );
     for (si, report) in reports.iter_mut().enumerate() {
         if let Some(reaction) = hard_reactions[si] {
             report.belt_reaction += reaction;
@@ -255,7 +263,7 @@ pub(super) fn apply_belt_support_field(
         reports
             .iter()
             .flat_map(|report| report.perceived_support.iter()),
-        affine.transform_vector3(Vec3::NEG_Z),
+        forward,
         &construction,
         &transmission.0,
         &trans_state.0,
@@ -276,6 +284,7 @@ pub(super) fn apply_belt_support_field(
             reactions,
             reaction_slopes,
             perceived_load,
+            sensed,
             dt,
         },
     );

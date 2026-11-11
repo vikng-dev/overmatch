@@ -31,6 +31,7 @@ use crate::substances::Matter;
 use crate::track::bump_stop::{
     TrackColliders, spawn_replica_track_colliders, spawn_track_colliders,
 };
+use crate::track::sense::DriverSense;
 use crate::track::sim::{DriveSignal, EngineRpm, TankTransmission, TrackGripElements};
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
@@ -224,7 +225,7 @@ pub(crate) fn load_tank_sim_assets(mut commands: Commands, asset_server: Res<Ass
     });
 }
 
-fn tank_transmission(spec: &TankSpec) -> TankTransmission {
+fn tank_transmission(spec: &TankSpec) -> (TankTransmission, DriverSense) {
     // Only `engine.idle_rpm` reaches the replicated `TankTransmission` state (the crank seed); the
     // geometry-coupled params (gears, kappa, sprocket radius) live in `TrackGear.trans`, built from
     // the measured `RigGeom` in `track::sim::init_track_gear`. So nominal geometry here is
@@ -234,7 +235,11 @@ fn tank_transmission(spec: &TankSpec) -> TankTransmission {
         .track
         .nominal_transmission_params(&spec.roadwheels)
         .expect("TankSpec transmission was validated before tank construction");
-    TankTransmission::from_spec(&params)
+    // The Driver's ledger averages one shift cut, a gearbox datum the nominal params carry.
+    (
+        TankTransmission::from_spec(&params),
+        DriverSense::for_cut(params.shift_ticks),
+    )
 }
 
 /// Complete fire-gate state in the same name-sorted order used to assign every [`WeaponIndex`].
@@ -267,7 +272,7 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     presentation: TankPresentation,
     root_bundle: B,
 ) -> Entity {
-    let transmission = tank_transmission(content.spec());
+    let (transmission, sense) = tank_transmission(content.spec());
     let resolution = crate::track::forces::CONTACT_RESOLUTION;
     // The element-grip slabs ride the SAME insertion that adds `Tank`: pre-sized synchronously
     // at force resolution (`track::sim::TrackGripElements` owns the fixed-size invariant),
@@ -279,6 +284,8 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         // root can replicate or simulate, and the public crank speed read off it.
         transmission,
         EngineRpm::of(&transmission),
+        // The Driver's ledger starts empty: nothing has been felt before the first tick.
+        sense,
         // The shaped drive signal starts at rest, as the command does.
         DriveSignal::default(),
         // Complete REV-17 weapon gate, synchronously constructed from the same sorted spec data as
@@ -314,7 +321,7 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
     content: TankContent,
     root_bundle: B,
 ) -> Entity {
-    let transmission = tank_transmission(content.spec());
+    let (transmission, sense) = tank_transmission(content.spec());
     let resolution = crate::track::forces::CONTACT_RESOLUTION;
     let root = commands
         .spawn((
@@ -322,6 +329,7 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
             TrackGripElements::for_links(resolution.stations, resolution.lateral_points),
             transmission,
             EngineRpm::of(&transmission),
+            sense,
             DriveSignal::default(),
             weapon_gate(content.spec()),
             weapon_loads(content.spec()),
@@ -1240,7 +1248,7 @@ mod proxy_tests {
             .spawn((
                 Position::default(),
                 Rotation::default(),
-                EngineRpm::of(&tank_transmission(content.spec())),
+                EngineRpm::of(&tank_transmission(content.spec()).0),
             ))
             .id();
         attach_replicated_tank_body(

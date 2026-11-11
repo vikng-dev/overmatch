@@ -120,6 +120,10 @@ const TRANSMISSION_INPUT_FIELDS: &[(&str, &str)] = &[
     ("perceived_load_n", "f32"),
     ("grip_limit_n", "f32"),
     ("turn_moment_nm", "f32"),
+    ("sensed", "bool"),
+    ("sensed_speed", "f32"),
+    ("sensed_resistance_n", "f32"),
+    ("sensed_push_difference_n", "f32"),
 ];
 
 const CLUTCH_ENGINE_FIELDS: &[(&str, &str)] = &[
@@ -273,6 +277,11 @@ pub(crate) struct TransmissionProbe {
     pub perceived_load_n: f32,
     pub grip_limit_n: f32,
     pub turn_moment_nm: f32,
+    /// What the Driver felt of the hull this tick (`track::sense`); zeros when nothing was sensed.
+    pub sensed: bool,
+    pub sensed_speed: f32,
+    pub sensed_resistance_n: f32,
+    pub sensed_push_difference_n: f32,
     pub priced_force_n: f32,
     pub delivered_force_n: f32,
     pub mean_speed: f32,
@@ -783,6 +792,14 @@ fn transmission_input_payload(capture: &BitprobeCapture) -> Vec<u32> {
         probe.perceived_load_n,
         probe.grip_limit_n,
         probe.turn_moment_nm,
+    ] {
+        f32_word(&mut output, value);
+    }
+    bool_word(&mut output, probe.sensed);
+    for value in [
+        probe.sensed_speed,
+        probe.sensed_resistance_n,
+        probe.sensed_push_difference_n,
     ] {
         f32_word(&mut output, value);
     }

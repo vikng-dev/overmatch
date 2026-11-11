@@ -445,10 +445,23 @@ impl BeltGripElements {
     }
 }
 
-/// The joint transmission's state (gear, shift countdown, steering detent, direction) — the
-/// sandbox analogue of the game's `TankTransmission` component. Reset with the rig.
+/// The joint transmission's state (gear, shift countdown, steering detent, direction) and the
+/// Driver's ledger — the sandbox analogue of the game's `TankTransmission` and `DriverSense`
+/// components. Reset with the rig.
 #[derive(Resource)]
-struct TransState(crate::track::transmission::TransmissionState);
+struct TransState(
+    crate::track::transmission::TransmissionState,
+    crate::track::sense::DriverSense,
+);
+
+impl TransState {
+    fn fresh(params: &crate::track::transmission::TransmissionParams) -> Self {
+        Self(
+            crate::track::transmission::TransmissionState::from_spec(params),
+            crate::track::sense::DriverSense::for_cut(params.shift_ticks),
+        )
+    }
+}
 
 /// Last tick's transmission report (gear/rpm/detent/power scale) — harness `tr` rows + the
 /// legend. `None` before the first tick.
@@ -1021,9 +1034,7 @@ fn build_rig(
             .transmission_params(&spec.roadwheels, geom.wrap_radii(), geom.plane_x)
             .expect("the Tiger's transmission block is validated at bake"),
     );
-    commands.insert_resource(TransState(
-        crate::track::transmission::TransmissionState::from_spec(&transmission.0),
-    ));
+    commands.insert_resource(TransState::fresh(&transmission.0));
     commands.insert_resource(transmission);
     // Size grip slabs at force resolution; see `BeltGripElements` for the invariant.
     let pin_belt = PinBelt::for_rig(&geom);
@@ -1348,9 +1359,7 @@ fn reset_rig(
     shaped.0 = crate::track::drive::DriveAxes::default();
     belt_state.reseat();
     // A fresh rig is in 1st gear with no shift in flight.
-    *trans_state = TransState(crate::track::transmission::TransmissionState::from_spec(
-        &transmission.0,
-    ));
+    *trans_state = TransState::fresh(&transmission.0);
     // Stale cosmetic wheel lift survives the teleport otherwise: for the first CLAIMED ~100 ms the
     // conform solves against phantom raised wheel circles while the hull settles.
     for mut susp in &mut wheels {
