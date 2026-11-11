@@ -1174,8 +1174,8 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// between gears on the same ground (MEASURED on rubble, house stop-go at 4.9 m/s: 0.92 in sixth
 /// against 0.90 in seventh; 1.00 on clear ground), so the engaged gear's share does not price
 /// another. A gear left on the way down, and every gear above it, is not taken while the hull
-/// meets at least what that gear sustained ([`super::sense::Failed`]): the retry would fail as it
-/// did (MEASURED on the standing heap at a third of the pedal: second priced 700 N over `R` from a
+/// meets at least what that gear sustained and a retry would turn its crank no faster than it
+/// failed at ([`super::sense::Failed`]): the retry would fail as it did (MEASURED on the standing heap at a third of the pedal: second priced 700 N over `R` from a
 /// crawl, stalled where the cut landed, and the Driver cycled first and second five times).
 /// 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
 ///    current gear, and none the memory holds back, else first where it offers more spare than
@@ -1253,17 +1253,39 @@ fn choose_gear(
     };
     let spare = |gear: u8, at: f32, prior: ClutchState| pull(gear, at, prior) - load(gear);
     let stall = sensed.stall.filter(|stall| stall.dir == dir);
+    // The crank speed delivery engages `gear` at with the hull at `at` along the ladder, its clutch
+    // closing from out: the launch rpm where it slips, else its shaft's.
+    let engaged_crank = |gear: u8, at: f32| {
+        let shaft = at * ladder[usize::from(gear - 1)] / tp.sprocket_radius;
+        let clutch = engagement(tp, ClutchState::Out, at < PARK_ENGAGE_SPEED, shaft, command);
+        if clutch == ClutchState::Slip {
+            tp.launch_omega(command)
+        } else {
+            shaft
+        }
+    };
     // A gear left on the way down, and every gear above it, waits for the hull to meet less than
-    // that gear sustained: the highest gear the memory admits.
-    let admitted = sensed
-        .failed
-        .filter(|failed| failed.gear.0 == st.reverse && dir * sensed.resistance >= failed.push)
-        .map_or(top, |failed| failed.gear.1 - 1);
+    // that gear sustained or for a crank faster than it failed at: the highest gear the memory
+    // admits with the hull at `at`.
+    let admitted = |at: f32| {
+        sensed
+            .failed
+            .filter(|failed| {
+                failed.gear.0 == st.reverse
+                    && dir * sensed.resistance >= failed.push
+                    && engaged_crank(failed.gear.1, at) <= failed.crank
+            })
+            .map_or(top, |failed| failed.gear.1 - 1)
+    };
     if st.clutch == ClutchState::Out && speed < PARK_ENGAGE_SPEED {
         // A gear observed failing at this stall is not priced again, nor any that pulls less:
         // the bound is a floor, so no gear weaker than the current one is taken against it.
-        let highest = stall.map_or(admitted, |stall| {
-            stall.gear.saturating_sub(1).min(st.gear).min(admitted)
+        let highest = stall.map_or(admitted(speed), |stall| {
+            stall
+                .gear
+                .saturating_sub(1)
+                .min(st.gear)
+                .min(admitted(speed))
         });
         st.gear = (1..=tp.launch_gears.min(highest))
             .rev()
@@ -1298,11 +1320,11 @@ fn choose_gear(
         && st.steer_step == 0
         && st.clutch == ClutchState::In
         && landing >= PARK_ENGAGE_SPEED
-        && st.gear < admitted
+        && st.gear < admitted(landing)
     {
         // A detent turn's radius belongs to its gear: no upshift changes it.
         // The candidate that pulls hardest where it lands, the higher on a tie.
-        (st.gear + 1..=st.gear.saturating_add(tp.max_step).min(admitted))
+        (st.gear + 1..=st.gear.saturating_add(tp.max_step).min(admitted(landing)))
             .filter(|&gear| spare(gear, landing, ClutchState::Out) > margin)
             .map(|gear| (gear, pull(gear, landing, ClutchState::Out)))
             .filter(|&(_, pull)| pull > dir * sensed.drive + margin)

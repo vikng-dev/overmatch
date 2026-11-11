@@ -2401,6 +2401,58 @@ fn the_top_of_the_longest_admitted_ladder_chooses_nothing_above_it() {
     assert_eq!(state.gear, top);
 }
 
+/// A gear left downward is retried once the hull meets less than it sustained or a retry would
+/// turn its crank faster than it failed at, and not before: the memory must hold a retry back no
+/// further than the operating point it observed, and no less. Fixture: each class drivetrain
+/// cruising in first where second qualifies, with second remembered on each side of both bounds.
+#[test]
+fn a_left_gear_waits_for_less_resistance_or_a_faster_crank() {
+    for (fp, tp) in class_drivetrains() {
+        let construction = construction(&fp);
+        let ratio = tp.gears_fwd[0];
+        let cruising = |rpm: f32| TransmissionState {
+            gear: 1,
+            clutch: ClutchState::In,
+            omega_e: rpm * RPM_TO_RAD,
+            ..fresh(&tp)
+        };
+        let span = tp.engine.governed_rpm - tp.engine.idle_rpm;
+        let (rpm, mut inp) = (1..24)
+            .flat_map(|step| (1..=20).map(move |share| (step, share)))
+            .find_map(|(step, share)| {
+                let rpm = tp.engine.idle_rpm + span * step as f32 / 24.0;
+                let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / ratio;
+                let inp = driver_input(speed, launch_force(&tp, 1) * share as f32 / 40.0, 1.0);
+                let mut st = cruising(rpm);
+                choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
+                (st.gear == 2).then_some((rpm, inp))
+            })
+            .expect("a cruise in first where second qualifies");
+        let resistance = felt(&inp).resistance;
+        for (push, crank, retried) in [
+            (0.5 * resistance, f32::INFINITY, false),
+            (0.5 * resistance, 0.0, true),
+            (2.0 * resistance, f32::INFINITY, true),
+        ] {
+            inp.sensed.as_mut().expect("a Driver-policy reading").failed =
+                Some(super::super::sense::Failed {
+                    gear: (false, 2),
+                    push,
+                    crank,
+                    command: 1.0,
+                    steer_step: 0,
+                });
+            let mut st = cruising(rpm);
+            choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
+            assert_eq!(
+                st.gear == 2,
+                retried,
+                "second sustained {push} N against {resistance} N, failed at {crank} rad/s"
+            );
+        }
+    }
+}
+
 /// Fixture launch price of forward `gear` at full pedal: what a slipping clutch delivers.
 fn launch_force(tp: &TransmissionParams, gear: u8) -> f32 {
     price_driver_force(
