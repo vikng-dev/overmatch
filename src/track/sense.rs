@@ -24,7 +24,7 @@ use std::num::NonZeroU8;
 use bevy::prelude::*;
 
 use super::stop_contacts::HardReaction;
-use super::transmission::{PARK_ENGAGE_SPEED, RPM_TO_RAD, TransmissionReport};
+use super::transmission::{PARK_ENGAGE_SPEED, TransmissionReport};
 
 /// One driven tick of the ledger: the belts' traction on the hull along its heading through it,
 /// `[left, right]` (N), its contacts' grip budget (N), the
@@ -79,35 +79,6 @@ pub struct Stall {
     pub gear: u8,
 }
 
-/// A gear the Driver left downward, and the operating point it failed at: it is not retried while
-/// the hull meets at least the resistance it failed under, less M, and a retry would turn its crank
-/// no faster, under no more pedal and in the same detent. Below the crank's peak-torque speed a
-/// slower crank pulls less, so a retry no faster fails as it did; a faster one, or resistance easing
-/// past M, is evidence the failure does not cover. A detent's steering takes its own share of the gear's work, so a push delivered in a turn
-/// says nothing of the gear straight (MEASURED, flat ground at a third of the pedal: fourth left in
-/// a tight turn delivering 22.6 kN against `R` of 29.0 kN, then priced at 53.9 kN straight and held
-/// back).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Failed {
-    /// The ladder and gear left.
-    pub gear: Engaged,
-    /// The resistance the gear failed under along its ladder (N): [`Sensed::resistance`] over the
-    /// window it was left in.
-    pub resistance: f32,
-    /// The crank speed the gear failed at (rad/s): the speed its clutch landed it at, as the
-    /// Driver predicts a landing (a slipping clutch's launch speed, a held one's shaft speed),
-    /// where no whole locked window of it held or gained, else the speed it lugged down to; for a
-    /// failed retry, never below the record it retried or the landing the Driver predicted when it
-    /// admitted the retry ([`TransmissionReport::landing_omega`]). A retry is admitted under the same
-    /// resistance only faster, and a retry that fails records that faster speed, so the retries
-    /// under one resistance are finite.
-    pub crank: f32,
-    /// The pedal it failed under.
-    pub command: f32,
-    /// The steering detent it failed in.
-    pub steer_step: u8,
-}
-
 /// The Driver's reading for one tick.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sensed {
@@ -137,8 +108,6 @@ pub struct Sensed {
     /// The bound a stall gives: `None` once the hull moves or no pull is asked. It is a floor on
     /// what the hull meets, and outlives the stall: whether the hull stalls now is [`Self::stalled`].
     pub stall: Option<Stall>,
-    /// The latest gear left downward while its memory holds.
-    pub failed: Option<Failed>,
     /// The hull stalls now under the engaged gear: a stall's bound holds, the gear drove every
     /// sample of the window with the hull at rest, and over the window its belts came to rest or
     /// did not gain. The window, not each tick, establishes the condition (MEASURED on the rubble
@@ -167,17 +136,6 @@ pub(crate) struct Contacts {
     pub(crate) hard: [Option<HardReaction>; 2],
 }
 
-/// The engaged gear since its clutch first drove or held under the pedal: the crank speed its
-/// clutch landed it at and on its latest such tick (rad/s), and whether a whole locked window of it
-/// held or gained.
-#[derive(Clone, Copy, Debug)]
-struct Attempt {
-    gear: Engaged,
-    first: f32,
-    latest: f32,
-    gained: bool,
-}
-
 /// The Driver's ledger: server-side driving state, built empty at spawn from the tank's cut
 /// length. Nothing is sensed until one driven tick has closed.
 #[derive(Component, Clone, Debug)]
@@ -187,12 +145,6 @@ pub struct DriverSense {
     /// The solver's push for this tick is read on the next one, so the sample closes there.
     open: Option<Open>,
     stall: Option<Stall>,
-    failed: Option<Failed>,
-    /// The failure of the gear engaged again, which a failure of its retry does not undercut.
-    retried: Option<Failed>,
-    /// The gear the Driver changed to last and the crank speed it predicted delivery engages it at.
-    landing: Option<(Engaged, f32)>,
-    attempt: Option<Attempt>,
     /// The gear asked to pull the latest samples, and how many of the latest of those it drove with
     /// the hull at rest and how many its clutch held.
     run: Option<(Engaged, usize, usize)>,
@@ -209,10 +161,6 @@ impl DriverSense {
             samples: VecDeque::with_capacity(window),
             open: None,
             stall: None,
-            failed: None,
-            retried: None,
-            landing: None,
-            attempt: None,
             run: None,
             reading: None,
         }
@@ -329,7 +277,6 @@ impl DriverSense {
                 drive_gain: mass * belt_gain / (count * dt),
                 grip: grip / count,
                 stall: self.stall,
-                failed: self.failed,
                 // The window's belts at rest or not gaining under the stall's pull.
                 stalled: self.stall.is_some_and(|stall| {
                     self.run.is_some_and(|(_, rested, _)| rested >= self.window)
@@ -349,101 +296,13 @@ impl DriverSense {
     }
 
     /// This tick's step as delivery ran it: a paid cut is not felt, a step that asked no pull
-    /// withdraws the push a stall's bound was read from, a cut to a lower gear remembers the gear
-    /// it left, and a driven step records its clutch and its sprockets' force.
+    /// withdraws the push a stall's bound was read from, and a driven step records its clutch and
+    /// its sprockets' force.
     pub(crate) fn drove(&mut self, report: &TransmissionReport) {
         let dir = if report.reverse { -1.0 } else { 1.0 };
         let pull = report.pulling.then_some(dir);
         if self.stall.is_some_and(|stall| pull != Some(stall.dir)) {
             self.stall = None;
-        }
-        let engaged = (report.reverse, report.gear);
-        if let Some(omega) = report.landing_omega {
-            self.landing = Some((engaged, omega));
-        }
-        // Released, on the other ladder, pressed harder or steered otherwise, a failure says nothing
-        // of the gear now.
-        let stale = |failed: Failed| {
-            !report.pulling
-                || failed.gear.0 != engaged.0
-                || report.command > failed.command
-                || report.steer_step != failed.steer_step
-        };
-        if self.retried.is_some_and(stale) {
-            self.retried = None;
-        }
-        if let Some(failed) = self.failed {
-            if stale(failed) {
-                self.failed = None;
-            } else if failed.gear.1 <= engaged.1 && !report.shifting {
-                // Engaged again: the gear is tried anew, and a failed retry records no slower than
-                // the landing the Driver admitted it at.
-                self.retried = Some(failed)
-                    .filter(|failed| failed.gear == engaged)
-                    .map(|failed| {
-                        let (_, landing) = self.landing.filter(|(gear, _)| *gear == engaged).expect(
-                            "a gear engaged again is the Driver's change, which predicts its landing",
-                        );
-                        Failed {
-                            crank: failed.crank.max(landing),
-                            ..failed
-                        }
-                    });
-                self.failed = None;
-            }
-        }
-        if let (true, Some((left, _, _)), Some(reading)) = (report.shifting, self.run, self.reading)
-            && left.0 == engaged.0
-            && engaged.1 < left.1
-        {
-            let attempt = self.attempt.filter(|attempt| attempt.gear == left).expect(
-                "a gear is left downward only after a window it stalled or held under its clutch",
-            );
-            let crank = if attempt.gained {
-                attempt.latest
-            } else {
-                attempt.first
-            };
-            let floor = self
-                .retried
-                .filter(|retried| retried.gear == left)
-                .map_or(crank, |retried| retried.crank);
-            self.failed = Some(Failed {
-                gear: left,
-                resistance: dir * reading.resistance,
-                crank: crank.max(floor),
-                command: report.command,
-                steer_step: report.steer_step,
-            });
-            self.retried = None;
-        }
-        if !report.pulling {
-            self.attempt = None;
-        } else if !report.shifting && (report.driving || report.locked) {
-            let crank = report.rpm * RPM_TO_RAD;
-            let gained = self.run.is_some_and(|(gear, _, _)| gear == engaged)
-                && self
-                    .reading
-                    .is_some_and(|reading| reading.observed && dir * reading.drive_gain >= 0.0);
-            self.attempt = Some(match self.attempt {
-                Some(attempt) if attempt.gear == engaged => Attempt {
-                    latest: crank,
-                    gained: attempt.gained || gained,
-                    ..attempt
-                },
-                _ => Attempt {
-                    gear: engaged,
-                    // The Driver predicts a slipping clutch's landing at the launch speed; a crank
-                    // still spooling to it, or held under it by the load, reads slower.
-                    first: if report.locked {
-                        crank
-                    } else {
-                        crank.max(report.launch_omega)
-                    },
-                    latest: crank,
-                    gained,
-                },
-            });
         }
         if report.shifting {
             self.cut();
@@ -627,58 +486,6 @@ mod tests {
         assert!(stalled.stalled, "driven at rest, the belts held");
     }
 
-    /// A gear left downward is remembered only while what it failed under holds: the same ladder,
-    /// no more pedal, the same detent, pull still asked and that gear not engaged again. The
-    /// Driver holds a gear back on the memory, so a memory outliving any of these holds it back
-    /// unseen. Fixture: third gear pulling at rest at a third of the pedal, then a cut to first.
-    #[test]
-    fn a_left_gear_is_remembered_while_its_failure_holds() {
-        let forward = Vec3::NEG_Z;
-        let pull = |gear: u8, command: f32, steer_step: u8| TransmissionReport {
-            gear,
-            command,
-            steer_step,
-            pulling: true,
-            driving: true,
-            ..Default::default()
-        };
-        let after = |report: TransmissionReport| {
-            let mut sense = DriverSense::for_cut(CUT);
-            let contacts = Contacts {
-                soft: [forward * 10_000.0; 2],
-                grip: 0.0,
-                hard: [None; 2],
-            };
-            let cut = TransmissionReport {
-                shifting: true,
-                ..pull(1, 0.3, 0)
-            };
-            for report in [pull(3, 0.3, 0), pull(3, 0.3, 0), cut, report] {
-                sense.tick(Vec3::ZERO, forward, 0.0, MASS, contacts, DT);
-                sense.drove(&report);
-            }
-            sense
-                .tick(Vec3::ZERO, forward, 0.0, MASS, contacts, DT)
-                .and_then(|reading| reading.failed)
-                .map(|failed| failed.gear)
-        };
-        assert_eq!(after(pull(1, 0.3, 0)), Some((false, 3)), "first, as it was");
-        for (report, case) in [
-            (pull(1, 0.5, 0), "pressed harder"),
-            (pull(1, 0.3, 1), "steered"),
-            (
-                TransmissionReport {
-                    landing_omega: Some(0.0), // Fixture: the Driver's change back to third.
-                    ..pull(3, 0.3, 0)
-                },
-                "third engaged again",
-            ),
-            (TransmissionReport::default(), "released"),
-        ] {
-            assert_eq!(after(report), None, "{case}");
-        }
-    }
-
     /// The engaged gear's drive reads its whole window, not its latest tick: the upshift compares a
     /// candidate against it over the same held window, so one tick's dip must not decide. Fixture:
     /// two locked windows of the same mean force, 50 kN, one steady and one opening on 65 kN and
@@ -722,111 +529,6 @@ mod tests {
                 reading.drive
             );
         }
-    }
-
-    /// A failed attempt records the crank speed its clutch landed it at, and a failed retry no
-    /// slower than the failure it retried: under one resistance the Driver admits a retry only
-    /// landing faster than the record, predicting a slipping clutch's landing at the launch speed,
-    /// so the record must read the landing that way and rise with each failed retry for the
-    /// retries to end. Fixture: third slipping at rest at half the pedal, its crank spooling at 900
-    /// rpm toward a 1500 rpm launch, failing; then retried at 0.3 of the pedal, landing at a 1200
-    /// rpm launch, and failing again, under a steady push.
-    #[test]
-    fn a_failed_attempt_records_its_landing_and_a_retry_no_slower() {
-        let forward = Vec3::NEG_Z;
-        let pull = |gear: u8, rpm: f32, command: f32, launch_rpm: f32| TransmissionReport {
-            gear,
-            rpm,
-            command,
-            launch_omega: launch_rpm * RPM_TO_RAD,
-            pulling: true,
-            driving: true,
-            ..Default::default()
-        };
-        let cut = |report: TransmissionReport| TransmissionReport {
-            shifting: true,
-            ..report
-        };
-        let mut sense = DriverSense::for_cut(CUT);
-        let contacts = Contacts {
-            soft: [forward * 10_000.0; 2],
-            grip: 0.0,
-            hard: [None; 2],
-        };
-        let mut failed = None;
-        for report in [
-            pull(3, 900.0, 0.5, 1500.0),
-            pull(3, 1400.0, 0.5, 1500.0),
-            cut(pull(2, 1400.0, 0.5, 1500.0)),
-            pull(2, 1400.0, 0.5, 1500.0),
-            TransmissionReport {
-                landing_omega: Some(1200.0 * RPM_TO_RAD),
-                ..pull(3, 1100.0, 0.3, 1200.0)
-            },
-            pull(3, 1100.0, 0.3, 1200.0),
-            cut(pull(2, 1100.0, 0.3, 1200.0)),
-            pull(2, 1100.0, 0.3, 1200.0),
-        ] {
-            failed = sense
-                .tick(Vec3::ZERO, forward, 0.0, MASS, contacts, DT)
-                .and_then(|reading| reading.failed)
-                .map(|failed| failed.crank / RPM_TO_RAD);
-            sense.drove(&report);
-        }
-        let failed = failed.expect("third is remembered after its second failure");
-        assert!((failed - 1500.0).abs() < 1e-2, "remembered at {failed} rpm");
-    }
-
-    /// A failed retry records no slower than the landing the Driver predicted when it admitted the
-    /// retry: a retry that gains and then lugs back to the old record's speed must still raise the
-    /// record, or the Driver admits the same retry again under the same resistance without end.
-    /// Fixture: third failed at 900 rpm, retried with a predicted 1000 rpm landing, holding a whole
-    /// locked window, then lugging back to 900 rpm and left again, at rest under a steady push.
-    #[test]
-    fn a_retry_that_gains_then_lugs_back_still_raises_its_record() {
-        let forward = Vec3::NEG_Z;
-        let pull = |gear: u8, rpm: f32| TransmissionReport {
-            gear,
-            rpm,
-            command: 0.5,
-            pulling: true,
-            driving: true,
-            locked: true,
-            ..Default::default()
-        };
-        let change = |gear: u8, landing_rpm: f32| TransmissionReport {
-            shifting: true,
-            locked: false,
-            landing_omega: Some(landing_rpm * RPM_TO_RAD),
-            ..pull(gear, landing_rpm)
-        };
-        let mut sense = DriverSense::for_cut(CUT);
-        let contacts = Contacts {
-            soft: [forward * 10_000.0; 2],
-            grip: 0.0,
-            hard: [None; 2],
-        };
-        let held = std::iter::repeat_n(pull(3, 1000.0), usize::from(CUT.get()) + 1);
-        let script = [
-            pull(3, 900.0),
-            pull(3, 900.0),
-            change(2, 900.0),
-            pull(2, 900.0),
-        ]
-        .into_iter()
-        .chain([change(3, 1000.0)])
-        .chain(held)
-        .chain([pull(3, 900.0), change(2, 900.0), pull(2, 900.0)]);
-        let mut failed = None;
-        for report in script {
-            failed = sense
-                .tick(Vec3::ZERO, forward, 0.0, MASS, contacts, DT)
-                .and_then(|reading| reading.failed)
-                .map(|failed| failed.crank / RPM_TO_RAD);
-            sense.drove(&report);
-        }
-        let failed = failed.expect("third is remembered after its retry failed");
-        assert!((failed - 1000.0).abs() < 1e-2, "remembered at {failed} rpm");
     }
 
     /// Turning the heading is not acceleration: a hull coasting at constant velocity while it
