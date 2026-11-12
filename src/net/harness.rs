@@ -121,6 +121,11 @@ pub(crate) enum Drive {
     Straight,
     /// Operator-duration straight run, used by the tracked full-speed ram recipe. Never fires.
     Ram { throttle_ticks: u32 },
+    /// The same run, then the service brake until the hull is stopped, then no demand: the tank
+    /// parks where the run ended (`scripts/perf/pile_park.py`). Zero demand alone parks only a
+    /// tank released under first gear's idle speed (`track::transmission`); a faster one keeps
+    /// rolling in gear. Never fires.
+    Park { throttle_ticks: u32 },
     /// Never drive, never fire: the tank sits on whatever contact it spawned onto (with
     /// `spawn_pose`, a known resting contact), with no drive input perturbing it.
     Idle,
@@ -241,11 +246,11 @@ impl Script {
     }
 
     fn validate(&self) -> Result<(), ScriptError> {
-        if let Drive::Ram { throttle_ticks } = self.drive
-            && (throttle_ticks == 0 || throttle_ticks > u32::MAX - 128)
+        if let Drive::Ram { throttle_ticks } | Drive::Park { throttle_ticks } = self.drive
+            && (throttle_ticks == 0 || throttle_ticks > u32::MAX - RUN_LEAD)
         {
             return Err(ScriptError::Invalid {
-                field: "drive.Ram.throttle_ticks",
+                field: "drive.throttle_ticks",
                 problem: "positive ticks leaving room for the initial settling window",
             });
         }
@@ -317,9 +322,17 @@ pub(crate) struct SimulateInput {
     range: f32,
     fire_tick: u32,
     fire_interval: u32,
+    /// [`Drive::Park`] has seen its hull stopped, and demands nothing from then on.
+    parked: bool,
     clock: ScriptClock,
     start: crate::cost::WorkloadStart,
 }
+
+/// Resolution: the ticks of no demand before a run's throttle, 128 / 64 Hz = 2 s (DERIVED), so
+/// every recipe starts from a hull the rig has bound and settled onto its belt. A lead too short
+/// starts a run unsettled; a longer one costs wall time only. `scripts/perf/pile_park.py` counts
+/// its window from it (`LEAD_TICKS`).
+const RUN_LEAD: u32 = 128;
 
 /// The launch phases in order, each a state the script really passes through. Waiting is bounded
 /// from launch; execution is bounded from its first released input.
@@ -357,6 +370,7 @@ impl SimulateInput {
             range: script.range_m,
             fire_tick: script.fire_tick,
             fire_interval: script.fire_interval,
+            parked: false,
             start: crate::cost::WorkloadStart::from_env(),
             clock: ScriptClock::AwaitingSlot {
                 deadline: WATCHDOG_SLACK,
@@ -453,11 +467,17 @@ pub(crate) fn buffer_input(
     timeline: Res<LocalTimeline>,
     sync: Res<LocalTimelineSync>,
     battles: Query<&BattleState>,
-    mut slots: Query<&mut ActionState<TankCommand>, With<InputMarker<TankCommand>>>,
+    mut slots: Query<
+        (
+            &mut ActionState<TankCommand>,
+            Option<&avian3d::prelude::LinearVelocity>,
+        ),
+        With<InputMarker<TankCommand>>,
+    >,
 ) {
     use bevy::ecs::query::QuerySingleError;
-    let mut state = match slots.single_mut() {
-        Ok(state) => state,
+    let (mut state, velocity) = match slots.single_mut() {
+        Ok(slot) => slot,
         // Before tank replication (or between lives), there is no local input slot.
         Err(QuerySingleError::NoEntities(_)) => return,
         Err(QuerySingleError::MultipleEntities(_)) => {
@@ -493,6 +513,7 @@ pub(crate) fn buffer_input(
     }
     let t = sim.ticks;
     sim.write(t, &mut state.0);
+    sim.stop(t, velocity.map(|v| v.length()), &mut state.0);
     if (state.0.fire_primary || state.0.fire_secondary)
         && let ScriptClock::Released {
             first_fire_logged, ..
@@ -515,9 +536,11 @@ impl SimulateInput {
         // Throttle and steer over the drive's window: the arc steers to exercise skid steer, the
         // courses run dead straight along the spawn axis.
         let (window, throttle, steer) = match self.drive {
-            Drive::Arc => (128..384, 1.0, 0.3),
-            Drive::Straight => (128..1088, 1.0, 0.0),
-            Drive::Ram { throttle_ticks } => (128..throttle_ticks + 128, 1.0, 0.0),
+            Drive::Arc => (RUN_LEAD..384, 1.0, 0.3),
+            Drive::Straight => (RUN_LEAD..1088, 1.0, 0.0),
+            Drive::Ram { throttle_ticks } | Drive::Park { throttle_ticks } => {
+                (RUN_LEAD..throttle_ticks + RUN_LEAD, 1.0, 0.0)
+            }
             Drive::Idle | Drive::Fire { .. } => (0..0, 0.0, 0.0),
         };
         let driving = window.contains(&t);
@@ -532,8 +555,27 @@ impl SimulateInput {
             ),
             Drive::Arc | Drive::Straight => (t == self.fire_tick, false),
             // A recoil impulse would disturb the resting contact under study.
-            Drive::Idle | Drive::Ram { .. } => (false, false),
+            Drive::Idle | Drive::Ram { .. } | Drive::Park { .. } => (false, false),
         };
+    }
+
+    /// [`Drive::Park`]'s stop, past its run: the service brake (full reverse demand on a forward
+    /// hull) until the hull is under the transmission's parked speed, then nothing for good.
+    /// The replicated speed trails the hull, so the release lands after the stop; the
+    /// transmission's stop-to-reverse pause keeps that late release from reversing.
+    fn stop(&mut self, t: u32, speed: Option<f32>, command: &mut TankCommand) {
+        let Drive::Park { throttle_ticks } = self.drive else {
+            return;
+        };
+        if self.parked || t < throttle_ticks + RUN_LEAD {
+            return;
+        }
+        // No replicated velocity yet is no reading of a stop.
+        if speed.is_none_or(|speed| speed >= crate::track::transmission::PARK_ENGAGE_SPEED) {
+            command.throttle = -1.0;
+        } else {
+            self.parked = true;
+        }
     }
 }
 
@@ -897,6 +939,31 @@ mod tests {
                 super::Script::parse(&format!("(drive: Ram(throttle_ticks: {ticks}))")).is_err()
             );
         }
+    }
+
+    /// The park recipe's tank must rest where its run ended (`scripts/perf/pile_park.py` reads
+    /// a parked tank): full throttle over the run, then the brake while the hull moves or its
+    /// speed is unknown, then no demand for good, whatever the hull does next. It never fires.
+    #[test]
+    fn park_runs_then_brakes_to_a_stop_and_then_demands_nothing() {
+        use crate::track::transmission::PARK_ENGAGE_SPEED;
+        let script = super::Script::parse("(drive: Park(throttle_ticks: 100))").unwrap();
+        let mut sim = super::SimulateInput::new(&script);
+        let (moving, stopped) = (Some(2.0 * PARK_ENGAGE_SPEED), Some(0.5 * PARK_ENGAGE_SPEED));
+        let mut at = |tick, speed| {
+            let mut command = crate::command::TankCommand::default();
+            sim.write(tick, &mut command);
+            sim.stop(tick, speed, &mut command);
+            assert!(!command.fire_primary && !command.fire_secondary);
+            command.throttle
+        };
+        assert_eq!(at(127, moving), 0.0);
+        assert_eq!(at(128, stopped), 1.0);
+        assert_eq!(at(227, stopped), 1.0);
+        assert_eq!(at(228, moving), -1.0);
+        assert_eq!(at(229, None), -1.0);
+        assert_eq!(at(230, stopped), 0.0);
+        assert_eq!(at(231, moving), 0.0);
     }
 
     use core::time::Duration;

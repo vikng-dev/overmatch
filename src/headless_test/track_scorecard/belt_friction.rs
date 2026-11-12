@@ -562,12 +562,13 @@ fn pieces_bed() -> Bed {
 /// full throttle, braked until the transmission parks and left to rest a second there.
 #[cfg(feature = "dev_ui")]
 fn house_bed() -> Bed {
-    use super::rubble_climb::{Case, Heap, Mode, live_pieces, settle};
+    use super::rubble_climb::{APPROACH_M, Case, Heap, Mode, live_pieces, settle};
     let case = Case {
         label: "house".into(),
         heap: Heap::House,
         throttle: 1.0,
         offset: 0.0,
+        approach_m: APPROACH_M,
         mode: Mode::Through,
     };
     let (mut bed, site) = settle(&case);
