@@ -173,7 +173,7 @@ impl Bed {
 /// Margins against compliant containment and the fixture's support reach, in metres.
 struct DriveMargins {
     side: f32,
-    growth: f32,
+    drift: f32,
     height: f32,
     slide: f32,
 }
@@ -296,17 +296,16 @@ impl Containment {
             .copied()
             .fold(f32::NEG_INFINITY, f32::max);
         let contact = &self.overlap[first..];
-        let (early, late) = contact.split_at(contact.len() / 2);
-        assert!(
-            !early.is_empty() && !late.is_empty(),
-            "the drive must continue after contact"
-        );
-        let peak_of = |samples: &[f32]| samples.iter().copied().fold(0.0_f32, f32::max);
-        // A fresh force-limited compression and roundoff may recur; arrival energy may not grow.
-        let growth = peak_of(early) + steady + self.roundoff - peak_of(late);
-        let steady_margin = steady + self.roundoff - peak_of(late);
+        assert!(contact.len() >= 2, "the drive must continue after contact");
+        let late = &contact[contact.len() / 2..];
+        // Rig transients add compression and decay, with no derived deadline (map-surroundings
+        // §3.6). Drift moves the held position itself, so the later half must come back within
+        // one force-limited compression of the face.
+        let floor = late.iter().copied().fold(f32::INFINITY, f32::min);
+        let drift = steady + self.roundoff - floor;
+        let late_peak = late.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         println!(
-            "DERIVED {name}: mass={} kg, effective_mass>={} kg, omega={} rad/s, push<={} N, arrival_energy<={} J, steady<={} m, contact_arrival<={} m, discovery<={} m, roundoff={} m; MEASURED peak={} m, side margin={} m, observed late static margin={} m, no-growth margin={} m",
+            "DERIVED {name}: mass={} kg, effective_mass>={} kg, omega={} rad/s, push<={} N, arrival_energy<={} J, steady<={} m, contact_arrival<={} m, discovery<={} m, roundoff={} m; MEASURED peak={} m, side margin={} m, later-half peak={} m, later-half floor={} m, no-drift margin={} m",
             self.mass,
             self.effective_mass,
             self.omega_squared.sqrt(),
@@ -318,10 +317,11 @@ impl Containment {
             self.roundoff,
             peak,
             arrival + discovery + self.roundoff - peak,
-            steady_margin,
-            growth
+            late_peak,
+            floor,
+            drift
         );
-        (arrival + discovery + self.roundoff - peak, growth)
+        (arrival + discovery + self.roundoff - peak, drift)
     }
 }
 
@@ -343,7 +343,7 @@ fn drive_at_wall(name: &str, yaw: f32, corner: bool, rolling: bool) -> DriveMarg
             slide = slide.max((bed.pose().0.z - start).abs());
         }
     }
-    let (side, growth) = containment.margins(name);
+    let (side, drift) = containment.margins(name);
     println!(
         "MEASURED {name}: droop-foot height={foot} m, height margin={} m, slide={slide} m",
         bed.tolerance - foot
@@ -359,7 +359,7 @@ fn drive_at_wall(name: &str, yaw: f32, corner: bool, rolling: bool) -> DriveMarg
         .fold(0.0_f32, f32::max);
     DriveMargins {
         side,
-        growth,
+        drift,
         height: bed.tolerance - foot,
         slide: slide - width,
     }
@@ -368,13 +368,13 @@ fn drive_at_wall(name: &str, yaw: f32, corner: bool, rolling: bool) -> DriveMarg
 #[test]
 fn full_throttle_head_on_stays_inside() {
     let margins = drive_at_wall("head-on", -90.0, false, true);
-    assert!(margins.side >= 0.0 && margins.growth >= 0.0);
+    assert!(margins.side >= 0.0 && margins.drift >= 0.0);
 }
 
 #[test]
 fn full_throttle_into_a_convex_corner_stays_inside() {
     let margins = drive_at_wall("convex-corner", -135.0, true, true);
-    assert!(margins.side >= 0.0 && margins.growth >= 0.0);
+    assert!(margins.side >= 0.0 && margins.drift >= 0.0);
 }
 
 /// The server relies on bounded compression without outward drift throughout the grind.
@@ -394,7 +394,7 @@ fn oblique_drive_slides_without_rearing_climbing_or_perching() {
         margins.side >= 0.0,
         "grind exceeded the compliant arrival bound"
     );
-    assert!(margins.growth >= 0.0, "grind accumulated outward drift");
+    assert!(margins.drift >= 0.0, "grind accumulated outward drift");
 }
 
 /// The server's side bound must hold even when terrain support is absent on arrival. The ramp
@@ -419,7 +419,7 @@ fn a_hull_launched_off_a_ramp_stays_inside_the_wall() {
             .0;
         airborne_at_wall |= side >= -bed.tolerance && contacts.iter().all(Vec::is_empty);
     }
-    let (side, growth) = containment.margins("ramp");
+    let (side, drift) = containment.margins("ramp");
     println!("MEASURED ramp: peak root={peak} m, airborne at wall={airborne_at_wall}");
     assert!(
         airborne_at_wall,
@@ -429,5 +429,5 @@ fn a_hull_launched_off_a_ramp_stays_inside_the_wall() {
         side >= 0.0,
         "airborne hull exceeded the compliant arrival bound"
     );
-    assert!(growth >= 0.0, "airborne arrival accumulated outward drift");
+    assert!(drift >= 0.0, "airborne arrival accumulated outward drift");
 }
