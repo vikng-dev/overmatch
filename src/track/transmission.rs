@@ -1188,9 +1188,10 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 ///    the engaged gear's drive by M, the one that pulls hardest, the higher on a tie.
 ///
 /// Clauses 2 and 3 pay the cut. A cut in flight, no pull asked or fuel that cannot beat drag
-/// choose nothing. Where a gear's price meets its observed drive, a lower gear that outpulls a
-/// higher one by M and a higher one that outpulls the lower by M cannot both exist at one landing,
-/// so on steady inputs neither clause undoes the other.
+/// choose nothing. At one landing where each gear's price meets its observed drive, a lower gear
+/// that outpulls a higher one by M and a higher one that outpulls the lower by M cannot both exist,
+/// so there a slowing step down and an upshift cannot undo each other. A stall's step down asks no
+/// outpull, and steady pedal and load do not by themselves fix the landing, so neither is covered.
 fn choose_gear(
     st: &mut TransmissionState,
     tp: &TransmissionParams,

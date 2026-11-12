@@ -614,13 +614,15 @@ ladder) or fuel under drag chooses nothing. The Driver uses requested pedal, not
 ramp. A slipping clutch holds its launch floor, capped at the speed the crank reaches freely, so a
 launch takes none of the flywheel's stored energy below that floor; a crank above the floor when
 the clutch closes can spend the excess. M is the crank arithmetic term alone.
-Clauses 2 and 3 cannot undo each other on steady inputs: each takes a gear only where its price
-where the cut lands beats the engaged gear's drive by M, so where every gear's price meets its
-observed drive, a step down from `g` to `g − 1` needs `P(g − 1) > P(g) + M` and a step back up
-needs `P(g) > P(g − 1) + M`, which cannot both hold at one landing; the same holds from an upshift
-back down. A cut and a full window of the new gear's drive separate any two decisions. Where the
-price and the delivery disagree by more than M, the Driver can still hunt (the failure-memory
-entry above).
+A slowing step down and an upshift cannot undo each other at one landing where every gear's price
+meets its observed drive: each takes a gear only where its price where the cut lands beats the
+engaged gear's drive by M, so a step down from `g` to `g − 1` needs `P(g − 1) > P(g) + M` and a step
+back up needs `P(g) > P(g − 1) + M`, which cannot both hold; the same holds from an upshift back
+down. The argument covers nothing else. A stall steps down even where `P(g − 1) ≤ D(g) + M`, and
+steady pedal and load do not by themselves fix the landing speed, so two decisions need not share
+one. A cut and a full window of the new gear's drive separate any two decisions. Where the price
+and the delivery disagree by more than M, the Driver can still hunt (the failure-memory entry
+above).
 Rejected forms: pricing the engaged gear (its spare reads model error); pricing a candidate at a
 crawl as a lug rather than the slip its clutch closes into (it carries the idle catch's whole
 torque and outbids a part-pedal launch, which then stops in the cut: MEASURED in

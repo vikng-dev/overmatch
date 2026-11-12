@@ -1658,6 +1658,27 @@ mod tests {
         }
     }
 
+    /// The shipped tank's certified blueprint and track shapes, a fixture.
+    fn shipped_construction() -> (
+        crate::bake::TankBlueprint,
+        crate::track::bump_stop::TrackColliders,
+    ) {
+        let root = crate::assets::asset_root();
+        let glb = root.join(crate::tank::TANK_SIM_GLB_PATH);
+        let spec_ron = std::fs::read_to_string(root.join(crate::tank::TANK_SPEC_PATH))
+            .expect("the shipped spec sheet");
+        let asset = crate::bake::certify_asset(
+            &glb,
+            &spec_ron,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .unwrap_or_else(|_| panic!("the shipped sim artifact certifies"));
+        let blueprint =
+            crate::bake::TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), asset);
+        let colliders = crate::track::bump_stop::TrackColliders::of_blueprint(&blueprint, &glb);
+        (blueprint, colliders)
+    }
+
     /// N bots are N complete tanks: one spawn pass builds every one from the blueprint, each its own
     /// combatant at its own home, bot 0 at the one bot's home; a later pass adds none. The server's
     /// load test reads its tank count off this lever, so a mutant that spawns one bot, or stacks
@@ -1666,21 +1687,7 @@ mod tests {
     /// Fixture data: the shipped Tiger, the one tank in the tree.
     #[test]
     fn n_bots_spawn_n_tanks_each_its_own_combatant_at_its_own_home() {
-        let root = crate::assets::asset_root();
-        let spec_ron = std::fs::read_to_string(root.join(crate::tank::TANK_SPEC_PATH))
-            .expect("the shipped spec sheet");
-        let asset = crate::bake::certify_asset(
-            &root.join(crate::tank::TANK_SIM_GLB_PATH),
-            &spec_ron,
-            &crate::substances::SubstanceRegistry::shipped(),
-        )
-        .unwrap_or_else(|_| panic!("the shipped sim artifact certifies"));
-        let blueprint =
-            crate::bake::TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), asset);
-        let track_colliders = crate::track::bump_stop::TrackColliders::of_blueprint(
-            &blueprint,
-            &root.join(crate::tank::TANK_SIM_GLB_PATH),
-        );
+        let (blueprint, track_colliders) = shipped_construction();
         let mut app = App::new();
         app.insert_resource(blueprint)
             .insert_resource(track_colliders)
@@ -1788,21 +1795,7 @@ mod tests {
     }
 
     fn placement_app_with(mode: Option<BattleMode>) -> App {
-        let root = crate::assets::asset_root();
-        let spec_ron = std::fs::read_to_string(root.join(crate::tank::TANK_SPEC_PATH))
-            .expect("the shipped spec sheet");
-        let asset = crate::bake::certify_asset(
-            &root.join(crate::tank::TANK_SIM_GLB_PATH),
-            &spec_ron,
-            &crate::substances::SubstanceRegistry::shipped(),
-        )
-        .unwrap_or_else(|_| panic!("the shipped sim artifact certifies"));
-        let blueprint =
-            crate::bake::TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), asset);
-        let colliders = crate::track::bump_stop::TrackColliders::of_blueprint(
-            &blueprint,
-            &root.join(crate::tank::TANK_SIM_GLB_PATH),
-        );
+        let (blueprint, colliders) = shipped_construction();
         let mut app = App::new();
         // Lightyear's replicated-component removal hooks read this registry on despawn.
         app.init_resource::<bevy_replicon::server::visibility::registry::FilterRegistry>()
