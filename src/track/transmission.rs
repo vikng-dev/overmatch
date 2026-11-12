@@ -222,7 +222,7 @@ pub struct TransmissionParams {
     /// Main clutch torque capacity (N·m), the engaged coupling's transmitted-torque clamp.
     pub clutch_capacity: f32,
     /// DERIVED torque-interruption ticks from authored `shift_secs`: at least one, so every gear
-    /// change opens the clutch and the Driver's ledger records the gear it left.
+    /// change opens the clutch.
     pub shift_ticks: NonZeroU8,
     /// DERIVED rpm of maximum fuel-governed torque: the launch and steering rev target.
     pub peak_torque_rpm: f32,
@@ -938,8 +938,6 @@ pub struct TransmissionReport {
     pub shifting: bool,
     /// This tick asked the engaged ladder for drive: a propulsive pedal past the dead band.
     pub pulling: bool,
-    /// The pedal requested this tick, whatever its direction.
-    pub command: f32,
     /// The clutch sent drive to the belts this tick: torque along the engaged ladder. A crank
     /// spooling to its launch rpm, an open clutch and overrun send none.
     pub driving: bool,
@@ -2414,7 +2412,6 @@ pub(crate) fn step(
         steer_step: st.steer_step,
         shifting,
         pulling: propulsive >= DEAD,
-        command: controls.command.abs(),
         driving: tau_c > 0.0,
         locked,
         power_scale,
