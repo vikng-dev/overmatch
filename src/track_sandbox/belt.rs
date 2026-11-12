@@ -598,7 +598,7 @@ pub(super) fn conform_belts_field(
         belt_len: pin_belt.length,
         count: pin_belt.count,
         pitch: geom.pitch,
-        thickness: geom.thickness,
+        face_offset: geom.model.pin_to_outer,
         probe_reach: contact_probe(),
         // The sandbox draws the `-` reference layer, so it asks the wrap to build it.
         reference: true,

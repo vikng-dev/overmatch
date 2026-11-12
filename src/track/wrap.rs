@@ -86,8 +86,8 @@ pub struct WrapInput<'a> {
     pub count: usize,
     /// Material link pitch (m).
     pub pitch: f32,
-    /// Plate thickness (m); probes use `thickness/2` as the surface offset, assuming centred pins.
-    pub thickness: f32,
+    /// Pin line → ground face (m), the measured `pin_to_outer`: the probes stand on the sole.
+    pub face_offset: f32,
     /// Downward probe reach (m) for the terrain oracle.
     pub probe_reach: f32,
     /// Build [`WrapSideOutput::reference`] for the sandbox's `-` diagnostic layer. The game passes
@@ -142,7 +142,7 @@ fn side_step<O: DepthOracle>(
         oracle,
         &input.affine,
         side.plane_x,
-        input.thickness,
+        input.face_offset,
         input.probe_reach,
         side.lateral_stations,
         circles,
@@ -493,7 +493,7 @@ pub(crate) fn step_cached<O: DepthOracle>(
                         oracle,
                         &input.affine,
                         side.plane_x,
-                        input.thickness,
+                        input.face_offset,
                         input.probe_reach,
                         side.lateral_stations,
                         rb,
@@ -552,7 +552,7 @@ fn raw_belly<O: DepthOracle>(
     oracle: &O,
     affine: &Affine3A,
     plane_x: f32,
-    thickness: f32,
+    face_offset: f32,
     probe_reach: f32,
     lateral_stations: [f32; 3],
     circles: &[(Vec2, f32)],
@@ -562,7 +562,7 @@ fn raw_belly<O: DepthOracle>(
         oracle,
         affine,
         plane_x,
-        thickness,
+        face_offset,
         probe_reach,
         lateral_stations,
         &rb,
@@ -611,13 +611,13 @@ fn belly_geometry(circles: &[(Vec2, f32)]) -> RawBelly {
     }
 }
 
-/// Probe the half-thickness surface offset for inward lift, taking the deepest of physics' three
-/// lateral columns. Offsets are measured shoe faces relative to the pin plane, along signed hull x.
+/// Probe the shoe's ground face for inward lift, taking the deepest of physics' three lateral
+/// columns. Offsets are measured shoe faces relative to the pin plane, along signed hull x.
 fn probe_belly<O: DepthOracle>(
     oracle: &O,
     affine: &Affine3A,
     plane_x: f32,
-    thickness: f32,
+    face_offset: f32,
     probe_reach: f32,
     lateral_stations: [f32; 3],
     rb: &RawBelly,
@@ -632,7 +632,7 @@ fn probe_belly<O: DepthOracle>(
             if out2 == Vec2::ZERO {
                 return 0.0;
             }
-            let s2 = stations[i] + out2 * (thickness / 2.0);
+            let s2 = stations[i] + out2 * face_offset;
             let w = affine.transform_point3(Vec3::new(plane_x, s2.y, s2.x));
             let out = affine
                 .transform_vector3(Vec3::new(0.0, out2.y, out2.x))
@@ -845,7 +845,7 @@ mod tests {
             belt_len: rig.belt_len(),
             count: rig.link_count,
             pitch: rig.pitch,
-            thickness: rig.thickness,
+            face_offset: rig.model.pin_to_outer,
             probe_reach: 0.5,
             reference,
             sides: Side::ALL.map(|s| WrapSideInput {

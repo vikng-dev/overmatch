@@ -156,9 +156,6 @@ struct TrackRig {
     /// pin-line radius minus THIS — the pin does not run mid-plate, so it is not half the
     /// plate. The WRAPPED idler does NOT subtract it: wrap rotation follows the pin line.
     pin_to_inner: f32,
-    /// Measured plate thickness (m) — the wrap's conform pushes the pin line to the outer face at
-    /// `thickness/2`.
-    thickness: f32,
     /// Per-side kinematic-wrap filter memory ([`wrap::WrapState`]). Reset on a
     /// presented-pose snap so the belly memory re-inits from the fresh pose rather than settling in.
     wrap: [wrap::WrapState; 2],
@@ -592,7 +589,6 @@ fn bind_track_rigs(
             count: spec.link_count,
             teeth: geom.teeth,
             pin_to_inner: geom.model.pin_to_inner,
-            thickness: geom.thickness,
             wrap: Default::default(),
             presented_phase: [None; 2],
             sides,
@@ -833,7 +829,7 @@ fn drive_track_views(
             // assumes. The wrap wraps phase by the material loop itself, so a whole-loop advance
             // shifts link identity by `count` ≡ 0 — seamless by construction.
             pitch: rig.belt_len / rig.count.max(1) as f32,
-            thickness: rig.thickness,
+            face_offset: gear.face_offset(),
             probe_reach: PROBE_REACH,
             // The game draws no reference loop — skip the throwaway `sag_span` + `Vec` per side.
             reference: false,
@@ -1126,7 +1122,6 @@ mod tests {
             count: geom.link_count,
             teeth: geom.teeth,
             pin_to_inner: geom.model.pin_to_inner,
-            thickness: geom.thickness,
             wrap: Default::default(),
             presented_phase: [None; 2],
             sides,
@@ -1394,7 +1389,7 @@ mod tests {
                 belt_len: 11.5,
                 count: 80,
                 pitch: 11.5 / 80.0,
-                thickness: 0.04,
+                face_offset: 0.02,
                 probe_reach: PROBE_REACH,
                 reference: false,
                 sides: [-1.0, 1.0].map(|plane_x| wrap::WrapSideInput {
@@ -1487,7 +1482,7 @@ mod tests {
                 belt_len: 11.5,
                 count: 80,
                 pitch: 11.5 / 80.0,
-                thickness: 0.04,
+                face_offset: 0.02,
                 probe_reach: PROBE_REACH,
                 reference: false,
                 sides: [-1.0, 1.0].map(|plane_x| wrap::WrapSideInput {
@@ -1665,7 +1660,7 @@ mod tests {
                     belt_len: 11.5,
                     count: 80,
                     pitch: 11.5 / 80.0,
-                    thickness: 0.04,
+                    face_offset: 0.02,
                     probe_reach: PROBE_REACH,
                     reference: false,
                     sides: [-1.0, 1.0].map(|plane_x| wrap::WrapSideInput {
