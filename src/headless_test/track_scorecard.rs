@@ -2290,6 +2290,9 @@ fn every_segment_on_loose_pieces_carries_the_running_gears_law_once() {
 /// The drivetrain reads a loose piece's friction once. The belts' reaction is the only
 /// longitudinal force on a hull carried wholly by solver contacts, so its total over a pull
 /// equals the hull's momentum change: a reading lost or counted twice breaks the balance.
+/// A tick's reaction is the solver's friction over the step before it (`stop_contacts`), so the
+/// readings of ticks 1..=N close the steps of ticks 0..N: one step out of line moves the balance by
+/// that step's friction, as much as the grip limit times a tick, whichever gear the Driver holds.
 /// Fixture: one broad heavy slab under the whole tank, and a pull short enough to stay on it.
 #[test]
 fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
@@ -2304,18 +2307,25 @@ fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
     }
     let start = bed.hull();
     let forward = start.forward();
-    let mut impulse = 0.0;
+    let (mut impulse, mut momentum) = (0.0, 0.0);
     let pull = TICKS;
-    for _ in 0..pull {
+    for tick in 0..=pull {
+        momentum = bed.mass() * (bed.hull().velocity - start.velocity).dot(forward);
         bed.tick(1.0, 0.0);
+        assert!(
+            bed.spring_forces().is_empty(),
+            "the sampled support carried the hull at tick {tick}"
+        );
         let effect = bed
             .app
             .world()
             .get::<TrackGripEffect>(bed.tank)
             .expect("a driven tank publishes its belt reaction");
-        impulse += (effect.belt_reaction[0] + effect.belt_reaction[1]) * DT;
+        if tick > 0 {
+            // Tick 0 reads the settle's last step.
+            impulse += (effect.belt_reaction[0] + effect.belt_reaction[1]) * DT;
+        }
     }
-    let momentum = bed.mass() * (bed.hull().velocity - start.velocity).dot(forward);
     println!("MEASURED belt impulse {impulse} N s, hull momentum change {momentum} N s");
     assert!(
         momentum.abs() > 1000.0,
