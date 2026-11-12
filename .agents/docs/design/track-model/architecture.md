@@ -509,9 +509,9 @@ nothing engages no gear from rest. Nothing modelled enters `R`: on a rolling inc
 drive (`headless_test::drive_load`). Parked, the contact law's rolling fade leaves the grade alone.
 Beside `R` the ledger carries the engaged gear's drive (both sprockets' mean force over the
 window), the drivetrain's gain over the window as a force (`M_hull` times the belts' mean
-acceleration), the contacts' mean grip budget (the patches' and the solver's), a stall's bound, the gear the
-Driver last left downward with drive to spare and that spare, and two counts of the engaged gear's run: the ticks it drove with the hull at rest, and the ticks its
-clutch held the crank to the belts.
+acceleration), the contacts' mean grip budget (the patches' and the solver's), a stall's bound,
+and two counts of the engaged gear's run: the ticks it drove with the hull at rest, and the ticks
+its clutch held the crank to the belts.
 
 **What the Driver infers.** Each fact is read from the force balance or the drivetrain's own
 state, none from a timer or a band:
@@ -548,20 +548,11 @@ state, none from a timer or a band:
   slowing crank loses torque and the gear does not recover; above it the torque rises and the gear
   settles where it holds (MEASURED on a 20° grade: fourth settled at 1.93 m/s with its drivetrain
   reading −4 N; stepping down cost a metre per second in the cut, and third settled slower).
-- *A gear left with drive to spare holds again only above that spare.* Where the Driver leaves a
-  gear downward while its window's mean sprocket drive exceeds the load it read there by more than
-  M, it records that spare, the larger over repeats. The forecast is priced at the sprocket too, so
-  a forecast no greater than the spare the gear lost with is no evidence it would now hold: that
-  gear and every gear above it hold only above the record. `R` is read on the hull's side of the
-  belt, and the belts' slip and inertia take what the hull does not, so the spare is never compared
-  with `R` (MEASURED, ram-x-0.35: fifth stalled sending 156.9 kN at the sprocket while the ledger
-  read `R` = 104.9 kN; yard-t0.3-x1.4: second left with 61.0 kN to spare). A departure with nothing
-  to spare records nothing: its window's drive explains it. The record goes stale on release, more
-  pedal, another ladder or detent, and once the gear holds a locked window that gains. Without it
-  the Driver re-engaged a gear on a forecast no greater than the spare it lost with, and left it
-  again, seven times on the rubble battery; with it, none. A record above every forecast the barred
-  gears reach holds the Driver below them until it goes stale (MEASURED, yard-t0.3-x1.4: second
-  barred at 61.0 kN against a 29.6 kN forecast, and the hull finished the course in first).
+- *The Driver keeps no failure memory.* Each clause chooses from the current window alone, so a
+  gear just left is chosen again wherever its forecast clears, and may fail there again. The cause
+  is open: the price and the sensed resistance sit on different sides of the belt, so a gear can
+  look affordable where it just failed (MEASURED, ram-x-0.35: fifth stalled sending 156.9 kN at
+  the sprocket while the ledger read `R` = 104.9 kN).
 - *Grip caps push.* No gear puts more traction into the ground along the belts than its
   contacts' grip budget, which they carry when every contact slides along the belt: the patches'
   `sum mu N_elastic` and the solver contacts' Coulomb limit, the solver's combined coefficient
@@ -577,7 +568,7 @@ delivery at the belts' mean speed; they agree where the belts roll with the hull
 slip is not forecast. A coupled gear adds reflected crank inertia, the clutch caps the pull and the
 grip budget caps it next. A pull is priced whole at the sprocket. A candidate *holds*
 when its pull, less `R` (at a stall, at least the bound) and its detent's share of the belt push
-difference, exceeds M, or at or above a recorded gear, that gear's spare. The clauses:
+difference, exceeds M. The clauses:
 
 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
    current gear nor at or above one that failed there; else
@@ -609,10 +600,14 @@ torque and outbids a part-pedal launch, which then stops in the cut: MEASURED in
 launch gear and a lug three gears up); a memory of the resistance a gear failed under, with or without the crank
 speed it failed at (its evidence holds only at the operating point that set it: a slower landing
 that slips at the launch rpm, a crank above the torque peak and better grip each escape it, a
-recovered lower gear wedges, and easing past M reopened gears on window noise); a threshold of
+recovered lower gear wedges, and easing past M reopened gears on window noise); a memory of
 `R + M_hull a_belt` (it reads negative while a clutch takes up, MEASURED −1699 N on the house
-rubble, and a negative record refuses a recovered gear under any resistance); no memory at all
-(seven blind repeats on the rubble battery); pricing a pull as the
+rubble, and a negative record refuses a recovered gear under any resistance); a memory of the
+spare a gear lost with, its window's sprocket drive less the load read there (MEASURED on the
+rubble battery: no gear re-engaged on a forecast at or below it, but barred gears could not return
+during a pedal hold: on yard-t0.3-x1.4 second was barred at 61.0 kN against a 29.6 kN forecast
+and the hull finished in first, on house-t0.3-x0-stopgo fifth at 24.2 kN against 13.0 kN), where
+no memory costs seven such re-engagements on four rows and every row still crosses; pricing a pull as the
 share of the belts' reaction that reaches the hull (the share differs between gears where solver
 contacts load the belts off the heading: 0.92 in sixth against 0.90 in seventh on rubble); a
 slide test on slip distance over the elastic shear length (slip distance is unimodal across it on

@@ -1,10 +1,10 @@
 //! The joint drivetrain integrates both belts and the crank from construction data.
 //! `step` owns Driver gear/clutch/brake decisions, then solves clutch and steering torque,
-//! work, belt acceleration and crank settlement. `TransmissionState` is its mechanical state; the
-//! Driver's history, what it felt of the hull and any gear it left, is `track::sense::DriverSense`.
-//! Gear decisions read that ledger (speed over the ground and resistance), requested pedal and
-//! crank rpm. Forces are N, torques N m, belt speeds m/s
-//! and crank speed rad/s. The design narrative lives in track-model architecture section 5a.
+//! work, belt acceleration and crank settlement. `TransmissionState` is its mechanical state;
+//! what the Driver has felt of the hull, a window of samples and a stall's bound, is
+//! `track::sense::DriverSense`. Gear decisions read that ledger (speed over the ground and
+//! resistance), requested pedal and crank rpm. Forces are N, torques N m, belt speeds m/s and
+//! crank speed rad/s. The design narrative lives in track-model architecture section 5a.
 //!
 //! The rejected `STEER_SERVO_BAND` proportional servo loses authority with vehicle scale;
 //! the steering law instead solves its capacity-limited constraint semi-implicitly.
