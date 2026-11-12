@@ -199,17 +199,7 @@ fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> Tr
 /// gear's pull. From an open clutch it launches in its highest launch gear; once engaged, no gear
 /// launches with more than the one it holds, so no gear changes.
 fn felt_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
-    inp.sensed = Some(Sensed {
-        speed: 0.0,
-        resistance: 0.0,
-        push_difference: 0.0,
-        drive: 0.0,
-        drive_gain: 0.0,
-        grip: f32::INFINITY,
-        stall: None,
-        stalled: false,
-        observed: true,
-    });
+    inp.sensed = driver_input(0.0, 0.0, 0.0).sensed;
     inp
 }
 
@@ -2316,17 +2306,7 @@ fn driver_force_price_uses_the_current_regime_and_the_clutch_cap() {
 #[test]
 fn driver_respects_the_shift_step_and_turn_contracts() {
     let (fp, mut tp) = (lab_fp(), lab_tp());
-    let launch = |tp: &TransmissionParams, gear: usize| {
-        price_driver_force(
-            tp,
-            DriveSupply::WHOLE,
-            0.0,
-            tp.gears_fwd[gear - 1],
-            1.0,
-            ClutchState::Slip,
-        )
-    };
-    let resistance = (launch(&tp, 1) + launch(&tp, 2)) * 0.5;
+    let resistance = (launch_force(&tp, 1) + launch_force(&tp, 2)) * 0.5;
     for (max_step, landed) in [(1, 2), (2, 1)] {
         tp.max_step = max_step;
         let mut state = TransmissionState {

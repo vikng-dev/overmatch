@@ -1891,7 +1891,6 @@ fn capture_scripted_determinism_tick(
             &avian3d::prelude::Rotation,
             &avian3d::prelude::LinearVelocity,
             &avian3d::prelude::AngularVelocity,
-            &avian3d::prelude::ComputedCenterOfMass,
             (
                 &crate::track::sim::TrackDrive,
                 &crate::track::sim::DriveSignal,
@@ -1919,7 +1918,6 @@ fn capture_scripted_determinism_tick(
         rotation,
         linear,
         angular,
-        com,
         (drive, signal),
         grip,
         elements,
@@ -1948,9 +1946,7 @@ fn capture_scripted_determinism_tick(
             }),
         ));
         if is_controlled {
-            controlled = Some((
-                position.0, rotation.0, linear.0, angular.0, com.0, signal, contacts, sim,
-            ));
+            controlled = Some((position.0, rotation.0, signal, contacts, sim));
             run.saw_element_strain |= elements
                 .sides
                 .iter()
@@ -1961,8 +1957,7 @@ fn capture_scripted_determinism_tick(
     digests.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     assert_eq!(digests.len(), 2, "the local duel has two simulation tanks");
 
-    let (position, rotation, linear, angular, local_com, signal, contacts, sim) =
-        controlled.expect("one controlled tank");
+    let (position, rotation, signal, contacts, sim) = controlled.expect("one controlled tank");
     let grounded = contacts.0.iter().filter(|side| !side.is_empty()).count();
     run.saw_airborne |= grounded == 0;
     run.saw_grounded |= grounded > 0;
@@ -1971,7 +1966,6 @@ fn capture_scripted_determinism_tick(
     // budget μ·N_elastic only while it slides. Resolution: a 1e-4 share of that budget absorbs the
     // capped grip vector's roundoff. The witness closes at the steered checkpoint, before the hull
     // meets the other tank, whose push would slide the belts without any steer.
-    let _ = (position, rotation, linear, angular, local_com);
     let loaded_contact_is_slipping = contacts.0.iter().flatten().any(|c| {
         let budget = c.mu * c.load_elastic;
         budget > 0.0 && c.f_long.hypot(c.f_lat) >= budget * (1.0 - 1e-4)

@@ -95,10 +95,8 @@ pub struct Sensed {
     pub drive: f32,
     /// The drivetrain's gain over the window as a force (N): hull mass times the belts' mean
     /// acceleration. Through a locked clutch the belts turn with the crank, so this is the revs
-    /// rising or falling under load. The hull rings on its patches' elastic shear after a clutch
-    /// takes up, and the belts, carrying the crank's inertia, do not (MEASURED, flat ground at a
-    /// third of the pedal, 4th to 5th: the hull's speed swung 2.235 to 2.201 m/s over six ticks
-    /// while the belts rose 2.212 to 2.227 m/s).
+    /// rising or falling under load; why the belts and not the hull read a gear's verdict is in
+    /// `.agents/docs/design/track-model/architecture.md` section 5a.
     pub drive_gain: f32,
     /// The contacts' mean grip budget over the window (N): the most traction any gear can put into
     /// the ground along the belts, which they carry when every contact slides along them. The
