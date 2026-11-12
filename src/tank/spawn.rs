@@ -278,14 +278,14 @@ fn authority_state(content: TankContent) -> impl Bundle {
         // Pre-sized synchronously at force resolution (`track::sim::TrackGripElements` owns the
         // fixed-size invariant), never an empty vector awaiting a first-tick resize.
         TrackGripElements::for_links(resolution.stations, resolution.lateral_points),
-        // Complete REV-14 transmission state and the public crank speed read off it.
+        // The complete transmission state, and the public crank speed read off it.
         transmission,
         EngineRpm::of(&transmission),
         // The Driver's ledger starts empty: nothing has been felt before the first tick.
         sense,
         // The shaped drive signal starts at rest, as the command does.
         DriveSignal::default(),
-        // Complete REV-17 weapon gate, from the same sorted spec data as its weapon slots.
+        // The complete weapon gate, from the same sorted spec data as its weapon slots.
         // Replicated client attachment must preserve the arriving authority value.
         weapon_gate(content.spec()),
         // The round each slot has loaded and selected, beside the gate it is read with.

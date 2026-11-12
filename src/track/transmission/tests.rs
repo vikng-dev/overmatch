@@ -1349,20 +1349,21 @@ fn a_geared_turn_integrates_the_crank_onto_the_steered_belts() {
     }
 }
 
-/// A belt solves its ground reaction implicitly: on a ground stiff enough that the explicit belt
-/// update reverses its step every tick, the coupled update does not. The grip law's shear length
-/// relies on this to be a ground fact rather than the fixed step's stability bound.
-/// Fixture: one belt of the grade construction pushing at half its grip, from rest, into an
-/// elastic share over a 10 mm shear length with the grip law's damper.
+/// A belt solves its ground reaction implicitly, through the reaction's slope, so on a stiff
+/// ground its step never alternates. The grip law's shear length relies on this to be a ground
+/// fact rather than the fixed step's stability bound. Fixture: one belt of the grade construction
+/// pushing at half its grip, from rest, into an elastic share over a 10 mm shear length with the
+/// grip law's damper. The slope-blind run witnesses only that fixture: production always hands
+/// the belt its slope.
 #[test]
-fn the_coupled_belt_settles_where_the_explicit_one_alternates() {
+fn the_coupled_belt_settles_on_a_stiff_ground() {
     let fp = grade_fixture_fp();
     let dt = 1.0 / TICK_HZ;
     let grip = fp.ground_grip * fp.grip.side_weight;
     let shear = 0.010;
     let damper = 2.0 * forces::GRIP_ELEMENT_DAMPING_RATIO
         / (shear * fp.ground_grip * super::super::derive::G).sqrt();
-    let reversals = |coupled: bool| {
+    let reversals = |sees_slope: bool| {
         let (mut speed, mut strain) = (0.0_f32, 0.0_f32);
         let mut steps = Vec::new();
         for _ in 0..TICK_HZ as usize {
@@ -1374,7 +1375,7 @@ fn the_coupled_belt_settles_where_the_explicit_one_alternates() {
                 (grip * share.signum(), 0.0)
             };
             let mut inp = input(0.0, 0.0, [speed; 2], [reaction; 2]);
-            inp.reaction_slopes = [if coupled { slope } else { 0.0 }; 2];
+            inp.reaction_slopes = [if sees_slope { slope } else { 0.0 }; 2];
             let next = BeltTick::new(&construction(&fp), &inp).land(0, 0.5 * grip);
             steps.push(next - speed);
             speed = next;
@@ -1386,7 +1387,7 @@ fn the_coupled_belt_settles_where_the_explicit_one_alternates() {
     };
     assert!(
         reversals(false) > 0,
-        "the fixture ground is one the explicit update cannot resolve"
+        "the fixture ground makes a slope-blind belt alternate"
     );
     assert_eq!(reversals(true), 0, "the coupled belt alternated");
 }
