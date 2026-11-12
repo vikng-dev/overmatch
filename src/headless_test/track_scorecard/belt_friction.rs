@@ -1,6 +1,6 @@
 //! Belt friction probe (the game's tank driving physics, game state only): how the solver's
 //! friction on a moving shoe face and the belt's speed answer each other tick by tick on loose
-//! pieces. A diagnosis instrument, run on demand:
+//! pieces, and what that friction does to the pieces. A diagnosis instrument, run on demand:
 //!
 //! `scripts/serial-cargo test --lib --features dev_ui,bitprobe belt_friction_probe -- --ignored --nocapture`
 //!
@@ -10,14 +10,17 @@
 //!
 //! Each case prints one `BELTFRICTION {json}` line. Per clutch regime, each taken within runs of
 //! consecutive ticks: the tick-to-tick alternation of the friction the solver delivered to each
-//! belt, of the belt's speed and of the hull's, and how often that friction flips sign. Every value
-//! is MEASURED from `ContactTransfers` (read through `stop_contacts`, as the drivetrain reads it),
-//! `TrackDrive`, `TankTransmission`, `TrackGripEffect` and Avian body state, except the `rig`
-//! block: the belt inertia is the drivetrain's construction and the mode masses are DERIVED from
-//! Avian's mass properties.
+//! belt, of the belt's speed and of the hull's, and how often that friction flips sign; and, for
+//! each piece a belt touched, its speed reversals along the hull's forward axis, its largest speed
+//! change in one tick and its largest swing over three ticks. Every value is MEASURED from
+//! `ContactTransfers` (read through `stop_contacts`, as the drivetrain reads it), `TrackDrive`,
+//! `TankTransmission`, `TrackGripEffect` and Avian body state, except the `rig` block: the belt
+//! inertia is the drivetrain's construction and the mode masses are DERIVED from Avian's mass
+//! properties.
 //!
 //! Fixture: every placement, duration and threshold below is fixture data.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use super::turn_probe::alternation;
@@ -103,6 +106,161 @@ fn read(bed: &mut Bed) -> Reading {
     }
 }
 
+/// One tick of a touched piece.
+#[derive(Clone, Copy)]
+struct PieceSample {
+    tick: usize,
+    position: Vec3,
+    /// Its velocity along the hull's forward axis, the belts' travel on their bottom run (m/s).
+    speed: f32,
+}
+
+/// A piece a belt touched, sampled every tick from the first touch.
+struct PieceTrack {
+    mass: f32,
+    /// The longest side of its bounding box in its own frame, over all its colliders (m).
+    size: f32,
+    /// The speed under which Avian may put it to rest: its sleep threshold (m/s).
+    rest: f32,
+    samples: Vec<PieceSample>,
+}
+
+/// The longest side of a body's bounding box in its own frame, over all its colliders (m).
+fn body_size(world: &World, body: Entity) -> f32 {
+    let (mut low, mut high) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+    for collider in world
+        .get::<RigidBodyColliders>(body)
+        .expect("a touched body carries its colliders")
+    {
+        let shape = world
+            .get::<Collider>(collider)
+            .expect("a body's collider has a shape");
+        let at = world
+            .get::<ColliderTransform>(collider)
+            .expect("a body's collider has its pose on the body");
+        let local = ColliderAabb::from_shape(shape.shape_scaled());
+        for corner in 0..8 {
+            let pick = |bit: usize, axis: usize| {
+                if corner & bit == 0 {
+                    local.min[axis]
+                } else {
+                    local.max[axis]
+                }
+            };
+            let point =
+                at.rotation.0 * Vec3::new(pick(1, 0), pick(2, 1), pick(4, 2)) + at.translation;
+            low = low.min(point);
+            high = high.max(point);
+        }
+    }
+    (high - low).max_element()
+}
+
+/// Tracks each piece a belt's face touched with load over the step just run, and samples every
+/// tracked piece.
+fn track_pieces(bed: &Bed, tick: usize, pieces: &mut BTreeMap<Entity, PieceTrack>) {
+    use crate::track::stop_contacts::BeltFace;
+    let world = bed.app.world();
+    for (point, _) in bed.solver_points() {
+        if point.impulse == Vec3::ZERO {
+            continue; // A speculative point that carried nothing.
+        }
+        let other = (
+            point.other,
+            point
+                .other_collider
+                .expect("a solver constraint joins two colliders"),
+        );
+        let reference = (point.reference, point.reference_collider);
+        for ((body, face), (piece, _)) in [(reference, other), (other, reference)] {
+            if body != bed.tank
+                || !world.entity(face).contains::<BeltFace>()
+                || !world.entity(piece).contains::<crate::debris::DebrisPiece>()
+            {
+                continue;
+            }
+            pieces.entry(piece).or_insert_with(|| PieceTrack {
+                mass: world
+                    .get::<ComputedMass>(piece)
+                    .expect("a piece is a rigid body")
+                    .value(),
+                size: body_size(world, piece),
+                rest: world
+                    .get::<SleepThreshold>(piece)
+                    .expect("a dynamic body carries its sleep threshold")
+                    .linear
+                    * world.resource::<PhysicsLengthUnit>().0,
+                samples: Vec::new(),
+            });
+        }
+    }
+    let forward = bed.hull().forward();
+    for (&piece, track) in pieces.iter_mut() {
+        let (Some(position), Some(velocity)) = (
+            world.get::<Position>(piece),
+            world.get::<LinearVelocity>(piece),
+        ) else {
+            continue; // The piece left the world (despawned or merged): its track ends.
+        };
+        track.samples.push(PieceSample {
+            tick,
+            position: position.0,
+            speed: velocity.0.dot(forward),
+        });
+    }
+}
+
+/// Each touched piece's motion within one regime's runs: its speed reversals between consecutive
+/// ticks with both speeds above its rest speed, its largest speed change in one tick, and its
+/// largest swing over three consecutive ticks, the middle position's distance from its neighbours'
+/// midpoint (m).
+fn piece_motion(pieces: &BTreeMap<Entity, PieceTrack>, runs: &[Range<usize>]) -> Value {
+    // Consecutive ticks of one run: a regime change or a gap in the track is no neighbour.
+    let together = |samples: &[PieceSample]| {
+        let run = runs.iter().find(|run| run.contains(&samples[0].tick));
+        run.is_some_and(|run| {
+            samples
+                .iter()
+                .enumerate()
+                .all(|(k, s)| s.tick == samples[0].tick + k && run.contains(&s.tick))
+        })
+    };
+    let rows = pieces.values().filter_map(|piece| {
+        let pairs: Vec<&[PieceSample]> = piece.samples.windows(2).filter(|w| together(w)).collect();
+        if pairs.is_empty() {
+            return None;
+        }
+        let reversals = pairs
+            .iter()
+            .filter(|w| {
+                w[0].speed * w[1].speed < 0.0
+                    && w[0].speed.abs() > piece.rest
+                    && w[1].speed.abs() > piece.rest
+            })
+            .count();
+        let speed_change = pairs
+            .iter()
+            .map(|w| (w[1].speed - w[0].speed).abs())
+            .fold(0.0, f32::max);
+        let swing = piece
+            .samples
+            .windows(3)
+            .filter(|w| together(w))
+            .map(|w| (w[1].position - (w[0].position + w[2].position) / 2.0).length())
+            .fold(0.0, f32::max);
+        Some(json!({
+            "mass_kg": piece.mass,
+            "size_m": piece.size,
+            "rest_m_s": piece.rest,
+            "pairs": pairs.len(),
+            "reversals": reversals,
+            "peak_speed_change_m_s": speed_change,
+            "peak_swing_m": swing,
+        }))
+    });
+    Value::Array(rows.collect())
+}
+
 /// The runs of consecutive ticks in one clutch regime.
 fn runs(ticks: &[Reading], clutch: ClutchState) -> Vec<Range<usize>> {
     let mut runs: Vec<Range<usize>> = Vec::new();
@@ -151,8 +309,8 @@ fn flips(run: &[Reading], si: usize) -> usize {
         .count()
 }
 
-/// The readings of one clutch regime.
-fn regime(ticks: &[Reading], clutch: ClutchState) -> Value {
+/// The readings and touched pieces of one clutch regime.
+fn regime(ticks: &[Reading], pieces: &BTreeMap<Entity, PieceTrack>, clutch: ClutchState) -> Value {
     let runs = runs(ticks, clutch);
     let all: Vec<&Reading> = runs.iter().flat_map(|run| &ticks[run.clone()]).collect();
     if all.is_empty() {
@@ -181,6 +339,7 @@ fn regime(ticks: &[Reading], clutch: ClutchState) -> Value {
         }),
         "left": per_side(0),
         "right": per_side(1),
+        "pieces": piece_motion(pieces, &runs),
     })
 }
 
@@ -334,6 +493,14 @@ const CASES: &[Case] = &[
     },
     #[cfg(feature = "dev_ui")]
     Case {
+        label: "house-pull",
+        bed: house_bed,
+        seconds: DRIVE_S,
+        throttle: 1.0,
+        steer: 0.0,
+    },
+    #[cfg(feature = "dev_ui")]
+    Case {
         label: "house-pivot",
         bed: house_bed,
         seconds: 2 * DRIVE_S,
@@ -344,13 +511,14 @@ const CASES: &[Case] = &[
 
 fn run(case: &Case, tag: &str) {
     let mut bed = (case.bed)();
-    let (mut ticks, mut modes) = (Vec::new(), Value::Null);
-    for _ in 0..case.seconds * TICKS {
+    let (mut ticks, mut modes, mut pieces) = (Vec::new(), Value::Null, BTreeMap::new());
+    for tick in 0..case.seconds * TICKS {
         bed.tick(case.throttle, case.steer);
         ticks.push(read(&mut bed));
         if modes.is_null() {
             modes = mode_masses(&bed);
         }
+        track_pieces(&bed, tick, &mut pieces);
     }
     let label = case.label;
     assert!(
@@ -378,9 +546,9 @@ fn run(case: &Case, tag: &str) {
             "hull_mass_kg": bed.mass(),
             "modes_at_first_contact": modes,
         },
-        "out": regime(&ticks, ClutchState::Out),
-        "slip": regime(&ticks, ClutchState::Slip),
-        "in": regime(&ticks, ClutchState::In),
+        "out": regime(&ticks, &pieces, ClutchState::Out),
+        "slip": regime(&ticks, &pieces, ClutchState::Slip),
+        "in": regime(&ticks, &pieces, ClutchState::In),
         "end_hull_m_s": ticks.last().map(|t| t.hull_speed),
     });
     println!("BELTFRICTION {line}");
