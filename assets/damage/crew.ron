@@ -1,4 +1,6 @@
-// The game's damage model: uniform foreign-station work competence, game state only.
+// The game's damage model: uniform foreign-station work competence and the backfill swap's
+// duration, game state only (design §7b; the swap is playtest fork F1).
 (
     foreign_competence: (0.6, StandIn("uniform foreign-station competence until per-crew training data supplies the crew/station relation; provisional work-rate share for reload, swap, drive and slew")),
+    swap_secs: (4.0, Taste("crew-swap pacing: seconds a backfill swap holds before the occupants of two seats exchange; playtest fork F1 starts in a 3-5 s band, tuned live by how the lone-survivor juggle feels")),
 )

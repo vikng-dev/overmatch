@@ -34,7 +34,7 @@ pub use model::{
     WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound, WeaponTiming,
 };
 pub use scenario::{client_plugin, sp_spawn_plugin};
-pub(crate) use servo::{RemoteServos, ServoRest, axis_inertia, servo_aim_frame};
+pub(crate) use servo::{RemoteServos, ServoRest, servo_aim_frame};
 pub use servo::{
     ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, servo_pose, shortest_angle,
 };

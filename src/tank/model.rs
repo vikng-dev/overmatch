@@ -17,8 +17,8 @@ pub struct Turret;
 pub struct TurretBody {
     /// Mass (kg).
     pub mass: f32,
-    /// Full box dimensions (m) standing in for the angular-inertia distribution.
-    pub inertia_extents: Vec3,
+    /// The sheet's turret box ([`crate::spec::TurretSpec::angular_inertia`]).
+    pub angular_inertia: avian3d::prelude::AngularInertia,
     /// The assembly's mass centre in its node's frame (m), a StandIn for its substances' densities:
     /// the centroid of its hard volumes at rest, every volume one density and an overlap counted
     /// twice ([`crate::ballistics::armour_set::ArmourSet::mass_centre`]). The sheet states no

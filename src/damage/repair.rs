@@ -192,16 +192,22 @@ mod tests {
         Capability, Group, Part, TankCapabilities, VolumeFacets, VolumeOf, requirement_met,
     };
 
+    /// Fixture fixed step (s), exact in binary so elapsed time sums without rounding.
+    const STEP: f64 = 1.0 / 64.0;
+
+    /// Fixture module capacities (HP); [`fixture`] empties each, so a repair owes all of it.
+    const POOL_HP: [u32; 2] = [21, 40];
+
     // ASSUMED fixture pools and fixed step: synthetic module data, independent of any tank asset.
     fn fixture() -> (World, Entity, [Entity; 2]) {
         let mut world = World::new();
         let mut time = Time::<()>::default();
-        time.advance_by(Duration::from_secs_f64(1.0 / 64.0));
+        time.advance_by(Duration::from_secs_f64(STEP));
         world.insert_resource(time);
         let tank = world
             .spawn((TankCommand::default(), ParsedTankCommand::default()))
             .id();
-        let modules = [21, 40].map(|points| {
+        let modules = POOL_HP.map(|points| {
             let mut health = ComponentHealth::full(points);
             health.drain();
             world
@@ -234,6 +240,17 @@ mod tests {
         }
     }
 
+    /// The fixture tick on which a repair owing `missing_hp` completes: that HP over the owner's
+    /// work rate, in whole steps.
+    fn finishing_tick(missing_hp: u32) -> usize {
+        (f64::from(missing_hp) / work_rate() / STEP).ceil() as usize
+    }
+
+    fn is_whole(world: &World, module: Entity) -> bool {
+        let health = world.get::<ComponentHealth>(module).unwrap();
+        health.held() == health.capacity()
+    }
+
     /// The game's damage model: capability consumers must see an empty pool until all authored
     /// HP/rate work is done; a partial refill or a rounded-down deadline breaks that contract.
     #[test]
@@ -247,20 +264,19 @@ mod tests {
                 .is_none()
         );
         press(&mut world, tank, 1, 1);
-        // DERIVED fixture deadline: 21 HP / 20 HP/s = 1.05 s; the first complete tick is 68.
-        advance(&mut world, 67);
-        assert!(world.get::<ComponentHealth>(modules[0]).unwrap().is_empty());
-        advance(&mut world, 1);
-        let health = world.get::<ComponentHealth>(modules[0]).unwrap();
-        assert_eq!(health.held(), health.capacity());
-        assert!(world.get::<ComponentHealth>(modules[1]).unwrap().is_empty());
-        advance(&mut world, 60);
-        let health = world.get::<ComponentHealth>(modules[1]).unwrap();
-        assert_eq!(health.held(), health.capacity());
+        let deadlines = POOL_HP.map(finishing_tick);
+        for tick in 1..=deadlines.into_iter().max().unwrap() {
+            advance(&mut world, 1);
+            for (module, deadline) in modules.into_iter().zip(deadlines) {
+                let empty = world.get::<ComponentHealth>(module).unwrap().is_empty();
+                assert_eq!(is_whole(&world, module), tick >= deadline, "tick {tick}");
+                assert_eq!(empty, tick < deadline, "tick {tick}: no partial refill");
+            }
+        }
     }
 
     /// The game's damage model: a reduced module can recover without first emptying its pool.
-    /// Fixture: 21 HP capacity, 1 HP held; the owner owes only 20 HP at the shared 20 HP/s.
+    /// Fixture: 21 HP capacity, 1 HP held; the owner owes only the 20 HP it misses.
     #[test]
     fn reduced_module_repairs_only_its_missing_hp() {
         let (mut world, tank, modules) = fixture();
@@ -274,14 +290,14 @@ mod tests {
                 .elapsed
                 .is_some()
         );
-        advance(&mut world, 63);
+        let deadline = finishing_tick(POOL_HP[0] - 1);
+        advance(&mut world, deadline - 1);
         assert_eq!(
             world.get::<ComponentHealth>(modules[0]).unwrap().held(),
             crate::ballistics::POOL_UNITS_PER_HP
         );
         advance(&mut world, 1);
-        let health = world.get::<ComponentHealth>(modules[0]).unwrap();
-        assert_eq!(health.held(), health.capacity());
+        assert!(is_whole(&world, modules[0]));
     }
 
     /// The game's damage model: cancellation preserves finished modules for their consumers,
@@ -290,9 +306,14 @@ mod tests {
     fn cancel_keeps_finished_modules_and_drops_unfinished_work() {
         let (mut world, tank, modules) = fixture();
         press(&mut world, tank, 1, 1);
-        advance(&mut world, 96);
+        let [first, second] = POOL_HP.map(finishing_tick);
+        assert!(
+            first < second,
+            "fixture: the larger pool is still under repair"
+        );
+        advance(&mut world, first);
         press(&mut world, tank, 2, 2);
-        assert!(!world.get::<ComponentHealth>(modules[0]).unwrap().is_empty());
+        assert!(is_whole(&world, modules[0]));
         assert!(
             world
                 .get::<ModuleRepair>(modules[1])
@@ -300,13 +321,13 @@ mod tests {
                 .elapsed
                 .is_none()
         );
-        advance(&mut world, 128);
+        advance(&mut world, second);
         assert!(world.get::<ComponentHealth>(modules[1]).unwrap().is_empty());
         press(&mut world, tank, 3, 3);
-        advance(&mut world, 127);
+        advance(&mut world, second - 1);
         assert!(world.get::<ComponentHealth>(modules[1]).unwrap().is_empty());
         advance(&mut world, 1);
-        assert!(!world.get::<ComponentHealth>(modules[1]).unwrap().is_empty());
+        assert!(is_whole(&world, modules[1]));
     }
 
     /// The game's damage model: a running repair holds the tank on its brakes
@@ -348,10 +369,10 @@ mod tests {
             .unwrap()
         }
         let (mut world, tank, _) = fixture();
-        world.entity_mut(tank).insert(TankCapabilities::new(
-            [(Capability::Drive, vec![])].into(),
-            crate::damage::ControlStaffing::NotRequired,
-        ));
+        world.entity_mut(tank).insert(TankCapabilities {
+            requirements: [(Capability::Drive, vec![])].into(),
+            drive_controls: crate::damage::ControlStaffing::NotRequired,
+        });
         world.spawn((
             VolumeOf(tank),
             FunctionRole::Breech,
@@ -360,7 +381,10 @@ mod tests {
         ));
         press(&mut world, tank, 1, 1);
         world.run_system_once(gates).unwrap();
-        advance(&mut world, 128);
+        advance(
+            &mut world,
+            POOL_HP.map(finishing_tick).into_iter().max().unwrap(),
+        );
         let (released, held) = world
             .run_system_once(
                 |tanks: Query<(&TankVolumes, &TankCapabilities)>, facets: Query<VolumeFacets>| {
@@ -422,7 +446,7 @@ mod tests {
         world.entity_mut(tank).insert(TankKnockedOut {
             reason: super::super::KnockoutReason::CrewLoss,
         });
-        advance(&mut world, 128);
+        advance(&mut world, finishing_tick(POOL_HP[0]));
         assert!(world.get::<ComponentHealth>(modules[0]).unwrap().is_empty());
     }
 
@@ -441,13 +465,15 @@ mod tests {
                 .id(),
             world.spawn(VolumeOf(tank)).id(),
         ];
+        // Fixture: each pool emptied from 10 HP.
+        let capacity = 10;
         for pool in pools {
-            let mut health = ComponentHealth::full(10);
+            let mut health = ComponentHealth::full(capacity);
             health.drain();
             world.entity_mut(pool).insert(health);
         }
         press(&mut world, tank, 1, 1);
-        advance(&mut world, 128);
+        advance(&mut world, finishing_tick(capacity));
         for pool in pools {
             assert!(world.get::<ComponentHealth>(pool).unwrap().is_empty());
         }

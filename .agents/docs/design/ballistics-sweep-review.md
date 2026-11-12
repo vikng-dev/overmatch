@@ -215,13 +215,17 @@ field-frame control panics instead of depositing dose along an invented directio
 
 - **B1, P1, unresolved:** moving the hand-set aerodynamic anchors into honestly labelled data
   did not establish their aerodynamic basis. No damage-topic web research was authorized here.
-- **B4, P1, unresolved:** `launch_turrets_on_cookoff` still prescribes linear and angular launch
-  velocities. `Ammo` identifies only a volume with HP and ownership. Per-weapon stowage counts
+- **B4, P1, unresolved:** `launch_turrets_on_cookoff` still prescribes the release's linear and
+  angular increment (StandIns in `assets/damage/cookoff.ron`); the assembly does keep the hull
+  motion at its mass centre and the hull's spin, so velocity is continuous up to that increment.
+  Momentum is not: the hull keeps the whole vehicle's mass, mass centre and inertia.
+  `Ammo` identifies only a volume with HP and ownership. Per-weapon stowage counts
   exist but do not assign contents to ammunition volumes; the reserve is currently infinite.
   Round filler energies exist, but neither propellant energy nor confinement, attachment failure
   work, a release force path or per-volume energetic contents are supplied. `TurretSpec` supplies
-  mass and inertia extents only. A conserving release also needs the hull's inherited motion and
-  its mass/inertia after detachment. These facts must be supplied before deriving a release;
+  mass and inertia extents only. The launch now supplies the inherited motion; a conserving
+  release still needs the hull's mass, mass centre and inertia after detachment. These facts must
+  be supplied before deriving a release;
   relabelling the current kick as an energy coefficient would leave the finding intact.
 - **B6, P1, unresolved:** the ground contact still functions the fuze with unbounded resistance
   and stops the round immediately. The old `stops_unresolved` catch-all is already gone. The

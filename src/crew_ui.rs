@@ -510,8 +510,8 @@ mod tests {
         let tank = world
             .spawn((
                 Controlled,
-                TankCapabilities::new(
-                    [(
+                TankCapabilities {
+                    requirements: [(
                         Capability::Drive,
                         vec![Group::Graded(GradedGroup::Backup(vec![
                             (1.0, vec![Part::Driver, Part::Transmission]),
@@ -519,8 +519,8 @@ mod tests {
                         ]))],
                     )]
                     .into(),
-                    ControlStaffing::Any(vec![vec![CrewStation::Driver]]),
-                ),
+                    drive_controls: ControlStaffing::Any(vec![vec![CrewStation::Driver]]),
+                },
                 ParsedTankCommand::hold(),
             ))
             .id();

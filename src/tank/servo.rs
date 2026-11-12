@@ -81,24 +81,15 @@ impl ServoMechanism {
     pub(super) fn new(spec: &TankSpec, engine: &TransmissionParams) -> Self {
         Self {
             engine: engine.clone(),
-            inertia: [
-                axis_inertia(&spec.turret, ServoRole::Yaw),
-                axis_inertia(&spec.turret, ServoRole::Pitch),
-            ],
+            inertia: axis_inertia(&spec.turret),
         }
     }
 }
 
-pub(crate) fn axis_inertia(turret: &TurretSpec, role: ServoRole) -> f32 {
-    let (x, y, z) = turret.inertia_extents.0;
-    // Uniform cuboid about its centre: I = m(a² + b²)/12, perpendicular to the axis.
-    turret.mass.0
-        * (z * z
-            + match role {
-                ServoRole::Yaw => x * x,
-                ServoRole::Pitch => y * y,
-            })
-        / 12.0
+/// The turret box's [yaw, pitch] moments: about its y and x axes.
+fn axis_inertia(turret: &TurretSpec) -> [f32; 2] {
+    let moments = turret.angular_inertia().principal;
+    [moments.y, moments.x]
 }
 
 /// Aiming degree of freedom and its local rotation axis.
@@ -642,10 +633,7 @@ mod tests {
             template,
             &template.validate().expect("the selected sheet is admitted"),
         );
-        mechanism.inertia = [
-            axis_inertia(&turret, ServoRole::Yaw),
-            axis_inertia(&turret, ServoRole::Pitch),
-        ];
+        mechanism.inertia = axis_inertia(&turret);
         // Fixture engine inputs replace every engine field the servo reads; unused transmission
         // construction comes from the admitted template and does not determine the expectations.
         mechanism.engine.engine.torque_nm = vec![(600.0, 1000.0), (2400.0, 1000.0)];

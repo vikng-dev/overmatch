@@ -1455,7 +1455,7 @@ level, min-count floors, per-gun keying (multi-turret), `OneOrMany` serde sugar.
 
 **Build status:** steps 1–3 landed and green — capability model + evaluator (behaviour-preserving),
 topology-B occupant split + `competence` (behaviour-preserving), and the swap mechanic
-(`PendingSwap` + `tick_swaps`, `SWAP_SECONDS = 4`) with a sandbox crew bar (`1`–`5` tap-source →
+(`PendingSwap` + `tick_swaps`, timed by the `swap_secs` Taste in `assets/damage/crew.ron`) with a sandbox crew bar (`1`–`5` tap-source →
 tap-target; layer toggles moved to `F1`–`F3`). The sandbox readout shows **scalar effectiveness**
 per capability (`Load 60%` when backfilled), not a boolean. GUI-verified. Slice-2 core is complete;
 remaining work is deferred refinements (§9) and the eventual game-side (non-sandbox) crew UI.

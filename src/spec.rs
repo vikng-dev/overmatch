@@ -1180,6 +1180,19 @@ pub struct TurretSpec {
     pub(crate) inertia_extents: Sourced<(f32, f32, f32)>,
 }
 
+impl TurretSpec {
+    /// The assembly's angular inertia, the turret sibling of
+    /// [`TankSpec::hull_angular_inertia`]: a uniform box of `inertia_extents` carrying `mass`,
+    /// m(b² + c²)/12 about each axis. The detached assembly is this body, and the servo drives
+    /// read their yaw (y) and pitch (x) moments from it. `TankSpec::validate` refuses a sheet
+    /// whose moments are not finite and positive.
+    pub(crate) fn angular_inertia(&self) -> avian3d::prelude::AngularInertia {
+        let (mass, (x, y, z)) = (self.mass.0, self.inertia_extents.0);
+        let moment = |b: f32, c: f32| mass * (b * b + c * c) / 12.0;
+        avian3d::prelude::AngularInertia::new(Vec3::new(moment(y, z), moment(x, z), moment(x, y)))
+    }
+}
+
 fn assembly_mass<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Sourced<f32>, D::Error> {
     Sourced::deserialize(d).map_err(|error| {
         serde::de::Error::custom(format!(
@@ -1869,11 +1882,9 @@ impl TankSpec {
                 return Err(format!("{what} must be finite and > 0 (got {value})").into());
             }
         }
-        for role in [crate::tank::ServoRole::Yaw, crate::tank::ServoRole::Pitch] {
-            let inertia = crate::tank::axis_inertia(turret, role);
-            if !inertia.is_finite() || inertia <= 0.0 {
-                return Err("turret.mass/inertia_extents yield an unrepresentable axis inertia; author dimensions and mass with finite positive cuboid moments".into());
-            }
+        let moments = turret.angular_inertia().principal;
+        if !moments.is_finite() || moments.cmple(Vec3::ZERO).any() {
+            return Err("turret.mass/inertia_extents yield an unrepresentable axis inertia; author dimensions and mass with finite positive cuboid moments".into());
         }
         // Four view nodes the belt binds by name: a blank or repeated one binds two roles to one
         // node, or none.

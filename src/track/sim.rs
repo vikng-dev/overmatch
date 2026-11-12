@@ -1279,6 +1279,21 @@ mod tests {
     struct DriveTest;
     use crate::damage::Part;
 
+    /// Fixture capabilities whose drive control the Driver alone grants.
+    fn driver_staffed(
+        requirements: std::collections::HashMap<
+            crate::damage::Capability,
+            crate::damage::Requirement,
+        >,
+    ) -> TankCapabilities {
+        TankCapabilities {
+            requirements,
+            drive_controls: crate::damage::ControlStaffing::Any(vec![vec![
+                crate::damage::CrewStation::Driver,
+            ]]),
+        }
+    }
+
     /// The production adapter's app with real data-derived running gear on a flat field (top
     /// face y = 0), no gravity, one 64 Hz tick per update. Returns it with the fixture hull
     /// height at which a belt face presses a surface at y = 0.25 by 1 cm.
@@ -1711,19 +1726,14 @@ mod tests {
         ] {
             let mut world = World::new();
             let tank = world
-                .spawn(TankCapabilities::new(
-                    std::collections::HashMap::from([(
-                        Capability::Drive,
-                        vec![
-                            Group::Single(Part::Driver),
-                            Group::Single(Part::Engine),
-                            Group::Single(Part::Transmission),
-                        ],
-                    )]),
-                    crate::damage::ControlStaffing::Any(vec![vec![
-                        crate::damage::CrewStation::Driver,
-                    ]]),
-                ))
+                .spawn(driver_staffed(std::collections::HashMap::from([(
+                    Capability::Drive,
+                    vec![
+                        Group::Single(Part::Driver),
+                        Group::Single(Part::Engine),
+                        Group::Single(Part::Transmission),
+                    ],
+                )])))
                 .id();
             let driver = world
                 .spawn((CrewStation::Driver, Crewman { home }, VolumeOf(tank)))
@@ -1796,9 +1806,9 @@ mod tests {
     /// engine or change the transmission's own held share. The idle and clutch consumers rely on it.
     #[test]
     fn unavailable_upstream_retains_each_modules_own_condition() {
-        use crate::damage::{ControlStaffing, CrewStation, GradedGroup, Group, Part};
+        use crate::damage::{GradedGroup, Group, Part};
         // Fixture: an unavailable complete path with a reduced downstream module.
-        let caps = TankCapabilities::new(
+        let caps = driver_staffed(
             [(
                 Capability::Drive,
                 vec![Group::Graded(GradedGroup::Backup(vec![(
@@ -1807,7 +1817,6 @@ mod tests {
                 )]))],
             )]
             .into(),
-            ControlStaffing::Any(vec![vec![CrewStation::Driver]]),
         );
         let supply = supply_from_parts(&caps, &[(Part::Transmission, 0.25)].into(), &[].into());
         assert_eq!(
@@ -1825,7 +1834,7 @@ mod tests {
     /// source conditions. Fixture: simultaneous reductions in one complete Backup path.
     #[test]
     fn drive_readout_matches_complete_path_rate() {
-        use crate::damage::{ControlStaffing, CrewStation, GradedGroup, Group, Part};
+        use crate::damage::{CrewStation, GradedGroup, Group, Part};
         let req = vec![Group::Graded(GradedGroup::Backup(vec![(
             1.0,
             vec![Part::Driver, Part::Engine, Part::Transmission],
@@ -1837,10 +1846,7 @@ mod tests {
         ]
         .into();
         let expected = crate::damage::evaluate(&req, &quality);
-        let caps = TankCapabilities::new(
-            [(Capability::Drive, req)].into(),
-            ControlStaffing::Any(vec![vec![CrewStation::Driver]]),
-        );
+        let caps = driver_staffed([(Capability::Drive, req)].into());
         let supply = supply_from_parts(&caps, &quality, &[CrewStation::Driver].into());
         assert_eq!(supply.task_rate, expected);
         assert_eq!(supply.task_rate, 0.3);
@@ -1852,7 +1858,7 @@ mod tests {
     /// Drive and the rendered HUD must read that same task rate, independently of source condition.
     #[test]
     fn required_groups_coefficients_and_readout_share_one_rate() {
-        use crate::damage::{ControlStaffing, CrewStation, GradedGroup, Group, Part};
+        use crate::damage::{CrewStation, GradedGroup, Group, Part};
         // Fixture: a reduced operator and a reduced transmission, plus an alternative operator.
         let quality = [
             (Part::Driver, 0.6),
@@ -1889,10 +1895,7 @@ mod tests {
                 0.24,
             ),
         ] {
-            let caps = TankCapabilities::new(
-                [(Capability::Drive, req)].into(),
-                ControlStaffing::Any(vec![vec![CrewStation::Driver]]),
-            );
+            let caps = driver_staffed([(Capability::Drive, req)].into());
             let supply = supply_from_parts(&caps, &quality, &[CrewStation::Driver].into());
             assert!((supply.task_rate - expected).abs() < 1e-6);
             assert!(supply.engine_in_action);
@@ -1905,8 +1908,8 @@ mod tests {
     /// Fixture: an available alternative task path with its declared control station unavailable.
     #[test]
     fn an_available_task_path_cannot_grant_unstaffed_controls() {
-        use crate::damage::{ControlStaffing, CrewStation, GradedGroup, Group, Part};
-        let caps = TankCapabilities::new(
+        use crate::damage::{CrewStation, GradedGroup, Group, Part};
+        let caps = driver_staffed(
             [(
                 Capability::Drive,
                 vec![Group::Graded(GradedGroup::Backup(vec![
@@ -1915,7 +1918,6 @@ mod tests {
                 ]))],
             )]
             .into(),
-            ControlStaffing::Any(vec![vec![CrewStation::Driver]]),
         );
         use crate::ballistics::ComponentHealth;
         use crate::damage::{Crewman, Dead, FunctionRole, VolumeOf};
@@ -2023,22 +2025,17 @@ mod tests {
             // Only the adapter runs from here, so the weight never moves the held body.
             app.insert_resource(Gravity(Vec3::NEG_Y * super::super::derive::G));
             run_adapter(&mut app, &[(root, Vec3::ZERO)]);
-            app.world_mut()
-                .entity_mut(root)
-                .insert(TankCapabilities::new(
-                    [(
-                        Capability::Drive,
-                        vec![
-                            Group::Single(Part::Driver),
-                            Group::Single(Part::Engine),
-                            Group::Single(Part::Transmission),
-                        ],
-                    )]
-                    .into(),
-                    crate::damage::ControlStaffing::Any(vec![vec![
-                        crate::damage::CrewStation::Driver,
-                    ]]),
-                ));
+            app.world_mut().entity_mut(root).insert(driver_staffed(
+                [(
+                    Capability::Drive,
+                    vec![
+                        Group::Single(Part::Driver),
+                        Group::Single(Part::Engine),
+                        Group::Single(Part::Transmission),
+                    ],
+                )]
+                .into(),
+            ));
             let driver = app
                 .world_mut()
                 .spawn((
@@ -2401,7 +2398,7 @@ mod tests {
         hull.app
             .world_mut()
             .entity_mut(hull.root)
-            .insert(TankCapabilities::new(
+            .insert(driver_staffed(
                 [(
                     Capability::Drive,
                     vec![Group::Graded(group(vec![
@@ -2410,7 +2407,6 @@ mod tests {
                     ]))],
                 )]
                 .into(),
-                crate::damage::ControlStaffing::Any(vec![vec![crate::damage::CrewStation::Driver]]),
             ));
         hull.app.world_mut().spawn((
             CrewStation::Commander,
@@ -2456,20 +2452,16 @@ mod tests {
             .entity_mut(hull.driver)
             .remove::<Dead>();
         hull.engine_held(0);
-        hull.app
-            .world_mut()
-            .entity_mut(root)
-            .insert(TankCapabilities::new(
-                [(
-                    Capability::Drive,
-                    vec![Group::Graded(group(vec![(
-                        1.0,
-                        vec![Part::Driver, Part::Engine],
-                    )]))],
-                )]
-                .into(),
-                crate::damage::ControlStaffing::Any(vec![vec![crate::damage::CrewStation::Driver]]),
-            ));
+        hull.app.world_mut().entity_mut(root).insert(driver_staffed(
+            [(
+                Capability::Drive,
+                vec![Group::Graded(group(vec![(
+                    1.0,
+                    vec![Part::Driver, Part::Engine],
+                )]))],
+            )]
+            .into(),
+        ));
         hull.app
             .world_mut()
             .run_system_once(

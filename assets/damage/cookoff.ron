@@ -1,0 +1,8 @@
+// The game's damage model: the release increment a cook-off adds to the detached turret
+// assembly, in the assembly's own frame at detachment, game state only. The assembly first keeps
+// the hull motion it left with (velocity continuity, in code); this file states only what the
+// release adds on top. Shared by every tank.
+(
+    launch_velocity: ((14.0, 3.0), StandIn("up, forward m/s added at release. Stands in for the cook-off release law: the energy the stowed charges release, how much of it the confinement turns into force, the work to part the turret from the hull, and where that force acts, applied to the assembly's mass. The game has no per-volume energetic contents, confinement or attachment failure work yet")),
+    launch_spin: ((3.0, 1.2), StandIn("about right, up rad/s added at release. Stands in for the moment of that same release force about the assembly's mass centre, against its inertia; missing the same facts as launch_velocity")),
+)

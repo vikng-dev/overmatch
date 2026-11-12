@@ -1151,12 +1151,11 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     let muzzle = entity_at(nodes.primary_muzzle);
     commands.entity(hull).insert(Hull);
     commands.entity(gun).insert(Gun);
-    let (tx, ty, tz) = spec.turret.inertia_extents.0;
     commands.entity(turret).insert((
         Turret,
         TurretBody {
             mass: spec.turret.mass.0,
-            inertia_extents: Vec3::new(tx, ty, tz),
+            angular_inertia: spec.turret.angular_inertia(),
             centre_of_mass: turret_centre,
         },
     ));
