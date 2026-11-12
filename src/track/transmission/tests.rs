@@ -3492,17 +3492,19 @@ fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
     assert!(TransmissionParams::from_authoring(&a).is_err());
 }
 
-/// A gear losing drive over a held window steps down to the highest lower gear in reach that pulls
-/// where the cut lands more than its own drive by M, wherever its crank sits on its curve, and
-/// stays where no lower gear does: a cut is paid only for more pull, as an upshift's is. Mutants:
+/// A gear losing drive over a held window steps down to the highest lower gear in reach that holds
+/// where the cut lands and pulls there more than its own drive by M, wherever its crank sits on
+/// its curve, and stays where no lower gear does: a cut is paid only as an upshift's is. Mutants:
 /// a veto where the crank's net torque rises as revs fall, or where the crank runs above its
-/// torque peak, keeps a crawling gear the next one down outpulls; stepping down on falling revs
-/// alone takes a gear that pulls no more. Fixture: the Tiger-modelled ladder's top gear driving
-/// what it meets, at 800 rpm on that curve at 0.3 pedal (drag only part released, so its net
-/// torque rises as revs fall) and at 1300 rpm at full pedal on a curve peaking at 1000 rpm and
-/// falling after; then each reading with the engaged gear sending the contacts' whole grip budget.
+/// torque peak, keeps a crawling gear the next one down relieves; dropping either half of the test
+/// takes a gear that pulls no more than the engaged one, or one the ground lets hold nothing.
+/// Fixture: the Tiger-modelled ladder's top gear at 800 rpm on that curve at 0.3 pedal (drag only
+/// part released, so its net torque rises as revs fall) and at 1300 rpm at full pedal on a curve
+/// peaking at 1000 rpm and falling after; each driving what it meets, then ten times that (more
+/// than any gear in reach pulls there), then half of it on ground granting no more than the hull
+/// meets.
 #[test]
-fn a_slowing_gear_steps_down_only_to_a_gear_that_outpulls_it() {
+fn a_slowing_gear_steps_down_only_to_a_gear_that_holds_and_outpulls_it() {
     let falling = [
         (800.0, 1300.0),
         (1000.0, 1850.0),
@@ -3524,7 +3526,12 @@ fn a_slowing_gear_steps_down_only_to_a_gear_that_outpulls_it() {
         .expect("the fixture curve is admitted");
         let top = tp.gears_fwd.len() as u8;
         let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[usize::from(top - 1)];
-        for (grip, steps) in [(f32::INFINITY, true), (resistance, false)] {
+        let readings = [
+            (resistance, f32::INFINITY, true),
+            (10.0 * resistance, f32::INFINITY, false),
+            (0.5 * resistance, resistance, false),
+        ];
+        for (drive, grip, steps) in readings {
             let mut state = TransmissionState {
                 gear: top,
                 clutch: ClutchState::In,
@@ -3534,6 +3541,7 @@ fn a_slowing_gear_steps_down_only_to_a_gear_that_outpulls_it() {
             let mut inp = driver_input(speed, resistance, command);
             let sensed = inp.sensed.as_mut().expect("a Driver-policy reading");
             sensed.drive_gain = -2.0 * force_margin(&tp);
+            sensed.drive = drive;
             sensed.grip = grip;
             choose_gear(
                 &mut state,
@@ -3548,13 +3556,13 @@ fn a_slowing_gear_steps_down_only_to_a_gear_that_outpulls_it() {
                 assert_eq!(
                     chosen,
                     (top - 1, true),
-                    "{rpm} rpm: the next gear down outpulls the top"
+                    "{rpm} rpm: the next gear down holds and outpulls the top"
                 );
             } else {
                 assert_eq!(
                     chosen,
                     (top, false),
-                    "{rpm} rpm: no gear pulls past the grip budget"
+                    "{rpm} rpm, drive {drive} N, grip {grip} N: no lower gear both holds and outpulls"
                 );
             }
         }

@@ -1182,7 +1182,7 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 ///    offers more spare than the current gear. Free.
 /// 2. The hull stalls now ([`super::sense::Sensed::stalled`]): the lowest gear within
 ///    `max_step`. A held window losing more than M: the highest lower gear within `max_step` that
-///    pulls where it lands more than the engaged gear's drive by M, else none.
+///    holds where it lands and pulls there more than the engaged gear's drive by M, else none.
 /// 3. Straight, clutch in, a held window and the hull moving where the cut lands: of the higher
 ///    gears within `max_step` that hold where they land and pull there more than
 ///    the engaged gear's drive by M, the one that pulls hardest, the higher on a tie.
@@ -1256,7 +1256,10 @@ fn choose_gear(
     } else if sensed.observed && dir * sensed.drive_gain < -margin {
         (st.gear.saturating_sub(tp.max_step).max(1)..st.gear)
             .rev()
-            .find(|&gear| pull(gear, landing, ClutchState::Out) > dir * sensed.drive + margin)
+            .find(|&gear| {
+                let pull = pull(gear, landing, ClutchState::Out);
+                pull - load(gear) > margin && pull > dir * sensed.drive + margin
+            })
     } else if sensed.observed
         && st.steer_step == 0
         && st.clutch == ClutchState::In

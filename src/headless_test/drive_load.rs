@@ -253,10 +253,9 @@ impl Measurements {
 /// cut opens the clutch for exactly one shift's ticks, a full window of drive separates it from the
 /// last, and it lands the gear its clause names. A stall steps to the lowest gear within
 /// `max_step`; any other cut lands a gear whose pull, priced at full pedal where the cut lands
-/// ([`candidate_pull`](crate::track::transmission::candidate_pull)) and capped by grip, beats the
-/// engaged gear's drive by M. An upshift's also beats the resistance it read by M, and a step down
-/// follows a held window whose drivetrain lost more than M. How many cuts a drive pays is an
-/// observation.
+/// ([`candidate_pull`](crate::track::transmission::candidate_pull)) and capped by grip, beats both
+/// the resistance it read and the engaged gear's drive by M, and a step down follows a held window
+/// whose drivetrain lost more than M. How many cuts a drive pays is an observation.
 #[derive(Default)]
 struct Cuts {
     count: usize,
@@ -343,21 +342,14 @@ impl Cuts {
         .min(reading.grip);
         let margin = crate::track::transmission::DriverResolution::load().margin_n(tp);
         assert!(
-            pull > dir * reading.drive + margin,
-            "gear {old} to {new}: the landing gear pulls {pull} N past the engaged drive {} N",
+            pull - resistance > margin && pull > dir * reading.drive + margin,
+            "gear {old} to {new}: the landing gear holds, pulling {pull} N against {resistance} N, and outpulls the engaged drive {} N",
             reading.drive
         );
-        if new > old {
-            assert!(
-                pull - resistance > margin,
-                "gear {old} to {new}: an upshift holds, pulling {pull} N against {resistance} N"
-            );
-        } else {
-            assert!(
-                reading.observed && dir * reading.drive_gain < -margin,
-                "gear {old} to {new}: a step down reads its drivetrain losing over a held window"
-            );
-        }
+        assert!(
+            new > old || (reading.observed && dir * reading.drive_gain < -margin),
+            "gear {old} to {new}: a step down reads its drivetrain losing over a held window"
+        );
     }
 }
 
