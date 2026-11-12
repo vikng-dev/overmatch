@@ -16,9 +16,9 @@
 //! THE PRESS. A link's print deepens from nothing to all of it while the link travels one pitch
 //! after touching down: its travel is its motion relative to the hull (the belt carrying it back as
 //! the tank drives on, or round as it pivots) plus its slide over the ground. The press is laid in
-//! [`PRESS_STEPS`] re-stamps, each at the next step's share of the pattern, and the stores keep
-//! the deepest, so a print only ever deepens. Straight driving therefore lays `PRESS_STEPS` stamps
-//! per link per touchdown.
+//! [`PRESS_STEPS`] re-stamps, each bearing the next step's share of its tank's pressure, and the
+//! stores keep the deepest, so a print only ever deepens. Straight driving therefore lays
+//! `PRESS_STEPS` stamps per link per touchdown.
 
 use bevy::math::{Affine3A, Vec2, Vec3};
 use bevy::platform::collections::HashMap;

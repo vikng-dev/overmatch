@@ -126,6 +126,7 @@ fn check() {{
         print_softness: Vec4::splat(0.0015), // Fixture: 0.15 m at 100 kPa.
         print_cap: Vec4::splat(0.15),
         print_law: crate::track_prints::law_params(),
+        print_store: crate::track_prints::store_params(),
         ..default()
     };
     params.print_relief = crate::track_prints::relief_params(

@@ -1,6 +1,5 @@
 (
     contact_m: (0.03, Taste("track-print contact: ASSUMED clearance above the drawn belt filter error; MEASURED 1.01 touchdowns per pitch in the mud demo's 8.6 m coast")),
-    pattern_range_m: (0.15, Taste("track-print pattern: ASSUMED relief scale; a 3 cm grouser prints 20 percent deeper, scaling shoe clearance rather than replacing its shape")),
     near_fade_m: (4.0, Taste("track-print handover: ASSUMED fade width inside the near store edge, m")),
     near_gone_px: (1.0, Resolution("near-store texels below one screen pixel alias their normal gradient; remove that unresolved normal")),
     near_full_px: (2.0, Resolution("two screen pixels per near-store texel resolve its gradient; end the anti-aliasing fade")),

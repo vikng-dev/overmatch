@@ -11,17 +11,20 @@
 //! grounded shoe touches at its lowest corner (`super::stamper`).
 //!
 //! Where the plane lies within [`PrintLaw::contact_m`] of the ground the sole rests there: that is
-//! the FOOTPRINT. Inside it the shoe's clearance `c` (the underside's height over its datum plus the
-//! plane) sets the PATTERN, `1 − c / pattern_range`, so a grouser prints deeper than the plate
-//! behind it and the whole footprint prints on every soft ground. The press scales the pattern from
-//! nothing at touchdown to all of it one pitch of travel later. A texel stores two bytes:
+//! the FOOTPRINT. Inside it the shoe's clearance `c` (the underside's height over its datum, the
+//! sole, plus the plane) says how far above the sinking sole that point of the shoe rides. The
+//! press is the share of its tank's pressure the link bears, from none at touchdown to all of it
+//! one pitch of travel later. A texel stores two bytes:
 //!
-//! * R — pattern × press, in 1/255: the share of the ground's print depth this point sinks by;
-//! * G — the tank's ground pressure, in [`KPA_PER_UNIT`]: zero off every footprint.
+//! * R — the REACH, `255 − c` in [`CLEARANCE_UNIT_M`]: the sole itself is 255;
+//! * G — the press times the tank's ground pressure, in [`KPA_PER_UNIT`]: nonzero exactly on a
+//!   footprint.
 //!
 //! Both combine by MAX, which is order-free, so any set of stamps draws the same texels in any
-//! order and in any pieces, and a print only ever deepens. The shader turns a texel into a depth:
-//! the ground's `softness × pressure`, capped, times R (`terrain_blend::print_depth_m`).
+//! order and in any pieces, and a print only ever deepens. The shader turns a texel into a depth
+//! (`terrain_blend::print_depth_m`): the sole sinks by the ground's `softness × pressure`, capped,
+//! and a point of the shoe `c` above it prints `c` less, nothing where `c` passes the sinkage, so
+//! the shoe's lowest parts print first and hard ground takes no depth.
 //!
 //! # The history
 //!
@@ -83,13 +86,14 @@ const WORLD_COUNT_TILE: u32 = 64;
 const ACTIVE_CELLS: usize = 256;
 /// Ground pressure per unit of a texel's G channel, kPa: 1, so a byte spans 1–255 kPa, every tank.
 pub(crate) const KPA_PER_UNIT: f32 = 1.0;
+/// Clearance over the sole per unit of a texel's R channel, m. Resolution: a millimetre is below
+/// any depth step a player can see in a print, and a byte then spans 255 mm over the sole, past
+/// any ground's sinkage cap, so a point of the shoe beyond it prints nothing, as it should.
+pub(crate) const CLEARANCE_UNIT_M: f32 = 0.001;
 
 /// How stamps turn into store texels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PrintLaw {
-    /// The clearance over which the pattern falls from full to none, m: a point of the sole that
-    /// clears the ground by `c` prints `1 − c / pattern_range_m` of the ground's depth.
-    pub(crate) pattern_range_m: f32,
     /// How far a sole's plane may clear the ground and still lie on it, m: the footprint's edge,
     /// and the stamper's test for a grounded shoe.
     pub(crate) contact_m: f32,
@@ -112,7 +116,7 @@ pub(crate) struct StampEntry {
     flags: u8,
     /// Which shoe stamp: an index into the stamps the stores are drawn with.
     shoe: u8,
-    /// How far into its press the link is, 1/255: the share of its pattern it prints.
+    /// How far into its press the link is, 1/255: the share of its tank's pressure it bears.
     press: u8,
     /// The ground pressure of the tank that laid it, in [`KPA_PER_UNIT`].
     pressure: u8,
@@ -173,9 +177,17 @@ impl StampEntry {
         usize::from(self.shoe)
     }
 
-    /// The share of its pattern this stamp prints, 0..1.
+    /// The share of its tank's pressure this stamp's link bears, 0..1.
     pub(crate) fn press(&self) -> f32 {
         f32::from(self.press) / 255.0
+    }
+
+    /// The pressure this stamp's link bears, its G, in [`KPA_PER_UNIT`]: the press times its tank's
+    /// pressure, at least one unit, so a link that bears at all marks its footprint.
+    fn bearing(&self) -> u8 {
+        (self.press() * f32::from(self.pressure))
+            .round()
+            .clamp(1.0, 255.0) as u8
     }
 
     /// The shoe's canonical `x` and `z` axes in world XZ.
@@ -217,9 +229,8 @@ impl StampEntry {
         )
     }
 
-    /// The texel this stamp writes at world XZ `world`, `[R, G]`; `None` off the footprint, over an
-    /// opening, and where the pattern prints nothing. The raster's law at one point, which
-    /// [`Raster`] evaluates incrementally.
+    /// The texel this stamp writes at world XZ `world`, `[R, G]`; `None` off the footprint and over
+    /// an opening. The raster's law at one point, which [`Raster`] evaluates incrementally.
     #[cfg(test)]
     fn texel_at(&self, shoe: &ClearanceStamp, world: Vec2, law: &PrintLaw) -> Option<[u8; 2]> {
         let (across, along) = self.axes();
@@ -230,9 +241,10 @@ impl StampEntry {
         if height >= OPEN_M || plane > law.contact_m {
             return None;
         }
-        let pattern = (1.0 - (height + plane) / law.pattern_range_m).clamp(0.0, 1.0);
-        let r = (self.press() * pattern * 255.0).round() as u8;
-        (r > 0).then_some([r, self.pressure])
+        let r = (255.0 - (height + plane) / CLEARANCE_UNIT_M)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        (self.press > 0).then_some([r, self.bearing()])
     }
 }
 
@@ -285,10 +297,8 @@ struct Raster<'a> {
     /// (inclusive, padded by [`ROW_PAD`]); `None` where the axis is constant along a row, which
     /// is checked per row instead.
     strips: [Option<[f32; 4]>; 2],
-    /// The press in 1/255, and how much of it a metre of clearance takes away.
-    full: f32,
-    per_metre: f32,
-    pressure: u8,
+    /// The G every texel of the footprint takes ([`StampEntry::bearing`]).
+    bearing: u8,
     contact_m: f32,
 }
 
@@ -333,7 +343,6 @@ impl<'a> Raster<'a> {
                 [lo - ROW_PAD, per_row, hi + ROW_PAD, per_row]
             })
         };
-        let full = entry.press() * 255.0;
         let tilt = |c: Vec2| entry.plane(c) - entry.plane(Vec2::ZERO);
         Some(Self {
             heights,
@@ -345,9 +354,7 @@ impl<'a> Raster<'a> {
             u,
             v,
             plane: [entry.plane(c0), tilt(ci), tilt(cj)],
-            full,
-            per_metre: full / law.pattern_range_m,
-            pressure: entry.pressure,
+            bearing: entry.bearing(),
             contact_m: law.contact_m,
         })
     }
@@ -365,8 +372,7 @@ impl<'a> Raster<'a> {
         let [p0, p1, p2] = self.plane;
         let (width, height) = (self.width, self.height);
         let (wf, hf) = (width as f32, height as f32);
-        let (full, per_metre, contact_m, pressure) =
-            (self.full, self.per_metre, self.contact_m, self.pressure);
+        let (contact_m, bearing) = (self.contact_m, self.bearing);
         let heights = self.heights;
         let mut changed = 0_u8;
         for gj in clip.min.y..clip.max.y {
@@ -420,17 +426,14 @@ impl<'a> Raster<'a> {
                 if lift >= OPEN_M || plane > contact_m {
                     continue;
                 }
-                // The pattern, `1 − clearance / range`, times the press, in 1/255.
-                let r = (full - (lift + plane) * per_metre + 0.5).clamp(0.0, 255.0) as u8;
-                if r == 0 {
-                    continue;
-                }
+                // The reach, `255 − clearance` in clearance units.
+                let r = (255.5 - (lift + plane) / CLEARANCE_UNIT_M).clamp(0.0, 255.0) as u8;
                 let texel = &mut texels[(row + i) as usize];
                 let [old_r, old_g] = *texel;
-                if r <= old_r && pressure <= old_g {
+                if r <= old_r && bearing <= old_g {
                     continue;
                 }
-                *texel = [old_r.max(r), old_g.max(pressure)];
+                *texel = [old_r.max(r), old_g.max(bearing)];
                 first_changed = first_changed.min(i);
                 last_changed = i;
                 if old_g == 0 {
@@ -1043,10 +1046,7 @@ mod tests {
         bake(&triangles).expect("covers")
     }
 
-    const LAW: PrintLaw = PrintLaw {
-        pattern_range_m: 0.10,
-        contact_m: 0.03,
-    };
+    const LAW: PrintLaw = PrintLaw { contact_m: 0.03 };
 
     /// Fixture ground pressure, kPa.
     const KPA: f32 = 100.0;
@@ -1425,9 +1425,10 @@ mod tests {
         assert_gpu_is_history(&stores, &gpu);
     }
 
-    /// The press and the pressure are MAX-combined, so a stamp laid twice changes nothing, the
+    /// The reach and the bearing are MAX-combined, so a stamp laid twice changes nothing, the
     /// store holds the deepest of two overlapping prints whatever order they arrive in, and a
-    /// stamp further into its press only ever deepens a print.
+    /// stamp further into its press only ever deepens a print. A sole resting on the ground writes
+    /// its whole reach, and bears its tank's pressure times its press.
     #[test]
     fn overlapping_stamps_keep_the_deepest_in_any_order() {
         let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
@@ -1462,8 +1463,16 @@ mod tests {
             0.5,
             KPA,
         );
-        assert_eq!(draw(&[half]).near_at(g)[0], 128, "half pressed");
-        assert_eq!(draw(&[deep, half]).near_at(g)[0], 255, "never shallower");
+        assert_eq!(
+            draw(&[half]).near_at(g),
+            [255, (KPA / 2.0) as u8],
+            "half pressed"
+        );
+        assert_eq!(
+            draw(&[deep, half]).near_at(g)[1],
+            KPA as u8,
+            "never shallower"
+        );
     }
 
     /// The world layer counts a near footprint texel once, at every sample phase: a sole visible

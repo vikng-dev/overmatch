@@ -21,12 +21,15 @@
 //!    GPU copy (which follows the eye, [`follow_eye`]) and the world layer are fed from it.
 //! 4. **The upload** ([`upload`]). Each frame's written tiles go to the two GPU images.
 //! 5. **The shader** (`terrain_blend.wgsl`). Each pack names a ground type
-//!    ([`crate::ground_types`]); a texel's depth is that ground's `softness × pressure`, capped,
-//!    times the texel's pattern and press. The world layer darkens and roughens everywhere; inside
-//!    the near store the depth bends the normal, and up to the player's set distance it is drawn
-//!    with parallax and the sun's shadow ([`crate::settings::TrackPrintRelief`]).
-//! 6. **The belt sink** ([`PrintDepths`]). The drawn belt lowers into its own rut by the depth the
-//!    shader draws under a full press (`track::view`).
+//!    ([`crate::ground_types`]); the sole, the shoe's lowest face, sinks by that ground's
+//!    `softness × pressure`, capped, under the share of its tank's pressure the press has put on
+//!    it, and a texel prints that sinkage less the shoe's baked clearance over its sole there, so a
+//!    print takes the shoe's shape as deep as the ground lets it in. Hard ground takes no depth.
+//!    The world layer darkens and roughens everywhere; inside the near store the depth bends the
+//!    normal, and up to the player's set distance it is drawn with parallax and the sun's shadow
+//!    ([`crate::settings::TrackPrintRelief`]).
+//! 6. **The belt sink** ([`PrintDepths`]). The drawn belt lowers its sole by the depth the shader
+//!    draws under a full press, onto its print's floor (`track::view`).
 //!
 //! # Entry points
 //!
@@ -69,8 +72,8 @@ use crate::view::PlayerView;
 use stamp::ClearanceStamp;
 use stamper::{ShoeKey, ShoeMemory};
 use store::{
-    KPA_PER_UNIT, NEAR_SIDE, NEAR_SPAN_M, NEAR_TEXEL_M, PrintLaw, PrintStores, StampEntry, Store,
-    WORLD_SIDE,
+    CLEARANCE_UNIT_M, KPA_PER_UNIT, NEAR_SIDE, NEAR_SPAN_M, NEAR_TEXEL_M, PrintLaw, PrintStores,
+    StampEntry, Store, WORLD_SIDE,
 };
 use upload::{PrintWrites, TileWrite};
 
@@ -78,7 +81,6 @@ use upload::{PrintWrites, TileWrite};
 #[serde(deny_unknown_fields)]
 struct PrintAppearance {
     contact_m: crate::provenance::Labelled<f32>,
-    pattern_range_m: crate::provenance::Labelled<f32>,
     near_fade_m: crate::provenance::Labelled<f32>,
     near_gone_px: crate::provenance::Labelled<f32>,
     near_full_px: crate::provenance::Labelled<f32>,
@@ -95,7 +97,6 @@ fn print_appearance() -> &'static PrintAppearance {
         .unwrap_or_else(|error| panic!("{error}"));
         for (field, value) in [
             ("contact_m", &data.contact_m),
-            ("pattern_range_m", &data.pattern_range_m),
             ("near_fade_m", &data.near_fade_m),
             ("relief_fade_share", &data.relief_fade_share),
         ] {
@@ -150,7 +151,6 @@ impl TrackPrints {
             world_image: images.world,
             material,
             law: PrintLaw {
-                pattern_range_m: print_appearance().pattern_range_m.value,
                 contact_m: print_appearance().contact_m.value,
             },
             shoes: Vec::new(),
@@ -229,11 +229,12 @@ impl PrintDepths {
     }
 
     /// The depth (m) the shader draws at world XZ `xz` under a full press by a tank of ground
-    /// pressure `kpa`: the deepest point of its print there. The pressure is read as the near store
-    /// stores it, in whole [`KPA_PER_UNIT`], so this is the shader's own number.
+    /// pressure `kpa`: the sole's sinkage, the deepest point of its print there. The pressure is
+    /// read as the near store stores it, in whole [`KPA_PER_UNIT`], so this is the shader's own
+    /// number.
     pub(crate) fn full_press_m(&self, xz: Vec2, kpa: f32) -> f32 {
         let stored = (kpa / KPA_PER_UNIT).round().clamp(1.0, 255.0) * KPA_PER_UNIT;
-        crate::terrain_blend::print_depth_m(&self.params, self.ground_weights(xz), stored)
+        crate::terrain_blend::sinkage_m(&self.params, self.ground_weights(xz), stored)
     }
 }
 
@@ -325,6 +326,12 @@ pub(crate) fn law_params() -> Vec4 {
         print_appearance().near_gone_px.value,
         print_appearance().near_full_px.value,
     )
+}
+
+/// The material's `print_store` lane: `x` the clearance over a sole (m) an empty R channel stands
+/// for.
+pub(crate) fn store_params() -> Vec4 {
+    Vec4::new(255.0 * CLEARANCE_UNIT_M, 0.0, 0.0, 0.0)
 }
 
 /// The material's `print_relief` lane for the player's `relief` and `range`: `x` the level, `y`
@@ -832,19 +839,28 @@ mod tests {
         );
     }
 
-    /// THE BELT SINK READS THE SAME DEPTH THE SHADER DRAWS. The shader's depth at a texel is the
-    /// ground's `softness × pressure`, capped, blended by the painted weights, times the texel's
-    /// press (`terrain_blend.wgsl`'s `print_depth`, mirrored by `terrain_blend::print_depth_m`);
-    /// the pressure it reads is the byte the store wrote. A fully pressed grouser texel, decoded
-    /// from what the store wrote, must give the sink's own number at every mix of grounds: a sink
-    /// that read the table rather than the material's lanes, the pressure unquantised, or its own
-    /// weights, drifts from the rut it sits in.
+    /// THE DRAWN SHOE RESTS ON THE PRINT IT MAKES. The drawn belt lowers its sole by
+    /// [`PrintDepths::full_press_m`] (`track::view`); the shader draws each texel at the sole's
+    /// sinkage less the shoe's clearance over its sole there (`terrain_blend.wgsl`'s `sunk_at`,
+    /// mirrored by `terrain_blend::print_depth_m`). Decoded from what the store wrote under a full
+    /// press, the sole's texels must draw exactly the sink, and the recess's the sink less its
+    /// height, none where the sole does not sink that far, at every mix of grounds, hard included:
+    /// a sink that read the table rather than the material's lanes, the pressure unquantised, or its
+    /// own weights, floats the drawn shoe over its print or buries it in the ground.
     #[test]
-    fn the_belt_sink_reads_the_same_depth_the_shader_draws() {
-        let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
+    fn the_drawn_shoe_rests_on_the_floor_the_shader_draws() {
+        let mut table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
+        // Fixture: the base pack's ground made hard, so the cases below span hard to yielding.
+        table
+            .types
+            .get_mut(crate::terrain_blend::BASE_GROUND)
+            .expect("the base pack's ground")
+            .print
+            .softness_mm_per_kpa = 0.0;
         let mut params = TerrainBlendParams {
             mask_map: Vec4::new(1.0 / 64.0, -1.0 / 64.0, 0.5, 0.5),
             print_law: law_params(),
+            print_store: store_params(),
             ..default()
         };
         crate::terrain_blend::set_print_lanes(&mut params, &table);
@@ -852,15 +868,37 @@ mod tests {
         let weights: Vec<Vec3> = (0..16)
             .map(|k| {
                 let f = k as f32 / 15.0;
-                Vec3::new(f * 0.3, (1.0 - f) * 0.8, if k % 3 == 0 { 0.9 } else { 0.0 })
+                Vec3::new(f * 0.3, (1.0 - f) * 0.4, if k % 3 == 0 { 0.5 } else { 0.0 })
             })
             .collect();
-        let depths = PrintDepths {
+        let mixed = PrintDepths {
             ground: crate::ground_field::GroundField::fixture_mask(UVec2::splat(4), 64.0, weights),
             params: params.clone(),
         };
+        // One ground over the whole map: the bare (hard) base pack, or one layer.
+        let only = |mask: Vec3| PrintDepths {
+            ground: crate::ground_field::GroundField::fixture_mask(UVec2::ONE, 64.0, vec![mask]),
+            params: params.clone(),
+        };
+        let (hard, red, blue) = (only(Vec3::ZERO), only(Vec3::X), only(Vec3::Z));
         let shoes = vec![ClearanceStamp::pooled(&stamp_fixture(), NEAR_TEXEL_M)];
-        for (k, kpa) in [37.3, 111.4, 180.0].into_iter().enumerate() {
+        let law = PrintLaw {
+            contact_m: print_appearance().contact_m.value,
+        };
+        // Seen: hard ground, a sole that stops above the recess, one that sinks past it.
+        let mut seen = [false; 3];
+        for (k, (depths, kpa)) in [
+            (&mixed, 37.3),
+            (&mixed, 111.4),
+            (&mixed, 180.0),
+            (&hard, 111.4),
+            (&red, 5.0),
+            (&red, 111.4),
+            (&blue, 250.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let at = Vec2::new(-20.0 + 13.0 * k as f32, 9.0 - 11.0 * k as f32);
             let mut stores = PrintStores::new(64.0, 64);
             stores.recentre(at);
@@ -876,44 +914,62 @@ mod tests {
                 1.0,
                 kpa,
             );
-            stores.stamp(
-                &entry,
-                &shoes,
-                &PrintLaw {
-                    pattern_range_m: print_appearance().pattern_range_m.value,
-                    contact_m: print_appearance().contact_m.value,
-                },
-            );
-            let texel = stores
+            stores.stamp(&entry, &shoes, &law);
+            let footprint: Vec<[u8; 2]> = stores
                 .take_uploads()
                 .into_iter()
                 .filter(|u| u.store == Store::Near)
                 .flat_map(|u| u.data.chunks(2).map(|t| [t[0], t[1]]).collect::<Vec<_>>())
-                .max()
-                .expect("the stamp printed");
-            assert_eq!(texel[0], 255, "the sole at full press");
-            // The shader: pressure from G, the depth law on the painted weights, times R.
-            let kpa_read = f32::from(texel[1]) / 255.0 * params.print_law.x;
-            let drawn =
-                crate::terrain_blend::print_depth_m(&params, depths.ground_weights(at), kpa_read)
-                    * f32::from(texel[0])
-                    / 255.0;
+                .filter(|texel| texel[1] > 0)
+                .collect();
+            let sole = *footprint.iter().max().expect("the stamp printed");
+            let recess = *footprint.iter().min().expect("the stamp printed");
+            assert_eq!(sole[0], 255, "the sole's own texels reach all the way");
+            // The shader: pressure from G, clearance from R, on the painted weights.
+            let weights = depths.ground_weights(at);
+            let drawn = |texel: [u8; 2]| {
+                crate::terrain_blend::print_depth_m(
+                    &params,
+                    weights,
+                    f32::from(texel[1]) / 255.0 * params.print_law.x,
+                    (1.0 - f32::from(texel[0]) / 255.0) * params.print_store.x,
+                )
+            };
             let sink = depths.full_press_m(at, kpa);
             assert!(
-                (sink - drawn).abs() < 1e-6 && sink > 0.0,
-                "at {at}, {kpa} kPa: the belt sinks {sink} m, the shader draws {drawn} m"
+                (drawn(sole) - sink).abs() < 1e-6,
+                "at {at}, {kpa} kPa: the sole sinks {sink} m, its print's floor is {} m",
+                drawn(sole)
             );
+            let under_recess = (sink - FIXTURE_RECESS_M).max(0.0);
+            assert!(
+                (drawn(recess) - under_recess).abs() <= 0.5 * CLEARANCE_UNIT_M + 1e-6,
+                "at {at}, {kpa} kPa: the recess sinks {under_recess} m, its print's floor is {} m",
+                drawn(recess)
+            );
+            seen[usize::from(sink > 0.0) + usize::from(sink > FIXTURE_RECESS_M)] = true;
         }
+        assert_eq!(seen, [true; 3], "the cases span hard, shallow and deep");
     }
 
-    /// A flat sole, fixture geometry: 0.6 m across, 0.16 m along, its whole underside its datum,
-    /// so every texel inside it prints at full press.
+    /// Fixture: how far the recess of [`stamp_fixture`] rides above its sole, m.
+    const FIXTURE_RECESS_M: f32 = 0.04;
+
+    /// A shoe with a sole and a recess, fixture geometry: 0.6 m across and 0.3 m along, its sole
+    /// over its front half and a recess [`FIXTURE_RECESS_M`] above it over its rear half, each
+    /// longer than two near texels so the pooled stamp keeps both whole.
     fn stamp_fixture() -> stamp::ShoeStamp {
-        let c = |x: f32, z: f32| Vec3::new(x, 0.0, z);
-        let triangles = vec![
-            [c(-0.3, -0.08), c(0.3, -0.08), c(0.3, 0.08)],
-            [c(-0.3, -0.08), c(0.3, 0.08), c(-0.3, 0.08)],
-        ];
+        let quad = |y: f32, z0: f32, z1: f32| {
+            let c = |x: f32, z: f32| Vec3::new(x, y, z);
+            [
+                [c(-0.3, z0), c(0.3, z0), c(0.3, z1)],
+                [c(-0.3, z0), c(0.3, z1), c(-0.3, z1)],
+            ]
+        };
+        let triangles: Vec<[Vec3; 3]> = quad(FIXTURE_RECESS_M, -0.15, 0.0)
+            .into_iter()
+            .chain(quad(0.0, 0.0, 0.15))
+            .collect();
         stamp::bake(&triangles).expect("covers")
     }
 }

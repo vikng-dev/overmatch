@@ -11,9 +11,12 @@
 //
 // TRACK PRINTS (`src/track_prints.rs`, cosmetic terrain marks). Each pack names a ground type
 // (`src/ground_types.rs`), and the prints read the ground by the map's PAINTED weights
-// (`print_weights`), which the CPU reproduces for the belt sink. A near-store texel holds a press
-// (R: the sole's pattern times how far into its press the link is) and the laying tank's ground
-// pressure (G); its depth is the ground's `softness × pressure`, capped, times R (`print_depth`).
+// (`print_weights`), which the CPU reproduces for the belt sink. A near-store texel holds the shoe's
+// reach there (R: one less its clearance over the sole, over the clearance an empty R stands for)
+// and the pressure its link bore (G: the laying tank's, times how far into its press the link is,
+// nonzero exactly on a footprint); its depth is the sole's sinkage, the ground's
+// `softness × pressure` capped, less that clearance (`sunk_at`). Hard ground, softness zero, takes
+// no depth.
 // The world layer's trodden coverage darkens and roughens everywhere; inside the near store's
 // window the depth's gradient bends the normal, and up to the player's relief distance the view
 // ray is marched into the depth (parallax), and from where it lands toward the sun (the rut's
@@ -39,8 +42,8 @@ struct TerrainBlendParams {
     blend_law: vec4<f32>,
     // x: macro-tint periods per metre, y: macro-tint amplitude. zw: unused.
     macro_tint: vec4<f32>,
-    // Per slot (x the base, yzw the layers), the ground type each pack names: print depth per kPa
-    // of ground pressure (m), depth cap (m), albedo gain, roughness gain.
+    // Per slot (x the base, yzw the layers), the ground type each pack names: the sole's sinkage per
+    // kPa of ground pressure (m, zero on hard ground), sinkage cap (m), albedo gain, roughness gain.
     print_softness: vec4<f32>,
     print_cap: vec4<f32>,
     print_albedo: vec4<f32>,
@@ -52,6 +55,8 @@ struct TerrainBlendParams {
     // x: the ground pressure (kPa) a full G channel stands for, y: window fade (m), z/w: pixels per
     // texel at which the near normal is gone / whole.
     print_law: vec4<f32>,
+    // x: the clearance over a sole (m) an empty R channel stands for. yzw: unused.
+    print_store: vec4<f32>,
     // x: relief level (0 lighting only, 1 parallax, 2 parallax and the sun's shadow), y: the
     // distance relief reaches (m), z: the distance it fades to lighting only over (m).
     print_relief: vec4<f32>,
@@ -83,10 +88,12 @@ const MACRO_OCTAVE_RATIO: f32 = 2.7;
 // Peak of the two-octave sum: the octaves are 1 and 1/2, each in 0..1.
 const MACRO_PEAK: f32 = 1.5;
 
-// How much of a print's press reads as fully trodden: a press of half or more darkens and roughens
-// the ground fully. ASSUMED: the darkening fades in with the first half of a link's press, so a
-// fresh print does not pop dark before it sinks.
-const FOOTPRINT_GAIN: f32 = 2.0;
+// The near store's G (the pressure a link bore, over its full scale) that reads as wholly trodden.
+// Resolution: G is nonzero exactly on a footprint, and a link bears at least its first press step
+// of its tank's pressure, far above the 4 kPa this gain whole-reads, so the near footprint is the
+// set of texels a sole bore, as the world layer counts it, and its edge is the bilinear crossing of
+// one texel.
+const FOOTPRINT_GAIN: f32 = 255.0 / 4.0;
 // The parallax march's step limits. ASSUMED minimum; DERIVED maximum: the tuning panel's
 // 0.3 m depth cap at PARALLAX_MIN_DOWN spans at most 6 m, or 256 half-texel steps.
 const PARALLAX_STEPS_MIN: f32 = 4.0;
@@ -133,13 +140,13 @@ fn print_weights(mask: vec3<f32>) -> vec4<f32> {
     return weights / max(dot(weights, vec4(1.0)), 1e-6);
 }
 
-// The depth (m) a full press reaches under a ground pressure of `kpa`, on ground of print weights
-// `ground`: each slot's `softness × pressure`, capped, blended. `terrain_blend::print_depth_m`.
-fn print_depth(ground: vec4<f32>, kpa: f32) -> f32 {
+// The depth (m) a sole sinks to under a ground pressure of `kpa`, on ground of print weights
+// `ground`: each slot's `softness × pressure`, capped, blended. `terrain_blend::sinkage_m`.
+fn sinkage(ground: vec4<f32>, kpa: f32) -> f32 {
     return dot(ground, min(blend.print_cap, blend.print_softness * kpa));
 }
 
-// The near store at world XZ `p`: R the press, G the ground pressure over its full scale.
+// The near store at world XZ `p`: R the reach, G the pressure borne, each over its full scale.
 fn near_texel(p: vec2<f32>) -> vec2<f32> {
     // Repeating addresses the torus, not another copy of the world. A grazing march can leave
     // the resident window; its wrapped storage there belongs to unrelated ground.
@@ -158,10 +165,13 @@ fn vertical_depth_ray(direction: vec3<f32>, normal: vec3<f32>, normal_speed: f32
     return direction * (normal.y / normal_speed);
 }
 
-// How far (m) the ground is sunk at world XZ `p`, on ground of print weights `ground`.
+// How far (m) the ground is sunk at world XZ `p`, on ground of print weights `ground`: the sole's
+// sinkage under the texel's pressure, less the shoe's clearance over its sole there.
+// `terrain_blend::print_depth_m`.
 fn sunk_at(p: vec2<f32>, ground: vec4<f32>) -> f32 {
     let texel = near_texel(p);
-    return print_depth(ground, texel.g * blend.print_law.x) * texel.r;
+    let clearance = (1.0 - texel.r) * blend.print_store.x;
+    return max(sinkage(ground, texel.g * blend.print_law.x) - clearance, 0.0);
 }
 
 // How much the prints' near store speaks at world XZ `p`, 0..1: whole inside its window and where
@@ -277,7 +287,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var depth_slope = vec3(0.0);
     if near > 0.0 {
         let relief = near * relief_weight(distance(view_bindings::view.world_position, in.world_position.xyz));
-        let bound = dot(ground, blend.print_cap) * relief;
+        // The deepest the ground can be sunk here: a sole under the store's full pressure scale.
+        let bound = sinkage(ground, blend.print_law.x) * relief;
         if blend.print_relief.x >= 0.5 && bound > 1e-4 {
             // The view ray into the vertically lowered height field.
             let into = normalize(in.world_position.xyz - view_bindings::view.world_position);
@@ -307,7 +318,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
                 - sunk_at(landed_xz - vec2(0.0, texel_m), ground),
         ) / (2.0 * texel_m);
         depth_slope = vec3(gradient.x, 0.0, gradient.y) * near;
-        footprint = mix(trodden, saturate(here.r * FOOTPRINT_GAIN), near);
+        footprint = mix(trodden, saturate(here.g * FOOTPRINT_GAIN), near);
     }
 
     // The surface as the view meets it, on the view ray, before the standard input samples the

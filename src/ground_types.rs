@@ -13,21 +13,27 @@
 //!
 //! One number per tank per ground type: the type's softness times the tank's ground pressure
 //! (mass over track footprint, both read from tank data — `track::rig_geom::ground_pressure_kpa`),
-//! capped by the type ([`PrintResponse::depth_m`]). No per-contact load, no weight distribution;
-//! the baked link shape supplies the pattern inside that depth (`track_prints::store`).
+//! capped by the type ([`PrintResponse::depth_m`]). The shoe's sole, its lowest face, sinks that
+//! deep, and the baked link shape prints inside it, each point its clearance over the sole less
+//! deep (`track_prints::store`), so the sole prints first and the rest of the shoe only where the
+//! ground lets it in that far. Zero softness is hard ground: nothing sinks. No per-contact load, no
+//! weight distribution, and no bearing share: the sole is read as bearing the whole footprint,
+//! though it bears only part of it (on the shipped shoe about 40 %, MEASURED from its mesh).
 //!
 //! # Where the starting values come from
 //!
-//! Print values are ASSUMED; traction and rolling facts carry their own provenance. Print ordering follows the ground-stamping note's §2
-//! table (`.agents/scratch/impact-feedback-2026-10-28/track-prints-ground-stamping.md`): its
-//! Bekker fits at a DERIVED 111 kPa put soft mud deepest (held at the note's 0.15 m visual cap), dry
-//! sand next (92 mm, so 0.8 mm/kPa), then firm dirt (5.9 mm) and gravel (7.6 mm), and intact paving
-//! at zero. Dirt and gravel are raised to about 5 cm under a 104 kPa fixture tank, because at the
-//! note's depths the base ground's prints were nearly invisible in play, and at 3 cm still faint in
-//! the slice's captures on the busy, stony base pack; a print must read, whole footprint and
-//! pattern, at 10–30 m on every shipped pack. Darkening and roughness start from the first slice's
-//! per-pack looks, dirt and gravel darkened further for the same reason. The owner tunes them by
-//! eye (`track_prints::tuning`), and the chosen values are written back here.
+//! Traction and rolling facts carry their own provenance. Each softness is its ground's sinkage in
+//! the ground-stamping note's §2 table
+//! (`.agents/scratch/impact-feedback-2026-10-28/track-prints-ground-stamping.md`) over that table's
+//! DERIVED 110.946 kPa: firm dirt 5.930 mm, DERIVED from the note's CLAIMED sandy-loam Bekker fit,
+//! so 0.0534 mm/kPa; gravel 7.602 mm, DERIVED from the note's ASSUMED game curve (150 kPa at 10 mm,
+//! exponent 1.10), so 0.0685 mm/kPa; dry sand 92 mm, DERIVED from its CLAIMED dry-sand fit, so
+//! 0.8 mm/kPa; soft mud ASSUMED at 1.6 mm/kPa and held at the note's ASSUMED 0.15 m visual cap (its
+//! heavy-clay fit's 1.5 m is rejected there); intact paving zero, hard. The linear softness stands
+//! in for each fit's exponent away from that pressure. The other caps are ASSUMED. Darkening and
+//! roughness are ASSUMED, from the first slice's per-pack looks, dirt and gravel darkened further
+//! so a footprint reads at 10–30 m on the busy, stony base pack. The owner tunes them by eye
+//! (`track_prints::tuning`), and the chosen values are written back here.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -44,7 +50,8 @@ pub(crate) const GROUND_TYPES_PATH: &str = "terrain/ground_types.ron";
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PrintResponse {
-    /// Print depth per unit of ground pressure, mm per kPa: finite, not negative.
+    /// Print depth per unit of ground pressure, mm per kPa: how deep the sole sinks; finite, not
+    /// negative, zero on hard ground.
     pub(crate) softness_mm_per_kpa: f32,
     /// The deepest print this ground takes, mm, whatever the pressure: finite, not negative.
     pub(crate) depth_cap_mm: f32,
@@ -63,7 +70,7 @@ impl PrintResponse {
             print_cap: Vec4::splat(self.depth_cap_mm / 1000.0),
             ..Default::default()
         };
-        crate::terrain_blend::print_depth_m(&params, Vec4::X, kpa)
+        crate::terrain_blend::sinkage_m(&params, Vec4::X, kpa)
     }
 
     /// The albedo multiplier where a sole lay: 0..=1, as `darkening` is.
@@ -166,8 +173,10 @@ const FILE_HEADER: &str = "\
 //   strike.lifted        the share of a round's strike read this ground throws, 0..1, labelled
 //   strike.sparks        whether a strike on this ground throws contact sparks, labelled
 //
-// Every print value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt
-// and gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
+// Each softness is the ground-stamping note's §2 sinkage over its DERIVED 110.946 kPa: dirt 5.930 mm
+// DERIVED from a CLAIMED sandy-loam fit, gravel 7.602 mm DERIVED from an ASSUMED curve, sand 92 mm
+// DERIVED from a CLAIMED dry-sand fit; mud's is ASSUMED under the note's ASSUMED 0.15 m cap; paving
+// is 0, hard. Every other print value is ASSUMED, tuned by eye in play (`track_prints::tuning`).
 // terrain_solver_friction is the explicit Avian solid-body stand-in, not track grip.
 // Track laws and row derivations: .agents/docs/design/track-model/architecture.md section 5a.
 // Each strike value carries its own label and note. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt

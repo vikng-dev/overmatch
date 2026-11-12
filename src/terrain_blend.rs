@@ -36,8 +36,8 @@
 //! ([`crate::track_prints`], cosmetic terrain marks): its softness and depth cap, and how its albedo
 //! and roughness change where a sole lay. The shader blends the four responses by the map's PAINTED
 //! weights ([`print_weights`]), not by the AO-biased weights it blends the packs' looks by, so the
-//! CPU can reproduce the depth it draws ([`print_depth_m`]): the drawn belt sinks by that depth
-//! (`track::view`), and nothing senses the ground per stamp.
+//! CPU can reproduce the sole's sinkage it draws ([`sinkage_m`]): the drawn belt sinks by that
+//! depth (`track::view`), and nothing senses the ground per stamp.
 
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{
@@ -169,11 +169,24 @@ pub(crate) fn print_weights(mask: Vec3) -> Vec4 {
     weights / weights.element_sum().max(1e-6)
 }
 
-/// The print depth (m) a full press reaches under a ground pressure of `kpa` (kPa), on ground of
-/// print weights `weights` ([`print_weights`]), from the material's own lanes: each slot's
-/// `softness × pressure`, capped, blended. `terrain_blend.wgsl`'s `print_depth` is this law.
-pub(crate) fn print_depth_m(params: &TerrainBlendParams, weights: Vec4, kpa: f32) -> f32 {
+/// The depth (m) a shoe's sole, its lowest face, sinks to under a ground pressure of `kpa` (kPa),
+/// on ground of print weights `weights` ([`print_weights`]), from the material's own lanes: each
+/// slot's `softness × pressure`, capped, blended. `terrain_blend.wgsl`'s `sinkage` is this law.
+pub(crate) fn sinkage_m(params: &TerrainBlendParams, weights: Vec4, kpa: f32) -> f32 {
     weights.dot(params.print_cap.min(params.print_softness * kpa))
+}
+
+/// The print's depth (m) where a point of the shoe `clearance_m` above its sole bore `kpa`: the
+/// sole's sinkage less that clearance, none where the point stays above the ground.
+/// `terrain_blend.wgsl`'s `sunk_at` is this law on a near-store texel.
+#[cfg(test)]
+pub(crate) fn print_depth_m(
+    params: &TerrainBlendParams,
+    weights: Vec4,
+    kpa: f32,
+    clearance_m: f32,
+) -> f32 {
+    (sinkage_m(params, weights, kpa) - clearance_m).max(0.0)
 }
 
 /// Albedo of every layer, as one KTX2 2D array (UASTC 4x4 + zstd, full mip chain, 2048² per
@@ -237,10 +250,11 @@ pub(crate) struct TerrainBlendParams {
     /// `x`: periods per metre (`1 / `[`MACRO_PERIOD_M`]), `y`: [`MACRO_AMPLITUDE`], `zw`: unused.
     /// World-space, so it rides no UV set and no pack's authored size.
     pub macro_tint: Vec4,
-    /// Per slot (`x` the base pack, `yzw` the layers), from the ground type the pack names: print
-    /// depth per kPa of ground pressure, m ([`PrintResponse::softness_mm_per_kpa`]).
+    /// Per slot (`x` the base pack, `yzw` the layers), from the ground type the pack names: the
+    /// sole's sinkage per kPa of ground pressure, m ([`PrintResponse::softness_mm_per_kpa`]); zero
+    /// is hard ground.
     pub print_softness: Vec4,
-    /// Per slot: the deepest print, m ([`PrintResponse::depth_cap_mm`]).
+    /// Per slot: the deepest the sole sinks, m ([`PrintResponse::depth_cap_mm`]).
     pub print_cap: Vec4,
     /// Per slot: the albedo multiplier where a sole lay ([`PrintResponse::albedo_gain`]).
     pub print_albedo: Vec4,
@@ -255,6 +269,9 @@ pub(crate) struct TerrainBlendParams {
     /// fade (m), `zw` the pixels per texel at which its normal is gone and whole
     /// ([`crate::track_prints::law_params`]).
     pub print_law: Vec4,
+    /// `x` the clearance over a sole (m) an empty R channel of the near store stands for, `yzw`
+    /// unused ([`crate::track_prints::store_params`]).
+    pub print_store: Vec4,
     /// How the prints' relief is drawn ([`crate::track_prints::relief_params`]): `x` the level
     /// (0 lighting only, 1 parallax, 2 parallax with the sun's shadow), `y` the distance (m) relief
     /// reaches, `z` the distance over which it fades to lighting only (m).
@@ -373,6 +390,7 @@ pub(crate) fn params(manifest: &MapManifest, ground: &GroundTypes) -> TerrainBle
         print_near: crate::track_prints::near_params(Vec2::ZERO),
         print_world: crate::track_prints::world_params(manifest.extent.world_size_m),
         print_law: crate::track_prints::law_params(),
+        print_store: crate::track_prints::store_params(),
         print_relief: crate::track_prints::relief_params(Default::default(), Default::default()),
         ..default()
     };

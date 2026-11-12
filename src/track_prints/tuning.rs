@@ -106,8 +106,11 @@ fn panel(
                         .default_open(true)
                         .show(ui, |ui| {
                             ui.add(
+                                // Logarithmic: the soil softnesses span 0.05 to 1.6 mm/kPa.
                                 egui::Slider::new(&mut print.softness_mm_per_kpa, 0.0..=3.0)
-                                    .text("softness, mm/kPa"),
+                                    .logarithmic(true)
+                                    .smallest_positive(0.01)
+                                    .text("softness, mm/kPa (0 hard)"),
                             );
                             ui.add(
                                 egui::Slider::new(&mut print.depth_cap_mm, 0.0..=300.0)
@@ -123,7 +126,7 @@ fn panel(
                             );
                             if let Some(kpa) = kpa {
                                 ui.label(format!(
-                                    "This tank prints {:.0} mm deep here.",
+                                    "This tank's sole sinks {:.1} mm here.",
                                     print.depth_m(kpa) * 1000.0
                                 ));
                             }

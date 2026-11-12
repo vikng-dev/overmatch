@@ -13,8 +13,10 @@
 //   strike.lifted        the share of a round's strike read this ground throws, 0..1, labelled
 //   strike.sparks        whether a strike on this ground throws contact sparks, labelled
 //
-// Every print value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt
-// and gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
+// Each softness is the ground-stamping note's §2 sinkage over its DERIVED 110.946 kPa: dirt 5.930 mm
+// DERIVED from a CLAIMED sandy-loam fit, gravel 7.602 mm DERIVED from an ASSUMED curve, sand 92 mm
+// DERIVED from a CLAIMED dry-sand fit; mud's is ASSUMED under the note's ASSUMED 0.15 m cap; paving
+// is 0, hard. Every other print value is ASSUMED, tuned by eye in play (`track_prints::tuning`).
 // terrain_solver_friction is the explicit Avian solid-body stand-in, not track grip.
 // Track laws and row derivations: .agents/docs/design/track-model/architecture.md section 5a.
 // Each strike value carries its own label and note. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
@@ -48,7 +50,7 @@
             grip: (0.418, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED tan(20 deg) + 4830/89500, rounded to .418; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
             shear_length_m: (0.010, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3: MEASURED 10 mm for firm sandy terrain, a proxy for this map's firm dirt; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
             print: (
-                softness_mm_per_kpa: 0.5,
+                softness_mm_per_kpa: 0.0534,
                 depth_cap_mm: 70.0,
                 darkening: 0.2,
                 roughness_gain: 0.9,
@@ -67,7 +69,7 @@
             grip: (0.712, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED tan(35 deg) + 1040/89500, rounded to .712; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
             shear_length_m: (0.010, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3: MEASURED 10 mm for firm sandy terrain, a proxy for this map's gravel; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
             print: (
-                softness_mm_per_kpa: 0.45,
+                softness_mm_per_kpa: 0.0685,
                 depth_cap_mm: 60.0,
                 darkening: 0.2,
                 roughness_gain: 1.0,
