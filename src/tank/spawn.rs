@@ -269,6 +269,34 @@ fn tank_servos(spec: &TankSpec) -> TankServos {
     TankServos::for_count(spec.servos.len())
 }
 
+/// The authority root's simulation state, built from data in the same insertion that adds `Tank`,
+/// before the root can replicate or simulate.
+fn authority_state(content: TankContent) -> impl Bundle {
+    let (transmission, sense) = tank_transmission(content);
+    let resolution = crate::track::forces::CONTACT_RESOLUTION;
+    (
+        // Pre-sized synchronously at force resolution (`track::sim::TrackGripElements` owns the
+        // fixed-size invariant), never an empty vector awaiting a first-tick resize.
+        TrackGripElements::for_links(resolution.stations, resolution.lateral_points),
+        // Complete REV-14 transmission state and the public crank speed read off it.
+        transmission,
+        EngineRpm::of(&transmission),
+        // The Driver's ledger starts empty: nothing has been felt before the first tick.
+        sense,
+        // The shaped drive signal starts at rest, as the command does.
+        DriveSignal::default(),
+        // Complete REV-17 weapon gate, from the same sorted spec data as its weapon slots.
+        // Replicated client attachment must preserve the arriving authority value.
+        weapon_gate(content.spec()),
+        // The round each slot has loaded and selected, beside the gate it is read with.
+        weapon_loads(content.spec()),
+        // Complete servo integrator inventory. The glb is a view and never initializes
+        // replicated state.
+        tank_servos(content.spec()),
+        ServoMechanism::new(content.spec(), content.transmission()),
+    )
+}
+
 /// Spawn a root and its complete local simulation body in one command batch.
 pub(crate) fn spawn_complete_tank<B: Bundle>(
     commands: &mut Commands,
@@ -276,31 +304,9 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     presentation: TankPresentation,
     root_bundle: B,
 ) -> Entity {
-    let (transmission, sense) = tank_transmission(content);
-    let resolution = crate::track::forces::CONTACT_RESOLUTION;
-    // The element-grip slabs ride the SAME insertion that adds `Tank`: pre-sized synchronously
-    // at force resolution (`track::sim::TrackGripElements` owns the fixed-size invariant),
-    // never an empty vector awaiting a first-tick resize.
     let mut root = commands.spawn((
         presentation.root_bundle(),
-        TrackGripElements::for_links(resolution.stations, resolution.lateral_points),
-        // Complete REV-14 transmission state, synchronously constructed from spec data before the
-        // root can replicate or simulate, and the public crank speed read off it.
-        transmission,
-        EngineRpm::of(&transmission),
-        // The Driver's ledger starts empty: nothing has been felt before the first tick.
-        sense,
-        // The shaped drive signal starts at rest, as the command does.
-        DriveSignal::default(),
-        // Complete REV-17 weapon gate, synchronously constructed from the same sorted spec data as
-        // its weapon slots. Replicated client attachment must preserve the arriving authority value.
-        weapon_gate(content.spec()),
-        // The round each slot has loaded and selected, beside the gate it is read with.
-        weapon_loads(content.spec()),
-        // Complete servo integrator inventory is data-built in the same spawn flush. The glb is a
-        // view and never initializes replicated state.
-        tank_servos(content.spec()),
-        ServoMechanism::new(content.spec(), content.transmission()),
+        authority_state(content),
         root_bundle,
     ));
     if let Some(scene) = presentation.scene_root() {
@@ -325,22 +331,8 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
     content: TankContent,
     root_bundle: B,
 ) -> Entity {
-    let (transmission, sense) = tank_transmission(content);
-    let resolution = crate::track::forces::CONTACT_RESOLUTION;
     let root = commands
-        .spawn((
-            Tank,
-            TrackGripElements::for_links(resolution.stations, resolution.lateral_points),
-            transmission,
-            EngineRpm::of(&transmission),
-            sense,
-            DriveSignal::default(),
-            weapon_gate(content.spec()),
-            weapon_loads(content.spec()),
-            tank_servos(content.spec()),
-            ServoMechanism::new(content.spec(), content.transmission()),
-            root_bundle,
-        ))
+        .spawn((Tank, authority_state(content), root_bundle))
         .id();
     assemble_tank_body(commands, root, content);
     spawn_track_colliders(commands, root, content.track_colliders);

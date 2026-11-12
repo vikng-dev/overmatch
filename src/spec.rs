@@ -1815,10 +1815,9 @@ impl TankSpec {
                 return Err(format!("servo `{node}`: {fault}").into());
             }
         }
-        // The two explicit node-list declarations that replaced the name scans. Both are required
-        // structure — a tank with no collision proxy falls through the world, one with no roadwheel
-        // on a side has no belt to drive — and a duplicate is a node bound twice, which for
-        // roadwheels silently shifts every later wire slot.
+        // Both declared node lists are required structure — a tank with no collision proxy falls
+        // through the world, one with no roadwheel on a side has no belt to drive — and a duplicate
+        // is a node bound twice, which for roadwheels silently shifts every later wire slot.
         if self.colliders.is_empty() {
             return Err("colliders must declare at least one collision-proxy node".into());
         }
