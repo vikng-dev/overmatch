@@ -25,6 +25,7 @@ use bevy::ecs::entity::EntityHashMap;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 use bevy::tasks::{ComputeTaskPool, ParallelSlice};
+use lightyear::interpolation::plugin::InterpolationSystems;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -223,7 +224,14 @@ pub(super) fn install_client(app: &mut App) {
             refuse_peer_pose.after(bevy_replicon::prelude::ClientSystems::Receive),
         )
         .add_systems(Startup, build_view)
-        .add_systems(Update, (attach_view, follow_pose).chain());
+        .add_systems(
+            Update,
+            // This frame's interpolated pose, before the breaks' view dresses a piece on it.
+            (attach_view, follow_pose)
+                .chain()
+                .after(InterpolationSystems::All)
+                .before(crate::construction::view::ViewSet),
+        );
 }
 
 /// The ordinary match-close path shows the cause in the lobby and stops reconnecting this link.

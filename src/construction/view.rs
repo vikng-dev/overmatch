@@ -23,7 +23,10 @@
 //! their hulls, framed exactly as the element's faces, so a swapped wall looks unchanged until a
 //! chunk goes; one with nothing left standing draws no mesh at all, never an empty one. Cracks are
 //! dark strips where an opened seam meets its element's surface ([`crack_mesh`]). A fallen group
-//! draws its chunks' hulls on its body or carrier ([`piece_mesh`]), holes and all.
+//! draws its chunks' hulls on its body or carrier ([`piece_mesh`]), holes and all. A fallen chunk
+//! stays on its construction, where it stood, until a shown group draws it ([`ShownOnPieces`]): a
+//! group shows only once its entity holds a pose, which can be frames after its fall is presented,
+//! so every chunk is drawn every frame across a fall.
 //!
 //! # Holes
 //!
@@ -597,7 +600,25 @@ struct CrackLook(Handle<StandardMaterial>);
 
 /// What a construction shows: the record presented up to the presentation clock.
 #[derive(Component, Clone, Debug, PartialEq)]
+#[require(ShownOnPieces)]
 pub(crate) struct ShownShape(pub(crate) Shape);
+
+/// The law chunks of a construction its shown pieces draw ([`show_pieces`]); it draws every other
+/// fallen chunk itself, where it stood ([`drawn_shape`]).
+#[derive(Component, Clone, Debug, Default, PartialEq)]
+struct ShownOnPieces(BTreeSet<usize>);
+
+/// The shape a construction draws itself: its shown shape, with each fallen chunk that no shown
+/// piece draws yet still standing.
+fn drawn_shape(shown: &Shape, on_pieces: &ShownOnPieces) -> Shape {
+    let mut drawn = shown.clone();
+    for (c, fate) in drawn.fate.iter_mut().enumerate() {
+        if *fate == Fate::Fallen && !on_pieces.0.contains(&c) {
+            *fate = Fate::Standing;
+        }
+    }
+    drawn
+}
 
 /// The holes a construction shows, per law chunk in record order, presented with its [`ShownShape`].
 #[derive(Component, Clone, Debug, Default, PartialEq)]
@@ -735,14 +756,25 @@ impl SurfaceStores<'_> {
     }
 }
 
-/// Redraw a construction whose shown shape or holes moved: its view's own mesh, its material (its own
-/// while a hole shows, module doc) and its cracks. A view holds a `Mesh3d` exactly while its
-/// construction has a face to draw: a zero-vertex mesh never reaches the renderer (see
+/// Redraw a construction whose shown shape, holes or chunks on shown pieces moved: its view's own
+/// mesh, its material (its own while a hole shows, module doc) and its cracks, all of the shape it
+/// draws itself ([`drawn_shape`]). A view holds a `Mesh3d` exactly while its construction has a
+/// face to draw: a zero-vertex mesh never reaches the renderer (see
 /// [`crate::track::shadow_proxy::ProxySide::mesh`]).
 fn redraw(
     constructions: Query<
-        (&Breakage, &ShownShape, Option<&ShownHoles>, &Children),
-        Or<(Changed<ShownShape>, Changed<ShownHoles>)>,
+        (
+            &Breakage,
+            &ShownShape,
+            Option<&ShownHoles>,
+            &ShownOnPieces,
+            &Children,
+        ),
+        Or<(
+            Changed<ShownShape>,
+            Changed<ShownHoles>,
+            Changed<ShownOnPieces>,
+        )>,
     >,
     mut views: Query<
         (
@@ -759,7 +791,7 @@ fn redraw(
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
     mut commands: Commands,
 ) {
-    for (breakage, shown, holes, children) in &constructions {
+    for (breakage, shown, holes, on_pieces, children) in &constructions {
         let Some(view) = children.iter().find(|child| views.contains(*child)) else {
             continue; // A construction spawned with no view attached has nothing to redraw.
         };
@@ -767,8 +799,8 @@ fn redraw(
             .get_mut(view)
             .expect("the view child was found in this same query");
         let kind = &breakage.kind;
-        let table =
-            holes.and_then(|holes| hole_table(&kind.asset, &kind.layout, &shown.0, &holes.0));
+        let shape = drawn_shape(&shown.0, on_pieces);
+        let table = holes.and_then(|holes| hole_table(&kind.asset, &kind.layout, &shape, &holes.0));
         match (surfaces.wear(table), worn) {
             (Some(surface), Some(mut worn)) => worn.0 = surface,
             (Some(surface), None) => {
@@ -776,9 +808,9 @@ fn redraw(
             }
             (None, _) => {}
         }
-        let broken = broken_mesh(kind, &shown.0);
+        let broken = broken_mesh(kind, &shape);
         let mesh = (broken.count_vertices() > 0).then(|| meshes.add(broken));
-        let cracks = crack_mesh(&kind.layout, &shown.0, crate::vfx::construction_cracks())
+        let cracks = crack_mesh(&kind.layout, &shape, crate::vfx::construction_cracks())
             .map(|m| meshes.add(m));
         match (&mesh, drawn) {
             (Some(mesh), Some(mut drawn)) => drawn.0 = mesh.clone(),
@@ -932,10 +964,11 @@ struct PieceHoled(usize);
 /// retirement tick. Until then (and while the retirement itself has not arrived) a replacement
 /// waits hidden behind the older piece still drawing its chunks, so each chunk is drawn by exactly
 /// one piece. The arrivals are indexed once per frame by construction, birth tick and chunk, and every
-/// handover check is a lookup there.
+/// handover check is a lookup there. Each construction learns which of its chunks its shown pieces
+/// draw ([`ShownOnPieces`]), and draws the other fallen ones itself.
 fn show_pieces(
     clock: Res<PresentationClock>,
-    arrived: Query<(&Piece, &PieceDressed)>,
+    // Every arrival: `dress_pieces` gives a piece its `Visibility` with its dressing.
     mut pieces: Query<(
         Entity,
         &Piece,
@@ -944,6 +977,7 @@ fn show_pieces(
         Option<&PieceHoled>,
     )>,
     constructions: Query<(&Breakage, &ShownShape, Option<&ShownHoles>)>,
+    mut on_pieces: Query<(Entity, &mut ShownOnPieces)>,
     mut worn: Query<&mut MeshMaterial3d<ConstructionMaterial>>,
     mut surfaces: SurfaceStores,
     mut commands: Commands,
@@ -952,9 +986,9 @@ fn show_pieces(
     // "Genuine remote-clock resyncs remain discontinuities" (`.agents/docs/design/net-motion-contract.md`).
     // A backward resync can reverse a handover; a local monotone cursor would detach it from poses.
     let due = |tick: u32| clock.since(tick).is_some_and(|elapsed| elapsed >= 0.0);
-    let born_with: BTreeSet<(Entity, u32, u16)> = arrived
+    let born_with: BTreeSet<(Entity, u32, u16)> = pieces
         .iter()
-        .flat_map(|(piece, dressed)| {
+        .flat_map(|(_, piece, dressed, ..)| {
             piece
                 .chunks
                 .iter()
@@ -978,7 +1012,7 @@ fn show_pieces(
     // hold it: the piece drawing that chunk. Births share the presentation clock's signed
     // half-range ordering, so ancestry survives tick wrap.
     let mut drawing: BTreeMap<(Entity, u16), u32> = BTreeMap::new();
-    for (piece, dressed) in &arrived {
+    for (_, piece, dressed, ..) in &pieces {
         if !handed_over(piece, dressed) {
             for &c in &piece.chunks {
                 let oldest = drawing
@@ -990,6 +1024,7 @@ fn show_pieces(
             }
         }
     }
+    let mut shown_on: BTreeMap<Entity, BTreeSet<usize>> = BTreeMap::new();
     for (entity, piece, dressed, mut visibility, holed) in &mut pieces {
         // A piece whose construction has despawned is hidden.
         let construction = constructions.get(dressed.construction).ok();
@@ -1008,6 +1043,12 @@ fn show_pieces(
                     .iter()
                     .any(|&c| shown.0.fate.get(usize::from(c)) == Some(&Fate::Fallen))
             });
+        if fallen {
+            shown_on
+                .entry(dressed.construction)
+                .or_default()
+                .extend(piece.chunks.iter().map(|&c| usize::from(c)));
+        }
         visibility.set_if_neq(if fallen {
             Visibility::Inherited
         } else {
@@ -1046,6 +1087,10 @@ fn show_pieces(
         }
         commands.entity(entity).insert(PieceHoled(hole_count));
     }
+    for (root, mut on_pieces) in &mut on_pieces {
+        // A construction with no piece shown draws every fallen chunk itself.
+        on_pieces.set_if_neq(ShownOnPieces(shown_on.remove(&root).unwrap_or_default()));
+    }
 }
 
 /// Off a replica the presentation clock is the sim's own tick and the fixed step's overstep.
@@ -1063,8 +1108,13 @@ fn publish_sim_clock(
     };
 }
 
+/// The breaks' view in `Update` ([`plugin`]). Whatever poses a piece's entity runs before it, so a
+/// piece is dressed on the frame its first pose is presented.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ViewSet;
+
 /// The breaks' view, on every root that draws: the record presented at the presentation clock,
-/// the broken constructions redrawn, the fallen groups dressed and shown.
+/// the fallen groups dressed and shown, then the broken constructions redrawn around them.
 pub(crate) fn plugin(app: &mut App) {
     app.init_resource::<PresentationClock>()
         .add_systems(
@@ -1075,9 +1125,10 @@ pub(crate) fn plugin(app: &mut App) {
         )
         .add_systems(
             Update,
-            (present_record, redraw, dress_pieces, show_pieces)
+            (present_record, dress_pieces, show_pieces, redraw)
                 .chain()
-                .after(ReplicaSet),
+                .after(ReplicaSet)
+                .in_set(ViewSet),
         );
 }
 
@@ -2081,6 +2132,78 @@ mod tests {
             "a reset stands the construction again"
         );
     }
+
+    /// EVERY CHUNK IS DRAWN EVERY FRAME ACROSS ITS FALL, BY EXACTLY ONE OWNER: a replica's carrier
+    /// can first hold a pose frames after its fall is presented (interpolation inserts its pose at
+    /// its first sample), so its construction keeps drawing the fallen chunks where they stood
+    /// until the piece shows, and drops them on the frame it does. A view that dropped them at the
+    /// presented fall blinks; one that kept them, or dropped them a frame after the piece showed,
+    /// draws them twice. The fates are ASSUMED fixture state, set directly rather than reached by
+    /// law.
+    #[test]
+    fn a_fallen_chunk_stays_on_its_construction_until_its_piece_shows() {
+        let kind = shipped_house();
+        let mut app = App::new();
+        shared_look(app.world_mut());
+        app.init_resource::<Record>()
+            .insert_resource(crate::ClientReplica);
+        plugin(&mut app);
+        let (e, range) = chunked_element(&kind.layout);
+        let fallen: Vec<u16> = range.take(2).map(|c| c as u16).collect();
+        let mut shape = Shape::intact(&kind.layout);
+        shape.swapped[e] = true;
+        for &c in &fallen {
+            shape.fate[usize::from(c)] = Fate::Fallen;
+        }
+        let root = app
+            .world_mut()
+            .spawn((
+                MapInstance {
+                    id: "fixture".to_owned(),
+                    ordinal: 3,
+                },
+                Breakage::new(kind, 3),
+                ShownShape(shape),
+            ))
+            .id();
+        let view = app.world_mut().spawn((View, ChildOf(root))).id();
+        let piece = Piece {
+            construction: 3,
+            chunks: fallen.clone(),
+            born: 0,
+            retired: None,
+        };
+        let admitted = piece
+            .admitted(Some((root, app.world().get::<Breakage>(root).unwrap())))
+            .unwrap();
+        // A carrier before its first interpolated pose: admitted, and no transform yet.
+        let carrier = app.world_mut().spawn((piece, admitted)).id();
+        let on_construction = |app: &App| {
+            let mesh = &app.world().get::<Mesh3d>(view).expect("standing chunks").0;
+            let tags = tags(app.world().resource::<Assets<Mesh>>().get(mesh).unwrap());
+            fallen
+                .iter()
+                .filter(|&&c| tags.contains(&(f32::from(c) + 1.0)))
+                .count()
+        };
+        let shown =
+            |app: &App| app.world().get::<Visibility>(carrier) == Some(&Visibility::Inherited);
+
+        app.update();
+        assert!(!shown(&app), "a carrier with no pose is not dressed");
+        assert_eq!(
+            on_construction(&app),
+            fallen.len(),
+            "its construction draws them where they stood"
+        );
+        app.world_mut()
+            .entity_mut(carrier)
+            .insert(Transform::IDENTITY);
+        app.update();
+        assert!(shown(&app), "posed, the piece shows");
+        assert_eq!(on_construction(&app), 0, "and its construction drops them");
+    }
+
     /// A split replaces the old carrier at the shared cursor, after all replacement views
     /// have arrived. A late child must not make occupied geometry disappear early.
     #[test]
