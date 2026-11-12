@@ -1,8 +1,9 @@
 //! The common shoe template's pin and face datums, extracted synchronously from the sim artifact.
 //!
-//! `Pin_Start` and `Pin_End` define pitch; `Link_Box` defines the shoe's radial and lateral faces.
-//! Running-gear membership and contact geometry come from the tank sheet and its declared axle
-//! nodes, through `rig_geom`. No loaded view geometry supplies simulation construction.
+//! `Pin_Start` and `Pin_End` define pitch; `Link_Box` defines the shoe's inner and lateral faces;
+//! the drawn `Link` mesh's lowest point is its ground face, the SOLE. Running-gear membership and
+//! contact geometry come from the tank sheet and its declared axle nodes, through `rig_geom`. No
+//! loaded view geometry supplies simulation construction.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -14,13 +15,15 @@ use bevy::prelude::Resource;
 /// The pin markers: the two ends of ONE link, the loop's immutable pitch.
 const PIN_START: &str = "Pin_Start";
 const PIN_END: &str = "Pin_End";
-/// The link's collision box — the shoe's own volume, and since the 2026-07 re-export the source of
-/// every lateral/radial datum (it replaced the deleted `Inner_Surface`/`Outer_Surface` empties).
-/// Authored so its COMPOSED world scale is exactly 1: its extents read directly in metres.
+/// The link's collision box: the source of the shoe's lateral and inner datums (it replaced the
+/// deleted `Inner_Surface` empty). Authored so its COMPOSED world scale is exactly 1: its extents
+/// read directly in metres.
 const LINK_BOX: &str = "Link_Box";
+/// The drawn shoe itself, in the same composed frame as its box: its lowest point is the sole.
+const LINK: &str = super::link_view::LINK_NODE;
 /// The common shoe template's marker contract.
 const REQUIRED_EMPTIES: [&str; 2] = [PIN_START, PIN_END];
-const REQUIRED_MESHES: [&str; 1] = [LINK_BOX];
+const REQUIRED_MESHES: [&str; 2] = [LINK_BOX, LINK];
 
 /// Everything the derived geometry needs, read out of the model (all lengths in metres, side-plane
 /// centres as `(z, y)` in the glTF frame the blueprint's wheel positions also use).
@@ -35,8 +38,10 @@ pub struct DerivedModel {
     /// Measured pin-centre → inner-face offset (stands the track off the wheels/sprocket), from
     /// `Link_Box`'s `+y` radial face.
     pub pin_to_inner: f32,
-    /// Measured pin-centre → outer-face offset (the ground-contact side), from `Link_Box`'s `−y`
-    /// radial face. `−y` is OUTER in the model's frame: the shoe hangs below the pin line.
+    /// Measured pin-centre → ground-face offset: down to the drawn `Link` mesh's lowest point, its
+    /// sole, what stands on hard ground and sinks first into soft. `−y` is OUTER in the model's
+    /// frame: the shoe hangs below the pin line. A raw minimum, like the box's faces: one stray
+    /// vertex below the sole moves it.
     pub pin_to_outer: f32,
     /// The track's lateral median plane = |x| of the PIN markers. This is the plane the 2-D route
     /// lives in, and it is NOT where the shoe is centred — see [`Self::link_center_x`].
@@ -81,6 +86,7 @@ impl DerivedModel {
         let p0 = miss.empty(&g, PIN_START);
         let p1 = miss.empty(&g, PIN_END);
         let link_box = miss.mesh(&g, LINK_BOX);
+        let link = miss.mesh(&g, LINK);
         miss.into_result()?;
 
         // PITCH, in the side plane only. A pin is a CYLINDER spanning the shoe's width: every point
@@ -92,11 +98,12 @@ impl DerivedModel {
         let pitch = super::derive::pitch_from_pins(p0.with_x(0.0), p1.with_x(0.0));
         let pin_mid = (p0 + p1) * 0.5;
 
-        // The two RADIAL faces of the shoe, from the link's collision box (which replaced the
-        // deleted `Inner_Surface`/`Outer_Surface` empties — it reproduces them to ~1 mm). `−y` is
-        // the OUTER, ground-contact side; `+y` is INNER, toward the wheels. Read independently, so
-        // there is no mid-plate assumption: the Tiger's shoe really is asymmetric (24.7 vs 25.6 mm).
-        let pin_to_outer = pin_mid.y - link_box.lo.y;
+        // The two RADIAL faces of the shoe, read independently, so there is no mid-plate
+        // assumption. `+y` is INNER, toward the wheels: the link's collision box's face (which
+        // replaced the deleted `Inner_Surface` empty). `−y` is the OUTER, ground-contact side: the
+        // drawn shoe's own lowest point, not the box's `−y` face, which stops at the hinge knuckles
+        // (on the shipped shoe 46.3 mm above the sole, MEASURED).
+        let pin_to_outer = pin_mid.y - link.lo.y;
         let pin_to_inner = link_box.hi.y - pin_mid.y;
 
         let model = Self {
@@ -116,7 +123,7 @@ impl DerivedModel {
         for (field, value) in [
             ("pin pitch", model.pitch),
             ("Link_Box inner-face offset", model.pin_to_inner),
-            ("Link_Box outer-face offset", model.pin_to_outer),
+            ("Link sole offset", model.pin_to_outer),
             ("Link_Box width", model.width),
         ] {
             if !value.is_finite() || value <= 0.0 {
@@ -344,8 +351,6 @@ fn bounds(verts: &[Vec3]) -> (Vec3, Vec3) {
     )
 }
 
-/// Linearly-interpolated quantile of an ASCENDING slice (numpy's default convention). `q` is
-/// clamped to `0..=1`; an empty slice is 0.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +407,30 @@ mod tests {
         assert!(
             !text.contains("falling back") && !text.contains("tiger_1.tank.ron"),
             "no fallback may be implied: {text}"
+        );
+    }
+
+    /// THE DRAWN SHOE STANDS ON THE SIM'S GROUND FACE. The sim stands the belt on `pin_to_outer`
+    /// below its pins; the view draws the tank glb's `Link` about the same pins, and the prints'
+    /// stamp takes that mesh's lowest point as its datum. That point must be the face: above it
+    /// the drawn shoe floats over hard ground, below it the shoe sinks into ground that does not
+    /// yield. Read from both shipped glbs, so a sim artifact that drifts from the drawn one fails.
+    #[test]
+    fn the_drawn_shoe_s_lowest_point_is_the_sim_s_ground_face() {
+        let root = crate::assets::asset_root();
+        let model = DerivedModel::build(1.0, &root.join(crate::tank::TANK_SIM_GLB_PATH));
+        let drawn = GlbNodes::read(
+            &root.join(crate::tank::TANK_GLB_PATH),
+            &REQUIRED_EMPTIES,
+            &[LINK],
+        )
+        .unwrap_or_else(|gap| panic!("the drawn glb: {gap}"));
+        let pin_mid = (drawn.empties[PIN_START] + drawn.empties[PIN_END]) * 0.5;
+        let sole = pin_mid.y - drawn.meshes[LINK].lo.y;
+        assert!(
+            (sole - model.pin_to_outer).abs() < 1e-5,
+            "the drawn sole hangs {sole} m below its pins, the sim's ground face {} m",
+            model.pin_to_outer
         );
     }
 

@@ -96,12 +96,12 @@
 //! # The cross-section is the measured shoe, with no fudge
 //!
 //! [`Section`] puts the ribbon's four faces exactly on the shoe's own measured faces — RADIALLY at
-//! `pin_line − pin_to_inner` … `pin_line + pin_to_outer` (MEASURED 25.56 mm and 24.73 mm; the pin
-//! does NOT run mid-plate, which is why this is two numbers and not `thickness/2`), LATERALLY
-//! across `link_center_x ± width/2` (MEASURED 725.97 mm wide, centred 16.85 mm OUTBOARD of the pin
-//! plane — `plane_x ± width/2` about the PIN plane is the wrong construction here, per `rig_geom`'s
-//! width rule). All four come from the model's `Link_Box`, so a new tank's belt needs no new
-//! constants.
+//! `pin_line − pin_to_inner` … `pin_line + pin_to_outer` (MEASURED 24.64 mm and 70.90 mm, the outer
+//! down to the sole; the pin does NOT run mid-plate, which is why this is two numbers and not
+//! `thickness/2`), LATERALLY across `link_center_x ± width/2` (MEASURED 725.97 mm wide, centred
+//! 16.85 mm OUTBOARD of the pin plane — `plane_x ± width/2` about the PIN plane is the wrong
+//! construction here, per `rig_geom`'s width rule). All four come from the model's measured shoe
+//! (`track::marker_model`), so a new tank's belt needs no new constants.
 //!
 //! There used to be two margins here (12 mm radial, 30 mm lateral) holding the ribbon strictly
 //! inside the shoe solid, on the reasoning that the shoes RECEIVE shadows — the hull's shadow

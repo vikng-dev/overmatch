@@ -111,11 +111,10 @@ pub fn link_count(perimeter: f32, pitch: f32) -> usize {
 
 /// Pin-line radius from a running-gear contact surface: `contact_radius + pin_to_inner`. The track's
 /// inner face rides the wheel/idler tread at `contact_radius`; the pin centers sit `pin_to_inner`
-/// outboard of that (`pin_to_inner` is MEASURED from the link's Pin/Inner_Surface markers, not
+/// outboard of that (`pin_to_inner` is MEASURED from the link's pin markers and `Link_Box`, not
 /// assumed to be half the thickness). The two surface offsets — `pin_to_inner` and `pin_to_outer` —
-/// are read independently, so there's no mid-plate assumption: asymmetric shoes just work, which is
-/// also where the deferred grouser re-enters (put `Outer_Surface` on the cleat tip and the outer
-/// offset carries it). See [`super::marker_model`] for the marker read.
+/// are read independently, so there's no mid-plate assumption: asymmetric shoes just work, the
+/// outer one reaching the drawn shoe's sole. See [`super::marker_model`] for the marker read.
 pub fn pin_line_radius(contact_radius: f32, pin_to_inner: f32) -> f32 {
     contact_radius + pin_to_inner
 }

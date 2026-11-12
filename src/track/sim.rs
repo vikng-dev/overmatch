@@ -322,7 +322,7 @@ impl TrackGear {
             .fold(0.0_f32, f32::max)
     }
 
-    /// The measured plate face offset (m): pin line → outer ground face (`pin_to_outer`). The view's
+    /// The measured ground face offset (m): pin line → the shoe's sole (`pin_to_outer`). The view's
     /// wheel-probe reach adds it to the pin-line wheel radius — no mid-plate assumption.
     pub(crate) fn face_offset(&self) -> f32 {
         self.params.face_offset
