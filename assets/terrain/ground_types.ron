@@ -15,15 +15,17 @@
 //
 // Each softness is the ground-stamping note's §2 sinkage over its DERIVED 110.946 kPa: dirt 5.930 mm
 // DERIVED from a CLAIMED sandy-loam fit, gravel 7.602 mm DERIVED from an ASSUMED curve, sand 92 mm
-// DERIVED from a CLAIMED dry-sand fit; mud's is ASSUMED under the note's ASSUMED 0.15 m cap; paving
+// DERIVED from a CLAIMED dry-sand fit, sandy loam 23.716 mm DERIVED from NASA TM-20250006958
+// Table 1's sandy loam at 15% moisture; mud's is ASSUMED under the note's ASSUMED 0.15 m cap; paving
 // is 0, hard. Every other print value is ASSUMED, tuned by eye in play (`track_prints::tuning`).
 // terrain_solver_friction is the explicit Avian solid-body stand-in, not track grip.
 // Track laws and row derivations: .agents/docs/design/track-model/architecture.md section 5a.
 // Each strike value carries its own label and note. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
-// and sand giving the whole cloud, gravel most of it, wet mud and intact paving little. Each
-// pack's dust colour is DERIVED: the mean of the pack's shipped full-resolution albedo slice
-// (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`), MEASURED; concrete names no pack, and its
-// light grey is ASSUMED.
+// and sand giving the whole cloud, gravel and stony sandy loam most of it, wet mud and intact paving
+// little. Each pack's dust colour is DERIVED: the mean of the pack's shipped full-resolution albedo
+// slice (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`), MEASURED. Concrete and gravel name no
+// pack: concrete's light grey is ASSUMED, and gravel keeps the base pack's mean from when it was
+// that pack's ground.
 (
     terrain_solver_friction: (0.5, StandIn("Avian solid-body contacts expose no soil contact footprint; retained base-terrain sliding coefficient pending an area-aware solid-body/soil contact law; the track reads each row's effective grip")),
     types: {
@@ -67,7 +69,7 @@
         ),
         "gravel": (
             grip: (0.712, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED tan(35 deg) + 1040/89500, rounded to .712; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
-            shear_length_m: (0.010, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3: MEASURED 10 mm for firm sandy terrain, a proxy for this map's gravel; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
+            shear_length_m: (0.010, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3: MEASURED 10 mm for firm sandy terrain, a proxy for gravel; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
             print: (
                 softness_mm_per_kpa: 0.0685,
                 depth_cap_mm: 60.0,
@@ -120,6 +122,25 @@
             strike: (
                 lifted: (1.0, Taste("impact effects: ASSUMED share of a round's strike read this ground throws: loose dry sand gives the whole read")),
                 sparks: (false, Taste("impact effects: ASSUMED: fine sand holds no stone to spark")),
+            ),
+        ),
+        "sandy loam": (
+            grip: (0.574, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED tan(29 deg) + 1720/89500, rounded to .574, from NASA TM-20250006958 Table 1's sandy loam at 15% moisture (c 1.72 kPa, phi 29 deg), attributed there to Wong 2001 Theory of Ground Vehicles; no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
+            shear_length_m: (0.010, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3: MEASURED 10 mm for firm sandy terrain, a proxy for this map's sandy loam; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
+            print: (
+                softness_mm_per_kpa: 0.2138,
+                depth_cap_mm: 60.0,
+                darkening: 0.2,
+                roughness_gain: 1.0,
+            ),
+            rolling_resistance: (0.043340820, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED 0.04 + z/((n+1)L) = 0.04 + 0.0204458/(1.7*3.60) = 0.043340820 at Unit 100 kPa, Bekker's compaction resistance per unit weight from NASA TM-20250006958 Table 1's sandy loam at 15% moisture (kc 5.27, kphi 1515.04, n 0.7) under the ground-stamping note's 0.70 m wide, 3.60 m long track; compaction only, no bulldozing or slip sinkage, and the length the coefficient divides by is that track's; no coast-down measured on representative ground; settle with pressure-varied coast-down tests")),
+            dust: (
+                erodibility: 0.8,
+                colour_srgb: (0.3, 0.28, 0.19),
+            ),
+            strike: (
+                lifted: (0.8, Taste("impact effects: ASSUMED share of a round's strike read this ground throws: a sandy soil strewn with stones gives most of the read")),
+                sparks: (true, Taste("impact effects: ASSUMED: the stones strewn on this ground throw contact sparks under a strike")),
             ),
         ),
     },

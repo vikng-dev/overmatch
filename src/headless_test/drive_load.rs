@@ -402,12 +402,20 @@ fn sensed_resistance_and_landing_gaps_on_declared_grounds() {
 
 /// The ledger closes on an incline: a rolling hull feels `W sin θ + c_rr W cos θ` along its
 /// heading whether it gains or loses speed, the gear law's one reading of the world. Parked, the contact law's
-/// rolling fade leaves the grade alone. Fixture: uninterrupted 10/20/30 degree ramp planes,
-/// parked then a rolling entry. Extending the faces isolates their support from the flat slab
-/// and short course crests.
+/// rolling fade leaves the grade alone. Fixture: uninterrupted 10 and 20 degree ramp planes and a
+/// third at nine tenths of the base ground's launch limit, parked then a rolling entry. Extending
+/// the faces isolates their support from the flat slab and short course crests.
 #[test]
 fn sensed_resistance_and_landing_gaps_on_the_course() {
-    for degrees in [10.0_f32, 20.0, 30.0] {
+    // DERIVED: a launch is capable while grip carries the grade and the rolling load,
+    // `tan θ < μ − r`; a fixture grade past that is no capable launch on this ground.
+    let ground = crate::ground_types::GroundTypes::load_shipped()
+        .get(crate::terrain_blend::BASE_GROUND)
+        .contact();
+    let kpa =
+        crate::track::rig_geom::tank_ground_pressure_kpa(&crate::track::rig_geom::tiger_rig());
+    let steepest = 0.9 * (ground.grip - ground.rolling_at(kpa)).atan().to_degrees();
+    for degrees in [10.0_f32, 20.0, steepest] {
         let angle = degrees.to_radians();
         let grid = driving_plane(angle);
         let mut app = booted_driving_grid(grid);

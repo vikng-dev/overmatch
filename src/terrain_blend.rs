@@ -58,9 +58,9 @@ use crate::terrain_grid::{RowOrder, TEXTURE_TILE_M, TerrainExtent};
 /// the blend law's constants).
 pub(crate) type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainBlend>;
 
-/// The ground type the BASE pack (`coast_sand_rocks_02`, sand strewn with stones) is: the
-/// ground-stamping note's GRAVEL row, a key into [`crate::ground_types::GroundTypes`].
-pub(crate) const BASE_GROUND: &str = "gravel";
+/// The ground type the BASE pack (`coast_sand_rocks_02`, sand strewn with stones) is: a sandy
+/// loam, its stones left to the look, a key into [`crate::ground_types::GroundTypes`].
+pub(crate) const BASE_GROUND: &str = "sandy loam";
 
 /// One blended layer's contract: which pack it is, the real-world metres that pack was authored
 /// at, and which ground type it is.

@@ -29,11 +29,21 @@
 //! so 0.0534 mm/kPa; gravel 7.602 mm, DERIVED from the note's ASSUMED game curve (150 kPa at 10 mm,
 //! exponent 1.10), so 0.0685 mm/kPa; dry sand 92 mm, DERIVED from its CLAIMED dry-sand fit, so
 //! 0.8 mm/kPa; soft mud ASSUMED at 1.6 mm/kPa and held at the note's ASSUMED 0.15 m visual cap (its
-//! heavy-clay fit's 1.5 m is rejected there); intact paving zero, hard. The linear softness stands
-//! in for each fit's exponent away from that pressure. The other caps are ASSUMED. Darkening and
-//! roughness are ASSUMED, from the first slice's per-pack looks, dirt and gravel darkened further
-//! so a footprint reads at 10–30 m on the busy, stony base pack. The owner tunes them by eye
-//! (`track_prints::tuning`), and the chosen values are written back here.
+//! heavy-clay fit's 1.5 m is rejected there); intact paving zero, hard. The base pack's sandy loam
+//! is the same §2 arithmetic on the same source's 15%-moisture sandy loam (NASA TM-20250006958
+//! Table 1: kc 5.27, kphi 1515.04, n 0.7): `[110.946 / (5.27/0.70 + 1515.04)]^(1/0.7)` = 23.716 mm,
+//! so 0.2138 mm/kPa; the stones strewn on it are left to its look, its soil carrying the track.
+//! The linear softness stands in for each fit's exponent away from that pressure. The other caps
+//! are ASSUMED.
+//!
+//! Dirt's fit, the source's 11%-moisture sandy loam, is printed with kphi 11127.97 kN/m^(n+2).
+//! Back in Bekker's lb/in units its kc 52.53 is 11.00 and 1127.97 would be 6.000, where the
+//! printed value is 59.19, so a doubled digit is likely (DERIVED); at 1127.97 firm dirt would sink
+//! 70.8 mm. Unsettled until Wong's own table is read.
+//!
+//! Darkening and roughness are ASSUMED, from the first slice's per-pack looks, dirt and the base
+//! darkened further so a footprint reads at 10–30 m on the busy, stony base pack. The owner tunes
+//! them by eye (`track_prints::tuning`), and the chosen values are written back here.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -175,15 +185,17 @@ const FILE_HEADER: &str = "\
 //
 // Each softness is the ground-stamping note's §2 sinkage over its DERIVED 110.946 kPa: dirt 5.930 mm
 // DERIVED from a CLAIMED sandy-loam fit, gravel 7.602 mm DERIVED from an ASSUMED curve, sand 92 mm
-// DERIVED from a CLAIMED dry-sand fit; mud's is ASSUMED under the note's ASSUMED 0.15 m cap; paving
+// DERIVED from a CLAIMED dry-sand fit, sandy loam 23.716 mm DERIVED from NASA TM-20250006958
+// Table 1's sandy loam at 15% moisture; mud's is ASSUMED under the note's ASSUMED 0.15 m cap; paving
 // is 0, hard. Every other print value is ASSUMED, tuned by eye in play (`track_prints::tuning`).
 // terrain_solver_friction is the explicit Avian solid-body stand-in, not track grip.
 // Track laws and row derivations: .agents/docs/design/track-model/architecture.md section 5a.
 // Each strike value carries its own label and note. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
-// and sand giving the whole cloud, gravel most of it, wet mud and intact paving little. Each
-// pack's dust colour is DERIVED: the mean of the pack's shipped full-resolution albedo slice
-// (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`), MEASURED; concrete names no pack, and its
-// light grey is ASSUMED.
+// and sand giving the whole cloud, gravel and stony sandy loam most of it, wet mud and intact paving
+// little. Each pack's dust colour is DERIVED: the mean of the pack's shipped full-resolution albedo
+// slice (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`), MEASURED. Concrete and gravel name no
+// pack: concrete's light grey is ASSUMED, and gravel keeps the base pack's mean from when it was
+// that pack's ground.
 ";
 
 /// Why the table could not be read or written: the file's I/O, its RON, a value [`GroundTypes::parse`]
@@ -455,10 +467,10 @@ mod tests {
     use super::*;
 
     /// A minimal table text: every ground a terrain pack names, each with every field
-    /// authored, the first one (`gravel`, the base pack's) carrying `gravel` in place of its block.
+    /// authored, the base pack's carrying `base` in place of its block.
     /// Fixture placeholders stand for no ground; rolling reads the shared hard datum so a new
     /// measurement cannot invalidate an otherwise valid fixture.
-    fn table_text(gravel: &str) -> String {
+    fn table_text(base: &str) -> String {
         let hard = crate::track::forces::rigid_rolling_resistance();
         let block = format!(
             "grip: (0.5, Fixture(\"fixture\")), shear_length_m: (0.01, Fixture(\"fixture\")), \
@@ -469,8 +481,9 @@ mod tests {
                      Fixture(\"fixture\")))"
         );
         format!(
-            "(terrain_solver_friction: (0.5, Fixture(\"fixture\")), types: {{\"gravel\": ({gravel}), \"dirt\": ({block}), \"sand\": ({block}), \
-             \"mud\": ({block})}})"
+            "(terrain_solver_friction: (0.5, Fixture(\"fixture\")), types: {{{:?}: ({base}), \"dirt\": ({block}), \"sand\": ({block}), \
+             \"mud\": ({block})}})",
+            crate::terrain_blend::BASE_GROUND
         )
     }
 
@@ -559,7 +572,7 @@ mod tests {
         let rolling = format!("rolling_resistance: ({hard}, Fixture(\"fixture\"))");
         let with_strike =
             |strike: &str| format!("{block}, {rolling}, {bare_dust}, strike: ({strike})");
-        for (missing, gravel) in [
+        for (missing, base) in [
             (
                 "print",
                 format!("grip: (0.5, Fixture(\"fixture\")), {shear}{rolling}, {dust}"),
@@ -611,7 +624,7 @@ mod tests {
                 ),
             ),
         ] {
-            let error = GroundTypes::parse(&table_text(&gravel))
+            let error = GroundTypes::parse(&table_text(&base))
                 .expect_err(missing)
                 .to_string();
             assert!(error.contains(missing), "{missing}: {error}");
@@ -664,7 +677,8 @@ mod tests {
     /// refused rather than read as a ground that states none.
     #[test]
     fn a_value_out_of_domain_is_refused_at_load_naming_the_ground() {
-        let gravel = |[
+        let base = crate::terrain_blend::BASE_GROUND;
+        let row = |[
             softness,
             cap,
             darkening,
@@ -737,10 +751,10 @@ mod tests {
             for value in bad[index] {
                 let mut values = ok;
                 values[index] = value;
-                let text = table_text(&gravel(values));
+                let text = table_text(&row(values));
                 let error = GroundTypes::parse(&text).expect_err(value).to_string();
                 assert!(
-                    error.contains("\"gravel\"") && error.contains(&format!("`{field}`")),
+                    error.contains(&format!("{base:?}")) && error.contains(&format!("`{field}`")),
                     "{field} {value}: {error}"
                 );
             }
@@ -748,11 +762,11 @@ mod tests {
         let mut zero = ok;
         zero[4] = "0.0";
         zero[11] = "0.0";
-        let zero = GroundTypes::parse(&table_text(&gravel(zero)))
+        let zero = GroundTypes::parse(&table_text(&row(zero)))
             .expect("zero grip and zero shear length are in domain");
-        assert_eq!(zero.get("gravel").contact().grip, 0.0);
-        assert_eq!(zero.get("gravel").contact().shear_length_m, 0.0);
-        let misspelt = table_text(&gravel(ok)).replacen("grip:", "gripp:", 1);
+        assert_eq!(zero.get(base).contact().grip, 0.0);
+        assert_eq!(zero.get(base).contact().shear_length_m, 0.0);
+        let misspelt = table_text(&row(ok)).replacen("grip:", "gripp:", 1);
         assert!(GroundTypes::parse(&misspelt).is_err());
     }
 

@@ -414,9 +414,26 @@ output is not their justification. The proxy limitations are explicit pending be
 | mud | .277 | tan(13°) + 4140 / 89500 | .15 | .162905028 | 25 |
 | gravel | .712 | tan(35°) + 1040 / 89500 | .05 | .051173184 | 10 |
 | sand | .543 | tan(28°) + 1040 / 89500 | .12 | .129385475 | 25 |
+| sandy loam | .574 | tan(29°) + 1720 / 89500 | none: compaction, below | .043340820 | 10 |
+
+Sandy loam is the base pack's ground (`coast_sand_rocks_02`, sand strewn with stones). Its row
+reads one sourced specimen, NASA TM-20250006958 Table 1's sandy loam at 15% moisture (n 0.7,
+kc 5.27 kN/m^(n+1), kphi 1515.04 kN/m^(n+2), c 1.72 kPa, phi 29°), attributed there to Wong's
+*Theory of Ground Vehicles* (2001). Of that table's six sandy loam rows it is the one with a
+sand's strength (beside dry sand's 1.04 kPa and 28°), as the pack's look asks, at a moist, not
+wet, state: the 11% and 23% rows are cohesive (4.83 and 9.65 kPa), and the 22%, 26% and 32% fits
+sink this pressure 0.4 m to metres, the boggy ground the mud layer stands for. Its stones carry
+no load in the row: the soil fit stands for the ground a track crosses, and the stones are left to
+the look and to strike sparks. Its rolling has no recalled seed: it is DERIVED as the hard datum plus Bekker's
+compaction resistance per unit weight, `z / ((n + 1) L)`, at the Unit 100 kPa with the stamping
+note's 0.70 m wide, 3.60 m long track: `z = [100 / (5.27/0.70 + 1515.04)]^(1/0.7)` = 20.446 mm,
+so `.04 + 0.020446 / (1.7 × 3.60)` = .043340820. Compaction is a lower bound beside the other
+rows' totals: it leaves out bulldozing and slip sinkage, and the coefficient divides by that
+track's length, which the per-weight law does not carry. Gravel stays as a row for real gravel; no
+pack is gravel, and the base-ground measurements in this section were taken while the base was.
 
 The shear lengths are Wong (2001, *Theory of Ground Vehicles*, 3rd ed., §2.4.3) MEASURED values
-standing as proxies: 10 mm for firm sandy terrain carries dirt and gravel, 25 mm for loose sand
+standing as proxies: 10 mm for firm sandy terrain carries dirt, gravel and sandy loam, 25 mm for loose sand
 carries sand, and mud borrows loose sand's 25 mm because Wong gives no wet-clay value (clay at
 maximum compaction is about 6 mm). Concrete stores no soil shear; the steel link's own shear on
 paving is unsourced (Wong's 75 mm, §6.4.3, is a fit for a rubber-padded track on paved road), so
@@ -817,8 +834,8 @@ Coast-down, DERIVED: with the belts declutched, belt and hull decelerate togethe
 `a = c_rr·g·M/(M + 2I)` down to the fade band, then decay inside it, so a tank coasts
 `d = (v₀² + V²)/(2a)` (`V` the band); no other term slows a declutched tank on flat ground, and
 `forces::tests::the_same_vehicle_coasts_to_rest_over_the_distances_its_ground_derives` checks the
-form. On the fixture tank (57 000 kg, 4 750 kg reflected per side) from 10 m/s: gravel (the base
-pack, 0.05) 119.0 m; dirt (0.06) 99.2 m; sand (0.12) 49.6 m; mud (0.15) 39.7 m; concrete (0.04)
+form. On the fixture tank (57 000 kg, 4 750 kg reflected per side) from 10 m/s: gravel (then the
+base pack, 0.05) 119.0 m; dirt (0.06) 99.2 m; sand (0.12) 49.6 m; mud (0.15) 39.7 m; concrete (0.04)
 148.8 m.
 
 Historical contact-law baseline, before the Driver laws; current acceptance belongs to the
@@ -907,7 +924,7 @@ The two entry protocols give the capacity/drawbar ranges below. No frame/tick pr
 | mud | 154.714–154.717 | 70.838–70.842 | F6, 4.849178 m/s | F6, 4.849177 m/s |
 | sand | 303.745–303.755 | 236.645–236.655 | F6, 4.874707 m/s | F7, 6.211259 m/s |
 
-The shipped map's base pack is gravel. At the fixture's DERIVED nominal weight 559.170 kN,
+The shipped map's base pack was gravel when these were measured. At the fixture's DERIVED nominal weight 559.170 kN,
 the previous 0.9 grip gave DERIVED 503.253 kN traction capacity and 475.295 kN capacity less nominal drag
 with its 0.05 motion resistance. The current law's base-ground samples instead give about
 398 kN capacity and 370 kN capacity less nominal drag, equivalent to about 0.712 of weight before motion
