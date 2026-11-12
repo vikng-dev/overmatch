@@ -584,11 +584,15 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
         }
         rolling_entry.sort_by(f32::total_cmp);
         let median = rolling_entry[rolling_entry.len() / 2];
-        println!("MEASURED rolling entry {degrees} degrees: median_offset_n={median}");
-        // Resolution: the ride's ripple on the median coupled reading, MEASURED within 1 N of
-        // the derived load at 559 kN on each plane.
+        // DERIVED: a reading that drops a term of the load, or counts one twice, misses by at
+        // least the smaller of the grade and rolling terms; half of it separates a closed ledger
+        // from an open one, whatever the ride's ripple.
+        let allowance = 0.5 * weight * angle.sin().min(rolling * angle.cos());
+        println!(
+            "MEASURED rolling entry {degrees} degrees: median_offset_n={median}, allowance_n={allowance}"
+        );
         assert!(
-            median.abs() < weight * 1e-4,
+            median.abs() < allowance,
             "a rolling hull must feel its incline whatever its acceleration: off by {median} of {expected}"
         );
         measurements.report(

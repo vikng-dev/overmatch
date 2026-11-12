@@ -420,7 +420,7 @@ pub(crate) fn plugin(app: &mut App) {
 }
 
 #[cfg(test)]
-mod relief_tests;
+pub(crate) mod relief_tests;
 
 #[cfg(test)]
 mod tests {
