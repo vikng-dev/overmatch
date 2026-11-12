@@ -5,9 +5,9 @@
 // DERIVATIVES ARE TAKEN ONCE, UP FRONT. A layer whose weight is zero is not sampled, and that
 // branch is not uniform across the quad — so every layer fetch is `textureSampleGrad` with
 // gradients computed outside the branch. `textureSample`'s implicit derivatives are undefined
-// under non-uniform control flow and would cost the skip its licence. The prints' near store is
-// read only near the eye, so it is read at level 0 (`textureSampleLevel`), which needs none — and
-// which is the only kind of read its loops may make.
+// under non-uniform control flow and would cost the skip its licence. The prints' near store has
+// one level and is read only near the eye, by `textureLoad` and `textureSampleLevel`, which need
+// none — the only kinds of read its loops may make.
 //
 // TRACK PRINTS (`src/track_prints.rs`, cosmetic terrain marks). Each pack names a ground type
 // (`src/ground_types.rs`), and the prints read the ground by the map's PAINTED weights
@@ -15,8 +15,8 @@
 // reach there (R: one less its clearance over the sole, over the clearance an empty R stands for)
 // and the pressure its link bore (G: the laying tank's, times how far into its press the link is,
 // nonzero exactly on a footprint); its depth is the sole's sinkage, the ground's
-// `softness × pressure` capped, less that clearance (`sunk_at`). Hard ground, softness zero, takes
-// no depth.
+// `softness × pressure` capped, less that clearance (`texel_sunk`), and between texels the
+// depths are filtered, never the channels (`sunk_at`). Hard ground, softness zero, takes no depth.
 // The world layer's trodden coverage darkens and roughens everywhere; inside the near store's
 // window the depth's gradient bends the normal, and up to the player's relief distance the view
 // ray is marched into the depth (parallax), and from where it lands toward the sun (the rut's
@@ -147,7 +147,7 @@ fn sinkage(ground: vec4<f32>, kpa: f32) -> f32 {
     return dot(ground, min(blend.print_cap, blend.print_softness * kpa));
 }
 
-// The near store at world XZ `p`: R the reach, G the pressure borne, each over its full scale.
+// The near store at world XZ `p`, filtered: R the reach, G the bearing, each over its full scale.
 fn near_texel(p: vec2<f32>) -> vec2<f32> {
     // Repeating addresses the torus, not another copy of the world. A grazing march can leave
     // the resident window; its wrapped storage there belongs to unrelated ground.
@@ -166,13 +166,36 @@ fn vertical_depth_ray(direction: vec3<f32>, normal: vec3<f32>, normal_speed: f32
     return direction * (normal.y / normal_speed);
 }
 
-// How far (m) the ground is sunk at world XZ `p`, on ground of print weights `ground`: the sole's
-// sinkage under the texel's pressure, less the shoe's clearance over its sole there.
-// `terrain_blend::print_depth_m`.
-fn sunk_at(p: vec2<f32>, ground: vec4<f32>) -> f32 {
-    let texel = near_texel(p);
+// How far (m) the ground is sunk under the near window's texel `at` (its low corner's texel 0), on
+// ground of print weights `ground`: the sole's sinkage under the texel's bearing, less the shoe's
+// clearance over its sole there. `terrain_blend::print_depth_m`. Off the window it is unprinted,
+// like `near_texel`.
+fn texel_sunk(at: vec2<i32>, ground: vec4<f32>) -> f32 {
+    let side = vec2<i32>(textureDimensions(print_near_texture));
+    if any(at < vec2(0)) || any(at >= side) {
+        return 0.0;
+    }
+    // The window's low corner is a whole texel of the torus (`store::NearStore::origin_m`).
+    let origin = vec2<i32>(round(blend.print_near.xy / blend.print_near.w));
+    let texel = textureLoad(print_near_texture, ((origin + at) % side + side) % side, 0).rg;
     let clearance = (1.0 - texel.r) * blend.print_store.x;
     return max(sinkage(ground, texel.g * blend.print_law.x) - clearance, 0.0);
+}
+
+// How far (m) the ground is sunk at world XZ `p`, on ground of print weights `ground`: its four
+// nearest texels' depths, mixed bilinearly. The texels are decoded before the mix, never their
+// channels: the cap and the floor at zero make the decode non-linear, so two texels' mixed
+// channels can print deeper between them than either one does.
+fn sunk_at(p: vec2<f32>, ground: vec4<f32>) -> f32 {
+    let f = (p - blend.print_near.xy) / blend.print_near.w - 0.5;
+    let low = floor(f);
+    let w = f - low;
+    let at = vec2<i32>(low);
+    return mix(
+        mix(texel_sunk(at, ground), texel_sunk(at + vec2(1, 0), ground), w.x),
+        mix(texel_sunk(at + vec2(0, 1), ground), texel_sunk(at + vec2(1, 1), ground), w.x),
+        w.y,
+    );
 }
 
 // How much the prints' near store speaks at world XZ `p`, 0..1: whole inside its window and where

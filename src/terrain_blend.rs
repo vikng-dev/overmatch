@@ -178,7 +178,8 @@ pub(crate) fn sinkage_m(params: &TerrainBlendParams, weights: Vec4, kpa: f32) ->
 
 /// The print's depth (m) where a point of the shoe `clearance_m` above its sole bore `kpa`: the
 /// sole's sinkage less that clearance, none where the point stays above the ground.
-/// `terrain_blend.wgsl`'s `sunk_at` is this law on a near-store texel.
+/// `terrain_blend.wgsl`'s `texel_sunk` is this law on a near-store texel, and its `sunk_at` filters
+/// those depths, never the channels.
 pub(crate) fn print_depth_m(
     params: &TerrainBlendParams,
     weights: Vec4,

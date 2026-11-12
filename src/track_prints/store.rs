@@ -475,7 +475,7 @@ impl<'a> Raster<'a> {
 }
 
 /// The depth (m) texel value `texel` prints at global near texel `at`, on that texel's own ground:
-/// the shader's decode (`terrain_blend.wgsl`'s `sunk_at`). Production reads it from
+/// the shader's decode (`terrain_blend.wgsl`'s `texel_sunk`). Production reads it from
 /// [`super::PrintDepths::texel_depth_m`].
 pub(crate) type TexelDepth<'a> = &'a dyn Fn(IVec2, [u8; 2]) -> f32;
 

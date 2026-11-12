@@ -1029,6 +1029,68 @@ mod tests {
         }
     }
 
+    /// BETWEEN TWO TEXELS THE SHADER PRINTS NO DEEPER THAN EITHER. The store keeps each texel's
+    /// deepest mark ([`store::TexelDepth`]), and the shader holds that bound between texel centres
+    /// by mixing the texels' decoded depths. Fixture pair, a DERIVED witness: on a ground of
+    /// 1.6 mm/kPa capped at 150 mm, `[240, 83]` decodes to 117.8 mm and `[223, 111]` to 118 mm,
+    /// while their mixed channels at the midpoint decode to 126.5 mm. A shader that filters the
+    /// channels before decoding prints that ridge between two flat marks.
+    #[test]
+    #[ignore = "manual headless GPU correctness check; requires a compute adapter, never a window"]
+    fn between_two_texels_the_shader_prints_no_deeper_than_either() {
+        let (near, far) = ([240u8, 83u8], [223u8, 111u8]);
+        const SIDE: u32 = 16;
+        let texels: Vec<u8> = (0..SIDE * SIDE)
+            .flat_map(|i| if i % SIDE < SIDE / 2 { near } else { far })
+            .collect();
+        let mut params = fixture_lanes();
+        params.print_softness.x = 1.6e-3;
+        params.print_cap.x = 0.15;
+        // Fixture window: its low corner at global texel (-21, 37), so its column 12 is the
+        // torus's column 7 and the read wraps.
+        params.print_near = Vec4::new(
+            -21.0 * NEAR_TEXEL_M,
+            37.0 * NEAR_TEXEL_M,
+            SIDE as f32 * NEAR_TEXEL_M,
+            NEAR_TEXEL_M,
+        );
+        let decode = |[reach, bearing]: [f32; 2]| {
+            crate::terrain_blend::print_depth_m(
+                &params,
+                Vec4::X,
+                bearing / 255.0 * params.print_law.x,
+                (1.0 - reach / 255.0) * params.print_store.x,
+            )
+        };
+        let (a, b) = (decode(near.map(f32::from)), decode(far.map(f32::from)));
+        let channels = decode([0.5 * (240.0 + 223.0), 0.5 * (83.0 + 111.0)]);
+        assert!(
+            channels > a.max(b) + 0.005,
+            "the fixture discriminates: mixed channels print {channels} m over texels of {a} and {b} m"
+        );
+        // Five points from the left texel's centre (window column 12) to the right's.
+        let values = crate::terrain_blend::relief_tests::evaluate(
+            "let t = blend.print_near.w;
+    for (var k = 0u; k < 5u; k++) {
+        let p = blend.print_near.xy + vec2(12.5 + 0.25 * f32(k), 8.5) * t;
+        result[k] = vec4(sunk_at(p, vec4(1.0, 0.0, 0.0, 0.0)));
+    }",
+            &params,
+            SIDE,
+            &texels,
+            5,
+        );
+        for k in 0..5 {
+            let share = 0.25 * k as f32;
+            let (drawn, mixed) = (values[4 * k], a + (b - a) * share);
+            assert!(
+                (drawn - mixed).abs() < 1e-6,
+                "{share} of the way from the {a} m texel to the {b} m one, the shader draws \
+                 {drawn} m, not their mix {mixed} m"
+            );
+        }
+    }
+
     /// Fixture: how far the recess of [`stamp_fixture`] rides above its sole, m.
     const FIXTURE_RECESS_M: f32 = 0.04;
 

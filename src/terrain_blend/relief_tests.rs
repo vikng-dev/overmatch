@@ -140,9 +140,49 @@ fn check() {{
         label: Some("terrain blend helpers"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
+    // Declared rather than derived from `body`: a derived layout holds only the bindings `body`
+    // reaches, and the bind group below binds all four.
+    let entry = |binding: u32, ty: wgpu::BindingType| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty,
+        count: None,
+    };
+    let buffer = |ty: wgpu::BufferBindingType| wgpu::BindingType::Buffer {
+        ty,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[
+            entry(100, buffer(wgpu::BufferBindingType::Uniform)),
+            entry(
+                102,
+                wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            ),
+            entry(
+                109,
+                wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+            ),
+            entry(
+                111,
+                buffer(wgpu::BufferBindingType::Storage { read_only: false }),
+            ),
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: None,
-        layout: None,
+        layout: Some(&pipeline_layout),
         module: &module,
         entry_point: Some("check"),
         compilation_options: default(),
@@ -204,7 +244,7 @@ fn check() {{
     });
     let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
-        layout: &pipeline.get_bind_group_layout(0),
+        layout: &layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 100,
