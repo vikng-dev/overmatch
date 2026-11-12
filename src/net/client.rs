@@ -4,7 +4,9 @@
 //! presentation never pauses the simulation while the authority continues ticking.
 
 use super::admission::JoinRefusal;
+use super::compatibility::Compatibility;
 use core::time::Duration;
+use std::borrow::Cow;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
@@ -23,7 +25,7 @@ use serde_json::json;
 
 use super::cursor_queue::CursorQueue;
 use super::protocol::{
-    DamageConfirm, DamageReceipt, FireEvent, FireVisualBatch, FireVisualFact, NetTank, protocol_id,
+    DamageConfirm, DamageReceipt, FireEvent, FireVisualBatch, FireVisualFact, NetTank,
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::{
@@ -134,21 +136,12 @@ impl ClientLinkTemplate {
             // Lightyear's client replication systems all filter on this marker: without it the
             // link connects and nothing replicates.
             ReplicationReceiver,
-            NetcodeClient::new(
-                Authentication::Manual {
-                    server_addr,
-                    client_id: self.client_id,
-                    private_key,
-                    // Must match the server's `NetcodeConfig.protocol_id`.
-                    protocol_id: protocol_id(),
-                },
-                NetcodeConfig {
-                    client_timeout_secs: 3,
-                    token_expire_secs: -1,
-                    ..default()
-                },
-            )
-            .expect("a manual token always builds"),
+            netcode_link(
+                server_addr,
+                self.client_id,
+                private_key,
+                Compatibility::local().clone(),
+            ),
             UdpIo::default(),
         )
     }
@@ -166,6 +159,32 @@ impl ClientLinkTemplate {
             seeded
         })
     }
+}
+
+/// The compatibility record a client link's token states; a refusal is read against it.
+#[derive(Component, Debug)]
+pub(super) struct StatedRecord(Compatibility);
+
+/// A client link's netcode endpoint, its token stating `record`.
+pub(super) fn netcode_link(
+    server_addr: SocketAddr,
+    client_id: u64,
+    private_key: [u8; 32],
+    record: Compatibility,
+) -> (NetcodeClient, StatedRecord) {
+    let defaults = NetcodeConfig::default();
+    let token =
+        lightyear::netcode::ConnectToken::build(server_addr, record.tag(), client_id, private_key)
+            .timeout_seconds(defaults.client_timeout_secs)
+            .expire_seconds(-1)
+            .user_data(record.user_data())
+            .generate()
+            .expect("a token for one address under a 32-byte key always builds");
+    (
+        NetcodeClient::new(Authentication::Token(token), defaults)
+            .expect("a generated token always reads back"),
+        StatedRecord(record),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -770,13 +789,14 @@ fn drive_connection(
             Has<Connecting>,
             Option<&Disconnected>,
             &NetcodeClient,
+            Option<&StatedRecord>,
         ),
         (With<NetcodeClient>, Without<Leaving>),
     >,
     mut retry: ResMut<ConnectRetry>,
     mut commands: Commands,
 ) {
-    let (entity, connected, connecting, disconnected, netcode) = match client.single() {
+    let (entity, connected, connecting, disconnected, netcode, stated) = match client.single() {
         Ok(link) => link,
         // No link to drive: the Join menu before a ticket, or the one link is being left.
         Err(QuerySingleError::NoEntities(_)) => return,
@@ -788,7 +808,12 @@ fn drive_connection(
     };
 
     if let Some(reason) = netcode.inner.denied_reason() {
-        retry.refusal = Some(JoinRefusal::from_netcode(reason));
+        if retry.refusal.is_none() {
+            let stated = stated.expect("every client link states its record (`netcode_link`)");
+            let refusal = JoinRefusal::from_netcode(reason, &stated.0);
+            warn!("client: refused by the server: {}", refusal.message());
+            retry.refusal = Some(refusal);
+        }
         retry.next_retry_at = None;
         return;
     }
@@ -837,7 +862,8 @@ fn drive_connection(
             retry.next_retry_at = None;
             retry.last_attempt_at = Some(now);
             commands.trigger(Connect { entity });
-            // Dev breadcrumb only; `client_policy` owns the ambiguous-timeout hint threshold.
+            // Dev breadcrumb only; the player is told once `client_policy`'s
+            // `unanswered_after_attempts` is reached.
             let reason = disconnected
                 .map_or_else(|| "no reason reported".to_owned(), |d| d.reason.to_string());
             info!(
@@ -871,7 +897,7 @@ pub(super) fn mount_refusal_probe(app: &mut App) {
 
 #[cfg(test)]
 pub(super) fn refusal_probe(app: &mut App) -> (Option<JoinRefusal>, String) {
-    let refusal = app.world().resource::<ConnectRetry>().refusal;
+    let refusal = app.world().resource::<ConnectRetry>().refusal.clone();
     let label = app
         .world_mut()
         .query_filtered::<&Text, With<JoiningText>>()
@@ -1019,22 +1045,19 @@ fn finish_leaving(
     }
 }
 
-/// Close on a server-gone report, the [`client_policy`] failed-join threshold, or exhausted
-/// reconnects. A once-connected link ends the match; one that never connected is a failed join.
+/// Close on a refusal, a server-gone report, the [`client_policy`] failed-join threshold, or
+/// exhausted reconnects. A once-connected link ends the match; one that never connected is a failed
+/// join.
 fn close_verdict(
     retry: &ConnectRetry,
     gone: Option<String>,
 ) -> Option<super::matchmaking::MatchClosed> {
     use super::matchmaking::MatchClosed;
-    if let Some(refusal) = retry.refusal {
-        let reason = refusal.message().to_owned();
-        return Some(if retry.connected_once {
-            MatchClosed::Ended(reason)
-        } else {
-            MatchClosed::Unreachable(reason)
-        });
-    }
-    if let Some(reason) = gone {
+    let refusal = retry
+        .refusal
+        .as_ref()
+        .map(|refusal| refusal.message().into_owned());
+    if let Some(reason) = refusal.or(gone) {
         return Some(if retry.connected_once {
             MatchClosed::Ended(reason)
         } else {
@@ -1042,7 +1065,7 @@ fn close_verdict(
         });
     }
     if !retry.connected_once {
-        return (retry.attempts >= client_policy().mismatch_hint_after_attempts.0)
+        return (retry.attempts >= client_policy().unanswered_after_attempts.0)
             .then(|| MatchClosed::Unreachable("could not reach the match server".into()));
     }
     retry
@@ -1145,8 +1168,8 @@ fn spawn_joining_screen(mut commands: Commands, fonts: Res<UiFonts>, retry: Res<
 /// The loading screen's label: a refusal's cause, the asset load and the wait for this client's
 /// tank, a dropped link, or the connect attempts.
 fn screen_label(retry: &ConnectRetry) -> String {
-    match retry.refusal {
-        Some(reason) => reason.message().to_owned(),
+    match &retry.refusal {
+        Some(reason) => reason.message().into_owned(),
         None if !retry.initiated => "LOADING…".to_owned(),
         None if retry.connected_once && retry.down_since.is_some() => RECONNECT_LABEL.to_owned(),
         None if retry.connected_once => "LOADING…".to_owned(),
@@ -1154,14 +1177,12 @@ fn screen_label(retry: &ConnectRetry) -> String {
     }
 }
 
-/// The joining screen's label after `attempts` failed connects. Past
-/// the [`client_policy`] failed-attempt threshold it names both causes a timeout can have:
-/// only a session that has never connected can be a build mismatch, and this screen is only ever
-/// shown to one.
+/// The joining screen's label after `attempts` unanswered connects. A server of another build
+/// answers with its cause ([`JoinRefusal::Incompatible`]), so past the [`client_policy`] threshold
+/// the silence is the server's: down, unreachable, or holding another key.
 fn joining_label(attempts: u32) -> String {
-    if attempts >= client_policy().mismatch_hint_after_attempts.0 {
-        "CAN'T CONNECT — server down or client/server build or asset mismatch\n\
-         (update the client or redeploy the server)"
+    if attempts >= client_policy().unanswered_after_attempts.0 {
+        "CAN'T CONNECT — the server is not answering\n(check that it is running and reachable)"
             .to_string()
     } else if attempts == 0 {
         "CONNECTING…".to_string()
@@ -1189,10 +1210,13 @@ fn update_connect_status(
 ) {
     let down = links.iter().any(|connected| !connected);
     overlays.declare(crate::overlay::Overlay::ConnectStatus, down);
-    let label = retry.refusal.map_or(RECONNECT_LABEL, JoinRefusal::message);
+    let label = retry
+        .refusal
+        .as_ref()
+        .map_or(Cow::Borrowed(RECONNECT_LABEL), JoinRefusal::message);
     for mut text in &mut labels {
         if text.0 != label {
-            text.0 = label.to_owned();
+            text.0 = label.clone().into_owned();
         }
     }
 }
@@ -3892,53 +3916,46 @@ mod tests {
     #[test]
     fn match_link_closes_on_each_exit_and_not_before() {
         use super::super::matchmaking::MatchClosed;
-        let joining = ConnectRetry {
+        let joining = |attempts| ConnectRetry {
             initiated: true,
-            attempts: client_policy().mismatch_hint_after_attempts.0 - 1,
+            attempts,
             ..default()
         };
-        assert_eq!(close_verdict(&joining, None), None);
+        let threshold = client_policy().unanswered_after_attempts.0;
+        let joining_before = joining(threshold - 1);
+        assert_eq!(close_verdict(&joining_before, None), None);
         assert_eq!(
-            close_verdict(
-                &ConnectRetry {
-                    attempts: client_policy().mismatch_hint_after_attempts.0,
-                    ..joining
-                },
-                None
-            ),
+            close_verdict(&joining(threshold), None),
             Some(MatchClosed::Unreachable(
                 "could not reach the match server".into()
             ))
         );
         assert_eq!(
-            close_verdict(&joining, Some("start failed".into())),
+            close_verdict(&joining_before, Some("start failed".into())),
             Some(MatchClosed::Unreachable("start failed".into())),
             "a server gone before the first connect is a failed join"
         );
 
-        let down = ConnectRetry {
+        let down = |exhausted| ConnectRetry {
             initiated: true,
             connected_once: true,
             attempts: 40,
             down_since: Some(10.0),
             last_attempt_at: Some(10.0 + 10.0 * client_policy().reconnect_give_up_s.0),
+            exhausted,
             ..default()
         };
         assert_eq!(
-            close_verdict(&down, None),
+            close_verdict(&down(false), None),
             None,
             "a dropped match keeps reconnecting until a retry past the give-up has failed"
         );
-        let exhausted = ConnectRetry {
-            exhausted: true,
-            ..down
-        };
         assert!(matches!(
-            close_verdict(&exhausted, None),
+            close_verdict(&down(true), None),
             Some(MatchClosed::Ended(reason)) if reason.contains("stopped answering")
         ));
         assert_eq!(
-            close_verdict(&down, Some("server stopped".into())),
+            close_verdict(&down(false), Some("server stopped".into())),
             Some(MatchClosed::Ended("server stopped".into())),
             "the Worker's verdict closes at once"
         );

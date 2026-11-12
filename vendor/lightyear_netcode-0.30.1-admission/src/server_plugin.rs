@@ -1,4 +1,7 @@
-use crate::{ClientId, Key, PRIVATE_KEY_BYTES, ServerConfig, USER_DATA_BYTES, server::MAX_CLIENTS};
+use crate::{
+    ClientId, Key, PRIVATE_KEY_BYTES, ServerConfig, USER_DATA_BYTES,
+    server::{ForeignProtocolHandler, MAX_CLIENTS},
+};
 use aeronet_io::connection::LocalAddr;
 use alloc::{sync::Arc, vec::Vec};
 use bevy_app::{App, Plugin, PostUpdate, PreUpdate};
@@ -77,6 +80,8 @@ pub struct NetcodeConfig {
     /// differs from the transport's bind address.
     pub additional_expected_addresses: Vec<SocketAddr>,
     pub connection_request_handler: Option<Arc<dyn ConnectionRequestHandler>>,
+    /// OVERMATCH PATCH: answers requests under another protocol id; `None` drops them, as upstream.
+    pub foreign_protocol_handler: Option<Arc<dyn ForeignProtocolHandler>>,
 }
 
 impl Default for NetcodeConfig {
@@ -91,6 +96,7 @@ impl Default for NetcodeConfig {
             server_addr_check: true,
             additional_expected_addresses: Vec::new(),
             connection_request_handler: None,
+            foreign_protocol_handler: None,
         }
     }
 }
@@ -153,6 +159,9 @@ impl NetcodeServer {
         let server_addr_check = config.server_addr_check;
         if let Some(handler) = config.connection_request_handler {
             cfg = cfg.connection_request_handler(handler);
+        }
+        if let Some(handler) = config.foreign_protocol_handler {
+            cfg = cfg.foreign_protocol_handler(handler);
         }
         let server =
             crate::server::Server::with_config(config.protocol_id, config.private_key, cfg)

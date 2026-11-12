@@ -31,9 +31,8 @@ use crate::track::sim::{
 };
 use crate::{CombatantId, CombatantLife, ShotId};
 
-// Replicon registration order is wire compatibility. Both netcode endpoints must use
-// `protocol_id()` — the compile-time `PROTOCOL_FINGERPRINT` plus the runtime map digest — as their
-// netcode `protocol_id`; ADR-0018 and the manifest-pinning tests own the compatibility guard.
+// Replicon registration order is wire compatibility. Both netcode endpoints use [`protocol_id`] as
+// their netcode `protocol_id`; ADR-0018 and the manifest-pinning tests own the compatibility guard.
 
 /// Every wire change bumps this revision and re-pins the affected manifest hashes (ADR-0018).
 /// The game's environment destruction model carries shared causes and chunk-addressed groups;
@@ -45,8 +44,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// (`tank::servo`), so a change to that law changes this revision too.
 pub const PROTOCOL_REV: u32 = 95;
 
-/// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
-/// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
+/// The compatibility record's wire term: the pinned wire manifest, [`PROTOCOL_REV`] and the crate
+/// version.
 pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
     WIRE_SURFACE_HASH,
     WIRE_TYPES_HASH,
@@ -57,87 +56,9 @@ pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
     env!("CARGO_PKG_VERSION"),
 );
 
-/// Handshake tag: [`PROTOCOL_FINGERPRINT`] plus runtime map, embedded material registry,
-/// tank construction and armament digests (ADR-0018). Map terrain/scatter are DERIVED on each
-/// peer from files beside the binary; stale files (including half-pulled LFS objects) must
-/// refuse before divergent belt contacts, spawn heights or hull collisions reach play. Netcode encrypts the connect token under this
-/// tag: a token under another tag cannot decrypt, so the server drops the request.
-///
-/// Embedded `materials.ron` determines every hard body's resistance but is invisible to the
-/// map digest and type manifest. The construction digest includes the embedded tank sheet and
-/// adjacent sim artifact, which decide the weapon, stowage and health-volume indices.
-///
-/// The game's damage model binds fuze modes and round facts from embedded round-type, round and
-/// gun registries. Their keys and bytes enter too: handshake-matched receivers can refuse an
-/// unresolvable index as malformed input rather than waiting for data skew to resolve.
-///
-/// The ground-type table beside the binary sets the server's ground response and each client's
-/// prints and drawn belt sink on it; a peer holding another table draws sinkage the server's
-/// ground never had.
-///
-/// Cached per process: map files must stay fixed while running, and the heightmap is tens of MB.
+/// The netcode handshake tag: this build's compatibility record (`net::compatibility`), hashed.
 pub fn protocol_id() -> u64 {
-    static ID: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *ID.get_or_init(|| {
-        let root = crate::assets::asset_root();
-        let ground = crate::ground_types::GroundTypes::shipped_path();
-        let ground_types = std::fs::read(&ground).unwrap_or_else(|err| {
-            panic!(
-                "the ground-type table {} cannot be read: {err}",
-                ground.display()
-            )
-        });
-        handshake_tag(
-            crate::map::content_digest(&root),
-            crate::substances::MATERIALS_RON.as_bytes(),
-            crate::bake::construction_digest(&root),
-            armaments_digest(
-                crate::rounds::ROUND_TYPES_RON,
-                crate::armaments_index::ROUND_FILES,
-                crate::armaments_index::GUN_FILES,
-            ),
-            crate::aim::INPUT_RON.as_bytes(),
-            &ground_types,
-        )
-    })
-}
-
-fn handshake_tag(
-    map_digest: u64,
-    materials: &[u8],
-    tank_digest: u64,
-    armaments_digest: u64,
-    aim_input: &[u8],
-    ground_types: &[u8],
-) -> u64 {
-    let tag = fingerprint_field(
-        PROTOCOL_FINGERPRINT,
-        b"map_content",
-        &map_digest.to_le_bytes(),
-    );
-    let tag = fingerprint_field(tag, b"materials_ron", materials);
-    let tag = fingerprint_field(tag, b"tank_construction", &tank_digest.to_le_bytes());
-    let tag = fingerprint_field(tag, b"armaments", &armaments_digest.to_le_bytes());
-    let tag = fingerprint_field(tag, b"aim_input", aim_input);
-    fingerprint_field(tag, b"ground_types_ron", ground_types)
-}
-
-/// The game's damage model: fingerprint every embedded armament key and source, in the index's
-/// byte-sorted order. These sources are what the shipped registries parse, not a second manifest.
-fn armaments_digest(round_types: &str, rounds: &[(&str, &str)], guns: &[(&str, &str)]) -> u64 {
-    let mut tag = fingerprint_field(
-        crate::fingerprint::FNV_OFFSET_BASIS,
-        b"round_types",
-        round_types.as_bytes(),
-    );
-    for (kind, files) in [(b"rounds".as_slice(), rounds), (b"guns".as_slice(), guns)] {
-        tag = fingerprint_field(tag, b"registry", kind);
-        for (key, text) in files {
-            tag = fingerprint_field(tag, b"key", key.as_bytes());
-            tag = fingerprint_field(tag, b"ron", text.as_bytes());
-        }
-    }
-    tag
+    super::compatibility::Compatibility::local().tag()
 }
 
 /// Version-independent manifest prefix pinned by the tripwire. Routine crate-version bumps
@@ -928,7 +849,7 @@ const WIRE_SURFACE_HASH: u64 = 0x71ba39380c57d0bd;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x899d67b6050ebd70;
+const WIRE_TYPES_HASH: u64 = 0xc197cae80aa45492;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol; replicon's
@@ -2091,7 +2012,7 @@ mod tests {
     /// into [`WIRE_TYPES_HASH`] after the type definitions. Codec tests live outside this fold.
     const WIRE_CODEC_SOURCES: &[&str] = &[
         "src/net/wire_quant.rs",
-        "src/net/admission.rs",
+        "src/net/admission/denial.rs",
         "src/net/debris_stress/pose.rs",
     ];
 
@@ -2316,105 +2237,6 @@ mod tests {
         }
     }
 
-    /// Same-build peers with different world/construction data must refuse at connect (ADR-0018).
-    /// The game's damage model relies on this when refusing unresolved weapon/volume indices.
-    #[test]
-    fn the_map_content_reaches_the_handshake_tag() {
-        assert_ne!(
-            protocol_id(),
-            PROTOCOL_FINGERPRINT,
-            "the handshake tag must carry a map term, not the wire manifest alone",
-        );
-        assert_eq!(
-            protocol_id(),
-            protocol_id(),
-            "the tag is stable per process"
-        );
-        // Sensitivity, through the production fold rather than a reimplementation of it: two maps
-        // are two tags, and so are two registries over one map — a build whose embedded
-        // `materials.ron` differs by one value resolves every hard body differently with every
-        // asset file identical, and must not connect.
-        let registry = crate::substances::MATERIALS_RON;
-        let root = crate::assets::asset_root();
-        let tank = crate::bake::construction_digest(&root);
-        let armaments = armaments_digest(
-            crate::rounds::ROUND_TYPES_RON,
-            crate::armaments_index::ROUND_FILES,
-            crate::armaments_index::GUN_FILES,
-        );
-        let ground = std::fs::read(crate::ground_types::GroundTypes::shipped_path())
-            .expect("the shipped ground-type table");
-        let tag = |digest: u64| {
-            handshake_tag(
-                digest,
-                registry.as_bytes(),
-                tank,
-                armaments,
-                crate::aim::INPUT_RON.as_bytes(),
-                &ground,
-            )
-        };
-        assert_ne!(tag(1), tag(2), "a different map must be a different tag");
-        assert_eq!(
-            tag(crate::map::content_digest(&root)),
-            protocol_id(),
-            "the tag must be the fold of THIS process's map, registry and tank",
-        );
-        assert_ne!(
-            handshake_tag(
-                1,
-                registry.as_bytes(),
-                tank ^ 1,
-                armaments,
-                crate::aim::INPUT_RON.as_bytes(),
-                &ground
-            ),
-            tag(1),
-            "another tank construction over the same world: a different tag",
-        );
-        assert_ne!(
-            handshake_tag(
-                1,
-                registry.as_bytes(),
-                tank,
-                armaments,
-                b"changed aim construction",
-                &ground
-            ),
-            tag(1),
-            "input admission policy must agree before peers connect",
-        );
-        let edited = registry.replacen("26.2", "26.3", 1);
-        assert_ne!(
-            edited, registry,
-            "the fixture edit must land on a registry value"
-        );
-        assert_ne!(
-            handshake_tag(
-                1,
-                edited.as_bytes(),
-                tank,
-                armaments,
-                crate::aim::INPUT_RON.as_bytes(),
-                &ground
-            ),
-            tag(1),
-            "a registry value moved under identical assets: a different tag",
-        );
-        assert_ne!(
-            handshake_tag(
-                1,
-                registry.as_bytes(),
-                tank,
-                armaments,
-                crate::aim::INPUT_RON.as_bytes(),
-                b"another ground-type table"
-            ),
-            tag(1),
-            "another ground table over the same world draws other sinkage: a different tag",
-        );
-    }
-
     /// A `LocalTimeline` (a `#[derive(Resource)]`) pinned to `tick`. Its field is private, so seed
     /// it from `Default` (tick 0) and step it with the public `apply_delta`.
     fn timeline_at(tick: i32) -> LocalTimeline {
@@ -2488,26 +2310,6 @@ mod tests {
             network_gameplay_tick(world.resource::<LocalTimeline>().tick()),
             Err(NetworkTickExhausted)
         );
-    }
-
-    /// The game's damage model: a registry-only fuze or gun edit must refuse at connect even
-    /// when tank construction and wire types match. Receiver fire bindings rely on this guarantee.
-    #[test]
-    fn every_armament_registry_input_reaches_the_handshake() {
-        // Fixture bytes test the generic source fingerprint, not any asset's physical values.
-        let rounds = [("round", "round source")];
-        let guns = [("gun", "gun source")];
-        let base = armaments_digest("round types", &rounds, &guns);
-        let tag = |digest| handshake_tag(1, b"materials", 2, digest, b"aim input", b"ground");
-        for changed in [
-            armaments_digest("changed types", &rounds, &guns),
-            armaments_digest("round types", &[("round", "changed source")], &guns),
-            armaments_digest("round types", &[("renamed round", "round source")], &guns),
-            armaments_digest("round types", &rounds, &[("gun", "changed source")]),
-            armaments_digest("round types", &rounds, &[("renamed gun", "gun source")]),
-        ] {
-            assert_ne!(tag(base), tag(changed));
-        }
     }
 
     /// The game's damage model: even an attested malformed command files idle input. A peer

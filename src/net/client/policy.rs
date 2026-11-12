@@ -9,7 +9,7 @@ pub(super) struct ClientPolicy {
     pub reconnect_base_s: Sourced<f64>,
     pub reconnect_step_s: Sourced<f64>,
     pub reconnect_cap_s: Sourced<f64>,
-    pub mismatch_hint_after_attempts: Sourced<u32>,
+    pub unanswered_after_attempts: Sourced<u32>,
 }
 
 pub(super) fn client_policy() -> &'static ClientPolicy {
@@ -35,8 +35,8 @@ pub(super) fn client_policy() -> &'static ClientPolicy {
             "assets/net/client.ron: reconnect_cap_s must cover reconnect_base_s; raise the cap or lower the base"
         );
         assert!(
-            policy.mismatch_hint_after_attempts.0 > 0,
-            "assets/net/client.ron: mismatch_hint_after_attempts must be positive; allow an initial connection attempt"
+            policy.unanswered_after_attempts.0 > 0,
+            "assets/net/client.ron: unanswered_after_attempts must be positive; allow an initial connection attempt"
         );
         policy
     });

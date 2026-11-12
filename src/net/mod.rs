@@ -10,6 +10,8 @@ mod battle_hud;
 /// The Battle mode's data: one file, parsed and checked once.
 mod battle_mode;
 mod client;
+/// What a build states at the handshake, and the cause a refused peer of another build is shown.
+mod compatibility;
 /// Tick-stamped server announcements held until the interpolation cursor crosses their tick, so an
 /// event presents in sync with the interpolated motion it belongs to.
 mod cursor_queue;

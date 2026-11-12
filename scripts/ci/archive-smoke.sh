@@ -6,9 +6,10 @@
 # THE POINT is the ARCHIVES' OWN BYTES. In `.github/workflows/release.yml` both binaries are the
 # ones a user downloads, extracted from the release archives with no path surgery, so the assets
 # each side digests are the shipped assets. A `level.json` whose line endings were rewritten
-# anywhere in build or packaging changes the client's map digest, and the map digest is half of the
-# netcode `protocol_id` (ADR-0018) — the connect token then decrypts to nothing and the server logs
-# a bad protocol id. That release shipped three times before this lane existed.
+# anywhere in build or packaging changes the client's map digest, a term of the compatibility record
+# the netcode `protocol_id` hashes (ADR-0018) — the server then refuses the client as another build,
+# naming the `map` term in both logs, and the client never connects. That release shipped three
+# times before this lane existed.
 #
 # WHAT IS OVERRIDDEN, and nothing else: `OVERMATCH_SERVER`, so the client dials this machine (a
 # scripted client always connects directly; a player's opens the Join menu against the baked

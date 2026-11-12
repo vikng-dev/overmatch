@@ -68,6 +68,9 @@ const BARLOW_TEXT_FILES: &[&str] = &[
     "src/ui_font.rs",
     "src/net/battle_hud.rs",
     "src/net/client.rs",
+    // The refusal causes the joining screen and the Join menu render.
+    "src/net/admission.rs",
+    "src/net/compatibility.rs",
     "src/net/death_screen.rs",
     "src/net/debug_hud.rs",
     "src/net/hit_feel.rs",

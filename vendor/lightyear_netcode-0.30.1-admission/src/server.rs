@@ -33,6 +33,19 @@ pub const MAX_CLIENTS: usize = 256;
 
 const CLIENT_TIMEOUT_SECS: i32 = 10;
 
+/// OVERMATCH PATCH: answers a connection request that names another protocol id but whose private
+/// token decrypts under this server's private key with that id: a key holder of another build.
+/// The returned reason is sent encrypted under the requester's own protocol id, so that peer can
+/// read it. The request creates no connection state, whatever the reason says.
+pub trait ForeignProtocolHandler: core::fmt::Debug + Send + Sync {
+    fn refuse(
+        &self,
+        client: id::PeerId,
+        protocol_id: u64,
+        user_data: &[u8; USER_DATA_BYTES],
+    ) -> DeniedReason;
+}
+
 #[derive(Clone, Copy)]
 struct TokenEntry {
     time: f64,
@@ -283,6 +296,8 @@ pub struct ServerConfig<Ctx> {
     token_expire_secs: i32,
     client_timeout_secs: i32,
     connection_request_handler: Arc<dyn ConnectionRequestHandler>,
+    // OVERMATCH PATCH: `None` drops a foreign-protocol request unanswered, as upstream does.
+    foreign_protocol_handler: Option<Arc<dyn ForeignProtocolHandler>>,
     pub(crate) additional_expected_addresses: Vec<SocketAddr>,
     pub(crate) context: Ctx,
     on_connect: Option<ConnectCallback<Ctx>>,
@@ -298,6 +313,7 @@ impl Default for ServerConfig<()> {
             token_expire_secs: TOKEN_EXPIRE_SEC,
             client_timeout_secs: CLIENT_TIMEOUT_SECS,
             connection_request_handler: Arc::new(DefaultConnectionRequestHandler),
+            foreign_protocol_handler: None,
             additional_expected_addresses: Vec::new(),
             context: (),
             on_connect: None,
@@ -320,6 +336,7 @@ impl<Ctx> ServerConfig<Ctx> {
             token_expire_secs: TOKEN_EXPIRE_SEC,
             client_timeout_secs: CLIENT_TIMEOUT_SECS,
             connection_request_handler: Arc::new(DefaultConnectionRequestHandler),
+            foreign_protocol_handler: None,
             additional_expected_addresses: Vec::new(),
             context: ctx,
             on_connect: None,
@@ -364,6 +381,12 @@ impl<Ctx> ServerConfig<Ctx> {
         handler: Arc<dyn ConnectionRequestHandler>,
     ) -> Self {
         self.connection_request_handler = handler;
+        self
+    }
+
+    /// OVERMATCH PATCH: set the handler that answers requests under another protocol id.
+    pub fn foreign_protocol_handler(mut self, handler: Arc<dyn ForeignProtocolHandler>) -> Self {
+        self.foreign_protocol_handler = Some(handler);
         self
     }
 
@@ -592,8 +615,18 @@ impl<Ctx> Server<Ctx> {
         }
     }
     fn send_netcode_packet(&mut self, packet: Packet, key: Key, entity: Entity) -> Result<()> {
+        self.send_netcode_packet_under(packet, key, entity, self.protocol_id)
+    }
+    // OVERMATCH PATCH: a foreign-protocol denial is sealed under the requester's protocol id.
+    fn send_netcode_packet_under(
+        &mut self,
+        packet: Packet,
+        key: Key,
+        entity: Entity,
+        protocol_id: u64,
+    ) -> Result<()> {
         let mut buf = [0u8; MAX_PKT_BUF_SIZE];
-        let size = packet.write(&mut buf, self.sequence, &key, self.protocol_id)?;
+        let size = packet.write(&mut buf, self.sequence, &key, protocol_id)?;
         self.writer.extend_from_slice(&buf[..size]);
         self.send_queue
             .entry(entity)
@@ -699,22 +732,7 @@ impl<Ctx> Server<Ctx> {
         let token = ConnectTokenPrivate::read_from(&mut reader)?;
         let entity = entity_mut.id();
 
-        if let Some(server_addr) = server_addr
-            && !token.server_addresses.iter().any(|(_, token_addr)| {
-                server_addr_matches(server_addr, token_addr)
-                    || self
-                        .cfg
-                        .additional_expected_addresses
-                        .iter()
-                        .any(|expected_addr| server_addr_matches(*expected_addr, token_addr))
-            })
-        {
-            info!(
-                token_addresses = ?token.server_addresses,
-                ?server_addr,
-                additional_expected_addresses = ?self.cfg.additional_expected_addresses,
-                "server ignored connection request. server address not in connect token whitelist"
-            );
+        if !self.token_names_this_server(&token, server_addr) {
             return Ok(());
         };
         if self
@@ -794,6 +812,63 @@ impl<Ctx> Server<Ctx> {
         debug!("server sent connection challenge packet");
         self.challenge_sequence += 1;
         Ok(())
+    }
+
+    /// Whether the token lists this server's address, when `server_addr` asks for the check.
+    /// OVERMATCH PATCH: lifted out of `process_connection_request` for `refuse_foreign_protocol`.
+    fn token_names_this_server(
+        &self,
+        token: &ConnectTokenPrivate,
+        server_addr: Option<SocketAddr>,
+    ) -> bool {
+        let Some(server_addr) = server_addr else {
+            return true;
+        };
+        let named = token.server_addresses.iter().any(|(_, token_addr)| {
+            server_addr_matches(server_addr, token_addr)
+                || self
+                    .cfg
+                    .additional_expected_addresses
+                    .iter()
+                    .any(|expected_addr| server_addr_matches(*expected_addr, token_addr))
+        });
+        if !named {
+            info!(
+                token_addresses = ?token.server_addresses,
+                ?server_addr,
+                additional_expected_addresses = ?self.cfg.additional_expected_addresses,
+                "server ignored connection request. server address not in connect token whitelist"
+            );
+        }
+        named
+    }
+
+    /// OVERMATCH PATCH: the [`ForeignProtocolHandler`] path, through the request checks that do
+    /// not compare protocol ids, except the reused-token check (`OVERMATCH_PATCH.md`).
+    fn refuse_foreign_protocol(
+        &mut self,
+        mut packet: RequestPacket,
+        now: u64,
+        entity: Entity,
+        server_addr: Option<SocketAddr>,
+        handler: &dyn ForeignProtocolHandler,
+    ) -> Result<()> {
+        // Against its own protocol id, only the version and expiry can fail.
+        packet.validate(packet.protocol_id, now)?;
+        packet.decrypt_token_data(self.private_key)?;
+        let mut reader = io::Cursor::new(&mut packet.token_data[..]);
+        let token = ConnectTokenPrivate::read_from(&mut reader)?;
+        if !self.token_names_this_server(&token, server_addr) {
+            return Ok(());
+        }
+        let client = id::PeerId::Netcode(token.client_id);
+        let reason = handler.refuse(client, packet.protocol_id, &token.user_data);
+        self.send_netcode_packet_under(
+            DeniedPacket::create(reason),
+            token.server_to_client_key,
+            entity,
+            packet.protocol_id,
+        )
     }
 
     fn process_connection_response(
@@ -932,6 +1007,21 @@ impl<Ctx> Server<Ctx> {
         let mut reader = io::Cursor::new(buf);
         let first_byte = reader.read_u8()?;
         let entity = entity_mut.id();
+        // OVERMATCH PATCH: a request under another protocol id goes to the foreign handler, under
+        // the size cap `Packet::read` applies; every other packet, and every request without a
+        // handler, takes the upstream path below.
+        if first_byte == Packet::REQUEST
+            && let Some(handler) = self.cfg.foreign_protocol_handler.clone()
+        {
+            if reader.get_ref().len() > MAX_PKT_BUF_SIZE {
+                return Err(crate::packet::Error::TooLarge.into());
+            }
+            let request = RequestPacket::read_from(&mut reader)?;
+            if request.protocol_id != self.protocol_id {
+                self.refuse_foreign_protocol(request, now, entity, server_addr, handler.as_ref())?;
+                return Ok(None);
+            }
+        }
         // reader.rewind()?;
         let (key, replay_protection) = match self.conn_cache.find_by_entity(&entity) {
             // Regardless of whether an entry in the connection cache exists for the client or not,

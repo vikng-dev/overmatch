@@ -285,15 +285,15 @@ fn bind_ip(value: Option<&str>) -> Result<Ipv4Addr, harness::LeverError> {
 }
 
 /// The netcode endpoint. Hosted: the Worker's per-match key and its player cap, past which the
-/// handshake answers `ServerFull`. Otherwise: the all-zero dev key every client's
-/// `Authentication::Manual` holds, and lightyear's default cap.
+/// handshake answers `ServerFull`. Otherwise: the all-zero dev key every direct client's token is
+/// sealed with, and lightyear's default cap.
 pub(super) fn netcode_server(
     hosted: Option<&HostedConfig>,
     admission: JoinAdmission,
 ) -> NetcodeServer {
     let defaults = NetcodeConfig::default();
     NetcodeServer::new(NetcodeConfig {
-        // Must match the client's `Authentication::Manual.protocol_id`.
+        // Must match the tag the client's token is sealed under.
         protocol_id: protocol_id(),
         private_key: hosted.map_or([0; 32], HostedConfig::netcode_key),
         max_clients: hosted.map_or(defaults.max_clients, HostedConfig::max_clients),
@@ -305,6 +305,9 @@ pub(super) fn netcode_server(
         // `additional_expected_addresses`.
         server_addr_check: false,
         connection_request_handler: Some(std::sync::Arc::new(admission)),
+        foreign_protocol_handler: Some(std::sync::Arc::new(
+            super::compatibility::RefuseOtherBuilds,
+        )),
         ..defaults
     })
 }

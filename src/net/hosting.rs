@@ -738,12 +738,12 @@ mod tests {
     use std::path::Path;
 
     use bevy::time::TimeUpdateStrategy;
-    use lightyear::prelude::client::{Client, ClientPlugins, Connect, NetcodeClient};
+    use lightyear::prelude::client::{Client, ClientPlugins, Connect};
     use lightyear::prelude::server::{ServerPlugins, ServerUdpIo, Start};
     use lightyear::prelude::*;
 
     use super::*;
-    use crate::net::protocol::protocol_id;
+    use crate::net::compatibility::Compatibility;
     use crate::net::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
 
     fn contract(name: &str) -> serde_json::Value {
@@ -1585,6 +1585,11 @@ mod tests {
     }
 
     fn client(port: u16, client_id: u64, key: [u8; 32]) -> App {
+        client_stating(port, client_id, key, Compatibility::local().clone())
+    }
+
+    /// A client whose token states `record`, through the shipped link constructor.
+    fn client_stating(port: u16, client_id: u64, key: [u8; 32], record: Compatibility) -> App {
         let mut app = base_app();
         app.insert_resource(TimeUpdateStrategy::ManualDuration(TICK));
         app.add_plugins(ClientPlugins {
@@ -1600,16 +1605,7 @@ mod tests {
                 LocalAddr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)),
                 PeerAddr(server_addr),
                 ReplicationReceiver,
-                NetcodeClient::new(
-                    Authentication::Manual {
-                        server_addr,
-                        client_id,
-                        private_key: key,
-                        protocol_id: protocol_id(),
-                    },
-                    lightyear::prelude::client::NetcodeConfig::default(),
-                )
-                .expect("manual token"),
+                crate::net::client::netcode_link(server_addr, client_id, key, record),
                 UdpIo::default(),
             ))
             .id();
@@ -1893,5 +1889,105 @@ mod tests {
             }
         }
         panic!("the challenge-crossing refusal never arrived");
+    }
+
+    /// A key holder of another build is answered with the server's record and never admitted, and
+    /// the shipped refusal reader puts the difference on the joining screen; a compatible peer
+    /// beside them connects. Each refused peer differs from the server in one stated field, the
+    /// revision or one content term: players rely on the named cause to know who updates. A peer of
+    /// another build without the server's key is told nothing, and no refusal leaves connection
+    /// state behind: the foreign path answers only key holders and holds no slot for anyone.
+    #[test]
+    fn a_peer_of_another_build_is_told_the_difference_and_never_admitted() {
+        use crate::net::admission::JoinRefusal;
+        use crate::net::compatibility::Incompatibility;
+        use crate::net::protocol::PROTOCOL_REV;
+
+        let _udp = lock_real_udp_test();
+        let config = hosted(&contract_env());
+        let key = config.netcode_key();
+        let port = free_port();
+        let mut server = capped_server(port, &config);
+        let local = Compatibility::local();
+        let mut compatible = client(port, 20, key);
+        let mut refused = [
+            (
+                client_stating(port, 21, key, local.at_revision(PROTOCOL_REV + 1)),
+                Incompatibility::Revision {
+                    client: PROTOCOL_REV + 1,
+                    server: PROTOCOL_REV,
+                },
+            ),
+            (
+                client_stating(port, 22, key, local.with_content_changed("ground")),
+                Incompatibility::Content(vec!["ground".into()]),
+            ),
+        ];
+        let mut keyless = client_stating(
+            port,
+            23,
+            key.map(|byte| !byte),
+            local.at_revision(PROTOCOL_REV + 1),
+        );
+        finish(&mut server);
+        finish(&mut compatible);
+        for peer in refused
+            .iter_mut()
+            .map(|(peer, _)| peer)
+            .chain([&mut keyless])
+        {
+            crate::net::client::mount_refusal_probe(peer);
+            finish(peer);
+        }
+        for _ in 0..2_000 {
+            server.update();
+            std::thread::sleep(Duration::from_micros(300));
+            compatible.update();
+            keyless.update();
+            for (peer, _) in &mut refused {
+                peer.update();
+            }
+            std::thread::sleep(Duration::from_micros(300));
+            let admitted = server
+                .world_mut()
+                .query_filtered::<(), (With<ClientOf>, With<Connected>)>()
+                .iter(server.world())
+                .count();
+            assert!(admitted <= 1, "only the compatible peer is ever admitted");
+            let mut told = true;
+            for (peer, cause) in &mut refused {
+                assert!(
+                    !client_state(peer).0,
+                    "a peer of another build never connects"
+                );
+                match crate::net::client::refusal_probe(peer) {
+                    (Some(refusal), label) => {
+                        assert_eq!(refusal, JoinRefusal::Incompatible(cause.clone()));
+                        assert_eq!(label, refusal.message());
+                    }
+                    (None, _) => told = false,
+                }
+            }
+            if told && client_state(&mut compatible).0 {
+                assert_eq!(admitted, 1);
+                assert_eq!(
+                    crate::net::client::refusal_probe(&mut keyless).0,
+                    None,
+                    "a peer without the server's key is told nothing"
+                );
+                assert!(!client_state(&mut keyless).0);
+                assert_eq!(
+                    server
+                        .world_mut()
+                        .query_filtered::<(), (With<LinkOf>, With<Connecting>)>()
+                        .iter(server.world())
+                        .count(),
+                    0,
+                    "a refusal leaves no pending connection on the server"
+                );
+                return;
+            }
+        }
+        panic!("the refusals or the compatible connection never arrived");
     }
 }
