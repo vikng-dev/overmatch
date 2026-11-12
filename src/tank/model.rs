@@ -737,9 +737,9 @@ pub struct WeaponLoads {
 
 /// Tick-correlated servo integrator state in deterministic name-sorted [`super::ServoIndex`] order.
 /// This is the complete minimal state needed to replay the fixed-step mechanism: each slot carries
-/// its current angle, previous angle, and angular velocity. The authority replicates the atomic
-/// component to the owner; prediction restores it at the producing tick before replay.
-#[derive(Component, Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+/// its current angle, previous angle, and angular velocity. The authority's integrator only: it
+/// never replicates, and a client replica integrates `RemoteServos` instead (`tank::servo`).
+#[derive(Component, Clone, PartialEq, Debug, Default)]
 pub struct TankServos {
     pub states: Vec<ServoState>,
 }
@@ -754,7 +754,7 @@ impl TankServos {
 
 /// Local weapon rollback state lives on the replicated root. Children carry deterministic,
 /// name-sorted indices into this vector and derive their transforms from the restored root state.
-/// Servo state is authoritative in the separately replicated [`TankServos`] component.
+/// Servo state lives in the root's one servo integrator ([`TankServos`] on the authority).
 #[derive(Component, Clone, PartialEq, Debug, Default)]
 pub struct TankSim {
     pub weapons: Vec<WeaponState>,

@@ -357,9 +357,9 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
         .insert((
             presentation.root_bundle(),
             ServoMechanism::new(content.spec(), content.transmission()),
-            // Replicated authority state (EngineRpm, servo snapshots; the owner's TankTransmission,
-            // DriveSignal, WeaponGate, WeaponLoads) arrived in the replication init snapshot. Do not
-            // overwrite it with fresh spec-derived values.
+            // Replicated authority state (EngineRpm, the public ServoAngles; the owner's
+            // TankTransmission, DriveSignal, WeaponGate, WeaponLoads) arrived in the replication
+            // init snapshot. Do not overwrite it with fresh spec-derived values.
             root_bundle,
         ))
         .observe(bind_tank_view);

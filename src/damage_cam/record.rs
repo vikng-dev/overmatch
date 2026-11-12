@@ -50,7 +50,7 @@ use crate::ballistics::{
 use crate::damage::{Ammo, CrewStation, FunctionRole, TankKnockedOut, VolumeOf};
 #[cfg(test)]
 use crate::tank::{Muzzle, Weapon, rig_world_pose};
-use crate::tank::{RemoteServos, Rig, ServoIndex, TankRoot, TankServos};
+use crate::tank::{RemoteServos, Rig, ServoIndex, TankRoot, TankServos, selected};
 #[cfg(test)]
 use avian3d::prelude::{Position, Rotation};
 #[cfg(test)]
@@ -246,10 +246,10 @@ pub fn muzzle_of(world: &mut World, shooter: Entity, weapon: &str) -> Option<Vec
     rig_world_pose(muzzle, shooter, position, rotation, &parents, &locals).map(|(at, _)| at)
 }
 
-/// The game's damage model: every registered servo's angle (degrees), from the same remote-first
-/// state the view poses. `None` means the tank despawned before recording; a rig with no servos
-/// has an empty pose. Callers open encounters only for living targets and pose them before
-/// damage consequences, so every registered slot still has its mounted node.
+/// The game's damage model: every registered servo's angle (degrees), from the root's one
+/// integrator, the state the view poses. `None` means the tank despawned before recording; a rig
+/// with no servos has an empty pose. Callers open encounters only for living targets and pose them
+/// before damage consequences, so every registered slot still has its mounted node.
 pub(crate) fn servo_angles(world: &mut World, tank: Entity) -> Option<BTreeMap<String, f32>> {
     world.get_entity(tank).ok()?; // A tank may despawn while its round still has an open encounter.
     let mut servos = world.query::<(&Name, &ServoIndex, &TankRoot)>();
@@ -258,21 +258,10 @@ pub(crate) fn servo_angles(world: &mut World, tank: Entity) -> Option<BTreeMap<S
         .filter(|(_, _, root)| root.0 == tank)
         .map(|(name, slot, _)| (name.as_str().to_owned(), slot.0))
         .collect();
-    let states = world
-        .get::<RemoteServos>(tank)
-        .map(|servos| servos.0.clone())
-        .or_else(|| {
-            world
-                .get::<TankServos>(tank)
-                .map(|servos| servos.states.clone())
-        });
-    let states = match states {
-        Some(states) => states,
-        None if nodes.is_empty() => return Some(BTreeMap::new()), // No servos.
-        None => panic!(
-            "the game's damage model records registered servos from their spawn-complete state"
-        ),
-    };
+    let states = selected(
+        world.get::<RemoteServos>(tank).map(|servos| &servos.0),
+        world.get::<TankServos>(tank).map(|servos| &servos.states),
+    );
     assert_eq!(
         nodes.len(),
         states.len(),
@@ -1635,14 +1624,16 @@ pub(crate) mod tests {
         );
     }
 
-    /// The game's damage model records complete living-target servo poses, distinguishes a
-    /// despawn from a servo-less rig, and refuses missing state or an invalid registered slot.
-    /// Presentation relies on every mounted slot having its recorded angle.
+    /// The game's damage model records complete living-target servo poses from the root's one
+    /// integrator, authority or replica, distinguishes a despawn from a servo-less rig, and refuses
+    /// missing state or an invalid registered slot. Presentation relies on every mounted slot
+    /// having its recorded angle.
     #[test]
     fn recording_servos_requires_registered_state_and_names_despawn() {
         let mut world = World::new();
-        let tank = world.spawn_empty().id();
+        let tank = world.spawn(TankServos::for_count(0)).id();
         assert_eq!(servo_angles(&mut world, tank), Some(BTreeMap::new()));
+        world.entity_mut(tank).remove::<TankServos>();
         let node = world
             .spawn((Name::new("fixture servo"), ServoIndex(0), TankRoot(tank)))
             .id();
@@ -1667,6 +1658,7 @@ pub(crate) mod tests {
         world.entity_mut(node).insert(ServoIndex(0));
         world
             .entity_mut(tank)
+            .remove::<TankServos>()
             .insert(RemoteServos(vec![crate::tank::ServoState::test_new(
                 0.5, 0.0, 0.0,
             )]));

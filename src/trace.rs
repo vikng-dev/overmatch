@@ -17,7 +17,9 @@ use avian3d::prelude::{AngularVelocity, Collisions, LinearVelocity, Position, Ro
 use bevy::prelude::*;
 use serde_json::{Value, json};
 
-use crate::tank::{Controlled, RemoteServos, Tank, TankServos, TankSim, WeaponGate, WeaponLoads};
+use crate::tank::{
+    Controlled, RemoteServos, Tank, TankServos, TankSim, WeaponGate, WeaponLoads, selected,
+};
 use crate::track::sim::{
     DriveSignal, TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripElements,
 };
@@ -499,13 +501,12 @@ fn record_tick(
         // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
         // and carried state already in hand, except the view-only tracer phase documented on
         // `TankStateHash`; costs a few dozen FNV rounds and runs only when tracing is armed.
-        // A client replica has `RemoteServos` permanently (the public-angle chase) and it takes
-        // precedence; the server/single-player path falls through to the authoritative
-        // `TankServos` integrator.
-        let servo_states = remote_servos
-            .map(|servos| servos.0.as_slice())
-            .or_else(|| servos.map(|servos| servos.states.as_slice()))
-            .unwrap_or(&[]);
+        // The servos are the root's one integrator: `RemoteServos` on a client replica, the
+        // authoritative `TankServos` on the server and single-player.
+        let servo_states = selected(
+            remote_servos.map(|servos| servos.0.as_slice()),
+            servos.map(|servos| servos.states.as_slice()),
+        );
         let hash = hash_tank_state(&TankState {
             position: position.0,
             rotation: rotation.0,

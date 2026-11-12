@@ -789,6 +789,8 @@ pub(crate) mod tests {
 
     impl AimRig {
         fn new() -> Self {
+            // `drive_servos` batches its per-tank evaluation on the compute pool.
+            bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
             let mut world = World::new();
             let mut time = Time::<()>::default();
             time.advance_by(Duration::from_secs_f32(TICK));

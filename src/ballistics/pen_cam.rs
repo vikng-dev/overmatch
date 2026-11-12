@@ -645,9 +645,14 @@ pub(super) fn fixture_tanks(
         .unwrap_or(1);
     let tanks: Vec<Entity> = (0..count)
         .map(|_| {
+            // Fixture: a servo-less rig, whose root still carries its one (empty) integrator.
             let tank = app
                 .world_mut()
-                .spawn((Transform::default(), RigidBody::Static))
+                .spawn((
+                    Transform::default(),
+                    RigidBody::Static,
+                    TankServos::for_count(0),
+                ))
                 .id();
             app.world_mut().entity_mut(tank).insert(Rig {
                 hull: tank,

@@ -123,6 +123,8 @@ fn tank(
             AngularInertia::new(Vec3::splat(1.0e5)),
             NoAutoMass,
             NoAutoAngularInertia,
+            // A servo-less rig still carries its root's one (empty) integrator.
+            crate::tank::TankServos::for_count(0),
         ))
         .id();
     app.world_mut().entity_mut(root).insert(Rig {

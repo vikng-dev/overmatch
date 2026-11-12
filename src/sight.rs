@@ -23,7 +23,7 @@ use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
     Controlled, RemoteServos, ServoIndex, ServoRest, ServoSpec, Tank, TankServos, TankViews,
-    rig_world_pose, shortest_angle,
+    rig_world_pose, selected, shortest_angle,
 };
 use crate::view::PlayerView;
 
@@ -319,7 +319,7 @@ fn resume_commit(committed_point: Option<Vec3>, moved: bool, resolved: Vec3) -> 
 }
 
 /// Read access to a tank's live servo lays: the [`ServoIndex`] slot each servo entity holds, plus
-/// the two root-resident integrators those slots address.
+/// the root's one integrator those slots address.
 #[derive(SystemParam)]
 pub(crate) struct LiveServos<'w, 's> {
     slots: Query<'w, 's, &'static ServoIndex>,
@@ -329,30 +329,25 @@ pub(crate) struct LiveServos<'w, 's> {
 }
 
 impl LiveServos<'_, '_> {
-    /// A `servo` entity's live parent-local lay under `tank`. Same preference the mechanism itself
-    /// integrates through (`tank::servo`): the client-local [`RemoteServos`] when the tank carries
-    /// one — every replica, the own hull included — else the authoritative [`TankServos`] snapshot.
-    /// The optic clamps intent against the gun's live lay, so it must read the integrator that is
-    /// moving it.
+    /// A `servo` entity's live parent-local lay under `tank`, from the root's one integrator
+    /// ([`selected`]): the client-local [`RemoteServos`] on every replica, the own hull included,
+    /// or the authoritative [`TankServos`]. The optic clamps intent against the gun's live lay, so
+    /// it must read the integrator that is moving it.
     fn angle(&self, tank: Entity, servo: Entity) -> f32 {
         let slot = self
             .slots
             .get(servo)
             .expect("every declared rig servo receives its index at complete spawn");
-        let state = if let Ok(servos) = self.remote.get(tank) {
-            servos
-                .0
-                .get(slot.0)
-                .expect("the replica's complete servo vector covers every declared slot")
-        } else {
+        let angle = selected(
+            self.remote.get(tank).ok().map(|remote| &remote.0),
             self.states
                 .get(tank)
-                .expect("a controlled rig has either replica or authoritative servo state")
-                .states
-                .get(slot.0)
-                .expect("the authority's complete servo vector covers every declared slot")
-        };
-        let angle = state.current();
+                .ok()
+                .map(|authority| &authority.states),
+        )
+        .get(slot.0)
+        .expect("the root's complete servo vector covers every declared slot")
+        .current();
         assert!(
             angle.is_finite(),
             "the live servo integrator holds finite angles"
@@ -726,17 +721,14 @@ mod tests {
         }
     }
 
-    /// Optic intent follows the replica's live lay. A malformed replica vector must fail rather
-    /// than silently borrowing the authority vector's different angle for the same slot.
+    /// Optic intent follows the replica's live lay. A replica vector missing a declared slot must
+    /// fail rather than clamp intent against an angle it does not hold.
     #[test]
-    #[should_panic(expected = "replica's complete servo vector")]
-    fn an_incomplete_replica_servo_vector_cannot_read_authority_state() {
+    #[should_panic(expected = "the root's complete servo vector")]
+    fn an_incomplete_replica_servo_vector_refuses_the_lay() {
         use bevy::ecs::system::RunSystemOnce;
         let mut app = App::new();
-        let tank = app
-            .world_mut()
-            .spawn((TankServos::for_count(1), RemoteServos(Vec::new())))
-            .id();
+        let tank = app.world_mut().spawn(RemoteServos(Vec::new())).id();
         let servo = app.world_mut().spawn(ServoIndex(0)).id();
         app.world_mut()
             .run_system_once(move |live: LiveServos| live.angle(tank, servo))

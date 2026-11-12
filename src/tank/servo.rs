@@ -3,7 +3,7 @@
 //! `armor-penetration-and-damage.md` §7c.
 
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::model::{Controlled, TankRoot, TankServos};
 use super::view::{ViewOf, ViewServo};
@@ -212,7 +212,7 @@ pub struct ServoCommand {
 
 /// Root-resident servo mechanism state. `drive_servos` writes fixed-step truth to the sim node;
 /// `interpolate_servos` blends `previous` to `current` only on its view node.
-#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct ServoState {
     current: f32,
     /// The angle at the previous fixed tick — the render interpolation's blend-from.
@@ -302,28 +302,45 @@ fn servo_rotation(spec: &ServoSpec, rest: &ServoRest, angle: f32) -> Quat {
     servo_pose(spec.role, rest.0, angle)
 }
 
-/// Replicas carry the remote integrator; authority-only roots carry TankServos. A registered
-/// slot must resolve in its selected source, even when both snapshots coexist during receipt.
+/// A tank root's one servo integrator: `RemoteServos` on a client replica, `TankServos` on the
+/// authority (the server and single-player). Spawn builds exactly one on every tank root, empty
+/// for a sheet with no servos; `TankServos` never replicates and a client attachment never builds
+/// it, so a root carrying both, or neither, is a broken spawn.
+pub(crate) fn selected<S>(remote: Option<S>, authority: Option<S>) -> S {
+    match (remote, authority) {
+        (Some(states), None) | (None, Some(states)) => states,
+        (Some(_), Some(_)) => panic!(
+            "a servo root carries one integrator: RemoteServos on a replica, TankServos on the authority"
+        ),
+        (None, None) => {
+            panic!("a registered servo's root carries its authoritative or remote mechanism state")
+        }
+    }
+}
+
+/// `slot`'s state in its root's one integrator.
+fn slot_state(states: &[ServoState], slot: usize) -> &ServoState {
+    states
+        .get(slot)
+        .expect("every registered servo slot belongs to its selected mechanism state")
+}
+
+/// `slot`'s state in `root`'s one integrator, through the integrator queries.
 fn registered_state<'a>(
     root: Entity,
     slot: usize,
     authority: &'a Query<&TankServos>,
     remote: &'a Query<&RemoteServos>,
 ) -> &'a ServoState {
-    let states = if let Ok(remote) = remote.get(root) {
-        &remote.0
-    } else {
-        &authority
-            .get(root)
-            .expect("a registered servo's root carries its authoritative or remote mechanism state")
-            .states
-    };
-    states
-        .get(slot)
-        .expect("every registered servo slot belongs to its selected mechanism state")
+    let states = selected(
+        remote.get(root).ok().map(|remote| &remote.0),
+        authority.get(root).ok().map(|authority| &authority.states),
+    );
+    slot_state(states, slot)
 }
 
 /// Restore sim-node transforms from rollback state before any fixed-step gameplay reader runs.
+/// Each node writes only its own transform, so nodes restore on the compute pool.
 pub(crate) fn restore_servo_truth(
     mut q: Query<(
         &mut Transform,
@@ -335,19 +352,23 @@ pub(crate) fn restore_servo_truth(
     servos: Query<&TankServos>,
     remote_servos: Query<&RemoteServos>,
 ) {
-    for (mut transform, spec, rest, slot, root) in &mut q {
-        // Replicas carry `RemoteServos` permanently and it takes precedence; the `TankServos` arm
-        // serves the server and single-player, where no `RemoteServos` exists.
-        let state = registered_state(root.0, slot.0, &servos, &remote_servos);
-        let rotation = servo_rotation(spec, rest, state.current);
-        if transform.rotation != rotation {
-            transform.rotation = rotation;
-        }
-    }
+    q.par_iter_mut()
+        .for_each(|(mut transform, spec, rest, slot, root)| {
+            let state = registered_state(root.0, slot.0, &servos, &remote_servos);
+            let rotation = servo_rotation(spec, rest, state.current);
+            if transform.rotation != rotation {
+                transform.rotation = rotation;
+            }
+        });
 }
 
+/// Each tank integrates its own slots from its own crew, modules and crank and this update's
+/// commands, and writes only its own integrator, so tanks evaluate on the compute pool (Bevy
+/// 0.19.1's `QueryParIter`); a tank's slots step in slot order.
 pub(crate) fn drive_servos(
-    mut q: Query<(
+    time: Res<Time>,
+    mut nodes: Query<(
+        Entity,
         &mut Transform,
         &ServoSpec,
         &ServoRest,
@@ -355,83 +376,110 @@ pub(crate) fn drive_servos(
         &ServoIndex,
         &TankRoot,
     )>,
-    mut servos: Query<&mut TankServos>,
-    mut remote_servos: Query<&mut RemoteServos>,
-    tanks: Query<(&TankVolumes, Has<Controlled>)>,
+    mut tanks: Query<
+        (
+            Entity,
+            Option<&mut TankServos>,
+            Option<&mut RemoteServos>,
+            Option<&TankVolumes>,
+            Has<Controlled>,
+            Option<(&ServoMechanism, &EngineRpm)>,
+        ),
+        Or<(With<TankServos>, With<RemoteServos>)>,
+    >,
     facets: Query<VolumeFacets>,
-    mechanisms: Query<(&ServoMechanism, &EngineRpm)>,
-    time: Res<Time>,
+    // This update's servo nodes as (root, slot, node), sorted; kept for its capacity.
+    mut owned: Local<Vec<(Entity, usize, Entity)>>,
 ) {
     let dt = time.delta_secs();
-    for (mut transform, spec, rest, command, slot, root) in &mut q {
-        // Absence of RemoteServos selects the authority integrator; a missing selected state
-        // or slot is a broken spawn bundle, never a reason to freeze a mechanism silently.
-        let mut remote = remote_servos.get_mut(root.0).ok();
-        let is_remote = remote.is_some();
-        let mut authoritative = if remote.is_none() {
-            Some(
-                servos
-                    .get_mut(root.0)
-                    .expect("an authority servo's root carries its mechanism state"),
-            )
-        } else {
-            None
-        };
-        let state = if let Some(remote) = remote.as_deref_mut() {
-            remote
-                .0
-                .get_mut(slot.0)
-                .expect("every registered servo slot belongs to its selected mechanism state")
-        } else {
-            authoritative
-                .as_deref_mut()
-                .expect("the authority integrator was selected")
-                .states
-                .get_mut(slot.0)
-                .expect("every registered servo slot belongs to its selected mechanism state")
-        };
-        // Preserve the prior fixed-step value for view interpolation.
-        state.previous = state.current;
-
-        let (volumes, controlled) = tanks
-            .get(root.0)
-            .expect("an admitted tank with a servo carries its volume relationship target");
-        if is_remote && !controlled {
-            // A published angle is resolved truth, not an aim command with momentum to simulate.
-            state.current = command.target;
-            state.velocity = 0.0;
-        } else {
+    owned.clear();
+    owned.extend(
+        nodes
+            .iter()
+            .map(|(node, .., slot, root)| (root.0, slot.0, node)),
+    );
+    owned.sort_unstable();
+    tanks
+        .par_iter_mut()
+        .for_each(|(root, authority, remote, volumes, controlled, drive)| {
+            let servos = &owned[owned.partition_point(|&(owner, ..)| owner < root)
+                ..owned.partition_point(|&(owner, ..)| owner <= root)];
+            if servos.is_empty() {
+                // No slot to step: every servo of this root left with a detached assembly, or its
+                // sheet declares none.
+                return;
+            }
+            // A replica this client does not drive presents published angles.
+            let published = remote.is_some() && !controlled;
+            let states = selected(
+                remote.map(|remote| &mut remote.into_inner().0),
+                authority.map(|authority| &mut authority.into_inner().states),
+            );
             // The game's damage model: requirements scale operator work; an engine in action
-            // supplies whole power (`module_quality`).
-            let facts = part_facts(volumes, &facets);
-            let slew = evaluate(&spec.requires, &facts.quality);
-            let (power, inertia) = match spec.drive {
-                ServoDrive::Hand { .. } => (0.0, 0.0),
-                ServoDrive::Powered { .. } => {
-                    let (mechanism, rpm) = mechanisms.get(root.0)
-                    .expect("a powered servo's root has spawn-built construction and replicated crank speed");
-                    // Missing Engine denotes an absent source in the game's damage model, hence no power.
-                    let quality = live_quality(&facts.quality, Part::Engine);
-                    // Accessory capacity saturates at the governed budget; fuel cut does not stop
-                    // a turning crank. The missing pump map is stated in design section 7c.
-                    let crank = rpm.rpm().min(mechanism.engine.engine.governed_rpm);
-                    let power = mechanism.engine.torque_at(crank) * crank * RPM_TO_RAD * quality;
-                    let inertia = mechanism.inertia[match spec.role {
-                        ServoRole::Yaw => 0,
-                        ServoRole::Pitch => 1,
-                    }];
-                    (power, inertia)
-                }
-            };
-            advance_servo(state, spec, command.target, power, inertia, slew, dt);
-        }
-
-        // The sim node always carries fixed-step truth; smoothing writes the view tree only.
-        let rotation = servo_rotation(spec, rest, state.current);
-        if transform.rotation != rotation {
-            transform.rotation = rotation;
-        }
-    }
+            // supplies whole power (`module_quality`). One reading serves every slot.
+            let facts = (!published).then(|| {
+                part_facts(
+                    volumes.expect(
+                        "an admitted tank with a servo carries its volume relationship target",
+                    ),
+                    &facets,
+                )
+            });
+            for &(_, slot, node) in servos {
+                let (_, _, spec, _, command, ..) = nodes
+                    .get(node)
+                    .expect("gathered from this query in this update");
+                let state = states
+                    .get_mut(slot)
+                    .expect("every registered servo slot belongs to its selected mechanism state");
+                state.previous = state.current;
+                let Some(facts) = &facts else {
+                    // A published angle is resolved truth, not an aim command with momentum.
+                    state.current = command.target;
+                    state.velocity = 0.0;
+                    continue;
+                };
+                let slew = evaluate(&spec.requires, &facts.quality);
+                let (power, inertia) = match spec.drive {
+                    ServoDrive::Hand { .. } => (0.0, 0.0),
+                    ServoDrive::Powered { .. } => {
+                        let (mechanism, rpm) = drive.expect(
+                            "a powered servo's root has spawn-built construction and replicated \
+                             crank speed",
+                        );
+                        let quality = live_quality(&facts.quality, Part::Engine);
+                        // Accessory capacity saturates at the governed budget; fuel cut does not
+                        // stop a turning crank. The missing pump map is stated in design
+                        // section 7c.
+                        let crank = rpm.rpm().min(mechanism.engine.engine.governed_rpm);
+                        let power =
+                            mechanism.engine.torque_at(crank) * crank * RPM_TO_RAD * quality;
+                        let inertia = mechanism.inertia[match spec.role {
+                            ServoRole::Yaw => 0,
+                            ServoRole::Pitch => 1,
+                        }];
+                        (power, inertia)
+                    }
+                };
+                advance_servo(state, spec, command.target, power, inertia, slew, dt);
+            }
+        });
+    // The sim node always carries fixed-step truth; smoothing writes the view tree only.
+    nodes
+        .par_iter_mut()
+        .for_each(|(_, mut transform, spec, rest, _, slot, root)| {
+            let (_, authority, remote, ..) = tanks.get(root.0).expect(
+                "a registered servo's root carries its authoritative or remote mechanism state",
+            );
+            let states = selected(
+                remote.map(|remote| &remote.0),
+                authority.map(|authority| &authority.states),
+            );
+            let rotation = servo_rotation(spec, rest, slot_state(states, slot.0).current);
+            if transform.rotation != rotation {
+                transform.rotation = rotation;
+            }
+        });
 }
 
 /// Implicit acceleration solves I Δω/Δt = min(Tstall, P/ω) - Tbearing.
@@ -619,7 +667,23 @@ mod tests {
         }
     }
 
+    /// A world `drive_servos` runs in: the clock it reads and the compute pool its per-tank
+    /// evaluation batches on.
+    fn sim_world() -> World {
+        bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world
+    }
+
     fn powered_world(mass: f32, engine_share: f32) -> (World, Entity, Entity, Entity) {
+        let mut world = sim_world();
+        let (root, servo, engine) = spawn_powered(&mut world, mass, engine_share);
+        (world, root, servo, engine)
+    }
+
+    /// One tank with one powered mount: (root, servo, engine).
+    fn spawn_powered(world: &mut World, mass: f32, engine_share: f32) -> (Entity, Entity, Entity) {
         use crate::ballistics::ComponentHealth;
         use crate::damage::{FunctionRole, VolumeOf};
         // Fixture box and drive facts; no shipped vehicle output determines the assertions.
@@ -639,8 +703,6 @@ mod tests {
         mechanism.engine.engine.torque_nm = vec![(600.0, 1000.0), (2400.0, 1000.0)];
         mechanism.engine.engine.governed_rpm = 2400.0;
         let rpm = EngineRpm(600);
-        let mut world = World::new();
-        world.insert_resource(Time::<()>::default());
         let root = world.spawn((TankServos::for_count(1), mechanism, rpm)).id();
         let mut health = ComponentHealth::full(10);
         health.set_held((health.capacity() as f32 * engine_share) as u32);
@@ -662,7 +724,41 @@ mod tests {
                 TankRoot(root),
             ))
             .id();
-        (world, root, servo, engine)
+        (root, servo, engine)
+    }
+
+    /// Tanks evaluate independently on the compute pool: each integrates only its own slots from
+    /// its own crew, modules and crank, so a tank steps beside another exactly as it steps alone.
+    /// The tanks differ in a per-tank fact, so one stepped with the other's facts fails.
+    #[test]
+    fn each_tank_integrates_only_its_own_slots() {
+        // Fixture: both mounts move at 0.5 rad/s; the second tank's engine is out of action.
+        let engine_shares = [1.0, 0.0];
+        let prepare = |world: &mut World, engine_share: f32| {
+            let (root, servo, _) = spawn_powered(world, 15.0, engine_share);
+            world.get_mut::<TankServos>(root).unwrap().states[0] =
+                ServoState::test_new(0.0, 0.0, 0.5);
+            world.get_mut::<ServoCommand>(servo).unwrap().target = 2.9;
+            root
+        };
+        let step = |world: &mut World| {
+            world
+                .resource_mut::<Time<()>>()
+                .advance_by(Duration::from_secs_f32(1.0 / 64.0));
+            world.run_system_once(drive_servos).unwrap();
+        };
+        let alone = engine_shares.map(|share| {
+            let mut world = sim_world();
+            let root = prepare(&mut world, share);
+            step(&mut world);
+            world.get::<TankServos>(root).unwrap().states[0]
+        });
+        let mut world = sim_world();
+        let roots = engine_shares.map(|share| prepare(&mut world, share));
+        step(&mut world);
+        let together = roots.map(|root| world.get::<TankServos>(root).unwrap().states[0]);
+        assert_ne!(alone[0], alone[1], "the fixture tanks step differently");
+        assert_eq!(together, alone);
     }
 
     fn tick_powered(world: &mut World, root: Entity, servo: Entity) -> ServoState {
@@ -758,6 +854,7 @@ mod tests {
         let (mut world, root, servo, _) = powered_world(15.0, 1.0);
         world
             .entity_mut(root)
+            .remove::<TankServos>()
             .insert(RemoteServos(vec![ServoState::test_new(0.0, 0.0, 0.55)]));
         world.get_mut::<ServoSpec>(servo).unwrap().requires =
             vec![crate::damage::Group::Single(Part::Gunner)];
@@ -774,12 +871,13 @@ mod tests {
     }
 
     /// The controlled replica's ahead-running input is still a command. Its exception to
-    /// published-angle presentation must retain the drive law and leave authority state alone.
+    /// published-angle presentation must retain the drive law.
     #[test]
     fn the_controlled_replica_integrates_its_own_aim() {
         let (mut world, root, servo, _) = powered_world(15.0, 1.0);
         world
             .entity_mut(root)
+            .remove::<TankServos>()
             .insert((super::super::model::Controlled, RemoteServos::for_count(1)));
         world.get_mut::<ServoCommand>(servo).unwrap().target = 0.5;
         world
@@ -789,10 +887,6 @@ mod tests {
         let state = world.get::<RemoteServos>(root).unwrap().0[0];
         assert!(state.current > 0.0 && state.current < 0.5);
         assert!(state.velocity > 0.0);
-        assert_eq!(
-            world.get::<TankServos>(root).unwrap().states[0],
-            ServoState::default()
-        );
     }
 
     /// At unchanged supply, aim consumers rely on monotone arrival within float angle
@@ -944,11 +1038,10 @@ mod tests {
     /// at full slew. The declared mechanical travel is the servo controller's invariant.
     #[test]
     fn a_limited_servo_never_leaves_its_window() {
-        let mut world = World::new();
+        let mut world = sim_world();
         let spec = ServoSpec::test_limited(ServoRole::Yaw, 90.0, -20.0, 35.0);
         let (lo, hi) = spec.travel_limits().unwrap();
         let dt = 1.0 / 64.0;
-        world.insert_resource(Time::<()>::default());
         let root = world
             .spawn(TankServos {
                 states: vec![ServoState::default()],
@@ -1047,19 +1140,11 @@ mod tests {
         }
     }
 
-    /// The selected remote source must own its slot; an authority snapshot cannot stand in for
-    /// a malformed remote vector. Both fixed-step restoration and integration rely on this.
-    fn missing_remote_slot() -> World {
-        let mut world = World::new();
-        world.insert_resource(Time::<()>::default());
-        let root = world
-            .spawn((
-                TankServos {
-                    states: vec![ServoState::default()],
-                },
-                RemoteServos(vec![]),
-            ))
-            .id();
+    /// One slot-0 servo on a root carrying `integrators`. Fixed-step restoration and integration
+    /// both rely on the root's one integrator owning every registered slot.
+    fn servo_on(integrators: impl Bundle) -> World {
+        let mut world = sim_world();
+        let root = world.spawn(integrators).id();
         world.spawn((
             Transform::default(),
             ServoSpec::test_continuous(ServoRole::Yaw, 1.0),
@@ -1069,6 +1154,16 @@ mod tests {
             TankRoot(root),
         ));
         world
+    }
+
+    /// A replica whose remote vector lacks the registered slot.
+    fn missing_remote_slot() -> World {
+        servo_on(RemoteServos(vec![]))
+    }
+
+    /// A root carrying both integrators, which no spawn path builds.
+    fn two_integrators() -> World {
+        servo_on((TankServos::for_count(1), RemoteServos::for_count(1)))
     }
 
     #[test]
@@ -1087,6 +1182,20 @@ mod tests {
     )]
     fn integration_refuses_a_slot_missing_from_the_selected_source() {
         missing_remote_slot().run_system_once(drive_servos).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "a servo root carries one integrator")]
+    fn restoration_refuses_a_root_with_two_integrators() {
+        two_integrators()
+            .run_system_once(restore_servo_truth)
+            .unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "a servo root carries one integrator")]
+    fn integration_refuses_a_root_with_two_integrators() {
+        two_integrators().run_system_once(drive_servos).unwrap();
     }
 
     /// Presentation relies on the source/view lifetime contract; an orphan must not freeze at its
@@ -1122,17 +1231,12 @@ mod tests {
         );
     }
 
+    /// A replica's view blends its remote integrator's last two fixed-step angles.
     #[test]
-    fn remote_servo_state_is_the_view_interpolation_source_when_both_integrators_exist() {
+    fn a_replica_view_interpolates_its_remote_state() {
         let mut world = World::new();
-        let authority = TankServos {
-            states: vec![ServoState::test_new(-1.0, -1.0, -1.0)],
-        };
         let root = world
-            .spawn((
-                authority.clone(),
-                RemoteServos(vec![ServoState::test_new(1.0, 0.0, 0.5)]),
-            ))
+            .spawn(RemoteServos(vec![ServoState::test_new(1.0, 0.0, 0.5)]))
             .id();
         let servo = world
             .spawn((
@@ -1156,12 +1260,7 @@ mod tests {
         assert_eq!(
             rendered.to_array().map(f32::to_bits),
             expected.to_array().map(f32::to_bits),
-            "the established remote state must still provide the interpolated pose",
-        );
-        assert_eq!(
-            world.get::<TankServos>(root).unwrap(),
-            &authority,
-            "remote presentation must not alter the arriving authority snapshot",
+            "the remote state provides the interpolated pose",
         );
     }
 }
