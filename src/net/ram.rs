@@ -652,18 +652,20 @@ mod tests {
         let mut recipe = Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap();
         recipe.instance = "brick_0001".into(); // Fixture construction in the manifest below.
         app.insert_resource(crate::map::tests::construction_fixture_manifest())
-            .insert_resource(crate::bake::TankBlueprint {
-                file: "fixture".into(),
+            .insert_resource(crate::bake::TankBlueprint::new(
+                "fixture".into(),
                 // Fixture: route admission reads spec/terrain only; no rig is spawned.
-                geometry: std::sync::Arc::new(crate::bake::TankGeometry {
-                    nodes: Vec::new(),
-                    by_name: default(),
-                    roadwheels: Vec::new(),
-                    collision_proxies: Vec::new(),
-                    ballistic_volumes: Vec::new(),
-                }),
-                spec: std::sync::Arc::new(fixture_spec()),
-            })
+                crate::bake::CertifiedAsset::fixture(
+                    fixture_spec(),
+                    crate::bake::TankGeometry {
+                        nodes: Vec::new(),
+                        by_name: default(),
+                        roadwheels: Vec::new(),
+                        collision_proxies: Vec::new(),
+                        ballistic_volumes: Vec::new(),
+                    },
+                ),
+            ))
             .init_resource::<ContactTransfers>()
             .init_resource::<SweepAccount>();
         install_recipe(&mut app, recipe);

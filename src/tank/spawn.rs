@@ -33,6 +33,7 @@ use crate::track::bump_stop::{
 };
 use crate::track::sense::DriverSense;
 use crate::track::sim::{DriveSignal, EngineRpm, TankTransmission, TrackGripElements};
+use crate::track::transmission::TransmissionParams;
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
 ///
@@ -144,6 +145,7 @@ impl TankSimSource<'_> {
         TankContent {
             geometry: &self.blueprint.geometry,
             spec: &self.blueprint.spec,
+            transmission: &self.blueprint.transmission,
             track_colliders: &self.track_colliders,
         }
     }
@@ -154,6 +156,7 @@ impl TankSimSource<'_> {
 pub(crate) struct TankContent<'a> {
     geometry: &'a TankGeometry,
     spec: &'a TankSpec,
+    transmission: &'a TransmissionParams,
     track_colliders: &'a TrackColliders,
 }
 
@@ -164,6 +167,11 @@ impl<'a> TankContent<'a> {
 
     pub(crate) fn spec(self) -> &'a TankSpec {
         self.spec
+    }
+
+    /// The nominal transmission the sheet's admission parsed ([`crate::bake::TankBlueprint`]).
+    pub(super) fn transmission(self) -> &'a TransmissionParams {
+        self.transmission
     }
 
     /// DERIVED conservative body radius in metres, from declared collision proxies and prepared
@@ -225,19 +233,15 @@ pub(crate) fn load_tank_sim_assets(mut commands: Commands, asset_server: Res<Ass
     });
 }
 
-fn tank_transmission(spec: &TankSpec) -> (TankTransmission, DriverSense) {
+fn tank_transmission(content: TankContent) -> (TankTransmission, DriverSense) {
     // Only `engine.idle_rpm` reaches the replicated `TankTransmission` state (the crank seed); the
     // geometry-coupled params (gears, kappa, sprocket radius) live in `TrackGear.trans`, built from
     // the measured `RigGeom` in `track::sim::init_track_gear`. So nominal geometry here is
-    // deterministic — it never enters replicated state, and construction was already validated at
-    // asset load.
-    let params = spec
-        .track
-        .nominal_transmission_params(&spec.roadwheels)
-        .expect("TankSpec transmission was validated before tank construction");
+    // deterministic — it never enters replicated state.
+    let params = content.transmission();
     // The Driver's ledger averages one shift cut, a gearbox datum the nominal params carry.
     (
-        TankTransmission::from_spec(&params),
+        TankTransmission::from_spec(params),
         DriverSense::for_cut(params.shift_ticks),
     )
 }
@@ -272,7 +276,7 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     presentation: TankPresentation,
     root_bundle: B,
 ) -> Entity {
-    let (transmission, sense) = tank_transmission(content.spec());
+    let (transmission, sense) = tank_transmission(content);
     let resolution = crate::track::forces::CONTACT_RESOLUTION;
     // The element-grip slabs ride the SAME insertion that adds `Tank`: pre-sized synchronously
     // at force resolution (`track::sim::TrackGripElements` owns the fixed-size invariant),
@@ -296,7 +300,7 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         // Complete servo integrator inventory is data-built in the same spawn flush. The glb is a
         // view and never initializes replicated state.
         tank_servos(content.spec()),
-        ServoMechanism::from_spec(content.spec()),
+        ServoMechanism::new(content.spec(), content.transmission()),
         root_bundle,
     ));
     if let Some(scene) = presentation.scene_root() {
@@ -321,7 +325,7 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
     content: TankContent,
     root_bundle: B,
 ) -> Entity {
-    let (transmission, sense) = tank_transmission(content.spec());
+    let (transmission, sense) = tank_transmission(content);
     let resolution = crate::track::forces::CONTACT_RESOLUTION;
     let root = commands
         .spawn((
@@ -334,7 +338,7 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
             weapon_gate(content.spec()),
             weapon_loads(content.spec()),
             tank_servos(content.spec()),
-            ServoMechanism::from_spec(content.spec()),
+            ServoMechanism::new(content.spec(), content.transmission()),
             root_bundle,
         ))
         .id();
@@ -360,7 +364,7 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     root_commands
         .insert((
             presentation.root_bundle(),
-            ServoMechanism::from_spec(content.spec()),
+            ServoMechanism::new(content.spec(), content.transmission()),
             // Replicated authority state (EngineRpm, servo snapshots; the owner's TankTransmission,
             // DriveSignal, WeaponGate, WeaponLoads) arrived in the replication init snapshot. Do not
             // overwrite it with fresh spec-derived values.
@@ -1224,7 +1228,10 @@ mod proxy_tests {
             &crate::substances::SubstanceRegistry::shipped(),
         )
         .unwrap();
-        let blueprint = TankBlueprint::new(TANK_SPEC_PATH.into(), geometry, spec);
+        let blueprint = TankBlueprint::new(
+            TANK_SPEC_PATH.into(),
+            crate::bake::CertifiedAsset::fixture(spec, geometry),
+        );
         let shapes = TrackColliders::of_blueprint(&blueprint, &glb);
         (blueprint, shapes)
     }
@@ -1236,6 +1243,7 @@ mod proxy_tests {
         let content = TankContent {
             geometry: &blueprint.geometry,
             spec: &blueprint.spec,
+            transmission: &blueprint.transmission,
             track_colliders: &shapes,
         };
         let mut commands = world.commands();
@@ -1248,7 +1256,7 @@ mod proxy_tests {
             .spawn((
                 Position::default(),
                 Rotation::default(),
-                EngineRpm::of(&tank_transmission(content.spec()).0),
+                EngineRpm::of(&tank_transmission(content).0),
             ))
             .id();
         attach_replicated_tank_body(

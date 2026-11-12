@@ -1003,8 +1003,7 @@ mod spawn_contract_tests {
         let mut app = App::new();
         app.insert_resource(TankBlueprint::new(
             crate::tank::TANK_SPEC_PATH.to_owned(),
-            geometry,
-            spec,
+            crate::bake::CertifiedAsset::fixture(spec, geometry),
         ))
         .insert_resource(track_colliders)
         .init_resource::<SourceProbe>()

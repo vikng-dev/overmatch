@@ -859,8 +859,10 @@ mod tests {
             &crate::substances::SubstanceRegistry::shipped(),
         )
         .unwrap();
-        let blueprint =
-            crate::bake::TankBlueprint::new(crate::tank::TANK_SPEC_PATH.into(), geometry, spec);
+        let blueprint = crate::bake::TankBlueprint::new(
+            crate::tank::TANK_SPEC_PATH.into(),
+            crate::bake::CertifiedAsset::fixture(spec, geometry),
+        );
         let shapes = TrackColliders::of_blueprint(&blueprint, &glb);
         let mut world = World::new();
         let body = world.spawn_empty().id();

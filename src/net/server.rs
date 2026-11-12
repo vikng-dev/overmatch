@@ -1675,11 +1675,8 @@ mod tests {
             &crate::substances::SubstanceRegistry::shipped(),
         )
         .unwrap_or_else(|_| panic!("the shipped sim artifact certifies"));
-        let blueprint = crate::bake::TankBlueprint::new(
-            crate::tank::TANK_SPEC_PATH.to_owned(),
-            asset.geometry,
-            asset.spec,
-        );
+        let blueprint =
+            crate::bake::TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), asset);
         let track_colliders = crate::track::bump_stop::TrackColliders::of_blueprint(
             &blueprint,
             &root.join(crate::tank::TANK_SIM_GLB_PATH),
@@ -1800,11 +1797,8 @@ mod tests {
             &crate::substances::SubstanceRegistry::shipped(),
         )
         .unwrap_or_else(|_| panic!("the shipped sim artifact certifies"));
-        let blueprint = crate::bake::TankBlueprint::new(
-            crate::tank::TANK_SPEC_PATH.to_owned(),
-            asset.geometry,
-            asset.spec,
-        );
+        let blueprint =
+            crate::bake::TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), asset);
         let colliders = crate::track::bump_stop::TrackColliders::of_blueprint(
             &blueprint,
             &root.join(crate::tank::TANK_SIM_GLB_PATH),

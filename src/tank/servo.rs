@@ -77,12 +77,10 @@ pub(crate) struct ServoMechanism {
 }
 
 impl ServoMechanism {
-    pub(super) fn from_spec(spec: &TankSpec) -> Self {
+    /// `engine` is the nominal transmission `spec`'s admission parsed.
+    pub(super) fn new(spec: &TankSpec, engine: &TransmissionParams) -> Self {
         Self {
-            engine: spec
-                .track
-                .nominal_transmission_params(&spec.roadwheels)
-                .expect("TankSpec admits the transmission before servo construction"),
+            engine: engine.clone(),
             inertia: [
                 axis_inertia(&spec.turret, ServoRole::Yaw),
                 axis_inertia(&spec.turret, ServoRole::Pitch),
@@ -639,7 +637,11 @@ mod tests {
             mass: Sourced(mass),
             inertia_extents: Sourced((2.0, 1.0, 2.0)),
         };
-        let mut mechanism = ServoMechanism::from_spec(crate::bake::selected_spec());
+        let template = crate::bake::selected_spec();
+        let mut mechanism = ServoMechanism::new(
+            template,
+            &template.validate().expect("the selected sheet is admitted"),
+        );
         mechanism.inertia = [
             axis_inertia(&turret, ServoRole::Yaw),
             axis_inertia(&turret, ServoRole::Pitch),

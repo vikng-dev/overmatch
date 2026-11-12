@@ -15,6 +15,7 @@ use bevy::world_serialization::WorldInstanceReady;
 use crate::spec::{NodeReference, NodeRole, TankSpec, TankSpecHandle};
 use crate::substances::{Matter, SubstanceRegistry};
 use crate::tank::{SimParts, TrackSide, rig_world_pose};
+use crate::track::transmission::TransmissionParams;
 
 mod embedding;
 #[cfg(test)]
@@ -354,11 +355,18 @@ pub(crate) struct TankBlueprint {
     pub file: String,
     pub geometry: Arc<TankGeometry>,
     pub spec: Arc<TankSpec>,
+    /// The nominal transmission the sheet's admission parsed ([`TankSpec::validate`]).
+    pub transmission: Arc<TransmissionParams>,
 }
 
 impl TankBlueprint {
     /// A tank kind's synchronous spawn data, shared by every instance.
-    pub(crate) fn new(file: String, geometry: TankGeometry, spec: TankSpec) -> Self {
+    pub(crate) fn new(file: String, asset: CertifiedAsset) -> Self {
+        let CertifiedAsset {
+            spec,
+            geometry,
+            transmission,
+        } = asset;
         // DERIVED from the mark wire's unsigned part index and signed millimetre coordinates.
         assert!(
             geometry.nodes.len() <= usize::from(u16::MAX) + 1,
@@ -386,6 +394,7 @@ impl TankBlueprint {
             file,
             geometry: Arc::new(geometry),
             spec: Arc::new(spec),
+            transmission: Arc::new(transmission),
         }
     }
 }
@@ -888,11 +897,7 @@ fn extract_at_startup(mut commands: Commands) {
             root.display(),
         )
     });
-    let blueprint = TankBlueprint::new(
-        crate::tank::TANK_SPEC_PATH.to_owned(),
-        asset.geometry,
-        asset.spec,
-    );
+    let blueprint = TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), asset);
     // The rigid track colliders ride the blueprint's flush: every body built from it gets them at
     // spawn. They are cut from the running gear measured off this same sim artifact.
     commands.insert_resource(crate::track::bump_stop::TrackColliders::of_blueprint(
@@ -901,10 +906,29 @@ fn extract_at_startup(mut commands: Commands) {
     commands.insert_resource(blueprint);
 }
 
-/// A GLB/spec pair that passed the whole L2 contract: the spec sheet and the certified geometry.
+/// A GLB/spec pair that passed the whole L2 contract: the spec sheet, the certified geometry and
+/// the nominal transmission the sheet's admission parsed.
 pub(crate) struct CertifiedAsset {
     pub spec: TankSpec,
     pub geometry: TankGeometry,
+    pub transmission: TransmissionParams,
+}
+
+#[cfg(test)]
+impl CertifiedAsset {
+    /// Fixture: `spec` with the nominal transmission its admission parses, beside geometry the
+    /// test built.
+    pub(crate) fn fixture(spec: TankSpec, geometry: TankGeometry) -> Self {
+        let transmission = spec
+            .track
+            .nominal_transmission_params(&spec.roadwheels)
+            .expect("a fixture sheet's transmission is admitted");
+        Self {
+            spec,
+            geometry,
+            transmission,
+        }
+    }
 }
 
 /// The single `L2.*` contract: certify a spec/model pair or return deterministic, ordered refusals.
@@ -925,8 +949,13 @@ pub(crate) fn certify_asset(
              position and field",
         )]
     })?;
-    let geometry = extract_tank_geometry(glb, &spec, registry)?;
-    Ok(CertifiedAsset { spec, geometry })
+    let transmission = admit_sheet(&spec, glb)?;
+    let geometry = capture_tank_geometry(glb, &spec, registry)?;
+    Ok(CertifiedAsset {
+        spec,
+        geometry,
+        transmission,
+    })
 }
 
 /// The substance registry one verification runs against: the file the door named, or — for the
@@ -1068,6 +1097,12 @@ pub(crate) fn extract_tank_geometry(
 ) -> Result<TankGeometry, Vec<Finding>> {
     // Validate before capture: duplicate or overlapping declarations (e.g. collider + armour)
     // would make capture unsound, regardless of caller.
+    admit_sheet(spec, path)?;
+    capture_tank_geometry(path, spec, registry)
+}
+
+/// The sheet's admission ([`TankSpec::validate`]) as an `L2.SPEC` refusal.
+fn admit_sheet(spec: &TankSpec, path: &Path) -> Result<TransmissionParams, Vec<Finding>> {
     spec.validate().map_err(|err| {
         vec![Finding::new(
             &L2_SPEC,
@@ -1076,7 +1111,15 @@ pub(crate) fn extract_tank_geometry(
             "author a value inside the domain the rejection names — a spec that parses but cannot \
              yield a working vehicle never reaches the sim",
         )]
-    })?;
+    })
+}
+
+/// Capture an admitted sheet's geometry from the glb.
+fn capture_tank_geometry(
+    path: &Path,
+    spec: &TankSpec,
+    registry: &SubstanceRegistry,
+) -> Result<TankGeometry, Vec<Finding>> {
     let refused = |evidence: String, repair: &str| {
         vec![Finding::new(
             &L2_DOCUMENT,

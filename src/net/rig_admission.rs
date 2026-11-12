@@ -129,14 +129,16 @@ mod tests {
             .collect();
         TankBlueprint::new(
             "fixture.tank.ron".into(),
-            TankGeometry {
-                nodes,
-                by_name,
-                roadwheels: vec![],
-                collision_proxies: vec![],
-                ballistic_volumes: vec![],
-            },
-            spec,
+            crate::bake::CertifiedAsset::fixture(
+                spec,
+                TankGeometry {
+                    nodes,
+                    by_name,
+                    roadwheels: vec![],
+                    collision_proxies: vec![],
+                    ballistic_volumes: vec![],
+                },
+            ),
         )
     }
 }

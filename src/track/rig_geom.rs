@@ -1039,7 +1039,10 @@ pub(crate) fn tiger_rig() -> RigGeom {
     )
     .expect("the Tiger glb extracts");
     let (teeth, link_count) = (spec.track.sprocket.teeth, spec.track.link_count);
-    let blueprint = TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), geometry, spec);
+    let blueprint = TankBlueprint::new(
+        crate::tank::TANK_SPEC_PATH.to_owned(),
+        crate::bake::CertifiedAsset::fixture(spec, geometry),
+    );
     RigGeom::build(
         &blueprint,
         &glb,
@@ -1090,7 +1093,10 @@ mod tests {
         )
         .expect("the Tiger glb extracts");
         let (teeth, link_count) = (spec.track.sprocket.teeth, spec.track.link_count);
-        let blueprint = TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), geometry, spec);
+        let blueprint = TankBlueprint::new(
+            crate::tank::TANK_SPEC_PATH.to_owned(),
+            crate::bake::CertifiedAsset::fixture(spec, geometry),
+        );
         let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             RigGeom::build(
                 &blueprint,
@@ -1143,8 +1149,10 @@ mod tests {
                     geometry.nodes[index].root_position.z = 0.0;
                 }
             }
-            let blueprint =
-                TankBlueprint::new("fixture/zero-footprint.tank.ron".into(), geometry, spec);
+            let blueprint = TankBlueprint::new(
+                "fixture/zero-footprint.tank.ron".into(),
+                crate::bake::CertifiedAsset::fixture(spec, geometry),
+            );
             let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 super::super::bump_stop::TrackColliders::of_blueprint(&blueprint, &glb)
             }))
@@ -1223,7 +1231,10 @@ mod tests {
         let parent = geometry.nodes[axle]
             .parent
             .expect("a station belongs to its authored hierarchy");
-        let mut blueprint = TankBlueprint::new("fixture.tank.ron".into(), geometry, spec);
+        let mut blueprint = TankBlueprint::new(
+            "fixture.tank.ron".into(),
+            crate::bake::CertifiedAsset::fixture(spec, geometry),
+        );
         assert_eq!(
             axle_position(&blueprint, axle),
             blueprint.geometry.nodes[axle].root_position

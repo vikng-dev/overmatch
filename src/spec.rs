@@ -1782,7 +1782,10 @@ impl TankSpec {
     ///   short-circuits on `0`, so there is no divide/modulo-by-zero); never traces, by design.
     /// - `belt_swap_secs == 0.0` / `reload_secs == 0.0` — a degenerate instant reload, not bricked
     ///   (the belt refills / the gun readies immediately); left legal.
-    pub fn validate(&self) -> Result<(), BevyError> {
+    ///
+    /// An admitted sheet yields the nominal transmission it parsed
+    /// ([`TrackSpec::nominal_transmission_params`]), which spawn builds from.
+    pub fn validate(&self) -> Result<TransmissionParams, BevyError> {
         // DERIVED: the wire addresses weapon slots with a u8, including slot zero.
         if self.weapons.len() > u8::MAX as usize + 1 {
             return Err(
@@ -1932,8 +1935,7 @@ impl TankSpec {
         }
         // Structural rules need no geometry. Running-gear admission checks the physical
         // tables, side inertia equality and coupling divisor against the actual pitch radius.
-        t.nominal_transmission_params(&self.roadwheels)
-            .map(|_| ())?;
+        let transmission = t.nominal_transmission_params(&self.roadwheels)?;
         // Engine audio data: the firing rate divides by neither, but both are DIVISORS in the
         // playback law (`sfx`) — a 0-cylinder engine pops at 0 Hz and a 0 Hz recording makes the
         // anchor infinite.
@@ -2007,7 +2009,7 @@ impl TankSpec {
                 .into());
             }
         }
-        Ok(())
+        Ok(transmission)
     }
 }
 
@@ -2713,7 +2715,7 @@ TankSpec(
         weapon.trigger = Trigger::Secondary;
         edit(&mut weapon);
         spec.weapons.insert("Phantom".to_string(), weapon);
-        spec.validate().map_err(|err| err.to_string())
+        spec.validate().map(|_| ()).map_err(|err| err.to_string())
     }
 
     /// `rounds` as stowage, `count` of each, with a fixture provenance.
@@ -3621,7 +3623,7 @@ TankSpec(
                 reload: TickSpan::of(TickSpan::MAX / 4 * 3),
             };
             match spec.validate() {
-                Ok(()) => admitted.push(part),
+                Ok(_) => admitted.push(part),
                 Err(error) => assert!(
                     error.to_string().contains("deadline horizon"),
                     "{part:?}: {error}"

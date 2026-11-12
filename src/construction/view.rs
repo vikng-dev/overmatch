@@ -1077,13 +1077,13 @@ fn show_pieces(
             )
         });
         if table.is_some() {
-            let Ok(mut worn) = worn.get_mut(dressed.view) else {
-                continue;
-            };
-            let Some(surface) = surfaces.wear(table) else {
-                continue;
-            };
-            worn.0 = surface;
+            let mut worn = worn.get_mut(dressed.view).expect(
+                "dress_pieces spawns a piece's view wearing the shared construction material",
+            );
+            worn.0 = surfaces.wear(table).expect(
+                "a piece is dressed only under `Look`, which the scatter inserts beside the \
+                 material and buffer stores it was made in",
+            );
         }
         commands.entity(entity).insert(PieceHoled(hole_count));
     }
