@@ -298,7 +298,7 @@ fn run_up_to(bed: &mut Bed, gear: u8, mut each_tick: impl FnMut(&Bed)) -> usize 
 
 /// Mean tick-to-tick alternation of a series, in its units: a wave at half the tick rate with
 /// amplitude A reads A, a ramp reads zero. `None` below three samples.
-fn alternation(x: &[f32]) -> Option<f32> {
+pub(super) fn alternation(x: &[f32]) -> Option<f32> {
     (x.len() >= 3).then(|| {
         x.windows(3)
             .map(|w| (w[2] - 2.0 * w[1] + w[0]).abs())

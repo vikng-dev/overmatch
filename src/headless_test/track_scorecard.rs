@@ -21,6 +21,8 @@
 //!
 //! Fixture: every dimension and placement below is fixture data, chosen to pose its question.
 
+#[cfg(feature = "bitprobe")]
+mod belt_friction;
 // The sandbox's rubble yard builds line 8c's heap; the sandbox builds with `dev_ui`.
 #[cfg(feature = "dev_ui")]
 mod heap;
@@ -2287,16 +2289,8 @@ fn every_segment_on_loose_pieces_carries_the_running_gears_law_once() {
     assert!(shared > 0, "no segment straddled two pieces");
 }
 
-/// The drivetrain reads a loose piece's friction once. The belts' reaction is the only
-/// longitudinal force on a hull carried wholly by solver contacts, so its total over a pull
-/// equals the hull's momentum change: a reading lost or counted twice breaks the balance.
-/// A tick's reaction is the solver's friction over the step before it (`stop_contacts`), so the
-/// readings of ticks 1..=N close the steps of ticks 0..N: one step out of line moves the balance by
-/// that step's friction, as much as the grip limit times a tick, whichever gear the Driver holds.
-/// Fixture: one broad heavy slab under the whole tank, and a pull short enough to stay on it.
-#[test]
-fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
-    use crate::track::sim::TrackGripEffect;
+/// One broad heavy slab under the whole tank, the tank settled a second on it. Fixture.
+fn slab_bed() -> Bed {
     let mut bed = Bed::on_ground(Some(base_ground()), flat());
     let level = 0.4 + 0.002;
     bed.spawn_piece(Vec3::Y * (level / 2.0), Vec3::new(8.0, 0.4, 16.0));
@@ -2305,6 +2299,20 @@ fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
     for _ in 0..TICKS {
         bed.tick(0.0, 0.0);
     }
+    bed
+}
+
+/// The drivetrain reads a loose piece's friction once. The belts' reaction is the only
+/// longitudinal force on a hull carried wholly by solver contacts, so its total over a pull
+/// equals the hull's momentum change: a reading lost or counted twice breaks the balance.
+/// A tick's reaction is the solver's friction over the step before it (`stop_contacts`), so the
+/// readings of ticks 1..=N close the steps of ticks 0..N: one step out of line moves the balance by
+/// that step's friction, as much as the grip limit times a tick, whichever gear the Driver holds.
+/// Fixture: a pull short enough to stay on the slab.
+#[test]
+fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
+    use crate::track::sim::TrackGripEffect;
+    let mut bed = slab_bed();
     let start = bed.hull();
     let forward = start.forward();
     let (mut impulse, mut momentum) = (0.0, 0.0);

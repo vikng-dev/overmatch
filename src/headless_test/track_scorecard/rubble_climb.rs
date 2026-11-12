@@ -41,7 +41,7 @@ const APPROACH_M: f32 = 2.0;
 const HOUSE_SAMPLES: u32 = 1025;
 
 #[derive(Clone, Copy, PartialEq)]
-enum Heap {
+pub(super) enum Heap {
     Yard,
     House,
     /// The house left standing, for the tank to ram.
@@ -49,7 +49,7 @@ enum Heap {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Mode {
+pub(super) enum Mode {
     /// Drive at the case's throttle for `DRIVE_S`.
     Through,
     /// As `Through`; after the first whole second stalled on the heap, coast `PAUSE_S` with no
@@ -60,13 +60,13 @@ enum Mode {
     StopGo,
 }
 
-struct Case {
-    label: String,
-    heap: Heap,
-    throttle: f32,
+pub(super) struct Case {
+    pub(super) label: String,
+    pub(super) heap: Heap,
+    pub(super) throttle: f32,
     /// The hull's sideways offset from the heap's centre line (m).
-    offset: f32,
-    mode: Mode,
+    pub(super) offset: f32,
+    pub(super) mode: Mode,
 }
 
 /// One tick's readings.
@@ -360,7 +360,7 @@ fn carried(ticks: &[&Tick], weight: f32, wheels_per_side: usize) -> Value {
 }
 
 /// The live loose pieces, ascending by entity.
-fn live_pieces(bed: &mut Bed) -> Vec<Entity> {
+pub(super) fn live_pieces(bed: &mut Bed) -> Vec<Entity> {
     let world = bed.app.world_mut();
     let mut pieces: Vec<Entity> = world
         .query_filtered::<Entity, (With<crate::debris::DebrisPiece>, With<Position>)>()
@@ -480,19 +480,19 @@ fn collapse_house(bed: &mut Bed) {
 }
 
 /// The heap a case drives at, settled, with the tank parked short of it.
-struct Site {
+pub(super) struct Site {
     asleep_after_s: f32,
     awake_at_drive: usize,
     standing_chunks: Option<usize>,
     top: f32,
-    near: f32,
-    far: f32,
+    pub(super) near: f32,
+    pub(super) far: f32,
     left: f32,
     right: f32,
     mid: f32,
 }
 
-fn settle(case: &Case) -> (Bed, Site) {
+pub(super) fn settle(case: &Case) -> (Bed, Site) {
     use crate::track_sandbox::rubble;
     let mut bed = match case.heap {
         Heap::Yard => {
