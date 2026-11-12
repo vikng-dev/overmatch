@@ -873,8 +873,9 @@ pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout 
 pub struct DriveSupply {
     pub control_authority: bool,
     pub task_rate: f32,
-    /// The engine's held HP share; the power readout reads its own source condition.
-    pub engine_condition: f32,
+    /// The engine's HP pool holds anything ([`crate::damage::module_quality`]); the power
+    /// readout reads this source even when the task has no throughput.
+    pub engine_in_action: bool,
     /// The transmission's held HP share; clutch and steering capacity read this source.
     pub transmission_condition: f32,
 }
@@ -894,7 +895,7 @@ impl DriveSupply {
     pub const WHOLE: Self = Self {
         control_authority: true,
         task_rate: 1.0,
-        engine_condition: 1.0,
+        engine_in_action: true,
         transmission_condition: 1.0,
     };
 }
@@ -1764,7 +1765,11 @@ fn crank_free_torque(
     let stop_drag = tp.engine_inertia * omega_e.abs() / inp.dt;
     let tau_free = tau_ind + tau_idle - tau_drag.clamp(-stop_drag, stop_drag);
 
-    let p_avail = supply.engine_condition * tp.torque_at(rpm) * omega_e.max(0.0);
+    let p_avail = if supply.engine_in_action {
+        tp.torque_at(rpm) * omega_e.max(0.0)
+    } else {
+        0.0
+    };
     #[cfg(feature = "bitprobe")]
     {
         probe.u_fuel = u_fuel * supply.served_task_rate();

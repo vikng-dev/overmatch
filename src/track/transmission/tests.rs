@@ -1468,40 +1468,38 @@ fn derived_parameter_overflow_is_refused_at_construction() {
     );
 }
 
-/// The game's damage model: under a full command the clutch latches at any positive combustion
-/// share (intent thresholds read the command, never the share), and a half engine pulls away
-/// more weakly than a whole one. Full reverse while rolling brakes at full service capacity
-/// through `step` whatever the engine supplies: brakes are construction. A step that scales the
-/// service brakes, or a command threshold that turns a small share into no drive, fails here.
-/// Fixture pools are 30, 168 and 336 of 336 HP; the belts run free of ground reactions.
+/// The game's damage model: under a full command the clutch latches at any positive task rate
+/// (intent thresholds read the command, never the rate), and a half rate pulls away more weakly
+/// than a whole one. Full reverse while rolling brakes at full service capacity through `step`
+/// whatever the rate: brakes are construction. A step that scales the service brakes, or a
+/// command threshold that turns a small rate into no drive, fails here. Fixture rates are
+/// 30/336, 0.5 and 1; the belts run free of ground reactions.
 #[test]
 fn reduced_supply_pulls_away_and_retains_full_service_brakes() {
     let fp = lab_fp();
     let tp = lab_tp();
-    let reduced_engine = DriveSupply {
-        engine_condition: 30.0 / 336.0,
+    let reduced = DriveSupply {
         task_rate: 30.0 / 336.0,
         ..DriveSupply::WHOLE
     };
-    let speeds = [1.0, 0.5, reduced_engine.engine_condition].map(|combustion| {
+    let speeds = [1.0, 0.5, reduced.task_rate].map(|rate| {
         let mut state = fresh(&tp);
         let mut speeds = [0.0; 2];
         for _ in 0..64 {
             let mut full = felt_at_rest(input(1.0, 0.0, speeds, [0.0; 2]));
-            full.supply.engine_condition = combustion;
-            full.supply.task_rate = combustion;
+            full.supply.task_rate = rate;
             let report = step(&fp, &tp, &mut state, &full);
             speeds = report.next_speeds;
             assert!(
                 state.clutch != ClutchState::Out || report.shifting,
-                "share {combustion}: the clutch transmits outside shift windows"
+                "rate {rate}: the clutch transmits outside shift windows"
             );
         }
         speeds[0]
     });
     assert!(
         0.0 < speeds[1] && speeds[1] < speeds[0],
-        "a half engine pulls away weakly: {speeds:?}"
+        "a half rate pulls away weakly: {speeds:?}"
     );
 
     let rolling = TransmissionState {
@@ -1511,11 +1509,11 @@ fn reduced_supply_pulls_away_and_retains_full_service_brakes() {
     let mut reverse = input(-1.0, 0.0, [10.0; 2], [0.0; 2]);
     let (mut whole_state, mut braked_state) = (rolling, rolling);
     let whole = step(&fp, &tp, &mut whole_state, &reverse);
-    reverse.supply = reduced_engine;
+    reverse.supply = reduced;
     let braked = step(&fp, &tp, &mut braked_state, &reverse);
     assert_eq!(
         braked.forces, whole.forces,
-        "at idle with no fueling, a reduced engine changes nothing the brakes or drag do"
+        "at idle with no fueling, a reduced task rate changes nothing the brakes or drag do"
     );
     assert!(
         braked
@@ -1548,14 +1546,14 @@ fn no_combustion_no_stored_energy_no_pivot_work() {
     let mut st = fresh(&tp);
     st.omega_e = 0.0;
     let mut inp = input(0.0, 1.0, [0.0; 2], [0.0; 2]);
-    inp.supply.engine_condition = 0.0;
+    inp.supply.engine_in_action = false;
     inp.supply.task_rate = 0.0;
     let rep = step(&fp, &tp, &mut st, &inp);
     assert_eq!(rep.next_speeds, [0.0; 2]);
 }
 
-/// The game's damage model: the crank and Driver price the same reduced full-pedal
-/// torque, including construction drag that does not scale with combustion.
+/// The game's damage model: the crank and Driver price the same full-pedal torque at a reduced
+/// task rate, including construction drag that does not scale with the rate.
 #[test]
 fn drag_release_and_driver_read_the_command() {
     let (fp, tp) = (lab_fp(), lab_tp());
@@ -1565,7 +1563,6 @@ fn drag_release_and_driver_read_the_command() {
     let ratio = tp.gears_fwd[0];
     let speed = st.omega_e * tp.sprocket_radius / ratio;
     let mut inp = input(1.0, 0.0, [speed; 2], [0.0; 2]);
-    inp.supply.engine_condition = 0.25;
     inp.supply.task_rate = 0.25;
     let rep = step(&fp, &tp, &mut st, &inp);
     let modeled = price_driver_force(&tp, inp.supply, speed, ratio, 1.0, ClutchState::In);
@@ -1612,8 +1609,8 @@ fn full_service_brakes_ignore_competence() {
 #[test]
 fn full_service_brakes_ignore_combustion() {
     assert_full_service_brakes(DriveSupply {
-        engine_condition: 0.25,
-        task_rate: 0.25,
+        engine_in_action: false,
+        task_rate: 0.0,
         ..DriveSupply::WHOLE
     });
 }
@@ -1643,10 +1640,10 @@ fn supply_loss_reaches_a_locked_clutch_on_its_tick() {
         whole.bitprobe.engaged && whole.bitprobe.reanchor_feasible,
         "the fixture must start with a locking clutch"
     );
-    let mut reduced_engine = input(1.0, 0.0, [speed; 2], [0.0; 2]);
-    reduced_engine.supply.engine_condition = 0.0;
-    reduced_engine.supply.task_rate = 0.0;
-    let no_combustion = step(&fp, &tp, &mut st, &reduced_engine);
+    let mut knocked_out = input(1.0, 0.0, [speed; 2], [0.0; 2]);
+    knocked_out.supply.engine_in_action = false;
+    knocked_out.supply.task_rate = 0.0;
+    let no_combustion = step(&fp, &tp, &mut st, &knocked_out);
     assert!(
         no_combustion.forces[0] < whole.forces[0],
         "combustion torque reaches a locked clutch on its tick"
@@ -1771,7 +1768,7 @@ fn all_drive_modes_without_combustion_conserve_total_kinetic_energy() {
             let mut previous = energy(st.omega_e, speeds);
             for _ in 0..64 {
                 let mut inp = input(throttle, steer, speeds, [0.0; 2]);
-                inp.supply.engine_condition = 0.0;
+                inp.supply.engine_in_action = false;
                 inp.supply.task_rate = 0.0;
                 speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
                 let next = energy(st.omega_e, speeds);
@@ -1794,7 +1791,7 @@ fn emptied_declutched_engine_runs_down_under_construction_drag() {
     let mut st = fresh(&tp);
     st.omega_e = 500.0 * RPM_TO_RAD; // Fixture start below healthy idle.
     let mut inp = input(0.0, 0.0, [0.0; 2], [0.0; 2]);
-    inp.supply.engine_condition = 0.0;
+    inp.supply.engine_in_action = false;
     inp.supply.task_rate = 0.0;
     inp.supply.transmission_condition = 0.0; // Fixture: no external crank work.
     let start = st.omega_e;
@@ -1818,7 +1815,7 @@ fn emptied_declutched_engine_runs_down_under_construction_drag() {
 fn absent_combustion_keeps_drag_at_full_pedal() {
     let tp = lab_tp();
     let supply = DriveSupply {
-        engine_condition: 0.0,
+        engine_in_action: false,
         task_rate: 0.0,
         ..DriveSupply::WHOLE
     };
@@ -1853,13 +1850,12 @@ fn full_pedal_reaches_the_curve_and_release_retains_drag() {
 }
 
 /// The game's damage model: commanded work consumes one task rate even when
-/// local module condition differs. Fixture: a reduced source and a further task bottleneck.
+/// local module condition differs. Fixture: a reduced transmission and a further task bottleneck.
 #[test]
 fn commanded_work_consumes_the_task_rate_once() {
     let tp = lab_tp();
     let supply = DriveSupply {
         task_rate: 0.3,
-        engine_condition: 0.5,
         transmission_condition: 0.75,
         ..DriveSupply::WHOLE
     };
@@ -3231,7 +3227,7 @@ fn staffed_zero_rate_stops_and_parks_without_engine_work() {
         for engine_empty in [false, true] {
             let supply = DriveSupply {
                 task_rate: 0.0,
-                engine_condition: if engine_empty { 0.0 } else { 1.0 },
+                engine_in_action: !engine_empty,
                 transmission_condition: if engine_empty { 1.0 } else { 0.0 },
                 ..DriveSupply::WHOLE
             };
@@ -3372,7 +3368,7 @@ fn zero_rate_steering_retains_park_on_a_supported_slope() {
         for tick in 0..128 {
             let mut inp = input(0.0, if tick < 64 { 1.0 } else { 0.0 }, speeds, [grade; 2]);
             inp.supply.task_rate = 0.0;
-            inp.supply.engine_condition = 0.0;
+            inp.supply.engine_in_action = false;
             let report = step(&fp, &tp, &mut state, &inp);
             assert!(state.park, "unworked steering must retain the park lever");
             // Resolution: f32 stop-force cancellation at the supported rest.
@@ -3403,7 +3399,7 @@ fn zero_rate_staffed_descent_keeps_the_crank_ceiling_with_brakes() {
         };
         let mut inp = input(0.0, 0.0, [ceiling; 2], [-grade; 2]);
         inp.supply.task_rate = 0.0;
-        inp.supply.engine_condition = 0.0;
+        inp.supply.engine_in_action = false;
         let staffed = step(&fp, &tp, &mut { state }, &inp);
         // Resolution: f32 integration at a data-derived ceiling.
         assert!(staffed.next_speeds[0] <= ceiling + 1e-5);

@@ -450,7 +450,7 @@ A gameplay verb the tank can perform, gated *and graded* by its requirements (cr
 _Avoid_: action (the player-facing intent verb is a Control; the tank-model verb is a Capability)
 
 **Effectiveness**:
-How well a capability is served, ∈ [0, 1] (0 = unavailable, 1 = full): a rate for reload and belt-swap work (`time = base / effectiveness`), servo slew and delivered drive torque. A module contributes its HP pool's held share; a crewman contributes competence in that station (native full, foreign reduced), independent of remaining HP while in action.
+How well a capability is served, ∈ [0, 1] (0 = unavailable, 1 = full): a rate for reload and belt-swap work (`time = base / effectiveness`), servo slew and delivered drive torque. A module contributes its HP pool's held share, except an engine, which contributes whole until its HP pool is emptied (provisional, playtest fork F20); a crewman contributes competence in that station (native full, foreign reduced), independent of remaining HP while in action.
 _Avoid_: efficiency (reserve that for a single requirement member's coefficient)
 
 **Cookoff**:

@@ -632,8 +632,8 @@ Subject: the game's damage model, game state only. Crew are HP pools at stations
 **Default.** A module contributes its held HP share, continuously; empty is out of action.
 A crew station contributes its occupant's competence while in action. Reload and belt swap use
 the composed rate with stable absolute deadlines. Drive scales what each part delivers
-(driver competence the fueling, the engine its combustion, the transmission its transmitted
-capacity), with a command only while someone serves the Driver station. Servo slew keeps its
+(driver competence the fueling, the transmission its transmitted capacity; the engine supplies
+whole until knocked out, F20), with a command only while someone serves the Driver station. Servo slew keeps its
 rate scale. The complete timing rule and consumer contract live in design
 §7b (`.agents/docs/design/armor-penetration-and-damage.md`).
 
@@ -645,7 +645,7 @@ there is no checkpoint table, feature flag or second implementation in code.
 are legible through reload, driving and slew, or whether discrete checkpoints communicate them
 better. Drive preserves full driver intent, service braking and engine braking while reducing
 its torque supply; test acceleration, steering and descents in forward and reverse, a driver
-put out of action at speed (the tank coasts), and a small positive engine share pulling away
+put out of action at speed (the tank coasts), and a small positive task rate pulling away
 weakly under full pedal. With nobody at the station, repair cannot command brakes and the
 park lever holds its state; a coasting standstill does not set it. Supply changes on the tick
 of a dose, swap or knockout. A locked clutch passes the torque step immediately; crank inertia
@@ -722,3 +722,41 @@ registration on the construction bundles; the default has no code to remove.
 
 **Lives in.** Design doc, "Bodies in contact" (the decision paragraph); `breakage::sweep_intake`;
 `net::ram`'s tracked ram test, which prints the attribution.
+
+## F20 — An engine's power: whole until its HP pool empties
+
+**Status:** open · owner default for the pre-playtest set in #348 ("let's drop it, and we
+revisit in the future if we ever want to add partial performance")
+
+Subject: the game's damage model, game state only. Crew are HP pools at stations.
+
+**Default — two states.** An engine supplies whole power while its HP pool holds anything and
+none once it is knocked out (`damage::module_quality`). A reduced engine drives, engine-brakes
+and powers traverse exactly as a whole one; its module row reads REDUCED, so repair still shows
+as owed. A knocked-out engine delivers no combustion torque: its construction drag stays, the
+crank runs down, a staffed Driver station keeps the service brakes and the park lever, and
+traverse falls back to hand work. Every other module keeps its continuous held share (F18).
+
+**Preserved alternative — power scales with the pool.** The F18 law applied to the engine: the
+engine's held share enters the Drive task rate, so combustion and the idle catch scale with
+it, and the servo's powered traverse scales the same way. Construction drag stays whole, as it
+must for engine braking. That produced the accident behind #348: full pedal nets
+`s × (curve + drag) − drag`, so an engine below `drag / (curve + drag)` of its pool cannot move
+the tank. DERIVED from the seed tank's curve, its drag fraction and the shared drag base
+share: 154 / (1300 + 154) ≈ 0.106 (about 11 %) with the crank at rest, 274 / (1300 + 274) ≈
+0.174 at idle. A 30 of 336 HP fixture engine (0.089) sat still. Building it
+again means choosing what happens below that share, a stall or a scaled drag, before play.
+
+**Why it's a playtest call.** Watch whether a reduced engine needs to read through driving at
+all, or whether the REDUCED row and the knock-out it foreshadows say enough. Partial
+performance returns only if play asks for it.
+
+**Revert cost.** Low. Delete the engine arm of `module_quality`; the Drive task rate, the
+servo's power, the load-deadline floor and the module row then read the held share again. Turn
+`DriveSupply::engine_in_action` back into a share if the power readout should scale, and
+restore the scaled-engine tests from git. The stall threshold above is the open design work.
+
+**Lives in.** `src/damage.rs` (`module_quality`), `src/track/sim.rs` (`supply_from_parts`),
+`src/track/transmission.rs` (`DriveSupply`), `src/tank/servo.rs`, `src/spec.rs` (load
+floors), `src/crew_ui.rs` (`module_status`); design §6 "Reduced module performance", §7c and
+the #348 entry in the #228 history; tracker #348.

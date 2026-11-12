@@ -563,7 +563,7 @@ pub struct PartFacts {
 }
 
 /// The game's damage model: collect each tank's facts once. A station in action supplies its
-/// occupant's competence; a module supplies its held HP share. Absent sources supply zero.
+/// occupant's competence; a module supplies its [`module_quality`]. Absent sources supply zero.
 /// Duplicate functions retain their best provider; staffing records station presence directly.
 pub fn part_facts(tank_volumes: &TankVolumes, volumes: &Query<VolumeFacets>) -> PartFacts {
     let mut quality: std::collections::HashMap<Part, f32> = std::collections::HashMap::new();
@@ -583,10 +583,20 @@ pub fn part_facts(tank_volumes: &TankVolumes, volumes: &Query<VolumeFacets>) -> 
             && !hp.is_empty()
         {
             let q = quality.entry(Part::from(*func)).or_insert(0.0);
-            *q = q.max(module_share(hp));
+            *q = q.max(module_quality(*func, hp));
         }
     }
     PartFacts { quality, staffed }
+}
+
+/// The game's damage model: what a module supplies its consumers. An engine supplies whole
+/// power while its HP pool holds anything, and none once it is knocked out (provisional:
+/// playtest fork F20); every other module supplies its held share.
+pub fn module_quality(role: FunctionRole, health: &ComponentHealth) -> f32 {
+    match role {
+        FunctionRole::Engine if !health.is_empty() => 1.0,
+        _ => module_share(health),
+    }
 }
 
 /// The game's damage model: the shared held share for simulation and rate presentation.
@@ -845,26 +855,35 @@ mod tests {
         pairs.iter().copied().collect()
     }
 
-    /// The game's damage model: rate consumers rely on a module's held share, including
-    /// zero at knockout. A binary-quality mutant fails the half-full row.
+    /// The game's damage model: rate consumers rely on a module's held share, including zero
+    /// at knockout, and on an engine being whole until its HP pool is emptied. A binary mutant
+    /// fails the half-full transmission; a scaled engine fails the half-full engine.
     #[test]
-    fn module_quality_is_its_held_share() {
+    fn module_quality_is_its_held_share_and_an_engine_is_whole_until_knocked_out() {
         use super::*;
         use bevy::ecs::system::RunSystemOnce;
-        // Fixture: a ten-point engine pool at full, half and empty.
-        for share in [1.0, 0.5, 0.0] {
+        // Fixture: ten-point pools at full, half and empty.
+        for (role, share, expected) in [
+            (FunctionRole::Transmission, 1.0, 1.0),
+            (FunctionRole::Transmission, 0.5, 0.5),
+            (FunctionRole::Transmission, 0.0, 0.0),
+            (FunctionRole::Engine, 1.0, 1.0),
+            (FunctionRole::Engine, 0.5, 1.0),
+            (FunctionRole::Engine, 0.0, 0.0),
+        ] {
             let mut world = World::new();
             let tank = world.spawn_empty().id();
             let mut hp = ComponentHealth::full(10);
             hp.set_held((hp.capacity() as f32 * share) as u32);
-            world.spawn((FunctionRole::Engine, hp, VolumeOf(tank)));
+            world.spawn((role, hp, VolumeOf(tank)));
             world
                 .run_system_once(
                     move |tanks: Query<&TankVolumes>, facets: Query<VolumeFacets>| {
                         let quality = part_facts(tanks.get(tank).unwrap(), &facets).quality;
                         assert_eq!(
-                            evaluate(&vec![Group::Single(Part::Engine)], &quality),
-                            share
+                            evaluate(&vec![Group::Single(Part::from(role))], &quality),
+                            expected,
+                            "{role:?} at {share}"
                         );
                     },
                 )
@@ -1035,9 +1054,9 @@ mod tests {
         ];
         let quality = q(&[
             (Part::Driver, 0.6),
-            (Part::Engine, 0.5),
+            (Part::Engine, 1.0),
             (Part::Commander, 1.0),
-            (Part::Transmission, 1.0),
+            (Part::Transmission, 0.5),
         ]);
         let first = members[0].0 * quality[&Part::Driver] * quality[&Part::Engine];
         let second = members[1].0 * quality[&Part::Commander] * quality[&Part::Transmission];

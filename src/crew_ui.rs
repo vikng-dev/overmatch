@@ -160,8 +160,11 @@ fn round_line(weapon_name: &str, rounds: &[WeaponRound], load: &WeaponLoad) -> O
     Some(line)
 }
 
-/// The game's damage model: a reduced module names the held-share rate its consumers use.
+/// The game's damage model: a reduced module names the rate its consumers use
+/// ([`crate::damage::module_quality`]); one that still supplies whole reads REDUCED, so the
+/// shortage repair acts on stays visible.
 fn module_status(
+    role: crate::damage::FunctionRole,
     health: &crate::ballistics::ComponentHealth,
     repair: &crate::damage::repair::ModuleRepair,
 ) -> String {
@@ -169,10 +172,12 @@ fn module_status(
         Some(fraction) => format!("REPAIR {:.0}%", (fraction * 100.0).floor()),
         None if health.is_empty() => "OUT OF ACTION".to_owned(),
         None if health.held() < health.capacity() => {
-            format!(
-                "RATE {}%",
-                served_percent(crate::damage::module_share(health))
-            )
+            let rate = crate::damage::module_quality(role, health);
+            if rate < 1.0 {
+                format!("RATE {}%", served_percent(rate))
+            } else {
+                "REDUCED".to_owned()
+            }
         }
         None => "READY".to_owned(),
     }
@@ -220,6 +225,7 @@ fn update_status_panel(
     modules: Query<
         (
             &Name,
+            &crate::damage::FunctionRole,
             &crate::ballistics::ComponentHealth,
             &crate::damage::repair::ModuleRepair,
         ),
@@ -327,17 +333,20 @@ fn update_status_panel(
     let mut module_rows: Vec<_> = volumes
         .iter()
         .filter_map(|volume| {
-            modules.get(volume).ok().map(|(name, health, repair)| {
-                let status = module_status(health, repair);
-                (name.as_str(), format!("\n{name}: {status}"))
-            })
+            modules
+                .get(volume)
+                .ok()
+                .map(|(name, role, health, repair)| {
+                    let status = module_status(*role, health, repair);
+                    (name.as_str(), format!("\n{name}: {status}"))
+                })
         })
         .collect();
     module_rows.sort_by_key(|(name, _)| *name);
     let repairing = volumes.iter().any(|volume| {
         modules
             .get(volume)
-            .is_ok_and(|(_, _, repair)| repair.elapsed.is_some())
+            .is_ok_and(|(_, _, _, repair)| repair.elapsed.is_some())
     });
     let repair_line = if knocked_out.is_some() {
         "\nRepair unavailable"
@@ -503,8 +512,8 @@ mod tests {
                     [(
                         Capability::Drive,
                         vec![Group::Graded(GradedGroup::Backup(vec![
-                            (1.0, vec![Part::Driver, Part::Engine]),
-                            (0.6, vec![Part::Commander, Part::Transmission]),
+                            (1.0, vec![Part::Driver, Part::Transmission]),
+                            (0.6, vec![Part::Commander, Part::Engine]),
                         ]))],
                     )]
                     .into(),
@@ -529,7 +538,7 @@ mod tests {
             },
             VolumeOf(tank),
         ));
-        for (role, held) in [(FunctionRole::Engine, 5), (FunctionRole::Transmission, 10)] {
+        for (role, held) in [(FunctionRole::Transmission, 5), (FunctionRole::Engine, 10)] {
             world.spawn((
                 role,
                 ComponentHealth::holding(10, held * crate::ballistics::POOL_UNITS_PER_HP),
@@ -571,18 +580,26 @@ mod tests {
         assert_eq!(*world.get::<Visibility>(panel).unwrap(), Visibility::Hidden);
     }
 
-    /// The game's damage model: the player must see a reduced module's rate rather than READY.
-    /// Fixture: 14 of 142 HP, whose held share rounds to ten percent.
+    /// The game's damage model: the player must see a reduced module's rate rather than READY,
+    /// and a reduced engine, which still supplies whole (playtest fork F20), as REDUCED rather
+    /// than a rate it does not serve. Fixture: 14 of 142 HP, whose held share rounds to ten
+    /// percent.
     #[test]
     fn a_reduced_module_row_names_its_rate() {
+        use crate::damage::FunctionRole;
         let health = crate::ballistics::ComponentHealth::holding(
             142,
             14 * crate::ballistics::POOL_UNITS_PER_HP,
         );
-        assert_eq!(
-            module_status(&health, &crate::damage::repair::ModuleRepair::default()),
-            "RATE 10%"
-        );
+        let row = |role| {
+            module_status(
+                role,
+                &health,
+                &crate::damage::repair::ModuleRepair::default(),
+            )
+        };
+        assert_eq!(row(FunctionRole::Transmission), "RATE 10%");
+        assert_eq!(row(FunctionRole::Engine), "REDUCED");
     }
 
     /// The game's damage model: a module that still serves must not read as out of action, and
@@ -592,6 +609,7 @@ mod tests {
     fn a_rate_names_a_serving_pool_above_zero_and_a_short_one_below_whole() {
         let row = |held: u32| {
             module_status(
+                crate::damage::FunctionRole::Transmission,
                 &crate::ballistics::ComponentHealth::holding(
                     336,
                     held * crate::ballistics::POOL_UNITS_PER_HP,
@@ -615,7 +633,11 @@ mod tests {
         assert!(share < 1.0);
         assert_eq!(served_percent(share), 99);
         assert_eq!(
-            module_status(&health, &crate::damage::repair::ModuleRepair::default()),
+            module_status(
+                crate::damage::FunctionRole::Transmission,
+                &health,
+                &crate::damage::repair::ModuleRepair::default()
+            ),
             "RATE 99%"
         );
     }

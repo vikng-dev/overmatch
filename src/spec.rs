@@ -1588,7 +1588,7 @@ impl TankSpec {
             }
         }
         // The game's damage model: load deadlines must fit even at the smallest positive
-        // module pool share or foreign-station competence. An emptied contributor may disappear,
+        // module supply (one pool unit held) or foreign-station competence. An emptied contributor may disappear,
         // so each graded group's floor uses its smallest member, not their full sum or maximum.
         for (name, weapon) in &self.weapons {
             let part_floor = |part: Part| {
@@ -1607,10 +1607,12 @@ impl TankSpec {
                                     .fold(1.0_f32, f32::min),
                             )
                         } else if volume.function.map(Part::from) == Some(part) {
-                            Some(
-                                1.0 / crate::ballistics::ComponentHealth::full(volume.hp).capacity()
-                                    as f32,
-                            )
+                            let function = volume
+                                .function
+                                .expect("the matching function facet is present");
+                            let mut one_unit = crate::ballistics::ComponentHealth::full(volume.hp);
+                            one_unit.set_held(1);
+                            Some(crate::damage::module_quality(function, &one_unit))
                         } else {
                             None
                         }

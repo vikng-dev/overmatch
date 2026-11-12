@@ -1184,6 +1184,8 @@ crew members are in action (`knockout_from_counts`, `src/damage.rs`; §1a).
 - **Reduced module performance:** current quality is the continuous held share of the pool;
   empty is out of action. There is no per-function checkpoint table. The owner chose this
   simplest pre-playtest law under #228; the checkpoint alternative is preserved in F18 and §7b.
+  The engine is the exception (#348): it supplies whole power while its HP pool holds anything
+  and none once knocked out; power scaling with its pool is preserved in F20.
 
 ## 7. Crew — positions with capabilities, served by crewmen
 
@@ -1349,8 +1351,8 @@ including zero. Cyclic intervals use the same work-free phase; neither interval 
 a load rate. The scalar work representation preserves actual work rather than turning tick
 rounding into extra work. This is ADR-0029's stable absolute-deadline contract with bounded work.
 
-Subject: the game's damage model, game state only. A module supplies its held HP share;
-a crew station supplies its occupant's competence while in action and zero when knocked out.
+Subject: the game's damage model, game state only. A module supplies its held HP share
+(an engine supplies whole until knocked out, F20); a crew station supplies its occupant's competence while in action and zero when knocked out.
 A task resolves its requirement once: multiply within complete authored members, capped sum
 across Pool members, best complete Backup alternative, and minimum across required groups.
 The resolution retains each group's contributions and the selected Backup member beside the
@@ -1362,14 +1364,15 @@ alternatives, while `NotRequired` explicitly permits controls without a station.
 refuses empty paths and undeclared stations. This authority permits axes, repair braking and
 park-lever changes independently of task rate. An unavailable production path cannot erase a
 staffed operator's intent. Drive consumes the resolved task rate directly, alongside the
-engine's and transmission's own held shares for the idle governor and mechanical capacities.
+transmission's own held share for mechanical capacities; the power readout reads only whether
+the engine is in action.
 No source condition is recovered by dividing projected rates. Brakes, engine
 drag and compression braking keep their construction. The authored full-load curve is net
 of construction losses: the pedal blend reconstructs its gross combustion torque, only that
 source scales with delivered supply, and construction drag is charged whole. At whole supply
 the gross/drag pair retains the prior healthy net torque at every command. An emptied engine
 therefore keeps its friction at full pedal, including under declutched rev-match commands.
-A small positive share may still pull away from the crank's stored energy; its sustained
+A small positive task rate may still pull away from the crank's stored energy; its sustained
 capability must also pay construction losses. The free-hull evidence below replaces the
 stationary-hull stall claim. The scheduler uses the crank's torque law, pricing sustained reserve at no less
 than idle rather than spending the governor's temporary sub-idle recovery.
@@ -1460,7 +1463,8 @@ remaining work is deferred refinements (§9) and the eventual game-side (non-san
 ### 7c. Engine-powered servo drive (#257)
 
 Subject: the game's tank internals and damage model, game state only. Crew are HP pools
-at stations; an engine reduced or out of action changes available power, not aiming intent.
+at stations; an engine out of action removes available power, never aiming intent, and a
+reduced one supplies whole (F20).
 `ServoSpec.drive` declares `Powered` or `Hand`; node names select neither law nor limits.
 This section owns the servo narrative. The tank sheet owns the facts and their provenance.
 
@@ -1471,7 +1475,8 @@ holds the governed power budget: the crank still turns, and a fuel cut is not a 
 The curve contains higher-rpm engine anchors, but gives no accessory pump regulation map;
 without that map, neither a capability collapse nor an extra high-rpm gain is justified.
 This saturation is a provisional capacity model, not measured pump behavior.
-For engine quality `qe`, operator requirement effectiveness `qo`, declared power share `s`,
+For engine quality `qe` (1 while the engine's HP pool holds anything, 0 once knocked out),
+operator requirement effectiveness `qo`, declared power share `s`,
 motor stall torque `Ts`, running bearing friction `Tf` and sustained hand rate `vh`:
 
 ```
@@ -1532,8 +1537,8 @@ mounts declare hand construction and provisional 45 degree/s rates.
 600 rpm and 441.394 kW at governed 2,500 rpm. The rated 3,000 rpm anchor is not substituted
 for the live crank speed. At 2,600 and 3,000 rpm the saturated accessory budget gives the
 same **DERIVED** rates as at governed rpm: yaw 31.6125 degree/s and pitch 20.2320 degree/s.
-At idle and engine quality 0.1, hand work wins: **DERIVED** yaw 1 degree/s and pitch
-0.5 degree/s, rather than the motor-only 0.585 and 0.3744 degree/s.
+With the engine knocked out, hand work alone remains: **DERIVED** yaw 1 degree/s and pitch
+0.5 degree/s.
 
 | Axis | Steady at idle (degree/s) | Steady at governed (degree/s) | Initial acceleration (degree/s²) | Governed time to 95% (s) | Previous authored speed / acceleration |
 |---|---:|---:|---:|---:|---|
@@ -1563,7 +1568,7 @@ coupling, with the drivetrain implementation unchanged.
 
 **Evidence and wire contract.** Generic inline fixtures derive steady rate from bearing work,
 startup from torque and cuboid inertia, and coast-down bounds from friction. They cover a
-reduced engine, a stopped crank, above-governor rpm, path transitions, target jumps, monotone
+reduced and a knocked-out engine, a stopped crank, above-governor rpm, path transitions, target jumps, monotone
 arrival at fixed supply, reversal and travel-stop momentum absorption. No expected rate is
 copied from a run.
 
@@ -2633,6 +2638,19 @@ constraints, not a reconstructed product of source shares. `TankSpec::validate` 
 and Transmission on every productive Drive path. A staffed task at zero rate opens the main
 clutch, so the engine's local idle catch cannot launch the hull while Drive reads zero.
 `transmission_bottleneck_reduces_the_one_drive_task_rate` pins the generic bottleneck outcome.
+
+#### Engine power is two-state (#348)
+
+Subject: the game's damage model, game state only. The owner dropped engine power scaling
+with its HP pool: an engine supplies whole power while its pool holds anything and none once
+knocked out (`damage::module_quality`), so the Drive task rate, the servo's powered traverse
+and the power readout all see 1 or 0 from the engine. The `free_hull_measurements` red that
+prompted it was the scaled law's own accident: combustion scaled with the pool while
+construction drag stayed whole, so below a DERIVED share of about 0.11 at rest the engine could
+not move the tank. The same threshold still applies to a Drive task rate lowered by the Driver
+station's competence or the transmission's held share. The rows above that cite a half or
+30/336 engine record the prior law. F20 holds the alternative and its revert cost. No wire type
+changed.
 
 ### Exchange and receiver review (#258)
 

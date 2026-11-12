@@ -412,7 +412,8 @@ pub(crate) fn drive_servos(
             state.current = command.target;
             state.velocity = 0.0;
         } else {
-            // The game's damage model: requirements scale operator work; engine quality scales power.
+            // The game's damage model: requirements scale operator work; an engine in action
+            // supplies whole power (`module_quality`).
             let facts = part_facts(volumes, &facets);
             let slew = evaluate(&spec.requires, &facts.quality);
             let (power, inertia) = match spec.drive {
@@ -629,7 +630,7 @@ mod tests {
         }
     }
 
-    fn powered_world(mass: f32, engine_share: f32) -> (World, Entity, Entity, Entity, f32) {
+    fn powered_world(mass: f32, engine_share: f32) -> (World, Entity, Entity, Entity) {
         use crate::ballistics::ComponentHealth;
         use crate::damage::{FunctionRole, VolumeOf};
         // Fixture box and drive facts; no shipped vehicle output determines the assertions.
@@ -648,7 +649,6 @@ mod tests {
         mechanism.engine.engine.torque_nm = vec![(600.0, 1000.0), (2400.0, 1000.0)];
         mechanism.engine.engine.governed_rpm = 2400.0;
         let rpm = EngineRpm(600);
-        let full_power = mechanism.engine.torque_at(rpm.rpm()) * rpm.rpm() * RPM_TO_RAD;
         let mut world = World::new();
         world.insert_resource(Time::<()>::default());
         let root = world.spawn((TankServos::for_count(1), mechanism, rpm)).id();
@@ -667,7 +667,7 @@ mod tests {
                 TankRoot(root),
             ))
             .id();
-        (world, root, servo, engine, full_power)
+        (world, root, servo, engine)
     }
 
     fn tick_powered(world: &mut World, root: Entity, servo: Entity) -> ServoState {
@@ -685,7 +685,7 @@ mod tests {
     /// of action leaves only the operator's authored hand drive, including after powered motion.
     #[test]
     fn an_engine_out_of_action_brakes_to_the_hand_rate() {
-        let (mut world, root, servo, engine, _) = powered_world(15.0, 1.0);
+        let (mut world, root, servo, engine) = powered_world(15.0, 1.0);
         for _ in 0..512 {
             tick_powered(&mut world, root, servo);
         }
@@ -715,38 +715,42 @@ mod tests {
     }
 
     /// The game's damage model: the best available path sets bearing work. Authority must
-    /// keep turning above the governor cut and must never be slower with a reduced engine.
+    /// keep turning above the governor cut; a reduced engine powers it whole (provisional,
+    /// playtest fork F20) and a knocked-out one leaves hand work.
     #[test]
     fn crank_speed_and_quality_select_the_best_available_work() {
         // Fixture flat curve: 1000 N m, governed at 2400 rpm; no engine-control width is assumed.
-        for (rpm, quality) in [
+        // Fixture shares: 0.1 holds one HP of the ten-HP fixture pool.
+        for (rpm, share) in [
             (0, 1.0),
-            (600, 0.001),
+            (600, 0.1),
+            (600, 0.0),
             (2400, 1.0),
             (2600, 1.0),
             (3000, 1.0),
         ] {
-            let (mut world, root, servo, _, _) = powered_world(15.0, quality);
-            // Fixture share keeps steady speed below the controller's stopping envelope at
+            let (mut world, root, servo, _) = powered_world(15.0, share);
+            let in_action = if share > 0.0 { 1.0 } else { 0.0 };
+            // Fixture power share keeps steady speed below the controller's stopping envelope at
             // the shortest-arc command's finite lead; this test isolates available work.
-            let share = 0.0001;
+            let power = 0.0001;
             let ServoDrive::Powered { power_share, .. } =
                 &mut world.get_mut::<ServoSpec>(servo).unwrap().drive
             else {
                 unreachable!()
             };
-            *power_share = Sourced(share);
+            *power_share = Sourced(power);
             world.get_mut::<EngineRpm>(root).unwrap().0 = rpm;
             for _ in 0..4096 {
                 tick_powered(&mut world, root, servo);
             }
-            let expected = (1000.0 * f32::from(rpm).min(2400.0) * RPM_TO_RAD * quality * share
+            let expected = (1000.0 * f32::from(rpm).min(2400.0) * RPM_TO_RAD * in_action * power
                 / 20.0)
                 .max(1f32.to_radians());
             let state = world.get::<TankServos>(root).unwrap().states[0];
             assert!(
                 (state.velocity - expected).abs() < expected * 0.001,
-                "rpm={rpm}, quality={quality}: {} vs {expected}",
+                "rpm={rpm}, engine share={share}: {} vs {expected}",
                 state.velocity
             );
         }
@@ -756,7 +760,7 @@ mod tests {
     /// in the game's damage model are stale. Presentation must invent no momentum past it.
     #[test]
     fn a_replica_consumes_truth_instead_of_simulating_a_second_drive() {
-        let (mut world, root, servo, _, _) = powered_world(15.0, 1.0);
+        let (mut world, root, servo, _) = powered_world(15.0, 1.0);
         world
             .entity_mut(root)
             .insert(RemoteServos(vec![ServoState::test_new(0.0, 0.0, 0.55)]));
@@ -778,7 +782,7 @@ mod tests {
     /// published-angle presentation must retain the drive law and leave authority state alone.
     #[test]
     fn the_controlled_replica_integrates_its_own_aim() {
-        let (mut world, root, servo, _, _) = powered_world(15.0, 1.0);
+        let (mut world, root, servo, _) = powered_world(15.0, 1.0);
         world
             .entity_mut(root)
             .insert((super::super::model::Controlled, RemoteServos::for_count(1)));
@@ -842,40 +846,6 @@ mod tests {
         }
     }
 
-    /// The game's damage model: steady bearing work is P = Tfriction*ω. Authority consumers
-    /// rely on half engine quality producing half speed, rather than an alive/dead flag.
-    #[test]
-    fn engine_quality_scales_the_power_equilibrium() {
-        let mut speeds = Vec::new();
-        for quality in [1.0, 0.5] {
-            let (mut world, root, servo, _, power) = powered_world(15.0, quality);
-            for _ in 0..2048 {
-                tick_powered(&mut world, root, servo);
-            }
-            let state = world.get::<TankServos>(root).unwrap().states[0];
-            let ServoDrive::Powered {
-                power_share,
-                bearing_friction,
-                ..
-            } = world.get::<ServoSpec>(servo).unwrap().drive
-            else {
-                unreachable!()
-            };
-            let expected = power * power_share.0 * quality / bearing_friction.0;
-            assert!(
-                (state.velocity - expected).abs() < expected * 0.001,
-                "{} vs {expected}",
-                state.velocity
-            );
-            speeds.push(state.velocity);
-        }
-        eprintln!(
-            "MEASURED fixture steady rates: full={} rad/s, half={} rad/s",
-            speeds[0], speeds[1]
-        );
-        assert!((speeds[1] / speeds[0] - 0.5).abs() < 0.001);
-    }
-
     /// Before the power knee, Δω = (Tstall - Tfriction)*dt/I. The mount's startup response
     /// therefore halves when its declared mass doubles at fixed dimensions.
     #[test]
@@ -883,7 +853,7 @@ mod tests {
         // Fixture masses; the independent cuboid derivation uses the fixture dimensions above.
         let mut speeds = Vec::new();
         for mass in [15.0, 30.0] {
-            let (mut world, root, servo, _, _) = powered_world(mass, 1.0);
+            let (mut world, root, servo, _) = powered_world(mass, 1.0);
             let state = tick_powered(&mut world, root, servo);
             let inertia = mass * (2.0 * 2.0 + 2.0 * 2.0) / 12.0;
             let expected = (100.0 - 20.0) / inertia / 64.0;
@@ -905,7 +875,7 @@ mod tests {
             powered_spec(0.01, 100.0, 20.0).drive,
             ServoSpec::test_continuous(ServoRole::Yaw, 1.0).drive,
         ] {
-            let (mut world, root, servo, _, _) = powered_world(15.0, 1.0);
+            let (mut world, root, servo, _) = powered_world(15.0, 1.0);
             // Fixture: Gunner is an absent source and the initial mechanism is moving.
             world.get_mut::<TankServos>(root).unwrap().states[0] =
                 ServoState::test_new(0.0, 0.0, 0.5);

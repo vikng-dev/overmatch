@@ -322,7 +322,7 @@ mod tests {
                 DriveTarget {
                     intent: DriveIntent::Brake,
                     supply: DriveSupply {
-                        engine_condition: 0.0,
+                        engine_in_action: false,
                         transmission_condition: 0.0,
                         ..DriveSupply::WHOLE
                     },
@@ -374,7 +374,7 @@ mod tests {
                     steer: 0.0
                 }),
                 supply: DriveSupply {
-                    engine_condition: 1.0,
+                    engine_in_action: true,
                     transmission_condition: 0.0,
                     ..DriveSupply::WHOLE
                 },
@@ -386,7 +386,7 @@ mod tests {
             DriveTarget {
                 intent: DriveIntent::Brake,
                 supply: DriveSupply {
-                    engine_condition: 1.0,
+                    engine_in_action: true,
                     transmission_condition: 0.0,
                     ..DriveSupply::WHOLE
                 },

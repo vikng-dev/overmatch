@@ -916,7 +916,7 @@ fn drive_supply(
         return DriveSupply {
             control_authority: false,
             task_rate: 0.0,
-            engine_condition: 0.0,
+            engine_in_action: false,
             transmission_condition: 0.0,
         };
     };
@@ -932,7 +932,7 @@ fn supply_from_parts(
     DriveSupply {
         control_authority: caps.drive_controls.permits(staffed),
         task_rate: evaluate(caps.requirement(Capability::Drive), quality),
-        engine_condition: live_quality(quality, crate::damage::Part::Engine),
+        engine_in_action: live_quality(quality, crate::damage::Part::Engine) > 0.0,
         transmission_condition: live_quality(quality, crate::damage::Part::Transmission),
     }
 }
@@ -1681,8 +1681,9 @@ mod tests {
     }
 
     /// The game's damage model: the selector preserves authored control authority, the
-    /// requirement's task rate and each source's own condition. Fixture: ten-point pools,
-    /// native and foreign operators, normalized input axes.
+    /// requirement's task rate and each source's own condition; a reduced engine supplies whole
+    /// and a knocked-out one leaves no task. Fixture: ten-point pools, native and foreign
+    /// operators, normalized input axes.
     #[test]
     fn drive_reads_staffing_task_rate_and_each_sources_condition() {
         use crate::ballistics::ComponentHealth;
@@ -1732,10 +1733,15 @@ mod tests {
                 health.set_held((health.capacity() as f32 * share) as u32);
                 world.spawn((role, health, VolumeOf(tank)));
             }
+            let engine_in_action = engine > 0.0;
             let supply = DriveSupply {
                 control_authority: !out,
-                task_rate: competence.min(engine).min(gearbox),
-                engine_condition: engine,
+                task_rate: if engine_in_action {
+                    competence.min(gearbox)
+                } else {
+                    0.0
+                },
+                engine_in_action,
                 transmission_condition: gearbox,
             };
             let command = ParsedTankCommand::try_from(TankCommand {
@@ -1795,7 +1801,7 @@ mod tests {
             DriveSupply {
                 control_authority: false,
                 task_rate: 0.0,
-                engine_condition: 0.0,
+                engine_in_action: false,
                 transmission_condition: 0.25,
             }
         );
@@ -1833,11 +1839,11 @@ mod tests {
     #[test]
     fn required_groups_coefficients_and_readout_share_one_rate() {
         use crate::damage::{ControlStaffing, CrewStation, GradedGroup, Group, Part};
-        // Fixture: reduced operator and two reduced modules, plus an alternative operator.
+        // Fixture: a reduced operator and a reduced transmission, plus an alternative operator.
         let quality = [
             (Part::Driver, 0.6),
             (Part::Commander, 1.0),
-            (Part::Engine, 0.5),
+            (Part::Engine, 1.0),
             (Part::Transmission, 0.5),
         ]
         .into();
@@ -1859,14 +1865,14 @@ mod tests {
                     Group::Graded(GradedGroup::Pool(members.clone())),
                     Group::Single(Part::Engine),
                 ],
-                0.32,
+                0.44,
             ),
             (
                 vec![
                     Group::Graded(GradedGroup::Backup(members)),
                     Group::Single(Part::Engine),
                 ],
-                0.2,
+                0.24,
             ),
         ] {
             let caps = TankCapabilities::new(
@@ -1875,7 +1881,7 @@ mod tests {
             );
             let supply = supply_from_parts(&caps, &quality, &[CrewStation::Driver].into());
             assert!((supply.task_rate - expected).abs() < 1e-6);
-            assert_eq!(supply.engine_condition, 0.5);
+            assert!(supply.engine_in_action);
             assert_eq!(supply.transmission_condition, 0.5);
             assert!(supply.control_authority);
         }
@@ -1943,7 +1949,7 @@ mod tests {
                     assert_eq!(target.supply.served_task_rate(), 0.0);
                     assert_eq!(target.supply.task_rate, 0.6);
                     assert!(!target.supply.control_authority);
-                    assert_eq!(target.supply.engine_condition, 0.5);
+                    assert!(target.supply.engine_in_action);
                 },
             )
             .unwrap();
@@ -2164,29 +2170,29 @@ mod tests {
         );
     }
 
-    /// The game's damage model: engine braking is a loss of the engine's construction, so a
-    /// half engine pool must not coast down a released descent faster than a whole one. Scaling
-    /// motoring drag with the pool fails. Fixture: a 10 degree along-track gravity share.
+    /// The game's damage model: an engine delivers whole power while its HP pool holds anything
+    /// (provisional, playtest fork F20), so a reduced engine drives bit for bit as a whole one,
+    /// pulling away under full pedal and engine braking down a released descent. Scaling
+    /// combustion or drag with the pool fails. Fixture: one HP held of the 336 HP pool, and a
+    /// 10 degree along-track gravity share.
     #[test]
-    fn a_reduced_engine_keeps_its_engine_braking_on_a_descent() {
-        let speeds = [DrivenHull::POOL, DrivenHull::POOL / 2].map(|held| {
+    fn a_reduced_engine_drives_exactly_as_a_whole_one() {
+        let runs = [DrivenHull::POOL, 1].map(|held| {
             let mut hull = DrivenHull::new();
-            hull.drive_to(5.0);
             hull.engine_held(held);
-            let grade = hull.mass * 9.81 * 10.0_f32.to_radians().sin();
+            let mut trace = Vec::new();
+            for _ in 0..64 * 5 {
+                hull.tick(1.0, 0.0);
+                trace.push((hull.speed.to_bits(), hull.rpm().to_bits()));
+            }
+            let grade = hull.mass * super::super::derive::G * 10.0_f32.to_radians().sin();
             for _ in 0..64 * 10 {
                 hull.tick(0.0, grade);
+                trace.push((hull.speed.to_bits(), hull.rpm().to_bits()));
             }
-            hull.speed
+            trace
         });
-        println!(
-            "MEASURED 10 degree descent released 10 s: whole engine {} m/s, half engine {} m/s",
-            speeds[0], speeds[1]
-        );
-        assert!(
-            speeds[1] <= speeds[0] * 1.001,
-            "half engine coasts faster: {speeds:?}"
-        );
+        assert!(runs[0] == runs[1], "a reduced engine drives differently");
     }
 
     /// The game's damage model: construction friction remains when combustion is absent.
@@ -2274,16 +2280,10 @@ mod tests {
         assert!(hull.speed > slowest, "a recovered engine pulls away again");
     }
 
-    /// The game's damage model: free-hull measurements distinguish propulsion from belt slip,
-    /// and nobody at the Driver station can set the park lever at a grade's turning point.
+    /// The game's damage model: with no one at the Driver station, a free hull coasting up a
+    /// grade turns and rolls back, and nobody can set the park lever at its turning point.
     #[test]
-    fn free_hull_measurements() {
-        let mut reduced = DrivenHull::new();
-        reduced.engine_held(30); // Fixture HP held of the fixture 336 HP pool.
-        for _ in 0..64 * 5 {
-            reduced.tick(1.0, 0.0);
-        }
-        println!("MEASURED 30/336 engine W after 5 s: {} m/s", reduced.speed);
+    fn an_unmanned_hull_rolls_back_off_a_grade_without_the_park_lever() {
         let mut grade = DrivenHull::new();
         grade.drive_to(5.0);
         grade
@@ -2310,10 +2310,6 @@ mod tests {
         );
         assert!(!parked, "nobody at the station can set the park lever");
         assert!(turned, "the free hull must roll back after coasting uphill");
-        assert!(
-            reduced.speed > 0.0,
-            "a positive full-pedal combustion supply pulls away"
-        );
     }
 
     /// The game's damage model: zero combustion and zero stored crank energy cannot power
@@ -2459,7 +2455,7 @@ mod tests {
                     let (volumes, caps) = tanks.get(root).unwrap();
                     let supply = drive_supply(Some(volumes), Some(caps), &facets);
                     assert!(supply.control_authority);
-                    assert_eq!(supply.engine_condition, 0.0);
+                    assert!(!supply.engine_in_action);
                     assert_eq!(supply.task_rate, 0.0);
                 },
             )
