@@ -676,12 +676,12 @@ fn insert_weapons(
 ///
 /// A witness node (ADR-0040) carries `WitnessVolume` instead of `BallisticVolume`, and its
 /// primitives are its set's crew box parts: no walk reads them; the witness pass does. It is never
-/// split — L2.WITNESS_ROLE certifies a witness node one substance and crew.
+/// split — L2.WITNESS_ROLE certifies a witness node crew, and L2.COMPONENT_SUBSTANCE certifies a
+/// crew volume one substance.
 ///
 /// The cost is that a mixed node cannot address damage: `hp` lives on the node, the deposits name
-/// the shard. That is REFUSED here rather than silently dropped. Lifting it means keying the walk's
-/// factor table per primitive instead of per volume — a §13 core change, deliberately not smuggled
-/// into this slice.
+/// the shard. L2.COMPONENT_SUBSTANCE refuses such an asset at admission. Lifting it means keying the walk's
+/// factor table per primitive instead of per volume — a §13 core change.
 ///
 /// Returns each primitive's armour set part ([`armour_set`]): its entity, its node's index, its
 /// shape and surfaces, and its role, the volume it belongs to.
@@ -707,13 +707,12 @@ fn insert_ballistic_volumes(
         let external = matches!(facets, Some(VolumeSpec::External));
         assert!(
             !(split && component.is_some()),
-            "volume `{name}` is authored from {} substances AND declares component facets — the \
-             facets sit on the node while each substance is its own volume, so its HP would never \
-             be deposited to. Author it as one substance, or split the object",
+            "L2.COMPONENT_SUBSTANCE certified component volume `{name}` one substance, yet it \
+             wears {}",
             groups.len()
         );
 
-        {
+        let witness = {
             let mut entity = commands.entity(entity);
             entity.insert(VolumeOf(root));
             if let Some(volume) = component {
@@ -761,23 +760,19 @@ fn insert_ballistic_volumes(
                             },
                             substance: (*substance).to_owned(),
                         });
+                        false
                     }
                     Matter::Witness => {
                         entity.insert(WitnessVolume {
                             substance: (*substance).to_owned(),
                         });
+                        true
                     }
                 }
+            } else {
+                false
             }
-        }
-        // L2.WITNESS_ROLE certified a witness node single-substance and crew, so `split` is hard.
-        let witness = !split
-            && groups.values().next().is_some_and(|primitives| {
-                primitives[0]
-                    .substance
-                    .as_ref()
-                    .is_some_and(|resolved| resolved.matter == Matter::Witness)
-            });
+        };
 
         for (substance, primitives) in &groups {
             for primitive in primitives {
@@ -835,7 +830,10 @@ fn insert_ballistic_volumes(
                                     debris_ratio,
                                 } = resolved.matter
                                 else {
-                                    unreachable!("L2.WITNESS_ROLE: a witness node is one substance")
+                                    unreachable!(
+                                        "L2.WITNESS_ROLE and L2.COMPONENT_SUBSTANCE: a witness \
+                                         node is one substance"
+                                    )
                                 };
                                 VolumeMaterial {
                                     substance: resolved.id,

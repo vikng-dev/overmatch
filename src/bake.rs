@@ -57,6 +57,13 @@ static L2_WITNESS_ROLE: Check = Check {
     law: "a volume declared crew wears only witness substances, and a witness substance is worn \
           only by a volume declared crew (ADR-0040)",
 };
+static L2_COMPONENT_SUBSTANCE: Check = Check {
+    id: "L2.COMPONENT_SUBSTANCE",
+    stage: Stage::Consumer,
+    severity: Severity::Error,
+    law: "a volume declared a component wears one substance: its HP pool sits on the node, and a \
+          node of several substances spawns each substance as its own volume",
+};
 static L2_PRIMITIVE_FORM: Check = Check {
     id: "L2.PRIMITIVE_FORM",
     stage: Stage::Consumer,
@@ -1287,6 +1294,7 @@ fn capture_tank_geometry(
     findings.extend(aim_chain_contract(path, &geometry, spec));
     findings.extend(collider_substances(spec, registry));
     findings.extend(witness_roles(&geometry, spec));
+    findings.extend(component_substances(&geometry, spec));
     if report::has_error(&findings) {
         return Err(sorted(findings));
     }
@@ -1529,6 +1537,33 @@ fn witness_roles(geometry: &TankGeometry, spec: &TankSpec) -> Vec<Finding> {
         }
     }
     findings
+}
+
+/// `L2.COMPONENT_SUBSTANCE`, by node.
+fn component_substances(geometry: &TankGeometry, spec: &TankSpec) -> Vec<Finding> {
+    geometry
+        .ballistic_volumes
+        .iter()
+        .map(|&index| &geometry.nodes[index])
+        .filter(|node| {
+            spec.volumes
+                .get(&node.name)
+                .and_then(|volume| volume.component())
+                .is_some()
+        })
+        .filter_map(|node| {
+            let substances: Vec<&str> = node.substance_groups().into_keys().collect();
+            (substances.len() > 1).then(|| {
+                Finding::new(
+                    &L2_COMPONENT_SUBSTANCE,
+                    Subject::node(&node.name),
+                    format!("declared a component and wearing substances {substances:?}"),
+                    "author the volume in one substance, or split the object so each substance \
+                     is its own node and declare the component on one of them",
+                )
+            })
+        })
+        .collect()
 }
 
 /// Resolve typed references (`L2.SPEC`), check their roles (`L2.ROLE_COHERENCE`) and require unit
@@ -2061,6 +2096,16 @@ mod tests {
         )
     }
 
+    /// [`sound_vehicle`]'s road-wheel stations, one per side.
+    const STATIONS: [(&str, &str); 2] = [("Station_L", "Left"), ("Station_R", "Right")];
+
+    /// [`sound_vehicle`]'s nodes and one more.
+    fn sound_vehicle_with(extra: Node) -> Vec<Node> {
+        let (mut nodes, _) = sound_vehicle();
+        nodes.push(extra);
+        nodes
+    }
+
     /// A vehicle that certifies: a hull, a plate, a collision proxy, and one station per side.
     fn sound_vehicle() -> (Vec<Node>, String) {
         let nodes = vec![
@@ -2093,7 +2138,7 @@ mod tests {
         ];
         let spec = fixture::spec(
             &["Proxy"],
-            &[("Station_L", "Left"), ("Station_R", "Right")],
+            &STATIONS,
             &[],
             &["Plate", "Station_L", "Station_R"],
         );
@@ -2546,7 +2591,7 @@ mod tests {
         // pass prints as the line to go to, and a role does not determine one.
         let declared = fixture::spec_with(
             &["Proxy"],
-            &[("Station_L", "Left"), ("Station_R", "Right")],
+            &STATIONS,
             &["Plate"],
             &[],
             r#"servos: {"Turret_Yaw": (role: Yaw, drive: Hand(hand_rate: (1.0, Fixture("fixture hand rate"))), travel: Continuous,
@@ -2655,12 +2700,7 @@ mod tests {
             base,
             "a renamed node reference is read by the build"
         );
-        let invalid = fixture::spec(
-            &[],
-            &[("Station_L", "Left"), ("Station_R", "Right")],
-            &[],
-            &[],
-        );
+        let invalid = fixture::spec(&[], &STATIONS, &[], &[]);
         let document: serde_json::Value =
             serde_json::from_str(&canon("projection-invalid", &invalid)).expect("one document");
         assert_eq!(document["spec_validates"], serde_json::json!(false));
@@ -2811,7 +2851,7 @@ mod tests {
         let (nodes, _) = sound_vehicle();
         let facets = fixture::spec(
             &["Proxy"],
-            &[("Station_L", "Left"), ("Station_R", "Right")],
+            &STATIONS,
             &["Proxy"],
             &["Station_L", "Station_R"],
         );
@@ -2840,53 +2880,110 @@ mod tests {
                 .child_of("Hull")
                 .holding(solid(material, [0.0, 3.0, 0.0]))
         };
-        let wheels = [("Station_L", "Left"), ("Station_R", "Right")];
         let declared = |entry: &str| {
-            fixture::spec(&["Proxy"], &wheels, &[], &["Station_L", "Station_R"]).replacen(
+            fixture::spec(&["Proxy"], &STATIONS, &[], &["Station_L", "Station_R"]).replacen(
                 "volumes: {",
                 &format!("volumes: {{\"Seat\": {entry}, "),
                 1,
             )
         };
         let crew = declared("(crew: Driver)");
-        let with = |extra: Node| {
-            let (mut nodes, _) = sound_vehicle();
-            nodes.push(extra);
-            nodes
-        };
 
-        let findings = verify("witness-crew", &with(seat(witness)), &crew);
+        let findings = verify("witness-crew", &sound_vehicle_with(seat(witness)), &crew);
         assert!(findings.is_empty(), "{}", render(&findings));
 
+        let witness_role = ["L2.WITNESS_ROLE"].as_slice();
         let cases = [
-            ("hard-crew", seat(SUBSTANCE), crew.clone()),
+            ("hard-crew", seat(SUBSTANCE), crew.clone(), witness_role),
             (
                 "mixed-crew",
                 seat(witness).holding(solid(SUBSTANCE, [0.0, 3.0, 0.0])),
                 crew,
+                // A crew box of two substances is also a component of two.
+                ["L2.COMPONENT_SUBSTANCE", "L2.WITNESS_ROLE"].as_slice(),
             ),
-            ("witness-module", seat(witness), declared("(hp: 10)")),
+            (
+                "witness-module",
+                seat(witness),
+                declared("(hp: 10)"),
+                witness_role,
+            ),
             (
                 "witness-plate",
                 seat(witness),
                 fixture::spec(
                     &["Proxy"],
-                    &wheels,
+                    &STATIONS,
                     &[],
                     &["Station_L", "Station_R", "Seat"],
                 ),
+                witness_role,
             ),
         ];
-        for (id, node, spec) in cases {
-            let findings = verify(id, &with(node), &spec);
-            assert_eq!(
-                refusals(&findings),
-                ["L2.WITNESS_ROLE"],
-                "{id}: {}",
-                render(&findings)
+        for (id, node, spec, refused) in cases {
+            let findings = verify(id, &sound_vehicle_with(node), &spec);
+            assert_eq!(refusals(&findings), refused, "{id}: {}", render(&findings));
+            assert!(
+                findings
+                    .iter()
+                    .all(|finding| finding.subject.name == "Seat"),
+                "{id}"
             );
-            assert_eq!(findings[0].subject.name, "Seat", "{id}");
         }
+    }
+
+    /// L2.COMPONENT_SUBSTANCE — the game's damage model: a module node of two substances is
+    /// refused by node; the same module in one substance certifies, and so does the two-substance
+    /// node declared plain armour (the road wheels' construction).
+    #[test]
+    fn a_component_of_several_substances_is_refused() {
+        let registry = SubstanceRegistry::shipped();
+        let other = registry
+            .keys()
+            .into_iter()
+            .find(|name| {
+                *name != SUBSTANCE
+                    && matches!(
+                        registry.get(name),
+                        Ok(crate::substances::Substance::Hard(_))
+                    )
+            })
+            .expect("the shipped registry declares a second hard substance");
+        let block = || {
+            Node::new("Block")
+                .child_of("Hull")
+                .holding(solid(SUBSTANCE, [0.0, 3.0, 0.0]))
+        };
+        let mixed = || block().holding(solid(other, [0.0, 5.0, 0.0]));
+        let module = fixture::spec(
+            &["Proxy"],
+            &STATIONS,
+            &["Block"],
+            &["Station_L", "Station_R"],
+        );
+        let plate = fixture::spec(
+            &["Proxy"],
+            &STATIONS,
+            &[],
+            &["Station_L", "Station_R", "Block"],
+        );
+
+        for (id, node, spec) in [
+            ("one-substance-module", block(), &module),
+            ("mixed-plate", mixed(), &plate),
+        ] {
+            let findings = verify(id, &sound_vehicle_with(node), spec);
+            assert!(findings.is_empty(), "{id}: {}", render(&findings));
+        }
+
+        let findings = verify("mixed-module", &sound_vehicle_with(mixed()), &module);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.COMPONENT_SUBSTANCE"],
+            "{}",
+            render(&findings)
+        );
+        assert_eq!(findings[0].subject.name, "Block");
     }
 
     /// L2.ROLE_COHERENCE — a primitive wearing an unworn substance's key (the shipped burst core)
