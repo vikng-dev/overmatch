@@ -1951,9 +1951,12 @@ mod tests {
 
     /// The game's damage model: a fixture hull driven through the production adapter, with
     /// its longitudinal speed integrated from the adapter's own traction at the vehicle mass the
-    /// grip law carries (DERIVED: twice its side weight over g). Drive requires
-    /// `[Driver, Engine, Transmission]`; the 336 HP pools and the along-track `grade` force are
-    /// fixture data, never an asset pass condition.
+    /// grip law carries (DERIVED: twice its side weight over g). The adapter lands each belt
+    /// against its own prediction of the body's motion, so the body is that hull: it carries
+    /// that mass, stands at the rig's rest height where the belts carry its weight, and feels
+    /// the grade through the world's gravity. Drive requires `[Driver, Engine, Transmission]`;
+    /// the 336 HP pools and the along-track `grade` force are fixture data, never an asset pass
+    /// condition.
     struct DrivenHull {
         app: App,
         root: Entity,
@@ -1970,8 +1973,29 @@ mod tests {
         fn new() -> Self {
             use crate::ballistics::ComponentHealth;
             use crate::damage::{CrewStation, Crewman, FunctionRole, Group, Part, VolumeOf};
-            let (mut app, roots) = support_fixture(false, false, true, 0.0);
-            let root = roots[0];
+            use avian3d::prelude::{Gravity, Mass, Sensor};
+            let (mut app, _) = adapter_app();
+            let grip = app
+                .world()
+                .resource::<TrackGear>()
+                .params
+                .grip
+                .expect("the shipped running gear carries a grip law");
+            let mass = 2.0 * grip.side_weight / super::super::derive::G;
+            let rest = app
+                .world()
+                .resource::<super::super::rig_geom::RigGeom>()
+                .hull_rest_y;
+            let root = fixture_tank(&mut app, Vec3::Y * rest);
+            app.world_mut()
+                .entity_mut(root)
+                .insert((Sensor, Mass(mass)));
+            // Let Avian publish body state and spatial bounds; the driving adapter is not scheduled.
+            app.update();
+            app.update();
+            // Only the adapter runs from here, so the weight never moves the held body.
+            app.insert_resource(Gravity(Vec3::NEG_Y * super::super::derive::G));
+            run_adapter(&mut app, &[(root, Vec3::ZERO)]);
             app.world_mut()
                 .entity_mut(root)
                 .insert(TankCapabilities::new(
@@ -2011,13 +2035,6 @@ mod tests {
                 ComponentHealth::full(Self::POOL),
                 VolumeOf(root),
             ));
-            let grip = app
-                .world()
-                .resource::<TrackGear>()
-                .params
-                .grip
-                .expect("the shipped running gear carries a grip law");
-            let mass = 2.0 * grip.side_weight / super::super::derive::G;
             Self {
                 app,
                 root,
@@ -2047,9 +2064,15 @@ mod tests {
                 / super::super::transmission::RPM_TO_RAD
         }
 
-        /// One adapter tick under `throttle`, plus a forward along-track `grade` force (N).
+        /// One adapter tick under `throttle`, plus a forward along-track `grade` force (N), the
+        /// weight's along-track share.
         fn tick(&mut self, throttle: f32, grade: f32) {
             use crate::command::TankCommand;
+            self.app
+                .world_mut()
+                .resource_mut::<avian3d::prelude::Gravity>()
+                .0
+                .z = -grade / self.mass;
             self.app.world_mut().entity_mut(self.root).insert(
                 ParsedTankCommand::try_from(TankCommand {
                     throttle,
