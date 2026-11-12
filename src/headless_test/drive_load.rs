@@ -249,6 +249,111 @@ impl Measurements {
     }
 }
 
+/// Every paid cut of one drive, held to the rules its construction states (architecture §5a): a
+/// cut opens the clutch for exactly one shift's ticks, a full window of drive separates it from the
+/// last, and it lands the gear its clause names. A stall steps to the lowest gear within
+/// `max_step`; any other cut lands a gear whose pull, priced at full pedal where the cut lands and
+/// capped by grip, beats the resistance it read by M, and an upshift's beats the engaged gear's
+/// drive by M as well. This is the chooser's own test less its reflected crank inertia, which only
+/// lowers a gear's spare, so it holds of every pull the chooser accepts. How many cuts a drive
+/// pays is an observation.
+#[derive(Default)]
+struct Cuts {
+    count: usize,
+    /// Ticks into the cut in flight, zero between cuts.
+    open: usize,
+    /// Driven ticks since the last cut closed; `None` before the first.
+    since: Option<usize>,
+    gear: u8,
+}
+
+impl Cuts {
+    fn tick(&mut self, app: &App, tank: Entity) {
+        use crate::track::transmission::ClutchState;
+        let gear = app.world().resource::<crate::track::sim::TrackGear>();
+        let tp = gear.trans();
+        let window = usize::from(tp.shift_ticks.get());
+        let p = probe(app, tank);
+        let state = app.world().get::<TankTransmission>(tank).unwrap().0;
+        if !p.shifting {
+            if self.open > 0 {
+                assert_eq!(self.open, window, "a cut lasts one shift");
+                self.open = 0;
+                self.since = Some(0);
+            }
+            if let Some(since) = &mut self.since {
+                *since += 1;
+            }
+            self.gear = state.gear;
+            return;
+        }
+        assert!(!p.engaged, "a cut opens the clutch");
+        self.open += 1;
+        if self.open > 1 {
+            return;
+        }
+        self.count += 1;
+        if let Some(since) = self.since {
+            assert!(
+                since >= window,
+                "a full window of drive separates two cuts: {since} of {window} ticks"
+            );
+        }
+        let (old, new) = (self.gear, state.gear);
+        let reading = app
+            .world()
+            .get::<crate::track::sense::DriverSense>(tank)
+            .unwrap()
+            .reading
+            .expect("a cut is chosen on a reading");
+        let dir = if state.reverse { -1.0 } else { 1.0 };
+        let stall = reading.stall.filter(|stall| stall.dir == dir);
+        if stall.is_some() && reading.stalled {
+            assert_eq!(
+                new,
+                old.saturating_sub(tp.max_step).max(1),
+                "a stall steps to the lowest gear in reach"
+            );
+            return;
+        }
+        assert_ne!(new, old, "a cut within one ladder pays for a gear change");
+        let resistance = stall.map_or(dir * reading.resistance, |stall| {
+            (dir * reading.resistance).max(stall.push)
+        });
+        let landing = ((dir * reading.speed).max(0.0)
+            - resistance * f32::from(tp.shift_ticks.get())
+                / FIXED_TICKS_PER_SECOND as f32
+                / gear.landing_mass())
+        .max(0.0);
+        let ladder = if state.reverse {
+            &tp.gears_rev
+        } else {
+            &tp.gears_fwd
+        };
+        let ratio = ladder[usize::from(new - 1)];
+        // A clutch closing from out slips below the pedal's launch speed.
+        let clutch = if landing * ratio / tp.sprocket_radius < tp.launch_omega(1.0) {
+            ClutchState::Slip
+        } else {
+            ClutchState::In
+        };
+        let pull = price_driver_force(tp, DriveSupply::WHOLE, landing, ratio, 1.0, clutch)
+            .min(reading.grip);
+        let margin = crate::track::transmission::DriverResolution::load().margin_n(tp);
+        assert!(
+            pull - resistance > margin,
+            "gear {old} to {new}: the landing gear holds, pulling {pull} N against {resistance} N"
+        );
+        if new > old {
+            assert!(
+                pull > dir * reading.drive + margin,
+                "gear {old} to {new}: an upshift pulls {pull} N past the engaged drive {} N",
+                reading.drive
+            );
+        }
+    }
+}
+
 fn probe(app: &App, tank: Entity) -> TransmissionProbe {
     app.world()
         .get::<TrackGripEffect>(tank)
@@ -402,7 +507,8 @@ fn sensed_resistance_and_landing_gaps_on_declared_grounds() {
 
 /// The ledger closes on an incline: a rolling hull feels `W sin θ + c_rr W cos θ` along its
 /// heading whether it gains or loses speed, the gear law's one reading of the world. Parked, the contact law's
-/// rolling fade leaves the grade alone. Fixture: uninterrupted 10 and 20 degree ramp planes and a
+/// rolling fade leaves the grade alone. Each cut the launch and the rolling entry pay keeps its
+/// construction's rules ([`Cuts`]). Fixture: uninterrupted 10 and 20 degree ramp planes and a
 /// third at nine tenths of the base ground's launch limit, parked then a rolling entry; a launch
 /// owes progress only on a grade its ground and drivetrain can carry. Extending the faces isolates
 /// their support from the flat slab and short course crests.
@@ -496,8 +602,7 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
         );
         let mut launch_gear = 0;
         let mut slip_ticks = 0;
-        let mut cuts = 0;
-        let mut was_cut = false;
+        let mut cuts = Cuts::default();
         let mut minimum = 0.0_f32;
         let (mut launch_coupled, mut launch_cut) = (Vec::new(), Vec::new());
         for tick in 0..30 * FIXED_TICKS_PER_SECOND {
@@ -516,12 +621,11 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
                     launch_coupled.push(p.sensed_resistance_n);
                 }
             }
-            cuts += usize::from(p.shifting && !was_cut);
+            cuts.tick(&app, tank);
             slip_ticks += usize::from(
                 app.world().get::<TankTransmission>(tank).unwrap().0.clutch
                     == crate::track::transmission::ClutchState::Slip,
             );
-            was_cut = p.shifting;
             minimum = minimum.min(p.next_speeds[0]).min(p.next_speeds[1]);
             if degrees == 20.0 && capable {
                 // Fixture: S2's specified class witness.
@@ -544,7 +648,8 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
             - launch_position)
             .dot(rotation * Vec3::NEG_Z);
         println!(
-            "MEASURED grade launch degrees={degrees} gear={launch_gear} distance_m={climb} cuts={cuts} slip_s={} minimum_belt_m_s={minimum}; DERIVED pull_n={pull} capable={capable}",
+            "MEASURED grade launch degrees={degrees} gear={launch_gear} distance_m={climb} cuts={} slip_s={} minimum_belt_m_s={minimum}; DERIVED pull_n={pull} capable={capable}",
+            cuts.count,
             slip_ticks as f32 / FIXED_TICKS_PER_SECOND as f32
         );
         println!(
@@ -553,9 +658,6 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
             summary(&launch_cut)
         );
         if capable {
-            if degrees == 20.0 {
-                assert!(cuts <= 1, "S2 must not cascade through cuts");
-            }
             assert!(
                 climb > 0.0,
                 "a supported capable launch must gain distance uphill"
@@ -581,9 +683,11 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
         // DERIVED, grade and support together give `W sin θ cos δ` there and rolling `cos δ` of it.
         let uphill = rotation * Vec3::NEG_Z;
         let mut rolling_entry = Vec::new();
+        let mut entry_cuts = Cuts::default();
         for _ in 0..512 {
             drive_tick(&mut app, tank, 1.0, 0.0);
             measurements.tick(&app, tank);
+            entry_cuts.tick(&app, tank);
             let p = probe(&app, tank);
             if p.sensed && !p.shifting {
                 let heading = app
@@ -602,7 +706,8 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
         // from an open one, whatever the ride's ripple.
         let allowance = 0.5 * weight * angle.sin().min(rolling * angle.cos());
         println!(
-            "MEASURED rolling entry {degrees} degrees: median_offset_n={median}, allowance_n={allowance}"
+            "MEASURED rolling entry {degrees} degrees: median_offset_n={median}, allowance_n={allowance} cuts={}",
+            entry_cuts.count
         );
         assert!(
             median.abs() < allowance,

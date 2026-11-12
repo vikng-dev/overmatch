@@ -467,24 +467,6 @@ impl TransmissionParams {
             peak_torque_nm,
         };
         derived.peak_torque_rpm = derived.delivered_peak_rpm();
-        // The Driver reads falling revs below the peak as a gear that cannot recover
-        // (`choose_gear`), so below the peak torque may not fall as revs rise. A span's torque is
-        // quadratic in rpm: its slope is checked at its start, and at its end when that lies below
-        // the peak.
-        let peak = f64::from(derived.peak_torque_rpm);
-        if derived.torque_spans().iter().any(|span| {
-            let [_, rise, bend] = span.torque;
-            let end = span.start_rpm + span.width_rpm;
-            span.start_rpm < peak
-                && (rise < 0.0 || (end < peak && rise + 2.0 * bend * span.width_rpm < 0.0))
-        }) {
-            return Err(
-                "track.powertrain.transmission: invalid engine.torque_curve: author torque that \
-                 never falls from the curve's first point to its peak, so a crank slowing below \
-                 the peak never gains torque"
-                    .into(),
-            );
-        }
         derived.check_derived(a.belt_inertia)?;
         Ok(derived)
     }
@@ -1000,6 +982,32 @@ fn engine_torques(
     [induced, (catch - induced).max(0.0), drag]
 }
 
+/// Resolution: the crank-speed step (rpm) over which [`slowing_gains_torque`] reads the net
+/// torque's slope. The secant reads the branch the crank is on except within one rpm of a knot of
+/// the curve, the governor's cut or the idle catch; a branch rising by more than about a millionth
+/// of the torques' magnitude per rpm clears the roundoff bound (DERIVED, 8 f32 epsilons).
+const SLOPE_STEP_RPM: f32 = 1.0;
+
+/// Falling revs raise the crank's net torque at pedal `command`: the fuel and catch less drag
+/// [`engine_torques`] gives one [`SLOPE_STEP_RPM`] below `omega` exceeds what it gives at `omega`.
+/// On such a branch a slowing crank gains torque toward the next local maximum below it; where the
+/// net falls or holds as revs fall, it does not.
+fn slowing_gains_torque(
+    tp: &TransmissionParams,
+    supply: DriveSupply,
+    omega: f32,
+    command: f32,
+) -> bool {
+    let net = |omega: f32| {
+        let [fuel, catch, drag] = engine_torques(tp, supply, omega, command);
+        (fuel + catch - drag, fuel + catch + drag.abs())
+    };
+    let (here, here_scale) = net(omega);
+    let (below, below_scale) = net(omega - SLOPE_STEP_RPM * RPM_TO_RAD);
+    // Resolution: each net carries a few f32 roundings of its terms, so a flat net reads flat.
+    below - here > 4.0 * f32::EPSILON * (here_scale + below_scale)
+}
+
 /// The game's driving and damage model: the Driver's idle catch is work by the Drive task,
 /// consuming the served task throughput, like commanded fueling.
 fn idle_catch_capacity(tp: &TransmissionParams, supply: DriveSupply) -> f32 {
@@ -1177,8 +1185,9 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 ///    current gear nor at or above the stall's gear; else first where it
 ///    offers more spare than the current gear. Free.
 /// 2. The hull stalls now ([`super::sense::Sensed::stalled`]): the lowest gear within
-///    `max_step`. A held window losing more than M with the crank below its peak-torque speed: the
-///    highest lower gear within `max_step` that holds where it lands, else none.
+///    `max_step`. A held window losing more than M where falling revs do not raise the crank's net
+///    torque at the pedal ([`slowing_gains_torque`]): the highest lower gear within `max_step` that
+///    holds where it lands, else none.
 /// 3. Straight, clutch in, a held window and the hull moving where the cut lands: of the higher
 ///    gears within `max_step` that hold where they land and pull there more than
 ///    the engaged gear's drive by M, the one that pulls hardest, the higher on a tie.
@@ -1252,12 +1261,11 @@ fn choose_gear(
     let landing = (speed
         - resistance * f32::from(tp.shift_ticks.get()) / TICK_HZ / coupled_mass(fp))
     .max(0.0);
-    // Admission refuses a curve whose torque falls anywhere below its peak
-    // (`TransmissionParams::from_authoring`), so below the crank's peak-torque speed falling revs
-    // never raise the torque and the gear does not recover. Above it the gear is kept: falling revs
-    // may raise the torque until it holds, and a crank that slows past the peak meets this clause.
-    let lugging = st.omega_e < tp.peak_torque_rpm * RPM_TO_RAD;
-    let slowing = sensed.observed && lugging && dir * sensed.drive_gain < -margin;
+    // A gear whose falling revs raise the crank's torque is kept: it may recover where it holds,
+    // and a crank that slows past the next local maximum meets this clause there.
+    let slowing = sensed.observed
+        && dir * sensed.drive_gain < -margin
+        && !slowing_gains_torque(tp, inp.supply, st.omega_e, command);
     let chosen = if stall.is_some() && sensed.stalled {
         // A stall bounds what the hull meets from below only: the lowest gear in reach pulls most.
         Some(st.gear.saturating_sub(tp.max_step).max(1)).filter(|&gear| gear < st.gear)

@@ -562,12 +562,13 @@ state, none from a timer or a band:
   rest or did not gain. The window establishes it, not each tick (MEASURED on the rubble battery:
   a test of every tick fired no stall step on the heap rams and tripled the stalled ticks). Belts
   that start gaining under a hull still at rest keep the bound and step nothing down.
-- *Falling revs fail a gear only below its torque peak.* Admission refuses a torque curve that
-  falls anywhere below its peak, so below the crank's peak-torque speed a slowing crank never gains
-  torque and the gear does not recover. Above it the gear is kept, and where falling revs raise the
-  torque it settles where it holds (MEASURED on a 20° grade: fourth settled at 1.93 m/s with its
-  drivetrain reading −4 N; stepping down cost a metre per second in the cut, and third settled
-  slower).
+- *Falling revs fail a gear only where they lower its torque.* The crank's net torque at the
+  requested pedal (fuel and the idle catch less drag, as the crank receives them) decides, on any
+  curve the data authors: where it rises as revs fall, toward the next local maximum below the
+  crank, the gear is kept and settles where it holds (MEASURED on a 20° grade: fourth settled at
+  1.93 m/s with its drivetrain reading −4 N; stepping down cost a metre per second in the cut, and
+  third settled slower); where it falls or holds flat as revs fall, a slowing crank gains nothing and
+  the gear does not recover.
 - *The Driver keeps no failure memory.* Each clause chooses from the current window alone, so a
   gear just left is chosen again wherever its forecast clears, and may fail there again. The cause
   is open: the price and the sensed resistance sit on different sides of the belt, so a gear can
@@ -594,9 +595,9 @@ difference, exceeds M. The clauses:
    current gear nor at or above one that failed there; else
    first where it offers more spare than the current gear. Free.
 2. The hull stalls now under the gear's drive: the lowest gear within `max_step`. Or
-   the drivetrain loses more than M over a held window with the crank below its peak-torque
-   speed: the highest lower gear within `max_step` that holds where it lands; with none the gear
-   stays.
+   the drivetrain loses more than M over a held window where falling revs do not raise the
+   crank's net torque: the highest lower gear within `max_step` that holds where it lands; with
+   none the gear stays.
 3. Straight, the clutch in, a held window and the hull moving where the cut lands: of the higher
    gears within `max_step`, those that hold where they land and pull there more
    than the engaged gear's drive by M, the one that pulls hardest, the higher on a tie. Gears
