@@ -71,9 +71,10 @@ use crate::view::PlayerView;
 
 use stamp::ClearanceStamp;
 use stamper::{ShoeKey, ShoeMemory};
+pub(crate) use store::CLEARANCE_SPAN_M;
 use store::{
-    CLEARANCE_UNIT_M, KPA_PER_UNIT, NEAR_SIDE, NEAR_SPAN_M, NEAR_TEXEL_M, PrintLaw, PrintStores,
-    StampEntry, Store, WORLD_SIDE,
+    KPA_PER_UNIT, NEAR_SIDE, NEAR_SPAN_M, NEAR_TEXEL_M, PrintLaw, PrintStores, StampEntry, Store,
+    WORLD_SIDE,
 };
 use upload::{PrintWrites, TileWrite};
 
@@ -236,6 +237,18 @@ impl PrintDepths {
         let stored = (kpa / KPA_PER_UNIT).round().clamp(1.0, 255.0) * KPA_PER_UNIT;
         crate::terrain_blend::sinkage_m(&self.params, self.ground_weights(xz), stored)
     }
+
+    /// The depth (m) near-store texel `texel` prints at global near texel `at`: the shader's
+    /// decode on that texel's ground, from the lanes the material last received
+    /// ([`store::TexelDepth`]).
+    pub(crate) fn texel_depth_m(&self, at: IVec2, [reach, bearing]: [u8; 2]) -> f32 {
+        crate::terrain_blend::print_depth_m(
+            &self.params,
+            self.ground_weights((at.as_vec2() + 0.5) * NEAR_TEXEL_M),
+            f32::from(bearing) / 255.0 * self.params.print_law.x,
+            (1.0 - f32::from(reach) / 255.0) * self.params.print_store.x,
+        )
+    }
 }
 
 /// A dev capture's override of the player's relief setting ([`demo`]); absent in play.
@@ -331,7 +344,7 @@ pub(crate) fn law_params() -> Vec4 {
 /// The material's `print_store` lane: `x` the clearance over a sole (m) an empty R channel stands
 /// for.
 pub(crate) fn store_params() -> Vec4 {
-    Vec4::new(255.0 * CLEARANCE_UNIT_M, 0.0, 0.0, 0.0)
+    Vec4::new(CLEARANCE_SPAN_M, 0.0, 0.0, 0.0)
 }
 
 /// The material's `print_relief` lane for the player's `relief` and `range`: `x` the level, `y`
@@ -448,11 +461,16 @@ fn snapped(previous: Affine3A, now: Affine3A) -> bool {
 /// tank's pose, or the ground, template or rig. With none moved its shoes' contacts are the ones
 /// already observed, and observing a contact again changes no memory and stamps nothing
 /// ([`stamper::ShoeMemory::observe`]), so a settled tank's belts are skipped whole.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the one stamping system: the stores, the ground, the template, the rig, the depth a texel prints, tanks, belts and its scratch"
+)]
 fn stamp_shoes(
     mut prints: ResMut<TrackPrints>,
     grid: Res<HeightGrid>,
     template: Res<LinkTemplate>,
     geom: Res<RigGeom>,
+    depths: Res<PrintDepths>,
     tanks: Query<(Entity, &GlobalTransform), With<Tank>>,
     belts: Query<(
         Entity,
@@ -533,8 +551,9 @@ fn stamp_shoes(
             }
         }
     }
+    let depth = |at: IVec2, texel: [u8; 2]| depths.texel_depth_m(at, texel);
     for entry in laid.drain(..) {
-        stores.stamp(&entry, shoes, law);
+        stores.stamp(&entry, shoes, law, &depth);
     }
 }
 
@@ -650,13 +669,13 @@ pub(crate) fn plugin(app: &mut App) {
     app.add_systems(
         PostUpdate,
         (
+            sync_material,
             stamp_shoes
                 .run_if(resource_exists::<HeightGrid>)
                 .run_if(resource_exists::<LinkTemplate>)
                 .run_if(resource_exists::<RigGeom>),
             follow_eye,
             flush,
-            sync_material,
         )
             .chain()
             .in_set(TrackPrintsSet),
@@ -723,6 +742,7 @@ mod tests {
             ),
             &prints.shoes,
             &prints.law,
+            &|_, _| 0.0,
         );
         assert!(prints.stores.log.len() > 0);
         let tank = world.spawn_empty().id();
@@ -914,7 +934,7 @@ mod tests {
                 1.0,
                 kpa,
             );
-            stores.stamp(&entry, &shoes, &law);
+            stores.stamp(&entry, &shoes, &law, &|_, _| 0.0);
             let footprint: Vec<[u8; 2]> = stores
                 .take_uploads()
                 .into_iter()
@@ -943,7 +963,7 @@ mod tests {
             );
             let under_recess = (sink - FIXTURE_RECESS_M).max(0.0);
             assert!(
-                (drawn(recess) - under_recess).abs() <= 0.5 * CLEARANCE_UNIT_M + 1e-6,
+                (drawn(recess) - under_recess).abs() <= 0.5 * store::CLEARANCE_UNIT_M + 1e-6,
                 "at {at}, {kpa} kPa: the recess sinks {under_recess} m, its print's floor is {} m",
                 drawn(recess)
             );

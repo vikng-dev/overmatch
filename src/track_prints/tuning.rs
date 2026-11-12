@@ -16,6 +16,7 @@ use bevy_egui::{
     EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui,
 };
 
+use super::CLEARANCE_SPAN_M;
 use crate::ground_types::GroundTypes;
 use crate::state::AppState;
 use crate::terrain_blend::{BASE_GROUND, BLEND_LAYERS};
@@ -113,8 +114,11 @@ fn panel(
                                     .text("softness, mm/kPa (0 hard)"),
                             );
                             ui.add(
-                                egui::Slider::new(&mut print.depth_cap_mm, 0.0..=300.0)
-                                    .text("depth cap, mm"),
+                                egui::Slider::new(
+                                    &mut print.depth_cap_mm.value,
+                                    0.0..=CLEARANCE_SPAN_M * 1000.0,
+                                )
+                                .text("depth cap, mm"),
                             );
                             ui.add(
                                 egui::Slider::new(&mut print.darkening, 0.0..=1.0)

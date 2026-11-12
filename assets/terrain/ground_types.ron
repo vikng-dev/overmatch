@@ -2,7 +2,7 @@
 // and cosmetic prints and dust. Each terrain pack names its type (`src/terrain_blend.rs`).
 //
 //   softness_mm_per_kpa  print depth per unit of the tank's ground pressure, mm per kPa
-//   depth_cap_mm         the deepest print this ground takes, mm
+//   depth_cap_mm         the deepest print this ground draws, mm, at most 255, labelled
 //   darkening            the share of albedo a print takes away, 0..1
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
 //   grip                 effective track capacity / normal load, labelled
@@ -17,7 +17,8 @@
 // DERIVED from a CLAIMED sandy-loam fit, gravel 7.602 mm DERIVED from an ASSUMED curve, sand 92 mm
 // DERIVED from a CLAIMED dry-sand fit, sandy loam 23.716 mm DERIVED from NASA TM-20250006958
 // Table 1's sandy loam at 15% moisture; mud's is ASSUMED under the note's ASSUMED 0.15 m cap; paving
-// is 0, hard. Every other print value is ASSUMED, tuned by eye in play (`track_prints::tuning`).
+// is 0, hard. Each depth cap carries its own label. Every other print value is ASSUMED, tuned by
+// eye in play (`track_prints::tuning`).
 // terrain_solver_friction is the explicit Avian solid-body stand-in, not track grip.
 // Track laws and row derivations: .agents/docs/design/track-model/architecture.md section 5a.
 // Each strike value carries its own label and note. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
@@ -34,7 +35,7 @@
             shear_length_m: (0.0, Unknown("rigid paving stores no soil shear, so the step's resolved length governs (track::forces::GripParams::step_shear_per_grip_m); the steel link's own shear on paving is unsourced (Wong's 75 mm, section 6.4.3, is a fit for a rubber-padded track on paved road); settle with a link-on-paving shear-displacement test")),
             print: (
                 softness_mm_per_kpa: 0.0,
-                depth_cap_mm: 0.0,
+                depth_cap_mm: (0.0, Taste("track prints: intact paving draws no rut")),
                 darkening: 0.05,
                 roughness_gain: 1.0,
             ),
@@ -53,7 +54,7 @@
             shear_length_m: (0.010, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3: MEASURED 10 mm for firm sandy terrain, a proxy for this map's firm dirt; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
             print: (
                 softness_mm_per_kpa: 0.0534,
-                depth_cap_mm: 70.0,
+                depth_cap_mm: (70.0, Taste("track prints: ASSUMED by eye, the deepest rut drawn in firm dirt; no sinkage limit sourced")),
                 darkening: 0.2,
                 roughness_gain: 0.9,
             ),
@@ -72,7 +73,7 @@
             shear_length_m: (0.010, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3: MEASURED 10 mm for firm sandy terrain, a proxy for gravel; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
             print: (
                 softness_mm_per_kpa: 0.0685,
-                depth_cap_mm: 60.0,
+                depth_cap_mm: (60.0, Taste("track prints: ASSUMED by eye, the deepest rut drawn in gravel; no sinkage limit sourced")),
                 darkening: 0.2,
                 roughness_gain: 1.0,
             ),
@@ -91,7 +92,7 @@
             shear_length_m: (0.025, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3 gives no wet-clay value (clay at maximum compaction MEASURED about 6 mm); loose sand's MEASURED 25 mm stands as a proxy for soft wet ground; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
             print: (
                 softness_mm_per_kpa: 1.6,
-                depth_cap_mm: 150.0,
+                depth_cap_mm: (150.0, Taste("track prints: the ground-stamping note's ASSUMED 0.15 m, the deepest rut drawn in soft mud; no sinkage limit sourced")),
                 darkening: 0.3,
                 roughness_gain: 0.6,
             ),
@@ -110,7 +111,7 @@
             shear_length_m: (0.025, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3: MEASURED 25 mm for loose sand; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
             print: (
                 softness_mm_per_kpa: 0.8,
-                depth_cap_mm: 120.0,
+                depth_cap_mm: (120.0, Taste("track prints: ASSUMED by eye, the deepest rut drawn in loose sand; no sinkage limit sourced")),
                 darkening: 0.12,
                 roughness_gain: 0.9,
             ),
@@ -129,7 +130,7 @@
             shear_length_m: (0.010, Unknown("Wong 2001 Theory of Ground Vehicles 3rd ed. section 2.4.3: MEASURED 10 mm for firm sandy terrain, a proxy for this map's sandy loam; no shear-displacement test on this ground; settle with a shear-plate or track-segment shear-displacement test on representative ground")),
             print: (
                 softness_mm_per_kpa: 0.2138,
-                depth_cap_mm: 60.0,
+                depth_cap_mm: (60.0, Taste("track prints: ASSUMED by eye, the deepest rut drawn in sandy loam; no sinkage limit sourced")),
                 darkening: 0.2,
                 roughness_gain: 1.0,
             ),

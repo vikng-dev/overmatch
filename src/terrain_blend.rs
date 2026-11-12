@@ -120,7 +120,7 @@ fn slot_grounds(table: &GroundTypes) -> [&crate::ground_types::GroundType; 4] {
 
 /// Every pack's print response in the shader's slot order: the base, then [`BLEND_LAYERS`].
 pub(crate) fn print_responses(table: &GroundTypes) -> [PrintResponse; 4] {
-    slot_grounds(table).map(|ground| ground.print)
+    slot_grounds(table).map(|ground| ground.print.clone())
 }
 
 /// What ground of print weights `weights` ([`print_weights`]) gives a muzzle blast, per slot: its
@@ -142,10 +142,10 @@ pub(crate) fn dust_sources(
 /// softness (m per kPa), depth cap (m), albedo gain and roughness gain.
 pub(crate) fn print_lanes(table: &GroundTypes) -> [Vec4; 4] {
     let responses = print_responses(table);
-    let lane = |of: fn(&PrintResponse) -> f32| Vec4::from_array(responses.map(|p| of(&p)));
+    let lane = |of: fn(&PrintResponse) -> f32| Vec4::from_array(responses.each_ref().map(of));
     [
         lane(|p| p.softness_mm_per_kpa / 1000.0),
-        lane(|p| p.depth_cap_mm / 1000.0),
+        lane(|p| p.depth_cap_mm.value / 1000.0),
         lane(PrintResponse::albedo_gain),
         lane(|p| p.roughness_gain),
     ]
@@ -179,7 +179,6 @@ pub(crate) fn sinkage_m(params: &TerrainBlendParams, weights: Vec4, kpa: f32) ->
 /// The print's depth (m) where a point of the shoe `clearance_m` above its sole bore `kpa`: the
 /// sole's sinkage less that clearance, none where the point stays above the ground.
 /// `terrain_blend.wgsl`'s `sunk_at` is this law on a near-store texel.
-#[cfg(test)]
 pub(crate) fn print_depth_m(
     params: &TerrainBlendParams,
     weights: Vec4,
@@ -504,9 +503,9 @@ mod tests {
             BLEND_LAYERS[2].ground,
         ];
         for (slot, name) in names.into_iter().enumerate() {
-            let print = table.get(name).print;
+            let print = &table.get(name).print;
             assert_eq!(softness[slot], print.softness_mm_per_kpa / 1000.0, "{name}");
-            assert_eq!(cap[slot], print.depth_cap_mm / 1000.0, "{name}");
+            assert_eq!(cap[slot], print.depth_cap_mm.value / 1000.0, "{name}");
             assert_eq!(albedo[slot], print.albedo_gain(), "{name}");
             assert_eq!(roughness[slot], print.roughness_gain, "{name}");
         }

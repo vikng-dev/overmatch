@@ -42,7 +42,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// diffs past its acknowledged cursor (bevy_replicon 0.44.3), each naming the position it lands
 /// at, and a whole copy only to a client without one or behind the retained history; the hull
 /// marks replicate whole.
-pub const PROTOCOL_REV: u32 = 93;
+pub const PROTOCOL_REV: u32 = 94;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -70,11 +70,22 @@ pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
 /// gun registries. Their keys and bytes enter too: handshake-matched receivers can refuse an
 /// unresolvable index as malformed input rather than waiting for data skew to resolve.
 ///
+/// The ground-type table beside the binary sets the server's ground response and each client's
+/// prints and drawn belt sink on it; a peer holding another table draws sinkage the server's
+/// ground never had.
+///
 /// Cached per process: map files must stay fixed while running, and the heightmap is tens of MB.
 pub fn protocol_id() -> u64 {
     static ID: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *ID.get_or_init(|| {
         let root = crate::assets::asset_root();
+        let ground = crate::ground_types::GroundTypes::shipped_path();
+        let ground_types = std::fs::read(&ground).unwrap_or_else(|err| {
+            panic!(
+                "the ground-type table {} cannot be read: {err}",
+                ground.display()
+            )
+        });
         handshake_tag(
             crate::map::content_digest(&root),
             crate::substances::MATERIALS_RON.as_bytes(),
@@ -85,6 +96,7 @@ pub fn protocol_id() -> u64 {
                 crate::armaments_index::GUN_FILES,
             ),
             crate::aim::INPUT_RON.as_bytes(),
+            &ground_types,
         )
     })
 }
@@ -95,6 +107,7 @@ fn handshake_tag(
     tank_digest: u64,
     armaments_digest: u64,
     aim_input: &[u8],
+    ground_types: &[u8],
 ) -> u64 {
     let tag = fingerprint_field(
         PROTOCOL_FINGERPRINT,
@@ -104,7 +117,8 @@ fn handshake_tag(
     let tag = fingerprint_field(tag, b"materials_ron", materials);
     let tag = fingerprint_field(tag, b"tank_construction", &tank_digest.to_le_bytes());
     let tag = fingerprint_field(tag, b"armaments", &armaments_digest.to_le_bytes());
-    fingerprint_field(tag, b"aim_input", aim_input)
+    let tag = fingerprint_field(tag, b"aim_input", aim_input);
+    fingerprint_field(tag, b"ground_types_ron", ground_types)
 }
 
 /// The game's damage model: fingerprint every embedded armament key and source, in the index's
@@ -2327,6 +2341,8 @@ mod tests {
             crate::armaments_index::ROUND_FILES,
             crate::armaments_index::GUN_FILES,
         );
+        let ground = std::fs::read(crate::ground_types::GroundTypes::shipped_path())
+            .expect("the shipped ground-type table");
         let tag = |digest: u64| {
             handshake_tag(
                 digest,
@@ -2334,6 +2350,7 @@ mod tests {
                 tank,
                 armaments,
                 crate::aim::INPUT_RON.as_bytes(),
+                &ground,
             )
         };
         assert_ne!(tag(1), tag(2), "a different map must be a different tag");
@@ -2348,7 +2365,8 @@ mod tests {
                 registry.as_bytes(),
                 tank ^ 1,
                 armaments,
-                crate::aim::INPUT_RON.as_bytes()
+                crate::aim::INPUT_RON.as_bytes(),
+                &ground
             ),
             tag(1),
             "another tank construction over the same world: a different tag",
@@ -2359,7 +2377,8 @@ mod tests {
                 registry.as_bytes(),
                 tank,
                 armaments,
-                b"changed aim construction"
+                b"changed aim construction",
+                &ground
             ),
             tag(1),
             "input admission policy must agree before peers connect",
@@ -2375,10 +2394,23 @@ mod tests {
                 edited.as_bytes(),
                 tank,
                 armaments,
-                crate::aim::INPUT_RON.as_bytes()
+                crate::aim::INPUT_RON.as_bytes(),
+                &ground
             ),
             tag(1),
             "a registry value moved under identical assets: a different tag",
+        );
+        assert_ne!(
+            handshake_tag(
+                1,
+                registry.as_bytes(),
+                tank,
+                armaments,
+                crate::aim::INPUT_RON.as_bytes(),
+                b"another ground-type table"
+            ),
+            tag(1),
+            "another ground table over the same world draws other sinkage: a different tag",
         );
     }
 
@@ -2465,7 +2497,7 @@ mod tests {
         let rounds = [("round", "round source")];
         let guns = [("gun", "gun source")];
         let base = armaments_digest("round types", &rounds, &guns);
-        let tag = |digest| handshake_tag(1, b"materials", 2, digest, b"aim input");
+        let tag = |digest| handshake_tag(1, b"materials", 2, digest, b"aim input", b"ground");
         for changed in [
             armaments_digest("changed types", &rounds, &guns),
             armaments_digest("round types", &[("round", "changed source")], &guns),

@@ -57,14 +57,15 @@ use crate::provenance::Labelled;
 pub(crate) const GROUND_TYPES_PATH: &str = "terrain/ground_types.ron";
 
 /// How one ground type takes a track print. Each field's domain is [`GroundTypes::parse`]'s.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PrintResponse {
     /// Print depth per unit of ground pressure, mm per kPa: how deep the sole sinks; finite, not
     /// negative, zero on hard ground.
     pub(crate) softness_mm_per_kpa: f32,
-    /// The deepest print this ground takes, mm, whatever the pressure: finite, not negative.
-    pub(crate) depth_cap_mm: f32,
+    /// The deepest print this ground draws, mm, whatever the pressure: a track-prints taste, from 0
+    /// to the near store's clearance span ([`crate::track_prints::CLEARANCE_SPAN_M`]).
+    pub(crate) depth_cap_mm: Labelled<f32>,
     /// The share of the ground's albedo a print takes away where a sole lay, 0..=1.
     pub(crate) darkening: f32,
     /// Roughness multiplier where a sole lay, finite and positive: below 1 reads wet.
@@ -77,7 +78,7 @@ impl PrintResponse {
     pub(crate) fn depth_m(&self, kpa: f32) -> f32 {
         let params = crate::terrain_blend::TerrainBlendParams {
             print_softness: Vec4::splat(self.softness_mm_per_kpa / 1000.0),
-            print_cap: Vec4::splat(self.depth_cap_mm / 1000.0),
+            print_cap: Vec4::splat(self.depth_cap_mm.value / 1000.0),
             ..Default::default()
         };
         crate::terrain_blend::sinkage_m(&params, Vec4::X, kpa)
@@ -172,7 +173,7 @@ const FILE_HEADER: &str = "\
 // and cosmetic prints and dust. Each terrain pack names its type (`src/terrain_blend.rs`).
 //
 //   softness_mm_per_kpa  print depth per unit of the tank's ground pressure, mm per kPa
-//   depth_cap_mm         the deepest print this ground takes, mm
+//   depth_cap_mm         the deepest print this ground draws, mm, at most 255, labelled
 //   darkening            the share of albedo a print takes away, 0..1
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
 //   grip                 effective track capacity / normal load, labelled
@@ -187,7 +188,8 @@ const FILE_HEADER: &str = "\
 // DERIVED from a CLAIMED sandy-loam fit, gravel 7.602 mm DERIVED from an ASSUMED curve, sand 92 mm
 // DERIVED from a CLAIMED dry-sand fit, sandy loam 23.716 mm DERIVED from NASA TM-20250006958
 // Table 1's sandy loam at 15% moisture; mud's is ASSUMED under the note's ASSUMED 0.15 m cap; paving
-// is 0, hard. Every other print value is ASSUMED, tuned by eye in play (`track_prints::tuning`).
+// is 0, hard. Each depth cap carries its own label. Every other print value is ASSUMED, tuned by
+// eye in play (`track_prints::tuning`).
 // terrain_solver_friction is the explicit Avian solid-body stand-in, not track grip.
 // Track laws and row derivations: .agents/docs/design/track-model/architecture.md section 5a.
 // Each strike value carries its own label and note. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
@@ -353,9 +355,11 @@ impl GroundTypes {
                 ),
                 (
                     "print.depth_cap_mm",
-                    print.depth_cap_mm,
-                    print.depth_cap_mm.is_finite() && print.depth_cap_mm >= 0.0,
-                    "finite and 0 or more",
+                    print.depth_cap_mm.value,
+                    print.depth_cap_mm.value >= 0.0
+                        && print.depth_cap_mm.value / 1000.0
+                            <= crate::track_prints::CLEARANCE_SPAN_M,
+                    "0 to 255 mm, the clearance over a sole the near store's reach byte spans",
                 ),
                 (
                     "print.darkening",
@@ -372,7 +376,8 @@ impl GroundTypes {
             ] {
                 if !in_domain {
                     return Err(GroundTableError::Refused(format!(
-                        "ground type {name:?}: `{field}` is {value}; state it as {domain}"
+                        "{GROUND_TYPES_PATH}: ground type {name:?}: `{field}` is {value}; state it \
+                         as {domain}"
                     )));
                 }
             }
@@ -474,7 +479,7 @@ mod tests {
         let hard = crate::track::forces::rigid_rolling_resistance();
         let block = format!(
             "grip: (0.5, Fixture(\"fixture\")), shear_length_m: (0.01, Fixture(\"fixture\")), \
-                     print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
+                     print: (softness_mm_per_kpa: 0.5, depth_cap_mm: (50.0, Fixture(\"fixture\")), darkening: 0.2, \
                      roughness_gain: 1.0), rolling_resistance: ({hard}, \
                      Fixture(\"fixture\")), dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3)), \
                      strike: (lifted: (0.5, Fixture(\"fixture\")), sparks: (false, \
@@ -495,7 +500,10 @@ mod tests {
     fn a_ground_with_no_softness_prints_no_depth() {
         let rigid = PrintResponse {
             softness_mm_per_kpa: 0.0,
-            depth_cap_mm: 150.0,
+            depth_cap_mm: Labelled {
+                value: 150.0,
+                label: crate::provenance::Provenance::Fixture("fixture cap".into()),
+            },
             darkening: 0.0,
             roughness_gain: 1.0,
         };
@@ -504,8 +512,8 @@ mod tests {
         }
         let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
         for (name, ground) in &table.types {
-            let print = ground.print;
-            let prints = print.softness_mm_per_kpa > 0.0 && print.depth_cap_mm > 0.0;
+            let print = &ground.print;
+            let prints = print.softness_mm_per_kpa > 0.0 && print.depth_cap_mm.value > 0.0;
             assert_eq!(print.depth_m(100.0) > 0.0, prints, "{name}");
         }
     }
@@ -518,31 +526,35 @@ mod tests {
         // Fixture: keep the cap law exercised even if every shipped ground is tuned to be rigid.
         let deformable = PrintResponse {
             softness_mm_per_kpa: 0.5,
-            depth_cap_mm: 50.0,
+            depth_cap_mm: Labelled {
+                value: 50.0,
+                label: crate::provenance::Provenance::Fixture("fixture cap".into()),
+            },
             darkening: 0.0,
             roughness_gain: 1.0,
         };
         let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
-        for (name, print) in std::iter::once(("inline fixture", deformable)).chain(
+        for (name, print) in std::iter::once(("inline fixture", &deformable)).chain(
             table
                 .types
                 .iter()
-                .map(|(name, ground)| (name.as_str(), ground.print)),
+                .map(|(name, ground)| (name.as_str(), &ground.print)),
         ) {
-            if print.softness_mm_per_kpa <= 0.0 || print.depth_cap_mm <= 0.0 {
+            let cap_mm = print.depth_cap_mm.value;
+            if print.softness_mm_per_kpa <= 0.0 || cap_mm <= 0.0 {
                 // Grounds that cannot print have no increasing interval.
                 continue;
             }
             // Both witnesses must be below this ground's cap: a valid live-tuned table may
             // saturate at either of the fixed pressures a fixture happened to choose.
-            let cap_kpa = print.depth_cap_mm / print.softness_mm_per_kpa;
+            let cap_kpa = cap_mm / print.softness_mm_per_kpa;
             let (light, heavy) = (0.25 * cap_kpa, 0.5 * cap_kpa);
             assert!(
                 print.depth_m(heavy) > print.depth_m(light),
                 "{name}: {heavy} kPa prints deeper than {light} kPa"
             );
             assert!(
-                (print.depth_m(2.0 * cap_kpa) - print.depth_cap_mm / 1000.0).abs() < 1e-6,
+                (print.depth_m(2.0 * cap_kpa) - cap_mm / 1000.0).abs() < 1e-6,
                 "{name}: the cap holds any pressure"
             );
         }
@@ -562,7 +574,7 @@ mod tests {
     fn a_ground_that_states_too_little_is_refused_at_load() {
         let shear = "shear_length_m: (0.01, Fixture(\"fixture\")), ";
         let block = format!(
-            "grip: (0.5, Fixture(\"fixture\")), {shear}print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
+            "grip: (0.5, Fixture(\"fixture\")), {shear}print: (softness_mm_per_kpa: 0.5, depth_cap_mm: (50.0, Fixture(\"fixture\")), darkening: 0.2, \
                      roughness_gain: 1.0)"
         );
         let dust = "dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3)), strike: (lifted: (0.5, \
@@ -665,12 +677,13 @@ mod tests {
         GroundTypes::parse(&text).unwrap();
     }
 
-    /// A VALUE OUT OF DOMAIN IS REFUSED AT LOAD, NAMING THE GROUND AND THE FIELD: a negative
-    /// grip is a negative capacity and an infinite one an
-    /// unbounded grip; a negative shear length stores slip backwards and an infinite one never
-    /// builds grip; a darkening outside 0..=1 is an albedo gain no material holds; a negative
-    /// softness or cap prints upward, and a roughness gain of 0 or less is no surface. Every
-    /// terrain collider and the prints read the table through [`GroundTypes::parse`]. Mutant: a
+    /// A VALUE OUT OF DOMAIN IS REFUSED AT LOAD, NAMING THE FILE, THE GROUND AND THE FIELD: a
+    /// negative grip is a negative capacity and an infinite one an unbounded grip; a negative shear
+    /// length stores slip backwards and an infinite one never builds grip; a darkening outside
+    /// 0..=1 is an albedo gain no material holds; a negative softness or cap prints upward, a cap
+    /// past the near store's 255 mm clearance span prints where a shoe clears the ground
+    /// (`track_prints::store`), and a roughness gain of 0 or less is no surface. Every terrain
+    /// collider and the prints read the table through [`GroundTypes::parse`]. Mutant: a
     /// parse that skips a field's check, or checks only one of sign and finiteness, loads one of
     /// these. Every soil colour channel is checked independently: lifting dust relies on all of
     /// them. A zero grip and a zero shear length are in domain and load, and a misspelt field is
@@ -694,7 +707,7 @@ mod tests {
         ]: [&str; 12]| {
             format!(
                 "grip: ({friction}, Fixture(\"fixture\")), shear_length_m: ({shear}, Fixture(\"fixture\")), \
-                 print: (softness_mm_per_kpa: {softness}, depth_cap_mm: {cap}, darkening: \
+                 print: (softness_mm_per_kpa: {softness}, depth_cap_mm: ({cap}, Fixture(\"fixture\")), darkening: \
                  {darkening}, roughness_gain: {roughness}), \
                  rolling_resistance: ({rolling}, Fixture(\"fixture\")), \
                  dust: (erodibility: {erodibility}, colour_srgb: ({red}, {green}, {blue})), \
@@ -735,7 +748,7 @@ mod tests {
         ];
         let bad: [&[&str]; 12] = [
             &["-0.1", "inf", "NaN"],
-            &["-1.0", "inf", "NaN"],
+            &["-1.0", "256.0", "inf", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["0.0", "-1.0", "inf", "NaN"],
             &["-0.1", "inf", "-inf", "NaN"],
@@ -754,7 +767,9 @@ mod tests {
                 let text = table_text(&row(values));
                 let error = GroundTypes::parse(&text).expect_err(value).to_string();
                 assert!(
-                    error.contains(&format!("{base:?}")) && error.contains(&format!("`{field}`")),
+                    error.contains(GROUND_TYPES_PATH)
+                        && error.contains(&format!("{base:?}"))
+                        && error.contains(&format!("`{field}`")),
                     "{field} {value}: {error}"
                 );
             }
@@ -766,6 +781,9 @@ mod tests {
             .expect("zero grip and zero shear length are in domain");
         assert_eq!(zero.get(base).contact().grip, 0.0);
         assert_eq!(zero.get(base).contact().shear_length_m, 0.0);
+        let mut deepest = ok;
+        deepest[1] = "255.0";
+        GroundTypes::parse(&table_text(&row(deepest))).expect("a cap at the clearance span loads");
         let misspelt = table_text(&row(ok)).replacen("grip:", "gripp:", 1);
         assert!(GroundTypes::parse(&misspelt).is_err());
     }

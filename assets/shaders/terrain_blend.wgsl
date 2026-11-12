@@ -94,8 +94,9 @@ const MACRO_PEAK: f32 = 1.5;
 // set of texels a sole bore, as the world layer counts it, and its edge is the bilinear crossing of
 // one texel.
 const FOOTPRINT_GAIN: f32 = 255.0 / 4.0;
-// The parallax march's step limits. ASSUMED minimum; DERIVED maximum: the tuning panel's
-// 0.3 m depth cap at PARALLAX_MIN_DOWN spans at most 6 m, or 256 half-texel steps.
+// The parallax march's step limits. ASSUMED minimum; the maximum covers the deepest cap the
+// ground table admits, the near store's 255 mm clearance span, which at PARALLAX_MIN_DOWN spans at
+// most 5.1 m, or 218 half-texel steps (DERIVED).
 const PARALLAX_STEPS_MIN: f32 = 4.0;
 const PARALLAX_STEPS_MAX: f32 = 256.0;
 // The least depth per unit of view ray the march accepts: views flatter than about 3° to the ground

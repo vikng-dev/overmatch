@@ -20,8 +20,13 @@
 //! * G — the press times the tank's ground pressure, in [`KPA_PER_UNIT`]: nonzero exactly on a
 //!   footprint.
 //!
-//! Both combine by MAX, which is order-free, so any set of stamps draws the same texels in any
-//! order and in any pieces, and a print only ever deepens. The shader turns a texel into a depth
+//! A texel keeps the deeper of two marks. A mark at least as near its sole and bearing at least as
+//! much is deeper on every ground; two that cross are ranked by the depth each prints on that
+//! texel's own ground ([`TexelDepth`]). Per-channel MAX would invent depth: a half-pressed sole
+//! `[255, 50]` and a fully pressed recess 40 mm above it `[215, 100]` combine to `[255, 100]`,
+//! which prints deeper than either. The merge is a maximum under one total order, so any set of
+//! stamps draws the same texels in any order and in any pieces, and a print only ever deepens
+//! while the ground's response holds. The shader turns a texel into a depth
 //! (`terrain_blend::print_depth_m`): the sole sinks by the ground's `softness × pressure`, capped,
 //! and a point of the shoe `c` above it prints `c` less, nothing where `c` passes the sinkage, so
 //! the shoe's lowest parts print first and hard ground takes no depth.
@@ -87,9 +92,12 @@ const ACTIVE_CELLS: usize = 256;
 /// Ground pressure per unit of a texel's G channel, kPa: 1, so a byte spans 1–255 kPa, every tank.
 pub(crate) const KPA_PER_UNIT: f32 = 1.0;
 /// Clearance over the sole per unit of a texel's R channel, m. Resolution: a millimetre is below
-/// any depth step a player can see in a print, and a byte then spans 255 mm over the sole, past
-/// any ground's sinkage cap, so a point of the shoe beyond it prints nothing, as it should.
+/// any depth step a player can see in a print.
 pub(crate) const CLEARANCE_UNIT_M: f32 = 0.001;
+/// The clearance over the sole an R byte spans, m: 255 mm. A point of the shoe farther above its
+/// sole saturates at it, so it prints nothing only while no ground sinks deeper; the ground-type
+/// table refuses a `depth_cap_mm` past it (`ground_types::GroundTypes::parse`).
+pub(crate) const CLEARANCE_SPAN_M: f32 = 255.0 * CLEARANCE_UNIT_M;
 
 /// How stamps turn into store texels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -366,7 +374,14 @@ impl<'a> Raster<'a> {
     /// Written as plain scalar loops over locals: this is the prints' hot loop, and the edit
     /// profile builds the crate at `opt-level = 1`, where iterator adapters and closures are not
     /// flattened away.
-    fn draw(&self, texels: &mut [[u8; 2]], min: IVec2, clip: Span, world: &mut WorldStore) -> u8 {
+    fn draw(
+        &self,
+        texels: &mut [[u8; 2]],
+        min: IVec2,
+        clip: Span,
+        world: &mut WorldStore,
+        depth: TexelDepth,
+    ) -> u8 {
         let [u0, u1, u2] = self.u;
         let [v0, v1, v2] = self.v;
         let [p0, p1, p2] = self.plane;
@@ -426,14 +441,21 @@ impl<'a> Raster<'a> {
                 if lift >= OPEN_M || plane > contact_m {
                     continue;
                 }
-                // The reach, `255 − clearance` in clearance units.
                 let r = (255.5 - (lift + plane) / CLEARANCE_UNIT_M).clamp(0.0, 255.0) as u8;
                 let texel = &mut texels[(row + i) as usize];
                 let [old_r, old_g] = *texel;
                 if r <= old_r && bearing <= old_g {
                     continue;
                 }
-                *texel = [old_r.max(r), old_g.max(bearing)];
+                let kept = if r >= old_r && bearing >= old_g {
+                    [r, bearing]
+                } else {
+                    deeper(IVec2::new(self.base.x + i, gj), *texel, [r, bearing], depth)
+                };
+                if kept == *texel {
+                    continue;
+                }
+                *texel = kept;
                 first_changed = first_changed.min(i);
                 last_changed = i;
                 if old_g == 0 {
@@ -449,6 +471,23 @@ impl<'a> Raster<'a> {
             }
         }
         changed
+    }
+}
+
+/// The depth (m) texel value `texel` prints at global near texel `at`, on that texel's own ground:
+/// the shader's decode (`terrain_blend.wgsl`'s `sunk_at`). Production reads it from
+/// [`super::PrintDepths::texel_depth_m`].
+pub(crate) type TexelDepth<'a> = &'a dyn Fn(IVec2, [u8; 2]) -> f32;
+
+/// Of two marks that cross at texel `at` (one nearer its sole, the other bearing more), the one
+/// that prints deeper there. Equal depths keep the greater pair in `[reach, bearing]` order, so
+/// the merge is a maximum under one total order and stays order-free.
+fn deeper(at: IVec2, old: [u8; 2], new: [u8; 2], depth: TexelDepth) -> [u8; 2] {
+    let (was, now) = (depth(at, old), depth(at, new));
+    if now > was || (now == was && new > old) {
+        new
+    } else {
+        old
     }
 }
 
@@ -988,8 +1027,14 @@ impl PrintStores {
     }
 
     /// Lay one stamp: rasterise it once into the history, and feed what it changed to the near
-    /// store's uploads and the world layer's counts.
-    pub(crate) fn stamp(&mut self, entry: &StampEntry, shoes: &[ClearanceStamp], law: &PrintLaw) {
+    /// store's uploads and the world layer's counts. `depth` ranks marks that cross on a texel.
+    pub(crate) fn stamp(
+        &mut self,
+        entry: &StampEntry,
+        shoes: &[ClearanceStamp],
+        law: &PrintLaw,
+        depth: TexelDepth,
+    ) {
         let shoe = shoes
             .get(entry.shoe())
             .expect("every stamp names a shoe registered in the retained print table");
@@ -1011,7 +1056,7 @@ impl PrintStores {
                 };
                 let cell = self.log.hot(key);
                 let texels = cell.checkpoint.raw();
-                let changed = raster.draw(texels, min, clip, &mut self.world);
+                let changed = raster.draw(texels, min, clip, &mut self.world, depth);
                 self.near.mark(key, changed);
             }
         }
@@ -1047,6 +1092,11 @@ mod tests {
     }
 
     const LAW: PrintLaw = PrintLaw { contact_m: 0.03 };
+
+    /// Fixture: hard ground, where no mark prints depth and crossing marks keep the greater pair.
+    fn hard(_: IVec2, _: [u8; 2]) -> f32 {
+        0.0
+    }
 
     /// Fixture ground pressure, kPa.
     const KPA: f32 = 100.0;
@@ -1127,7 +1177,12 @@ mod tests {
     #[should_panic(expected = "every stamp names a shoe registered")]
     fn an_unregistered_stamp_shoe_is_a_bug() {
         let mut stores = PrintStores::new(64.0, 256); // FIXTURE DATA: a small map.
-        stores.stamp(&entry(Vec2::ZERO, 0.0, 0.0, Vec2::ZERO, false), &[], &LAW);
+        stores.stamp(
+            &entry(Vec2::ZERO, 0.0, 0.0, Vec2::ZERO, false),
+            &[],
+            &LAW,
+            &hard,
+        );
     }
 
     /// A fully covered world texel must reach full coverage independently of map/raster scale.
@@ -1216,7 +1271,7 @@ mod tests {
         {
             let (mut stores, _) = stores();
             let entry = entry(Vec2::new(-3.1, 7.7 + k as f32), yaw, 0.002, tilt, mirrored);
-            stores.stamp(&entry, &shoes, &LAW);
+            stores.stamp(&entry, &shoes, &LAW, &hard);
             let (low, high) = entry.world_bounds(&shoes[0]);
             let span = Span::covering(low - 0.2, high + 0.2, NEAR_TEXEL_M);
             let mut drawn: HashMap<IVec2, [u8; 2]> = HashMap::default();
@@ -1305,14 +1360,14 @@ mod tests {
         let (a, b) = (Vec2::new(10.0, -20.0), Vec2::new(70.0, 15.0));
         assert!(stores.recentre(a));
         for entry in scatter((a + b) * 0.5, 60.0, 3000, 1) {
-            stores.stamp(&entry, &shoes, &LAW);
+            stores.stamp(&entry, &shoes, &LAW, &hard);
         }
         flush(&mut stores, &mut gpu);
         assert!(stores.recentre(b), "the eye left the slack");
         flush(&mut stores, &mut gpu);
         assert_gpu_is_history(&stores, &gpu);
         for entry in scatter((a + b) * 0.5, 60.0, 3000, 2) {
-            stores.stamp(&entry, &shoes, &LAW);
+            stores.stamp(&entry, &shoes, &LAW, &hard);
         }
         flush(&mut stores, &mut gpu);
         assert!(stores.recentre(a), "and came back");
@@ -1349,7 +1404,7 @@ mod tests {
                     8192,
                 ))
         {
-            stores.stamp(&entry, &shoes, &LAW);
+            stores.stamp(&entry, &shoes, &LAW, &hard);
         }
         flush(&mut stores, &mut gpu);
         let direct = gpu.near.clone();
@@ -1358,7 +1413,7 @@ mod tests {
                 200.0 + (k % 20) as f32 * 12.0,
                 200.0 + (k / 20) as f32 * 12.0,
             );
-            stores.stamp(&entry(at, 0.0, 0.0, Vec2::ZERO, false), &shoes, &LAW);
+            stores.stamp(&entry(at, 0.0, 0.0, Vec2::ZERO, false), &shoes, &LAW, &hard);
         }
         assert!(
             stores
@@ -1377,7 +1432,7 @@ mod tests {
             "the torus restores compacted history after a full eviction"
         );
         let new_entry = entry(Vec2::new(-5.4, -6.1), 0.7, 0.01, Vec2::ZERO, false);
-        stores.stamp(&new_entry, &shoes, &LAW);
+        stores.stamp(&new_entry, &shoes, &LAW, &hard);
         flush(&mut stores, &mut gpu);
         assert_gpu_is_history(&stores, &gpu);
         let noisy: Vec<_> = (0..CELL * CELL).map(|i| [(i % 2) as u8, 255]).collect();
@@ -1404,6 +1459,7 @@ mod tests {
             &entry(Vec2::ZERO, 0.0, 0.0, Vec2::ZERO, false),
             &shoes,
             &LAW,
+            &hard,
         );
         assert!(!flush(&mut stores, &mut gpu).is_empty());
         stores.recentre(Vec2::splat(200.0));
@@ -1425,9 +1481,9 @@ mod tests {
         assert_gpu_is_history(&stores, &gpu);
     }
 
-    /// The reach and the bearing are MAX-combined, so a stamp laid twice changes nothing, the
-    /// store holds the deepest of two overlapping prints whatever order they arrive in, and a
-    /// stamp further into its press only ever deepens a print. A sole resting on the ground writes
+    /// A stamp laid twice changes nothing, the store holds the deeper of two overlapping prints
+    /// whatever order they arrive in, and a stamp further into its press only ever deepens a
+    /// print. A sole resting on the ground writes
     /// its whole reach, and bears its tank's pressure times its press.
     #[test]
     fn overlapping_stamps_keep_the_deepest_in_any_order() {
@@ -1438,7 +1494,7 @@ mod tests {
             let (mut stores, mut gpu) = stores();
             stores.recentre(Vec2::ZERO);
             for entry in order {
-                stores.stamp(entry, &shoes, &LAW);
+                stores.stamp(entry, &shoes, &LAW, &hard);
             }
             flush(&mut stores, &mut gpu);
             gpu
@@ -1475,6 +1531,84 @@ mod tests {
         );
     }
 
+    /// TWO MARKS THAT CROSS NEVER PRINT DEEPER THAN THE DEEPER OF THEM. A half-pressed sole
+    /// (nearest its sole, bearing less) and a fully pressed recess over the same texel (bearing
+    /// more, farther from its sole) combine to the one that prints deeper on that texel's ground,
+    /// in either order. Per-channel MAX keeps the sole's reach with the recess's bearing, which
+    /// prints deeper than both on any ground that sinks under the recess's bearing less than the
+    /// recess's height. Fixture: a sole half and a recess half 40 mm above it, 0.3 m along, two
+    /// fixture softnesses (0.2138 and 1.6 mm per kPa), no cap.
+    #[test]
+    fn crossing_marks_keep_the_deeper_print() {
+        let step = |y: f32, z0: f32, z1: f32| {
+            let c = |x: f32, z: f32| Vec3::new(x, y, z);
+            [
+                [c(-0.3, z0), c(0.3, z0), c(0.3, z1)],
+                [c(-0.3, z0), c(0.3, z1), c(-0.3, z1)],
+            ]
+        };
+        let shoe: Vec<[Vec3; 3]> = step(0.04, -0.15, 0.0)
+            .into_iter()
+            .chain(step(0.0, 0.0, 0.15))
+            .collect();
+        let shoes = vec![ClearanceStamp::pooled(
+            &bake(&shoe).expect("covers"),
+            NEAR_TEXEL_M,
+        )];
+        let mark = |datum: Vec2, press: f32| {
+            StampEntry::new(
+                Placement {
+                    datum,
+                    yaw: 0.0,
+                    lift: 0.0,
+                    tilt: Vec2::ZERO,
+                    shoe: 0,
+                    mirrored: false,
+                },
+                press,
+                KPA,
+            )
+        };
+        // The half-pressed mark's sole and the fully pressed mark's recess both cover `at`.
+        let at = Vec2::new(0.0, 0.075);
+        let (sole, recess) = (mark(Vec2::ZERO, 0.5), mark(Vec2::new(0.0, 0.15), 1.0));
+        let g = (at / NEAR_TEXEL_M).floor().as_ivec2();
+        let texel = |order: &[StampEntry], depth: TexelDepth| {
+            let mut stores = PrintStores::new(64.0, 64);
+            for entry in order {
+                stores.stamp(entry, &shoes, &LAW, depth);
+            }
+            let mut got = [0, 0];
+            stores.log.draw(Span { min: g, max: g + 1 }, |at, value| {
+                if at == g {
+                    got = value;
+                }
+            });
+            got
+        };
+        for softness_m_per_kpa in [0.2138e-3, 1.6e-3] {
+            let depth = move |_: IVec2, [reach, bearing]: [u8; 2]| {
+                let clearance = f32::from(255 - reach) * CLEARANCE_UNIT_M;
+                (softness_m_per_kpa * f32::from(bearing) * KPA_PER_UNIT - clearance).max(0.0)
+            };
+            let (a, b) = (texel(&[sole], &depth), texel(&[recess], &depth));
+            assert!(
+                a[0] > b[0] && a[1] < b[1],
+                "the fixture marks cross: {a:?} {b:?}"
+            );
+            let deepest = depth(g, a).max(depth(g, b));
+            assert!(
+                depth(g, [a[0].max(b[0]), a[1].max(b[1])]) > deepest,
+                "per-channel MAX would invent depth on this ground"
+            );
+            for order in [[sole, recess], [recess, sole]] {
+                let kept = texel(&order, &depth);
+                assert!(kept == a || kept == b, "a real mark is kept: {kept:?}");
+                assert_eq!(depth(g, kept), deepest, "the deeper mark is kept");
+            }
+        }
+    }
+
     /// The world layer counts a near footprint texel once, at every sample phase: a sole visible
     /// in the near store never vanishes from the world layer, and overprinting a track is union,
     /// not accumulated darkness.
@@ -1485,7 +1619,12 @@ mod tests {
         let texel_m = 1500.0 / WORLD_SIDE as f32;
         for phase in 0..8 {
             let datum = Vec2::new(phase as f32 * 2.0, phase as f32 * texel_m / 8.0);
-            stores.stamp(&entry(datum, 0.0, 0.0, Vec2::ZERO, false), &shoes, &LAW);
+            stores.stamp(
+                &entry(datum, 0.0, 0.0, Vec2::ZERO, false),
+                &shoes,
+                &LAW,
+                &hard,
+            );
             let cell = ((datum + 750.0) / texel_m).floor().as_uvec2();
             let covered: u32 = (cell.y - 1..=cell.y + 1)
                 .flat_map(|j| (cell.x - 2..=cell.x + 2).map(move |i| (i, j)))
@@ -1502,6 +1641,7 @@ mod tests {
             &entry(Vec2::ZERO, 0.0, 0.0, Vec2::ZERO, false),
             &shoes,
             &LAW,
+            &hard,
         );
         assert_eq!(
             stores.world.counts, before,
@@ -1525,7 +1665,12 @@ mod tests {
         let mut stores = PrintStores::new(64.0, 256);
         for k in 0..40 {
             let along = Vec2::new(-20.0, -28.0 + 0.13 * k as f32);
-            stores.stamp(&entry(along, 0.0, 0.0, Vec2::ZERO, false), &shoes, &LAW);
+            stores.stamp(
+                &entry(along, 0.0, 0.0, Vec2::ZERO, false),
+                &shoes,
+                &LAW,
+                &hard,
+            );
         }
         let uploads = stores.take_uploads();
         assert!(
@@ -1648,7 +1793,7 @@ mod tests {
                 }
                 let contacts = Instant::now();
                 for entry in laid.drain(..) {
-                    stores.stamp(&entry, &shoes, &LAW);
+                    stores.stamp(&entry, &shoes, &LAW, &hard);
                 }
                 let stamped = Instant::now();
                 let uploads = stores.take_uploads();
