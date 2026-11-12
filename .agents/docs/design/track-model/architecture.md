@@ -544,10 +544,12 @@ state, none from a timer or a band:
   rest or did not gain. The window establishes it, not each tick (MEASURED on the rubble battery:
   a test of every tick fired no stall step on the heap rams and tripled the stalled ticks). Belts
   that start gaining under a hull still at rest keep the bound and step nothing down.
-- *Falling revs fail a gear only below its torque peak.* Below the crank's peak-torque speed a
-  slowing crank loses torque and the gear does not recover; above it the torque rises and the gear
-  settles where it holds (MEASURED on a 20° grade: fourth settled at 1.93 m/s with its drivetrain
-  reading −4 N; stepping down cost a metre per second in the cut, and third settled slower).
+- *Falling revs fail a gear only below its torque peak.* Admission refuses a torque curve that
+  falls anywhere below its peak, so below the crank's peak-torque speed a slowing crank never gains
+  torque and the gear does not recover. Above it the gear is kept, and where falling revs raise the
+  torque it settles where it holds (MEASURED on a 20° grade: fourth settled at 1.93 m/s with its
+  drivetrain reading −4 N; stepping down cost a metre per second in the cut, and third settled
+  slower).
 - *The Driver keeps no failure memory.* Each clause chooses from the current window alone, so a
   gear just left is chosen again wherever its forecast clears, and may fail there again. The cause
   is open: the price and the sensed resistance sit on different sides of the belt, so a gear can

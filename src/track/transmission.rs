@@ -467,6 +467,24 @@ impl TransmissionParams {
             peak_torque_nm,
         };
         derived.peak_torque_rpm = derived.delivered_peak_rpm();
+        // The Driver reads falling revs below the peak as a gear that cannot recover
+        // (`choose_gear`), so below the peak torque may not fall as revs rise. A span's torque is
+        // quadratic in rpm: its slope is checked at its start, and at its end when that lies below
+        // the peak.
+        let peak = f64::from(derived.peak_torque_rpm);
+        if derived.torque_spans().iter().any(|span| {
+            let [_, rise, bend] = span.torque;
+            let end = span.start_rpm + span.width_rpm;
+            span.start_rpm < peak
+                && (rise < 0.0 || (end < peak && rise + 2.0 * bend * span.width_rpm < 0.0))
+        }) {
+            return Err(
+                "track.powertrain.transmission: invalid engine.torque_curve: author torque that \
+                 never falls from the curve's first point to its peak, so a crank slowing below \
+                 the peak never gains torque"
+                    .into(),
+            );
+        }
         derived.check_derived(a.belt_inertia)?;
         Ok(derived)
     }
@@ -1235,8 +1253,10 @@ fn choose_gear(
     let landing = (speed
         - resistance * f32::from(tp.shift_ticks.get()) / TICK_HZ / coupled_mass(fp))
     .max(0.0);
-    // Below the crank's peak-torque speed falling revs lower the torque, so the gear does not
-    // recover; above it they raise it, and the gear settles where it holds.
+    // Admission refuses a curve whose torque falls anywhere below its peak
+    // (`TransmissionParams::from_authoring`), so below the crank's peak-torque speed falling revs
+    // never raise the torque and the gear does not recover. Above it the gear is kept: falling revs
+    // may raise the torque until it holds, and a crank that slows past the peak meets this clause.
     let lugging = st.omega_e < tp.peak_torque_rpm * RPM_TO_RAD;
     let slowing = sensed.observed && lugging && dir * sensed.drive_gain < -margin;
     let chosen = if stall.is_some() && sensed.stalled {

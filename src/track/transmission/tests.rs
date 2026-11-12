@@ -3516,6 +3516,28 @@ fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
     assert!(TransmissionParams::from_authoring(&a).is_err());
 }
 
+/// Admission refuses an engine whose torque falls anywhere below its peak: the Driver reads
+/// falling revs below the peak as a gear that cannot recover, true only where the torque never
+/// rises as the crank slows. Fixture: the Tiger-modelled authoring, admitted, then with a point
+/// inserted midway below its peak at half the torque of the point before it.
+#[test]
+fn a_torque_curve_falling_below_its_peak_is_refused() {
+    let mut a = tiger_authoring();
+    assert!(TransmissionParams::from_authoring(&a).is_ok());
+    let peak = (0..a.torque_nm.len())
+        .max_by(|&i, &j| a.torque_nm[i].1.total_cmp(&a.torque_nm[j].1))
+        .expect("a curve of points");
+    assert!(peak > 0, "fixture: a point below the peak");
+    let [(below_rpm, below), (peak_rpm, _)] = [a.torque_nm[peak - 1], a.torque_nm[peak]];
+    let mut dipped = a.torque_nm.to_vec();
+    dipped.insert(peak, ((below_rpm + peak_rpm) * 0.5, below * 0.5));
+    a.torque_nm = &dipped;
+    let error = TransmissionParams::from_authoring(&a)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("engine.torque_curve"), "{error}");
+}
+
 /// The coast expectation must solve the same force balance below and above the rolling
 /// fade, on every construction; a full-resistance inverse rejects valid slow roots.
 #[test]
