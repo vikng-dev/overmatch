@@ -859,14 +859,16 @@ fn drive_track_views(
             // instead of wandering one link per pitch — all of it in `link_view`, which the sandbox
             // drives with the same call. An unchanged table stays unmarked: its upload, its bounds
             // and every reader key on the change.
-            if let Ok(mut frames) = belts.get_mut(side.belt)
-                && frames.bypass_change_detection().fit(
-                    &out[si].joints,
-                    phases[si],
-                    rig.belt_len / rig.count.max(1) as f32,
-                    Stragglers::Keep,
-                )
-            {
+            let mut frames = belts.get_mut(side.belt).expect(
+                "a bound rig's belt keeps its table until the rig goes with it (the root's \
+                 despawn, or rebind_on_reinstance in one command flush)",
+            );
+            if frames.bypass_change_detection().fit(
+                &out[si].joints,
+                phases[si],
+                rig.belt_len / rig.count.max(1) as f32,
+                Stragglers::Keep,
+            ) {
                 frames.set_changed();
             }
             // The SHADOW CASTER, on the same joints ([`super::shadow_proxy`]). The ribbon retains

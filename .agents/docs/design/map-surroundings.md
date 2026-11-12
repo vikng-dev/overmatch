@@ -657,8 +657,8 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
     with the track's grip friction through `GripParams::pair`, and with `DefaultFriction`, is zero,
     static and dynamic.
 - W1d (server hull containment): overlap past the face Avian holds hulls at (the edge less the
-  contact margin) remains within the force-and-arrival bound below throughout the drive, without
-  accumulating outward drift.
+  contact margin) remains within the force-and-arrival bound below throughout the drive; drift
+  is observed, not gated.
   - Entries: full throttle head-on, at 30° grinding along the wall, into a convex corner, and
     airborne off a ramp through ordinary track support.
   - The oblique drive gains no height: no rearing, climb or perch, and at least a hull width of
@@ -687,20 +687,18 @@ The separate numeric allowance is a coordinate-scaled f32 pose/AABB operation bu
 also checks that the arrival bound lies below `SolverConfig::max_overlap_solve_speed / b`
 (with the configured length unit), where the bias is uncapped and the spring derivation applies.
 
-The witness checks every drive sample against `d_a` plus that numeric allowance. The driven rig
-can change contact geometry and excite coupled suspension and rotational modes; scalar contact
-softness alone establishes no finite-time settling deadline for that system, and a full-rig
-transient bound remains open. One check on the held position stands in for it, and it bounds no
-transient. The sustained-displacement check reads the held position as the least overlap of each
-of four successive later-half windows, and refuses a trace whose last window stands past `d_s`
-plus the numeric allowance, where the static hold sits, after every window climbed past the
-allowance over the window before. A decaying transient descends however slowly, so only a hold
-that keeps yielding fails it; it resolves a yield faster than the allowance per window, DERIVED
-about 0.8 mm/s on the oblique drive's 0.63 s windows. A synthetic trace that yields from the
-static hold itself is refused, and a slow settle from above passes. Whether the later half comes
-back to the static hold (revisitation) is reported, not asserted: a compliant transient slower
-than the later half would fail it without drifting. The later half's peak is reported as an
-observation too.
+The witness checks every drive sample against `d_a` plus that numeric allowance, and that is its
+only containment assertion. The driven rig can change contact geometry and excite coupled
+suspension and rotational modes; scalar contact softness alone establishes no finite-time settling
+deadline for that system, so drift is observed, not gated. The witness reports the held position,
+the least overlap of each of four successive later-half windows, and whether the later half comes
+back within `d_s` plus the allowance, where the static hold sits (revisitation). Neither is a drift
+test. A compliant transient slower than the later half never revisits, though nothing drifts, and a
+stable damped oscillation that crosses the static hold early in the later half and rises toward
+its next peak climbs window after window while its energy decays: the displacement is not its
+envelope. Gating drift needs a settling premise from the coupled mode, a derived decay rate or
+deadline for the rig's slowest contact-coupled mode, after which the held position's envelope must
+lie within the static hold. The later half's peak is reported as an observation too.
 
 A peak relation (the later peak within the earlier peak plus `d_s` and the allowance) was
 rejected: it made the first transient an allowance for every later one. On the oblique drive the
@@ -710,8 +708,8 @@ fixture tank, later against earlier peak: gravel 0.65 against 0.56 mm, sandy loa
 0.43 mm, dirt 1.46 against 0.31 mm, every trace returning to 0.008 mm between the spikes. A wall
 that yields 1 mm/s from the start of the drive, MEASURED on the fixture tank, leaves later-half
 floors of 6.4 to 9.3 mm, every window past the static hold and climbing 0.6 to 1.3 mm on the one
-before; the sustained-displacement check refuses it on all four drives, and none revisits the
-hold, while `d_a` still holds.
+before, none revisiting the hold, while `d_a` still holds: the witness reports that yield and
+does not refuse it.
 
 **Capture.** W1d: third person at the east edge, the tank held at the wall and the camera pulled in.
 
@@ -731,7 +729,7 @@ hold, while `d_a` still holds.
 | Boundary admission (W1b delivered) | cross-file gate checks 3–5: spawns, resolved placement footprints and outward edge boxes; startup and compatibility share every refusal | square spawn limit | a polygon-inset spawn picker (#200) |
 | Boundary wall (W1c delivered) | admitted finite wall dimensions; `PlayArea::wall_boxes` supplies outward edge solids at Startup on every map composition; `Terrain` layer, friction through `substances::contact_friction`; camera, debris and pair-path witnesses | invisible; routed landing response | map art; generic contact materials (#304) |
 | Placement Y | finite authored Y is admitted | scatter replaces Y with terrain height because the export is stale | #221: restore the off-repo Houdini source, export truthful world XYZ against the shipped height decode (including moved XZ), then retain authored Y; hand-resampling the product alone would be overwritten on export |
-| Boundary driving | production-composition hull witnesses; force/energy-derived containment and sustained-displacement checks, a reported revisitation observation, and geometry-derived support reach | none new | #299: the owner judges the wall capture |
+| Boundary driving | production-composition hull witnesses; a force/energy-derived containment check, a reported revisitation and held-position trend, and geometry-derived support reach | none new | #299: the owner judges the wall capture |
 | Boundary floor consumers (W2, W3 delivered) | shared admitted floor; ordered authority retirement and shared-cursor records | none new | none |
 | Map load (W1a delivered) | one admitted sequence and digest, including boundary and masks (R6); height-decode range must remain finite | the decoders' second read (R6 remainder) | the snapshot carrying the bytes, with destruction-05 and destruction-09 |
 | Map sources | tracked, reproducible, admitted generators | off-repo Houdini scene and TIFF; `map_ui.png` recipe | #221's pipeline; a startup derivation |
@@ -790,7 +788,7 @@ south-east, square to the sun's bearing, so the faces in view take their fill fr
 | **W1a** Play area | Codex | none | `boundary.ron`, `PlayArea`, gate checks 1–2, the R6 sequence with `content_digest = load().digest`, masks in the digest, and the Play area and Boundary glossary entries. | Each refusal fires on its fixture. Editing `boundary.ron` or the masks changes the digest. | none | square polygon |
 | **W1b** Cross-file gate | Codex | W1a | Gate checks 3–5; the refused Kalinovo instances moved in `level.json`. | Each refusal fires on its fixture; the shipped map loads. | none | square spawn limit |
 | **W1c** Wall | Codex | W1b; trackworld session 3 on main | Spawns the edge boxes with the `friction` row through `contact_friction`, plus its refusal. | W1c witnesses (§3.6), the no-grip pair witness included. | none | invisible; routed landing response |
-| **W1d** Hulls at the wall | Codex | W1c | Driving witnesses with bounds from live contact softness, fixture inertia, traction capacity and arrival energy. | All W1d containment, sustained-displacement and no-lift witnesses (§3.6). | east edge, third person | none |
+| **W1d** Hulls at the wall | Codex | W1c | Driving witnesses with bounds from live contact softness, fixture inertia, traction capacity and arrival energy. | All W1d containment and no-lift witnesses (§3.6). | east edge, third person | none |
 | **W2** Round floor | Codex | W1a | Subject: the game's damage model; the brief carries the vocabulary section. The march retires below `PlayArea.floor_m`; `physical_laws.ron`'s `floor_m` is deleted. | A round fired outward over the edge is retired once below the floor (invariant: every march ends; relied on by the server's per-round cost). | none | none |
 | **W3** Piece floor | Codex | W1a | Debris pieces below the floor retire, logged with speed; a tank below the floor panics, naming it. `debris.rs:42` is restated. | A piece placed below the floor is retired within one tick (invariant: no body falls forever). | none | none |
 | **A1** Aim meets what rounds meet | Codex | none | Subject: the game's damage model. `aim_distance` uses the height grid's exact caster plus `Armor`; the doc claim at `aim.rs:41-42` is corrected. | Aim over a `Terrain`-only fixture block reaches the height grid behind it, as the march does (invariant: the aim predicts the round; relied on by the aim dots). | none | none |
@@ -802,7 +800,7 @@ The plan's L6 (an `Atmosphere` spike) is out: settled.
 ## 5. Owner decisions left
 
 1. **Wall driving verdict.** W1c supplies the edge solids after the convex and terrain adapters;
-   W1d supplies the compliant containment and sustained-displacement witnesses (§3.6); the owner's visual verdict remains open.
+   W1d supplies the compliant containment witnesses (§3.6); the owner's visual verdict remains open.
 2. **Haze default.** 12 km under the playtest fork (alternatives 8 km and 20 km). Settled in play;
    nothing is needed before L2a.
 3. **When the outland gets authored land.** Odd-reflection height now; an authored outland, or

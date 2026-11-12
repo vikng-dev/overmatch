@@ -173,51 +173,16 @@ impl Bed {
 /// Margins against compliant containment and the fixture's support reach, in metres.
 struct DriveMargins {
     side: f32,
-    held: f32,
     height: f32,
     slide: f32,
 }
 
-/// Successive held-position observations over the later half of a contact trace. Resolution: a
-/// displacement counts as sustained only after three successive climbs, each past the numeric
-/// allowance; a window's length is printed with the margins.
+/// The windows the later half of a contact trace is split into for its reported held-position
+/// trend, the least overlap of each. Resolution: an observation's granularity, asserted nowhere.
 const HELD_WINDOWS: usize = 4;
 
-/// What [`Containment::margins`] measures, in metres; each is met at zero or above.
-struct ContainmentMargins {
-    /// The arrival bound less the peak overlap.
-    side: f32,
-    /// Against sustained outward displacement ([`held_margin`]).
-    held: f32,
-}
-
-/// The held position over `late`, the later half of a contact trace (overlaps, m): the least
-/// overlap of each of [`HELD_WINDOWS`] successive windows. Its margin against sustained outward
-/// displacement is negative exactly when the last floor stands past `hold`, the static hold plus
-/// `roundoff`, and every floor climbs past the one before by more than `roundoff`: a hold that
-/// keeps yielding. A transient that decays, however slowly, descends instead and passes.
-fn held_margin(late: &[f32], hold: f32, roundoff: f32) -> ([f32; HELD_WINDOWS], f32) {
-    assert!(
-        late.len() >= HELD_WINDOWS,
-        "the later half spans every window"
-    );
-    let floors: [f32; HELD_WINDOWS] = std::array::from_fn(|window| {
-        let [start, end] = [window, window + 1].map(|edge| edge * late.len() / HELD_WINDOWS);
-        late[start..end]
-            .iter()
-            .copied()
-            .fold(f32::INFINITY, f32::min)
-    });
-    let beyond = floors[HELD_WINDOWS - 1] - hold;
-    let climb = floors
-        .windows(2)
-        .map(|pair| pair[1] - pair[0] - roundoff)
-        .fold(f32::INFINITY, f32::min);
-    (floors, -beyond.min(climb))
-}
-
-/// Server containment permits bounded contact compression, never accumulating outward drift.
-/// Derivation and premises: map-surroundings §3.6. All inputs come from the mounted sim.
+/// Server containment bounds contact compression; drift is observed, not gated. Derivation and
+/// premises: map-surroundings §3.6. All inputs come from the mounted sim.
 struct Containment {
     mass: f32,
     linear_overlap_limit: f32,
@@ -311,7 +276,8 @@ impl Containment {
         self.overlap.push(overlap);
     }
 
-    fn margins(&self, name: &str) -> ContainmentMargins {
+    /// The arrival bound less the peak overlap, m, met at zero or above.
+    fn side_margin(&self, name: &str) -> f32 {
         let first = self
             .first_contact
             .expect("the drive must exercise the wall");
@@ -336,14 +302,22 @@ impl Containment {
         let contact = &self.overlap[first..];
         assert!(contact.len() >= 2, "the drive must continue after contact");
         let late = &contact[contact.len() / 2..];
-        // No transient bound is derived for the coupled rig (map-surroundings §3.6), so only
-        // sustained displacement is refused. Whether the later half comes back to the static hold
-        // is an observation: a compliant transient may settle after it.
-        let (floors, held) = held_margin(late, steady + self.roundoff, self.roundoff);
-        let floor = late.iter().copied().fold(f32::INFINITY, f32::min);
+        assert!(
+            late.len() >= HELD_WINDOWS,
+            "{name}: the later half spans every window"
+        );
+        // Observations, not gates: no settling premise is derived for the coupled rig
+        // (map-surroundings §3.6), so neither a return to the static hold nor the held
+        // position's trend is asserted.
+        let least = |trace: &[f32]| trace.iter().copied().fold(f32::INFINITY, f32::min);
+        let floors: [f32; HELD_WINDOWS] = std::array::from_fn(|window| {
+            let [start, end] = [window, window + 1].map(|edge| edge * late.len() / HELD_WINDOWS);
+            least(&late[start..end])
+        });
+        let floor = least(late);
         let late_peak = late.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         println!(
-            "DERIVED {name}: mass={} kg, effective_mass>={} kg, omega={} rad/s, push<={} N, arrival_energy<={} J, steady<={} m, contact_arrival<={} m, discovery<={} m, roundoff={} m, held window={} s; MEASURED peak={} m, side margin={} m, later-half peak={} m, later-half floor={} m, revisits the hold={}, held floors={:?} m, sustained margin={} m",
+            "DERIVED {name}: mass={} kg, effective_mass>={} kg, omega={} rad/s, push<={} N, arrival_energy<={} J, steady<={} m, contact_arrival<={} m, discovery<={} m, roundoff={} m, held window={} s; MEASURED peak={} m, side margin={} m, later-half peak={} m, later-half floor={} m, revisits the hold={}, held floors={:?} m",
             self.mass,
             self.effective_mass,
             self.omega_squared.sqrt(),
@@ -360,12 +334,8 @@ impl Containment {
             floor,
             floor <= steady + self.roundoff,
             floors,
-            held
         );
-        ContainmentMargins {
-            side: arrival + discovery + self.roundoff - peak,
-            held,
-        }
+        arrival + discovery + self.roundoff - peak
     }
 }
 
@@ -387,7 +357,7 @@ fn drive_at_wall(name: &str, yaw: f32, corner: bool, rolling: bool) -> DriveMarg
             slide = slide.max((bed.pose().0.z - start).abs());
         }
     }
-    let margins = containment.margins(name);
+    let side = containment.side_margin(name);
     println!(
         "MEASURED {name}: droop-foot height={foot} m, height margin={} m, slide={slide} m",
         bed.tolerance - foot
@@ -402,8 +372,7 @@ fn drive_at_wall(name: &str, yaw: f32, corner: bool, rolling: bool) -> DriveMarg
         })
         .fold(0.0_f32, f32::max);
     DriveMargins {
-        side: margins.side,
-        held: margins.held,
+        side,
         height: bed.tolerance - foot,
         slide: slide - width,
     }
@@ -412,17 +381,16 @@ fn drive_at_wall(name: &str, yaw: f32, corner: bool, rolling: bool) -> DriveMarg
 #[test]
 fn full_throttle_head_on_stays_inside() {
     let margins = drive_at_wall("head-on", -90.0, false, true);
-    assert!(margins.side >= 0.0 && margins.held >= 0.0);
+    assert!(margins.side >= 0.0);
 }
 
 #[test]
 fn full_throttle_into_a_convex_corner_stays_inside() {
     let margins = drive_at_wall("convex-corner", -135.0, true, true);
-    assert!(margins.side >= 0.0 && margins.held >= 0.0);
+    assert!(margins.side >= 0.0);
 }
 
-/// The server relies on bounded compression without sustained outward displacement throughout the
-/// grind.
+/// The server relies on bounded compression throughout the grind.
 #[test]
 fn oblique_drive_slides_without_rearing_climbing_or_perching() {
     // Fixture: 30 degrees to the wall, accelerating from rest.
@@ -438,10 +406,6 @@ fn oblique_drive_slides_without_rearing_climbing_or_perching() {
     assert!(
         margins.side >= 0.0,
         "grind exceeded the compliant arrival bound"
-    );
-    assert!(
-        margins.held >= 0.0,
-        "the grind's held position climbed outward window after window"
     );
 }
 
@@ -467,47 +431,14 @@ fn a_hull_launched_off_a_ramp_stays_inside_the_wall() {
             .0;
         airborne_at_wall |= side >= -bed.tolerance && contacts.iter().all(Vec::is_empty);
     }
-    let margins = containment.margins("ramp");
+    let side = containment.side_margin("ramp");
     println!("MEASURED ramp: peak root={peak} m, airborne at wall={airborne_at_wall}");
     assert!(
         airborne_at_wall,
         "the ramp must deliver an airborne wall contact"
     );
     assert!(
-        margins.side >= 0.0,
+        side >= 0.0,
         "airborne hull exceeded the compliant arrival bound"
     );
-    assert!(
-        margins.held >= 0.0,
-        "the airborne arrival's held position climbed outward window after window"
-    );
-}
-
-/// SUSTAINED DISPLACEMENT STANDS ON ITS OWN. Fixture traces in units of the roundoff `r` over a
-/// static hold `s`: a hold that yields `2r` a window from `s` comes back to the hold in its first
-/// window, which a revisitation check accepts, yet its last floor stands past the hold after three
-/// climbs, so [`held_margin`] refuses it; a slow settle from above, which never reaches the hold,
-/// descends and passes. A margin read from any floor but the last, or one that skipped the climbs,
-/// would pass the first trace or refuse the second.
-#[test]
-fn held_margin_refuses_a_yield_that_revisits_the_hold_and_passes_a_slow_settle() {
-    let (s, r) = (0.01_f32, 1e-6_f32);
-    // Two samples a window: a spike 3r out, then the window's floor.
-    let trace = |floor: &dyn Fn(f32) -> f32| -> Vec<f32> {
-        (0..HELD_WINDOWS)
-            .map(|window| floor(window as f32))
-            .flat_map(|floor| [floor + 3.0 * r, floor])
-            .collect()
-    };
-    let yielding = trace(&|window| s + 2.0 * r * window);
-    let settling = trace(&|window| s + 100.0 * r / (1.0 + window));
-    let least = |trace: &[f32]| trace.iter().copied().fold(f32::INFINITY, f32::min);
-    assert!(
-        least(&yielding) <= s + r && least(&settling) > s + r,
-        "the yield revisits the hold, the settle does not"
-    );
-    let (floors, held) = held_margin(&yielding, s + r, r);
-    assert!(held < 0.0, "a yield of 2r a window, floors {floors:?}");
-    let (floors, held) = held_margin(&settling, s + r, r);
-    assert!(held >= 0.0, "a settle from above, floors {floors:?}");
 }

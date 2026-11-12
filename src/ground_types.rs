@@ -166,40 +166,6 @@ pub(crate) struct GroundTypes {
     pub(crate) types: BTreeMap<String, GroundType>,
 }
 
-/// The comment the table is written back under: the file stays self-describing after a save.
-#[cfg(any(feature = "dev_ui", test))]
-const FILE_HEADER: &str = "\
-// The ground-type table (`src/ground_types.rs`): physical traction and motion resistance,
-// and cosmetic prints and dust. Each terrain pack names its type (`src/terrain_blend.rs`).
-//
-//   softness_mm_per_kpa  print depth per unit of the tank's ground pressure, mm per kPa
-//   depth_cap_mm         the deepest print this ground draws, mm, at most 255, labelled
-//   darkening            the share of albedo a print takes away, 0..1
-//   roughness_gain       roughness multiplier under a sole; below 1 reads wet
-//   grip                 effective track capacity / normal load, labelled
-//   shear_length_m       ground slip, m, that builds the full grip, labelled
-//   rolling_resistance   total motion resistance at grip.ron rolling_reference_kpa, labelled
-//   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
-//   dust.colour_srgb     the lifted soil's albedo, sRGB, each channel 0..1
-//   strike.lifted        the share of a round's strike read this ground throws, 0..1, labelled
-//   strike.sparks        whether a strike on this ground throws contact sparks, labelled
-//
-// Each softness is the ground-stamping note's §2 sinkage over its DERIVED 110.946 kPa: dirt 5.930 mm
-// DERIVED from a CLAIMED sandy-loam fit, gravel 7.602 mm DERIVED from an ASSUMED curve, sand 92 mm
-// DERIVED from a CLAIMED dry-sand fit, sandy loam 23.716 mm DERIVED from NASA TM-20250006958
-// Table 1's sandy loam at 15% moisture; mud's is ASSUMED under the note's ASSUMED 0.15 m cap; paving
-// is 0, hard. Each depth cap carries its own label. Every other print value is ASSUMED, tuned by
-// eye in play (`track_prints::tuning`).
-// terrain_solver_friction is the explicit Avian solid-body stand-in, not track grip.
-// Track laws and row derivations: .agents/docs/design/track-model/architecture.md section 5a.
-// Each strike value carries its own label and note. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
-// and sand giving the whole cloud, gravel and stony sandy loam most of it, wet mud and intact paving
-// little. Each pack's dust colour is DERIVED: the mean of the pack's shipped full-resolution albedo
-// slice (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`), MEASURED. Concrete and gravel name no
-// pack: concrete's light grey is ASSUMED, and gravel keeps the base pack's mean from when it was
-// that pack's ground.
-";
-
 /// Why the table could not be read or written: the file's I/O, its RON, a value [`GroundTypes::parse`]
 /// refuses, or the table's own serialization. Each keeps its source, so the editor's status line
 /// (`track_prints::tuning`) and the load-time panic say which.
@@ -445,9 +411,16 @@ impl GroundTypes {
     /// The table as the file holds it.
     #[cfg(any(feature = "dev_ui", test))]
     pub(crate) fn to_file_text(&self) -> Result<String, GroundTableError> {
+        // Under the shipped file's own preamble, so a save keeps the file self-describing and its
+        // explanation has one owner.
+        let header: String = include_str!("../assets/terrain/ground_types.ron")
+            .lines()
+            .take_while(|line| line.starts_with("//"))
+            .flat_map(|line| [line, "\n"])
+            .collect();
         let body = ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::new())
             .map_err(GroundTableError::Serialize)?;
-        Ok(format!("{FILE_HEADER}{body}\n"))
+        Ok(format!("{header}{body}\n"))
     }
 
     /// Write the table to `path`, replacing it through a sibling temporary file so a failed write

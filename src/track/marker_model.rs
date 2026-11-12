@@ -383,11 +383,9 @@ mod tests {
             .unwrap_or_else(|| "<non-string panic payload>".into())
     }
 
-    /// THE POLICY TEST: a dropped marker aborts, and the abort message names EVERY missing node in
-    /// one go (this is the incident that killed the fallback — three nodes vanished in one
-    /// re-export), plus the file and the fix. Driven through [`refuse`] directly because the shipped
-    /// glb is complete: there is no on-disk asset with a marker missing, and inventing one would
-    /// test the fixture rather than the policy.
+    /// THE POLICY TEST: a dropped marker aborts, and the abort message names EVERY missing node at
+    /// once, plus the file and the fix. Driven through [`refuse`] directly: the shipped glb is
+    /// complete, and an invented asset with a marker missing would test the fixture, not the policy.
     #[test]
     fn a_missing_marker_aborts_and_names_the_whole_gap() {
         let gap = ModelGap::Missing(vec![PIN_END, LINK_BOX]);
@@ -402,7 +400,7 @@ mod tests {
         }
         assert!(text.contains("tiger_1.glb"), "must name the file: {text}");
         assert!(text.contains("re-export"), "must say what to do: {text}");
-        // And it must never offer the substitute geometry that caused the incident.
+        // A missing marker has no substitute geometry to offer.
         assert!(
             !text.contains("falling back") && !text.contains("tiger_1.tank.ron"),
             "no fallback may be implied: {text}"

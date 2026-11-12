@@ -403,8 +403,9 @@ fn sensed_resistance_and_landing_gaps_on_declared_grounds() {
 /// The ledger closes on an incline: a rolling hull feels `W sin θ + c_rr W cos θ` along its
 /// heading whether it gains or loses speed, the gear law's one reading of the world. Parked, the contact law's
 /// rolling fade leaves the grade alone. Fixture: uninterrupted 10 and 20 degree ramp planes and a
-/// third at nine tenths of the base ground's launch limit, parked then a rolling entry. Extending
-/// the faces isolates their support from the flat slab and short course crests.
+/// third at nine tenths of the base ground's launch limit, parked then a rolling entry; a launch
+/// owes progress only on a grade its ground and drivetrain can carry. Extending the faces isolates
+/// their support from the flat slab and short course crests.
 #[test]
 fn sensed_resistance_and_landing_gaps_on_the_course() {
     // DERIVED: a launch is capable while grip carries the grade and the rolling load,
@@ -443,6 +444,16 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
             .contact()
             .rolling_at(nominal_pressure(&app));
         let expected = weight * (angle.sin() + rolling * angle.cos());
+        // DERIVED: a launch is also capable only while first gear's peak torque, through the
+        // clutch, out-pulls the grade and the rolling load, `min(T, C) G₁ / r_s > W (sin θ + r cos θ)`.
+        // A grade past either limit owes no progress uphill.
+        let tp = app
+            .world()
+            .resource::<crate::track::sim::TrackGear>()
+            .trans();
+        let pull = tp.torque_at(tp.peak_torque_rpm).min(tp.clutch_capacity) * tp.gears_fwd[0]
+            / tp.sprocket_radius;
+        let capable = angle.tan() < ground.grip - rolling && pull > expected;
         let mut measurements = Measurements::default();
         let mut parked = Vec::new();
         for _ in 0..64 {
@@ -512,7 +523,7 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
             );
             was_cut = p.shifting;
             minimum = minimum.min(p.next_speeds[0]).min(p.next_speeds[1]);
-            if degrees == 20.0 {
+            if degrees == 20.0 && capable {
                 // Fixture: S2's specified class witness.
                 assert!(
                     p.next_speeds
@@ -533,7 +544,7 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
             - launch_position)
             .dot(rotation * Vec3::NEG_Z);
         println!(
-            "MEASURED grade launch degrees={degrees} gear={launch_gear} distance_m={climb} cuts={cuts} slip_s={} minimum_belt_m_s={minimum}",
+            "MEASURED grade launch degrees={degrees} gear={launch_gear} distance_m={climb} cuts={cuts} slip_s={} minimum_belt_m_s={minimum}; DERIVED pull_n={pull} capable={capable}",
             slip_ticks as f32 / FIXED_TICKS_PER_SECOND as f32
         );
         println!(
@@ -541,13 +552,15 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
             summary(&launch_coupled),
             summary(&launch_cut)
         );
-        if degrees == 20.0 {
-            assert!(cuts <= 1, "S2 must not cascade through cuts");
+        if capable {
+            if degrees == 20.0 {
+                assert!(cuts <= 1, "S2 must not cascade through cuts");
+            }
+            assert!(
+                climb > 0.0,
+                "a supported capable launch must gain distance uphill"
+            );
         }
-        assert!(
-            climb > 0.0,
-            "a supported capable launch must gain distance uphill"
-        );
         // Fixture: observe a rolling entry through the same supported grade.
         let position = app
             .world()
