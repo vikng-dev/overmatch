@@ -574,6 +574,18 @@ state, none from a timer or a band:
   is open: the price and the sensed resistance sit on different sides of the belt, so a gear can
   look affordable where it just failed (MEASURED, ram-x-0.35: fifth stalled sending 156.9 kN at
   the sprocket while the ledger read `R` = 104.9 kN).
+- *A step down reaches only `max_step` gears.* Where every gear in reach fails to hold where the
+  cut lands and one beyond reach would hold, the engaged gear keeps slowing until it settles, and a
+  settled gear reads no slowing, so it crawls. The shipped sheet reaches this (DERIVED from the
+  Driver's price, not a sim run: the engaged gear's drive taken as its own price, straight, grip
+  unbounded): at pedal 0.25, fifth engaged against 46.5 kN, second, third and fourth fail to hold
+  where the cut lands, first would pull about 48.8 kN but lies four steps down, and fifth settles
+  near 560 rpm in the idle catch's band; 524 such states at pedal 0.25–0.3 and 31.5–82.5 kN. At
+  part pedal the net torque is small and nearly flat, so pull follows the ratio. Whether the sim's
+  delivered drive matches the price there is unchecked. Evaluating a lower destination across
+  combined cuts, or a reach that follows need, would lift it. The rejected peak-torque form had the
+  same limit: below the torque peak, where this crank sits, its slowing clause also took only the
+  highest gear within `max_step` that holds where the cut lands.
 - *Grip caps push.* No gear puts more traction into the ground along the belts than its
   contacts' grip budget, which they carry when every contact slides along the belt: the patches'
   `sum mu N_elastic` and the solver contacts' Coulomb limit, the solver's combined coefficient
