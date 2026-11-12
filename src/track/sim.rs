@@ -291,6 +291,12 @@ impl TrackGear {
         transmission::coupled_mass(&self.construction)
     }
 
+    /// The construction the Driver prices candidates against.
+    #[cfg(all(test, feature = "bitprobe"))]
+    pub(crate) fn construction(&self) -> transmission::DriveConstruction {
+        self.construction
+    }
+
     /// DERIVED full service-brake deceleration along the direction of motion (m/s^2).
     /// Grip is limited by brakes and observed capacity; delivered rolling acts alongside it.
     /// `rolling_braking_n` is the contact law's rolling force projected opposite travel, so

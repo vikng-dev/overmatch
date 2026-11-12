@@ -252,11 +252,11 @@ impl Measurements {
 /// Every paid cut of one drive, held to the rules its construction states (architecture §5a): a
 /// cut opens the clutch for exactly one shift's ticks, a full window of drive separates it from the
 /// last, and it lands the gear its clause names. A stall steps to the lowest gear within
-/// `max_step`; any other cut lands a gear whose pull, priced at full pedal where the cut lands and
-/// capped by grip, beats the resistance it read by M, and an upshift's beats the engaged gear's
-/// drive by M as well. This is the chooser's own test less its reflected crank inertia, which only
-/// lowers a gear's spare, so it holds of every pull the chooser accepts. How many cuts a drive
-/// pays is an observation.
+/// `max_step`; any other cut lands a gear whose pull, priced at full pedal where the cut lands
+/// ([`candidate_pull`](crate::track::transmission::candidate_pull)) and capped by grip, beats the
+/// engaged gear's drive by M. An upshift's also beats the resistance it read by M, and a step down
+/// follows a held window whose drivetrain lost more than M. How many cuts a drive pays is an
+/// observation.
 #[derive(Default)]
 struct Cuts {
     count: usize,
@@ -330,25 +330,32 @@ impl Cuts {
         } else {
             &tp.gears_fwd
         };
-        let ratio = ladder[usize::from(new - 1)];
-        // A clutch closing from out slips below the pedal's launch speed.
-        let clutch = if landing * ratio / tp.sprocket_radius < tp.launch_omega(1.0) {
-            ClutchState::Slip
-        } else {
-            ClutchState::In
-        };
-        let pull = price_driver_force(tp, DriveSupply::WHOLE, landing, ratio, 1.0, clutch)
-            .min(reading.grip);
+        let pull = crate::track::transmission::candidate_pull(
+            tp,
+            &gear.construction(),
+            DriveSupply::WHOLE,
+            landing,
+            ladder[usize::from(new - 1)],
+            1.0,
+            resistance,
+            ClutchState::Out,
+        )
+        .min(reading.grip);
         let margin = crate::track::transmission::DriverResolution::load().margin_n(tp);
         assert!(
-            pull - resistance > margin,
-            "gear {old} to {new}: the landing gear holds, pulling {pull} N against {resistance} N"
+            pull > dir * reading.drive + margin,
+            "gear {old} to {new}: the landing gear pulls {pull} N past the engaged drive {} N",
+            reading.drive
         );
         if new > old {
             assert!(
-                pull > dir * reading.drive + margin,
-                "gear {old} to {new}: an upshift pulls {pull} N past the engaged drive {} N",
-                reading.drive
+                pull - resistance > margin,
+                "gear {old} to {new}: an upshift holds, pulling {pull} N against {resistance} N"
+            );
+        } else {
+            assert!(
+                reading.observed && dir * reading.drive_gain < -margin,
+                "gear {old} to {new}: a step down reads its drivetrain losing over a held window"
             );
         }
     }

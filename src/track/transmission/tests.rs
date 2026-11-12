@@ -3492,51 +3492,71 @@ fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
     assert!(TransmissionParams::from_authoring(&a).is_err());
 }
 
-/// A slowing gear is kept where its falling revs raise the crank's net torque and steps down where
-/// they lower it, on any admitted curve: one that dips before its global peak recovers on the
-/// branch rising toward the local maximum below the crank. Mutant: reading every crank below the
-/// global peak as lugging steps down there. Fixture: the Tiger-modelled authoring with a local
-/// maximum and then a dip below its global peak; its top gear, losing drive over a held window
-/// against a light load, with the crank on each branch.
+/// A gear losing drive over a held window steps down to the highest lower gear in reach that pulls
+/// where the cut lands more than its own drive by M, wherever its crank sits on its curve, and
+/// stays where no lower gear does: a cut is paid only for more pull, as an upshift's is. Mutants:
+/// a veto where the crank's net torque rises as revs fall, or where the crank runs above its
+/// torque peak, keeps a crawling gear the next one down outpulls; stepping down on falling revs
+/// alone takes a gear that pulls no more. Fixture: the Tiger-modelled ladder's top gear driving
+/// what it meets, at 800 rpm on that curve at 0.3 pedal (drag only part released, so its net
+/// torque rises as revs fall) and at 1300 rpm at full pedal on a curve peaking at 1000 rpm and
+/// falling after; then each reading with the engaged gear sending the contacts' whole grip budget.
 #[test]
-fn a_slowing_gear_recovers_only_where_falling_revs_raise_its_torque() {
-    let curve = [
+fn a_slowing_gear_steps_down_only_to_a_gear_that_outpulls_it() {
+    let falling = [
         (800.0, 1300.0),
-        (1200.0, 1600.0),
-        (1500.0, 1300.0),
-        (2100.0, 1850.0),
+        (1000.0, 1850.0),
+        (2100.0, 1700.0),
         (2500.0, 1686.0),
         (3000.0, 1639.0),
     ];
-    let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
-        torque_nm: &curve,
-        ..tiger_authoring()
-    })
-    .expect("a curve that dips before its global peak is admitted");
     let fp = grade_fixture_fp();
-    let top = tp.gears_fwd.len() as u8;
-    // Fixture cranks: between the local maximum and the dip, then between the dip and the peak.
-    for (rpm, recovers) in [(1350.0, true), (1600.0, false)] {
+    // Fixture: crank speed (rpm), pedal and resistance (N) per curve.
+    let cases = [
+        (tiger_authoring().torque_nm, 800.0, 0.3, 7_100.0),
+        (&falling[..], 1300.0, 1.0, 40_000.0),
+    ];
+    for (curve, rpm, command, resistance) in cases {
+        let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
+            torque_nm: curve,
+            ..tiger_authoring()
+        })
+        .expect("the fixture curve is admitted");
+        let top = tp.gears_fwd.len() as u8;
         let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[usize::from(top - 1)];
-        let mut state = TransmissionState {
-            gear: top,
-            clutch: ClutchState::In,
-            omega_e: rpm * RPM_TO_RAD,
-            ..fresh(&tp)
-        };
-        let mut inp = driver_input(speed, 1_000.0, 1.0);
-        inp.sensed
-            .as_mut()
-            .expect("a Driver-policy reading")
-            .drive_gain = -2.0 * force_margin(&tp);
-        choose_gear(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
-        if recovers {
-            assert_eq!(state.gear, top, "{rpm} rpm: falling revs raise the torque");
-        } else {
-            assert!(
-                state.gear < top && state.shift_ticks > 0,
-                "{rpm} rpm: falling revs lower the torque, so the gear steps down"
+        for (grip, steps) in [(f32::INFINITY, true), (resistance, false)] {
+            let mut state = TransmissionState {
+                gear: top,
+                clutch: ClutchState::In,
+                omega_e: rpm * RPM_TO_RAD,
+                ..fresh(&tp)
+            };
+            let mut inp = driver_input(speed, resistance, command);
+            let sensed = inp.sensed.as_mut().expect("a Driver-policy reading");
+            sensed.drive_gain = -2.0 * force_margin(&tp);
+            sensed.grip = grip;
+            choose_gear(
+                &mut state,
+                &tp,
+                &construction(&fp),
+                &inp,
+                command,
+                felt(&inp),
             );
+            let chosen = (state.gear, state.shift_ticks > 0);
+            if steps {
+                assert_eq!(
+                    chosen,
+                    (top - 1, true),
+                    "{rpm} rpm: the next gear down outpulls the top"
+                );
+            } else {
+                assert_eq!(
+                    chosen,
+                    (top, false),
+                    "{rpm} rpm: no gear pulls past the grip budget"
+                );
+            }
         }
     }
 }

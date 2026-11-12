@@ -562,13 +562,13 @@ state, none from a timer or a band:
   rest or did not gain. The window establishes it, not each tick (MEASURED on the rubble battery:
   a test of every tick fired no stall step on the heap rams and tripled the stalled ticks). Belts
   that start gaining under a hull still at rest keep the bound and step nothing down.
-- *Falling revs fail a gear only where they lower its torque.* The crank's net torque at the
-  requested pedal (fuel and the idle catch less drag, as the crank receives them) decides, on any
-  curve the data authors: where it rises as revs fall, toward the next local maximum below the
-  crank, the gear is kept and settles where it holds (MEASURED on a 20° grade: fourth settled at
-  1.93 m/s with its drivetrain reading −4 N; stepping down cost a metre per second in the cut, and
-  third settled slower); where it falls or holds flat as revs fall, a slowing crank gains nothing and
-  the gear does not recover.
+- *Falling revs fault the engaged gear, not the gear below.* A drivetrain losing over a held
+  window says the engaged gear does not hold; whether a lower one does better is the price of that
+  gear where the cut lands, the comparison an upshift makes, mirrored: the Driver steps down only
+  to a gear that pulls there more than the engaged gear's drive by M. The cut is paid in the
+  landing speed, so a lower gear that would arrive slower than the engaged one settles is not taken
+  for its ratio alone (MEASURED on a 20° grade: fourth settled at 1.93 m/s with its drivetrain
+  reading −4 N; stepping down cost a metre per second in the cut, and third settled slower).
 - *The Driver keeps no failure memory.* Each clause chooses from the current window alone, so a
   gear just left is chosen again wherever its forecast clears, and may fail there again. The cause
   is open: the price and the sensed resistance sit on different sides of the belt, so a gear can
@@ -595,9 +595,8 @@ difference, exceeds M. The clauses:
    current gear nor at or above one that failed there; else
    first where it offers more spare than the current gear. Free.
 2. The hull stalls now under the gear's drive: the lowest gear within `max_step`. Or
-   the drivetrain loses more than M over a held window where falling revs do not raise the
-   crank's net torque: the highest lower gear within `max_step` that holds where it lands; with
-   none the gear stays.
+   the drivetrain loses more than M over a held window: the highest lower gear within `max_step`
+   that pulls where it lands more than the engaged gear's drive by M; with none the gear stays.
 3. Straight, the clutch in, a held window and the hull moving where the cut lands: of the higher
    gears within `max_step`, those that hold where they land and pull there more
    than the engaged gear's drive by M, the one that pulls hardest, the higher on a tie. Gears
@@ -614,6 +613,13 @@ ladder) or fuel under drag chooses nothing. The Driver uses requested pedal, not
 ramp. A slipping clutch holds its launch floor, capped at the speed the crank reaches freely, so a
 launch takes none of the flywheel's stored energy below that floor; a crank above the floor when
 the clutch closes can spend the excess. M is the crank arithmetic term alone.
+Clauses 2 and 3 cannot undo each other on steady inputs: each takes a gear only where its price
+where the cut lands beats the engaged gear's drive by M, so where every gear's price meets its
+observed drive, a step down from `g` to `g − 1` needs `P(g − 1) > P(g) + M` and a step back up
+needs `P(g) > P(g − 1) + M`, which cannot both hold at one landing; the same holds from an upshift
+back down. A cut and a full window of the new gear's drive separate any two decisions. Where the
+price and the delivery disagree by more than M, the Driver can still hunt (the failure-memory
+entry above).
 Rejected forms: pricing the engaged gear (its spare reads model error); pricing a candidate at a
 crawl as a lug rather than the slip its clutch closes into (it carries the idle catch's whole
 torque and outbids a part-pedal launch, which then stops in the cut: MEASURED in
@@ -634,8 +640,14 @@ contacts load the belts off the heading: 0.92 in sixth against 0.90 in seventh o
 slide test on slip distance over the elastic shear length (slip distance is unimodal across it on
 the rubble battery); the hull's own gain as a gear's verdict (the ring above); a stall stepping to
 the highest lower gear that holds against its bound (a floor prices every weaker gear as
-holding); and keeping the park latch off under drive (the one-way lever already carries rollback
-there, and the latch is what holds a hull at rest the tick a cut opens its clutch).
+holding); a slowing gear kept while its crank runs above the torque peak, with admission refusing
+a curve that falls below its peak (it fits one curve shape, and a lower gear can outpull a crank
+above its peak); a slowing gear kept where its crank's net torque rises as revs fall (that marks
+a stable crawl, not a gear that serves the Driver: DERIVED, the Tiger-modelled ladder's top gear
+at 800 rpm and 0.3 pedal against 7.1 kN settles near 724 rpm while seventh has ample spare;
+MEASURED on the rubble battery, six part-pedal stop-go rows lost every step down and ended 4 to
+19 m shorter); and keeping the park latch off under drive (the one-way lever already carries
+rollback there, and the latch is what holds a hull at rest the tick a cut opens its clutch).
 The brake lever carries only the stop-force shortfall against intent, without a release latch.
 Opposite input brakes to rest, waits the authored pause, then pays one direction cut;
 release during the pause keeps park held. Zero intent below first gear's idle speed parks.
