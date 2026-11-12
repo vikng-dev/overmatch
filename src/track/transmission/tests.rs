@@ -207,6 +207,7 @@ fn felt_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
         drive_gain: 0.0,
         grip: f32::INFINITY,
         stall: None,
+        failed: None,
         stalled: false,
         observed: true,
     });
@@ -1115,6 +1116,7 @@ fn stall_guard_holds_crank_under_grade_lug() {
             drive_gain: 0.0,
             grip: f32::INFINITY,
             stall: None,
+            failed: None,
             stalled: false,
             observed: true,
         });
@@ -2189,6 +2191,7 @@ fn driver_input(speed: f32, load: f32, command: f32) -> TransmissionInput {
         drive_gain: 0.0,
         grip: f32::INFINITY,
         stall: None,
+        failed: None,
         stalled: false,
         observed: true,
     });
@@ -2396,6 +2399,90 @@ fn the_top_of_the_longest_admitted_ladder_chooses_nothing_above_it() {
         felt(&inp),
     );
     assert_eq!(state.gear, top);
+}
+
+/// A departure records the engaged gear's window-mean sprocket drive less the load the chooser
+/// read in that window, and nothing at or below M, so the record is below the drive delivered: a
+/// retry's forecast is compared with it on the same side of the belt. Fixture: a stalled third at
+/// 50 kN, its window's drive 3 kN over that load, then within M of it.
+#[test]
+fn a_departure_records_drive_less_its_windows_load_and_nothing_at_or_below_m() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let margin = force_margin(&tp);
+    let resistance = 50_000.0;
+    for (over, recorded) in [(3_000.0, true), (0.5 * margin, false)] {
+        let mut state = TransmissionState {
+            gear: 3,
+            clutch: ClutchState::Slip,
+            ..fresh(&tp)
+        };
+        let mut inp = stalled(driver_input(0.0, resistance, 1.0), 3);
+        let drive = resistance + over;
+        inp.sensed.as_mut().expect("a Driver-policy reading").drive = drive;
+        let departure = choose_gear(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
+        assert!(state.gear < 3, "the stalled third steps down");
+        match departure {
+            Some((gear, spare)) => {
+                assert!(recorded, "a spare within M is recorded: {spare} N");
+                assert_eq!((gear, spare), (3, drive - resistance));
+                assert!(spare < drive, "the record is below the drive delivered");
+            }
+            None => assert!(!recorded, "{over} N over the load is not recorded"),
+        }
+    }
+}
+
+/// A failed gear and every gear above it hold only with more to spare than it lost with: the same
+/// forecast is refused, a price the grip raises past it is admitted, and so is the gear once the
+/// hull meets little on ground that grips. Fixture: each class drivetrain cruising in first where
+/// second qualifies against 1 kN, second recorded as lost with 4 kN to spare, on grip capping
+/// second's pull at that forecast, 1 kN above it, and uncapped.
+#[test]
+fn a_failed_gear_and_those_above_hold_only_above_its_record() {
+    for (fp, tp) in class_drivetrains() {
+        let construction = construction(&fp);
+        let ratio = tp.gears_fwd[0];
+        let (load, lost) = (1_000.0, 4_000.0);
+        let cruising = |rpm: f32| TransmissionState {
+            gear: 1,
+            clutch: ClutchState::In,
+            omega_e: rpm * RPM_TO_RAD,
+            ..fresh(&tp)
+        };
+        let span = tp.engine.governed_rpm - tp.engine.idle_rpm;
+        let (rpm, inp) = (1..24)
+            .find_map(|step| {
+                let rpm = tp.engine.idle_rpm + span * step as f32 / 24.0;
+                let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / ratio;
+                let inp = driver_input(speed, load, 1.0);
+                let mut st = cruising(rpm);
+                choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
+                (st.gear == 2).then_some((rpm, inp))
+            })
+            .expect("a cruise in first where second qualifies");
+        for (grip, admitted) in [
+            (load + lost, false),
+            (load + lost + 1_000.0, true),
+            (f32::INFINITY, true),
+        ] {
+            let mut inp = inp;
+            let sensed = inp.sensed.as_mut().expect("a Driver-policy reading");
+            sensed.grip = grip;
+            sensed.failed = Some(super::super::sense::Failed {
+                gear: (false, 2),
+                spare: lost,
+                command: 1.0,
+                steer_step: 0,
+            });
+            let mut st = cruising(rpm);
+            choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
+            assert_eq!(
+                st.gear >= 2,
+                admitted,
+                "second lost with {lost} N to spare, on {grip} N of grip"
+            );
+        }
+    }
 }
 
 /// Fixture launch price of forward `gear` at full pedal: what a slipping clutch delivers.
