@@ -305,23 +305,30 @@ pub(crate) fn horizontal_ground_speed(velocity: Vec3) -> f32 {
 
 /// Fixed-radius steering visibility from the live detent state and the source radius table retained
 /// by [`TransmissionParams`](crate::track::transmission::TransmissionParams).
-pub(crate) fn steering_hud_line(
+fn steering_hud_line(
     st: &TransmissionState,
     params: Option<&crate::track::transmission::TransmissionParams>,
 ) -> String {
+    steering_detent(st, params).map_or_else(String::new, |(detent, radius)| {
+        format!("STEER {detent} R~{radius:.0}m")
+    })
+}
+
+/// The engaged detent's label and its radius (m) on the engaged ladder's row, or none straight.
+fn steering_detent(
+    st: &TransmissionState,
+    params: Option<&crate::track::transmission::TransmissionParams>,
+) -> Option<(&'static str, f32)> {
     if st.steer_step == 0 {
-        return String::new();
+        return None;
     }
-    let Some(params) = params else {
-        return String::new(); // No running gear is built yet: no steering table to read.
-    };
-    let (tight, wide) = params.steering_radii(st.reverse, st.gear);
-    let (detent, radius) = match st.steer_step {
+    // No running gear is built yet: no steering table to read.
+    let (tight, wide) = params?.steering_radii(st.reverse, st.gear);
+    Some(match st.steer_step {
         1 => ("I", wide),
         2 => ("II", tight),
         _ => panic!("the transmission admits only straight, wide and tight detents"),
-    };
-    format!("STEER {detent} R~{radius:.0}m")
+    })
 }
 
 /// Rebuild both shared HUD surfaces from the controlled tank's server-stream components.
@@ -468,6 +475,40 @@ mod tests {
             assert!(!row.contains("-0.0k"));
             if rpm == -3100.0 {
                 assert!(row.contains("-3.1k"));
+            }
+        }
+    }
+
+    /// The steering readout names the engaged detent's radius on the engaged ladder's own row: the
+    /// tight radius at the second detent, the wide at the first, none straight. Players read the
+    /// radius they turn on from it. Mutant: the forward row read in reverse, or the wide radius at
+    /// the tight detent. Fixture: the selected construction's ladders carrying distinct radii on
+    /// every row of each ladder.
+    #[test]
+    fn the_steering_readout_names_the_engaged_detents_radius() {
+        let mut tp = crate::bake::selected_spec()
+            .validate()
+            .expect("the selected sheet is admitted");
+        let row = |base: f32, gear: u8| (base + f32::from(gear), base + 50.0 + f32::from(gear));
+        let (fwd, rev) = (tp.gears_fwd.len() as u8, tp.gears_rev.len() as u8);
+        tp.steer_radii_m = (1..=fwd).map(|gear| row(0.0, gear)).collect();
+        tp.reverse_steer_radii_m = (1..=rev).map(|gear| row(100.0, gear)).collect();
+        for (reverse, base, gears) in [(false, 0.0, fwd), (true, 100.0, rev)] {
+            for gear in 1..=gears {
+                let (tight, wide) = row(base, gear);
+                for (steer_step, radius) in [(0, None), (1, Some(wide)), (2, Some(tight))] {
+                    let st = TransmissionState {
+                        reverse,
+                        gear,
+                        steer_step,
+                        ..TransmissionState::stopped()
+                    };
+                    assert_eq!(
+                        steering_detent(&st, Some(&tp)).map(|(_, radius)| radius),
+                        radius,
+                        "reverse={reverse} gear={gear} detent={steer_step}"
+                    );
+                }
             }
         }
     }

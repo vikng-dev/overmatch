@@ -3717,10 +3717,6 @@ fn reverse_radii_belong_to_the_reverse_gear() {
         None,
     );
     assert_eq!(jacobian, [(1.0 + kappa) / 2.0, -(1.0 - kappa) / 2.0]);
-    assert_eq!(
-        crate::drive_hud::steering_hud_line(&state, Some(&tp)),
-        "STEER II R~6m"
-    );
 }
 
 /// Finite authored scalars must not publish an overflowing crank-energy budget to the work law.
