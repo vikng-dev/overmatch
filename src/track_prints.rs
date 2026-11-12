@@ -278,7 +278,7 @@ fn store_image(side: u32, format: TextureFormat, levels: u32) -> Image {
     image
 }
 
-/// Make the two GPU images: the near store (`Rg8Unorm`, press and pressure) and the world layer
+/// Make the two GPU images: the near store (`Rg8Unorm`, reach and bearing) and the world layer
 /// (`R8Unorm`, coverage, full mip chain).
 pub(crate) fn images(images: &mut Assets<Image>) -> PrintImages {
     PrintImages {
@@ -514,15 +514,17 @@ fn stamp_shoes(
             .then(|| grid.height_at(xz.x, xz.y))
     };
     for (entity, belt, frames, parent, at) in &belts {
-        let Some(tank) = memory.get_mut(&parent.parent()) else {
-            continue;
-        };
+        let tank = memory.get_mut(&parent.parent()).expect(
+            "a belt is spawned under its tank's root (track::view::bind_track_rigs), whose memory \
+             the loop above keeps",
+        );
         if !refit && !tank.moved && !frames.is_changed() && !at.is_changed() {
             continue;
         }
-        let Some(hull) = tank.last.map(|pose| pose.inverse()) else {
-            continue;
-        };
+        let hull = tank
+            .last
+            .expect("the loop above recorded every kept tank's pose this run")
+            .inverse();
         let side = belt.side();
         let mirrored = side == Side::Left;
         let to_mesh = template.frame(side).canonical_to_mesh();
@@ -829,8 +831,10 @@ mod tests {
 
     /// HIGHER GROUND PRESSURE PRINTS DEEPER ON THE SAME GROUND: a heavier tank on the same
     /// footprint bears harder on the ground, the store carries its pressure, and the depth the
-    /// shader draws from that pressure is deeper until the ground's cap. Fixture masses and
-    /// footprints, no vehicle: the law reads mass, width and length and nothing else.
+    /// shader draws from that pressure is deeper until the ground's cap. Fixture masses,
+    /// footprints and ground, no vehicle: the law reads mass, width and length and nothing else,
+    /// and the ground is soft with a cap neither pressure reaches, so a tuned table cannot
+    /// saturate both.
     #[test]
     fn higher_ground_pressure_prints_deeper_on_the_same_ground() {
         let (light, heavy) = (
@@ -842,13 +846,22 @@ mod tests {
             ground_pressure_kpa(40_000.0, 1.0, 3.0) < heavy,
             "a wider track bears more lightly"
         );
-        let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
-        let mut depths = PrintDepths {
-            ground: crate::ground_field::GroundField::unpainted(&GroundTypes::load_shipped()),
-            params: TerrainBlendParams::default(),
+        let mut params = fixture_lanes();
+        params.print_softness.x = 1.0e-3;
+        params.print_cap.x = 0.2;
+        assert!(
+            params.print_softness.x * heavy < params.print_cap.x,
+            "the fixture ground's cap holds neither pressure"
+        );
+        // Silent mask: the fixture base ground everywhere.
+        let depths = PrintDepths {
+            ground: crate::ground_field::GroundField::fixture_mask(
+                UVec2::ONE,
+                64.0,
+                vec![Vec3::ZERO],
+            ),
+            params,
         };
-        crate::terrain_blend::set_print_lanes(&mut depths.params, &table);
-        // Silent mask: the base pack's ground everywhere.
         let (shallow, deep) = (
             depths.full_press_m(Vec2::ZERO, light),
             depths.full_press_m(Vec2::ZERO, heavy),

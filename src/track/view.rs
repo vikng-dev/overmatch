@@ -841,7 +841,8 @@ fn drive_track_views(
                 phase: phases[si],
             }),
         };
-        // Both feel tiers are unconditional — parameter-free laws, so there is nothing to dial.
+        // Both feel tiers are unconditional: the conform ease falls under gravity alone, and the
+        // slack spring damps by its authored taste (`wrap::wrap_feel_zeta`).
         let out = wrap::step_cached(
             &input,
             field,

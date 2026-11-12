@@ -34,7 +34,6 @@
 //!
 //! # What it buys — MEASURED 2026-07-28, against a proxy that casts
 //!
-//! A ribbon that casts nothing measures an invisible mesh, so the proxy here casts.
 //! `OVERMATCH_PROBE_TANKS` 2 vs 8, `M350` / 4096, vsync off, foreground on the built-in panel, the
 //! median of a 24 s window, two runs per arm agreeing inside ±0.02 ms at 8 tanks:
 //!
@@ -91,21 +90,17 @@
 //! construction here, per `rig_geom`'s width rule). All four come from the model's measured shoe
 //! (`track::marker_model`), so a new tank's belt needs no new constants.
 //!
-//! There used to be two margins here (12 mm radial, 30 mm lateral) holding the ribbon strictly
-//! inside the shoe solid, on the reasoning that the shoes RECEIVE shadows — the hull's shadow
-//! crossing the return run is a thing you can see — so a coincident caster would stripe the very
-//! links it stands in for. That reasoning had a hole: `Link_Box` is an authored ENVELOPE, not the
-//! plate's surface, so an inset measured from it is not guaranteed to land inside solid material
-//! between the grousers anyway. And the defence was redundant: a caster coincident with its own
-//! receiver is the textbook acne case, which is what [`crate::world`]'s `SUN_SHADOW_NORMAL_BIAS`
-//! already exists to solve.
+//! The faces are flush. An inset (12 mm radial, 30 mm lateral) holding the ribbon inside the shoe
+//! solid, so a coincident caster cannot stripe the links it stands in for (they RECEIVE shadows:
+//! the hull's shadow crossing the return run is visible), is rejected: `Link_Box` is an authored
+//! ENVELOPE, not the plate's surface, so an inset from it need not land inside solid material
+//! between the grousers, and a caster coincident with its own receiver is the acne case
+//! [`crate::world`]'s `SUN_SHADOW_NORMAL_BIAS` owns. Compared by eye (a live `I`-key A/B on one
+//! tank, one patch of ground, one sun), flush looks better, and it keeps the 60 mm of shadow width
+//! out of 726 (8%) and the 25 mm of drop the inset cost.
 //!
-//! Tested by eye 2026-07-28 (live `I`-key A/B on one tank, one patch of ground, one sun, so the two
-//! arms differed in nothing else) — flush is BETTER, and both constants were deleted. Flush also
-//! recovers what the inset cost: 60 mm of shadow width out of 726 (8%) and 25 mm of drop.
-//!
-//! If acne ever does appear here, the margin should be DERIVED — `max(bias × texel size,
-//! envelope-to-material gap)`, both of which are measurable — never picked again.
+//! If acne appears here, the margin is DERIVED — `max(bias × texel size, envelope-to-material
+//! gap)`, both measurable — never picked.
 
 use std::ops::DerefMut;
 

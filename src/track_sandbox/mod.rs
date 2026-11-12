@@ -257,7 +257,7 @@ pub fn plugin(app: &mut App) {
         .init_resource::<TerrainField>()
         .init_resource::<rubble::RubbleTouches>()
         // `conform_belts_field` mutates this memory; reseats clear it. Feel laws are
-        // unconditional and parameter-free.
+        // unconditional; the slack spring's damping is its authored taste.
         .init_resource::<WrapMemory>()
         .init_resource::<ViewPerf>()
         .init_resource::<RigSuspension>()

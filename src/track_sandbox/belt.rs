@@ -538,8 +538,8 @@ pub(super) struct ViewPerf {
 ///
 /// Wrong-side wheel capture, compression zigzag, teleport transients, and solver stability are
 /// unrepresentable in the wrap CORE: the envelope+conform+sag geometry has no state to capture,
-/// buckle, stale, or diverge. Over it sit the two parameter-free feel tiers (a hull-frame conform
-/// ease and a slack spring, always on), whose CLIENT-LOCAL filter memory means the drawn belt
+/// buckle, stale, or diverge. Over it sit the two feel tiers (a hull-frame conform ease under
+/// gravity and a slack spring damped by its authored taste, always on), whose CLIENT-LOCAL filter memory means the drawn belt
 /// carries this client's own history rather than being a pure function of replicated state
 /// (ADR-0014) — cosmetic view juice, while the pins/wheels/gear still derive from replicated state
 /// alone.

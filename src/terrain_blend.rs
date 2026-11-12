@@ -118,11 +118,6 @@ fn slot_grounds(table: &GroundTypes) -> [&crate::ground_types::GroundType; 4] {
     ]
 }
 
-/// Every pack's print response in the shader's slot order: the base, then [`BLEND_LAYERS`].
-pub(crate) fn print_responses(table: &GroundTypes) -> [PrintResponse; 4] {
-    slot_grounds(table).map(|ground| ground.print.clone())
-}
-
 /// What ground of print weights `weights` ([`print_weights`]) gives a muzzle blast, per slot: its
 /// share of a fully erodible ground's cloud (the slot's painted weight times its
 /// [`crate::ground_types::DustResponse::erodibility`]) and that ground's dust response. The
@@ -141,8 +136,8 @@ pub(crate) fn dust_sources(
 /// The material's print lanes for `table`, per slot (`x` the base pack, `yzw` the layers):
 /// softness (m per kPa), depth cap (m), albedo gain and roughness gain.
 pub(crate) fn print_lanes(table: &GroundTypes) -> [Vec4; 4] {
-    let responses = print_responses(table);
-    let lane = |of: fn(&PrintResponse) -> f32| Vec4::from_array(responses.each_ref().map(of));
+    let grounds = slot_grounds(table);
+    let lane = |of: fn(&PrintResponse) -> f32| Vec4::from_array(grounds.map(|g| of(&g.print)));
     [
         lane(|p| p.softness_mm_per_kpa / 1000.0),
         lane(|p| p.depth_cap_mm.value / 1000.0),
@@ -305,7 +300,7 @@ pub(crate) struct TerrainBlend {
     #[texture(107)]
     #[sampler(108)]
     pub masks: Handle<Image>,
-    /// The track prints' near store ([`crate::track_prints`]): R the press, G the ground pressure, in a
+    /// The track prints' near store ([`crate::track_prints`]): R the reach, G the bearing, in a
     /// window that wraps. NO SAMPLER OF ITS OWN: the shader reads it through the layer albedo's
     /// repeating sampler, because every sampler the material declares counts against the 16 a
     /// stage that Metal and DX12 resource-binding tier 1 allow.

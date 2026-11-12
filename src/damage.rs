@@ -590,9 +590,10 @@ pub fn part_facts(tank_volumes: &TankVolumes, volumes: &Query<VolumeFacets>) -> 
             let q = quality.entry(Part::from(*role)).or_insert(0.0);
             *q = q.max(competence(home, *role));
         }
-        if let (Some(func), Some(hp)) = (facets.function, facets.health)
-            && !hp.is_empty()
-        {
+        if let Some(func) = facets.function {
+            let hp = facets
+                .health
+                .expect("a function volume is spawned with its HP pool (tank::spawn)");
             let supply = facets
                 .supply
                 .expect("a function volume is spawned with its declared supply (tank::spawn)");
@@ -603,9 +604,8 @@ pub fn part_facts(tank_volumes: &TankVolumes, volumes: &Query<VolumeFacets>) -> 
     PartFacts { quality, staffed }
 }
 
-/// The game's damage model: what a module supplies its consumers, by its declared
-/// [`ModuleSupply`]: its held share, or whole while its HP pool holds anything and none once it is
-/// knocked out. Which one a module declares is its data (the engine's `Whole`: playtest fork F20).
+/// The game's damage model: what a module supplies its consumers under its declared
+/// [`ModuleSupply`].
 pub fn module_quality(supply: ModuleSupply, health: &ComponentHealth) -> f32 {
     match supply {
         ModuleSupply::Held => module_share(health),
