@@ -928,9 +928,6 @@ pub struct TransmissionReport {
     /// The clutch held the crank to the belts at the tick's end, so the engaged gear set the
     /// drive. A slipping clutch sends its capacity, or the crank's stored speed, whatever the gear.
     pub locked: bool,
-    /// The gear the Driver left downward this tick and the spare it lost with (N): the window's
-    /// mean sprocket drive less the load the chooser read there, reported only above M.
-    pub departure: Option<(u8, f32)>,
     /// Power-conservation scale applied to the drive/steer forces this tick (1 = unconstrained).
     pub power_scale: f32,
     /// Combustion power capacity at the pre-tick operating point (W). The work gate also
@@ -1154,8 +1151,7 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// Speed `v` (m/s) and resistance `R` (N) read along the engaged ladder, `v` floored at rest; at a
 /// stall `R` is at least the stall's bound ([`super::sense::Sensed::stall`]). A candidate carries
 /// `R` plus its detent's share of the belt push difference, `s·κ·ΔR` ([`BeltTick::tied_mean`]),
-/// and *holds* when its pull exceeds that load by M ([`force_margin`]), or, at or above a gear left
-/// downward with drive to spare, by that spare ([`super::sense::Failed`]). Its pull is [`gear_force`]
+/// and *holds* when its pull exceeds that load by M ([`force_margin`]). Its pull is [`gear_force`]
 /// as delivery engages it ([`engagement`]) where the cut lands, `v − R·t_cut/M_c` and no lower
 /// than rest, its clutch closing from out, capped by the contacts' grip budget
 /// ([`super::sense::Sensed::grip`]). The engaged gear is observed, never priced: its drive and
@@ -1171,8 +1167,7 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 ///    the engaged gear's drive by M, the one that pulls hardest, the higher on a tie.
 ///
 /// Clauses 2 and 3 pay the cut. A cut in flight, no pull asked or fuel that cannot beat drag
-/// choose nothing. Returns a gear it left downward and the spare that gear lost with: its window's
-/// mean drive less the load read there, where that exceeds M.
+/// choose nothing.
 fn choose_gear(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1180,13 +1175,13 @@ fn choose_gear(
     inp: &TransmissionInput,
     command: f32,
     sensed: super::sense::Sensed,
-) -> Option<(u8, f32)> {
+) {
     if st.shift_ticks != 0 || command <= 0.0 {
-        return None;
+        return;
     }
     let [fuel, catch, drag] = engine_torques(tp, inp.supply, st.omega_e, command);
     if fuel + catch <= drag.abs() {
-        return None;
+        return;
     }
     let (ladder, dir) = if st.reverse {
         (&tp.gears_rev, -1.0)
@@ -1218,20 +1213,13 @@ fn choose_gear(
     };
     let spare = |gear: u8, at: f32, prior: ClutchState| pull(gear, at, prior) - load(gear);
     let stall = sensed.stall.filter(|stall| stall.dir == dir);
-    // The spare `gear` must offer to hold: M, or what a gear at or below it lost with.
-    let bar = |gear: u8| {
-        sensed
-            .failed
-            .filter(|failed| failed.gear.0 == st.reverse && gear >= failed.gear.1)
-            .map_or(margin, |failed| failed.spare)
-    };
     if st.clutch == ClutchState::Out && speed < PARK_ENGAGE_SPEED {
         // A gear observed failing at this stall is not priced again, nor any that pulls less:
         // the bound is a floor, so no gear weaker than the current one is taken against it.
         let highest = stall.map_or(top, |stall| stall.gear.saturating_sub(1).min(st.gear));
         st.gear = (1..=tp.launch_gears.min(highest))
             .rev()
-            .find(|&gear| spare(gear, speed, st.clutch) > bar(gear))
+            .find(|&gear| spare(gear, speed, st.clutch) > margin)
             .unwrap_or_else(|| {
                 // No launch gear holds: first gear is the most the ladder has, unless the ground
                 // grants it no more than the current gear.
@@ -1241,7 +1229,7 @@ fn choose_gear(
                     st.gear
                 }
             });
-        return None;
+        return;
     }
     // A hull the cut brings to rest is held there by the park latch, so no cut lands below rest.
     let landing = (speed
@@ -1257,7 +1245,7 @@ fn choose_gear(
     } else if slowing {
         (st.gear.saturating_sub(tp.max_step).max(1)..st.gear)
             .rev()
-            .find(|&gear| spare(gear, landing, ClutchState::Out) > bar(gear))
+            .find(|&gear| spare(gear, landing, ClutchState::Out) > margin)
     } else if sensed.observed
         && st.steer_step == 0
         && st.clutch == ClutchState::In
@@ -1267,7 +1255,7 @@ fn choose_gear(
         // A detent turn's radius belongs to its gear: no upshift changes it.
         // The candidate that pulls hardest where it lands, the higher on a tie.
         (st.gear + 1..=st.gear.saturating_add(tp.max_step).min(top))
-            .filter(|&gear| spare(gear, landing, ClutchState::Out) > bar(gear))
+            .filter(|&gear| spare(gear, landing, ClutchState::Out) > margin)
             .map(|gear| (gear, pull(gear, landing, ClutchState::Out)))
             .filter(|&(_, pull)| pull > dir * sensed.drive + margin)
             .max_by(|a, b| a.1.total_cmp(&b.1))
@@ -1275,13 +1263,11 @@ fn choose_gear(
     } else {
         None
     };
-    let (left, lost) = (st.gear, dir * sensed.drive - load(st.gear));
     // No gear qualifies: the current one stays.
-    chosen.and_then(|gear| {
+    if let Some(gear) = chosen {
         st.gear = gear;
         st.shift_ticks = tp.shift_ticks.get();
-        (gear < left && lost > margin).then_some((left, lost))
-    })
+    }
 }
 
 /// Both belts over one tick. A belt lands at `speed + (force − reaction)·mobility`, its ground
@@ -1494,8 +1480,6 @@ struct Controls {
     shifting: bool,
     /// A held mean path ties the mean belt speed at rest during this tick's neutral pivot.
     mean_hold: bool,
-    /// The gear the Driver left downward this tick with drive to spare, and that spare (N).
-    departure: Option<(u8, f32)>,
 }
 
 /// The game's driving and damage model: policy reads the requested action, staffing and served work.
@@ -1552,14 +1536,13 @@ fn driver(
     update_steer_detent(st, input.steer);
     // Before the ledger closes its first tick the Driver has felt nothing, so it chooses nothing.
     // A request against the engaged ladder asks no pull of it: it brakes, then waits for the swap.
-    let mut departure = None;
     if work && let Some(sensed) = input.sensed {
         let price_command = if service || opposing {
             0.0
         } else {
             command.abs().min(1.0)
         };
-        departure = choose_gear(st, tp, fp, &input, price_command, sensed);
+        choose_gear(st, tp, fp, &input, price_command, sensed);
     }
     let shifting = advance_shift_window(st);
     if work {
@@ -1601,7 +1584,6 @@ fn driver(
         ceiling: staffed,
         shifting,
         mean_hold,
-        departure,
     }
 }
 
@@ -2415,7 +2397,6 @@ pub(crate) fn step(
         command: controls.command.abs(),
         driving: tau_c > 0.0,
         locked,
-        departure: controls.departure,
         power_scale,
         power_available: p_avail,
         #[cfg(feature = "bitprobe")]

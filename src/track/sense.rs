@@ -79,25 +79,6 @@ pub struct Stall {
     pub gear: u8,
 }
 
-/// A gear the Driver left downward with drive to spare: it and every gear above it hold only where
-/// their forecast spare exceeds the spare it lost with, under no more pedal, on its ladder and in
-/// its detent, until it holds a locked window that gains. The spare is the window's mean sprocket
-/// drive less the load the chooser read in that window, on the sprocket's side of the belt as the
-/// forecast is, so a forecast no greater is no evidence the gear would now hold (MEASURED, house
-/// rubble at a third of the pedal: fifth left with 24.2 kN to spare, re-engaged on a 19.5 kN
-/// forecast and left again).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Failed {
-    /// The ladder and gear left.
-    pub gear: Engaged,
-    /// The spare it lost with (N), above M: the larger over its repeats.
-    pub spare: f32,
-    /// The pedal it failed under.
-    pub command: f32,
-    /// The steering detent it failed in.
-    pub steer_step: u8,
-}
-
 /// The Driver's reading for one tick.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sensed {
@@ -127,8 +108,6 @@ pub struct Sensed {
     /// The bound a stall gives: `None` once the hull moves or no pull is asked. It is a floor on
     /// what the hull meets, and outlives the stall: whether the hull stalls now is [`Self::stalled`].
     pub stall: Option<Stall>,
-    /// The latest gear left downward with drive to spare, while its record holds.
-    pub failed: Option<Failed>,
     /// The hull stalls now under the engaged gear: a stall's bound holds, the gear drove every
     /// sample of the window with the hull at rest, and over the window its belts came to rest or
     /// did not gain. The window, not each tick, establishes the condition (MEASURED on the rubble
@@ -166,7 +145,6 @@ pub struct DriverSense {
     /// The solver's push for this tick is read on the next one, so the sample closes there.
     open: Option<Open>,
     stall: Option<Stall>,
-    failed: Option<Failed>,
     /// The gear asked to pull the latest samples, and how many of the latest of those it drove with
     /// the hull at rest and how many its clutch held.
     run: Option<(Engaged, usize, usize)>,
@@ -183,7 +161,6 @@ impl DriverSense {
             samples: VecDeque::with_capacity(window),
             open: None,
             stall: None,
-            failed: None,
             run: None,
             reading: None,
         }
@@ -300,7 +277,6 @@ impl DriverSense {
                 drive_gain: mass * belt_gain / (count * dt),
                 grip: grip / count,
                 stall: self.stall,
-                failed: self.failed,
                 // The window's belts at rest or not gaining under the stall's pull.
                 stalled: self.stall.is_some_and(|stall| {
                     self.run.is_some_and(|(_, rested, _)| rested >= self.window)
@@ -320,41 +296,13 @@ impl DriverSense {
     }
 
     /// This tick's step as delivery ran it: a paid cut is not felt, a step that asked no pull
-    /// withdraws the push a stall's bound was read from, a departure with drive to spare is
-    /// recorded, and a driven step records its clutch and its sprockets' force.
+    /// withdraws the push a stall's bound was read from, and a driven step records its clutch and
+    /// its sprockets' force.
     pub(crate) fn drove(&mut self, report: &TransmissionReport) {
         let dir = if report.reverse { -1.0 } else { 1.0 };
         let pull = report.pulling.then_some(dir);
         if self.stall.is_some_and(|stall| pull != Some(stall.dir)) {
             self.stall = None;
-        }
-        let engaged = (report.reverse, report.gear);
-        let gains = self.run.is_some_and(|(gear, _, _)| gear == engaged)
-            && self
-                .reading
-                .is_some_and(|reading| reading.observed && dir * reading.drive_gain > 0.0);
-        // Released, pressed harder, on the other ladder or steered otherwise, a record says nothing
-        // of the gear now; nor once the gear holds a locked window that gains.
-        if self.failed.is_some_and(|failed| {
-            !report.pulling
-                || failed.gear.0 != engaged.0
-                || report.command > failed.command
-                || report.steer_step != failed.steer_step
-                || (failed.gear == engaged && gains)
-        }) {
-            self.failed = None;
-        }
-        if let Some((gear, spare)) = report.departure {
-            let gear = (report.reverse, gear);
-            self.failed = Some(Failed {
-                gear,
-                spare: self
-                    .failed
-                    .filter(|failed| failed.gear == gear)
-                    .map_or(spare, |failed| failed.spare.max(spare)),
-                command: report.command,
-                steer_step: report.steer_step,
-            });
         }
         if report.shifting {
             self.cut();
