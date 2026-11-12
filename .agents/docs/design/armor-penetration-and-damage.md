@@ -2643,7 +2643,9 @@ clutch, so the engine's local idle catch cannot launch the hull while Drive read
 
 Subject: the game's damage model, game state only. The owner dropped engine power scaling
 with its HP pool: an engine supplies whole power while its pool holds anything and none once
-knocked out (`damage::module_quality`), so the Drive task rate, the servo's powered traverse
+knocked out. The engine's volume declares `supply: Whole` in the tank sheet and every other
+module `Held`; `damage::module_quality` reads the declared supply, not the role. So the Drive
+task rate, the servo's powered traverse
 and the power readout all see 1 or 0 from the engine. The `free_hull_measurements` red that
 prompted it was the scaled law's own accident: combustion scaled with the pool while
 construction drag stayed whole, so below a DERIVED share of about 0.11 at rest the engine could

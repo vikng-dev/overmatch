@@ -284,14 +284,16 @@ TankSpec(
         "Turret_Side":       (main: true),
         "Turret_Top":        (main: true),
         // --- Modules (hp = integrity; the substance carries resistance, independently) ---
-        "Engine":           (hp: 336, function: Engine),
-        "Transmission":     (hp: 479, function: Transmission),
-        "Breech":           (hp: 142, function: Breech),
-        "Main_Gun_Barrel":  (hp: 250, function: GunBarrel),
+        // `supply` is what the HP pool lets the module supply its consumers: its held share, or
+        // all of it until knocked out. The engine's `Whole` is provisional (playtest fork F20).
+        "Engine":           (hp: 336, function: Engine, supply: Whole),
+        "Transmission":     (hp: 479, function: Transmission, supply: Held),
+        "Breech":           (hp: 142, function: Breech, supply: Held),
+        "Main_Gun_Barrel":  (hp: 250, function: GunBarrel, supply: Held),
         // Each MG barrel serves its own weapon's barrel function, which that weapon's fire gate
         // names, as the main gun's does.
-        "Coax_MG_Barrel":   (hp:   4, function: CoaxMgBarrel),
-        "Hull_MG_Barrel":   (hp:   4, function: BowMgBarrel),
+        "Coax_MG_Barrel":   (hp:   4, function: CoaxMgBarrel, supply: Held),
+        "Hull_MG_Barrel":   (hp:   4, function: BowMgBarrel, supply: Held),
         // --- Crew --- the shared crew pool; an hp here does not load.
         "Commander":        (crew: Commander),
         "Gunner":           (crew: Gunner),

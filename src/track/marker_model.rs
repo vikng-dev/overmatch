@@ -15,9 +15,8 @@ use bevy::prelude::Resource;
 /// The pin markers: the two ends of ONE link, the loop's immutable pitch.
 const PIN_START: &str = "Pin_Start";
 const PIN_END: &str = "Pin_End";
-/// The link's collision box: the source of the shoe's lateral and inner datums (it replaced the
-/// deleted `Inner_Surface` empty). Authored so its COMPOSED world scale is exactly 1: its extents
-/// read directly in metres.
+/// The link's collision box: the source of the shoe's lateral and inner datums. Authored so its
+/// COMPOSED world scale is exactly 1: its extents read directly in metres.
 const LINK_BOX: &str = "Link_Box";
 /// The drawn shoe itself, in the same composed frame as its box: its lowest point is the sole.
 const LINK: &str = super::link_view::LINK_NODE;
@@ -99,10 +98,10 @@ impl DerivedModel {
         let pin_mid = (p0 + p1) * 0.5;
 
         // The two RADIAL faces of the shoe, read independently, so there is no mid-plate
-        // assumption. `+y` is INNER, toward the wheels: the link's collision box's face (which
-        // replaced the deleted `Inner_Surface` empty). `−y` is the OUTER, ground-contact side: the
-        // drawn shoe's own lowest point, not the box's `−y` face, which stops at the hinge knuckles
-        // (on the shipped shoe 46.3 mm above the sole, MEASURED).
+        // assumption. `+y` is INNER, toward the wheels: the link's collision box's face. `−y` is
+        // the OUTER, ground-contact side: the drawn shoe's own lowest point, not the box's `−y`
+        // face, which stops at the hinge knuckles (on the shipped shoe 46.3 mm above the sole,
+        // MEASURED).
         let pin_to_outer = pin_mid.y - link.lo.y;
         let pin_to_inner = link_box.hi.y - pin_mid.y;
 

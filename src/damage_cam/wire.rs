@@ -228,13 +228,17 @@ impl VehicleWords {
                         Role::Crew
                     } else if component.ammo {
                         Role::Ammo
-                    } else if component.function == Some(FunctionRole::Engine) {
+                    } else if component.function.map(|function| function.role)
+                        == Some(FunctionRole::Engine)
+                    {
                         Role::Engine
                     } else {
                         Role::Module
                     },
                     count: component.hp,
-                    function: component.function.map(|function| format!("{function:?}")),
+                    function: component
+                        .function
+                        .map(|function| format!("{:?}", function.role)),
                 },
                 None => VolumeWord::Armour(class),
             };

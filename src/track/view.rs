@@ -46,6 +46,7 @@ pub struct TrackViewSet;
 
 pub fn view_plugin(app: &mut App) {
     wheel_lift_rise_omega();
+    super::wrap::wrap_feel_zeta();
     app.add_observer(rebind_on_reinstance);
     // The shoe template: one read of the glb's `Link` node, and the every-frame `Added<Name>` scan
     // that HIDES it (and `Link_Box`). Shared verbatim with the sandbox — the game rendered

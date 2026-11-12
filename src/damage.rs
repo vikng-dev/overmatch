@@ -189,6 +189,16 @@ pub enum FunctionRole {
     BowMgBarrel,
 }
 
+/// The game's damage model: what a module's HP pool lets it supply its consumers, declared on the
+/// module's own volume (`supply` beside its `function` in the tank sheet) and read by
+/// [`module_quality`]. `Held` supplies its held share; `Whole` supplies all of it until the module
+/// is knocked out.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub enum ModuleSupply {
+    Held,
+    Whole,
+}
+
 /// A gameplay verb the tank can perform (design §7b). Closed enum — consuming systems (driving,
 /// shooting, cameras) reference variants directly. Adding one is a variant, its entry in
 /// [`Self::ALL`] and one consuming system. The *requirements* for each capability are per-tank RON data
@@ -544,7 +554,7 @@ fn place_occupant(
 /// The per-volume facets the capability system reads off each tank volume — a *named* form of the
 /// 5-`Option` query that otherwise repeats verbatim across every control system. A volume carries
 /// whatever subset applies: a crew seat has `crew` (+ `crewman`, maybe `dead`, `health`); a module
-/// has `function` + `health`. Use it as `Query<VolumeFacets>`; `.get(e)` yields a struct with these
+/// has `function` + `supply` + `health`. Use it as `Query<VolumeFacets>`; `.get(e)` yields a struct with these
 /// named fields.
 #[derive(QueryData)]
 pub struct VolumeFacets {
@@ -552,6 +562,7 @@ pub struct VolumeFacets {
     pub crewman: Option<&'static Crewman>,
     pub dead: Option<&'static Dead>,
     pub function: Option<&'static FunctionRole>,
+    pub supply: Option<&'static ModuleSupply>,
     pub health: Option<&'static ComponentHealth>,
     pub repair: Option<&'static repair::ModuleRepair>,
 }
@@ -582,20 +593,24 @@ pub fn part_facts(tank_volumes: &TankVolumes, volumes: &Query<VolumeFacets>) -> 
         if let (Some(func), Some(hp)) = (facets.function, facets.health)
             && !hp.is_empty()
         {
+            let supply = facets
+                .supply
+                .expect("a function volume is spawned with its declared supply (tank::spawn)");
             let q = quality.entry(Part::from(*func)).or_insert(0.0);
-            *q = q.max(module_quality(*func, hp));
+            *q = q.max(module_quality(*supply, hp));
         }
     }
     PartFacts { quality, staffed }
 }
 
-/// The game's damage model: what a module supplies its consumers. An engine supplies whole
-/// power while its HP pool holds anything, and none once it is knocked out (provisional:
-/// playtest fork F20); every other module supplies its held share.
-pub fn module_quality(role: FunctionRole, health: &ComponentHealth) -> f32 {
-    match role {
-        FunctionRole::Engine if !health.is_empty() => 1.0,
-        _ => module_share(health),
+/// The game's damage model: what a module supplies its consumers, by its declared
+/// [`ModuleSupply`]: its held share, or whole while its HP pool holds anything and none once it is
+/// knocked out. Which one a module declares is its data (the engine's `Whole`: playtest fork F20).
+pub fn module_quality(supply: ModuleSupply, health: &ComponentHealth) -> f32 {
+    match supply {
+        ModuleSupply::Held => module_share(health),
+        ModuleSupply::Whole if health.is_empty() => 0.0,
+        ModuleSupply::Whole => 1.0,
     }
 }
 
@@ -855,27 +870,30 @@ mod tests {
         pairs.iter().copied().collect()
     }
 
-    /// The game's damage model: rate consumers rely on a module's held share, including zero
-    /// at knockout, and on an engine being whole until its HP pool is emptied. A binary mutant
-    /// fails the half-full transmission; a scaled engine fails the half-full engine.
+    /// The game's damage model: rate consumers rely on a module supplying what its declared
+    /// [`super::ModuleSupply`] says, whatever its role: a `Held` module its held share, including
+    /// zero at knockout, a `Whole` one all of it until its HP pool is emptied. A per-role branch
+    /// fails the crossed cases; a binary `Held` fails the half-full one, a scaled `Whole` its own.
     #[test]
-    fn module_quality_is_its_held_share_and_an_engine_is_whole_until_knocked_out() {
+    fn module_quality_follows_its_declared_supply_whatever_its_role() {
         use super::*;
         use bevy::ecs::system::RunSystemOnce;
-        // Fixture: ten-point pools at full, half and empty.
-        for (role, share, expected) in [
-            (FunctionRole::Transmission, 1.0, 1.0),
-            (FunctionRole::Transmission, 0.5, 0.5),
-            (FunctionRole::Transmission, 0.0, 0.0),
-            (FunctionRole::Engine, 1.0, 1.0),
-            (FunctionRole::Engine, 0.5, 1.0),
-            (FunctionRole::Engine, 0.0, 0.0),
+        // Fixture: ten-point pools at full, half and empty, each supply on two roles.
+        for (role, supply, share, expected) in [
+            (FunctionRole::Transmission, ModuleSupply::Held, 1.0, 1.0),
+            (FunctionRole::Transmission, ModuleSupply::Held, 0.5, 0.5),
+            (FunctionRole::Transmission, ModuleSupply::Held, 0.0, 0.0),
+            (FunctionRole::Engine, ModuleSupply::Held, 0.5, 0.5),
+            (FunctionRole::Engine, ModuleSupply::Whole, 1.0, 1.0),
+            (FunctionRole::Engine, ModuleSupply::Whole, 0.5, 1.0),
+            (FunctionRole::Engine, ModuleSupply::Whole, 0.0, 0.0),
+            (FunctionRole::Transmission, ModuleSupply::Whole, 0.5, 1.0),
         ] {
             let mut world = World::new();
             let tank = world.spawn_empty().id();
             let mut hp = ComponentHealth::full(10);
             hp.set_held((hp.capacity() as f32 * share) as u32);
-            world.spawn((role, hp, VolumeOf(tank)));
+            world.spawn((role, supply, hp, VolumeOf(tank)));
             world
                 .run_system_once(
                     move |tanks: Query<&TankVolumes>, facets: Query<VolumeFacets>| {
@@ -883,12 +901,34 @@ mod tests {
                         assert_eq!(
                             evaluate(&vec![Group::Single(Part::from(role))], &quality),
                             expected,
-                            "{role:?} at {share}"
+                            "{role:?} {supply:?} at {share}"
                         );
                     },
                 )
                 .unwrap();
         }
+    }
+
+    /// The game's damage model: the owner's decision that an engine supplies whole power until it
+    /// is knocked out (provisional, playtest fork F20) is the shipped sheet's data, its engine's
+    /// declared supply; a sheet whose engine declares `Held` reverts the fork.
+    #[test]
+    fn the_shipped_engine_supplies_whole_until_knocked_out() {
+        use super::*;
+        let engines: Vec<_> = crate::bake::selected_spec()
+            .volumes
+            .values()
+            .filter_map(crate::spec::VolumeSpec::component)
+            .filter_map(|component| component.function)
+            .filter(|function| function.role == FunctionRole::Engine)
+            .collect();
+        assert!(!engines.is_empty(), "the shipped sheet has an engine");
+        assert!(
+            engines
+                .iter()
+                .all(|function| function.supply == ModuleSupply::Whole),
+            "the shipped engine supplies whole: {engines:?}"
+        );
     }
 
     /// The game's damage model: a station supplies competence while in action, independent

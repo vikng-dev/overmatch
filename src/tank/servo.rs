@@ -655,7 +655,12 @@ mod tests {
         let mut health = ComponentHealth::full(10);
         health.set_held((health.capacity() as f32 * engine_share) as u32);
         let engine = world
-            .spawn((FunctionRole::Engine, health, VolumeOf(root)))
+            .spawn((
+                FunctionRole::Engine,
+                crate::damage::ModuleSupply::Whole,
+                health,
+                VolumeOf(root),
+            ))
             .id();
         let servo = world
             .spawn((

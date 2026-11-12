@@ -24,8 +24,30 @@ use super::route::{
     slack, taut_lower_run,
 };
 
-/// Resolution: half-critical damping controls ringing in the cosmetic slack spring.
-const WRAP_FEEL_ZETA: f32 = 0.5;
+/// The slack spring's damping ratio ζ, a belt-drape animation taste: how many visible swings a
+/// drape makes before it settles. Admitted before view startup; the exact integrator
+/// ([`SlackSpring::step`]) is the underdamped solution, so ζ lies strictly between 0 and 1.
+pub(crate) fn wrap_feel_zeta() -> f32 {
+    static DATA: std::sync::LazyLock<crate::provenance::Labelled<f32>> =
+        std::sync::LazyLock::new(|| {
+            const PATH: &str = "assets/driving/belt_view.ron";
+            let value: crate::provenance::Labelled<f32> = crate::provenance::from_shipped_str(
+                PATH,
+                include_str!("../../assets/driving/belt_view.ron"),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            assert!(
+                value.value > 0.0
+                    && value.value < 1.0
+                    && matches!(value.label, crate::provenance::Provenance::Taste(_)),
+                "{PATH}: the slack spring's damping ratio must lie strictly between 0 and 1 and be \
+                 Taste; state how the belt's drape rings"
+            );
+            value
+        });
+    DATA.value
+}
+
 /// Resolution: sag-depth floor (m) keeps DERIVED pendulum frequency `ω = √(g / sag_depth)` finite
 /// as a return span goes taut (sag → 0).
 const SLACK_SAG_FLOOR: f32 = 0.02;
@@ -182,7 +204,13 @@ fn finish_side(
 
     // Spring-track leftover length from the eased belly, so filters compose. `route::slack`
     // enforces the length budget; the spring also clamps slack ≥ 0.
-    let raw_excess = slack(input.belt_len, polyline_len(&conformed), chord);
+    let path = polyline_len(&conformed);
+    // `slack` floors at zero, so a NaN path would draw as a taut return run.
+    assert!(
+        path.is_finite(),
+        "the eased belly is drawn from finite poses and depths, so its length is finite"
+    );
+    let raw_excess = slack(input.belt_len, path, chord);
     let drawn_excess = st.spring.step(raw_excess, input.dt, chord);
     let mut loop_pts = conformed;
     // [`SagClip::EveryCircle`]: the DRAWN drape is pushed out of the sprocket and idler too, not
@@ -343,16 +371,16 @@ impl ConformEase {
 /// One-DOF damped spring on `belt_len − eased_bottom_run − chord`, avoiding shape snaps while
 /// composing with [`ConformEase`]. DERIVED pendulum frequency `ω = √(g / sag_depth)` slows deep
 /// drapes and accelerates shallow ones; [`SLACK_SAG_FLOOR`] keeps it finite near taut. Damping is
-/// [`WRAP_FEEL_ZETA`]'s canonical `ζ = 0.5`, a fixed choice rather than a frequency derivation.
+/// [`wrap_feel_zeta`], a taste, not a derivation.
 ///
 /// [`Self::step`] solves the underdamped equation exactly for each step's fixed target and rate;
 /// the rate is recomputed from drawn sag each step, so the whole filter need not be frame-rate
 /// invariant. DERIVED Euler counterexample: `dt < ~2/ω` is required; at `ω ≈ 22 rad/s`, a 100 ms
-/// hitch can launch slack to several times its target. Nonfinite state resets to rest.
+/// hitch can launch slack to several times its target.
 ///
-/// A scalar spring cannot conserve loop length: overshoot temporarily draws extra belt.
-/// `ζ = 0.5` bounds the fixed-rate response's energy, keeping that accepted cosmetic artifact
-/// modest. Simulation's rigid pin loop is unaffected.
+/// A scalar spring cannot conserve loop length: overshoot temporarily draws extra belt, more of it
+/// the lighter the damping; the cosmetic artifact is accepted. Simulation's rigid pin loop is
+/// unaffected.
 #[derive(Default)]
 struct SlackSpring {
     value: f32,
@@ -376,26 +404,30 @@ impl SlackSpring {
     /// step error, in `dt` frames. Sweeps use this owner rather than copy the rate derivation.
     #[cfg(test)]
     fn settle_frames(chord: f32, excess: f32, dt: f32) -> usize {
-        ((5.0 / (WRAP_FEEL_ZETA * Self::omega(chord, excess))) / dt).ceil() as usize
+        ((5.0 / (wrap_feel_zeta() * Self::omega(chord, excess))) / dt).ceil() as usize
     }
 
     /// Advance the spring toward `target` (m of slack) and return the drawn value, clamped ≥ 0.
     /// `chord` is the return-run span; the frequency is DERIVED from the current drawn sag depth
-    /// (`√(g / sag_depth)`, pendulum scaling), the damping is the canonical [`WRAP_FEEL_ZETA`].
+    /// (`√(g / sag_depth)`, pendulum scaling), the damping [`wrap_feel_zeta`].
     ///
     /// The integrator is the EXACT underdamped discretization of `e″ + 2ζω·e′ + ω²·e = 0` about the
     /// (constant-over-dt) target, `e = value − target`. With `ω_d = ω√(1−ζ²)`, `A = e^(−ζω·dt)`:
     /// `e ← A[e·cos(ω_d·dt) + (v + ζω·e)/ω_d · sin(ω_d·dt)]`,
     /// `v ← A[v·cos(ω_d·dt) − (ω²·e + ζω·v)/ω_d · sin(ω_d·dt)]`.
-    /// For fixed target and `ω`, `A ∈ (0, 1]` gives a stable, frame-rate-invariant step.
+    /// For fixed target and `ω`, `A ∈ (0, 1]` gives a stable, frame-rate-invariant step; a `dt` of 0
+    /// holds the state.
+    ///
+    /// The caller passes finite slack and chord, from the rig's finite geometry, and the frame
+    /// clock's finite, nonnegative `dt`; anything else is a bug upstream and panics here.
     fn step(&mut self, target: f32, dt: f32, chord: f32) -> f32 {
-        // Filter reset: first frame, nonpositive dt or nonfinite state/target snaps to rest.
-        if !self.primed
-            || dt <= 0.0
-            || !self.value.is_finite()
-            || !self.velocity.is_finite()
-            || !target.is_finite()
-        {
+        assert!(
+            target.is_finite() && chord.is_finite() && dt.is_finite() && dt >= 0.0,
+            "the slack spring steps on finite slack and chord over a finite, nonnegative frame: \
+             target {target}, chord {chord}, dt {dt}"
+        );
+        // The first frame, or after a teleport, respawn or snap ([`Self::reset`]): rest at target.
+        if !self.primed {
             self.value = target.max(0.0);
             self.velocity = 0.0;
             self.primed = true;
@@ -403,7 +435,7 @@ impl SlackSpring {
         }
         // The pendulum rate of the CURRENT drawn slack — the same parabola `sag_span` draws.
         let omega = Self::omega(chord, self.value);
-        let zeta = WRAP_FEEL_ZETA; // ζ = 0.5 ⇒ always underdamped
+        let zeta = wrap_feel_zeta();
         let omega_d = omega * (1.0 - zeta * zeta).sqrt();
         let decay = (-zeta * omega * dt).exp();
         let (s, c) = (omega_d * dt).sin_cos();
@@ -415,11 +447,11 @@ impl SlackSpring {
             self.value = 0.0;
             self.velocity = self.velocity.max(0.0);
         }
-        // Reset nonfinite output from a pathological chord/target.
-        if !self.value.is_finite() || !self.velocity.is_finite() {
-            self.value = target.max(0.0);
-            self.velocity = 0.0;
-        }
+        assert!(
+            self.value.is_finite() && self.velocity.is_finite(),
+            "an exact underdamped step of finite state, at the positive rate of a finite drape \
+             (SLACK_SAG_FLOOR caps it), over a finite frame stays finite"
+        );
         self.value
     }
 }

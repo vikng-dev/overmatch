@@ -53,7 +53,10 @@ enum AimRole {
 impl AimRole {
     fn matches(self, component: &crate::spec::ComponentSpec) -> bool {
         match self {
-            Self::Engine => component.function == Some(crate::damage::FunctionRole::Engine),
+            Self::Engine => {
+                component.function.map(|function| function.role)
+                    == Some(crate::damage::FunctionRole::Engine)
+            }
             Self::Ammunition => component.ammo,
         }
     }

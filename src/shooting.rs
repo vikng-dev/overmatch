@@ -1433,7 +1433,12 @@ mod tests {
                 for (function, held) in [(FunctionRole::Breech, 5), (FunctionRole::GunBarrel, 4)] {
                     let mut health = crate::ballistics::ComponentHealth::full(10);
                     health.set_held(held * crate::ballistics::POOL_UNITS_PER_HP);
-                    world.spawn((function, health, VolumeOf(root)));
+                    world.spawn((
+                        function,
+                        crate::damage::ModuleSupply::Held,
+                        health,
+                        VolumeOf(root),
+                    ));
                 }
                 let rate = world
                     .run_system_once(

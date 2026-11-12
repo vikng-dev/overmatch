@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::damage::{
-    Capability, ControlStaffing, CrewStation, FunctionRole, GradedGroup, Group, Member, Part,
-    Requirement,
+    Capability, ControlStaffing, CrewStation, FunctionRole, GradedGroup, Group, Member,
+    ModuleSupply, Part, Requirement,
 };
 use crate::guns::{GunError, GunRegistry, Mechanism};
 use crate::provenance::Sourced;
@@ -32,8 +32,9 @@ use crate::track::transmission::{TransmissionAuthoring, TransmissionParams};
 /// the one home of the fact, so a node cannot be declared twice or in two roles.
 ///
 /// Authored as one record: `(main: true)` is main armour, `(external: true)` is external armour,
-/// and `(hp: …, crew: …, ammo: …, function: …)` is a component. An entry that is more than one of
-/// these, or none, fails to parse ([`VolumeEntry`]).
+/// and `(hp: …, crew: …, ammo: …, function: …, supply: …)` is a component. An entry that is more
+/// than one of these, or none, fails to parse ([`VolumeEntry`]); so does a `function` without its
+/// `supply`, or a `supply` without a `function`.
 #[derive(Deserialize, Clone)]
 #[serde(try_from = "VolumeEntry")]
 pub enum VolumeSpec {
@@ -74,6 +75,8 @@ struct VolumeEntry {
     ammo: bool,
     #[serde(default)]
     function: Option<FunctionRole>,
+    #[serde(default)]
+    supply: Option<ModuleSupply>,
 }
 
 /// `volumes` as a map that refuses a repeated key: a plain `HashMap` keeps the last of two
@@ -114,6 +117,10 @@ const ARMOUR_WITH_FACETS: &str = "a main or external armour volume carries no co
      crew, ammo, function) and is not both: a volume is main armour, external armour or a component";
 const COMPONENT_WITHOUT_HP: &str = "a component volume needs an hp pool; main armour is \
      `(main: true)` and external armour is `(external: true)`";
+const FUNCTION_WITHOUT_SUPPLY: &str = "a function volume declares what its HP pool supplies: \
+     `supply: Held` (its held share) or `supply: Whole` (all of it until knocked out)";
+const SUPPLY_WITHOUT_FUNCTION: &str = "a `supply` belongs to a function volume; add its \
+     `function` or remove the `supply`";
 const CREW_WITH_HP: &str = "a crew station authors no hp: every crew station of every tank has \
      the one shared crew pool (`crew_hp` in assets/ballistics/box_classes.ron)";
 
@@ -123,7 +130,10 @@ impl TryFrom<VolumeEntry> for VolumeSpec {
     /// A crew station's pool is the shared crew pool, filled in here; every other component's is
     /// the one its entry authors.
     fn try_from(entry: VolumeEntry) -> Result<Self, String> {
-        let facets = entry.crew.is_some() || entry.ammo || entry.function.is_some();
+        let facets = entry.crew.is_some()
+            || entry.ammo
+            || entry.function.is_some()
+            || entry.supply.is_some();
         let hp = match (entry.main, entry.external, entry.hp, entry.crew) {
             (true, false, None, _) if !facets => return Ok(Self::MainArmour),
             (false, true, None, _) if !facets => return Ok(Self::External),
@@ -135,11 +145,17 @@ impl TryFrom<VolumeEntry> for VolumeSpec {
             (false, false, Some(hp), None) => hp,
             (false, false, None, None) => return Err(COMPONENT_WITHOUT_HP.into()),
         };
+        let function = match (entry.function, entry.supply) {
+            (Some(role), Some(supply)) => Some(ModuleFunction { role, supply }),
+            (None, None) => None,
+            (Some(_), None) => return Err(FUNCTION_WITHOUT_SUPPLY.into()),
+            (None, Some(_)) => return Err(SUPPLY_WITHOUT_FUNCTION.into()),
+        };
         Ok(Self::Component(ComponentSpec {
             hp,
             crew: entry.crew,
             ammo: entry.ammo,
-            function: entry.function,
+            function,
         }))
     }
 }
@@ -164,8 +180,15 @@ pub struct ComponentSpec {
     pub crew: Option<CrewStation>,
     /// Ammunition volume: HP depletion cooks off and kills all crew.
     pub ammo: bool,
-    /// Repairable capability served by this module. Function loss is derived from HP.
-    pub function: Option<FunctionRole>,
+    /// Repairable capability served by this module, and what its HP pool supplies.
+    pub function: Option<ModuleFunction>,
+}
+
+/// A module's function and how its HP pool sets what it supplies its consumers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModuleFunction {
+    pub role: FunctionRole,
+    pub supply: ModuleSupply,
 }
 
 /// One roadwheel station: the model node, and which track it drives.
@@ -1507,7 +1530,7 @@ impl TankSpec {
                     .crew
                     .map(Part::from)
                     .into_iter()
-                    .chain(volume.function.map(Part::from))
+                    .chain(volume.function.map(|function| Part::from(function.role)))
             })
             .collect();
         if let ControlStaffing::Any(paths) = &self.drive_controls {
@@ -1606,13 +1629,12 @@ impl TankSpec {
                                     .map(|home| crate::damage::competence(home, station))
                                     .fold(1.0_f32, f32::min),
                             )
-                        } else if volume.function.map(Part::from) == Some(part) {
-                            let function = volume
-                                .function
-                                .expect("the matching function facet is present");
+                        } else if let Some(function) = volume.function
+                            && Part::from(function.role) == part
+                        {
                             let mut one_unit = crate::ballistics::ComponentHealth::full(volume.hp);
                             one_unit.set_held(1);
-                            Some(crate::damage::module_quality(function, &one_unit))
+                            Some(crate::damage::module_quality(function.supply, &one_unit))
                         } else {
                             None
                         }
@@ -2321,9 +2343,9 @@ TankSpec(
     volumes: {
         "Gunner": (crew: Gunner),
         "Driver": (crew: Driver),
-        "Breech": (hp: 80, function: Breech),
-        "Engine": (hp: 80, function: Engine),
-        "Transmission": (hp: 80, function: Transmission),
+        "Breech": (hp: 80, function: Breech, supply: Held),
+        "Engine": (hp: 80, function: Engine, supply: Whole),
+        "Transmission": (hp: 80, function: Transmission, supply: Held),
         "Hull_Plate": (main: true),
         "Wheel_L_0": (external: true),
         "Wheel_R_0": (external: true),
@@ -2427,7 +2449,8 @@ TankSpec(
     /// A volume entry is exactly one of main armour, external armour or a component: the
     /// armour tags carry no component facet, a component other than a crew station authors an
     /// hp pool, and a crew station authors none and carries the shared crew pool, so no tank file
-    /// can give its crew a pool of its own.
+    /// can give its crew a pool of its own. A function volume declares what its pool supplies, and
+    /// only a function volume does: a module whose supply nobody stated has no consequence law.
     #[test]
     fn a_volume_entry_is_main_external_or_a_component() {
         // The extension the shipped sheets declare.
@@ -2448,6 +2471,14 @@ TankSpec(
         assert_eq!(crew.crew, Some(CrewStation::Driver));
         let module = parse("(hp: 20, external: false)").expect("a module parses");
         assert_eq!(module.component().expect("it is a component").hp, 20);
+        let function = parse("(hp: 20, function: Engine, supply: Whole)").expect("a module parses");
+        assert_eq!(
+            function.component().expect("it is a component").function,
+            Some(ModuleFunction {
+                role: FunctionRole::Engine,
+                supply: ModuleSupply::Whole,
+            })
+        );
         for refused in [
             "(main: true, hp: 20)",
             "(main: true, external: true)",
@@ -2456,6 +2487,9 @@ TankSpec(
             "(external: true, ammo: true)",
             "(external: true, crew: Driver)",
             "(external: true, function: Engine)",
+            "(external: true, supply: Held)",
+            "(hp: 20, function: Engine)",
+            "(hp: 20, supply: Whole)",
             "()",
             "(external: false)",
             "(hp: 30, crew: Driver)",

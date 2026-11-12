@@ -104,9 +104,10 @@ envelope + terrain conform + budgeted sag, refitted every frame). The chain lost
   The cure is two self-healing FILTER tiers over the stateless core — a hull-frame temporal ease
   on the conform depth (rise instant, fall BALLISTIC at the same gravity the view wheels fall at)
   and a 1-DOF spring on the sag budget (frequency = a hanging span's pendulum rate
-  `√(g / sag_depth)`, damping = the canonical ζ = 0.5). Both are **parameter-free derived laws**,
-  which is why they are unconditional: there is no dial to set and therefore no toggle to offer.
-  A filter cannot tear; only a solver can.
+  `√(g / sag_depth)`). The ease and the spring's frequency are derived laws; the spring's damping
+  ratio is a taste, ζ = 0.5 in `assets/driving/belt_view.ron`, since no pin-friction damping is
+  sourced, and it sets how many visible swings a drape makes. Both filters are unconditional:
+  there is no toggle to offer. A filter cannot tear; only a solver can.
 - **A third tier was built and deleted.** A droop LIMIT on the conform was tried and removed:
   clamping is a solver's job, and the two laws above already bound the shape.
 

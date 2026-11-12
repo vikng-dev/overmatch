@@ -205,7 +205,12 @@ mod tests {
             let mut health = ComponentHealth::full(points);
             health.drain();
             world
-                .spawn((VolumeOf(tank), FunctionRole::Engine, health))
+                .spawn((
+                    VolumeOf(tank),
+                    FunctionRole::Engine,
+                    crate::damage::ModuleSupply::Whole,
+                    health,
+                ))
                 .id()
         });
         (world, tank, modules)
@@ -350,6 +355,7 @@ mod tests {
         world.spawn((
             VolumeOf(tank),
             FunctionRole::Breech,
+            crate::damage::ModuleSupply::Held,
             ComponentHealth::full(10),
         ));
         press(&mut world, tank, 1, 1);

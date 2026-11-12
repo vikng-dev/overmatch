@@ -1725,13 +1725,21 @@ mod tests {
             if out {
                 world.entity_mut(driver).insert(Dead);
             }
-            for (role, share) in [
-                (FunctionRole::Engine, engine),
-                (FunctionRole::Transmission, gearbox),
+            for (role, supply, share) in [
+                (
+                    FunctionRole::Engine,
+                    crate::damage::ModuleSupply::Whole,
+                    engine,
+                ),
+                (
+                    FunctionRole::Transmission,
+                    crate::damage::ModuleSupply::Held,
+                    gearbox,
+                ),
             ] {
                 let mut health = ComponentHealth::full(10);
                 health.set_held((health.capacity() as f32 * share) as u32);
-                world.spawn((role, health, VolumeOf(tank)));
+                world.spawn((role, supply, health, VolumeOf(tank)));
             }
             let engine_in_action = engine > 0.0;
             let supply = DriveSupply {
@@ -1923,10 +1931,17 @@ mod tests {
             },
             VolumeOf(tank),
         ));
-        for (function, held) in [(FunctionRole::Engine, 5), (FunctionRole::Transmission, 10)] {
+        for (function, supply, held) in [
+            (FunctionRole::Engine, crate::damage::ModuleSupply::Whole, 5),
+            (
+                FunctionRole::Transmission,
+                crate::damage::ModuleSupply::Held,
+                10,
+            ),
+        ] {
             let mut health = ComponentHealth::full(10);
             health.set_held(held * crate::ballistics::POOL_UNITS_PER_HP);
-            world.spawn((function, health, VolumeOf(tank)));
+            world.spawn((function, supply, health, VolumeOf(tank)));
         }
         let command = ParsedTankCommand::try_from(crate::command::TankCommand {
             throttle: 1.0,
@@ -2032,12 +2047,14 @@ mod tests {
                 .world_mut()
                 .spawn((
                     FunctionRole::Engine,
+                    crate::damage::ModuleSupply::Whole,
                     ComponentHealth::full(Self::POOL),
                     VolumeOf(root),
                 ))
                 .id();
             app.world_mut().spawn((
                 FunctionRole::Transmission,
+                crate::damage::ModuleSupply::Held,
                 ComponentHealth::full(Self::POOL),
                 VolumeOf(root),
             ));

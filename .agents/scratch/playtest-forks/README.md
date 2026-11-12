@@ -731,7 +731,8 @@ revisit in the future if we ever want to add partial performance")
 Subject: the game's damage model, game state only. Crew are HP pools at stations.
 
 **Default — two states.** An engine supplies whole power while its HP pool holds anything and
-none once it is knocked out (`damage::module_quality`). A reduced engine drives, engine-brakes
+none once it is knocked out: its volume declares `supply: Whole` in the tank sheet, and
+`damage::module_quality` reads the declared supply, never the role. A reduced engine drives, engine-brakes
 and powers traverse exactly as a whole one; its module row reads REDUCED, so repair still shows
 as owed. A knocked-out engine delivers no combustion torque: its construction drag stays, the
 crank runs down, a staffed Driver station keeps the service brakes and the park lever, and
@@ -751,12 +752,14 @@ again means choosing what happens below that share, a stall or a scaled drag, be
 all, or whether the REDUCED row and the knock-out it foreshadows say enough. Partial
 performance returns only if play asks for it.
 
-**Revert cost.** Low. Delete the engine arm of `module_quality`; the Drive task rate, the
-servo's power, the load-deadline floor and the module row then read the held share again. Turn
+**Revert cost.** Low. Declare the engine's `supply: Held` in the tank sheet and flip the shipped
+engine's pin (`damage` tests); the Drive task rate, the servo's power, the load-deadline floor
+and the module row then read the held share again. Turn
 `DriveSupply::engine_in_action` back into a share if the power readout should scale, and
 restore the scaled-engine tests from git. The stall threshold above is the open design work.
 
-**Lives in.** `src/damage.rs` (`module_quality`), `src/track/sim.rs` (`supply_from_parts`),
+**Lives in.** `assets/tiger_1/tiger_1.tank.ron` (the engine's `supply`), `src/damage.rs`
+(`ModuleSupply`, `module_quality`), `src/track/sim.rs` (`supply_from_parts`),
 `src/track/transmission.rs` (`DriveSupply`), `src/tank/servo.rs`, `src/spec.rs` (load
 floors), `src/crew_ui.rs` (`module_status`); design §6 "Reduced module performance", §7c and
 the #348 entry in the #228 history; tracker #348.

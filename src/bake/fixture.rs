@@ -202,8 +202,8 @@ pub(super) fn spec_with(
                 .map(|node| format!("\"{node}\": (main: true)")),
         )
         .chain([
-            "\"Fixture_Engine\": (hp: 10, function: Engine)".to_owned(),
-            "\"Fixture_Transmission\": (hp: 10, function: Transmission)".to_owned(),
+            "\"Fixture_Engine\": (hp: 10, function: Engine, supply: Whole)".to_owned(),
+            "\"Fixture_Transmission\": (hp: 10, function: Transmission, supply: Held)".to_owned(),
             "\"Fixture_SeatA\": (crew: Commander)".to_owned(),
             "\"Fixture_SeatB\": (crew: BowGunner)".to_owned(),
         ])

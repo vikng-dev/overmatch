@@ -32,11 +32,9 @@
 //! (`StandardMaterial` defaults to back-face culling), so a single sheet would vanish for every sun
 //! direction that sees its back. A closed tube always presents front faces.
 //!
-//! # What it buys — MEASURED 2026-07-28, against a proxy that actually casts
+//! # What it buys — MEASURED 2026-07-28, against a proxy that casts
 //!
-//! The first numbers this module carried were taken while the ribbon cast NOTHING (an
-//! `AlphaMode::Blend` material — see the folklore section), so they measured the cost of an
-//! invisible mesh. Re-measured on the fix,
+//! A ribbon that casts nothing measures an invisible mesh, so the proxy here casts.
 //! `OVERMATCH_PROBE_TANKS` 2 vs 8, `M350` / 4096, vsync off, foreground on the built-in panel, the
 //! median of a 24 s window, two runs per arm agreeing inside ±0.02 ms at 8 tanks:
 //!
@@ -52,8 +50,8 @@
 //! 4 cascades the ribbon's marginal cost is down at the session's own repeatability. The shipped
 //! frame at 8 tanks / 4 cascades goes 13.15 → 5.88 ms.
 //!
-//! The old figure (18.5×, 0.0385 ms/tank/cascade) UNDERSTATED the win rather than inventing it, so
-//! the shadow ladder tuned against it is conservative, not optimistic.
+//! The shadow ladder was tuned against an 18.5× figure (0.0385 ms/tank/cascade) that understated
+//! the win, so it is conservative, not optimistic.
 //!
 //! # How it hides from the camera
 //!
@@ -62,36 +60,26 @@
 //! and the rest of this module has no opinion about rendering at all. `track::view` sets the scope
 //! at spawn; `render_policy` owns what it resolves to.
 //!
-//! ## The folklore this replaces
+//! ## What it relies on
 //!
-//! For a while the answer was a `StandardMaterial` with zero alpha and `AlphaMode::Multiply`, and
-//! ~60 lines here argued that a render layer COULD NOT work. The argument was true when it was
-//! written and is false now, so it is worth recording exactly what changed — the failure it
-//! describes is real, and it will come back on the next Bevy upgrade if the patch below is dropped.
+//! **Each light carries the right mask.** bevy_pbr 0.19.1 copies the light's `RenderLayers` onto
+//! every kind of shadow view (bevyengine/bevy#24797; record in
+//! `upstream/bevy-shadow-view-ignores-light-render-layers.md`). Without that patch,
+//! `queue_shadows` filters every caster against a shadow view that has no mask, so layer 0, and a
+//! ribbon off layer 0 casts nothing. `bevy_light`'s `check_dir_light_mesh_visibility` gates
+//! casters on the light's mask and marks what it saw visible, so a caster no camera draws
+//! survives extraction. The sun declares `LightProfile::BattlefieldSun`, which covers this
+//! ribbon's channel, and `render_policy`'s tests pin that the sun reaches it and that no camera
+//! does.
 //!
-//! The claim was: bevy 0.19's `prepare_lights` spawns each shadow view with no `RenderLayers` at
-//! all, and `queue_shadows` then filters every candidate caster against THAT view's mask — absent,
-//! so `RenderLayers::default()`, so layer 0. Anything off layer 0 was silently dropped from every
-//! shadow phase, which made the obvious mechanism (a layer the camera skips and the sun keeps) cast
-//! nothing. The two facts around it were also true and remain true: `bevy_light`'s
-//! `check_dir_light_mesh_visibility` gates casters on the LIGHT's mask and explicitly
-//! `set_visible()`s what it saw, so a caster no camera draws does survive extraction — the bug was
-//! only ever in `queue_shadows`.
+//! **Its scope overrides its tank's.** The ribbon is parented under its hull, and scopes are
+//! inherited and overridable: a shadow proxy overrides its tank-root ancestor by construction. A
+//! sweep that rewrote the `RenderLayers` of every mesh under a tank would put it back on the
+//! camera's layers.
 //!
-//! It is fixed. bevy_pbr 0.19.1 copies the LIGHT's `RenderLayers` onto every kind of shadow view
-//! (bevyengine/bevy#24797; record in `upstream/bevy-shadow-view-ignores-light-render-layers.md`).
-//! **So shadow correctness now depends on each LIGHT carrying the right mask**: the sun declares `LightProfile::BattlefieldSun`, which covers this ribbon's channel, and
-//! `render_policy`'s tests pin that the sun reaches it and that no camera does.
-//!
-//! The second blocker was local and is also gone: `sight` used to run a per-frame sweep that
-//! rewrote the `RenderLayers` of every `Mesh3d` under a tank, so a proxy parented to the hull could
-//! not hold a layer of its own for one frame. Scopes are now inherited and overridable, and a
-//! shadow proxy overrides its tank-root ancestor by construction.
-//!
-//! Hiding the ribbon INSIDE the shoes instead — the third fallback, no trick at all — was measured
-//! and rejected: painted magenta, the ribbon shows through the gaps between consecutive shoes all
-//! around the belt. A track is a chain of plates, not a surface, and
-//! there is nowhere inside it to hide.
+//! Hiding the ribbon inside the shoes was measured and rejected: painted magenta, the ribbon shows
+//! through the gaps between consecutive shoes all around the belt. A track is a chain of plates,
+//! not a surface, and there is nowhere inside it to hide.
 //!
 //! # The cross-section is the measured shoe, with no fudge
 //!

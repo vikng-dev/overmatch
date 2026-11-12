@@ -730,7 +730,7 @@ fn insert_ballistic_volumes(
                     entity.insert(Ammo);
                 }
                 if let Some(function) = volume.function {
-                    entity.insert(function);
+                    entity.insert((function.role, function.supply));
                 }
                 // Damageable (module/crew/ammo): an HP pool the march depletes.
                 entity.insert((ComponentVolume, ComponentHealth::full(volume.hp)));
