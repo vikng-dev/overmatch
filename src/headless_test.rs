@@ -2250,14 +2250,17 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
         "{label} driving checkpoint ticks moved",
     );
 
-    // DERIVED broad semantic bounds: reject a deterministic broken drivetrain or reversed steering
-    // without treating one platform's floating-point trajectory as the portable contract.
-    const MIN_PROGRESS_M: f32 = 1.0;
-    const MIN_RIGHT_TURN_COMPONENT: f32 = 0.02;
+    // Directions, not one platform's trajectory: a driven segment's mean speed beats the at-rest
+    // belt tolerance, below which motion is imperceptible and the park latch holds, and positive
+    // steer turns the hull right by more than the straight segment's own heading drift.
+    let at_rest = |from: &ScriptedPose, to: &ScriptedPose| {
+        crate::track::transmission::PARK_ENGAGE_SPEED * (to.tick - from.tick) as f32
+            / FIXED_TICKS_PER_SECOND as f32
+    };
     let settled_forward = settled.rotation * Vec3::NEG_Z;
     let straight_progress = (powered.position - settled.position).dot(settled_forward);
     assert!(
-        straight_progress > MIN_PROGRESS_M,
+        straight_progress > at_rest(settled, powered),
         "{label} did not drive forward during straight throttle: {straight_progress} m",
     );
 
@@ -2265,13 +2268,14 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
     let powered_right = powered.rotation * Vec3::X;
     let steering_progress = (steered.position - powered.position).dot(powered_forward);
     assert!(
-        steering_progress > MIN_PROGRESS_M,
+        steering_progress > at_rest(powered, steered),
         "{label} stopped progressing when steering began: {steering_progress} m",
     );
+    let drift = powered_forward.dot(settled.rotation * Vec3::X).abs();
     let right_turn_component = (steered.rotation * Vec3::NEG_Z).dot(powered_right);
     assert!(
-        right_turn_component > MIN_RIGHT_TURN_COMPONENT,
-        "{label} positive steer did not turn the hull right: component {right_turn_component}",
+        right_turn_component > drift,
+        "{label} positive steer did not turn the hull right past its straight drift {drift}: component {right_turn_component}",
     );
 }
 
