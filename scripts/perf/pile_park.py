@@ -42,9 +42,10 @@ on average) and a flat or rubble run's overlaps none. Whether a sleeping tank do
 no part of the witness. Evidence is refused, never patched, naming the file and line: a stats
 record that does not parse (only the kill's torn final line, with no line end, is skipped), a
 record without its trace, a record or trace tick of another shape, a trace tick lacking a quantity
-the run reads, a failed process census, or a settle span with no tick. A duration or tick count
-that is not finite and positive is refused at the command line, and a checkout whose revision
-git cannot read refuses the whole run.
+the run reads, a failed process census, a binary that cannot start, or a settle span with no tick.
+A duration or tick count that is not finite and positive is refused at the command line, and a
+checkout whose revision git cannot read, or a spawn whose sampled footprint leaves the heightmap,
+refuses the whole run.
 
 Products in --out: <run>.server.log, <run>.client.log, <run>.window.jsonl (the window's tick
 rows), <run>.harness.ron, summary.json (per run and pooled per condition) and summary.txt.
@@ -66,7 +67,8 @@ import time
 import zlib
 
 ROOT = Path(__file__).resolve().parents[2]
-ADDRESS = "127.0.0.1:5888"
+# The server binds this host on the game's fixed port (src/net/client.rs, SERVER_PORT).
+ENDPOINT = ("127.0.0.1", 5888)
 # Harness facts (src/net/harness.rs): the fixed rate, and `Drive::Park`'s lead-in before throttle.
 TICK_HZ = 64
 LEAD_TICKS = 128
@@ -138,9 +140,17 @@ def heightmap():
     first = terrain["sample_centers_xz"]["pixel_0_0"]
     last = terrain["sample_centers_xz"][f"pixel_{width - 1}_{height - 1}"]
 
+    def grid(x, z):
+        return ((x - first[0]) / (last[0] - first[0]) * (width - 1),
+                (z - first[1]) / (last[1] - first[1]) * (height - 1))
+
+    def inside(x, z):
+        """Whether (x, z) lies where `at` interpolates between four samples."""
+        fx, fz = grid(x, z)
+        return 0 <= fx < width - 1 and 0 <= fz < height - 1
+
     def at(x, z):
-        fx = (x - first[0]) / (last[0] - first[0]) * (width - 1)
-        fz = (z - first[1]) / (last[1] - first[1]) * (height - 1)
+        fx, fz = grid(x, z)
         i, j = int(fx), int(fz)
         tx, tz = fx - i, fz - j
 
@@ -150,7 +160,8 @@ def heightmap():
         top = h(i, j) * (1 - tx) + h(i + 1, j) * tx
         bottom = h(i, j + 1) * (1 - tx) + h(i + 1, j + 1) * tx
         return top * (1 - tz) + bottom * tz
-    return level, at
+    span = f"x {first[0]}..{last[0]} m, z {first[1]}..{last[1]} m"
+    return level, at, inside, span
 
 
 def spawn_y(ground, x, z):
@@ -160,15 +171,25 @@ def spawn_y(ground, x, z):
 
 def poses(args):
     """(pos, rot) per condition: the pile run-up on the ram recipe's heading, else flat ground."""
-    level, ground = heightmap()
+    level, ground, inside, span = heightmap()
+
+    def admitted(option, x, z):
+        """Refuses a spawn whose footprint, the square `spawn_y` samples, leaves the heightmap."""
+        corners = [(x + sx * SPAWN_HALF_M, z + sz * SPAWN_HALF_M)
+                   for sx in (-1, 1) for sz in (-1, 1)]
+        if not all(inside(cx, cz) for cx, cz in corners):
+            raise Refused(f"{option}: the spawn at x {x:.1f}, z {z:.1f} m samples a "
+                          f"{2 * SPAWN_HALF_M:.0f} m square that leaves the heightmap ({span}); "
+                          f"choose a value that keeps it inside")
+        return x, z
     house = next(i for i in level["instances"] if i["id"] == "house_0001")
     heading = math.radians(json.loads((ROOT / "scripts/perf/ram.json").read_text())["heading_deg"])
     # Quat::from_rotation_y(heading) * -Z, as `net::ram` plans its approach.
     dx, dz = -math.sin(heading), -math.cos(heading)
     hx, _, hz = house["translation"]
-    x, z = hx - dx * args.runup_m, hz - dz * args.runup_m
+    x, z = admitted("--runup-m", hx - dx * args.runup_m, hz - dz * args.runup_m)
     rot = (0.0, math.sin(heading / 2), 0.0, math.cos(heading / 2))
-    fx, fz = args.flat_pose
+    fx, fz = admitted("--flat-pose", *args.flat_pose)
     flat_pose = ((fx, spawn_y(ground, fx, fz), fz), (0.0, 0.0, 0.0, 1.0))
     return {"pile": ((x, spawn_y(ground, x, z), z), rot), "flat": flat_pose, "rubble": flat_pose}
 
@@ -199,10 +220,21 @@ def wait_quiet(limit_s):
 def port_free():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         try:
-            sock.bind(("127.0.0.1", 5888))
+            sock.bind(ENDPOINT)
         except OSError:
             return False
     return True
+
+
+def launch(exe, env, log):
+    """A session process in its own group; one that cannot start refuses the run."""
+    try:
+        return subprocess.Popen([str(exe)], env=env, stdout=log, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+    except OSError as error:
+        raise Refused(f"{exe} cannot start ({error}); build both binaries with "
+                      f"`scripts/serial-cargo build --release --locked --bin overmatch-server "
+                      f"--bin overmatch`, or pass --bin a directory holding them")
 
 
 def alive(proc):
@@ -304,9 +336,10 @@ def measure(args, name, condition, pose, out, record):
     recorder = IDLE_RECORDER
     if condition == "rubble":
         recorder = {"tanks": 1, "events": [{"at_s": args.fell_at_s, "instances": ["house_0001"]}]}
-    server_env = dict(base, OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_SERVER_STATS_S="1",
+    server_env = dict(base, OVERMATCH_SERVER_BIND=ENDPOINT[0], OVERMATCH_SERVER_STATS_S="1",
                       OVERMATCH_LOADTEST=json.dumps(recorder, separators=(",", ":")))
-    client_env = dict(base, OVERMATCH_WINDOW="headless", OVERMATCH_SERVER=ADDRESS)
+    client_env = dict(base, OVERMATCH_WINDOW="headless",
+                      OVERMATCH_SERVER=f"{ENDPOINT[0]}:{ENDPOINT[1]}")
     record.update(drive=drive, recorder=recorder, window_s=[start_s, end_s],
                   loadavg_before=os.getloadavg())
     waited = wait_quiet(args.quiet_wait_s)
@@ -315,12 +348,11 @@ def measure(args, name, condition, pose, out, record):
         record["invalid"] = "another compile outlasted --quiet-wait-s"
         return record, []
     if not port_free():
-        record["invalid"] = "UDP 5888 is already bound"
+        record["invalid"] = f"UDP {ENDPOINT[1]} is already bound"
         return record, []
     server_log, client_log = out / f"{name}.server.log", out / f"{name}.client.log"
     with open(server_log, "w") as slog, open(client_log, "w") as clog:
-        server = subprocess.Popen([str(args.bin / "overmatch-server")], env=server_env, stdout=slog,
-                                  stderr=subprocess.STDOUT, start_new_session=True)
+        server = launch(args.bin / "overmatch-server", server_env, slog)
         client = None
         try:
             deadline = time.monotonic() + 60
@@ -329,8 +361,7 @@ def measure(args, name, condition, pose, out, record):
                     record["invalid"] = "the server never listened"
                     return record, []
                 time.sleep(0.2)
-            client = subprocess.Popen([str(args.bin / "overmatch")], env=client_env, stdout=clog,
-                                      stderr=subprocess.STDOUT, start_new_session=True)
+            client = launch(args.bin / "overmatch", client_env, clog)
             deadline = time.monotonic() + 120
             while "harness: released" not in client_log.read_text(errors="replace"):
                 if not alive(client) or time.monotonic() > deadline:
