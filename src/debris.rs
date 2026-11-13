@@ -39,10 +39,10 @@
 //! * is disabled, turns sensor or loses its body to a disable ([`wake_on_collider_disabled`],
 //!   [`wake_on_collider_sensed`], [`wake_on_body_disabled`]): avian may drop the pairs in an `Add`
 //!   observer that Bevy runs before these, so they read bounds instead ([`Unheld`]);
-//! * changes in place ([`wake_on_static_moved`]: a static body's collider re-posed, by its own
-//!   [`Position`] or [`Rotation`] or by its body's, reshaped or re-layered), read inside the step
-//!   before the broad phase, while the last step's pairs still stand. It relies on the vendored
-//!   avian and lightyear child-pose writers (`vendor/avian3d-0.7.0-child-pose`,
+//! * changes in place ([`wake_on_static_moved`]: a collider of a static body or of none re-posed,
+//!   by its own [`Position`] or [`Rotation`] or by its body's, reshaped or re-layered), read inside
+//!   the step before the broad phase, while the last step's pairs still stand. It relies on the
+//!   vendored avian and lightyear child-pose writers (`vendor/avian3d-0.7.0-child-pose`,
 //!   `vendor/lightyear_avian3d-0.30.1-child-pose`) writing a child collider's pose only when its
 //!   bits change, and on avian rescaling a collider only when its scale changes
 //!   (`collision/collider/backend.rs`, `update_collider_scale`): a writer that rewrote either
@@ -228,23 +228,26 @@ fn wake_on_body_disabled(
     }
 }
 
-/// Every collider of a static body re-posed, reshaped or re-layered since the last step: every
-/// sleeping body it carries wakes (module doc), and each frozen island depending on any of them is
-/// judged at this step's thaw ([`freeze`]). The changed colliders are judged on the compute pool;
-/// the scan that finds them reads one change tick per collider and stays serial, since a parallel
-/// query spawns its tasks every step whatever it finds (bevy_ecs 0.19 `QueryParIter`): MEASURED on
-/// the M4 server with nothing changed, 9 to 13 µs more per tick in the physics schedule's own
-/// systems than this scan (`scripts/perf/pile_park.py`, pile and flat).
-/// The thaw reads the notes as a set, so their order decides nothing.
+/// Every collider of a static body or of none re-posed, reshaped or re-layered since the last step:
+/// every sleeping body it carries wakes (module doc), and each frozen island depending on any of
+/// them is judged at this step's thaw ([`freeze`]). The changed colliders are judged on the
+/// compute pool; the scan that finds them reads one change tick per collider and stays serial,
+/// since a parallel query spawns its tasks every step whatever it finds (bevy_ecs 0.19
+/// `QueryParIter`): MEASURED on the M4 server with nothing changed, 9 to 13 µs more per tick in the
+/// physics schedule's own systems than this scan (`scripts/perf/pile_park.py`, pile and flat). The
+/// thaw reads the notes as a set, so their order decides nothing.
 fn wake_on_static_moved(
     changed: Query<
-        (Entity, &ColliderOf),
-        Or<(
-            Changed<Position>,
-            Changed<Rotation>,
-            Changed<Collider>,
-            Changed<CollisionLayers>,
-        )>,
+        (Entity, Option<&ColliderOf>),
+        (
+            With<Collider>,
+            Or<(
+                Changed<Position>,
+                Changed<Rotation>,
+                Changed<Collider>,
+                Changed<CollisionLayers>,
+            )>,
+        ),
     >,
     bodies: Query<&RigidBody>,
     carried: Carried,
@@ -257,8 +260,11 @@ fn wake_on_static_moved(
     moved.extend(
         changed
             .iter()
-            // A moving body's colliders move with it.
-            .filter(|(_, of)| bodies.get(of.body).is_ok_and(RigidBody::is_static))
+            // A collider with no body is static to the solver, and the belt's sampling reads it as
+            // one (`track::rubble::RubbleQuery`); a moving body's colliders move with it.
+            .filter(|(_, of)| {
+                of.is_none_or(|of| bodies.get(of.body).is_ok_and(RigidBody::is_static))
+            })
             .map(|(collider, _)| collider),
     );
     if moved.is_empty() {

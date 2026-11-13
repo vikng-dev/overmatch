@@ -364,20 +364,13 @@ impl Bed {
 
     /// A static block as the map makes a graybox: centre and full size (m).
     fn spawn_static(&mut self, center: Vec3, size: Vec3) -> Entity {
-        let friction = crate::substances::SubstanceRegistry::shipped_static()
-            .contact_friction(FIXTURE_SUBSTANCE)
-            .expect("the fixture substance states a friction");
-        self.app
-            .world_mut()
-            .spawn((
-                Name::new("track scorecard fixture"),
-                Transform::from_translation(center),
-                RigidBody::Static,
-                Collider::cuboid(size.x, size.y, size.z),
-                CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
-                friction,
-            ))
-            .id()
+        let block = fixed_block(center, size);
+        self.app.world_mut().spawn((block, RigidBody::Static)).id()
+    }
+
+    /// [`Self::spawn_static`]'s block as a collider with no body, which the solver reads as static.
+    fn spawn_bodyless(&mut self, center: Vec3, size: Vec3) -> Entity {
+        self.app.world_mut().spawn(fixed_block(center, size)).id()
     }
 
     /// A dynamic rubble piece of the fixture substance: centre and full size (m).
@@ -2295,79 +2288,109 @@ fn resting_on_flat() -> Bed {
 /// drops measurably when it goes.
 const SLAB: Vec3 = Vec3::new(20.0, 0.5, 20.0);
 
+/// A fixed block's collider of the fixture substance on the terrain layer: centre and full size (m).
+fn fixed_block(center: Vec3, size: Vec3) -> impl Bundle {
+    let friction = crate::substances::SubstanceRegistry::shipped_static()
+        .contact_friction(FIXTURE_SUBSTANCE)
+        .expect("the fixture substance states a friction");
+    (
+        Name::new("track scorecard fixture"),
+        Transform::from_translation(center),
+        Collider::cuboid(size.x, size.y, size.z),
+        CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+        friction,
+    )
+}
+
 /// A resting tank's sampled support is no collider pair, so Avian wakes it for no change of that
 /// support: every way the support can change must wake it (`debris`'s wakes), and it falls by what
-/// the change took away. The support goes, is disabled, loses its body to a disable, turns sensor,
-/// moves down by its thickness, or shrinks about its centre to half its thickness. Fixture
-/// watchdog: 2 s to fall half the drop.
+/// the change took away. A support on a static body goes, is disabled, loses its body to a
+/// disable, turns sensor, moves down by its thickness, shrinks about its centre to half its
+/// thickness, or stops meeting vehicles; a support with no body, which the belt reads as static,
+/// moves, shrinks or stops meeting vehicles. Fixture watchdog: 2 s to fall half the drop.
 #[test]
 fn a_resting_tank_wakes_and_falls_when_its_support_changes() {
-    let changes: [(&str, f32, fn(&mut World, Entity)); 6] = [
-        ("goes", SLAB.y, |world, slab| {
-            world.despawn(slab);
-        }),
-        ("is disabled", SLAB.y, |world, slab| {
-            world.entity_mut(slab).insert(ColliderDisabled);
-        }),
-        ("loses its body to a disable", SLAB.y, |world, slab| {
-            world.entity_mut(slab).insert(RigidBodyDisabled);
-        }),
-        ("turns sensor", SLAB.y, |world, slab| {
-            world.entity_mut(slab).insert(Sensor);
-        }),
-        ("moves", SLAB.y, |world, slab| {
-            let mut slab = world.entity_mut(slab);
-            slab.get_mut::<Position>().expect("slab position").0.y -= SLAB.y;
-            slab.get_mut::<Transform>()
-                .expect("slab transform")
-                .translation
-                .y -= SLAB.y;
-        }),
-        ("shrinks", SLAB.y / 4.0, |world, slab| {
-            world
-                .entity_mut(slab)
-                .insert(Collider::cuboid(SLAB.x, SLAB.y / 2.0, SLAB.z));
-        }),
+    type Change = (&'static str, f32, fn(&mut World, Entity));
+    let goes: Change = ("goes", SLAB.y, |world, slab| {
+        world.despawn(slab);
+    });
+    let disabled: Change = ("is disabled", SLAB.y, |world, slab| {
+        world.entity_mut(slab).insert(ColliderDisabled);
+    });
+    let body_disabled: Change = ("loses its body to a disable", SLAB.y, |world, slab| {
+        world.entity_mut(slab).insert(RigidBodyDisabled);
+    });
+    let sensor: Change = ("turns sensor", SLAB.y, |world, slab| {
+        world.entity_mut(slab).insert(Sensor);
+    });
+    let moves: Change = ("moves", SLAB.y, |world, slab| {
+        let mut slab = world.entity_mut(slab);
+        slab.get_mut::<Position>().expect("slab position").0.y -= SLAB.y;
+        slab.get_mut::<Transform>()
+            .expect("slab transform")
+            .translation
+            .y -= SLAB.y;
+    });
+    let shrinks: Change = ("shrinks", SLAB.y / 4.0, |world, slab| {
+        world
+            .entity_mut(slab)
+            .insert(Collider::cuboid(SLAB.x, SLAB.y / 2.0, SLAB.z));
+    });
+    let unmet: Change = ("stops meeting vehicles", SLAB.y, |world, slab| {
+        world
+            .entity_mut(slab)
+            .insert(CollisionLayers::new([Layer::Terrain], LayerMask::NONE));
+    });
+    let supports: [(&str, fn(&mut Bed, Vec3, Vec3) -> Entity, &[Change]); 2] = [
+        (
+            "static",
+            Bed::spawn_static,
+            &[goes, disabled, body_disabled, sensor, moves, shrinks, unmet],
+        ),
+        ("bodyless", Bed::spawn_bodyless, &[moves, shrinks, unmet]),
     ];
-    for (change, drop, apply) in changes {
-        let mut bed = Bed::on_ground(Some(base_ground()), flat());
-        let slab = bed.spawn_static(Vec3::Y * SLAB.y / 2.0, SLAB);
-        bed.place(Vec3::Y * SLAB.y, Quat::IDENTITY);
-        bed.start();
-        until_resting(&mut bed);
-        let world = bed.app.world();
-        assert!(
-            world
-                .get::<TrackContacts>(bed.tank)
-                .expect("a driving tank reports its belt contacts")
-                .0
-                .iter()
-                .flatten()
-                .any(|contact| contact.collider == Some(slab)),
-            "the resting tank stands on the slab through its sampled support"
-        );
-        assert!(
-            world
-                .resource::<ContactGraph>()
-                .contact_edges_with(slab)
-                .all(|edge| !edge.is_touching()),
-            "no collider pair carries the tank on the slab"
-        );
-        let rest = bed.hull().position.y;
-        apply(bed.app.world_mut(), slab);
-        bed.tick(0.0, 0.0);
-        assert!(
-            !is_asleep(&bed),
-            "a resting tank stayed asleep as its support {change}"
-        );
-        let mut ticks = 0;
-        while bed.hull().position.y > rest - drop / 2.0 {
+    for (support, spawn, changes) in supports {
+        for &(change, drop, apply) in changes {
+            let mut bed = Bed::on_ground(Some(base_ground()), flat());
+            let slab = spawn(&mut bed, Vec3::Y * SLAB.y / 2.0, SLAB);
+            bed.place(Vec3::Y * SLAB.y, Quat::IDENTITY);
+            bed.start();
+            until_resting(&mut bed);
+            let world = bed.app.world();
             assert!(
-                ticks < 2 * TICKS,
-                "the woken tank did not fall as its support {change}"
+                world
+                    .get::<TrackContacts>(bed.tank)
+                    .expect("a driving tank reports its belt contacts")
+                    .0
+                    .iter()
+                    .flatten()
+                    .any(|contact| contact.collider == Some(slab)),
+                "the resting tank stands on the {support} slab through its sampled support"
             );
+            assert!(
+                world
+                    .resource::<ContactGraph>()
+                    .contact_edges_with(slab)
+                    .filter(|edge| [edge.body1, edge.body2].contains(&Some(bed.tank)))
+                    .all(|edge| !edge.is_touching()),
+                "no collider pair carries the tank on the {support} slab"
+            );
+            let rest = bed.hull().position.y;
+            apply(bed.app.world_mut(), slab);
             bed.tick(0.0, 0.0);
-            ticks += 1;
+            assert!(
+                !is_asleep(&bed),
+                "a resting tank stayed asleep as its {support} support {change}"
+            );
+            let mut ticks = 0;
+            while bed.hull().position.y > rest - drop / 2.0 {
+                assert!(
+                    ticks < 2 * TICKS,
+                    "the woken tank did not fall as its {support} support {change}"
+                );
+                bed.tick(0.0, 0.0);
+                ticks += 1;
+            }
         }
     }
 }
