@@ -46,8 +46,8 @@ use crate::bitprobe::BitprobeCapture;
 
 use super::drive::{DriveAxes, DriveIntent, DriveTarget, shape_drive};
 use super::forces::{
-    BeltContact, ForceParams, GripElements, GripParams, SideInput, SideReport, SideState,
-    contact_side,
+    BeltContact, ForceParams, GripElements, GripParams, PROBE_REACH, SideInput, SideReport,
+    SideState, contact_side,
 };
 use super::oracle::TerrainOracle;
 use super::route::build_route;
@@ -611,7 +611,7 @@ impl TrackGear {
             resolution.stations,
             geom.model.pin_to_outer,
             spec.suspension.engage,
-            0.5,
+            PROBE_REACH,
             blueprint.spec.mass * super::derive::G,
             droop.effective,
             sus.ride_frequency,
@@ -667,8 +667,13 @@ impl TrackGear {
             .flatten()
             .map(|(_, t)| *t)
             .fold(0.0_f32, f32::max);
-        let rubble_radius =
-            footprint_radius(pin_radius, column, geom.model.pin_to_outer, travel, 0.5);
+        let rubble_radius = footprint_radius(
+            pin_radius,
+            column,
+            geom.model.pin_to_outer,
+            travel,
+            PROBE_REACH,
+        );
         let inertia = spec
             .reflected_inertia(&blueprint.spec.roadwheels, geom.wrap_radii())
             .expect("running-gear admission certified the construction inertia");
@@ -702,7 +707,7 @@ impl TrackGear {
                 support_stiffness_per_m: cal.stiffness_per_m,
                 support_damping_per_m: cal.damping_per_m,
                 engage_depth: spec.suspension.engage,
-                probe_reach: 0.5,
+                probe_reach: PROBE_REACH,
 
                 grip: Some(grip),
             },

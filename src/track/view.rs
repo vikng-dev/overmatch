@@ -27,6 +27,7 @@ use crate::render_policy::VisualScope;
 use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
 
 use super::belt_draw::BeltAssets;
+use super::forces::PROBE_REACH;
 use super::gear_phase::{GearFrame, hull_from_parent, spin_angle, tooth_angle};
 use super::link_view::{self, BeltFrames, LinkTemplate, Stragglers};
 use super::oracle::{BlockField, DepthOracle};
@@ -132,8 +133,6 @@ impl<F: Fn(Vec2) -> f32> DepthOracle for Sunk<'_, F> {
     }
 }
 
-/// Downward terrain-probe reach (m) — for the wrap's conform and the view wheel lift.
-const PROBE_REACH: f32 = 0.5;
 /// Presented-pose discontinuity thresholds: a root that moves further than this in ONE frame is
 /// a teleport/respawn/snap, not motion — reset the wrap filters and the wheel-lift state. The view
 /// detects locally, with no published signal: works identically in SP and MP, no netcode coupling.

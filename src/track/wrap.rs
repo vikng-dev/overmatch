@@ -878,7 +878,7 @@ mod tests {
             count: rig.link_count,
             pitch: rig.pitch,
             face_offset: rig.model.pin_to_outer,
-            probe_reach: 0.5,
+            probe_reach: crate::track::forces::PROBE_REACH,
             reference,
             sides: Side::ALL.map(|s| WrapSideInput {
                 circles,
@@ -1200,7 +1200,7 @@ mod tests {
             max_lift: tiger_spec().track.suspension.bump_stop,
             max_droop: rig.droop_travel(params).effective,
             lateral_spans: &[(-0.08, 0.08)],
-            probe_reach: 0.5,
+            probe_reach: crate::track::forces::PROBE_REACH,
         }
     }
 

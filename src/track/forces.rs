@@ -283,6 +283,13 @@ pub(crate) fn material_link(station: usize, wraps: i64, count: usize) -> usize {
     (station as i128 - i128::from(wraps)).rem_euclid(count as i128) as usize
 }
 
+/// Resolution: a terrain probe's base reach behind its rest face (m), shared by the sim's support
+/// probes, their envelope calibration and their rubble candidate bound, and the view's conform and
+/// wheel-lift probes. A face pressed deeper than this plus its travel starts its ray buried and
+/// reads no contact, so the reach sits well past any press the support law carries; a longer ray
+/// costs its length, never another ray.
+pub const PROBE_REACH: f32 = 0.5;
+
 /// The force model's parameters: vehicle data (spec-authored) + the per-metre support law.
 /// Nothing here is solver-quality policy — quality lives in the station/column geometry the
 /// caller selects (force resolution sets station density).
@@ -309,6 +316,7 @@ pub struct ForceParams {
     /// The law extends each probe's reach by its own local free travel, so callers pass the
     /// plain base (no `+ free_travel`) — the ray origin must sit at `face − base` for every
     /// station or zero-travel return-run origins start too deep (buried-origin saturation).
+    /// Every rig passes [`PROBE_REACH`].
     pub probe_reach: f32,
 
     /// The traction law's inputs. Ground grip or a solid-recipient material pair sets the
@@ -1525,7 +1533,7 @@ mod tests {
             support_stiffness_per_m: 2.0e6,
             support_damping_per_m: 1.0e5,
             engage_depth: 0.002,
-            probe_reach: 0.5,
+            probe_reach: PROBE_REACH,
 
             grip: Some(GripParams {
                 track: crate::substances::contact_friction(0.9),

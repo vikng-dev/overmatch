@@ -207,7 +207,7 @@ mod tests {
             max_lift,
             max_droop,
             lateral_spans: &[(-0.08, 0.08)],
-            probe_reach: 0.5,
+            probe_reach: crate::track::forces::PROBE_REACH,
         }
     }
 

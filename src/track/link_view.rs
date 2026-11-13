@@ -1551,8 +1551,8 @@ mod tests {
 
         /// How far the near and far shoes stand from the belt origin, along the camera's own axis.
         const SPREAD_M: f32 = 2.0;
-        /// `track::view::PROBE_REACH` — the view's downward probe, and the sandbox's conform reach.
-        const CONFORM_M: f32 = 0.5;
+        /// The view's downward probe, and the sandbox's conform reach.
+        const CONFORM_M: f32 = crate::track::forces::PROBE_REACH;
         let rig = tiger_rig();
         let mut assets = Assets::<Mesh>::default();
         let template = fixture_template(&mut assets);
