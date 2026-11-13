@@ -4,9 +4,9 @@
 //!
 //! `scripts/serial-cargo test --lib --features dev_ui,bitprobe belt_friction_probe -- --ignored --nocapture`
 //!
-//! `BELT_FRICTION_ONLY=<text>` runs only the cases whose label contains the text and refuses a
-//! text that selects none; `BELT_FRICTION_TAG=<text>` names the run in the per-tick CSV files
-//! under `target/belt-friction/`.
+//! `BELT_FRICTION_ONLY=<text>` runs only the cases whose label contains the text and refuses an
+//! empty text or one that selects none; `BELT_FRICTION_TAG=<text>` names the run in the per-tick
+//! CSV files under `target/belt-friction/`.
 //!
 //! Each case prints one `BELTFRICTION {json}` line. Per clutch regime, each taken within runs of
 //! consecutive ticks: the tick-to-tick alternation of the friction the solver delivered to each
@@ -391,12 +391,7 @@ fn mode_masses(bed: &Bed) -> Value {
     use crate::track::stop_contacts::BeltFace;
     let world = bed.app.world();
     let hull = bed.hull();
-    let com = hull.position
-        + hull.rotation
-            * world
-                .get::<ComputedCenterOfMass>(bed.tank)
-                .expect("the tank's centre of mass")
-                .0;
+    let com = bed.center_of_mass();
     let inverse_mass = world
         .get::<ComputedMass>(bed.tank)
         .expect("the tank's mass")
@@ -554,12 +549,9 @@ fn run(case: &Case, tag: &str) {
     println!("BELTFRICTION {line}");
 }
 
-/// One layer of pieces under each track (`pile_under`), settled.
+/// The tank on its layer of pieces (`bed_on_pile`), settled.
 fn pieces_bed() -> Bed {
-    let mut bed = Bed::on_ground(Some(base_ground()), flat());
-    let lift = pile_under(&mut bed);
-    bed.place(Vec3::Y * lift, Quat::IDENTITY);
-    bed.start();
+    let mut bed = bed_on_pile();
     for _ in 0..2 * TICKS {
         bed.tick(0.0, 0.0);
     }
@@ -629,6 +621,10 @@ fn house_bed() -> Bed {
 fn belt_friction_probe() {
     let lever = |name: &str| crate::env_text(name).unwrap_or_else(|error| panic!("{error}"));
     let only = lever("BELT_FRICTION_ONLY");
+    assert!(
+        only.as_deref() != Some(""),
+        "BELT_FRICTION_ONLY is set but empty: give a label text, or unset it to run every case"
+    );
     let tag = lever("BELT_FRICTION_TAG").unwrap_or_else(|| "run".to_owned());
     let selected: Vec<&Case> = CASES
         .iter()
