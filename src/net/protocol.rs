@@ -41,8 +41,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// fragments reach players as decoration events. The construction ledger reaches a client as the
 /// diffs past its acknowledged cursor (bevy_replicon 0.44.3), each naming the position it lands
 /// at, and a whole copy only to a client without one or behind the retained history; the hull
-/// marks replicate whole.
-pub const PROTOCOL_REV: u32 = 94;
+/// marks replicate whole. The owner's ahead-running aim integrates the authority's servo law
+/// (`tank::servo`), so a change to that law changes this revision too.
+pub const PROTOCOL_REV: u32 = 95;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.

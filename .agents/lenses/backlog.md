@@ -12,7 +12,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | load-02 | P2 | `src/geometry_lod.rs::resolve_chains` | error-handling: Silent exit | A certificate chain for nonexistent `"Missing#0"` passes validation because resolution visits only existing meshes. | Require every declared source and rung to resolve; name the certificate, key and repair. | ratchet |
 | load-24 | P3 | `src/settings/ui.rs::tests::the_selection_skips_disabled_rows` | testing: Coupled assertion | A permitted `defaults.vsync: Off` taste change fails the ON premise before testing selection, though row skipping is unchanged. | Set the disabled-cap fixture to explicit `VsyncMode::On` rather than pinning the authored default. | ratchet |
 | load-30 | P3 | `src/tank/view.rs::bind_tank_view` | testing: Unwitnessed arm | The late-view path (a view arriving after the launch) has no test: `WorldInstanceReady`'s `InstanceId` has no public constructor, so a witness needs the real spawner over a loaded world asset | Witness it through the world-asset spawner | ratchet |
-| load-31 | P3 | `src/tank/servo.rs::advance_servo` | base-truths: Stated law unwitnessed | Hand-arm friction-only braking and arrival have no witness though §7c claims them, and `slew == 0` erases stored momentum in one tick: a Gunner HP pool emptied at .55 rad/s stops dead while quality .001 coasts | State a brake fact or let friction stop it; witness the hand arm | ratchet |
 
 ## net
 

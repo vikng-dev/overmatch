@@ -159,6 +159,10 @@ impl ServoSpec {
             if !hand_work.is_finite() || hand_work <= 0.0 {
                 return Some("drive.Powered.hand_rate * bearing_friction must yield finite positive hand work; author representable rate and friction facts".into());
             }
+            // The unoperated coast's deceleration (rad/s²); positive, as both facts are.
+            if !(bearing_friction.0 / moving_inertia_kgm2.0).is_normal() {
+                return Some("drive.Powered.bearing_friction / moving_inertia_kgm2 must be a normal positive f32 deceleration; author representable friction and inertia facts".into());
+            }
         }
         let Travel::Limited { min, max } = self.travel else {
             return None;
@@ -530,11 +534,21 @@ fn advance_servo(
     let hand_rate = match spec.drive {
         ServoDrive::Hand { hand_rate } | ServoDrive::Powered { hand_rate, .. } => hand_rate.0,
     };
-    if slew == 0.0 {
-        state.velocity = 0.0;
-        return;
-    }
     state.velocity = match spec.drive {
+        // No operator, no controller: the command neither drives nor brakes the mount. Its stored
+        // momentum runs down under bearing friction, the only stopping torque the construction
+        // declares (no brake, no self-locking gear), and static friction holds it at rest.
+        // Resolution limit: a decrement under half the speed's f32 ulp leaves it unchanged, so
+        // above about 2^24 * Tf/I * dt the coast stalls; DERIVED over 1e5 rad/s for the shipped
+        // moments at 64 Hz. Admission keeps Tf/I itself a normal f32.
+        ServoDrive::Powered {
+            bearing_friction,
+            moving_inertia_kgm2,
+            ..
+        } if slew == 0.0 => {
+            let braking = bearing_friction.0 / moving_inertia_kgm2.0 * dt;
+            state.velocity.signum() * (state.velocity.abs() - braking).max(0.0)
+        }
         ServoDrive::Powered {
             power_share,
             stall_torque,
@@ -578,6 +592,7 @@ fn advance_servo(
                     * powered_velocity(speed, power, stall, friction, inertia, dt).min(desired)
             }
         }
+        // Kinematic: no declared inertia stores momentum, so an absent operator holds it at once.
         ServoDrive::Hand { .. } => {
             if error == 0.0 {
                 0.0
@@ -791,25 +806,24 @@ mod tests {
         for _ in 0..512 {
             tick_powered(&mut world, root, servo);
         }
-        let before = world.get::<TankServos>(root).unwrap().states[0];
+        let mut velocity = world.get::<TankServos>(root).unwrap().states[0].velocity;
         world
             .get_mut::<crate::ballistics::ComponentHealth>(engine)
             .unwrap()
             .set_held(0);
-        let state = tick_powered(&mut world, root, servo);
         let spec = world.get::<ServoSpec>(servo).unwrap();
         let ServoDrive::Powered { hand_rate, .. } = spec.drive else {
             unreachable!()
         };
-        // Bearing friction alone is a lower bound on coast-down time; hand work can only
-        // reduce that braking, never erase the stored momentum in the game's damage model.
         let (friction, inertia) = bearing_and_inertia(spec);
-        assert!(state.velocity >= before.velocity - friction / inertia / 64.0);
         for _ in 0..4096 {
-            tick_powered(&mut world, root, servo);
+            let state = tick_powered(&mut world, root, servo);
+            // Bearing friction alone is a lower bound on coast-down time; hand work can only
+            // reduce that braking, never erase the stored momentum in the game's damage model.
+            assert!(state.velocity >= velocity - friction / inertia / 64.0);
+            velocity = state.velocity;
         }
-        let state = world.get::<TankServos>(root).unwrap().states[0];
-        assert!((state.velocity - hand_rate.0).abs() < hand_rate.0 * 0.001);
+        assert!((velocity - hand_rate.0).abs() < hand_rate.0 * 0.001);
     }
 
     /// The game's damage model: the best available path sets bearing work. Authority must
@@ -897,13 +911,14 @@ mod tests {
     }
 
     /// At unchanged supply, aim consumers rely on monotone arrival within float angle
-    /// resolution. A command jump retains the separate momentum contract.
+    /// resolution, on the hand arm (no engine power) as on the motor's. A command jump retains
+    /// the separate momentum contract.
     #[test]
     fn a_constant_target_is_approached_within_angle_resolution() {
         // Fixture drive, inertia, target and solver steps, spanning the stall/power knee.
         let spec = powered_spec(1.0, 100.0, 20.0);
         for dt in [1.0 / 32.0, 1.0 / 64.0, 1.0 / 128.0] {
-            for power in [1.0, 10.0, 1000.0] {
+            for power in [0.0, 1.0, 10.0, 1000.0] {
                 for target in [-0.5_f32, 0.5] {
                     let mut state = ServoState::default();
                     // Fixture allowance: subtraction, velocity rounding, product and addition
@@ -963,25 +978,85 @@ mod tests {
         assert_eq!(speeds[1], speeds[0] / 2.0);
     }
 
-    /// Operator requirements gate both selected drive laws; no stored powered velocity may
-    /// carry an unavailable operator past the current pose in the game's damage model.
+    /// The game's damage model: with its operator's HP pool emptied, a moving powered mount has no
+    /// controller, so the command neither drives nor brakes it. Its momentum runs down under the
+    /// only stopping torque its construction declares, bearing friction: each tick removes Tf/I·dt
+    /// until rest, which it reaches by v0·I/Tf and keeps. The owner's ahead-running replica
+    /// integrates the same coast.
     #[test]
-    fn an_unavailable_operator_stops_either_drive() {
-        for drive in [
-            powered_spec(0.01, 100.0, 20.0).drive,
-            ServoSpec::test_continuous(ServoRole::Yaw, 1.0).drive,
-        ] {
-            let (mut world, root, servo, _) = powered_world(1.0);
-            // Fixture: Gunner is an absent source and the initial mechanism is moving.
-            world.get_mut::<TankServos>(root).unwrap().states[0] =
-                ServoState::test_new(0.0, 0.0, 0.5);
-            let mut spec = world.get_mut::<ServoSpec>(servo).unwrap();
-            spec.drive = drive;
-            spec.requires = vec![crate::damage::Group::Single(Part::Gunner)];
-            let state = tick_powered(&mut world, root, servo);
-            assert_eq!(state.current, 0.0);
-            assert_eq!(state.velocity, 0.0);
+    fn an_unoperated_powered_mount_coasts_to_rest_under_bearing_friction() {
+        // Fixture: the mechanism moves at 0.5 rad/s from the zero pose.
+        let moving = ServoState::test_new(0.0, 0.0, 0.5);
+        for fixed in [false, true] {
+            let mut runs = Vec::new();
+            for owner in [false, true] {
+                let (mut world, root, servo, _) = powered_world(1.0);
+                let (friction, inertia) =
+                    bearing_and_inertia(world.get::<ServoSpec>(servo).unwrap());
+                let braking = friction / inertia / 64.0;
+                let rest = (moving.velocity / braking).ceil() as usize;
+                // Fixture commands: far ahead of the pose every tick, or fixed at the continuous
+                // law's coast distance v0²·I/(2·Tf), beyond where the per-tick coast rests. A
+                // controller reaches the fixed one only by braking less than friction does.
+                let stop = moving.velocity * moving.velocity * inertia / (2.0 * friction);
+                let command = |pose: f32| if fixed { stop } else { pose + 2.9 };
+                world.get_mut::<ServoSpec>(servo).unwrap().requires =
+                    vec![crate::damage::Group::Single(Part::Gunner)];
+                if owner {
+                    world
+                        .entity_mut(root)
+                        .remove::<TankServos>()
+                        .insert((super::super::model::Controlled, RemoteServos(vec![moving])));
+                } else {
+                    world.get_mut::<TankServos>(root).unwrap().states[0] = moving;
+                }
+                let state = |world: &World| match owner {
+                    true => world.get::<RemoteServos>(root).unwrap().0[0],
+                    false => world.get::<TankServos>(root).unwrap().states[0],
+                };
+                let mut run = Vec::new();
+                let mut velocity = moving.velocity;
+                for _ in 0..rest + 4 {
+                    world.get_mut::<ServoCommand>(servo).unwrap().target =
+                        command(state(&world).current);
+                    world
+                        .resource_mut::<Time<()>>()
+                        .advance_by(Duration::from_secs_f32(1.0 / 64.0));
+                    world.run_system_once(drive_servos).unwrap();
+                    let now = state(&world);
+                    // Fixture allowance: one f32 rounding of the speed subtraction.
+                    let coast = (velocity - braking).max(0.0);
+                    assert!(
+                        (now.velocity - coast).abs() <= f32::EPSILON * velocity,
+                        "{} rad/s where friction leaves {coast}",
+                        now.velocity
+                    );
+                    velocity = now.velocity;
+                    run.push(now);
+                }
+                assert_eq!(velocity, 0.0);
+                runs.push(run);
+            }
+            assert_eq!(
+                runs[0], runs[1],
+                "the owner's replica coasts as the authority does"
+            );
         }
+    }
+
+    /// A hand mount declares no moving inertia: with its operator's HP pool emptied it stores no
+    /// momentum to coast on and holds its pose.
+    #[test]
+    fn an_unoperated_hand_mount_holds() {
+        let (mut world, root, servo, _) = powered_world(1.0);
+        // Fixture: Gunner is an absent source and the mechanism was moving.
+        world.get_mut::<TankServos>(root).unwrap().states[0] = ServoState::test_new(0.0, 0.0, 0.5);
+        let mut spec = world.get_mut::<ServoSpec>(servo).unwrap();
+        spec.drive = ServoSpec::test_continuous(ServoRole::Yaw, 1.0).drive;
+        spec.requires = vec![crate::damage::Group::Single(Part::Gunner)];
+        let state = tick_powered(&mut world, root, servo);
+        assert_eq!(state.current, 0.0);
+        assert_eq!(state.velocity, 0.0);
     }
 
     /// Operator throughput limits available work, not the drive's physical stall torque. A
@@ -1148,6 +1223,13 @@ mod tests {
                 .admission_fault()
                 .unwrap();
             assert!(fault.contains("moving_inertia_kgm2"), "{fault}");
+        }
+        // Fixture individually representable facts whose coast deceleration overflows, is
+        // subnormal, or underflows.
+        for (friction, inertia) in [(1e30, 1e-10), (1e-20, 1e20), (1e-30, 1e30)] {
+            let spec = with_inertia(powered_spec(0.1, 2.0 * friction, friction), inertia);
+            let fault = spec.admission_fault().unwrap();
+            assert!(fault.contains("/ moving_inertia_kgm2"), "{fault}");
         }
         // Fixture individually representable facts whose derived hand work over/underflows.
         for (rate, friction) in [(1e30, 1e20), (1e-20, 1e-30)] {

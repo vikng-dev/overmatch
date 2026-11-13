@@ -1503,8 +1503,14 @@ speed reserves both this
 tick's travel and subsequent stopping distance: `v*dt + v*v/(2*a) <= abs(error)`, where `a`
 is the current available braking acceleration. A command or supply jump can still leave
 insufficient stopping distance; neither erases momentum. A mechanical stop absorbs it.
-Zero operator effectiveness holds the mount. `Hand` construction has no declared inertia
-and retains its kinematic, operator-scaled hand rate.
+Zero operator effectiveness (the operator's HP pool emptied) removes the controller: the command
+neither drives nor brakes a `Powered` mount, whose momentum runs down under bearing friction
+alone, `I*domega/dt = -Tf*sign(omega)`, and static friction holds it at rest. The sheet declares
+no brake and no self-locking (non-back-drivable) gear, so friction is the only stopping torque
+its construction states; a sourced brake or self-locking traverse would be a construction fact
+on the row. **DERIVED** on the Tiger at governed steady rate: yaw coasts 10.7 degrees in 0.68 s,
+pitch 6.6 degrees in 0.65 s unless a travel stop absorbs it. `Hand` construction has no declared
+inertia: it holds at once and otherwise keeps its kinematic, operator-scaled hand rate.
 
 The game's damage model: a Driver out of action on a stopped tank no longer supplies the
 Driver-operated idle catch (`idle_catch_capacity` reads `DriveSupply::served_task_rate`).
@@ -1517,8 +1523,8 @@ own axis (kg m²). No role or assembly lookup supplies it, so a powered cupola s
 load; the `turret` block is the detached assembly's free body only. `ServoMechanism` holds the
 engine curve in the spawn batch; the view asset supplies none of it. Hand rates and travel
 convert degrees to radians once at deserialization. Admission refuses invalid drive facts, a
-missing or non-positive moving load and unrepresentable hand work before play, naming the field
-and repair.
+missing or non-positive moving load, unrepresentable hand work and a coast deceleration
+`Tf/I` that is not a normal f32 before play, naming the field and repair.
 
 At sustained demand, with admitted `Ts > Tf`, the steady rate is **DERIVED** from bearing work:
 `omega_inf = max(Pmotor/Tf, qo*vh)`. On the motor path, initial acceleration is **DERIVED**
@@ -1570,9 +1576,11 @@ are rescaled to recover the previous limits. Crank accessory-load feedback is a 
 coupling, with the drivetrain implementation unchanged.
 
 **Evidence and wire contract.** Generic inline fixtures derive steady rate from bearing work,
-startup from torque and cuboid inertia, and coast-down bounds from friction. They cover a
-reduced and a knocked-out engine, a stopped crank, above-governor rpm, path transitions, target jumps, monotone
-arrival at fixed supply, reversal and travel-stop momentum absorption. No expected rate is
+startup from torque and the declared moving inertia, and coast-down bounds from friction. They
+cover a reduced and a knocked-out engine, a stopped crank, above-governor rpm, path transitions,
+target jumps, monotone arrival at fixed supply on the motor and hand arms, an unoperated mount
+coasting to rest (authority and owner replica alike), reversal and travel-stop momentum
+absorption. No expected rate is
 copied from a run.
 
 Non-owner replicas consume published `ServoAngles` directly; a resolved angle is not a
@@ -1585,7 +1593,8 @@ View interpolation still blends previous and current angles on the view node onl
 
 `ServoState` and public `ServoAngles` are unchanged; `TankServos` remains authoritative state,
 `RemoteServos` holds client presentation state, and `ServoMechanism` is immutable local
-construction. PROTOCOL_REV stays 82.
+construction. The owner's ahead-running aim integrates this same law, so a law change bumps
+PROTOCOL_REV: the unoperated coast-down took it to 95.
 
 Ratchet dispositions: `load-07` is fixed by required explicit `turret.node` construction,
 independent of optic ancestry; `None` is refused before play because complete rigs require that
