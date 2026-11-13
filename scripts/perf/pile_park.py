@@ -39,7 +39,10 @@ the server listened, the client was released and both were alive at the window's
 window holds at least 95 % of its ticks, each with one tank; over the settle span before the
 window, while the tank is awake, a pile run's belt overlaps loose pieces (`work.belt_overlaps` > 0
 on average) and a flat or rubble run's overlaps none. Whether a sleeping tank does belt work is
-no part of the witness.
+no part of the witness. Evidence is refused, never patched, naming the file and line: a stats
+record that does not parse (only the kill's torn final line, with no line end, is skipped), a
+record without its trace, a trace tick lacking a quantity the run reads, a failed process census,
+or a settle span with no tick.
 
 Products in --out: <run>.server.log, <run>.client.log, <run>.window.jsonl (the window's tick
 rows), <run>.harness.ron, summary.json (per run and pooled per condition) and summary.txt.
@@ -86,6 +89,9 @@ TIMES = ("tick_us", "net_us", "physics_us", "sleep_us", "tick_cpu_us", "belt_con
          "avian.prepare_constraints_us", "avian.solve_constraints_us", "avian.warm_start_us",
          "avian.relax_velocities_us", "avian.integrate_velocities_us",
          "avian.integrate_positions_us", "avian.collider_tree_update_us", "avian.finalize_us")
+# Every quantity a trace tick must carry: the producer serializes each one, zero included.
+READ = tuple(dict.fromkeys(("elapsed_s", "tanks", "work.belt_overlaps") + COUNTS + CENSUS_LEAVES
+                           + tuple(k for k in TIMES if k != "net_us")))
 
 
 def heightmap():
@@ -201,19 +207,36 @@ def alive(proc):
     return proc.poll() is None
 
 
-def stats_lines(path):
-    """The log's stats objects. The kill can cut the log's final line short: a record there with
-    no line end is torn and skipped; any other record that does not parse refuses the run."""
+def traces(path):
+    """(where, trace) per stats record. The kill can cut the log's final line short: a record
+    there with no line end is torn and skipped; any other record that does not parse, or carries
+    no trace, refuses the run."""
     text = path.read_text(errors="replace")
     lines = text.splitlines()
     for number, line in enumerate(lines, 1):
         if line.startswith("server_stats "):
+            where = f"{path}:{number}"
             try:
-                yield json.loads(line[len("server_stats "):])
+                record = json.loads(line[len("server_stats "):])
             except json.JSONDecodeError as error:
                 if number == len(lines) and not text.endswith("\n"):
                     continue
-                raise Refused(f"{path}:{number}: malformed server_stats record ({error})")
+                raise Refused(f"{where}: malformed server_stats record ({error})")
+            load = record.get("loadtest")
+            if not isinstance(load, dict) or not isinstance(load.get("ticks"), list) \
+                    or "awake_bodies" not in load:
+                raise Refused(f"{where}: the record carries no trace with ticks and awake_bodies")
+            yield where, load
+
+
+def admit(row, where):
+    """A trace tick's quantities, with `net_us`; a tick lacking one the run reads refuses it."""
+    cells = flat(row)
+    missing = [k for k in READ if k not in cells]
+    if missing:
+        raise Refused(f"{where}: a trace tick lacks {missing}")
+    cells["net_us"] = cells["tick_us"] - sum(cells[k] for k in CENSUS_LEAVES)
+    return cells
 
 
 def flat(row, prefix=""):
@@ -233,13 +256,14 @@ def percentile(values, q):
 
 def describe(rows):
     out = {"ticks": len(rows)}
+    if not rows:
+        return out
     for key in COUNTS + TIMES:
-        values = [r[key] for r in rows if key in r]
-        if values:
-            out[key] = {"mean": statistics.fmean(values)}
-            if key in TIMES:
-                out[key].update(p50=percentile(values, 0.5), p95=percentile(values, 0.95),
-                                p99=percentile(values, 0.99), max=max(values))
+        values = [r[key] for r in rows]
+        out[key] = {"mean": statistics.fmean(values)}
+        if key in TIMES:
+            out[key].update(p50=percentile(values, 0.5), p95=percentile(values, 0.95),
+                            p99=percentile(values, 0.99), max=max(values))
     return out
 
 
@@ -320,28 +344,22 @@ def measure(args, name, condition, pose, out, record):
                 if proc is not None and alive(proc):
                     os.killpg(proc.pid, signal.SIGKILL)
                     proc.wait()
-    rows, awake_bodies, settle_overlaps = [], [], []
-    for line in stats_lines(server_log):
-        load = line.get("loadtest")
-        if not load:
-            continue
-        settle_overlaps.extend(r["work"]["belt_overlaps"] for r in load["ticks"]
-                               if lead_s <= r["elapsed_s"] < start_s)
-        window_rows = [r for r in load["ticks"] if start_s <= r["elapsed_s"] <= end_s]
-        if window_rows:
+    rows, flats, awake_bodies, settle_overlaps = [], [], [], []
+    for where, load in traces(server_log):
+        in_window = False
+        for row in load["ticks"]:
+            cells = admit(row, where)
+            if lead_s <= cells["elapsed_s"] < start_s:
+                settle_overlaps.append(cells["work.belt_overlaps"])
+            elif start_s <= cells["elapsed_s"] <= end_s:
+                rows.append(row)
+                flats.append(cells)
+                in_window = True
+        if in_window:
             awake_bodies.append(load["awake_bodies"])
-        rows.extend(window_rows)
     with open(out / f"{name}.window.jsonl", "w") as handle:
         for row in rows:
             handle.write(json.dumps(row) + "\n")
-    flats = []
-    for row in rows:
-        cells = flat(row)
-        missing = [k for k in ("tick_us",) + CENSUS_LEAVES if k not in cells]
-        if missing:
-            raise Refused(f"{server_log}: the window tick at {row['elapsed_s']} s lacks {missing}")
-        cells["net_us"] = cells["tick_us"] - sum(cells[k] for k in CENSUS_LEAVES)
-        flats.append(cells)
     record["loadavg_after"] = os.getloadavg()
     record["awake_bodies_per_line"] = awake_bodies
     record["window"] = describe(flats)
@@ -353,7 +371,7 @@ def measure(args, name, condition, pose, out, record):
     record["settle_belt_overlaps_mean"] = belt
     if len(flats) < WINDOW_SHARE * expected:
         record["invalid"] = f"the window holds {len(flats)} of {expected} ticks"
-    elif any(r.get("tanks") != 1 for r in flats):
+    elif any(r["tanks"] != 1 for r in flats):
         record["invalid"] = "a window tick holds other than one tank"
     elif condition == "pile" and belt <= 0:
         record["invalid"] = "the tank does not rest on loose pieces"
