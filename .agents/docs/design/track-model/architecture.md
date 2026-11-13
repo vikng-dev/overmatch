@@ -581,7 +581,8 @@ state, none from a timer or a band:
   through a whole held window holds only on torque the pedal did not ask for. While the catch still
   fuels at the demand the Driver reads, the step takes the highest lower gear within `max_step`
   that holds where the cut lands, by the slowing step's own test, else the lowest within
-  `max_step`; a gear still carried there steps again. A candidate's clutch closes from out at or
+  `max_step` whose crank lands short of completed fuel cut, else none; a gear still carried there
+  steps again. A candidate's clutch closes from out at or
   above idle, where the catch adds nothing, so its price is the pedal's own. `max_step` is a fact
   about one selector event, not a reach to widen. The catch draws no more than the served rack
   gives at full command, so at full pedal it adds nothing at any task rate, and a window carried at
@@ -618,7 +619,8 @@ difference, exceeds M. The clauses:
 2. The hull stalls now under the gear's drive: the lowest gear within `max_step`. Or the idle
    catch carried the gear through a held window and still fuels at this demand: the highest lower
    gear within `max_step` that holds where it lands and pulls there more than the engaged gear's
-   drive by M, else the lowest within `max_step`. Or the drivetrain loses more than M over a held
+   drive by M, else the lowest within `max_step` whose crank lands short of completed fuel cut.
+   Or the drivetrain loses more than M over a held
    window: that highest holding gear; with none the gear stays.
 3. Straight, the clutch in, a held window and the hull moving where the cut lands: of the higher
    gears within `max_step`, those that hold where they land and pull there more
@@ -670,7 +672,10 @@ crawl the idle catch carries (`max_step` states one selector event); a carried g
 the lowest gear within `max_step`, as a stall does (it passes a lower gear that holds: DERIVED on
 the lab ladder of `transmission::tests`, fifth carried at 580 rpm meets about 3.9 kN, fourth lands
 above its launch speed pulling about 5.5 kN, and second, the lowest in reach, turns past its
-crank limit and pulls backward); a carried window acted on whatever the demand (a window carried
+crank limit and pulls backward); a carried gear no lower gear holds for taking the lowest in reach
+wherever its crank lands (DERIVED on the lab engine with couplings of 100, 50, 45, 40 and 10 per
+metre: fifth carried at 580 rpm, fourth, third and second land at 2312, 2601 and 2889 rpm, past
+completed fuel cut at 1900 rpm, and second was taken pulling backward); a carried window acted on whatever the demand (a window carried
 at part pedal steps down a gear the full pedal that follows would hold); a slowing gear kept while its crank runs above the torque peak, with admission refusing
 a curve that falls below its peak (it fits one curve shape, and a lower gear can outpull a crank
 above its peak); a slowing gear kept where its crank's net torque rises as revs fall (that marks

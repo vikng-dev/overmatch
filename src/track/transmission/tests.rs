@@ -1983,6 +1983,47 @@ fn a_carried_gear_steps_to_the_highest_lower_gear_that_holds() {
     );
 }
 
+/// The game's driving model: a carried gear that no lower gear in reach holds for steps only to a
+/// gear whose crank lands short of completed fuel cut, and stays where none does: past the cut a
+/// crank turns against its drag alone. Mutant: the lowest gear in reach taken wherever its crank
+/// lands steps fifth to second. Fixture: the lab engine on couplings of 100, 50, 45, 40 and 10 per
+/// metre, fifth carried at 580 rpm.
+#[test]
+fn a_carried_gear_stays_where_every_lower_gear_lands_past_fuel_cut() {
+    let (fp, authoring) = (lab_fp(), lab_authoring());
+    let speeds = [100.0, 50.0, 45.0, 40.0, 10.0]
+        .map(|coupling: f32| 3.6 * authoring.rated_rpm * RPM_TO_RAD / coupling);
+    let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
+        forward_speeds_kmh: &speeds,
+        ..authoring
+    })
+    .expect("the fixture ladder is admitted");
+    let (mut state, inp) = carried_top_gear(&tp);
+    let sensed = felt(&inp);
+    let [_, catch, _] = engine_torques(&tp, DriveSupply::WHOLE, state.omega_e, 0.25);
+    assert!(catch > 0.0, "the catch still fuels at the fixture's demand");
+    let landing = sensed.speed
+        - sensed.resistance * f32::from(tp.shift_ticks.get())
+            / TICK_HZ
+            / coupled_mass(&construction(&fp));
+    let cut = tp.engine.governed_rpm + engine_control().governor_cut_rpm.value;
+    let top = state.gear;
+    for gear in top - tp.max_step..top {
+        let rpm = landing * tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius / RPM_TO_RAD;
+        println!("gear {gear} lands at {rpm:.0} rpm");
+        assert!(
+            rpm >= cut,
+            "the fixture's gear {gear} lands past completed fuel cut"
+        );
+    }
+    choose_gear(&mut state, &tp, &construction(&fp), &inp, 0.25, sensed);
+    assert_eq!(
+        (state.gear, state.shift_ticks),
+        (top, 0),
+        "no gear landing past fuel cut is taken"
+    );
+}
+
 /// The game's driving model: a window the idle catch carried at part pedal is no verdict on full
 /// pedal, where the catch adds nothing, so the Driver steps a carried gear down only while the catch
 /// still fuels at the demand it reads. Mutant: acting on the carried window alone downshifts at

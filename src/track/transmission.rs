@@ -1191,8 +1191,8 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 ///    The idle catch carried the engaged gear through a held window
 ///    ([`super::sense::Sensed::caught`]) and still fuels at this demand: the highest lower gear
 ///    within `max_step` that holds where it lands and pulls there more than the engaged gear's
-///    drive by M, else the lowest within `max_step`. A held window losing more than M: that
-///    highest holding gear, else none.
+///    drive by M, else the lowest within `max_step` whose crank lands short of completed fuel cut,
+///    else none. A held window losing more than M: that highest holding gear, else none.
 /// 3. Straight, clutch in, a held window and the hull moving where the cut lands: of the higher
 ///    gears within `max_step` that hold where they land and pull there more than
 ///    the engaged gear's drive by M, the one that pulls hardest, the higher on a tie.
@@ -1272,13 +1272,18 @@ fn choose_gear(
             pull - load(gear) > margin && pull > dir * sensed.drive + margin
         })
     };
+    // A crank landing at or past completed fuel cut turns against its drag alone.
+    let fueled_landing = |gear: u8| {
+        let shaft = landing * ladder[usize::from(gear - 1)] / tp.sprocket_radius;
+        tp.fuel_cut(shaft / RPM_TO_RAD) > 0.0
+    };
     let chosen = if stall.is_some() && sensed.stalled {
         // A stall bounds what the hull meets from below only: the lowest gear in reach pulls most.
         Some(lowest).filter(|&gear| gear < st.gear)
     } else if sensed.caught && catch > 0.0 {
         // The catch carried the gear and still fuels at this demand, so the gear holds only on
         // torque the pedal does not ask for. A window carried at part pedal is no verdict on full.
-        holding_below().or(Some(lowest).filter(|&gear| gear < st.gear))
+        holding_below().or_else(|| (lowest..st.gear).find(|&gear| fueled_landing(gear)))
     } else if sensed.observed && dir * sensed.drive_gain < -margin {
         holding_below()
     } else if sensed.observed
