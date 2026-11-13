@@ -150,17 +150,14 @@ fn wake_on_collider_gone(
 }
 
 /// A body about to go or change type: every sleeping body any of its colliders carries wakes
-/// (module doc).
+/// (module doc). A body without attached colliders carries nothing.
 fn wake_on_body_gone(
     gone: On<Discard, RigidBody>,
     bodies: Query<&RigidBodyColliders>,
     carried: Carried,
     mut commands: Commands,
 ) {
-    let Ok(colliders) = bodies.get(gone.entity) else {
-        return;
-    };
-    for collider in colliders {
+    for collider in bodies.get(gone.entity).into_iter().flatten() {
         carried.wake(collider, &mut commands);
     }
 }
