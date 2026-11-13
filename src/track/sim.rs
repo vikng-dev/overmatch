@@ -193,6 +193,53 @@ pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
 pub(crate) struct PassTarget(Option<DriveTarget>);
 
+/// Each collider some tank's last driving pass sampled as support, with the tanks it carries.
+/// Kept at the contact commit, so a resting tank keeps the entries of the pass it rested under; a
+/// collider that goes, is disabled or moves finds the resting tanks it carries here
+/// (`crate::debris`), and a tank that goes leaves it.
+#[derive(Resource, Default)]
+pub(crate) struct SampledSupports {
+    tanks: bevy::ecs::entity::EntityHashMap<Vec<Entity>>,
+    colliders: bevy::ecs::entity::EntityHashMap<Vec<Entity>>,
+}
+
+impl SampledSupports {
+    /// The tanks whose last pass sampled `collider`.
+    pub(crate) fn carried_by(&self, collider: Entity) -> &[Entity] {
+        self.tanks.get(&collider).map_or(&[], Vec::as_slice)
+    }
+
+    /// `tank`'s last pass sampled `colliders`, sorted and distinct.
+    fn record(&mut self, tank: Entity, colliders: Vec<Entity>) {
+        if self.colliders.get(&tank) == Some(&colliders) {
+            return;
+        }
+        self.forget(tank);
+        for &collider in &colliders {
+            self.tanks.entry(collider).or_default().push(tank);
+        }
+        self.colliders.insert(tank, colliders);
+    }
+
+    fn forget(&mut self, tank: Entity) {
+        for collider in self.colliders.remove(&tank).into_iter().flatten() {
+            let carried = self
+                .tanks
+                .get_mut(&collider)
+                .expect("every recorded collider indexes the tanks that sampled it");
+            carried.retain(|&other| other != tank);
+            if carried.is_empty() {
+                self.tanks.remove(&collider);
+            }
+        }
+    }
+}
+
+/// A tank that goes leaves the support index.
+fn forget_sampled_supports(gone: On<Remove, TrackContacts>, mut index: ResMut<SampledSupports>) {
+    index.forget(gone.entity);
+}
+
 /// Simulation per-element shear and loss dwell, one field per side. Constructed at spawn
 /// at the force station/lateral resolution; `contact_side` preserves that membership so a
 /// runtime rebuild cannot silently erase accumulated strain. Clients render the server stream.
@@ -461,7 +508,9 @@ impl TrackGear {
 
 pub fn sim_plugin(app: &mut App) {
     app.add_plugins((super::world_contact::plugin, super::belt_segment::plugin));
-    app.init_resource::<DriveSupports>();
+    app.init_resource::<DriveSupports>()
+        .init_resource::<SampledSupports>()
+        .add_observer(forget_sampled_supports);
     app.insert_resource(super::transmission::DriverResolution::load());
     // Lazy one-shot: the blueprint lands at Startup (bake); the gear builds on the first
     // frame after and never again.
@@ -1329,13 +1378,15 @@ fn drivetrain_settled(
 }
 
 /// Reactions commit by ascending source entity, then side and contact emission order. Impulses
-/// on a dynamic recipient add, so no order among them matters.
+/// on a dynamic recipient add, so no order among them matters. Each source's sampled colliders
+/// replace its entries in [`SampledSupports`].
 fn commit_track_contacts(
     time: Res<Time>,
     mut supports: ResMut<DriveSupports>,
     tanks: Query<&TrackContacts, With<Tank>>,
     mut bodies: Query<PieceData>,
     mut transfers: ResMut<crate::contact_transfer::ContactTransfers>,
+    mut sampled: ResMut<SampledSupports>,
 ) {
     let DriveSupports {
         pieces,
@@ -1352,6 +1403,15 @@ fn commit_track_contacts(
             pieces.record_static_contacts(source, side, &mut transfers);
             apply_pushes(&reactions(pieces, side, dt), &mut bodies);
         }
+        let mut colliders: Vec<Entity> = contacts
+            .0
+            .iter()
+            .flatten()
+            .filter_map(|contact| contact.collider)
+            .collect();
+        colliders.sort_unstable();
+        colliders.dedup();
+        sampled.record(source, colliders);
     }
     *pieces = RubbleBodies::default();
     sources.clear();
@@ -1398,6 +1458,7 @@ mod tests {
         ))
         .init_asset::<Mesh>()
         .init_resource::<DriveSupports>()
+        .init_resource::<SampledSupports>()
         .add_systems(DriveTest, driving_systems())
         .init_resource::<crate::contact_transfer::ContactTransfers>()
         .insert_resource(Gravity::ZERO)

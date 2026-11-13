@@ -27,7 +27,9 @@
 //! THE WAKES AVIAN LACKS. Avian wakes no body when a support with no dynamic body of its own goes,
 //! is disabled or moves (the TODO in `collision/narrow_phase/mod.rs`, `remove_collider`), so a
 //! construction chunk turned to dust under a sleeping piece would leave it hanging. The rule wakes
-//! every sleeping body, a piece or any other (a launched turret), that touches a support as it:
+//! every sleeping body, a piece or any other (a launched turret), that touches a support, and every
+//! resting tank whose sampled support stands on it (no collider pair records a sampled support;
+//! the contact commit indexes it in [`SampledSupports`]), as the support:
 //! * goes ([`wake_on_collider_gone`]: `Discard` runs before avian's `Remove` drops the pairs);
 //! * goes with its body ([`wake_on_body_gone`]: a static root despawned with child colliders,
 //!   whose pairs avian's `Remove<RigidBody>` drops before the children's queued despawn);
@@ -59,6 +61,8 @@ pub(crate) mod launch;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+
+use crate::track::sim::SampledSupports;
 
 /// Shared environment presentation cursor. A replica waits until its interpolation timeline
 /// is synchronized; an authority or a tank-less view fixture owns an explicit tick cursor.
@@ -92,62 +96,77 @@ impl PresentationClock {
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct DebrisPiece;
 
-/// Wake every sleeping body in a touching pair with `collider` in avian's contact graph: removing
-/// `Sleeping` wakes its island (avian's `wake_on_remove_sleeping` hook).
-fn wake_touching(
-    collider: Entity,
-    contacts: &ContactGraph,
-    sleeping: &Query<(), With<Sleeping>>,
-    commands: &mut Commands,
-) {
-    for edge in contacts.contact_edges_with(collider) {
-        if !edge.is_touching() {
-            continue;
+/// The sleeping bodies a support carries (module doc).
+#[derive(bevy::ecs::system::SystemParam)]
+struct Carried<'w, 's> {
+    contacts: Res<'w, ContactGraph>,
+    sleeping: Query<'w, 's, (), With<Sleeping>>,
+    sampled: Res<'w, SampledSupports>,
+}
+
+impl Carried<'_, '_> {
+    /// Wake every sleeping body `collider` carries. Removing `Sleeping` wakes its island (avian's
+    /// `wake_on_remove_sleeping` hook).
+    fn wake(&self, collider: Entity, commands: &mut Commands) {
+        for edge in self.contacts.contact_edges_with(collider) {
+            if !edge.is_touching() {
+                continue;
+            }
+            for body in [edge.body1, edge.body2].into_iter().flatten() {
+                if self.sleeping.contains(body) {
+                    commands.entity(body).try_remove::<Sleeping>();
+                }
+            }
         }
-        for body in [edge.body1, edge.body2].into_iter().flatten() {
-            if sleeping.contains(body) {
-                commands.entity(body).try_remove::<Sleeping>();
+        self.wake_sampled(collider, commands);
+    }
+
+    /// Wake every resting tank whose last pass's sampled support stands on `collider`; an awake
+    /// one meets the change in its own next pass.
+    fn wake_sampled(&self, collider: Entity, commands: &mut Commands) {
+        for &tank in self.sampled.carried_by(collider) {
+            if self.sleeping.contains(tank) {
+                commands.entity(tank).try_remove::<Sleeping>();
             }
         }
     }
 }
 
-/// A collider about to go: every sleeping body it touches wakes (module doc).
+/// A collider about to go: every sleeping body it carries wakes (module doc).
 fn wake_on_collider_gone(
     gone: On<Discard, ColliderMarker>,
-    contacts: Res<ContactGraph>,
-    sleeping: Query<(), With<Sleeping>>,
+    carried: Carried,
     mut commands: Commands,
 ) {
-    wake_touching(gone.entity, &contacts, &sleeping, &mut commands);
+    carried.wake(gone.entity, &mut commands);
 }
 
-/// A body about to go or change type: every sleeping body touching any of its colliders wakes
+/// A body about to go or change type: every sleeping body any of its colliders carries wakes
 /// (module doc).
 fn wake_on_body_gone(
     gone: On<Discard, RigidBody>,
     bodies: Query<&RigidBodyColliders>,
-    contacts: Res<ContactGraph>,
-    sleeping: Query<(), With<Sleeping>>,
+    carried: Carried,
     mut commands: Commands,
 ) {
     let Ok(colliders) = bodies.get(gone.entity) else {
         return;
     };
     for collider in colliders {
-        wake_touching(collider, &contacts, &sleeping, &mut commands);
+        carried.wake(collider, &mut commands);
     }
 }
 
 /// A collider disabled: every sleeping body with a collider whose bounds come within avian's
-/// contact tolerance of its bounds wakes (module doc).
+/// contact tolerance of its bounds wakes, and every resting tank its sampled support carries
+/// (module doc).
 fn wake_on_collider_disabled(
     disabled: On<Add, ColliderDisabled>,
     aabbs: Query<&ColliderAabb>,
     spatial: SpatialQuery,
     collider_of: Query<&ColliderOf>,
     config: Res<NarrowPhaseConfig>,
-    sleeping: Query<(), With<Sleeping>>,
+    carried: Carried,
     mut commands: Commands,
 ) {
     let aabb = aabbs
@@ -159,16 +178,17 @@ fn wake_on_collider_disabled(
     );
     spatial.aabb_intersections_with_aabb_callback(grown, |other| {
         if let Ok(&ColliderOf { body }) = collider_of.get(other)
-            && sleeping.contains(body)
+            && carried.sleeping.contains(body)
         {
             commands.entity(body).try_remove::<Sleeping>();
         }
         true
     });
+    carried.wake_sampled(disabled.entity, &mut commands);
 }
 
 /// Every collider of a static body re-posed, reshaped or re-layered since the last step: every
-/// sleeping body touching a re-posed one wakes (module doc), and each frozen island depending on
+/// sleeping body a re-posed one carries wakes (module doc), and each frozen island depending on
 /// any of them is judged at this step's thaw ([`freeze`]).
 fn wake_on_static_moved(
     changed: Query<
@@ -181,8 +201,7 @@ fn wake_on_static_moved(
         )>,
     >,
     bodies: Query<&RigidBody>,
-    contacts: Res<ContactGraph>,
-    sleeping: Query<(), With<Sleeping>>,
+    carried: Carried,
     mut islands: ResMut<freeze::FrozenIslands>,
     mut commands: Commands,
 ) {
@@ -191,7 +210,7 @@ fn wake_on_static_moved(
             continue; // A moving body's colliders move with it.
         }
         if position.is_changed() || rotation.is_changed() {
-            wake_touching(collider, &contacts, &sleeping, &mut commands);
+            carried.wake(collider, &mut commands);
         }
         islands.changed_in_place(collider);
     }
@@ -292,7 +311,9 @@ fn assert_tanks_above_floor(
 /// Mount the rule.
 pub(crate) fn sim_plugin(app: &mut App) {
     freeze::sim_plugin(app);
+    // Without the driving sim no tank samples a support, and the index stays empty.
     app.init_resource::<crate::map::MapManifest>()
+        .init_resource::<SampledSupports>()
         .add_observer(wake_on_collider_gone)
         .add_observer(wake_on_body_gone)
         .add_observer(wake_on_collider_disabled)

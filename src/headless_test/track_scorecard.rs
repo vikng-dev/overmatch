@@ -2241,15 +2241,7 @@ fn a_braked_tank_on_a_slope_rests_where_it_stopped() {
     let mut bed = Bed::on_ground(Some(ground), card_grid(|_, z| -z * angle.tan()));
     bed.place(Vec3::ZERO, Quat::from_rotation_x(angle));
     bed.start();
-    let mut settled = 0;
-    while !is_asleep(&bed) && settled < 8 * TICKS {
-        bed.tick(0.0, 0.0);
-        settled += 1;
-    }
-    assert!(
-        is_asleep(&bed),
-        "a braked tank on a holding slope must come to rest"
-    );
+    until_resting(&mut bed);
     let rest = bed.hull();
     let window = (2.0 * bed.app.world().resource::<TimeToSleep>().0 / DT).ceil() as usize;
     for tick in 0..window {
@@ -2261,6 +2253,180 @@ fn a_braked_tank_on_a_slope_rests_where_it_stopped() {
             (rest.position, rest.rotation),
             "the resting tank moved on the slope at tick {tick}"
         );
+    }
+}
+
+/// Tick the parked tank with no demand until it rests. Fixture watchdog: 8 s.
+fn until_resting(bed: &mut Bed) {
+    let mut ticks = 0;
+    while !is_asleep(bed) {
+        assert!(
+            ticks < 8 * TICKS,
+            "a parked tank with no demand must come to rest"
+        );
+        bed.tick(0.0, 0.0);
+        ticks += 1;
+    }
+}
+
+/// The world bounds of every collider on the tank's body (m).
+fn hull_bounds(bed: &mut Bed) -> (Vec3, Vec3) {
+    let tank = bed.tank;
+    let world = bed.app.world_mut();
+    world
+        .query::<(&ColliderOf, &ColliderAabb)>()
+        .iter(world)
+        .filter(|(of, _)| of.body == tank)
+        .fold(
+            (Vec3::INFINITY, Vec3::NEG_INFINITY),
+            |(lo, hi), (_, aabb)| (lo.min(aabb.min), hi.max(aabb.max)),
+        )
+}
+
+/// A tank at rest on the flat card.
+fn resting_on_flat() -> Bed {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    bed.place(Vec3::ZERO, Quat::IDENTITY);
+    bed.start();
+    until_resting(&mut bed);
+    bed
+}
+
+/// Fixture: a static slab on the flat card, wider than the hull, thick enough that a tank on it
+/// drops measurably when it goes.
+const SLAB: Vec3 = Vec3::new(20.0, 0.5, 20.0);
+
+/// A resting tank's sampled support is no collider pair, so Avian wakes it for no change of that
+/// support: the support going, disabled or moved must wake it (`debris::Carried`), and it falls.
+/// Each change drops the support by the slab's thickness. Fixture watchdog: 2 s to fall half that
+/// drop.
+#[test]
+fn a_resting_tank_wakes_and_falls_when_its_support_goes_is_disabled_or_moves() {
+    let changes: [(&str, fn(&mut World, Entity)); 3] = [
+        ("goes", |world, slab| {
+            world.despawn(slab);
+        }),
+        ("is disabled", |world, slab| {
+            world.entity_mut(slab).insert(ColliderDisabled);
+        }),
+        ("moves", |world, slab| {
+            let mut slab = world.entity_mut(slab);
+            slab.get_mut::<Position>().expect("slab position").0.y -= SLAB.y;
+            slab.get_mut::<Transform>()
+                .expect("slab transform")
+                .translation
+                .y -= SLAB.y;
+        }),
+    ];
+    for (change, apply) in changes {
+        let mut bed = Bed::on_ground(Some(base_ground()), flat());
+        let slab = bed.spawn_static(Vec3::Y * SLAB.y / 2.0, SLAB);
+        bed.place(Vec3::Y * SLAB.y, Quat::IDENTITY);
+        bed.start();
+        until_resting(&mut bed);
+        let world = bed.app.world();
+        assert!(
+            world
+                .get::<TrackContacts>(bed.tank)
+                .expect("a driving tank reports its belt contacts")
+                .0
+                .iter()
+                .flatten()
+                .any(|contact| contact.collider == Some(slab)),
+            "the resting tank stands on the slab through its sampled support"
+        );
+        assert!(
+            world
+                .resource::<ContactGraph>()
+                .contact_edges_with(slab)
+                .all(|edge| !edge.is_touching()),
+            "no collider pair carries the tank on the slab"
+        );
+        let rest = bed.hull().position.y;
+        apply(bed.app.world_mut(), slab);
+        bed.tick(0.0, 0.0);
+        assert!(
+            !is_asleep(&bed),
+            "a resting tank stayed asleep as its support {change}"
+        );
+        let mut ticks = 0;
+        while bed.hull().position.y > rest - SLAB.y / 2.0 {
+            assert!(
+                ticks < 2 * TICKS,
+                "the woken tank did not fall as its support {change}"
+            );
+            bed.tick(0.0, 0.0);
+            ticks += 1;
+        }
+    }
+}
+
+/// The world's other wakes reach a resting tank through Avian alone: a round's impulse through the
+/// waking call every explicit impulse takes (`track::sim::apply_explicit_impulse`), and a moving
+/// body striking it, another tank's hull or a falling piece alike (Avian's island wake on a new
+/// touching contact with an awake body). Fixture: an impulse worth twice Avian's rest speed at the
+/// centre of mass; a free 1 m vehicle-layer block closing at 2 m/s from 1 m beside the hull; a
+/// piece dropped from 1 m above it; a 2 s watchdog each.
+#[test]
+fn a_resting_tank_wakes_for_a_round_a_moving_body_and_a_falling_piece() {
+    let mut bed = resting_on_flat();
+    let before = bed.hull().position;
+    let push = bed.hull().forward()
+        * (2.0
+            * bed
+                .app
+                .world()
+                .get::<SleepThreshold>(bed.tank)
+                .expect("a dynamic tank carries its rest threshold")
+                .linear);
+    let (impulse, at, tank) = (push * bed.mass(), bed.center_of_mass(), bed.tank);
+    let world = bed.app.world_mut();
+    let mut bodies = world.query::<Forces>();
+    let forces = bodies
+        .get_mut(world, tank)
+        .expect("a dynamic tank takes forces");
+    crate::track::sim::apply_explicit_impulse(forces, impulse, at);
+    bed.tick(0.0, 0.0);
+    assert!(!is_asleep(&bed), "a round's impulse left the tank asleep");
+    // Avian commits island waking at the end of the step; the next tick integrates the impulse.
+    bed.tick(0.0, 0.0);
+    assert!(
+        (bed.hull().position - before).dot(push) > 0.0,
+        "the struck hull did not move"
+    );
+    drop(bed); // One booted app at a time (`BOOT_LEASE`).
+
+    let strikers: [(&str, fn(&mut Bed, (Vec3, Vec3))); 2] = [
+        ("a moving body", |bed, (lo, hi)| {
+            let centre = (lo + hi) / 2.0;
+            bed.app.world_mut().spawn((
+                Position(Vec3::new(hi.x + 1.5, centre.y, centre.z)),
+                Rotation::default(),
+                RigidBody::Dynamic,
+                GravityScale(0.0),
+                Collider::cuboid(1.0, 1.0, 1.0),
+                CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+                LinearVelocity(Vec3::NEG_X * 2.0),
+            ));
+        }),
+        ("a falling piece", |bed, (lo, hi)| {
+            let centre = (lo + hi) / 2.0;
+            bed.spawn_piece(
+                Vec3::new(centre.x, hi.y + 1.0 + PIECE.y / 2.0, centre.z),
+                PIECE,
+            );
+        }),
+    ];
+    for (striker, spawn) in strikers {
+        let mut bed = resting_on_flat();
+        let bounds = hull_bounds(&mut bed);
+        spawn(&mut bed, bounds);
+        let mut ticks = 0;
+        while is_asleep(&bed) {
+            assert!(ticks < 2 * TICKS, "{striker} left the resting tank asleep");
+            bed.tick(0.0, 0.0);
+            ticks += 1;
+        }
     }
 }
 
