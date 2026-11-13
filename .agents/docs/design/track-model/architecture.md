@@ -585,8 +585,8 @@ state, none from a timer or a band:
   steps again. A candidate's clutch closes from out at or
   above idle, where the catch adds nothing, so its price is the pedal's own. `max_step` is a fact
   about one selector event, not a reach to widen. The catch draws no more than the served rack
-  gives at full command, so at full pedal it adds nothing at any task rate, and a window carried at
-  part pedal moves nothing once the demand reads full.
+  gives at full command, so at full pedal it adds nothing at any task rate, and the carried-window
+  clause triggers no downshift once demand reads full.
   MEASURED in `headless_test::drive_load` (pedal 0.25, fifth entered at mid-band against a
   46.5 kN grade): without the clause the catch carried fifth for 2334 consecutive held ticks at
   0.74 m/s and 567 rpm, no cut paid, 31.9 m in 40 s; with it no gear in reach held, so fifth

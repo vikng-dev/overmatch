@@ -2030,7 +2030,7 @@ fn a_carried_gear_stays_where_every_lower_gear_lands_past_fuel_cut() {
 /// full pedal. Fixture: the lab ladder's top gear carried at 580 rpm through a quarter-pedal window,
 /// read on the tick the pedal reaches full.
 #[test]
-fn a_part_pedal_carried_window_moves_nothing_at_full_pedal() {
+fn a_part_pedal_carried_window_triggers_no_downshift_at_full_pedal() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let (mut state, inp) = carried_top_gear(&tp);
     let top = state.gear;
