@@ -41,8 +41,10 @@ window, while the tank is awake, a pile run's belt overlaps loose pieces (`work.
 on average) and a flat or rubble run's overlaps none. Whether a sleeping tank does belt work is
 no part of the witness. Evidence is refused, never patched, naming the file and line: a stats
 record that does not parse (only the kill's torn final line, with no line end, is skipped), a
-record without its trace, a trace tick lacking a quantity the run reads, a failed process census,
-or a settle span with no tick.
+record without its trace, a record or trace tick of another shape, a trace tick lacking a quantity
+the run reads, a failed process census, or a settle span with no tick. A duration or tick count
+that is not finite and positive is refused at the command line, and a checkout whose revision
+git cannot read refuses the whole run.
 
 Products in --out: <run>.server.log, <run>.client.log, <run>.window.jsonl (the window's tick
 rows), <run>.harness.ron, summary.json (per run and pooled per condition) and summary.txt.
@@ -222,19 +224,27 @@ def traces(path):
                 if number == len(lines) and not text.endswith("\n"):
                     continue
                 raise Refused(f"{where}: malformed server_stats record ({error})")
-            load = record.get("loadtest")
+            load = record.get("loadtest") if isinstance(record, dict) else None
             if not isinstance(load, dict) or not isinstance(load.get("ticks"), list) \
                     or "awake_bodies" not in load:
-                raise Refused(f"{where}: the record carries no trace with ticks and awake_bodies")
+                raise Refused(f"{where}: the record is not an object carrying a trace with ticks "
+                              f"and awake_bodies; {REBUILD}")
             yield where, load
 
 
+# The repair for a trace of another shape: the server and this script come from different checkouts.
+REBUILD = "rebuild --bin's server from this script's checkout"
+
+
 def admit(row, where):
-    """A trace tick's quantities, with `net_us`; a tick lacking one the run reads refuses it."""
+    """A trace tick's quantities, with `net_us`; a tick that is no object, or lacks a quantity
+    the run reads, refuses it."""
+    if not isinstance(row, dict):
+        raise Refused(f"{where}: a trace tick is {type(row).__name__}, not an object; {REBUILD}")
     cells = flat(row)
     missing = [k for k in READ if k not in cells]
     if missing:
-        raise Refused(f"{where}: a trace tick lacks {missing}")
+        raise Refused(f"{where}: a trace tick lacks {missing}; {REBUILD}")
     cells["net_us"] = cells["tick_us"] - sum(cells[k] for k in CENSUS_LEAVES)
     return cells
 
@@ -380,6 +390,30 @@ def measure(args, name, condition, pose, out, record):
     return record, flats
 
 
+def positive(kind):
+    """An argparse type: a finite value of `kind` above zero, refused at the command line."""
+    def parse(text):
+        try:
+            value = kind(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{text!r} is no {kind.__name__}")
+        if not (math.isfinite(value) and value > 0):
+            raise argparse.ArgumentTypeError(f"{text!r} is not finite and positive")
+        return value
+    return parse
+
+
+def revision():
+    """The checkout's short revision; a git that cannot read it refuses the run's provenance."""
+    git = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True,
+                         text=True)
+    head = git.stdout.strip()
+    if git.returncode != 0 or not head:
+        raise Refused(f"git rev-parse in {ROOT} failed (exit {git.returncode}: "
+                      f"{git.stderr.strip()}); run the script from its git checkout")
+    return head
+
+
 def table(pooled):
     names = list(pooled)
     lines = ["quantity " + " ".join(f"{n:>14}" for n in names)]
@@ -400,23 +434,24 @@ def main():
     parser.add_argument("--bin", type=Path, default=ROOT / "target/release")
     parser.add_argument("conditions", nargs="*",
                         default=["pile", "flat", "rubble", "rubble", "flat", "pile"])
-    parser.add_argument("--runup-m", type=float, default=30.0)
-    parser.add_argument("--throttle-ticks", type=int, default=640)
+    parser.add_argument("--runup-m", type=positive(float), default=30.0)
+    parser.add_argument("--throttle-ticks", type=positive(int), default=640)
     parser.add_argument("--flat-pose", type=float, nargs=2, default=(680.0, -520.0),
                         metavar=("X", "Z"))
-    parser.add_argument("--fell-at-s", type=float, default=1.0)
-    parser.add_argument("--settle-s", type=float, default=10.0)
-    parser.add_argument("--park-s", type=float, default=30.0)
-    parser.add_argument("--quiet-wait-s", type=float, default=2400.0)
+    parser.add_argument("--fell-at-s", type=positive(float), default=1.0)
+    parser.add_argument("--settle-s", type=positive(float), default=10.0)
+    parser.add_argument("--park-s", type=positive(float), default=30.0)
+    parser.add_argument("--quiet-wait-s", type=positive(float), default=2400.0)
     args = parser.parse_args()
     if any(c not in ("pile", "flat", "rubble") for c in args.conditions):
         parser.error("conditions are pile, flat and rubble")
+    if not all(math.isfinite(v) for v in args.flat_pose):
+        parser.error("--flat-pose takes finite coordinates")
     args.bin = args.bin.resolve()
+    head = revision()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     caffeinate = subprocess.Popen(["caffeinate", "-ims", "-w", str(os.getpid())])
-    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True,
-                          text=True).stdout.strip()
     spawn = poses(args)
     manifest = {"head": head, "bin": str(args.bin),
                 "args": {k: str(v) for k, v in vars(args).items()},
@@ -442,4 +477,7 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Refused as refusal:
+        sys.exit(f"pile_park: refused: {refusal}")
