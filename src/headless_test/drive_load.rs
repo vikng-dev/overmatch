@@ -251,12 +251,13 @@ impl Measurements {
 
 /// Every paid cut of one drive, held to the rules its construction states (architecture §5a): a
 /// cut opens the clutch for exactly one shift's ticks, a full window of drive separates it from the
-/// last, and it lands the gear its clause names. A stall, or a gear the idle catch carried through
-/// a held window, steps to the lowest gear within `max_step`; any other cut lands a gear whose
-/// pull, priced at the drive's pedal where the cut lands
-/// ([`candidate_pull`](crate::track::transmission::candidate_pull)) and capped by grip, beats both
-/// the resistance it read and the engaged gear's drive by M, and a step down follows a held window
-/// whose drivetrain lost more than M. How many cuts a drive pays is an observation.
+/// last, and it lands the gear its clause names. A stall steps to the lowest gear within
+/// `max_step`. Any other cut lands a gear that holds: its pull, priced at the drive's pedal where
+/// the cut lands ([`candidate_pull`](crate::track::transmission::candidate_pull)) and capped by
+/// grip, beats both the resistance it read and the engaged gear's drive by M. A gear the idle catch
+/// carried through a held window steps to the highest such gear in reach, else the lowest; any
+/// other step down follows a held window whose drivetrain lost more than M. How many cuts a drive
+/// pays is an observation.
 struct Cuts {
     /// The requested pedal the drive holds, the command the Driver prices with.
     pedal: f32,
@@ -319,12 +320,9 @@ impl Cuts {
             .expect("a cut is chosen on a reading");
         let dir = if state.reverse { -1.0 } else { 1.0 };
         let stall = reading.stall.filter(|stall| stall.dir == dir);
-        if (stall.is_some() && reading.stalled) || reading.caught {
-            assert_eq!(
-                new,
-                old.saturating_sub(tp.max_step).max(1),
-                "a stall, or a gear the catch carried, steps to the lowest gear in reach"
-            );
+        let lowest = old.saturating_sub(tp.max_step).max(1);
+        if stall.is_some() && reading.stalled {
+            assert_eq!(new, lowest, "a stall steps to the lowest gear in reach");
             return;
         }
         assert_ne!(new, old, "a cut within one ladder pays for a gear change");
@@ -341,21 +339,42 @@ impl Cuts {
         } else {
             &tp.gears_fwd
         };
-        let pull = crate::track::transmission::candidate_pull(
-            tp,
-            &gear.construction(),
-            DriveSupply::WHOLE,
-            landing,
-            ladder[usize::from(new - 1)],
-            self.pedal,
-            resistance,
-            ClutchState::Out,
-        )
-        .min(reading.grip);
+        let pull = |candidate: u8| {
+            crate::track::transmission::candidate_pull(
+                tp,
+                &gear.construction(),
+                DriveSupply::WHOLE,
+                landing,
+                ladder[usize::from(candidate - 1)],
+                self.pedal,
+                resistance,
+                ClutchState::Out,
+            )
+            .min(reading.grip)
+        };
         let margin = crate::track::transmission::DriverResolution::load().margin_n(tp);
+        let holds = |candidate: u8| {
+            let pull = pull(candidate);
+            pull - resistance > margin && pull > dir * reading.drive + margin
+        };
+        if reading.caught && new < old {
+            // Whether the catch carried the gear at this demand or its drivetrain lost, a step
+            // down lands the highest gear in reach that holds; only a carried gear finding none
+            // takes the lowest.
+            assert_eq!(
+                new,
+                (lowest..old)
+                    .rev()
+                    .find(|&candidate| holds(candidate))
+                    .unwrap_or(lowest),
+                "gear {old}: a gear the catch carried steps to the highest lower gear in reach that holds, else the lowest"
+            );
+            return;
+        }
         assert!(
-            pull - resistance > margin && pull > dir * reading.drive + margin,
-            "gear {old} to {new}: the landing gear holds, pulling {pull} N against {resistance} N, and outpulls the engaged drive {} N",
+            holds(new),
+            "gear {old} to {new}: the landing gear holds, pulling {} N against {resistance} N, and outpulls the engaged drive {} N",
+            pull(new),
             reading.drive
         );
         assert!(
@@ -363,6 +382,31 @@ impl Cuts {
             "gear {old} to {new}: a step down reads its drivetrain losing over a held window"
         );
     }
+}
+
+/// Fixture: the shipped tank booted on an uninterrupted plane rising at `angle` (rad) toward −Z,
+/// placed parked in first on it and settled for 128 undriven ticks, which build the grip strain a
+/// placement resets. Returns the app, the tank and the plane's rotation.
+fn settled_on_grade(angle: f32) -> (BootedSim, Entity, Quat) {
+    let mut app = booted_driving_grid(driving_plane(angle));
+    start_fixed_clock(&mut app);
+    app.update(); // Initialize the physics body before the fixture teleports it.
+    let tank = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+        .single(app.world())
+        .expect("one controlled tank");
+    let rotation = Quat::from_rotation_x(angle);
+    let rest = app
+        .world()
+        .resource::<crate::track::rig_geom::RigGeom>()
+        .hull_rest_y;
+    let position = Vec3::new(100.0, 0.0, 0.0) + rotation * Vec3::Y * rest;
+    place(&mut app, tank, position, rotation, 0.0, 1);
+    for _ in 0..128 {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    (app, tank, rotation)
 }
 
 fn probe(app: &App, tank: Entity) -> TransmissionProbe {
@@ -529,26 +573,7 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
     let steepest = 0.9 * (ground.grip - ground.rolling_at(kpa)).atan().to_degrees();
     for degrees in [10.0_f32, 20.0, steepest] {
         let angle = degrees.to_radians();
-        let grid = driving_plane(angle);
-        let mut app = booted_driving_grid(grid);
-        start_fixed_clock(&mut app);
-        app.update(); // Initialize the physics body before the fixture teleports it.
-        let tank = app
-            .world_mut()
-            .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
-            .single(app.world())
-            .expect("one controlled tank");
-        let rotation = Quat::from_rotation_x(angle);
-        let normal = rotation * Vec3::Y;
-        let rest = app
-            .world()
-            .resource::<crate::track::rig_geom::RigGeom>()
-            .hull_rest_y;
-        let position = Vec3::new(100.0, 0.0, 0.0) + normal * rest;
-        place(&mut app, tank, position, rotation, 0.0, 1);
-        for _ in 0..128 {
-            drive_tick(&mut app, tank, 0.0, 0.0);
-        }
+        let (mut app, tank, rotation) = settled_on_grade(angle);
         let weight = app.world().resource::<TankBlueprint>().spec.mass * crate::track::derive::G;
         let rolling = crate::ground_types::GroundTypes::load_shipped()
             .get(crate::terrain_blend::BASE_GROUND)
@@ -734,7 +759,7 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
 /// its crank falls into the catch's band, where the catch fuels past the pedal and holds a crawl
 /// that neither slows nor stalls; the Driver relies on the step to leave a crawl on torque no pedal
 /// asked for. No gear above first stays carried longer than one window, and each cut keeps its
-/// construction's rules ([`Cuts`]). Mutant: without the catch in the stall clause, fifth crawls
+/// construction's rules ([`Cuts`]). Mutant: without the carried-gear clause, fifth crawls
 /// carried for the whole drive. Where the drive ends is an observation. Fixture: an uninterrupted
 /// grade meeting 46.5 kN, entered at a mid-band crank in the lowest gear whose step down cannot
 /// reach first, at 0.25 pedal for 40 seconds.
@@ -752,31 +777,7 @@ fn a_gear_the_idle_catch_carries_through_a_held_window_steps_down() {
     let weight = crate::track::rig_geom::tiger_spec().mass * crate::track::derive::G;
     // DERIVED: `W (sin θ + r cos θ) = R` solves as `θ = asin(R / (W √(1 + r²))) − atan r`.
     let angle = (resistance / (weight * (1.0 + rolling * rolling).sqrt())).asin() - rolling.atan();
-    let mut app = booted_driving_grid(driving_plane(angle));
-    start_fixed_clock(&mut app);
-    app.update(); // Initialize the physics body before the fixture teleports it.
-    let tank = app
-        .world_mut()
-        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
-        .single(app.world())
-        .expect("one controlled tank");
-    let rotation = Quat::from_rotation_x(angle);
-    let rest = app
-        .world()
-        .resource::<crate::track::rig_geom::RigGeom>()
-        .hull_rest_y;
-    place(
-        &mut app,
-        tank,
-        Vec3::new(100.0, 0.0, 0.0) + rotation * Vec3::Y * rest,
-        rotation,
-        0.0,
-        1,
-    );
-    // The settle builds the grip strain a placement resets.
-    for _ in 0..128 {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
+    let (mut app, tank, rotation) = settled_on_grade(angle);
     let tp = app
         .world()
         .resource::<crate::track::sim::TrackGear>()
@@ -865,28 +866,8 @@ fn a_gear_the_idle_catch_carries_through_a_held_window_steps_down() {
 #[test]
 fn a_rearward_shot_uphill_reads_as_falling_resistance() {
     let run = |fire: bool| {
-        let angle = 20.0_f32.to_radians();
         // Fixture: an uninterrupted incline; recoil cannot move a patch across a ramp edge.
-        let grid = driving_plane(angle);
-        let mut app = booted_driving_grid(grid);
-        start_fixed_clock(&mut app);
-        app.update();
-        let tank = app
-            .world_mut()
-            .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
-            .single(app.world())
-            .expect("the fixture spawns one controlled tank");
-        let rotation = Quat::from_rotation_x(angle);
-        let normal = rotation * Vec3::Y;
-        let rest = app
-            .world()
-            .resource::<crate::track::rig_geom::RigGeom>()
-            .hull_rest_y;
-        let position = Vec3::new(100.0, 0.0, 0.0) + normal * rest;
-        place(&mut app, tank, position, rotation, 0.0, 1);
-        for _ in 0..128 {
-            drive_tick(&mut app, tank, 0.0, 0.0);
-        }
+        let (mut app, tank, _) = settled_on_grade(20.0_f32.to_radians());
         let slots: Vec<_> = app
             .world_mut()
             .query::<(

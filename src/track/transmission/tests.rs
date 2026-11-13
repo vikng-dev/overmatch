@@ -40,7 +40,28 @@ fn step(
 
 /// Fixture: a second torque curve and ladder, independent of the shipped vehicle.
 fn lab_tp() -> TransmissionParams {
+    TransmissionParams::from_authoring(&lab_authoring())
+        .expect("lab transmission authoring must be valid")
+}
+
+/// Fixture: the lab drivetrain with a curve that sags under its idle, 600 N m at 500 rpm against
+/// 1650 at idle, so there its idle torque exceeds the curve and drag together.
+fn sagging_tp() -> TransmissionParams {
     TransmissionParams::from_authoring(&TransmissionAuthoring {
+        torque_nm: &[
+            (500.0, 600.0),
+            (600.0, 1650.0),
+            (1100.0, 2200.0),
+            (1700.0, 1950.0),
+            (1800.0, 0.0),
+        ],
+        ..lab_authoring()
+    })
+    .expect("a curve sagging under idle is admitted")
+}
+
+fn lab_authoring() -> TransmissionAuthoring<'static> {
+    TransmissionAuthoring {
         idle_rpm: 600.0,
         governed_rpm: 1800.0,
         crank_limit_rpm: 1900.0, // Fixture: completed fuel cut.
@@ -79,8 +100,7 @@ fn lab_tp() -> TransmissionParams {
 
         sprocket_radius_m: 0.34,
         half_tread_m: 1.25,
-    })
-    .expect("lab transmission authoring must be valid")
+    }
 }
 
 /// FIXTURE DATA: per-side belt inertia (kg) at the scale the shipped sheet's construction sum
@@ -1841,45 +1861,144 @@ fn full_pedal_reaches_the_curve_and_release_retains_drag() {
     assert!(drag > 0.0);
 }
 
-/// The game's driving model: the report's `caught` is the idle catch fueling past the command.
-/// The Driver steps a gear it carries down as a stall, and full-pedal driving stays clear of that
-/// step because full pedal under full task rate already fuels all the catch can ask, at every
-/// crank speed; at part pedal a crank lugging through the catch's band below idle is caught.
-/// Fixture: each class drivetrain's engaged crank swept from rest to idle, at a quarter pedal.
+/// The game's driving and damage model: the report's `caught` is the idle catch fueling past the
+/// command. The Driver steps down a gear the catch carries, and full-pedal driving stays clear of
+/// that step because full pedal already fuels all the catch can ask, at every crank speed and at
+/// any task rate (the HP pools' served rate); at part pedal a crank lugging through the catch's
+/// band below idle is caught. Mutant: a catch ceiling the task rate does not scale is caught at
+/// full pedal on the sagging curve at half rate. Fixture: each class drivetrain and one whose curve
+/// sags under idle, the engaged crank swept from rest to idle at whole, half and quarter task
+/// rates, a quarter pedal.
 #[test]
 fn only_a_part_pedal_crank_below_idle_is_caught() {
-    for (_, tp) in class_drivetrains() {
+    let sagging = sagging_tp();
+    let saturated = |tp: &TransmissionParams| {
+        (tp.engine.idle_rpm - engine_control().idle_catch_droop_rpm.value) * RPM_TO_RAD
+    };
+    // Fixture: 65 crank speeds from rest to `top`.
+    let sweep = |top: f32| (0..=64).map(move |step| top * step as f32 / 64.0);
+    assert!(
+        sweep(saturated(&sagging)).any(|omega| {
+            sagging.torque_at(sagging.engine.idle_rpm)
+                > sagging.torque_at(omega / RPM_TO_RAD) + engine_drag(&sagging, omega)
+        }),
+        "the fixture's saturated catch asks more than its curve and drag give somewhere"
+    );
+    for tp in class_drivetrains()
+        .map(|(_, tp)| tp)
+        .into_iter()
+        .chain([sagging])
+    {
         let idle = tp.engine.idle_rpm * RPM_TO_RAD;
-        let saturated = idle - engine_control().idle_catch_droop_rpm.value * RPM_TO_RAD;
-        let caught = |omega: f32, command: f32| {
-            let inp = input(command, 0.0, [0.0; 2], [0.0; 2]);
-            #[cfg(feature = "bitprobe")]
-            let mut probe = TransmissionProbe::default();
-            crank_free_torque(
-                &tp,
-                &inp,
-                true,
-                false,
-                command,
-                0.0,
-                1.0,
-                omega,
-                idle,
+        for task_rate in [1.0, 0.5, 0.25] {
+            let caught = |omega: f32, command: f32| {
+                let mut inp = input(command, 0.0, [0.0; 2], [0.0; 2]);
+                inp.supply.task_rate = task_rate;
                 #[cfg(feature = "bitprobe")]
-                &mut probe,
-            )
-            .2
-        };
-        // Fixture: 65 crank speeds from rest to idle.
-        for omega in (0..=64).map(|step| idle * step as f32 / 64.0) {
-            assert!(!caught(omega, 1.0), "full pedal caught at {omega} rad/s");
-            assert!(
-                omega > saturated || caught(omega, 0.25),
-                "a quarter pedal lugging at {omega} rad/s, below the catch's band"
-            );
+                let mut probe = TransmissionProbe::default();
+                crank_free_torque(
+                    &tp,
+                    &inp,
+                    true,
+                    false,
+                    command,
+                    0.0,
+                    1.0,
+                    omega,
+                    idle,
+                    #[cfg(feature = "bitprobe")]
+                    &mut probe,
+                )
+                .2
+            };
+            for omega in sweep(idle) {
+                assert!(
+                    !caught(omega, 1.0),
+                    "full pedal caught at {omega} rad/s, task rate {task_rate}"
+                );
+                assert!(
+                    omega > saturated(&tp) || caught(omega, 0.25),
+                    "a quarter pedal lugging at {omega} rad/s below the catch's band, task rate {task_rate}"
+                );
+            }
+            assert!(!caught(idle, 0.25), "no catch at idle");
         }
-        assert!(!caught(idle, 0.25), "no catch at idle");
     }
+}
+
+/// Fixture: the lab ladder's top gear crawling locked at 580 rpm, inside the idle catch's band,
+/// read over a quarter-pedal window the catch carried whole, the hull meeting what that gear
+/// delivers there, on ground that grips beyond any gear's pull.
+fn carried_top_gear(tp: &TransmissionParams) -> (TransmissionState, TransmissionInput) {
+    let omega = 580.0 * RPM_TO_RAD;
+    let top = tp.gears_fwd.len() as u8;
+    let ratio = tp.gears_fwd[usize::from(top - 1)];
+    let speed = omega * tp.sprocket_radius / ratio;
+    let crawl = price_driver_force(tp, DriveSupply::WHOLE, speed, ratio, 0.25, ClutchState::In);
+    let mut inp = driver_input(speed, crawl, 0.25);
+    inp.sensed.as_mut().expect("a Driver-policy reading").caught = true;
+    let state = TransmissionState {
+        gear: top,
+        clutch: ClutchState::In,
+        omega_e: omega,
+        ..fresh(tp)
+    };
+    (state, inp)
+}
+
+/// The game's driving model: a gear the idle catch carries steps to the highest lower gear in reach
+/// that holds where the cut lands, never past it, since the lowest gear in reach can land past its
+/// fuel cut and pull backward. Mutant: the lowest gear in reach taken unconditionally lands second.
+/// Fixture: the lab ladder's top gear (fifth) carried at 580 rpm, where second, the lowest within
+/// three steps, turns past its crank limit and fourth turns above its launch speed.
+#[test]
+fn a_carried_gear_steps_to_the_highest_lower_gear_that_holds() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let (mut state, inp) = carried_top_gear(&tp);
+    let sensed = felt(&inp);
+    let spare = |gear: u8| {
+        let ratio = tp.gears_fwd[usize::from(gear - 1)];
+        price_driver_force(
+            &tp,
+            DriveSupply::WHOLE,
+            sensed.speed,
+            ratio,
+            0.25,
+            ClutchState::In,
+        ) - sensed.resistance
+    };
+    let (lowest, next) = (state.gear - tp.max_step, state.gear - 1);
+    assert!(
+        spare(lowest) < 0.0,
+        "the fixture's lowest gear in reach falls short"
+    );
+    assert!(
+        spare(next) > force_margin(&tp),
+        "the fixture's next gear down holds"
+    );
+    choose_gear(&mut state, &tp, &construction(&fp), &inp, 0.25, sensed);
+    assert_eq!(
+        state.gear, next,
+        "the carried gear steps to the highest that holds"
+    );
+}
+
+/// The game's driving model: a window the idle catch carried at part pedal is no verdict on full
+/// pedal, where the catch adds nothing, so the Driver steps a carried gear down only while the catch
+/// still fuels at the demand it reads. Mutant: acting on the carried window alone downshifts at
+/// full pedal. Fixture: the lab ladder's top gear carried at 580 rpm through a quarter-pedal window,
+/// read on the tick the pedal reaches full.
+#[test]
+fn a_part_pedal_carried_window_moves_nothing_at_full_pedal() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let (mut state, inp) = carried_top_gear(&tp);
+    let top = state.gear;
+    choose_gear(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
+    assert_eq!(
+        (state.gear, state.shift_ticks),
+        (top, 0),
+        "full pedal keeps the gear a part-pedal window saw carried"
+    );
 }
 
 /// The game's damage model: commanded work consumes one task rate even when

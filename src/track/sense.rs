@@ -322,7 +322,11 @@ impl DriverSense {
         }
         if report.shifting {
             self.cut();
-        } else if let Some(open) = &mut self.open {
+        } else {
+            let open = self
+                .open
+                .as_mut()
+                .expect("every non-shifting delivery follows the tick it drove, opened by `tick`");
             open.pull = pull;
             open.pulled_by = report.pulling.then_some((report.reverse, report.gear));
             open.driving = report.driving;

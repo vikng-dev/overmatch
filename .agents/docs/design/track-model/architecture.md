@@ -578,17 +578,23 @@ state, none from a timer or a band:
 - *A gear the idle catch carries fails the pedal.* At part pedal against more than the pedal
   pulls, the engaged gear slows until its crank falls into the idle catch's band, where the catch
   fuels past the pedal and holds a crawl that neither slows nor stalls. A gear the catch carried
-  through a whole held window holds only on torque the pedal did not ask for, so it is stall-class:
-  the step takes the lowest gear within `max_step`, and a gear still carried there steps again.
-  `max_step` is a fact about one selector event, not a reach to widen. At full pedal under full task
-  rate the pedal's fuel covers all the catch can ask, so the catch adds nothing, and a pedal rising
-  to full spends fewer ticks below it than a window holds (DERIVED, shipped data: 16 ticks at a
-  rise of 4 per second, against a 20-tick window), so full-pedal driving cannot reach the clause.
+  through a whole held window holds only on torque the pedal did not ask for. While the catch still
+  fuels at the demand the Driver reads, the step takes the highest lower gear within `max_step`
+  that holds where the cut lands, by the slowing step's own test, else the lowest within
+  `max_step`; a gear still carried there steps again. A candidate's clutch closes from out at or
+  above idle, where the catch adds nothing, so its price is the pedal's own. `max_step` is a fact
+  about one selector event, not a reach to widen. The catch draws no more than the served rack
+  gives at full command, so at full pedal it adds nothing at any task rate, and a window carried at
+  part pedal moves nothing once the demand reads full.
   MEASURED in `headless_test::drive_load` (pedal 0.25, fifth entered at mid-band against a
   46.5 kN grade): without the clause the catch carried fifth for 2334 consecutive held ticks at
-  0.74 m/s and 567 rpm, no cut paid, 31.9 m in 40 s; with it fifth stepped to second after 20
-  carried ticks, second fell to first on its slowing drivetrain 55 ticks later, and first ended
-  at 2404 rpm and 0.62 m/s, 26.3 m in 40 s: slower than the crawl, which ran on the catch's torque.
+  0.74 m/s and 567 rpm, no cut paid, 31.9 m in 40 s; with it no gear in reach held, so fifth
+  stepped to second after 20 carried ticks, second fell to first on its slowing drivetrain 55
+  ticks later, and first ended at 2404 rpm and 0.62 m/s, 26.3 m in 40 s: slower than the crawl,
+  which ran on the catch's torque. MEASURED on the rubble battery: the clause fires on the four
+  part-pedal stop-go restarts (the lowest-in-reach form moved them, fifth to second and sixth to
+  third), and there it lands the gear the slowing step took without it, so every row and every
+  turn-probe row match the Driver without the clause.
 - *Grip caps push.* No gear puts more traction into the ground along the belts than its
   contacts' grip budget, which they carry when every contact slides along the belt: the patches'
   `sum mu N_elastic` and the solver contacts' Coulomb limit, the solver's combined coefficient
@@ -609,11 +615,11 @@ difference, exceeds M. The clauses:
 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
    current gear nor at or above one that failed there; else
    first where it offers more spare than the current gear. Free.
-2. The hull stalls now under the gear's drive, or the idle catch carried the gear through a held
-   window: the lowest gear within `max_step`. Or
-   the drivetrain loses more than M over a held window: the highest lower gear within `max_step`
-   that holds where it lands and pulls there more than the engaged gear's drive by M; with none
-   the gear stays.
+2. The hull stalls now under the gear's drive: the lowest gear within `max_step`. Or the idle
+   catch carried the gear through a held window and still fuels at this demand: the highest lower
+   gear within `max_step` that holds where it lands and pulls there more than the engaged gear's
+   drive by M, else the lowest within `max_step`. Or the drivetrain loses more than M over a held
+   window: that highest holding gear; with none the gear stays.
 3. Straight, the clutch in, a held window and the hull moving where the cut lands: of the higher
    gears within `max_step`, those that hold where they land and pull there more
    than the engaged gear's drive by M, the one that pulls hardest, the higher on a tie. Gears
@@ -634,8 +640,8 @@ A slowing step down and an upshift cannot undo each other at one landing where e
 meets its observed drive: each takes a gear only where its price where the cut lands beats the
 engaged gear's drive by M, so a step down from `g` to `g − 1` needs `P(g − 1) > P(g) + M` and a step
 back up needs `P(g) > P(g − 1) + M`, which cannot both hold; the same holds from an upshift back
-down. The argument covers nothing else. A stall or a carried gear steps down even where
-`P(g − 1) ≤ D(g) + M`, and steady pedal and load do not by themselves fix the landing speed, so two
+down. The argument covers nothing else. A stall, or a carried gear no lower gear in reach holds
+for, steps down even where `P(g − 1) ≤ D(g) + M`, and steady pedal and load do not by themselves fix the landing speed, so two
 decisions need not share one. A cut and a full window of the new gear's drive separate any two decisions. Where the price
 and the delivery disagree by more than M, the Driver can still hunt (the failure-memory entry
 above).
@@ -660,8 +666,12 @@ slide test on slip distance over the elastic shear length (slip distance is unim
 the rubble battery); the hull's own gain as a gear's verdict (the ring above); a stall stepping to
 the highest lower gear that holds against its bound (a floor prices every weaker gear as
 holding); a destination planned across combined cuts, or a reach that follows need, to leave a
-crawl the idle catch carries (`max_step` states one selector event, and the carried gear is
-stall-class); a slowing gear kept while its crank runs above the torque peak, with admission refusing
+crawl the idle catch carries (`max_step` states one selector event); a carried gear always taking
+the lowest gear within `max_step`, as a stall does (it passes a lower gear that holds: DERIVED on
+the lab ladder of `transmission::tests`, fifth carried at 580 rpm meets about 3.9 kN, fourth lands
+above its launch speed pulling about 5.5 kN, and second, the lowest in reach, turns past its
+crank limit and pulls backward); a carried window acted on whatever the demand (a window carried
+at part pedal steps down a gear the full pedal that follows would hold); a slowing gear kept while its crank runs above the torque peak, with admission refusing
 a curve that falls below its peak (it fits one curve shape, and a lower gear can outpull a crank
 above its peak); a slowing gear kept where its crank's net torque rises as revs fall (that marks
 a stable crawl, not a gear that serves the Driver: DERIVED, the Tiger-modelled ladder's top gear

@@ -928,8 +928,8 @@ pub struct TransmissionReport {
     /// drive. A slipping clutch sends its capacity, or the crank's stored speed, whatever the gear.
     pub locked: bool,
     /// The Driver's idle catch fueled the crank past its command this tick ([`engine_torques`]):
-    /// torque no command asked for. Full pedal under full task rate fuels all the catch can ask,
-    /// so there it never does.
+    /// torque no command asked for. Full pedal fuels all the catch can ask at any task rate, so
+    /// there it never does.
     pub caught: bool,
     /// Power-conservation scale applied to the drive/steer forces this tick (1 = unconstrained).
     pub power_scale: f32,
@@ -975,14 +975,17 @@ fn engine_torques(
     let released = pedal * pedal * (3.0 - 2.0 * pedal);
     let rpm = omega / RPM_TO_RAD;
     let curve = tp.torque_at(rpm);
-    let induced =
-        supply.served_task_rate() * (command * curve + released * drag * tp.fuel_cut(rpm));
+    let cut_drag = drag * tp.fuel_cut(rpm);
+    let rate = supply.served_task_rate();
+    let induced = rate * (command * curve + released * cut_drag);
     let idle_capacity = idle_catch_capacity(tp, supply);
+    // Both requests move one rack: the catch asks no more than the served rack gives at full
+    // command, so full pedal leaves it nothing to add at any task rate, and it supplies only what
+    // the command has not supplied.
     let catch = (idle_capacity * (tp.engine.idle_rpm * RPM_TO_RAD - omega)
         / (engine_control().idle_catch_droop_rpm.value * RPM_TO_RAD))
         .clamp(0.0, idle_capacity)
-        .min(curve + drag);
-    // Both requests move one rack; the catch supplies only what the command has not supplied.
+        .min(rate * (curve + cut_drag));
     [induced, (catch - induced).max(0.0), drag]
 }
 
@@ -1184,10 +1187,12 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
 ///    current gear nor at or above the stall's gear; else first where it
 ///    offers more spare than the current gear. Free.
-/// 2. The hull stalls now ([`super::sense::Sensed::stalled`]), or the idle catch carried the
-///    engaged gear through a held window ([`super::sense::Sensed::caught`]): the lowest gear within
-///    `max_step`. A held window losing more than M: the highest lower gear within `max_step` that
-///    holds where it lands and pulls there more than the engaged gear's drive by M, else none.
+/// 2. The hull stalls now ([`super::sense::Sensed::stalled`]): the lowest gear within `max_step`.
+///    The idle catch carried the engaged gear through a held window
+///    ([`super::sense::Sensed::caught`]) and still fuels at this demand: the highest lower gear
+///    within `max_step` that holds where it lands and pulls there more than the engaged gear's
+///    drive by M, else the lowest within `max_step`. A held window losing more than M: that
+///    highest holding gear, else none.
 /// 3. Straight, clutch in, a held window and the hull moving where the cut lands: of the higher
 ///    gears within `max_step` that hold where they land and pull there more than
 ///    the engaged gear's drive by M, the one that pulls hardest, the higher on a tie.
@@ -1195,8 +1200,8 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// Clauses 2 and 3 pay the cut. A cut in flight, no pull asked or fuel that cannot beat drag
 /// choose nothing. At one landing where each gear's price meets its observed drive, a lower gear
 /// that outpulls a higher one by M and a higher one that outpulls the lower by M cannot both exist,
-/// so there a slowing step down and an upshift cannot undo each other. Clause 2's lowest-gear step
-/// asks no outpull, and steady pedal and load do not by themselves fix the landing, so neither is
+/// so there a slowing step down and an upshift cannot undo each other. Clause 2's lowest-gear steps
+/// ask no outpull, and steady pedal and load do not by themselves fix the landing, so neither is
 /// covered.
 fn choose_gear(
     st: &mut TransmissionState,
@@ -1257,18 +1262,25 @@ fn choose_gear(
     let landing = (speed
         - resistance * f32::from(tp.shift_ticks.get()) / TICK_HZ / coupled_mass(fp))
     .max(0.0);
-    let chosen = if (stall.is_some() && sensed.stalled) || sensed.caught {
-        // A stall bounds what the hull meets from below only, and a gear the catch carries holds
-        // only on torque the pedal did not ask for: either way the engaged gear fails what the
-        // pedal asks, and the lowest gear in reach pulls most.
-        Some(st.gear.saturating_sub(tp.max_step).max(1)).filter(|&gear| gear < st.gear)
+    let lowest = st.gear.saturating_sub(tp.max_step).max(1);
+    // The highest lower gear in reach that holds where the cut lands and pulls there more than the
+    // engaged gear's drive by M. Under a pull its clutch closes from out at or above idle
+    // ([`engagement`]), where the catch adds nothing, so its price is the pedal's own.
+    let holding_below = || {
+        (lowest..st.gear).rev().find(|&gear| {
+            let pull = pull(gear, landing, ClutchState::Out);
+            pull - load(gear) > margin && pull > dir * sensed.drive + margin
+        })
+    };
+    let chosen = if stall.is_some() && sensed.stalled {
+        // A stall bounds what the hull meets from below only: the lowest gear in reach pulls most.
+        Some(lowest).filter(|&gear| gear < st.gear)
+    } else if sensed.caught && catch > 0.0 {
+        // The catch carried the gear and still fuels at this demand, so the gear holds only on
+        // torque the pedal does not ask for. A window carried at part pedal is no verdict on full.
+        holding_below().or(Some(lowest).filter(|&gear| gear < st.gear))
     } else if sensed.observed && dir * sensed.drive_gain < -margin {
-        (st.gear.saturating_sub(tp.max_step).max(1)..st.gear)
-            .rev()
-            .find(|&gear| {
-                let pull = pull(gear, landing, ClutchState::Out);
-                pull - load(gear) > margin && pull > dir * sensed.drive + margin
-            })
+        holding_below()
     } else if sensed.observed
         && st.steer_step == 0
         && st.clutch == ClutchState::In
@@ -2190,9 +2202,12 @@ fn crank_guards(
 
 /// The saturated catch protects only a nonnegative live crank. A cut's free crank cannot cross
 /// zero under drag, so a backward vehicle landing does not revoke this admission in pricing.
+/// The test reads the catch the law gives at the guard point, released, so a catch the served rack
+/// caps below drag there guards nothing.
 fn idle_floor(tp: &TransmissionParams, supply: DriveSupply, omega_e: f32) -> Option<f32> {
     let point = (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value) * RPM_TO_RAD;
-    (omega_e >= 0.0 && idle_catch_capacity(tp, supply) > engine_drag(tp, point)).then_some(point)
+    let [_, catch, drag] = engine_torques(tp, supply, point, 0.0);
+    (omega_e >= 0.0 && catch > drag).then_some(point)
 }
 
 /// The input half of the optional drivetrain trace, kept out of the physical solve.
