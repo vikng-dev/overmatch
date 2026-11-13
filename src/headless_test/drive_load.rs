@@ -252,12 +252,13 @@ impl Measurements {
 /// Every paid cut of one drive, held to the rules its construction states (architecture §5a): a
 /// cut opens the clutch for exactly one shift's ticks, a full window of drive separates it from the
 /// last, and it lands the gear its clause names. A stall steps to the lowest gear within
-/// `max_step`; any other cut lands a gear whose pull, priced at full pedal where the cut lands
-/// ([`candidate_pull`](crate::track::transmission::candidate_pull)) and capped by grip, beats both
-/// the resistance it read and the engaged gear's drive by M, and a step down follows a held window
-/// whose drivetrain lost more than M. How many cuts a drive pays is an observation.
-#[derive(Default)]
+/// `max_step`; any other cut lands a gear whose pull, priced at the drive's pedal where the cut
+/// lands ([`candidate_pull`](crate::track::transmission::candidate_pull)) and capped by grip, beats
+/// both the resistance it read and the engaged gear's drive by M, and a step down follows a held
+/// window whose drivetrain lost more than M. How many cuts a drive pays is an observation.
 struct Cuts {
+    /// The requested pedal the drive holds, the command the Driver prices with.
+    pedal: f32,
     count: usize,
     /// Ticks into the cut in flight, zero between cuts.
     open: usize,
@@ -267,6 +268,16 @@ struct Cuts {
 }
 
 impl Cuts {
+    fn at(pedal: f32) -> Self {
+        Self {
+            pedal,
+            count: 0,
+            open: 0,
+            since: None,
+            gear: 0,
+        }
+    }
+
     fn tick(&mut self, app: &App, tank: Entity) {
         use crate::track::transmission::ClutchState;
         let gear = app.world().resource::<crate::track::sim::TrackGear>();
@@ -335,7 +346,7 @@ impl Cuts {
             DriveSupply::WHOLE,
             landing,
             ladder[usize::from(new - 1)],
-            1.0,
+            self.pedal,
             resistance,
             ClutchState::Out,
         )
@@ -595,7 +606,7 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
         );
         let mut launch_gear = 0;
         let mut slip_ticks = 0;
-        let mut cuts = Cuts::default();
+        let mut cuts = Cuts::at(1.0);
         let mut minimum = 0.0_f32;
         let (mut launch_coupled, mut launch_cut) = (Vec::new(), Vec::new());
         for tick in 0..30 * FIXED_TICKS_PER_SECOND {
@@ -676,7 +687,7 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
         // DERIVED, grade and support together give `W sin θ cos δ` there and rolling `cos δ` of it.
         let uphill = rotation * Vec3::NEG_Z;
         let mut rolling_entry = Vec::new();
-        let mut entry_cuts = Cuts::default();
+        let mut entry_cuts = Cuts::at(1.0);
         for _ in 0..512 {
             drive_tick(&mut app, tank, 1.0, 0.0);
             measurements.tick(&app, tank);
@@ -715,6 +726,127 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
                 .trans(),
         );
     }
+}
+
+/// The game's driving model, game state only: a gear the Driver's idle catch carries. At part
+/// pedal against more than the pedal pulls, the engaged gear slows until its crank falls into the
+/// catch's band, where the catch fuels past the pedal and holds a crawl that neither slows nor
+/// stalls. Observation: how long the catch carries each gear through a held clutch, the cuts the
+/// drive pays and where it ends; each cut keeps its construction's rules ([`Cuts`]). Fixture: an
+/// uninterrupted grade meeting 46.5 kN, entered at a mid-band crank in the lowest gear whose step
+/// down cannot reach first, at 0.25 pedal for 40 seconds.
+#[test]
+fn a_part_pedal_gear_the_idle_catch_carries() {
+    use crate::track::transmission::RPM_TO_RAD;
+    // Fixture: the resistance and pedal at which the Driver's price showed a gear crawling.
+    let (resistance, pedal) = (46_500.0_f32, 0.25);
+    let rolling = crate::ground_types::GroundTypes::load_shipped()
+        .get(crate::terrain_blend::BASE_GROUND)
+        .contact()
+        .rolling_at(crate::track::rig_geom::tank_ground_pressure_kpa(
+            &crate::track::rig_geom::tiger_rig(),
+        ));
+    let weight = crate::track::rig_geom::tiger_spec().mass * crate::track::derive::G;
+    // DERIVED: `W (sin θ + r cos θ) = R` solves as `θ = asin(R / (W √(1 + r²))) − atan r`.
+    let angle = (resistance / (weight * (1.0 + rolling * rolling).sqrt())).asin() - rolling.atan();
+    let mut app = booted_driving_grid(driving_plane(angle));
+    start_fixed_clock(&mut app);
+    app.update(); // Initialize the physics body before the fixture teleports it.
+    let tank = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+        .single(app.world())
+        .expect("one controlled tank");
+    let rotation = Quat::from_rotation_x(angle);
+    let rest = app
+        .world()
+        .resource::<crate::track::rig_geom::RigGeom>()
+        .hull_rest_y;
+    place(
+        &mut app,
+        tank,
+        Vec3::new(100.0, 0.0, 0.0) + rotation * Vec3::Y * rest,
+        rotation,
+        0.0,
+        1,
+    );
+    // The settle builds the grip strain a placement resets.
+    for _ in 0..128 {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    let tp = app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .trans();
+    let window = usize::from(tp.shift_ticks.get());
+    let entry = (tp.max_step + 2).min(tp.gears_fwd.len() as u8);
+    let rpm = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5;
+    let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[usize::from(entry - 1)];
+    let start = app
+        .world()
+        .get::<avian3d::prelude::Position>(tank)
+        .unwrap()
+        .0;
+    place(&mut app, tank, start, rotation, speed, entry);
+    let uphill = rotation * Vec3::NEG_Z;
+    let mut cuts = Cuts::at(pedal);
+    let mut gears = vec![(0, entry)];
+    // Per gear, the longest run of ticks the catch fueled past the pedal through a held clutch.
+    let mut carried = std::collections::BTreeMap::<u8, usize>::new();
+    let mut run = 0;
+    let mut sensed = Vec::new();
+    for tick in 0..40 * FIXED_TICKS_PER_SECOND {
+        drive_tick(&mut app, tank, pedal, 0.0);
+        cuts.tick(&app, tank);
+        let p = probe(&app, tank);
+        let gear = app.world().get::<TankTransmission>(tank).unwrap().0.gear;
+        if gears.last().is_some_and(|&(_, last)| last != gear) {
+            gears.push((tick, gear));
+        }
+        // Every gear change opens the clutch, so a run never spans two gears. The clutch holding
+        // the crank to the belts is the report's `locked`, which the probe reads as the re-anchor.
+        run = if p.tau_idle > 0.0 && p.reanchor_feasible {
+            run + 1
+        } else {
+            0
+        };
+        let longest = carried.entry(gear).or_default();
+        *longest = (*longest).max(run);
+        if !p.shifting {
+            sensed.extend(sensed_resistance(&app, tank));
+        }
+    }
+    let state = app.world().get::<TankTransmission>(tank).unwrap().0;
+    let final_speed = app
+        .world()
+        .get::<avian3d::prelude::LinearVelocity>(tank)
+        .unwrap()
+        .0
+        .dot(uphill);
+    let distance = (app
+        .world()
+        .get::<avian3d::prelude::Position>(tank)
+        .unwrap()
+        .0
+        - start)
+        .dot(uphill);
+    println!(
+        "MEASURED idle catch witness: pedal={pedal} entry_gear={entry} window_ticks={window} gears(tick, gear)={gears:?} longest_carried_ticks={carried:?} cuts={} final_gear={} final_speed_m_s={final_speed} final_rpm={} distance_m={distance} R[{}]",
+        cuts.count,
+        state.gear,
+        state.omega_e / RPM_TO_RAD,
+        summary(&sensed)
+    );
+    let above_first = carried
+        .iter()
+        .filter(|(gear, _)| **gear > 1)
+        .map(|(_, run)| *run)
+        .max()
+        .unwrap_or(0);
+    assert!(
+        above_first >= window,
+        "the fixture reaches a gear above first that the catch carries through a held window: {carried:?}"
+    );
 }
 
 /// The game's driving and damage model: a rearward shot recoils the hull uphill with momentum its
