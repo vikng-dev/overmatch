@@ -1292,7 +1292,6 @@ fn choose_gear(
         && st.gear < top
     {
         // A detent turn's radius belongs to its gear: no upshift changes it.
-        // The candidate that pulls hardest where it lands, the higher on a tie.
         (st.gear + 1..=st.gear.saturating_add(tp.max_step).min(top))
             .filter(|&gear| spare(gear, landing, ClutchState::Out) > margin)
             .map(|gear| (gear, pull(gear, landing, ClutchState::Out)))
