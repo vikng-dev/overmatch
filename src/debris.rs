@@ -230,8 +230,11 @@ fn wake_on_body_disabled(
 
 /// Every collider of a static body re-posed, reshaped or re-layered since the last step: every
 /// sleeping body it carries wakes (module doc), and each frozen island depending on any of them is
-/// judged at this step's thaw ([`freeze`]). Each changed collider is judged on the compute pool;
-/// the notes commit after, and the thaw reads them as a set, so their order decides nothing.
+/// judged at this step's thaw ([`freeze`]). The changed colliders are judged on the compute pool;
+/// the scan that finds them reads one change tick per collider and stays serial, since a parallel
+/// query spawns its tasks every step whatever it finds: MEASURED on the M4 server, with nothing
+/// changed, 9 to 13 µs more per tick than this scan (`scripts/perf/pile_park.py`, pile and flat).
+/// The thaw reads the notes as a set, so their order decides nothing.
 fn wake_on_static_moved(
     changed: Query<
         (Entity, &ColliderOf),
@@ -246,16 +249,28 @@ fn wake_on_static_moved(
     carried: Carried,
     mut islands: ResMut<freeze::FrozenIslands>,
     commands: ParallelCommands,
-    mut moved: Local<bevy::utils::Parallel<Vec<Entity>>>,
+    mut moved: Local<Vec<Entity>>,
 ) {
-    changed.par_iter().for_each(|(collider, of)| {
-        if !bodies.get(of.body).is_ok_and(RigidBody::is_static) {
-            return; // A moving body's colliders move with it.
-        }
-        commands.command_scope(|mut commands| carried.wake(collider, &mut commands));
-        moved.scope(|moved| moved.push(collider));
+    use bevy::tasks::{ComputeTaskPool, ParallelSlice};
+    moved.clear();
+    moved.extend(
+        changed
+            .iter()
+            // A moving body's colliders move with it.
+            .filter(|(_, of)| bodies.get(of.body).is_ok_and(RigidBody::is_static))
+            .map(|(collider, _)| collider),
+    );
+    if moved.is_empty() {
+        return; // Nothing static changed in place this step.
+    }
+    moved.par_splat_map(ComputeTaskPool::get(), None, |_, colliders| {
+        commands.command_scope(|mut commands| {
+            for &collider in colliders {
+                carried.wake(collider, &mut commands);
+            }
+        });
     });
-    for collider in moved.drain() {
+    for &collider in moved.iter() {
         islands.changed_in_place(collider);
     }
 }
