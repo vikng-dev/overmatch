@@ -1002,8 +1002,8 @@ impl TransmissionSpec {
             forward_speeds_kmh: &gearbox.forward_speeds_kmh,
             reverse_speeds_kmh: &gearbox.reverse_speeds_kmh,
 
-            launch_gears: gearbox.launch_gears,
-            max_step: gearbox.max_step,
+            launch_gears: gearbox.launch_gears.0,
+            max_step: gearbox.max_step.0,
             steer_radii_m: &steering.radii,
             reverse_steer_radii_m: &steering.reverse_radii,
             steer_capacity_n: steering.capacity,
@@ -1079,8 +1079,10 @@ pub struct EngineSoundSpec {
 pub struct GearboxSpec {
     pub forward_speeds_kmh: Vec<f32>,
     pub reverse_speeds_kmh: Vec<f32>,
-    pub launch_gears: u8,
-    pub max_step: u8,
+    /// The highest gear a start from rest may engage.
+    pub(crate) launch_gears: Sourced<u8>,
+    /// The most gears one selector event moves, up or down.
+    pub(crate) max_step: Sourced<u8>,
     /// Gear-shift torque-interruption time (s) — how long the drive is uncoupled through a
     /// shift. Vehicle data, required: a preselector and a crash box differ.
     pub shift_secs: f32,
@@ -2324,8 +2326,8 @@ TankSpec(
                     forward_speeds_kmh: [5.0, 8.0, 12.0, 18.0],
                     reverse_speeds_kmh: [5.0, 8.0],
 
-                    launch_gears: 4,
-                    max_step: 3,
+                    launch_gears: (4, Fixture("fixture launch limit")),
+                    max_step: (3, Fixture("fixture shift reach")),
                     shift_secs: 0.3,
 
                 ),
@@ -3303,8 +3305,8 @@ TankSpec(
                 tr.brake_static_factor = f32::NAN
             }),
             ("brake_static_factor", |tr| tr.brake_static_factor = 0.99),
-            ("launch_gears", |tr| gearbox(tr).launch_gears = 0),
-            ("max_step", |tr| gearbox(tr).max_step = 0),
+            ("launch_gears", |tr| gearbox(tr).launch_gears = Sourced(0)),
+            ("max_step", |tr| gearbox(tr).max_step = Sourced(0)),
             ("ladder shape", |tr| {
                 gearbox(tr).forward_speeds_kmh.swap(2, 3);
             }),
@@ -3492,8 +3494,16 @@ TankSpec(
         for (field, authored, kept) in [
             ("drag_fraction", "drag_fraction: 0.25,", ""),
             ("shift_secs", "shift_secs: 0.3,", ""),
-            ("launch_gears", "launch_gears: 4,", ""),
-            ("max_step", "max_step: 3,", ""),
+            (
+                "launch_gears",
+                "launch_gears: (4, Fixture(\"fixture launch limit\")),",
+                "",
+            ),
+            (
+                "max_step",
+                "max_step: (3, Fixture(\"fixture shift reach\")),",
+                "",
+            ),
             ("shadow_proxies", "shadow_proxies: [],", ""),
             (
                 "capabilities",

@@ -21,8 +21,8 @@ pub(crate) fn compact_spec() -> crate::spec::TankSpec {
     tr.engine.clutch_capacity_nm = 1100.0;
     tr.gearbox.forward_speeds_kmh = vec![5.0, 12.0, 25.0];
     tr.gearbox.reverse_speeds_kmh = vec![10.0];
-    tr.gearbox.launch_gears = 2;
-    tr.gearbox.max_step = 1;
+    tr.gearbox.launch_gears = crate::provenance::Sourced(2); // Fixture limit.
+    tr.gearbox.max_step = crate::provenance::Sourced(1); // Fixture reach.
     tr.gearbox.shift_secs = 0.2;
     tr.steering.radii = vec![(3.0, 8.0), (7.2, 19.2), (15.0, 40.0)];
     tr.steering.reverse_radii = vec![(6.0, 16.0)];

@@ -91,8 +91,8 @@ TankSpec(
                 gearbox: (
                     forward_speeds_kmh: [5.0, 8.0],
                     reverse_speeds_kmh: [5.0],
-                    launch_gears: 2,
-                    max_step: 1,
+                    launch_gears: (2, Derived("nominal gearbox design: either of the two forward gears may start from rest")),
+                    max_step: (1, Derived("nominal gearbox design: one selector event moves one gear")),
                     shift_secs: 0.3,
                 ),
                 steering: (

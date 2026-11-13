@@ -116,10 +116,8 @@ TankSpec(
                     // 19-vs-20-tooth discrepancy rule). DERIVED F8 @ governed 2500 → 10.509 m/s.
                     forward_speeds_kmh: [2.8, 4.3, 6.2, 9.2, 14.1, 20.9, 30.5, 45.4],
                     reverse_speeds_kmh: [2.8, 4.3, 6.2, 9.2],
-                    // Measured: operating instructions allow starting in gears 1-4 and
-                    // skipping at most two gears (one event spans three), Fibel pp.40-41.
-                    launch_gears: 4,
-                    max_step: 3,
+                    launch_gears: (4, Measured("Tigerfibel D 656/27 (1943) p. 40, moving off: the selector to 1st-4th, '5th-8th impossible'")),
+                    max_step: (3, Derived("Tigerfibel D 656/27 (1943) p. 40: 1-2 gears may be skipped, up or down, once the transmission is warm; skipping two, one selector event moves three gears")),
                     // OLVAR preselector: pre-selected shifts complete with drive uncoupled
                     // for a noticeable fraction of a second — INFERRED ~0.31 s, no shift-
                     // time datum reached.

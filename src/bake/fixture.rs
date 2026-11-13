@@ -243,8 +243,8 @@ TankSpec(
                     forward_speeds_kmh: [5.0, 8.0],
                     reverse_speeds_kmh: [5.0],
 
-                    launch_gears: 4,
-                    max_step: 3,
+                    launch_gears: (4, Fixture(\"fixture launch limit\")),
+                    max_step: (3, Fixture(\"fixture shift reach\")),
                     shift_secs: 0.3,
 
                 ),

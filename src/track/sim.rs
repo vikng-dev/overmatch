@@ -2696,7 +2696,7 @@ mod tests {
         let spec = compact_spec();
         spec.validate().unwrap();
         let mass = spec.mass;
-        let launch_limit = spec.track.powertrain.transmission.gearbox.launch_gears;
+        let launch_limit = spec.track.powertrain.transmission.gearbox.launch_gears.0;
         let mut app = App::new();
         app.add_plugins((crate::bake::plugin, sim_plugin));
         app.world_mut().run_schedule(Startup);
