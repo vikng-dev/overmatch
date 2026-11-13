@@ -2142,15 +2142,21 @@ fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
     );
     println!("MEASURED asleep after {settled} ticks");
     let before = bed.hull().position;
-    // Short enough that the belts stay on the row of pieces: ground under any link would hold the
-    // tank awake through its sampled force.
+    // Fixture: half a second of full throttle, short enough that the belts stay on the row.
     for _ in 0..TICKS / 2 {
         bed.tick(1.0, 0.0);
     }
     assert!(!is_asleep(&bed), "throttle left the tank asleep");
-    let moved = (bed.hull().position - before).length();
-    println!("MEASURED driven {moved} m in 0.5 s");
-    assert!(moved > 0.05, "throttle gave no reaction: {moved} m");
+    let moved = bed.hull().position - before;
+    let ahead = moved.dot(bed.hull().forward());
+    println!(
+        "MEASURED driven {} m in 0.5 s, {ahead} m of it ahead",
+        moved.length()
+    );
+    assert!(
+        ahead > roundoff(before, TICKS / 2),
+        "throttle gave no forward reaction: {ahead} m"
+    );
     assert!(
         assert_coast_and_sleep(&mut bed) > 0,
         "the release must witness belts coasting above the stopped tolerance"
@@ -2176,11 +2182,20 @@ fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
     assert!(!is_asleep(&bed), "an external push left the tank asleep");
     // Avian commits island waking at the end of the step; the next tick integrates the push.
     bed.tick(0.0, 0.0);
+    let along = (bed.hull().position - before).dot(push.normalize());
+    println!("MEASURED pushed {along} m along the push in 2 ticks");
     assert!(
-        (bed.hull().position - before).dot(push) > 0.0,
-        "the externally pushed hull did not move"
+        along > roundoff(before, 2),
+        "the externally pushed hull did not move along the push: {along} m"
     );
     assert_coast_and_sleep(&mut bed);
+}
+
+/// Resolution: the most roundoff alone moves a hull along a direction over `ticks` position
+/// updates. Each update rounds every coordinate by at most an ulp of the largest, at most
+/// `max · ε`, so √3 of those along any unit direction.
+fn roundoff(position: Vec3, ticks: usize) -> f32 {
+    position.abs().max_element() * f32::EPSILON * 3.0_f32.sqrt() * ticks as f32
 }
 
 /// A motionless hull can still have a coasting belt: contact may stop the hull before its
@@ -2207,10 +2222,13 @@ fn a_tank_on_loose_pieces_wakes_for_either_coasting_belt_without_a_command() {
     }
 }
 
-/// A braked slope within both holding capacities keeps stopped belts. Sampled support is an
-/// applied force, so this channel deliberately keeps the hull awake, unlike a parked pile.
+/// A tank parked on a slope within both holding capacities (the brakes' and the ground's grip)
+/// rests where it stopped. Its sampled support carries it without waking it, so Avian's rest test
+/// alone decides; a resting body is not integrated, so it cannot creep down the slope, and only
+/// a wake moves it again. Fixture watchdog: 8 s to come to rest; the held window is DERIVED as
+/// twice Avian's own sleep duration.
 #[test]
-fn a_braked_tank_on_a_slope_stays_awake_under_sampled_support() {
+fn a_braked_tank_on_a_slope_rests_where_it_stopped() {
     let spec = shipped_spec();
     let tr = &spec.track.powertrain.transmission;
     let ground = base_ground();
@@ -2223,26 +2241,26 @@ fn a_braked_tank_on_a_slope_stays_awake_under_sampled_support() {
     let mut bed = Bed::on_ground(Some(ground), card_grid(|_, z| -z * angle.tan()));
     bed.place(Vec3::ZERO, Quat::from_rotation_x(angle));
     bed.start();
-    // Fixture: allow the suspension and grip to settle before checking the parked state.
-    for _ in 0..4 * TICKS {
+    let mut settled = 0;
+    while !is_asleep(&bed) && settled < 8 * TICKS {
         bed.tick(0.0, 0.0);
+        settled += 1;
     }
+    assert!(
+        is_asleep(&bed),
+        "a braked tank on a holding slope must come to rest"
+    );
+    let rest = bed.hull();
     let window = (2.0 * bed.app.world().resource::<TimeToSleep>().0 / DT).ceil() as usize;
-    for _ in 0..window {
+    for tick in 0..window {
         bed.tick(0.0, 0.0);
-        assert!(
-            bed.app
-                .world()
-                .get::<crate::track::sim::TankTransmission>(bed.tank)
-                .unwrap()
-                .0
-                .park
+        assert!(is_asleep(&bed), "woke without input at tick {tick}");
+        let hull = bed.hull();
+        assert_eq!(
+            (hull.position, hull.rotation),
+            (rest.position, rest.rotation),
+            "the resting tank moved on the slope at tick {tick}"
         );
-        assert!(
-            !belts_moving(&bed),
-            "the brakes did not hold the belts on the slope"
-        );
-        assert!(!is_asleep(&bed), "sampled support must keep the hull awake");
     }
 }
 

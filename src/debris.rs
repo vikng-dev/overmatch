@@ -19,12 +19,10 @@
 //! (`collision/narrow_phase/system_param.rs:247-261`), as does a body or a body's collider of that
 //! island going (`collision/narrow_phase/mod.rs:484,528`). An island sleeps whole: a piece touching
 //! an awake body that is no piece (a driven tank) shares its island and stays awake while it
-//! touches, with every piece that touches it in turn. A tank with any spring contact never sleeps
-//! (DERIVED): a non-zero force call resets the sleep timer
-//! (`dynamics/rigid_body/forces/query_data.rs:345,687`) and the track code applies its sampled
-//! forces every tick (`track::sim::apply_track_forces`). A tank wholly on loose pieces has no
-//! sampled force, and with no drive demand it sleeps with its pile; drive demand ends that sleep
-//! (`track::sim::wake_driven_tanks`).
+//! touches, with every piece that touches it in turn. A tank's sampled support is applied without
+//! the waking force call (`dynamics/rigid_body/forces/query_data.rs:153,797`;
+//! `track::sim::apply_track_forces`), so with no drive demand a tank rests with its pile whatever
+//! carries it, and drive demand ends that rest (`track::sim::wake_driven_tanks`).
 //!
 //! THE WAKES AVIAN LACKS. Avian wakes no body when a support with no dynamic body of its own goes,
 //! is disabled or moves (the TODO in `collision/narrow_phase/mod.rs`, `remove_collider`), so a

@@ -547,6 +547,9 @@ pub struct SideReport {
     /// The gripping patches' grip budget, Σ μ·N_elastic (N): the most traction they can carry
     /// along the belt, which they carry when they all slide along it.
     pub grip_budget: f32,
+    /// Some gripping patch carried less than its whole budget: it holds, with grip to spare. A
+    /// side whose every gripping patch slides holds nothing more.
+    pub grip_reserve: bool,
     /// Material-station depth probes; surface quadrature casts are not recorded.
     #[cfg(feature = "bitprobe")]
     pub(crate) bitprobe_contacts: Vec<ContactInputProbe>,
@@ -1282,6 +1285,7 @@ fn update_grip_elements(
         grips[idx] = ContactGrip {
             g: Vec2::new(g.dot(c.long_dir), g.dot(c.lat_dir)),
             slope: strain_slope[c.element].transpose() * in_plane / shear_m + pull * d_coef,
+            slides: g_len > 1.0,
         };
     }
     // Columns the damped support clipped out this tick but whose elastic penetration
@@ -1306,6 +1310,9 @@ fn update_grip_elements(
 struct ContactGrip {
     g: Vec2,
     slope: Vec3,
+    /// Strain and damping together asked for more than the budget, which capped them: the patch
+    /// carries its whole budget and slides.
+    slides: bool,
 }
 
 /// Emit support then total tangent force per contact, and sum the reaction's slope with moments
@@ -1334,10 +1341,11 @@ fn emit_contact_forces(
             // No velocity-regularized kinetic term is added: its former near-zero slope was
             // MEASURED about 270 kN s/m per side, marginal at the fixed step (ADR-0026).
             let grip_el = c.mu * c.load_elastic;
-            let ContactGrip { g, slope } = grips[idx];
+            let ContactGrip { g, slope, slides } = grips[idx];
             f_long = grip_el * g.x;
             f_lat = grip_el * g.y;
             report.grip_budget += grip_el;
+            report.grip_reserve |= grip_el > 0.0 && !slides;
             elem_sum += Vec2::new(f_long, f_lat);
             traction = c.long_dir * f_long + c.lat_dir * f_lat;
             belt_reaction += f_long;

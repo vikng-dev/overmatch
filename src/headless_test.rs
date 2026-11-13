@@ -680,6 +680,32 @@ pub(crate) fn drive_tick(app: &mut App, tank: Entity, throttle: f32, steer: f32)
     app.update();
 }
 
+/// The hull's linear motion (m/s). A resting hull (Avian's `Sleeping`) is not integrated: the
+/// velocity it keeps is only what Avian's solver resumes it with when it wakes.
+fn hull_motion(world: &World, tank: Entity) -> Vec3 {
+    if world.get::<avian3d::prelude::Sleeping>(tank).is_some() {
+        return Vec3::ZERO;
+    }
+    world
+        .get::<avian3d::prelude::LinearVelocity>(tank)
+        .expect("tank has a velocity")
+        .0
+}
+
+/// Every press the structure reading holds after a step, as the destruction laws take it
+/// (`construction::breakage::read_contacts`): the step's transfers and the rests of the bodies
+/// asleep against a structure.
+fn structure_presses(
+    transfers: &crate::contact_transfer::ContactTransfers,
+) -> impl Iterator<Item = (crate::contact_transfer::ContactTransfer, Vec3)> + '_ {
+    transfers.presses().chain(
+        transfers
+            .resting()
+            .iter()
+            .map(|rest| (rest.transfer, rest.press())),
+    )
+}
+
 /// Body-frame yaw rate (rad/s): world angular velocity projected on the hull's up axis
 /// (world `av.y` lies on slopes — the harness's own rule).
 fn yaw_rate(app: &mut App, tank: Entity) -> f32 {
@@ -1026,7 +1052,7 @@ fn contact_law_shipped_ground_speeds() {
 #[test]
 fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
     use crate::track::sim::{TrackContacts, TrackGripEffect};
-    use avian3d::prelude::{LinearVelocity, Position};
+    use avian3d::prelude::Position;
     let (mut app, tank) = booted_offline_sim();
     let ground = crate::ground_types::GroundTypes::load_shipped()
         .get("mud")
@@ -1076,7 +1102,7 @@ fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
         let world = app.world();
         last = world.get::<Position>(tank).unwrap().0.z;
         peak = peak.max(last);
-        reverse = reverse.min(world.get::<LinearVelocity>(tank).unwrap().0.z);
+        reverse = reverse.min(hull_motion(world, tank).z);
         let effect = world.get::<TrackGripEffect>(tank).unwrap();
         let expected: f32 = world
             .get::<TrackContacts>(tank)
@@ -1094,7 +1120,7 @@ fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
     }
     // FIXTURE rest observation: below 1 mm/s before comparing recovered travel.
     assert!(
-        app.world().get::<LinearVelocity>(tank).unwrap().0.z.abs() < 0.001,
+        hull_motion(app.world(), tank).z.abs() < 0.001,
         "the hull must stop before its rebound is read"
     );
     assert!(
@@ -1121,10 +1147,11 @@ fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
 /// either static capacity. Settling can breach a static brake before the field is loaded;
 /// static capacity alone therefore promises no capture. The transmission's
 /// `brake_capacity_breach_backdrives` test pins stationary hold and static breakaway.
-/// Fixture: tilted planes, a fresh parked tank, 60 s capture and 8 s sliding observations.
+/// Fixture: tilted planes, a fresh parked tank, 60 s capture and 8 s sliding observations, under
+/// production rest: a tank whose grip or brakes slide is not at rest however slowly it moves.
 #[test]
 fn contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_limits() {
-    use avian3d::prelude::{LinearVelocity, Position};
+    use avian3d::prelude::Position;
     let spec = crate::track::rig_geom::tiger_spec();
     let tr = &spec.track.powertrain.transmission;
     let weight = spec.mass * crate::track::derive::G;
@@ -1185,14 +1212,8 @@ fn contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_
                     late_start = last;
                 }
                 if tick >= (seconds - 1) * FIXED_TICKS_PER_SECOND {
-                    late_max_speed = late_max_speed.max(
-                        app.world()
-                            .get::<LinearVelocity>(tank)
-                            .unwrap()
-                            .0
-                            .dot(downhill)
-                            .abs(),
-                    );
+                    late_max_speed =
+                        late_max_speed.max(hull_motion(app.world(), tank).dot(downhill).abs());
                 }
             }
             // Resolution: 0.1% of a tick's gravitational speed permits force/pose roundoff.
@@ -1233,6 +1254,206 @@ fn contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_
                 "the slope witness must retain support"
             );
         }
+    }
+}
+
+/// The game's damage model: a parked tank rests only with its drivetrain settled, and a change to
+/// what that drivetrain would do ends the rest. With its engine's HP pool emptied the crank stops
+/// and the tank rests stalled; the crew's repair refills the pool while it rests, and with no
+/// hull input the crank must catch the idle it parked at, every traverse the stall slowed must
+/// regain engine power, and the tank must rest again. Fixture: flat ground; each traverse starts
+/// on the hull's axis and is laid a quarter turn off it for one second; watchdogs 8 s to rest and
+/// 60 s for the repair.
+#[test]
+fn a_tank_repaired_at_rest_catches_its_idle_and_its_powered_traverse() {
+    use crate::ballistics::ComponentHealth;
+    use crate::damage::{FunctionRole, VolumeOf};
+    use crate::tank::{ServoIndex, ServoRole, ServoState, TankRoot, TankServos};
+    use crate::track::sim::EngineRpm;
+    use avian3d::prelude::Sleeping;
+
+    fn resting(app: &App, tank: Entity) -> bool {
+        app.world().get::<Sleeping>(tank).is_some()
+    }
+    fn rest(app: &mut App, tank: Entity) {
+        for _ in 0..8 * FIXED_TICKS_PER_SECOND {
+            if resting(app, tank) {
+                return;
+            }
+            drive_tick(app, tank, 0.0, 0.0);
+        }
+        panic!("a parked tank with no demand must come to rest");
+    }
+    fn rpm(app: &App, tank: Entity) -> u16 {
+        app.world()
+            .get::<EngineRpm>(tank)
+            .expect("tank has an rpm")
+            .0
+    }
+    // Each slot's fastest traverse (rad/s) over a second laid a quarter turn off the hull's axis,
+    // then back on the axis at rest.
+    fn traverses(app: &mut App, tank: Entity, slots: &[usize]) -> Vec<f32> {
+        let lay = |app: &mut App, aim: Vec3| {
+            let mut servos = app
+                .world_mut()
+                .get_mut::<TankServos>(tank)
+                .expect("tank has servos");
+            for &slot in slots {
+                servos.states[slot] = ServoState::test_new(0.0, 0.0, 0.0);
+            }
+            app.world_mut()
+                .get_mut::<TankCommand>(tank)
+                .expect("tank carries a command")
+                .aim = Some(crate::command::AimIntent::HullLocal(aim));
+        };
+        let angles = |app: &App| -> Vec<f32> {
+            let servos = app
+                .world()
+                .get::<TankServos>(tank)
+                .expect("tank has servos");
+            slots
+                .iter()
+                .map(|&slot| servos.states[slot].current())
+                .collect()
+        };
+        let dt = crate::sim_tick::sim_timestep().as_secs_f32();
+        lay(app, Vec3::X * 1000.0);
+        let mut last = angles(app);
+        let mut fastest = vec![0.0_f32; slots.len()];
+        for _ in 0..FIXED_TICKS_PER_SECOND {
+            drive_tick(app, tank, 0.0, 0.0);
+            let now = angles(app);
+            for ((fastest, last), now) in fastest.iter_mut().zip(&last).zip(&now) {
+                *fastest = fastest.max(crate::tank::shortest_angle(now - last).abs() / dt);
+            }
+            last = now;
+        }
+        lay(app, Vec3::NEG_Z * 1000.0);
+        fastest
+    }
+
+    let mut app = booted_driving_grid(driving_plane(0.0));
+    start_fixed_clock(&mut app);
+    app.update();
+    let tank = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+        .single(app.world())
+        .expect("one controlled tank");
+    let rest_y = app
+        .world()
+        .resource::<crate::track::rig_geom::RigGeom>()
+        .hull_rest_y;
+    drive_load::place(
+        &mut app,
+        tank,
+        Vec3::new(100.0, rest_y, 0.0),
+        Quat::IDENTITY,
+        0.0,
+        1,
+    );
+    let slots: Vec<usize> = app
+        .world_mut()
+        .query::<(&TankRoot, &ServoIndex, &ServoRole)>()
+        .iter(app.world())
+        .filter(|(root, _, role)| root.0 == tank && matches!(role, ServoRole::Yaw))
+        .map(|(_, index, _)| index.0)
+        .collect();
+    let engines: Vec<Entity> = app
+        .world_mut()
+        .query::<(Entity, &VolumeOf, &FunctionRole)>()
+        .iter(app.world())
+        .filter(|(_, of, role)| of.0 == tank && **role == FunctionRole::Engine)
+        .map(|(volume, ..)| volume)
+        .collect();
+    assert!(!engines.is_empty(), "the fixture tank has an engine");
+
+    rest(&mut app, tank);
+    let idle = rpm(&app, tank);
+    assert!(idle > 0, "a parked tank's crank idles");
+    let running = traverses(&mut app, tank, &slots);
+    rest(&mut app, tank);
+
+    for &engine in &engines {
+        app.world_mut()
+            .get_mut::<ComponentHealth>(engine)
+            .expect("an engine volume carries its HP pool")
+            .drain();
+    }
+    drive_tick(&mut app, tank, 0.0, 0.0);
+    assert!(
+        !resting(&app, tank),
+        "an emptied engine changes the supply the tank rested under"
+    );
+    rest(&mut app, tank);
+    assert_eq!(
+        rpm(&app, tank),
+        0,
+        "an engine out of action stalls its crank"
+    );
+    let stalled = traverses(&mut app, tank, &slots);
+    let powered: Vec<usize> = (0..slots.len())
+        .filter(|&i| stalled[i] < running[i])
+        .collect();
+    println!("MEASURED yaw traverses (rad/s): running {running:?}, stalled {stalled:?}");
+    assert!(
+        !powered.is_empty(),
+        "the fixture tank has a traverse its engine powers"
+    );
+    rest(&mut app, tank);
+
+    app.world_mut()
+        .get_mut::<TankCommand>(tank)
+        .expect("tank carries a command")
+        .repair = true;
+    drive_tick(&mut app, tank, 0.0, 0.0);
+    app.world_mut()
+        .get_mut::<TankCommand>(tank)
+        .expect("tank carries a command")
+        .repair = false;
+    let whole = |app: &App| {
+        engines.iter().all(|&engine| {
+            let health = app
+                .world()
+                .get::<ComponentHealth>(engine)
+                .expect("an engine volume carries its HP pool");
+            health.held() == health.capacity()
+        })
+    };
+    let mut resting_at_refill = false;
+    for _ in 0..60 * FIXED_TICKS_PER_SECOND {
+        if whole(&app) {
+            break;
+        }
+        resting_at_refill = resting(&app, tank);
+        drive_tick(&mut app, tank, 0.0, 0.0);
+    }
+    assert!(whole(&app), "the crew's repair refills the engine");
+    assert!(
+        resting_at_refill,
+        "the fixture repairs the engine of a resting tank"
+    );
+    drive_tick(&mut app, tank, 0.0, 0.0);
+    assert!(
+        !resting(&app, tank),
+        "a repaired engine changes the supply the tank rested under"
+    );
+    rest(&mut app, tank);
+    assert_eq!(
+        rpm(&app, tank),
+        idle,
+        "the repaired crank catches the idle it parked at"
+    );
+    let repaired = traverses(&mut app, tank, &slots);
+    println!("MEASURED yaw traverses repaired (rad/s): {repaired:?}");
+    for i in powered {
+        assert!(
+            repaired[i] > stalled[i],
+            "slot {}: the repaired engine powers the traverse again ({} vs stalled {} rad/s)",
+            slots[i],
+            repaired[i],
+            stalled[i]
+        );
     }
 }
 
@@ -1464,15 +1685,16 @@ fn lowest_bump_stop_y(app: &mut App, tank: Entity) -> f32 {
 }
 
 /// A tank whose springs are too soft to hold it bottoms on its bump stops: it comes to rest on
-/// them, not through them, and their contacts reach the contact reader as any collider's do. On
+/// them, pressing the ground through them every tick of its last second, and their contacts
+/// reach the contact reader as any collider's do, asleep as awake ([`structure_presses`]). On
 /// its own springs the same tank at rest touches nothing with them: the stop must never stand in
 /// for the belt. FIXTURE DATA: the support springs at 2 % of the tank's own, far softer than its
-/// stop's clearance can hold; the solver's resting penetration bound (3 cm) is ASSUMED.
+/// stop's clearance can hold. How deep the stops rest is the solver's and is printed only.
 #[test]
 fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
     use crate::contact_transfer::{ContactTransfers, StructureBody};
     use crate::track::bump_stop::BumpStop;
-    use avian3d::prelude::{Collider, LinearVelocity, Position, RigidBody};
+    use avian3d::prelude::{Collider, LinearVelocity, Position, RigidBody, Sleeping};
 
     let (mut app, tank) = booted_offline_sim();
     let rest_clearance = lowest_bump_stop_y(&mut app, tank);
@@ -1551,15 +1773,8 @@ fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
         }
         lowest_late = lowest_late.min(lowest_bump_stop_y(&mut app, tank));
         let world = app.world();
-        let speed = world
-            .get::<LinearVelocity>(tank)
-            .expect("tank has a velocity")
-            .0
-            .length();
-        fastest_late = fastest_late.max(speed);
-        let press: f32 = world
-            .resource::<ContactTransfers>()
-            .presses()
+        fastest_late = fastest_late.max(hull_motion(world, tank).length());
+        let press: f32 = structure_presses(world.resource::<ContactTransfers>())
             .filter(|(point, _)| {
                 point.other == tank
                     && point
@@ -1588,18 +1803,8 @@ fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
         press_up / FIXED_TICKS_PER_SECOND as f32 / weight,
     );
     assert!(
-        lowest_late >= -0.03,
-        "the tank sank {:.4} m through its bump stops",
-        -lowest_late
-    );
-    assert!(
-        lowest_late <= 0.03,
-        "springs this soft cannot hold the tank clear of its stops (lowest vertex \
-         {lowest_late:.4} m)"
-    );
-    assert!(
-        fastest_late < 0.05,
-        "the tank must come to rest on its stops (moving {fastest_late:.4} m/s)"
+        app.world().get::<Sleeping>(tank).is_some(),
+        "the tank must come to rest on its stops (fastest {fastest_late:.4} m/s in its last second)"
     );
     assert_eq!(
         pressed_ticks, FIXED_TICKS_PER_SECOND,
@@ -1607,19 +1812,14 @@ fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
     );
 }
 
-/// THE GAME'S DRIVING ADAPTER LOADS FIXED STRUCTURE THROUGH THE BELT. A tank parked on standing
-/// structural construction bears on it through its belt alone, and the reaction staged by
-/// `track::sim::apply_track_forces` reaches the structure reading that wall and trunk laws judge.
-/// Dropping the adapter's staging, or a structure taking no share of the hull's weight, fails it.
-/// FIXTURE DATA: a 30 m slab of Terrain membership (which keeps the side plates off it, as on
-/// ordinary ground), its top 5 cm above the flat ground. The observed vertical momentum change
-/// closes the gravity/reaction budget; a settling time does not imply zero acceleration.
-#[test]
-fn a_parked_tank_loads_fixed_structure_through_its_belt() {
-    use crate::contact_transfer::{ContactTransfers, StructureBody};
-    use avian3d::prelude::{Collider, CollisionLayers, LayerMask, Mass, Position, RigidBody};
+/// Standing structural construction slid under a parked tank. FIXTURE DATA: a 30 m slab of
+/// Terrain membership (which keeps the side plates off it, as on ordinary ground), its top 5 cm
+/// above the flat ground. A new static body is no disturbance Avian wakes a sleeping body for,
+/// so the fixture wakes the tank it puts the slab under. Returns the slab.
+fn slab_under(app: &mut App, tank: Entity) -> Entity {
+    use crate::contact_transfer::StructureBody;
+    use avian3d::prelude::{Collider, CollisionLayers, LayerMask, Position, RigidBody, Sleeping};
 
-    let (mut app, tank) = booted_offline_sim();
     let at = app
         .world()
         .get::<Position>(tank)
@@ -1639,6 +1839,26 @@ fn a_parked_tank_loads_fixed_structure_through_its_belt() {
         Collider::cuboid(30.0, 1.0, 30.0),
         CollisionLayers::new([crate::Layer::Terrain], LayerMask::ALL),
     ));
+    app.world_mut().entity_mut(tank).remove::<Sleeping>();
+    slab
+}
+
+/// THE GAME'S DRIVING ADAPTER LOADS FIXED STRUCTURE THROUGH THE BELT. A tank parked on standing
+/// structural construction bears on it through its belt alone, and the reaction staged by
+/// `track::sim::apply_track_forces` reaches the structure reading that wall and trunk laws judge.
+/// Dropping the adapter's staging, or a structure taking no share of the hull's weight, fails it.
+/// The observed vertical momentum change closes the gravity/reaction budget; a settling time does
+/// not imply zero acceleration. FIXTURE: [`slab_under`]; the closure needs every tick's staged
+/// reaction integrated, so the tank's island stays awake (Avian's `SleepingDisabled`): a resting
+/// tank's press is [`a_resting_tank_keeps_its_belt_press_on_fixed_structure`]'s.
+#[test]
+fn a_parked_tank_loads_fixed_structure_through_its_belt() {
+    use crate::contact_transfer::ContactTransfers;
+    use avian3d::prelude::{Mass, SleepingDisabled};
+
+    let (mut app, tank) = booted_offline_sim();
+    let slab = slab_under(&mut app, tank);
+    app.world_mut().entity_mut(tank).insert(SleepingDisabled);
     let ticks = 3 * FIXED_TICKS_PER_SECOND;
     let (mut lift, mut elapsed, mut read_ticks) = (0.0_f64, 0.0_f64, 0);
     let mass = app.world().get::<Mass>(tank).expect("tank has mass").0;
@@ -1699,6 +1919,79 @@ fn a_parked_tank_loads_fixed_structure_through_its_belt() {
     assert!(
         (lift - weight_impulse - momentum_change).abs() <= 1e-4 * weight_impulse,
         "vertical momentum must close: reaction={lift}, gravity={weight_impulse}, delta_p={momentum_change}"
+    );
+}
+
+/// A TANK AT REST KEEPS ITS WEIGHT ON FIXED STRUCTURE. A resting tank runs no belt pass, so the
+/// belt's reaction from the last step it moved stands on the structure, unchanged, every tick it
+/// rests, and the wall and trunk laws keep its load. Drive demand wakes it within the tick, whose
+/// belt pass stages afresh while the rest drops, so the load is never read twice. Losing the rest,
+/// keeping it past the wake, or reading it beside a staged reaction fails it. FIXTURE:
+/// [`slab_under`]; an 8 s watchdog to come to rest; the held window is DERIVED as twice Avian's own
+/// sleep duration.
+#[test]
+fn a_resting_tank_keeps_its_belt_press_on_fixed_structure() {
+    use crate::contact_transfer::{ContactTransfer, ContactTransfers};
+    use avian3d::prelude::{Sleeping, TimeToSleep};
+
+    let (mut app, tank) = booted_offline_sim();
+    slab_under(&mut app, tank);
+    let staged = |app: &App| -> Vec<ContactTransfer> {
+        app.world()
+            .resource::<ContactTransfers>()
+            .groups()
+            .flatten()
+            .filter(|point| point.other == tank && point.other_collider.is_none())
+            .collect()
+    };
+    let rests = |app: &App| -> Vec<ContactTransfer> {
+        app.world()
+            .resource::<ContactTransfers>()
+            .resting()
+            .iter()
+            .map(|rest| rest.transfer)
+            .filter(|point| point.other == tank && point.other_collider.is_none())
+            .collect()
+    };
+    let resting = |app: &App| app.world().get::<Sleeping>(tank).is_some();
+    let mut last = Vec::new();
+    let mut ticks = 0;
+    while !resting(&app) {
+        assert!(
+            ticks < 8 * FIXED_TICKS_PER_SECOND,
+            "a tank parked on fixed structure must come to rest"
+        );
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        last = staged(&app);
+        ticks += 1;
+    }
+    assert!(
+        !last.is_empty(),
+        "the belt bears on the slab as it comes to rest"
+    );
+    let window = (2.0 * app.world().resource::<TimeToSleep>().0 * FIXED_TICKS_PER_SECOND as f32)
+        .ceil() as usize;
+    for tick in 0..window {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        assert!(resting(&app), "the parked tank rests (tick {tick})");
+        assert!(
+            staged(&app).is_empty(),
+            "a resting tank stages no reaction (tick {tick})"
+        );
+        assert_eq!(
+            rests(&app),
+            last,
+            "the reaction of the last step it moved stands on the structure (tick {tick})"
+        );
+    }
+    drive_tick(&mut app, tank, 1.0, 0.0);
+    assert!(
+        !resting(&app),
+        "drive demand wakes a resting tank within the tick"
+    );
+    assert!(
+        !staged(&app).is_empty() && rests(&app).is_empty(),
+        "the woken belt stages its reaction and its rest drops"
     );
 }
 
