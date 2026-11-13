@@ -23,6 +23,10 @@
 //! has rested `TimeToSleep` (`dynamics/solver/islands/sleeping.rs` in the vendored crate). So a
 //! timer read after the tick tells a force's reset (one step) from motion (zero).
 //!
+//! `rubble_wedge_probe` (same command, that name) parks on the house heap and prints one
+//! `WEDGE {json}` line per piece of the tank's island still failing the rest test, per tick, with
+//! each of its touching contacts and the solver's force through it.
+//!
 //! Fixture: every placement, duration, threshold and bin below is fixture data.
 
 use super::*;
@@ -1223,11 +1227,11 @@ fn park_summary(ticks: &[ParkTick]) -> Value {
     })
 }
 
-/// One parked case: the tank on `heap` (driven at full throttle from the given approach in m until
-/// its hull origin passes the heap's middle, then braked to a stop), or on flat ground for `None`;
-/// parked `PARK_S` with no demand, read after `PARK_SETTLE_S`.
-fn park_case(heap: Option<(Heap, f32)>, label: &str, tag: &str) {
-    let (mut bed, arrival) = match heap {
+/// The tank on `heap`, driven at full throttle from the given approach in m until its hull origin
+/// passes the heap's middle, then braked to a stop; or on flat ground for `None`. Returns the bed
+/// and the arrival's record.
+fn park_arrival(heap: Option<(Heap, f32)>, label: &str) -> (Bed, Value) {
+    match heap {
         None => {
             let mut bed = house_bed();
             bed.start();
@@ -1269,7 +1273,12 @@ fn park_case(heap: Option<(Heap, f32)>, label: &str, tag: &str) {
             });
             (bed, arrival)
         }
-    };
+    }
+}
+
+/// One parked case ([`park_arrival`]), parked `PARK_S` with no demand, read after `PARK_SETTLE_S`.
+fn park_case(heap: Option<(Heap, f32)>, label: &str, tag: &str) {
+    let (mut bed, arrival) = park_arrival(heap, label);
     let begin = bed.hull().position;
     let mut ticks = Vec::with_capacity(PARK_S * TICKS);
     for _ in 0..PARK_S * TICKS {
@@ -1300,6 +1309,142 @@ fn park_case(heap: Option<(Heap, f32)>, label: &str, tag: &str) {
         "window": park_summary(&ticks[PARK_SETTLE_S * TICKS..]),
     });
     println!("RUBBLEPARK {line}");
+}
+
+/// Each piece in the tank's island still failing the rest test this tick (awake, its rest timer
+/// under `TimeToSleep`), with its motion and every touching manifold in the hull's frame: the other
+/// collider's role, the normal into the piece, the deepest overlap, the compliant law and conveyor
+/// velocity the contact hook set, and the solver's mean force on the piece over the step. The force
+/// is the collider pair's, repeated on each of its manifolds.
+fn wedge_read(bed: &mut Bed, tick: usize) -> Vec<Value> {
+    use avian3d::dynamics::solver::islands::BodyIslandNode;
+    bed.pieces = live_pieces(bed);
+    let world = bed.app.world();
+    let to_sleep = world.resource::<TimeToSleep>().0;
+    let hull = bed.hull();
+    let local = |v: Vec3| (hull.rotation.inverse() * v).to_array();
+    let island = |e: Entity| world.get::<BodyIslandNode>(e).map(|n| n.island_id());
+    let transfers = world.resource::<crate::contact_transfer::ContactTransfers>();
+    let graph = world.resource::<ContactGraph>();
+    let mut out = Vec::new();
+    for &piece in &bed.pieces {
+        if world.get::<Sleeping>(piece).is_some()
+            || world.get::<crate::debris::freeze::Frozen>(piece).is_some()
+            || island(piece) != island(bed.tank)
+            || world
+                .get::<SleepTimer>(piece)
+                .is_some_and(|t| t.0 >= to_sleep)
+        {
+            continue;
+        }
+        let colliders: Vec<Entity> = world
+            .get::<RigidBodyColliders>(piece)
+            .map(|c| c.iter().collect())
+            .unwrap_or_default();
+        let mut contacts = Vec::new();
+        for &collider in &colliders {
+            for pair in graph.contact_pairs_with(collider) {
+                if !pair.is_touching() {
+                    continue;
+                }
+                let first = pair.collider1 == collider;
+                let (other, other_body) = if first {
+                    (pair.collider2, pair.body2)
+                } else {
+                    (pair.collider1, pair.body1)
+                };
+                let role = if other_body == Some(bed.tank) {
+                    bed.role(other)
+                } else if other_body.is_some_and(|b| bed.pieces.contains(&b)) {
+                    "piece".to_owned()
+                } else {
+                    "fixed".to_owned()
+                };
+                let force: Vec3 = transfers
+                    .solver_groups()
+                    .flatten()
+                    .filter_map(|p| {
+                        if p.reference_collider == other && p.other_collider == Some(collider) {
+                            Some(p.impulse)
+                        } else if p.reference_collider == collider
+                            && p.other_collider == Some(other)
+                        {
+                            Some(-p.impulse)
+                        } else {
+                            None
+                        }
+                    })
+                    .sum::<Vec3>()
+                    / transfers.dt();
+                for manifold in &pair.manifolds {
+                    let into = if first {
+                        -manifold.normal
+                    } else {
+                        manifold.normal
+                    };
+                    let pen = manifold
+                        .points
+                        .iter()
+                        .map(|p| p.penetration)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    contacts.push(json!({
+                        "role": role,
+                        "n": local(into),
+                        "pen": pen,
+                        "points": manifold.points.len(),
+                        "k": manifold.compliance.as_ref().map(|c| c.stiffness),
+                        "c": manifold.compliance.as_ref().map(|c| c.damping),
+                        "conveyor": local(manifold.tangent_velocity),
+                        "force": local(force),
+                    }));
+                }
+            }
+        }
+        let velocity = world
+            .get::<LinearVelocity>(piece)
+            .expect("a dynamic piece has a velocity")
+            .0;
+        let spin = world
+            .get::<AngularVelocity>(piece)
+            .expect("a dynamic piece has a spin")
+            .0;
+        let mass = world
+            .get::<ComputedMass>(piece)
+            .expect("a dynamic piece has a mass")
+            .value();
+        let at = world
+            .get::<Position>(piece)
+            .expect("a dynamic piece has a position")
+            .0;
+        out.push(json!({
+            "tick": tick,
+            "piece": piece.to_bits(),
+            "mass": mass,
+            "at": local(at - hull.position),
+            "v": local(velocity),
+            "w": local(spin),
+            "contacts": contacts,
+        }));
+    }
+    out
+}
+
+/// Probe the house heap's wedged pieces: a `WEDGE` line per [`wedge_read`] piece per tick over the
+/// 4 s after `PARK_SETTLE_S`, from the same arrival as the park probe.
+#[test]
+#[ignore = "the wedged-piece probe, run on demand"]
+fn rubble_wedge_probe() {
+    let (mut bed, _) = park_arrival(Some((Heap::House, APPROACH_M)), "house");
+    for _ in 0..PARK_SETTLE_S * TICKS {
+        bed.tick(0.0, 0.0);
+    }
+    for tick in 0..4 * TICKS {
+        bed.tick(0.0, 0.0);
+        let asleep = is_asleep(&bed);
+        for line in wedge_read(&mut bed, tick) {
+            println!("WEDGE {}", json!({"asleep": asleep, "piece": line}));
+        }
+    }
 }
 
 #[test]
