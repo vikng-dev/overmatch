@@ -1439,7 +1439,13 @@ mod tests {
         }
         assert!(!hosted.shared.unknown.load(Ordering::Relaxed));
         hosted.finish();
-        let end = worker.next();
+        // The 20 ms reporter may send further heartbeats before it sees the finish.
+        let end = loop {
+            let request = worker.next();
+            if !request.path.ends_with("/heartbeat") {
+                break request;
+            }
+        };
         assert!(end.path.ends_with("/end"));
         assert_eq!(end.body["reason"], "shutdown");
     }
