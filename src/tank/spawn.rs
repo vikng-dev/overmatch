@@ -293,7 +293,7 @@ fn authority_state(content: TankContent) -> impl Bundle {
         // Complete servo integrator inventory. The glb is a view and never initializes
         // replicated state.
         tank_servos(content.spec()),
-        ServoMechanism::new(content.spec(), content.transmission()),
+        ServoMechanism::new(content.transmission()),
     )
 }
 
@@ -356,7 +356,7 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     root_commands
         .insert((
             presentation.root_bundle(),
-            ServoMechanism::new(content.spec(), content.transmission()),
+            ServoMechanism::new(content.transmission()),
             // Replicated authority state (EngineRpm, the public ServoAngles; the owner's
             // TankTransmission, DriveSignal, WeaponGate, WeaponLoads) arrived in the replication
             // init snapshot. Do not overwrite it with fresh spec-derived values.

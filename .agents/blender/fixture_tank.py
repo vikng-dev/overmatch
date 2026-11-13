@@ -121,6 +121,7 @@ TankSpec(
                 power_share: (0.01, Unknown("provisional nominal pump share; pump design data would settle it")),
                 stall_torque: (100.0, Unknown("provisional nominal motor N m; motor design data would settle it")),
                 bearing_friction: (10.0, Unknown("provisional nominal bearing N m; bearing-drag measurements would settle it")),
+                moving_inertia_kgm2: (10.0, Unknown("provisional nominal driven-frame kg m^2; the frame's mass distribution would settle it")),
                 hand_rate: (1.0, Unknown("provisional nominal degrees/s; handwheel design data would settle it")),
             ),
             travel: Continuous,

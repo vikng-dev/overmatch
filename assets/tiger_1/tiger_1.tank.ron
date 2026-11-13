@@ -4,10 +4,9 @@ TankSpec(
     display_name: "Tiger I",
     mass: 57_000.0,
     inertia_extents: (3.0, 2.0, 6.3),
-    // The game's damage model (game state only): assembly mass in kg and full inertia-box
-    // extents in m. Unknown provisional mass and dimensions; assembly weighing and moment
-    // measurements would settle them. Servo law and derivation: design
-    // armor-penetration-and-damage.md section 7c.
+    // The game's damage model (game state only): the detached assembly's free body, mass in kg
+    // and full inertia-box extents in m. Unknown provisional mass and dimensions; assembly
+    // weighing and moment measurements would settle them.
     turret: (
         node: "Turret_Yaw",
         mass: (8_000.0, Unknown("provisional assembly kg; weighing the complete assembly would settle it")),
@@ -214,6 +213,7 @@ TankSpec(
                 power_share: (0.01, Unknown("provisional crank-power share; traverse pump pressure, flow and efficiency versus crank rpm would settle it")),
                 stall_torque: (16_000.0, Unknown("provisional output N m; hydraulic motor stall pressure, displacement and reduction data would settle it")),
                 bearing_friction: (8_000.0, Unknown("provisional running N m; unpowered assembly bearing-drag measurements would settle it")),
+                moving_inertia_kgm2: (9_840.0, StandIn("the turret assembly's moment about the ring axis; none measured. Stand-in: the turret block's provisional 8,000 kg box, 3.0 x 2.4 m in plan, as a uniform cuboid about its vertical centre axis, m (x^2 + z^2) / 12. A measured moment about the ring axis settles it")),
                 hand_rate: (1.0, Unknown("provisional degrees/s; handwheel ratio and sustained operator turn-rate measurements would settle it")),
             ),
             travel: Continuous,
@@ -225,6 +225,7 @@ TankSpec(
                 power_share: (0.002, Unknown("provisional crank-power share; elevation-drive pressure, flow and efficiency data would settle it")),
                 stall_torque: (5_000.0, Unknown("provisional output N m; elevation-drive stall torque and reduction data would settle it")),
                 bearing_friction: (2_500.0, Unknown("provisional running N m; unpowered elevation bearing-drag measurements would settle it")),
+                moving_inertia_kgm2: (4_600.0, StandIn("the elevating assembly's moment about the trunnions; no weighed gun, cradle or mantlet in the repo. Rounded stand-in for a mount balanced on its trunnions, as the drive law's missing gravity torque already treats it: the barrel a uniform GunSteel tube (7,800 kg/m^3) from trunnions to muzzle, MainGun bore_length L = 4.149 m and calibre 0.088 m with an ASSUMED 0.18 m mean outer diameter, m = 627 kg; the breech and recoil system balance it at an ASSUMED r = 0.8 m behind; I = m L (L/3 + r/2) = 4,636. The mantlet near the axis is neglected. Weighing the assembly and its distribution about the trunnions settles it")),
                 hand_rate: (0.5, Unknown("provisional degrees/s; elevation handwheel ratio and operator turn-rate measurements would settle it")),
             ),
             travel: Limited(min: -8.0, max: 15.0),

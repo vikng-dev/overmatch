@@ -1512,12 +1512,13 @@ The crank runs down under construction drag (`crank_free_torque`), reducing powe
 to hand work even with engine and Gunner whole. The missing independent foot actuation is a
 `StandIn` in the driving model; this drive consumes its resulting crank speed unchanged.
 
-The uniform cuboid law supplies the moments about the declared role axes:
-`Iyaw = m*(x*x + z*z)/12`, `Ipitch = m*(y*y + z*z)/12`, with full extents in metres,
-mass in kg and moments in kg m². `ServoMechanism` holds the immutable construction in the
-spawn batch; the view asset supplies none of it. Hand rates and travel convert degrees to
-radians once at deserialization. Admission refuses invalid drive facts, unrepresentable hand work
-and unrepresentable moments before play, naming the field and repair.
+Each `Powered` row declares `moving_inertia_kgm2`, the moment of everything it turns about its
+own axis (kg m²). No role or assembly lookup supplies it, so a powered cupola states its own
+load; the `turret` block is the detached assembly's free body only. `ServoMechanism` holds the
+engine curve in the spawn batch; the view asset supplies none of it. Hand rates and travel
+convert degrees to radians once at deserialization. Admission refuses invalid drive facts, a
+missing or non-positive moving load and unrepresentable hand work before play, naming the field
+and repair.
 
 At sustained demand, with admitted `Ts > Tf`, the steady rate is **DERIVED** from bearing work:
 `omega_inf = max(Pmotor/Tf, qo*vh)`. On the motor path, initial acceleration is **DERIVED**
@@ -1528,12 +1529,15 @@ accessory work is not yet fed back as a load into the crank solver.
 **Authored facts.** The yaw row declares share 0.01, stall torque 16,000 N m, running friction
 8,000 N m and hand rate 1 degree/s. Pitch declares share 0.002, stall torque 5,000 N m,
 friction 2,500 N m and hand rate 0.5 degree/s. Every drive fact is `Unknown`: the sheet names
-the pump/motor service data or bench measurement which would settle it. The turret's provisional
-8,000 kg and full extents (3, 1.2, 2.4) m are also unknown facts, not measurements. Hull MG
-mounts declare hand construction and provisional 45 degree/s rates.
+the pump/motor service data or bench measurement which would settle it. The moving loads are
+`StandIn`s whose derivations the sheet states: yaw 9,840 kg m², the turret block's provisional
+8,000 kg box about its vertical axis; pitch 4,600 kg m², an elevating assembly balanced on its
+trunnions, the barrel a uniform gun-steel tube over the bore length with an assumed outer
+diameter and the breech balancing it at an assumed arm. Hull MG mounts declare hand
+construction and provisional 45 degree/s rates.
 
-**DERIVED consequences of those provisional facts**, at full engine and operator quality:
-`Iyaw = 9,840 kg m²`, `Ipitch = 4,800 kg m²`. The declared curve supplies 81.681 kW at idle
+**DERIVED consequences of those provisional facts**, at full engine and operator quality.
+The declared curve supplies 81.681 kW at idle
 600 rpm and 441.394 kW at governed 2,500 rpm. The rated 3,000 rpm anchor is not substituted
 for the live crank speed. At 2,600 and 3,000 rpm the saturated accessory budget gives the
 same **DERIVED** rates as at governed rpm: yaw 31.6125 degree/s and pitch 20.2320 degree/s.
@@ -1543,7 +1547,7 @@ With the engine knocked out, hand work alone remains: **DERIVED** yaw 1 degree/s
 | Axis | Steady at idle (degree/s) | Steady at governed (degree/s) | Initial acceleration (degree/s²) | Governed time to 95% (s) | Previous authored speed / acceleration |
 |---|---:|---:|---:|---:|---|
 | Yaw | 5.850 | 31.6125 | 46.5819 | 1.5966 | 34 degree/s / 70 degree/s² |
-| Pitch | 3.744 | 20.2320 | 29.8416 | 1.5950 | 23 degree/s / 70 degree/s² |
+| Pitch | 3.744 | 20.2320 | 31.1390 | 1.5285 | 23 degree/s / 70 degree/s² |
 
 These times integrate the continuous law, not frame or tick cost. Exact full rate is an
 asymptote: its time is infinite. On the motor path, for `k = Pmotor/Ts` and a requested rate `v > k`,
@@ -1559,9 +1563,8 @@ The previous linear limits reached full yaw rate in **DERIVED** 34/70 = 0.4857 s
 rate in 23/70 = 0.3286 s; they were tuning values, not measured operating envelopes.
 
 The large idle-rate and acceleration differences are retained. Missing construction/law inputs
-are the pump pressure/flow regulation map, elevation's own moving-assembly inertia, and its
-gravity/counterbalance torque. Pitch currently uses the whole declared turret cuboid about X;
-that approximation is not a claim about the elevation assembly's measured moment. A measured
+are the pump pressure/flow regulation map, each mount's measured moving load, and elevation's
+gravity/counterbalance torque. A measured
 operating envelope and those inputs must settle the gaps; neither mass nor physical constants
 are rescaled to recover the previous limits. Crank accessory-load feedback is a separate missing
 coupling, with the drivetrain implementation unchanged.

@@ -1183,9 +1183,8 @@ pub struct TurretSpec {
 impl TurretSpec {
     /// The assembly's angular inertia, the turret sibling of
     /// [`TankSpec::hull_angular_inertia`]: a uniform box of `inertia_extents` carrying `mass`,
-    /// m(b² + c²)/12 about each axis. The detached assembly is this body, and the servo drives
-    /// read their yaw (y) and pitch (x) moments from it. `TankSpec::validate` refuses a sheet
-    /// whose moments are not finite and positive.
+    /// m(b² + c²)/12 about each axis: the detached assembly's body. `TankSpec::validate` refuses
+    /// a sheet whose moments are not finite and positive.
     pub(crate) fn angular_inertia(&self) -> avian3d::prelude::AngularInertia {
         let (mass, (x, y, z)) = (self.mass.0, self.inertia_extents.0);
         let moment = |b: f32, c: f32| mass * (b * b + c * c) / 12.0;
@@ -3184,10 +3183,11 @@ TankSpec(
     }
 
     /// Finite positive body fields can still overflow or underflow the cuboid moments. The
-    /// powered integrator and detached body must never receive an unrepresentable axis moment.
+    /// detached body must never receive an unrepresentable axis moment.
     #[test]
     fn validate_refuses_unrepresentable_axis_inertia() {
-        // Fixture boxes isolate yaw and pitch in turn; squares overflow or underflow in f32.
+        // Fixture boxes isolate the vertical and transverse axes in turn; squares overflow or
+        // underflow in f32.
         for extents in [
             (f32::MAX, 1.0, 1.0),
             (1.0, f32::MAX, 1.0),

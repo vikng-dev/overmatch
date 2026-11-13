@@ -11,7 +11,6 @@ use crate::damage::{
     Part, Requirement, TankVolumes, VolumeFacets, evaluate, live_quality, part_facts,
 };
 use crate::provenance::Sourced;
-use crate::spec::{TankSpec, TurretSpec};
 use crate::track::sim::EngineRpm;
 use crate::track::transmission::{RPM_TO_RAD, TransmissionParams};
 
@@ -64,6 +63,8 @@ enum ServoDrive {
         power_share: Sourced<f32>,
         stall_torque: Sourced<f32>,
         bearing_friction: Sourced<f32>,
+        /// Moment of inertia (kg m²) of everything this servo turns, about its own axis.
+        moving_inertia_kgm2: Sourced<f32>,
         #[serde(deserialize_with = "angular_rate")]
         hand_rate: Sourced<f32>,
     },
@@ -73,23 +74,15 @@ enum ServoDrive {
 #[derive(Component)]
 pub(crate) struct ServoMechanism {
     engine: TransmissionParams,
-    inertia: [f32; 2],
 }
 
 impl ServoMechanism {
-    /// `engine` is the nominal transmission `spec`'s admission parsed.
-    pub(super) fn new(spec: &TankSpec, engine: &TransmissionParams) -> Self {
+    /// `engine` is the nominal transmission the sheet's admission parsed.
+    pub(super) fn new(engine: &TransmissionParams) -> Self {
         Self {
             engine: engine.clone(),
-            inertia: axis_inertia(&spec.turret),
         }
     }
-}
-
-/// The turret box's [yaw, pitch] moments: about its y and x axes.
-fn axis_inertia(turret: &TurretSpec) -> [f32; 2] {
-    let moments = turret.angular_inertia().principal;
-    [moments.y, moments.x]
 }
 
 /// Aiming degree of freedom and its local rotation axis.
@@ -143,6 +136,7 @@ impl ServoSpec {
             power_share,
             stall_torque,
             bearing_friction,
+            moving_inertia_kgm2,
             hand_rate,
         } = self.drive
         {
@@ -150,6 +144,7 @@ impl ServoSpec {
                 ("power_share", power_share.0),
                 ("stall_torque", stall_torque.0),
                 ("bearing_friction", bearing_friction.0),
+                ("moving_inertia_kgm2", moving_inertia_kgm2.0),
             ] {
                 if !value.is_finite() || value <= 0.0 {
                     return Some(format!(
@@ -440,8 +435,8 @@ pub(crate) fn drive_servos(
                     continue;
                 };
                 let slew = evaluate(&spec.requires, &facts.quality);
-                let (power, inertia) = match spec.drive {
-                    ServoDrive::Hand { .. } => (0.0, 0.0),
+                let power = match spec.drive {
+                    ServoDrive::Hand { .. } => 0.0,
                     ServoDrive::Powered { .. } => {
                         let (mechanism, rpm) = drive.expect(
                             "a powered servo's root has spawn-built construction and replicated \
@@ -452,16 +447,10 @@ pub(crate) fn drive_servos(
                         // stop a turning crank. The missing pump map is stated in design
                         // section 7c.
                         let crank = rpm.rpm().min(mechanism.engine.engine.governed_rpm);
-                        let power =
-                            mechanism.engine.torque_at(crank) * crank * RPM_TO_RAD * quality;
-                        let inertia = mechanism.inertia[match spec.role {
-                            ServoRole::Yaw => 0,
-                            ServoRole::Pitch => 1,
-                        }];
-                        (power, inertia)
+                        mechanism.engine.torque_at(crank) * crank * RPM_TO_RAD * quality
                     }
                 };
-                advance_servo(state, spec, command.target, power, inertia, slew, dt);
+                advance_servo(state, spec, command.target, power, slew, dt);
             }
         });
     // The sim node always carries fixed-step truth; smoothing writes the view tree only.
@@ -523,7 +512,6 @@ fn advance_servo(
     spec: &ServoSpec,
     target: f32,
     engine_power: f32,
-    inertia: f32,
     slew: f32,
     dt: f32,
 ) {
@@ -551,9 +539,10 @@ fn advance_servo(
             power_share,
             stall_torque,
             bearing_friction,
+            moving_inertia_kgm2,
             ..
         } => {
-            let friction = bearing_friction.0;
+            let (friction, inertia) = (bearing_friction.0, moving_inertia_kgm2.0);
             let motor_power = engine_power * power_share.0 * slew;
             // Hand rate names sustained motion against the same bearing: P = Tf*ω.
             // No handwheel torque curve is supplied; do not borrow the powered motor's stall.
@@ -654,6 +643,9 @@ mod tests {
 
     use super::*;
 
+    /// Fixture moving inertia (kg m²) of [`powered_spec`]'s mount.
+    const FIXTURE_INERTIA: f32 = 10.0;
+
     fn powered_spec(share: f32, stall: f32, friction: f32) -> ServoSpec {
         // Fixture: a small powered mount with a one-degree/s hand drive.
         ServoSpec {
@@ -661,10 +653,37 @@ mod tests {
                 power_share: Sourced(share),
                 stall_torque: Sourced(stall),
                 bearing_friction: Sourced(friction),
+                moving_inertia_kgm2: Sourced(FIXTURE_INERTIA),
                 hand_rate: Sourced(1f32.to_radians()),
             },
             ..ServoSpec::test_continuous(ServoRole::Yaw, 1.0)
         }
+    }
+
+    /// `spec` with its powered mount's moving inertia (kg m²) replaced.
+    fn with_inertia(mut spec: ServoSpec, inertia: f32) -> ServoSpec {
+        let ServoDrive::Powered {
+            moving_inertia_kgm2,
+            ..
+        } = &mut spec.drive
+        else {
+            unreachable!("the fixture mount is powered")
+        };
+        *moving_inertia_kgm2 = Sourced(inertia);
+        spec
+    }
+
+    /// A powered mount's declared bearing friction (N m) and moving inertia (kg m²).
+    fn bearing_and_inertia(spec: &ServoSpec) -> (f32, f32) {
+        let ServoDrive::Powered {
+            bearing_friction,
+            moving_inertia_kgm2,
+            ..
+        } = spec.drive
+        else {
+            unreachable!("the fixture mount is powered")
+        };
+        (bearing_friction.0, moving_inertia_kgm2.0)
     }
 
     /// A world `drive_servos` runs in: the clock it reads and the compute pool its per-tank
@@ -676,28 +695,20 @@ mod tests {
         world
     }
 
-    fn powered_world(mass: f32, engine_share: f32) -> (World, Entity, Entity, Entity) {
+    fn powered_world(engine_share: f32) -> (World, Entity, Entity, Entity) {
         let mut world = sim_world();
-        let (root, servo, engine) = spawn_powered(&mut world, mass, engine_share);
+        let (root, servo, engine) = spawn_powered(&mut world, engine_share);
         (world, root, servo, engine)
     }
 
     /// One tank with one powered mount: (root, servo, engine).
-    fn spawn_powered(world: &mut World, mass: f32, engine_share: f32) -> (Entity, Entity, Entity) {
+    fn spawn_powered(world: &mut World, engine_share: f32) -> (Entity, Entity, Entity) {
         use crate::ballistics::ComponentHealth;
         use crate::damage::{FunctionRole, VolumeOf};
-        // Fixture box and drive facts; no shipped vehicle output determines the assertions.
-        let turret = TurretSpec {
-            node: "Fixture_Turret".into(),
-            mass: Sourced(mass),
-            inertia_extents: Sourced((2.0, 1.0, 2.0)),
-        };
+        // Fixture drive facts; no shipped vehicle output determines the assertions.
         let template = crate::bake::selected_spec();
-        let mut mechanism = ServoMechanism::new(
-            template,
-            &template.validate().expect("the selected sheet is admitted"),
-        );
-        mechanism.inertia = axis_inertia(&turret);
+        let mut mechanism =
+            ServoMechanism::new(&template.validate().expect("the selected sheet is admitted"));
         // Fixture engine inputs replace every engine field the servo reads; unused transmission
         // construction comes from the admitted template and does not determine the expectations.
         mechanism.engine.engine.torque_nm = vec![(600.0, 1000.0), (2400.0, 1000.0)];
@@ -735,7 +746,7 @@ mod tests {
         // Fixture: both mounts move at 0.5 rad/s; the second tank's engine is out of action.
         let engine_shares = [1.0, 0.0];
         let prepare = |world: &mut World, engine_share: f32| {
-            let (root, servo, _) = spawn_powered(world, 15.0, engine_share);
+            let (root, servo, _) = spawn_powered(world, engine_share);
             world.get_mut::<TankServos>(root).unwrap().states[0] =
                 ServoState::test_new(0.0, 0.0, 0.5);
             world.get_mut::<ServoCommand>(servo).unwrap().target = 2.9;
@@ -776,7 +787,7 @@ mod tests {
     /// of action leaves only the operator's authored hand drive, including after powered motion.
     #[test]
     fn an_engine_out_of_action_brakes_to_the_hand_rate() {
-        let (mut world, root, servo, engine) = powered_world(15.0, 1.0);
+        let (mut world, root, servo, engine) = powered_world(1.0);
         for _ in 0..512 {
             tick_powered(&mut world, root, servo);
         }
@@ -786,18 +797,14 @@ mod tests {
             .unwrap()
             .set_held(0);
         let state = tick_powered(&mut world, root, servo);
-        let ServoDrive::Powered {
-            hand_rate,
-            bearing_friction,
-            ..
-        } = world.get::<ServoSpec>(servo).unwrap().drive
-        else {
+        let spec = world.get::<ServoSpec>(servo).unwrap();
+        let ServoDrive::Powered { hand_rate, .. } = spec.drive else {
             unreachable!()
         };
         // Bearing friction alone is a lower bound on coast-down time; hand work can only
         // reduce that braking, never erase the stored momentum in the game's damage model.
-        let inertia = world.get::<ServoMechanism>(root).unwrap().inertia[0];
-        assert!(state.velocity >= before.velocity - bearing_friction.0 / inertia / 64.0);
+        let (friction, inertia) = bearing_and_inertia(spec);
+        assert!(state.velocity >= before.velocity - friction / inertia / 64.0);
         for _ in 0..4096 {
             tick_powered(&mut world, root, servo);
         }
@@ -820,7 +827,7 @@ mod tests {
             (2600, 1.0),
             (3000, 1.0),
         ] {
-            let (mut world, root, servo, _) = powered_world(15.0, share);
+            let (mut world, root, servo, _) = powered_world(share);
             let in_action = if share > 0.0 { 1.0 } else { 0.0 };
             // Fixture power share keeps steady speed below the controller's stopping envelope at
             // the shortest-arc command's finite lead; this test isolates available work.
@@ -851,7 +858,7 @@ mod tests {
     /// in the game's damage model are stale. Presentation must invent no momentum past it.
     #[test]
     fn a_replica_consumes_truth_instead_of_simulating_a_second_drive() {
-        let (mut world, root, servo, _) = powered_world(15.0, 1.0);
+        let (mut world, root, servo, _) = powered_world(1.0);
         world
             .entity_mut(root)
             .remove::<TankServos>()
@@ -874,7 +881,7 @@ mod tests {
     /// published-angle presentation must retain the drive law.
     #[test]
     fn the_controlled_replica_integrates_its_own_aim() {
-        let (mut world, root, servo, _) = powered_world(15.0, 1.0);
+        let (mut world, root, servo, _) = powered_world(1.0);
         world
             .entity_mut(root)
             .remove::<TankServos>()
@@ -904,7 +911,7 @@ mod tests {
                     let roundoff = 4.0 * f32::EPSILON * target.abs();
                     for _ in 0..8192 {
                         let previous = state.current;
-                        advance_servo(&mut state, &spec, target, power, 10.0, 1.0, dt);
+                        advance_servo(&mut state, &spec, target, power, 1.0, dt);
                         assert!(
                             state.current * target.signum() <= target.abs() + roundoff,
                             "crossed {target}: {}",
@@ -929,28 +936,28 @@ mod tests {
         };
         for direction in [-1.0, 1.0] {
             let mut state = ServoState::test_new(direction * 0.499, 0.0, direction);
-            advance_servo(&mut state, &spec, direction, 1000.0, 10.0, 1.0, 1.0 / 64.0);
+            advance_servo(&mut state, &spec, direction, 1000.0, 1.0, 1.0 / 64.0);
             assert_eq!(state.current, direction * 0.5);
             assert_eq!(state.velocity, 0.0);
         }
     }
 
     /// Before the power knee, Δω = (Tstall - Tfriction)*dt/I. The mount's startup response
-    /// therefore halves when its declared mass doubles at fixed dimensions.
+    /// therefore halves when its own declared moving inertia doubles.
     #[test]
-    fn declared_mass_sets_stall_acceleration() {
-        // Fixture masses; the independent cuboid derivation uses the fixture dimensions above.
+    fn declared_moving_inertia_sets_stall_acceleration() {
         let mut speeds = Vec::new();
-        for mass in [15.0, 30.0] {
-            let (mut world, root, servo, _) = powered_world(mass, 1.0);
+        for inertia in [FIXTURE_INERTIA, 2.0 * FIXTURE_INERTIA] {
+            let (mut world, root, servo, _) = powered_world(1.0);
+            let mut spec = world.get_mut::<ServoSpec>(servo).unwrap();
+            *spec = with_inertia(spec.clone(), inertia);
             let state = tick_powered(&mut world, root, servo);
-            let inertia = mass * (2.0 * 2.0 + 2.0 * 2.0) / 12.0;
             let expected = (100.0 - 20.0) / inertia / 64.0;
             assert!((state.velocity - expected).abs() < 1e-6);
             speeds.push(state.velocity);
         }
         eprintln!(
-            "MEASURED fixture startup steps: base={} rad/s, doubled mass={} rad/s",
+            "MEASURED fixture startup steps: base={} rad/s, doubled inertia={} rad/s",
             speeds[0], speeds[1]
         );
         assert_eq!(speeds[1], speeds[0] / 2.0);
@@ -964,7 +971,7 @@ mod tests {
             powered_spec(0.01, 100.0, 20.0).drive,
             ServoSpec::test_continuous(ServoRole::Yaw, 1.0).drive,
         ] {
-            let (mut world, root, servo, _) = powered_world(15.0, 1.0);
+            let (mut world, root, servo, _) = powered_world(1.0);
             // Fixture: Gunner is an absent source and the initial mechanism is moving.
             world.get_mut::<TankServos>(root).unwrap().states[0] =
                 ServoState::test_new(0.0, 0.0, 0.5);
@@ -986,11 +993,11 @@ mod tests {
         let spec = powered_spec(0.001, 100.0, 20.0);
         for operator in [1.0, 0.5] {
             let mut state = ServoState::default();
-            advance_servo(&mut state, &spec, 2.9, power, 10.0, operator, 1.0 / 64.0);
+            advance_servo(&mut state, &spec, 2.9, power, operator, 1.0 / 64.0);
             assert_eq!(state.velocity, (100.0 - 20.0) / 10.0 / 64.0);
             for _ in 0..2048 {
                 let target = state.current + 2.9;
-                advance_servo(&mut state, &spec, target, power, 10.0, operator, 1.0 / 64.0);
+                advance_servo(&mut state, &spec, target, power, operator, 1.0 / 64.0);
             }
             let expected = power * 0.001 * operator / 20.0;
             assert!((state.velocity - expected).abs() < expected * 0.001);
@@ -1006,7 +1013,7 @@ mod tests {
         let dt = 1.0 / 64.0;
         for target in [0.0, 0.001, -0.001] {
             let mut state = ServoState::test_new(0.0, 0.0, 1.0);
-            advance_servo(&mut state, &spec, target, 1000.0, 10.0, 1.0, dt);
+            advance_servo(&mut state, &spec, target, 1000.0, 1.0, dt);
             assert_eq!(state.velocity, 1.0 - 12.0 * dt);
             assert!(state.current > target);
         }
@@ -1025,7 +1032,7 @@ mod tests {
         let mut state = ServoState::default();
         for target in [0.5, -0.5, 2.0, -2.0, 0.0] {
             for _ in 0..2048 {
-                advance_servo(&mut state, &spec, target, 1000.0, 10.0, 1.0, 1.0 / 64.0);
+                advance_servo(&mut state, &spec, target, 1000.0, 1.0, 1.0 / 64.0);
                 assert!((-1.0..=1.0).contains(&state.current));
             }
             assert!((state.current - target.clamp(-1.0, 1.0)).abs() < 1e-6);
@@ -1127,6 +1134,20 @@ mod tests {
         ] {
             let spec = powered_spec(share, stall, friction);
             assert!(spec.admission_fault().is_some());
+        }
+        // A powered row states its own moving load: absent, it does not parse; unusable, it is
+        // refused by name.
+        let row = "(role: Yaw, drive: Powered(power_share: (0.1, Fixture(\"share\")), \
+                   stall_torque: (10.0, Fixture(\"stall\")), bearing_friction: (1.0, \
+                   Fixture(\"bearing\")), hand_rate: (1.0, Fixture(\"rate\"))), \
+                   travel: Continuous, requires: [])";
+        let err = ron::from_str::<ServoSpec>(row).err().unwrap().to_string();
+        assert!(err.contains("moving_inertia_kgm2"), "{err}");
+        for inertia in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let fault = with_inertia(powered_spec(0.1, 10.0, 1.0), inertia)
+                .admission_fault()
+                .unwrap();
+            assert!(fault.contains("moving_inertia_kgm2"), "{fault}");
         }
         // Fixture individually representable facts whose derived hand work over/underflows.
         for (rate, friction) in [(1e30, 1e20), (1e-20, 1e-30)] {
