@@ -1107,6 +1107,7 @@ fn stall_guard_holds_crank_under_grade_lug() {
             stall: None,
             stalled: false,
             observed: true,
+            caught: false,
         });
         #[cfg(feature = "bitprobe")]
         let (roundoff, mut settled) = (
@@ -1840,6 +1841,47 @@ fn full_pedal_reaches_the_curve_and_release_retains_drag() {
     assert!(drag > 0.0);
 }
 
+/// The game's driving model: the report's `caught` is the idle catch fueling past the command.
+/// The Driver steps a gear it carries down as a stall, and full-pedal driving stays clear of that
+/// step because full pedal under full task rate already fuels all the catch can ask, at every
+/// crank speed; at part pedal a crank lugging through the catch's band below idle is caught.
+/// Fixture: each class drivetrain's engaged crank swept from rest to idle, at a quarter pedal.
+#[test]
+fn only_a_part_pedal_crank_below_idle_is_caught() {
+    for (_, tp) in class_drivetrains() {
+        let idle = tp.engine.idle_rpm * RPM_TO_RAD;
+        let saturated = idle - engine_control().idle_catch_droop_rpm.value * RPM_TO_RAD;
+        let caught = |omega: f32, command: f32| {
+            let inp = input(command, 0.0, [0.0; 2], [0.0; 2]);
+            #[cfg(feature = "bitprobe")]
+            let mut probe = TransmissionProbe::default();
+            crank_free_torque(
+                &tp,
+                &inp,
+                true,
+                false,
+                command,
+                0.0,
+                1.0,
+                omega,
+                idle,
+                #[cfg(feature = "bitprobe")]
+                &mut probe,
+            )
+            .2
+        };
+        // Fixture: 65 crank speeds from rest to idle.
+        for omega in (0..=64).map(|step| idle * step as f32 / 64.0) {
+            assert!(!caught(omega, 1.0), "full pedal caught at {omega} rad/s");
+            assert!(
+                omega > saturated || caught(omega, 0.25),
+                "a quarter pedal lugging at {omega} rad/s, below the catch's band"
+            );
+        }
+        assert!(!caught(idle, 0.25), "no catch at idle");
+    }
+}
+
 /// The game's damage model: commanded work consumes one task rate even when
 /// local module condition differs. Fixture: a reduced transmission and a further task bottleneck.
 #[test]
@@ -2178,6 +2220,7 @@ fn driver_input(speed: f32, load: f32, command: f32) -> TransmissionInput {
         stall: None,
         stalled: false,
         observed: true,
+        caught: false,
     });
     inp
 }
@@ -3310,7 +3353,7 @@ fn free_crank_drag_stops_without_crossing_zero() {
             inp.supply.task_rate = 0.0;
             #[cfg(feature = "bitprobe")]
             let mut probe = TransmissionProbe::default();
-            let (torque, _) = crank_free_torque(
+            let (torque, _, _) = crank_free_torque(
                 &tp,
                 &inp,
                 false,

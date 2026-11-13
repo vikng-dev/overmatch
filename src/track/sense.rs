@@ -43,7 +43,8 @@ struct Sample {
 /// start speed (m/s), the sampled-contact push along that heading and those contacts' grip budget
 /// (N), and what this tick's step reported: the drive direction it pulled along (±1 along the
 /// heading; `None` when it asked no pull), the ladder and gear asked, whether its clutch sent
-/// drive and whether it held, and both sprockets' force (N; `None` until it reports).
+/// drive and whether it held, whether the idle catch fueled past the command, and both sprockets'
+/// force (N; `None` until it reports).
 #[derive(Clone, Copy, Debug)]
 struct Open {
     velocity: Vec3,
@@ -55,6 +56,7 @@ struct Open {
     pulled_by: Option<Engaged>,
     driving: bool,
     locked: bool,
+    caught: bool,
     drive: Option<f32>,
 }
 
@@ -121,6 +123,10 @@ pub struct Sensed {
     /// third of the pedal, 4th to 5th: four ticks at clutch capacity lift the push to 214 kN
     /// against 35 kN once locked).
     pub observed: bool,
+    /// The idle catch carried the engaged gear through the window: on every sample of a window
+    /// its clutch held whole ([`Self::observed`]), the catch fueled the crank past the pedal
+    /// ([`TransmissionReport::caught`]), so the gear runs on torque no pedal asked for.
+    pub caught: bool,
 }
 
 /// The belts' contacts on the hull at one driving tick (N, world frame).
@@ -144,8 +150,9 @@ pub struct DriverSense {
     open: Option<Open>,
     stall: Option<Stall>,
     /// The gear asked to pull the latest samples, and how many of the latest of those it drove with
-    /// the hull at rest and how many its clutch held.
-    run: Option<(Engaged, usize, usize)>,
+    /// the hull at rest, how many its clutch held, and how many its clutch held with the idle catch
+    /// fueling past the pedal.
+    run: Option<(Engaged, usize, usize, usize)>,
     /// The reading this tick's choice used: telemetry and probes read it.
     pub(crate) reading: Option<Sensed>,
 }
@@ -220,12 +227,16 @@ impl DriverSense {
                 });
             }
             let resting = open.driving && at_rest(open.velocity) && at_rest(velocity);
-            let [resting, held] = [resting, open.locked].map(usize::from);
+            let [resting, held, carried] =
+                [resting, open.locked, open.locked && open.caught].map(usize::from);
             self.run = match (open.pulled_by, self.run) {
-                (Some(by), Some((gear, rested, locked))) if by == gear => {
-                    Some((gear, (rested + 1) * resting, (locked + 1) * held))
-                }
-                (by, _) => by.map(|by| (by, resting, held)),
+                (Some(by), Some((gear, rested, locked, caught))) if by == gear => Some((
+                    gear,
+                    (rested + 1) * resting,
+                    (locked + 1) * held,
+                    (caught + 1) * carried,
+                )),
+                (by, _) => by.map(|by| (by, resting, held, carried)),
             };
             if self.samples.len() == self.window {
                 self.samples.pop_front();
@@ -248,6 +259,7 @@ impl DriverSense {
             pulled_by: None,
             driving: false,
             locked: false,
+            caught: false,
             drive: None,
         });
         self.reading = (!self.samples.is_empty()).then(|| {
@@ -277,10 +289,16 @@ impl DriverSense {
                 stall: self.stall,
                 // The window's belts at rest or not gaining under the stall's pull.
                 stalled: self.stall.is_some_and(|stall| {
-                    self.run.is_some_and(|(_, rested, _)| rested >= self.window)
+                    self.run
+                        .is_some_and(|(_, rested, _, _)| rested >= self.window)
                         && (belts.abs() < PARK_ENGAGE_SPEED || stall.dir * belt_gain <= 0.0)
                 }),
-                observed: self.run.is_some_and(|(_, _, locked)| locked >= self.window),
+                observed: self
+                    .run
+                    .is_some_and(|(_, _, locked, _)| locked >= self.window),
+                caught: self
+                    .run
+                    .is_some_and(|(_, _, _, caught)| caught >= self.window),
             }
         });
         self.reading
@@ -309,6 +327,7 @@ impl DriverSense {
             open.pulled_by = report.pulling.then_some((report.reverse, report.gear));
             open.driving = report.driving;
             open.locked = report.locked;
+            open.caught = report.caught;
             open.drive = Some(report.forces.iter().sum());
         }
     }
@@ -526,6 +545,47 @@ mod tests {
                 "drive {} over a 50 kN window",
                 reading.drive
             );
+        }
+    }
+
+    /// The idle catch carries the engaged gear only through a whole window its clutch held, the
+    /// catch fueling past the pedal on every sample: the Driver steps such a gear down as a stall,
+    /// and a slipping tick (its crank not set by the gear) or a tick the pedal's fuel covers is no
+    /// crawl on unasked torque. Fixture: a hull moving at 1 m/s under one pulling gear, a window
+    /// held and caught throughout, and the same window with one tick slipping or uncaught.
+    #[test]
+    fn the_catch_carries_a_gear_only_through_a_whole_held_window() {
+        let forward = Vec3::NEG_Z;
+        let contacts = Contacts {
+            soft: [forward * 15_000.0; 2],
+            grip: 0.0,
+            hard: [None; 2],
+        };
+        let caught = |samples: &[(bool, bool)]| {
+            let mut sense = DriverSense::for_cut(CUT);
+            let mut reading = None;
+            // Each reading closes the tick before it, so one more tick closes the last sample.
+            for &(locked, caught) in samples.iter().chain(&[(true, true)]) {
+                reading = sense.tick(forward, forward, 1.0, MASS, contacts, DT);
+                sense.drove(&TransmissionReport {
+                    pulling: true,
+                    driving: true,
+                    locked,
+                    caught,
+                    ..Default::default()
+                });
+            }
+            reading.expect("a closed window").caught
+        };
+        let whole = vec![(true, true); usize::from(CUT.get())];
+        assert!(caught(&whole), "a window held and caught throughout");
+        for tick in [0, whole.len() / 2, whole.len() - 1] {
+            let mut slipping = whole.clone();
+            slipping[tick].0 = false;
+            assert!(!caught(&slipping), "tick {tick} slipping");
+            let mut covered = whole.clone();
+            covered[tick].1 = false;
+            assert!(!caught(&covered), "tick {tick} the pedal's fuel covers");
         }
     }
 

@@ -528,8 +528,9 @@ drive (`headless_test::drive_load`). Parked, the contact law's rolling fade leav
 Beside `R` the ledger carries the engaged gear's drive (both sprockets' mean force over the
 window), the drivetrain's gain over the window as a force (`M_hull` times the belts' mean
 acceleration), the contacts' mean grip budget (the patches' and the solver's), a stall's bound,
-and two counts of the engaged gear's run: the ticks it drove with the hull at rest, and the ticks
-its clutch held the crank to the belts.
+and three counts of the engaged gear's run: the ticks it drove with the hull at rest, the ticks
+its clutch held the crank to the belts, and the ticks it held them with the idle catch fueling past
+the pedal.
 
 **What the Driver infers.** Each fact is read from the force balance or the drivetrain's own
 state, none from a timer or a band:
@@ -574,18 +575,20 @@ state, none from a timer or a band:
   is open: the price and the sensed resistance sit on different sides of the belt, so a gear can
   look affordable where it just failed (MEASURED, ram-x-0.35: fifth stalled sending 156.9 kN at
   the sprocket while the ledger read `R` = 104.9 kN).
-- *A step down reaches only `max_step` gears.* Where every gear in reach fails to hold where the
-  cut lands and one beyond reach would hold, the engaged gear keeps slowing until it settles, and a
-  settled gear reads no slowing, so it crawls. The shipped sheet reaches this (DERIVED from the
-  Driver's price, not a sim run: the engaged gear's drive taken as its own price, straight, grip
-  unbounded): at pedal 0.25, fifth engaged against 46.5 kN, second, third and fourth fail to hold
-  where the cut lands, first would pull about 48.8 kN but lies four steps down, and fifth settles
-  near 560 rpm in the idle catch's band; 524 such states at pedal 0.25–0.3 and 31.5–82.5 kN. At
-  part pedal the net torque is small and nearly flat, so pull follows the ratio. Whether the sim's
-  delivered drive matches the price there is unchecked. Evaluating a lower destination across
-  combined cuts, or a reach that follows need, would lift it. The rejected peak-torque form had the
-  same limit: below the torque peak, where this crank sits, its slowing clause also took only the
-  highest gear within `max_step` that holds where the cut lands.
+- *A gear the idle catch carries fails the pedal.* At part pedal against more than the pedal
+  pulls, the engaged gear slows until its crank falls into the idle catch's band, where the catch
+  fuels past the pedal and holds a crawl that neither slows nor stalls. A gear the catch carried
+  through a whole held window holds only on torque the pedal did not ask for, so it is stall-class:
+  the step takes the lowest gear within `max_step`, and a gear still carried there steps again.
+  `max_step` is a fact about one selector event, not a reach to widen. At full pedal under full task
+  rate the pedal's fuel covers all the catch can ask, so the catch adds nothing, and a pedal rising
+  to full spends fewer ticks below it than a window holds (DERIVED, shipped data: 16 ticks at a
+  rise of 4 per second, against a 20-tick window), so full-pedal driving cannot reach the clause.
+  MEASURED in `headless_test::drive_load` (pedal 0.25, fifth entered at mid-band against a
+  46.5 kN grade): without the clause the catch carried fifth for 2334 consecutive held ticks at
+  0.74 m/s and 567 rpm, no cut paid, 31.9 m in 40 s; with it fifth stepped to second after 20
+  carried ticks, second fell to first on its slowing drivetrain 55 ticks later, and first ended
+  at 2404 rpm and 0.62 m/s, 26.3 m in 40 s: slower than the crawl, which ran on the catch's torque.
 - *Grip caps push.* No gear puts more traction into the ground along the belts than its
   contacts' grip budget, which they carry when every contact slides along the belt: the patches'
   `sum mu N_elastic` and the solver contacts' Coulomb limit, the solver's combined coefficient
@@ -606,7 +609,8 @@ difference, exceeds M. The clauses:
 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
    current gear nor at or above one that failed there; else
    first where it offers more spare than the current gear. Free.
-2. The hull stalls now under the gear's drive: the lowest gear within `max_step`. Or
+2. The hull stalls now under the gear's drive, or the idle catch carried the gear through a held
+   window: the lowest gear within `max_step`. Or
    the drivetrain loses more than M over a held window: the highest lower gear within `max_step`
    that holds where it lands and pulls there more than the engaged gear's drive by M; with none
    the gear stays.
@@ -630,9 +634,9 @@ A slowing step down and an upshift cannot undo each other at one landing where e
 meets its observed drive: each takes a gear only where its price where the cut lands beats the
 engaged gear's drive by M, so a step down from `g` to `g − 1` needs `P(g − 1) > P(g) + M` and a step
 back up needs `P(g) > P(g − 1) + M`, which cannot both hold; the same holds from an upshift back
-down. The argument covers nothing else. A stall steps down even where `P(g − 1) ≤ D(g) + M`, and
-steady pedal and load do not by themselves fix the landing speed, so two decisions need not share
-one. A cut and a full window of the new gear's drive separate any two decisions. Where the price
+down. The argument covers nothing else. A stall or a carried gear steps down even where
+`P(g − 1) ≤ D(g) + M`, and steady pedal and load do not by themselves fix the landing speed, so two
+decisions need not share one. A cut and a full window of the new gear's drive separate any two decisions. Where the price
 and the delivery disagree by more than M, the Driver can still hunt (the failure-memory entry
 above).
 Rejected forms: pricing the engaged gear (its spare reads model error); pricing a candidate at a
@@ -655,7 +659,9 @@ contacts load the belts off the heading: 0.92 in sixth against 0.90 in seventh o
 slide test on slip distance over the elastic shear length (slip distance is unimodal across it on
 the rubble battery); the hull's own gain as a gear's verdict (the ring above); a stall stepping to
 the highest lower gear that holds against its bound (a floor prices every weaker gear as
-holding); a slowing gear kept while its crank runs above the torque peak, with admission refusing
+holding); a destination planned across combined cuts, or a reach that follows need, to leave a
+crawl the idle catch carries (`max_step` states one selector event, and the carried gear is
+stall-class); a slowing gear kept while its crank runs above the torque peak, with admission refusing
 a curve that falls below its peak (it fits one curve shape, and a lower gear can outpull a crank
 above its peak); a slowing gear kept where its crank's net torque rises as revs fall (that marks
 a stable crawl, not a gear that serves the Driver: DERIVED, the Tiger-modelled ladder's top gear

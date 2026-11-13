@@ -927,6 +927,10 @@ pub struct TransmissionReport {
     /// The clutch held the crank to the belts at the tick's end, so the engaged gear set the
     /// drive. A slipping clutch sends its capacity, or the crank's stored speed, whatever the gear.
     pub locked: bool,
+    /// The Driver's idle catch fueled the crank past its command this tick ([`engine_torques`]):
+    /// torque no command asked for. Full pedal under full task rate fuels all the catch can ask,
+    /// so there it never does.
+    pub caught: bool,
     /// Power-conservation scale applied to the drive/steer forces this tick (1 = unconstrained).
     pub power_scale: f32,
     /// Combustion power capacity at the pre-tick operating point (W). The work gate also
@@ -1180,7 +1184,8 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
 ///    current gear nor at or above the stall's gear; else first where it
 ///    offers more spare than the current gear. Free.
-/// 2. The hull stalls now ([`super::sense::Sensed::stalled`]): the lowest gear within
+/// 2. The hull stalls now ([`super::sense::Sensed::stalled`]), or the idle catch carried the
+///    engaged gear through a held window ([`super::sense::Sensed::caught`]): the lowest gear within
 ///    `max_step`. A held window losing more than M: the highest lower gear within `max_step` that
 ///    holds where it lands and pulls there more than the engaged gear's drive by M, else none.
 /// 3. Straight, clutch in, a held window and the hull moving where the cut lands: of the higher
@@ -1190,8 +1195,9 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
 /// Clauses 2 and 3 pay the cut. A cut in flight, no pull asked or fuel that cannot beat drag
 /// choose nothing. At one landing where each gear's price meets its observed drive, a lower gear
 /// that outpulls a higher one by M and a higher one that outpulls the lower by M cannot both exist,
-/// so there a slowing step down and an upshift cannot undo each other. A stall's step down asks no
-/// outpull, and steady pedal and load do not by themselves fix the landing, so neither is covered.
+/// so there a slowing step down and an upshift cannot undo each other. Clause 2's lowest-gear step
+/// asks no outpull, and steady pedal and load do not by themselves fix the landing, so neither is
+/// covered.
 fn choose_gear(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1251,8 +1257,10 @@ fn choose_gear(
     let landing = (speed
         - resistance * f32::from(tp.shift_ticks.get()) / TICK_HZ / coupled_mass(fp))
     .max(0.0);
-    let chosen = if stall.is_some() && sensed.stalled {
-        // A stall bounds what the hull meets from below only: the lowest gear in reach pulls most.
+    let chosen = if (stall.is_some() && sensed.stalled) || sensed.caught {
+        // A stall bounds what the hull meets from below only, and a gear the catch carries holds
+        // only on torque the pedal did not ask for: either way the engaged gear fails what the
+        // pedal asks, and the lowest gear in reach pulls most.
         Some(st.gear.saturating_sub(tp.max_step).max(1)).filter(|&gear| gear < st.gear)
     } else if sensed.observed && dir * sensed.drive_gain < -margin {
         (st.gear.saturating_sub(tp.max_step).max(1)..st.gear)
@@ -1715,6 +1723,7 @@ fn engagement(
 /// unscaled.
 /// `engine_work` charges sprocket work against combustion and stored crank energy, including
 /// steering work with the main clutch open. The governor width lives in assets/driving/engine.ron.
+/// Returns the free torque, the combustion power capacity and [`TransmissionReport::caught`].
 #[expect(
     clippy::too_many_arguments,
     reason = "the free-torque law's inputs: params, input, engagement, throttle, belt speed, ratio and both crank speeds"
@@ -1730,7 +1739,7 @@ fn crank_free_torque(
     omega_e: f32,
     omega_idle: f32,
     #[cfg(feature = "bitprobe")] probe: &mut TransmissionProbe,
-) -> (f32, f32) {
+) -> (f32, f32, bool) {
     let u_fuel = if engaged {
         propulsive
     } else if inp.steer.abs() >= DEAD || shifting {
@@ -1775,7 +1784,7 @@ fn crank_free_torque(
         probe.tau_free = tau_free;
         probe.power_available = p_avail;
     }
-    (tau_free, p_avail)
+    (tau_free, p_avail, tau_idle > 0.0)
 }
 
 /// The geared steering member's signed ratio `s·κ` of belt half-difference to |mean| this tick;
@@ -2269,7 +2278,7 @@ pub(crate) fn step(
 
     let engaged = st.clutch != ClutchState::Out;
 
-    let (tau_free, p_avail) = crank_free_torque(
+    let (tau_free, p_avail, caught) = crank_free_torque(
         tp,
         inp,
         engaged,
@@ -2414,6 +2423,7 @@ pub(crate) fn step(
         pulling: propulsive >= DEAD,
         driving: tau_c > 0.0,
         locked,
+        caught,
         power_scale,
         power_available: p_avail,
         #[cfg(feature = "bitprobe")]

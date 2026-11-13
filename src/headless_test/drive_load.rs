@@ -251,11 +251,12 @@ impl Measurements {
 
 /// Every paid cut of one drive, held to the rules its construction states (architecture §5a): a
 /// cut opens the clutch for exactly one shift's ticks, a full window of drive separates it from the
-/// last, and it lands the gear its clause names. A stall steps to the lowest gear within
-/// `max_step`; any other cut lands a gear whose pull, priced at the drive's pedal where the cut
-/// lands ([`candidate_pull`](crate::track::transmission::candidate_pull)) and capped by grip, beats
-/// both the resistance it read and the engaged gear's drive by M, and a step down follows a held
-/// window whose drivetrain lost more than M. How many cuts a drive pays is an observation.
+/// last, and it lands the gear its clause names. A stall, or a gear the idle catch carried through
+/// a held window, steps to the lowest gear within `max_step`; any other cut lands a gear whose
+/// pull, priced at the drive's pedal where the cut lands
+/// ([`candidate_pull`](crate::track::transmission::candidate_pull)) and capped by grip, beats both
+/// the resistance it read and the engaged gear's drive by M, and a step down follows a held window
+/// whose drivetrain lost more than M. How many cuts a drive pays is an observation.
 struct Cuts {
     /// The requested pedal the drive holds, the command the Driver prices with.
     pedal: f32,
@@ -318,11 +319,11 @@ impl Cuts {
             .expect("a cut is chosen on a reading");
         let dir = if state.reverse { -1.0 } else { 1.0 };
         let stall = reading.stall.filter(|stall| stall.dir == dir);
-        if stall.is_some() && reading.stalled {
+        if (stall.is_some() && reading.stalled) || reading.caught {
             assert_eq!(
                 new,
                 old.saturating_sub(tp.max_step).max(1),
-                "a stall steps to the lowest gear in reach"
+                "a stall, or a gear the catch carried, steps to the lowest gear in reach"
             );
             return;
         }
@@ -728,17 +729,19 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
     }
 }
 
-/// The game's driving model, game state only: a gear the Driver's idle catch carries. At part
-/// pedal against more than the pedal pulls, the engaged gear slows until its crank falls into the
-/// catch's band, where the catch fuels past the pedal and holds a crawl that neither slows nor
-/// stalls. Observation: how long the catch carries each gear through a held clutch, the cuts the
-/// drive pays and where it ends; each cut keeps its construction's rules ([`Cuts`]). Fixture: an
-/// uninterrupted grade meeting 46.5 kN, entered at a mid-band crank in the lowest gear whose step
-/// down cannot reach first, at 0.25 pedal for 40 seconds.
+/// The game's driving model, game state only: a gear the Driver's idle catch carries through a held
+/// window steps down. At part pedal against more than the pedal pulls, the engaged gear slows until
+/// its crank falls into the catch's band, where the catch fuels past the pedal and holds a crawl
+/// that neither slows nor stalls; the Driver relies on the step to leave a crawl on torque no pedal
+/// asked for. No gear above first stays carried longer than one window, and each cut keeps its
+/// construction's rules ([`Cuts`]). Mutant: without the catch in the stall clause, fifth crawls
+/// carried for the whole drive. Where the drive ends is an observation. Fixture: an uninterrupted
+/// grade meeting 46.5 kN, entered at a mid-band crank in the lowest gear whose step down cannot
+/// reach first, at 0.25 pedal for 40 seconds.
 #[test]
-fn a_part_pedal_gear_the_idle_catch_carries() {
+fn a_gear_the_idle_catch_carries_through_a_held_window_steps_down() {
     use crate::track::transmission::RPM_TO_RAD;
-    // Fixture: the resistance and pedal at which the Driver's price showed a gear crawling.
+    // Fixture: the grade's resistance (N) and the pedal.
     let (resistance, pedal) = (46_500.0_f32, 0.25);
     let rolling = crate::ground_types::GroundTypes::load_shipped()
         .get(crate::terrain_blend::BASE_GROUND)
@@ -846,6 +849,10 @@ fn a_part_pedal_gear_the_idle_catch_carries() {
     assert!(
         above_first >= window,
         "the fixture reaches a gear above first that the catch carries through a held window: {carried:?}"
+    );
+    assert!(
+        above_first <= window,
+        "a gear the catch carried through a held window steps down: {carried:?}"
     );
 }
 
