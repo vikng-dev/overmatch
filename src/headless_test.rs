@@ -1477,10 +1477,11 @@ fn a_tank_repaired_at_rest_catches_its_idle_and_its_powered_traverse() {
 /// (`track::sim::settle_rest`). Witness: an in-flight shift's countdown, which every drivetrain
 /// step lowers by one tick (`transmission::advance_shift_window`). Fixture: the scenario's two
 /// tanks parked side by side on flat ground, their hull bounds overlapping 5 mm so a solver
-/// contact joins their islands; the shipped shift time; the 8 s rest watchdog.
+/// contact joins their islands; an 8-tick shift countdown, so the two ticks read 6 left from a
+/// single step a tick and 5 from a double step; the 8 s rest watchdog.
 #[test]
 fn a_drivetrain_advances_once_per_tick_whatever_wakes_its_island() {
-    use crate::track::sim::{TankTransmission, TrackGear};
+    use crate::track::sim::TankTransmission;
     use avian3d::dynamics::solver::islands::BodyIslandNode;
     use avian3d::prelude::{ColliderAabb, RigidBodyColliders, Sleeping};
 
@@ -1553,12 +1554,8 @@ fn a_drivetrain_advances_once_per_tick_whatever_wakes_its_island() {
         "the fixture's hull contact joins the two tanks' islands"
     );
 
-    let shift = app
-        .world()
-        .resource::<TrackGear>()
-        .trans()
-        .shift_ticks
-        .get();
+    // Fixture: the seeded shift countdown, in ticks.
+    let shift: u8 = 8;
     let countdown = |app: &App| {
         app.world()
             .get::<TankTransmission>(a)
