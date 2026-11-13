@@ -42,10 +42,11 @@ on average) and a flat or rubble run's overlaps none. Whether a sleeping tank do
 no part of the witness. Evidence is refused, never patched, naming the file and line: a stats
 record that does not parse (only the kill's torn final line, with no line end, is skipped), a
 record without its trace, a record or trace tick of another shape, a trace tick lacking a quantity
-the run reads, a failed process census, a binary that cannot start, or a settle span with no tick.
+the run reads, a failed process census, a binary that cannot start, a session process that cannot
+be stopped, or a settle span with no tick.
 A duration or tick count that is not finite and positive is refused at the command line, and a
-checkout whose revision git cannot read, or a spawn whose sampled footprint leaves the heightmap,
-refuses the whole run.
+checkout whose revision git cannot read, a heightmap other than a 16-bit grey PNG, or a spawn whose
+sampled footprint leaves the heightmap, refuses the whole run.
 
 Products in --out: <run>.server.log, <run>.client.log, <run>.window.jsonl (the window's tick
 rows), <run>.harness.ron, summary.json (per run and pooled per condition) and summary.txt.
@@ -100,18 +101,27 @@ READ = tuple(dict.fromkeys(("elapsed_s", "tanks", "work.belt_overlaps") + COUNTS
 
 def heightmap():
     """The shipped heightmap's metres and its sample-centre mapping (level.json, 16-bit grey)."""
-    level = json.loads((ROOT / "assets/maps/kalinovo/level.json").read_text())
+    level_path = ROOT / "assets/maps/kalinovo/level.json"
+    level = json.loads(level_path.read_text())
     terrain = level["terrain"]["heightmap"]
-    assert terrain["bit_depth"] == 16 and terrain["channels"] == "grayscale", terrain
-    data = (ROOT / "assets/maps/kalinovo" / terrain["asset"]).read_bytes()
-    assert data[:8] == b"\x89PNG\r\n\x1a\n", "the heightmap is a PNG"
+    if (terrain["bit_depth"], terrain["channels"]) != (16, "grayscale"):
+        raise Refused(f"{level_path}: terrain.heightmap declares bit_depth {terrain['bit_depth']} "
+                      f"and channels {terrain['channels']!r}; this reader takes 16 and "
+                      f"'grayscale', so convert the heightmap to 16-bit grey")
+    asset = ROOT / "assets/maps/kalinovo" / terrain["asset"]
+    data = asset.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise Refused(f"{asset}: no PNG signature; convert the heightmap to a 16-bit grey PNG")
     pos, idat, (width, height) = 8, b"", (0, 0)
     while pos < len(data):
         length, kind = struct.unpack(">I4s", data[pos:pos + 8])
         body = data[pos + 8:pos + 8 + length]
         if kind == b"IHDR":
             width, height, depth, colour, _, _, interlace = struct.unpack(">IIBBBBB", body)
-            assert (depth, colour, interlace) == (16, 0, 0), "16-bit grey, not interlaced"
+            if (depth, colour, interlace) != (16, 0, 0):
+                raise Refused(f"{asset}: IHDR bit depth {depth}, colour type {colour}, interlace "
+                              f"{interlace}; convert it to bit depth 16, colour type 0 (grey) and "
+                              f"interlace 0")
         elif kind == b"IDAT":
             idat += body
         pos += 12 + length
@@ -239,6 +249,22 @@ def launch(exe, env, log):
 
 def alive(proc):
     return proc.poll() is None
+
+
+def stop(proc):
+    """Kill a live session's process group and reap it. A process that exited since its poll is a
+    legitimate absence, told by polling again rather than by the error: macOS answers a signal to
+    an exited, unreaped group leader with EPERM, not ESRCH (MEASURED, Darwin 25). Any other
+    failure refuses, naming the process to stop by hand."""
+    if proc is None or not alive(proc):
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError as error:
+        if alive(proc):
+            raise Refused(f"{proc.args[0]} (process group {proc.pid}) could not be stopped "
+                          f"({error}); stop it by hand before the next run") from error
+    proc.wait()
 
 
 def traces(path):
@@ -381,10 +407,15 @@ def measure(args, name, condition, pose, out, record):
                 time.sleep(1)
             record["seconds_with_rustc_running"] = compiles
         finally:
+            # Each process is stopped whatever another's stop raised.
             for proc in (client, server):
-                if proc is not None and alive(proc):
-                    os.killpg(proc.pid, signal.SIGKILL)
-                    proc.wait()
+                try:
+                    stop(proc)
+                except Refused as refusal:
+                    record["invalid"] = "; ".join(filter(None, (record.get("invalid"),
+                                                                str(refusal))))
+    if "invalid" in record:
+        return record, []
     rows, flats, awake_bodies, settle_overlaps = [], [], [], []
     for where, load in traces(server_log):
         in_window = False
