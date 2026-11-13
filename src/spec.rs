@@ -1072,8 +1072,7 @@ pub struct EngineSoundSpec {
     pub clip_pop_hz: f32,
 }
 
-/// The gear ladders as authored per-gear top belt speeds (km/h) at `rated_rpm`, plus what the
-/// construction allows a Driver: the highest launch gear and the widest single shift.
+/// The gear ladders as authored per-gear top belt speeds (km/h) at `rated_rpm`.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct GearboxSpec {

@@ -1263,9 +1263,8 @@ fn choose_gear(
         - resistance * f32::from(tp.shift_ticks.get()) / TICK_HZ / coupled_mass(fp))
     .max(0.0);
     let lowest = st.gear.saturating_sub(tp.max_step).max(1);
-    // The highest lower gear in reach that holds where the cut lands and pulls there more than the
-    // engaged gear's drive by M. Under a pull its clutch closes from out at or above idle
-    // ([`engagement`]), where the catch adds nothing, so its price is the pedal's own.
+    // Under a pull a candidate's clutch closes from out at or above idle ([`engagement`]), where
+    // the catch adds nothing, so its price is the pedal's own.
     let holding_below = || {
         (lowest..st.gear).rev().find(|&gear| {
             let pull = pull(gear, landing, ClutchState::Out);
@@ -1736,8 +1735,7 @@ fn engagement(
 /// targets the crank speed the landing gear's clutch closes at, `|m|*k` or the launch rpm where it
 /// will slip ([`engagement`]), so it re-engages near-synchronous; without a window that target is
 /// idle. Steering targets `idle + (peak - idle)*|steer|`; the governor takes the larger target.
-/// Open rest requests no fuel. The catch and induced combustion consume task throughput; drag stays
-/// unscaled.
+/// Open rest requests no fuel; construction drag remains unscaled.
 /// `engine_work` charges sprocket work against combustion and stored crank energy, including
 /// steering work with the main clutch open. The governor width lives in assets/driving/engine.ron.
 /// Returns the free torque, the combustion power capacity and [`TransmissionReport::caught`].
