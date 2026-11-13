@@ -42,8 +42,9 @@ pass's points, and a fixed construction under it keeps that pass's reaction in i
 starts from rest under an acceleration below `SleepThreshold`'s 0.15 m/s over `TimeToSleep`'s
 0.5 s, 0.3 m/s² (DERIVED), would sleep before reaching the threshold. A tank's pass supplies what
 motion cannot show (`track::sim::apply_track_forces`): a pass whose every gripping patch slides,
-whose brake meets a stop beyond its capacity, or that moved its drivetrain's state, finds the
-tank not at rest however slowly it moves. A tank creeping past its grip limit keeps creeping:
+whose brake meets a stop beyond its capacity, or that changed its drivetrain's regime or drive
+signal or moved its crank out of the hull's angular rest speed of where it last moved
+(`track::sim::RestCrank`), finds the tank not at rest however slowly it moves. A tank creeping past its grip limit keeps creeping:
 `contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_limits` judges the
 slope limits under production rest, mud at 17.0° against its 15.5° limit among them. A tank rests
 under the drive intent and supply its drivetrain settled under, and any change to them (the

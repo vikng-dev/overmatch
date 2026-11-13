@@ -22,7 +22,7 @@
 use avian3d::dynamics::rigid_body::forces::ForcesItem;
 use avian3d::prelude::{
     ComputedAngularInertia, ComputedCenterOfMass, ComputedMass, Forces, Gravity, Position,
-    ReadRigidBodyForces, RigidBody, Rotation, SleepThreshold, SleepTimer, Sleeping, TimeToSleep,
+    ReadRigidBodyForces, RigidBody, Rotation, SleepThreshold, SleepTimer, Sleeping,
     WriteRigidBodyForces,
 };
 use bevy::ecs::query::QueryData;
@@ -193,6 +193,43 @@ pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
 pub(crate) struct PassTarget(Option<DriveTarget>);
 
+/// The crank speed (rad/s) a tank's rest is judged from ([`RestCrank::held`]): its speed after
+/// the last driving pass that found the tank not at rest, `None` before its first pass.
+#[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
+pub(crate) struct RestCrank(Option<f32>);
+
+impl RestCrank {
+    /// A pass from `was` to `now` left the tank at rest: its grip and brakes held (`undisturbed`)
+    /// and its drivetrain settled, its regime and drive signal exactly as they were and its crank,
+    /// the one continuous member, within the hull's own angular rest speed `crank_rest` (rad/s) of
+    /// this crank speed. A crank that stays in that band through a rest time is at rest as a body
+    /// is in Avian's test, whose speed stays under its rest speed; a spool to idle or a stop under
+    /// drag leaves the band. A resting hull's residual reactions reach the crank through the
+    /// steering member and only jitter within it: MEASURED parked on the rubble pile of
+    /// `scripts/perf/pile_park.py`, up to 0.038 rad/s a tick (0.016 at the 95th percentile) inside
+    /// a 0.038 rad/s band, against Avian's 0.15. A per-tick bound on the crank read that jitter as
+    /// a drivetrain still changing and held such a tank awake while its pile moved under it.
+    /// A pass not at rest moves the band to its crank.
+    fn held(
+        &mut self,
+        (was, was_signal): (TransmissionState, DriveSignal),
+        (now, signal): (TransmissionState, DriveSignal),
+        crank_rest: f32,
+        undisturbed: bool,
+    ) -> bool {
+        let from = self.0.unwrap_or(was.omega_e);
+        let held = undisturbed
+            && signal == was_signal
+            && TransmissionState {
+                omega_e: was.omega_e,
+                ..now
+            } == was
+            && (now.omega_e - from).abs() < crank_rest;
+        self.0 = Some(if held { from } else { now.omega_e });
+        held
+    }
+}
+
 /// Each collider some tank's last driving pass sampled as support, with the tanks it carries.
 /// Kept at the contact commit, so a resting tank keeps the entries of the pass it rested under; a
 /// collider that goes, is disabled or moves finds the resting tanks it carries here
@@ -244,7 +281,7 @@ fn forget_sampled_supports(gone: On<Remove, TrackContacts>, mut index: ResMut<Sa
 /// at the force station/lateral resolution; `contact_side` preserves that membership so a
 /// runtime rebuild cannot silently erase accumulated strain. Clients render the server stream.
 #[derive(Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[require(TrackGripEffect, PassTarget)]
+#[require(TrackGripEffect, PassTarget, RestCrank)]
 pub struct TrackGripElements {
     pub sides: [GripElements; 2],
 }
@@ -1028,6 +1065,7 @@ struct DriveTank {
     sense: &'static mut super::sense::DriverSense,
     contacts: &'static mut TrackContacts,
     pass_target: &'static mut PassTarget,
+    rest_crank: &'static mut RestCrank,
     rest_speed: &'static SleepThreshold,
     forces: Option<Forces>,
     volumes: Option<&'static TankVolumes>,
@@ -1047,7 +1085,7 @@ struct DriveSupports {
 /// The tanks whose driving pass runs this tick: every tank but a resting one. A resting tank is
 /// one Avian's island sleep holds still, with whatever carries it: terrain and construction
 /// through the sampled support, loose pieces through its island. It came to rest from a pass
-/// that left its drivetrain settled ([`drivetrain_settled`]) and whose grip and brakes held
+/// that left its drivetrain settled ([`RestCrank::held`]) and whose grip and brakes held
 /// within capacity ([`apply_track_forces`]). Nothing in its pass can change while it rests: no
 /// demand reaches it, its drivetrain is settled under the intent and supply it rested under
 /// ([`PassTarget`]), and the load its support carries is the one it slept under, so the pass
@@ -1179,7 +1217,6 @@ fn gather_drive_supports(
 fn apply_track_forces(
     time: Res<Time>,
     gravity: Res<Gravity>,
-    rest_time: Res<TimeToSleep>,
     field: Res<TrackField>,
     gear: Option<Res<TrackGear>>,
     #[cfg(feature = "bitprobe")] mut bitprobe: Option<ResMut<BitprobeCapture>>,
@@ -1314,10 +1351,12 @@ fn apply_track_forces(
         // gripping patch or a brake slid, finds the tank not at rest however slowly it moves.
         let grips = reports.iter().any(|report| report.grip_budget > 0.0);
         let grip_slides = grips && !reports.iter().any(|report| report.grip_reserve);
-        let crank_rest = tank.rest_speed.angular * dt / rest_time.0;
-        let held = drivetrain_settled(drivetrain, (tank.transmission.0, *tank.signal), crank_rest)
-            && !grip_slides
-            && !tr.brakes_slide;
+        let held = tank.rest_crank.held(
+            drivetrain,
+            (tank.transmission.0, *tank.signal),
+            tank.rest_speed.angular,
+            !grip_slides && !tr.brakes_slide,
+        );
         *tank.pass_target = PassTarget(Some(target));
         let mut effect = TrackGripEffect::default();
         #[cfg(feature = "bitprobe")]
@@ -1360,26 +1399,6 @@ fn apply_track_forces(
             .into_inner()
             .expect("the selected dynamic capture source completed this tick");
     }
-}
-
-/// A pass left its drivetrain settled: its regime and drive signal exactly as they were, and its
-/// crank, the one continuous member, within `crank_rest` (rad/s) of its speed before the pass.
-/// That bound spreads the hull's own angular rest speed over Avian's rest time, so a crank at rest
-/// changes its speed by less than that rest speed over a rest time, as a body at rest does in
-/// Avian's test. A resting hull's residual reactions reach the crank through the steering member
-/// (MEASURED about 3e-4 rad/s per tick on bump stops, against 0.0047 at Avian's defaults); a spool
-/// to idle or a stop under drag moves it far faster.
-fn drivetrain_settled(
-    (was, was_signal): (TransmissionState, DriveSignal),
-    (now, signal): (TransmissionState, DriveSignal),
-    crank_rest: f32,
-) -> bool {
-    signal == was_signal
-        && TransmissionState {
-            omega_e: was.omega_e,
-            ..now
-        } == was
-        && (now.omega_e - was.omega_e).abs() < crank_rest
 }
 
 /// Reactions commit by ascending source entity, then side and contact emission order. Impulses
@@ -3402,5 +3421,47 @@ mod tests {
         let (mut app, roots) = support_fixture(false, false, true, 0.0);
         app.world_mut().entity_mut(roots[0]).remove::<Position>();
         run_adapter(&mut app, &[(roots[0], Vec3::ZERO)]);
+    }
+
+    /// A parked tank's crank is judged over its rest, not tick by tick. Residual reactions that
+    /// jitter it within the hull's angular rest speed leave it settled however large each tick's
+    /// step, so a tank on a pile its belts feel can rest; a drift out of that band unsettles it
+    /// however small each step, so a crank spooling to idle never rests mid-spool. A per-tick
+    /// bound fails the first, and no crank test the second. Fixture: the crank at 60 rad/s, Avian's
+    /// default rest speed, jitter steps of 0.8 of it and drift steps of 1/64 of it.
+    #[test]
+    fn a_crank_rests_by_its_band_over_the_rest_not_its_step_per_tick() {
+        let rest = SleepThreshold::default().angular;
+        let pass = |omega_e| {
+            (
+                TransmissionState {
+                    omega_e,
+                    ..TransmissionState::stopped()
+                },
+                DriveSignal::default(),
+            )
+        };
+        let mut crank = RestCrank::default();
+        let mut was = pass(60.0);
+        for tick in 0..64 {
+            let now = pass(60.0 + if tick % 2 == 0 { 0.4 } else { -0.4 } * rest);
+            assert!(
+                crank.held(was, now, rest, true),
+                "a crank jittering within the rest speed is settled (tick {tick})"
+            );
+            was = now;
+        }
+        let mut crank = RestCrank::default();
+        let mut was = pass(60.0);
+        let unsettled = (1..=128).any(|tick| {
+            let now = pass(60.0 + tick as f32 * rest / 64.0);
+            let held = crank.held(was, now, rest, true);
+            was = now;
+            !held
+        });
+        assert!(
+            unsettled,
+            "a crank drifting out of the rest band is not settled"
+        );
     }
 }
