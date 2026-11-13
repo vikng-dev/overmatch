@@ -1247,41 +1247,60 @@ fn rev_match_across_upshift_is_continuous() {
     );
 }
 
-/// Unloaded free-rev — declutched full steer at standstill (the pivot's crank
-/// demand) revs the crank from idle toward the steer-demand target (the PEAK-TORQUE
-/// rpm, reached dynamically; deliberately NOT the
-/// governed cut-out, where `torque_at·ω = 0` would zero the pivot's power budget).
-/// Lab arithmetic: Δω = 500 rpm = 52.4 rad/s at ≈ τ/J ≈ 2000/4 = 500 rad/s² plus the
-/// proportional-band taper → ≈ 0.15–0.3 s to 95%; the steady point parks ≈ 30 rpm
-/// under the target where the taper's fueling meets the re-engaging drag. Pinned with
-/// margin.
+/// Declutched full steer at standstill (the pivot's crank demand) revs the crank toward the
+/// steer-demand target, the peak-torque rpm, never the governed cut-out, where `torque_at·ω = 0`
+/// would zero the pivot's power budget. The rev governor fuels in full below its authored band
+/// beneath the target and not at all at it, so the crank parks inside that band, its fuel
+/// balancing drag. Mutant: a governor aimed at the governed rpm parks above the target. Fixture:
+/// the lab drivetrain for two seconds; the time to 95% of the target and the parked rpm print as
+/// observations.
 #[test]
-fn free_rev_reaches_steer_target_promptly() {
+fn free_rev_parks_in_the_governor_band_beneath_the_steer_target() {
     let (fp, mut tp) = (lab_fp(), lab_tp());
     // Fixture isolation: steer requests crank rpm but transmits no work to the belts.
     tp.steer_capacity_n = 0.0;
+    let inp = input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]);
     let mut st = fresh(&tp);
     let mut reached = None;
     for tick in 0..128 {
-        step(&fp, &tp, &mut st, &input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]));
-        let rpm = st.omega_e / RPM_TO_RAD;
-        if reached.is_none() && rpm >= 0.95 * tp.peak_torque_rpm {
+        step(&fp, &tp, &mut st, &inp);
+        if reached.is_none() && st.omega_e / RPM_TO_RAD >= 0.95 * tp.peak_torque_rpm {
             reached = Some(tick + 1);
         }
     }
-    let ticks = reached.expect("the crank must reach 95% of the steer target in 2 s");
-    let secs = ticks as f32 / TICK_HZ;
-    println!("lab free-rev idle -> 95% of peak-torque rpm: {secs:.3} s");
-    assert!(
-        (0.05..=0.6).contains(&secs),
-        "free-rev time {secs:.3} s outside the pinned band"
-    );
     let steady = st.omega_e / RPM_TO_RAD;
+    println!(
+        "lab free-rev: 95% of the steer target after {:?} s, parked at {steady:.0} rpm",
+        reached.map(|ticks: u32| ticks as f32 / TICK_HZ)
+    );
+    let band = engine_control().rev_match_band_rpm.value;
     assert!(
-        (tp.peak_torque_rpm - 150.0..=tp.peak_torque_rpm + 50.0).contains(&steady),
-        "the declutched full-steer crank must park at the peak-torque operating point \
-             (~{:.0} rpm), got {steady:.0} — a cut-out park would zero pivot power",
+        (tp.peak_torque_rpm - band..tp.peak_torque_rpm).contains(&steady),
+        "the crank parks within the governor's {band} rpm band beneath the steer target ({:.0} \
+         rpm), got {steady:.0}",
         tp.peak_torque_rpm
+    );
+    #[cfg(feature = "bitprobe")]
+    let mut probe = TransmissionProbe::default();
+    let (free, ..) = crank_free_torque(
+        &tp,
+        &inp,
+        false,
+        false,
+        0.0,
+        0.0,
+        1.0,
+        st.omega_e,
+        tp.engine.idle_rpm * RPM_TO_RAD,
+        #[cfg(feature = "bitprobe")]
+        &mut probe,
+    );
+    let drag = engine_drag(&tp, st.omega_e);
+    println!("parked free torque {free} N m against {drag} N m drag");
+    // Test resolution: settled to within a hundredth of the drag the fuel meets.
+    assert!(
+        free.abs() < 0.01 * drag,
+        "parked, the governor's fuel balances drag: {free} N m free against {drag} N m"
     );
 }
 

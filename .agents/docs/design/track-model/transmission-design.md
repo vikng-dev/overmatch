@@ -521,9 +521,9 @@ k₁ × capacity ≈ 242.5 kN lab, measurably NOT the old rev-floor 186.6 kN),
 `stall_guard_holds_crank_under_grade_lug` (full-W lug + coast backslide: ω_e never below
 idle − 100 rpm; forward drive persists through the slipping clutch),
 `rev_match_across_upshift_is_continuous` (≤ 250 rpm/tick slew, ≤ 400 rpm gap at window
-end, re-locks to the geared point), `free_rev_reaches_steer_target_promptly` (lab
-idle → 95% of peak-torque target in 0.05–0.6 s; parks at the peak-torque point, NOT the
-cut-out), `coast_drag_reaches_belt_through_coupling` (steady coast force through the
+end, re-locks to the geared point), `free_rev_parks_in_the_governor_band_beneath_the_steer_target`
+(lab: parks within the rev governor's band beneath the peak-torque target, NOT the cut-out, its
+fuel balancing drag), `coast_drag_reaches_belt_through_coupling` (steady coast force through the
 clutch = the declared drag share exactly — the steady state is coupling-law-invariant),
 `readout_reports_crank_state`. Backslide behavior: forward drive during slides now comes
 through the clutch — capacity-clamped under full W (`F_c = k·2400`), `τ_free`-limited on
