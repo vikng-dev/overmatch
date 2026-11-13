@@ -1132,8 +1132,6 @@ fn park_summary(ticks: &[ParkTick]) -> Value {
     let n = ticks.len() as f32;
     let mean = |key: &dyn Fn(&ParkTick) -> f32| f(ticks.iter().map(key).sum::<f32>() / n);
     let count = |key: &dyn Fn(&ParkTick) -> bool| ticks.iter().filter(|t| key(t)).count();
-    // After the tick the timer is zero when the step found the hull moving, one step when a
-    // waking force zeroed it before a step that found it at rest, and longer otherwise.
     let step_reset = |t: &ParkTick| t.tank_timer > 0.0 && t.tank_timer < 1.5 * DT;
     let mut clutch = std::collections::BTreeMap::<&str, usize>::new();
     for t in ticks {
