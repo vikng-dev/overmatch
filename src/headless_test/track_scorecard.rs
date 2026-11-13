@@ -2303,11 +2303,9 @@ fn fixed_block(center: Vec3, size: Vec3) -> impl Bundle {
 }
 
 /// A resting tank's sampled support is no collider pair, so Avian wakes it for no change of that
-/// support: every way the support can change must wake it (`debris`'s wakes), and it falls by what
-/// the change took away. A support on a static body goes, is disabled, loses its body to a
-/// disable, turns sensor, moves down by its thickness, shrinks about its centre to half its
-/// thickness, or stops meeting vehicles; a support with no body, which the belt reads as static,
-/// moves, shrinks or stops meeting vehicles. Fixture watchdog: 2 s to fall half the drop.
+/// support: every way the support can change must wake it (`debris`'s wakes), a support with no
+/// body among them, which the belt reads as static, and it falls by what the change took away.
+/// Fixture watchdog: 2 s to fall half the drop.
 #[test]
 fn a_resting_tank_wakes_and_falls_when_its_support_changes() {
     type Change = (&'static str, f32, fn(&mut World, Entity));

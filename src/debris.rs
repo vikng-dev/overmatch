@@ -268,7 +268,7 @@ fn wake_on_static_moved(
             .map(|(collider, _)| collider),
     );
     if moved.is_empty() {
-        return; // Nothing static changed in place this step.
+        return;
     }
     moved.par_splat_map(ComputeTaskPool::get(), None, |_, colliders| {
         commands.command_scope(|mut commands| {
