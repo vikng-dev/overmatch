@@ -42,7 +42,7 @@ pass's points, and a fixed construction under it keeps that pass's reaction in i
 starts from rest under an acceleration below `SleepThreshold`'s 0.15 m/s over `TimeToSleep`'s
 0.5 s, 0.3 m/s² (DERIVED), would sleep before reaching the threshold. Each pass judges what motion
 cannot show (`track::sim::apply_track_forces`), and one that finds the tank not at rest zeroes
-its timer (`track::sim::hold_unsettled_awake`): drive demand, a belt its brake does not hold, a brake meeting a
+its timer (`track::sim::settle_rest`): drive demand, a belt its brake does not hold, a brake meeting a
 stop beyond its capacity, every gripping patch at or past its budget, or a sampled support whose
 body is not static. A tank creeping past its grip limit keeps creeping:
 `contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_limits` judges the
@@ -50,9 +50,11 @@ slope limits under production rest, mud at 17.0° against its 15.5° limit among
 that can move wakes nothing it carries, so a tank never rests on one, another tank's hull among
 them. The drivetrain is no part of the rest: a sleeping tank's hull and contacts stand still, but
 its transmission steps each tick on its last pass's belt loads with the belts at rest
-(`track::sim::wake_driven_tanks`). A step that holds both belts and slides no brake commits, so a
+(`track::sim::wake_driven_tanks`). A step that holds both belts and slides no brake is staged and
+commits if the tank still rests once the tick's wakes have applied (`track::sim::settle_rest`), so a
 repaired engine spools up under the resting hull; any other step is discarded and wakes the tank,
-whose full pass runs that tick from the same state. Drive demand (a pedal, a steer, or a belt
+whose full pass runs that tick from the same state, as does a tank whose island another body's wake
+reaches: a drivetrain advances once per tick. Drive demand (a pedal, a steer, or a belt
 still coasting) wakes the tank before any trial: under a pedal the lever holds a belt only against
 rollback, a sign test on contact jitter that frozen loads cannot answer, and an awake twin's belts
 crept from the first tick of full throttle (MEASURED once), so its full pass moves it within its

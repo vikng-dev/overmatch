@@ -203,13 +203,19 @@ pub(crate) struct LastPass {
     /// ([`wake_driven_tanks`]).
     loads: Option<Loads>,
     /// The pass found the tank at rest ([`apply_track_forces`]); one that did not holds it awake
-    /// ([`hold_unsettled_awake`]).
+    /// ([`settle_rest`]).
     at_rest: bool,
     /// The impulses its belts put on dynamic bodies ([`reactions`]) and the colliders it sampled
     /// as support, sorted and distinct, for the shared commit ([`commit_track_contacts`]).
     pushes: Vec<super::rubble::Push>,
     colliders: Vec<Entity>,
 }
+
+/// A resting tank's drivetrain step this tick: its signal and transmission after a trial that
+/// held both belts ([`wake_driven_tanks`]), staged until the tick's wakes have applied
+/// ([`settle_rest`]). Never hashed, never rolled back.
+#[derive(Component, Default)]
+pub(crate) struct RestingStep(Option<(DriveSignal, TransmissionState)>);
 
 /// Each collider some tank's last driving pass sampled as support, with the tanks it carries.
 /// Kept at the contact commit, so a resting tank keeps the entries of the pass it rested under; a
@@ -261,7 +267,7 @@ fn forget_sampled_supports(gone: On<Remove, TrackContacts>, mut index: ResMut<Sa
 /// at the force station/lateral resolution; `contact_side` preserves that membership so a
 /// runtime rebuild cannot silently erase accumulated strain. Clients render the server stream.
 #[derive(Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[require(TrackGripEffect, LastPass)]
+#[require(TrackGripEffect, LastPass, RestingStep)]
 pub struct TrackGripElements {
     pub sides: [GripElements; 2],
 }
@@ -1118,12 +1124,11 @@ fn demand(command: &ParsedTankCommand, drive: &TrackDrive) -> bool {
 /// Drive demand ([`demand`]) wakes a resting tank before this tick's driving pass. Without it,
 /// the resting tank's drivetrain steps while its hull rests: the transmission steps on its last
 /// pass's loads with the belts at rest, as Avian holds them. A step that holds both belts and
-/// slides no brake leaves them at rest, and so every contact, and commits as that tick's whole
-/// pass: a repaired engine spools up under a resting hull. Any other step is discarded
-/// and the tank wakes, so the tick's full pass steps the drivetrain once, from the same state. The
-/// Driver's ledger reads the hull, which gives it nothing while it rests. Removing `Sleeping` is
-/// Avian's own wake of the island (`wake_on_remove_sleeping`, which zeroes the timer); the
-/// chain's sync point applies it before [`gather_drive_supports`].
+/// slides no brake leaves them at rest, and so every contact, and is staged as that tick's whole
+/// pass ([`RestingStep`]): a repaired engine spools up under a resting hull. Any other step is
+/// discarded and the tank wakes. The Driver's ledger reads the hull, which gives it nothing while
+/// it rests. Removing `Sleeping` is Avian's own wake of the island (`wake_on_remove_sleeping`,
+/// which zeroes the timer); the chain's sync point applies it before [`gather_drive_supports`].
 fn wake_driven_tanks(
     time: Res<Time>,
     gear: Option<Res<TrackGear>>,
@@ -1133,7 +1138,7 @@ fn wake_driven_tanks(
             &RigidBody,
             &ParsedTankCommand,
             &TrackDrive,
-            (&mut DriveSignal, &mut TankTransmission),
+            (&DriveSignal, &TankTransmission, &mut RestingStep),
             &LastPass,
             (Option<&TankVolumes>, Option<&TankCapabilities>),
         ),
@@ -1144,7 +1149,7 @@ fn wake_driven_tanks(
 ) {
     let dt = time.delta_secs();
     tanks.par_iter_mut().for_each(
-        |(entity, body, command, drive, (mut signal, mut transmission), last, (tank, caps))| {
+        |(entity, body, command, drive, (signal, transmission, mut step), last, (tank, caps))| {
             if *body != RigidBody::Dynamic {
                 return;
             }
@@ -1155,19 +1160,18 @@ fn wake_driven_tanks(
                 let loads = last
                     .loads
                     .expect("a tank rests only after driving passes found it at rest");
-                let (mut held_signal, mut state) = (*signal, transmission.0);
+                let (mut signal, mut state) = (*signal, transmission.0);
                 let tr = drivetrain_tick(
                     gear,
                     drive_target(command, tank, caps, &volumes),
-                    &mut held_signal,
+                    &mut signal,
                     &mut state,
                     [0.0; 2],
                     loads,
                     dt,
                 );
                 if tr.held == [true; 2] && !tr.brakes_slide {
-                    signal.set_if_neq(held_signal);
-                    transmission.set_if_neq(TankTransmission(state));
+                    step.0 = Some((signal, state));
                     return;
                 }
             }
@@ -1178,17 +1182,48 @@ fn wake_driven_tanks(
     );
 }
 
-/// A pass that did not find its tank at rest restarts the tank's rest timer, which Avian's island
-/// sleep reads after this update (`update_sleeping_states`, `dynamics/solver/islands/
-/// sleeping.rs`): the tank and its island rest only once a whole rest time of passes found it at
-/// rest. Avian's `Forces` item holds the timer through the pass and writes it only for a force.
-fn hold_unsettled_awake(mut tanks: Query<(&RigidBody, &LastPass, &mut SleepTimer), NotResting>) {
-    tanks.par_iter_mut().for_each(|(body, last, mut timer)| {
-        // Replicas have no driving pass.
-        if *body == RigidBody::Dynamic && !last.at_rest {
-            timer.0 = 0.0;
-        }
-    });
+/// Each tank's rest once the tick's driving passes have run. A tank still resting commits the
+/// step [`wake_driven_tanks`] staged for it. A tank woken since, by its own step or by any wake
+/// of its island, drops its staged step and has run its full pass from the state the tick began
+/// with, so a drivetrain advances once per tick: the chain's sync point applies each removed
+/// `Sleeping`, whose hook wakes the whole island within that sync point (avian
+/// `wake_on_remove_sleeping` queues `WakeBody`, whose `WakeIslands` removes every member's
+/// `Sleeping`; bevy_ecs 0.19 applies the world commands a command queues before the next one,
+/// `RawCommandQueue::push`). An awake tank whose pass did not find it at rest restarts its rest
+/// timer, which Avian's island sleep reads after this update (`update_sleeping_states`,
+/// `dynamics/solver/islands/sleeping.rs`): the tank and its island rest only once a whole rest
+/// time of passes found it at rest. Avian's `Forces` item holds the timer through the pass and
+/// writes it only for a force.
+fn settle_rest(
+    mut tanks: Query<
+        (
+            &RigidBody,
+            &LastPass,
+            &mut SleepTimer,
+            (&mut RestingStep, &mut DriveSignal, &mut TankTransmission),
+            Has<Sleeping>,
+        ),
+        With<Tank>,
+    >,
+) {
+    tanks.par_iter_mut().for_each(
+        |(body, last, mut timer, (mut step, mut signal, mut transmission), resting)| {
+            // Replicas have no driving pass.
+            if *body != RigidBody::Dynamic {
+                return;
+            }
+            let staged = step.0.take();
+            if resting {
+                let (held_signal, state) = staged.expect(
+                    "a tank resting through the sync point had its trial staged, not its wake",
+                );
+                signal.set_if_neq(held_signal);
+                transmission.set_if_neq(TankTransmission(state));
+            } else if !last.at_rest {
+                timer.0 = 0.0;
+            }
+        },
+    );
 }
 
 fn driving_systems() -> ScheduleConfigs<ScheduleSystem> {
@@ -1196,7 +1231,7 @@ fn driving_systems() -> ScheduleConfigs<ScheduleSystem> {
         wake_driven_tanks,
         gather_drive_supports,
         apply_track_forces,
-        hold_unsettled_awake,
+        settle_rest,
         commit_track_contacts,
     )
         .chain()

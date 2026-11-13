@@ -1460,6 +1460,132 @@ fn a_tank_repaired_at_rest_catches_its_idle_and_its_powered_traverse() {
     }
 }
 
+/// A drivetrain advances exactly once per tick whatever wakes its island: a resting tank's step
+/// commits only if the tank still rests once the tick's wakes have applied, so a tank its island
+/// neighbour's drive demand wakes runs its full pass from the state the tick began with
+/// (`track::sim::settle_rest`). Witness: an in-flight shift's countdown, which every drivetrain
+/// step lowers by one tick (`transmission::advance_shift_window`). Fixture: the scenario's two
+/// tanks parked side by side on flat ground, their hull bounds overlapping 5 mm so a solver
+/// contact joins their islands; the shipped shift time; the 8 s rest watchdog.
+#[test]
+fn a_drivetrain_advances_once_per_tick_whatever_wakes_its_island() {
+    use crate::track::sim::{TankTransmission, TrackGear};
+    use avian3d::dynamics::solver::islands::BodyIslandNode;
+    use avian3d::prelude::{ColliderAabb, RigidBodyColliders, Sleeping};
+
+    let mut app = booted_driving_grid(driving_plane(0.0));
+    start_fixed_clock(&mut app);
+    app.update();
+    let a = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+        .single(app.world())
+        .expect("one controlled tank");
+    let b = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, Without<Controlled>)>()
+        .single(app.world())
+        .expect("the scenario's second tank");
+    let rest_y = app
+        .world()
+        .resource::<crate::track::rig_geom::RigGeom>()
+        .hull_rest_y;
+    drive_load::place(
+        &mut app,
+        a,
+        Vec3::new(100.0, rest_y, 0.0),
+        Quat::IDENTITY,
+        0.0,
+        1,
+    );
+    app.update();
+    let (lo, hi) = app
+        .world()
+        .get::<RigidBodyColliders>(a)
+        .expect("a tank carries its colliders")
+        .iter()
+        .map(|collider| {
+            app.world()
+                .get::<ColliderAabb>(collider)
+                .expect("a collider carries its bounds")
+        })
+        .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), aabb| {
+            (lo.min(aabb.min), hi.max(aabb.max))
+        });
+    drive_load::place(
+        &mut app,
+        b,
+        Vec3::new(100.0 + (hi.x - lo.x) - 0.005, rest_y, 0.0),
+        Quat::IDENTITY,
+        0.0,
+        1,
+    );
+    let resting = |app: &App, tank: Entity| app.world().get::<Sleeping>(tank).is_some();
+    let mut ticks = 0;
+    while !(resting(&app, a) && resting(&app, b)) {
+        assert!(
+            ticks < 8 * FIXED_TICKS_PER_SECOND,
+            "two parked tanks with no demand must come to rest"
+        );
+        drive_tick(&mut app, a, 0.0, 0.0);
+        ticks += 1;
+    }
+    let island = |app: &App, tank: Entity| {
+        app.world()
+            .get::<BodyIslandNode>(tank)
+            .expect("a dynamic tank belongs to an island")
+            .island_id()
+    };
+    assert_eq!(
+        island(&app, a),
+        island(&app, b),
+        "the fixture's hull contact joins the two tanks' islands"
+    );
+
+    let shift = app
+        .world()
+        .resource::<TrackGear>()
+        .trans()
+        .shift_ticks
+        .get();
+    let countdown = |app: &App| {
+        app.world()
+            .get::<TankTransmission>(a)
+            .expect("a tank carries its transmission")
+            .0
+            .shift_ticks
+    };
+    app.world_mut()
+        .get_mut::<TankTransmission>(a)
+        .expect("a tank carries its transmission")
+        .0
+        .shift_ticks = shift;
+    drive_tick(&mut app, a, 0.0, 0.0);
+    assert!(
+        resting(&app, a),
+        "an in-flight shift steps under the resting hull"
+    );
+    assert_eq!(
+        countdown(&app),
+        shift - 1,
+        "a resting tank's drivetrain steps once in its tick"
+    );
+    app.world_mut()
+        .get_mut::<TankCommand>(b)
+        .expect("tank carries a command")
+        .throttle = 1.0;
+    drive_tick(&mut app, a, 0.0, 0.0);
+    assert!(
+        !resting(&app, a),
+        "the neighbour's drive demand wakes their shared island"
+    );
+    assert_eq!(
+        countdown(&app),
+        shift - 2,
+        "a drivetrain its island's wake reached steps once in its tick"
+    );
+}
+
 /// A soft ground that a declared launch gear can out-pull must not strand the vehicle in
 /// first. Fixture: friction 0.4 and rolling resistance 0.12; full pedal for 40 seconds.
 #[test]
