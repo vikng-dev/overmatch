@@ -1545,8 +1545,13 @@ fn pile_ahead(bed: &mut Bed) -> (f32, f32) {
 /// One layer of pieces under each track's ground run, the tank parked on top; returns the
 /// support level (m). Each row is centred on its track's shoe and spans its road wheels.
 fn pile_under(bed: &mut Bed) -> f32 {
+    pile_under_sides(bed, &Side::ALL)
+}
+
+/// [`pile_under`] for the tracks of `sides` alone.
+fn pile_under_sides(bed: &mut Bed, sides: &[Side]) -> f32 {
     let geom = bed.geom();
-    let rows: Vec<(f32, f32, f32)> = Side::ALL
+    let rows: Vec<(f32, f32, f32)> = sides
         .iter()
         .map(|&side| {
             let wheels = geom.road_wheels.get(side);
@@ -2427,6 +2432,90 @@ fn a_resting_tank_wakes_for_a_round_a_moving_body_and_a_falling_piece() {
             bed.tick(0.0, 0.0);
             ticks += 1;
         }
+    }
+}
+
+/// What carries a parked tank in the rest cases: ground alone, pieces under both tracks, and
+/// pieces under one track with ground under the other.
+const CARRIERS: [(&str, &[Side]); 3] = [
+    ("ground", &[]),
+    ("pieces", &Side::ALL),
+    ("pieces and ground", &[Side::Left]),
+];
+
+/// A tank parked with no demand over the pieces of [`pile_under_sides`] for `sides`.
+fn parked_over(sides: &[Side]) -> Bed {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    let level = if sides.is_empty() {
+        0.0
+    } else {
+        pile_under_sides(&mut bed, sides)
+    };
+    bed.place(Vec3::new(0.0, level, 0.0), Quat::IDENTITY);
+    bed.start();
+    bed
+}
+
+/// Rest is the economy of a parked tank whatever carries it: ground through its sampled support,
+/// pieces through its island with them, or both. It comes to rest with every piece it carries and
+/// stays at rest with no input. Fixture: [`CARRIERS`]; the held window is DERIVED as twice Avian's
+/// own sleep duration.
+#[test]
+fn a_parked_tank_rests_with_its_pile_whatever_carries_it() {
+    for (carrier, sides) in CARRIERS {
+        let mut bed = parked_over(sides);
+        until_resting(&mut bed);
+        let window = (2.0 * bed.app.world().resource::<TimeToSleep>().0 / DT).ceil() as usize;
+        for tick in 0..window {
+            assert!(
+                bed.awake_pieces().is_empty(),
+                "a piece under the resting tank on {carrier} is awake at tick {tick}"
+            );
+            bed.tick(0.0, 0.0);
+            assert!(
+                is_asleep(&bed),
+                "the tank resting on {carrier} woke without input at tick {tick}"
+            );
+        }
+    }
+}
+
+/// Drive demand ends a tank's rest within the tick it arrives, whatever carries the tank: that
+/// tick's driving pass runs, and a resting tick's does not. Witness: the pass's terrain sampling
+/// (`Work::BeltTerrainSamples`). Fixture: [`CARRIERS`], full throttle.
+#[test]
+fn drive_demand_wakes_a_resting_tank_within_its_tick() {
+    let sampled = |bed: &Bed| -> f64 {
+        bed.take_work()
+            .into_iter()
+            .filter(|(name, _)| name == "belt_terrain_samples")
+            .map(|(_, count)| count)
+            .sum()
+    };
+    for (carrier, sides) in CARRIERS {
+        let mut bed = parked_over(sides);
+        until_resting(&mut bed);
+        bed.tick(0.0, 0.0);
+        assert!(
+            is_asleep(&bed),
+            "the tank resting on {carrier} woke without input"
+        );
+        bed.take_work();
+        bed.tick(0.0, 0.0);
+        assert_eq!(
+            sampled(&bed),
+            0.0,
+            "the driving pass of a tank resting on {carrier} ran"
+        );
+        bed.tick(1.0, 0.0);
+        assert!(
+            !is_asleep(&bed),
+            "drive demand left the tank resting on {carrier} asleep"
+        );
+        assert!(
+            sampled(&bed) > 0.0,
+            "the driving pass of the tank woken on {carrier} did not run in the waking tick"
+        );
     }
 }
 
