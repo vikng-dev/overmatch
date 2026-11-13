@@ -2099,7 +2099,6 @@ mod tests {
     /// [`sound_vehicle`]'s road-wheel stations, one per side.
     const STATIONS: [(&str, &str); 2] = [("Station_L", "Left"), ("Station_R", "Right")];
 
-    /// [`sound_vehicle`]'s nodes and one more.
     fn sound_vehicle_with(extra: Node) -> Vec<Node> {
         let (mut nodes, _) = sound_vehicle();
         nodes.push(extra);

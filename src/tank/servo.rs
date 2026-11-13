@@ -317,14 +317,12 @@ pub(crate) fn selected<S>(remote: Option<S>, authority: Option<S>) -> S {
     }
 }
 
-/// `slot`'s state in its root's one integrator.
 fn slot_state(states: &[ServoState], slot: usize) -> &ServoState {
     states
         .get(slot)
         .expect("every registered servo slot belongs to its selected mechanism state")
 }
 
-/// `slot`'s state in `root`'s one integrator, through the integrator queries.
 fn registered_state<'a>(
     root: Entity,
     slot: usize,
@@ -1117,7 +1115,7 @@ mod tests {
 
     /// Invariant: a `Limited` servo's `current` stays inside `travel_limits()` on every tick, for any
     /// start inside the window and any target, including one beyond either limit and one sweeping
-    /// at full slew. The declared mechanical travel is the servo controller's invariant.
+    /// at full slew.
     #[test]
     fn a_limited_servo_never_leaves_its_window() {
         let mut world = sim_world();
