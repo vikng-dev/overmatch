@@ -5,12 +5,10 @@ use lightyear::connection::shared::DeniedReason;
 
 const BATTLE_CLOSED: &str = "overmatch:battle_late_join_closed";
 
-/// The denial a Battle closed to late joins answers with.
 pub(super) fn battle_closed() -> DeniedReason {
     DeniedReason::Custom(BATTLE_CLOSED.into())
 }
 
-/// Whether `reason` is [`battle_closed`]'s.
 pub(super) fn is_battle_closed(reason: &DeniedReason) -> bool {
     matches!(reason, DeniedReason::Custom(code) if code == BATTLE_CLOSED)
 }
