@@ -93,8 +93,14 @@ pub enum ForceSystems {
 }
 
 /// Applies [`ConstantForce`] to the accumulated forces.
+///
+/// OVERMATCH PATCH: only bodies with a [`SolverBody`], as with every world-frame velocity
+/// increment (`integrator::pre_process_velocity_increments`).
 fn apply_constant_forces(
-    mut bodies: Query<(&mut VelocityIntegrationData, &ComputedMass, &ConstantForce)>,
+    mut bodies: Query<
+        (&mut VelocityIntegrationData, &ComputedMass, &ConstantForce),
+        With<SolverBody>,
+    >,
 ) {
     bodies
         .iter_mut()
@@ -120,8 +126,13 @@ fn apply_constant_torques(
 }
 
 /// Applies [`ConstantLinearAcceleration`] to the linear velocity increments.
+///
+/// OVERMATCH PATCH: only bodies with a [`SolverBody`] (`apply_constant_forces`).
 fn apply_constant_linear_acceleration(
-    mut bodies: Query<(&mut VelocityIntegrationData, &ConstantLinearAcceleration)>,
+    mut bodies: Query<
+        (&mut VelocityIntegrationData, &ConstantLinearAcceleration),
+        With<SolverBody>,
+    >,
 ) {
     bodies
         .iter_mut()
@@ -131,8 +142,13 @@ fn apply_constant_linear_acceleration(
 }
 
 /// Applies [`ConstantAngularAcceleration`] to the angular velocity increments.
+///
+/// OVERMATCH PATCH: only bodies with a [`SolverBody`] (`apply_constant_forces`).
 fn apply_constant_angular_acceleration(
-    mut bodies: Query<(&mut VelocityIntegrationData, &ConstantAngularAcceleration)>,
+    mut bodies: Query<
+        (&mut VelocityIntegrationData, &ConstantAngularAcceleration),
+        With<SolverBody>,
+    >,
 ) {
     bodies
         .iter_mut()
