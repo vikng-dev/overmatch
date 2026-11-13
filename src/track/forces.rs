@@ -283,6 +283,13 @@ pub(crate) fn material_link(station: usize, wraps: i64, count: usize) -> usize {
     (station as i128 - i128::from(wraps)).rem_euclid(count as i128) as usize
 }
 
+/// Resolution: a terrain probe's base reach behind its rest face (m), shared by the sim's support
+/// probes, their envelope calibration and their rubble candidate bound, and the view's conform and
+/// wheel-lift probes. A face pressed deeper than this plus its travel starts its ray buried and
+/// reads no contact, so the reach sits well past any press the support law carries; a longer ray
+/// costs its length, never another ray.
+pub const PROBE_REACH: f32 = 0.5;
+
 /// The force model's parameters: vehicle data (spec-authored) + the per-metre support law.
 /// Nothing here is solver-quality policy — quality lives in the station/column geometry the
 /// caller selects (force resolution sets station density).
@@ -309,6 +316,7 @@ pub struct ForceParams {
     /// The law extends each probe's reach by its own local free travel, so callers pass the
     /// plain base (no `+ free_travel`) — the ray origin must sit at `face − base` for every
     /// station or zero-travel return-run origins start too deep (buried-origin saturation).
+    /// Every rig passes [`PROBE_REACH`].
     pub probe_reach: f32,
 
     /// The traction law's inputs. Ground grip or a solid-recipient material pair sets the
@@ -547,6 +555,9 @@ pub struct SideReport {
     /// The gripping patches' grip budget, Σ μ·N_elastic (N): the most traction they can carry
     /// along the belt, which they carry when they all slide along it.
     pub grip_budget: f32,
+    /// Some gripping patch carried less than its whole budget: it holds, with grip to spare. A
+    /// side whose every gripping patch slides holds nothing more.
+    pub grip_reserve: bool,
     /// Material-station depth probes; surface quadrature casts are not recorded.
     #[cfg(feature = "bitprobe")]
     pub(crate) bitprobe_contacts: Vec<ContactInputProbe>,
@@ -1282,6 +1293,7 @@ fn update_grip_elements(
         grips[idx] = ContactGrip {
             g: Vec2::new(g.dot(c.long_dir), g.dot(c.lat_dir)),
             slope: strain_slope[c.element].transpose() * in_plane / shear_m + pull * d_coef,
+            slides: g_len >= 1.0,
         };
     }
     // Columns the damped support clipped out this tick but whose elastic penetration
@@ -1306,6 +1318,9 @@ fn update_grip_elements(
 struct ContactGrip {
     g: Vec2,
     slope: Vec3,
+    /// Strain and damping together asked for at least the budget, which caps them: the patch
+    /// carries its whole budget, with none to spare, and slides.
+    slides: bool,
 }
 
 /// Emit support then total tangent force per contact, and sum the reaction's slope with moments
@@ -1334,10 +1349,11 @@ fn emit_contact_forces(
             // No velocity-regularized kinetic term is added: its former near-zero slope was
             // MEASURED about 270 kN s/m per side, marginal at the fixed step (ADR-0026).
             let grip_el = c.mu * c.load_elastic;
-            let ContactGrip { g, slope } = grips[idx];
+            let ContactGrip { g, slope, slides } = grips[idx];
             f_long = grip_el * g.x;
             f_lat = grip_el * g.y;
             report.grip_budget += grip_el;
+            report.grip_reserve |= grip_el > 0.0 && !slides;
             elem_sum += Vec2::new(f_long, f_lat);
             traction = c.long_dir * f_long + c.lat_dir * f_lat;
             belt_reaction += f_long;
@@ -1517,7 +1533,7 @@ mod tests {
             support_stiffness_per_m: 2.0e6,
             support_damping_per_m: 1.0e5,
             engage_depth: 0.002,
-            probe_reach: 0.5,
+            probe_reach: PROBE_REACH,
 
             grip: Some(GripParams {
                 track: crate::substances::contact_friction(0.9),
@@ -3301,6 +3317,48 @@ mod tests {
         }
         assert_eq!(results[0], results[1]);
         assert!(results[0].length() > 0.0);
+    }
+
+    /// Exact capacity is no reserve: a patch whose stored shear sits at its shear length, with no
+    /// slip, carries its whole budget with none to spare, so it slides and its side reports no
+    /// [`SideReport::grip_reserve`], which a driving pass needs to find its tank at rest
+    /// (`track::sim::apply_track_forces`). Below its shear length it holds. FIXTURE: one patch at
+    /// the side's weight with a unit shear length along the belt, its stored shear at that length
+    /// and at half of it.
+    #[test]
+    fn a_patch_at_its_whole_budget_has_none_to_spare() {
+        let grip = rig_params().grip.expect("the rig runs grip");
+        let patch = || ColumnContact {
+            p: Vec3::ZERO,
+            normal: Vec3::Y,
+            load: grip.side_weight,
+            load_elastic: grip.side_weight,
+            long_dir: Vec3::Z,
+            lat_dir: Vec3::X,
+            has_plane: true,
+            slip_long: 0.0,
+            slip_lat: 0.0,
+            element: 0,
+            belt_velocity: Vec3::ZERO,
+            collider: None,
+            mu: 0.5,
+            shear_length_m: 1.0,
+            recipient_mobility: 0.0,
+            travel_speed: 0.0,
+            rolling: 0.0,
+            #[cfg(feature = "bitprobe")]
+            probe_index: 0,
+        };
+        let slides = |stored: f32| {
+            let mut elements = GripElements::for_stations(1, 1);
+            elements.strain[0] = Vec3::Z * stored;
+            update_grip_elements(&[patch()], &[], &mut elements, &grip, 1.0 / 64.0, 1)[0].slides
+        };
+        assert!(
+            slides(1.0),
+            "a patch at its whole budget slides, with none to spare"
+        );
+        assert!(!slides(0.5), "a patch below its budget holds");
     }
 }
 

@@ -22,7 +22,7 @@
 use avian3d::dynamics::rigid_body::forces::ForcesItem;
 use avian3d::prelude::{
     ComputedAngularInertia, ComputedCenterOfMass, ComputedMass, Forces, Gravity, Position,
-    ReadRigidBodyForces, RigidBody, Rotation, SleepTimer, WriteRigidBodyForces,
+    ReadRigidBodyForces, RigidBody, Rotation, SleepTimer, Sleeping, WriteRigidBodyForces,
 };
 use bevy::ecs::query::QueryData;
 use bevy::ecs::schedule::ScheduleConfigs;
@@ -45,8 +45,8 @@ use crate::bitprobe::BitprobeCapture;
 
 use super::drive::{DriveAxes, DriveIntent, DriveTarget, shape_drive};
 use super::forces::{
-    BeltContact, ForceParams, GripElements, GripParams, SideInput, SideReport, SideState,
-    contact_side,
+    BeltContact, ForceParams, GripElements, GripParams, PROBE_REACH, SideInput, SideReport,
+    SideState, contact_side,
 };
 use super::oracle::TerrainOracle;
 use super::route::build_route;
@@ -179,16 +179,95 @@ pub(crate) fn apply_explicit_impulse(mut forces: ForcesItem<'_, '_>, impulse: Ve
     forces.apply_linear_impulse_at_point(impulse, point);
 }
 
-/// Last tick's contact telemetry per side — viz/diagnostics ONLY (debug force arrows, the
-/// grounded count, traces). Rewritten every tick, never hashed, never rolled back.
+/// The last driving pass's contact telemetry per side — viz/diagnostics (debug force arrows, the
+/// grounded count, traces). Rewritten by every pass; a resting tank keeps its last pass's, the
+/// support it rests on ([`NotResting`]). Never hashed, never rolled back.
 #[derive(Component, Default)]
 pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
+
+/// The contact inputs of one drivetrain step ([`TransmissionInput`]): each belt's reaction and its
+/// slope against its own speed, and the Driver's reading.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Loads {
+    reactions: [f32; 2],
+    reaction_slopes: [f32; 2],
+    sensed: Option<super::sense::Sensed>,
+}
+
+/// What a tank's last driving pass leaves ([`apply_track_forces`]). Never hashed, never rolled
+/// back.
+#[derive(Component, Default)]
+pub(crate) struct LastPass {
+    /// Its drivetrain step's contact inputs, `None` before its first pass. A resting tank's are
+    /// the ones it came to rest under, which its drivetrain keeps stepping on
+    /// ([`wake_driven_tanks`]).
+    loads: Option<Loads>,
+    /// The pass found the tank at rest ([`apply_track_forces`]); one that did not holds it awake
+    /// ([`settle_rest`]).
+    at_rest: bool,
+    /// The impulses its belts put on dynamic bodies ([`reactions`]) and the colliders it sampled
+    /// as support, sorted and distinct, for the shared commit ([`commit_track_contacts`]).
+    pushes: Vec<super::rubble::Push>,
+    colliders: Vec<Entity>,
+}
+
+/// A resting tank's drivetrain step this tick: its signal and transmission after a trial that
+/// held both belts ([`wake_driven_tanks`]), staged until the tick's wakes have applied
+/// ([`settle_rest`]). Never hashed, never rolled back.
+#[derive(Component, Default)]
+pub(crate) struct RestingStep(Option<(DriveSignal, TransmissionState)>);
+
+/// Each collider some tank's last driving pass sampled as support, with the tanks it carries.
+/// Kept at the contact commit, so a resting tank keeps the entries of the pass it rested under; a
+/// collider that goes, is disabled or moves finds the resting tanks it carries here
+/// (`crate::debris`), and a tank that goes leaves it.
+#[derive(Resource, Default)]
+pub(crate) struct SampledSupports {
+    tanks: bevy::ecs::entity::EntityHashMap<Vec<Entity>>,
+    colliders: bevy::ecs::entity::EntityHashMap<Vec<Entity>>,
+}
+
+impl SampledSupports {
+    /// The tanks whose last pass sampled `collider`.
+    pub(crate) fn carried_by(&self, collider: Entity) -> &[Entity] {
+        self.tanks.get(&collider).map_or(&[], Vec::as_slice)
+    }
+
+    /// `tank`'s last pass sampled `colliders`, sorted and distinct.
+    fn record(&mut self, tank: Entity, colliders: &[Entity]) {
+        if self.colliders.get(&tank).map(Vec::as_slice) == Some(colliders) {
+            return;
+        }
+        self.forget(tank);
+        for &collider in colliders {
+            self.tanks.entry(collider).or_default().push(tank);
+        }
+        self.colliders.insert(tank, colliders.to_vec());
+    }
+
+    fn forget(&mut self, tank: Entity) {
+        for collider in self.colliders.remove(&tank).into_iter().flatten() {
+            let carried = self
+                .tanks
+                .get_mut(&collider)
+                .expect("every recorded collider indexes the tanks that sampled it");
+            carried.retain(|&other| other != tank);
+            if carried.is_empty() {
+                self.tanks.remove(&collider);
+            }
+        }
+    }
+}
+
+fn forget_sampled_supports(gone: On<Remove, TrackContacts>, mut index: ResMut<SampledSupports>) {
+    index.forget(gone.entity);
+}
 
 /// Simulation per-element shear and loss dwell, one field per side. Constructed at spawn
 /// at the force station/lateral resolution; `contact_side` preserves that membership so a
 /// runtime rebuild cannot silently erase accumulated strain. Clients render the server stream.
 #[derive(Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[require(TrackGripEffect)]
+#[require(TrackGripEffect, LastPass, RestingStep)]
 pub struct TrackGripElements {
     pub sides: [GripElements; 2],
 }
@@ -452,7 +531,9 @@ impl TrackGear {
 
 pub fn sim_plugin(app: &mut App) {
     app.add_plugins((super::world_contact::plugin, super::belt_segment::plugin));
-    app.init_resource::<DriveSupports>();
+    app.init_resource::<DriveSupports>()
+        .init_resource::<SampledSupports>()
+        .add_observer(forget_sampled_supports);
     app.insert_resource(super::transmission::DriverResolution::load());
     // Lazy one-shot: the blueprint lands at Startup (bake); the gear builds on the first
     // frame after and never again.
@@ -464,10 +545,7 @@ pub fn sim_plugin(app: &mut App) {
     app.add_systems(
         FixedUpdate,
         // RPM reads the completed crank; contact commits need not delay its projection.
-        (
-            driving_systems(),
-            publish_engine_rpm.after(apply_track_forces),
-        )
+        (driving_systems(), publish_engine_rpm.after(settle_rest))
             .in_set(SimPhase::DrivingForces)
             .in_set(GameplaySet),
     );
@@ -553,7 +631,7 @@ impl TrackGear {
             resolution.stations,
             geom.model.pin_to_outer,
             spec.suspension.engage,
-            0.5,
+            PROBE_REACH,
             blueprint.spec.mass * super::derive::G,
             droop.effective,
             sus.ride_frequency,
@@ -609,8 +687,13 @@ impl TrackGear {
             .flatten()
             .map(|(_, t)| *t)
             .fold(0.0_f32, f32::max);
-        let rubble_radius =
-            footprint_radius(pin_radius, column, geom.model.pin_to_outer, travel, 0.5);
+        let rubble_radius = footprint_radius(
+            pin_radius,
+            column,
+            geom.model.pin_to_outer,
+            travel,
+            PROBE_REACH,
+        );
         let inertia = spec
             .reflected_inertia(&blueprint.spec.roadwheels, geom.wrap_radii())
             .expect("running-gear admission certified the construction inertia");
@@ -644,7 +727,7 @@ impl TrackGear {
                 support_stiffness_per_m: cal.stiffness_per_m,
                 support_damping_per_m: cal.damping_per_m,
                 engage_depth: spec.suspension.engage,
-                probe_reach: 0.5,
+                probe_reach: PROBE_REACH,
 
                 grip: Some(grip),
             },
@@ -766,9 +849,59 @@ pub(crate) struct BeltRig<'a> {
 /// [`apply_track_forces`] (the ECS adapter) runs exactly this function, so every caller gets the
 /// sim's own arithmetic, never a copy of it.
 ///
+/// The drivetrain's tick under `target`, its belts at `speeds` (m/s) meeting `loads`: the
+/// Driver's command slews `signal` ([`shape_drive`]) and the joint transmission steps `state`.
+fn drivetrain_tick(
+    gear: &TrackGear,
+    target: DriveTarget,
+    signal: &mut DriveSignal,
+    state: &mut TransmissionState,
+    speeds: [f32; 2],
+    loads: Loads,
+    dt: f32,
+) -> TransmissionReport {
+    let DriveTarget { intent, supply } = target;
+    let axes = match intent {
+        DriveIntent::Axes(axes) if supply.control_authority => axes,
+        DriveIntent::Axes(_) => {
+            *signal = DriveSignal::default();
+            DriveAxes::default()
+        }
+        DriveIntent::Brake => DriveAxes::default(),
+    };
+    let shaped = shape_drive(
+        DriveAxes {
+            throttle: signal.throttle,
+            steer: signal.steer,
+        },
+        axes,
+        dt,
+    );
+    signal.throttle = shaped.throttle;
+    signal.steer = shaped.steer;
+    transmission::step(
+        &gear.construction,
+        &gear.trans,
+        state,
+        &TransmissionInput {
+            intent,
+            throttle: signal.throttle,
+            steer: signal.steer,
+            side_commands: shaped.side_commands(),
+            speeds,
+            reactions: loads.reactions,
+            reaction_slopes: loads.reaction_slopes,
+            sensed: loads.sensed,
+            dt,
+            supply,
+        },
+    )
+}
+
 /// Returns the per-side reports (force applications in emission order — the caller applies or
-/// integrates them, left then right, verbatim) and the transmission report. Belt state
-/// (`drive.sides`, `grip.sides`) is committed in here; forces/telemetry stay with the caller.
+/// integrates them, left then right, verbatim), the transmission report and the loads it stepped
+/// on. Belt state (`drive.sides`, `grip.sides`) is committed in here; forces/telemetry stay with
+/// the caller.
 #[expect(
     clippy::too_many_arguments,
     reason = "the complete per-tank driving tick"
@@ -782,28 +915,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     dt: f32,
     hull: HullBody,
     rig: BeltRig<'_>,
-) -> ([SideReport; 2], TransmissionReport) {
-    let DriveTarget { intent, supply } = target;
-    let target = match intent {
-        DriveIntent::Axes(axes) if supply.control_authority => axes,
-        DriveIntent::Axes(_) => {
-            *rig.signal = DriveSignal::default();
-            DriveAxes::default()
-        }
-        DriveIntent::Brake => DriveAxes::default(),
-    };
-    let shaped = shape_drive(
-        DriveAxes {
-            throttle: rig.signal.throttle,
-            steer: rig.signal.steer,
-        },
-        target,
-        dt,
-    );
-    rig.signal.throttle = shaped.throttle;
-    rig.signal.steer = shaped.steer;
-    let side_commands = shaped.side_commands();
-
+) -> ([SideReport; 2], TransmissionReport, Loads) {
     // Transmission-design §2 scheduling: evaluate BOTH contact patches at their pre-tick belt
     // speeds, solve the joint transmission once, integrate both speeds, advect both phases.
     // Within a tick force application never feeds back into `vel_at`, so contact evaluation
@@ -852,22 +964,19 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     );
     let (reactions, reaction_slopes) =
         belt_reactions(&reports, &hull, affine.translation.into(), dt);
-    let tr = transmission::step(
-        &gear.construction,
-        &gear.trans,
+    let loads = Loads {
+        reactions,
+        reaction_slopes,
+        sensed,
+    };
+    let tr = drivetrain_tick(
+        gear,
+        target,
+        rig.signal,
         rig.transmission,
-        &TransmissionInput {
-            intent,
-            throttle: rig.signal.throttle,
-            steer: rig.signal.steer,
-            side_commands,
-            speeds: [rig.drive.sides[0].speed, rig.drive.sides[1].speed],
-            reactions,
-            reaction_slopes,
-            sensed,
-            dt,
-            supply,
-        },
+        [rig.drive.sides[0].speed, rig.drive.sides[1].speed],
+        loads,
+        dt,
     );
     rig.sense.drove(&tr);
     for (si, report) in reports.iter().enumerate() {
@@ -885,7 +994,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
         };
         rig.grip.sides[si] = [report.state.grip.x, report.state.grip.y];
     }
-    (reports, tr)
+    (reports, tr, loads)
 }
 
 /// The game's damage model: a phase hold imposes service brakes independently of staffing.
@@ -964,6 +1073,7 @@ struct DriveTank {
     transmission: &'static mut TankTransmission,
     sense: &'static mut super::sense::DriverSense,
     contacts: &'static mut TrackContacts,
+    last: &'static mut LastPass,
     forces: Option<Forces>,
     volumes: Option<&'static TankVolumes>,
     capabilities: Option<&'static TankCapabilities>,
@@ -979,29 +1089,138 @@ struct DriveSupports {
     hard_dt: f32,
 }
 
+/// The tanks whose driving pass runs this tick: every tank but a resting one. A resting tank is
+/// one Avian's island sleep holds still, with whatever carries it: terrain and construction
+/// through the sampled support, loose pieces through its island. Every pass over its last rest
+/// time found it at rest ([`apply_track_forces`]), so its hull and every contact are as its last
+/// pass found them: its [`TrackContacts`] keep that support, fixed construction keeps that pass's
+/// reaction (`crate::contact_transfer`, IMPLICIT CONTACTS), and its drivetrain steps on that
+/// pass's loads ([`wake_driven_tanks`]). It rests until something wakes it: drive demand, a
+/// drivetrain step that no longer holds both belts, a support that goes, is disabled, turns sensor
+/// or changes (`crate::debris`'s wakes), or a contact or impulse from a moving body (Avian's island
+/// wake).
+type NotResting = (With<Tank>, Without<Sleeping>);
+
+/// The Driver asks the drive for something, a pedal or a steer off zero, or a belt still coasts at
+/// the transmission's own parked speed or more. Driven belts answer through their contacts, which
+/// a resting tank's last pass no longer reads: under a pedal the lever holds a belt only against
+/// rollback, so whether it holds turns on the sign of a reaction that jitters about zero at rest.
+/// MEASURED once from rest under full throttle, with the trial stepping on the last pass's loads
+/// (a probe on `track_scorecard`'s ground and pieces-on-ground carriers, not kept): an awake
+/// twin's belts crept from the first tick and launched 9 ticks before the trial released them.
+fn demand(command: &ParsedTankCommand, drive: &TrackDrive) -> bool {
+    command.throttle != 0.0
+        || command.steer != 0.0
+        || drive
+            .sides
+            .iter()
+            .any(|side| side.speed.abs() >= super::transmission::PARK_ENGAGE_SPEED)
+}
+
 /// Snapshot -> owner-local calculation -> cross-owner effects, all in this fixed update.
-/// The driver's demand ends a tank's sleep. A tank wholly on loose pieces has no sampled force to
-/// reset its timer, and its island's contacts do not exist while it sleeps, so neither throttle
-/// nor belt speed could reach the hull. A parked tank with no demand keeps its timer and sleeps
-/// with its pile; hull speed alone is no test, since a held command under the sleep speed still
-/// drives. A belt counts as stopped at the transmission's own parked speed, so a residual never
-/// holds a parked tank awake forever.
+/// Drive demand ([`demand`]) wakes a resting tank before this tick's driving pass. Without it,
+/// the resting tank's drivetrain steps while its hull rests: the transmission steps on its last
+/// pass's loads with the belts at rest, as Avian holds them. A step that holds both belts and
+/// slides no brake leaves them at rest, and so every contact, and is staged as that tick's whole
+/// pass ([`RestingStep`]): a repaired engine spools up under a resting hull. Any other step is
+/// discarded and the tank wakes. The Driver's ledger reads the hull, which gives it nothing while
+/// it rests. Removing `Sleeping` is Avian's own wake of the island (`wake_on_remove_sleeping`,
+/// which zeroes the timer); the chain's sync point applies it before [`gather_drive_supports`].
 fn wake_driven_tanks(
-    mut tanks: Query<(&RigidBody, &ParsedTankCommand, &TrackDrive, &mut SleepTimer)>,
+    time: Res<Time>,
+    gear: Option<Res<TrackGear>>,
+    mut tanks: Query<
+        (
+            Entity,
+            &RigidBody,
+            &ParsedTankCommand,
+            &TrackDrive,
+            (&DriveSignal, &TankTransmission, &mut RestingStep),
+            &LastPass,
+            (Option<&TankVolumes>, Option<&TankCapabilities>),
+        ),
+        (With<Tank>, With<Sleeping>),
+    >,
+    volumes: Query<VolumeFacets>,
+    commands: ParallelCommands,
 ) {
-    tanks
-        .par_iter_mut()
-        .for_each(|(body, command, drive, mut timer)| {
-            let demand = command.throttle != 0.0
-                || command.steer != 0.0
-                || drive
-                    .sides
-                    .iter()
-                    .any(|side| side.speed.abs() >= super::transmission::PARK_ENGAGE_SPEED);
-            if *body == RigidBody::Dynamic && demand && timer.0 != 0.0 {
-                timer.0 = 0.0; // Writing the timer is Avian's own wake (`wake_on_changed`).
+    let dt = time.delta_secs();
+    tanks.par_iter_mut().for_each(
+        |(entity, body, command, drive, (signal, transmission, mut step), last, (tank, caps))| {
+            if *body != RigidBody::Dynamic {
+                return;
             }
-        });
+            if !demand(command, drive) {
+                let gear = gear
+                    .as_deref()
+                    .expect("a dynamic tank is admitted only after startup constructs TrackGear");
+                let loads = last
+                    .loads
+                    .expect("a tank rests only after driving passes found it at rest");
+                let (mut signal, mut state) = (*signal, transmission.0);
+                let tr = drivetrain_tick(
+                    gear,
+                    drive_target(command, tank, caps, &volumes),
+                    &mut signal,
+                    &mut state,
+                    [0.0; 2],
+                    loads,
+                    dt,
+                );
+                if tr.held == [true; 2] && !tr.brakes_slide {
+                    step.0 = Some((signal, state));
+                    return;
+                }
+            }
+            commands.command_scope(|mut commands| {
+                commands.entity(entity).remove::<Sleeping>();
+            });
+        },
+    );
+}
+
+/// Each tank's rest once the tick's driving passes have run. A tank still resting commits the
+/// step [`wake_driven_tanks`] staged for it. A tank woken since, by its own step or by any wake
+/// of its island, drops its staged step and has run its full pass from the state the tick began
+/// with, so a drivetrain advances once per tick: the chain's sync point applies each removed
+/// `Sleeping`, whose hook wakes the whole island within that sync point (avian
+/// `wake_on_remove_sleeping` queues `WakeBody`, whose `WakeIslands` removes every member's
+/// `Sleeping`; bevy_ecs 0.19 applies the world commands a command queues before the next one,
+/// `RawCommandQueue::push`). An awake tank whose pass did not find it at rest restarts its rest
+/// timer, which Avian's island sleep reads after this update (`update_sleeping_states`,
+/// `dynamics/solver/islands/sleeping.rs`): the tank and its island rest only once a whole rest
+/// time of passes found it at rest. Avian's `Forces` item holds the timer through the pass and
+/// writes it only for a force.
+fn settle_rest(
+    mut tanks: Query<
+        (
+            &RigidBody,
+            &LastPass,
+            &mut SleepTimer,
+            (&mut RestingStep, &mut DriveSignal, &mut TankTransmission),
+            Has<Sleeping>,
+        ),
+        With<Tank>,
+    >,
+) {
+    tanks.par_iter_mut().for_each(
+        |(body, last, mut timer, (mut step, mut signal, mut transmission), resting)| {
+            // Replicas have no driving pass.
+            if *body != RigidBody::Dynamic {
+                return;
+            }
+            let staged = step.0.take();
+            if resting {
+                let (held_signal, state) = staged.expect(
+                    "a tank resting through the sync point had its trial staged, not its wake",
+                );
+                signal.set_if_neq(held_signal);
+                transmission.set_if_neq(TankTransmission(state));
+            } else if !last.at_rest {
+                timer.0 = 0.0;
+            }
+        },
+    );
 }
 
 fn driving_systems() -> ScheduleConfigs<ScheduleSystem> {
@@ -1009,6 +1228,7 @@ fn driving_systems() -> ScheduleConfigs<ScheduleSystem> {
         wake_driven_tanks,
         gather_drive_supports,
         apply_track_forces,
+        settle_rest,
         commit_track_contacts,
     )
         .chain()
@@ -1024,7 +1244,7 @@ fn gather_drive_supports(
     gear: Option<Res<TrackGear>>,
     rubble: RubbleQuery,
     bodies: Query<PieceReadData>,
-    tanks: Query<(Entity, Option<&Position>, &RigidBody), With<Tank>>,
+    tanks: Query<(Entity, Option<&Position>, &RigidBody), NotResting>,
     mut supports: ResMut<DriveSupports>,
     transfers: Res<crate::contact_transfer::ContactTransfers>,
     faces: Query<(
@@ -1086,7 +1306,7 @@ fn apply_track_forces(
         &super::stop_contacts::BeltFace,
         &avian3d::prelude::ColliderOf,
     )>,
-    mut tanks: Query<DriveTank, With<Tank>>,
+    mut tanks: Query<DriveTank, NotResting>,
 ) {
     #[cfg(feature = "bitprobe")]
     if let Some(capture) = bitprobe.as_deref_mut() {
@@ -1158,11 +1378,10 @@ fn apply_track_forces(
             not(feature = "bitprobe"),
             expect(
                 unused_mut,
-                unused_variables,
-                reason = "only bitprobe consumes the transmission trace"
+                reason = "only bitprobe takes its probes out of the reports"
             )
         )]
-        let (mut reports, tr) = belt_tick(
+        let (mut reports, tr, loads) = belt_tick(
             gear,
             oracle,
             &pieces,
@@ -1207,6 +1426,26 @@ fn apply_track_forces(
                 })
                 .expect("a parallel query visits its selected capture source exactly once");
         }
+        // Avian's rest test reads motion alone. The pass finds the tank at rest only without
+        // drive demand, with both belts held, which lands them at rest, no brake or every
+        // gripping patch sliding, and every sampled support fixed: nothing tells a tank that a
+        // moving support moved.
+        let grips = reports.iter().any(|report| report.grip_budget > 0.0);
+        let grip_slides = grips && !reports.iter().any(|report| report.grip_reserve);
+        let contacts = || reports.iter().flat_map(|report| &report.contacts);
+        let last = &mut *tank.last;
+        last.loads = Some(loads);
+        last.at_rest = !demand(tank.command, &tank.drive)
+            && tr.held == [true; 2]
+            && !tr.brakes_slide
+            && !grip_slides
+            && contacts().all(|contact| contact.collider.is_none_or(|c| pieces.fixed(c)));
+        last.pushes = reactions(&pieces, contacts(), dt);
+        last.colliders.clear();
+        last.colliders
+            .extend(contacts().filter_map(|contact| contact.collider));
+        last.colliders.sort_unstable();
+        last.colliders.dedup();
         let mut effect = TrackGripEffect::default();
         #[cfg(feature = "bitprobe")]
         {
@@ -1221,9 +1460,12 @@ fn apply_track_forces(
                 effect.tangential_torque +=
                     (contact.point - center_of_mass).cross(contact.tangential_force());
             }
-            // Each owner retains left/right and force-emission order.
+            // Each owner retains left/right and force-emission order. The pass's verdict alone
+            // restarts the rest timer, so a force leaves it alone, as a solver contact does.
             for app in &report.apps {
-                forces.apply_force_at_point(app.force, app.point);
+                forces
+                    .non_waking()
+                    .apply_force_at_point(app.force, app.point);
             }
             tank.contacts.0[si] = report.contacts;
         }
@@ -1241,14 +1483,16 @@ fn apply_track_forces(
     }
 }
 
-/// Reactions commit by ascending source entity, then side and contact emission order. Impulses
-/// on a dynamic recipient add, so no order among them matters.
+/// Each source's pass prepared its effects ([`LastPass`]); they commit by ascending source
+/// entity, then side and contact emission order. Impulses on a dynamic recipient add, so no order
+/// among them matters. Each source's sampled colliders replace its entries in
+/// [`SampledSupports`].
 fn commit_track_contacts(
-    time: Res<Time>,
     mut supports: ResMut<DriveSupports>,
-    tanks: Query<&TrackContacts, With<Tank>>,
+    tanks: Query<(&TrackContacts, &LastPass), With<Tank>>,
     mut bodies: Query<PieceData>,
     mut transfers: ResMut<crate::contact_transfer::ContactTransfers>,
+    mut sampled: ResMut<SampledSupports>,
 ) {
     let DriveSupports {
         pieces,
@@ -1256,15 +1500,15 @@ fn commit_track_contacts(
         hard_contacts,
         ..
     } = &mut *supports;
-    let dt = time.delta_secs();
     for &(source, _) in sources.iter() {
-        let contacts = tanks
+        let (contacts, last) = tanks
             .get(source)
             .expect("a gathered source remains alive through its same-tick commit");
         for side in &contacts.0 {
             pieces.record_static_contacts(source, side, &mut transfers);
-            apply_pushes(&reactions(pieces, side, dt), &mut bodies);
         }
+        apply_pushes(&last.pushes, &mut bodies);
+        sampled.record(source, &last.colliders);
     }
     *pieces = RubbleBodies::default();
     sources.clear();
@@ -1311,6 +1555,7 @@ mod tests {
         ))
         .init_asset::<Mesh>()
         .init_resource::<DriveSupports>()
+        .init_resource::<SampledSupports>()
         .add_systems(DriveTest, driving_systems())
         .init_resource::<crate::contact_transfer::ContactTransfers>()
         .insert_resource(Gravity::ZERO)
@@ -2738,7 +2983,7 @@ mod tests {
         let mut final_hi = f32::NEG_INFINITY;
         let (mut resisted, mut contact_load) = (Vec::new(), Vec::new());
         for tick in 0..64 * 60 {
-            let (reports, _) = belt_tick(
+            let (reports, ..) = belt_tick(
                 gear,
                 &field,
                 &pieces,
@@ -2908,7 +3153,7 @@ mod tests {
             let mut late_force = 0.0;
             let mut full_drag_force = 0.0;
             for tick in 0..64 * 60 {
-                let (reports, _) = belt_tick(
+                let (reports, ..) = belt_tick(
                     gear,
                     &field,
                     &pieces,

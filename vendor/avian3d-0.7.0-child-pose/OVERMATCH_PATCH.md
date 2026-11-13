@@ -388,3 +388,21 @@ panics on it.
 Guard: `src/tests/avian_moved_lists.rs` (both lists equal the scanning form after every step of
 a tick of 2,000 rehomes and 1,000 toggles, and of 20,000 generated adds, removals, marks and
 clears with reused ids; a second mark is refused).
+
+## Sleeping bodies' velocity increments (`src/dynamics/integrator/mod.rs`, `src/dynamics/rigid_body/forces/plugin.rs`)
+
+Subject: the game's rigid-body rest, server physics, game state only.
+
+The world-frame velocity increments (gravity, `ConstantForce`, `ConstantLinearAcceleration`,
+`ConstantAngularAcceleration`) are built only for bodies with a `SolverBody`, the set
+`clear_velocity_increments` clears. A sleeping body has no solver body but keeps its
+`VelocityIntegrationData`. As published, every step added gravity to it and scaled it by the
+substep without clearing it, so it held `g·h/(1 − h)` and its first step awake gained an extra
+`N·g·h²/(1 − h)` (DERIVED; `h` the substep length in s, `N` the substeps). MEASURED on the shipped
+tank's wake tick: 22.8 N·s of downward momentum its contact account did not hold, 0.26 % of the
+step's weight impulse. A force applied to a sleeping body through the waking `Forces` call now
+waits in the increment for the body's first step awake, where stock Avian scaled it away.
+The patched force adapters keep upstream's serial loops: the patch changes only their filter.
+
+Guard: `src/tests/avian_island_sleep.rs` (`a_woken_body_takes_only_its_first_steps_gravity`).
+Local upstream draft: `upstream/avian-sleeping-velocity-increments.md`.

@@ -15,6 +15,18 @@
 //! `ContactTransfers`, `TrackContacts`, `TrackDrive` and `TankTransmission`; shares are of the
 //! tank's weight, taken along world up. Every line is an observation.
 //!
+//! `rubble_park_probe` (same command, that name) parks the tank on each heap and, as the control,
+//! on the flat ground beside the standing house, and prints one `RUBBLEPARK {json}` line per case:
+//! what Avian's rest test sees on the tank and on every awake piece, and the tick's contact and
+//! belt work counts. Avian zeroes a body's rest timer when a waking force is applied to it, and
+//! adds the step when the step finds the body at rest; an island sleeps once every body in it
+//! has rested `TimeToSleep` (`dynamics/solver/islands/sleeping.rs` in the vendored crate). So a
+//! timer read after the tick tells a force's reset (one step) from motion (zero).
+//!
+//! `rubble_wedge_probe` (same command, that name) parks on the house heap and prints one
+//! `WEDGE {json}` line per piece of the tank's island still failing the rest test, per tick, with
+//! each of its touching contacts and the solver's force through it.
+//!
 //! Fixture: every placement, duration, threshold and bin below is fixture data.
 
 use super::*;
@@ -35,8 +47,8 @@ const STATION_LOADED: f32 = 0.005;
 const UNDER_TANK_M: f32 = 4.0;
 /// Fixture: the house's chunks with a centroid under this height are broken with its supports (m).
 const COLLAPSE_BAND_M: f32 = 1.2;
-/// Fixture: the belt's front stands this far short of the heap's near edge at the start (m).
-const APPROACH_M: f32 = 2.0;
+/// Fixture: the climb cases' approach, belt front to the heap's near edge at the start (m).
+pub(super) const APPROACH_M: f32 = 2.0;
 /// Fixture: the flat world's samples per side, a cell near the shipped grid's.
 const HOUSE_SAMPLES: u32 = 1025;
 
@@ -47,6 +59,15 @@ pub(super) enum Heap {
     /// The house left standing, for the tank to ram.
     Standing,
 }
+
+/// Fixture: the parked cases' rest with no demand (s), and the part of it their reading skips
+/// while the tank and its pieces settle (s).
+const PARK_S: usize = 25;
+const PARK_SETTLE_S: usize = 5;
+/// Fixture: the parked ram's run-up, belt front to the standing house (m). The fixture map's
+/// graybox block at its origin stands 16 m short of the house's near wall, and the whole tank
+/// must start past it.
+const PARK_RUNUP_M: f32 = 5.0;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Mode {
@@ -66,6 +87,8 @@ pub(super) struct Case {
     pub(super) throttle: f32,
     /// The hull's sideways offset from the heap's centre line (m).
     pub(super) offset: f32,
+    /// The belt's front stands this far short of the heap's near edge at the start (m).
+    pub(super) approach_m: f32,
     pub(super) mode: Mode,
 }
 
@@ -581,7 +604,7 @@ pub(super) fn settle(case: &Case) -> (Bed, Site) {
         .map(|&(c, r)| -(c.x - r))
         .fold(f32::NEG_INFINITY, f32::max);
     bed.place(
-        Vec3::new(mid + case.offset, 0.0, near + APPROACH_M + front),
+        Vec3::new(mid + case.offset, 0.0, near + case.approach_m + front),
         Quat::IDENTITY,
     );
     for _ in 0..2 * TICKS {
@@ -889,6 +912,7 @@ fn rubble_climb_probe() {
                     label: format!("{name}-t{throttle}-x{offset}"),
                     throttle,
                     offset,
+                    approach_m: APPROACH_M,
                     mode: Mode::Through,
                 });
                 cases.push(Case {
@@ -896,6 +920,7 @@ fn rubble_climb_probe() {
                     label: format!("{name}-t{throttle}-x{offset}-stopgo"),
                     throttle,
                     offset,
+                    approach_m: APPROACH_M,
                     mode: Mode::StopGo,
                 });
             }
@@ -906,6 +931,7 @@ fn rubble_climb_probe() {
                 label: format!("{name}-t0.3-x{offset}-pause"),
                 throttle: 0.3,
                 offset,
+                approach_m: APPROACH_M,
                 mode: Mode::StallPause,
             });
         }
@@ -918,6 +944,7 @@ fn rubble_climb_probe() {
             label: format!("ram-x{offset:.2}"),
             throttle: 1.0,
             offset,
+            approach_m: APPROACH_M,
             mode: Mode::Through,
         });
     }
@@ -926,5 +953,511 @@ fn rubble_climb_probe() {
             continue;
         }
         run(case, &tag);
+    }
+}
+
+/// One parked tick: the tank's and the awake pieces' rest state, the sampled support and the
+/// tick's contact and belt work.
+struct ParkTick {
+    tank_asleep: bool,
+    /// The tank's rest timer after the tick (s).
+    tank_timer: f32,
+    tank_speed: f32,
+    tank_spin: f32,
+    /// Sampled-support contacts on the terrain field and on solids.
+    field_contacts: usize,
+    solid_contacts: usize,
+    clutch: String,
+    park: bool,
+    belt_reaction: [f32; 2],
+    /// Belt surface speed per side (m/s), which the segments' contact hook gives their faces.
+    belt_speed: [f32; 2],
+    awake: usize,
+    /// Awake pieces in the tank's island, and of those (and of the rest) the ones whose own
+    /// rest timer is short of `TimeToSleep`: Avian's rest test failed on them within it.
+    in_island: usize,
+    island_moving: usize,
+    other_moving: usize,
+    piece_speed_max: f32,
+    /// Each moving piece in the tank's island: the tank colliders it touches, and its speed.
+    moving_touch: Vec<(String, f32)>,
+    touching_pairs: usize,
+    tank_pairs: usize,
+    constraints: usize,
+    work: Vec<(String, f64)>,
+}
+
+fn park_read(bed: &mut Bed) -> ParkTick {
+    use avian3d::dynamics::solver::constraint_graph::ConstraintGraph;
+    use avian3d::dynamics::solver::islands::BodyIslandNode;
+    bed.pieces = live_pieces(bed);
+    let work = bed.take_work();
+    let tank_pairs = bed.solver_contacts().0;
+    let world = bed.app.world();
+    let to_sleep = world.resource::<TimeToSleep>().0;
+    let island = |e: Entity| {
+        world
+            .get::<BodyIslandNode>(e)
+            .expect("a dynamic body belongs to an island")
+            .island_id()
+    };
+    let tank_island = island(bed.tank);
+    // Each piece touching the tank, with the roles of the tank colliders it touches.
+    let mut on_tank = std::collections::BTreeMap::<Entity, Vec<String>>::new();
+    for pair in world.resource::<ContactGraph>().iter_active_touching() {
+        let (piece, tank_collider) = match (pair.body1, pair.body2) {
+            (Some(body), Some(other)) if other == bed.tank => (body, pair.collider2),
+            (Some(tank), Some(body)) if tank == bed.tank => (body, pair.collider1),
+            _ => continue,
+        };
+        on_tank
+            .entry(piece)
+            .or_default()
+            .push(bed.role(tank_collider));
+    }
+    let (mut awake, mut in_island, mut island_moving, mut other_moving) = (0, 0, 0, 0);
+    let mut piece_speed_max = 0.0_f32;
+    let mut moving_touch = Vec::new();
+    for &piece in &bed.pieces {
+        if world.get::<Sleeping>(piece).is_some()
+            || world.get::<crate::debris::freeze::Frozen>(piece).is_some()
+        {
+            continue;
+        }
+        awake += 1;
+        let moving = world
+            .get::<SleepTimer>(piece)
+            .expect("a dynamic piece carries its rest timer")
+            .0
+            < to_sleep;
+        let speed = world
+            .get::<LinearVelocity>(piece)
+            .expect("a dynamic piece has a velocity")
+            .length();
+        piece_speed_max = piece_speed_max.max(speed);
+        if island(piece) == tank_island {
+            in_island += 1;
+            island_moving += usize::from(moving);
+            if moving {
+                // A moving piece in the tank's island that touches no tank collider rests on
+                // other pieces (or the ground) only.
+                let touch = match on_tank.get_mut(&piece) {
+                    None => "pieces only".to_owned(),
+                    Some(roles) => {
+                        roles.sort();
+                        roles.dedup();
+                        roles.join(" + ")
+                    }
+                };
+                moving_touch.push((touch, speed));
+            }
+        } else {
+            other_moving += usize::from(moving);
+        }
+    }
+    let contacts = world
+        .get::<TrackContacts>(bed.tank)
+        .expect("a driving tank reports its belt contacts");
+    let field_contacts = contacts
+        .0
+        .iter()
+        .flatten()
+        .filter(|c| c.collider.is_none())
+        .count();
+    let solid_contacts = contacts.0.iter().flatten().count() - field_contacts;
+    let state = world
+        .get::<crate::track::sim::TankTransmission>(bed.tank)
+        .expect("a tank carries its transmission")
+        .0;
+    let hull = bed.hull();
+    ParkTick {
+        tank_asleep: world.get::<Sleeping>(bed.tank).is_some(),
+        tank_timer: world
+            .get::<SleepTimer>(bed.tank)
+            .expect("a dynamic tank carries its rest timer")
+            .0,
+        tank_speed: hull.velocity.length(),
+        tank_spin: hull.angular.length(),
+        field_contacts,
+        solid_contacts,
+        clutch: format!("{:?}", state.clutch),
+        park: state.park,
+        belt_reaction: world
+            .get::<crate::track::sim::TrackGripEffect>(bed.tank)
+            .expect("a driven tank publishes its belt reaction")
+            .belt_reaction,
+        belt_speed: world
+            .get::<crate::track::sim::TrackDrive>(bed.tank)
+            .expect("a driven tank carries its belt state")
+            .sides
+            .map(|side| side.speed),
+        awake,
+        in_island,
+        island_moving,
+        other_moving,
+        piece_speed_max,
+        moving_touch,
+        touching_pairs: world
+            .resource::<ContactGraph>()
+            .iter_active_touching()
+            .count(),
+        tank_pairs,
+        constraints: world
+            .resource::<ConstraintGraph>()
+            .colors
+            .iter()
+            .map(|color| color.contact_constraints.len())
+            .sum(),
+        work,
+    }
+}
+
+/// The belt work counts the parked summary averages.
+const PARK_WORK: [&str; 12] = [
+    "belt_near_colliders",
+    "belt_candidates",
+    "belt_slab_checks",
+    "belt_slab_aabb_passes",
+    "belt_overlaps",
+    "belt_dynamic_contacts",
+    "belt_dispatches",
+    "belt_partition_faces",
+    "belt_partition_cells",
+    "belt_partition_patches",
+    "belt_terrain_samples",
+    "contact_points",
+];
+
+fn park_summary(ticks: &[ParkTick]) -> Value {
+    let n = ticks.len() as f32;
+    let mean = |key: &dyn Fn(&ParkTick) -> f32| f(ticks.iter().map(key).sum::<f32>() / n);
+    let count = |key: &dyn Fn(&ParkTick) -> bool| ticks.iter().filter(|t| key(t)).count();
+    let step_reset = |t: &ParkTick| t.tank_timer > 0.0 && t.tank_timer < 1.5 * DT;
+    let mut clutch = std::collections::BTreeMap::<&str, usize>::new();
+    for t in ticks {
+        *clutch.entry(t.clutch.as_str()).or_default() += 1;
+    }
+    let flips = |side: usize| {
+        ticks
+            .windows(2)
+            .filter(|w| w[0].belt_reaction[side] * w[1].belt_reaction[side] < 0.0)
+            .count()
+    };
+    let belt_speed = [0, 1].map(|side| {
+        [
+            mean(&|t| t.belt_speed[side].abs()),
+            f(ticks
+                .iter()
+                .map(|t| t.belt_speed[side].abs())
+                .fold(0.0, f32::max)),
+        ]
+    });
+    // `track::sim::wake_driven_tanks` reads a belt this fast as drive demand.
+    let belt_moving = count(&|t| {
+        t.belt_speed
+            .iter()
+            .any(|s| s.abs() >= crate::track::transmission::PARK_ENGAGE_SPEED)
+    });
+    // Per class of tank collider touched: moving pieces per tick, their mean and greatest speed.
+    let mut touch = std::collections::BTreeMap::<&str, (usize, f32, f32)>::new();
+    for (class, speed) in ticks.iter().flat_map(|t| t.moving_touch.iter()) {
+        let entry = touch.entry(class.as_str()).or_default();
+        *entry = (entry.0 + 1, entry.1 + speed, entry.2.max(*speed));
+    }
+    let touch: serde_json::Map<String, Value> = touch
+        .into_iter()
+        .map(|(class, (count, sum, max))| {
+            let per_tick = f(count as f32 / n);
+            let speeds = [f(sum / count as f32), f(max)];
+            (
+                class.to_owned(),
+                json!({ "per_tick": per_tick, "speed_mean_max_m_s": speeds }),
+            )
+        })
+        .collect();
+    let work: serde_json::Map<String, Value> = PARK_WORK
+        .iter()
+        .map(|&name| {
+            let total: f64 = ticks
+                .iter()
+                .flat_map(|t| t.work.iter())
+                .filter(|(k, _)| k == name)
+                .map(|(_, v)| v)
+                .sum();
+            (name.to_owned(), json!(total / f64::from(n)))
+        })
+        .collect();
+    json!({
+        "ticks": ticks.len(),
+        "tank": {
+            "asleep_ticks": count(&|t| t.tank_asleep),
+            "timer_zero_moving_ticks": count(&|t| !t.tank_asleep && t.tank_timer == 0.0),
+            "timer_one_step_force_reset_ticks": count(&|t| !t.tank_asleep && step_reset(t)),
+            "timer_accumulating_ticks": count(&|t| !t.tank_asleep && t.tank_timer >= 1.5 * DT),
+            "speed_mean_m_s": mean(&|t| t.tank_speed),
+            "speed_max_m_s": f(ticks.iter().map(|t| t.tank_speed).fold(0.0, f32::max)),
+            "spin_mean_rad_s": mean(&|t| t.tank_spin),
+            "spin_max_rad_s": f(ticks.iter().map(|t| t.tank_spin).fold(0.0, f32::max)),
+            "sampled_field_contacts": mean(&|t| t.field_contacts as f32),
+            "sampled_solid_contacts": mean(&|t| t.solid_contacts as f32),
+            "ticks_with_field_contact": count(&|t| t.field_contacts > 0),
+            "park_ticks": count(&|t| t.park),
+            "clutch_ticks": clutch,
+            "belt_reaction_sign_flips": [flips(0), flips(1)],
+            "belt_speed_abs_mean_max_m_s": belt_speed,
+            "belt_moving_ticks": belt_moving,
+        },
+        "pieces": {
+            "awake": mean(&|t| t.awake as f32),
+            "awake_in_tank_island": mean(&|t| t.in_island as f32),
+            "in_island_moving": mean(&|t| t.island_moving as f32),
+            "in_island_rested_held_by_island": mean(&|t| (t.in_island - t.island_moving) as f32),
+            "outside_island_moving": mean(&|t| t.other_moving as f32),
+            "speed_max_m_s": f(ticks.iter().map(|t| t.piece_speed_max).fold(0.0, f32::max)),
+            "in_island_moving_by_tank_touch": touch,
+        },
+        "contacts": {
+            "touching_pairs": mean(&|t| t.touching_pairs as f32),
+            "tank_pairs": mean(&|t| t.tank_pairs as f32),
+            "constraints": mean(&|t| t.constraints as f32),
+        },
+        "work_per_tick": work,
+    })
+}
+
+/// The tank on `heap`, driven at full throttle from the given approach in m until its hull origin
+/// passes the heap's middle, then braked to a stop; or on flat ground for `None`. Returns the bed
+/// and the arrival's record.
+fn park_arrival(heap: Option<(Heap, f32)>, label: &str) -> (Bed, Value) {
+    match heap {
+        None => {
+            let mut bed = house_bed();
+            bed.start();
+            (bed, Value::Null)
+        }
+        Some((heap, approach_m)) => {
+            let case = Case {
+                label: label.to_owned(),
+                heap,
+                throttle: 1.0,
+                offset: 0.0,
+                approach_m,
+                mode: Mode::Through,
+            };
+            let (mut bed, site) = settle(&case);
+            let middle = (site.near + site.far) / 2.0;
+            let (mut driven, mut top_speed) = (0, 0.0_f32);
+            while bed.hull().position.z > middle && driven < 15 * TICKS {
+                bed.tick(1.0, 0.0);
+                top_speed = top_speed.max(bed.hull().speed());
+                driven += 1;
+            }
+            let reached = bed.hull().position.z <= middle;
+            // Zero demand parks only a tank released under first gear's idle speed: brake to a
+            // stop first, as `net::harness`'s park recipe does.
+            let mut braked = 0;
+            while bed.hull().velocity.length() >= crate::track::transmission::PARK_ENGAGE_SPEED
+                && braked < 5 * TICKS
+            {
+                bed.tick(-1.0, 0.0);
+                braked += 1;
+            }
+            let arrival = json!({
+                "driven_s": driven as f32 * DT,
+                "braked_s": braked as f32 * DT,
+                "top_speed_m_s": top_speed,
+                "reached_middle": reached,
+                "heap_middle_z": middle,
+            });
+            (bed, arrival)
+        }
+    }
+}
+
+/// One parked case ([`park_arrival`]), parked `PARK_S` with no demand, read after `PARK_SETTLE_S`.
+fn park_case(heap: Option<(Heap, f32)>, label: &str, tag: &str) {
+    let (mut bed, arrival) = park_arrival(heap, label);
+    let begin = bed.hull().position;
+    let mut ticks = Vec::with_capacity(PARK_S * TICKS);
+    for _ in 0..PARK_S * TICKS {
+        bed.tick(0.0, 0.0);
+        ticks.push(park_read(&mut bed));
+    }
+    let end = bed.hull().position;
+    // Per second: awake pieces, those in the tank's island, and ticks the tank slept.
+    let per_second: Vec<Value> = ticks
+        .chunks(TICKS)
+        .map(|s| {
+            let n = s.len() as f32;
+            json!([
+                s.iter().map(|t| t.awake).sum::<usize>() as f32 / n,
+                s.iter().map(|t| t.in_island).sum::<usize>() as f32 / n,
+                s.iter().filter(|t| t.tank_asleep).count(),
+            ])
+        })
+        .collect();
+    let line = json!({
+        "tag": tag,
+        "label": label,
+        "arrival": arrival,
+        "parked_z": begin.z,
+        "park_travel_m": (end - begin).length(),
+        "pieces_live": bed.pieces.len(),
+        "per_second_awake_in_island_asleep": per_second,
+        "window": park_summary(&ticks[PARK_SETTLE_S * TICKS..]),
+    });
+    println!("RUBBLEPARK {line}");
+}
+
+/// Each piece in the tank's island still failing the rest test this tick (awake, its rest timer
+/// under `TimeToSleep`), with its motion and every touching manifold in the hull's frame: the other
+/// collider's role, the normal into the piece, the deepest overlap, the compliant law and conveyor
+/// velocity the contact hook set, and the solver's mean force on the piece over the step. The force
+/// is the collider pair's, repeated on each of its manifolds.
+fn wedge_read(bed: &mut Bed, tick: usize) -> Vec<Value> {
+    use avian3d::dynamics::solver::islands::BodyIslandNode;
+    bed.pieces = live_pieces(bed);
+    let world = bed.app.world();
+    let to_sleep = world.resource::<TimeToSleep>().0;
+    let hull = bed.hull();
+    let local = |v: Vec3| (hull.rotation.inverse() * v).to_array();
+    let island = |e: Entity| world.get::<BodyIslandNode>(e).map(|n| n.island_id());
+    let transfers = world.resource::<crate::contact_transfer::ContactTransfers>();
+    let graph = world.resource::<ContactGraph>();
+    let mut out = Vec::new();
+    for &piece in &bed.pieces {
+        if world.get::<Sleeping>(piece).is_some()
+            || world.get::<crate::debris::freeze::Frozen>(piece).is_some()
+            || island(piece) != island(bed.tank)
+            || world
+                .get::<SleepTimer>(piece)
+                .is_some_and(|t| t.0 >= to_sleep)
+        {
+            continue;
+        }
+        let mut contacts = Vec::new();
+        for collider in world.get::<RigidBodyColliders>(piece).into_iter().flatten() {
+            for pair in graph.contact_pairs_with(collider) {
+                if !pair.is_touching() {
+                    continue;
+                }
+                let first = pair.collider1 == collider;
+                let (other, other_body) = if first {
+                    (pair.collider2, pair.body2)
+                } else {
+                    (pair.collider1, pair.body1)
+                };
+                let role = if other_body == Some(bed.tank) {
+                    bed.role(other)
+                } else if other_body.is_some_and(|b| bed.pieces.contains(&b)) {
+                    "piece".to_owned()
+                } else {
+                    "fixed".to_owned()
+                };
+                let force: Vec3 = transfers
+                    .solver_groups()
+                    .flatten()
+                    .filter_map(|p| {
+                        if p.reference_collider == other && p.other_collider == Some(collider) {
+                            Some(p.impulse)
+                        } else if p.reference_collider == collider
+                            && p.other_collider == Some(other)
+                        {
+                            Some(-p.impulse)
+                        } else {
+                            None
+                        }
+                    })
+                    .sum::<Vec3>()
+                    / transfers.dt();
+                for manifold in &pair.manifolds {
+                    let into = if first {
+                        -manifold.normal
+                    } else {
+                        manifold.normal
+                    };
+                    let pen = manifold
+                        .points
+                        .iter()
+                        .map(|p| p.penetration)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    contacts.push(json!({
+                        "role": role,
+                        "n": local(into),
+                        "pen": pen,
+                        "points": manifold.points.len(),
+                        "k": manifold.compliance.as_ref().map(|c| c.stiffness),
+                        "c": manifold.compliance.as_ref().map(|c| c.damping),
+                        "conveyor": local(manifold.tangent_velocity),
+                        "force": local(force),
+                    }));
+                }
+            }
+        }
+        let velocity = world
+            .get::<LinearVelocity>(piece)
+            .expect("a dynamic piece has a velocity")
+            .0;
+        let spin = world
+            .get::<AngularVelocity>(piece)
+            .expect("a dynamic piece has a spin")
+            .0;
+        let mass = world
+            .get::<ComputedMass>(piece)
+            .expect("a dynamic piece has a mass")
+            .value();
+        let at = world
+            .get::<Position>(piece)
+            .expect("a dynamic piece has a position")
+            .0;
+        out.push(json!({
+            "tick": tick,
+            "piece": piece.to_bits(),
+            "mass": mass,
+            "at": local(at - hull.position),
+            "v": local(velocity),
+            "w": local(spin),
+            "contacts": contacts,
+        }));
+    }
+    out
+}
+
+/// Probe the house heap's wedged pieces: a `WEDGE` line per [`wedge_read`] piece per tick over the
+/// 4 s after `PARK_SETTLE_S`, from the same arrival as the park probe.
+#[test]
+#[ignore = "the wedged-piece probe, run on demand"]
+fn rubble_wedge_probe() {
+    let (mut bed, _) = park_arrival(Some((Heap::House, APPROACH_M)), "house");
+    for _ in 0..PARK_SETTLE_S * TICKS {
+        bed.tick(0.0, 0.0);
+    }
+    for tick in 0..4 * TICKS {
+        bed.tick(0.0, 0.0);
+        let asleep = is_asleep(&bed);
+        for line in wedge_read(&mut bed, tick) {
+            println!("WEDGE {}", json!({"asleep": asleep, "piece": line}));
+        }
+    }
+}
+
+#[test]
+#[ignore = "the rubble park probe, run on demand"]
+fn rubble_park_probe() {
+    let only = std::env::var("RUBBLE_CLIMB_ONLY").ok();
+    let tag = std::env::var("RUBBLE_CLIMB_TAG").unwrap_or_else(|_| "run".to_owned());
+    for (heap, label) in [
+        (None, "flat"),
+        (Some((Heap::Standing, PARK_RUNUP_M)), "rammed"),
+        (Some((Heap::House, APPROACH_M)), "house"),
+        (Some((Heap::Yard, APPROACH_M)), "yard"),
+    ] {
+        if only
+            .as_ref()
+            .is_some_and(|only| !label.contains(only.as_str()))
+        {
+            continue;
+        }
+        park_case(heap, label, &tag);
     }
 }

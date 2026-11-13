@@ -32,11 +32,40 @@ travel, the outer face on the droop envelope. They meet only `Layer::Debris`. Ea
 compliant contact: Avian's stock contact solves its relaxing pass rigidly along the normal, so a
 body cannot rest on it at a load-proportional deflection (DERIVED from
 `ContactNormalPart::solve_impulse`). The vendored patch adds an absolute per-point law set by the
-contact hook (`upstream/avian-compliant-contact.md`). Nothing freezes a loaded piece. A tank wholly
-on pieces has no sampled force, so with no drive demand it sleeps with its pile through Avian's
-island sleep, and any drive demand ends that sleep (`track::sim::wake_driven_tanks`). A tank with
-any spring contact never sleeps: a non-zero sampled force resets the timer, so its pile stays awake
-too.
+contact hook (`upstream/avian-compliant-contact.md`). Nothing freezes a loaded piece.
+
+**Rest.** A tank at rest sleeps with its pile through Avian's island sleep, whatever carries it.
+The sampled support goes through the non-waking force call, so no force resets the rest timer,
+and a sleeping tank runs no belt pass (`track::sim::NotResting`): its contacts keep the last
+pass's points, and a fixed construction under it keeps that pass's reaction in its load reading
+(`contact_transfer`, IMPLICIT CONTACTS). Avian's rest test reads motion only, and a body that
+starts from rest under an acceleration below `SleepThreshold`'s 0.15 m/s over `TimeToSleep`'s
+0.5 s, 0.3 m/s² (DERIVED), would sleep before reaching the threshold. Each pass judges what motion
+cannot show (`track::sim::apply_track_forces`), and one that finds the tank not at rest zeroes
+its timer (`track::sim::settle_rest`): drive demand, a belt its brake does not hold, a brake meeting a
+stop beyond its capacity, every gripping patch at or past its budget, or a sampled support whose
+body is not static. A tank creeping past its grip limit keeps creeping:
+`contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_limits` judges the
+slope limits under production rest, mud at 17.0° against its 15.5° limit among them. A tank
+never rests on a support that can move by itself, another tank's hull among them, an admitted
+limit: Avian links bodies into an island only through solver contacts and joints
+(`dynamics/solver/islands`), the sampled support is neither, so that support's motion would wake
+nothing it carries, and a joint per tank and support, which would carry the link, was rejected
+on cost. The drivetrain is no part of the rest: a sleeping tank's hull and contacts stand still, but
+its transmission steps each tick on its last pass's belt loads with the belts at rest
+(`track::sim::wake_driven_tanks`). A step that holds both belts and slides no brake is staged and
+commits if the tank still rests once the tick's wakes have applied (`track::sim::settle_rest`), so a
+repaired engine spools up under the resting hull; any other step is discarded and wakes the tank,
+whose full pass runs that tick from the same state, as does a tank whose island another body's wake
+reaches: a drivetrain advances once per tick. Drive demand (a pedal, a steer, or a belt
+still coasting) wakes the tank before any trial: under a pedal the lever holds a belt only against
+rollback, a sign test on contact jitter that frozen loads cannot answer, and an awake twin's belts
+crept from the first tick of full throttle (MEASURED once), so its full pass moves it within its
+tick. An emptied engine may wake the tank: its clutch springs in and the crank can slide the
+parked brakes (MEASURED on the repair fixture: the clutch went in and both belts slid). A support that goes, is disabled, turns sensor or changes wakes it as
+it wakes a sleeping piece (`debris`), through the colliders its last pass sampled
+(`track::sim::SampledSupports`). A round's impulse and the tank's own shot wake it through the
+waking impulse; a moving body or a falling piece wakes it through the island wake.
 
 **One law.** `k'` and `c'` per metre of belt are the spring channel's calibration
 (`SegmentLaw`, `ForceParams`), and the envelope comes from the same travel knots, so the segment
@@ -56,6 +85,19 @@ Known differences between the channels, none tuned:
   `suspension.engage`.
 - **Friction on pieces** is Avian's Coulomb at the pair's μ, not a belt element's strain, and no
   rolling resistance acts on a piece.
+- **A side plate over a deflected segment.** A side plate is rigid at the rest geometry, from the
+  stop down to the rest outer face, within its depth of the shoe edge; a segment spans the shoe's
+  width down to the droop envelope. A piece the tank presses past the rest face at a shoe edge is
+  in both: the segment holds it at its deflection, and the plate's lateral contact pushes it out
+  from under the edge through Avian's penetration recovery. MEASURED on the scorecard's house heap
+  (`rubble_wedge_probe`): on each of the five pieces a plate overlapped by 1 cm or more on average
+  (at most 10 cm), the plate did the most net positive work, 0.2 to 5.8 kW per piece, which the
+  segment, the ground and the other pieces took back; the segments' surface speed was zero. On one
+  arrival the pieces settled within 6 s and the island slept; on another (`c609a5df`, the tank
+  parked 0.15 m short of the first) two pieces under the plates and two they touch kept moving
+  through the 4 s window at 0.2 to 0.3 m/s mean, reversing about every second tick. Open, as each
+  moves the channel boundary: a plate that meets a piece only above the belt's deflected outer
+  face, or no plate against `Layer::Debris`.
 
 ## The boundary, one rule
 

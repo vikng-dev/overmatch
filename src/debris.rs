@@ -19,30 +19,37 @@
 //! (`collision/narrow_phase/system_param.rs:247-261`), as does a body or a body's collider of that
 //! island going (`collision/narrow_phase/mod.rs:484,528`). An island sleeps whole: a piece touching
 //! an awake body that is no piece (a driven tank) shares its island and stays awake while it
-//! touches, with every piece that touches it in turn. A tank with any spring contact never sleeps
-//! (DERIVED): a non-zero force call resets the sleep timer
-//! (`dynamics/rigid_body/forces/query_data.rs:345,687`) and the track code applies its sampled
-//! forces every tick (`track::sim::apply_track_forces`). A tank wholly on loose pieces has no
-//! sampled force, and with no drive demand it sleeps with its pile; drive demand ends that sleep
-//! (`track::sim::wake_driven_tanks`).
+//! touches, with every piece that touches it in turn. A tank's sampled support is applied without
+//! the waking force call (`dynamics/rigid_body/forces/query_data.rs:153,797`); its driving pass
+//! alone judges whether it rests (`track::sim::apply_track_forces`), so a parked tank rests with
+//! its pile whatever carries it, and drive demand or a drivetrain step that no longer holds its
+//! belts ends that rest (`track::sim::wake_driven_tanks`).
 //!
 //! THE WAKES AVIAN LACKS. Avian wakes no body when a support with no dynamic body of its own goes,
 //! is disabled or moves (the TODO in `collision/narrow_phase/mod.rs`, `remove_collider`), so a
 //! construction chunk turned to dust under a sleeping piece would leave it hanging. The rule wakes
-//! every sleeping body, a piece or any other (a launched turret), that touches a support as it:
+//! every sleeping body, a piece or any other (a launched turret), that touches a support, and every
+//! resting tank whose sampled support stands on it (no collider pair records a sampled support;
+//! the contact commit indexes it in [`SampledSupports`]), for each way a support can change: it
+//! exists, is enabled, is solid, and has a pose, a shape, layers and a body type. The support:
 //! * goes ([`wake_on_collider_gone`]: `Discard` runs before avian's `Remove` drops the pairs);
-//! * goes with its body ([`wake_on_body_gone`]: a static root despawned with child colliders,
-//!   whose pairs avian's `Remove<RigidBody>` drops before the children's queued despawn);
-//! * is disabled ([`wake_on_collider_disabled`]): avian drops the pairs in an `Add` observer that
-//!   Bevy may run before this one, so the rule reads bounds instead: every sleeping body with a
-//!   collider whose bounds come within avian's contact tolerance of the support's;
-//! * moves ([`wake_on_static_moved`]: a static body's collider re-posed, by its own [`Position`]
-//!   or [`Rotation`] or by its body's), read inside the step before
-//!   the broad phase, while the last step's pairs still stand. It relies on the vendored avian and
-//!   lightyear child-pose writers (`vendor/avian3d-0.7.0-child-pose`,
+//! * goes with its body, or its body changes type ([`wake_on_body_gone`]: a static root despawned
+//!   with child colliders, whose pairs avian's `Remove<RigidBody>` drops before the children's
+//!   queued despawn; a type switch is an insert, which discards the old type);
+//! * is disabled, turns sensor or loses its body to a disable ([`wake_on_collider_disabled`],
+//!   [`wake_on_collider_sensed`], [`wake_on_body_disabled`]): avian may drop the pairs in an `Add`
+//!   observer that Bevy runs before these, so they read bounds instead ([`Unheld`]);
+//! * changes in place ([`wake_on_static_moved`]: a collider of a static body or of none re-posed,
+//!   by its own [`Position`] or [`Rotation`] or by its body's, reshaped or re-layered), read inside
+//!   the step before the broad phase, while the last step's pairs still stand. It relies on the
+//!   vendored avian and lightyear child-pose writers (`vendor/avian3d-0.7.0-child-pose`,
 //!   `vendor/lightyear_avian3d-0.30.1-child-pose`) writing a child collider's pose only when its
-//!   bits change: a writer that rewrote it every step would wake every sleeper touching a
-//!   construction every step.
+//!   bits change, and on avian rescaling a collider only when its scale changes
+//!   (`collision/collider/backend.rs`, `update_collider_scale`): a writer that rewrote either
+//!   every step would wake every sleeper touching a construction every step.
+//!
+//! A moving support needs none of these: a tank's pass never finds it at rest on one, and a body
+//! it carries through a pair shares its island.
 //!
 //! A piece remains simulated until it crosses the admitted play-area floor. The authority retires
 //! it there, logging its speed; construction chunks publish dust and a retirement tick for the
@@ -51,8 +58,9 @@
 //! HOW MANY CONSTRUCTION PIECES (DERIVED from `construction::breakage`): a chunk leaves its construction at most once
 //! and every split partitions its owned chunks, so live construction bodies never exceed the map's
 //! breakable chunks. The construction design owns the retained carriers' bound and the split model.
-//! Awake pieces are the ones in the solver. A sleeping piece's own per-tick cost and an awake pile
-//! held by a tank's island (above) are both unpriced; a frozen piece has no pair with fixed matter.
+//! Awake pieces are the ones in the solver. A sleeping piece's own per-tick cost is unpriced; the
+//! construction design prices a resting tank's pile (`scripts/perf/pile_park.py`). A frozen piece
+//! has no pair with fixed matter.
 
 pub(crate) mod crumble;
 pub(crate) mod decor;
@@ -61,6 +69,8 @@ pub(crate) mod launch;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+
+use crate::track::sim::SampledSupports;
 
 /// Shared environment presentation cursor. A replica waits until its interpolation timeline
 /// is synchronized; an authority or a tank-less view fixture owns an explicit tick cursor.
@@ -94,107 +104,180 @@ impl PresentationClock {
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct DebrisPiece;
 
-/// Wake every sleeping body in a touching pair with `collider` in avian's contact graph: removing
-/// `Sleeping` wakes its island (avian's `wake_on_remove_sleeping` hook).
-fn wake_touching(
-    collider: Entity,
-    contacts: &ContactGraph,
-    sleeping: &Query<(), With<Sleeping>>,
-    commands: &mut Commands,
-) {
-    for edge in contacts.contact_edges_with(collider) {
-        if !edge.is_touching() {
-            continue;
+/// The sleeping bodies a support carries (module doc).
+#[derive(bevy::ecs::system::SystemParam)]
+struct Carried<'w, 's> {
+    contacts: Res<'w, ContactGraph>,
+    sleeping: Query<'w, 's, (), With<Sleeping>>,
+    sampled: Res<'w, SampledSupports>,
+}
+
+impl Carried<'_, '_> {
+    /// Wake every sleeping body `collider` carries. Removing `Sleeping` wakes its island (avian's
+    /// `wake_on_remove_sleeping` hook).
+    fn wake(&self, collider: Entity, commands: &mut Commands) {
+        for edge in self.contacts.contact_edges_with(collider) {
+            if !edge.is_touching() {
+                continue;
+            }
+            for body in [edge.body1, edge.body2].into_iter().flatten() {
+                if self.sleeping.contains(body) {
+                    commands.entity(body).try_remove::<Sleeping>();
+                }
+            }
         }
-        for body in [edge.body1, edge.body2].into_iter().flatten() {
-            if sleeping.contains(body) {
-                commands.entity(body).try_remove::<Sleeping>();
+        self.wake_sampled(collider, commands);
+    }
+
+    /// Wake every resting tank whose last pass's sampled support stands on `collider`; an awake
+    /// one meets the change in its own next pass.
+    fn wake_sampled(&self, collider: Entity, commands: &mut Commands) {
+        for &tank in self.sampled.carried_by(collider) {
+            if self.sleeping.contains(tank) {
+                commands.entity(tank).try_remove::<Sleeping>();
             }
         }
     }
 }
 
-/// A collider about to go: every sleeping body it touches wakes (module doc).
+/// A collider about to go: every sleeping body it carries wakes (module doc).
 fn wake_on_collider_gone(
     gone: On<Discard, ColliderMarker>,
-    contacts: Res<ContactGraph>,
-    sleeping: Query<(), With<Sleeping>>,
+    carried: Carried,
     mut commands: Commands,
 ) {
-    wake_touching(gone.entity, &contacts, &sleeping, &mut commands);
+    carried.wake(gone.entity, &mut commands);
 }
 
-/// A body about to go or change type: every sleeping body touching any of its colliders wakes
-/// (module doc).
+/// A body about to go or change type: every sleeping body any of its colliders carries wakes
+/// (module doc). A body without attached colliders carries nothing.
 fn wake_on_body_gone(
     gone: On<Discard, RigidBody>,
     bodies: Query<&RigidBodyColliders>,
-    contacts: Res<ContactGraph>,
-    sleeping: Query<(), With<Sleeping>>,
+    carried: Carried,
     mut commands: Commands,
 ) {
-    let Ok(colliders) = bodies.get(gone.entity) else {
-        return;
-    };
-    for collider in colliders {
-        wake_touching(collider, &contacts, &sleeping, &mut commands);
+    for collider in bodies.get(gone.entity).into_iter().flatten() {
+        carried.wake(collider, &mut commands);
     }
 }
 
-/// A collider disabled: every sleeping body with a collider whose bounds come within avian's
-/// contact tolerance of its bounds wakes (module doc).
-fn wake_on_collider_disabled(
-    disabled: On<Add, ColliderDisabled>,
-    aabbs: Query<&ColliderAabb>,
-    spatial: SpatialQuery,
-    collider_of: Query<&ColliderOf>,
-    config: Res<NarrowPhaseConfig>,
-    sleeping: Query<(), With<Sleeping>>,
-    mut commands: Commands,
-) {
-    let aabb = aabbs
-        .get(disabled.entity)
-        .expect("`ColliderDisabled` marks a collider, which carries its bounds");
-    let grown = ColliderAabb::from_min_max(
-        aabb.min - Vec3::splat(config.contact_tolerance),
-        aabb.max + Vec3::splat(config.contact_tolerance),
-    );
-    spatial.aabb_intersections_with_aabb_callback(grown, |other| {
-        if let Ok(&ColliderOf { body }) = collider_of.get(other)
-            && sleeping.contains(body)
-        {
-            commands.entity(body).try_remove::<Sleeping>();
-        }
-        true
-    });
+/// The sleeping bodies near a collider that holds nothing up any more, read by bounds (module
+/// doc).
+#[derive(bevy::ecs::system::SystemParam)]
+struct Unheld<'w, 's> {
+    aabbs: Query<'w, 's, &'static ColliderAabb>,
+    spatial: SpatialQuery<'w, 's>,
+    collider_of: Query<'w, 's, &'static ColliderOf>,
+    config: Res<'w, NarrowPhaseConfig>,
+    carried: Carried<'w, 's>,
 }
 
-/// Every collider of a static body re-posed, reshaped or re-layered since the last step: every
-/// sleeping body touching a re-posed one wakes (module doc), and each frozen island depending on
-/// any of them is judged at this step's thaw ([`freeze`]).
-fn wake_on_static_moved(
-    changed: Query<
-        (Entity, &ColliderOf, Ref<Position>, Ref<Rotation>),
-        Or<(
-            Changed<Position>,
-            Changed<Rotation>,
-            Changed<Collider>,
-            Changed<CollisionLayers>,
-        )>,
-    >,
-    bodies: Query<&RigidBody>,
-    contacts: Res<ContactGraph>,
-    sleeping: Query<(), With<Sleeping>>,
-    mut islands: ResMut<freeze::FrozenIslands>,
+impl Unheld<'_, '_> {
+    /// Wake every sleeping body with a collider whose bounds come within avian's contact tolerance
+    /// of `collider`'s, and every resting tank its sampled support carries.
+    fn wake(&self, collider: Entity, commands: &mut Commands) {
+        let aabb = self
+            .aabbs
+            .get(collider)
+            .expect("a support is a collider, which carries its bounds");
+        let grown = ColliderAabb::from_min_max(
+            aabb.min - Vec3::splat(self.config.contact_tolerance),
+            aabb.max + Vec3::splat(self.config.contact_tolerance),
+        );
+        self.spatial
+            .aabb_intersections_with_aabb_callback(grown, |other| {
+                if let Ok(&ColliderOf { body }) = self.collider_of.get(other)
+                    && self.carried.sleeping.contains(body)
+                {
+                    commands.entity(body).try_remove::<Sleeping>();
+                }
+                true
+            });
+        self.carried.wake_sampled(collider, commands);
+    }
+}
+
+/// A collider disabled: what it carried wakes (module doc).
+fn wake_on_collider_disabled(
+    disabled: On<Add, ColliderDisabled>,
+    unheld: Unheld,
     mut commands: Commands,
 ) {
-    for (collider, of, position, rotation) in &changed {
-        if !bodies.get(of.body).is_ok_and(RigidBody::is_static) {
-            continue; // A moving body's colliders move with it.
-        }
-        if position.is_changed() || rotation.is_changed() {
-            wake_touching(collider, &contacts, &sleeping, &mut commands);
-        }
+    unheld.wake(disabled.entity, &mut commands);
+}
+
+/// A collider turned sensor: what it carried wakes (module doc). A `Sensor` marks a collider;
+/// on any other entity avian reads nothing of it.
+fn wake_on_collider_sensed(sensed: On<Add, Sensor>, unheld: Unheld, mut commands: Commands) {
+    if unheld.aabbs.contains(sensed.entity) {
+        unheld.wake(sensed.entity, &mut commands);
+    }
+}
+
+/// A body disabled: what each of its colliders carried wakes (module doc). A body without
+/// attached colliders carries nothing.
+fn wake_on_body_disabled(
+    disabled: On<Add, RigidBodyDisabled>,
+    bodies: Query<&RigidBodyColliders>,
+    unheld: Unheld,
+    mut commands: Commands,
+) {
+    for collider in bodies.get(disabled.entity).into_iter().flatten() {
+        unheld.wake(collider, &mut commands);
+    }
+}
+
+/// Every collider of a static body or of none re-posed, reshaped or re-layered since the last step:
+/// every sleeping body it carries wakes (module doc), and each frozen island depending on any of
+/// them is judged at this step's thaw ([`freeze`]). The changed colliders are judged on the
+/// compute pool; the scan that finds them reads one change tick per collider and stays serial,
+/// since a parallel query spawns its tasks every step whatever it finds (bevy_ecs 0.19
+/// `QueryParIter`): MEASURED on the M4 server with nothing changed, 9 to 13 µs more per tick in the
+/// physics schedule's own systems than this scan (`scripts/perf/pile_park.py`, pile and flat). The
+/// thaw reads the notes as a set, so their order decides nothing.
+fn wake_on_static_moved(
+    changed: Query<
+        (Entity, Option<&ColliderOf>),
+        (
+            With<Collider>,
+            Or<(
+                Changed<Position>,
+                Changed<Rotation>,
+                Changed<Collider>,
+                Changed<CollisionLayers>,
+            )>,
+        ),
+    >,
+    bodies: Query<&RigidBody>,
+    carried: Carried,
+    mut islands: ResMut<freeze::FrozenIslands>,
+    commands: ParallelCommands,
+    mut moved: Local<Vec<Entity>>,
+) {
+    use bevy::tasks::{ComputeTaskPool, ParallelSlice};
+    moved.clear();
+    moved.extend(
+        changed
+            .iter()
+            // A collider with no body is static to the solver, and the belt's sampling reads it as
+            // one (`track::rubble::RubbleQuery`); a moving body's colliders move with it.
+            .filter(|(_, of)| {
+                of.is_none_or(|of| bodies.get(of.body).is_ok_and(RigidBody::is_static))
+            })
+            .map(|(collider, _)| collider),
+    );
+    if moved.is_empty() {
+        return;
+    }
+    moved.par_splat_map(ComputeTaskPool::get(), None, |_, colliders| {
+        commands.command_scope(|mut commands| {
+            for &collider in colliders {
+                carried.wake(collider, &mut commands);
+            }
+        });
+    });
+    for &collider in moved.iter() {
         islands.changed_in_place(collider);
     }
 }
@@ -294,10 +377,14 @@ fn assert_tanks_above_floor(
 /// Mount the rule.
 pub(crate) fn sim_plugin(app: &mut App) {
     freeze::sim_plugin(app);
+    // Without the driving sim no tank samples a support, and the index stays empty.
     app.init_resource::<crate::map::MapManifest>()
+        .init_resource::<SampledSupports>()
         .add_observer(wake_on_collider_gone)
         .add_observer(wake_on_body_gone)
         .add_observer(wake_on_collider_disabled)
+        .add_observer(wake_on_collider_sensed)
+        .add_observer(wake_on_body_disabled)
         .add_systems(
             PhysicsSchedule,
             wake_on_static_moved

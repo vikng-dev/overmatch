@@ -577,7 +577,7 @@ mod tests {
                     support_stiffness_per_m: 2.0e6,
                     support_damping_per_m: 1.0e5,
                     engage_depth: 0.002,
-                    probe_reach: 0.5,
+                    probe_reach: crate::track::forces::PROBE_REACH,
                     grip: Some(GripParams {
                         track,
                         nominal_pressure_kpa: rolling_reference_kpa(),

@@ -3,6 +3,10 @@
 Status: ACCEPTED 2026-11-08 by the owner. Subject: the video game's tank driving physics; game
 state only.
 
+Amended 2026-11-13 by the owner: a tank at rest sleeps whatever carries it. The sentence it
+replaces, that a spring contact keeps a tank and its pile awake, recorded a side effect of the
+waking force call, not a decision.
+
 ## Decision
 
 - **Ground and fixed structure take the sampled support**: spring, damper and per-element grip at
@@ -15,9 +19,20 @@ state only.
 - **Loose pieces take belt segments**: solver slabs along the belt's travel that meet only
   `Layer::Debris`, each carrying the calibrated law as a compliant contact (a local patch to the
   vendored Avian, drafted under `upstream/`). A piece takes its equal and opposite reaction through
-  the solver. A tank wholly on pieces with no drive demand sleeps with its pile through the
-  engine's island sleep; drive demand ends that sleep (`track::sim::wake_driven_tanks`). A tank with
-  any spring contact is kept awake by its sampled force, and its pile with it.
+  the solver.
+- **A tank at rest sleeps whatever carries it**, with its pile, through the engine's island sleep
+  and its rest threshold and time: no sampled force touches the rest timer, and a sleeping tank
+  runs no belt pass. Each pass judges what motion cannot show and restarts the timer when the tank
+  is not at rest however slowly it moves: drive demand, a belt its brake does not hold, a brake or
+  every gripping patch sliding, or a sampled support that can move. The drivetrain is no part of
+  the rest: drive demand wakes a sleeping tank within its tick, and without it the tank's
+  transmission keeps stepping on its last pass's belt loads with the belts at rest; a step that
+  holds both belts and slides no brake commits if the tank still rests once the tick's wakes have
+  applied, so a repaired engine spools up under the resting hull, and any other step wakes the
+  tank (`track::sim::wake_driven_tanks`, `track::sim::settle_rest`). A support that goes, is disabled, turns sensor or changes
+  wakes it as it wakes a sleeping piece (`debris`); a round's impulse and the tank's own shot wake
+  it through the engine's waking impulse (`track::sim::apply_explicit_impulse`), and a moving body
+  or a falling piece through its island wake.
 - **The boundary is the layer a collider was built on.** Nothing asks what a body is or how heavy.
 - **One support law**: `k'` and `c'` per metre of belt and the droop envelope are shared by the
   channels. A shoe is a rigid plate, so a segment takes `k' × length` whatever the width a piece
@@ -45,5 +60,9 @@ covered width. Each is costed in the design doc.
   collider caps the travel; and pieces leave the spring channel.
 - The partial-coverage difference between the sampled support and a segment is a named property,
   not a defect to tune.
+- An admitted limit: a tank on a support that can move by itself, another tank's hull among them,
+  never rests. The engine links bodies into an island only through solver contacts and joints, and
+  the sampled support is neither, so that support's motion would wake nothing it carries; a joint
+  per tank and support would carry the link and was rejected on cost.
 - Sim state stays spawn-built ([[0014-sim-view-split]]): stops and segments are cut from
   construction data with the hull. Everything here is server-simulated ([[0037-one-authoritative-timeline-and-view-overlays]]).

@@ -150,6 +150,40 @@ fn removing_sleeping_restarts_the_woken_bodys_rest_interval() {
     );
 }
 
+/// Server physics relies on a woken body's first step taking that step's gravity alone: a resting
+/// tank's momentum account closes on the tick drive demand wakes it. A mutant that builds the
+/// velocity increments of a sleeping body without clearing them (Avian 0.7 as published) carries a
+/// stale increment into that step. Fixture: a free body held asleep for a second under gravity.
+#[test]
+fn a_woken_body_takes_only_its_first_steps_gravity() {
+    let mut app = physics_app();
+    let gravity = Vec3::NEG_Y * 9.81;
+    app.insert_resource(Gravity(gravity));
+    let free = body(&mut app, Vec3::ZERO);
+    app.update();
+    app.update();
+    app.world_mut().entity_mut(free).insert(Sleeping);
+    for _ in 0..64 {
+        app.update();
+    }
+    assert!(app.world().get::<Sleeping>(free).is_some());
+    let before = app.world().get::<LinearVelocity>(free).unwrap().0;
+    app.world_mut().entity_mut(free).remove::<Sleeping>();
+    app.update();
+    let step = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let gained = app.world().get::<LinearVelocity>(free).unwrap().0 - before;
+    // Resolution: f32 summation over the substeps, far below a substep's stale increment.
+    assert!(
+        (gained - gravity * step).length() <= 1e-4 * (gravity * step).length(),
+        "the first step awake gained {gained}, gravity gives {}",
+        gravity * step
+    );
+}
+
 /// Physics users need corrupt island membership refused rather than a partly woken island.
 /// Missing required body state must not terminate the linked-list walk silently.
 #[test]

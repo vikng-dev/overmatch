@@ -268,7 +268,9 @@ fn read_solver(
 }
 
 /// The migration's instrument must close the tank's linear momentum account. A missed contact,
-/// wrong sign, or twice-counted warm start would misidentify the path carrying the vehicle.
+/// wrong sign, or twice-counted warm start would misidentify the path carrying the vehicle. A
+/// tick the tank rests through (asleep before and after it) is not integrated and has no
+/// account: its momentum must not change.
 /// Fixture: shipped composition, flat world, resting then straight and pivot commands.
 #[test]
 fn contact_account_closes_momentum() {
@@ -276,9 +278,11 @@ fn contact_account_closes_momentum() {
     mount(&mut app, tank);
     let mass = app.world().get::<ComputedMass>(tank).unwrap().value();
     let gravity = app.world().resource::<Gravity>().0;
+    let resting = |app: &App| app.world().get::<Sleeping>(tank).is_some();
     let mut max_error = 0.0_f32;
     for tick in 0..256 {
         let before = app.world().get::<LinearVelocity>(tank).unwrap().0;
+        let rested = resting(&app);
         drive_tick(
             &mut app,
             tank,
@@ -286,6 +290,13 @@ fn contact_account_closes_momentum() {
             if tick < 128 { 0.0 } else { 1.0 },
         );
         let after = app.world().get::<LinearVelocity>(tank).unwrap().0;
+        if rested && resting(&app) {
+            assert_eq!(
+                after, before,
+                "tick {tick}: a resting tank's momentum changed"
+            );
+            continue;
+        }
         let account = app.world().resource::<ContactAccount>();
         let observed = (after - before) * mass;
         let accounted = (account.force() + gravity * mass) * account.dt;

@@ -364,24 +364,28 @@ impl Bed {
 
     /// A static block as the map makes a graybox: centre and full size (m).
     fn spawn_static(&mut self, center: Vec3, size: Vec3) -> Entity {
-        let friction = crate::substances::SubstanceRegistry::shipped_static()
-            .contact_friction(FIXTURE_SUBSTANCE)
-            .expect("the fixture substance states a friction");
-        self.app
-            .world_mut()
-            .spawn((
-                Name::new("track scorecard fixture"),
-                Transform::from_translation(center),
-                RigidBody::Static,
-                Collider::cuboid(size.x, size.y, size.z),
-                CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
-                friction,
-            ))
-            .id()
+        let block = fixed_block(center, size);
+        self.app.world_mut().spawn((block, RigidBody::Static)).id()
+    }
+
+    /// [`Self::spawn_static`]'s block as a collider with no body, which the solver reads as static.
+    fn spawn_bodyless(&mut self, center: Vec3, size: Vec3) -> Entity {
+        self.app.world_mut().spawn(fixed_block(center, size)).id()
     }
 
     /// A dynamic rubble piece of the fixture substance: centre and full size (m).
     fn spawn_piece(&mut self, center: Vec3, size: Vec3) -> Entity {
+        let piece = self.spawn_body(center, size, crate::construction::breakage::piece_layers());
+        self.app
+            .world_mut()
+            .entity_mut(piece)
+            .insert(crate::debris::DebrisPiece);
+        self.pieces.push(piece);
+        piece
+    }
+
+    /// A dynamic box of the fixture substance on `layers`: centre and full size (m).
+    fn spawn_body(&mut self, center: Vec3, size: Vec3, layers: CollisionLayers) -> Entity {
         let registry = crate::substances::SubstanceRegistry::shipped_static();
         let density = registry
             .hard(FIXTURE_SUBSTANCE)
@@ -393,11 +397,9 @@ impl Bed {
             .contact_friction(FIXTURE_SUBSTANCE)
             .expect("the fixture substance states a friction");
         let shape = Cuboid::new(size.x, size.y, size.z);
-        let piece = self
-            .app
+        self.app
             .world_mut()
             .spawn((
-                crate::debris::DebrisPiece,
                 Transform::from_translation(center),
                 Position(center),
                 Rotation::default(),
@@ -410,11 +412,9 @@ impl Bed {
                 CenterOfMass(Vec3::ZERO),
                 NoAutoCenterOfMass,
                 friction,
-                crate::construction::breakage::piece_layers(),
+                layers,
             ))
-            .id();
-        self.pieces.push(piece);
-        piece
+            .id()
     }
 
     /// Every solver contact point of the last physics step, with its mean force on `other` over
@@ -1542,11 +1542,12 @@ fn pile_ahead(bed: &mut Bed) -> (f32, f32) {
     (near, near - 3.0 * (PIECE.z + PIECE_GAP))
 }
 
-/// One layer of pieces under each track's ground run, the tank parked on top; returns the
-/// support level (m). Each row is centred on its track's shoe and spans its road wheels.
-fn pile_under(bed: &mut Bed) -> f32 {
+/// One layer of pieces under the ground run of each track of `sides`, the tank parked on top;
+/// returns the support level (m). Each row is centred on its track's shoe and spans its road
+/// wheels.
+fn pile_under_sides(bed: &mut Bed, sides: &[Side]) -> f32 {
     let geom = bed.geom();
-    let rows: Vec<(f32, f32, f32)> = Side::ALL
+    let rows: Vec<(f32, f32, f32)> = sides
         .iter()
         .map(|&side| {
             let wheels = geom.road_wheels.get(side);
@@ -1688,7 +1689,7 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
     }
 
     let mut bed = Bed::on_ground(Some(ground), flat());
-    let level = pile_under(&mut bed);
+    let level = pile_under_sides(&mut bed, &Side::ALL);
     bed.place(Vec3::new(0.0, level, 0.0), Quat::IDENTITY);
     bed.start();
     let begin_y = bed.hull().position.y - level;
@@ -2116,21 +2117,12 @@ fn assert_coast_and_sleep(bed: &mut Bed) -> usize {
     moving_ticks
 }
 
-/// A tank on a layer of loose pieces under each track: its whole support is solver contacts.
-fn bed_on_pile() -> Bed {
-    let mut bed = Bed::on_ground(Some(base_ground()), flat());
-    let level = pile_under(&mut bed);
-    bed.place(Vec3::new(0.0, level, 0.0), Quat::IDENTITY);
-    bed.start();
-    bed
-}
-
 /// Sleep is the economy of a parked tank and its pile; it must end when the driver asks. The
 /// solver contacts that would carry the drive do not exist while the pair sleeps, so nothing but
 /// the demand itself can wake the island.
 #[test]
 fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
-    let mut bed = bed_on_pile();
+    let mut bed = parked_over(&Side::ALL);
     let mut settled = 0;
     while !is_asleep(&bed) && settled < 8 * TICKS {
         bed.tick(0.0, 0.0);
@@ -2142,15 +2134,21 @@ fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
     );
     println!("MEASURED asleep after {settled} ticks");
     let before = bed.hull().position;
-    // Short enough that the belts stay on the row of pieces: ground under any link would hold the
-    // tank awake through its sampled force.
+    // Fixture: half a second of full throttle, short enough that the belts stay on the row.
     for _ in 0..TICKS / 2 {
         bed.tick(1.0, 0.0);
     }
     assert!(!is_asleep(&bed), "throttle left the tank asleep");
-    let moved = (bed.hull().position - before).length();
-    println!("MEASURED driven {moved} m in 0.5 s");
-    assert!(moved > 0.05, "throttle gave no reaction: {moved} m");
+    let moved = bed.hull().position - before;
+    let ahead = moved.dot(bed.hull().forward());
+    println!(
+        "MEASURED driven {} m in 0.5 s, {ahead} m of it ahead",
+        moved.length()
+    );
+    assert!(
+        ahead > roundoff(before, TICKS / 2),
+        "throttle gave no forward reaction: {ahead} m"
+    );
     assert!(
         assert_coast_and_sleep(&mut bed) > 0,
         "the release must witness belts coasting above the stopped tolerance"
@@ -2176,11 +2174,20 @@ fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
     assert!(!is_asleep(&bed), "an external push left the tank asleep");
     // Avian commits island waking at the end of the step; the next tick integrates the push.
     bed.tick(0.0, 0.0);
+    let along = (bed.hull().position - before).dot(push.normalize());
+    println!("MEASURED pushed {along} m along the push in 2 ticks");
     assert!(
-        (bed.hull().position - before).dot(push) > 0.0,
-        "the externally pushed hull did not move"
+        along > roundoff(before, 2),
+        "the externally pushed hull did not move along the push: {along} m"
     );
     assert_coast_and_sleep(&mut bed);
+}
+
+/// Resolution: the most roundoff alone moves a hull along a direction over `ticks` position
+/// updates. Each update rounds every coordinate by at most an ulp of the largest, at most
+/// `max · ε`, so √3 of those along any unit direction.
+fn roundoff(position: Vec3, ticks: usize) -> f32 {
+    position.abs().max_element() * f32::EPSILON * 3.0_f32.sqrt() * ticks as f32
 }
 
 /// A motionless hull can still have a coasting belt: contact may stop the hull before its
@@ -2188,7 +2195,7 @@ fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
 /// tolerance, no command. Every side and direction must wake; hull motion cannot mask this arm.
 #[test]
 fn a_tank_on_loose_pieces_wakes_for_either_coasting_belt_without_a_command() {
-    let mut bed = bed_on_pile();
+    let mut bed = parked_over(&Side::ALL);
     assert_coast_and_sleep(&mut bed);
     for side in 0..2 {
         for direction in [-1.0, 1.0] {
@@ -2207,10 +2214,13 @@ fn a_tank_on_loose_pieces_wakes_for_either_coasting_belt_without_a_command() {
     }
 }
 
-/// A braked slope within both holding capacities keeps stopped belts. Sampled support is an
-/// applied force, so this channel deliberately keeps the hull awake, unlike a parked pile.
+/// A tank parked on a slope within both holding capacities (the brakes' and the ground's grip)
+/// rests where it stopped. Its sampled support carries it without waking it, so Avian's rest test
+/// alone decides; a resting body is not integrated, so it cannot creep down the slope, and only
+/// a wake moves it again. Fixture watchdog: 8 s to come to rest; the held window is DERIVED as
+/// twice Avian's own sleep duration.
 #[test]
-fn a_braked_tank_on_a_slope_stays_awake_under_sampled_support() {
+fn a_braked_tank_on_a_slope_rests_where_it_stopped() {
     let spec = shipped_spec();
     let tr = &spec.track.powertrain.transmission;
     let ground = base_ground();
@@ -2223,26 +2233,352 @@ fn a_braked_tank_on_a_slope_stays_awake_under_sampled_support() {
     let mut bed = Bed::on_ground(Some(ground), card_grid(|_, z| -z * angle.tan()));
     bed.place(Vec3::ZERO, Quat::from_rotation_x(angle));
     bed.start();
-    // Fixture: allow the suspension and grip to settle before checking the parked state.
-    for _ in 0..4 * TICKS {
-        bed.tick(0.0, 0.0);
-    }
+    until_resting(&mut bed);
+    let rest = bed.hull();
     let window = (2.0 * bed.app.world().resource::<TimeToSleep>().0 / DT).ceil() as usize;
-    for _ in 0..window {
+    for tick in 0..window {
+        bed.tick(0.0, 0.0);
+        assert!(is_asleep(&bed), "woke without input at tick {tick}");
+        let hull = bed.hull();
+        assert_eq!(
+            (hull.position, hull.rotation),
+            (rest.position, rest.rotation),
+            "the resting tank moved on the slope at tick {tick}"
+        );
+    }
+}
+
+/// Tick the parked tank with no demand until it rests. Fixture watchdog: 8 s.
+fn until_resting(bed: &mut Bed) {
+    let mut ticks = 0;
+    while !is_asleep(bed) {
+        assert!(
+            ticks < 8 * TICKS,
+            "a parked tank with no demand must come to rest"
+        );
+        bed.tick(0.0, 0.0);
+        ticks += 1;
+    }
+}
+
+/// The world bounds of every collider on the tank's body (m).
+fn hull_bounds(bed: &mut Bed) -> (Vec3, Vec3) {
+    let tank = bed.tank;
+    let world = bed.app.world_mut();
+    world
+        .query::<(&ColliderOf, &ColliderAabb)>()
+        .iter(world)
+        .filter(|(of, _)| of.body == tank)
+        .fold(
+            (Vec3::INFINITY, Vec3::NEG_INFINITY),
+            |(lo, hi), (_, aabb)| (lo.min(aabb.min), hi.max(aabb.max)),
+        )
+}
+
+/// A tank at rest on the flat card.
+fn resting_on_flat() -> Bed {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    bed.place(Vec3::ZERO, Quat::IDENTITY);
+    bed.start();
+    until_resting(&mut bed);
+    bed
+}
+
+/// Fixture: a static slab on the flat card, wider than the hull, thick enough that a tank on it
+/// drops measurably when it goes.
+const SLAB: Vec3 = Vec3::new(20.0, 0.5, 20.0);
+
+/// A fixed block's collider of the fixture substance on the terrain layer: centre and full size (m).
+fn fixed_block(center: Vec3, size: Vec3) -> impl Bundle {
+    let friction = crate::substances::SubstanceRegistry::shipped_static()
+        .contact_friction(FIXTURE_SUBSTANCE)
+        .expect("the fixture substance states a friction");
+    (
+        Name::new("track scorecard fixture"),
+        Transform::from_translation(center),
+        Collider::cuboid(size.x, size.y, size.z),
+        CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+        friction,
+    )
+}
+
+/// A resting tank's sampled support is no collider pair, so Avian wakes it for no change of that
+/// support: every way the support can change must wake it (`debris`'s wakes), a support with no
+/// body among them, which the belt reads as static, and it falls by what the change took away.
+/// Fixture watchdog: 2 s to fall half the drop.
+#[test]
+fn a_resting_tank_wakes_and_falls_when_its_support_changes() {
+    type Change = (&'static str, f32, fn(&mut World, Entity));
+    let goes: Change = ("goes", SLAB.y, |world, slab| {
+        world.despawn(slab);
+    });
+    let disabled: Change = ("is disabled", SLAB.y, |world, slab| {
+        world.entity_mut(slab).insert(ColliderDisabled);
+    });
+    let body_disabled: Change = ("loses its body to a disable", SLAB.y, |world, slab| {
+        world.entity_mut(slab).insert(RigidBodyDisabled);
+    });
+    let sensor: Change = ("turns sensor", SLAB.y, |world, slab| {
+        world.entity_mut(slab).insert(Sensor);
+    });
+    let moves: Change = ("moves", SLAB.y, |world, slab| {
+        let mut slab = world.entity_mut(slab);
+        slab.get_mut::<Position>().expect("slab position").0.y -= SLAB.y;
+        slab.get_mut::<Transform>()
+            .expect("slab transform")
+            .translation
+            .y -= SLAB.y;
+    });
+    let shrinks: Change = ("shrinks", SLAB.y / 4.0, |world, slab| {
+        world
+            .entity_mut(slab)
+            .insert(Collider::cuboid(SLAB.x, SLAB.y / 2.0, SLAB.z));
+    });
+    let unmet: Change = ("stops meeting vehicles", SLAB.y, |world, slab| {
+        world
+            .entity_mut(slab)
+            .insert(CollisionLayers::new([Layer::Terrain], LayerMask::NONE));
+    });
+    let supports: [(&str, fn(&mut Bed, Vec3, Vec3) -> Entity, &[Change]); 2] = [
+        (
+            "static",
+            Bed::spawn_static,
+            &[goes, disabled, body_disabled, sensor, moves, shrinks, unmet],
+        ),
+        ("bodyless", Bed::spawn_bodyless, &[moves, shrinks, unmet]),
+    ];
+    for (support, spawn, changes) in supports {
+        for &(change, drop, apply) in changes {
+            let mut bed = Bed::on_ground(Some(base_ground()), flat());
+            let slab = spawn(&mut bed, Vec3::Y * SLAB.y / 2.0, SLAB);
+            bed.place(Vec3::Y * SLAB.y, Quat::IDENTITY);
+            bed.start();
+            until_resting(&mut bed);
+            let world = bed.app.world();
+            assert!(
+                world
+                    .get::<TrackContacts>(bed.tank)
+                    .expect("a driving tank reports its belt contacts")
+                    .0
+                    .iter()
+                    .flatten()
+                    .any(|contact| contact.collider == Some(slab)),
+                "the resting tank stands on the {support} slab through its sampled support"
+            );
+            assert!(
+                world
+                    .resource::<ContactGraph>()
+                    .contact_edges_with(slab)
+                    .filter(|edge| [edge.body1, edge.body2].contains(&Some(bed.tank)))
+                    .all(|edge| !edge.is_touching()),
+                "no collider pair carries the tank on the {support} slab"
+            );
+            let rest = bed.hull().position.y;
+            apply(bed.app.world_mut(), slab);
+            bed.tick(0.0, 0.0);
+            assert!(
+                !is_asleep(&bed),
+                "a resting tank stayed asleep as its {support} support {change}"
+            );
+            let mut ticks = 0;
+            while bed.hull().position.y > rest - drop / 2.0 {
+                assert!(
+                    ticks < 2 * TICKS,
+                    "the woken tank did not fall as its {support} support {change}"
+                );
+                bed.tick(0.0, 0.0);
+                ticks += 1;
+            }
+        }
+    }
+}
+
+/// A sampled support is no collider pair, and a support that moves wakes nothing it carries
+/// (`debris`'s wakes read fixed supports alone), so a tank on a body that can move must not rest:
+/// its pass finds it at rest only on fixed support (`track::sim::apply_track_forces`). Otherwise
+/// the body could move from under a resting tank, another tank's hull driving off, and leave it
+/// hanging. Fixture: a dynamic [`SLAB`] of the fixture substance on the vehicle layer, as a hull
+/// is, on the flat card; the rest watchdog of [`until_resting`], 8 s.
+#[test]
+fn a_tank_never_rests_on_a_support_that_can_move() {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    let slab = bed.spawn_body(
+        Vec3::Y * SLAB.y / 2.0,
+        SLAB,
+        CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+    );
+    bed.place(Vec3::Y * SLAB.y, Quat::IDENTITY);
+    bed.start();
+    for tick in 0..8 * TICKS {
         bed.tick(0.0, 0.0);
         assert!(
-            bed.app
+            !is_asleep(&bed),
+            "the tank rested on a support that can move at tick {tick}"
+        );
+    }
+    assert!(
+        bed.app
+            .world()
+            .get::<TrackContacts>(bed.tank)
+            .expect("a driving tank reports its belt contacts")
+            .0
+            .iter()
+            .flatten()
+            .any(|contact| contact.collider == Some(slab)),
+        "the tank stands on the moving body through its sampled support"
+    );
+}
+
+/// The world's other wakes reach a resting tank through Avian alone: a round's impulse through the
+/// waking call every explicit impulse takes (`track::sim::apply_explicit_impulse`), and a moving
+/// body striking it, another tank's hull or a falling piece alike (Avian's island wake on a new
+/// touching contact with an awake body). Fixture: an impulse worth twice Avian's rest speed at the
+/// centre of mass; a free 1 m vehicle-layer block closing at 2 m/s from 1 m beside the hull; a
+/// piece dropped from 1 m above it; a 2 s watchdog each.
+#[test]
+fn a_resting_tank_wakes_for_a_round_a_moving_body_and_a_falling_piece() {
+    let mut bed = resting_on_flat();
+    let before = bed.hull().position;
+    let push = bed.hull().forward()
+        * (2.0
+            * bed
+                .app
                 .world()
-                .get::<crate::track::sim::TankTransmission>(bed.tank)
-                .unwrap()
-                .0
-                .park
+                .get::<SleepThreshold>(bed.tank)
+                .expect("a dynamic tank carries its rest threshold")
+                .linear);
+    let (impulse, at, tank) = (push * bed.mass(), bed.center_of_mass(), bed.tank);
+    let world = bed.app.world_mut();
+    let mut bodies = world.query::<Forces>();
+    let forces = bodies
+        .get_mut(world, tank)
+        .expect("a dynamic tank takes forces");
+    crate::track::sim::apply_explicit_impulse(forces, impulse, at);
+    bed.tick(0.0, 0.0);
+    assert!(!is_asleep(&bed), "a round's impulse left the tank asleep");
+    // Avian commits island waking at the end of the step; the next tick integrates the impulse.
+    bed.tick(0.0, 0.0);
+    assert!(
+        (bed.hull().position - before).dot(push) > 0.0,
+        "the struck hull did not move"
+    );
+    drop(bed); // One booted app at a time (`BOOT_LEASE`).
+
+    let strikers: [(&str, fn(&mut Bed, (Vec3, Vec3))); 2] = [
+        ("a moving body", |bed, (lo, hi)| {
+            let centre = (lo + hi) / 2.0;
+            bed.app.world_mut().spawn((
+                Position(Vec3::new(hi.x + 1.5, centre.y, centre.z)),
+                Rotation::default(),
+                RigidBody::Dynamic,
+                GravityScale(0.0),
+                Collider::cuboid(1.0, 1.0, 1.0),
+                CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+                LinearVelocity(Vec3::NEG_X * 2.0),
+            ));
+        }),
+        ("a falling piece", |bed, (lo, hi)| {
+            let centre = (lo + hi) / 2.0;
+            bed.spawn_piece(
+                Vec3::new(centre.x, hi.y + 1.0 + PIECE.y / 2.0, centre.z),
+                PIECE,
+            );
+        }),
+    ];
+    for (striker, spawn) in strikers {
+        let mut bed = resting_on_flat();
+        let bounds = hull_bounds(&mut bed);
+        spawn(&mut bed, bounds);
+        let mut ticks = 0;
+        while is_asleep(&bed) {
+            assert!(ticks < 2 * TICKS, "{striker} left the resting tank asleep");
+            bed.tick(0.0, 0.0);
+            ticks += 1;
+        }
+    }
+}
+
+/// What carries a parked tank in the rest cases: ground alone, pieces under both tracks, and
+/// pieces under one track with ground under the other.
+const CARRIERS: [(&str, &[Side]); 3] = [
+    ("ground", &[]),
+    ("pieces", &Side::ALL),
+    ("pieces and ground", &[Side::Left]),
+];
+
+/// A tank parked with no demand over the pieces of [`pile_under_sides`] for `sides`.
+fn parked_over(sides: &[Side]) -> Bed {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    let level = if sides.is_empty() {
+        0.0
+    } else {
+        pile_under_sides(&mut bed, sides)
+    };
+    bed.place(Vec3::new(0.0, level, 0.0), Quat::IDENTITY);
+    bed.start();
+    bed
+}
+
+/// Rest is the economy of a parked tank whatever carries it: ground through its sampled support,
+/// pieces through its island with them, or both. It comes to rest with every piece it carries and
+/// stays at rest with no input. Fixture: [`CARRIERS`]; the held window is DERIVED as twice Avian's
+/// own sleep duration.
+#[test]
+fn a_parked_tank_rests_with_its_pile_whatever_carries_it() {
+    for (carrier, sides) in CARRIERS {
+        let mut bed = parked_over(sides);
+        until_resting(&mut bed);
+        let window = (2.0 * bed.app.world().resource::<TimeToSleep>().0 / DT).ceil() as usize;
+        for tick in 0..window {
+            assert!(
+                bed.awake_pieces().is_empty(),
+                "a piece under the resting tank on {carrier} is awake at tick {tick}"
+            );
+            bed.tick(0.0, 0.0);
+            assert!(
+                is_asleep(&bed),
+                "the tank resting on {carrier} woke without input at tick {tick}"
+            );
+        }
+    }
+}
+
+/// Drive demand ends a tank's rest within the tick it arrives, whatever carries the tank: that
+/// tick's driving pass runs, and a resting tick's does not. Witness: the pass's terrain sampling
+/// (`Work::BeltTerrainSamples`). Fixture: [`CARRIERS`], full throttle.
+#[test]
+fn drive_demand_wakes_a_resting_tank_within_its_tick() {
+    let sampled = |bed: &Bed| -> f64 {
+        bed.take_work()
+            .into_iter()
+            .filter(|(name, _)| name == "belt_terrain_samples")
+            .map(|(_, count)| count)
+            .sum()
+    };
+    for (carrier, sides) in CARRIERS {
+        let mut bed = parked_over(sides);
+        until_resting(&mut bed);
+        bed.tick(0.0, 0.0);
+        assert!(
+            is_asleep(&bed),
+            "the tank resting on {carrier} woke without input"
+        );
+        bed.take_work();
+        bed.tick(0.0, 0.0);
+        assert_eq!(
+            sampled(&bed),
+            0.0,
+            "the driving pass of a tank resting on {carrier} ran"
+        );
+        bed.tick(1.0, 0.0);
+        assert!(
+            !is_asleep(&bed),
+            "drive demand left the tank resting on {carrier} asleep"
         );
         assert!(
-            !belts_moving(&bed),
-            "the brakes did not hold the belts on the slope"
+            sampled(&bed) > 0.0,
+            "the driving pass of the tank woken on {carrier} did not run in the waking tick"
         );
-        assert!(!is_asleep(&bed), "sampled support must keep the hull awake");
     }
 }
 
@@ -2250,7 +2586,7 @@ fn a_braked_tank_on_a_slope_stays_awake_under_sampled_support() {
 /// sleep would end the drive with the demand still held.
 #[test]
 fn a_creeping_tank_on_loose_pieces_never_sleeps_under_its_command() {
-    let mut bed = bed_on_pile();
+    let mut bed = parked_over(&Side::ALL);
     let mut slowest = f32::INFINITY;
     for tick in 0..4 * TICKS {
         bed.tick(0.01, 0.0);
@@ -2269,7 +2605,7 @@ fn a_creeping_tank_on_loose_pieces_never_sleeps_under_its_command() {
 #[test]
 fn every_segment_on_loose_pieces_carries_the_running_gears_law_once() {
     use crate::track::belt_segment::SegmentLaw;
-    let mut bed = bed_on_pile();
+    let mut bed = parked_over(&Side::ALL);
     let (mut checked, mut shared) = (0, 0);
     for _ in 0..TICKS {
         bed.tick(0.3, 0.0);

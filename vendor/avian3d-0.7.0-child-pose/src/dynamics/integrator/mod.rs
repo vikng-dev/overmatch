@@ -257,15 +257,23 @@ impl VelocityIntegrationData {
 }
 
 /// Applies gravity and locked axes to the linear and angular velocity increments of bodies.
+///
+/// OVERMATCH PATCH: only bodies with a [`SolverBody`], the ones [`clear_velocity_increments`]
+/// clears. A sleeping body keeps its [`VelocityIntegrationData`] without a solver body; building
+/// its increments every step without clearing them carried a stale gravity increment into its
+/// first step awake.
 pub fn pre_process_velocity_increments(
-    mut bodies: Query<(
-        &RigidBody,
-        &mut VelocityIntegrationData,
-        Option<&LinearDamping>,
-        Option<&AngularDamping>,
-        Option<&GravityScale>,
-        Option<&LockedAxes>,
-    )>,
+    mut bodies: Query<
+        (
+            &RigidBody,
+            &mut VelocityIntegrationData,
+            Option<&LinearDamping>,
+            Option<&AngularDamping>,
+            Option<&GravityScale>,
+            Option<&LockedAxes>,
+        ),
+        With<SolverBody>,
+    >,
     gravity: Res<Gravity>,
     time: Res<Time<Substeps>>,
     mut diagnostics: ResMut<SolverDiagnostics>,

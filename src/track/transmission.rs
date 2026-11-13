@@ -913,6 +913,9 @@ pub struct TransmissionReport {
     pub next_speeds: [f32; 2],
     /// Each side's capacity-limited brake supplied the exact stop force: a held constraint.
     pub held: [bool; 2],
+    /// A holding brake (a side's stop brake or the held mean path) met a stop beyond its
+    /// capacity: what it holds slides under it.
+    pub brakes_slide: bool,
     pub forces: [f32; 2],
     pub rpm: f32,
     pub gear: u8,
@@ -2004,32 +2007,40 @@ fn engine_work(
 /// Under intent the lever takes only its rollback-opposing half after the reversal pause and cut,
 /// so useful launch motion is free.
 /// No temporal release decision or command/speed blend participates in that balance.
+/// Returns each side's held constraint, and whether a stop the brake opposes exceeded its
+/// capacity on either side: that belt slides under its brake.
 fn apply_brake_stop_forces(
     q: &mut [f32; 2],
     tp: &TransmissionParams,
     belts: &BeltTick,
     st: &TransmissionState,
     controls: &Controls,
-) -> [bool; 2] {
+) -> ([bool; 2], bool) {
     let service = controls.service;
     let one_way = controls.one_way;
     let lever = st.park || one_way;
     let mut held = [false; 2];
+    let mut slides = false;
     for (i, qi) in q.iter_mut().enumerate() {
         if !lever && !service {
             continue;
         }
         let cap = brake_capacity_for_regime(tp, lever, service, belts.speeds[i]);
         let stop = belts.reactions[i] - *qi - belts.speeds[i] / belts.mobility[i];
-        let brake = if one_way && !service {
-            controls.command.signum() * (stop * controls.command.signum()).clamp(0.0, cap)
+        let (brake, beyond) = if one_way && !service {
+            let opposed = stop * controls.command.signum();
+            (
+                controls.command.signum() * opposed.clamp(0.0, cap),
+                opposed > cap,
+            )
         } else {
-            stop.clamp(-cap, cap)
+            (stop.clamp(-cap, cap), stop.abs() > cap)
         };
         *qi += brake;
         held[i] = brake == stop;
+        slides |= beyond;
     }
-    held
+    (held, slides)
 }
 
 /// The held mean path's capacity this tick when it acts (N): twice the per-side brake capacity
@@ -2074,10 +2085,10 @@ fn even_stop_capacity(
 /// [`BeltTick`], split evenly, within its capacity `hold`; the neutral servo has solved alongside
 /// the split ([`steering_force`]), so the steering member's difference still lands. The hold is
 /// passive, so it is not charged to the engine. Beyond capacity the mean slides and the neutral
-/// regime may end.
-fn apply_mean_hold(q: &mut [f32; 2], belts: &BeltTick, hold: Option<f32>) {
+/// regime may end; the return says whether it did.
+fn apply_mean_hold(q: &mut [f32; 2], belts: &BeltTick, hold: Option<f32>) -> bool {
     let Some(cap) = hold else {
-        return; // No held mean path this tick.
+        return false; // No held mean path this tick.
     };
     // A total force split evenly moves the mean by `force·(w_l + w_r)/4`.
     let [w0, w1] = belts.mobility;
@@ -2086,6 +2097,7 @@ fn apply_mean_hold(q: &mut [f32; 2], belts: &BeltTick, hold: Option<f32>) {
     for force in q {
         *force += hold;
     }
+    stop.abs() > cap
 }
 
 /// The Driver holds the crank ceiling with service brakes. Below it no brake acts; beyond
@@ -2378,8 +2390,8 @@ pub(crate) fn step(
     ];
 
     apply_ceiling_brakes(&mut q, tp, &belts, st, &controls, crank);
-    let held = apply_brake_stop_forces(&mut q, tp, &belts, st, &controls);
-    apply_mean_hold(&mut q, &belts, hold);
+    let (held, side_slides) = apply_brake_stop_forces(&mut q, tp, &belts, st, &controls);
+    let mean_slides = apply_mean_hold(&mut q, &belts, hold);
 
     // --- Integrate both sides simultaneously against their implicit reactions.
     let next = [belts.land(0, q[0]), belts.land(1, q[1])];
@@ -2430,6 +2442,7 @@ pub(crate) fn step(
     TransmissionReport {
         next_speeds: next,
         held,
+        brakes_slide: side_slides || mean_slides,
         forces: q,
         // The crank state, post-tick — the report shows the same truth `readout` does.
         rpm: st.omega_e / RPM_TO_RAD,

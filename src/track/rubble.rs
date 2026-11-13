@@ -57,7 +57,8 @@ use std::{borrow::Cow, sync::OnceLock};
 use avian3d::prelude::{
     Collider, ColliderAabb, ColliderOf, CollisionLayers, ComputedAngularInertia,
     ComputedCenterOfMass, ComputedMass, DefaultFriction, Forces, Friction, Position,
-    ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery, WriteRigidBodyForces,
+    ReadRigidBodyForces, RigidBody, RigidBodyDisabled, Rotation, Sensor, SpatialQuery,
+    WriteRigidBodyForces,
 };
 use bevy::ecs::query::{QueryData, QueryFilter};
 use bevy::ecs::system::SystemParam;
@@ -79,6 +80,7 @@ pub(crate) struct RubbleQuery<'w, 's> {
     structures: Query<'w, 's, (), With<StructureBody>>,
     collider_of: Query<'w, 's, &'static ColliderOf>,
     sensors: Query<'w, 's, (), With<Sensor>>,
+    disabled: Query<'w, 's, (), With<RigidBodyDisabled>>,
     layers: Query<'w, 's, &'static CollisionLayers>,
     rigid_bodies: Query<'w, 's, &'static RigidBody>,
     shapes: Query<
@@ -97,7 +99,8 @@ pub(crate) struct RubbleQuery<'w, 's> {
 
 impl RubbleQuery<'_, '_> {
     /// Whether `collider` is a surface the belt bears on (module doc). A collider with no rigid
-    /// body is static to the solver, and is read as one here.
+    /// body is static to the solver, and is read as one here. A disabled body's colliders still
+    /// answer spatial queries but hold nothing up: Avian gives them no contact response.
     pub(crate) fn supports(&self, collider: Entity) -> bool {
         let layers = self
             .layers
@@ -105,6 +108,7 @@ impl RubbleQuery<'_, '_> {
             .expect("avian requires CollisionLayers on every Collider");
         super::world_contact::solid(layers, self.sensors.contains(collider))
             && !self.field_surfaces.contains(collider)
+            && !self.disabled.contains(self.body_of(collider))
     }
 
     /// Whether `collider` is a loose piece the belt segments carry (`super::belt_segment`).
@@ -459,6 +463,12 @@ impl RubbleBodies<'_> {
     /// than the spring channel. Only a collider from this snapshot may be read.
     pub(crate) fn loose(&self, collider: Entity) -> bool {
         self.surface(collider).loose
+    }
+
+    /// Whether `collider`'s body is static: it neither moves nor yields. Only a collider from this
+    /// snapshot may be read.
+    pub(crate) fn fixed(&self, collider: Entity) -> bool {
+        self.surface(collider).motion.is_none()
     }
 
     /// The collider of a [`SlabOverlap::piece`].
@@ -1540,7 +1550,7 @@ mod tests {
             support_stiffness_per_m: 2.0e6,
             support_damping_per_m: 1.0e5,
             engage_depth: 0.002,
-            probe_reach: 0.5,
+            probe_reach: crate::track::forces::PROBE_REACH,
 
             grip: Some(grip),
         };

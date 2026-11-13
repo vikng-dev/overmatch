@@ -37,9 +37,9 @@
 //! new transfer.
 //!
 //! IMPLICIT CONTACTS. The belt applies support and traction before physics without collider
-//! constraints. Fixed construction receives its opposite reaction through [`ContactTransfers::stage`].
-//! These contacts are refreshed by the belt each tick and never enter the solver's sleeping-pair
-//! cache.
+//! constraints. Fixed construction receives its opposite reaction through [`ContactTransfers::stage`],
+//! refreshed by every belt pass. A tank at rest runs no pass (`track::sim::NotResting`), so its
+//! last step's points rest on the structure as a sleeping pair's do, held while the tank sleeps.
 //!
 //! Filled on the authority only, where the destruction laws run; a replica's stays empty.
 
@@ -51,7 +51,7 @@ use avian3d::dynamics::solver::contact::{ContactConstraint, ContactConstraintPoi
 use avian3d::dynamics::solver::schedule::{SolverSystems, SubstepSchedule, SubstepSolverSystems};
 use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
 use avian3d::prelude::{
-    ComputedCenterOfMass, ContactGraph, PhysicsSchedule, Position, RigidBody, Rotation,
+    ComputedCenterOfMass, ContactGraph, PhysicsSchedule, Position, RigidBody, Rotation, Sleeping,
 };
 use bevy::prelude::*;
 use bevy::tasks::{ComputeTaskPool, ParallelSlice, ParallelSliceMut, TaskPool};
@@ -156,8 +156,8 @@ pub(crate) struct AppliedContact {
     pub(crate) closing_speed: f32,
 }
 
-/// A point of a pair whose body sleeps against a static structure (module doc): its transfer over the
-/// last step the solver moved it, and that step's length (s).
+/// A point whose body sleeps against a static structure, a solver pair's or a tank's belt point
+/// (module doc): its transfer over the last step its body moved, and that step's length (s).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Resting {
     pub(crate) transfer: ContactTransfer,
@@ -298,8 +298,8 @@ impl ContactTransfers {
             .expect("every body in this step's contacts has its inertia recorded with them")
     }
 
-    /// The points of every pair whose body sleeps against a static structure, each pair once, in the
-    /// order their bodies fell asleep.
+    /// The points of every body asleep against a static structure, each once, in the order their
+    /// bodies fell asleep.
     pub(crate) fn resting(&self) -> &[Resting] {
         &self.resting
     }
@@ -443,27 +443,37 @@ fn prepare_constraint(
     }
 }
 
-/// What keeps a press at rest: Avian holding its pair asleep and touching, or its body frozen
+/// What keeps a press at rest: Avian holding its pair asleep and touching, its body frozen
 /// (`debris::freeze`), which left Avian's contact graph as it turned static and holds the press
-/// it slept with until it thaws.
+/// it slept with until it thaws, or, for an implicit belt point, its tank asleep.
 #[derive(bevy::ecs::system::SystemParam)]
 struct Rests<'w, 's> {
     contacts: Res<'w, ContactGraph>,
     frozen: Query<'w, 's, (), With<crate::debris::freeze::Frozen>>,
+    sleeping: Query<'w, 's, (), With<Sleeping>>,
+    structures: Query<'w, 's, &'static RigidBody, With<StructureBody>>,
 }
 
 impl Rests<'_, '_> {
+    /// Only static structural receivers consume cached presses, and a frozen piece is a moving
+    /// group at rest. Moving groups read awake landings through debris; their sleeping contacts
+    /// have no structural load.
+    fn receives(&self, reference: Entity) -> bool {
+        self.structures
+            .get(reference)
+            .is_ok_and(RigidBody::is_static)
+            && !self.frozen.contains(reference)
+    }
+
     fn hold(&self, transfer: &ContactTransfer) -> bool {
         self.frozen.contains(transfer.other)
-            || self
-                .contacts
-                .get(
-                    transfer.reference_collider,
-                    transfer
-                        .other_collider
-                        .expect("only solver contacts enter the sleeping-pair cache"),
-                )
-                .is_some_and(|(edge, pair)| edge.is_sleeping() && pair.is_touching())
+            || match transfer.other_collider {
+                Some(collider) => self
+                    .contacts
+                    .get(transfer.reference_collider, collider)
+                    .is_some_and(|(edge, pair)| edge.is_sleeping() && pair.is_touching()),
+                None => self.sleeping.contains(transfer.other),
+            }
     }
 }
 
@@ -473,27 +483,23 @@ fn keep(
     stages: Option<Res<crate::cost::stages::Stages>>,
     graph: Res<ConstraintGraph>,
     rests: Rests,
-    structures: Query<&RigidBody, With<StructureBody>>,
     bodies: ContactBodies,
     time: Res<Time>,
     mut transfers: ResMut<ContactTransfers>,
 ) {
     let _contacts =
         crate::cost::stages::Stages::start(stages.as_deref(), crate::cost::stages::Stage::Contacts);
-    // Only static structural receivers consume cached presses, and a frozen piece is a moving
-    // group at rest. Moving groups read awake landings through debris; their sleeping contacts
-    // have no structural load.
-    let groups: Vec<_> = transfers.structural_solver_groups().collect();
+    let groups: Vec<_> = transfers.groups().collect();
     let newly_resting = groups.par_splat_map(ComputeTaskPool::get(), None, |_, groups| {
         groups
             .iter()
             .filter(|group| {
-                let reference = group
-                    .first()
-                    .expect("solver manifolds are nonempty")
-                    .reference;
-                structures.get(reference).is_ok_and(RigidBody::is_static)
-                    && !rests.frozen.contains(reference)
+                rests.receives(
+                    group
+                        .first()
+                        .expect("contact groups are nonempty")
+                        .reference,
+                )
             })
             .flat_map(|group| group.iter())
             .filter(|point| rests.hold(point))
@@ -503,8 +509,8 @@ fn keep(
             })
             .collect::<Vec<_>>()
     });
-    // A pair that woke or ended drops its rest. Sleeping pairs build no constraint, so retained
-    // and newly sleeping points are disjoint.
+    // A pair that woke or ended, or a tank that woke, drops its rest. Neither a sleeping pair nor
+    // a sleeping tank adds a point to the step, so retained and newly resting points are disjoint.
     let retained = transfers
         .resting
         .par_splat_map(ComputeTaskPool::get(), None, |_, chunk| {
@@ -562,7 +568,7 @@ fn keep(
                     index,
                     constraint,
                     &rests.contacts,
-                    &structures,
+                    &rests.structures,
                     #[cfg(test)]
                     &bodies,
                 )
