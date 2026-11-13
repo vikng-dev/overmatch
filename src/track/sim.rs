@@ -545,10 +545,7 @@ pub fn sim_plugin(app: &mut App) {
     app.add_systems(
         FixedUpdate,
         // RPM reads the completed crank; contact commits need not delay its projection.
-        (
-            driving_systems(),
-            publish_engine_rpm.after(apply_track_forces),
-        )
+        (driving_systems(), publish_engine_rpm.after(settle_rest))
             .in_set(SimPhase::DrivingForces)
             .in_set(GameplaySet),
     );

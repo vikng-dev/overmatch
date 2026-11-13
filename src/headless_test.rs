@@ -1268,7 +1268,7 @@ fn a_tank_repaired_at_rest_catches_its_idle_and_its_powered_traverse() {
     use crate::ballistics::ComponentHealth;
     use crate::damage::{FunctionRole, VolumeOf};
     use crate::tank::{ServoIndex, ServoRole, ServoState, TankRoot, TankServos};
-    use crate::track::sim::EngineRpm;
+    use crate::track::sim::{EngineRpm, TankTransmission};
     use avian3d::prelude::Sleeping;
 
     fn resting(app: &App, tank: Entity) -> bool {
@@ -1289,10 +1289,21 @@ fn a_tank_repaired_at_rest_catches_its_idle_and_its_powered_traverse() {
             .expect("tank has an rpm")
             .0
     }
-    // The crank reaches `target` rpm with the hull resting at every tick on the way.
+    // The crank reaches `target` rpm with the hull resting at every tick on the way, and each
+    // tick publishes the crank that tick completed (engine sound and powered servos read it).
     fn resting_until_rpm(app: &mut App, tank: Entity, target: u16, why: &str) {
         for _ in 0..8 * FIXED_TICKS_PER_SECOND {
             assert!(resting(app, tank), "{why}: the hull woke");
+            let crank = EngineRpm::of(
+                app.world()
+                    .get::<TankTransmission>(tank)
+                    .expect("tank has a transmission"),
+            );
+            assert_eq!(
+                rpm(app, tank),
+                crank.0,
+                "{why}: the public rpm lags the resting crank"
+            );
             if rpm(app, tank) == target {
                 return;
             }
