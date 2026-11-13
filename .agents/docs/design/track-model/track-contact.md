@@ -35,24 +35,32 @@ body cannot rest on it at a load-proportional deflection (DERIVED from
 contact hook (`upstream/avian-compliant-contact.md`). Nothing freezes a loaded piece.
 
 **Rest.** A tank at rest sleeps with its pile through Avian's island sleep, whatever carries it.
-The sampled support goes through the non-waking force call, so it never resets the rest timer,
+The sampled support goes through the non-waking force call, so no force resets the rest timer,
 and a sleeping tank runs no belt pass (`track::sim::NotResting`): its contacts keep the last
 pass's points, and a fixed construction under it keeps that pass's reaction in its load reading
 (`contact_transfer`, IMPLICIT CONTACTS). Avian's rest test reads motion only, and a body that
 starts from rest under an acceleration below `SleepThreshold`'s 0.15 m/s over `TimeToSleep`'s
-0.5 s, 0.3 m/s² (DERIVED), would sleep before reaching the threshold. A tank's pass supplies what
-motion cannot show (`track::sim::apply_track_forces`): a pass whose every gripping patch slides,
-whose brake meets a stop beyond its capacity, or that changed its drivetrain's regime or drive
-signal or moved its crank out of the hull's angular rest speed of where it last moved
-(`track::sim::RestCrank`), finds the tank not at rest however slowly it moves. A tank creeping past its grip limit keeps creeping:
+0.5 s, 0.3 m/s² (DERIVED), would sleep before reaching the threshold. Each pass judges what motion
+cannot show (`track::sim::apply_track_forces`), and one that finds the tank not at rest zeroes
+its timer (`track::sim::hold_unsettled_awake`): drive demand, a belt its brake does not hold, a brake meeting a
+stop beyond its capacity, every gripping patch at or past its budget, or a sampled support whose
+body is not static. A tank creeping past its grip limit keeps creeping:
 `contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_limits` judges the
-slope limits under production rest, mud at 17.0° against its 15.5° limit among them. A tank rests
-under the drive intent and supply its drivetrain settled under, and any change to them (the
-driver's command, staffing at the controls, a module's condition) wakes it within its tick
-(`track::sim::wake_driven_tanks`), as drive demand does. A support that goes, is disabled or
-moves wakes it as it wakes a sleeping piece (`debris::Carried`), through the colliders its last
-pass sampled (`track::sim::SampledSupports`). A round's impulse and the tank's own shot wake it
-through the waking impulse; a moving body or a falling piece wakes it through the island wake.
+slope limits under production rest, mud at 17.0° against its 15.5° limit among them. A support
+that can move wakes nothing it carries, so a tank never rests on one, another tank's hull among
+them. The drivetrain is no part of the rest: a sleeping tank's hull and contacts stand still, but
+its transmission steps each tick on its last pass's belt loads with the belts at rest
+(`track::sim::wake_driven_tanks`). A step that holds both belts and slides no brake commits, so a
+repaired engine spools up under the resting hull; any other step is discarded and wakes the tank,
+whose full pass runs that tick from the same state. Drive demand (a pedal, a steer, or a belt
+still coasting) wakes the tank before any trial: under a pedal the lever holds a belt only against
+rollback, a sign test on contact jitter that frozen loads cannot answer, and an awake twin's belts
+crept from the first tick of full throttle (MEASURED once), so its full pass moves it within its
+tick. An emptied engine may wake the tank: its clutch springs in and the crank can slide the
+parked brakes (MEASURED on the repair fixture: the clutch went in and both belts slid). A support that goes, is disabled, turns sensor or changes wakes it as
+it wakes a sleeping piece (`debris`), through the colliders its last pass sampled
+(`track::sim::SampledSupports`). A round's impulse and the tank's own shot wake it through the
+waking impulse; a moving body or a falling piece wakes it through the island wake.
 
 **One law.** `k'` and `c'` per metre of belt are the spring channel's calibration
 (`SegmentLaw`, `ForceParams`), and the envelope comes from the same travel knots, so the segment

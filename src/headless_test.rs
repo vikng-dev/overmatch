@@ -1257,13 +1257,12 @@ fn contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_
     }
 }
 
-/// The game's damage model: a parked tank rests only with its drivetrain settled, and a change to
-/// what that drivetrain would do ends the rest. With its engine's HP pool emptied the crank stops
-/// and the tank rests stalled; the crew's repair refills the pool while it rests, and with no
-/// hull input the crank must catch the idle it parked at, every traverse the stall slowed must
-/// regain engine power, and the tank must rest again. Fixture: flat ground; each traverse starts
-/// on the hull's axis and is laid a quarter turn off it for one second; watchdogs 8 s to rest and
-/// 60 s for the repair.
+/// The game's damage model: a parked tank's drivetrain keeps stepping while its hull rests. With
+/// its engine's HP pool emptied the crank runs down to a stall (its clutch springing in may slide
+/// the parked brakes and wake the hull); the crew's repair refills the pool while the hull rests,
+/// and with no hull input the crank must catch the idle it parked at with the hull still resting,
+/// and every traverse the stall slowed must regain engine power. Fixture: flat ground; each traverse starts on the hull's axis and is laid a quarter turn
+/// off it for one second; watchdogs 8 s to rest or reach a crank speed, 60 s for the repair.
 #[test]
 fn a_tank_repaired_at_rest_catches_its_idle_and_its_powered_traverse() {
     use crate::ballistics::ComponentHealth;
@@ -1289,6 +1288,17 @@ fn a_tank_repaired_at_rest_catches_its_idle_and_its_powered_traverse() {
             .get::<EngineRpm>(tank)
             .expect("tank has an rpm")
             .0
+    }
+    // The crank reaches `target` rpm with the hull resting at every tick on the way.
+    fn resting_until_rpm(app: &mut App, tank: Entity, target: u16, why: &str) {
+        for _ in 0..8 * FIXED_TICKS_PER_SECOND {
+            assert!(resting(app, tank), "{why}: the hull woke");
+            if rpm(app, tank) == target {
+                return;
+            }
+            drive_tick(app, tank, 0.0, 0.0);
+        }
+        panic!("{why}: the crank never reached {target} rpm");
     }
     // Each slot's fastest traverse (rad/s) over a second laid a quarter turn off the hull's axis,
     // then back on the axis at rest.
@@ -1380,17 +1390,12 @@ fn a_tank_repaired_at_rest_catches_its_idle_and_its_powered_traverse() {
             .expect("an engine volume carries its HP pool")
             .drain();
     }
-    drive_tick(&mut app, tank, 0.0, 0.0);
-    assert!(
-        !resting(&app, tank),
-        "an emptied engine changes the supply the tank rested under"
-    );
+    let stalls = (0..8 * FIXED_TICKS_PER_SECOND).any(|_| {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        rpm(&app, tank) == 0
+    });
+    assert!(stalls, "an engine out of action stalls its crank");
     rest(&mut app, tank);
-    assert_eq!(
-        rpm(&app, tank),
-        0,
-        "an engine out of action stalls its crank"
-    );
     let stalled = traverses(&mut app, tank, &slots);
     let powered: Vec<usize> = (0..slots.len())
         .filter(|&i| stalled[i] < running[i])
@@ -1433,19 +1438,17 @@ fn a_tank_repaired_at_rest_catches_its_idle_and_its_powered_traverse() {
         resting_at_refill,
         "the fixture repairs the engine of a resting tank"
     );
-    drive_tick(&mut app, tank, 0.0, 0.0);
-    assert!(
-        !resting(&app, tank),
-        "a repaired engine changes the supply the tank rested under"
-    );
-    rest(&mut app, tank);
-    assert_eq!(
-        rpm(&app, tank),
+    resting_until_rpm(
+        &mut app,
+        tank,
         idle,
-        "the repaired crank catches the idle it parked at"
+        "the repaired crank catches the idle it parked at under the resting hull",
     );
     let repaired = traverses(&mut app, tank, &slots);
-    println!("MEASURED yaw traverses repaired (rad/s): {repaired:?}");
+    println!(
+        "MEASURED yaw traverses repaired (rad/s): {repaired:?}, hull resting after them: {}",
+        resting(&app, tank)
+    );
     for i in powered {
         assert!(
             repaired[i] > stalled[i],

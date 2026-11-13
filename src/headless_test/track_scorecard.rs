@@ -382,6 +382,17 @@ impl Bed {
 
     /// A dynamic rubble piece of the fixture substance: centre and full size (m).
     fn spawn_piece(&mut self, center: Vec3, size: Vec3) -> Entity {
+        let piece = self.spawn_body(center, size, crate::construction::breakage::piece_layers());
+        self.app
+            .world_mut()
+            .entity_mut(piece)
+            .insert(crate::debris::DebrisPiece);
+        self.pieces.push(piece);
+        piece
+    }
+
+    /// A dynamic box of the fixture substance on `layers`: centre and full size (m).
+    fn spawn_body(&mut self, center: Vec3, size: Vec3, layers: CollisionLayers) -> Entity {
         let registry = crate::substances::SubstanceRegistry::shipped_static();
         let density = registry
             .hard(FIXTURE_SUBSTANCE)
@@ -393,11 +404,9 @@ impl Bed {
             .contact_friction(FIXTURE_SUBSTANCE)
             .expect("the fixture substance states a friction");
         let shape = Cuboid::new(size.x, size.y, size.z);
-        let piece = self
-            .app
+        self.app
             .world_mut()
             .spawn((
-                crate::debris::DebrisPiece,
                 Transform::from_translation(center),
                 Position(center),
                 Rotation::default(),
@@ -410,11 +419,9 @@ impl Bed {
                 CenterOfMass(Vec3::ZERO),
                 NoAutoCenterOfMass,
                 friction,
-                crate::construction::breakage::piece_layers(),
+                layers,
             ))
-            .id();
-        self.pieces.push(piece);
-        piece
+            .id()
     }
 
     /// Every solver contact point of the last physics step, with its mean force on `other` over
@@ -2302,19 +2309,26 @@ fn resting_on_flat() -> Bed {
 const SLAB: Vec3 = Vec3::new(20.0, 0.5, 20.0);
 
 /// A resting tank's sampled support is no collider pair, so Avian wakes it for no change of that
-/// support: the support going, disabled or moved must wake it (`debris::Carried`), and it falls.
-/// Each change drops the support by the slab's thickness. Fixture watchdog: 2 s to fall half that
-/// drop.
+/// support: every way the support can change must wake it (`debris`'s wakes), and it falls by what
+/// the change took away. The support goes, is disabled, loses its body to a disable, turns sensor,
+/// moves down by its thickness, or shrinks about its centre to half its thickness. Fixture
+/// watchdog: 2 s to fall half the drop.
 #[test]
-fn a_resting_tank_wakes_and_falls_when_its_support_goes_is_disabled_or_moves() {
-    let changes: [(&str, fn(&mut World, Entity)); 3] = [
-        ("goes", |world, slab| {
+fn a_resting_tank_wakes_and_falls_when_its_support_changes() {
+    let changes: [(&str, f32, fn(&mut World, Entity)); 6] = [
+        ("goes", SLAB.y, |world, slab| {
             world.despawn(slab);
         }),
-        ("is disabled", |world, slab| {
+        ("is disabled", SLAB.y, |world, slab| {
             world.entity_mut(slab).insert(ColliderDisabled);
         }),
-        ("moves", |world, slab| {
+        ("loses its body to a disable", SLAB.y, |world, slab| {
+            world.entity_mut(slab).insert(RigidBodyDisabled);
+        }),
+        ("turns sensor", SLAB.y, |world, slab| {
+            world.entity_mut(slab).insert(Sensor);
+        }),
+        ("moves", SLAB.y, |world, slab| {
             let mut slab = world.entity_mut(slab);
             slab.get_mut::<Position>().expect("slab position").0.y -= SLAB.y;
             slab.get_mut::<Transform>()
@@ -2322,8 +2336,13 @@ fn a_resting_tank_wakes_and_falls_when_its_support_goes_is_disabled_or_moves() {
                 .translation
                 .y -= SLAB.y;
         }),
+        ("shrinks", SLAB.y / 4.0, |world, slab| {
+            world
+                .entity_mut(slab)
+                .insert(Collider::cuboid(SLAB.x, SLAB.y / 2.0, SLAB.z));
+        }),
     ];
-    for (change, apply) in changes {
+    for (change, drop, apply) in changes {
         let mut bed = Bed::on_ground(Some(base_ground()), flat());
         let slab = bed.spawn_static(Vec3::Y * SLAB.y / 2.0, SLAB);
         bed.place(Vec3::Y * SLAB.y, Quat::IDENTITY);
@@ -2355,7 +2374,7 @@ fn a_resting_tank_wakes_and_falls_when_its_support_goes_is_disabled_or_moves() {
             "a resting tank stayed asleep as its support {change}"
         );
         let mut ticks = 0;
-        while bed.hull().position.y > rest - SLAB.y / 2.0 {
+        while bed.hull().position.y > rest - drop / 2.0 {
             assert!(
                 ticks < 2 * TICKS,
                 "the woken tank did not fall as its support {change}"
@@ -2364,6 +2383,42 @@ fn a_resting_tank_wakes_and_falls_when_its_support_goes_is_disabled_or_moves() {
             ticks += 1;
         }
     }
+}
+
+/// A sampled support is no collider pair, and a support that moves wakes nothing it carries
+/// (`debris`'s wakes read fixed supports alone), so a tank on a body that can move must not rest:
+/// its pass finds it at rest only on fixed support (`track::sim::apply_track_forces`). Otherwise
+/// the body could move from under a resting tank, another tank's hull driving off, and leave it
+/// hanging. Fixture: a dynamic [`SLAB`] of the fixture substance on the vehicle layer, as a hull
+/// is, on the flat card; the rest watchdog of [`until_resting`], 8 s.
+#[test]
+fn a_tank_never_rests_on_a_support_that_can_move() {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    let slab = bed.spawn_body(
+        Vec3::Y * SLAB.y / 2.0,
+        SLAB,
+        CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+    );
+    bed.place(Vec3::Y * SLAB.y, Quat::IDENTITY);
+    bed.start();
+    for tick in 0..8 * TICKS {
+        bed.tick(0.0, 0.0);
+        assert!(
+            !is_asleep(&bed),
+            "the tank rested on a support that can move at tick {tick}"
+        );
+    }
+    assert!(
+        bed.app
+            .world()
+            .get::<TrackContacts>(bed.tank)
+            .expect("a driving tank reports its belt contacts")
+            .0
+            .iter()
+            .flatten()
+            .any(|contact| contact.collider == Some(slab)),
+        "the tank stands on the moving body through its sampled support"
+    );
 }
 
 /// The world's other wakes reach a resting tank through Avian alone: a round's impulse through the

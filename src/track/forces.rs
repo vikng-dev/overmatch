@@ -1293,7 +1293,7 @@ fn update_grip_elements(
         grips[idx] = ContactGrip {
             g: Vec2::new(g.dot(c.long_dir), g.dot(c.lat_dir)),
             slope: strain_slope[c.element].transpose() * in_plane / shear_m + pull * d_coef,
-            slides: g_len > 1.0,
+            slides: g_len >= 1.0,
         };
     }
     // Columns the damped support clipped out this tick but whose elastic penetration
@@ -1318,8 +1318,8 @@ fn update_grip_elements(
 struct ContactGrip {
     g: Vec2,
     slope: Vec3,
-    /// Strain and damping together asked for more than the budget, which capped them: the patch
-    /// carries its whole budget and slides.
+    /// Strain and damping together asked for at least the budget, which caps them: the patch
+    /// carries its whole budget, with none to spare, and slides.
     slides: bool,
 }
 
@@ -3317,6 +3317,48 @@ mod tests {
         }
         assert_eq!(results[0], results[1]);
         assert!(results[0].length() > 0.0);
+    }
+
+    /// Exact capacity is no reserve: a patch whose stored shear sits at its shear length, with no
+    /// slip, carries its whole budget with none to spare, so it slides and its side reports no
+    /// [`SideReport::grip_reserve`], which a driving pass needs to find its tank at rest
+    /// (`track::sim::apply_track_forces`). Below its shear length it holds. FIXTURE: one patch at
+    /// the side's weight with a unit shear length along the belt, its stored shear at that length
+    /// and at half of it.
+    #[test]
+    fn a_patch_at_its_whole_budget_has_none_to_spare() {
+        let grip = rig_params().grip.expect("the rig runs grip");
+        let patch = || ColumnContact {
+            p: Vec3::ZERO,
+            normal: Vec3::Y,
+            load: grip.side_weight,
+            load_elastic: grip.side_weight,
+            long_dir: Vec3::Z,
+            lat_dir: Vec3::X,
+            has_plane: true,
+            slip_long: 0.0,
+            slip_lat: 0.0,
+            element: 0,
+            belt_velocity: Vec3::ZERO,
+            collider: None,
+            mu: 0.5,
+            shear_length_m: 1.0,
+            recipient_mobility: 0.0,
+            travel_speed: 0.0,
+            rolling: 0.0,
+            #[cfg(feature = "bitprobe")]
+            probe_index: 0,
+        };
+        let slides = |stored: f32| {
+            let mut elements = GripElements::for_stations(1, 1);
+            elements.strain[0] = Vec3::Z * stored;
+            update_grip_elements(&[patch()], &[], &mut elements, &grip, 1.0 / 64.0, 1)[0].slides
+        };
+        assert!(
+            slides(1.0),
+            "a patch at its whole budget slides, with none to spare"
+        );
+        assert!(!slides(0.5), "a patch below its budget holds");
     }
 }
 

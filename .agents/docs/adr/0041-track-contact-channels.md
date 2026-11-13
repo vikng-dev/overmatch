@@ -21,14 +21,17 @@ waking force call, not a decision.
   vendored Avian, drafted under `upstream/`). A piece takes its equal and opposite reaction through
   the solver.
 - **A tank at rest sleeps whatever carries it**, with its pile, through the engine's island sleep
-  and its rest threshold and time: the sampled support never wakes a tank, and a sleeping tank runs
-  no belt pass. A tank whose grip or brakes slide, or whose drivetrain is still changing, is not at
-  rest however slowly it moves. Drive demand, or a change to the intent or supply its drivetrain
-  settled under, wakes it within its tick (`track::sim::wake_driven_tanks`); a support
-  that goes, is disabled or moves wakes it as it wakes a sleeping piece (`debris::Carried`); a
-  round's impulse and the tank's own shot wake it through the engine's waking impulse
-  (`track::sim::apply_explicit_impulse`), and a moving body or a falling piece through its island
-  wake.
+  and its rest threshold and time: no sampled force touches the rest timer, and a sleeping tank
+  runs no belt pass. Each pass judges what motion cannot show and restarts the timer when the tank
+  is not at rest however slowly it moves: drive demand, a belt its brake does not hold, a brake or
+  every gripping patch sliding, or a sampled support that can move. The drivetrain is no part of
+  the rest: drive demand wakes a sleeping tank within its tick, and without it the tank's
+  transmission keeps stepping on its last pass's belt loads with the belts at rest; a step that
+  holds both belts and slides no brake commits, so a repaired engine spools up under the resting
+  hull, and any other step wakes the tank (`track::sim::wake_driven_tanks`). A support that goes, is disabled, turns sensor or changes
+  wakes it as it wakes a sleeping piece (`debris`); a round's impulse and the tank's own shot wake
+  it through the engine's waking impulse (`track::sim::apply_explicit_impulse`), and a moving body
+  or a falling piece through its island wake.
 - **The boundary is the layer a collider was built on.** Nothing asks what a body is or how heavy.
 - **One support law**: `k'` and `c'` per metre of belt and the droop envelope are shared by the
   channels. A shoe is a rigid plate, so a segment takes `k' × length` whatever the width a piece
