@@ -3,6 +3,10 @@
 Status: ACCEPTED 2026-11-08 by the owner. Subject: the video game's tank driving physics; game
 state only.
 
+Amended 2026-11-13 by the owner: a tank at rest sleeps whatever carries it. The sentence it
+replaces, that a spring contact keeps a tank and its pile awake, recorded a side effect of the
+waking force call, not a decision.
+
 ## Decision
 
 - **Ground and fixed structure take the sampled support**: spring, damper and per-element grip at
@@ -15,9 +19,16 @@ state only.
 - **Loose pieces take belt segments**: solver slabs along the belt's travel that meet only
   `Layer::Debris`, each carrying the calibrated law as a compliant contact (a local patch to the
   vendored Avian, drafted under `upstream/`). A piece takes its equal and opposite reaction through
-  the solver. A tank wholly on pieces with no drive demand sleeps with its pile through the
-  engine's island sleep; drive demand ends that sleep (`track::sim::wake_driven_tanks`). A tank with
-  any spring contact is kept awake by its sampled force, and its pile with it.
+  the solver.
+- **A tank at rest sleeps whatever carries it**, with its pile, through the engine's island sleep
+  and its rest threshold and time: the sampled support never wakes a tank, and a sleeping tank runs
+  no belt pass. A tank whose grip or brakes slide, or whose drivetrain is still changing, is not at
+  rest however slowly it moves. Drive demand, or a change to the intent or supply its drivetrain
+  settled under, wakes it within its tick (`track::sim::wake_driven_tanks`); a support
+  that goes, is disabled or moves wakes it as it wakes a sleeping piece (`debris::Carried`); a
+  round's impulse and the tank's own shot wake it through the engine's waking impulse
+  (`track::sim::apply_explicit_impulse`), and a moving body or a falling piece through its island
+  wake.
 - **The boundary is the layer a collider was built on.** Nothing asks what a body is or how heavy.
 - **One support law**: `k'` and `c'` per metre of belt and the droop envelope are shared by the
   channels. A shoe is a rigid plate, so a segment takes `k' × length` whatever the width a piece
