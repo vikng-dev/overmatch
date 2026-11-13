@@ -51,8 +51,9 @@
 //! HOW MANY CONSTRUCTION PIECES (DERIVED from `construction::breakage`): a chunk leaves its construction at most once
 //! and every split partitions its owned chunks, so live construction bodies never exceed the map's
 //! breakable chunks. The construction design owns the retained carriers' bound and the split model.
-//! Awake pieces are the ones in the solver. A sleeping piece's own per-tick cost and an awake pile
-//! held by a tank's island (above) are both unpriced; a frozen piece has no pair with fixed matter.
+//! Awake pieces are the ones in the solver. A sleeping piece's own per-tick cost is unpriced; the
+//! construction design prices a resting tank's pile (`scripts/perf/pile_park.py`). A frozen piece
+//! has no pair with fixed matter.
 
 pub(crate) mod crumble;
 pub(crate) mod decor;
