@@ -46,9 +46,12 @@ its timer (`track::sim::settle_rest`): drive demand, a belt its brake does not h
 stop beyond its capacity, every gripping patch at or past its budget, or a sampled support whose
 body is not static. A tank creeping past its grip limit keeps creeping:
 `contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_limits` judges the
-slope limits under production rest, mud at 17.0° against its 15.5° limit among them. A support
-that can move wakes nothing it carries, so a tank never rests on one, another tank's hull among
-them. The drivetrain is no part of the rest: a sleeping tank's hull and contacts stand still, but
+slope limits under production rest, mud at 17.0° against its 15.5° limit among them. A tank
+never rests on a support that can move by itself, another tank's hull among them, an admitted
+limit: Avian links bodies into an island only through solver contacts and joints
+(`dynamics/solver/islands`), the sampled support is neither, so that support's motion would wake
+nothing it carries, and a joint per tank and support, which would carry the link, was rejected
+on cost. The drivetrain is no part of the rest: a sleeping tank's hull and contacts stand still, but
 its transmission steps each tick on its last pass's belt loads with the belts at rest
 (`track::sim::wake_driven_tanks`). A step that holds both belts and slides no brake is staged and
 commits if the tank still rests once the tick's wakes have applied (`track::sim::settle_rest`), so a

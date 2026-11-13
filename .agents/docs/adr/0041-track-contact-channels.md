@@ -60,5 +60,9 @@ covered width. Each is costed in the design doc.
   collider caps the travel; and pieces leave the spring channel.
 - The partial-coverage difference between the sampled support and a segment is a named property,
   not a defect to tune.
+- An admitted limit: a tank on a support that can move by itself, another tank's hull among them,
+  never rests. The engine links bodies into an island only through solver contacts and joints, and
+  the sampled support is neither, so that support's motion would wake nothing it carries; a joint
+  per tank and support would carry the link and was rejected on cost.
 - Sim state stays spawn-built ([[0014-sim-view-split]]): stops and segments are cut from
   construction data with the hull. Everything here is server-simulated ([[0037-one-authoritative-timeline-and-view-overlays]]).
