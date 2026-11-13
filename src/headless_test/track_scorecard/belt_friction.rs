@@ -549,9 +549,9 @@ fn run(case: &Case, tag: &str) {
     println!("BELTFRICTION {line}");
 }
 
-/// The tank on its layer of pieces (`bed_on_pile`), settled.
+/// The tank on its layer of pieces (`parked_over`), settled.
 fn pieces_bed() -> Bed {
-    let mut bed = bed_on_pile();
+    let mut bed = parked_over(&Side::ALL);
     for _ in 0..2 * TICKS {
         bed.tick(0.0, 0.0);
     }

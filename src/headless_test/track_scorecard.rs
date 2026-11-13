@@ -1549,13 +1549,9 @@ fn pile_ahead(bed: &mut Bed) -> (f32, f32) {
     (near, near - 3.0 * (PIECE.z + PIECE_GAP))
 }
 
-/// One layer of pieces under each track's ground run, the tank parked on top; returns the
-/// support level (m). Each row is centred on its track's shoe and spans its road wheels.
-fn pile_under(bed: &mut Bed) -> f32 {
-    pile_under_sides(bed, &Side::ALL)
-}
-
-/// [`pile_under`] for the tracks of `sides` alone.
+/// One layer of pieces under the ground run of each track of `sides`, the tank parked on top;
+/// returns the support level (m). Each row is centred on its track's shoe and spans its road
+/// wheels.
 fn pile_under_sides(bed: &mut Bed, sides: &[Side]) -> f32 {
     let geom = bed.geom();
     let rows: Vec<(f32, f32, f32)> = sides
@@ -1700,7 +1696,7 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
     }
 
     let mut bed = Bed::on_ground(Some(ground), flat());
-    let level = pile_under(&mut bed);
+    let level = pile_under_sides(&mut bed, &Side::ALL);
     bed.place(Vec3::new(0.0, level, 0.0), Quat::IDENTITY);
     bed.start();
     let begin_y = bed.hull().position.y - level;
@@ -2128,21 +2124,12 @@ fn assert_coast_and_sleep(bed: &mut Bed) -> usize {
     moving_ticks
 }
 
-/// A tank on a layer of loose pieces under each track: its whole support is solver contacts.
-fn bed_on_pile() -> Bed {
-    let mut bed = Bed::on_ground(Some(base_ground()), flat());
-    let level = pile_under(&mut bed);
-    bed.place(Vec3::new(0.0, level, 0.0), Quat::IDENTITY);
-    bed.start();
-    bed
-}
-
 /// Sleep is the economy of a parked tank and its pile; it must end when the driver asks. The
 /// solver contacts that would carry the drive do not exist while the pair sleeps, so nothing but
 /// the demand itself can wake the island.
 #[test]
 fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
-    let mut bed = bed_on_pile();
+    let mut bed = parked_over(&Side::ALL);
     let mut settled = 0;
     while !is_asleep(&bed) && settled < 8 * TICKS {
         bed.tick(0.0, 0.0);
@@ -2215,7 +2202,7 @@ fn roundoff(position: Vec3, ticks: usize) -> f32 {
 /// tolerance, no command. Every side and direction must wake; hull motion cannot mask this arm.
 #[test]
 fn a_tank_on_loose_pieces_wakes_for_either_coasting_belt_without_a_command() {
-    let mut bed = bed_on_pile();
+    let mut bed = parked_over(&Side::ALL);
     assert_coast_and_sleep(&mut bed);
     for side in 0..2 {
         for direction in [-1.0, 1.0] {
@@ -2578,7 +2565,7 @@ fn drive_demand_wakes_a_resting_tank_within_its_tick() {
 /// sleep would end the drive with the demand still held.
 #[test]
 fn a_creeping_tank_on_loose_pieces_never_sleeps_under_its_command() {
-    let mut bed = bed_on_pile();
+    let mut bed = parked_over(&Side::ALL);
     let mut slowest = f32::INFINITY;
     for tick in 0..4 * TICKS {
         bed.tick(0.01, 0.0);
@@ -2597,7 +2584,7 @@ fn a_creeping_tank_on_loose_pieces_never_sleeps_under_its_command() {
 #[test]
 fn every_segment_on_loose_pieces_carries_the_running_gears_law_once() {
     use crate::track::belt_segment::SegmentLaw;
-    let mut bed = bed_on_pile();
+    let mut bed = parked_over(&Side::ALL);
     let (mut checked, mut shared) = (0, 0);
     for _ in 0..TICKS {
         bed.tick(0.3, 0.0);

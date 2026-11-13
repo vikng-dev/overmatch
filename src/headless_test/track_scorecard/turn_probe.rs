@@ -259,7 +259,7 @@ fn settled(ground: &Ground) -> Bed {
     let mut bed = Bed::on_ground(Some(base_ground()), grid);
     let mut lift = 0.0;
     if matches!(ground, Ground::Pieces) {
-        lift = pile_under(&mut bed);
+        lift = pile_under_sides(&mut bed, &Side::ALL);
     }
     let normal = match ground {
         Ground::Slope { angle, along: true } => Vec3::new(0.0, 1.0, angle.tan()),

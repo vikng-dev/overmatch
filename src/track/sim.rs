@@ -253,7 +253,6 @@ impl SampledSupports {
     }
 }
 
-/// A tank that goes leaves the support index.
 fn forget_sampled_supports(gone: On<Remove, TrackContacts>, mut index: ResMut<SampledSupports>) {
     index.forget(gone.entity);
 }

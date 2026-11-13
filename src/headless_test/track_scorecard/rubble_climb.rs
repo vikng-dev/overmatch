@@ -1337,12 +1337,8 @@ fn wedge_read(bed: &mut Bed, tick: usize) -> Vec<Value> {
         {
             continue;
         }
-        let colliders: Vec<Entity> = world
-            .get::<RigidBodyColliders>(piece)
-            .map(|c| c.iter().collect())
-            .unwrap_or_default();
         let mut contacts = Vec::new();
-        for &collider in &colliders {
+        for collider in world.get::<RigidBodyColliders>(piece).into_iter().flatten() {
             for pair in graph.contact_pairs_with(collider) {
                 if !pair.is_touching() {
                     continue;
