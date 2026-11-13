@@ -622,10 +622,8 @@ mod tests {
         wakes_and_falls(&mut app, resting);
     }
 
-    /// A SLEEPING BODY WAKES WHEN ITS SUPPORT MOVES: a body asleep on a static slab wakes when the
-    /// slab is re-posed a metre down, and falls after it. Avian wakes no body for a static
-    /// collider's move, so a mutant that drops [`wake_on_static_moved`] leaves the body hanging
-    /// where the slab was; a falling tree's trunk under a piece relies on it.
+    /// Avian wakes no body for a static collider's move; without [`wake_on_static_moved`] a piece
+    /// stays hanging when the tree trunk under it moves.
     #[test]
     fn a_sleeping_body_wakes_when_its_support_moves() {
         let mut app = settling(Vec3::NEG_Y * 9.81);

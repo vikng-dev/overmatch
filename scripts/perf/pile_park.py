@@ -341,7 +341,8 @@ def run(args, name, condition, pose, out):
     try:
         return measure(args, name, condition, pose, out, record)
     except Refused as refusal:
-        record["invalid"] = str(refusal)
+        # Cleanup may already have recorded a process it could not stop; keep both.
+        record["invalid"] = "; ".join(filter(None, [record.get("invalid"), str(refusal)]))
         return record, []
 
 
