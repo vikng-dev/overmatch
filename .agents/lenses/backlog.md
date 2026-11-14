@@ -63,9 +63,3 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | ballistics-24 | P3 | `.agents/scratch/research/walk-panics-2026-11-03.md` Reach | base-truths: Claim beyond the evidence | "No flight that did not panic changed": runs go unpaired after a panic, and agreement omits a changed `SampleSeed.t`, which `sitting_reach` reads. | Pair flights by seed, compare `t`, or narrow the claim. | ratchet |
 
 | ballistics-30 | P3 | `assets/ballistics/spall_cone.ron::cone_emitted_hp_per_joule` | base-truths: Retrospective calibration | The unit is set against a retired reference cone of 395 HP, a target with no remaining owner. | State the crew-station outcome it aims at as a balance decision, or replace it with the fragment-hit law it names. | ratchet |
-
-## driving
-
-| id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
-|---|---|---|---|---|---|---|
-| driving-12 | P2 | `src/track/route.rs::sag_span_at` endpoint exemption | error-handling: Silent exit | Radial `on_circle` also exempts a lower-pole contact: DERIVED real-arithmetic witness `from=(0,0.1)`, `to=(-2,0.1)`, excess `0.02`, circles `[((-2,0),0.1), ((0,0.22),0.12), ((0,0),0.1)]` lifts the next sample to the upper hemisphere and cuts about 117.7 mm against the 1 mm contract; this is not a Rust-run measurement. | Represent endpoint support ownership explicitly, retain clipping for lower-pole contacts, and add the counterexample as a route regression test. | ratchet |
