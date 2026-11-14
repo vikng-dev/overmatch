@@ -563,7 +563,7 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
                 world
                     .get::<CollisionLayers>(entity)
                     .unwrap()
-                    .interacts_with(crate::track::belt_segment::segment_layers()),
+                    .interacts_with(crate::track::soft_run::run_layers()),
                 "the freed hull meets the belt's soft run"
             );
             assert!(

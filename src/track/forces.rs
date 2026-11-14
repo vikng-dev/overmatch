@@ -327,6 +327,26 @@ pub struct ForceParams {
     pub grip: Option<GripParams>,
 }
 
+/// The support law per metre of belt, which the soft run carries against loose pieces
+/// (`super::soft_run`): the sampled support's own, published from the [`ForceParams`] of whichever
+/// driver calibrated it, the game's `TrackGear` or the sandbox's rig.
+#[derive(bevy::prelude::Resource, Clone, Copy, Debug)]
+pub(crate) struct SupportLaw {
+    /// N/m per metre of belt.
+    pub(crate) stiffness_per_m: f32,
+    /// N·s/m per metre of belt.
+    pub(crate) damping_per_m: f32,
+}
+
+impl ForceParams {
+    pub(crate) fn support_law(&self) -> SupportLaw {
+        SupportLaw {
+            stiffness_per_m: self.support_stiffness_per_m,
+            damping_per_m: self.support_damping_per_m,
+        }
+    }
+}
+
 /// Recoverable shear state, one WORLD-space vector (m) per advected force station × lateral column
 /// (flat index `station * lateral_points + column`). Force reads this vector divided by the
 /// element's shear length, capped at that contact's capacity. Sliding returns the state within
@@ -594,6 +614,12 @@ pub fn clipped_linear_piece(x0: f32, x1: f32, p0: f32, p1: f32) -> (f32, f32, f3
     }
 }
 
+/// The arc between consecutive force stations on the closed `loop_pts`, `count` stations round:
+/// a chord between them, so a patch's contacting length, is never longer.
+pub(crate) fn station_pitch(loop_pts: &[Vec2], count: usize) -> f32 {
+    polyline_len(loop_pts) / count as f32
+}
+
 /// Advance one side's contact by one fixed tick: support + traction forces at the advected
 /// stations (probing `oracle` at the presented `affine`, reading the hull's velocity field
 /// through `vel_at`), contacts, grip-state update, and the summed longitudinal ground reaction.
@@ -629,7 +655,7 @@ pub fn contact_side<O: TerrainOracle>(
         input.count >= 3,
         "admitted running gear has enough force stations to enclose a belt"
     );
-    let pitch = polyline_len(input.loop_pts) / input.count as f32;
+    let pitch = station_pitch(input.loop_pts, input.count);
     let (wraps, station_offset) = phase_decompose(state.phase, pitch);
     let stations = resample_loop(input.loop_pts, pitch, station_offset, input.count);
 

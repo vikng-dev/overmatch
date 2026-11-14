@@ -68,6 +68,7 @@ use super::schema::{ConstructionAsset, PLANE_TOLERANCE_M, SurfaceFrame};
 use crate::construction_surface::{ConstructionMaterial, holed};
 use crate::debris::PresentationClock;
 use crate::scatter::MapInstance;
+use crate::track::oracle::HullField;
 
 /// `<id>.dressing.ron` as authored or generated (module doc).
 #[derive(Debug, serde::Deserialize)]
@@ -921,12 +922,6 @@ fn dress_pieces(
         let kind = &admitted.kind;
         let construction = admitted.construction;
         let origin = admitted.origin;
-        let reach = admitted
-            .chunks
-            .iter()
-            .flat_map(|&c| &kind.layout.blocks[usize::from(c)].points)
-            .map(|p| p.distance(origin))
-            .fold(0.0, f32::max);
         let mesh = meshes.add(piece_mesh(kind, &admitted.chunks, origin));
         let view = commands
             .spawn((
@@ -942,7 +937,6 @@ fn dress_pieces(
                 construction,
                 view,
                 origin,
-                reach,
             },
             Visibility::Hidden,
         ));
@@ -950,14 +944,12 @@ fn dress_pieces(
 }
 
 /// A dressed piece: its construction's root, resolved from the piece's ordinal once, at dressing; its
-/// mesh child; the point (asset frame) its mesh is drawn about; and how far from that point its
-/// chunks reach (m).
+/// mesh child; and the point (asset frame) its mesh is drawn about.
 #[derive(Component)]
 struct PieceDressed {
     construction: Entity,
     view: Entity,
     origin: Vec3,
-    reach: f32,
 }
 
 /// The fallen pieces as this module draws them, for a view that rests on them: the track view's
@@ -980,12 +972,10 @@ pub(crate) struct DrawnPieces<'w, 's> {
 impl DrawnPieces<'_, '_> {
     /// Push the chunk hulls of every shown piece reaching within `radius` of `centre` (world, m)
     /// onto `hulls`.
-    pub(crate) fn near(&self, centre: Vec3, radius: f32, hulls: &mut DrawnHulls) {
+    pub(crate) fn near(&self, centre: Vec3, radius: f32, hulls: &mut HullField) {
         for (pose, piece, dressed, visibility) in &self.pieces {
-            if *visibility == Visibility::Hidden
-                || pose.translation.distance(centre) > radius + dressed.reach
-            {
-                continue; // Not drawn, or out of reach.
+            if *visibility == Visibility::Hidden {
+                continue; // Not drawn.
             }
             let kind = &self
                 .constructions
@@ -993,32 +983,47 @@ impl DrawnPieces<'_, '_> {
                 .expect("a dressed piece's construction outlives its presentation (dress_pieces)")
                 .kind;
             for &c in &piece.chunks {
-                hulls.push(&kind.layout.blocks[usize::from(c)], dressed.origin, pose);
+                let block = &kind.layout.blocks[usize::from(c)];
+                push_drawn(hulls, block, (dressed.origin, pose), (centre, radius));
             }
         }
     }
 }
 
+/// Push `block` onto `hulls`, drawn about `origin` (asset frame) at the rigid `pose`, if it reaches
+/// within `radius` of `centre` (world, m). A carrier's pose (`DebrisPose::transform`) and a body's
+/// writeback carry unit scale.
+fn push_drawn(
+    hulls: &mut HullField,
+    block: &Block,
+    (origin, pose): (Vec3, &Transform),
+    (centre, radius): (Vec3, f32),
+) {
+    // An asset point `x` is drawn at `pose · (x − origin)`.
+    let frame = pose.mul_transform(Transform::from_translation(-origin));
+    // Every point of the block lies in its box, so within half the box's diagonal of its middle.
+    let bound = (
+        (block.min + block.max) / 2.0,
+        (block.max - block.min).length() / 2.0,
+    );
+    if frame.transform_point(bound.0).distance(centre) <= radius + bound.1 {
+        hulls.push(&block.planes, bound, &frame);
+    }
+}
+
 /// A shown, dressed piece of chunk `chunk` of the construction `root` (its `Breakage`), drawn at
-/// `pose` about the chunk's middle: what `dress_pieces` and `show_pieces` leave for a view to rest
-/// on, without a mesh.
+/// `pose` about `origin` (asset frame): what `dress_pieces` and `show_pieces` leave for a view to
+/// rest on, without a mesh.
 #[cfg(test)]
 pub(crate) fn spawn_drawn_piece(
     world: &mut World,
     root: Entity,
     chunk: u16,
-    pose: Transform,
+    (origin, pose): (Vec3, Transform),
 ) -> Entity {
     let breakage = world
         .get::<Breakage>(root)
         .expect("a piece's construction carries its breakage");
-    let block = &breakage.kind.layout.blocks[usize::from(chunk)];
-    let origin = (block.min + block.max) / 2.0;
-    let reach = block
-        .points
-        .iter()
-        .map(|p| p.distance(origin))
-        .fold(0.0, f32::max);
     let piece = Piece {
         construction: breakage.construction,
         chunks: vec![chunk],
@@ -1033,87 +1038,11 @@ pub(crate) fn spawn_drawn_piece(
                 construction: root,
                 view,
                 origin,
-                reach,
             },
             pose,
             Visibility::Inherited,
         ))
         .id()
-}
-
-/// Convex hulls in world space, each by its planes as [`Block`] states them (a point `x` is inside
-/// when `n · x ≤ o` for every outward unit normal `n` and offset `o`) and a bounding sphere. Two
-/// gathers are equal when they hold the same hulls in the same order.
-#[derive(Default, Clone, PartialEq)]
-pub(crate) struct DrawnHulls {
-    planes: Vec<(Vec3, f32)>,
-    hulls: Vec<(Vec3, f32, std::ops::Range<usize>)>,
-}
-
-impl DrawnHulls {
-    pub(crate) fn clear(&mut self) {
-        self.planes.clear();
-        self.hulls.clear();
-    }
-
-    /// `block` drawn `origin` back from its asset frame at `pose`, which is rigid: a carrier's
-    /// pose (`DebrisPose::transform`) and a body's writeback carry unit scale.
-    pub(crate) fn push(&mut self, block: &Block, origin: Vec3, pose: &Transform) {
-        let start = self.planes.len();
-        self.planes
-            .extend(block.planes.iter().map(|&(normal, offset)| {
-                let turned = pose.rotation * normal;
-                (
-                    turned,
-                    offset - normal.dot(origin) + turned.dot(pose.translation),
-                )
-            }));
-        let centre = (block.min + block.max) / 2.0;
-        let radius = block
-            .points
-            .iter()
-            .map(|p| p.distance(centre))
-            .fold(0.0, f32::max);
-        self.hulls.push((
-            pose.translation + pose.rotation * (centre - origin),
-            radius,
-            start..self.planes.len(),
-        ));
-    }
-
-    /// The hulls' surface as `track::oracle::DepthOracle::depth_along` reads one: the ray starts
-    /// `reach` behind `station` along `out` and runs twice `reach`; a first crossing at `t` is
-    /// `reach − t` deep, and a start inside a hull saturates at `reach`. `None` when the ray meets
-    /// no hull.
-    pub(crate) fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> Option<f32> {
-        let origin = station - out * reach;
-        let span = 2.0 * reach;
-        let mut deepest: Option<f32> = None;
-        for (centre, radius, planes) in &self.hulls {
-            let closest = origin + out * (*centre - origin).dot(out).clamp(0.0, span);
-            if closest.distance_squared(*centre) > radius * radius {
-                continue; // The ray passes outside the hull's bounding sphere.
-            }
-            // The ray lies inside every half-space, so inside the hull, over [enter, exit].
-            let (mut enter, mut exit) = (f32::NEG_INFINITY, f32::INFINITY);
-            for &(normal, offset) in &self.planes[planes.clone()] {
-                let rate = normal.dot(out);
-                let room = offset - normal.dot(origin);
-                if rate > 0.0 {
-                    exit = exit.min(room / rate);
-                } else if rate < 0.0 {
-                    enter = enter.max(room / rate);
-                } else if room < 0.0 {
-                    exit = f32::NEG_INFINITY; // Parallel to this plane, and outside it.
-                }
-            }
-            if enter <= exit && exit >= 0.0 && enter <= span {
-                let depth = reach - enter.max(0.0);
-                deepest = Some(deepest.map_or(depth, |d| d.max(depth)));
-            }
-        }
-        deepest
-    }
 }
 
 /// A shown piece whose mesh wears its chunks' holes.

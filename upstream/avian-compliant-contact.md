@@ -26,9 +26,13 @@ impulse scale `m/(m + a)`, the exact rewrite of `SoftnessParameters::compute_coe
 laws sum over points; a per-contact frequency would make the total stiffness grow with the number
 of points and with the masses involved.
 
-One further rule: a compliant point at positive separation applies no impulse. The stock
+Two further rules. A compliant point at positive separation applies no impulse: the stock
 speculative branch would stop the bodies rigidly at the spring's surface, which MEASURED as a
-2.4 MN single-tick impulse against a 0.08 m bar.
+2.4 MN single-tick impulse against a 0.08 m bar. And a compliant point out of overlap at the narrow
+phase bears nothing all step: no warm start, and coefficients (bias 0, mass scale 0, impulse
+scale 1) under which each solve returns its accumulated impulse. The point stays in the manifold,
+whose impulses are stored back by index, so a caller sharing one law over the points in overlap
+need not prune the rest, and the law it reads from the manifold reads the same again.
 
 Files: `collision/contact_types/mod.rs` (field, type, coefficients), `collision/mod.rs` (prelude),
 `collision/narrow_phase/system_param.rs` (reset), `dynamics/solver/contact/mod.rs` and

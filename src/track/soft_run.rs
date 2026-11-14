@@ -4,53 +4,95 @@
 //! outer-face stop (`bump_stop`). A loose piece meets one run collider per side, as a solver
 //! contact, so the piece takes the equal and opposite reaction through Avian:
 //!
-//! - **Shape.** [`run_outline`]: the convex outline of the rest belt's outer face, extruded across
-//!   the shoe's measured faces. Built at spawn from construction data and hung on the hull with
-//!   the stop (`bump_stop::spawn_track_colliders`; ADR-0014), on [`crate::Layer::TrackBelt`], which
-//!   meets only `Layer::Debris`.
+//! - **Shape.** [`RunShape::build`]: the convex outline of the rest belt's outer face, extruded
+//!   across the shoe's measured faces. Built at spawn from construction data and hung on the hull
+//!   with the stop (`bump_stop::spawn_track_colliders`; ADR-0014), on [`run_layers`]: a run meets
+//!   loose pieces and nothing else, and the sampled support reads no collider a run meets
+//!   (`rubble::RubbleQuery::near`), so every solid has one channel. No side plate meets a loose
+//!   piece (`bump_stop`); the stop does, as the hard limit at full bump travel.
 //! - **Support.** The run is read as links of one pitch along its outline, and each link carries
-//!   the running gear's calibrated law per metre (`belt_segment::SegmentLaw`, the sampled
-//!   support's own) times its length, at the deepest overlap any contact gives it, once however
-//!   many pieces press it ([`RunContacts`]). A contact's overlap runs along the belt through its
-//!   points, linear between neighbours the shorter way round; a link takes the deepest that
-//!   reaches on its length, nothing where that is zero or less. A link is rigid along its
-//!   length, so one point loads a whole link. The contacts on a link share its law in proportion
-//!   to their depth there. Only a contact's points in overlap reach the solver, and they carry
-//!   its whole share. The datum is the rest face, so a piece's force adds to the ground's under
-//!   the same belt, which the sampled support still carries. The stop meets loose pieces too, as
-//!   the hard limit at full bump travel.
+//!   the running gear's calibrated law per metre (`forces::SupportLaw`, the sampled support's own)
+//!   times its length, at the deepest overlap any contact gives it, once however many pieces press
+//!   it ([`RunContacts`]). A piece's manifold is read on the one face of the convex run that faces
+//!   its normal ([`SoftRun::facing`]), its points projected onto it: on a rim face its overlap runs
+//!   along that face's outline edge, linear between its points; on a lateral cap each point loads
+//!   the link nearest it. A link takes the deepest that reaches on its length, nothing where that
+//!   is zero or less. A link is rigid along its length, so one point loads a whole link. The
+//!   contacts on a link share its law in proportion to their depth there, and a contact's points in
+//!   overlap carry its whole share; the solver leaves its other points inert. The datum is the rest
+//!   face, so a piece's force adds to the ground's under the same belt, which the sampled support
+//!   carries. The reading's limits are the design doc's
+//!   (`.agents/docs/design/track-model/track-contact.md`).
 //! - **Drivetrain.** A run carries its side's `BeltFace`, so the shared hook moves its surface at
 //!   belt speed and `stop_contacts::by_owner` reads its friction into the transmission.
 //!
 //! Each run's laws come from a shared read of the contact graph, every run apart ([`read_runs`]);
-//! one short step then writes them into the manifolds ([`write_runs`]).
-//!
-//! Loose pieces meet nothing else of the track: the sampled support's footprint query skips them
-//! (`rubble::RubbleQuery::near`) and the side plates' layers leave them out (`bump_stop`).
+//! one short step then writes them into the manifolds ([`write_runs`]), the only writer of a
+//! contact's compliance.
 
 use std::ops::Range;
 
 use avian3d::collision::contact_types::{ContactId, ContactManifold};
 use avian3d::prelude::{
-    ColliderOf, ContactCompliance, ContactGraph, PhysicsSchedule, PhysicsStepSystems, Position,
-    Rotation,
+    Collider, ColliderOf, CollisionLayers, ContactCompliance, ContactGraph, PhysicsSchedule,
+    PhysicsStepSystems, Position, Rotation,
 };
 use bevy::prelude::*;
 
-use super::belt_segment::SegmentLaw;
+use super::forces::SupportLaw;
 use super::rig_geom::RigGeom;
 use super::route::build_route;
 use super::side::Side;
+use super::stop_contacts::BeltFace;
+use crate::Layer;
+
+/// One side's run as a tank kind's track shapes cache it (`bump_stop::TrackColliders`): its
+/// body-local collider, its moving face and its links.
+#[derive(Clone)]
+pub(crate) struct RunShape {
+    collider: Collider,
+    face: BeltFace,
+    run: SoftRun,
+}
+
+impl RunShape {
+    /// `side`'s run, from the measured running gear `geom`.
+    pub(crate) fn build(geom: &RigGeom, side: Side) -> Self {
+        let outline = outline(geom, side);
+        Self {
+            collider: super::bump_stop::across_shoe(geom, side, &outline),
+            run: SoftRun::new(&outline, geom.pitch),
+            face: BeltFace::new(side, outline, false),
+        }
+    }
+
+    pub(crate) fn collider(&self) -> &Collider {
+        &self.collider
+    }
+
+    /// What a run's entity carries beside its pose, parent and friction.
+    pub(crate) fn bundle(&self) -> impl Bundle {
+        (
+            self.run.clone(),
+            self.face.clone(),
+            self.collider.clone(),
+            run_layers(),
+        )
+    }
+}
+
+/// What a run meets: loose pieces only.
+pub(crate) fn run_layers() -> CollisionLayers {
+    CollisionLayers::new([Layer::TrackBelt], [Layer::Debris])
+}
 
 /// A run collider: one side's belt against loose pieces, and the links its contacts are read on.
 #[derive(Component, Clone, Debug)]
 #[require(RunContacts)]
 pub(crate) struct SoftRun {
-    /// The run's outline in the side plane `(z, y)`, each vertex with its arc length from the
-    /// first along the closed outline (m).
-    outline: Vec<(Vec2, f32)>,
-    /// The closed outline's length (m).
-    length: f32,
+    /// The run's outline in the side plane `(z, y)`, counter-clockwise from its first vertex: one
+    /// rim face of the collider per edge.
+    edges: Vec<Edge>,
     /// The closed outline's links: its length over the belt's pitch, rounded.
     links: usize,
     /// The belt one link stands for (m): the outline's length over its links, so the links tile
@@ -58,47 +100,110 @@ pub(crate) struct SoftRun {
     link: f32,
 }
 
+/// One edge of a run's outline in the side plane `(z, y)`.
+#[derive(Clone, Copy, Debug)]
+struct Edge {
+    /// Its first vertex, and that vertex's arc from the outline's first (m).
+    start: Vec2,
+    arc: f32,
+    /// Its length (m), its direction round the outline and its outward normal, both unit.
+    length: f32,
+    dir: Vec2,
+    out: Vec2,
+}
+
+impl Edge {
+    /// How far along this edge side-plane point `p`'s foot stands, clamped to the edge (m).
+    fn foot(&self, p: Vec2) -> f32 {
+        (p - self.start).dot(self.dir).clamp(0.0, self.length)
+    }
+}
+
+/// The face of a run a manifold is read on.
+#[derive(Clone, Copy, Debug)]
+enum Face {
+    /// The rim face over one outline edge, by its index.
+    Rim(usize),
+    /// Either lateral cap. `StandIn`: a cap's points load their nearest links at the belt's own
+    /// law; what a piece pressed against the shoe's side should carry is open
+    /// (`.agents/docs/design/track-model/track-contact.md`).
+    Cap,
+}
+
 impl SoftRun {
-    /// The run of side-plane `outline`, closed, read as links of about `pitch`.
-    pub(crate) fn new(outline: &[Vec2], pitch: f32) -> Self {
+    /// The run of side-plane `outline`, closed and counter-clockwise, read as links of about
+    /// `pitch`.
+    fn new(outline: &[Vec2], pitch: f32) -> Self {
         let mut length = 0.0;
-        let outline: Vec<(Vec2, f32)> = outline
+        let edges: Vec<Edge> = outline
             .iter()
             .zip(outline.iter().cycle().skip(1))
             .map(|(&a, &b)| {
-                let vertex = (a, length);
-                length += a.distance(b);
-                vertex
+                let dir = (b - a).normalize();
+                let edge = Edge {
+                    start: a,
+                    arc: length,
+                    length: a.distance(b),
+                    dir,
+                    out: Vec2::new(dir.y, -dir.x),
+                };
+                length += edge.length;
+                edge
             })
             .collect();
+        assert!(
+            edges
+                .iter()
+                .zip(edges.iter().cycle().skip(1))
+                .all(|(a, b)| a.dir.perp_dot(b.dir) > 0.0),
+            "a run outline turns left at every vertex of the side plane (z, y): {outline:?}"
+        );
         let links = (length / pitch).round() as usize;
         assert!(
             links >= 3,
             "a run outline {length} m round holds at least three links of {pitch} m"
         );
         Self {
-            outline,
-            length,
+            edges,
             links,
             link: length / links as f32,
         }
     }
 
-    /// Where along the closed outline side-plane point `p` lies, at its nearest point on the
-    /// outline: m from its first vertex, below the outline's length, so that every gap between
-    /// two distinct arcs round the outline is positive.
-    fn arc_of(&self, p: Vec2) -> f32 {
-        let mut nearest = (f32::INFINITY, 0.0);
-        for (i, &(a, at)) in self.outline.iter().enumerate() {
-            let edge = self.outline[(i + 1) % self.outline.len()].0 - a;
-            let t = ((p - a).dot(edge) / edge.length_squared()).clamp(0.0, 1.0);
-            let gap = p.distance_squared(a + edge * t);
-            if gap < nearest.0 {
-                nearest = (gap, at + t * edge.length());
+    /// The face a manifold whose normal leaves the run along body-frame `out` is read on, by the
+    /// narrow phase's own rule (parry's `ConvexPolyhedron::local_support_feature`): the face whose
+    /// outward normal lies nearest `out`. At an exact tie between two edges the last wins, where
+    /// parry may pick the other; the feet then clamp onto the corner they share.
+    fn facing(&self, out: Vec3) -> Face {
+        let side = Vec2::new(out.z, out.y);
+        let (rim, nearest) = (self.edges.iter().map(|edge| edge.out.dot(side)).enumerate())
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("a run outline has edges");
+        if out.x.abs() > nearest {
+            Face::Cap
+        } else {
+            Face::Rim(rim)
+        }
+    }
+
+    /// Where along the closed outline side-plane point `p` lies on `face` (m from the first
+    /// vertex, up to the outline's length): at its foot on a rim face's edge, or at the outline
+    /// point nearest it on a cap.
+    fn arc_on(&self, face: Face, p: Vec2) -> f32 {
+        match face {
+            Face::Rim(edge) => self.edges[edge].arc + self.edges[edge].foot(p),
+            Face::Cap => {
+                let mut nearest = (f32::INFINITY, 0.0);
+                for edge in &self.edges {
+                    let foot = edge.foot(p);
+                    let gap = p.distance_squared(edge.start + edge.dir * foot);
+                    if gap < nearest.0 {
+                        nearest = (gap, edge.arc + foot);
+                    }
+                }
+                nearest.1
             }
         }
-        // The last edge's end is the first vertex, at the outline's length.
-        nearest.1 % self.length
     }
 
     /// The link holding arc `s` (m), round the closed outline.
@@ -112,6 +217,12 @@ impl SoftRun {
         self.link
     }
 
+    /// The run's outline in the side plane `(z, y)`, from its first vertex.
+    #[cfg(test)]
+    pub(crate) fn outline(&self) -> Vec<Vec2> {
+        self.edges.iter().map(|edge| edge.start).collect()
+    }
+
     /// Fixture: a run round a 3 m square, 96 links of 0.125 m (12 m round).
     #[cfg(test)]
     pub(crate) fn fixture() -> Self {
@@ -122,12 +233,12 @@ impl SoftRun {
 
 /// Resolution: the least turn a run outline's vertex keeps, as the sine of its angle (about 2°).
 /// The raw route's near-collinear arc points make sliver faces, and the convex contact against a
-/// piece answers them with loaded points 1.5–3 km deep (MEASURED with the raw route, spike R).
+/// piece answers them with loaded points 1.5–3 km deep (MEASURED with the raw route).
 const OUTLINE_TURN_MIN: f32 = 0.035;
 
 /// One side's run outline in the side plane `(z, y)`: the convex hull of the rest belt's outer
 /// face, every vertex turning less than [`OUTLINE_TURN_MIN`] dropped.
-pub(crate) fn run_outline(geom: &RigGeom, side: Side) -> Vec<Vec2> {
+fn outline(geom: &RigGeom, side: Side) -> Vec<Vec2> {
     let outer: Vec<(Vec2, f32)> = geom
         .rest
         .get(side)
@@ -163,7 +274,7 @@ struct Manifold {
     index: usize,
     /// Its links in overlap in [`RunContacts::depths`].
     depths: Range<usize>,
-    /// Its points' summed overlap (m), and how many are in overlap: the points the solver gets.
+    /// Its points' summed overlap (m), and how many are in overlap: the points the solver loads.
     overlap: f32,
     count: usize,
 }
@@ -171,7 +282,7 @@ struct Manifold {
 /// One run's touching contacts this step and the law each takes, rebuilt every step from the
 /// contact graph. Its buffers keep their capacity from step to step.
 #[derive(Component, Default)]
-pub(crate) struct RunContacts {
+struct RunContacts {
     manifolds: Vec<Manifold>,
     /// Each manifold's links in overlap, `(link, depth)` (m, above zero), ascending by link.
     depths: Vec<(u32, f32)>,
@@ -190,8 +301,8 @@ pub(crate) struct RunContacts {
     /// One manifold's terms per link: its deepest depth times the manifold's share there (m), and
     /// that share.
     terms: Vec<(f32, f32)>,
-    /// Each manifold's law, in `manifolds` order: none for one with no point in overlap.
-    laws: Vec<Option<ContactCompliance>>,
+    /// Each manifold's law, in `manifolds` order.
+    laws: Vec<ContactCompliance>,
 }
 
 impl RunContacts {
@@ -201,20 +312,34 @@ impl RunContacts {
         self.laws.clear();
     }
 
-    /// Add one manifold of `run`, `index` of pair `pair`, from its points `(arc, overlap)`. Its
-    /// overlap runs through its points, the deepest where two stand together, linear between
-    /// neighbours across every gap but the widest, so the shorter way round; each link takes the
-    /// deepest it reaches on the link's length. Gaps that tie for the widest are all left open:
-    /// which way round a contact runs then depends on nothing but the gaps, never on where the
-    /// run's seam lies.
-    fn push(
+    /// Add `manifold`, `index` of pair `pair`, as the narrow phase left it, on `run` hung on a body
+    /// at `body` (position, rotation); `first` says the run is the pair's first collider, which
+    /// the normal leaves. On a rim face its overlap runs along the straight edge through its feet,
+    /// the deepest where two stand together, linear between neighbours; on a cap each point loads
+    /// the link nearest it alone. Each link takes the deepest it reaches on the link's length.
+    fn read(
         &mut self,
         run: &SoftRun,
+        (position, rotation): (Vec3, Quat),
         (pair, index): (ContactId, usize),
-        points: impl Iterator<Item = (f32, f32)>,
+        manifold: &ContactManifold,
+        first: bool,
     ) {
+        let to_body = rotation.inverse();
+        let leaving = if first {
+            manifold.normal
+        } else {
+            -manifold.normal
+        };
+        let face = run.facing(to_body * leaving);
         self.points.clear();
-        self.points.extend(points);
+        self.points.extend(manifold.points.iter().map(|point| {
+            let local = to_body * (point.point - position);
+            (
+                run.arc_on(face, Vec2::new(local.z, local.y)),
+                point.penetration,
+            )
+        }));
         // Summed by value, so the order the points came in cannot move the sum.
         self.points.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
         let (overlap, count) = self
@@ -225,28 +350,19 @@ impl RunContacts {
         self.points
             .sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(b.1.total_cmp(&a.1)));
         self.points.dedup_by(|b, a| a.0 == b.0);
-        let k = self.points.len();
-        let gap = |i: usize| match self.points.get(i + 1) {
-            Some(next) => next.0 - self.points[i].0,
-            None => self.points[0].0 + run.length - self.points[i].0,
-        };
-        let widest = (0..k).map(gap).fold(0.0, f32::max);
         self.span.clear();
-        for i in 0..k {
-            let (s0, d0) = self.points[i];
-            self.span.push((run.link_at(s0), d0));
-            let width = gap(i);
-            if width >= widest {
-                continue;
-            }
-            let (s1, d1) = (s0 + width, self.points[(i + 1) % k].1);
-            let at = |s: f32| d0 + (d1 - d0) * ((s - s0) / width);
-            let (first, last) = ((s0 / run.link).floor(), (s1 / run.link).floor());
-            for link in first as usize..=last as usize {
-                let lo = s0.max(link as f32 * run.link);
-                let hi = s1.min((link + 1) as f32 * run.link);
-                self.span
-                    .push(((link % run.links) as u32, at(lo).max(at(hi))));
+        self.span
+            .extend(self.points.iter().map(|&(s, d)| (run.link_at(s), d)));
+        if let Face::Rim(_) = face {
+            for knots in self.points.windows(2) {
+                let [(s0, d0), (s1, d1)] = [knots[0], knots[1]];
+                let at = |s: f32| d0 + (d1 - d0) * ((s - s0) / (s1 - s0));
+                for link in (s0 / run.link).floor() as usize..=(s1 / run.link).floor() as usize {
+                    let lo = s0.max(link as f32 * run.link);
+                    let hi = s1.min((link + 1) as f32 * run.link);
+                    self.span
+                        .push(((link % run.links) as u32, at(lo).max(at(hi))));
+                }
             }
         }
         // Deepest first on each link, then one entry per link.
@@ -268,8 +384,9 @@ impl RunContacts {
     /// Each manifold's law under the running gear's `law`: a link carries `k'·link` at its deepest
     /// depth and `c'·link`, shared among the manifolds on it in proportion to their depth there;
     /// a manifold's points in overlap together carry its shares at their own overlaps and at a
-    /// common closing speed. A manifold with none in overlap reaches no link and takes no law.
-    fn solve(&mut self, run: &SoftRun, law: &SegmentLaw) {
+    /// common closing speed. A manifold with none in overlap reaches no link and takes the zero
+    /// law, which the solver leaves inert; `None` would be a rigid contact.
+    fn solve(&mut self, run: &SoftRun, law: &SupportLaw) {
         let links = run.links;
         // Grouped by link (a counting sort), each group by value, so a link's sum runs in one
         // order whatever order the manifolds came in.
@@ -318,35 +435,27 @@ impl RunContacts {
                 (area + term.0, length + term.1)
             });
             self.laws.push(if manifold.count == 0 {
-                None
+                ContactCompliance {
+                    stiffness: 0.0,
+                    damping: 0.0,
+                }
             } else {
-                Some(ContactCompliance {
+                ContactCompliance {
                     stiffness: stiffness * area / manifold.overlap,
                     damping: damping * length / manifold.count as f32,
-                })
+                }
             });
         }
     }
 }
 
-/// Hand one manifold its law. The solver acts on every point it gets whose separation is not
-/// positive (`ContactNormalPart::solve_impulse`), so a point at zero overlap would take damping,
-/// and a point the narrow phase found apart could close mid-step, each with a share counted for
-/// the points in overlap only. So the solver gets only those: a point at or past zero overlap
-/// pushes nothing this step and is read again at the next narrow phase. A manifold with none in
-/// overlap gets no point and no law.
-fn hand_over(manifold: &mut ContactManifold, law: Option<ContactCompliance>) {
-    manifold.points.retain(|point| point.penetration > 0.0);
-    manifold.compliance = law;
-}
-
 /// Read each run's touching contacts from a shared read of the contact graph and work out the
 /// law each takes, every run apart: a run's laws read only its own contacts.
-pub(crate) fn read_runs(
+fn read_runs(
     graph: Res<ContactGraph>,
     mut runs: Query<(Entity, &ColliderOf, &SoftRun, &mut RunContacts)>,
     bodies: Query<(&Position, &Rotation)>,
-    law: Option<Res<SegmentLaw>>,
+    law: Option<Res<SupportLaw>>,
 ) {
     let law = law.as_deref();
     runs.par_iter_mut()
@@ -355,10 +464,6 @@ pub(crate) fn read_runs(
             let (position, rotation) = bodies
                 .get(of.body)
                 .expect("a run hangs on its spawn-built body");
-            let side_plane = |p: Vec3| {
-                let local = rotation.0.inverse() * (p - position.0);
-                Vec2::new(local.z, local.y)
-            };
             for edge in graph.contact_edges_with(run) {
                 if !edge.is_touching() || edge.is_sleeping() {
                     continue;
@@ -367,11 +472,13 @@ pub(crate) fn read_runs(
                     .get_pair_by_edge(edge)
                     .expect("a contact edge names its pair");
                 for (index, manifold) in pair.manifolds.iter().enumerate() {
-                    let points = manifold
-                        .points
-                        .iter()
-                        .map(|p| (soft.arc_of(side_plane(p.point)), p.penetration));
-                    contacts.push(soft, (edge.id, index), points);
+                    contacts.read(
+                        soft,
+                        (position.0, rotation.0),
+                        (edge.id, index),
+                        manifold,
+                        edge.collider1 == run,
+                    );
                 }
             }
             if !contacts.manifolds.is_empty() {
@@ -381,14 +488,17 @@ pub(crate) fn read_runs(
         });
 }
 
-/// Write each run's laws into its manifolds: the one step that holds the graph exclusively.
-pub(crate) fn write_runs(mut graph: ResMut<ContactGraph>, runs: Query<&RunContacts>) {
+/// Write each run's laws into its manifolds: the one step that holds the graph exclusively. A
+/// manifold keeps every point: the solver leaves one out of overlap inert (the vendored
+/// compliant contact), so the law stays a function of the manifold as the narrow phase left it,
+/// and reads the same when read again.
+fn write_runs(mut graph: ResMut<ContactGraph>, runs: Query<&RunContacts>) {
     for contacts in &runs {
-        for (manifold, law) in contacts.manifolds.iter().zip(&contacts.laws) {
+        for (manifold, &law) in contacts.manifolds.iter().zip(&contacts.laws) {
             let (_, pair) = graph
                 .get_mut_by_id(manifold.pair)
                 .expect("a pair read this step is still in the graph");
-            hand_over(&mut pair.manifolds[manifold.index], *law);
+            pair.manifolds[manifold.index].compliance = Some(law);
         }
     }
 }
@@ -405,13 +515,42 @@ pub(crate) fn plugin(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use avian3d::collision::contact_types::ContactPoint;
-    use avian3d::dynamics::solver::contact::ContactNormalPart;
+    use avian3d::collision::contact_types::{ContactEdge, ContactEdgeFlags, ContactPoint};
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::tasks::{ComputeTaskPool, TaskPool};
 
     use super::*;
 
+    /// A run meets loose pieces and nothing else: the sampled support carries every other solid,
+    /// terrain included, so a run meeting one would carry it a second time. Fails if the run's
+    /// layers admit terrain, a hull, a standing construction or another run, or stop admitting a
+    /// loose piece.
+    #[test]
+    fn a_run_meets_loose_pieces_and_nothing_else() {
+        use avian3d::prelude::LayerMask;
+        let run = run_layers();
+        assert!(run.interacts_with(crate::construction::breakage::piece_layers()));
+        for (other, layers) in [
+            (
+                "terrain",
+                CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+            ),
+            (
+                "a hull",
+                CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+            ),
+            (
+                "a standing construction",
+                crate::construction::element_layers(),
+            ),
+            ("another run", run),
+        ] {
+            assert!(!run.interacts_with(layers), "a run meets {other}");
+        }
+    }
+
     /// Fixture: a law of 400 kN/m and 40 kN·s/m per metre.
-    const LAW: SegmentLaw = SegmentLaw {
+    const LAW: SupportLaw = SupportLaw {
         stiffness_per_m: 4.0e5,
         damping_per_m: 4.0e4,
     };
@@ -421,35 +560,92 @@ mod tests {
         links * SoftRun::fixture().link
     }
 
-    /// Each manifold's law, for manifolds given by their points `(arc, overlap)`.
-    fn laws(contacts: &[&[(f32, f32)]]) -> Vec<Option<ContactCompliance>> {
+    /// One manifold given by its face and its points `(arc, overlap)` on the fixture run.
+    type Given<'a> = (Face, &'a [(f32, f32)]);
+
+    /// A world holding the fixture run on a body at the origin under the fixture law, touching one
+    /// piece per manifold; each manifold's points stand on the outline at their arcs, its normal
+    /// leaving the run through its face. Returns the world and the manifolds' pairs, in order.
+    fn world(manifolds: &[Given]) -> (World, Vec<ContactId>) {
+        ComputeTaskPool::get_or_init(TaskPool::default);
+        let mut world = World::new();
+        world.insert_resource(LAW);
+        let body = world
+            .spawn((
+                Position::default(),
+                Rotation::default(),
+                Transform::IDENTITY,
+            ))
+            .id();
         let run = SoftRun::fixture();
-        let mut read = RunContacts::default();
-        for (i, points) in contacts.iter().enumerate() {
-            read.push(&run, (ContactId(i as u32), 0), points.iter().copied());
-        }
-        read.solve(&run, &LAW);
-        read.laws
+        let collider = world
+            .spawn((ColliderOf { body }, run.clone(), Transform::IDENTITY))
+            .id();
+        let mut graph = ContactGraph::default();
+        let pairs = manifolds
+            .iter()
+            .map(|&(face, points)| {
+                let normal = match face {
+                    Face::Rim(edge) => Vec3::new(0.0, run.edges[edge].out.y, run.edges[edge].out.x),
+                    Face::Cap => Vec3::X,
+                };
+                let points = points.iter().map(|&(s, overlap)| {
+                    let last = run.edges.last().expect("a run outline has edges");
+                    let s = s.rem_euclid(last.arc + last.length);
+                    let edge = run
+                        .edges
+                        .iter()
+                        .rfind(|edge| edge.arc <= s)
+                        .expect("the first edge starts at arc zero");
+                    let p = edge.start + edge.dir * (s - edge.arc);
+                    let at = Vec3::new(0.0, p.y, p.x);
+                    ContactPoint::new(at, at, at, overlap)
+                });
+                let manifold = ContactManifold::new(points, normal);
+                let mut edge = ContactEdge::new(collider, world.spawn_empty().id());
+                edge.flags.insert(ContactEdgeFlags::TOUCHING);
+                graph
+                    .add_edge_with(edge, |pair| pair.manifolds.push(manifold.clone()))
+                    .expect("each piece meets the run once")
+            })
+            .collect();
+        world.insert_resource(graph);
+        (world, pairs)
+    }
+
+    /// Each manifold's law as `read_runs` reads it, in `pairs` order.
+    fn read(world: &mut World, pairs: &[ContactId]) -> Vec<ContactCompliance> {
+        world.run_system_once(read_runs).expect("the read runs");
+        let contacts = world
+            .query::<&RunContacts>()
+            .single(world)
+            .expect("the world holds one run");
+        pairs
+            .iter()
+            .map(|&pair| {
+                let at = contacts.manifolds.iter().position(|m| m.pair == pair);
+                contacts.laws[at.expect("every touching manifold is read")]
+            })
+            .collect()
+    }
+
+    fn laws(manifolds: &[Given]) -> Vec<ContactCompliance> {
+        let (mut world, pairs) = world(manifolds);
+        read(&mut world, &pairs)
     }
 
     /// The force the manifolds' springs carry together at their own overlaps (N), and their
-    /// dampers at a common closing speed of 1 m/s (N), on the points the solver gets.
-    fn carried(contacts: &[&[(f32, f32)]]) -> (f32, f32) {
-        laws(contacts)
+    /// dampers at a common closing speed of 1 m/s (N), on the points in overlap.
+    fn carried(manifolds: &[Given]) -> (f32, f32) {
+        laws(manifolds)
             .iter()
-            .zip(contacts)
-            .map(|(law, points)| {
+            .zip(manifolds)
+            .map(|(law, (_, points))| {
                 let overlapping = points.iter().filter(|p| p.1 > 0.0);
-                match law {
-                    Some(law) => (
-                        law.stiffness * overlapping.clone().map(|p| p.1).sum::<f32>(),
-                        law.damping * overlapping.count() as f32,
-                    ),
-                    None => {
-                        assert_eq!(overlapping.count(), 0, "a manifold in overlap took no law");
-                        (0.0, 0.0)
-                    }
-                }
+                (
+                    law.stiffness * overlapping.clone().map(|p| p.1).sum::<f32>(),
+                    law.damping * overlapping.count() as f32,
+                )
             })
             .fold((0.0, 0.0), |(k, c), (dk, dc)| (k + dk, c + dc))
     }
@@ -459,54 +655,67 @@ mod tests {
         (a - x).abs() <= x.abs() * 1e-5 && (b - y).abs() <= y.abs() * 1e-5
     }
 
-    fn bits(laws: &[Option<ContactCompliance>]) -> Vec<Option<(u32, u32)>> {
+    fn bits(laws: &[ContactCompliance]) -> Vec<(u32, u32)> {
         laws.iter()
-            .map(|law| law.map(|law| (law.stiffness.to_bits(), law.damping.to_bits())))
+            .map(|law| (law.stiffness.to_bits(), law.damping.to_bits()))
             .collect()
     }
 
     /// A piece split in two carries what the whole carries: a link carries the law once, at the
-    /// deepest overlap reaching it. Links 16 to 40 pressed `d` deep by one piece carry `k'·d` and
-    /// `c'` per metre of their 25 links; so do two pieces side by side across the shoe, and two
-    /// end to end split inside link 28. A piece tilted along the belt, cut inside link 28, and a
-    /// piece clear of the belt past link 20, split where it leaves it, carry what they carry
-    /// whole, to f32 round-off. Fails if a link's law adds up over its manifolds (side by side
-    /// doubles it), if a manifold loads links past its own (a per-manifold floor loads the split
-    /// link twice), if a contact's points are read at their links before its overlap runs between
-    /// them (the tilted cut steepens both halves), or if a link at or below zero carries (the
-    /// clear half pushes).
+    /// deepest overlap reaching it. Links 26 to 46, inside the square's second edge, pressed `d`
+    /// deep by one piece carry `k'·d` and `c'` per metre of their 21 links; so do two pieces side
+    /// by side across the shoe, and two end to end split inside link 36. A piece tilted along the
+    /// belt, cut inside link 36, and a piece clear of the belt past link 36, split where it leaves
+    /// it, carry what they carry whole, to f32 round-off. Fails if a link's law adds up over its
+    /// manifolds (side by side doubles it), if a manifold loads links past its own (a per-manifold
+    /// floor loads the split link twice), if a contact's points are read at their links before its
+    /// overlap runs between them (the tilted cut steepens both halves), or if a link at or below
+    /// zero carries (the clear half pushes).
     #[test]
     fn a_piece_split_in_two_carries_what_the_whole_carries() {
         let d = 0.04;
         let flat = (
-            LAW.stiffness_per_m * SoftRun::fixture().link * 25.0 * d,
-            LAW.damping_per_m * SoftRun::fixture().link * 25.0,
+            LAW.stiffness_per_m * SoftRun::fixture().link * 21.0 * d,
+            LAW.damping_per_m * SoftRun::fixture().link * 21.0,
         );
+        let edge = Face::Rim(1);
         let level = |link: f32| (at(link), d);
-        let tilt = |link: f32| (at(link), 0.01 + 0.002 * (link - 16.0));
-        let clear = |link: f32| (at(link), d * (20.0 - link) / 10.0);
-        let whole = carried(&[&[level(16.0), level(16.0), level(40.0), level(40.0)]]);
+        let tilt = |link: f32| (at(link), 0.01 + 0.002 * (link - 26.0));
+        let clear = |link: f32| (at(link), d * (36.0 - link) / 10.0);
+        let whole = carried(&[(edge, &[level(26.0), level(26.0), level(46.0), level(46.0)])]);
         assert!(close(whole, flat), "one piece: {whole:?} against {flat:?}");
         for (layout, whole, parts) in [
             (
                 "side by side",
-                carried(&[&[level(16.0), level(16.0), level(40.0), level(40.0)]]),
-                carried(&[&[level(16.0), level(40.0)], &[level(16.0), level(40.0)]]),
+                whole,
+                carried(&[
+                    (edge, &[level(26.0), level(46.0)]),
+                    (edge, &[level(26.0), level(46.0)]),
+                ]),
             ),
             (
                 "end to end",
-                carried(&[&[level(16.0), level(40.0)]]),
-                carried(&[&[level(16.0), level(28.5)], &[level(28.5), level(40.0)]]),
+                carried(&[(edge, &[level(26.0), level(46.0)])]),
+                carried(&[
+                    (edge, &[level(26.0), level(36.5)]),
+                    (edge, &[level(36.5), level(46.0)]),
+                ]),
             ),
             (
-                "tilted, cut inside link 28",
-                carried(&[&[tilt(16.0), tilt(40.0)]]),
-                carried(&[&[tilt(16.0), tilt(28.5)], &[tilt(28.5), tilt(40.0)]]),
+                "tilted, cut inside link 36",
+                carried(&[(edge, &[tilt(26.0), tilt(46.0)])]),
+                carried(&[
+                    (edge, &[tilt(26.0), tilt(36.5)]),
+                    (edge, &[tilt(36.5), tilt(46.0)]),
+                ]),
             ),
             (
-                "clear past link 20",
-                carried(&[&[clear(10.0), clear(30.0)]]),
-                carried(&[&[clear(10.0), clear(20.0)], &[clear(20.0), clear(30.0)]]),
+                "clear past link 36",
+                carried(&[(edge, &[clear(26.0), clear(46.0)])]),
+                carried(&[
+                    (edge, &[clear(26.0), clear(36.0)]),
+                    (edge, &[clear(36.0), clear(46.0)]),
+                ]),
             ),
         ] {
             assert!(
@@ -531,13 +740,16 @@ mod tests {
             &[(at(5.0), tiny), (at(7.0), tiny)],
             &[(at(8.0), 0.05), (at(12.0), -0.02), (at(10.0), 0.01)],
         ];
-        let reference = bits(&laws(&manifolds));
+        let reference = bits(&laws(&manifolds.map(|points| (Face::Rim(0), points))));
         for order in [[3, 2, 1, 0], [1, 3, 0, 2], [2, 0, 3, 1]] {
             let reversed: Vec<Vec<(f32, f32)>> = order
                 .iter()
                 .map(|&m| manifolds[m].iter().rev().copied().collect())
                 .collect();
-            let permuted: Vec<&[(f32, f32)]> = reversed.iter().map(Vec::as_slice).collect();
+            let permuted: Vec<Given> = reversed
+                .iter()
+                .map(|points| (Face::Rim(0), points.as_slice()))
+                .collect();
             let got = bits(&laws(&permuted));
             for (k, &m) in order.iter().enumerate() {
                 assert_eq!(
@@ -548,135 +760,92 @@ mod tests {
         }
     }
 
-    /// A contact across the run's closing seam equals the same contact away from it: the run is
-    /// closed, so moving every point by whole links moves no law, bit for bit. Fails if a
-    /// manifold's span walks the long way round, reads the seam as the run's whole length, or
-    /// sums its links in their numbering, which starts at the seam.
+    /// The edge ending at the seam reads as any other edge: its far corner stands at the outline's
+    /// full length, the seam, and a contact reaching it spans its own edge alone. Two manifolds on
+    /// the square's last edge, one reaching that corner, take the laws the same two take on its
+    /// second edge, to f32 round-off (the arcs are not dyadic). Fails if an arc is taken round the
+    /// closed outline (the corner reads as arc zero, and the contact spans the run the long way),
+    /// or if the link past the last does not wrap to the first.
     #[test]
-    fn a_contact_across_the_seam_equals_the_same_contact_away_from_it() {
-        let links = SoftRun::fixture().links as f32;
-        let layout = |first: f32| -> Vec<Vec<(f32, f32)>> {
-            let point = |offset: f32, depth: f32| (at((first + offset) % links), depth);
-            vec![
-                vec![point(0.25, 0.03), point(5.5, -0.01), point(2.75, 0.04)],
-                vec![point(3.0, 0.02), point(7.5, 0.02)],
-            ]
+    fn the_edge_ending_at_the_seam_reads_as_any_other_edge() {
+        let run = SoftRun::fixture();
+        let read = |edge: usize| {
+            let from = run.edges[edge].arc;
+            let a = [(from + 0.3, 0.03), (from + 1.7, -0.01), (from + 2.35, 0.04)];
+            let b = [(from + 2.1, 0.02), (from + 3.0, 0.025)];
+            let face = Face::Rim(edge);
+            (
+                laws(&[(face, &a), (face, &b)]),
+                carried(&[(face, &a), (face, &b)]),
+            )
         };
-        let read = |first: f32| {
-            let layout = layout(first);
-            let slices: Vec<&[(f32, f32)]> = layout.iter().map(Vec::as_slice).collect();
-            (bits(&laws(&slices)), carried(&slices))
-        };
-        let (away, carried) = read(20.0);
+        let ((second, carried), (last, _)) = (read(1), read(3));
         assert!(carried.0 > 0.0, "the contact carries nothing");
-        assert_eq!(read(links - 3.0).0, away, "across the seam the laws moved");
-    }
-
-    /// A contact whose points stand exactly half the run apart runs neither way round, wherever
-    /// the seam lies: each half is as short as the other, so each point loads only its own link.
-    /// Manifold A presses links 0 and 48 `d` deep, mid-link, and B link 24 between them; shifted
-    /// round the run by every whole link, together they carry `k'·d` and `c'` per metre of three
-    /// links, each law the same bit for bit. Fails if a tie picks a half by the seam (A spans the
-    /// half past its first gap from the seam: over B at some shifts and not at others), or if A
-    /// spans either half.
-    #[test]
-    fn a_contact_half_the_run_round_spans_neither_half() {
-        let d = 0.04;
-        let links = SoftRun::fixture().links as f32;
-        let three = (
-            LAW.stiffness_per_m * SoftRun::fixture().link * 3.0 * d,
-            LAW.damping_per_m * SoftRun::fixture().link * 3.0,
-        );
-        let read = |shift: f32| {
-            let point = |link: f32| (at((link + shift) % links), d);
-            let a: &[(f32, f32)] = &[point(0.5), point(48.5)];
-            let b: &[(f32, f32)] = &[point(24.5)];
-            (bits(&laws(&[a, b])), carried(&[a, b]))
-        };
-        let (unshifted, carried) = read(0.0);
-        assert!(
-            close(carried, three),
-            "carried {carried:?} against {three:?}"
-        );
-        for shift in 1..SoftRun::fixture().links {
-            assert_eq!(
-                read(shift as f32).0,
-                unshifted,
-                "shifted {shift} links round, the laws moved"
+        for (k, (last, second)) in last.iter().zip(&second).enumerate() {
+            assert!(
+                close(
+                    (last.stiffness, last.damping),
+                    (second.stiffness, second.damping)
+                ),
+                "manifold {k}: {last:?} on the last edge against {second:?} on the second"
             );
         }
     }
 
-    /// Fixture: one point's mass along the normal (kg), and one substep (s): 64 Hz in six.
-    const MASS: f32 = 200.0;
-    const SUBSTEP: f32 = 1.0 / 384.0;
-
-    /// The points the solver gets from a manifold of points `(arc, overlap)` handed `law`, and the
-    /// normal impulse it puts through them in one substep closing at 1 m/s, each point built as
-    /// `ContactConstraint::generate` builds a compliant one, at its own overlap.
-    fn solved(points: &[(f32, f32)], law: Option<ContactCompliance>) -> (usize, f32) {
-        let mut manifold = ContactManifold::new(
-            points.iter().map(|&(_, overlap)| {
-                ContactPoint::new(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, overlap)
-            }),
-            Vec3::Y,
+    /// A manifold on a lateral cap loads the link nearest each of its points and nothing between:
+    /// its points can stand off opposite runs, with no stretch of belt between them. Two points
+    /// `d` deep, by the bottom run's link 12 and the top run's link 60, carry `k'·d` and `c'` per
+    /// metre of two links. Fails if a cap's points are read along the belt between them.
+    #[test]
+    fn a_cap_contact_loads_only_the_links_nearest_its_points() {
+        let d = 0.04;
+        let two = (
+            LAW.stiffness_per_m * SoftRun::fixture().link * 2.0 * d,
+            LAW.damping_per_m * SoftRun::fixture().link * 2.0,
         );
-        hand_over(&mut manifold, law);
-        let impulse = manifold
-            .points
-            .iter()
-            .map(|point| {
-                let spring = manifold
-                    .compliance
-                    .expect("a manifold that hands the solver a point carries its law")
-                    .coefficients(MASS, SUBSTEP);
-                ContactNormalPart {
-                    impulse: 0.0,
-                    total_impulse: 0.0,
-                    effective_mass: MASS,
-                    softness: spring,
-                    compliant: true,
-                    spring,
-                }
-                .solve_impulse(
-                    -point.penetration,
-                    Vec3::NEG_Y,
-                    Vec3::Y,
-                    true,
-                    f32::INFINITY,
-                    SUBSTEP,
-                )
-            })
-            .sum();
-        (manifold.points.len(), impulse)
+        let carried = carried(&[(Face::Cap, &[(at(12.5), d), (at(60.5), d)])]);
+        assert!(close(carried, two), "carried {carried:?} against {two:?}");
     }
 
-    /// The solver gets exactly the points a manifold's law is shared over. A piece pressing link
-    /// 16 `d` deep and touching link 24 at zero overlap puts through the solver, bit for bit, the
-    /// impulse the same law puts through its point at link 16 alone; a piece touching only at zero
-    /// overlap or apart takes no law and hands the solver no point. Fails if a point at zero
-    /// overlap reaches the solver, which damps it under closing speed (its separation is not
-    /// positive) with a share counted for the points in overlap only, so the manifold damps twice;
-    /// or if a manifold with no point in overlap reaches it at all.
+    /// Handing a manifold its law changes none of its points, so the law is a function of the
+    /// manifold as the narrow phase left it, as one kept through a sleep needs: read again after
+    /// the hand-over, it is the same bit for bit. A manifold out of overlap takes the zero law,
+    /// never none, which the solver would read as a rigid contact. Fails if the hand-over drops a
+    /// point at or past zero overlap (the profile through it, and so the law, moves), or leaves a
+    /// manifold without a law.
     #[test]
-    fn only_points_in_overlap_reach_the_solver() {
-        let d = 0.04;
-        let touching: &[(f32, f32)] = &[(at(16.0), d), (at(24.0), 0.0)];
-        let law = laws(&[touching])[0];
-        let alone = solved(&[(at(16.0), d)], law);
-        assert!(alone.1 > 0.0, "the point in overlap took no impulse");
+    fn handing_a_law_over_leaves_the_manifold_it_was_read_from() {
+        let touching: &[(f32, f32)] = &[(at(26.0), 0.04), (at(30.5), 0.0), (at(34.0), -0.01)];
+        let apart: &[(f32, f32)] = &[(at(40.0), 0.0), (at(44.0), -0.01)];
+        let (mut world, pairs) = world(&[(Face::Rim(1), touching), (Face::Rim(1), apart)]);
+        let manifolds = |world: &World| -> Vec<ContactManifold> {
+            let graph = world.resource::<ContactGraph>();
+            pairs
+                .iter()
+                .map(|&pair| graph.get_by_id(pair).expect("a pair stays").1.manifolds[0].clone())
+                .collect()
+        };
+        let before = manifolds(&world);
+        let law = read(&mut world, &pairs);
+        world.run_system_once(write_runs).expect("the write runs");
+        let after = manifolds(&world);
+        for ((before, after), law) in before.iter().zip(&after).zip(&law) {
+            assert_eq!(after.points, before.points, "the hand-over changed a point");
+            assert_eq!(
+                after.compliance,
+                Some(*law),
+                "a manifold went without its law"
+            );
+        }
+        let zero = ContactCompliance {
+            stiffness: 0.0,
+            damping: 0.0,
+        };
+        assert_eq!(law[1], zero, "a manifold out of overlap carries");
         assert_eq!(
-            solved(touching, law).1.to_bits(),
-            alone.1.to_bits(),
-            "the point at zero overlap moved the manifold's impulse"
-        );
-        let apart: &[(f32, f32)] = &[(at(16.0), 0.0), (at(20.0), -0.01)];
-        let law = laws(&[apart])[0];
-        assert_eq!(law, None, "a piece out of overlap took a law");
-        assert_eq!(
-            solved(apart, law).0,
-            0,
-            "a piece out of overlap reached the solver"
+            bits(&read(&mut world, &pairs)),
+            bits(&law),
+            "read again, the law moved"
         );
     }
 }

@@ -1726,17 +1726,21 @@ fn contact_law_forward_step_trace() {
     let mut peak_delta = 0.0_f32;
     let mut previous_force = 0.0_f32;
     // The damper's rate from its owners: per-metre damping over the widest column's share of the
-    // longest patch a station can hold, one chord between stations.
+    // longest patch a station can hold, one station pitch along the force loop.
     let damping_rate = {
-        use crate::track::forces::CONTACT_RESOLUTION;
+        use crate::track::side::Side;
         let geom = app.world().resource::<crate::track::rig_geom::RigGeom>();
-        let share = geom
-            .grip_columns(crate::track::side::Side::Left)
-            .into_iter()
-            .fold(0.0, |widest: f32, (_, share)| widest.max(share));
         let gear = app.world().resource::<crate::track::sim::TrackGear>();
-        gear.segment_law().damping_per_m * share * geom.belt_len()
-            / CONTACT_RESOLUTION.stations as f32
+        let share = Side::ALL
+            .into_iter()
+            .flat_map(|side| geom.grip_columns(side))
+            .fold(0.0, |widest: f32, (_, share)| widest.max(share));
+        let pitch = Side::ALL
+            .into_iter()
+            .map(|side| gear.station_pitch(side))
+            .fold(0.0, f32::max);
+        let law = app.world().resource::<crate::track::forces::SupportLaw>();
+        law.damping_per_m * share * pitch
     };
     let mut max_damping_excess = 0.0_f32;
     let mut last_bin = i32::MIN;
@@ -1785,10 +1789,12 @@ fn contact_law_forward_step_trace() {
         max_y - initial_y
     );
     println!("MEASURED hull lip maximum damping bound excess {max_damping_excess:.8}");
-    // Fixture tolerance: a patch spans one station chord, nominally belt_len/48, and the bound
-    // reads the nominal; MEASURED excess 3.0e-4 of the load.
+    // Resolution: rounding alone. The bound is exact in real arithmetic. In f32 a load and its
+    // elastic part round apart by a few ε of the load, and a station lands about ε times the
+    // loop's few-metre extent off its arc, about 1e-5 of a station pitch (DERIVED, ε 1.2e-7).
+    // 1e-4 of the load clears both by an order; any larger amplification fails.
     assert!(
-        max_damping_excess < 1e-3,
+        max_damping_excess < 1e-4,
         "contact damping amplified the point speed: {max_damping_excess}"
     );
     assert!(

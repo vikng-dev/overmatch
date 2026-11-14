@@ -23,7 +23,7 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
 use crate::bake::TankBlueprint;
-use crate::construction::view::{DrawnHulls, DrawnPieces};
+use crate::construction::view::DrawnPieces;
 use crate::render_policy::VisualScope;
 use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
 
@@ -31,7 +31,7 @@ use super::belt_draw::BeltAssets;
 use super::forces::PROBE_REACH;
 use super::gear_phase::{GearFrame, hull_from_parent, spin_angle, tooth_angle};
 use super::link_view::{self, BeltFrames, LinkTemplate, Stragglers};
-use super::oracle::{BlockField, DepthOracle};
+use super::oracle::{BlockField, DepthOracle, HullField};
 use super::rig_geom::RigGeom;
 use super::shadow_proxy::{self, ProxySide, ProxyStep};
 use super::side::Side;
@@ -139,15 +139,13 @@ impl<F: Fn(Vec2) -> f32> DepthOracle for Sunk<'_, F> {
 /// run's spring travel, so a wheel drawn lifted by that overlap draws the belt on the piece.
 struct OnPieces<'a, O> {
     ground: &'a O,
-    pieces: &'a DrawnHulls,
+    pieces: &'a HullField,
 }
 
 impl<O: DepthOracle> DepthOracle for OnPieces<'_, O> {
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
         let ground = self.ground.depth_along(station, out, reach);
-        self.pieces
-            .depth_along(station, out, reach)
-            .map_or(ground, |piece| piece.max(ground))
+        ground.max(self.pieces.depth_along(station, out, reach))
     }
 }
 
@@ -190,7 +188,7 @@ struct TrackRig {
     contacts: [wrap::ContactCache; 2],
     /// The drawn pieces near the tank when its wheels and belt last sampled: a later gather that
     /// differs (a piece moved, hid, went or came) re-probes both at the next sample.
-    pieces: DrawnHulls,
+    pieces: HullField,
     /// Per-side wrap circles, rewritten in place each frame ([`drive_track_views`]).
     circles: [Vec<(Vec2, f32)>; 2],
 }
@@ -728,7 +726,7 @@ fn drive_track_views(
     // The loose pieces as drawn, gathered per tank within its running gear's bounding sphere.
     pieces: (
         DrawnPieces,
-        Local<DrawnHulls>,
+        Local<HullField>,
         Res<super::bump_stop::TrackColliders>,
     ),
 ) {
@@ -996,8 +994,9 @@ mod tests {
 
     /// Tank-part presentation consumes fresh view facts, then writes running gear before globals
     /// and belt upload consume it, and gives the ribbon its mesh before scope resolution reads it.
-    /// Audit the production registrations without running a renderer; removing a required order
-    /// must expose the conflicting pair or the missing path regardless of executor order.
+    /// The drawn pieces the belt rests on are dressed and shown in `Update`, so the fit reads this
+    /// frame's. Audit the production registrations without running a renderer; removing a required
+    /// order must expose the conflicting pair or the missing path regardless of executor order.
     #[test]
     fn presented_tank_parts_have_ordered_producers_and_consumers() {
         use bevy::ecs::schedule::{LogLevel, NodeId, ScheduleBuildSettings, ScheduleLabel};
@@ -1012,6 +1011,7 @@ mod tests {
             crate::view::plugin,
             crate::geometry_lod::view_plugin,
             crate::render_policy::plugin,
+            crate::construction::view::plugin,
             view_plugin,
         ));
         for label in [Update.intern(), PostUpdate.intern()] {
@@ -1067,6 +1067,15 @@ mod tests {
                     assert!(
                         index(producer) < index(consumer),
                         "{producer} must produce this frame's value before {consumer} reads it"
+                    );
+                }
+                // `Update` runs wholly before `PostUpdate`'s fit; a piece's pose lands earlier
+                // still, from the fixed step (a body) or before the breaks' view (a carrier).
+                for system in ["dress_pieces", "show_pieces"] {
+                    assert_eq!(
+                        order.iter().any(|name| name == system),
+                        label == Update.intern(),
+                        "{system} must present the pieces in Update, before the fit reads them"
                     );
                 }
                 // The ribbon's `Mesh3d` lands by command, which no access conflict sees, and the
@@ -1417,7 +1426,7 @@ mod tests {
         schedule.add_systems(drive_track_views);
         let bare = sample(world, &mut schedule, tank);
 
-        let piece = drawn_box(world, (-half, half), at(first));
+        let piece = drawn_box(world, (-half, half), (Vec3::ZERO, at(first)));
         let returned = |now: &(Vec<f32>, Vec<f32>), case: &str| {
             assert_eq!(
                 *now, bare,
@@ -1456,10 +1465,14 @@ mod tests {
     }
 
     /// A shown piece of one box chunk spanning `min..max` (asset frame, m), drawn at `pose` about
-    /// the box's middle. Fixture geometry: the inline column construction
+    /// `origin` (asset frame). Fixture geometry: the inline column construction
     /// (`construction::tests::column_construction`) with its first chunk's hull made the box,
     /// which is all a drawn piece reads of its construction.
-    fn drawn_box(world: &mut World, (min, max): (Vec3, Vec3), pose: Transform) -> Entity {
+    fn drawn_box(
+        world: &mut World,
+        (min, max): (Vec3, Vec3),
+        (origin, pose): (Vec3, Transform),
+    ) -> Entity {
         let pick = |bit: bool, axis: usize| if bit { max[axis] } else { min[axis] };
         let corners = (0..8)
             .map(|k| Vec3::new(pick(k & 1 > 0, 0), pick(k & 2 > 0, 1), pick(k & 4 > 0, 2)))
@@ -1473,7 +1486,7 @@ mod tests {
                 0,
             ))
             .id();
-        crate::construction::view::spawn_drawn_piece(world, root, 0, pose)
+        crate::construction::view::spawn_drawn_piece(world, root, 0, (origin, pose))
     }
 
     /// Invariant: no empty mesh reaches a render entity. On every frame of a bound rig's life,
@@ -1932,23 +1945,26 @@ mod tests {
     /// the soft run never draws sunk into the belt. The reference is the box's own slab test in its
     /// frame (terrain blocks round their edges, so they are no reference). Mutants: the pieces
     /// dropped, a plane carried without the pose's turn or without the drawn origin. Fixture: one
-    /// box piece, turned and moved, drawn about a point off its centre.
+    /// box piece, turned and moved, drawn about a point off its centre, gathered as the view
+    /// gathers ([`DrawnPieces::near`]).
     #[test]
     fn a_drawn_piece_carries_the_belt_as_a_solid_of_its_shape() {
+        use bevy::ecs::system::RunSystemOnce;
         let size = Vec3::new(1.2, 0.4, 0.8);
         let origin = Vec3::new(5.0, 1.0, -2.0);
         let centre = origin + Vec3::new(0.1, -0.05, 0.2);
-        let sign = |bit: bool| if bit { 1.0 } else { -1.0 };
-        let corners = (0..8)
-            .map(|k| {
-                centre + size / 2.0 * Vec3::new(sign(k & 1 > 0), sign(k & 2 > 0), sign(k & 4 > 0))
-            })
-            .collect();
-        let block = crate::construction::fracture::Block::hull(corners).expect("a box is solid");
         let pose = Transform::from_xyz(0.3, 0.15, -0.2)
             .with_rotation(Quat::from_rotation_y(0.4) * Quat::from_rotation_x(0.1));
-        let mut pieces = DrawnHulls::default();
-        pieces.push(&block, origin, &pose);
+        let mut world = World::new();
+        let span = (centre - size / 2.0, centre + size / 2.0);
+        drawn_box(&mut world, span, (origin, pose));
+        let pieces = world
+            .run_system_once(|drawn: DrawnPieces| {
+                let mut pieces = HullField::default();
+                drawn.near(Vec3::ZERO, f32::INFINITY, &mut pieces);
+                pieces
+            })
+            .expect("the gather runs");
         let ground = print_ground(Vec::new());
         let placed = pose.translation + pose.rotation * (centre - origin);
         let solid = |station: Vec3, out: Vec3, reach: f32| -> f32 {

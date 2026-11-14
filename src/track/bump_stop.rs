@@ -18,6 +18,7 @@ use super::derive::SuspensionParams;
 use super::rig_geom::RigGeom;
 use super::route::build_route;
 use super::side::{PerSide, Side};
+use super::soft_run::RunShape;
 use super::stop_contacts::BeltFace;
 use crate::Layer;
 
@@ -38,17 +39,15 @@ pub(crate) struct TrackColliders {
     side_plates: PerSide<[Collider; 2]>,
     friction: Friction,
     faces: PerSide<[BeltFace; 2]>,
-    /// The run loose pieces meet per side ([`super::soft_run`]), with its moving face and law.
-    runs: PerSide<(Collider, BeltFace, super::soft_run::SoftRun)>,
+    runs: PerSide<RunShape>,
 }
 
 impl TrackColliders {
-    /// Cut the compression prisms and shoe-edge slices from `geom`, carrying `friction`, the
-    /// track's own ([`crate::spec::TrackSpec::friction`]).
+    /// Cut the compression prisms, shoe-edge slices and soft runs from `geom`, carrying `friction`,
+    /// the track's own ([`crate::spec::TrackSpec::friction`]).
     pub(crate) fn new(geom: &RigGeom, params: &SuspensionParams, friction: Friction) -> Self {
-        let colliders = PerSide::new(
-            hull(prism(geom, Side::Left, params), Side::Left),
-            hull(prism(geom, Side::Right, params), Side::Right),
+        let colliders = PerSide(
+            Side::ALL.map(|side| across_shoe(geom, side, &geom.hard_stop_polyline(side, params))),
         );
         let side_plates = PerSide::new(
             plates(geom, Side::Left, params),
@@ -66,22 +65,12 @@ impl TrackColliders {
                 BeltFace::new(side, build_route(&rest, 0.0).pts, true),
             ]
         }));
-        let runs = PerSide(Side::ALL.map(|side| {
-            let outline = super::soft_run::run_outline(geom, side);
-            let cols = geom.grip_columns(side);
-            let (x_in, x_out) = (cols[0].0, cols[2].0);
-            (
-                hull(extrude(&outline, x_in, x_out), side),
-                BeltFace::new(side, outline.clone(), false),
-                super::soft_run::SoftRun::new(&outline, geom.pitch),
-            )
-        }));
         Self {
             colliders,
             side_plates,
             friction,
             faces,
-            runs,
+            runs: PerSide(Side::ALL.map(|side| RunShape::build(geom, side))),
         }
     }
 
@@ -91,7 +80,7 @@ impl TrackColliders {
         self.colliders
             .values()
             .chain(self.side_plates.values().flat_map(|pair| pair.iter()))
-            .chain(self.runs.values().map(|(collider, ..)| collider))
+            .chain(self.runs.values().map(RunShape::collider))
             .map(|collider| {
                 let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
                 bounds.min.abs().max(bounds.max.abs()).length()
@@ -118,11 +107,11 @@ impl TrackColliders {
     }
 }
 
-/// Compression wrap extruded across the shoe's true lateral faces, in body coordinates.
-fn prism(geom: &RigGeom, side: Side, params: &SuspensionParams) -> Vec<Vec3> {
+/// Side-plane `profile` extruded across `side`'s shoe between its true lateral faces, as one convex
+/// collider in body coordinates: the stop's compression wrap, or a soft run's outline.
+pub(super) fn across_shoe(geom: &RigGeom, side: Side, profile: &[Vec2]) -> Collider {
     let cols = geom.grip_columns(side);
-    let (x_in, x_out) = (cols[0].0, cols[2].0);
-    extrude(&geom.hard_stop_polyline(side, params), x_in, x_out)
+    hull(extrude(profile, cols[0].0, cols[2].0), side)
 }
 
 /// Thin side slices cover the compression stop and extend to the rest belt's ground face. They
@@ -187,13 +176,9 @@ pub(crate) fn spawn_track_colliders(
 ) {
     for side in Side::ALL {
         spawn_side_surfaces(commands, body, shapes, side);
-        let (collider, face, run) = shapes.runs.get(side);
         commands.spawn((
-            run.clone(),
-            face.clone(),
-            collider.clone(),
+            shapes.runs.get(side).bundle(),
             crate::tank::authored_attachment(Transform::IDENTITY),
-            super::belt_segment::segment_layers(),
             shapes.friction,
             ChildOf(body),
         ));

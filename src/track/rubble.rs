@@ -19,8 +19,8 @@
 //!   for the shipped belt law on a 50 t body at 64 Hz, so the bound holds down to about 2.5 t.
 //!
 //! - **What the belt bears on** ([`RubbleQuery::supports`]): solid, layer-compatible colliders,
-//!   except [`super::terrain::FieldSurface`] geometry already represented by the field. Callers
-//!   exclude self-support by identity ([`RubbleBodies::select_source`]).
+//!   except loose pieces and [`super::terrain::FieldSurface`] geometry already represented by the
+//!   field. Callers exclude self-support by identity ([`RubbleBodies::select_source`]).
 //! - **The footprint check**: a link's slab ([`Slab`]) is the volume its field probes sweep, made
 //!   solid across the true shoe width. Six support points reject separated shapes; the convex
 //!   adapter then clips entry faces to that envelope. Narrow pieces and empty corners are
@@ -96,36 +96,29 @@ pub(crate) struct RubbleQuery<'w, 's> {
 }
 
 impl RubbleQuery<'_, '_> {
-    /// Whether `collider` is a surface the belt bears on (module doc). A collider with no rigid
-    /// body is static to the solver, and is read as one here. A disabled body's colliders still
-    /// answer spatial queries but hold nothing up: Avian gives them no contact response.
-    pub(crate) fn supports(&self, collider: Entity) -> bool {
+    /// Whether `collider` is a surface the belt bears on (module doc). A loose piece is none: it
+    /// meets the soft run instead (`super::soft_run`). A collider with no rigid body is static to
+    /// the solver, and is read as one here. A disabled body's colliders still answer spatial
+    /// queries but hold nothing up: Avian gives them no contact response.
+    fn supports(&self, collider: Entity) -> bool {
         let layers = self
             .layers
             .get(collider)
             .expect("avian requires CollisionLayers on every Collider");
         super::world_contact::solid(layers, self.sensors.contains(collider))
+            && !layers.interacts_with(super::soft_run::run_layers())
             && !self.field_surfaces.contains(collider)
             && !self.disabled.contains(self.body_of(collider))
     }
 
-    /// Whether `collider` is a loose piece: one that meets the belt's soft run (`super::soft_run`).
-    fn loose(&self, collider: Entity) -> bool {
-        self.layers
-            .get(collider)
-            .expect("avian requires CollisionLayers on every Collider")
-            .interacts_with(super::belt_segment::segment_layers())
-    }
-
     /// The support colliders meeting the AABB of half-extent `radius` about `center`, ascending
-    /// by entity, so their contacts and the force sums over them keep one order. A loose piece is
-    /// never one: the soft run carries it (`super::soft_run`).
+    /// by entity, so their contacts and the force sums over them keep one order.
     pub(crate) fn near(&self, center: Vec3, radius: f32) -> Vec<Entity> {
         let mut near = Vec::new();
         self.spatial.aabb_intersections_with_aabb_callback(
             ColliderAabb::new(center, Vec3::splat(radius)),
             |collider| {
-                if self.supports(collider) && !self.loose(collider) {
+                if self.supports(collider) {
                     near.push(collider);
                 }
                 true

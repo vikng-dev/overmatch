@@ -2615,11 +2615,11 @@ fn a_creeping_tank_on_loose_pieces_never_sleeps_under_its_command() {
 /// from the tank's own law and links. Fixture: the slab, `d` and the cuts.
 #[test]
 fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
-    use crate::track::belt_segment::SegmentLaw;
-    use crate::track::soft_run::{SoftRun, run_outline};
+    use crate::track::forces::SupportLaw;
+    use crate::track::soft_run::SoftRun;
     let (top, d) = (0.4, 0.05);
-    // Pieces by their `(x0, x1, z0, z1)` bounds (m); per run, as `Side::ALL`: the spring force
-    // (N) and the contacts in overlap.
+    // Pieces by their `(x0, x1, z0, z1)` bounds (m); per run, as `Side::ALL`: the run, the spring
+    // force (N) and the contacts in overlap.
     let springs = |cuts: &[(f32, f32, f32, f32)]| {
         let mut bed = Bed::on_ground(Some(base_ground()), flat());
         for &(x0, x1, z0, z1) in cuts {
@@ -2630,41 +2630,39 @@ fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
         bed.start();
         bed.tick(0.0, 0.0);
         let world = bed.app.world_mut();
-        let runs: Vec<(Side, Entity)> = world
-            .query_filtered::<(Entity, &crate::track::stop_contacts::BeltFace), With<SoftRun>>()
+        let runs: Vec<(Side, Entity, SoftRun)> = world
+            .query::<(Entity, &crate::track::stop_contacts::BeltFace, &SoftRun)>()
             .iter(world)
-            .map(|(run, face)| (face.side, run))
+            .map(|(run, face, soft)| (face.side, run, soft.clone()))
             .collect();
         let graph = world.resource::<ContactGraph>();
         let carried = Side::ALL.map(|side| {
-            let (_, run) = *runs
+            let (_, run, soft) = runs
                 .iter()
-                .find(|(of, _)| *of == side)
+                .find(|(of, ..)| *of == side)
                 .expect("a driving tank hangs a run on each side");
-            graph
-                .contact_pairs_with(run)
+            let (spring, contacts) = graph
+                .contact_pairs_with(*run)
                 .flat_map(|pair| &pair.manifolds)
-                // A contact with no point in overlap reaches the solver with none.
-                .filter(|manifold| !manifold.points.is_empty())
                 .map(|manifold| {
                     let overlap: f32 = manifold.points.iter().map(|p| p.penetration.max(0.0)).sum();
                     let law = manifold
                         .compliance
-                        .expect("a run's contact in overlap takes the running gear's law");
+                        .expect("every contact of a run takes the running gear's law");
                     (law.stiffness * overlap, usize::from(overlap > 0.0))
                 })
-                .fold((0.0, 0), |(f, n), (df, dn)| (f + df, n + dn))
+                .fold((0.0, 0), |(f, n), (df, dn)| (f + df, n + dn));
+            (soft.clone(), spring, contacts)
         });
         (bed, carried)
     };
     let (bed, whole) = springs(&[(-4.0, 4.0, -8.0, 8.0)]);
-    let geom = bed.geom().clone();
-    let law = *bed.app.world().resource::<SegmentLaw>();
+    let [left, right] = Side::ALL.map(|side| bed.geom().side_plane_x(side));
+    let law = *bed.app.world().resource::<SupportLaw>();
     // One booted app at a time: the next bed's boot waits on this one's lease.
     drop(bed);
-    let [left, right] = Side::ALL.map(|side| geom.side_plane_x(side));
-    for (side, &(spring, _)) in Side::ALL.iter().zip(&whole) {
-        let outline = run_outline(&geom, *side);
+    for (side, (run, spring, _)) in Side::ALL.iter().zip(&whole) {
+        let (outline, spring) = (run.outline(), *spring);
         let low = outline.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
         let (mut flat, mut wet) = (0.0, 0.0);
         for (a, b) in outline.iter().zip(outline.iter().cycle().skip(1)) {
@@ -2683,10 +2681,9 @@ fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
             }
         }
         // A link is rigid along its length: the end links of the wetted stretch load whole.
-        let link = SoftRun::new(&outline, geom.pitch).link();
         let (least, most) = (
             law.stiffness_per_m * d * flat,
-            law.stiffness_per_m * d * (wet + 2.0 * link),
+            law.stiffness_per_m * d * (wet + 2.0 * run.link()),
         );
         println!("MEASURED {side:?} run: {spring} N on the whole slab, bounds {least}..{most} N");
         assert!(
@@ -2709,7 +2706,9 @@ fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
         ),
     ] {
         let (_, pieces) = springs(&cuts);
-        for ((side, &(spring, contacts)), &(one, _)) in Side::ALL.iter().zip(&pieces).zip(&whole) {
+        for ((side, &(_, spring, contacts)), &(_, one, _)) in
+            Side::ALL.iter().zip(&pieces).zip(&whole)
+        {
             println!("MEASURED cut {cut}: {side:?} run {spring} N over {contacts} contacts");
             assert!(contacts > 1, "cut {cut}: the {side:?} run met one piece");
             assert!(

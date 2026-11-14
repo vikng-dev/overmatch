@@ -69,9 +69,9 @@ fn body(app: &mut App, geom: &RigGeom, shapes: &TrackColliders, role: RigidBody)
 }
 
 /// Every tank's side contact must start at its measured shoe faces and end at the belt's bottom,
-/// rather than a symmetric pin-plane approximation. Driving relies on both edges seeing a piece
-/// before it enters the belt's footprint; changing the fixture's shoe bias must move both faces.
-/// Geometry comparisons allow 1e-5 m (ASSUMED f32 round-off allowance).
+/// rather than a symmetric pin-plane approximation. Driving relies on both edges meeting a
+/// structure or another hull at the shoe's true faces; changing the fixture's shoe bias must move
+/// both faces. Geometry comparisons allow 1e-5 m (Resolution: f32 round-off).
 #[test]
 fn side_plates_follow_the_true_shoe_faces_and_belt_bottom() {
     let mut geom = super::super::rig_geom::tiger_rig();
@@ -131,21 +131,21 @@ fn side_plates_follow_the_true_shoe_faces_and_belt_bottom() {
 }
 
 /// The running gear's calibrated support law, as the shipped tank's construction publishes it.
-fn shipped_law() -> super::super::belt_segment::SegmentLaw {
+fn shipped_law() -> super::super::forces::SupportLaw {
     let mut app = App::new();
     app.add_plugins((crate::bake::plugin, super::super::sim::sim_plugin));
     app.world_mut().run_schedule(Startup);
     app.world_mut().run_schedule(PreUpdate);
-    *app.world()
-        .resource::<super::super::belt_segment::SegmentLaw>()
+    *app.world().resource::<super::super::forces::SupportLaw>()
 }
 
 /// A piece beside any shoe face starts OUTSIDE every collider it meets and entirely below the
 /// stop. A pivot must shove it sideways through the run's soft contact, carrying the shipped law,
-/// within the run's maximum surface speed plus 0.1 m/s (ASSUMED discrete-contact allowance, well
-/// below the solver's 4 m/s default overlap separation speed), by more than its width. Driving
-/// relies on this to push pieces aside rather than throw them at first contact. Terrain
-/// deliberately intersects the run geometrically, but must never form a contact pair with it.
+/// within the run's maximum surface speed plus 0.1 m/s (Resolution: the discrete contact's
+/// allowance, well below the solver's 4 m/s default overlap separation speed), by more than its
+/// width. Driving relies on this to push pieces aside rather than throw them at first contact.
+/// Terrain deliberately intersects the run geometrically, but must never form a contact pair with
+/// it.
 #[test]
 fn a_pivoting_track_shoves_a_piece_without_throwing_it_or_touching_terrain() {
     let law = shipped_law();
@@ -172,7 +172,7 @@ fn a_pivoting_track_shoves_a_piece_without_throwing_it_or_touching_terrain() {
     let terrain_shape = Collider::cuboid(20.0, 1.0, 20.0); // FIXTURE ground extent.
     let terrain_at = Vec3::Y * (top - 0.5);
     for side in Side::ALL {
-        let (run, ..) = shapes.runs.get(side);
+        let run = shapes.runs.get(side).collider();
         for edge_index in 0..2 {
             let mut app = physics(Vec3::NEG_Y * super::super::derive::G);
             app.insert_resource(law);
@@ -185,11 +185,12 @@ fn a_pivoting_track_shoves_a_piece_without_throwing_it_or_touching_terrain() {
             let edge = geom.grip_columns(side)[edge_index * 2].0;
             let initial = Vec3::new(edge + out * size * 0.75, top + size * 0.5, z);
             let piece_shape = Collider::cuboid(size, size, size);
-            for collider in shapes
-                .colliders
-                .values()
-                .chain(shapes.runs.values().map(|(run, ..)| run))
-            {
+            for collider in shapes.colliders.values().chain(
+                shapes
+                    .runs
+                    .values()
+                    .map(super::super::soft_run::RunShape::collider),
+            ) {
                 assert!(
                     !intersection_test(
                         collider,
