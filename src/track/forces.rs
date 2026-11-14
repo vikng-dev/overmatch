@@ -32,7 +32,7 @@ use super::rubble::{RubbleBodies, Slab};
 use super::world_contact::surface_under;
 use super::world_contact::{PatchQuery, patches, sample};
 
-use super::route::{polyline_len, resample};
+use super::route::{polyline_len, resample_loop};
 #[cfg(feature = "bitprobe")]
 use crate::bitprobe::{ContactInputProbe, ElementOutputProbe};
 
@@ -631,12 +631,7 @@ pub fn contact_side<O: TerrainOracle>(
     );
     let pitch = polyline_len(input.loop_pts) / input.count as f32;
     let (wraps, station_offset) = phase_decompose(state.phase, pitch);
-    let mut stations = resample(input.loop_pts, pitch, station_offset);
-    stations.truncate(input.count);
-    assert!(
-        stations.len() >= 3,
-        "admitted running gear resamples to a closed contact loop; reject degenerate construction before publication"
-    );
+    let stations = resample_loop(input.loop_pts, pitch, station_offset, input.count);
 
     // The caller owns fixed-size slabs constructed at spawn by `GripElements::for_stations`.
     // A size mismatch is a construction bug; resizing here would erase valid contact strain.

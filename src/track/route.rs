@@ -629,6 +629,20 @@ pub fn resample(points: &[Vec2], spacing: f32, offset: f32) -> Vec<Vec2> {
     out
 }
 
+/// `count` stations round a closed loop (`points` ends where it starts), `spacing` its length over
+/// `count`. The walk accumulates arc in f32, so the last station, `spacing − offset` short of the
+/// end, can round past it, and a station rounded onto the end repeats station 0: on a periodic
+/// loop the first is the end point and the second goes, so the count is exact.
+pub fn resample_loop(points: &[Vec2], spacing: f32, offset: f32, count: usize) -> Vec<Vec2> {
+    let mut out = resample(points, spacing, offset);
+    assert!(
+        out.len() + 1 >= count,
+        "a closed loop of {count} spacings resamples to within one rounding of {count} stations"
+    );
+    out.resize(count, points[points.len() - 1]);
+    out
+}
+
 /// Deepest segment cut into a circle (0 = no entry), the rendered quantity
 /// [`SagClip::EveryCircle`] promises to bound. A vertex-only measure misses chord cuts.
 /// Shared by route and `wrap` tests: the same measurement on different polylines, not separate
@@ -1052,6 +1066,42 @@ mod tests {
             ratio > 1.05,
             "a lifted wheel must not be wrapped from below — the route came within {ratio}x \
              its radius"
+        );
+    }
+
+    /// The force stations and the drawn joints index by station, so a closed loop resamples to
+    /// its count at every phase, its closing gap one spacing like the rest. The sweep reaches the
+    /// phases whose walk rounds the last station past the loop's end.
+    #[test]
+    fn a_closed_loop_resamples_to_its_count_at_every_phase() {
+        let ring: Vec<Vec2> = (0..=360)
+            .map(|k| Vec2::from_angle((k % 360) as f32 * std::f32::consts::TAU / 360.0))
+            .collect();
+        let count = 97;
+        let spacing = polyline_len(&ring) / count as f32;
+        let mut rounded_past = 0;
+        let near_spacing = (1..2_000).scan(spacing, |o, _| {
+            *o = o.next_down();
+            Some(*o)
+        });
+        for offset in (0..20_000)
+            .map(|k| spacing * k as f32 / 20_000.0)
+            .chain(near_spacing)
+        {
+            rounded_past += usize::from(resample(&ring, spacing, offset).len() < count);
+            let stations = resample_loop(&ring, spacing, offset, count);
+            assert_eq!(stations.len(), count);
+            for i in 0..count {
+                let gap = stations[i].distance(stations[(i + 1) % count]);
+                assert!(
+                    (gap - spacing).abs() < 1e-4,
+                    "gap {i} at offset {offset} is {gap} m, one spacing is {spacing} m"
+                );
+            }
+        }
+        assert!(
+            rounded_past > 0,
+            "the sweep reaches a walk that rounds a station past the end"
         );
     }
 }

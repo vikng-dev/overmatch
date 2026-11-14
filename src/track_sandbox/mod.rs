@@ -75,7 +75,7 @@ use mesh_layers::{MeshState, VolumeState};
 use rig_geom::{Pose, RigGeom};
 // Re-export the shared geometry core for model submodules using `super::*`.
 pub(crate) use crate::track::oracle::{BlockField, TerrainBlock};
-pub(crate) use crate::track::route::{arc, external_tangent, polyline_len, resample};
+pub(crate) use crate::track::route::{arc, external_tangent, polyline_len, resample_loop};
 pub(crate) use crate::track::side::{PerSide, Side};
 
 // Rig lengths, radii, centres and counts come from `RigGeom`, derived from glb markers and tank
