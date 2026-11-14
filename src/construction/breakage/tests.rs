@@ -541,9 +541,6 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
         let after = app.world().get::<Position>(owner).unwrap().0;
         assert!(after.x > before.x, "the common dynamic owner advances");
         for (entity, chunk) in contact {
-            use crate::track::rubble::{PieceData, RubbleBodies, RubbleQuery, Slab};
-            use bevy::ecs::system::RunSystemOnce;
-
             let world = app.world();
             assert_eq!(world.get::<ColliderOf>(entity).unwrap().body, owner);
             assert_eq!(
@@ -562,38 +559,13 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
                 bound.min.cmple(expected.min).all() && bound.max.cmpge(expected.max).all(),
                 "the common collider's live bounds contain its posed hull"
             );
-            let centre = (bound.min + bound.max) * 0.5;
-            let radius = (bound.max - bound.min).length();
-            app.world_mut()
-                .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                    let near = rubble.near(centre, radius);
-                    assert!(
-                        near.contains(&entity),
-                        "the belt spatial query must find the freed hull"
-                    );
-                    assert_eq!(rubble.body_of(entity), owner);
-                    let gathered = RubbleBodies::gather(&rubble, &near, &bodies);
-                    assert!(gathered.is_dynamic(entity));
-                    // Fixture footprint encloses the hull; its positive projected area must support.
-                    let slab = Slab {
-                        origin: centre - Vec3::X * radius,
-                        axis: Vec3::X,
-                        lat: Vec3::Z,
-                        out: Vec3::NEG_Y,
-                        len: 2.0 * radius,
-                        lateral: (-radius, radius),
-                        face: 0.0,
-                        reach: radius,
-                        travel: radius,
-                    };
-                    assert!(
-                        gathered.in_slab(&slab).iter().any(|overlap| {
-                            gathered.collider(overlap.piece) == entity && !overlap.faces.is_empty()
-                        }),
-                        "the freed occupied hull must reach the belt footprint reader"
-                    );
-                })
-                .unwrap();
+            assert!(
+                world
+                    .get::<CollisionLayers>(entity)
+                    .unwrap()
+                    .interacts_with(crate::track::belt_segment::segment_layers()),
+                "the freed hull meets the belt's soft run"
+            );
             assert!(
                 app.world()
                     .get::<Collider>(entity)
@@ -609,7 +581,7 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
             Fate::Fallen
         );
         println!(
-            "MEASURED {asset}: common detachment retains chunks {group:?} (decor witness {decor:?}), direct contact hulls, moving bounds and production belt support"
+            "MEASURED {asset}: common detachment retains chunks {group:?} (decor witness {decor:?}), direct contact hulls, moving bounds and the belt's soft run"
         );
     }
 }

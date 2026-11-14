@@ -456,15 +456,31 @@ impl SlackSpring {
 }
 
 /// View-local contact memory. The caller resets it when terrain, print response or immutable
-/// rig parameters change. Phase is deliberately absent: it scrolls over the fitted route.
+/// rig parameters change, and marks it [`ContactCache::stale`] when the field under the belt
+/// moves under an unchanged pose. Phase is deliberately absent: it scrolls over the fitted route.
 #[derive(Default)]
 pub(crate) struct ContactCache {
     geometry: Option<RawBelly>,
     circles: Vec<(Vec2, f32)>,
     sampled_circles: Vec<(Vec2, f32)>,
     affine: Option<Affine3A>,
+    stale: bool,
     previous: DepthProfile,
     current: DepthProfile,
+}
+
+impl ContactCache {
+    /// The field changed since the last sample: the next refresh probes again, blending from the
+    /// last sample as a moved pose's does.
+    pub(crate) fn stale(&mut self) {
+        self.stale = true;
+    }
+
+    /// The depths the last probe read, one per belly station (m).
+    #[cfg(test)]
+    pub(crate) fn sampled_depths(&self) -> &[f32] {
+        &self.current.depths
+    }
 }
 
 #[derive(Default, Clone)]
@@ -517,7 +533,12 @@ pub(crate) fn step_cached<O: DepthOracle>(
                 .fractions
                 .clone_from(&cache.current.fractions);
             cache.previous.depths.clone_from(&cache.current.depths);
-            if cold || cache.affine != Some(input.affine) || cache.sampled_circles != side.circles {
+            if cold
+                || cache.stale
+                || cache.affine != Some(input.affine)
+                || cache.sampled_circles != side.circles
+            {
+                cache.stale = false;
                 cache.current = DepthProfile {
                     fractions: rb.fractions.clone(),
                     depths: probe_belly(

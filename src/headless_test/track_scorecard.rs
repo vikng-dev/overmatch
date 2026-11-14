@@ -2602,57 +2602,120 @@ fn a_creeping_tank_on_loose_pieces_never_sleeps_under_its_command() {
     println!("MEASURED slowest hull speed {slowest} m/s");
 }
 
-/// The running gear's law, per segment: every overlapping point of a segment together carries
-/// exactly `k' × length`, whatever it touches. Pins the compliance in the contact, the
-/// stiffness read from the tank's own law, and the sharing across pieces.
+/// The running gear's law, per stretch of belt: a run's contacts with loose pieces together carry
+/// `k'` per metre of belt they overlap, whatever pieces they touch. A tank set `d` into one slab,
+/// and into the same slab cut in two across the belly (pieces end to end along each belt) or cut
+/// in three under each shoe's middle (pieces side by side across each shoe), meets one spring:
+/// the solver's spring force at the first step's overlap, summed over each run's contacts, is the
+/// same for every cut to 1e-3 of it (f32 round-off over identical links), and on the whole slab
+/// lies between `k'·d` over the run's flat belly and over all of the run below the slab's top and
+/// the link past each end (each contact's depth is at most `d`, and a link loads whole), read
+/// from the tank's own law and links. Fixture: the slab, `d` and the cuts.
 #[test]
-fn every_segment_on_loose_pieces_carries_the_running_gears_law_once() {
+fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
     use crate::track::belt_segment::SegmentLaw;
-    let mut bed = parked_over(&Side::ALL);
-    let (mut checked, mut shared) = (0, 0);
-    for _ in 0..TICKS {
-        bed.tick(0.3, 0.0);
+    use crate::track::soft_run::{SoftRun, run_outline};
+    let (top, d) = (0.4, 0.05);
+    // Pieces by their `(x0, x1, z0, z1)` bounds (m); per run, as `Side::ALL`: the spring force
+    // (N) and the contacts in overlap.
+    let springs = |cuts: &[(f32, f32, f32, f32)]| {
+        let mut bed = Bed::on_ground(Some(base_ground()), flat());
+        for &(x0, x1, z0, z1) in cuts {
+            let centre = Vec3::new((x0 + x1) / 2.0, top / 2.0, (z0 + z1) / 2.0);
+            bed.spawn_piece(centre, Vec3::new(x1 - x0, top, z1 - z0));
+        }
+        bed.place(Vec3::new(0.0, top - d, 0.0), Quat::IDENTITY);
+        bed.start();
+        bed.tick(0.0, 0.0);
         let world = bed.app.world_mut();
-        let law = *world.resource::<SegmentLaw>();
-        let segments: Vec<(Entity, f32)> = world
-            .query::<(Entity, &BeltSegment)>()
+        let runs: Vec<(Side, Entity)> = world
+            .query_filtered::<(Entity, &crate::track::stop_contacts::BeltFace), With<SoftRun>>()
             .iter(world)
-            .map(|(entity, segment)| (entity, segment.length))
+            .map(|(run, face)| (face.side, run))
             .collect();
         let graph = world.resource::<ContactGraph>();
-        for (segment, length) in segments {
-            let (mut stiffness, mut damping, mut pairs) = (0.0, 0.0, 0);
-            for pair in graph.contact_pairs_with(segment) {
-                let mut overlapped = false;
-                for manifold in &pair.manifolds {
-                    for _ in manifold.points.iter().filter(|p| p.penetration > 0.0) {
-                        let compliance = manifold
-                            .compliance
-                            .expect("a segment's contact takes the running gear's law");
-                        stiffness += compliance.stiffness;
-                        damping += compliance.damping;
-                        overlapped = true;
-                    }
-                }
-                pairs += usize::from(overlapped);
+        let carried = Side::ALL.map(|side| {
+            let (_, run) = *runs
+                .iter()
+                .find(|(of, _)| *of == side)
+                .expect("a driving tank hangs a run on each side");
+            graph
+                .contact_pairs_with(run)
+                .flat_map(|pair| &pair.manifolds)
+                // A contact with no point in overlap reaches the solver with none.
+                .filter(|manifold| !manifold.points.is_empty())
+                .map(|manifold| {
+                    let overlap: f32 = manifold.points.iter().map(|p| p.penetration.max(0.0)).sum();
+                    let law = manifold
+                        .compliance
+                        .expect("a run's contact in overlap takes the running gear's law");
+                    (law.stiffness * overlap, usize::from(overlap > 0.0))
+                })
+                .fold((0.0, 0), |(f, n), (df, dn)| (f + df, n + dn))
+        });
+        (bed, carried)
+    };
+    let (bed, whole) = springs(&[(-4.0, 4.0, -8.0, 8.0)]);
+    let geom = bed.geom().clone();
+    let law = *bed.app.world().resource::<SegmentLaw>();
+    // One booted app at a time: the next bed's boot waits on this one's lease.
+    drop(bed);
+    let [left, right] = Side::ALL.map(|side| geom.side_plane_x(side));
+    for (side, &(spring, _)) in Side::ALL.iter().zip(&whole) {
+        let outline = run_outline(&geom, *side);
+        let low = outline.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let (mut flat, mut wet) = (0.0, 0.0);
+        for (a, b) in outline.iter().zip(outline.iter().cycle().skip(1)) {
+            if (a.y - low).abs() < 1e-4 && (b.y - low).abs() < 1e-4 {
+                flat += a.distance(*b);
             }
-            if pairs == 0 {
-                continue;
+            let under = |p: &Vec2| (low + d - p.y).max(0.0);
+            let (ua, ub) = (under(a), under(b));
+            if ua > 0.0 || ub > 0.0 {
+                let wetted = if ua > 0.0 && ub > 0.0 {
+                    1.0
+                } else {
+                    ua.max(ub) / (a.y - b.y).abs()
+                };
+                wet += a.distance(*b) * wetted;
             }
-            let whole = law.stiffness_per_m * length;
+        }
+        // A link is rigid along its length: the end links of the wetted stretch load whole.
+        let link = SoftRun::new(&outline, geom.pitch).link();
+        let (least, most) = (
+            law.stiffness_per_m * d * flat,
+            law.stiffness_per_m * d * (wet + 2.0 * link),
+        );
+        println!("MEASURED {side:?} run: {spring} N on the whole slab, bounds {least}..{most} N");
+        assert!(
+            spring > least * (1.0 - 1e-3) && spring < most * (1.0 + 1e-3),
+            "the {side:?} run carries {spring} N on the whole slab, outside {least}..{most} N"
+        );
+    }
+    for (cut, cuts) in [
+        (
+            "across the belly",
+            vec![(-4.0, 4.0, -8.0, 0.0), (-4.0, 4.0, 0.0, 8.0)],
+        ),
+        (
+            "under each shoe",
+            vec![
+                (-4.0, left, -8.0, 8.0),
+                (left, right, -8.0, 8.0),
+                (right, 4.0, -8.0, 8.0),
+            ],
+        ),
+    ] {
+        let (_, pieces) = springs(&cuts);
+        for ((side, &(spring, contacts)), &(one, _)) in Side::ALL.iter().zip(&pieces).zip(&whole) {
+            println!("MEASURED cut {cut}: {side:?} run {spring} N over {contacts} contacts");
+            assert!(contacts > 1, "cut {cut}: the {side:?} run met one piece");
             assert!(
-                (stiffness - whole).abs() < whole * 1e-4,
-                "{pairs} pairs carry {stiffness} N/m against {whole} N/m"
+                (spring - one).abs() < one * 1e-3,
+                "cut {cut}: the {side:?} run carries {spring} N against {one} N on one slab"
             );
-            let whole = law.damping_per_m * length;
-            assert!((damping - whole).abs() < whole * 1e-4, "damping {damping}");
-            checked += 1;
-            shared += usize::from(pairs > 1);
         }
     }
-    println!("MEASURED segment-steps checked {checked}, across several pieces {shared}");
-    assert!(checked > 0, "no segment reached the pile");
-    assert!(shared > 0, "no segment straddled two pieces");
 }
 
 /// One broad heavy slab under the whole tank, the tank settled a second on it. Fixture.
@@ -2668,33 +2731,39 @@ fn slab_bed() -> Bed {
     bed
 }
 
-/// The drivetrain reads a loose piece's friction once, with its sign. The belts' reaction is the
-/// only longitudinal force on a hull carried wholly by solver contacts, so its total over a pull
-/// equals the hull's momentum change. A tick's reaction is the solver's friction over the step
+/// The drivetrain reads a loose piece's friction once, with its sign. On a hull carried wholly by
+/// solver contacts, the momentum change along its level heading, where gravity has no part, is
+/// the belts' friction plus the contact normals' push along it: a bump stop meeting the slab can
+/// take a tilted normal. So the readings' total equals the momentum change less that push, read
+/// from the same solver points. A tick's reaction is the solver's friction over the step
 /// before it (`stop_contacts`), so the readings of ticks 1..=N close the steps of ticks 0..N.
 /// A reading lost, doubled or one step out of line moves the balance by that step's friction, up
 /// to its grip limit times the step; the allowance is half the least such limit over the pull's
 /// steps with contact, the solver's Coulomb limit on both belts (`HardReaction::grip`) times the
-/// fixed step, so the
-/// balance catches such a fault at any step whose friction exceeds half its grip, whatever gear
-/// the Driver holds. Fixture: a pull short enough to stay on the slab.
+/// fixed step, so the balance catches such a fault at any step whose friction exceeds half its
+/// grip, whatever gear the Driver holds. Fixture: a pull short enough to stay on the slab.
 #[test]
 fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
     use crate::track::sim::TrackGripEffect;
     let mut bed = slab_bed();
     let start = bed.hull();
-    let forward = start.forward();
-    let (mut impulse, mut magnitude, mut momentum) = (0.0, 0.0, 0.0);
+    let forward = (start.forward() * Vec3::new(1.0, 0.0, 1.0)).normalize();
+    let (mut impulse, mut magnitude, mut momentum, mut pushed) = (0.0, 0.0, 0.0, 0.0);
     let mut least_grip = f32::INFINITY;
     let pull = TICKS;
     for tick in 0..=pull {
-        momentum = bed.mass() * (bed.hull().velocity - start.velocity).dot(forward);
+        momentum = bed.mass() * (bed.hull().velocity - start.velocity).dot(forward) - pushed;
         bed.tick(1.0, 0.0);
         assert!(
             bed.spring_forces().is_empty(),
             "the sampled support carried the hull at tick {tick}"
         );
         if tick < pull {
+            pushed += bed
+                .tank_solver_forces()
+                .iter()
+                .map(|(force, normal)| force.force.dot(*normal) * normal.dot(forward) * DT)
+                .sum::<f32>();
             // A step with no solver contact moves no friction, so no fault there can move the
             // balance; a side without one has no grip over the step.
             let sides = bed.hard_reactions();
@@ -2718,8 +2787,8 @@ fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
     // DERIVED: each f32 addition errs by at most ε of a partial sum, which is under `magnitude`.
     let rounding = f32::EPSILON * pull as f32 * magnitude;
     println!(
-        "MEASURED belt impulse {impulse} N s, hull momentum change {momentum} N s, \
-         allowance {allowance} N s"
+        "MEASURED belt impulse {impulse} N s, hull momentum change less the normals' push \
+         {momentum} N s, the push {pushed} N s, allowance {allowance} N s"
     );
     assert!(
         rounding < allowance,

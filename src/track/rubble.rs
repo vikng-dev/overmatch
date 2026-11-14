@@ -7,11 +7,9 @@
 //!
 //! **The boundary, one rule from construction facts: the layer a collider was built on.**
 //! - **On `Layer::Debris`** (a construction's fallen pieces and the debris stress lever's
-//!   fragments, at any mass, [`RubbleBodies::loose`]): a solver body. It meets the belt's sprung
-//!   segments (`super::belt_segment`), so Avian resolves the equal and opposite reaction and
-//!   whatever holds the piece. The sampled support keeps it in the footprint partition, across
-//!   the whole shoe over the length it covers (a link is stiff across its width), so that length
-//!   takes no ground support as well; the Driver perceives it, but no spring force acts on it.
+//!   fragments, at any mass): a solver body. It meets the belt's soft run (`super::soft_run`), so
+//!   Avian resolves the equal and opposite reaction and whatever holds the piece. The sampled
+//!   support never reads it ([`RubbleQuery::near`]): the ground under it keeps its own support.
 //! - **Every other solid** (standing construction, map blocks, another tank's hull; terrain is the
 //!   field): the sampled support carries the belt and the solid takes the whole opposite reaction,
 //!   fixed construction into its structural load reading
@@ -111,7 +109,7 @@ impl RubbleQuery<'_, '_> {
             && !self.disabled.contains(self.body_of(collider))
     }
 
-    /// Whether `collider` is a loose piece the belt segments carry (`super::belt_segment`).
+    /// Whether `collider` is a loose piece: one that meets the belt's soft run (`super::soft_run`).
     fn loose(&self, collider: Entity) -> bool {
         self.layers
             .get(collider)
@@ -120,13 +118,14 @@ impl RubbleQuery<'_, '_> {
     }
 
     /// The support colliders meeting the AABB of half-extent `radius` about `center`, ascending
-    /// by entity, so their contacts and the force sums over them keep one order.
+    /// by entity, so their contacts and the force sums over them keep one order. A loose piece is
+    /// never one: the soft run carries it (`super::soft_run`).
     pub(crate) fn near(&self, center: Vec3, radius: f32) -> Vec<Entity> {
         let mut near = Vec::new();
         self.spatial.aabb_intersections_with_aabb_callback(
             ColliderAabb::new(center, Vec3::splat(radius)),
             |collider| {
-                if self.supports(collider) {
+                if self.supports(collider) && !self.loose(collider) {
                     near.push(collider);
                 }
                 true
@@ -459,7 +458,7 @@ impl RubbleBodies<'_> {
         self.surface(collider).friction
     }
 
-    /// Whether `collider` is a loose piece, carried by the belt segments' solver contacts rather
+    /// Whether `collider` is a loose piece, carried by the soft run's solver contacts rather
     /// than the spring channel. Only a collider from this snapshot may be read.
     pub(crate) fn loose(&self, collider: Entity) -> bool {
         self.surface(collider).loose
@@ -1666,60 +1665,6 @@ mod tests {
             "wrong footprint share: {narrow}/{full}"
         );
         assert_eq!(beside, 0.0);
-    }
-
-    /// A LINK IS STIFF ACROSS ITS WIDTH, SO A LOOSE PIECE UNDER PART OF IT LIFTS ALL OF IT. The
-    /// ground beside the piece, over the covered length, is not touching the plate; the belt
-    /// segment carries that length whole, so ground left under it would count it twice. Past the
-    /// piece's length the ground keeps the belt. FIXTURE DATA: a 2 m pad 0.2 m wide, 5 mm into
-    /// the ground; the piece stands 15 mm proud of that, under half the width.
-    #[test]
-    fn a_loose_piece_under_part_of_the_width_lifts_the_whole_link_off_the_ground() {
-        let ground_load = |piece: Option<(Vec3, Vec3)>| {
-            let mut app = physics();
-            if let Some((at, size)) = piece {
-                let piece = piece_box(&mut app, at, size);
-                app.world_mut()
-                    .entity_mut(piece)
-                    .insert(crate::construction::breakage::piece_layers());
-            }
-            app.update();
-            app.world_mut()
-                .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                    let near = rubble.near(Vec3::ZERO, 4.0);
-                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
-                    pad_pass(
-                        &ground(),
-                        &pieces,
-                        Affine3A::IDENTITY,
-                        SideState::default(),
-                        Vec3::ZERO,
-                        &mut GripElements::for_stations(30, 3),
-                    )
-                    .contacts
-                    .iter()
-                    .filter(|c| c.collider.is_none())
-                    .map(|c| c.load_elastic * c.normal.y)
-                    .sum::<f32>()
-                })
-                .unwrap()
-        };
-        let box_at = |x: f32, z: f32| Vec3::new(x, 0.015 - 0.2, z);
-        let bare = ground_load(None);
-        let whole_length = ground_load(Some((box_at(0.05, 0.0), Vec3::new(0.1, 0.4, 4.0))));
-        let half_length = ground_load(Some((box_at(0.05, 0.5), Vec3::new(0.1, 0.4, 1.0))));
-        let beside = ground_load(Some((box_at(0.2, 0.0), Vec3::new(0.1, 0.4, 4.0))));
-        println!(
-            "MEASURED ground load: bare {bare:.1} N, piece the whole length {whole_length:.1} N, \
-             half the length {half_length:.1} N, beside the shoe {beside:.1} N"
-        );
-        assert!(bare > 0.0);
-        assert_eq!(whole_length, 0.0, "ground left beside the piece");
-        assert!(
-            (half_length / bare - 0.5).abs() < 0.1,
-            "{half_length}/{bare}"
-        );
-        assert_eq!(beside, bare);
     }
 
     /// STACKED PIECES DO NOT MULTIPLY SUPPORT, AND A SPLIT ELEMENT ADVANCES ITS GRIP ONCE.

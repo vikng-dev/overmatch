@@ -23,6 +23,7 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
 use crate::bake::TankBlueprint;
+use crate::construction::view::{DrawnHulls, DrawnPieces};
 use crate::render_policy::VisualScope;
 use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
 
@@ -133,6 +134,23 @@ impl<F: Fn(Vec2) -> f32> DepthOracle for Sunk<'_, F> {
     }
 }
 
+/// The ground the drawn belt fits with the drawn loose pieces on it: each probe reads the
+/// deeper surface. The sim carries a piece on the soft run (`super::soft_run`), its overlap the
+/// run's spring travel, so a wheel drawn lifted by that overlap draws the belt on the piece.
+struct OnPieces<'a, O> {
+    ground: &'a O,
+    pieces: &'a DrawnHulls,
+}
+
+impl<O: DepthOracle> DepthOracle for OnPieces<'_, O> {
+    fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+        let ground = self.ground.depth_along(station, out, reach);
+        self.pieces
+            .depth_along(station, out, reach)
+            .map_or(ground, |piece| piece.max(ground))
+    }
+}
+
 /// Presented-pose discontinuity thresholds: a root that moves further than this in ONE frame is
 /// a teleport/respawn/snap, not motion — reset the wrap filters and the wheel-lift state. The view
 /// detects locally, with no published signal: works identically in SP and MP, no netcode coupling.
@@ -170,6 +188,9 @@ struct TrackRig {
     contact_clock: ContactClock,
     fit_affine: Option<Affine3A>,
     contacts: [wrap::ContactCache; 2],
+    /// The drawn pieces near the tank when its wheels and belt last sampled: a later gather that
+    /// differs (a piece moved, hid, went or came) re-probes both at the next sample.
+    pieces: DrawnHulls,
     /// Per-side wrap circles, rewritten in place each frame ([`drive_track_views`]).
     circles: [Vec<(Vec2, f32)>; 2],
 }
@@ -598,6 +619,7 @@ fn bind_track_rigs(
             contact_clock: Default::default(),
             fit_affine: None,
             contacts: Default::default(),
+            pieces: Default::default(),
             circles: Default::default(),
         });
     }
@@ -684,7 +706,14 @@ fn drive_track_views(
     // and rewritten in place (never shared — two tanks stand on different ground).
     mut proxy_meshes: ResMut<Assets<Mesh>>,
     mut tanks: Query<(&Transform, &TrackDrive, &mut TrackRig)>,
-    mut views: Query<&mut Transform, Without<TrackRig>>,
+    // Running-gear view nodes; a loose piece is none, and its pose is read below.
+    mut views: Query<
+        &mut Transform,
+        (
+            Without<TrackRig>,
+            Without<crate::construction::breakage::Piece>,
+        ),
+    >,
     // Each side's frame table, which its belt draws, the prints stamp and the rung selector reads.
     mut belts: Query<&mut BeltFrames>,
     // The caster swap's writes: the ribbon's `Mesh3d` and `VisualScope::PROXIED_CASTER` onto this
@@ -696,11 +725,25 @@ fn drive_track_views(
         Option<Res<crate::track_prints::PrintDepths>>,
         Option<Res<RigGeom>>,
     ),
+    // The loose pieces as drawn, gathered per tank within its running gear's bounding sphere.
+    pieces: (
+        DrawnPieces,
+        Local<DrawnHulls>,
+        Res<super::bump_stop::TrackColliders>,
+    ),
 ) {
     let Some(ground) = track.field.as_ref() else {
         return;
     };
     let (depths, geom) = sink;
+    let (drawn, mut hulls, shapes) = pieces;
+    // A probe station lies on the running gear's shapes moved by at most its travel, and its ray
+    // runs PROBE_REACH past the station.
+    let travel = Side::ALL
+        .into_iter()
+        .map(|side| gear.max_droop(side))
+        .fold(blueprint.spec.track.suspension.bump_stop, f32::max);
+    let gather_m = shapes.contact_radius() + travel + PROBE_REACH;
     let pressure_kpa = geom
         .as_deref()
         .map(crate::track_prints::tank_ground_pressure_kpa);
@@ -749,7 +792,7 @@ fn drive_track_views(
         // by the depth the ground's shader draws this tank's print at, under a full press, so the
         // track sits in its own rut instead of riding the undisturbed surface above it. The sim,
         // the oracle and the collider read the ground as it is.
-        let field = &Sunk {
+        let sunk = Sunk {
             ground,
             depth_m: |xz| match (&depths, pressure_kpa) {
                 (Some(depths), Some(kpa)) => depths.full_press_m(xz, kpa),
@@ -759,6 +802,19 @@ fn drive_track_views(
                 .into_iter()
                 .map(|side| gear.max_droop(side))
                 .fold(0.0, f32::max),
+        };
+        hulls.clear();
+        drawn.near(affine.translation.into(), gather_m, &mut hulls);
+        let pieces_changed = refresh && rig.pieces != *hulls;
+        if pieces_changed {
+            rig.pieces.clone_from(&hulls);
+            for cache in &mut rig.contacts {
+                cache.stale();
+            }
+        }
+        let field = &OnPieces {
+            ground: &sunk,
+            pieces: &hulls,
         };
 
         // Belt phase from the SIM (phase B): a simulated hull's `TrackDrive` written by the
@@ -796,9 +852,12 @@ fn drive_track_views(
                     lateral_spans: &wheel.tread.spans,
                     probe_reach: PROBE_REACH,
                 };
-                let target = wheel.target.sample(refresh, wheel_changed, alpha, || {
-                    wheel_lift_target(field, &affine, down, wheel.pivot, &wparams)
-                });
+                let target =
+                    wheel
+                        .target
+                        .sample(refresh, wheel_changed || pieces_changed, alpha, || {
+                            wheel_lift_target(field, &affine, down, wheel.pivot, &wparams)
+                        });
                 if snapped {
                     wheel.dy = target;
                     wheel.dvel = 0.0;
@@ -1117,6 +1176,7 @@ mod tests {
             contact_clock: Default::default(),
             fit_affine: None,
             contacts: Default::default(),
+            pieces: Default::default(),
             circles: Default::default(),
         }
     }
@@ -1238,6 +1298,182 @@ mod tests {
         let mut expected = belts;
         expected.sort();
         assert_eq!(tables, expected, "a moving belt writes both its tables");
+    }
+
+    /// Invariant: a still hull's wheels and belt follow the drawn pieces under them. A piece shown
+    /// under one side, its top past the wheels' bump travel, lifts the wheels to that travel and
+    /// the belt's sampled depth past them; raised further, the wheels stay at their travel and the
+    /// belt alone reads the new top; hidden, and again despawned, every lift and depth returns to
+    /// the bare ground's. The hull never moves, so the view relies on comparing its gather of the
+    /// pieces near the tank with the one it last sampled against, for the wheels and for the belt
+    /// apart. The first top lies the bump travel plus half a wheel's reach up, so a wheel with any
+    /// of its probed arc (within 50° of its bottom) over the piece reads past its travel; the
+    /// raise is half the travel. The reading is the refreshed targets, not the eased lift, so no
+    /// wheel ease taste can pass or fail it: the wheels' lift targets, and the belt's depths
+    /// sampled once every wheel stands on its target, as a snap stands it. The piece is a box
+    /// under the middle wheel of one side, across that wheel's treads and the belt's stations and
+    /// along the side's largest reach either way, so every probe of that wheel and some of the
+    /// belt's meet it. The box and the tick are fixture data; a rise is read as half the raise.
+    #[test]
+    fn a_still_hulls_wheels_and_belt_follow_the_drawn_pieces_under_them() {
+        /// Every wheel's lift target, then the belt's sampled depths (m), at the next fixed tick.
+        fn sample(
+            world: &mut World,
+            schedule: &mut Schedule,
+            tank: Entity,
+        ) -> (Vec<f32>, Vec<f32>) {
+            let tick = |world: &mut World, schedule: &mut Schedule| {
+                let dt = std::time::Duration::from_secs_f64(1.0 / 128.0);
+                world.resource_mut::<Time>().advance_by(dt);
+                world.resource_mut::<Time<Fixed>>().advance_by(dt);
+                schedule.run(world);
+            };
+            tick(world, schedule);
+            let mut rig = world.get_mut::<TrackRig>(tank).expect("the rig");
+            for wheel in rig.sides.iter_mut().flat_map(|side| side.wheels.iter_mut()) {
+                wheel.dy = wheel
+                    .target
+                    .current
+                    .expect("a sampled wheel holds its target");
+                wheel.dvel = 0.0;
+            }
+            // The wheels stay on their unchanged targets; the belt wraps them where they stand.
+            tick(world, schedule);
+            let rig = world.get::<TrackRig>(tank).expect("the rig");
+            (
+                rig.sides
+                    .iter()
+                    .flat_map(|side| side.wheels.iter())
+                    .map(|wheel| {
+                        wheel
+                            .target
+                            .current
+                            .expect("a sampled wheel holds its target")
+                    })
+                    .collect(),
+                rig.contacts
+                    .iter()
+                    .flat_map(|cache| cache.sampled_depths().iter().copied())
+                    .collect(),
+            )
+        }
+        /// The largest rise from `from` to `to` (m).
+        fn rise(from: &[f32], to: &[f32]) -> f32 {
+            from.iter()
+                .zip(to)
+                .map(|(from, to)| to - from)
+                .fold(f32::NEG_INFINITY, f32::max)
+        }
+        let (mut app, geom) = construction_app();
+        let travel = app
+            .world()
+            .resource::<TankBlueprint>()
+            .spec
+            .track
+            .suspension
+            .bump_stop;
+        let face_offset = app
+            .world()
+            .resource::<super::super::sim::TrackGear>()
+            .face_offset();
+        let world = app.world_mut();
+        let rig = fixture_rig(world, &geom);
+        let side = &rig.sides[1];
+        let wheel = &side.wheels[side.wheels.len() / 2];
+        let reach = side
+            .wheels
+            .iter()
+            .map(|wheel| wheel.radius + face_offset)
+            .fold(0.0, f32::max);
+        let first = travel + reach / 2.0;
+        let (left, right) = wheel
+            .tread
+            .spans
+            .iter()
+            .flat_map(|&(lo, hi)| [wheel.pivot.x + lo, wheel.pivot.x + hi])
+            .chain(side.lateral_stations.map(|station| side.plane_x + station))
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), x| {
+                (lo.min(x), hi.max(x))
+            });
+        // The box reaches down to the ground at its first top.
+        let half = Vec3::new(right - left, first, 2.0 * reach) / 2.0;
+        let (middle_x, under_z) = ((left + right) / 2.0, wheel.pivot.z);
+        let at = |top: f32| Transform::from_xyz(middle_x, top - half.y, under_z);
+        let tank = world
+            .spawn((
+                Transform::from_translation(Vec3::Y * geom.hull_rest_y),
+                TrackDrive::default(),
+                rig,
+            ))
+            .id();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(TrackField {
+            revision: Some(0),
+            field: Some(print_ground(vec![])),
+        });
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Time::<Fixed>::default());
+        let mut schedule = Schedule::default();
+        schedule.add_systems(drive_track_views);
+        let bare = sample(world, &mut schedule, tank);
+
+        let piece = drawn_box(world, (-half, half), at(first));
+        let returned = |now: &(Vec<f32>, Vec<f32>), case: &str| {
+            assert_eq!(
+                *now, bare,
+                "{case}: the wheel targets and belt depths hold against the bare ground's"
+            );
+        };
+        let shown = sample(world, &mut schedule, tank);
+        assert!(
+            rise(&bare.0, &shown.0) > travel / 2.0 && rise(&bare.1, &shown.1) > travel / 4.0,
+            "shown: the wheels rose {} m and the belt {} m",
+            rise(&bare.0, &shown.0),
+            rise(&bare.1, &shown.1)
+        );
+        world.entity_mut(piece).insert(at(first + travel / 2.0));
+        let raised = sample(world, &mut schedule, tank);
+        assert_eq!(
+            raised.0, shown.0,
+            "raised: the wheels moved past their travel"
+        );
+        assert!(
+            rise(&shown.1, &raised.1) > travel / 4.0,
+            "raised: the belt rose {} m under still wheels",
+            rise(&shown.1, &raised.1)
+        );
+        world.entity_mut(piece).insert(Visibility::Hidden);
+        returned(&sample(world, &mut schedule, tank), "hidden");
+        world.entity_mut(piece).insert(Visibility::Inherited);
+        let again = sample(world, &mut schedule, tank);
+        assert!(
+            rise(&shown.1, &again.1) > travel / 4.0,
+            "shown again: the belt rose {} m",
+            rise(&shown.1, &again.1)
+        );
+        world.despawn(piece);
+        returned(&sample(world, &mut schedule, tank), "despawned");
+    }
+
+    /// A shown piece of one box chunk spanning `min..max` (asset frame, m), drawn at `pose` about
+    /// the box's middle. Fixture geometry: the inline column construction
+    /// (`construction::tests::column_construction`) with its first chunk's hull made the box,
+    /// which is all a drawn piece reads of its construction.
+    fn drawn_box(world: &mut World, (min, max): (Vec3, Vec3), pose: Transform) -> Entity {
+        let pick = |bit: bool, axis: usize| if bit { max[axis] } else { min[axis] };
+        let corners = (0..8)
+            .map(|k| Vec3::new(pick(k & 1 > 0, 0), pick(k & 2 > 0, 1), pick(k & 4 > 0, 2)))
+            .collect();
+        let mut kind = (*crate::construction::tests::column_construction()).clone();
+        kind.layout.blocks[0] =
+            crate::construction::fracture::Block::hull(corners).expect("a box is solid");
+        let root = world
+            .spawn(crate::construction::breakage::Breakage::new(
+                std::sync::Arc::new(kind),
+                0,
+            ))
+            .id();
+        crate::construction::view::spawn_drawn_piece(world, root, 0, pose)
     }
 
     /// Invariant: no empty mesh reaches a render entity. On every frame of a bound rig's life,
@@ -1689,6 +1925,75 @@ mod tests {
             },
         );
         BlockField::new(blocks).with_height(Some(grid))
+    }
+
+    /// A drawn loose piece carries the belt as a solid of its shape would, at its presented pose:
+    /// the probes read the deeper of the ground and the drawn pieces, so rubble the sim carries on
+    /// the soft run never draws sunk into the belt. The reference is the box's own slab test in its
+    /// frame (terrain blocks round their edges, so they are no reference). Mutants: the pieces
+    /// dropped, a plane carried without the pose's turn or without the drawn origin. Fixture: one
+    /// box piece, turned and moved, drawn about a point off its centre.
+    #[test]
+    fn a_drawn_piece_carries_the_belt_as_a_solid_of_its_shape() {
+        let size = Vec3::new(1.2, 0.4, 0.8);
+        let origin = Vec3::new(5.0, 1.0, -2.0);
+        let centre = origin + Vec3::new(0.1, -0.05, 0.2);
+        let sign = |bit: bool| if bit { 1.0 } else { -1.0 };
+        let corners = (0..8)
+            .map(|k| {
+                centre + size / 2.0 * Vec3::new(sign(k & 1 > 0), sign(k & 2 > 0), sign(k & 4 > 0))
+            })
+            .collect();
+        let block = crate::construction::fracture::Block::hull(corners).expect("a box is solid");
+        let pose = Transform::from_xyz(0.3, 0.15, -0.2)
+            .with_rotation(Quat::from_rotation_y(0.4) * Quat::from_rotation_x(0.1));
+        let mut pieces = DrawnHulls::default();
+        pieces.push(&block, origin, &pose);
+        let ground = print_ground(Vec::new());
+        let placed = pose.translation + pose.rotation * (centre - origin);
+        let solid = |station: Vec3, out: Vec3, reach: f32| -> f32 {
+            let start = pose.rotation.inverse() * (station - out * reach - placed);
+            let along = pose.rotation.inverse() * out;
+            let (mut enter, mut exit) = (0.0_f32, 2.0 * reach);
+            for axis in 0..3 {
+                let (a, b) = (
+                    (-size[axis] / 2.0 - start[axis]) / along[axis],
+                    (size[axis] / 2.0 - start[axis]) / along[axis],
+                );
+                enter = enter.max(a.min(b));
+                exit = exit.min(a.max(b));
+            }
+            let ground = ground.depth_along(station, out, reach);
+            if enter <= exit {
+                ground.max(reach - enter)
+            } else {
+                ground
+            }
+        };
+        let oracle = OnPieces {
+            ground: &ground,
+            pieces: &pieces,
+        };
+        let mut met = 0;
+        for out in [Vec3::NEG_Y, Quat::from_rotation_z(0.2) * Vec3::NEG_Y] {
+            for reach in [0.5, 0.1] {
+                for (i, j, y) in (0..23 * 23 * 3).map(|k| (k % 23, k / 23 % 23, k / 529)) {
+                    let station = Vec3::new(
+                        -1.13 + i as f32 * 0.1,
+                        [0.05, 0.27, 0.6][y],
+                        -1.07 + j as f32 * 0.1,
+                    );
+                    let read = oracle.depth_along(station, out, reach);
+                    let expected = solid(station, out, reach);
+                    assert!(
+                        (read - expected).abs() < 1e-4,
+                        "at {station} along {out}: {read} against {expected}"
+                    );
+                    met += usize::from(read > ground.depth_along(station, out, reach));
+                }
+            }
+        }
+        assert!(met > 0, "no probe met the piece");
     }
 
     /// The view's terrain probes must sink by the ground beneath each belt, bounded by suspension

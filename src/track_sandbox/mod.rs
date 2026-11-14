@@ -237,6 +237,8 @@ pub fn plugin(app: &mut App) {
         .add_plugins(mesh_layers::plugin)
         .add_plugins(crate::offline_physics())
         .add_plugins(crate::contact_transfer::sim_plugin)
+        // The soft runs' law against loose pieces, as the game solves it.
+        .add_plugins(crate::track::soft_run::plugin)
         // Registers the `PhysicsGizmos` group for the collider-wireframe layer; starts disabled in
         // `configure_collider_gizmos`.
         .add_plugins(PhysicsDebugPlugin)

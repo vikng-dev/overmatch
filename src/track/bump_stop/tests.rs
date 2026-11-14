@@ -16,6 +16,7 @@ fn physics(gravity: Vec3) -> App {
         AssetPlugin::default(),
         PhysicsPlugins::default(),
         crate::contact_transfer::sim_plugin,
+        super::super::soft_run::plugin,
     ))
     .init_asset::<Mesh>()
     .insert_resource(Gravity(gravity))
@@ -120,19 +121,34 @@ fn side_plates_follow_the_true_shoe_faces_and_belt_bottom() {
     let layers = side_plate_layers();
     assert!(!layers.interacts_with(CollisionLayers::new([Layer::Terrain], LayerMask::ALL)));
     assert!(layers.interacts_with(crate::construction::element_layers()));
-    assert!(layers.interacts_with(crate::construction::breakage::piece_layers()));
+    assert!(
+        !layers.interacts_with(crate::construction::breakage::piece_layers()),
+        "loose pieces meet the soft run and the stop, never a side plate"
+    );
     assert!(layers.interacts_with(CollisionLayers::new([Layer::Vehicle], LayerMask::ALL)));
     assert!(layers.interacts_with(layers));
     assert!(!layers.interacts_with(CollisionLayers::new([Layer::Armor], LayerMask::NONE)));
 }
 
-/// A piece beside any shoe face starts OUTSIDE every collider and entirely below the stop. A
-/// pivot must shove it sideways through the ordinary solver, within the plate's maximum surface
-/// speed plus 0.1 m/s (ASSUMED discrete-contact allowance, well below the solver's 4 m/s default
-/// overlap separation speed). Driving relies on this to avoid throwing pieces at first contact.
-/// Terrain deliberately intersects the plates geometrically, but must never form a contact pair.
+/// The running gear's calibrated support law, as the shipped tank's construction publishes it.
+fn shipped_law() -> super::super::belt_segment::SegmentLaw {
+    let mut app = App::new();
+    app.add_plugins((crate::bake::plugin, super::super::sim::sim_plugin));
+    app.world_mut().run_schedule(Startup);
+    app.world_mut().run_schedule(PreUpdate);
+    *app.world()
+        .resource::<super::super::belt_segment::SegmentLaw>()
+}
+
+/// A piece beside any shoe face starts OUTSIDE every collider it meets and entirely below the
+/// stop. A pivot must shove it sideways through the run's soft contact, carrying the shipped law,
+/// within the run's maximum surface speed plus 0.1 m/s (ASSUMED discrete-contact allowance, well
+/// below the solver's 4 m/s default overlap separation speed), by more than its width. Driving
+/// relies on this to push pieces aside rather than throw them at first contact. Terrain
+/// deliberately intersects the run geometrically, but must never form a contact pair with it.
 #[test]
 fn a_pivoting_track_shoves_a_piece_without_throwing_it_or_touching_terrain() {
+    let law = shipped_law();
     let geom = super::super::rig_geom::tiger_rig();
     let params = super::super::rig_geom::tiger_spec()
         .track
@@ -156,8 +172,10 @@ fn a_pivoting_track_shoves_a_piece_without_throwing_it_or_touching_terrain() {
     let terrain_shape = Collider::cuboid(20.0, 1.0, 20.0); // FIXTURE ground extent.
     let terrain_at = Vec3::Y * (top - 0.5);
     for side in Side::ALL {
+        let (run, ..) = shapes.runs.get(side);
         for edge_index in 0..2 {
             let mut app = physics(Vec3::NEG_Y * super::super::derive::G);
+            app.insert_resource(law);
             let tank = body(&mut app, &geom, &shapes, RigidBody::Kinematic);
             let out = if edge_index == 0 {
                 -side.sign()
@@ -170,7 +188,7 @@ fn a_pivoting_track_shoves_a_piece_without_throwing_it_or_touching_terrain() {
             for collider in shapes
                 .colliders
                 .values()
-                .chain(shapes.side_plates.values().flatten())
+                .chain(shapes.runs.values().map(|(run, ..)| run))
             {
                 assert!(
                     !intersection_test(
@@ -187,7 +205,7 @@ fn a_pivoting_track_shoves_a_piece_without_throwing_it_or_touching_terrain() {
             }
             assert!(
                 intersection_test(
-                    &shapes.side_plates.get(side)[edge_index],
+                    run,
                     Vec3::Y * geom.hull_rest_y,
                     Quat::IDENTITY,
                     &terrain_shape,
@@ -224,11 +242,8 @@ fn a_pivoting_track_shoves_a_piece_without_throwing_it_or_touching_terrain() {
             app.world_mut()
                 .entity_mut(tank)
                 .insert(AngularVelocity(omega));
-            let surface_speed = shapes
-                .side_plates
-                .values()
-                .flatten()
-                .flat_map(points)
+            let surface_speed = points(run)
+                .iter()
                 .map(|p| omega.cross(*p).length())
                 .fold(0.0f32, f32::max);
             let mut fastest = 0.0f32;
@@ -241,28 +256,25 @@ fn a_pivoting_track_shoves_a_piece_without_throwing_it_or_touching_terrain() {
                 fastest = fastest.max(speed);
                 assert!(
                     speed <= surface_speed + 0.1,
-                    "{side:?} edge {edge_index}: piece {speed} m/s, plate {surface_speed} m/s"
+                    "{side:?} edge {edge_index}: piece {speed} m/s, run {surface_speed} m/s"
                 );
                 for pair in world.resource::<ContactGraph>().iter_active_touching() {
-                    let is_plate = |e| world.get::<SidePlate>(e).is_some();
+                    let is_run = |e| world.get::<super::super::soft_run::SoftRun>(e).is_some();
                     assert!(
-                        !((is_plate(pair.collider1) && pair.collider2 == terrain)
-                            || (is_plate(pair.collider2) && pair.collider1 == terrain)),
-                        "side plates never carry terrain support"
+                        !((is_run(pair.collider1) && pair.collider2 == terrain)
+                            || (is_run(pair.collider2) && pair.collider1 == terrain)),
+                        "a run never carries terrain support"
                     );
-                    touched |= (is_plate(pair.collider1) && pair.collider2 == piece)
-                        || (is_plate(pair.collider2) && pair.collider1 == piece);
+                    touched |= (is_run(pair.collider1) && pair.collider2 == piece)
+                        || (is_run(pair.collider2) && pair.collider1 == piece);
                 }
             }
             let displacement = (app.world().get::<Position>(piece).unwrap().x - initial.x) * out;
             println!(
                 "MEASURED {side:?} edge {edge_index}: shove {displacement:.4} m, \
-                fastest {fastest:.4} m/s; DERIVED plate surface bound {surface_speed:.4} m/s"
+                fastest {fastest:.4} m/s; DERIVED run surface bound {surface_speed:.4} m/s"
             );
-            assert!(
-                touched,
-                "the side plate must be the collider that meets the piece"
-            );
+            assert!(touched, "the run must be the collider that meets the piece");
             assert!(
                 displacement > size,
                 "the piece must move sideways by more than its width"
