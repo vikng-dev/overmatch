@@ -13,10 +13,11 @@ therefore cannot be a spring. Under a steady load its overlap decays to zero, wh
 softness, so a vehicle cannot rest on its contacts at a load-proportional deflection.
 
 The patch adds `ContactManifold::compliance: Option<ContactCompliance>`, an absolute normal law
-per point (`stiffness` N/m, `damping` N·s/m), reset by the narrow phase each step and set by a
-contact-modification hook. Constraint preparation turns it into soft-constraint coefficients from
-the point's own effective mass and the substep length, and the normal solve keeps those
-coefficients in the relaxing pass and does not cap them by `max_overlap_solve_speed`.
+per point (`stiffness` N/m, `damping` N·s/m), reset by the narrow phase each step and set after it,
+before the solver (the game's soft run sets it from a system there). Constraint preparation turns
+it into soft-constraint coefficients from the point's own effective mass and the substep length,
+and the normal solve keeps those coefficients in the relaxing pass and does not cap them by
+`max_overlap_solve_speed`.
 
 DERIVED: with `a = h(c + hk)` the coefficients are bias `k/(c + hk)`, mass scale `a/(m + a)` and
 impulse scale `m/(m + a)`, the exact rewrite of `SoftnessParameters::compute_coefficients` at

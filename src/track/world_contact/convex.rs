@@ -114,59 +114,6 @@ pub(crate) struct ClippedFace {
     planes: Vec<Vec3>,
 }
 
-impl ClippedFace {
-    /// A rigid shoe rests on the cross-width maximum at each along coordinate. On a convex
-    /// face that envelope follows one polygon chain; each edge supplies one linear interval.
-    /// Its shadow spans the shoe width only where that interval reaches the probe envelope.
-    pub(crate) fn across_shoe(self, slab: &Slab) -> Vec<Self> {
-        self.polygon
-            .iter()
-            .zip(self.polygon.iter().cycle().skip(1))
-            .take(self.polygon.len())
-            .filter_map(|(a, b)| {
-                let along = b.x - a.x;
-                // CCW polygons traverse the upper chain toward decreasing along coordinates.
-                // Vertical edges have no length; a flat depth may use either chain.
-                if along == 0.0
-                    || if self.depth.y < 0.0 {
-                        along < 0.0
-                    } else {
-                        along > 0.0
-                    }
-                {
-                    return None;
-                }
-                let lateral_slope = (b.y - a.y) / along;
-                let depth = Vec3::new(
-                    self.depth.x + self.depth.y * lateral_slope,
-                    0.0,
-                    self.depth.z + self.depth.y * (a.y - lateral_slope * a.x),
-                );
-                let (start, end) = (a.x.min(b.x), a.x.max(b.x));
-                let envelope = [Vec3::Z * slab.reach - depth, depth + Vec3::Z * slab.travel];
-                let polygon = envelope.iter().fold(
-                    vec![
-                        Vec3::new(start, slab.lateral.0, 1.0),
-                        Vec3::new(end, slab.lateral.0, 1.0),
-                        Vec3::new(end, slab.lateral.1, 1.0),
-                        Vec3::new(start, slab.lateral.1, 1.0),
-                    ],
-                    |polygon, plane| clip(&polygon, *plane),
-                );
-                (signed_area(&polygon) != 0.0).then_some(Self {
-                    polygon,
-                    depth,
-                    normal: self.normal,
-                    planes: [Vec3::new(1.0, 0.0, -start), Vec3::new(-1.0, 0.0, end)]
-                        .into_iter()
-                        .chain(envelope)
-                        .collect(),
-                })
-            })
-            .collect()
-    }
-}
-
 pub(crate) fn clip_faces(triangles: &[[Vec3; 3]], slab: &Slab) -> Vec<ClippedFace> {
     let mut faces = Vec::new();
     for &[a, b, c] in triangles {
@@ -576,59 +523,6 @@ mod tests {
                 assert!(
                     (moment - Vec3::new(209.0 / 192.0, 209.0 / 192.0, 49.0 / 24.0)).length() < 1e-6
                 );
-            }
-        }
-    }
-
-    /// Loose-piece shadows must replace each other inside a half. Sampling must not carry
-    /// an owner chosen on their tie boundary across the other shadow's visible region. Shadows
-    /// of one loose piece overlap too: a mutant skipping crossings within a collider loses theirs.
-    #[test]
-    fn crossing_shoe_shadows_close_lateral_bands_in_both_orders() {
-        // Fixture: dyadic and oblique f32 crossings, with exact and non-dyadic shoe edges.
-        for (intercept, pieces) in [2.0, 1.74, 1.26]
-            .into_iter()
-            .flat_map(|intercept| [(intercept, (0, 1)), (intercept, (0, 0))])
-        {
-            for strip in [(0.0, 1.0), (-0.34611118, 0.3786031)] {
-                let (mut slab, _, _) = partition_fixture(false);
-                slab.len = 2.0;
-                slab.lateral = strip;
-                slab.reach = 4.0;
-                let faces: Vec<_> = [
-                    unit_face(Vec3::new(1.0, 0.0, 1.0)),
-                    unit_face(Vec3::new(-1.0, 0.0, intercept)),
-                ]
-                .into_iter()
-                .flat_map(|f| f.across_shoe(&slab))
-                .collect();
-                let crossing = (intercept - 1.0) / 2.0;
-                for refs in [
-                    vec![(pieces.0, &faces[0]), (pieces.1, &faces[1])],
-                    vec![(pieces.1, &faces[1]), (pieces.0, &faces[0])],
-                ] {
-                    let cells = partition(0.0, 1.0, strip, Vec3::ZERO, Vec3::ZERO, &refs);
-                    let (area, pressure, moment) = moments(&cells, strip.1 - strip.0);
-                    // DERIVED: integrate 1+x, then add 2(c-x) on [0,c].
-                    let expected = 1.5 + crossing * crossing;
-                    let mx = 5.0 / 6.0 + crossing * crossing * crossing / 3.0;
-                    // Resolution: unit-scale f32 integration roundoff.
-                    assert!((area - 1.0).abs() < 1e-6);
-                    assert!((pressure - expected).abs() < 1e-6);
-                    assert!(
-                        (moment - Vec3::new(mx, expected * (strip.0 + strip.1) / 2.0, expected))
-                            .length()
-                            < 1e-6
-                    );
-                    for (x, owner) in [(crossing / 2.0, 1), ((1.0 + crossing) / 2.0, 0)] {
-                        let p = Vec3::new(x, (strip.0 + strip.1) / 2.0, 1.0);
-                        let cell = cells
-                            .iter()
-                            .find(|c| contains_point(&c.polygon, p, 0.0))
-                            .unwrap();
-                        assert!(std::ptr::eq(refs[cell.face.unwrap()].1, &faces[owner]));
-                    }
-                }
             }
         }
     }
@@ -1289,39 +1183,6 @@ mod tests {
         }
     }
 
-    /// The ground partition must keep ground exposed where a loose piece is lower. Fixture:
-    /// projected triangle (0,0), (1,0), (1,1), depth = lateral. DERIVED: its cross-width
-    /// maximum is along, so ground at depth 1/2 is exposed over half the shoe's length.
-    #[test]
-    fn a_tilted_loose_faces_shadow_keeps_lower_ground_exposed() {
-        let slab = Slab {
-            origin: Vec3::ZERO,
-            axis: Vec3::X,
-            lat: Vec3::Y,
-            out: -Vec3::Z,
-            len: 1.0,
-            lateral: (0.0, 1.0),
-            face: 0.0,
-            reach: 2.0,
-            travel: 0.0,
-        };
-        let face = ClippedFace {
-            polygon: vec![Vec3::Z, Vec3::new(1.0, 0.0, 1.0), Vec3::ONE],
-            depth: Vec3::Y,
-            normal: Vec3::Z,
-            planes: Vec::new(),
-        };
-        let shadow: Vec<_> = face.across_shoe(&slab).into_iter().collect();
-        let above_ground: f32 = shadow
-            .iter()
-            .map(|face| signed_area(&clip(&face.polygon, face.depth - Vec3::Z * 0.5)))
-            .sum();
-        assert!(
-            (above_ground - 0.5).abs() < 1e-6,
-            "the piece suppressed ground over {above_ground} of the unit shoe"
-        );
-    }
-
     /// The contact law relies on pressure and its lever arm belonging only to covered area.
     /// Fixture: unit right triangle, depth = along coordinate. DERIVED barycentric integrals:
     /// area 1/2, pressure 1/6, pressure centroid (1/2, 1/4), not the bounding box's centre.
@@ -1492,48 +1353,6 @@ mod tests {
         }
     }
 
-    /// Each half's patches: half, owner, pressure integral, contact length, first moment of
-    /// pressure and maximum depth.
-    fn column_patches(
-        column: &Column,
-        mut scratch: envelope::Scratch,
-    ) -> Vec<(usize, Option<usize>, f32, f32, Vec3, f32)> {
-        let refs: Vec<_> = column
-            .faces
-            .iter()
-            .map(|(piece, face)| (*piece, face))
-            .collect();
-        let len = column.slab.len;
-        let width = column.slab.lateral.1 - column.slab.lateral.0;
-        (0..2)
-            .flat_map(|half| {
-                let mut cells = Vec::new();
-                envelope::partition(
-                    (half as f32 * len / 2.0, (half + 1) as f32 * len / 2.0),
-                    column.strip,
-                    half_plane(len, column.pen, half),
-                    half_plane(len, column.travel, half),
-                    &refs,
-                    &mut scratch,
-                    &mut cells,
-                );
-                owners(&cells, refs.len(), width)
-                    .into_iter()
-                    .map(move |(owner, i, _, _)| {
-                        (
-                            half,
-                            owner,
-                            i.area,
-                            i.length,
-                            i.centroid * i.area,
-                            i.max_depth,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    }
-
     fn fixtures() -> Vec<(&'static str, Column)> {
         let solid = |many| {
             let (slab, collider, rotation) = partition_fixture(many);
@@ -1558,46 +1377,47 @@ mod tests {
         ]
     }
 
-    /// Faces across a shared edge are never crossed (`envelope`). Suspension must read the same
-    /// owners and moments as when every pair is crossed. Fixtures: the captured tank-on-tank
-    /// column, the 512-chunk pile and its shoe shadows, a fanned non-planar hull, the rotated
-    /// box and the ring hull. A mutant that also skips a pair sharing no edge, or matches a line
-    /// by its points rather than its orientation, changes an owner or a moment here.
+    /// The suspension reads the visible upper envelope: on each half of the captured tank-on-tank
+    /// column, the 512-chunk pile, a fanned non-planar hull, the rotated box and the ring hull,
+    /// every sample lies in a cell carrying the deepest of the field and the faces covering it.
+    /// Fails if faces sharing no edge go uncrossed (an owner then holds past the line where
+    /// another rises above it) or a band is left uncovered.
     #[test]
-    fn skipping_shared_edge_crossings_keeps_every_owner_and_moment() {
-        let mut fixtures = fixtures();
-        let pile = &fixtures[1].1;
-        let shadows = Column {
-            slab: Slab { ..pile.slab },
-            faces: pile
-                .faces
-                .iter()
-                .flat_map(|(piece, face)| {
-                    face.clone()
-                        .across_shoe(&pile.slab)
-                        .into_iter()
-                        .map(|face| (*piece, face))
-                })
-                .collect(),
-            ..*pile
-        };
-        fixtures.push(("pile shadows", shadows));
-        for (name, column) in fixtures {
-            let [skipped, crossed] = [
-                envelope::Scratch::default(),
-                envelope::Scratch::crossing_shared_edges(),
-            ]
-            .map(|scratch| column_patches(&column, scratch));
-            assert!(!crossed.is_empty(), "{name}: the fixture has support");
-            assert_eq!(skipped.len(), crossed.len(), "{name}: patch count");
-            for (a, b) in skipped.iter().zip(&crossed) {
-                assert_eq!((a.0, a.1), (b.0, b.1), "{name}: owner");
-                // Resolution: f32 accumulation over a column's bands, far below any patch.
-                let epsilon = 1e-6;
-                assert!((a.2 - b.2).abs() < epsilon, "{name}: pressure {a:?} {b:?}");
-                assert!((a.3 - b.3).abs() < epsilon, "{name}: length {a:?} {b:?}");
-                assert!((a.4 - b.4).length() < epsilon, "{name}: moment {a:?} {b:?}");
-                assert!((a.5 - b.5).abs() < epsilon, "{name}: depth {a:?} {b:?}");
+    fn every_fixture_partitions_into_its_visible_envelope() {
+        for (name, column) in fixtures() {
+            let refs: Vec<_> = (column.faces.iter())
+                .map(|(piece, face)| (*piece, face))
+                .collect();
+            let (len, strip) = (column.slab.len, column.strip);
+            let width = strip.1 - strip.0;
+            // Resolution: point containment allows f32 shared-edge roundoff in footprint metres.
+            let distance_epsilon = 1e-6 * len.max(width);
+            for half in 0..2 {
+                let base = half_plane(len, column.pen, half);
+                let free = half_plane(len, column.travel, half);
+                let start = half as f32 * len / 2.0;
+                let cells = partition(start, start + len / 2.0, strip, base, free, &refs);
+                // Fixture: offset grid samples avoid shared surface edges and half boundaries.
+                for (x, y) in (0..7).flat_map(|x| (0..11).map(move |y| (x, y))) {
+                    let p = Vec3::new(
+                        start + (x as f32 + 0.37) * len / 14.0,
+                        strip.0 + (y as f32 + 0.29) * width / 11.0,
+                        1.0,
+                    );
+                    let expected = (refs.iter())
+                        .filter(|(_, f)| f.planes.iter().all(|plane| plane.dot(p) >= 0.0))
+                        .map(|(_, f)| (f.depth + free).dot(p))
+                        .fold(base.dot(p), f32::max);
+                    let actual = (cells.iter())
+                        .filter(|c| contains_point(&c.polygon, p, distance_epsilon))
+                        .map(|c| c.depth.dot(p))
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    // Resolution: depth-plane evaluation roundoff at the fixtures' scale.
+                    assert!(
+                        (actual - expected).abs() < 2e-4,
+                        "{name}: half {half} at {p}: {actual} against {expected}"
+                    );
+                }
             }
         }
     }

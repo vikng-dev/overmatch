@@ -3726,9 +3726,6 @@ fn every_collider_carries_its_materials_friction_under_the_one_rule() {
                 .get::<crate::track::bump_stop::SidePlate>(collider)
                 .is_some()
             || world
-                .get::<crate::track::belt_segment::BeltSegment>(collider)
-                .is_some()
-            || world
                 .get::<crate::track::soft_run::SoftRun>(collider)
                 .is_some()
         {

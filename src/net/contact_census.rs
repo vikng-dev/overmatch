@@ -30,7 +30,7 @@ use crate::construction::{
 };
 use crate::debris::{DebrisPiece, freeze::Frozen};
 use crate::tank::Tank;
-use crate::track::belt_segment::BeltSegment;
+use crate::track::soft_run::SoftRun;
 
 /// Resolution: a pair whose normal impulse over the step is at most this does no work. DERIVED:
 /// the weight of 6.5 g over a 64 Hz tick, three orders under a piece at the size floor.
@@ -89,8 +89,9 @@ enum Side {
     Standing,
     /// Terrain or any other static body, a standalone collider included.
     Ground,
-    /// A tank collider that is no belt segment (hull and side plates).
+    /// A tank collider that is no soft run: a hull proxy, bump stop or side plate.
     Hull,
+    /// A belt's soft run.
     Belt,
     Other,
 }
@@ -573,7 +574,7 @@ pub(super) struct ContactCensus<'w, 's> {
     standing: Query<'w, 's, (), With<Body>>,
     tanks: Query<'w, 's, &'static BodyIslandNode, With<Tank>>,
     tank_marks: Query<'w, 's, (), With<Tank>>,
-    belts: Query<'w, 's, (), With<BeltSegment>>,
+    belts: Query<'w, 's, (), With<SoftRun>>,
     pieces: Query<'w, 's, PieceFields, With<DebrisPiece>>,
     piece_marks: Query<'w, 's, (), With<DebrisPiece>>,
     frozen: Query<'w, 's, (), With<Frozen>>,
@@ -1018,7 +1019,7 @@ mod tests {
         app.world_mut()
             .spawn((RigidBody::Static, Body, cube_at(20.0, 5.5)));
         piece(&mut app, 20.0, 6.5);
-        // Fixture: pieces on a tank's hull and on its belt segment.
+        // Fixture: pieces on a tank's hull and on its soft run.
         let tank = app
             .world_mut()
             .spawn((
@@ -1036,7 +1037,7 @@ mod tests {
             ChildOf(tank),
             Transform::from_xyz(3.0, 0.0, 0.0),
             Collider::cuboid(CUBE, CUBE, CUBE),
-            BeltSegment::FIXTURE,
+            SoftRun::fixture(),
         ));
         piece(&mut app, 30.0, 6.5);
         piece(&mut app, 33.0, 6.5);

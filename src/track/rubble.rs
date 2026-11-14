@@ -45,8 +45,8 @@
 //!   them sits under the belt unseen. A custom reaction law on pieces outside the solver, a
 //!   clamped impulse sized against each piece's effective mass, gave the tank ground support while
 //!   a resting piece took no normal push: nothing pressed the piece into what held it, so the belt
-//!   swept a heap apart, and the law was the larger code path. The belt's solver segments give the
-//!   piece the equal and opposite reaction instead.
+//!   swept a heap apart, and the law was the larger code path. The soft run's solver contacts give
+//!   the piece the equal and opposite reaction instead.
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -183,8 +183,6 @@ struct Surface {
     structure: Option<Entity>,
     /// The body's motion at the tick's start, dynamic or kinematic; static surfaces have none.
     motion: Option<SurfaceMotion>,
-    /// A loose piece: the belt segments carry it, the spring channel only partitions over it.
-    loose: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -384,7 +382,6 @@ impl RubbleBodies<'_> {
                             friction: rubble.friction(collider),
                             structure: rubble.structures.contains(body).then_some(body),
                             motion,
-                            loose: rubble.loose(collider),
                         }
                 })
                 .collect::<Vec<_>>()
@@ -456,12 +453,6 @@ impl RubbleBodies<'_> {
     /// Only a collider from this snapshot may be read.
     pub(crate) fn friction(&self, collider: Entity) -> Friction {
         self.surface(collider).friction
-    }
-
-    /// Whether `collider` is a loose piece, carried by the soft run's solver contacts rather
-    /// than the spring channel. Only a collider from this snapshot may be read.
-    pub(crate) fn loose(&self, collider: Entity) -> bool {
-        self.surface(collider).loose
     }
 
     /// Whether `collider`'s body is static: it neither moves nor yields. Only a collider from this
@@ -607,13 +598,7 @@ impl RubbleBodies<'_> {
             self.count(Work::BeltBoundaryBuilds, 1);
             Surface::triangles(&s.shape, s.position, s.rotation)
         });
-        let mut faces = super::world_contact::convex::clip_faces(triangles, slab);
-        if s.loose {
-            faces = faces
-                .into_iter()
-                .flat_map(|face| face.across_shoe(slab))
-                .collect();
-        }
+        let faces = super::world_contact::convex::clip_faces(triangles, slab);
         self.count(Work::BeltOverlaps, usize::from(!faces.is_empty()));
         (!faces.is_empty()).then_some(SlabOverlap { piece, faces })
     }
@@ -977,12 +962,13 @@ mod tests {
         }).unwrap();
     }
 
-    /// THE LAYER DECIDES THE CHANNEL, WHATEVER THE BODY WEIGHS (module doc). A debris-layer body
-    /// is loose at 2.9 t as at 16 kg, so a heavy chunk cannot fall between the channels; a dynamic
-    /// body off that layer takes the whole opposite of the belt's force, grip and rolling
-    /// included. A mutant that gates `loose` on mass, or clamps or drops a part of the reaction,
-    /// fails here. FIXTURE DATA: boxes at brick density, one contact pressing 100 N with 8 N grip
-    /// and 6 N rolling.
+    /// THE LAYER DECIDES THE CHANNEL, WHATEVER THE BODY WEIGHS (module doc). The sampled support
+    /// never reads a debris-layer body, at 2.9 t as at 16 kg, so a heavy chunk cannot fall between
+    /// the channels or be carried by both; a dynamic body off that layer is a support and takes the
+    /// whole opposite of the belt's force, grip and rolling included. A mutant that gates the
+    /// channel on mass, lets [`RubbleQuery::near`] return a piece the soft run meets, or clamps or
+    /// drops a part of the reaction, fails here. FIXTURE DATA: boxes at brick density, one contact
+    /// pressing 100 N with 8 N grip and 6 N rolling.
     #[test]
     fn the_layer_decides_the_channel_and_a_hull_takes_the_whole_reaction() {
         let mut app = physics();
@@ -998,10 +984,10 @@ mod tests {
         app.update();
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                let near = [light, heavy, hull];
+                // Fixture: a box enclosing all three bodies.
+                let near = rubble.near(Vec3::new(4.0, 0.5, 0.0), 6.0);
+                assert_eq!(near, [hull], "the sampled support reads a loose piece");
                 let gathered = RubbleBodies::gather(&rubble, &near, &bodies);
-                assert!(gathered.loose(light) && gathered.loose(heavy));
-                assert!(!gathered.loose(hull));
                 let contact = BeltContact {
                     traction: Vec3::X * 8.0,
                     rolling_force: Vec3::Z * 6.0,

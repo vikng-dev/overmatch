@@ -530,11 +530,7 @@ impl TrackGear {
 }
 
 pub fn sim_plugin(app: &mut App) {
-    app.add_plugins((
-        super::world_contact::plugin,
-        super::belt_segment::plugin,
-        super::soft_run::plugin,
-    ));
+    app.add_plugins((super::world_contact::plugin, super::soft_run::plugin));
     app.init_resource::<DriveSupports>()
         .init_resource::<SampledSupports>()
         .add_observer(forget_sampled_supports);

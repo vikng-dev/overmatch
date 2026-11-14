@@ -406,7 +406,7 @@ pub struct ContactManifold {
     pub tangent_velocity: Vector,
     /// OVERMATCH PATCH: an absolute spring-damper law for every point of this manifold along its
     /// normal, in place of the global contact softness. `None` keeps Avian's rigid contact.
-    /// Reset by the narrow phase each step; a contact-modification hook sets it.
+    /// Reset by the narrow phase each step; set after it and before the solver.
     pub compliance: Option<ContactCompliance>,
 }
 

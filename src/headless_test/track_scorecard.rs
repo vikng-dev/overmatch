@@ -41,7 +41,6 @@ use crate::Layer;
 use crate::contact_transfer::ContactTransfer;
 use crate::ground_field::{ContactGround, GroundField};
 use crate::terrain_grid::{HeightGrid, TerrainExtent};
-use crate::track::belt_segment::BeltSegment;
 use crate::track::bump_stop::{BumpStop, SidePlate};
 use crate::track::rig_geom::RigGeom;
 use crate::track::side::Side;
@@ -534,13 +533,16 @@ impl Bed {
             })
     }
 
-    /// The role of one of the tank's colliders, from what spawned it: a segment, stop or side
+    /// The role of one of the tank's colliders, from what spawned it: a soft run, stop or side
     /// plate by its marker; a remaining collider on the vehicle layer is a hull proxy, spawned
     /// from the tank's authored proxy node, which names it.
     fn role(&self, collider: Entity) -> String {
         let world = self.app.world();
-        if world.get::<BeltSegment>(collider).is_some() {
-            return "belt segment".to_owned();
+        if world
+            .get::<crate::track::soft_run::SoftRun>(collider)
+            .is_some()
+        {
+            return "soft run".to_owned();
         }
         if world.get::<BumpStop>(collider).is_some() {
             return "bump stop".to_owned();

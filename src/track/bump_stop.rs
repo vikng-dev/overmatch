@@ -14,7 +14,6 @@
 use avian3d::prelude::{Collider, CollisionLayers, Friction, LayerMask, SimpleCollider};
 use bevy::prelude::*;
 
-use super::belt_segment::BeltSegment;
 use super::derive::SuspensionParams;
 use super::rig_geom::RigGeom;
 use super::route::build_route;
@@ -39,8 +38,6 @@ pub(crate) struct TrackColliders {
     side_plates: PerSide<[Collider; 2]>,
     friction: Friction,
     faces: PerSide<[BeltFace; 2]>,
-    /// The sprung belt segments, built and no longer spawned: the soft runs meet loose pieces.
-    segments: PerSide<Vec<(Collider, BeltSegment)>>,
     /// The run loose pieces meet per side ([`super::soft_run`]), with its moving face and law.
     runs: PerSide<(Collider, BeltFace, super::soft_run::SoftRun)>,
 }
@@ -69,8 +66,6 @@ impl TrackColliders {
                 BeltFace::new(side, build_route(&rest, 0.0).pts, true),
             ]
         }));
-        let segments =
-            PerSide(Side::ALL.map(|side| super::belt_segment::segments(geom, side, params)));
         let runs = PerSide(Side::ALL.map(|side| {
             let outline = super::soft_run::run_outline(geom, side);
             let cols = geom.grip_columns(side);
@@ -86,7 +81,6 @@ impl TrackColliders {
             side_plates,
             friction,
             faces,
-            segments,
             runs,
         }
     }
@@ -97,11 +91,6 @@ impl TrackColliders {
         self.colliders
             .values()
             .chain(self.side_plates.values().flat_map(|pair| pair.iter()))
-            .chain(
-                self.segments
-                    .values()
-                    .flat_map(|side| side.iter().map(|(collider, _)| collider)),
-            )
             .chain(self.runs.values().map(|(collider, ..)| collider))
             .map(|collider| {
                 let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);

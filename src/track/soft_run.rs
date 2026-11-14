@@ -111,6 +111,13 @@ impl SoftRun {
     pub(crate) fn link(&self) -> f32 {
         self.link
     }
+
+    /// Fixture: a run round a 3 m square, 96 links of 0.125 m (12 m round).
+    #[cfg(test)]
+    pub(crate) fn fixture() -> Self {
+        let corners = [(0.0, 0.0), (3.0, 0.0), (3.0, 3.0), (0.0, 3.0)];
+        Self::new(&corners.map(|(z, y)| Vec2::new(z, y)), 0.125)
+    }
 }
 
 /// Resolution: the least turn a run outline's vertex keeps, as the sine of its angle (about 2°).
@@ -392,7 +399,6 @@ pub(crate) fn plugin(app: &mut App) {
         (read_runs, write_runs)
             .chain()
             .after(PhysicsStepSystems::NarrowPhase)
-            .after(super::belt_segment::share_segment_laws)
             .before(PhysicsStepSystems::Solver),
     );
 }
@@ -404,17 +410,7 @@ mod tests {
 
     use super::*;
 
-    /// Fixture: a run of 96 links of 0.125 m (12 m round), and a law of 400 kN/m and
-    /// 40 kN·s/m per metre.
-    fn run() -> SoftRun {
-        SoftRun {
-            outline: Vec::new(),
-            length: 12.0,
-            links: 96,
-            link: 0.125,
-        }
-    }
-
+    /// Fixture: a law of 400 kN/m and 40 kN·s/m per metre.
     const LAW: SegmentLaw = SegmentLaw {
         stiffness_per_m: 4.0e5,
         damping_per_m: 4.0e4,
@@ -422,12 +418,12 @@ mod tests {
 
     /// The arc `links` links round the run from its seam (m).
     fn at(links: f32) -> f32 {
-        links * run().link
+        links * SoftRun::fixture().link
     }
 
     /// Each manifold's law, for manifolds given by their points `(arc, overlap)`.
     fn laws(contacts: &[&[(f32, f32)]]) -> Vec<Option<ContactCompliance>> {
-        let run = run();
+        let run = SoftRun::fixture();
         let mut read = RunContacts::default();
         for (i, points) in contacts.iter().enumerate() {
             read.push(&run, (ContactId(i as u32), 0), points.iter().copied());
@@ -483,8 +479,8 @@ mod tests {
     fn a_piece_split_in_two_carries_what_the_whole_carries() {
         let d = 0.04;
         let flat = (
-            LAW.stiffness_per_m * run().link * 25.0 * d,
-            LAW.damping_per_m * run().link * 25.0,
+            LAW.stiffness_per_m * SoftRun::fixture().link * 25.0 * d,
+            LAW.damping_per_m * SoftRun::fixture().link * 25.0,
         );
         let level = |link: f32| (at(link), d);
         let tilt = |link: f32| (at(link), 0.01 + 0.002 * (link - 16.0));
@@ -558,7 +554,7 @@ mod tests {
     /// sums its links in their numbering, which starts at the seam.
     #[test]
     fn a_contact_across_the_seam_equals_the_same_contact_away_from_it() {
-        let links = run().links as f32;
+        let links = SoftRun::fixture().links as f32;
         let layout = |first: f32| -> Vec<Vec<(f32, f32)>> {
             let point = |offset: f32, depth: f32| (at((first + offset) % links), depth);
             vec![
@@ -586,10 +582,10 @@ mod tests {
     #[test]
     fn a_contact_half_the_run_round_spans_neither_half() {
         let d = 0.04;
-        let links = run().links as f32;
+        let links = SoftRun::fixture().links as f32;
         let three = (
-            LAW.stiffness_per_m * run().link * 3.0 * d,
-            LAW.damping_per_m * run().link * 3.0,
+            LAW.stiffness_per_m * SoftRun::fixture().link * 3.0 * d,
+            LAW.damping_per_m * SoftRun::fixture().link * 3.0,
         );
         let read = |shift: f32| {
             let point = |link: f32| (at((link + shift) % links), d);
@@ -602,7 +598,7 @@ mod tests {
             close(carried, three),
             "carried {carried:?} against {three:?}"
         );
-        for shift in 1..run().links {
+        for shift in 1..SoftRun::fixture().links {
             assert_eq!(
                 read(shift as f32).0,
                 unshifted,

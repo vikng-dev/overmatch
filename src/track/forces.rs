@@ -1049,9 +1049,6 @@ fn collect_column_contacts<O: TerrainOracle>(
                     (p, normal),
                     (load, load_elastic),
                 );
-                if collider.is_some_and(|piece| pieces.loose(piece)) {
-                    continue; // A loose piece shadows the ground; `belt_segment` carries it.
-                }
                 if load <= 0.0 {
                     if elements_mode && load_elastic > 0.0 {
                         held.push((material(i) * samples.len() + ci, load_elastic));
