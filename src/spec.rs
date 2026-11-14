@@ -1015,7 +1015,7 @@ impl TransmissionSpec {
             engine_inertia_kgm2: engine.inertia_kgm2,
             clutch_capacity_nm: engine.clutch_capacity_nm,
             belt_inertia,
-            shift_secs: gearbox.shift_secs,
+            shift_secs: gearbox.shift_secs.0,
 
             sprocket_radius_m,
             half_tread_m,
@@ -1082,9 +1082,8 @@ pub struct GearboxSpec {
     pub(crate) launch_gears: Sourced<u8>,
     /// The most gears one selector event moves, up or down.
     pub(crate) max_step: Sourced<u8>,
-    /// Gear-shift torque-interruption time (s) — how long the drive is uncoupled through a
-    /// shift. Vehicle data, required: a preselector and a crash box differ.
-    pub shift_secs: f32,
+    /// How long a shift uncouples the drive (s); required, as a preselector and a crash box differ.
+    pub(crate) shift_secs: Sourced<f32>,
 }
 
 /// The steering member: per-gear fixed radii (the L600's two detents), its force capacity, and the
@@ -2327,7 +2326,7 @@ TankSpec(
 
                     launch_gears: (4, Fixture("fixture launch limit")),
                     max_step: (3, Fixture("fixture shift reach")),
-                    shift_secs: 0.3,
+                    shift_secs: (0.3, Fixture("fixture shift interruption")),
 
                 ),
                 steering: (
@@ -3492,7 +3491,11 @@ TankSpec(
     fn a_sheet_omitting_a_required_field_does_not_parse() {
         for (field, authored, kept) in [
             ("drag_fraction", "drag_fraction: 0.25,", ""),
-            ("shift_secs", "shift_secs: 0.3,", ""),
+            (
+                "shift_secs",
+                "shift_secs: (0.3, Fixture(\"fixture shift interruption\")),",
+                "",
+            ),
             (
                 "launch_gears",
                 "launch_gears: (4, Fixture(\"fixture launch limit\")),",

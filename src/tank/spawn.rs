@@ -31,7 +31,7 @@ use crate::substances::Matter;
 use crate::track::bump_stop::{
     TrackColliders, spawn_replica_track_colliders, spawn_track_colliders,
 };
-use crate::track::sense::DriverSense;
+use crate::track::driver::DriverSense;
 use crate::track::sim::{DriveSignal, EngineRpm, TankTransmission, TrackGripElements};
 use crate::track::transmission::TransmissionParams;
 

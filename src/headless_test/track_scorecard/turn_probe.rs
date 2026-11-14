@@ -97,10 +97,10 @@ fn transmission(bed: &Bed) -> crate::track::transmission::TransmissionState {
 }
 
 /// The reading the Driver chose with on the last tick.
-fn sensed(bed: &Bed) -> Option<crate::track::sense::Sensed> {
+fn sensed(bed: &Bed) -> Option<crate::track::driver::Sensed> {
     bed.app
         .world()
-        .get::<crate::track::sense::DriverSense>(bed.tank)
+        .get::<crate::track::driver::DriverSense>(bed.tank)
         .expect("a driving tank carries its Driver's ledger")
         .reading
 }
@@ -174,7 +174,7 @@ fn record(bed: &Bed, z_c: f32, series: &mut Series, bins: Option<&mut [[f32; 4];
         .expect("a tank carries its drive signal");
     series.push("steer_signal", signal.steer);
     series.push("throttle_signal", signal.throttle);
-    // The Driver's reading this tick (`track::sense`); null before the ledger closes a tick.
+    // The Driver's reading this tick (`track::driver`); null before the ledger closes two ticks.
     let sensed = sensed(bed);
     series.push("sense_speed", sensed.map_or(f32::NAN, |s| s.speed));
     series.push("sense_r", sensed.map_or(f32::NAN, |s| s.resistance));

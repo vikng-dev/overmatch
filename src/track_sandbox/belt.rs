@@ -688,12 +688,8 @@ pub(super) fn draw_sample_points(
         let pitch = polyline_len(&loop_pts) / resolution.stations as f32;
         // Resample offset from the canonical decomposition (wrap count unused here).
         let (_, offset) = phase_decompose(phase.get(side), pitch);
-        let mut stations = resample(&loop_pts, pitch, offset);
-        stations.truncate(resolution.stations);
+        let stations = resample_loop(&loop_pts, pitch, offset, resolution.stations);
         let n = stations.len();
-        if n < 3 {
-            continue;
-        }
         for i in 0..n {
             let a = stations[i];
             let b = stations[(i + 1) % n];

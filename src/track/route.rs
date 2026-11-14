@@ -226,8 +226,8 @@ fn bracket_admits(bracket: Option<(f32, f32)>, t: f32) -> bool {
     bracket.is_some_and(|(t0, t1)| (t0.next_down()..=t1.next_up()).contains(&t))
 }
 
-/// Circle membership within [`SPAN_END_ON_CIRCLE`], shared by drape endpoint ownership and
-/// the view's wrap-arc chord measurement so their tolerances cannot drift.
+/// Circle membership within [`SPAN_END_ON_CIRCLE`], shared by [`sag_span`]'s check of its ends
+/// and the view's wrap-arc chord measurement so their tolerances cannot drift.
 pub fn on_circle(p: Vec2, (c, r): (Vec2, f32)) -> bool {
     (p.distance(c) - r).abs() <= SPAN_END_ON_CIRCLE
 }
@@ -236,9 +236,8 @@ pub fn on_circle(p: Vec2, (c, r): (Vec2, f32)) -> bool {
 /// [`SagClip::EveryCircle`] refinement): `SAG_SEGMENTS + 1` abscissas at `t = i / SAG_SEGMENTS`.
 const SAG_SEGMENTS: usize = 16;
 
-/// Resolution: radial endpoint-ownership tolerance for [`sag_span`]. DERIVED two-sided margin:
-/// 10 µm is two orders above tangent/promoted-top float noise (~1e-7 m at running-gear radii)
-/// and below [`SAG_CLIP_INSET`]. Mis-ownership can leave at most this radial cut at an endpoint.
+/// Resolution: [`on_circle`]'s radial tolerance. DERIVED two-sided margin: 10 µm is two orders
+/// above tangent-point float noise (~1e-7 m at running-gear radii) and below [`SAG_CLIP_INSET`].
 const SPAN_END_ON_CIRCLE: f32 = 1e-5;
 
 /// Closed-form chord-parameter interval an [`SagClip::EveryCircle`] ride covers on one circle;
@@ -316,20 +315,20 @@ fn ride_bracket(from: Vec2, to: Vec2, h: f32, c: Vec2, r: f32) -> Option<(f32, f
 /// subdivide steps; merging/overlaps cannot lengthen them.
 ///
 /// A penetration running off the span domain clamps its ride to an endpoint, possibly its deepest
-/// point. Circles not passing the radial endpoint test below lift that endpoint. The test also
-/// exempts lower-pole contacts: their adjoining segments can exceed the bound (driving-12 in
-/// `.agents/lenses/backlog.md`). This is not a universal clearance guarantee.
+/// point; every circle but that end's owner lifts it there.
 ///
 /// # Who may hand a span endpoint through unclipped
 ///
-/// [`SagClip::EveryCircle`] skips endpoint projection for each circle whose circumference
-/// contains it within [`SPAN_END_ON_CIRCLE`]. This radial test does not establish support ownership;
-/// promoted subspan ends can sit on road wheels.
-/// Tangent points/promoted tops must join the preceding run exactly; recomputing
-/// `c.y + √(r² − dz²)` could round away a ULP from the exact input.
-/// All other circles clip it: a blanket exemption leaves off-domain penetration's deepest point
-/// inside a non-owner. Raising this attachment changes the preceding join only when that join
-/// was already cutting a circle it did not belong to.
+/// Under [`SagClip::EveryCircle`], only its owner, the circle the span hangs from there: `from`
+/// is the last circle's upper tangent point and `to` the first's (asserted), and a promoted split
+/// is its road wheel's top. They join the preceding run exactly; recomputing `c.y + √(r² − dz²)`
+/// could round away a ULP from the exact input. Every other circle clips the end, one touching it
+/// included: exempting every circle whose circumference holds the end left it at a wheel's lowest
+/// point while the next ridden sample rode that wheel's top, the chord between them cutting through
+/// the wheel (`a_wheel_touching_a_span_end_from_above_still_clips_it`). Raising an end changes the
+/// preceding join only where the end lies in or on a circle it does not belong to. Every circle
+/// lies inside the loop, so the run passes over that circle; the straight join from the owner's
+/// tangent point up to the raised end may still cross it.
 ///
 /// [`SagClip::RoadWheels`] projects all samples, including endpoints. Its only endpoint-bearing
 /// circles are promoted road wheels, whose tops project back to themselves.
@@ -341,47 +340,69 @@ pub fn sag_span(
     clip: SagClip,
     out: &mut Vec<Vec2>,
 ) {
-    sag_span_at(from, to, excess, circles, clip, 0, out);
+    let owners = [circles.len() - 1, 0];
+    for (end, owner) in [from, to].into_iter().zip(owners) {
+        assert!(
+            on_circle(end, circles[owner]),
+            "a return span runs from the last circle's upper tangent point to the first's"
+        );
+    }
+    sag_span_at(
+        [(from, owners[0]), (to, owners[1])],
+        excess,
+        circles,
+        clip,
+        out,
+    );
 }
 
-/// Keep promotion recursion depth off [`sag_span`]'s public signature; callers always start at 0.
+/// Resolution: the narrowest span (m, along the hull) whose road wheels promotion considers. The
+/// search reads the drape at a wheel's abscissa through `t = (c.x − from.x) / (to.x − from.x)`,
+/// which loses precision as the width shrinks. A span this narrow is left to the safety clip,
+/// whose chords across it cut a circle by at most `w/4` (DERIVED: the sagitta `L²/8r` of a chord
+/// at the circle's side, `L² = 2rw`), 25 µm against [`SAG_CLIP_INSET`].
+const PROMOTION_MIN_WIDTH: f32 = 1e-4;
+
+/// [`sag_span`] over `ends`, each a point and the index of the circle that owns it. A promotion
+/// splits at its wheel's own abscissa, which both halves exclude, so the recursion ends within the
+/// road-wheel count.
 fn sag_span_at(
-    from: Vec2,
-    to: Vec2,
+    ends: [(Vec2, usize); 2],
     excess: f32,
     circles: &[(Vec2, f32)],
     clip: SagClip,
-    depth: usize,
     out: &mut Vec<Vec2>,
 ) {
+    let [(from, _), (to, _)] = ends;
     let chord = from.distance(to);
     let h = sag_depth(chord, excess);
     // Support candidates: road wheels only (see above). Also the `RoadWheels` clip set.
     let wheels = circles
         .get(1..circles.len().saturating_sub(1))
         .unwrap_or_default();
-    // The deepest wheel the sag would enter, tested at the wheel's own abscissa.
-    let mut worst: Option<(Vec2, f32)> = None;
-    if depth < 4 {
-        for &(c, r) in wheels {
-            let (lo, hi) = (from.x.min(to.x), from.x.max(to.x));
-            if c.x <= lo || c.x >= hi || (to.x - from.x).abs() < 1e-4 {
+    // The deepest wheel the sag would enter, tested at the wheel's own abscissa: its index among
+    // `circles` and its top.
+    let mut worst: Option<(usize, Vec2, f32)> = None;
+    let (lo, hi) = (from.x.min(to.x), from.x.max(to.x));
+    if hi - lo >= PROMOTION_MIN_WIDTH {
+        for (k, &(c, r)) in wheels.iter().enumerate() {
+            if c.x <= lo || c.x >= hi {
                 continue;
             }
             let t = (c.x - from.x) / (to.x - from.x);
             let pen = (c.y + r) - sag_y(from, to, h, t);
-            if pen > SAG_CLIP_INSET && worst.is_none_or(|(_, w)| pen > w) {
-                worst = Some((Vec2::new(c.x, c.y + r), pen));
+            if pen > SAG_CLIP_INSET && worst.is_none_or(|(_, _, w)| pen > w) {
+                worst = Some((k + 1, Vec2::new(c.x, c.y + r), pen));
             }
         }
     }
-    if let Some((split, _)) = worst {
+    if let Some((wheel, split, _)) = worst {
         let (l, r) = (from.distance(split), split.distance(to));
         // The detour over the wheel top consumes slack; the remainder splits by chord share.
         let remaining = (excess - (l + r - chord)).max(0.0);
         let (left, right) = (remaining * l / (l + r), remaining * r / (l + r));
-        sag_span_at(from, split, left, circles, clip, depth + 1, out);
-        sag_span_at(split, to, right, circles, clip, depth + 1, out);
+        sag_span_at([ends[0], (split, wheel)], left, circles, clip, out);
+        sag_span_at([(split, wheel), ends[1]], right, circles, clip, out);
         return;
     }
     let clipped = match clip {
@@ -406,14 +427,16 @@ fn sag_span_at(
     let last = ts.len() - 1;
     for (i, &t) in ts.iter().enumerate() {
         let mut q = Vec2::new(from.lerp(to, t).x, sag_y(from, to, h, t));
-        // Capture before any lift: ownership tests the caller's point, not another circle's
-        // moved point. `RoadWheels` sets no owner (see `sag_span`).
-        let end = (clip == SagClip::EveryCircle && (i == 0 || i == last)).then_some(q);
+        // An end's owner hands it through (see `sag_span`); `RoadWheels` clips every sample.
+        let owner = match (clip, i) {
+            (SagClip::EveryCircle, 0) => Some(ends[0].1),
+            (SagClip::EveryCircle, i) if i == last => Some(ends[1].1),
+            _ => None,
+        };
         // Safety clip (mm-scale grazes near tangency that promotion's point-split leaves) — and,
         // under `EveryCircle`, the whole dip out of a tangent point promotion cannot see.
         for (j, &(c, r)) in clipped.iter().enumerate() {
-            // `sag_span` owns the per-circle endpoint exemption.
-            if end.is_some_and(|p| on_circle(p, (c, r))) {
+            if owner == Some(j) {
                 continue;
             }
             // Only bracket members get boundary-inclusive projection (`silhouette_y`);
@@ -439,7 +462,7 @@ fn sag_span_at(
 /// [`wrap_joint_angle`] supplies the chord/angle relation shared with sprocket meshing and bounds
 /// work by `π / step`, requiring no cap. Merging circles only subdivides steps, preserving bounds.
 /// Dedup bracket ends coincident with uniform samples/span ends; re-pin 0/1 so endpoint
-/// projection and the radial exemption test start from the exact span ends.
+/// projection starts from the exact span ends.
 fn sag_samples(
     from: Vec2,
     to: Vec2,
@@ -603,6 +626,20 @@ pub fn resample(points: &[Vec2], spacing: f32, offset: f32) -> Vec<Vec2> {
             out.push(w[0] + dir * pos);
         }
     }
+    out
+}
+
+/// `count` stations round a closed loop (`points` ends where it starts), `spacing` its length over
+/// `count`. The walk accumulates arc in f32, so the last station, `spacing − offset` short of the
+/// end, can round past it, and a station rounded onto the end repeats station 0: on a periodic
+/// loop the first is the end point and the second goes, so the count is exact.
+pub fn resample_loop(points: &[Vec2], spacing: f32, offset: f32, count: usize) -> Vec<Vec2> {
+    let mut out = resample(points, spacing, offset);
+    assert!(
+        out.len() + 1 >= count,
+        "a closed loop of {count} spacings resamples to within one rounding of {count} stations"
+    );
+    out.resize(count, points[points.len() - 1]);
     out
 }
 
@@ -814,9 +851,9 @@ mod tests {
         for step in -100..=100 {
             let poke = step as f32 * 2e-4; // ±20 mm about grazing, in 0.2 mm steps
             let circles = vec![
-                end_a,
-                (Vec2::new(probe_x, sag_y - probe_r + poke), probe_r),
                 end_b,
+                (Vec2::new(probe_x, sag_y - probe_r + poke), probe_r),
+                end_a,
             ];
             let mut pts = Vec::new();
             sag_span(from, to, excess, &circles, SagClip::EveryCircle, &mut pts);
@@ -926,7 +963,6 @@ mod tests {
             );
         }
 
-        // The lifted attachment must pass the same `on_circle` ownership test.
         let lifted = pts[0];
         assert!(
             lifted.y > from.y,
@@ -936,13 +972,43 @@ mod tests {
             (lifted.distance(rogue.0) - rogue.1).abs() <= SPAN_END_ON_CIRCLE,
             "the lifted start is not on the rogue wheel's hemisphere: {lifted:?}"
         );
-        // The far endpoint stays within the radial tolerance of its tangent point.
         let far = *pts.last().expect("the drape is never empty");
         assert!(
             far.distance(to) <= SPAN_END_ON_CIRCLE,
             "the far span end moved {:.4} mm — the circle that OWNS it must still hand it through",
             far.distance(to) * 1000.0,
         );
+    }
+
+    /// A span end touching a road wheel's lowest point is not that wheel's to hand through: the end
+    /// hangs from its idler, and the wheel clips it like any circle that does not own it. Handed
+    /// through, the end stays at the wheel's lower pole while the next ridden sample rides its upper
+    /// hemisphere, and the chord between them cuts through the wheel. Fixture: idler and sprocket of
+    /// 0.1 m, 2 m apart and level, with a 0.12 m wheel standing on the idler's top.
+    #[test]
+    fn a_wheel_touching_a_span_end_from_above_still_clips_it() {
+        let circles = [
+            (Vec2::new(-2.0, 0.0), 0.1),
+            (Vec2::new(0.0, 0.22), 0.12),
+            (Vec2::new(0.0, 0.0), 0.1),
+        ];
+        let (from, to) = (Vec2::new(0.0, 0.1), Vec2::new(-2.0, 0.1));
+        assert!(
+            on_circle(from, circles[1]) && on_circle(from, circles[2]),
+            "fixture: the span starts on the idler's top, the wheel's lowest point"
+        );
+        let mut pts = Vec::new();
+        sag_span(from, to, 0.02, &circles, SagClip::EveryCircle, &mut pts);
+        for &circle in &circles {
+            let cut = deepest(&pts, circle);
+            assert!(
+                cut <= SAG_CLIP_INSET + 1e-6,
+                "the drape cuts {:.1} mm into the circle at {:?}, past the {:.0} mm ride budget",
+                cut * 1e3,
+                circle.0,
+                SAG_CLIP_INSET * 1e3,
+            );
+        }
     }
 
     fn gear() -> Vec<(Vec2, f32)> {
@@ -1000,6 +1066,42 @@ mod tests {
             ratio > 1.05,
             "a lifted wheel must not be wrapped from below — the route came within {ratio}x \
              its radius"
+        );
+    }
+
+    /// The force stations and the drawn joints index by station, so a closed loop resamples to
+    /// its count at every phase, its closing gap one spacing like the rest. The sweep reaches the
+    /// phases whose walk rounds the last station past the loop's end.
+    #[test]
+    fn a_closed_loop_resamples_to_its_count_at_every_phase() {
+        let ring: Vec<Vec2> = (0..=360)
+            .map(|k| Vec2::from_angle((k % 360) as f32 * std::f32::consts::TAU / 360.0))
+            .collect();
+        let count = 97;
+        let spacing = polyline_len(&ring) / count as f32;
+        let mut rounded_past = 0;
+        let near_spacing = (1..2_000).scan(spacing, |o, _| {
+            *o = o.next_down();
+            Some(*o)
+        });
+        for offset in (0..20_000)
+            .map(|k| spacing * k as f32 / 20_000.0)
+            .chain(near_spacing)
+        {
+            rounded_past += usize::from(resample(&ring, spacing, offset).len() < count);
+            let stations = resample_loop(&ring, spacing, offset, count);
+            assert_eq!(stations.len(), count);
+            for i in 0..count {
+                let gap = stations[i].distance(stations[(i + 1) % count]);
+                assert!(
+                    (gap - spacing).abs() < 1e-4,
+                    "gap {i} at offset {offset} is {gap} m, one spacing is {spacing} m"
+                );
+            }
+        }
+        assert!(
+            rounded_past > 0,
+            "the sweep reaches a walk that rounds a station past the end"
         );
     }
 }

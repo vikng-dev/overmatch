@@ -20,8 +20,8 @@ use super::derive::G;
 use super::forces::phase_decompose;
 use super::oracle::DepthOracle;
 use super::route::{
-    SagClip, external_tangent, max_admissible_depth, polyline_len, resample, sag_depth, sag_span,
-    slack, taut_lower_run,
+    SagClip, external_tangent, max_admissible_depth, polyline_len, resample, resample_loop,
+    sag_depth, sag_span, slack, taut_lower_run,
 };
 
 /// The slack spring's damping ratio ζ, a belt-drape animation taste: how many visible swings a
@@ -234,8 +234,7 @@ fn finish_side(
         polyline_len(&loop_pts),
         input.count,
     );
-    let mut joints = resample(&loop_pts, spacing, offset);
-    joints.truncate(input.count);
+    let joints = resample_loop(&loop_pts, spacing, offset, input.count);
 
     WrapSideOutput {
         joints,

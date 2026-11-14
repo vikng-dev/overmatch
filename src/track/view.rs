@@ -870,34 +870,17 @@ fn drive_track_views(
             ) {
                 frames.set_changed();
             }
-            // The SHADOW CASTER, on the same joints ([`super::shadow_proxy`]). The ribbon retains
-            // its topology and updates positions only when these hull-local joints change.
-            //
-            // This is also where the CASTER SWAP happens, and it is atomic on purpose: the ribbon
-            // gets its mesh and the shoes are silenced on the frame the first fit closes a loop,
-            // never at spawn and never apart ([`shadow_proxy::ProxySide::mesh`]). Both writes are
-            // resolved this frame: `TrackViewSet` runs before `ScopeResolution`.
-            if let Some(proxy) = &mut side.proxy {
-                match proxy.fit(proxy_meshes.reborrow(), &out[si].joints) {
-                    ProxyStep::Idle => {}
-                    // The shoes keep rendering at full detail to the camera at every distance — this
-                    // is a CASTER swap, not an LOD. `PROXIED_CASTER` is the preset that says so: it
-                    // stops the belt casting and leaves it RECEIVING, and it deliberately keeps
-                    // inheriting the tank's channel, so a silenced belt still follows its tank into
-                    // and out of the gunner optic.
-                    ProxyStep::Silence { mesh } => {
-                        commands.entity(proxy.entity).insert(Mesh3d(mesh));
-                        commands
-                            .entity(side.belt)
-                            .insert(VisualScope::PROXIED_CASTER);
-                    }
-                    ProxyStep::Overdue => warn!(
-                        "track shadow proxy: side {si} still has no ribbon after {} frames — the \
-                         {} real shoes are carrying the belt's shadow at full cost",
-                        shadow_proxy::PROXY_READY_GRACE_FRAMES,
-                        rig.count
-                    ),
-                }
+            // The SHADOW CASTER, on the same joints: the ribbon's mesh and the belt's
+            // `PROXIED_CASTER` land on the frame of the first fit ([`shadow_proxy::ProxySide::mesh`]),
+            // both resolved this frame: `TrackViewSet` runs before `ScopeResolution`.
+            if let Some(proxy) = &mut side.proxy
+                && let ProxyStep::Silence { mesh } =
+                    proxy.fit(proxy_meshes.reborrow(), &out[si].joints)
+            {
+                commands.entity(proxy.entity).insert(Mesh3d(mesh));
+                commands
+                    .entity(side.belt)
+                    .insert(VisualScope::PROXIED_CASTER);
             }
             // Wheels roll on the track's INNER face (pin line − `pin_to_inner`, the measured inner
             // offset — the pin does not run mid-plate, so it is not half the plate). Every axle

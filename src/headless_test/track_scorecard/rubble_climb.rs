@@ -132,11 +132,11 @@ struct Tick {
     asleep_under_tank: usize,
     piece_sleep_changes: usize,
     tank_asleep: bool,
-    /// The Driver's reading this tick (`track::sense`).
-    sensed: Option<crate::track::sense::Sensed>,
+    /// The Driver's reading this tick (`track::driver`).
+    sensed: Option<crate::track::driver::Sensed>,
 }
 
-const ROLES: [&str; 4] = ["belt segment", "bump stop", "side plate", "hull proxy"];
+pub(super) const ROLES: [&str; 4] = ["belt segment", "bump stop", "side plate", "hull proxy"];
 
 fn read(
     bed: &Bed,
@@ -289,7 +289,7 @@ fn read(
         piece_sleep_changes,
         tank_asleep: world.get::<Sleeping>(bed.tank).is_some(),
         sensed: world
-            .get::<crate::track::sense::DriverSense>(bed.tank)
+            .get::<crate::track::driver::DriverSense>(bed.tank)
             .expect("a driving tank carries its Driver's ledger")
             .reading,
     }

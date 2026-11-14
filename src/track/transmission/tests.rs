@@ -1,241 +1,22 @@
 use super::super::drive::DriveAxes;
+use super::super::drive_fixture::{step, *};
+use super::super::driver::Sensed;
 use super::super::forces;
-use super::super::sense::Sensed;
 use super::*;
-
-#[derive(Clone)]
-struct FixtureConstruction {
-    grip: forces::GripParams,
-    ground_grip: f32,
-    inertia: f32,
-}
-
-/// Fixture: contact grip and reflected belt inertia for the arithmetic drivetrain.
-fn lab_fp() -> FixtureConstruction {
-    FixtureConstruction {
-        inertia: 8_000.0,
-        ground_grip: 0.9, // Fixture terrain coefficient, independent of track material.
-        grip: forces::GripParams {
-            track: crate::substances::contact_friction(0.9),
-            nominal_pressure_kpa: forces::rolling_reference_kpa(),
-            side_weight: 26_500.0 * 9.81 / 2.0,
-            hull_coupling: 1.0, // Fixture point-mass hull.
-        },
-    }
-}
-
-/// Fixture adapter: arithmetic contact fixtures always carry a driven material pair.
-fn construction(params: &FixtureConstruction) -> DriveConstruction {
-    DriveConstruction::new(params.grip, params.inertia)
-}
-
-fn step(
-    fp: &FixtureConstruction,
-    tp: &TransmissionParams,
-    state: &mut TransmissionState,
-    input: &TransmissionInput,
-) -> TransmissionReport {
-    super::step(&construction(fp), tp, state, input)
-}
-
-/// Fixture: a second torque curve and ladder, independent of the shipped vehicle.
-fn lab_tp() -> TransmissionParams {
-    TransmissionParams::from_authoring(&lab_authoring())
-        .expect("lab transmission authoring must be valid")
-}
-
-/// Fixture: the lab drivetrain with a curve that sags under its idle, 600 N m at 500 rpm against
-/// 1650 at idle, so there its idle torque exceeds the curve and drag together.
-fn sagging_tp() -> TransmissionParams {
-    TransmissionParams::from_authoring(&TransmissionAuthoring {
-        torque_nm: &[
-            (500.0, 600.0),
-            (600.0, 1650.0),
-            (1100.0, 2200.0),
-            (1700.0, 1950.0),
-            (1800.0, 0.0),
-        ],
-        ..lab_authoring()
-    })
-    .expect("a curve sagging under idle is admitted")
-}
-
-fn lab_authoring() -> TransmissionAuthoring<'static> {
-    TransmissionAuthoring {
-        idle_rpm: 600.0,
-        governed_rpm: 1800.0,
-        crank_limit_rpm: 1900.0, // Fixture: completed fuel cut.
-        rated_rpm: 1800.0,
-        torque_nm: &[
-            (600.0, 1650.0),
-            (1100.0, 2200.0),
-            (1700.0, 1950.0),
-            (1800.0, 0.0),
-        ],
-        forward_speeds_kmh: &[8.0, 12.7, 20.4, 32.6, 52.2],
-        reverse_speeds_kmh: &[8.0],
-
-        launch_gears: 4,
-        max_step: 3,
-        steer_radii_m: &[
-            (3.0, 8.9),
-            (4.8, 14.2),
-            (7.7, 22.8),
-            (12.3, 36.4),
-            (19.7, 58.3),
-        ],
-        reverse_steer_radii_m: &[(3.0, 8.9)],
-        steer_capacity_n: 240_000.0,
-        neutral_mean: NeutralMean::Free,
-        recirculation: 0.9,
-        brake_capacity_n: 120_000.0,
-        brake_static_factor: 1.6,
-        drag_fraction: 0.25,
-        // Fixture: six kg m² resolves this curve's idle catch (DERIVED minimum about five).
-        // Clutch capacity is about 1.3 times the fixture peak torque.
-        engine_inertia_kgm2: 6.0,
-        clutch_capacity_nm: 2860.0,
-        belt_inertia: 8_000.0,
-        shift_secs: 0.31,
-
-        sprocket_radius_m: 0.34,
-        half_tread_m: 1.25,
-    }
-}
-
-/// FIXTURE DATA: per-side belt inertia (kg) at the scale the shipped sheet's construction sum
-/// derives (DERIVED 4,749.86 kg, `reflected-track-inertia.md`), rounded. The arithmetic tests
-/// assert gear choices at this coupling; none is a pass condition on the shipped vehicle.
-const TIGER_BELT_INERTIA: f32 = 4_750.0;
-
-/// FIXTURE DATA modelled on the shipped Tiger's declared drivetrain: the torque curve, speed
-/// anchors, steering table, clutch and brakes as tiger_1.tank.ron states them. The sprocket radius, half-tread and belt inertia are fixture
-/// values at the sheet's scale, not its measured or derived ones. Kept local to arithmetic tests
-/// so they exercise the authored curve and speed anchors without reaching through the ECS/spec
-/// adapter. Exposed as the authoring struct so validator tests can mutate one field and
-/// re-validate.
-fn tiger_authoring() -> TransmissionAuthoring<'static> {
-    TransmissionAuthoring {
-        idle_rpm: 600.0,
-        governed_rpm: 2500.0,
-        crank_limit_rpm: 3000.0,
-        rated_rpm: 3000.0,
-        torque_nm: &[
-            (800.0, 1300.0),
-            (2100.0, 1850.0),
-            (2500.0, 1686.0),
-            (3000.0, 1639.0),
-        ],
-        forward_speeds_kmh: &[2.8, 4.3, 6.2, 9.2, 14.1, 20.9, 30.5, 45.4],
-        reverse_speeds_kmh: &[2.8, 4.3, 6.2, 9.2],
-
-        launch_gears: 4,
-        max_step: 3,
-        steer_radii_m: &[
-            (3.44, 10.2),
-            (5.28, 15.6),
-            (7.62, 22.5),
-            (11.30, 33.4),
-            (17.32, 51.2),
-            (25.68, 76.0),
-            (37.47, 110.8),
-            (55.78, 165.0),
-        ],
-        reverse_steer_radii_m: &[(3.44, 10.2), (5.28, 15.6), (7.62, 22.5), (11.30, 33.4)],
-        steer_capacity_n: 250_000.0,
-        neutral_mean: NeutralMean::Held,
-        recirculation: 0.9,
-        brake_capacity_n: 96_000.0,
-        brake_static_factor: 1.5,
-        drag_fraction: 0.25,
-        engine_inertia_kgm2: 4.0,
-        clutch_capacity_nm: 2400.0,
-        belt_inertia: TIGER_BELT_INERTIA,
-        shift_secs: 0.31,
-
-        sprocket_radius_m: 19.0 * 0.130 / std::f32::consts::TAU,
-        half_tread_m: 1.4904,
-    }
-}
-
-fn tiger_tp() -> TransmissionParams {
-    TransmissionParams::from_authoring(&tiger_authoring())
-        .expect("Tiger transmission authoring must be valid")
-}
-
-/// Fixture: a lighter three-speed drivetrain with its own curve, ratios and capacities.
-fn compact_drivetrain() -> (FixtureConstruction, TransmissionParams) {
-    let spec = super::super::drive_fixture::compact_spec();
-    let ground = super::super::drive_fixture::ground();
-    let mut fp = lab_fp();
-    fp.inertia = 3000.0; // Fixture belt inertia, independent of the contact composition's geometry.
-    fp.ground_grip = ground.grip;
-    fp.grip = forces::GripParams {
-        track: spec.track.friction(),
-
-        nominal_pressure_kpa: forces::rolling_reference_kpa(),
-        side_weight: spec.mass * super::super::derive::G / 2.0,
-        hull_coupling: 1.0, // Fixture point-mass hull.
-    };
-    let tp = spec
-        .track
-        .powertrain
-        .transmission
-        .params(0.3, 1.0, fp.inertia)
-        .expect("inline Fixture drivetrain must be admitted");
-    (fp, tp)
-}
-
-fn class_drivetrains() -> [(FixtureConstruction, TransmissionParams); 3] {
-    [
-        (lab_fp(), lab_tp()),
-        (grade_fixture_fp(), tiger_tp()),
-        compact_drivetrain(),
-    ]
-}
-
-fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> TransmissionInput {
-    TransmissionInput {
-        supply: DriveSupply::WHOLE,
-        intent: DriveIntent::Axes(DriveAxes { throttle, steer }),
-        throttle,
-        steer,
-        side_commands: [
-            (throttle + steer).clamp(-1.0, 1.0),
-            (throttle - steer).clamp(-1.0, 1.0),
-        ],
-        speeds,
-        reactions,
-        // Fixture: reactions that do not move with belt speed.
-        reaction_slopes: [0.0; 2],
-        // Fixture: the Driver has felt nothing, so it neither chooses a gear nor engages one from
-        // rest; a launch reads `felt_at_rest`, Driver policy `driver_input`.
-        sensed: None,
-        dt: 1.0 / 64.0,
-    }
-}
 
 /// Fixture: the Driver has felt a hull at rest meeting nothing, on ground that grips beyond any
 /// gear's pull. From an open clutch it launches in its highest launch gear; once engaged, no gear
 /// launches with more than the one it holds, so no gear changes.
 fn felt_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
-    inp.sensed = driver_input(0.0, 0.0, 0.0).sensed;
+    inp.sensed = Some(Sensed::steady(0.0, 0.0, f32::INFINITY));
     inp
 }
 
 /// Fixture: `felt_at_rest` with belts that meet no ground, which gives them no grip to carry a
 /// pull, so no gear offers more than the gear engaged.
-fn felt_free_at_rest(inp: TransmissionInput) -> TransmissionInput {
-    let mut inp = felt_at_rest(inp);
-    inp.sensed.as_mut().expect("the fixture feels").grip = 0.0;
+fn felt_free_at_rest(mut inp: TransmissionInput) -> TransmissionInput {
+    inp.sensed = Some(Sensed::steady(0.0, 0.0, 0.0));
     inp
-}
-
-fn fresh(tp: &TransmissionParams) -> TransmissionState {
-    TransmissionState {
-        park: false,
-        ..TransmissionState::from_spec(tp)
-    }
 }
 
 /// The HUD readout reports the CRANK STATE ω_e directly — the state IS the
@@ -609,14 +390,19 @@ fn top_gear_wide_steer_preserves_the_outer_belt_differential() {
         omega_e: cruise_m * tp.gears_fwd[top] / tp.sprocket_radius,
         ..fresh(&tp)
     };
+    let feel = super::super::drive::drive_feel();
+    let wide = 0.5 * (feel.wide_on.0 + feel.tight_on.0);
     let rep = step(
         &fp,
         &tp,
         &mut st,
-        &input(1.0, 0.3, [cruise_m, cruise_m], [0.0, 0.0]),
+        &input(1.0, wide, [cruise_m, cruise_m], [0.0, 0.0]),
     );
 
-    assert_eq!(rep.steer_step, 1, "0.3 steer must engage the WIDE detent");
+    assert_eq!(
+        rep.steer_step, 1,
+        "a steer between the thresholds engages the WIDE detent"
+    );
     let m = (rep.next_speeds[0] + rep.next_speeds[1]) / 2.0;
     let d = (rep.next_speeds[0] - rep.next_speeds[1]) / 2.0;
     let expected_d = tp.steer_kappa[top].1 * m.abs();
@@ -1116,19 +902,8 @@ fn stall_guard_holds_crank_under_grade_lug() {
     ] {
         let mut st = fresh(&tp);
         let mut inp = input(throttle, 0.0, speeds, reactions);
-        // Fixture: ground that grips beyond any gear's pull.
-        inp.sensed = Some(Sensed {
-            speed: speeds[0],
-            resistance: reactions[0] + reactions[1],
-            push_difference: reactions[0] - reactions[1],
-            drive: reactions[0] + reactions[1],
-            drive_gain: 0.0,
-            grip: f32::INFINITY,
-            stall: None,
-            stalled: false,
-            observed: true,
-            caught: false,
-        });
+        // The fixture's belts carry equal reactions, so the reading has no push difference.
+        inp.sensed = driver_input(speeds[0], reactions[0] + reactions[1], throttle).sensed;
         #[cfg(feature = "bitprobe")]
         let (roundoff, mut settled) = (
             DriverResolution::load().crank_roundoff_share * tp.roundoff_torque_scale(),
@@ -1172,13 +947,11 @@ fn stall_guard_holds_crank_under_grade_lug() {
     }
 }
 
-/// Rev-match across an upshift — the crank is CONTINUOUS through the window
-/// (no teleport: per-tick slew bounded by `(capacity + τ_free)/J·dt` ≈ 189 rpm/tick in
-/// the lab), lands within a bounded gap of the new geared speed at window end (drag-only
-/// shedding covers ≈ 410 of the ≈ 660 rpm step in the 0.31 s window; the clutch
-/// shoulders the ≈ 250 rpm residual at capacity for a few ticks — the bounded physical
-/// cost of the shift), and re-locks to the geared point within a handful of engaged
-/// ticks.
+/// Rev-match across an upshift: the crank is continuous through the window, no tick moving it
+/// further than its free torque and the clutch's capacity can, `(|τ_free| + τ_cap)·dt/J` (DERIVED
+/// from `J dω/dt = τ_free − τ_c` with `|τ_c| ≤ τ_cap`), and once the window closes the held clutch
+/// keeps the crank on the geared speed of the belt the step integrated. How far the window's end
+/// leaves the crank from the new gear's speed is an observation.
 #[test]
 fn rev_match_across_upshift_is_continuous() {
     let (fp, tp) = (lab_fp(), lab_tp());
@@ -1198,24 +971,25 @@ fn rev_match_across_upshift_is_continuous() {
     }
     st.gear = 2;
     st.shift_ticks = tp.shift_ticks.get();
-    let target_rpm = v_up * g2 / tp.sprocket_radius / RPM_TO_RAD; // ≈ 1121
-    let mut prev_rpm = st.omega_e / RPM_TO_RAD;
+    let target_rpm = v_up * g2 / tp.sprocket_radius / RPM_TO_RAD;
     let mut window_end_gap = None;
     let mut ticks_since_window = 0u32;
     let mut rep = TransmissionReport::default();
     for tick in 0..96 {
-        rep = step(
-            &fp,
-            &tp,
-            &mut st,
-            &input(1.0, 0.0, [v_up, v_up], [0.0, 0.0]),
+        let inp = input(1.0, 0.0, [v_up, v_up], [0.0, 0.0]);
+        let before = st.omega_e;
+        rep = step(&fp, &tp, &mut st, &inp);
+        // Fuel at full pedal bounds the free torque's drive, and drag its loss.
+        let [fuel, catch, drag] = engine_torques(&tp, inp.supply, before, 1.0);
+        let slew = (fuel + catch + drag + tp.clutch_capacity) * inp.dt / tp.engine_inertia;
+        // Resolution: the integration's f32 rounding at the crank's speed.
+        let rounding = 4.0 * f32::EPSILON * before.abs();
+        assert!(
+            (st.omega_e - before).abs() <= slew + rounding,
+            "tick {tick}: the crank moved {before} -> {} rad/s, past {slew} rad/s",
+            st.omega_e
         );
         let rpm = st.omega_e / RPM_TO_RAD;
-        assert!(
-            (rpm - prev_rpm).abs() <= 250.0,
-            "tick {tick}: crank teleported {prev_rpm:.0} -> {rpm:.0} rpm"
-        );
-        prev_rpm = rpm;
         if st.gear == 2 && !rep.shifting && window_end_gap.is_none() {
             window_end_gap = Some((rpm - target_rpm).abs());
         }
@@ -1225,25 +999,23 @@ fn rev_match_across_upshift_is_continuous() {
     }
     assert_eq!(st.gear, 2, "the upshift must have committed");
     let gap = window_end_gap.expect("the window must end inside the run");
-    assert!(
-        gap <= 400.0,
-        "rpm at window end must be within 400 rpm of the geared landing \
-             ({target_rpm:.0}), gap {gap:.0}"
+    println!(
+        "MEASURED rev match: {gap:.0} rpm from the geared landing ({target_rpm:.0}) at the window's end"
     );
     assert!(
         ticks_since_window > 16,
         "post-window settling must be observed"
     );
-    // Re-lock anchor: the geared rpm of the belt the transmission itself integrated
-    // (this harness holds the INPUT speeds, so the lock's fixed point rides
-    // `k·τ_free·dt/I_m` above the held value — the crank follows THAT belt exactly).
+    // The lock's anchor is the belt the step integrated: this harness holds the input speeds, so
+    // the integrated belt rides `k·τ_free·dt/I_m` above them.
     let m_next = (rep.next_speeds[0] + rep.next_speeds[1]) / 2.0;
-    let lock_rpm = m_next * g2 / tp.sprocket_radius / RPM_TO_RAD;
-    let final_rpm = st.omega_e / RPM_TO_RAD;
+    let locked = g2 / tp.sprocket_radius * m_next;
+    assert!(rep.locked, "the engaged clutch holds the crank");
+    // Resolution: the lock's product rounds once.
     assert!(
-        (final_rpm - lock_rpm).abs() < 50.0,
-        "the engaged clutch must re-lock the crank to the geared point of the \
-             integrated belt ({lock_rpm:.0}), got {final_rpm:.0}"
+        (st.omega_e - locked).abs() <= f32::EPSILON * locked,
+        "the held crank turns at {} rad/s against the belt's geared {locked} rad/s",
+        st.omega_e
     );
 }
 
@@ -1880,185 +1652,56 @@ fn full_pedal_reaches_the_curve_and_release_retains_drag() {
     assert!(drag > 0.0);
 }
 
-/// The game's driving and damage model: the report's `caught` is the idle catch fueling past the
-/// command. The Driver steps down a gear the catch carries, and full-pedal driving stays clear of
-/// that step because full pedal already fuels all the catch can ask, at every crank speed and at
-/// any task rate (the HP pools' served rate); at part pedal a crank lugging through the catch's
-/// band below idle is caught. Mutant: a catch ceiling the task rate does not scale is caught at
-/// full pedal on the sagging curve at half rate. Fixture: each class drivetrain and one whose curve
-/// sags under idle, the engaged crank swept from rest to idle at whole, half and quarter task
-/// rates, a quarter pedal.
+/// The game's driving model: a gear landing with its clutch held holds the most its pedal nets at
+/// any crank speed down to the idle guard, since the hull slows into it; one landing below its
+/// launch speed holds its slip pull. Viability relies on both. Mutant: pricing only where the gear
+/// lands misses the torque peak below it. Fixture: each class drivetrain's top gear at a third of
+/// the pedal, landing at its governed speed and at half its launch speed.
 #[test]
-fn only_a_part_pedal_crank_below_idle_is_caught() {
-    let sagging = sagging_tp();
-    let saturated = |tp: &TransmissionParams| {
-        (tp.engine.idle_rpm - engine_control().idle_catch_droop_rpm.value) * RPM_TO_RAD
-    };
-    // Fixture: 65 crank speeds from rest to `top`.
-    let sweep = |top: f32| (0..=64).map(move |step| top * step as f32 / 64.0);
-    assert!(
-        sweep(saturated(&sagging)).any(|omega| {
-            sagging.torque_at(sagging.engine.idle_rpm)
-                > sagging.torque_at(omega / RPM_TO_RAD) + engine_drag(&sagging, omega)
-        }),
-        "the fixture's saturated catch asks more than its curve and drag give somewhere"
-    );
-    for tp in class_drivetrains()
-        .map(|(_, tp)| tp)
-        .into_iter()
-        .chain([sagging])
-    {
-        let idle = tp.engine.idle_rpm * RPM_TO_RAD;
-        for task_rate in [1.0, 0.5, 0.25] {
-            let caught = |omega: f32, command: f32| {
-                let mut inp = input(command, 0.0, [0.0; 2], [0.0; 2]);
-                inp.supply.task_rate = task_rate;
-                #[cfg(feature = "bitprobe")]
-                let mut probe = TransmissionProbe::default();
-                crank_free_torque(
-                    &tp,
-                    &inp,
-                    true,
-                    false,
-                    command,
-                    0.0,
-                    1.0,
-                    omega,
-                    idle,
-                    #[cfg(feature = "bitprobe")]
-                    &mut probe,
-                )
-                .2
-            };
-            for omega in sweep(idle) {
-                assert!(
-                    !caught(omega, 1.0),
-                    "full pedal caught at {omega} rad/s, task rate {task_rate}"
-                );
-                assert!(
-                    omega > saturated(&tp) || caught(omega, 0.25),
-                    "a quarter pedal lugging at {omega} rad/s below the catch's band, task rate {task_rate}"
-                );
-            }
-            assert!(!caught(idle, 0.25), "no catch at idle");
-        }
-    }
-}
-
-/// Fixture: the lab ladder's top gear crawling locked at 580 rpm, inside the idle catch's band,
-/// read over a quarter-pedal window the catch carried whole, the hull meeting what that gear
-/// delivers there, on ground that grips beyond any gear's pull.
-fn carried_top_gear(tp: &TransmissionParams) -> (TransmissionState, TransmissionInput) {
-    let omega = 580.0 * RPM_TO_RAD;
-    let top = tp.gears_fwd.len() as u8;
-    let ratio = tp.gears_fwd[usize::from(top - 1)];
-    let speed = omega * tp.sprocket_radius / ratio;
-    let crawl = price_driver_force(tp, DriveSupply::WHOLE, speed, ratio, 0.25, ClutchState::In);
-    let mut inp = driver_input(speed, crawl, 0.25);
-    inp.sensed.as_mut().expect("a Driver-policy reading").caught = true;
-    let state = TransmissionState {
-        gear: top,
-        clutch: ClutchState::In,
-        omega_e: omega,
-        ..fresh(tp)
-    };
-    (state, inp)
-}
-
-/// The game's driving model: a gear the idle catch carries steps to the highest lower gear in reach
-/// that holds where the cut lands, never past it, since the lowest gear in reach can land past its
-/// fuel cut and pull backward. Mutant: the lowest gear in reach taken unconditionally lands second.
-/// Fixture: the lab ladder's top gear (fifth) carried at 580 rpm, where second, the lowest within
-/// three steps, turns past its crank limit and fourth turns above its launch speed.
-#[test]
-fn a_carried_gear_steps_to_the_highest_lower_gear_that_holds() {
-    let (fp, tp) = (lab_fp(), lab_tp());
-    let (mut state, inp) = carried_top_gear(&tp);
-    let sensed = felt(&inp);
-    let spare = |gear: u8| {
-        let ratio = tp.gears_fwd[usize::from(gear - 1)];
-        price_driver_force(
+fn a_gear_holds_the_most_its_pedal_nets_at_or_below_where_it_lands() {
+    let command = 0.3; // Fixture: part pedal.
+    for (_, tp) in class_drivetrains() {
+        let ratio = *tp.gears_fwd.last().expect("a ladder");
+        let at = |omega: f32| omega * tp.sprocket_radius / ratio;
+        let pedal = |rpm: f32| {
+            let [fuel, _, drag] =
+                engine_torques(&tp, DriveSupply::WHOLE, rpm * RPM_TO_RAD, command);
+            (fuel - drag) * ratio / tp.sprocket_radius
+        };
+        let governed = tp.engine.governed_rpm;
+        let held = viable_pull(
             &tp,
             DriveSupply::WHOLE,
-            sensed.speed,
+            at(governed * RPM_TO_RAD),
             ratio,
-            0.25,
+            command,
             ClutchState::In,
-        ) - sensed.resistance
-    };
-    let (lowest, next) = (state.gear - tp.max_step, state.gear - 1);
-    assert!(
-        spare(lowest) < 0.0,
-        "the fixture's lowest gear in reach falls short"
-    );
-    assert!(
-        spare(next) > force_margin(&tp),
-        "the fixture's next gear down holds"
-    );
-    choose_gear(&mut state, &tp, &construction(&fp), &inp, 0.25, sensed);
-    assert_eq!(
-        state.gear, next,
-        "the carried gear steps to the highest that holds"
-    );
-}
-
-/// The game's driving model: a carried gear that no lower gear in reach holds for steps only to a
-/// gear whose crank lands short of completed fuel cut, and stays where none does: past the cut a
-/// crank turns against its drag alone. Mutant: the lowest gear in reach taken wherever its crank
-/// lands steps fifth to second. Fixture: the lab engine on couplings of 100, 50, 45, 40 and 10 per
-/// metre, fifth carried at 580 rpm.
-#[test]
-fn a_carried_gear_stays_where_every_lower_gear_lands_past_fuel_cut() {
-    let (fp, authoring) = (lab_fp(), lab_authoring());
-    let speeds = [100.0, 50.0, 45.0, 40.0, 10.0]
-        .map(|coupling: f32| 3.6 * authoring.rated_rpm * RPM_TO_RAD / coupling);
-    let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
-        forward_speeds_kmh: &speeds,
-        ..authoring
-    })
-    .expect("the fixture ladder is admitted");
-    let (mut state, inp) = carried_top_gear(&tp);
-    let sensed = felt(&inp);
-    let [_, catch, _] = engine_torques(&tp, DriveSupply::WHOLE, state.omega_e, 0.25);
-    assert!(catch > 0.0, "the catch still fuels at the fixture's demand");
-    let landing = sensed.speed
-        - sensed.resistance * f32::from(tp.shift_ticks.get())
-            / TICK_HZ
-            / coupled_mass(&construction(&fp));
-    let cut = tp.engine.governed_rpm + engine_control().governor_cut_rpm.value;
-    let top = state.gear;
-    for gear in top - tp.max_step..top {
-        let rpm = landing * tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius / RPM_TO_RAD;
-        println!("gear {gear} lands at {rpm:.0} rpm");
+        );
         assert!(
-            rpm >= cut,
-            "the fixture's gear {gear} lands past completed fuel cut"
+            held >= pedal(tp.peak_torque_rpm) && pedal(tp.peak_torque_rpm) > pedal(governed),
+            "landing at {governed} rpm the gear holds its peak below: {held} N"
+        );
+        let slipping = viable_pull(
+            &tp,
+            DriveSupply::WHOLE,
+            at(0.5 * tp.launch_omega(command)),
+            ratio,
+            command,
+            ClutchState::Out,
+        );
+        let slip = price_driver_force(
+            &tp,
+            DriveSupply::WHOLE,
+            0.0,
+            ratio,
+            command,
+            ClutchState::Slip,
+        );
+        assert!(
+            (slipping - slip).abs() <= 1e-5 * slip.abs(),
+            "below its launch speed the gear holds its slip pull: {slipping} N against {slip} N"
         );
     }
-    choose_gear(&mut state, &tp, &construction(&fp), &inp, 0.25, sensed);
-    assert_eq!(
-        (state.gear, state.shift_ticks),
-        (top, 0),
-        "no gear landing past fuel cut is taken"
-    );
-}
-
-/// The game's driving model: a window the idle catch carried at part pedal is no verdict on full
-/// pedal, where the catch adds nothing, so the Driver steps a carried gear down only while the catch
-/// still fuels at the demand it reads. Mutant: acting on the carried window alone downshifts at
-/// full pedal. Fixture: the lab ladder's top gear carried at 580 rpm through a quarter-pedal window,
-/// read on the tick the pedal reaches full.
-#[test]
-fn a_part_pedal_carried_window_triggers_no_downshift_at_full_pedal() {
-    let (fp, tp) = (lab_fp(), lab_tp());
-    let (mut state, inp) = carried_top_gear(&tp);
-    let top = state.gear;
-    choose_gear(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
-    assert_eq!(
-        (state.gear, state.shift_ticks),
-        (top, 0),
-        "full pedal keeps the gear a part-pedal window saw carried"
-    );
 }
 
 /// The game's damage model: commanded work consumes one task rate even when
@@ -2384,63 +2027,6 @@ fn part_pedal_preserves_the_net_curve_blend() {
     }
 }
 
-/// Fixture Driver reading for Driver-policy tests: a hull riding its belts at `speed` and
-/// meeting `load` along its heading (forward positive), independent of dynamic belt reactions,
-/// so acceleration cannot manufacture a gear change, on ground that grips beyond any gear's pull.
-fn driver_input(speed: f32, load: f32, command: f32) -> TransmissionInput {
-    let mut inp = input(command, 0.0, [speed; 2], [0.0; 2]);
-    inp.sensed = Some(Sensed {
-        speed,
-        resistance: load,
-        push_difference: 0.0,
-        drive: load,
-        drive_gain: 0.0,
-        grip: f32::INFINITY,
-        stall: None,
-        stalled: false,
-        observed: true,
-        caught: false,
-    });
-    inp
-}
-
-/// Fixture: `inp`'s hull held at rest under `gear`'s forward pull of the resistance it feels,
-/// which is what the ledger reads of a pull that does not move the hull.
-fn stalled(mut inp: TransmissionInput, gear: u8) -> TransmissionInput {
-    let sensed = inp.sensed.as_mut().expect("a Driver-policy reading");
-    sensed.stall = Some(super::super::sense::Stall {
-        dir: 1.0,
-        push: sensed.resistance,
-        gear,
-    });
-    sensed.stalled = true;
-    inp
-}
-
-/// The fixture reading a Driver-policy input carries.
-fn felt(inp: &TransmissionInput) -> Sensed {
-    inp.sensed
-        .expect("a Driver-policy fixture carries a reading")
-}
-
-/// Fixture oracle: enumerate the declared straight-launch domain using the separately pinned
-/// crank/cap force price against the felt resistance. This never consults the selector.
-fn affordable_launch(tp: &TransmissionParams, inp: &TransmissionInput, command: f32) -> Option<u8> {
-    (1..=tp.launch_gears.min(tp.gears_fwd.len() as u8))
-        .rev()
-        .find(|&gear| {
-            price_driver_force(
-                tp,
-                inp.supply,
-                0.0,
-                tp.gears_fwd[usize::from(gear - 1)],
-                command,
-                ClutchState::Slip,
-            ) - felt(inp).resistance
-                > force_margin(tp)
-        })
-}
-
 /// Under a constant affordable load, the Driver must settle in top gear; players must
 /// not hunt between gears after the acceleration transient in each class Fixture.
 #[test]
@@ -2522,137 +2108,6 @@ fn driver_force_price_uses_the_current_regime_and_the_clutch_cap() {
     }
 }
 
-/// The declared skip limit and the detent prohibition constrain the same choice path: a stall
-/// steps to the lowest gear in reach, never past it. Fixture: a stalled third gear meeting a
-/// resistance only first gear's launch can hold, then a straight fourth gear past its governor
-/// where fifth has more to spare.
-#[test]
-fn driver_respects_the_shift_step_and_turn_contracts() {
-    let (fp, mut tp) = (lab_fp(), lab_tp());
-    let resistance = (launch_force(&tp, 1) + launch_force(&tp, 2)) * 0.5;
-    for (max_step, landed) in [(1, 2), (2, 1)] {
-        tp.max_step = max_step;
-        let mut state = TransmissionState {
-            gear: 3,
-            clutch: ClutchState::Slip,
-            ..fresh(&tp)
-        };
-        let inp = stalled(driver_input(0.0, resistance, 1.0), 3);
-        choose_gear(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
-        assert_eq!(
-            state.gear, landed,
-            "a step down reaches no further than max_step {max_step}"
-        );
-    }
-    let governed = tp.engine.governed_rpm + 0.5 * engine_control().governor_cut_rpm.value;
-    let speed = governed * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[3];
-    for detent in [0, 1, 2] {
-        let mut state = TransmissionState {
-            gear: 4,
-            clutch: ClutchState::In,
-            steer_step: detent,
-            omega_e: (tp.engine.governed_rpm - 50.0) * RPM_TO_RAD, // Fixture: fuel beats drag.
-            ..fresh(&tp)
-        };
-        let inp = driver_input(speed, 1_000.0, 1.0);
-        choose_gear(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
-        assert_eq!(
-            state.gear,
-            if detent == 0 { 5 } else { 4 },
-            "a detent turn's radius belongs to its gear"
-        );
-    }
-}
-
-/// The top of any admitted ladder chooses no gear above it: the upshift clause relies on a
-/// higher gear existing before it forms the range above the engaged one. Fixture: a ladder of the
-/// most gears the u8 index admits, cruising straight in its top gear on ample grip.
-#[test]
-fn the_top_of_the_longest_admitted_ladder_chooses_nothing_above_it() {
-    let speeds: Vec<f32> = (1..=u8::MAX).map(|gear| f32::from(gear) * 0.5).collect();
-    let radii = vec![(10.0, 30.0); speeds.len()];
-    let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
-        forward_speeds_kmh: &speeds,
-        steer_radii_m: &radii,
-        ..tiger_authoring()
-    })
-    .expect("a ladder of u8::MAX gears is admitted");
-    let top = u8::MAX;
-    let speed = 0.5 * tp.governed_speed(false);
-    let mut state = TransmissionState {
-        gear: top,
-        clutch: ClutchState::In,
-        omega_e: (tp.engine.governed_rpm - 50.0) * RPM_TO_RAD, // Fixture: fuel beats drag.
-        ..fresh(&tp)
-    };
-    let inp = driver_input(speed, 1_000.0, 1.0);
-    choose_gear(
-        &mut state,
-        &tp,
-        &construction(&lab_fp()),
-        &inp,
-        1.0,
-        felt(&inp),
-    );
-    assert_eq!(state.gear, top);
-}
-
-/// Fixture launch price of forward `gear` at full pedal: what a slipping clutch delivers.
-fn launch_force(tp: &TransmissionParams, gear: u8) -> f32 {
-    price_driver_force(
-        tp,
-        DriveSupply::WHOLE,
-        0.0,
-        tp.gears_fwd[usize::from(gear - 1)],
-        1.0,
-        ClutchState::Slip,
-    )
-}
-
-/// No gear is priced above the grip its belts can carry: belts sliding along their travel at
-/// their grip limit, carrying the whole resistance, change no gear, where the same reading on
-/// ample grip changes gears. A Driver that shifted on an ungranted pull would cut the drive for
-/// nothing. Fixture: each class drivetrain moving in each forward gear with the clutch in, the
-/// crank from idle to governed and resistance up to first gear's launch pull, every patch sliding
-/// along the belt so that its grip budget is the resistance.
-#[test]
-fn belts_at_their_grip_limit_change_no_gear() {
-    for (fp, tp) in class_drivetrains() {
-        let construction = construction(&fp);
-        let mut changed = 0;
-        for gear in 1..=tp.gears_fwd.len() as u8 {
-            let ratio = tp.gears_fwd[usize::from(gear - 1)];
-            for step in 0..=24 {
-                let span = tp.engine.governed_rpm - tp.engine.idle_rpm;
-                let rpm = tp.engine.idle_rpm + span * step as f32 / 24.0;
-                let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / ratio;
-                for share in 0..=20 {
-                    let resistance = launch_force(&tp, 1) * share as f32 / 20.0;
-                    let mut inp = driver_input(speed, resistance, 1.0);
-                    let engaged = TransmissionState {
-                        gear,
-                        clutch: ClutchState::In,
-                        omega_e: rpm * RPM_TO_RAD,
-                        ..fresh(&tp)
-                    };
-                    let mut st = engaged;
-                    choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
-                    changed += usize::from(st.gear != gear);
-                    let sliding = inp.sensed.as_mut().expect("a Driver-policy reading");
-                    sliding.grip = resistance;
-                    let mut st = engaged;
-                    choose_gear(&mut st, &tp, &construction, &inp, 1.0, felt(&inp));
-                    assert_eq!(
-                        st.gear, gear,
-                        "gear {gear} at {rpm} rpm against {resistance} N, sliding"
-                    );
-                }
-            }
-        }
-        assert!(changed > 0, "the fixture's ample grip changes gears");
-    }
-}
-
 /// A Driver that has felt nothing has chosen no gear, so it engages none from rest: the launch's
 /// free choice relies on the clutch still being open once the first reading arrives.
 #[test]
@@ -2676,119 +2131,6 @@ fn nothing_felt_engages_nothing_from_rest() {
             state.clutch,
             ClutchState::Slip,
             "the first reading launches"
-        );
-    }
-}
-
-/// The free choice at hull rest is the highest launch gear that holds what the Driver feels,
-/// and costs no cut: the launch relies on it. Fixture: every starting gear against no
-/// resistance, a resistance between the launch prices, and one no launch gear holds.
-#[test]
-fn the_free_choice_at_rest_launches_in_the_highest_launch_gear_that_holds() {
-    for (fp, tp) in class_drivetrains() {
-        let top = tp.gears_fwd.len() as u8;
-        let lowest = tp.launch_gears.min(top);
-        for resistance in [
-            0.0,
-            (launch_force(&tp, 1) + launch_force(&tp, lowest)) * 0.5,
-            launch_force(&tp, 1) * 1.5,
-        ] {
-            let inp = driver_input(0.0, resistance, 1.0);
-            let expected = affordable_launch(&tp, &inp, 1.0).unwrap_or(1);
-            for start in 1..=top {
-                let mut state = TransmissionState {
-                    gear: start,
-                    ..fresh(&tp)
-                };
-                choose_gear(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
-                assert_eq!(state.gear, expected, "R={resistance} from gear {start}");
-                assert_eq!(state.shift_ticks, 0, "the choice at rest is free");
-            }
-        }
-    }
-}
-
-/// A hull at rest with its clutch engaged never upshifts: every higher gear launches with less
-/// force. A stalled push relies on it to step down, never up. Fixture: each class and gear,
-/// slipping or engaged, against no resistance, half and all of first gear's launch.
-#[test]
-fn no_upshift_at_hull_rest() {
-    for (fp, tp) in class_drivetrains() {
-        for start in 1..=tp.gears_fwd.len() as u8 {
-            for clutch in [ClutchState::Slip, ClutchState::In] {
-                for share in [0.0, 0.5, 1.0] {
-                    let inp = driver_input(0.0, share * launch_force(&tp, 1), 1.0);
-                    let mut state = TransmissionState {
-                        gear: start,
-                        clutch,
-                        ..fresh(&tp)
-                    };
-                    choose_gear(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
-                    assert!(
-                        state.gear <= start,
-                        "{clutch:?} gear {start} at rest rose to {}",
-                        state.gear
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// A full-pedal push held at rest by an obstacle steps down to first gear and never up: the
-/// stalled hull's push is what it feels, and every lower gear launches with more. Fixture: hull
-/// and belts held at rest, the obstacle returning the push the Driver felt a tick earlier.
-#[test]
-fn a_stalled_full_clutch_push_steps_down() {
-    for (fp, tp) in class_drivetrains() {
-        let construction = construction(&fp);
-        let mass = construction.weight_n() / super::super::derive::G;
-        let mut sense = super::super::sense::DriverSense::for_cut(tp.shift_ticks);
-        let mut state = TransmissionState {
-            gear: tp.launch_gears.min(tp.gears_fwd.len() as u8),
-            clutch: ClutchState::Slip,
-            ..fresh(&tp)
-        };
-        let mut pushed = [0.0_f32; 2];
-        let mut gears = vec![state.gear];
-        // Fixture: ten seconds for every step down.
-        for _ in 0..64 * 10 {
-            let mut inp = input(1.0, 0.0, [0.0; 2], pushed);
-            let forward = bevy::math::Vec3::NEG_Z;
-            let hard = pushed.map(|push| {
-                Some(super::super::stop_contacts::HardReaction {
-                    belt: push,
-                    friction: forward * push,
-                    grip: f32::INFINITY, // Fixture: an obstacle gripping beyond any gear's pull.
-                })
-            });
-            inp.sensed = sense.tick(
-                bevy::math::Vec3::ZERO,
-                forward,
-                0.0,
-                mass,
-                super::super::sense::Contacts {
-                    soft: [bevy::math::Vec3::ZERO; 2],
-                    grip: 0.0,
-                    hard,
-                },
-                inp.dt,
-            );
-            let report = step(&fp, &tp, &mut state, &inp);
-            sense.drove(&report);
-            pushed = report.forces;
-            if gears.last() != Some(&state.gear) {
-                assert!(
-                    state.gear < *gears.last().unwrap(),
-                    "a stalled push rose: {gears:?}"
-                );
-                gears.push(state.gear);
-            }
-        }
-        println!("MEASURED stalled push gears={gears:?}");
-        assert_eq!(
-            state.gear, 1,
-            "a stalled push ends in first gear: {gears:?}"
         );
     }
 }
@@ -3094,14 +2436,6 @@ fn law_arrested_climb_reenters_launch_slip() {
             "arrested intent must not remain an engaged lug"
         );
     }
-}
-
-/// Fixture: nominal 57-tonne construction and its derived 4,750 kg reflected belt.
-fn grade_fixture_fp() -> FixtureConstruction {
-    let mut fp = lab_fp();
-    fp.inertia = TIGER_BELT_INERTIA;
-    fp.grip.side_weight = 57_000.0 * super::super::derive::G / 2.0;
-    fp
 }
 
 /// The player must receive the complete stopped pause followed by exactly one direction cut.
@@ -3532,7 +2866,7 @@ fn free_crank_drag_stops_without_crossing_zero() {
             inp.supply.task_rate = 0.0;
             #[cfg(feature = "bitprobe")]
             let mut probe = TransmissionProbe::default();
-            let (torque, _, _) = crank_free_torque(
+            let (torque, _) = crank_free_torque(
                 &tp,
                 &inp,
                 false,
@@ -3713,83 +3047,6 @@ fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
     a.shift_secs = 3.5;
     a.belt_inertia = f32::MIN_POSITIVE;
     assert!(TransmissionParams::from_authoring(&a).is_err());
-}
-
-/// A gear losing drive over a held window steps down to the highest lower gear in reach that holds
-/// where the cut lands and pulls there more than its own drive by M, wherever its crank sits on
-/// its curve, and stays where no lower gear does: a cut is paid only as an upshift's is. Mutants:
-/// a veto where the crank's net torque rises as revs fall, or where the crank runs above its
-/// torque peak, keeps a crawling gear the next one down relieves; dropping either half of the test
-/// takes a gear that pulls no more than the engaged one, or one the ground lets hold nothing.
-/// Fixture: the Tiger-modelled ladder's top gear at 800 rpm on that curve at 0.3 pedal (drag only
-/// part released, so its net torque rises as revs fall) and at 1300 rpm at full pedal on a curve
-/// peaking at 1000 rpm and falling after; each driving what it meets, then ten times that (more
-/// than any gear in reach pulls there), then half of it on ground granting no more than the hull
-/// meets.
-#[test]
-fn a_slowing_gear_steps_down_only_to_a_gear_that_holds_and_outpulls_it() {
-    let falling = [
-        (800.0, 1300.0),
-        (1000.0, 1850.0),
-        (2100.0, 1700.0),
-        (2500.0, 1686.0),
-        (3000.0, 1639.0),
-    ];
-    let fp = grade_fixture_fp();
-    // Fixture: crank speed (rpm), pedal and resistance (N) per curve.
-    let cases = [
-        (tiger_authoring().torque_nm, 800.0, 0.3, 7_100.0),
-        (&falling[..], 1300.0, 1.0, 40_000.0),
-    ];
-    for (curve, rpm, command, resistance) in cases {
-        let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
-            torque_nm: curve,
-            ..tiger_authoring()
-        })
-        .expect("the fixture curve is admitted");
-        let top = tp.gears_fwd.len() as u8;
-        let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[usize::from(top - 1)];
-        let readings = [
-            (resistance, f32::INFINITY, true),
-            (10.0 * resistance, f32::INFINITY, false),
-            (0.5 * resistance, resistance, false),
-        ];
-        for (drive, grip, steps) in readings {
-            let mut state = TransmissionState {
-                gear: top,
-                clutch: ClutchState::In,
-                omega_e: rpm * RPM_TO_RAD,
-                ..fresh(&tp)
-            };
-            let mut inp = driver_input(speed, resistance, command);
-            let sensed = inp.sensed.as_mut().expect("a Driver-policy reading");
-            sensed.drive_gain = -2.0 * force_margin(&tp);
-            sensed.drive = drive;
-            sensed.grip = grip;
-            choose_gear(
-                &mut state,
-                &tp,
-                &construction(&fp),
-                &inp,
-                command,
-                felt(&inp),
-            );
-            let chosen = (state.gear, state.shift_ticks > 0);
-            if steps {
-                assert_eq!(
-                    chosen,
-                    (top - 1, true),
-                    "{rpm} rpm: the next gear down holds and outpulls the top"
-                );
-            } else {
-                assert_eq!(
-                    chosen,
-                    (top, false),
-                    "{rpm} rpm, drive {drive} N, grip {grip} N: no lower gear both holds and outpulls"
-                );
-            }
-        }
-    }
 }
 
 /// The coast expectation must solve the same force balance below and above the rolling
@@ -4095,55 +3352,28 @@ fn a_steep_torque_branch_is_refused_by_its_slope() {
     );
 }
 
-/// A raw peak beyond fuel cut is unavailable to launch. Both classes must select a capable
-/// gear inside their declared launch domain instead of retaining an out-of-domain cruise gear.
-#[test]
-fn launch_targets_the_peak_available_after_fuel_cut() {
-    for mut spec in [
-        super::super::drive_fixture::compact_spec(),
-        super::super::rig_geom::tiger_spec(),
-    ] {
-        let tr = &mut spec.track.powertrain.transmission;
-        let peak = tr
-            .engine
-            .torque_curve
-            .iter()
-            .map(|point| point.1)
-            .fold(0.0_f32, f32::max);
-        // Fixture: compact's tail becomes 900 N m at 2600 rpm, beyond its 2200 rpm governor.
-        tr.engine.torque_curve.last_mut().unwrap().1 = peak * 1.125;
-        let mut fp = lab_fp();
-        fp.inertia = 3000.0; // Fixture arithmetic coupling.
-        fp.grip.side_weight = spec.mass * super::super::derive::G / 2.0;
-        let tp = tr.params(0.3, 1.0, fp.inertia).unwrap(); // Fixture sprocket radius and half-tread.
-        let inp = driver_input(0.0, 0.0, 1.0);
-        let selected = affordable_launch(&tp, &inp, 1.0)
-            .expect("fuel-governed peak must select a capable launch");
-        assert!(tp.torque_at(tp.launch_omega(1.0) / RPM_TO_RAD) > 0.0);
-        let mut state = TransmissionState {
-            gear: tp.gears_fwd.len() as u8,
-            park: true,
-            ..fresh(&tp)
-        };
-        choose_gear(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
-        assert_eq!(state.gear, selected);
-    }
-}
-
 /// The launch target follows the interior maximum of raw torque times fuel cut, not a knot
-/// or a clamp to governed rpm. Fixture: (100 + 9*x)*(1 - x/100) on the fuel ramp.
+/// or a clamp to governed rpm. Fixture: x rpm past governed, torque `w + 9x` N m across the fuel
+/// ramp of width `w` (the base of `w` keeps the rise at 9 N m/rpm at any width), so the pedal's
+/// torque `(w + 9x)(1 − x/w)` peaks inside the ramp.
 #[test]
 fn launch_peak_can_lie_inside_the_fuel_cut_ramp() {
-    let mut a = tiger_authoring();
-    a.governed_rpm = 1000.0;
-    a.torque_nm = &[
-        (800.0, 100.0),
-        (1000.0, 100.0),
-        (1100.0, 1000.0),
-        (3000.0, 1000.0),
+    let w = engine_control().governor_cut_rpm.value;
+    let governed = 1000.0;
+    let end = governed + 2.0 * w;
+    let curve = [
+        (800.0, w),
+        (governed, w),
+        (governed + w, 10.0 * w),
+        (end, 10.0 * w),
     ];
+    let mut a = tiger_authoring();
+    a.governed_rpm = governed;
+    a.crank_limit_rpm = end;
+    a.torque_nm = &curve;
     let tp = TransmissionParams::from_authoring(&a).unwrap();
-    let expected = 1000.0 + 8.0 / 0.18; // DERIVED vertex of 100 + 8*x - 0.09*x^2.
+    // DERIVED: d/dx (w + 9x)(1 − x/w) = 8 − 18x/w vanishes at x = 4w/9.
+    let expected = governed + 4.0 * w / 9.0;
     assert!((tp.peak_torque_rpm - expected).abs() < 0.01); // Resolution: f32 rpm interpolation.
     assert!(tp.torque_at(tp.peak_torque_rpm) > tp.torque_at(a.governed_rpm));
 }

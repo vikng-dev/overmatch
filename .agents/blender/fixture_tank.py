@@ -93,7 +93,7 @@ TankSpec(
                     reverse_speeds_kmh: [5.0],
                     launch_gears: (2, Derived("nominal gearbox design: either of the two forward gears may start from rest")),
                     max_step: (1, Derived("nominal gearbox design: one selector event moves one gear")),
-                    shift_secs: 0.3,
+                    shift_secs: (0.3, Derived("nominal gearbox design: a shift uncouples the drive for 0.3 s")),
                 ),
                 steering: (
                     radii: [(4.0, 12.0), (6.0, 18.0)],

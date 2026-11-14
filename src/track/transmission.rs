@@ -1,10 +1,10 @@
 //! The joint drivetrain integrates both belts and the crank from construction data.
-//! `step` owns Driver gear/clutch/brake decisions, then solves clutch and steering torque,
-//! work, belt acceleration and crank settlement. `TransmissionState` is its mechanical state;
-//! what the Driver has felt of the hull, a window of samples and a stall's bound, is
-//! `track::sense::DriverSense`. Gear decisions read that ledger (speed over the ground and
-//! resistance), requested pedal and crank rpm. Forces are N, torques N m, belt speeds m/s and
-//! crank speed rad/s. The design narrative lives in track-model architecture section 5a.
+//! `step` runs the Driver's controls, then solves clutch and steering torque, work, belt
+//! acceleration and crank settlement. `TransmissionState` is its mechanical state. The Driver's
+//! gear choice and the ledger it reads are [`super::driver`]; the pulls it judges gears by,
+//! [`viable_pull`] and [`candidate_pull`], are the drivetrain's and live here. Forces are N,
+//! torques N m, belt speeds m/s and crank speed rad/s. The design narrative lives in track-model
+//! architecture section 5a.
 //!
 //! The rejected `STEER_SERVO_BAND` proportional servo loses authority with vehicle scale;
 //! the steering law instead solves its capacity-limited constraint semi-implicitly.
@@ -391,8 +391,7 @@ impl TransmissionParams {
             }
         }
 
-        // A cut of no ticks would change gear with the clutch in, unfelt by the ledger; the
-        // rounded countdown must fit its u8 state field.
+        // The rounded countdown must fit its u8 state field.
         let shift_ticks = Some(a.shift_secs * TICK_HZ)
             .filter(|ticks| ticks.is_finite() && ticks.round() <= f32::from(u8::MAX))
             .and_then(|ticks| NonZeroU8::new(ticks.round() as u8))
@@ -900,8 +899,8 @@ pub struct TransmissionInput {
     /// Each reaction's slope against its own belt's speed over the tick (N s/m); the belt solves
     /// against it implicitly.
     pub reaction_slopes: [f32; 2],
-    /// What the Driver feels of the hull this tick; `None` until the ledger has closed a tick.
-    pub sensed: Option<super::sense::Sensed>,
+    /// What the Driver feels of the hull this tick; `None` until the ledger has closed two ticks.
+    pub sensed: Option<super::driver::Sensed>,
     pub dt: f32,
 }
 
@@ -930,10 +929,6 @@ pub struct TransmissionReport {
     /// The clutch held the crank to the belts at the tick's end, so the engaged gear set the
     /// drive. A slipping clutch sends its capacity, or the crank's stored speed, whatever the gear.
     pub locked: bool,
-    /// The Driver's idle catch fueled the crank past its command this tick ([`engine_torques`]):
-    /// torque no command asked for. Full pedal fuels all the catch can ask at any task rate, so
-    /// there it never does.
-    pub caught: bool,
     /// Power-conservation scale applied to the drive/steer forces this tick (1 = unconstrained).
     pub power_scale: f32,
     /// Combustion power capacity at the pre-tick operating point (W). The work gate also
@@ -990,6 +985,18 @@ fn engine_torques(
         .clamp(0.0, idle_capacity)
         .min(rate * (curve + cut_drag));
     [induced, (catch - induced).max(0.0), drag]
+}
+
+/// The fuel `command` and the idle catch give the crank at `omega` (rad/s) beats its drag: the
+/// Driver chooses no gear for a crank that cannot drive.
+pub(super) fn fuel_beats_drag(
+    tp: &TransmissionParams,
+    supply: DriveSupply,
+    omega: f32,
+    command: f32,
+) -> bool {
+    let [fuel, catch, drag] = engine_torques(tp, supply, omega, command);
+    fuel + catch > drag.abs()
 }
 
 /// The game's driving and damage model: the Driver's idle catch is work by the Drive task,
@@ -1105,7 +1112,7 @@ impl DriverResolution {
     }
 }
 
-fn force_margin(tp: &TransmissionParams) -> f32 {
+pub(super) fn force_margin(tp: &TransmissionParams) -> f32 {
     DriverResolution::load().margin_n(tp)
 }
 
@@ -1144,7 +1151,7 @@ fn gear_force(
     clippy::too_many_arguments,
     reason = "the price reads construction, supply, shaft speed, ratio, command, load and the prior clutch"
 )]
-pub(crate) fn candidate_pull(
+pub(super) fn candidate_pull(
     tp: &TransmissionParams,
     fp: &DriveConstruction,
     supply: DriveSupply,
@@ -1157,6 +1164,79 @@ pub(crate) fn candidate_pull(
     let at_rest = at.abs() < PARK_ENGAGE_SPEED;
     let clutch = engagement(tp, prior, at_rest, at * ratio / tp.sprocket_radius, command);
     gear_force(tp, fp, supply, at, ratio, command, load, clutch)
+}
+
+/// The most a gear holds on the pedal's own fuel (N, before the grip cap), its shaft at `at` (m/s
+/// along the ladder) and its clutch closing from `prior` as delivery engages it ([`engagement`]).
+/// A slipping clutch holds the crank at the launch rpm until the shaft reaches the launch speed,
+/// so the gear holds its slip pull. A held clutch keeps the crank on the shaft as the hull slows,
+/// lugging down to the idle guard ([`crank_guards`]), so the gear holds a speed wherever its pull
+/// at or below `at` meets the load: the most any crank speed down there gives. The idle catch
+/// fuels past the pedal and counts for nothing; the clutch caps the torque.
+pub(crate) fn viable_pull(
+    tp: &TransmissionParams,
+    supply: DriveSupply,
+    at: f32,
+    ratio: f32,
+    command: f32,
+    prior: ClutchState,
+) -> f32 {
+    let shaft = at * ratio / tp.sprocket_radius;
+    let crank = match engagement(tp, prior, at.abs() < PARK_ENGAGE_SPEED, shaft, command) {
+        ClutchState::Slip => {
+            let launch = tp.launch_omega(command);
+            launch..=launch
+        }
+        _ => {
+            // An unguarded crank lugs down to rest.
+            let floor = idle_floor(tp, supply, 0.0).unwrap_or(0.0);
+            floor..=shaft.max(floor)
+        }
+    };
+    let capacity = supply.transmission_condition * tp.clutch_capacity;
+    pedal_peak(tp, supply, command, crank).min(capacity) * ratio / tp.sprocket_radius
+}
+
+/// The most torque the pedal's own fuel nets at the crank over crank speeds `crank` (rad/s, N m).
+/// Between the curve's points and the governor ramp's ends the net torque is quadratic in crank
+/// speed (a linear curve under a linear fuel ramp, less affine drag), so each span's ends and its
+/// parabola's vertex bound it.
+fn pedal_peak(
+    tp: &TransmissionParams,
+    supply: DriveSupply,
+    command: f32,
+    crank: std::ops::RangeInclusive<f32>,
+) -> f32 {
+    let (low, high) = crank.into_inner();
+    let net = |omega: f32| {
+        let [fuel, _, drag] = engine_torques(tp, supply, omega, command);
+        fuel - drag
+    };
+    let governed = tp.engine.governed_rpm;
+    // The curve's points and the governor ramp's ends, each ascending, merged in order.
+    let mut curve = tp.engine.torque_nm.iter().map(|&(rpm, _)| rpm).peekable();
+    let mut ramp = [governed, governed + engine_control().governor_cut_rpm.value]
+        .into_iter()
+        .peekable();
+    let knots = std::iter::from_fn(|| match (curve.peek(), ramp.peek()) {
+        (Some(c), Some(r)) if r < c => ramp.next(),
+        (Some(_), _) => curve.next(),
+        (None, _) => ramp.next(),
+    });
+    knots
+        .map(|rpm| rpm * RPM_TO_RAD)
+        .filter(|&omega| omega > low && omega < high)
+        .chain([high])
+        .scan(low, |from, to| Some([std::mem::replace(from, to), to]))
+        .flat_map(|span| {
+            let [ends @ .., mid] = [span[0], span[1], 0.5 * (span[0] + span[1])].map(net);
+            // The span's parabola in `t` from -1 to 1 across it: `mid + slope t + bend t²`.
+            let (slope, bend) = (0.5 * (ends[1] - ends[0]), 0.5 * (ends[0] + ends[1]) - mid);
+            let vertex = (bend < 0.0 && slope.abs() < -2.0 * bend)
+                .then(|| mid - slope * slope / (4.0 * bend));
+            ends.into_iter().chain(vertex)
+        })
+        .fold(f32::NEG_INFINITY, f32::max)
 }
 
 /// The detent's steering ratio `κ` for `gear` on the engaged ladder: 0 straight.
@@ -1172,141 +1252,6 @@ fn detent_kappa(tp: &TransmissionParams, st: &TransmissionState, gear: u8) -> f3
         1 => wide,
         2 => tight,
         _ => panic!("the transmission admits only straight, wide and tight detents"),
-    }
-}
-
-/// One Driver decision on what it felt, at the requested pedal `command`. The design, the
-/// measurements behind each clause and the rejected forms are
-/// `.agents/docs/design/track-model/architecture.md` section 5a.
-///
-/// Speed `v` (m/s) and resistance `R` (N) read along the engaged ladder, `v` floored at rest; at a
-/// stall `R` is at least the stall's bound ([`super::sense::Sensed::stall`]). A candidate carries
-/// `R` plus its detent's share of the belt push difference, `s·κ·ΔR` ([`BeltTick::tied_mean`]),
-/// and *holds* when its pull exceeds that load by M ([`force_margin`]). Its pull is
-/// [`candidate_pull`] where the cut lands, `v − R·t_cut/M_c` and no lower than rest, its clutch
-/// closing from out, capped by the contacts' grip budget ([`super::sense::Sensed::grip`]). The
-/// engaged gear is observed, never priced: its drive and drivetrain gain over a window its clutch
-/// held whole ([`super::sense::Sensed::observed`]).
-/// 1. Clutch out at hull rest: the highest launch gear that holds, at a stall none above the
-///    current gear nor at or above the stall's gear; else first where it
-///    offers more spare than the current gear. Free.
-/// 2. The hull stalls now ([`super::sense::Sensed::stalled`]): the lowest gear within `max_step`.
-///    The idle catch carried the engaged gear through a held window
-///    ([`super::sense::Sensed::caught`]) and still fuels at this demand: the highest lower gear
-///    within `max_step` that holds where it lands and pulls there more than the engaged gear's
-///    drive by M, else the lowest within `max_step` whose crank lands short of completed fuel cut,
-///    else none. A held window losing more than M: that highest holding gear, else none.
-/// 3. Straight, clutch in, a held window and the hull moving where the cut lands: of the higher
-///    gears within `max_step` that hold where they land and pull there more than
-///    the engaged gear's drive by M, the one that pulls hardest, the higher on a tie.
-///
-/// Clauses 2 and 3 pay the cut. A cut in flight, no pull asked or fuel that cannot beat drag
-/// choose nothing. At one landing where each gear's price meets its observed drive, a lower gear
-/// that outpulls a higher one by M and a higher one that outpulls the lower by M cannot both exist,
-/// so there a slowing step down and an upshift cannot undo each other. Clause 2's lowest-gear steps
-/// ask no outpull, and steady pedal and load do not by themselves fix the landing, so neither is
-/// covered.
-fn choose_gear(
-    st: &mut TransmissionState,
-    tp: &TransmissionParams,
-    fp: &DriveConstruction,
-    inp: &TransmissionInput,
-    command: f32,
-    sensed: super::sense::Sensed,
-) {
-    if st.shift_ticks != 0 || command <= 0.0 {
-        return;
-    }
-    let [fuel, catch, drag] = engine_torques(tp, inp.supply, st.omega_e, command);
-    if fuel + catch <= drag.abs() {
-        return;
-    }
-    let (ladder, dir) = if st.reverse {
-        (&tp.gears_rev, -1.0)
-    } else {
-        (&tp.gears_fwd, 1.0)
-    };
-    let top = ladder.len() as u8;
-    let speed = (dir * sensed.speed).max(0.0);
-    // A stalled hull meets at least the push that failed to move it.
-    let resistance = match sensed.stall {
-        Some(stall) if stall.dir == dir => (dir * sensed.resistance).max(stall.push),
-        _ => dir * sensed.resistance,
-    };
-    let margin = force_margin(tp);
-    let load = |gear: u8| {
-        resistance + branch(inp.steer) * detent_kappa(tp, st, gear) * sensed.push_difference
-    };
-    let pull = |gear: u8, at: f32, prior: ClutchState| {
-        let ratio = ladder[usize::from(gear - 1)];
-        candidate_pull(tp, fp, inp.supply, at, ratio, command, load(gear), prior).min(sensed.grip)
-    };
-    let spare = |gear: u8, at: f32, prior: ClutchState| pull(gear, at, prior) - load(gear);
-    let stall = sensed.stall.filter(|stall| stall.dir == dir);
-    if st.clutch == ClutchState::Out && speed < PARK_ENGAGE_SPEED {
-        // A gear observed failing at this stall is not priced again, nor any that pulls less:
-        // the bound is a floor, so no gear weaker than the current one is taken against it.
-        let highest = stall.map_or(top, |stall| stall.gear.saturating_sub(1).min(st.gear));
-        st.gear = (1..=tp.launch_gears.min(highest))
-            .rev()
-            .find(|&gear| spare(gear, speed, st.clutch) > margin)
-            .unwrap_or_else(|| {
-                // No launch gear holds: first gear is the most the ladder has, unless the ground
-                // grants it no more than the current gear.
-                if spare(1, speed, st.clutch) > spare(st.gear, speed, st.clutch) {
-                    1
-                } else {
-                    st.gear
-                }
-            });
-        return;
-    }
-    // A hull the cut brings to rest is held there by the park latch, so no cut lands below rest.
-    let landing = (speed
-        - resistance * f32::from(tp.shift_ticks.get()) / TICK_HZ / coupled_mass(fp))
-    .max(0.0);
-    let lowest = st.gear.saturating_sub(tp.max_step).max(1);
-    // Under a pull a candidate's clutch closes from out at or above idle ([`engagement`]), where
-    // the catch adds nothing, so its price is the pedal's own.
-    let holding_below = || {
-        (lowest..st.gear).rev().find(|&gear| {
-            let pull = pull(gear, landing, ClutchState::Out);
-            pull - load(gear) > margin && pull > dir * sensed.drive + margin
-        })
-    };
-    // A crank landing at or past completed fuel cut turns against its drag alone.
-    let fueled_landing = |gear: u8| {
-        let shaft = landing * ladder[usize::from(gear - 1)] / tp.sprocket_radius;
-        tp.fuel_cut(shaft / RPM_TO_RAD) > 0.0
-    };
-    let chosen = if stall.is_some() && sensed.stalled {
-        // A stall bounds what the hull meets from below only: the lowest gear in reach pulls most.
-        Some(lowest).filter(|&gear| gear < st.gear)
-    } else if sensed.caught && catch > 0.0 {
-        // The catch carried the gear and still fuels at this demand, so the gear holds only on
-        // torque the pedal does not ask for. A window carried at part pedal is no verdict on full.
-        holding_below().or_else(|| (lowest..st.gear).find(|&gear| fueled_landing(gear)))
-    } else if sensed.observed && dir * sensed.drive_gain < -margin {
-        holding_below()
-    } else if sensed.observed
-        && st.steer_step == 0
-        && st.clutch == ClutchState::In
-        && landing >= PARK_ENGAGE_SPEED
-        && st.gear < top
-    {
-        // A detent turn's radius belongs to its gear: no upshift changes it.
-        (st.gear + 1..=st.gear.saturating_add(tp.max_step).min(top))
-            .filter(|&gear| spare(gear, landing, ClutchState::Out) > margin)
-            .map(|gear| (gear, pull(gear, landing, ClutchState::Out)))
-            .filter(|&(_, pull)| pull > dir * sensed.drive + margin)
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(gear, _)| gear)
-    } else {
-        None
-    };
-    if let Some(gear) = chosen {
-        st.gear = gear;
-        st.shift_ticks = tp.shift_ticks.get();
     }
 }
 
@@ -1574,15 +1519,15 @@ fn driver(
         (input.throttle * dir).clamp(0.0, 1.0)
     };
     update_steer_detent(st, input.steer);
-    // Before the ledger closes its first tick the Driver has felt nothing, so it chooses nothing.
-    // A request against the engaged ladder asks no pull of it: it brakes, then waits for the swap.
+    // Before the ledger has a reading the Driver has felt nothing, so it chooses nothing. A
+    // request against the engaged ladder asks no pull of it: it brakes, then waits for the swap.
     if work && let Some(sensed) = input.sensed {
         let price_command = if service || opposing {
             0.0
         } else {
             command.abs().min(1.0)
         };
-        choose_gear(st, tp, fp, &input, price_command, sensed);
+        super::driver::choose(st, tp, fp, &input, price_command, sensed);
     }
     let shifting = advance_shift_window(st);
     if work {
@@ -1740,7 +1685,7 @@ fn engagement(
 /// Open rest requests no fuel; construction drag remains unscaled.
 /// `engine_work` charges sprocket work against combustion and stored crank energy, including
 /// steering work with the main clutch open. The governor width lives in assets/driving/engine.ron.
-/// Returns the free torque, the combustion power capacity and [`TransmissionReport::caught`].
+/// Returns the free torque and the combustion power capacity.
 #[expect(
     clippy::too_many_arguments,
     reason = "the free-torque law's inputs: params, input, engagement, throttle, belt speed, ratio and both crank speeds"
@@ -1756,7 +1701,7 @@ fn crank_free_torque(
     omega_e: f32,
     omega_idle: f32,
     #[cfg(feature = "bitprobe")] probe: &mut TransmissionProbe,
-) -> (f32, f32, bool) {
+) -> (f32, f32) {
     let u_fuel = if engaged {
         propulsive
     } else if inp.steer.abs() >= DEAD || shifting {
@@ -1801,18 +1746,23 @@ fn crank_free_torque(
         probe.tau_free = tau_free;
         probe.power_available = p_avail;
     }
-    (tau_free, p_avail, tau_idle > 0.0)
+    (tau_free, p_avail)
 }
 
-/// The geared steering member's signed ratio `s·κ` of belt half-difference to |mean| this tick;
-/// zero when straight.
+/// The geared steering member's signed ratio `s·κ` of belt half-difference to |mean| this tick
+/// with `gear` engaged; zero when straight.
 ///
-/// κ is indexed by the active gear on its own forward or reverse ladder; `d` follows the
+/// κ is indexed by `gear` on the engaged forward or reverse ladder; `d` follows the
 /// steer SIGN regardless of travel direction — the superimposed steering shaft is independent of
 /// the gear's direction, historically and mechanically. The detent (`st.steer_step`) was updated
 /// for this tick before gear selection: one detent truth per tick.
-fn steer_ratio(tp: &TransmissionParams, st: &TransmissionState, inp: &TransmissionInput) -> f32 {
-    branch(inp.steer) * detent_kappa(tp, st, st.gear)
+pub(super) fn steer_ratio(
+    tp: &TransmissionParams,
+    st: &TransmissionState,
+    inp: &TransmissionInput,
+    gear: u8,
+) -> f32 {
+    branch(inp.steer) * detent_kappa(tp, st, gear)
 }
 
 /// The sign of `x`, zero at zero: the |m| branch a geared steering solve linearizes on.
@@ -1841,7 +1791,7 @@ fn steering_tie(
     if neutral_turn(inp, m) {
         ([0.5, -0.5], inp.steer * tp.neutral_d_full)
     } else {
-        let e = steer_ratio(tp, st, inp) * side;
+        let e = steer_ratio(tp, st, inp, st.gear) * side;
         ([(1.0 - e) / 2.0, -(1.0 + e) / 2.0], 0.0)
     }
 }
@@ -2307,7 +2257,7 @@ pub(crate) fn step(
 
     let engaged = st.clutch != ClutchState::Out;
 
-    let (tau_free, p_avail, caught) = crank_free_torque(
+    let (tau_free, p_avail) = crank_free_torque(
         tp,
         inp,
         engaged,
@@ -2453,7 +2403,6 @@ pub(crate) fn step(
         pulling: propulsive >= DEAD,
         driving: tau_c > 0.0,
         locked,
-        caught,
         power_scale,
         power_available: p_avail,
         #[cfg(feature = "bitprobe")]

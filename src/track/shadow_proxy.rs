@@ -110,23 +110,14 @@ use bevy::prelude::*;
 
 use super::loop_geom;
 
-/// How many fitted frames a bound rig may go without a ribbon before the silence is worth a
-/// warning (counted as [`ProxySide::pending_frames`] counts).
-///
-/// The swap is atomic (see [`ProxySide::mesh`]) so an unbuilt proxy costs nothing but performance
-/// — the shoes are still casting and the picture is still right. But "the optimisation quietly did
-/// not happen" is exactly the kind of thing that survives a year, so it gets said out loud. ~2 s at
-/// 60 fps (DERIVED: 120 frames / 60 fps): long enough that a slow first frame or a mid-bind belt never trips it.
-pub(crate) const PROXY_READY_GRACE_FRAMES: u32 = 120;
-
 /// One side's proxy, held on the side's rig entry.
 pub(crate) struct ProxySide {
     /// The ribbon entity — a child of the tank root, identity transform, so its mesh is authored
     /// directly in hull space (the frame the belt joints already live in). It carries no `Mesh3d`
     /// until [`ProxySide::mesh`] exists.
     pub(crate) entity: Entity,
-    /// This side's OWN mesh asset, created by the first fit that closes a loop and holding that
-    /// geometry from its first frame. Never shared between tanks or sides: two tanks stand on
+    /// This side's OWN mesh asset, created by the first fit and holding that geometry from its
+    /// first frame. Never shared between tanks or sides: two tanks stand on
     /// different ground, and their belts differ every frame.
     ///
     /// No empty ribbon exists, in `Assets<Mesh>` or on an entity. bevy_render 0.19.1 logs every
@@ -134,19 +125,11 @@ pub(crate) struct ProxySide {
     /// mesh with no positions fails the shadow prepass pipeline's validation (vertex input
     /// `Location[0]` not provided), which quits the client.
     ///
-    /// `Some` is also the CASTER SWAP's readiness. The shoes are silenced on the frame it is set, never at spawn: the first fit
-    /// can legitimately be late (no `TrackField` yet, a replica whose interpolated `TrackDrive` is
-    /// not yet visible, a mid-bind belt with under three joints), and silencing the shoes before it
-    /// lands is a tank with NO belt shadow at all, silently. Silencing them only against geometry
-    /// that exists makes the worst case "the optimisation did not happen", which is a cost, not a
-    /// bug.
+    /// `Some` is also the CASTER SWAP's readiness. The shoes are silenced on the frame it is set,
+    /// never at spawn: the first fit can legitimately be late (no `TrackField` yet, a replica whose
+    /// interpolated `TrackDrive` is not yet visible), and silencing the shoes before it lands is a
+    /// tank with NO belt shadow at all, silently.
     pub(crate) mesh: Option<Handle<Mesh>>,
-    /// Fitted frames since bind with no ribbon yet — the counter behind
-    /// [`PROXY_READY_GRACE_FRAMES`]. It counts only frames that reach [`ProxySide::fit`] with joints
-    /// that cannot close a loop, and stops once [`ProxySide::mesh`] exists. A tank
-    /// `drive_track_views` skips (no `TrackField`, no `TrackDrive` yet) never reaches `fit`, so
-    /// those late-fit routes never advance it and never report `Overdue`.
-    pub(crate) pending_frames: u32,
     /// This side's cross-section, resolved from the measured shoe at bind.
     pub(crate) section: Section,
     /// Retained hull-local shape and mesh buffers; independent of the root transform.
@@ -156,13 +139,10 @@ pub(crate) struct ProxySide {
 /// What the view layer owes the world after folding one frame's belt into a proxy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProxyStep {
-    /// Nothing to do — the ribbon is already carrying the shadow, or is still not ready and the
-    /// shoes are still carrying it.
+    /// Nothing to do — the ribbon is already carrying the shadow.
     Idle,
     /// The ribbon became real this frame. Give its entity the mesh and silence the shoes now.
     Silence { mesh: Handle<Mesh> },
-    /// [`PROXY_READY_GRACE_FRAMES`] fitted frames have passed with no ribbon. Say so, once.
-    Overdue,
 }
 
 impl ProxySide {
@@ -172,46 +152,33 @@ impl ProxySide {
         Self {
             entity,
             mesh: None,
-            pending_frames: 0,
             section,
             ribbon: RibbonCache::default(),
         }
     }
 
-    /// Fold one frame's drawn pin `joints` into the ribbon and say what the caller must do. The
-    /// ribbon follows the live belt: one `Mesh` asset per tank SIDE (never shared: two tanks are on
-    /// different ground), rewritten in place only when the hull-local joints change. `meshes` is
-    /// dereferenced mutably only when the ribbon is created or changes, so a settled ribbon leaves
-    /// a `ResMut` store unchanged.
-    ///
-    /// This is the atomicity, in the one place it can be tested without a GPU: the mesh asset is
-    /// created on the first frame the joints close a loop, already holding that loop, the shoes are
-    /// silenced exactly then and exactly once, and a proxy that never builds creates no asset and
-    /// silences nothing.
+    /// Fold one frame's drawn pin `joints` into the ribbon and say what the caller must do: the first
+    /// fit creates the side's asset and asks for the swap ([`ProxySide::mesh`]); a later fit
+    /// rewrites it in place only when the hull-local joints change. `meshes` is dereferenced
+    /// mutably only when the ribbon is created or changes, so a settled ribbon leaves a `ResMut`
+    /// store unchanged.
     pub(crate) fn fit(
         &mut self,
         mut meshes: impl DerefMut<Target = Assets<Mesh>>,
         joints: &[Vec2],
     ) -> ProxyStep {
-        if let Some(handle) = &self.mesh {
-            if self.ribbon.needs_update(joints)
-                && let Some(mut mesh) = meshes.get_mut(handle)
-            {
-                self.ribbon.write(&mut mesh, joints, self.section);
-            }
-            return ProxyStep::Idle;
-        }
-        if let Some(mesh) = self.ribbon.build(joints, self.section) {
-            let mesh = meshes.add(mesh);
+        let Some(handle) = &self.mesh else {
+            let mesh = meshes.add(self.ribbon.build(joints, self.section));
             self.mesh = Some(mesh.clone());
             return ProxyStep::Silence { mesh };
+        };
+        if self.ribbon.needs_update(joints) {
+            let mut mesh = meshes
+                .get_mut(handle)
+                .expect("a side's ribbon asset lives while the side holds its handle");
+            self.ribbon.write(&mut mesh, joints, self.section);
         }
-        self.pending_frames += 1;
-        if self.pending_frames == PROXY_READY_GRACE_FRAMES {
-            ProxyStep::Overdue
-        } else {
-            ProxyStep::Idle
-        }
+        ProxyStep::Idle
     }
 }
 
@@ -237,6 +204,8 @@ impl Section {
     /// `pin_to_inner`/`pin_to_outer` are the measured plate offsets (never `thickness/2`); `width`
     /// is the measured `Link_Box` lateral extent; `center_x` is this side's `link_center_x`. Every
     /// one of the four comes from the model, so this takes no constants and a new tank needs none.
+    /// The model's admission refuses a width or plate offset that is not finite and positive
+    /// ([`super::marker_model::DerivedModel`]), so every section has volume.
     pub(crate) fn from_shoe(
         center_x: f32,
         width: f32,
@@ -245,11 +214,9 @@ impl Section {
     ) -> Self {
         Self {
             center_x,
-            // `max` rather than an assert: a future model with a degenerate shoe should draw a
-            // thin ribbon, not panic in a view system. Same for the radial pair below.
-            half_width: (width * 0.5).max(1e-3),
-            outer: pin_to_outer.max(1e-3),
-            inner: -pin_to_inner.max(1e-3),
+            half_width: width * 0.5,
+            outer: pin_to_outer,
+            inner: -pin_to_inner,
         }
     }
 }
@@ -282,50 +249,46 @@ pub(crate) fn proxy_material() -> StandardMaterial {
 }
 
 /// A bound ribbon has a fixed station count, loop winding and cross-section. Rebinding the rig
-/// constructs a fresh cache. Invalid or incomplete joint lists leave the last valid ribbon alone.
-/// Positions live in the mesh's retained attribute buffer; the joint copy is the equality key.
+/// constructs a fresh cache. Positions live in the mesh's retained attribute buffer; the joint copy
+/// is the equality key.
 #[derive(Default)]
 pub(crate) struct RibbonCache {
     stations: Vec<Vec2>,
     winding: f32,
-    #[cfg(test)]
-    topology_builds: usize,
 }
 
 impl RibbonCache {
     pub(crate) fn needs_update(&self, stations: &[Vec2]) -> bool {
-        stations.len() >= 3
-            && (self.stations.is_empty() || self.stations.len() == stations.len())
-            && self.stations != stations
+        self.stations != stations
     }
 
-    /// The first fit: the whole ribbon, topology and all, or `None` while the joints cannot close
-    /// a loop (under three). Fixes the station count and winding for the life of the bound rig.
-    /// Called only while [`ProxySide::mesh`] is `None`; that field is the one record of whether
-    /// the ribbon is built.
-    pub(crate) fn build(&mut self, stations: &[Vec2], section: Section) -> Option<Mesh> {
-        if !self.needs_update(stations) {
-            return None;
-        }
-        debug_assert!(self.stations.is_empty(), "a built ribbon never rebuilds");
+    /// The first fit: the whole ribbon, topology and all. Fixes the station count and winding for
+    /// the life of the bound rig. Called only while [`ProxySide::mesh`] is `None`; that field is
+    /// the one record of whether the ribbon is built.
+    pub(crate) fn build(&mut self, stations: &[Vec2], section: Section) -> Mesh {
+        assert!(
+            stations.len() >= 3,
+            "the wrap resamples to the admitted `track.link_count`, at least three links"
+        );
+        assert!(self.stations.is_empty(), "a built ribbon never rebuilds");
         self.winding = loop_geom::loop_winding(stations);
         self.stations.extend_from_slice(stations);
-        #[cfg(test)]
-        {
-            self.topology_builds += 1;
-        }
-        Some(build_ribbon(stations, section, self.winding))
+        build_ribbon(stations, section, self.winding)
     }
 
     /// Every later fit: write only a changed hull-local shape into the retained position buffer
     /// of the mesh [`RibbonCache::build`] returned. Callers check `needs_update` before borrowing
     /// the asset mutably, so a settled ribbon emits no asset modification for render extraction.
     pub(crate) fn write(&mut self, mesh: &mut Mesh, stations: &[Vec2], section: Section) {
-        debug_assert!(self.needs_update(stations) && !self.stations.is_empty());
+        assert_eq!(
+            stations.len(),
+            self.stations.len(),
+            "the wrap resamples every frame to the rig's station count"
+        );
         let Some(VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
         else {
-            return;
+            panic!("`build_ribbon` gives the ribbon its positions as Float32x3");
         };
         ribbon_vertices(stations, section, self.winding, |i, position, _, _, _| {
             positions[i] = position;
@@ -416,9 +379,8 @@ fn build_ribbon(stations: &[Vec2], section: Section, winding: f32) -> Mesh {
 }
 
 #[cfg(test)]
-fn ribbon_mesh(stations: &[Vec2], section: Section) -> Option<Mesh> {
-    (stations.len() >= 3)
-        .then(|| build_ribbon(stations, section, loop_geom::loop_winding(stations)))
+fn ribbon_mesh(stations: &[Vec2], section: Section) -> Mesh {
+    build_ribbon(stations, section, loop_geom::loop_winding(stations))
 }
 
 /// Six times the signed volume of a closed triangle soup (the divergence-theorem sum). Positive when
@@ -481,9 +443,7 @@ mod tests {
             if reverse {
                 stations.reverse();
             }
-            let mut mesh = cache
-                .build(&stations, tiger_section())
-                .expect("a closed loop builds");
+            let mut mesh = cache.build(&stations, tiger_section());
             let Some(Indices::U32(indices)) = mesh.indices() else {
                 panic!("indexed ribbon")
             };
@@ -505,7 +465,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 assert!(cache.needs_update(&shape));
                 cache.write(&mut mesh, &shape, tiger_section());
-                let reference = ribbon_mesh(&shape, tiger_section()).unwrap();
+                let reference = ribbon_mesh(&shape, tiger_section());
                 assert_eq!(positions(&mesh), positions(&reference));
                 let Some(Indices::U32(current)) = mesh.indices() else {
                     panic!("indexed ribbon")
@@ -525,11 +485,7 @@ mod tests {
                 assert_eq!(mesh.attribute(Mesh::ATTRIBUTE_UV_0), Some(&uv));
                 assert_eq!(cache.stations.as_ptr(), joint_ptr);
                 assert!(!cache.needs_update(&shape));
-                assert_eq!(cache.topology_builds, 1);
             }
-            assert!(!cache.needs_update(&[]));
-            assert!(!cache.needs_update(&ring(3, 1.0)));
-            assert_eq!(cache.topology_builds, 1);
         }
     }
 
@@ -538,7 +494,7 @@ mod tests {
     #[test]
     fn the_ribbon_costs_eight_triangles_per_link() {
         for count in [12, 97, 240] {
-            let mesh = ribbon_mesh(&ring(count, 1.0), tiger_section()).expect("a closed belt");
+            let mesh = ribbon_mesh(&ring(count, 1.0), tiger_section());
             let Some(Indices::U32(indices)) = mesh.indices() else {
                 panic!("the ribbon is indexed");
             };
@@ -549,17 +505,8 @@ mod tests {
         assert_eq!(97 * 8, 776);
     }
 
-    /// A degenerate belt leaves the caller holding `None` rather than a folded tube.
-    #[test]
-    fn a_belt_with_no_loop_builds_nothing() {
-        assert!(ribbon_mesh(&[], tiger_section()).is_none());
-        assert!(ribbon_mesh(&ring(2, 1.0), tiger_section()).is_none());
-        assert!(ribbon_mesh(&ring(3, 1.0), tiger_section()).is_some());
-    }
-
-    /// The inset is the acne guard, so it is the thing worth pinning: every ribbon vertex sits
-    /// strictly INSIDE the measured shoe envelope, by at least the two margins, on both a CCW and a
-    /// CW belt (the wrap is free to emit either winding).
+    /// The ribbon is flush with the measured shoe: every vertex sits within its envelope, on both a
+    /// CCW and a CW belt (the wrap is free to emit either winding).
     #[test]
     fn the_ribbon_stays_inside_the_shoe_envelope() {
         let section = tiger_section();
@@ -568,9 +515,8 @@ mod tests {
             if reversed {
                 stations.reverse();
             }
-            let mesh = ribbon_mesh(&stations, section).expect("a closed belt");
+            let mesh = ribbon_mesh(&stations, section);
             for p in positions(&mesh) {
-                // Lateral: inside `link_center_x ± width/2`, by the lateral margin.
                 let dx = (p.x - CENTER_X).abs();
                 assert!(
                     dx <= WIDTH * 0.5 + 1e-4,
@@ -601,7 +547,7 @@ mod tests {
             if reversed {
                 stations.reverse();
             }
-            let mesh = ribbon_mesh(&stations, tiger_section()).expect("a closed belt");
+            let mesh = ribbon_mesh(&stations, tiger_section());
             let Some(Indices::U32(indices)) = mesh.indices() else {
                 panic!("the ribbon is indexed");
             };
@@ -639,19 +585,9 @@ mod tests {
         )
     }
 
-    /// THE regression, in its surviving half: whatever the ribbon's material is, its shadow draw
-    /// must not be routed through the prepass fragment shader.
-    ///
-    /// The invisibility half of this test is GONE, and deliberately: the ribbon is hidden by its
-    /// `VisualScope::SHADOW_PROXY` channel now, which `render_policy` pins ("no camera draws
-    /// shadow-only geometry", "the sun reaches every channel"). The day this module shipped, the
-    /// material had to satisfy BOTH demands at once and picked the wrong alpha mode to do it —
-    /// `AlphaMode::Blend` at alpha 0, which draws nothing and casts nothing, and which three A/B
-    /// screenshots called "indistinguishable". Splitting the two demands is exactly what made the
-    /// material's job trivial again.
-    ///
-    /// So this is the transparency TRIPWIRE: reach for an alpha trick here and it fails, with the
-    /// decode attached.
+    /// The ribbon's shadow is its opaque depth draw, and the shadow pass discards a material that
+    /// may discard before it writes depth; the ribbon's invisibility is its
+    /// `VisualScope::SHADOW_PROXY` channel, which `render_policy` pins, never its material.
     #[test]
     fn the_proxy_material_survives_the_shadow_pass() {
         let material = proxy_material();
@@ -674,9 +610,8 @@ mod tests {
         ProxySide::new(Entity::PLACEHOLDER, tiger_section())
     }
 
-    /// Invariant: no empty ribbon mesh exists. Frames whose joints cannot close a loop create no
-    /// asset at all, and the first frame that can creates the asset already holding the whole
-    /// ribbon and silences the shoes, exactly once. The renderer relies on the first half: an
+    /// Invariant: no empty ribbon mesh exists. The first fit creates the asset already holding the
+    /// whole ribbon and silences the shoes, exactly once. The renderer relies on the first half: an
     /// empty mesh on a shadow caster fails the prepass pipeline's validation and quits the client.
     /// The caster swap relies on the second: shoes silenced before geometry exists leave a tank
     /// with no belt shadow. ASSUMED synthetic rings, independent of any tank asset.
@@ -684,14 +619,6 @@ mod tests {
     fn the_ribbon_asset_is_born_whole_on_the_frame_the_shoes_are_silenced() {
         let mut meshes = Assets::<Mesh>::default();
         let mut side = fresh_side();
-        for joints in [vec![], ring(2, 1.0)] {
-            for _ in 0..10 {
-                assert_eq!(side.fit(&mut meshes, &joints), ProxyStep::Idle);
-            }
-        }
-        assert!(side.mesh.is_none(), "no loop, no ribbon");
-        assert!(meshes.is_empty(), "no loop, no mesh asset");
-
         let stations = ring(48, 2.0);
         let ProxyStep::Silence { mesh } = side.fit(&mut meshes, &stations) else {
             panic!("the first closed loop is the swap");
@@ -703,7 +630,7 @@ mod tests {
         assert_eq!(meshes.len(), 1);
 
         let moved: Vec<Vec2> = stations.iter().map(|p| *p * 1.01).collect();
-        for joints in [&moved, &stations, &vec![]] {
+        for joints in [&moved, &stations] {
             assert_eq!(
                 side.fit(&mut meshes, joints),
                 ProxyStep::Idle,
@@ -717,26 +644,32 @@ mod tests {
         );
         assert_eq!(
             positions(meshes.get(&mesh).unwrap()),
-            positions(&ribbon_mesh(&stations, tiger_section()).unwrap()),
-            "an empty joint list leaves the last ribbon alone"
+            positions(&ribbon_mesh(&stations, tiger_section())),
+            "the ribbon follows the latest joints"
         );
     }
 
-    /// A proxy that never builds degrades to "the shoes keep casting", which is a COST and not a
-    /// bug — but it says so out loud exactly once rather than disappearing.
+    /// The side holds its ribbon asset's strong handle, so a fit that finds the asset gone is a
+    /// broken invariant and stops rather than keeping the last shape unseen.
     #[test]
-    fn a_proxy_that_never_builds_complains_once_and_never_silences() {
+    #[should_panic(expected = "a side's ribbon asset lives while the side holds its handle")]
+    fn a_ribbon_whose_asset_is_gone_stops() {
         let mut meshes = Assets::<Mesh>::default();
         let mut side = fresh_side();
-        let mut overdue = 0;
-        for _ in 0..(PROXY_READY_GRACE_FRAMES * 3) {
-            match side.fit(&mut meshes, &[]) {
-                ProxyStep::Overdue => overdue += 1,
-                ProxyStep::Idle => {}
-                ProxyStep::Silence { .. } => panic!("nothing to silence against"),
-            }
-        }
-        assert_eq!(overdue, 1, "one warning, not one per frame");
-        assert!(side.mesh.is_none() && meshes.is_empty());
+        let stations = ring(48, 2.0);
+        side.fit(&mut meshes, &stations);
+        meshes.remove(side.mesh.as_ref().unwrap());
+        side.fit(&mut meshes, &ring(48, 2.1));
+    }
+
+    /// `build_ribbon` gives the mesh its positions, so a write that finds none is a broken
+    /// invariant and stops rather than keeping the last shape unseen.
+    #[test]
+    #[should_panic(expected = "`build_ribbon` gives the ribbon its positions as Float32x3")]
+    fn a_ribbon_without_its_positions_stops() {
+        let mut cache = RibbonCache::default();
+        let mut mesh = cache.build(&ring(48, 2.0), tiger_section());
+        mesh.remove_attribute(Mesh::ATTRIBUTE_POSITION);
+        cache.write(&mut mesh, &ring(48, 2.1), tiger_section());
     }
 }
