@@ -360,13 +360,6 @@ pub(super) struct BodyQuery {
     pub(super) inertia: Option<Read<SolverBodyInertia>>,
 }
 
-/// OVERMATCH PATCH: the active manifolds below which contact constraints are prepared serially.
-/// Resolution (cost): at 309-396 manifolds the two-thread split over colors MEASURED 6 µs slower
-/// than serial; the game's MEASURED per-step means are 708 (a tank braking into a pile) and 574
-/// (parked against it), so those stay serial and only peaks (1,872) keep the parallel path
-/// (`OVERMATCH_PATCH.md`, "Serial small loops").
-const MIN_PAR_CONTACT_PREP: usize = 1024;
-
 fn prepare_contact_constraints(
     contact_graph: Res<ContactGraph>,
     mut constraint_graph: ResMut<ConstraintGraph>,
@@ -394,9 +387,9 @@ fn prepare_contact_constraints(
         .filter(|color| !color.manifold_handles.is_empty())
         .collect::<Vec<&mut GraphColor>>();
 
-    // OVERMATCH PATCH: below `MIN_PAR_CONTACT_PREP` manifolds the colors are prepared serially.
+    // OVERMATCH PATCH: the colors are prepared serially through a manifold count.
     let manifolds: usize = active_colors.iter().map(|c| c.manifold_handles.len()).sum();
-    let min_colors = if manifolds >= MIN_PAR_CONTACT_PREP {
+    let min_colors = if manifolds > crate::utils::serial_through::PREPARE_CONTACT_CONSTRAINTS {
         2
     } else {
         usize::MAX

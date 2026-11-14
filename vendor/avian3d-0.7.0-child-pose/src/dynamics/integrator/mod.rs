@@ -4,8 +4,8 @@
 //! See [`IntegratorPlugin`].
 
 use crate::prelude::*;
-// OVERMATCH PATCH: serial below a body count (`utils::MIN_PAR_BODIES`).
-use crate::utils::{MIN_PAR_BODIES, ParallelQueryForEach};
+// OVERMATCH PATCH: serial through a body count per loop.
+use crate::utils::{ParallelQueryForEach, serial_through};
 use bevy::{
     ecs::{intern::Interned, query::QueryData, schedule::ScheduleLabel},
     prelude::*,
@@ -286,7 +286,7 @@ pub fn pre_process_velocity_increments(
 
     // TODO: Do we want to skip kinematic bodies here?
     bodies.par_for_each_mut(
-        MIN_PAR_BODIES,
+        serial_through::PRE_PROCESS_VELOCITY_INCREMENTS,
         |(rb, mut integration, lin_damping, ang_damping, gravity_scale, locked_axes)| {
             if !rb.is_dynamic() {
                 // Skip non-dynamic bodies.
@@ -330,10 +330,13 @@ fn clear_velocity_increments(
 ) {
     let start = crate::utils::Instant::now();
 
-    bodies.par_for_each_mut(MIN_PAR_BODIES, |mut integration| {
-        integration.linear_increment = Vector::ZERO;
-        integration.angular_increment = AngularVector::ZERO;
-    });
+    bodies.par_for_each_mut(
+        serial_through::CLEAR_VELOCITY_INCREMENTS,
+        |mut integration| {
+            integration.linear_increment = Vector::ZERO;
+            integration.angular_increment = AngularVector::ZERO;
+        },
+    );
 
     diagnostics.update_velocity_increments += start.elapsed();
 }
@@ -364,7 +367,7 @@ pub fn integrate_velocities(
     #[cfg(feature = "3d")]
     let delta_secs = time.delta_secs_f64() as Scalar;
 
-    bodies.par_for_each_mut(MIN_PAR_BODIES, |mut body| {
+    bodies.par_for_each_mut(serial_through::INTEGRATE_VELOCITIES, |mut body| {
         if body.solver_body.flags.is_kinematic() {
             // Skip kinematic bodies.
             return;
@@ -520,7 +523,7 @@ pub fn integrate_positions(
 
     let delta_secs = time.delta_seconds_adjusted();
 
-    solver_bodies.par_for_each_mut(MIN_PAR_BODIES, |body| {
+    solver_bodies.par_for_each_mut(serial_through::INTEGRATE_POSITIONS, |body| {
         let SolverBody {
             linear_velocity,
             angular_velocity,

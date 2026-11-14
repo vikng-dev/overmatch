@@ -7,19 +7,29 @@ use bevy::ecs::{
 
 pub(crate) use bevy::platform::time::Instant;
 
-/// OVERMATCH PATCH: the matched bodies below which a per-body loop runs serially. Resolution
-/// (cost): a two-thread `par_iter` costs 2.6 µs per call whatever it finds and these loops cost
-/// 6-66 ns per body, so a perfect two-way split breaks even at 80-880 bodies; this is the next
-/// power of two above the highest (MEASURED and derivation in `OVERMATCH_PATCH.md`).
-pub(crate) const MIN_PAR_BODIES: usize = 1024;
+/// OVERMATCH PATCH, Resolution (cost), matched bodies per loop (active manifolds for contact
+/// preparation): each loop runs serially through the largest population at which its serial path
+/// MEASURED cheaper than its parallel one on two compute threads, and in parallel above it
+/// (`OVERMATCH_PATCH.md`, "Serial small loops").
+pub(crate) mod serial_through {
+    pub(crate) const PREPARE_CONTACT_CONSTRAINTS: usize = 561;
+    pub(crate) const PRE_PROCESS_VELOCITY_INCREMENTS: usize = 4000;
+    pub(crate) const INTEGRATE_VELOCITIES: usize = 2000;
+    pub(crate) const INTEGRATE_POSITIONS: usize = 4000;
+    pub(crate) const CLEAR_VELOCITY_INCREMENTS: usize = 4000;
+    pub(crate) const PREPARE_SOLVER_BODIES: usize = 1500;
+    pub(crate) const WRITEBACK_SOLVER_BODIES: usize = 2000;
+    pub(crate) const UPDATE_SOLVER_BODY_ANGULAR_INERTIA: usize = 4000;
+    pub(crate) const UPDATE_SLEEPING_STATES: usize = 1500;
+}
 
-/// OVERMATCH PATCH: query iteration that dispatches to the compute pool only from
-/// `min_parallel_len` matched entities, as upstream's `ParallelQueryForEach` (avian #1035):
-/// Bevy's `par_iter` opens a task scope whenever the pool has two threads, even for one batch.
-/// Each item is processed by the same closure either way, so the choice cannot change a result.
+/// OVERMATCH PATCH: query iteration that dispatches to the compute pool only above `serial_through`
+/// matched entities, as upstream's `ParallelQueryForEach` (avian #1035): Bevy's `par_iter` opens a
+/// task scope whenever the pool has two threads, even for one batch. The caller's closure runs on
+/// both paths, in different item orders, so its effects and reductions must not depend on order.
 pub(crate) trait ParallelQueryForEach<'s, D: IterQueryData> {
-    /// Calls `f` for every mutable query item, in parallel only from `min_parallel_len` matches.
-    fn par_for_each_mut<FN>(&mut self, min_parallel_len: usize, f: FN)
+    /// Calls `f` for every mutable query item, in parallel only above `serial_through` matches.
+    fn par_for_each_mut<FN>(&mut self, serial_through: usize, f: FN)
     where
         FN: for<'a> Fn(QueryItem<'a, 's, D>) + Send + Sync + Clone;
 }
@@ -27,14 +37,13 @@ pub(crate) trait ParallelQueryForEach<'s, D: IterQueryData> {
 impl<'s, D: IterQueryData, F: QueryFilter> ParallelQueryForEach<'s, D> for Query<'_, 's, D, F> {
     #[inline(always)]
     #[allow(unused_variables)]
-    fn par_for_each_mut<FN>(&mut self, min_parallel_len: usize, f: FN)
+    fn par_for_each_mut<FN>(&mut self, serial_through: usize, f: FN)
     where
         FN: for<'a> Fn(QueryItem<'a, 's, D>) + Send + Sync + Clone,
     {
         #[cfg(feature = "parallel")]
         {
-            if bevy::tasks::ComputeTaskPool::get().thread_num() > 1
-                && self.count() >= min_parallel_len
+            if bevy::tasks::ComputeTaskPool::get().thread_num() > 1 && self.count() > serial_through
             {
                 self.par_iter_mut().for_each(f);
                 return;

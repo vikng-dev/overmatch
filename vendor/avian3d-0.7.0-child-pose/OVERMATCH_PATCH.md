@@ -415,33 +415,64 @@ Bevy 0.19's `QueryParIter::for_each` opens a compute-pool scope whenever the poo
 however few items match; `BatchingStrategy` sizes the batches but cannot skip the scope.
 MEASURED on the hosted server's sizing (compute pool 2): one `par_iter` over 35 bodies costs
 2.64 µs against 0.014 µs serially. `utils::ParallelQueryForEach` (as upstream's, avian #1035)
-counts the matches and dispatches only from a floor; below it the same closure runs serially.
-Every patched closure touches only its own item, or pushes to a thread-local list whose drain is
-order-independent (the sleep commit breaks ties by island id), so the choice changes no result.
+counts the matches and runs the closure serially through a per-loop count
+(`utils::serial_through`), in parallel above it; contact preparation does the same for its split
+over colors. Every patched closure touches only its own item, or pushes to a thread-local list whose
+drain is order-independent (the sleep commit breaks ties by island id), so the choice changes no
+result; a new caller must keep that property.
 
-Floors and the readings that set them (MEASURED, the stage-split instrument
-`src/headless_test/rubble_engine_spike/stage_split.rs` on the 45-piece house-collapse pile,
-phase A, median of 10 runs, µs per step, compute pool 2 / 1):
+### Crossovers
 
-| site | stage | 2 / 1 | floor |
-|---|---|---:|---|
-| `pre_process_velocity_increments` | pre-substep | 2.7 / 0.5 | `MIN_PAR_BODIES` |
-| `integrate_velocities` | integrate velocities | 17.3 / 4.7 | `MIN_PAR_BODIES` |
-| `integrate_positions`, `update_solver_body_angular_inertia` | integrate positions | 19.8 / 2.6 | `MIN_PAR_BODIES` |
-| `clear_velocity_increments` | post-substep | 2.1 / 0.3 | `MIN_PAR_BODIES` |
-| `prepare_solver_bodies` | prepare bodies | 2.9 / 0.6 | `MIN_PAR_BODIES` |
-| `writeback_solver_bodies` | solver finalize | 10.7 / 8.8 | `MIN_PAR_BODIES` |
-| `update_sleeping_states` | sleeping | 4.4 / 2.3 | `MIN_PAR_BODIES` |
-| `prepare_contact_constraints` (colors) | prepare contacts | 40.3 / 34.3 | `MIN_PAR_CONTACT_PREP` |
+MEASURED: each loop's parallel path against its serial path, alternating step by step within one
+raw-Avian run (the rubble spike's plugin set, pools compute 2, async 1, IO 1), 192 settling steps
+then 256 measured, the median per path; five runs. Bodies: `n` copies of the 35-body
+house-collapse pile's pieces in free fall on a 6 m grid, all awake. Manifolds: one to six copies of
+the pile (15 to 35 pieces each) on flat ground, held awake, 24 colors. A loop's cost is the
+stage-split instrument's segment or Avian's own timer around it; every patched site switched paths
+together. Cells: parallel − serial, µs per step, median of the five runs; **bold** where parallel
+was cheaper in every run.
 
-`MIN_PAR_BODIES` = 1024: the 1-thread readings put these loops at 6-66 ns per body, so a perfect
-two-way split repays the 2.6 µs dispatch only from 80-880 bodies (DERIVED). `MIN_PAR_CONTACT_PREP`
-= 1024 manifolds: two threads lost at the pile's 309-396; the game-share run's per-step means are
-708 (a tank braking into the pile) and 574 (parked against it), peaks 1,872, so the means run
-serially and the peaks keep upstream's split.
+| bodies | 50 | 100 | 250 | 500 | 750 | 1,000 | 1,500 | 2,000 | 3,000 | 4,000 | serial through |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `pre_process_velocity_increments` | +1.4 | +1.8 | +2.9 | +4.2 | +5.2 | +6.7 | +10.6 | +10.9 | +11.1 | +11.2 | 4,000 |
+| `integrate_velocities` | +14.7 | +13.2 | +17.4 | +20.7 | +36.3 | +32.3 | +17.2 | +2.1 | **−28.0** | **−57.2** | 2,000 |
+| `integrate_positions` | +9.6 | +7.8 | +18.0 | +12.4 | +21.1 | +26.8 | +31.0 | +29.6 | +27.5 | +22.7 | 4,000 |
+| `update_solver_body_angular_inertia` | +17.6 | +29.0 | +27.7 | +43.2 | +33.1 | +43.2 | +52.3 | +53.3 | +49.8 | +48.2 | 4,000 |
+| `clear_velocity_increments` | +2.1 | +2.0 | +2.0 | +2.5 | +2.5 | +3.0 | +2.9 | +3.1 | +3.5 | +4.0 | 4,000 |
+| `prepare_solver_bodies` | +2.0 | +2.1 | +5.7 | +3.9 | +7.6 | +6.8 | +4.1 | **−1.1** | **−4.9** | **−5.9** | 1,500 |
+| `writeback_solver_bodies` | +1.6 | +1.7 | +2.5 | +4.8 | +4.5 | +3.2 | +1.9 | +0.5 | **−1.7** | **−5.2** | 2,000 |
+| `update_sleeping_states` | +4.1 | +2.5 | +2.6 | +6.3 | +4.7 | +3.2 | +1.4 | **−0.7** | **−6.1** | **−11.4** | 1,500 |
 
-Kept parallel, two threads faster or level: the narrow phase's pair update (702 / 1,090) and
+| manifolds | 99 | 196 | 274 | 494 | 561 | 723 | 862 | 1,103 | 1,683 | serial through |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `prepare_contact_constraints` | +2.2 | +3.6 | +6.2 | +2.7 | +1.1 | **−3.9** | **−4.5** | **−6.5** | **−27.6** | 561 |
+
+Each loop runs serially through the largest population below its first parallel win at which serial
+was cheaper in every run, and in parallel above it: between rungs upstream's parallel path stands,
+and a loop that never crossed runs in parallel above the measured 4,000. The crossovers differ
+beyond noise (at 2,000 bodies `integrate_velocities` stays 1.4-2.2 µs cheaper serially in every
+run while `prepare_solver_bodies` is 0.5-1.5 µs cheaper in parallel), so each loop keeps its own
+count rather than one shared floor. At the game's MEASURED populations (the 35-body pile; per-step
+manifold means of 308-395 on the pile alone, 574 with a tank parked against it and 708 braking into
+it, peaks 1,872) every body loop runs serially, and contact preparation runs serially on the pile
+alone and in parallel at the game world's means.
+
+Kept parallel, two threads faster or level (MEASURED on the pile, phase A, median of 10 runs, µs per
+step with compute pool 2 / 1): the narrow phase's pair update (702 / 1,090) and
 body-pair reduction (69 / 92), the collider tree's moved-proxy update (66 / 71), the broad phase
 (37 / 38) and collider transform propagation (inside the step's first and final segments, both
 level or faster on two threads). The per-color contact solve keeps its floor of 64 constraints
 per color, which no measured color reached.
+
+### At the rebase onto avian #1035
+
+Upstream's `ParallelQueryForEach` supersedes `utils::ParallelQueryForEach` and its seven integrator
+and solver-body call sites: take upstream's helper and sites and drop ours, noting that upstream's
+count is the first parallel one (`>=`) where ours is the last serial one (`>`). Upstream gives them
+one floor, `MIN_PAR_ITER_ENTITIES` = 4,096, which matches the four loops that never crossed here;
+`integrate_velocities`, `writeback_solver_bodies` and `prepare_solver_bodies` measured cheaper in
+parallel from 2,000-3,000 bodies, so re-run the crossover on the rebased tree before accepting it
+for them. #1035 also floors sites this patch keeps parallel (the collider tree's two updates and
+collider transform propagation, level or faster on two threads at the pile; CCD, unmeasured):
+reassess those the same way. Not in #1035, and reassessed at the rebase: `update_sleeping_states`'
+count, which moves onto upstream's helper, and contact preparation's color floor.

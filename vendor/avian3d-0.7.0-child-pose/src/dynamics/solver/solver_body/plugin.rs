@@ -21,8 +21,8 @@ use crate::{
         AppDiagnosticsExt, ComputedAngularInertia, ComputedCenterOfMass, ComputedMass, Dominance,
         LockedAxes,
     },
-    // OVERMATCH PATCH: serial below a body count (`utils::MIN_PAR_BODIES`).
-    utils::{MIN_PAR_BODIES, ParallelQueryForEach},
+    // OVERMATCH PATCH: serial through a body count per loop.
+    utils::{ParallelQueryForEach, serial_through},
 };
 #[cfg(feature = "3d")]
 use crate::{
@@ -205,7 +205,7 @@ fn prepare_solver_bodies(
 ) {
     #[allow(unused_variables)]
     query.par_for_each_mut(
-        MIN_PAR_BODIES,
+        serial_through::PREPARE_SOLVER_BODIES,
         |(
             rb,
             mut solver_body,
@@ -286,7 +286,7 @@ fn writeback_solver_bodies(
     let start = bevy::platform::time::Instant::now();
 
     query.par_for_each_mut(
-        MIN_PAR_BODIES,
+        serial_through::WRITEBACK_SOLVER_BODIES,
         |(solver_body, mut pos, mut rot, com, mut lin_vel, mut ang_vel)| {
             // Write back the position and rotation deltas,
             // rotating the body around its center of mass.
@@ -309,7 +309,7 @@ pub(crate) fn update_solver_body_angular_inertia(
     mut query: Query<(&mut SolverBodyInertia, &ComputedAngularInertia, &Rotation)>,
 ) {
     query.par_for_each_mut(
-        MIN_PAR_BODIES,
+        serial_through::UPDATE_SOLVER_BODY_ANGULAR_INERTIA,
         |(mut inertia, angular_inertia, rotation)| {
             inertia.update_effective_inv_angular_inertia(angular_inertia, rotation.0);
         },
