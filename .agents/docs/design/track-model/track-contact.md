@@ -33,15 +33,16 @@ belt's pitch, each carrying `k' × link` and `c' × link` at the deepest overlap
 shared among the contacts on it by depth. A contact's shares are its stiffness and damping; its
 deepest points that bear split them evenly, and a rest length places its force at the step's start
 (`ContactCompliance::rest`), so force, stiffness and damping each add up to the links' own however a
-piece splits. A piece's contact is read on the one face of the run its normal picks, its points
-projected onto it: on a rim face its overlap runs along that face's outline edge, linear between its
-points; on a lateral cap each point loads its nearest link. Each contact is compliant: Avian's stock
-contact solves its relaxing pass rigidly along the normal, so a body cannot rest on it at a
-load-proportional deflection (DERIVED from `ContactNormalPart::solve_impulse`). The vendored patch
-adds an absolute per-point law (`upstream/avian-compliant-contact.md`), with a signed rest length,
-under which a point whose spring is free at the narrow phase bears nothing all step, and `soft_run`
-is its one writer: it keeps every point, so a contact's law is a function of the contact as the
-narrow phase left it. Nothing freezes a loaded piece.
+piece splits. A piece's contact is read on the one face of the run its normal picks. On a rim face
+its points are projected onto the face's outline edge, and its overlap runs along it, linear between
+them; a contact on a lateral cap carries one link's law along its normal, outside the links' budget
+(the cap law, below). Each contact is compliant: Avian's stock contact solves its relaxing pass
+rigidly along the normal, so a body cannot rest on it at a load-proportional deflection (DERIVED
+from `ContactNormalPart::solve_impulse`). The vendored patch adds an absolute per-point law
+(`upstream/avian-compliant-contact.md`), with a signed rest length, under which a point whose spring
+is free at the narrow phase bears nothing all step, and `soft_run` is its one writer: it keeps every
+point, so a contact's law is a function of the contact as the narrow phase left it. Nothing freezes
+a loaded piece.
 
 **Rest.** A tank at rest sleeps with its pile through Avian's island sleep, whatever carries it.
 The sampled support goes through the non-waking force call, so no force resets the rest timer,
@@ -120,15 +121,21 @@ Known differences between the channels, none tuned:
   loads that face alone; the belt past the corner takes nothing from it that step. At an exact tie
   between two edges the run may take the one parry did not, and the feet then clamp onto their
   shared corner.
-- **The cap law** is a `StandIn`. A contact on a lateral cap (a pivot sweeping the shoe's side into
-  pieces, a piece overlapped at the shoe's edge whose least-penetration direction is sideways)
-  loads its points' nearest links at the belt's law along the lateral normal, though nothing says
-  a piece against the shoe's side meets the running gear's radial spring. One probe A/B, with cap
-  contacts handed `None` (rigid) against this, would settle whether it matters. The nearest
-  measurement is the belt segments' side plates below: related, not the same, since a piece there
-  sat in two colliders at once. Parry clips a face to its first four vertices (the TODO in
-  `ConvexPolyhedron::local_support_feature`, parry 0.27), so a cap contact, its face an N-gon, is
-  mostly the lone GJK witness point (DERIVED).
+- **The cap law** is a `StandIn`. A contact on a lateral cap carries one link's `k'` and `c'` along
+  its normal, split over its points in overlap however many parry gives it, outside the links'
+  budget, so a piece against the shoe's side takes no support from the rim's links. It continues the
+  rim's law across a flip, where parry's two depths are equal: a piece within one link, bearing at
+  one point, carries the same force on either face, and one reaching `n` links on the rim `1/n` of
+  it on the cap (DERIVED). The truth beside a shoe is steel, and the stop gives it above the
+  compression wrap, sharing the run's lateral faces and meeting every layer (`bump_stop`): the stop
+  is the lateral limit. Two cases meet a cap: a pivot sweeping the shoe's side into pieces, and a
+  piece under the shoe's edge whose least overlap is sideways, an artefact of one normal per convex
+  pair whose truth is the radial law, which no cap law gives. A rigid cap would eject by their
+  lateral overlap the pieces the soft run leaves inside the solid; the nearest measurement is the
+  belt segments' side plates below, 28.5 reversals (related, not the same, since a piece there sat
+  in two colliders at once). An inert cap would hand those pieces to the rigid stop. Parry clips a
+  face to its first four vertices (the TODO in `ConvexPolyhedron::local_support_feature`, parry
+  0.27), so a cap contact, its face an N-gon, is mostly the lone GJK witness point (DERIVED).
 - **The law within a step.** A contact's shares and the points that bear are read once, at the
   narrow phase, so its stiffness is exact for a common compression of its links, not for one piece
   retreating alone. The points split the force by `overlap + rest`, so the centre of pressure and

@@ -14,17 +14,17 @@
 //!   the running gear's calibrated law per metre (`forces::SupportLaw`, the sampled support's own)
 //!   times its length, at the deepest overlap any contact gives it, once however many pieces press
 //!   it ([`RunContacts`]). A piece's manifold is read on the one face of the convex run that faces
-//!   its normal ([`SoftRun::facing`]), its points projected onto it: on a rim face its overlap runs
-//!   along that face's outline edge, linear between its points; on a lateral cap each point loads
-//!   the link nearest it. A link takes the deepest that reaches on its length, nothing where that
-//!   is zero or less. A link is rigid along its length, so one point loads a whole link. The
-//!   contacts on a link share its stiffness and damping in proportion to their depth there. A
-//!   contact's deepest points that bear split its share evenly, and a common rest length
-//!   (`ContactCompliance::rest`) carries its force at the step's start, so its law is affine and
-//!   its tangent stiffness the links' own; the solver leaves its other points inert. The datum is
-//!   the rest face, so a piece's force adds to the ground's under the same belt, which the sampled
-//!   support carries. The reading's limits are the design doc's
-//!   (`.agents/docs/design/track-model/track-contact.md`).
+//!   its normal ([`SoftRun::facing`]). On a rim face its points are projected onto the face's
+//!   outline edge, and its overlap runs along it, linear between them. A link takes the deepest
+//!   that reaches on its length, nothing where that is zero or less. A link is rigid along its
+//!   length, so one point loads a whole link. The contacts on a link share its stiffness and
+//!   damping in proportion to their depth there. A contact's deepest points that bear split its
+//!   share evenly, and a common rest length (`ContactCompliance::rest`) carries its force at the
+//!   step's start, so its law is affine and its tangent stiffness the links' own; the solver leaves
+//!   its other points inert. A contact on a lateral cap carries one link's law along its normal,
+//!   outside the links' budget ([`Face::Cap`]). The datum is the rest face, so a piece's force adds
+//!   to the ground's under the same belt, which the sampled support carries. The reading's limits
+//!   are the design doc's (`.agents/docs/design/track-model/track-contact.md`).
 //! - **Drivetrain.** A run carries its side's `BeltFace`, so the shared hook moves its surface at
 //!   belt speed and `stop_contacts::by_owner` reads its friction into the transmission.
 //!
@@ -126,8 +126,9 @@ impl Edge {
 enum Face {
     /// The rim face over one outline edge, by its index.
     Rim(usize),
-    /// Either lateral cap. `StandIn`: a cap's points load their nearest links at the belt's own
-    /// law; what a piece pressed against the shoe's side should carry is open
+    /// Either lateral cap. `StandIn`: a cap contact carries one link's law along its normal, split
+    /// over its points in overlap, outside the links' budget: the solid's lateral continuation,
+    /// the rim's own at a flip for a piece within one link. The stop is the lateral limit
     /// (`.agents/docs/design/track-model/track-contact.md`).
     Cap,
 }
@@ -188,24 +189,10 @@ impl SoftRun {
         }
     }
 
-    /// Where along the closed outline side-plane point `p` lies on `face` (m from the first
-    /// vertex, up to the outline's length): at its foot on a rim face's edge, or at the outline
-    /// point nearest it on a cap.
-    fn arc_on(&self, face: Face, p: Vec2) -> f32 {
-        match face {
-            Face::Rim(edge) => self.edges[edge].arc + self.edges[edge].foot(p),
-            Face::Cap => {
-                let mut nearest = (f32::INFINITY, 0.0);
-                for edge in &self.edges {
-                    let foot = edge.foot(p);
-                    let gap = p.distance_squared(edge.start + edge.dir * foot);
-                    if gap < nearest.0 {
-                        nearest = (gap, edge.arc + foot);
-                    }
-                }
-                nearest.1
-            }
-        }
+    /// Where along the closed outline side-plane point `p` lies on rim face `edge`: at its foot on
+    /// the edge (m from the first vertex, up to the outline's length).
+    fn arc_on(&self, edge: usize, p: Vec2) -> f32 {
+        self.edges[edge].arc + self.edges[edge].foot(p)
     }
 
     /// The link holding arc `s` (m), round the closed outline.
@@ -274,7 +261,8 @@ struct Manifold {
     pair: ContactId,
     /// Its index in its pair's manifolds.
     index: usize,
-    /// Its links in overlap in [`RunContacts::depths`].
+    face: Face,
+    /// Its links in overlap in [`RunContacts::depths`]: none on a cap.
     depths: Range<usize>,
     /// Its points' overlaps in [`RunContacts::overlaps`].
     overlaps: Range<usize>,
@@ -319,8 +307,8 @@ impl RunContacts {
     /// Add `manifold`, `index` of pair `pair`, as the narrow phase left it, on `run` hung on a body
     /// at `body` (position, rotation); `first` says the run is the pair's first collider, which
     /// the normal leaves. On a rim face its overlap runs along the straight edge through its feet,
-    /// the deepest where two stand together, linear between neighbours; on a cap each point loads
-    /// the link nearest it alone. Each link takes the deepest it reaches on the link's length.
+    /// the deepest where two stand together, linear between neighbours, and each link takes the
+    /// deepest it reaches on the link's length; a cap reaches no link.
     fn read(
         &mut self,
         run: &SoftRun,
@@ -336,25 +324,27 @@ impl RunContacts {
             -manifold.normal
         };
         let face = run.facing(to_body * leaving);
-        self.points.clear();
-        self.points.extend(manifold.points.iter().map(|point| {
-            let local = to_body * (point.point - position);
-            (
-                run.arc_on(face, Vec2::new(local.z, local.y)),
-                point.penetration,
-            )
-        }));
         // By value, so the order the points came in cannot move the law's sums.
         let first = self.overlaps.len();
-        self.overlaps.extend(self.points.iter().map(|p| p.1));
+        self.overlaps
+            .extend(manifold.points.iter().map(|point| point.penetration));
         self.overlaps[first..].sort_unstable_by(|a, b| b.total_cmp(a));
-        self.points
-            .sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(b.1.total_cmp(&a.1)));
-        self.points.dedup_by(|b, a| a.0 == b.0);
-        self.span.clear();
-        self.span
-            .extend(self.points.iter().map(|&(s, d)| (run.link_at(s), d)));
-        if let Face::Rim(_) = face {
+        let start = self.depths.len();
+        if let Face::Rim(edge) = face {
+            self.points.clear();
+            self.points.extend(manifold.points.iter().map(|point| {
+                let local = to_body * (point.point - position);
+                (
+                    run.arc_on(edge, Vec2::new(local.z, local.y)),
+                    point.penetration,
+                )
+            }));
+            self.points
+                .sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(b.1.total_cmp(&a.1)));
+            self.points.dedup_by(|b, a| a.0 == b.0);
+            self.span.clear();
+            self.span
+                .extend(self.points.iter().map(|&(s, d)| (run.link_at(s), d)));
             for knots in self.points.windows(2) {
                 let [(s0, d0), (s1, d1)] = [knots[0], knots[1]];
                 let at = |s: f32| d0 + (d1 - d0) * ((s - s0) / (s1 - s0));
@@ -365,17 +355,16 @@ impl RunContacts {
                         .push(((link % run.links) as u32, at(lo).max(at(hi))));
                 }
             }
+            self.span
+                .sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
+            self.span.dedup_by_key(|entry| entry.0);
+            self.depths
+                .extend(self.span.iter().filter(|entry| entry.1 > 0.0));
         }
-        // Deepest first on each link, then one entry per link.
-        self.span
-            .sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
-        self.span.dedup_by_key(|entry| entry.0);
-        let start = self.depths.len();
-        self.depths
-            .extend(self.span.iter().filter(|entry| entry.1 > 0.0));
         self.manifolds.push(Manifold {
             pair,
             index,
+            face,
             depths: start..self.depths.len(),
             overlaps: first..self.overlaps.len(),
         });
@@ -384,9 +373,10 @@ impl RunContacts {
     /// Each manifold's law under the running gear's `law`: a link carries `k'·link` and `c'·link`
     /// at its deepest depth, shared among the manifolds on it in proportion to their depth there.
     /// A manifold's shares are its stiffness and damping, and its links' deepest depths weighted by
-    /// them its force at the step's start; its points that bear take them ([`shared`]). A manifold
-    /// with none in overlap reaches no link and takes the zero law, which the solver leaves inert;
-    /// `None` would be a rigid contact.
+    /// them its force at the step's start; its points that bear take them ([`shared`]). A cap
+    /// manifold carries one link's law over its points in overlap ([`Face::Cap`]). A manifold with
+    /// none in overlap takes the zero law, which the solver leaves inert; `None` would be a rigid
+    /// contact.
     fn solve(&mut self, run: &SoftRun, law: &SupportLaw) {
         let links = run.links;
         // Grouped by link (a counting sort), each group by value, so a link's sum runs in one
@@ -435,18 +425,24 @@ impl RunContacts {
             let (area, length) = self.terms.iter().fold((0.0, 0.0), |(area, length), term| {
                 (area + term.0, length + term.1)
             });
-            self.laws.push(if manifold.depths.is_empty() {
-                ContactCompliance {
+            let overlaps = &self.overlaps[manifold.overlaps.clone()];
+            let bearing = overlaps.iter().filter(|&&overlap| overlap > 0.0).count();
+            self.laws.push(match manifold.face {
+                Face::Rim(_) if length > 0.0 => shared(
+                    overlaps,
+                    (stiffness * length, damping * length),
+                    area / length,
+                ),
+                Face::Cap if bearing > 0 => ContactCompliance {
+                    stiffness: stiffness / bearing as f32,
+                    damping: damping / bearing as f32,
+                    rest: 0.0,
+                },
+                _ => ContactCompliance {
                     stiffness: 0.0,
                     damping: 0.0,
                     rest: 0.0,
-                }
-            } else {
-                shared(
-                    &self.overlaps[manifold.overlaps.clone()],
-                    (stiffness * length, damping * length),
-                    area / length,
-                )
+                },
             });
         }
     }
@@ -846,21 +842,43 @@ mod tests {
         }
     }
 
-    /// A manifold on a lateral cap loads the link nearest each of its points and nothing between:
-    /// its points can stand off opposite runs, with no stretch of belt between them. Two points
-    /// `d` deep, by the bottom run's link 12 and the top run's link 60, carry `k'·d`, `k'` and `c'`
-    /// per metre of two links. Fails if a cap's points are read along the belt between them.
+    /// A cap contact carries one link's law along its normal, split over its points in overlap
+    /// however many parry gives it, and leaves the rim's links alone. Two points `d` deep, and three
+    /// with a fourth apart, carry `k'·d`, `k'` and `c'` per metre of one link, and a rim contact
+    /// on the links they stand by carries what it carries without them. Fails if a cap's law grows
+    /// with its points, or if a cap takes a share of a link's budget from the rim.
     #[test]
-    fn a_cap_contact_loads_only_the_links_nearest_its_points() {
+    fn a_cap_contact_carries_one_links_law_outside_the_links() {
         let d = 0.04;
         let link = SoftRun::fixture().link;
-        let two = [
-            LAW.stiffness_per_m * link * 2.0 * d,
-            LAW.stiffness_per_m * link * 2.0,
-            LAW.damping_per_m * link * 2.0,
+        let one = [
+            LAW.stiffness_per_m * link * d,
+            LAW.stiffness_per_m * link,
+            LAW.damping_per_m * link,
         ];
-        let carried = carried(&[(Face::Cap, &[(at(12.5), d), (at(60.5), d)])]);
-        assert!(close(carried, two), "carried {carried:?} against {two:?}");
+        let rim: &[(f32, f32)] = &[(at(12.0), d), (at(13.0), d)];
+        let alone = carried(&[(Face::Rim(0), rim)]);
+        let two: &[(f32, f32)] = &[(at(12.5), d), (at(60.5), d)];
+        let four: &[(f32, f32)] = &[
+            (at(12.5), d),
+            (at(12.7), d),
+            (at(60.5), d),
+            (at(30.0), -0.01),
+        ];
+        for cap in [two, four] {
+            let laws = laws(&[(Face::Rim(0), rim), (Face::Cap, cap)]);
+            let (carried, rim_carried) = (carries(&laws[1], cap), carries(&laws[0], rim));
+            assert!(
+                close(carried, one),
+                "{} points: {carried:?} against {one:?}",
+                cap.len()
+            );
+            assert!(
+                close(rim_carried, alone),
+                "{} points: the rim carries {rim_carried:?} against {alone:?} alone",
+                cap.len()
+            );
+        }
     }
 
     /// Handing a manifold its law changes none of its points, so the law is a function of the
