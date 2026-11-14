@@ -263,6 +263,18 @@ either collider, child rehoming, new neighbors, same-step motion and touching ge
 per-step decision, including the unresolved-target path fixed in `27562bd8`.
 Count evidence, same-input geometry comparison and reproduction: `upstream/avian-still-pairs.md`.
 
+## Unreadable pair state (`src/collision/narrow_phase/system_param.rs`)
+
+`update_contacts` reads a pair's two colliders and their bodies. It skips a pair whose colliders
+it cannot fetch only when one is of another collider type (that type's narrow phase updates the
+pair) or unposed (a client's replication lifted its pose for a frame,
+`src/tests/avian_body_query_gap.rs`); disabled and removed colliders lose their pairs first
+(`remove_collider_on`). It reads a body outside its body query as no body only when the body is
+disabled (`RigidBodyDisabled` or `Disabled`, whose pairs generate no constraints) or unposed.
+Anything else has lost a component every collider or body carries, and panics naming the pair or
+the body. Guards: `src/net/ram/avian_tests.rs` and the tripwire in
+`src/tests/avian_body_query_gap.rs`.
+
 ## Body-pair contact reduction (`src/collision/contact_types/reduction.rs`)
 
 Two bodies touching through many collider pairs (a broken piece's chunk hulls along a seam) carry
