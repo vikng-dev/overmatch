@@ -31,6 +31,8 @@ mod creep_stall;
 mod heap;
 #[cfg(feature = "dev_ui")]
 mod rubble_climb;
+#[cfg(feature = "dev_ui")]
+mod soft_run_probe;
 mod turn_probe;
 
 use super::*;

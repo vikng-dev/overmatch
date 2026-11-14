@@ -123,7 +123,7 @@ impl Edge {
 
 /// The face of a run a manifold is read on.
 #[derive(Clone, Copy, Debug)]
-enum Face {
+pub(crate) enum Face {
     /// The rim face over one outline edge, by its index.
     Rim(usize),
     /// Either lateral cap. `StandIn`: a cap contact carries one link's law along its normal, split
@@ -177,7 +177,7 @@ impl SoftRun {
     /// narrow phase's own rule (parry's `ConvexPolyhedron::local_support_feature`): the face whose
     /// outward normal lies nearest `out`. At an exact tie between two edges the last wins, where
     /// parry may pick the other; the feet then clamp onto the corner they share.
-    fn facing(&self, out: Vec3) -> Face {
+    pub(crate) fn facing(&self, out: Vec3) -> Face {
         let side = Vec2::new(out.z, out.y);
         let (rim, nearest) = (self.edges.iter().map(|edge| edge.out.dot(side)).enumerate())
             .max_by(|a, b| a.1.total_cmp(&b.1))
