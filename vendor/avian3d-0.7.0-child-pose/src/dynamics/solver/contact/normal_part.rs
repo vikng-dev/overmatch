@@ -137,15 +137,16 @@ impl ContactNormalPart {
 
         // Compute the incremental normal impulse.
         let mut impulse = if separation > 0.0 && self.compliant {
-            // OVERMATCH PATCH: a spring-damper contact pushes only while it overlaps; a
-            // speculative stop at its surface would be a rigid wall in front of the spring.
+            // OVERMATCH PATCH: a spring-damper contact pushes only while its spring is
+            // compressed; a speculative stop there would be a rigid wall in front of the spring.
             -self.impulse
         } else if separation > 0.0 {
             // Speculative contact: Push back the part of the velocity that would cause penetration.
             -self.effective_mass * (normal_speed + separation / delta_secs)
         } else if self.compliant {
-            // OVERMATCH PATCH: a spring-damper contact. Its fixed point under a steady load is
-            // `impulse = k·overlap·h`, the same in the biased and relaxing passes.
+            // OVERMATCH PATCH: a spring-damper contact, its separation the spring's. Its fixed
+            // point under a steady load is `impulse = k·(overlap + rest)·h`, the same in the
+            // biased and relaxing passes.
             let bias = self.spring.bias * separation;
             let scaled_mass = self.spring.mass_scale * self.effective_mass;
             let scaled_impulse = self.spring.impulse_scale * self.impulse;

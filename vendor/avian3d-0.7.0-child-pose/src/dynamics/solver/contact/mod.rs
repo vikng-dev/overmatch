@@ -172,10 +172,12 @@ impl ContactConstraint {
             let anchor1 = point.anchor1;
             let anchor2 = point.anchor2;
 
-            // OVERMATCH PATCH: a compliant manifold's point out of overlap at the narrow phase
-            // bears nothing this step: it starts cold and solves inert. It stays in the manifold,
-            // whose impulses are stored back point by point in order.
-            let inert = manifold.compliance.is_some() && point.penetration <= 0.0;
+            // OVERMATCH PATCH: a compliant manifold's point its law does not bear at the narrow
+            // phase bears nothing this step: it starts cold and solves inert. It stays in the
+            // manifold, whose impulses are stored back point by point in order.
+            let inert = manifold
+                .compliance
+                .is_some_and(|law| !law.bears(point.penetration));
             let warm_start = warm_start_enabled && !inert;
 
             let mut point = ContactConstraintPoint {
@@ -203,7 +205,10 @@ impl ContactConstraint {
                 anchor1,
                 anchor2,
                 normal_speed: point.normal_speed,
-                initial_separation: -point.penetration - (anchor2 - anchor1).dot(manifold.normal),
+                // OVERMATCH PATCH: a compliant point's separation is its spring's.
+                initial_separation: -point.penetration
+                    - manifold.compliance.map_or(0.0, |law| law.rest)
+                    - (anchor2 - anchor1).dot(manifold.normal),
             };
             // OVERMATCH PATCH: a compliant manifold's absolute law, at this point's own mass.
             if let Some(compliance) = manifold.compliance {

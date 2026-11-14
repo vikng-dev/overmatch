@@ -406,16 +406,17 @@ pub struct ContactManifold {
     pub tangent_velocity: Vector,
     /// OVERMATCH PATCH: an absolute spring-damper law for every point of this manifold along its
     /// normal, in place of the global contact softness. `None` keeps Avian's rigid contact.
-    /// Reset by the narrow phase each step; set after it and before the solver. A point out of
-    /// overlap at the narrow phase bears none of it that step.
+    /// Reset by the narrow phase each step; set after it and before the solver. A point it does
+    /// not [bear](ContactCompliance::bears) at the narrow phase bears none of it that step.
     pub compliance: Option<ContactCompliance>,
 }
 
-/// OVERMATCH PATCH: a compliant contact's per-point normal law, `F = k·overlap + c·closing`,
-/// in absolute units, so contacts compose by summation whatever the bodies' masses.
-/// The solver turns it into soft-constraint coefficients from each point's effective mass and the
-/// substep length, and keeps them in the relaxing pass too: the overlap under load is the spring's
-/// static deflection, never pushed out.
+/// OVERMATCH PATCH: a compliant contact's per-point normal law,
+/// `F = k·(overlap + rest) + c·closing` while `overlap + rest` is above zero, in absolute units, so
+/// contacts compose by summation whatever the bodies' masses. The solver turns it into
+/// soft-constraint coefficients from each point's effective mass and the substep length, and keeps
+/// them in the relaxing pass too: the spring's compression under load is its static deflection,
+/// never pushed out.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContactCompliance {
@@ -423,9 +424,18 @@ pub struct ContactCompliance {
     pub stiffness: Scalar,
     /// Normal damping per point (N·s/m).
     pub damping: Scalar,
+    /// The spring's compression at zero overlap (m, signed): above zero it pushes across a gap of
+    /// up to `rest`, below zero it is free through `-rest` of overlap. The solver's separation is
+    /// the spring's, so zero is Avian's surface.
+    pub rest: Scalar,
 }
 
 impl ContactCompliance {
+    /// Whether a point `penetration` deep bears this law: its spring is compressed.
+    pub fn bears(self, penetration: Scalar) -> bool {
+        penetration + self.rest > 0.0
+    }
+
     /// The soft-constraint coefficients of this law for a point of effective mass `mass` over a
     /// substep `h`. Exact rewrite of `SoftnessParameters::compute_coefficients` with
     /// `ω² = k/m`, `2ζω = c/m`: with `a = h(c + hk)`, bias `k/(c + hk)`, mass scale `a/(m + a)`,

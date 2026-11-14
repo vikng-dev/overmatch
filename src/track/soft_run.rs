@@ -438,11 +438,13 @@ impl RunContacts {
                 ContactCompliance {
                     stiffness: 0.0,
                     damping: 0.0,
+                    rest: 0.0,
                 }
             } else {
                 ContactCompliance {
                     stiffness: stiffness * area / manifold.overlap,
                     damping: damping * length / manifold.count as f32,
+                    rest: 0.0,
                 }
             });
         }
@@ -840,6 +842,7 @@ mod tests {
         let zero = ContactCompliance {
             stiffness: 0.0,
             damping: 0.0,
+            rest: 0.0,
         };
         assert_eq!(law[1], zero, "a manifold out of overlap carries");
         assert_eq!(
