@@ -5,13 +5,24 @@ use bevy::{
 
 use super::{SolverBody, SolverBodyInertia};
 use crate::{
-    AngularVelocity, LinearVelocity, PhysicsSchedule, Position, RigidBody, RigidBodyActiveFilter,
-    RigidBodyDisabled, Rotation, Sleeping, SolverSystems, Vector,
+    AngularVelocity,
+    LinearVelocity,
+    PhysicsSchedule,
+    Position,
+    RigidBody,
+    RigidBodyActiveFilter,
+    RigidBodyDisabled,
+    Rotation,
+    Sleeping,
+    SolverSystems,
+    Vector,
     dynamics::solver::{SolverDiagnostics, solver_body::SolverBodyFlags},
     prelude::{
         AppDiagnosticsExt, ComputedAngularInertia, ComputedCenterOfMass, ComputedMass, Dominance,
         LockedAxes,
     },
+    // OVERMATCH PATCH: serial below a body count (`utils::MIN_PAR_BODIES`).
+    utils::{MIN_PAR_BODIES, ParallelQueryForEach},
 };
 #[cfg(feature = "3d")]
 use crate::{
@@ -193,7 +204,8 @@ fn prepare_solver_bodies(
     )>,
 ) {
     #[allow(unused_variables)]
-    query.par_iter_mut().for_each(
+    query.par_for_each_mut(
+        MIN_PAR_BODIES,
         |(
             rb,
             mut solver_body,
@@ -273,7 +285,8 @@ fn writeback_solver_bodies(
 ) {
     let start = bevy::platform::time::Instant::now();
 
-    query.par_iter_mut().for_each(
+    query.par_for_each_mut(
+        MIN_PAR_BODIES,
         |(solver_body, mut pos, mut rot, com, mut lin_vel, mut ang_vel)| {
             // Write back the position and rotation deltas,
             // rotating the body around its center of mass.
@@ -295,11 +308,12 @@ fn writeback_solver_bodies(
 pub(crate) fn update_solver_body_angular_inertia(
     mut query: Query<(&mut SolverBodyInertia, &ComputedAngularInertia, &Rotation)>,
 ) {
-    query
-        .par_iter_mut()
-        .for_each(|(mut inertia, angular_inertia, rotation)| {
+    query.par_for_each_mut(
+        MIN_PAR_BODIES,
+        |(mut inertia, angular_inertia, rotation)| {
             inertia.update_effective_inv_angular_inertia(angular_inertia, rotation.0);
-        });
+        },
+    );
 }
 
 #[cfg(test)]

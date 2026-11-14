@@ -406,3 +406,42 @@ The patched force adapters keep upstream's serial loops: the patch changes only 
 
 Guard: `src/tests/avian_island_sleep.rs` (`a_woken_body_takes_only_its_first_steps_gravity`).
 Local upstream draft: `upstream/avian-sleeping-velocity-increments.md`.
+
+## Serial small loops (`src/utils.rs`, `src/dynamics/integrator/mod.rs`, `src/dynamics/solver/solver_body/plugin.rs`, `src/dynamics/solver/islands/sleeping.rs`, `src/dynamics/solver/plugin.rs`)
+
+Subject: the game's server physics step, game state only.
+
+Bevy 0.19's `QueryParIter::for_each` opens a compute-pool scope whenever the pool has two threads,
+however few items match; `BatchingStrategy` sizes the batches but cannot skip the scope.
+MEASURED on the hosted server's sizing (compute pool 2): one `par_iter` over 35 bodies costs
+2.64 µs against 0.014 µs serially. `utils::ParallelQueryForEach` (as upstream's, avian #1035)
+counts the matches and dispatches only from a floor; below it the same closure runs serially.
+Every patched closure touches only its own item, or pushes to a thread-local list whose drain is
+order-independent (the sleep commit breaks ties by island id), so the choice changes no result.
+
+Floors and the readings that set them (MEASURED, the stage-split instrument
+`src/headless_test/rubble_engine_spike/stage_split.rs` on the 45-piece house-collapse pile,
+phase A, median of 10 runs, µs per step, compute pool 2 / 1):
+
+| site | stage | 2 / 1 | floor |
+|---|---|---:|---|
+| `pre_process_velocity_increments` | pre-substep | 2.7 / 0.5 | `MIN_PAR_BODIES` |
+| `integrate_velocities` | integrate velocities | 17.3 / 4.7 | `MIN_PAR_BODIES` |
+| `integrate_positions`, `update_solver_body_angular_inertia` | integrate positions | 19.8 / 2.6 | `MIN_PAR_BODIES` |
+| `clear_velocity_increments` | post-substep | 2.1 / 0.3 | `MIN_PAR_BODIES` |
+| `prepare_solver_bodies` | prepare bodies | 2.9 / 0.6 | `MIN_PAR_BODIES` |
+| `writeback_solver_bodies` | solver finalize | 10.7 / 8.8 | `MIN_PAR_BODIES` |
+| `update_sleeping_states` | sleeping | 4.4 / 2.3 | `MIN_PAR_BODIES` |
+| `prepare_contact_constraints` (colors) | prepare contacts | 40.3 / 34.3 | `MIN_PAR_CONTACT_PREP` |
+
+`MIN_PAR_BODIES` = 1024: the 1-thread readings put these loops at 6-66 ns per body, so a perfect
+two-way split repays the 2.6 µs dispatch only from 80-880 bodies (DERIVED). `MIN_PAR_CONTACT_PREP`
+= 1024 manifolds: two threads lost at the pile's 309-396; the game-share run's per-step means are
+708 (a tank braking into the pile) and 574 (parked against it), peaks 1,872, so the means run
+serially and the peaks keep upstream's split.
+
+Kept parallel, two threads faster or level: the narrow phase's pair update (702 / 1,090) and
+body-pair reduction (69 / 92), the collider tree's moved-proxy update (66 / 71), the broad phase
+(37 / 38) and collider transform propagation (inside the step's first and final segments, both
+level or faster on two threads). The per-color contact solve keeps its floor of 64 constraints
+per color, which no measured color reached.

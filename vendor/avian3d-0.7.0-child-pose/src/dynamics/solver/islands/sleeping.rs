@@ -36,6 +36,8 @@ use crate::{
     },
     prelude::*,
     schedule::{LastPhysicsTick, is_changed_after_tick},
+    // OVERMATCH PATCH: serial below a body count (`utils::MIN_PAR_BODIES`).
+    utils::{MIN_PAR_BODIES, ParallelQueryForEach},
 };
 
 /// A plugin for managing sleeping and waking of [`PhysicsIsland`](super::PhysicsIsland)s.
@@ -211,7 +213,8 @@ fn update_sleeping_states(
 
     islands.split_candidate_sleep_timer = 0.0;
 
-    query.par_iter_mut().for_each(
+    query.par_for_each_mut(
+        MIN_PAR_BODIES,
         |(mut sleep_timer, sleep_threshold, solver_body, mass, inertia, rotation, island_data)| {
             let lin_vel_squared = solver_body.linear_velocity.length_squared();
             #[cfg(feature = "2d")]

@@ -4,6 +4,8 @@
 //! See [`IntegratorPlugin`].
 
 use crate::prelude::*;
+// OVERMATCH PATCH: serial below a body count (`utils::MIN_PAR_BODIES`).
+use crate::utils::{MIN_PAR_BODIES, ParallelQueryForEach};
 use bevy::{
     ecs::{intern::Interned, query::QueryData, schedule::ScheduleLabel},
     prelude::*,
@@ -283,7 +285,8 @@ pub fn pre_process_velocity_increments(
     let delta_secs = time.delta_secs_f64() as Scalar;
 
     // TODO: Do we want to skip kinematic bodies here?
-    bodies.par_iter_mut().for_each(
+    bodies.par_for_each_mut(
+        MIN_PAR_BODIES,
         |(rb, mut integration, lin_damping, ang_damping, gravity_scale, locked_axes)| {
             if !rb.is_dynamic() {
                 // Skip non-dynamic bodies.
@@ -327,7 +330,7 @@ fn clear_velocity_increments(
 ) {
     let start = crate::utils::Instant::now();
 
-    bodies.par_iter_mut().for_each(|mut integration| {
+    bodies.par_for_each_mut(MIN_PAR_BODIES, |mut integration| {
         integration.linear_increment = Vector::ZERO;
         integration.angular_increment = AngularVector::ZERO;
     });
@@ -361,7 +364,7 @@ pub fn integrate_velocities(
     #[cfg(feature = "3d")]
     let delta_secs = time.delta_secs_f64() as Scalar;
 
-    bodies.par_iter_mut().for_each(|mut body| {
+    bodies.par_for_each_mut(MIN_PAR_BODIES, |mut body| {
         if body.solver_body.flags.is_kinematic() {
             // Skip kinematic bodies.
             return;
@@ -517,7 +520,7 @@ pub fn integrate_positions(
 
     let delta_secs = time.delta_seconds_adjusted();
 
-    solver_bodies.par_iter_mut().for_each(|body| {
+    solver_bodies.par_for_each_mut(MIN_PAR_BODIES, |body| {
         let SolverBody {
             linear_velocity,
             angular_velocity,
