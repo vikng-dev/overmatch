@@ -12,9 +12,10 @@
 //!
 //! The dedicated-server operator sets `OVERMATCH_DEBRIS_STRESS=<pieces>:<period_s>`. Unset, empty,
 //! `off`, `false` or zero pieces is off. An armed server releases breaches beside tanks in turn,
-//! alternating flanks. Pieces collide with terrain, vehicle proxies and each other. Their rest
-//! rule is [`crate::debris`]'s. Sleeping pieces have no cap: removing a body wakes its contact
-//! island, and removing pieces from the bottom of a pile would create the wakes being observed.
+//! alternating flanks. Pieces collide as a construction's fallen pieces do
+//! ([`crate::construction::breakage::piece_layers`]). Their rest rule is [`crate::debris`]'s.
+//! Sleeping pieces have no cap: removing a body wakes its contact island, and removing pieces from
+//! the bottom of a pile would create the wakes being observed.
 //!
 //! Required construction and appearance live in `assets/dev/debris-stress.ron`, with every authored
 //! value's job and provenance. Authority and presentation admit it before play.
@@ -40,8 +41,7 @@ pub(super) use pose::replication as pose_replication;
 
 use super::harness::{LeverError, env_text};
 use super::world_reset::AuthorityWorld;
-use crate::Layer;
-use crate::construction::breakage::{Piece, RetirePiece};
+use crate::construction::breakage::{Piece, RetirePiece, piece_layers};
 use crate::debris::{DebrisPiece, freeze::Frozen};
 use crate::tank::Tank;
 use crate::terrain_grid::HeightGrid;
@@ -445,15 +445,6 @@ fn release_breaches(
     );
     stress.next_release_s = now + stress.lever.period_s;
     stress.breaches += 1;
-    let layers = CollisionLayers::new(
-        [Layer::Debris],
-        [
-            Layer::Terrain,
-            Layer::Vehicle,
-            Layer::Debris,
-            Layer::TrackBelt,
-        ],
-    );
     // This structural transaction pairs each body with its carrier before publishing the batch.
     for release in releases {
         stress.released += 1;
@@ -479,7 +470,7 @@ fn release_breaches(
             RigidBody::Dynamic,
             stress.scenario.collider.clone(),
             ColliderDensity(stress.scenario.parameters.density_kg_m3.0),
-            layers,
+            piece_layers(),
             LinearVelocity(release.velocity),
             AngularVelocity(release.spin),
         ));
@@ -645,6 +636,7 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
+    use crate::Layer;
 
     /// FIXTURE DATA: the generation every carrier of these worlds is tagged with.
     fn fixture_world() -> AuthorityWorld {
@@ -951,15 +943,15 @@ mod tests {
     /// A RESTING PIECE STOPS PUBLISHING: a piece dropped onto the ground comes to rest and
     /// freezes, its published pose follows the fall, and from then on its carrier's pose stops
     /// changing, so replicon sends it nothing: the freeze moves no piece, and its body is not on
-    /// the wire. A mutant that writes every piece's carrier every tick, or that keeps a resting
-    /// piece awake, reds this.
+    /// the wire. It mounts the server's installer, published in its phase after the freeze: a
+    /// mutant that writes every piece's carrier every tick, that keeps a resting piece awake, or
+    /// whose server publishes no movement, reds this.
     #[test]
     fn a_resting_piece_stops_publishing() {
         let mut app = physics_app();
-        app.add_systems(
-            FixedPostUpdate,
-            publish_poses.after(PhysicsSystems::StepSimulation),
-        );
+        app.insert_resource(fixture_world());
+        install_server_from(&mut app, None, scenario::RON)
+            .expect("the shipped scenario installs without a lever");
         let scenario = Scenario::shipped();
         let radius = scenario
             .parameters
@@ -990,10 +982,7 @@ mod tests {
                 RigidBody::Dynamic,
                 scenario.collider.clone(),
                 ColliderDensity(scenario.parameters.density_kg_m3.0),
-                CollisionLayers::new(
-                    [Layer::Debris],
-                    [Layer::Terrain, Layer::Vehicle, Layer::Debris],
-                ),
+                piece_layers(),
             ))
             .id();
         let frozen_at = (0..640)
@@ -1036,6 +1025,55 @@ mod tests {
             last_change,
             "a frozen piece's carrier no longer changes, so it sends nothing"
         );
+    }
+
+    /// A lever piece collides as a construction's fallen piece does: a mutant that gives the
+    /// released bodies their own layers stresses a contact set no fallen piece meets.
+    #[test]
+    fn a_released_piece_collides_as_a_fallen_piece_does() {
+        use bevy::ecs::system::RunSystemOnce;
+        // Fixture data: the shipped tank's sheet and rig, beside no geometry.
+        let spec = crate::track::rig_geom::tiger_spec();
+        let track_colliders = crate::track::bump_stop::TrackColliders::new(
+            &crate::track::rig_geom::tiger_rig(),
+            &spec.track.suspension.params(),
+            spec.track.friction(),
+        );
+        let geometry = crate::bake::TankGeometry {
+            nodes: Vec::new(),
+            by_name: Default::default(),
+            roadwheels: Vec::new(),
+            collision_proxies: Vec::new(),
+            ballistic_volumes: Vec::new(),
+        };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(fixture_world())
+            .insert_resource(crate::bake::TankBlueprint::new(
+                crate::tank::TANK_SPEC_PATH.to_owned(),
+                crate::bake::CertifiedAsset::fixture(spec, geometry),
+            ))
+            .insert_resource(track_colliders)
+            .insert_resource(DebrisStress::new(
+                Lever {
+                    pieces: 3,
+                    period_s: 1.0,
+                },
+                Scenario::shipped(),
+            ));
+        app.world_mut()
+            .spawn((Tank, Position(Vec3::ZERO), Rotation::default()));
+        app.world_mut()
+            .run_system_once(release_breaches)
+            .expect("the lever's system runs");
+        let world = app.world_mut();
+        let layers: Vec<CollisionLayers> = world
+            .query_filtered::<&CollisionLayers, With<DebrisPiece>>()
+            .iter(world)
+            .copied()
+            .collect();
+        assert_eq!(layers.len(), 3);
+        assert!(layers.iter().all(|&layers| layers == piece_layers()));
     }
 
     /// The breach places every piece above the ground beside the tank's flank and throws it
