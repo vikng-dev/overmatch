@@ -191,7 +191,7 @@ pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
 pub(crate) struct Loads {
     reactions: [f32; 2],
     reaction_slopes: [f32; 2],
-    sensed: Option<super::sense::Sensed>,
+    sensed: Option<super::driver::Sensed>,
 }
 
 /// What a tank's last driving pass leaves ([`apply_track_forces`]). Never hashed, never rolled
@@ -795,29 +795,35 @@ pub(crate) fn belt_reactions(
     )
 }
 
-/// The Driver feels the tick ([`super::sense`]) with the belts at `belts` (m/s, `[left, right]`),
+/// The Driver feels the tick ([`super::driver`]) with the belts at `belts` (m/s, `[left, right]`),
 /// then each belt takes on its solver contact's belt reaction. The ledger reads each contact's traction on the hull along the heading; the belt
 /// reaction is the drive's load along each contact's travel, partly vertical around a wrap.
 pub(crate) fn feel_tick(
-    sense: &mut super::sense::DriverSense,
+    sense: &mut super::driver::DriverSense,
     reports: &mut [SideReport; 2],
     hard: [Option<super::stop_contacts::HardReaction>; 2],
     hull: &HullBody,
     belts: [f32; 2],
     affine: Affine3A,
     dt: f32,
-) -> Option<super::sense::Sensed> {
+) -> Option<super::driver::Sensed> {
     let forward = affine.transform_vector3(Vec3::NEG_Z);
     let sensed = sense.tick(
         hull.linear,
         forward,
         (belts[0] + belts[1]) * 0.5,
         1.0 / hull.inverse_mass,
-        super::sense::Contacts {
+        super::driver::Contacts {
             soft: reports
                 .each_ref()
                 .map(|report| report.contacts.iter().map(|c| c.traction).sum()),
             grip: reports.iter().map(|report| report.grip_budget).sum(),
+            rolling: reports
+                .iter()
+                .flat_map(|report| &report.contacts)
+                .map(|c| c.rolling_force)
+                .sum(),
+            rolling_budget: reports.iter().map(|report| report.rolling_budget).sum(),
             hard,
         },
         dt,
@@ -838,7 +844,7 @@ pub(crate) struct BeltRig<'a> {
     pub grip: &'a mut TrackGrip,
     pub elements: &'a mut TrackGripElements,
     pub transmission: &'a mut TransmissionState,
-    pub sense: &'a mut super::sense::DriverSense,
+    pub sense: &'a mut super::driver::DriverSense,
     /// Last physics step's hard-contact reaction; None means that side had no solver contact,
     /// preserving the spring-only tick.
     pub hard_reactions: [Option<super::stop_contacts::HardReaction>; 2],
@@ -1071,7 +1077,7 @@ struct DriveTank {
     elements: &'static mut TrackGripElements,
     effect: &'static mut TrackGripEffect,
     transmission: &'static mut TankTransmission,
-    sense: &'static mut super::sense::DriverSense,
+    sense: &'static mut super::driver::DriverSense,
     contacts: &'static mut TrackContacts,
     last: &'static mut LastPass,
     forces: Option<Forces>,
@@ -1600,7 +1606,7 @@ mod tests {
         use avian3d::prelude::*;
         let gear = app.world().resource::<TrackGear>();
         let trans = TankTransmission::from_spec(gear.trans());
-        let sense = super::super::sense::DriverSense::for_cut(gear.trans().shift_ticks);
+        let sense = super::super::driver::DriverSense::for_cut(gear.trans().shift_ticks);
         let count = gear.count;
         let lateral_points = gear.columns[0].samples().len();
         app.world_mut()
@@ -2973,7 +2979,7 @@ mod tests {
         let mut elements =
             TrackGripElements::for_links(gear.count, gear.columns[0].samples().len());
         let mut transmission = TransmissionState::from_spec(&gear.trans);
-        let mut sense = super::super::sense::DriverSense::for_cut(gear.trans.shift_ticks);
+        let mut sense = super::super::driver::DriverSense::for_cut(gear.trans.shift_ticks);
         let pieces = RubbleBodies::default();
         let dt = 1.0 / 64.0; // Fixture tick.
         let weight = mass * super::super::derive::G;
@@ -3140,7 +3146,7 @@ mod tests {
             let mut elements =
                 TrackGripElements::for_links(gear.count, gear.columns[0].samples().len());
             let mut state = TransmissionState::from_spec(&gear.trans);
-            let mut sense = super::super::sense::DriverSense::for_cut(gear.trans.shift_ticks);
+            let mut sense = super::super::driver::DriverSense::for_cut(gear.trans.shift_ticks);
             let pieces = RubbleBodies::default();
             let dt = 1.0 / 64.0; // Fixture fixed step.
             let (mut speed, mut distance) = (ROLLING_FADE_SPEED, 0.0_f32);
@@ -3151,6 +3157,8 @@ mod tests {
             let mut late_min = f32::INFINITY;
             let mut late_max = f32::NEG_INFINITY;
             let mut late_force = 0.0;
+            let mut late_drag = 0.0;
+            let mut late_grip = 0.0;
             let mut full_drag_force = 0.0;
             for tick in 0..64 * 60 {
                 let (reports, ..) = belt_tick(
@@ -3200,6 +3208,8 @@ mod tests {
                         .flat_map(|r| &r.contacts)
                         .map(|c| c.rolling_force.z)
                         .sum();
+                    late_drag += rolling / 64.0;
+                    late_grip += reports.iter().map(|r| r.grip_budget).sum::<f32>() / 64.0;
                     full_drag_force += (force + rolling - rolling_n) / 64.0;
                 }
                 speed += force / mass * dt;
@@ -3221,13 +3231,13 @@ mod tests {
                         full_drag_force < -force_precision,
                         "a refused launch must have no full-drag surplus"
                     );
-                    let expected = ROLLING_FADE_SPEED * engine_pull.min(grip_n) / rolling_n;
-                    // Resolution: the stations' passing ripple on the crawl, MEASURED 0.26 % of the
-                    // fade speed at 48 stations.
+                    // The crawl sits where the faded drag meets the limiting force, the grip its
+                    // contacts carry or the engine's pull; the stations' passing ripple about that
+                    // speed is an observation.
+                    let limit = engine_pull.min(late_grip);
                     assert!(
-                        (late_min - expected).abs() < ROLLING_FADE_SPEED * 5e-3
-                            && (late_max - expected).abs() < ROLLING_FADE_SPEED * 5e-3,
-                        "{case}: crawl [{late_min}, {late_max}] must follow limiting force, expected {expected}"
+                        (late_drag - limit).abs() < force_precision,
+                        "{case}: the crawl's drag {late_drag} N must meet the limiting force {limit} N"
                     );
                     assert!(
                         late_force.abs() < force_precision,
@@ -3243,7 +3253,7 @@ mod tests {
                 _ => unreachable!("all fixture cases are declared inline"),
             }
             println!(
-                "MEASURED pressure case={case} mass_kg={mass:.3} pressure_kpa={pressure:.6} drag_n={:.3} grip_n={:.3} engine_pull_n={engine_pull:.3} late_speed=[{late_min:.8},{late_max:.8}] late_force_n={late_force:.4} full_drag_force_n={full_drag_force:.4}",
+                "MEASURED pressure case={case} mass_kg={mass:.3} pressure_kpa={pressure:.6} drag_n={:.3} grip_n={:.3} engine_pull_n={engine_pull:.3} late_speed=[{late_min:.8},{late_max:.8}] late_force_n={late_force:.4} late_drag_n={late_drag:.4} late_grip_n={late_grip:.4} full_drag_force_n={full_drag_force:.4}",
                 rolling_n, grip_n
             );
         }

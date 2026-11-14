@@ -251,13 +251,10 @@ impl Measurements {
 
 /// Every paid cut of one drive, held to the rules its construction states (architecture §5a): a
 /// cut opens the clutch for exactly one shift's ticks, a full window of drive separates it from the
-/// last, and it lands the gear its clause names. A stall steps to the lowest gear within
-/// `max_step`. Any other cut lands a gear that holds: its pull, priced at the drive's pedal where
-/// the cut lands ([`candidate_pull`](crate::track::transmission::candidate_pull)) and capped by
-/// grip, beats both the resistance it read and the engaged gear's drive by M. A gear the idle catch
-/// carried through a held window steps to the highest such gear in reach, else the lowest; any
-/// other step down follows a held window whose drivetrain lost more than M. How many cuts a drive
-/// pays is an observation.
+/// last, it changes gear within `max_step`, and a step down lands a gear that holds more than the
+/// engaged gear on the drive's pedal ([`viable_pull`](crate::track::transmission::viable_pull)).
+/// Which clause decides a cut is the Driver's unit tests' to show ([`crate::track::driver`]); how
+/// many cuts a drive pays is an observation.
 struct Cuts {
     /// The requested pedal the drive holds, the command the Driver prices with.
     pedal: f32,
@@ -266,7 +263,9 @@ struct Cuts {
     open: usize,
     /// Driven ticks since the last cut closed; `None` before the first.
     since: Option<usize>,
+    /// The gear and clutch the last driven tick left, which the next choice starts from.
     gear: u8,
+    clutch: crate::track::transmission::ClutchState,
 }
 
 impl Cuts {
@@ -277,11 +276,12 @@ impl Cuts {
             open: 0,
             since: None,
             gear: 0,
+            clutch: crate::track::transmission::ClutchState::Out,
         }
     }
 
     fn tick(&mut self, app: &App, tank: Entity) {
-        use crate::track::transmission::ClutchState;
+        use crate::track::transmission::{ClutchState, viable_pull};
         let gear = app.world().resource::<crate::track::sim::TrackGear>();
         let tp = gear.trans();
         let window = usize::from(tp.shift_ticks.get());
@@ -296,7 +296,7 @@ impl Cuts {
             if let Some(since) = &mut self.since {
                 *since += 1;
             }
-            self.gear = state.gear;
+            (self.gear, self.clutch) = (state.gear, state.clutch);
             return;
         }
         assert!(!p.engaged, "a cut opens the clutch");
@@ -312,74 +312,40 @@ impl Cuts {
             );
         }
         let (old, new) = (self.gear, state.gear);
-        let reading = app
-            .world()
-            .get::<crate::track::sense::DriverSense>(tank)
-            .unwrap()
-            .reading
-            .expect("a cut is chosen on a reading");
-        let dir = if state.reverse { -1.0 } else { 1.0 };
-        let stall = reading.stall.filter(|stall| stall.dir == dir);
-        let lowest = old.saturating_sub(tp.max_step).max(1);
-        if stall.is_some() && reading.stalled {
-            assert_eq!(new, lowest, "a stall steps to the lowest gear in reach");
+        assert_ne!(new, old, "a cut within one ladder pays for a gear change");
+        assert!(
+            new.abs_diff(old) <= tp.max_step,
+            "gear {old} to {new}: one selector event moves at most max_step"
+        );
+        if new > old {
             return;
         }
-        assert_ne!(new, old, "a cut within one ladder pays for a gear change");
-        let resistance = stall.map_or(dir * reading.resistance, |stall| {
-            (dir * reading.resistance).max(stall.push)
-        });
-        let landing = ((dir * reading.speed).max(0.0)
-            - resistance * f32::from(tp.shift_ticks.get())
+        assert!(p.sensed, "a cut is chosen on a reading");
+        let (ladder, dir) = if state.reverse {
+            (&tp.gears_rev, -1.0)
+        } else {
+            (&tp.gears_fwd, 1.0)
+        };
+        let holds = |candidate: u8, at: f32, clutch: ClutchState| {
+            let ratio = ladder[usize::from(candidate - 1)];
+            viable_pull(tp, DriveSupply::WHOLE, at, ratio, self.pedal, clutch)
+        };
+        let speed = (dir * p.sensed_speed).max(0.0);
+        let landing = (speed
+            - dir * p.sensed_resistance_n * f32::from(tp.shift_ticks.get())
                 / FIXED_TICKS_PER_SECOND as f32
                 / gear.landing_mass())
         .max(0.0);
-        let ladder = if state.reverse {
-            &tp.gears_rev
-        } else {
-            &tp.gears_fwd
-        };
-        let pull = |candidate: u8| {
-            crate::track::transmission::candidate_pull(
-                tp,
-                &gear.construction(),
-                DriveSupply::WHOLE,
-                landing,
-                ladder[usize::from(candidate - 1)],
-                self.pedal,
-                resistance,
-                ClutchState::Out,
-            )
-            .min(reading.grip)
-        };
-        let margin = crate::track::transmission::DriverResolution::load().margin_n(tp);
-        let holds = |candidate: u8| {
-            let pull = pull(candidate);
-            pull - resistance > margin && pull > dir * reading.drive + margin
-        };
-        if reading.caught && new < old {
-            // Whether the catch carried the gear at this demand or its drivetrain lost, a step
-            // down lands the highest gear in reach that holds; only a carried gear finding none
-            // takes the lowest.
-            assert_eq!(
-                new,
-                (lowest..old)
-                    .rev()
-                    .find(|&candidate| holds(candidate))
-                    .unwrap_or(lowest),
-                "gear {old}: a gear the catch carried steps to the highest lower gear in reach that holds, else the lowest"
-            );
-            return;
-        }
-        assert!(
-            holds(new),
-            "gear {old} to {new}: the landing gear holds, pulling {} N against {resistance} N, and outpulls the engaged drive {} N",
-            pull(new),
-            reading.drive
+        // The Driver also caps both holds by grip and floors the resistance at a stall, which can
+        // only lower the landing; a gear holds no less landing faster, so its step down passes
+        // this uncapped, unfloored comparison too.
+        let (landed, engaged) = (
+            holds(new, landing, ClutchState::Out),
+            holds(old, speed, self.clutch),
         );
         assert!(
-            new > old || (reading.observed && dir * reading.drive_gain < -margin),
-            "gear {old} to {new}: a step down reads its drivetrain losing over a held window"
+            landed > engaged,
+            "gear {old} to {new}: a step down lands a gear that holds more, {landed} N against {engaged} N"
         );
     }
 }
@@ -436,7 +402,7 @@ pub(super) fn place(
     transmission.0.omega_e = (speed * params.gears_fwd[(gear - 1) as usize]
         / params.sprocket_radius)
         .max(params.engine.idle_rpm * crate::track::transmission::RPM_TO_RAD);
-    let sense = crate::track::sense::DriverSense::for_cut(params.shift_ticks);
+    let sense = crate::track::driver::DriverSense::for_cut(params.shift_ticks);
     let mut e = app.world_mut().entity_mut(tank);
     {
         let mut transform = e.get_mut::<Transform>().unwrap();
@@ -448,7 +414,7 @@ pub(super) fn place(
     e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = rotation * Vec3::NEG_Z * speed;
     e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
     *e.get_mut::<TankTransmission>().unwrap() = transmission;
-    *e.get_mut::<crate::track::sense::DriverSense>().unwrap() = sense;
+    *e.get_mut::<crate::track::driver::DriverSense>().unwrap() = sense;
     *e.get_mut::<crate::track::sim::DriveSignal>().unwrap() =
         crate::track::sim::DriveSignal::default();
     for side in &mut e.get_mut::<TrackDrive>().unwrap().sides {
@@ -754,18 +720,19 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
     }
 }
 
-/// The game's driving model, game state only: a gear the Driver's idle catch carries through a held
-/// window steps down. At part pedal against more than the pedal pulls, the engaged gear slows until
-/// its crank falls into the catch's band, where the catch fuels past the pedal and holds a crawl
-/// that neither slows nor stalls; the Driver relies on the step to leave a crawl on torque no pedal
-/// asked for. No gear above first stays carried longer than one window, and each cut keeps its
-/// construction's rules ([`Cuts`]). Mutant: without the carried-gear clause, fifth crawls
-/// carried for the whole drive. Where the drive ends is an observation. Fixture: an uninterrupted
-/// grade meeting 46.5 kN, entered at a mid-band crank in the lowest gear whose step down cannot
-/// reach first, at 0.25 pedal for 40 seconds.
+/// The game's driving model, game state only: a gear its pedal cannot hold steps down. At part pedal
+/// against more than the engaged gear holds, the gear slows until its crank falls into the idle
+/// catch's band, where the catch fuels past the pedal and holds a crawl that neither slows nor
+/// stalls; the Driver relies on judging the engaged gear on its pedal to leave that crawl. Each cut
+/// keeps its construction's rules ([`Cuts`]). Mutant: without the verdict on the engaged gear, the
+/// entry gear slows into the catch's band and crawls carried for the whole drive. When it steps
+/// down, how long any gear rode the catch and where the drive ends are observations: the reading's
+/// error, which the ride's scatter sets, decides when. Fixture: an uninterrupted grade meeting
+/// 46.5 kN, entered at a mid-band crank in the lowest gear whose step down cannot reach first, at
+/// 0.25 pedal for 40 seconds.
 #[test]
-fn a_gear_the_idle_catch_carries_through_a_held_window_steps_down() {
-    use crate::track::transmission::RPM_TO_RAD;
+fn a_gear_its_pedal_cannot_hold_steps_down_before_the_catch_carries_it() {
+    use crate::track::transmission::{ClutchState, RPM_TO_RAD, viable_pull};
     // Fixture: the grade's resistance (N) and the pedal.
     let (resistance, pedal) = (46_500.0_f32, 0.25);
     let rolling = crate::ground_types::GroundTypes::load_shipped()
@@ -785,7 +752,12 @@ fn a_gear_the_idle_catch_carries_through_a_held_window_steps_down() {
     let window = usize::from(tp.shift_ticks.get());
     let entry = (tp.max_step + 2).min(tp.gears_fwd.len() as u8);
     let rpm = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5;
-    let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[usize::from(entry - 1)];
+    let ratio = tp.gears_fwd[usize::from(entry - 1)];
+    let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / ratio;
+    assert!(
+        viable_pull(tp, DriveSupply::WHOLE, speed, ratio, pedal, ClutchState::In) < resistance,
+        "the fixture enters a gear its pedal cannot hold"
+    );
     let start = app
         .world()
         .get::<avian3d::prelude::Position>(tank)
@@ -835,25 +807,15 @@ fn a_gear_the_idle_catch_carries_through_a_held_window_steps_down() {
         - start)
         .dot(uphill);
     println!(
-        "MEASURED idle catch witness: pedal={pedal} entry_gear={entry} window_ticks={window} gears(tick, gear)={gears:?} longest_carried_ticks={carried:?} cuts={} final_gear={} final_speed_m_s={final_speed} final_rpm={} distance_m={distance} R[{}]",
+        "MEASURED unheld gear witness: pedal={pedal} entry_gear={entry} window_ticks={window} gears(tick, gear)={gears:?} longest_carried_ticks={carried:?} cuts={} final_gear={} final_speed_m_s={final_speed} final_rpm={} distance_m={distance} R[{}]",
         cuts.count,
         state.gear,
         state.omega_e / RPM_TO_RAD,
         summary(&sensed)
     );
-    let above_first = carried
-        .iter()
-        .filter(|(gear, _)| **gear > 1)
-        .map(|(_, run)| *run)
-        .max()
-        .unwrap_or(0);
     assert!(
-        above_first >= window,
-        "the fixture reaches a gear above first that the catch carries through a held window: {carried:?}"
-    );
-    assert!(
-        above_first <= window,
-        "a gear the catch carried through a held window steps down: {carried:?}"
+        gears.get(1).is_some_and(|&(_, gear)| gear < entry),
+        "the entry gear steps down: {gears:?}"
     );
 }
 

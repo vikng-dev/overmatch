@@ -452,14 +452,14 @@ impl BeltGripElements {
 #[derive(Resource)]
 struct TransState(
     crate::track::transmission::TransmissionState,
-    crate::track::sense::DriverSense,
+    crate::track::driver::DriverSense,
 );
 
 impl TransState {
     fn fresh(params: &crate::track::transmission::TransmissionParams) -> Self {
         Self(
             crate::track::transmission::TransmissionState::from_spec(params),
-            crate::track::sense::DriverSense::for_cut(params.shift_ticks),
+            crate::track::driver::DriverSense::for_cut(params.shift_ticks),
         )
     }
 }

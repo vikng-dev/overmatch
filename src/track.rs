@@ -13,6 +13,7 @@
 pub mod drive;
 #[cfg(test)]
 pub(crate) mod drive_fixture;
+pub(crate) mod driver;
 pub mod forces;
 pub mod oracle;
 // The marker-driven suspension/track model, promoted out of `track_sandbox` (mirrors `forces`):
@@ -38,7 +39,6 @@ pub mod route;
 pub(crate) mod rubble;
 #[cfg(test)]
 pub(crate) mod schedule_path;
-pub mod sense;
 pub(crate) mod stop_contacts;
 // The belt's SHADOW CASTER: a low-poly ribbon swept along the same drawn polyline the shoes are
 // placed on, so the 1.08 M-triangle shoe pool can stop being re-submitted into every cascade. Pure

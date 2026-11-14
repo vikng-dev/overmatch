@@ -271,7 +271,7 @@ pub(crate) struct TransmissionProbe {
     pub reactions: [f32; 2],
     pub dt: f32,
     pub direction: f32,
-    /// What the Driver felt of the hull this tick (`track::sense`); zeros when nothing was sensed.
+    /// What the Driver felt of the hull this tick (`track::driver`); zeros when nothing was sensed.
     pub sensed: bool,
     pub sensed_speed: f32,
     pub sensed_resistance_n: f32,

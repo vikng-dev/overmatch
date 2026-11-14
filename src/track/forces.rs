@@ -558,6 +558,9 @@ pub struct SideReport {
     /// Some gripping patch carried less than its whole budget: it holds, with grip to spare. A
     /// side whose every gripping patch slides holds nothing more.
     pub grip_reserve: bool,
+    /// The rolling resistance its contacts apply to a hull travelling forward past the fade
+    /// (N, world): each contact's [`BeltContact::rolling_force`] unfaded, `-long_dir r N`.
+    pub rolling_budget: Vec3,
     /// Material-station depth probes; surface quadrature casts are not recorded.
     #[cfg(feature = "bitprobe")]
     pub(crate) bitprobe_contacts: Vec<ContactInputProbe>,
@@ -1365,6 +1368,7 @@ fn emit_contact_forces(
             report.reaction_slope.angular += (c.p - origin).cross(hull);
         }
         let rolling = if c.has_plane {
+            report.rolling_budget -= c.long_dir * c.rolling * c.load;
             rolling_resistance(c.rolling * c.load, c.travel_speed)
         } else {
             0.0 // No longitudinal tangent exists on this contact.
@@ -3039,7 +3043,10 @@ mod tests {
     }
 
     /// Rolling follows hull travel, not belt spin; grip alone reacts on the belt. A spinning
-    /// stationary rig and a coasting hull therefore read different rolling loads. Fixture pad.
+    /// stationary rig and a coasting hull therefore read different rolling loads. The rolling
+    /// budget reads neither: `r N` against forward travel, unfaded, which the Driver prices a gear
+    /// against once it moves the hull past the fade. Mutants: a faded budget reads none at rest;
+    /// one signed by travel reads backward travel as pushing. Fixture pad.
     #[test]
     fn rolling_reads_hull_motion_independently_of_belt_spin() {
         let ground = crate::ground_field::ContactGround {
@@ -3067,6 +3074,8 @@ mod tests {
                 let expected = ground.rolling_resistance * load * (hull_speed / ROLLING_FADE_SPEED);
                 let rolling: f32 = report.contacts.iter().map(|c| c.rolling_force.z).sum();
                 assert!((rolling - expected).abs() < load * 1e-6);
+                let budget = ground.rolling_resistance * load;
+                assert!((report.rolling_budget.z - budget).abs() < load * 1e-6);
                 let reaction: f32 = report.contacts.iter().map(|c| c.f_long).sum();
                 assert_eq!(report.belt_reaction, reaction);
                 let hull_force: f32 = report.apps.iter().map(|a| -a.force.z).sum();

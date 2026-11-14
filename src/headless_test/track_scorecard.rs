@@ -284,7 +284,7 @@ impl Bed {
     fn place(&mut self, ground: Vec3, rotation: Quat) {
         let at = ground + rotation * Vec3::Y * self.rest_y;
         // A teleport is no motion the Driver felt: the ledger starts again.
-        let sense = crate::track::sense::DriverSense::for_cut(
+        let sense = crate::track::driver::DriverSense::for_cut(
             self.app
                 .world()
                 .resource::<crate::track::sim::TrackGear>()
@@ -292,7 +292,7 @@ impl Bed {
                 .shift_ticks,
         );
         let mut e = self.app.world_mut().entity_mut(self.tank);
-        *e.get_mut::<crate::track::sense::DriverSense>()
+        *e.get_mut::<crate::track::driver::DriverSense>()
             .expect("a driving tank carries its Driver's ledger") = sense;
         *e.get_mut::<Transform>().expect("tank transform") =
             Transform::from_translation(at).with_rotation(rotation);
