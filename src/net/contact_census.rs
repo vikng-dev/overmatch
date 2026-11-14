@@ -217,6 +217,17 @@ pub(crate) struct SweepSplit {
     casts_per_source: Vec<u32>,
 }
 
+/// Tanks that loose pieces hold up through their soft runs, each as of its latest awake step: a
+/// sleeping tank's contacts leave the solver, so it keeps the reading it fell asleep with, and a
+/// wake reads afresh. `scripts/perf/pile_park.py` gates a parked tank's pile on it.
+#[derive(Clone, Copy, Default, Serialize)]
+pub(crate) struct PieceLift {
+    /// Tanks whose upward momentum from loose pieces over that step exceeds [`SEAM_IMPULSE_NS`].
+    tanks: u32,
+    /// That upward momentum summed over every tank, N·s.
+    impulse_ns: f32,
+}
+
 /// One tick's contact census: a nested row field, so `collapse.py`'s `_us` summation skips it.
 #[derive(Clone, Default, Serialize)]
 pub(crate) struct ContactTick {
@@ -224,6 +235,7 @@ pub(crate) struct ContactTick {
     kinds: Kinds,
     airborne: Airborne,
     islands: Islands,
+    piece_lift: PieceLift,
     sweep: SweepSplit,
 }
 
@@ -572,7 +584,7 @@ pub(super) struct ContactCensus<'w, 's> {
     normal_transfers: Local<'s, HashMap<(Entity, Entity), f32>>,
     bodies: Query<'w, 's, &'static RigidBody>,
     standing: Query<'w, 's, (), With<Body>>,
-    tanks: Query<'w, 's, &'static BodyIslandNode, With<Tank>>,
+    tanks: Query<'w, 's, (Entity, &'static BodyIslandNode, Has<Sleeping>), With<Tank>>,
     tank_marks: Query<'w, 's, (), With<Tank>>,
     belts: Query<'w, 's, (), With<SoftRun>>,
     pieces: Query<'w, 's, PieceFields, With<DebrisPiece>>,
@@ -606,6 +618,8 @@ pub(super) struct ContactCensus<'w, 's> {
     flags: Local<'s, EntityHashMap<u8>>,
     awake_islands: Local<'s, HashMap<u32, u32>>,
     tank_islands: Local<'s, HashSet<u32>>,
+    /// Each tank's upward momentum from loose pieces through its soft runs (N·s, [`PieceLift`]).
+    lifts: Local<'s, EntityHashMap<f32>>,
 }
 
 impl ContactCensus<'_, '_> {
@@ -760,6 +774,13 @@ impl ContactCensus<'_, '_> {
         let tick = self.records.tick;
         self.record_motion(tick);
         self.normal_transfers.clear();
+        let lifts = &mut *self.lifts;
+        lifts.retain(|tank, _| self.tanks.contains(*tank));
+        for (tank, _, sleeping) in &self.tanks {
+            if !sleeping {
+                lifts.insert(tank, 0.0);
+            }
+        }
         for point in self.transfers.solver_groups().flatten() {
             let other = point
                 .other_collider
@@ -769,6 +790,23 @@ impl ContactCensus<'_, '_> {
                 point.reference_collider.max(other),
             );
             *self.normal_transfers.entry(key).or_default() += point.impulse.dot(point.normal);
+            // Up is +Y; the reference takes the opposite of what `other` takes.
+            for (run, tank, piece, into_tank) in [
+                (
+                    point.reference_collider,
+                    point.reference,
+                    point.other,
+                    -point.impulse,
+                ),
+                (other, point.other, point.reference, point.impulse),
+            ] {
+                if self.belts.contains(run) && self.piece_marks.contains(piece) {
+                    *lifts
+                        .get_mut(&tank)
+                        .expect("a soft run's tank is awake while its contacts solve") +=
+                        into_tank.y;
+                }
+            }
             // The two endpoints can have different rest speeds; each owns its impact test. A
             // frozen piece is static, outside the motion record until it thaws.
             for entity in [point.reference, point.other] {
@@ -788,6 +826,13 @@ impl ContactCensus<'_, '_> {
                 }
             }
         }
+        let piece_lift = PieceLift {
+            tanks: lifts
+                .values()
+                .filter(|&&lift| lift > SEAM_IMPULSE_NS)
+                .count() as u32,
+            impulse_ns: lifts.values().sum(),
+        };
 
         // Each batch owns a disjoint pair range and its reusable buffers.
         let pairs = self.graph.active_pairs();
@@ -904,11 +949,12 @@ impl ContactCensus<'_, '_> {
         row.islands.with_tank = self
             .tanks
             .iter()
-            .filter(|island| {
+            .filter(|(_, island, _)| {
                 let id = island.island_id().0;
                 awake_islands.contains_key(&id) && tank_islands.insert(id)
             })
             .count() as u32;
+        row.piece_lift = piece_lift;
 
         *self.workers = workers;
         row.census_us = started.elapsed().as_secs_f64() * 1.0e6;
@@ -1278,6 +1324,108 @@ mod tests {
             assert_eq!(row.kinds.piece_ground.seam_pairs, u32::from(seam));
             assert_eq!(row.airborne.loaded.awake, u32::from(seam));
         }
+    }
+
+    /// A tank with a loose piece under each of its two soft runs, once the census has seen them;
+    /// each case then hands it the solver's transfers.
+    fn lift_fixture() -> (App, Entity, [(Entity, Entity); 2]) {
+        let mut app = app(Vec3::ZERO);
+        let tank = app
+            .world_mut()
+            .spawn((RigidBody::Dynamic, Tank, Transform::IDENTITY))
+            .id();
+        let runs = [-3.0, 3.0].map(|x| {
+            let run = app
+                .world_mut()
+                .spawn((
+                    ChildOf(tank),
+                    Transform::from_xyz(x, 0.0, 0.0),
+                    Collider::cuboid(CUBE, CUBE, CUBE),
+                    SoftRun::fixture(),
+                ))
+                .id();
+            (run, piece(&mut app, x, -1.0))
+        });
+        step(&mut app, 4);
+        (app, tank, runs)
+    }
+
+    /// One step's momentum `into_tank` from a piece through its run, the pair ordered with the
+    /// run first or second, as Avian may order it.
+    fn pushing(
+        tank: Entity,
+        (run, piece): (Entity, Entity),
+        into_tank: Vec3,
+        run_first: bool,
+    ) -> crate::contact_transfer::ContactTransfer {
+        let (reference, reference_collider, other, other_collider, impulse) = if run_first {
+            (tank, run, piece, piece, -into_tank)
+        } else {
+            (piece, piece, tank, run, into_tank)
+        };
+        crate::contact_transfer::ContactTransfer {
+            reference,
+            reference_collider,
+            other,
+            other_collider: Some(other_collider),
+            point: Vec3::ZERO,
+            normal: impulse.normalize(),
+            impulse,
+            effective_mass: 1.0,
+            closing_speed: 0.0,
+            friction: 0.0,
+        }
+    }
+
+    fn lift(app: &mut App, points: Vec<crate::contact_transfer::ContactTransfer>) -> PieceLift {
+        app.world_mut()
+            .insert_resource(ContactTransfers::fixture(vec![points], 1.0 / 64.0));
+        read_pairs(app).piece_lift
+    }
+
+    /// The pile gate (`scripts/perf/pile_park.py`) counts a tank as resting on loose pieces only
+    /// when they push it up through its soft runs, whichever way Avian orders the pair: a press
+    /// on a run's side or down onto it lifts nothing, however hard. Reading the momentum's size,
+    /// one ordering's sign, or counting runs for tanks breaks this.
+    #[test]
+    fn only_upward_momentum_through_a_soft_run_lifts_a_tank() {
+        let (mut app, tank, runs) = lift_fixture();
+        let up = Vec3::Y * SEAM_IMPULSE_NS * 2.0;
+        let side = Vec3::X * SEAM_IMPULSE_NS * 1.0e3; // Fixture: a press far past the lift.
+        for run_first in [true, false] {
+            for (into_tank, lifted) in [(up, 1), (side, 0), (-up, 0)] {
+                let reading = lift(&mut app, vec![pushing(tank, runs[0], into_tank, run_first)]);
+                assert_eq!(reading.tanks, lifted, "{into_tank}, run first: {run_first}");
+                assert_eq!(reading.impulse_ns, into_tank.y);
+            }
+        }
+        let both = lift(
+            &mut app,
+            runs.map(|run| pushing(tank, run, up, true)).to_vec(),
+        );
+        assert_eq!(
+            (both.tanks, both.impulse_ns),
+            (1, 2.0 * up.y),
+            "one tank on two runs"
+        );
+    }
+
+    /// The pile gate reads the lift at the settle span's end, where the tank may sleep: asleep,
+    /// its contacts leave the solver and it keeps the lift it fell asleep with; awake, a step
+    /// without one clears it, as when the pile rolls out from under it. Clearing the lift on
+    /// sleep, or holding it through a wake, breaks this.
+    #[test]
+    fn a_tank_keeps_its_lift_asleep_and_loses_it_awake() {
+        let (mut app, tank, runs) = lift_fixture();
+        let up = Vec3::Y * SEAM_IMPULSE_NS * 2.0;
+        assert_eq!(
+            lift(&mut app, vec![pushing(tank, runs[0], up, true)]).tanks,
+            1
+        );
+        app.world_mut().entity_mut(tank).insert(Sleeping);
+        assert_eq!(lift(&mut app, vec![]).tanks, 1, "asleep, it keeps its lift");
+        app.world_mut().entity_mut(tank).remove::<Sleeping>();
+        assert_eq!(lift(&mut app, vec![]).tanks, 0, "awake, the pile is gone");
     }
 
     /// A wake cannot mutate a completed sleep cohort. Impact history belongs to the new awake

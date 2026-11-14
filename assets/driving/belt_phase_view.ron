@@ -1,0 +1,1 @@
+(4.0, Taste("belt phase correction: how fast the drawn belt's phase eases onto the simulated one, settling in about 1.2 s (DERIVED 4.7/omega); faster draws the sample staircase back into the scroll, slower lets drawn travel scrub against the ground; this taste does not change the simulated belt"))

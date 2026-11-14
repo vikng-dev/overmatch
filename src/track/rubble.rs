@@ -1,9 +1,10 @@
 //! Constructions and rubble under the running gear, in the game's tank driving physics (game state
 //! only). The terrain field ([`super::oracle::BlockField`]) is the heightmap and the authored
 //! blocks; a construction's elements and standing chunks and every loose piece are Avian colliders
-//! the field never holds. [`RubbleBodies`] snapshots the nearby colliders shared by every driving
-//! source, and the belt's sampled support reads each through a convex shape check over every
-//! link's footprint ([`RubbleBodies::in_slabs`]) at the ground's own per-metre spring.
+//! the field never holds. [`RubbleBodies`] snapshots the nearby solids the belt bears on, loose
+//! pieces excluded, shared by every driving source, and the belt's sampled support reads each
+//! through a convex shape check over every link's footprint ([`RubbleBodies::in_slabs`]) at the
+//! ground's own per-metre spring.
 //!
 //! **The boundary, one rule from construction facts: the layer a collider was built on.**
 //! - **On `Layer::Debris`** (a construction's fallen pieces and the debris stress lever's
@@ -15,8 +16,8 @@
 //!   fixed construction into its structural load reading
 //!   ([`RubbleBodies::record_static_contacts`]), a dynamic body as an impulse ([`reactions`]). The
 //!   dynamic bodies here are the hulls and a launched turret, on `Layer::Vehicle`. The explicit
-//!   spring is stable for a body while `dt² k / m + 2 dt c / m` stays under 4: DERIVED, about 0.2
-//!   for the shipped belt law on a 50 t body at 64 Hz, so the bound holds down to about 2.5 t.
+//!   spring is stable for a body while `dt² k / m + 2 dt c / m` stays under 4 (the shipped margin:
+//!   `.agents/docs/design/track-model/track-contact.md`, "The boundary, one rule").
 //!
 //! - **What the belt bears on** ([`RubbleQuery::supports`]): solid, layer-compatible colliders,
 //!   except loose pieces and [`super::terrain::FieldSurface`] geometry already represented by the
@@ -40,13 +41,8 @@
 //! - **Tick truth**: avian refits dynamic bodies' AABBs at the end of its physics step
 //!   (`update_solver_body_aabbs`) and writes each collider's `Position`/`Rotation`, so a snapshot
 //!   in `FixedUpdate` reads the poses the last step wrote.
-//! - **Rejected alternatives**: probe rays folded onto the colliders (each probe also a ray
-//!   against the rubble, the deepest hit wins) see only the three column lines, so a brick between
-//!   them sits under the belt unseen. A custom reaction law on pieces outside the solver, a
-//!   clamped impulse sized against each piece's effective mass, gave the tank ground support while
-//!   a resting piece took no normal push: nothing pressed the piece into what held it, so the belt
-//!   swept a heap apart, and the law was the larger code path. The soft run's solver contacts give
-//!   the piece the equal and opposite reaction instead.
+//! - **Rejected**: probe rays against the colliders see only the three column lines, so a brick
+//!   between them sits under the belt unseen; `track-contact.md` tells the others.
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};

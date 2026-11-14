@@ -214,12 +214,12 @@ pub(crate) const GRIP_ELEMENT_DAMPING_RATIO: f32 = 0.5;
 /// Resolution: element membership bounds, as fractions of the side's nominal weight: a pad ENTERS the
 /// grip population above the high bound and STAYS down to the low bound (hysteresis).
 /// Membership reads the ELASTIC load only, never the damped load's sign — the damped load
-/// carries the support damper's separation transients, and keying reset to it erased a
-/// parked tank's strain on one noisy tick (netcode review defect 1: unsafe for parking).
+/// carries the support damper's separation transients, and keying reset to it erases a
+/// parked tank's strain on one noisy tick.
 /// The bounds are tiny against a real bearing column (~0.1% / 0.025% of side weight vs the
 /// several percent a grounded column carries) — they exclude numeric dust, not load.
 ///
-/// LOW-LOAD POLICY (netcode review defect 3): strain INTEGRATES only while the element is a
+/// LOW-LOAD POLICY: strain INTEGRATES only while the element is a
 /// member — accumulation shares exactly the membership hysteresis, one regime, one set of
 /// bounds. A barely-touching pad never clears the enter bound, so it accumulates nothing
 /// and later real load finds no stored-up strain to fire as a sudden force; a member that
@@ -241,8 +241,8 @@ pub(crate) const GRIP_ELEMENT_LOSS_DWELL_TICKS: u8 = 8;
 /// The canonical belt-phase decomposition: travel → (integer wrap count, residual station
 /// offset in `[0, pitch)`). ONE function feeds BOTH the resample offset and material
 /// identity — computing them separately (f32 residual here, f64 floor there) let rounding
-/// disagree for one tick at exact pitch multiples, mis-keying element state by a whole link
-/// (netcode review defect 2). The residual comes from the exact f64 remainder; the wrap
+/// disagree for one tick at exact pitch multiples, mis-keying element state by a whole link.
+/// The residual comes from the exact f64 remainder; the wrap
 /// count is derived FROM that residual (never from an independently rounded division), and
 /// the carry branch absorbs the one remaining seam: the f32 cast of a residual just under
 /// `pitch` can round up to exactly `pitch`, which `resample`'s internal `rem_euclid` would
@@ -375,9 +375,8 @@ pub(crate) struct ContactResolution {
 /// Resolution: 48 stations × 3 lateral points. A feature shorter than perimeter/48 is unresolved;
 /// MEASURED on the track scorecard, turning at 48 stations is within 0.2 % of 97, and drifts 1 %
 /// at 24 and 2 % at 16. The three points are Simpson's nodes (both shoe edges and the centre):
-/// they integrate lateral pressure exactly through a cubic profile, and their width/2 gap must
-/// stay below the data-owned piece size floor for point-based detection to see a piece. Solid
-/// detection uses the shoe's full bounds.
+/// they integrate lateral pressure exactly through a cubic profile. Solid detection uses the
+/// shoe's full bounds.
 pub(crate) const CONTACT_RESOLUTION: ContactResolution = ContactResolution {
     stations: 48,
     lateral_points: 3,

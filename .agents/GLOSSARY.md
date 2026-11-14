@@ -214,9 +214,9 @@ _Avoid_: roadwheel contact, contact patch
 A solver collider per side (code: `BumpStop`) on the belt's outer face past the wheels' travel, its surface moving at belt speed, so a wall meets it and friction reaches the transmission.
 _Avoid_: bump stop as a suspension spring; it is the hard limit past the travel
 
-**Belt segment**:
-A solver slab of the belt's outer face, over suspension travel, that meets only loose pieces (`Layer::Debris`). It carries the belt's per-metre support law as a compliant contact over its length, shared among the pieces under it.
-_Avoid_: conveyor, track collider
+**Soft run**:
+A solver collider per side (code: `SoftRun`) of the rest belt's outer face, that meets only loose pieces (`Layer::Debris`). It is read as links of the belt's pitch, each carrying the belt's per-metre support law times its length as a compliant contact, shared among the pieces on it.
+_Avoid_: belt segment, conveyor, track collider
 
 **Compliant contact**:
 A solver contact holding an absolute stiffness and damping per point, so a body rests on it at a load-proportional deflection (`ContactManifold::compliance`, a local patch to the vendored Avian).

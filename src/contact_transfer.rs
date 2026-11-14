@@ -609,7 +609,7 @@ fn keep(
         pending.iter().map(|contact| {
             let (_, kind, ..) = bodies.get(contact.structure)
                 .expect("an implicit structural recipient survives until the contact reading");
-            assert!(!kind.is_dynamic(), "the belt's implicit contacts land only on fixed construction; a moving group meets the belt's segments in the solver");
+            assert!(!kind.is_dynamic(), "the belt's implicit contacts land only on fixed construction; a moving body takes the sampled support's impulse or meets a soft run in the solver");
             let (solver, _, position, rotation, com) = bodies.get(contact.body).expect(
                 "a source that applied an implicit contact remains a dynamic body through this physics step");
             let solver = solver.expect("an implicit contact source is an active moving body");

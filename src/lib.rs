@@ -599,14 +599,16 @@ pub(crate) enum Layer {
     /// what the penetration march meets in avian's tree. A tank's armour is no collider; the march
     /// reads it from the tank's armour set.
     Armor,
-    /// Server-simulated pieces (`crate::debris`): a construction's fallen chunks and the debris stress
-    /// lever's fragments. They collide with `Terrain`, `Vehicle` and each other, and no ground
-    /// query reads them. A construction piece's separate occupied-hull sensors carry `Armor`
-    /// and ballistic volumes, so the game's damage-model walk meets its substance.
+    /// Server-simulated pieces (`crate::debris`): a construction's fallen chunks and the debris
+    /// stress lever's fragments. They collide with `Terrain`, `Vehicle`, each other and the belts'
+    /// soft runs (`TrackBelt`), and no ground query reads them. A construction piece's separate
+    /// occupied-hull sensors carry `Armor` and ballistic volumes, so the game's damage-model walk
+    /// meets its substance.
     Debris,
-    /// Track side faces: physical contacts with bodies and structures, excluded from terrain.
+    /// Track side faces: physical contacts with bodies and structures, never terrain or a loose
+    /// piece.
     TrackSide,
-    /// Track belt segments: the belt's sprung outer face, meeting only loose pieces (`Debris`).
+    /// The belts' soft runs (`track::soft_run`), meeting only loose pieces (`Debris`).
     TrackBelt,
 }
 

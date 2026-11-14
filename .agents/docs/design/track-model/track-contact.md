@@ -3,7 +3,7 @@
 Subject: the video game's tank driving physics (the track belt, the suspension and their contact
 with terrain, structures and rubble); game state only. The decision is
 [[0041-track-contact-channels]]. This file owns the narrative; modules hold their own invariants.
-Numbers are MEASURED on 2026-11-08 unless labelled DERIVED.
+Numbers are MEASURED on 2026-11-08 unless labelled DERIVED or dated otherwise.
 
 ## Three channels, one law
 
@@ -11,7 +11,7 @@ Numbers are MEASURED on 2026-11-08 unless labelled DERIVED.
 |---|---|---|---|
 | ground, standing construction, map blocks, another hull | sampled support | no | `track::forces` |
 | a wall or a step past the belt's travel | outer-face stop and side plates | yes, as solver contacts moving at belt speed | `track::bump_stop`, `track::stop_contacts` |
-| loose pieces | belt segments on `Layer::TrackBelt` | yes, as compliant contacts | `track::belt_segment` |
+| loose pieces | one soft run per side on `Layer::TrackBelt` | yes, as compliant contacts | `track::soft_run` |
 
 **The sampled support.** Each side has 48 stations round the closed loop and three points across
 the shoe (both edges and the centre). Terrain gives one height-grid facet plane per column, read
@@ -25,14 +25,20 @@ load reading, a dynamic body as an impulse at the contact.
 hard limit, and thin slices at the shoe faces meet bodies laterally. Each surface moves at belt
 speed in the solver (`stop_contacts`), so friction against a wall lifts the hull at μ times the
 forward push wherever the belt wraps an end wheel. Solver friction returns to the transmission
-through one reader of the contact transfers, the segments' with it.
+through one reader of the contact transfers, the runs' with it.
 
-**The segments.** The rest loop is cut into 0.3 m slabs (`SEGMENT_M`, Resolution) over suspension
-travel, the outer face on the droop envelope. They meet only `Layer::Debris`. Each pair is a
-compliant contact: Avian's stock contact solves its relaxing pass rigidly along the normal, so a
-body cannot rest on it at a load-proportional deflection (DERIVED from
-`ContactNormalPart::solve_impulse`). The vendored patch adds an absolute per-point law set by the
-contact hook (`upstream/avian-compliant-contact.md`). Nothing freezes a loaded piece.
+**The soft run.** Per side, one convex collider: the rest belt's outer outline across the shoe's
+measured faces, on `Layer::TrackBelt`, which meets only `Layer::Debris`. It is read as links of the
+belt's pitch, each carrying `k' × link` at the deepest overlap any contact gives it, shared among
+the contacts on it by depth. A piece's contact is read on the one face of the run its normal picks,
+its points projected onto it: on a rim face its overlap runs along that face's outline edge, linear
+between its points; on a lateral cap each point loads its nearest link. Each contact is compliant:
+Avian's stock contact solves its relaxing pass rigidly along the normal, so a body cannot rest on it
+at a load-proportional deflection (DERIVED from `ContactNormalPart::solve_impulse`). The vendored
+patch adds an absolute per-point law (`upstream/avian-compliant-contact.md`), under which a point
+out of overlap at the narrow phase bears nothing all step, and `soft_run` is its one writer: it
+keeps every point, so a contact's law is a function of the contact as the narrow phase left it.
+Nothing freezes a loaded piece.
 
 **Rest.** A tank at rest sleeps with its pile through Avian's island sleep, whatever carries it.
 The sampled support goes through the non-waking force call, so no force resets the rest timer,
@@ -68,56 +74,70 @@ it wakes a sleeping piece (`debris`), through the colliders its last pass sample
 waking impulse; a moving body or a falling piece wakes it through the island wake.
 
 **One law.** `k'` and `c'` per metre of belt are the spring channel's calibration
-(`SegmentLaw`, `ForceParams`), and the envelope comes from the same travel knots, so the segment
-and the sampled support hold a tank at the same deflection on a surface wider than the shoe. A
-shoe is a rigid plate: a piece under part of its width still loads the running gear through the
-whole link, so a segment takes `k' × length` whatever its coverage, shared over every point it
-touches. Coverage moves where the force acts, so the roll moment follows the contact's position.
+(`forces::SupportLaw`, from `ForceParams`). A shoe is a rigid plate: a piece under part of its
+width still loads the running gear through the whole link, so a link takes `k' × link` whatever
+its coverage. Coverage moves where the force acts, so the roll moment follows the contact's
+position.
 
 Known differences between the channels, none tuned:
 
+- **The datum.** The sampled support's zero-force datum is the droop envelope, so the tank's
+  weight holds it at its rest pose on ground. The run's is the rest outer face, so a piece's force
+  adds to the ground's under the same belt, and a tank carried on pieces alone rests about one
+  free travel lower against them than on ground (DERIVED: the same `k'` from a datum one free
+  travel higher). It rides low on a heap, and the drawn belt follows the drawn pieces
+  (`track::view`). The datum at the droop envelope, past the ground's own intrusion at each link,
+  measured worse (MEASURED 2026-11-14): the stop's lift share fell to 0.21–0.25, but the straight
+  drive's heave peak rose from 14.9 to 24.1 m/s², the hull's rise from 0.15–0.18 to 0.26–0.39 m,
+  creep crossings fell from 5/12 to 2/12, and a tank asleep on pieces no longer woke on drive
+  demand. `ContactCompliance` has no preload or rest-offset term, so that datum reached the solver
+  as a secant stiffness over the whole overlap, exact only at each step's start. Such a term would
+  let the datum move there truthfully.
 - **Partial coverage.** Over ground the sampled support is a column quadrature, so a curb under one
   edge takes that column's share. A loose piece under part of the width carries the rigid plate
-  whole: the segment takes its whole law and the shadow lifts the shoe off the ground over that
-  length. Over 0.1 m pieces covering 0.728 of the shoe the rise is 0.107 m (MEASURED). Width enters
-  only the sampled channel's ground.
+  whole: its link takes its whole law. Width enters only the sampled channel's ground.
 - **No engagement ramp** in the compliant contact; the spring channel ramps over
   `suspension.engage`.
 - **Friction on pieces** is Avian's Coulomb at the pair's μ, not a belt element's strain, and no
   rolling resistance acts on a piece.
-- **A side plate over a deflected segment.** A side plate is rigid at the rest geometry, from the
-  stop down to the rest outer face, within its depth of the shoe edge; a segment spans the shoe's
-  width down to the droop envelope. A piece the tank presses past the rest face at a shoe edge is
-  in both: the segment holds it at its deflection, and the plate's lateral contact pushes it out
-  from under the edge through Avian's penetration recovery. MEASURED on the scorecard's house heap
-  (`rubble_wedge_probe`): on each of the five pieces a plate overlapped by 1 cm or more on average
-  (at most 10 cm), the plate did the most net positive work, 0.2 to 5.8 kW per piece, which the
-  segment, the ground and the other pieces took back; the segments' surface speed was zero. On one
-  arrival the pieces settled within 6 s and the island slept; on another (`c609a5df`, the tank
-  parked 0.15 m short of the first) two pieces under the plates and two they touch kept moving
-  through the 4 s window at 0.2 to 0.3 m/s mean, reversing about every second tick. Open, as each
-  moves the channel boundary: a plate that meets a piece only above the belt's deflected outer
-  face, or no plate against `Layer::Debris`.
+- **One face per piece.** A convex pair gets one contact with one normal (DERIVED from parry 0.27:
+  `contact_manifold_pfm_pfm` clips the faces `ConvexPolyhedron::local_support_feature` picks, the
+  ones whose normals best match the contact's, then adds its GJK witness point). Avian exposes each
+  point midway between the two shapes' witnesses (`contact_manifolds`, avian 0.7), so an exposed
+  point need not lie on the run's face: a run witness at (z, y) = (3, 3), outward normal (0.6, 0.8)
+  and 0.1 m of overlap expose (2.97, 2.96), inside the outline. The reader selects one face from the
+  normal and projects every exposed point onto it, so a piece bearing across a corner of the outline
+  loads that face alone; the belt past the corner takes nothing from it that step. At an exact tie
+  between two edges the run may take the one parry did not, and the feet then clamp onto their
+  shared corner.
+- **The cap law** is a `StandIn`. A contact on a lateral cap (a pivot sweeping the shoe's side into
+  pieces, a piece overlapped at the shoe's edge whose least-penetration direction is sideways)
+  loads its points' nearest links at the belt's law along the lateral normal, though nothing says
+  a piece against the shoe's side meets the running gear's radial spring. One probe A/B, with cap
+  contacts handed `None` (rigid) against this, would settle whether it matters. The nearest
+  measurement is the belt segments' side plates below: related, not the same, since a piece there
+  sat in two colliders at once. Parry clips a face to its first four vertices (the TODO in
+  `ConvexPolyhedron::local_support_feature`, parry 0.27), so a cap contact, its face an N-gon, is
+  mostly the lone GJK witness point (DERIVED).
 
 ## The boundary, one rule
 
 The channel is the layer a collider was built on. `Layer::Debris` (a construction's fallen pieces
-and debris stress fragments, at any mass, `RubbleBodies::loose`) goes to the segments; the sampled
-support keeps it in the footprint partition, so a covered cell takes no ground support and the
-Driver perceives it, and applies no spring force. Over the length a loose piece covers, its shadow
-spans the whole shoe: a link is rigid across its width, so the ground beside the piece is not
-touching it (`ClippedFace::across_shoe`). Every other solid stays in the sampled support. The
-dynamic bodies left there are the hulls and a launched turret, which stays on `Layer::Vehicle`. The
-explicit spring is stable for a body while `dt² k / m + 2 dt c / m` stays under 4. DERIVED: about
-0.2 for the shipped belt law on a 50 t body at 64 Hz, so the bound holds down to about 2.5 t.
+and debris stress fragments, at any mass) meets the soft run and the stop, and no side plate; the
+sampled support reads no collider a run meets (`rubble::RubbleQuery::near`), so the ground under a
+piece keeps its own support and the drivetrain reads the piece through the run's solver friction.
+Every other solid stays in the sampled support. The dynamic bodies left there are the hulls and a
+launched turret, which stays on `Layer::Vehicle`. The explicit spring is stable for a body while
+`dt² k / m + 2 dt c / m` stays under 4. DERIVED: about 0.2 for the shipped belt law on a 50 t body
+at 64 Hz, so the bound holds down to about 2.5 t.
 
 ## Resolution
 
 48 × 3 is a `Resolution` number (`forces::CONTACT_RESOLUTION`). Belt stage on the local Mac for 30
 tanks: 0.79 ms at 97 × 3, 0.51 at 48, 0.38 at 24, 0.32 at 16; the tick stops falling visibly below
 48. Turning at 48 is within 0.2 % of 97, and drifts 1 % at 24 and 2 % at 16; 16 fails the slope law
-on gravel. Three lateral points are the knee: the gap between points stays below the 0.5 m piece
-size floor, so no piece sits unseen under a shoe (DERIVED).
+on gravel. The three lateral points are Simpson's nodes (both shoe edges and the centre), exact for
+lateral pressure through a cubic profile.
 
 ## What was rejected, and why
 
@@ -127,12 +147,17 @@ size floor, so no piece sits unseen under a shoe (DERIVED).
   (22 of 44), and the physics step priced 9.0 ms against the sampled channel's 1.0 ms.
 - **A custom reaction law for pieces.** A clamped explicit impulse that held a loaded piece as
   ground. The pile's reaction ratio read 0.58 / 0.56 / 0.012 against the required 1.0, and in the
-  loose heap it moved 39 / 49 pieces against the segments' 17 / 18. Local ram, first 4 s after
+  loose heap it moved 39 / 49 pieces against the belt segments' 17 / 18. Local ram, first 4 s after
   impact: belt stage 2.8 to 4.4 ms against 1.1, and up to 64 ticks more than two late against
   none. It was also the larger code: its removal is −1548 +184 lines.
+- **Belt segments, with side plates meeting pieces.** 0.3 m sprung slabs over the wheels' travel,
+  their outer faces on the droop envelope, the sampled support shadowing the ground beside a piece
+  across the whole shoe. On the house heap a pivot shook pieces back and forth under the belt, 28.5
+  reversals median against the soft run's 0, and the tank slept after stopping in 41 of 48 starts
+  against 47 of 48 (MEASURED 2026-11-14, 12 to 36 starts per arm).
 - **Exact-triangle terrain clipping.** It added 5.3 ms per tick for 30 tanks (4.2 to 9.4 ms p50,
   local); fixture loads moved 0.04 % on flat ground once replaced by facet samples. Convex overlays
   stay for solids, where the facets are few and the outline matters.
-- **A segment's stiffness following the covered width.** It halved the loose-heap climb (rise max
-  0.185 / 0.223 m to 0.104 / 0.113 m) and has no basis in a rigid shoe. The width enters the
-  sampled channel only through its quadrature over ground.
+- **Stiffness following the covered width.** On the belt segments it halved the loose-heap climb
+  (rise max 0.185 / 0.223 m to 0.104 / 0.113 m) and has no basis in a rigid shoe. The width enters
+  the sampled channel only through its quadrature over ground.

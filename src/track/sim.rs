@@ -8,8 +8,9 @@
 //! replaces):
 //! - Pose from tick-truth `Position`/`Rotation`, never `GlobalTransform` (render lag differs
 //!   per machine).
-//! - Terrain from the analytic [`TrackField`]; construction and loose-piece support from a
-//!   tick-start shape snapshot ([`RubbleBodies`]), checked across the complete shoe footprint.
+//! - Terrain from the analytic [`TrackField`]; standing-solid support from a tick-start shape
+//!   snapshot ([`RubbleBodies`]), checked across the complete shoe footprint. Loose pieces meet
+//!   the soft run in the solver instead (`super::soft_run`).
 //! - Runs every tick unconditionally (this is sim state); stays inside
 //!   `SimPhase::DrivingForces` so drive samples velocity before the weapon-fire impulse.
 //! - The game's damage model ([`drive_target`]): axes actuate only while someone serves the

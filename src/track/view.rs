@@ -49,11 +49,11 @@ pub struct TrackViewSet;
 pub fn view_plugin(app: &mut App) {
     wheel_lift_rise_omega();
     super::wrap::wrap_feel_zeta();
+    phase_heal_omega();
     app.add_observer(rebind_on_reinstance);
     // The shoe template: one read of the glb's `Link` node, and the every-frame `Added<Name>` scan
-    // that HIDES it (and `Link_Box`). Shared verbatim with the sandbox — the game rendered
-    // procedural boxes and hid neither node until 2026-07-26, so every session drew a stray white
-    // marker box and a loose shoe parked beside the hull.
+    // that hides it and `Link_Box`, shared verbatim with the sandbox. Either node left visible draws
+    // stray geometry beside the hull: a white marker box, a loose shoe.
     app.add_plugins(link_view::template_plugin);
     // The belt's shadow caster ([`super::shadow_proxy`]).
     app.add_systems(Update, (bind_track_rigs, attach_shadow_proxies).chain());
@@ -76,20 +76,41 @@ pub fn view_plugin(app: &mut App) {
     app.add_plugins(crate::track_prints::plugin);
 }
 
-/// Presented-phase heal frequency (rad/s) — settle ≈ 4.7/ω ≈ 1.2 s.
+/// Presented-phase heal frequency ω (rad/s), settling in about 4.7/ω: the belt-phase correction
+/// taste, admitted before view startup.
 ///
 /// Bounded from ABOVE by the artefact it exists to remove. Easing onto a staircase puts the
 /// staircase back into the drawn rate, scaled: a residual sawtooth of `speed × T_sample` entering a
 /// per-frame ease of `ω·Δt` ripples the drawn rate by at most `ω · T_sample / 2` of the belt's
-/// speed — under 2 % across one 64 Hz sample (MEASURED, `worst_rate_error`), a few times that
-/// across the multi-sample gaps jitter opens. Every factor faster is that much of the stutter back.
+/// speed — at ω = 4, under 2 % across one 64 Hz sample (MEASURED, `worst_rate_error`), a few times
+/// that across the multi-sample gaps jitter opens. Every factor faster is that much of the stutter
+/// back.
 ///
 /// Bounded from BELOW by drift alone, and only barely: the carry integrates the sim's own belt
 /// speed, so the residual it accumulates is the acceleration across one sample, and the drawn belt
 /// stays tooth-locked whatever the residual is (pins and sprocket read the SAME presented phase).
 /// What drift costs is BELLY SCRUB — drawn travel walking away from ground travel — so the heal has
 /// to close it in well under the time a driver watches one patch of ground go by, not sooner.
-const PHASE_HEAL_OMEGA: f32 = 4.0;
+fn phase_heal_omega() -> f32 {
+    static DATA: std::sync::LazyLock<crate::provenance::Labelled<f32>> =
+        std::sync::LazyLock::new(|| {
+            const PATH: &str = "assets/driving/belt_phase_view.ron";
+            let value: crate::provenance::Labelled<f32> = crate::provenance::from_shipped_str(
+                PATH,
+                include_str!("../../assets/driving/belt_phase_view.ron"),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            assert!(
+                value.value.is_finite()
+                    && value.value > 0.0
+                    && matches!(value.label, crate::provenance::Provenance::Taste(_)),
+                "{PATH}: the heal frequency must be positive, finite and Taste; state how fast \
+                 the drawn belt's phase eases onto the simulated one"
+            );
+            value
+        });
+    DATA.value
+}
 
 /// One frame of the belt's PRESENTED phase: carry the drawn phase at the sim's own belt speed, then
 /// ease the residual onto the sim phase. Pure; `None` (cold start, snap) adopts `sim` whole.
@@ -103,7 +124,7 @@ const PHASE_HEAL_OMEGA: f32 = 4.0;
 ///
 /// It also cannot invent travel the vehicle has not got: `speed` is the belt's surface speed, so a
 /// braked skid (`speed` 0) still stops the links dead and wheelspin still scrolls them under a
-/// stationary hull. The ease bounds what the carry accumulates — see [`PHASE_HEAL_OMEGA`].
+/// stationary hull. The ease bounds what the carry accumulates — see [`phase_heal_omega`].
 ///
 /// The residual is taken modulo [`super::sim::BELT_PHASE_WRAP_M`]: a replica's `sim` phase is
 /// wrapped on the wire and jumps a whole wrap where the authority's crosses one, while the drawn
@@ -113,7 +134,7 @@ fn presented_phase(previous: Option<f64>, sim: f64, speed: f32, dt: f32) -> f64 
         return sim;
     };
     let carried = previous + f64::from(speed) * f64::from(dt);
-    let heal = 1.0 - f64::from(-PHASE_HEAL_OMEGA * dt).exp();
+    let heal = 1.0 - f64::from(-phase_heal_omega() * dt).exp();
     carried + super::sim::wrapped_phase_delta(carried, sim) * heal
 }
 
@@ -149,13 +170,14 @@ impl<O: DepthOracle> DepthOracle for OnPieces<'_, O> {
     }
 }
 
-/// Presented-pose discontinuity thresholds: a root that moves further than this in ONE frame is
-/// a teleport/respawn/snap, not motion — reset the wrap filters and the wheel-lift state. The view
-/// detects locally, with no published signal: works identically in SP and MP, no netcode coupling.
-/// 60 km/h at 30 fps is 0.56 m/frame — half the trip threshold.
+/// Resolution: a presented root that moves further than this in ONE frame is a
+/// teleport/respawn/snap, not motion, so the view resets the wrap filters and the wheel-lift
+/// state. It sits above driven motion so a slow frame never resets them: 60 km/h at 30 fps is
+/// 0.56 m a frame, under half of it (DERIVED). The view detects locally, with no published signal:
+/// works identically in SP and MP, no netcode coupling.
 pub(crate) const SNAP_TRANSLATION: f32 = 1.2;
-/// Axis chord per frame (~30°), checked on BOTH the forward and up axes — a pure roll leaves
-/// forward unchanged.
+/// Resolution: the same reading of turn, as an axis chord per frame (about 29°, DERIVED
+/// 2·asin(0.25)), checked on BOTH the forward and up axes — a pure roll leaves forward unchanged.
 pub(crate) const SNAP_AXIS: f32 = 0.5;
 /// One tank's track-view state, on the root. Pure view: despawns with the root, resets its filter
 /// memory on any presented-pose discontinuity.
@@ -1317,9 +1339,8 @@ mod tests {
     /// pieces near the tank with the one it last sampled against, for the wheels and for the belt
     /// apart. The first top lies the bump travel plus half a wheel's reach up, so a wheel with any
     /// of its probed arc (within 50° of its bottom) over the piece reads past its travel; the
-    /// raise is half the travel. The reading is the refreshed targets, not the eased lift, so no
-    /// wheel ease taste can pass or fail it: the wheels' lift targets, and the belt's depths
-    /// sampled once every wheel stands on its target, as a snap stands it. The piece is a box
+    /// raise is half the travel. It reads the refreshed wheel targets and the belt's depths with
+    /// every wheel set to its target, so wheel easing cannot affect the result. The piece is a box
     /// under the middle wheel of one side, across that wheel's treads and the belt's stations and
     /// along the side's largest reach either way, so every probe of that wheel and some of the
     /// belt's meet it. The box and the tick are fixture data; a rise is read as half the raise.
@@ -2090,33 +2111,38 @@ mod tests {
 
     /// THE artefact. Drawing the sim phase directly stalls the belt for every frame no sample
     /// reached and lurches it on the one that did — an error of the belt's whole speed, growing
-    /// with the gap. The carry holds the belt's own speed across the same gaps.
+    /// with the gap. The carry holds the belt's own speed across the same gaps, leaving only the
+    /// ease's ripple: each frame draws `h·r` past the carry (`h` the authored rate's share of a
+    /// frame, `r` the residual), and a staircase of `g` frames of travel `u` settles into the
+    /// periodic residual that runs from `r₀ = g·u / (1 − (1 − h)^g) − u / h` down by the carry
+    /// and the ease to `r_last = (r₀ + u − g·u) / (1 − h)` (DERIVED). Easing faster than
+    /// authored, or carrying at other than the belt's speed, breaks the bound.
     #[test]
     fn the_drawn_scroll_rate_survives_the_gaps_between_samples() {
-        // MEASURED ripple at ω = 4: 0.067 / 0.202 / 0.482 m/s. These bounds sit half again above
-        // that, so doubling ω fails all three rather than sneaking one through.
-        for (gap, tolerance) in [(2, 0.10), (4, 0.30), (8, 0.70)] {
+        let h = 1.0 - f64::from(-phase_heal_omega() * DT).exp();
+        let u = f64::from(SPEED) * f64::from(DT);
+        for gap in [2, 4, 8] {
+            let g = f64::from(gap);
+            let first = g * u / (1.0 - (1.0 - h).powf(g)) - u / h;
+            let last = (first + u - g * u) / (1.0 - h);
+            let ripple = h * first.max(-last) / f64::from(DT);
             let (raw, presented) = worst_rate_error(gap);
+            println!("gap {gap}: raw {raw:.3}, presented {presented:.3}, ripple {ripple:.3} m/s");
             // A stalled frame alone is already the full belt speed out.
             assert!(
                 raw >= f64::from(SPEED) - 1e-9,
                 "gap {gap}: raw error {raw} should stall a whole {SPEED} m/s",
             );
             assert!(
-                presented < tolerance,
-                "gap {gap}: presented error {presented} exceeds {tolerance} m/s",
-            );
-            // And the point of the exercise: the drawn rate is orders better, not marginally.
-            assert!(
-                presented * 10.0 < raw,
-                "gap {gap}: presented {presented} vs raw {raw}",
+                presented <= ripple + 1e-9,
+                "gap {gap}: presented error {presented} exceeds the ease's ripple {ripple} m/s",
             );
         }
     }
 
     /// The ease is what keeps the carry from walking away from the ground — a belly that scrubs is
     /// the failure a left-open residual causes. A whole metre of it must be down to 1 % inside two
-    /// seconds, which is the lower bound on [`PHASE_HEAL_OMEGA`]: halve the rate and this fails.
+    /// seconds, which is the lower bound on [`phase_heal_omega`]: halve the rate and this fails.
     #[test]
     fn the_heal_closes_a_residual_the_carry_cannot() {
         let mut phase = 0.0;

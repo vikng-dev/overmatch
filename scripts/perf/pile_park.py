@@ -34,16 +34,19 @@ throttle's end (the harness's 128-tick lead-in plus --throttle-ticks, DERIVED at
 contact census leaves the trace adds (`contact_census_us`, `sweep_census_us`); `net_us` subtracts
 them. The collector runs outside `tick_us`.
 
-Gates per run (a failed one marks it INVALID in summary.json and leaves the pooled tables):
-the server listened, the client was released and both were alive at the window's close; the
-window holds at least 95 % of its ticks, each with one tank; over the settle span before the
-window, while the tank is awake, a pile run's belt overlaps loose pieces (`work.belt_overlaps` > 0
-on average) and a flat or rubble run's overlaps none. Whether a sleeping tank does belt work is
-no part of the witness. Evidence is refused, never patched, naming the file and line: a stats
-record that does not parse (only the kill's torn final line, with no line end, is skipped), a
-record without its trace, a record or trace tick of another shape, a trace tick lacking a quantity
-the run reads, a failed process census, a binary that cannot start, a session process that cannot
-be stopped, or a settle span with no tick.
+Gates per run (a failed one marks it INVALID in summary.json and leaves the pooled tables): the
+server listened, the client was released and both were alive at the window's close; the window holds
+at least 95 % of its ticks, each with one tank; at the settle span's last tick a pile run's tank is
+held up by loose pieces through its soft runs and a flat or rubble run's is not (the contact
+census's `contacts.piece_lift.tanks`: upward momentum from pieces over the tank's latest awake step,
+kept while it sleeps, so a tank that rolled off its pile or only presses a piece sideways fails).
+The gate certifies the settle span's end only: support lost after it, inside the window, passes
+unseen.
+Evidence is refused, never patched, naming the file and line: a stats record that does not parse
+(only the kill's torn final line, with no line end, is skipped), a record without its trace, a
+record or trace tick of another shape, a trace tick lacking a quantity the run reads, a failed
+process census, a binary that cannot start, a session process that cannot be stopped, or a settle
+span with no tick.
 A duration or tick count that is not finite and positive is refused at the command line, and a
 checkout whose revision git cannot read, a heightmap other than a 16-bit grey PNG, or a spawn whose
 sampled footprint leaves the heightmap, refuses the whole run.
@@ -95,7 +98,10 @@ TIMES = ("tick_us", "net_us", "physics_us", "sleep_us", "tick_cpu_us", "belt_con
          "avian.relax_velocities_us", "avian.integrate_velocities_us",
          "avian.integrate_positions_us", "avian.collider_tree_update_us", "avian.finalize_us")
 # Every quantity a trace tick must carry: the producer serializes each one, zero included.
-READ = tuple(dict.fromkeys(("elapsed_s", "tanks", "work.belt_overlaps") + COUNTS + CENSUS_LEAVES
+# The census's tanks held up by loose pieces through their soft runs, and that upward momentum
+# (src/net/contact_census.rs, `PieceLift`).
+PIECE_LIFT = ("contacts.piece_lift.tanks", "contacts.piece_lift.impulse_ns")
+READ = tuple(dict.fromkeys(("elapsed_s", "tanks") + PIECE_LIFT + COUNTS + CENSUS_LEAVES
                            + tuple(k for k in TIMES if k != "net_us")))
 
 
@@ -417,13 +423,14 @@ def measure(args, name, condition, pose, out, record):
                                                                 str(refusal))))
     if "invalid" in record:
         return record, []
-    rows, flats, awake_bodies, settle_overlaps = [], [], [], []
+    rows, flats, awake_bodies, settled = [], [], [], None
     for where, load in traces(server_log):
         in_window = False
         for row in load["ticks"]:
             cells = admit(row, where)
             if lead_s <= cells["elapsed_s"] < start_s:
-                settle_overlaps.append(cells["work.belt_overlaps"])
+                if settled is None or cells["elapsed_s"] >= settled["elapsed_s"]:
+                    settled = cells
             elif start_s <= cells["elapsed_s"] <= end_s:
                 rows.append(row)
                 flats.append(cells)
@@ -437,19 +444,18 @@ def measure(args, name, condition, pose, out, record):
     record["awake_bodies_per_line"] = awake_bodies
     record["window"] = describe(flats)
     expected = args.park_s * TICK_HZ
-    if not settle_overlaps:
+    if settled is None:
         raise Refused(f"{server_log}: the settle span [{lead_s}, {start_s}) s holds no tick")
-    # The settle span's tank is awake, so its belt work witnesses what it rests on.
-    belt = statistics.fmean(settle_overlaps)
-    record["settle_belt_overlaps_mean"] = belt
+    lifted, lift_ns = (settled[k] for k in PIECE_LIFT)
+    record["settle_end_piece_lift_ns"] = lift_ns
     if len(flats) < WINDOW_SHARE * expected:
         record["invalid"] = f"the window holds {len(flats)} of {expected} ticks"
     elif any(r["tanks"] != 1 for r in flats):
         record["invalid"] = "a window tick holds other than one tank"
-    elif condition == "pile" and belt <= 0:
+    elif condition == "pile" and lifted == 0:
         record["invalid"] = "the tank does not rest on loose pieces"
-    elif condition != "pile" and belt > 0:
-        record["invalid"] = "the flat tank touches loose pieces"
+    elif condition != "pile" and lifted > 0:
+        record["invalid"] = "the flat tank rests on loose pieces"
     return record, flats
 
 
