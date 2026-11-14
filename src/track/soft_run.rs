@@ -18,10 +18,12 @@
 //!   along that face's outline edge, linear between its points; on a lateral cap each point loads
 //!   the link nearest it. A link takes the deepest that reaches on its length, nothing where that
 //!   is zero or less. A link is rigid along its length, so one point loads a whole link. The
-//!   contacts on a link share its law in proportion to their depth there, and a contact's points in
-//!   overlap carry its whole share; the solver leaves its other points inert. The datum is the rest
-//!   face, so a piece's force adds to the ground's under the same belt, which the sampled support
-//!   carries. The reading's limits are the design doc's
+//!   contacts on a link share its stiffness and damping in proportion to their depth there. A
+//!   contact's deepest points that bear split its share evenly, and a common rest length
+//!   (`ContactCompliance::rest`) carries its force at the step's start, so its law is affine and
+//!   its tangent stiffness the links' own; the solver leaves its other points inert. The datum is
+//!   the rest face, so a piece's force adds to the ground's under the same belt, which the sampled
+//!   support carries. The reading's limits are the design doc's
 //!   (`.agents/docs/design/track-model/track-contact.md`).
 //! - **Drivetrain.** A run carries its side's `BeltFace`, so the shared hook moves its surface at
 //!   belt speed and `stop_contacts::by_owner` reads its friction into the transmission.
@@ -274,9 +276,8 @@ struct Manifold {
     index: usize,
     /// Its links in overlap in [`RunContacts::depths`].
     depths: Range<usize>,
-    /// Its points' summed overlap (m), and how many are in overlap: the points the solver loads.
-    overlap: f32,
-    count: usize,
+    /// Its points' overlaps in [`RunContacts::overlaps`].
+    overlaps: Range<usize>,
 }
 
 /// One run's touching contacts this step and the law each takes, rebuilt every step from the
@@ -286,6 +287,8 @@ struct RunContacts {
     manifolds: Vec<Manifold>,
     /// Each manifold's links in overlap, `(link, depth)` (m, above zero), ascending by link.
     depths: Vec<(u32, f32)>,
+    /// Each manifold's points' overlaps (m; a separated point's is negative), deepest first.
+    overlaps: Vec<f32>,
     /// One manifold's points as `(arc, overlap)` (m; a separated point's overlap is negative).
     points: Vec<(f32, f32)>,
     /// One manifold's depth on each link its profile reaches, once per knot or stretch.
@@ -309,6 +312,7 @@ impl RunContacts {
     fn clear(&mut self) {
         self.manifolds.clear();
         self.depths.clear();
+        self.overlaps.clear();
         self.laws.clear();
     }
 
@@ -340,13 +344,10 @@ impl RunContacts {
                 point.penetration,
             )
         }));
-        // Summed by value, so the order the points came in cannot move the sum.
-        self.points.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
-        let (overlap, count) = self
-            .points
-            .iter()
-            .filter(|p| p.1 > 0.0)
-            .fold((0.0, 0), |(sum, n), p| (sum + p.1, n + 1));
+        // By value, so the order the points came in cannot move the law's sums.
+        let first = self.overlaps.len();
+        self.overlaps.extend(self.points.iter().map(|p| p.1));
+        self.overlaps[first..].sort_unstable_by(|a, b| b.total_cmp(a));
         self.points
             .sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(b.1.total_cmp(&a.1)));
         self.points.dedup_by(|b, a| a.0 == b.0);
@@ -376,16 +377,16 @@ impl RunContacts {
             pair,
             index,
             depths: start..self.depths.len(),
-            overlap,
-            count,
+            overlaps: first..self.overlaps.len(),
         });
     }
 
-    /// Each manifold's law under the running gear's `law`: a link carries `k'·link` at its deepest
-    /// depth and `c'·link`, shared among the manifolds on it in proportion to their depth there;
-    /// a manifold's points in overlap together carry its shares at their own overlaps and at a
-    /// common closing speed. A manifold with none in overlap reaches no link and takes the zero
-    /// law, which the solver leaves inert; `None` would be a rigid contact.
+    /// Each manifold's law under the running gear's `law`: a link carries `k'·link` and `c'·link`
+    /// at its deepest depth, shared among the manifolds on it in proportion to their depth there.
+    /// A manifold's shares are its stiffness and damping, and its links' deepest depths weighted by
+    /// them its force at the step's start; its points that bear take them ([`shared`]). A manifold
+    /// with none in overlap reaches no link and takes the zero law, which the solver leaves inert;
+    /// `None` would be a rigid contact.
     fn solve(&mut self, run: &SoftRun, law: &SupportLaw) {
         let links = run.links;
         // Grouped by link (a counting sort), each group by value, so a link's sum runs in one
@@ -434,21 +435,50 @@ impl RunContacts {
             let (area, length) = self.terms.iter().fold((0.0, 0.0), |(area, length), term| {
                 (area + term.0, length + term.1)
             });
-            self.laws.push(if manifold.count == 0 {
+            self.laws.push(if manifold.depths.is_empty() {
                 ContactCompliance {
                     stiffness: 0.0,
                     damping: 0.0,
                     rest: 0.0,
                 }
             } else {
-                ContactCompliance {
-                    stiffness: stiffness * area / manifold.overlap,
-                    damping: damping * length / manifold.count as f32,
-                    rest: 0.0,
-                }
+                shared(
+                    &self.overlaps[manifold.overlaps.clone()],
+                    (stiffness * length, damping * length),
+                    area / length,
+                )
             });
         }
     }
+}
+
+/// The law handing a manifold's points stiffness and damping `(stiffness, damping)` in all at a
+/// mean compression `depth` (m, above zero), over the most of its deepest points that all bear it
+/// (`overlaps`, deepest first): `n` of them take `1/n` each and a common rest length that puts
+/// their mean compression at `depth`. So force, stiffness and damping are the manifold's whole,
+/// and the law affine. The deepest point alone bears at `depth`; under the law for `n`, the next
+/// point bears nothing (DERIVED: were it to bear, the rest for one more point, no smaller, would
+/// let them all bear).
+fn shared(overlaps: &[f32], (stiffness, damping): (f32, f32), depth: f32) -> ContactCompliance {
+    let mut sum = overlaps[0];
+    let mut law = ContactCompliance {
+        stiffness,
+        damping,
+        rest: depth - sum,
+    };
+    for (n, &overlap) in overlaps.iter().enumerate().skip(1) {
+        sum += overlap;
+        let points = (n + 1) as f32;
+        let more = ContactCompliance {
+            stiffness: stiffness / points,
+            damping: damping / points,
+            rest: depth - sum / points,
+        };
+        if more.bears(overlap) {
+            law = more;
+        }
+    }
+    law
 }
 
 /// Read each run's touching contacts from a shared read of the contact graph and work out the
@@ -491,7 +521,7 @@ fn read_runs(
 }
 
 /// Write each run's laws into its manifolds: the one step that holds the graph exclusively. A
-/// manifold keeps every point: the solver leaves one out of overlap inert (the vendored
+/// manifold keeps every point: the solver leaves one its law does not bear inert (the vendored
 /// compliant contact), so the law stays a function of the manifold as the narrow phase left it,
 /// and reads the same when read again.
 fn write_runs(mut graph: ResMut<ContactGraph>, runs: Query<&RunContacts>) {
@@ -636,56 +666,75 @@ mod tests {
         read(&mut world, &pairs)
     }
 
-    /// The force the manifolds' springs carry together at their own overlaps (N), and their
-    /// dampers at a common closing speed of 1 m/s (N), on the points in overlap.
-    fn carried(manifolds: &[Given]) -> (f32, f32) {
+    /// What one manifold's points that bear `law` carry at their own overlaps: their springs'
+    /// force (N), stiffness (N/m) and damping (N·s/m), each summed.
+    fn carries(law: &ContactCompliance, points: &[(f32, f32)]) -> [f32; 3] {
+        points
+            .iter()
+            .filter(|p| law.bears(p.1))
+            .fold([0.0; 3], |[f, k, c], p| {
+                [
+                    f + law.stiffness * (p.1 + law.rest),
+                    k + law.stiffness,
+                    c + law.damping,
+                ]
+            })
+    }
+
+    /// What the manifolds carry together ([`carries`]).
+    fn carried(manifolds: &[Given]) -> [f32; 3] {
         laws(manifolds)
             .iter()
             .zip(manifolds)
-            .map(|(law, (_, points))| {
-                let overlapping = points.iter().filter(|p| p.1 > 0.0);
-                (
-                    law.stiffness * overlapping.clone().map(|p| p.1).sum::<f32>(),
-                    law.damping * overlapping.count() as f32,
-                )
-            })
-            .fold((0.0, 0.0), |(k, c), (dk, dc)| (k + dk, c + dc))
+            .map(|(law, (_, points))| carries(law, points))
+            .fold([0.0; 3], |[f, k, c], [df, dk, dc]| [f + df, k + dk, c + dc])
     }
 
-    /// Whether two `(spring, damper)` readings agree to f32 round-off.
-    fn close((a, b): (f32, f32), (x, y): (f32, f32)) -> bool {
-        (a - x).abs() <= x.abs() * 1e-5 && (b - y).abs() <= y.abs() * 1e-5
+    /// Whether two readings agree to f32 round-off.
+    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
+        a.iter()
+            .zip(&b)
+            .all(|(a, b)| (a - b).abs() <= b.abs() * 1e-5)
     }
 
-    fn bits(laws: &[ContactCompliance]) -> Vec<(u32, u32)> {
+    fn bits(laws: &[ContactCompliance]) -> Vec<[u32; 3]> {
         laws.iter()
-            .map(|law| (law.stiffness.to_bits(), law.damping.to_bits()))
+            .map(|law| [law.stiffness, law.damping, law.rest].map(f32::to_bits))
             .collect()
     }
 
     /// A piece split in two carries what the whole carries: a link carries the law once, at the
-    /// deepest overlap reaching it. Links 26 to 46, inside the square's second edge, pressed `d`
-    /// deep by one piece carry `k'·d` and `c'` per metre of their 21 links; so do two pieces side
-    /// by side across the shoe, and two end to end split inside link 36. A piece tilted along the
-    /// belt, cut inside link 36, and a piece clear of the belt past link 36, split where it leaves
-    /// it, carry what they carry whole, to f32 round-off. Fails if a link's law adds up over its
-    /// manifolds (side by side doubles it), if a manifold loads links past its own (a per-manifold
-    /// floor loads the split link twice), if a contact's points are read at their links before its
-    /// overlap runs between them (the tilted cut steepens both halves), or if a link at or below
-    /// zero carries (the clear half pushes).
+    /// deepest overlap reaching it, its stiffness and damping whole. Links 26 to 46, inside the
+    /// square's second edge, pressed `d` deep by one piece carry `k'·d`, `k'` and `c'` per metre of
+    /// their 21 links; so do two pieces side by side across the shoe, and two end to end split
+    /// inside link 36. A piece tilted along the belt, cut inside link 36, a piece clear of the belt
+    /// past link 36, split where it leaves it, and a piece `d` and `3d` deep across link 30, split
+    /// at `2d`, carry what they carry whole, to f32 round-off; the last carries one link's `k'`,
+    /// `c'` and `3d·k'`. Fails if a link's law adds up over its manifolds (side by side doubles
+    /// it), if a manifold loads links past its own (a per-manifold floor loads the split link
+    /// twice), if a contact's points are read at their links before its overlap runs between them
+    /// (the tilted cut steepens both halves), if a link at or below zero carries (the clear half
+    /// pushes), or if a manifold's stiffness is its force over its overlap (the one link's whole
+    /// carries `1.5·k'`, its halves `1.52·k'`).
     #[test]
     fn a_piece_split_in_two_carries_what_the_whole_carries() {
         let d = 0.04;
-        let flat = (
-            LAW.stiffness_per_m * SoftRun::fixture().link * 21.0 * d,
-            LAW.damping_per_m * SoftRun::fixture().link * 21.0,
-        );
+        let link = SoftRun::fixture().link;
+        let (k, c) = (LAW.stiffness_per_m * link, LAW.damping_per_m * link);
         let edge = Face::Rim(1);
         let level = |link: f32| (at(link), d);
         let tilt = |link: f32| (at(link), 0.01 + 0.002 * (link - 26.0));
         let clear = |link: f32| (at(link), d * (36.0 - link) / 10.0);
+        let steep = |depth: f32| (at(30.0 + 0.3 * depth / d), depth);
         let whole = carried(&[(edge, &[level(26.0), level(26.0), level(46.0), level(46.0)])]);
+        let flat = [21.0 * k * d, 21.0 * k, 21.0 * c];
         assert!(close(whole, flat), "one piece: {whole:?} against {flat:?}");
+        let one = carried(&[(edge, &[steep(d), steep(3.0 * d)])]);
+        let link_law = [3.0 * k * d, k, c];
+        assert!(
+            close(one, link_law),
+            "one link: {one:?} against {link_law:?}"
+        );
         for (layout, whole, parts) in [
             (
                 "side by side",
@@ -719,9 +768,17 @@ mod tests {
                     (edge, &[clear(36.0), clear(46.0)]),
                 ]),
             ),
+            (
+                "d and 3d across one link, cut at 2d",
+                one,
+                carried(&[
+                    (edge, &[steep(d), steep(2.0 * d)]),
+                    (edge, &[steep(2.0 * d), steep(3.0 * d)]),
+                ]),
+            ),
         ] {
             assert!(
-                whole.0 > 0.0 && close(parts, whole),
+                whole[0] > 0.0 && close(parts, whole),
                 "{layout}: the parts carry {parts:?} against the whole's {whole:?}"
             );
         }
@@ -764,7 +821,7 @@ mod tests {
 
     /// The edge ending at the seam reads as any other edge: its far corner stands at the outline's
     /// full length, the seam, and a contact reaching it spans its own edge alone. Two manifolds on
-    /// the square's last edge, one reaching that corner, take the laws the same two take on its
+    /// the square's last edge, one reaching that corner, each carry what the same two carry on its
     /// second edge, to f32 round-off (the arcs are not dyadic). Fails if an arc is taken round the
     /// closed outline (the corner reads as arc zero, and the contact spans the run the long way),
     /// or if the link past the last does not wrap to the first.
@@ -776,19 +833,14 @@ mod tests {
             let a = [(from + 0.3, 0.03), (from + 1.7, -0.01), (from + 2.35, 0.04)];
             let b = [(from + 2.1, 0.02), (from + 3.0, 0.025)];
             let face = Face::Rim(edge);
-            (
-                laws(&[(face, &a), (face, &b)]),
-                carried(&[(face, &a), (face, &b)]),
-            )
+            let laws = laws(&[(face, &a), (face, &b)]);
+            [carries(&laws[0], &a), carries(&laws[1], &b)]
         };
-        let ((second, carried), (last, _)) = (read(1), read(3));
-        assert!(carried.0 > 0.0, "the contact carries nothing");
+        let (second, last) = (read(1), read(3));
+        assert!(second[0][0] > 0.0, "the contact carries nothing");
         for (k, (last, second)) in last.iter().zip(&second).enumerate() {
             assert!(
-                close(
-                    (last.stiffness, last.damping),
-                    (second.stiffness, second.damping)
-                ),
+                close(*last, *second),
                 "manifold {k}: {last:?} on the last edge against {second:?} on the second"
             );
         }
@@ -796,15 +848,17 @@ mod tests {
 
     /// A manifold on a lateral cap loads the link nearest each of its points and nothing between:
     /// its points can stand off opposite runs, with no stretch of belt between them. Two points
-    /// `d` deep, by the bottom run's link 12 and the top run's link 60, carry `k'·d` and `c'` per
-    /// metre of two links. Fails if a cap's points are read along the belt between them.
+    /// `d` deep, by the bottom run's link 12 and the top run's link 60, carry `k'·d`, `k'` and `c'`
+    /// per metre of two links. Fails if a cap's points are read along the belt between them.
     #[test]
     fn a_cap_contact_loads_only_the_links_nearest_its_points() {
         let d = 0.04;
-        let two = (
-            LAW.stiffness_per_m * SoftRun::fixture().link * 2.0 * d,
-            LAW.damping_per_m * SoftRun::fixture().link * 2.0,
-        );
+        let link = SoftRun::fixture().link;
+        let two = [
+            LAW.stiffness_per_m * link * 2.0 * d,
+            LAW.stiffness_per_m * link * 2.0,
+            LAW.damping_per_m * link * 2.0,
+        ];
         let carried = carried(&[(Face::Cap, &[(at(12.5), d), (at(60.5), d)])]);
         assert!(close(carried, two), "carried {carried:?} against {two:?}");
     }

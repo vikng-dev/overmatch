@@ -2608,25 +2608,31 @@ fn a_creeping_tank_on_loose_pieces_never_sleeps_under_its_command() {
 /// `k'` per metre of belt they overlap, whatever pieces they touch. A tank set `d` into one slab,
 /// and into the same slab cut in two across the belly (pieces end to end along each belt) or cut
 /// in three under each shoe's middle (pieces side by side across each shoe), meets one spring:
-/// the solver's spring force at the first step's overlap, summed over each run's contacts, is the
-/// same for every cut to 1e-3 of it (f32 round-off over identical links), and on the whole slab
-/// lies between `k'·d` over the run's flat belly and over all of the run below the slab's top and
-/// the link past each end (each contact's depth is at most `d`, and a link loads whole), read
-/// from the tank's own law and links. Fixture: the slab, `d` and the cuts.
+/// the solver's spring force at the first step's overlap, each bearing point's
+/// `k·(overlap + rest)` summed over each run's contacts, is the same for every cut to 1e-3 of it
+/// (f32 round-off over identical links), and on the whole slab lies between `k'·d` over the run's
+/// flat belly and over all of the run below the slab's top and the link past each end (each
+/// contact's depth is at most `d`, and a link loads whole), read from the tank's own law and
+/// links. Rolled about the belt, its `-x` side lower, so each shoe's overlap varies across its
+/// width, the slab cut a quarter into each shoe carries what it carries whole. Fails if a
+/// contact's points carry its law without its common rest (DERIVED: the rolled cut's contacts
+/// then part from the whole by about the overlap's spread across a shoe over twice the overlap).
+/// Fixture: the slab, `d`, the cuts and the roll.
 #[test]
 fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
     use crate::track::forces::SupportLaw;
     use crate::track::soft_run::SoftRun;
     let (top, d) = (0.4, 0.05);
-    // Pieces by their `(x0, x1, z0, z1)` bounds (m); per run, as `Side::ALL`: the run, the spring
-    // force (N) and the contacts in overlap.
-    let springs = |cuts: &[(f32, f32, f32, f32)]| {
+    let roll = Quat::from_rotation_z(1.0_f32.to_radians());
+    // Pieces by their `(x0, x1, z0, z1)` bounds (m), and the hull's rotation; per run, as
+    // `Side::ALL`: the run, the spring force (N) and the contacts that bear.
+    let springs = |cuts: &[(f32, f32, f32, f32)], rotation: Quat| {
         let mut bed = Bed::on_ground(Some(base_ground()), flat());
         for &(x0, x1, z0, z1) in cuts {
             let centre = Vec3::new((x0 + x1) / 2.0, top / 2.0, (z0 + z1) / 2.0);
             bed.spawn_piece(centre, Vec3::new(x1 - x0, top, z1 - z0));
         }
-        bed.place(Vec3::new(0.0, top - d, 0.0), Quat::IDENTITY);
+        bed.place(Vec3::new(0.0, top - d, 0.0), rotation);
         bed.start();
         bed.tick(0.0, 0.0);
         let world = bed.app.world_mut();
@@ -2645,19 +2651,27 @@ fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
                 .contact_pairs_with(*run)
                 .flat_map(|pair| &pair.manifolds)
                 .map(|manifold| {
-                    let overlap: f32 = manifold.points.iter().map(|p| p.penetration.max(0.0)).sum();
                     let law = manifold
                         .compliance
                         .expect("every contact of a run takes the running gear's law");
-                    (law.stiffness * overlap, usize::from(overlap > 0.0))
+                    let force: f32 = (manifold.points.iter())
+                        .map(|p| law.stiffness * (p.penetration + law.rest).max(0.0))
+                        .sum();
+                    (force, usize::from(force > 0.0))
                 })
                 .fold((0.0, 0), |(f, n), (df, dn)| (f + df, n + dn));
             (soft.clone(), spring, contacts)
         });
         (bed, carried)
     };
-    let (bed, whole) = springs(&[(-4.0, 4.0, -8.0, 8.0)]);
+    let slab = (-4.0, 4.0, -8.0, 8.0);
+    let (bed, whole) = springs(&[slab], Quat::IDENTITY);
     let [left, right] = Side::ALL.map(|side| bed.geom().side_plane_x(side));
+    let quarters = Side::ALL.map(|side| {
+        let [(a, _), _, (b, _)] = bed.geom().grip_columns(side);
+        a.min(b) + (a - b).abs() / 4.0
+    });
+    let (inner, outer) = (quarters[0].min(quarters[1]), quarters[0].max(quarters[1]));
     let law = *bed.app.world().resource::<SupportLaw>();
     // One booted app at a time: the next bed's boot waits on this one's lease.
     drop(bed);
@@ -2691,10 +2705,13 @@ fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
             "the {side:?} run carries {spring} N on the whole slab, outside {least}..{most} N"
         );
     }
-    for (cut, cuts) in [
+    let (_, rolled) = springs(&[slab], roll);
+    for (cut, cuts, rotation, whole) in [
         (
             "across the belly",
             vec![(-4.0, 4.0, -8.0, 0.0), (-4.0, 4.0, 0.0, 8.0)],
+            Quat::IDENTITY,
+            &whole,
         ),
         (
             "under each shoe",
@@ -2703,11 +2720,23 @@ fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
                 (left, right, -8.0, 8.0),
                 (right, 4.0, -8.0, 8.0),
             ],
+            Quat::IDENTITY,
+            &whole,
+        ),
+        (
+            "a quarter into each shoe, rolled",
+            vec![
+                (-4.0, inner, -8.0, 8.0),
+                (inner, outer, -8.0, 8.0),
+                (outer, 4.0, -8.0, 8.0),
+            ],
+            roll,
+            &rolled,
         ),
     ] {
-        let (_, pieces) = springs(&cuts);
+        let (_, pieces) = springs(&cuts, rotation);
         for ((side, &(_, spring, contacts)), &(_, one, _)) in
-            Side::ALL.iter().zip(&pieces).zip(&whole)
+            Side::ALL.iter().zip(&pieces).zip(whole)
         {
             println!("MEASURED cut {cut}: {side:?} run {spring} N over {contacts} contacts");
             assert!(contacts > 1, "cut {cut}: the {side:?} run met one piece");

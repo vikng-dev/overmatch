@@ -29,16 +29,19 @@ through one reader of the contact transfers, the runs' with it.
 
 **The soft run.** Per side, one convex collider: the rest belt's outer outline across the shoe's
 measured faces, on `Layer::TrackBelt`, which meets only `Layer::Debris`. It is read as links of the
-belt's pitch, each carrying `k' × link` at the deepest overlap any contact gives it, shared among
-the contacts on it by depth. A piece's contact is read on the one face of the run its normal picks,
-its points projected onto it: on a rim face its overlap runs along that face's outline edge, linear
-between its points; on a lateral cap each point loads its nearest link. Each contact is compliant:
-Avian's stock contact solves its relaxing pass rigidly along the normal, so a body cannot rest on it
-at a load-proportional deflection (DERIVED from `ContactNormalPart::solve_impulse`). The vendored
-patch adds an absolute per-point law (`upstream/avian-compliant-contact.md`), under which a point
-out of overlap at the narrow phase bears nothing all step, and `soft_run` is its one writer: it
-keeps every point, so a contact's law is a function of the contact as the narrow phase left it.
-Nothing freezes a loaded piece.
+belt's pitch, each carrying `k' × link` and `c' × link` at the deepest overlap any contact gives it,
+shared among the contacts on it by depth. A contact's shares are its stiffness and damping; its
+deepest points that bear split them evenly, and a rest length places its force at the step's start
+(`ContactCompliance::rest`), so force, stiffness and damping each add up to the links' own however a
+piece splits. A piece's contact is read on the one face of the run its normal picks, its points
+projected onto it: on a rim face its overlap runs along that face's outline edge, linear between its
+points; on a lateral cap each point loads its nearest link. Each contact is compliant: Avian's stock
+contact solves its relaxing pass rigidly along the normal, so a body cannot rest on it at a
+load-proportional deflection (DERIVED from `ContactNormalPart::solve_impulse`). The vendored patch
+adds an absolute per-point law (`upstream/avian-compliant-contact.md`), with a signed rest length,
+under which a point whose spring is free at the narrow phase bears nothing all step, and `soft_run`
+is its one writer: it keeps every point, so a contact's law is a function of the contact as the
+narrow phase left it. Nothing freezes a loaded piece.
 
 **Rest.** A tank at rest sleeps with its pile through Avian's island sleep, whatever carries it.
 The sampled support goes through the non-waking force call, so no force resets the rest timer,
@@ -81,18 +84,25 @@ position.
 
 Known differences between the channels, none tuned:
 
-- **The datum.** The sampled support's zero-force datum is the droop envelope, so the tank's
-  weight holds it at its rest pose on ground. The run's is the rest outer face, so a piece's force
-  adds to the ground's under the same belt, and a tank carried on pieces alone rests about one
-  free travel lower against them than on ground (DERIVED: the same `k'` from a datum one free
-  travel higher). It rides low on a heap, and the drawn belt follows the drawn pieces
-  (`track::view`). The datum at the droop envelope, past the ground's own intrusion at each link,
-  measured worse (MEASURED 2026-11-14): the stop's lift share fell to 0.21–0.25, but the straight
-  drive's heave peak rose from 14.9 to 24.1 m/s², the hull's rise from 0.15–0.18 to 0.26–0.39 m,
-  creep crossings fell from 5/12 to 2/12, and a tank asleep on pieces no longer woke on drive
-  demand. `ContactCompliance` has no preload or rest-offset term, so that datum reached the solver
-  as a secant stiffness over the whole overlap, exact only at each step's start. Such a term would
-  let the datum move there truthfully.
+- **The datum.** The sampled support's zero-force datum is the droop envelope, so the tank's weight
+  holds it at its rest pose on ground. The run's is the rest outer face, so a piece's force adds to
+  the ground's under the same belt, both springs acting: a hull on a loose slab `h` high rises `h/2`
+  where the same slab fixed lifts it `h`, at twice the link's stiffness, and a tank carried on
+  pieces alone rides one free travel lower against them than on ground (DERIVED: the same `k'` from
+  a datum one free travel higher). The drawn belt follows the drawn pieces (`track::view`). The
+  datum at the droop envelope, past the ground's own intrusion at each link, measured worse
+  (MEASURED 2026-11-14): the stop's lift share fell to 0.21–0.25, but the straight drive's heave
+  peak rose from 14.9 to 24.1 m/s², the hull's rise from 0.15–0.18 to 0.26–0.39 m, creep crossings
+  fell from 5/12 to 2/12, and a tank asleep on pieces no longer woke on drive demand. Its rise is
+  about one free travel (0.173 m), the datum working; its law, a secant stiffness, explains at most
+  8 % less damping (DERIVED, below); its heave and creep changes were never isolated from the moved
+  geometry and the higher ride; and the lost wake was a rest judgement, the tank sleeping while its
+  pitch settled. What would settle it: the run kept at the rest face with a collision margin of the
+  travel's reach, each link's rest length a dead band of the ground's own intrusion there, so a
+  piece carries only its excess past the ground (the whole link where no ground reaches) and the
+  hull rises `h` on the loose slab as on the fixed one. It moves the ride height on heaps, so it
+  goes to the owner as a proposal first; it would round the reach beside the shoe's edge, where the
+  margin is a sphere's.
 - **Partial coverage.** Over ground the sampled support is a column quadrature, so a curb under one
   edge takes that column's share. A loose piece under part of the width carries the rigid plate
   whole: its link takes its whole law. Width enters only the sampled channel's ground.
@@ -119,6 +129,17 @@ Known differences between the channels, none tuned:
   sat in two colliders at once. Parry clips a face to its first four vertices (the TODO in
   `ConvexPolyhedron::local_support_feature`, parry 0.27), so a cap contact, its face an N-gon, is
   mostly the lone GJK witness point (DERIVED).
+- **The law within a step.** A contact's shares and the points that bear are read once, at the
+  narrow phase, so its stiffness is exact for a common compression of its links, not for one piece
+  retreating alone. The points split the force by `overlap + rest`, so the centre of pressure and
+  the rotational stiffness are those of at most four parry points, and Avian's midpoint point sits
+  half the overlap inside the run, so a foot near a corner can land one link over.
+- **The secant it replaced** was a damping error, not a feel defect: within a step a secant `k_sec`
+  in place of the tangent `K` acts as a damper of `(k_sec − K)·dt/2`, about `0.084·(k_sec/K − 1)` of
+  the link's damping for the shipped law (DERIVED: `c'/k' = 2ζ/ω = 0.093 s` unless the travel is
+  chain-clamped, at 64 Hz), +4 % for a piece `d` and `3d` deep across one link.
+- **Restitution** above zero would take a rigid impulse on a compliant point
+  (`ContactConstraint::apply_restitution`); pieces and runs set none, and Avian's default is zero.
 
 ## The boundary, one rule
 
