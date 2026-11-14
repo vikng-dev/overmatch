@@ -23,7 +23,7 @@ pub(crate) fn compact_spec() -> crate::spec::TankSpec {
     tr.gearbox.reverse_speeds_kmh = vec![10.0];
     tr.gearbox.launch_gears = crate::provenance::Sourced(2); // Fixture limit.
     tr.gearbox.max_step = crate::provenance::Sourced(1); // Fixture reach.
-    tr.gearbox.shift_secs = 0.2;
+    tr.gearbox.shift_secs = crate::provenance::Sourced(0.2); // Fixture interruption.
     tr.steering.radii = vec![(3.0, 8.0), (7.2, 19.2), (15.0, 40.0)];
     tr.steering.reverse_radii = vec![(6.0, 16.0)];
     tr.steering.capacity = 80_000.0;

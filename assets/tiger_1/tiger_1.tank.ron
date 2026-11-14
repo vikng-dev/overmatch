@@ -118,10 +118,7 @@ TankSpec(
                     reverse_speeds_kmh: [2.8, 4.3, 6.2, 9.2],
                     launch_gears: (4, Measured("Tigerfibel D 656/27 (1943) p. 40, moving off: the selector to 1st-4th, '5th-8th impossible'")),
                     max_step: (3, Derived("Tigerfibel D 656/27 (1943) p. 40: 1-2 gears may be skipped, up or down, once the transmission is warm; skipping two, one selector event moves three gears")),
-                    // OLVAR preselector: pre-selected shifts complete with drive uncoupled
-                    // for a noticeable fraction of a second — INFERRED ~0.31 s, no shift-
-                    // time datum reached.
-                    shift_secs: 0.31,
+                    shift_secs: (0.31, Unknown("OLVAR preselector: a pre-selected shift completes with the drive uncoupled for a noticeable fraction of a second; 0.31 s is inferred from that, no shift-time datum reached. Settled by a measured OLVAR shift interruption time")),
                 ),
                 steering: (
                     // (R_tight, R_wide) per forward gear (m): anchored at BOTH corners

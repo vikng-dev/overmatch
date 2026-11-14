@@ -245,7 +245,7 @@ TankSpec(
 
                     launch_gears: (4, Fixture(\"fixture launch limit\")),
                     max_step: (3, Fixture(\"fixture shift reach\")),
-                    shift_secs: 0.3,
+                    shift_secs: (0.3, Fixture(\"fixture shift interruption\")),
 
                 ),
                 steering: (
