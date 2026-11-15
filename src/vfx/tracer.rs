@@ -54,7 +54,6 @@ mod tests {
     use super::*;
 
     use crate::ballistics::{FireShell, FireShellOrigin};
-    use avian3d::prelude::*;
     use bevy::asset::AssetPlugin;
     use bevy::time::TimeUpdateStrategy;
     use std::collections::BTreeSet;
@@ -362,7 +361,7 @@ mod tests {
         app.world()
             .inspect_entity(entity)
             .expect("entity exists")
-            .map(|info| info.name().to_string())
+            .map(|(_, info)| info.name().to_string())
             .collect()
     }
 

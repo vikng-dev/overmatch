@@ -3431,7 +3431,7 @@ mod tests {
     /// a positive chord through a solid, and its dose, lost.
     #[test]
     fn a_face_whose_f64_rate_cancels_to_zero_is_still_crossed_at_its_exact_parameter() {
-        let tetrahedron = Collider::convex_hull(&vec![
+        let tetrahedron = Collider::convex_hull(&[
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(1.0, 1.0, -1.0),
             Vec3::new(-1.0, 0.0, 1.0e-9),

@@ -770,7 +770,11 @@ fn device(app: &mut App, player: Entity, camera: Entity) {
     world.entity_mut(camera).insert((
         Camera {
             computed: bevy::camera::ComputedCameraValues {
-                clip_from_view: Mat4::perspective_infinite_reverse_rh(0.9, 16.0 / 9.0, 0.1),
+                clip_from_view: bevy::math::proj::perspective_infinite_reverse(
+                    0.9,
+                    16.0 / 9.0,
+                    0.1,
+                ),
                 target_info: Some(bevy::camera::RenderTargetInfo {
                     physical_size: UVec2::new(1280, 720),
                     scale_factor: 1.0,
