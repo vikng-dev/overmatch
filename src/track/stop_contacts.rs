@@ -594,12 +594,11 @@ mod tests {
         }
     }
 
-    /// Sleep never changes which points a slice bears, and a moving body's candidate contact wakes
-    /// a resting belt whatever either face's filtering keeps; its next pass then rewrites the band
-    /// (`TrackRise`). Each case runs in both pair orders. Fails if a resting belt bears a point in
-    /// its band, if a dynamic or kinematic body leaves it asleep (a moving belt's face whose band
-    /// erases the pair first, or a normal the slice rejects, included), or if static matter, a
-    /// resting body or nothing wakes it.
+    /// Sleep never changes which points a slice bears. A dynamic or kinematic body's candidate
+    /// contact wakes a resting belt whatever either face's filtering keeps (a moving belt's face
+    /// whose band erases the pair first, or a normal the slice rejects); static matter, a resting
+    /// body or none does not. The belt's next pass then rewrites the band (`TrackRise`). Each case
+    /// runs in both pair orders.
     #[test]
     fn sleep_keeps_the_band_and_a_moving_body_wakes_the_belt() {
         let (side, rise) = (Side::Left, 0.2); // Fixture rise under the outboard edge, m.
