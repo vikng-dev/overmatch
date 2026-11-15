@@ -27,11 +27,7 @@ Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are cou
 of `src/` against the published crate: 722 in all (MEASURED), 644 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
-Guards run in `vendor/avian3d-0.8.0-guards`, a crate beside this one that builds the fork with the
-game's `src/avian_ext/` and the game's `src/tests/avian_*.rs` included by path, without the game
-crate (`CARGO_TARGET_DIR=<bay>/target/avian-guards scripts/serial-cargo test --profile test
---manifest-path vendor/avian3d-0.8.0-guards/Cargo.toml`). It is deleted when the guards run as the
-game's own tests again.
+Guards run as the game's own tests, each named in its patch's section.
 
 ## Child collider poses (`src/collision/collider/collider_transform/plugin.rs`): hook
 
@@ -64,13 +60,14 @@ disables that plugin, so there a body spawned without `Transform` takes this pat
 The game refuses it in an observer on `Insert<ColliderOf>` (`avian_ext::attachment`), which runs
 after the hook on the same insertion and panics naming both entities and the fix. It reads both
 entities raw, as the hook does, so a disabled collider or body passes it as it passes the hook. The
-0.7 fork panicked inside the hook. Cost of the observer, MEASURED in the guard crate's unoptimized
-test profile, 10 000 attachments spawned onto 2 000 static bodies, three runs each: 305 to 310 ms
+0.7 fork panicked inside the hook. Cost of the observer, MEASURED on this fork in an unoptimized
+test build, 10 000 attachments spawned onto 2 000 static bodies, three runs each: 305 to 310 ms
 without it, 315 to 316 ms with it, about 2%; the hook form is not worth its fork lines.
 
 Guards: `src/tests/avian_child_pose_churn.rs`,
 `a_collider_attached_to_a_body_without_a_global_transform_is_refused` (stock 0.8.0 does not panic,
-MEASURED) and `a_posed_attachment_stands_with_either_side_disabled`.
+MEASURED) and `a_posed_attachment_stands_with_either_side_disabled` (red with the observer reading
+through default-filtered queries, which skip a disabled entity, MEASURED).
 
 ## Prepared collider mass (`src/collision/collider/parry/mod.rs`): kept
 
@@ -535,12 +532,13 @@ counters leave `CollisionDiagnostics` for the game's `ReductionCounts` resource,
 totals.
 
 0 fork lines. Guards: `src/tests/avian_contact_reduction.rs`, 24 tests, all green: the 21 of the
-0.7 fork (14 of the law alone; world-level, among them a body held by its fifth corner, a reduced
-body resting on its loaded supports and sleeping, and only marked non-static pairs reducing), and
-three for the pass: one constraint per kept manifold through settling, a lift and a drop, with
-enough groups for the parallel path (a mutant queueing beside Avian's entry, or none, trips Avian's
-`push_manifold` assertion, MEASURED); a landing judged at the slower body's rest speed (judged at the
-faster one it fails, MEASURED); and a recycled pair regenerated after reduction (the sink above).
+0.7 fork (15 of the law alone, and six world-level, among them a body held by its fifth corner, a
+reduced body resting on its loaded supports and sleeping, and only marked non-static pairs
+reducing), and three for the pass: one constraint per kept manifold through settling, a lift and a
+drop, with enough groups for the parallel path (a mutant queueing beside Avian's entry, or none,
+trips Avian's `push_manifold` assertion, MEASURED); a landing judged at the slower body's rest speed
+(judged at the faster one it fails, MEASURED); and a recycled pair regenerated after reduction (the
+sink above).
 
 ## Solver contact visits (`src/dynamics/solver/plugin.rs`, `src/dynamics/solver/diagnostics.rs`, `src/utils.rs`): kept
 

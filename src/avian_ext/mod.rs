@@ -3,8 +3,7 @@
 //! or through a narrow hook the fork exposes. Each file is one seam; the fork's
 //! `OVERMATCH_PATCH.md` names each seam's form and its guard.
 //!
-//! These modules depend on Avian and Bevy only, never on the rest of the game, so the fork's guard
-//! crate can build them beside it.
+//! These modules depend on Avian and Bevy only, never on the rest of the game.
 //!
 //! [`plugin`] installs every seam; each composition of Avian's `PhysicsPlugins` adds it after them.
 
