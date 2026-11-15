@@ -5,7 +5,7 @@
 // pipeline culls the faces a line from the origin meets from behind (`picture::CASTER_CULL`), so
 // a line from inside a body leaves it unstopped. Each texel holds the radial distance (record m)
 // from the origin to the nearest face it meets head-on along the texel's centre direction: the
-// reach the look tests a point against (`pen_cam_look.wgsl`, `picture_at`).
+// reach the look tests a point against (`pen_cam_look.wesl`, `picture_at`).
 //
 // The face's frame (record frame, unit): `right`, `up` and `forward`, `right × up = −forward`;
 // `origin` the field's origin; `rect` the face's crop (x0, y0, x1, y1) in tangent units, a

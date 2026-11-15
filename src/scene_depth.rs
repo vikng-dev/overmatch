@@ -1,10 +1,10 @@
 //! The scene depth a camera's translucent draws read, copied from that camera's own main pass
 //! instead of drawn a second time by a depth prepass. Two readers sample it: the VFX billboards'
-//! soft-particle fade (`assets/shaders/vfx_billboard.wgsl`) and the hull marks' `ForwardDecal`
+//! soft-particle fade (`assets/shaders/vfx_billboard.wesl`) and the hull marks' `ForwardDecal`
 //! (`vfx/hull_marks.rs`), whose fade is also what hides a mark behind a nearer surface. Both draw
 //! in `Transparent3d`.
 //!
-//! # Mechanism (bevy 0.19, `bevy_core_pipeline` 0.19.1 and the vendored `bevy_pbr`)
+//! # Mechanism (bevy 0.20.1, `bevy_core_pipeline` 0.20.1 and the vendored `bevy_pbr`)
 //!
 //! A [`MainPassDepth`] camera keeps `DepthPrepass`: the readers' `DEPTH_PREPASS` shader def, the
 //! prepass depth binding in the mesh view layout and the main depth texture's `COPY_SRC` usage
@@ -66,8 +66,8 @@ use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::render_phase::ViewBinnedRenderPhases;
 use bevy::render::render_resource::{TextureDescriptor, TextureDimension, TextureUsages};
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
-use bevy::render::texture::{ColorAttachment, TextureCache};
-use bevy::render::view::{ExtractedView, Msaa, ViewDepthTexture};
+use bevy::render::texture::{DepthStencilAttachment, TextureCache};
+use bevy::render::view::{ExtractedView, Msaa, ViewDepthStencilTexture};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 /// On a camera: its prepass depth texture holds its own main pass's depth, copied after the opaque
@@ -173,7 +173,9 @@ fn provide_depth_texture(
             },
         );
         commands.entity(entity).insert(ViewPrepassTextures {
-            depth: Some(ColorAttachment::new(texture, None, None, None)),
+            // CORE_3D_DEPTH_FORMAT is depth-only. The attachment supplies a depth-only
+            // sampling view; no stencil aspect is copied or bound.
+            depth: Some(DepthStencilAttachment::new(texture, None, None, None)),
             normal: None,
             motion_vectors: None,
             deferred: None,
@@ -184,7 +186,7 @@ fn provide_depth_texture(
 }
 
 fn copy_main_pass_depth(
-    view: ViewQuery<(&ViewDepthTexture, &ViewPrepassTextures), Served>,
+    view: ViewQuery<(&ViewDepthStencilTexture, &ViewPrepassTextures), Served>,
     mut ctx: RenderContext,
 ) {
     let (depth, prepass) = view.into_inner();
@@ -192,7 +194,7 @@ fn copy_main_pass_depth(
         return; // Before the render target's first preparation there is no depth attachment to copy.
     };
     ctx.command_encoder().copy_texture_to_texture(
-        depth.texture.as_image_copy(),
+        depth.texture().as_image_copy(),
         copy.texture.texture.as_image_copy(),
         prepass.size,
     );

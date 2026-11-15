@@ -132,7 +132,7 @@ fn read_scatter_crossings(
 mod tests {
     use std::time::Duration;
 
-    use avian3d::prelude::{Collider, CollisionLayers, LayerMask, PhysicsPlugins, RigidBody};
+    use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody};
     use bevy::app::PluginsState;
     use bevy::asset::AssetPlugin;
     use bevy::time::TimeUpdateStrategy;
@@ -160,7 +160,7 @@ mod tests {
             // Avian's collider cache reads `AssetEvent<Mesh>`, so the asset system must be present
             // even though this collider carries no mesh handle.
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
         ))
         .init_asset::<Mesh>()
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(

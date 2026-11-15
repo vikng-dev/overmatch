@@ -1,3 +1,5 @@
+import constants::MATERIAL_BIND_GROUP;
+
 // The pen cam's corner look (`src/damage_cam/pen_cam/look.rs`, `LookMaterial`): one material, its
 // drawing chosen per instance by `mode.x`.
 //
@@ -59,7 +61,7 @@
 // and above `bands.y` (`T_mid`), reduced from `bands.x` (`T_floor`) up to it, nothing below. No
 // lane the bands are read from carries a display gain.
 //
-// The depth pictures (`picture::Picture`, `picture::Pictures`; `pen_cam_picture.wgsl` renders
+// The depth pictures (`picture::Picture`, `picture::Pictures`; `pen_cam_picture.wesl` renders
 // them): field `f`'s, the reach (record m) from its origin to the struck tank's hard bodies along
 // each direction of its support, on the cube about its axis (`face_of`), each face cropped to the
 // support at the field's pitch and placed in `pictures`, loaded unfiltered: each of the four
@@ -72,7 +74,7 @@
 //
 // Output: straight `rgb, a`.
 
-#import bevy_pbr::{forward_io::Vertex, mesh_functions, mesh_view_bindings::view}
+import bevy_pbr::render::{forward_io::{Vertex, decompress_vertex}, mesh_functions, mesh_view_bindings::view};
 
 struct LookParams {
     color: vec4<f32>,
@@ -136,10 +138,10 @@ const HALF_PI: f32 = 1.57079633;
 const PI: f32 = 3.14159265;
 const SQRT_2: f32 = 1.41421356;
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> look: LookParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var hull_mask: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var part_mask: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var pictures: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(0) var<uniform> look: LookParams;
+@group(MATERIAL_BIND_GROUP) @binding(1) var hull_mask: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(2) var part_mask: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(3) var pictures: texture_2d<f32>;
 
 struct LookVertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -152,16 +154,18 @@ fn mode() -> i32 {
 }
 
 @vertex
-fn vertex(vertex: Vertex) -> LookVertexOutput {
+fn vertex(vertex_in: Vertex) -> LookVertexOutput {
+    let vertex = decompress_vertex(vertex_in, vertex_in.instance_index);
     var out: LookVertexOutput;
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(vertex.position, 1.0));
     out.position = view.clip_from_world * vec4(out.world_position.xyz, 1.0);
-#ifdef VERTEX_NORMALS
+@if(VERTEX_NORMALS) {
     out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
-#else
+}
+@else {
     out.world_normal = vec3(0.0, 1.0, 0.0);
-#endif
+}
     return out;
 }
 

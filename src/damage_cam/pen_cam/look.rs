@@ -10,7 +10,7 @@
 //! A field lights a point by its law times its depth picture: the strength its law gives the
 //! point's direction, where the picture holds the point within that direction's reach to the
 //! struck tank's hard bodies. A field the record stops at its origin is drawn nowhere.
-//! [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`], [`component`] and
+//! [`LookMaterial`] (`pen_cam_look.wesl`) draws every element; [`hull`], [`component`] and
 //! [`volume`] choose them, and the stage spawns what they return.
 //!
 //! Draw order, in every frame that draws the body behind ([`body_behind`]: the glass frames and
@@ -76,7 +76,7 @@ use crate::ballistics::spall_cone::{FieldDescriptor, Terms};
 use crate::damage_cam::Role;
 use crate::render_policy::CameraProfile;
 
-/// The volume's colour (`pen_cam_look.wgsl`, `strongest`): each band's opacity, the knockout
+/// The volume's colour (`pen_cam_look.wesl`, `strongest`): each band's opacity, the knockout
 /// band's dense so its core reads solid, the reduced band's faint so the wide shell about it reads
 /// through; and how far (octaves of the peak) about its threshold a band's edge can fade. Within
 /// that window the edge fades over one pixel's change in its held level, as the painting's edges
@@ -89,10 +89,10 @@ use crate::render_policy::CameraProfile;
 const KNOCKOUT_OPACITY: f32 = 0.5;
 const REDUCED_OPACITY: f32 = 0.2;
 const BAND_WINDOW_OCTAVES: f32 = 0.5;
-/// The peak search (`pen_cam_look.wgsl`, `peak`): the equal steps each field's stretch is
+/// The peak search (`pen_cam_look.wesl`, `peak`): the equal steps each field's stretch is
 /// searched in, however short the clips leave it, and the golden-section steps about the best
 /// sample, which narrow its bracket of two steps to `0.618⁸`, about 2 % (DERIVED), at the
-/// section's ratio `(√5 − 1)/2`. `pen_cam_look.wgsl` declares all three. A stretch the part mask
+/// section's ratio `(√5 − 1)/2`. `pen_cam_look.wesl` declares all three. A stretch the part mask
 /// or the cut leaves short, or a chord near a ball's rim, is searched as finely as its length
 /// allows, so a lit sliver on it a step of its own length wide holds a sample; steps of a fixed
 /// length cross such a stretch in one or two and stair-step the band's edge (design doc §5,
@@ -140,13 +140,13 @@ const BASE_COMPONENT_FACE_SHARE: f32 = 1.0;
 /// component's surface counts as met, past the tolerance ([`super::picture::Picture::lit`]).
 const FOOTPRINT_FILL_ALPHA: f32 = 0.6;
 const FOOTPRINT_REACH_SLACK_M: f32 = 0.01;
-/// The most fields the look draws: the pictures' ([`PICTURE_FIELDS`]). `pen_cam_look.wgsl`'s
+/// The most fields the look draws: the pictures' ([`PICTURE_FIELDS`]). `pen_cam_look.wesl`'s
 /// arrays hold only the potency-selected fields' lanes; the full record still owns dose and timing.
 const FIELDS: usize = PICTURE_FIELDS;
 /// One field's lanes ([`pack`]): six of its own and its picture's faces'.
 const PRINT_LANES: usize = 6 + FACE_LANES;
 
-/// The uniform block `pen_cam_look.wgsl` reads; its lanes are documented there.
+/// The uniform block `pen_cam_look.wesl` reads; its lanes are documented there.
 #[derive(ShaderType, Debug, Clone, Copy, PartialEq)]
 pub struct LookParams {
     pub color: Vec4,
@@ -333,11 +333,11 @@ impl LookMaterial {
 
 impl Material for LookMaterial {
     fn vertex_shader() -> ShaderRef {
-        "shaders/pen_cam_look.wgsl".into()
+        "shaders/pen_cam_look.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "shaders/pen_cam_look.wgsl".into()
+        "shaders/pen_cam_look.wesl".into()
     }
 
     fn alpha_mode(&self) -> AlphaMode {
@@ -388,7 +388,7 @@ impl Material for LookMaterial {
     }
 }
 
-/// A belt's placement under the look (`pen_cam_look_belt.wgsl`): the same table page as the belt's
+/// A belt's placement under the look (`pen_cam_look_belt.wesl`): the same table page as the belt's
 /// own material ([`crate::track::belt_draw::BeltShoes`]), each belt's block found by the drawing
 /// entity's `MeshTag`, so the look draws every shoe where the belt does. A live track belt is one
 /// mesh whose shoes the vertex stage places; a plain [`LookMaterial`] would draw the undeformed
@@ -410,7 +410,7 @@ impl BeltLook {
 
 impl MaterialExtension for BeltLook {
     fn vertex_shader() -> ShaderRef {
-        "shaders/pen_cam_look_belt.wgsl".into()
+        "shaders/pen_cam_look_belt.wesl".into()
     }
 
     // The look is drawn in no prepass and casts no shadow, as `LookMaterial` itself.
@@ -627,7 +627,7 @@ pub fn own(
                         scale_factor: scale,
                     }),
                     Hdr,
-                    Tonemapping::None,
+                    Tonemapping::Linear,
                     DebandDither::Disabled,
                     Msaa::Off,
                     Projection::Perspective(default()),
@@ -761,7 +761,7 @@ pub struct FieldPrint {
 /// ([`Potency::emission`], `Ω` its support's solid angle) in world units (squared metres, whose
 /// intensity falls as the square of a world distance), the world's metres per record metre (the
 /// picture holds record metres) and the longest reach (world m); its law ([`law_lane`]), whose
-/// weight along a direction (`pen_cam_look.wgsl`, `law`) times that emission is the direction's;
+/// weight along a direction (`pen_cam_look.wesl`, `law`) times that emission is the direction's;
 /// and its picture's faces, each face's crop and place in the record's atlas
 /// ([`super::picture::Picture::lanes`]).
 fn pack(prints: &[FieldPrint], potency: &Potency) -> ([Vec4; PRINT_LANES * FIELDS], usize) {
@@ -785,7 +785,7 @@ fn pack(prints: &[FieldPrint], potency: &Potency) -> ([Vec4; PRINT_LANES * FIELD
     (lanes, prints.len())
 }
 
-/// Field `field`'s law as the look evaluates it (`pen_cam_look.wgsl`, `law`), thrown in `strata`
+/// Field `field`'s law as the look evaluates it (`pen_cam_look.wesl`, `law`), thrown in `strata`
 /// strata: the kind of its terms (x: 1 the ball's cap, 2 the ball over the whole sphere, 3 the
 /// ring's band; 0 a descriptor outside the law's domain, which lights nothing), their numbers (y,
 /// z: the cap's `λ²` and depth `w`, the sphere's `λ`, the band's depths `t_lo` and `t_hi`;
@@ -802,7 +802,7 @@ pub fn law_lane(field: FieldDescriptor, strata: usize) -> Vec4 {
 }
 
 /// The weight of the law `lane` ([`law_lane`]) along a direction at depth `t = 1 − cos θ` off its
-/// axis, in f32 as `pen_cam_look.wgsl`'s `law` takes it: the law's weight averaged over the window
+/// axis, in f32 as `pen_cam_look.wesl`'s `law` takes it: the law's weight averaged over the window
 /// one stratum wide (`Δ = (t_hi − t_lo) / N`) centred on `t` and held to the support,
 /// `(t_hi − t_lo)/2 · share(a, b)/(b − a)`, `share` the emission's share between depths `a` and
 /// `b`. At stratum `k`'s centre the window is the stratum and the weight is the stratum's `f_k`
@@ -918,7 +918,7 @@ pub fn paint_fields(
 }
 
 /// The fields' summed intensity (HP points per m²) at world point `p`, as the volume samples it
-/// (`pen_cam_look.wgsl`, `intensity` and `field_at`): each of `prints`, seen as `seen` alike,
+/// (`pen_cam_look.wesl`, `intensity` and `field_at`): each of `prints`, seen as `seen` alike,
 /// adds `S w / (Ω r²)` where `p` lies on its support and within its front, `S w` the strength
 /// its law gives `p`'s direction ([`law`]), lit as its picture lights `p`
 /// ([`super::picture::Picture::lit`]: each texel about `p`'s direction tested against its own
@@ -959,7 +959,7 @@ pub fn intensity(prints: &[FieldPrint], seen: &[Seen], potency: &Potency, p: Vec
 }
 
 /// The fields' summed intensity (HP points per m²) a component's surface is painted by at world
-/// point `p`, its unit normal `n` (world), under `rule`, as `pen_cam_look.wgsl`'s `footprint`
+/// point `p`, its unit normal `n` (world), under `rule`, as `pen_cam_look.wesl`'s `footprint`
 /// sums it with every edge sharp: each of `prints` (seen as `seen`, as [`intensity`] reads them)
 /// that covers `p` adds `S w / (Ω r²)`, `S w` the strength its law gives `p`'s direction
 /// ([`law`]), lit as its picture lights `p` within the rule's slack past each texel's reach
@@ -1003,7 +1003,7 @@ pub fn painting(
 }
 
 /// The stretch of the eye ray `eye + dir t` (`dir` unit, `t` the eye depth) a volume fragment can
-/// show, as `pen_cam_look.wgsl`'s `visible` keeps it, `x ≥ y` where none: past the near plane of
+/// show, as `pen_cam_look.wesl`'s `visible` keeps it, `x ≥ y` where none: past the near plane of
 /// the camera whose `clip_from_world` the view hands the shader, where clip `z ≤ w` (Bevy's
 /// reversed depth, in a perspective view and an orthographic one alike: clip `z` is `w` on the
 /// near plane and exceeds it on the plane's eye side), the ray's one front bound, so an
@@ -1036,7 +1036,7 @@ pub fn visible(
 }
 
 /// The depths `t` of `seen` where `g0 + gd t ≤ 0`, one side of a plane a ray crosses at
-/// `t = −g0 / gd`, as `pen_cam_look.wgsl`'s `kept` takes them; `x ≥ y` where none is, the ray
+/// `t = −g0 / gd`, as `pen_cam_look.wesl`'s `kept` takes them; `x ≥ y` where none is, the ray
 /// parallel to the plane on its far side.
 #[cfg(test)]
 fn kept(seen: (f32, f32), g0: f32, gd: f32) -> (f32, f32) {
@@ -1051,7 +1051,7 @@ fn kept(seen: (f32, f32), g0: f32, gd: f32) -> (f32, f32) {
 
 /// The greatest summed intensity the search finds on the eye ray `eye + dir t` over fields
 /// `prints`, kept to `[near, far]` (m along the ray, the ray's visible stretch: [`visible`]), as
-/// `pen_cam_look.wgsl`'s `peak` finds it, `intensity` the sum at `t` ([`intensity`]). First each
+/// `pen_cam_look.wesl`'s `peak` finds it, `intensity` the sum at `t` ([`intensity`]). First each
 /// field's point nearest its origin on its stretch ([`stretch`]); then each stretch in
 /// [`VOLUME_STEPS`] equal steps however short the clips leave it, ends included; then
 /// [`VOLUME_REFINE`] golden-section steps about the best sample, one of its stretch's steps either
@@ -1132,7 +1132,7 @@ pub fn peak(
     best.max(i1).max(i2)
 }
 
-/// The levels a pixel's bands are drawn from, as `pen_cam_look.wgsl`'s `strongest` holds them:
+/// The levels a pixel's bands are drawn from, as `pen_cam_look.wesl`'s `strongest` holds them:
 /// `log2` of the peak `top` (a 4096th of the floor at least), held to each band's window,
 /// `params`' `volume.x` octaves about the floor (x) and about the mid (y). A peak past a window
 /// reads its end, so the colour no longer changes there, and the search stops past the mid's
@@ -1152,7 +1152,7 @@ pub fn levels(params: &LookParams, top: f32) -> Vec2 {
 }
 
 /// The volume's colour at a pixel whose eye ray peaks at summed intensity `top` ([`peak`]),
-/// premultiplied (rgb, a), as `pen_cam_look.wgsl`'s `strongest` draws it from `params`' lanes: the
+/// premultiplied (rgb, a), as `pen_cam_look.wesl`'s `strongest` draws it from `params`' lanes: the
 /// strongest band's colour at that band's opacity ([`KNOCKOUT_OPACITY`], [`REDUCED_OPACITY`]),
 /// each band's presence a [`soft_step`] about its threshold in its held level ([`levels`]),
 /// `width` each held level's change across the pixel (the shader's `fwidth`). The colour is the
@@ -1169,7 +1169,7 @@ pub fn strongest(params: &LookParams, top: f32, width: Vec2) -> Vec4 {
 }
 
 /// Field `print`'s stretch of the line `eye + dir t` (`dir` unit, `t` of either sign: [`visible`]
-/// holds the ray's one front bound), as `pen_cam_look.wgsl`'s `stretch` finds it: inside its ball
+/// holds the ray's one front bound), as `pen_cam_look.wesl`'s `stretch` finds it: inside its ball
 /// out to its front or its longest reach, the nearer, and for a cap no wider than a hemisphere
 /// inside its cone too; `None` where the line misses it. Every point the field holds on the line
 /// lies within it, so the peak search, which samples only these stretches, leaves none of the
@@ -1283,7 +1283,7 @@ impl Layer {
     }
 }
 
-/// The rule a component's surface takes the fields' painting by (`pen_cam_look.wgsl`,
+/// The rule a component's surface takes the fields' painting by (`pen_cam_look.wesl`,
 /// `footprint`): its role's ([`Self::of`]), set in its material when the material is built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Footprint {
@@ -1317,7 +1317,7 @@ impl Footprint {
         }
     }
 
-    /// The `foot` lane (`pen_cam_look.wgsl`): the painting's opacity, how far (m) past each
+    /// The `foot` lane (`pen_cam_look.wesl`): the painting's opacity, how far (m) past each
     /// texel's reach a surface counts as met, and the witness rule (1) or the hard one (0).
     pub fn lane(self) -> Vec4 {
         match self {
@@ -1448,7 +1448,7 @@ pub fn component(
 /// The record's fields as one volume, drawn on the back faces of a box about every field's reach
 /// ([`field_bounds`]). Each fragment takes the strongest band the search finds for the fields'
 /// summed intensity on the visible part of its eye ray, past the camera's near plane
-/// (`pen_cam_look.wgsl`: `intensity`, `visible`, `peak` over the fields' stretches, `stretch`), in
+/// (`pen_cam_look.wesl`: `intensity`, `visible`, `peak` over the fields' stretches, `stretch`), in
 /// that band's colour at that band's opacity (`strongest`); how far the ray runs in the band never
 /// counts. The fields' lanes are set each frame
 /// ([`LookMaterial::set_fields`]), and with them the atlas of the pictures they read. Straight
@@ -1504,7 +1504,7 @@ mod tests {
         std::fs::read_to_string(path).unwrap()
     }
 
-    /// `pen_cam_look.wgsl` declares the look's counts and lanes: the fields and each one's lanes,
+    /// `pen_cam_look.wesl` declares the look's counts and lanes: the fields and each one's lanes,
     /// where a field's face lanes start and how many a face takes ([`Picture::lanes`]), the peak
     /// search's steps, golden-section steps and ratio, the reach tolerance its pictures are read
     /// with ([`Picture::lit`]), the arrays' lengths, and [`LookParams`]' lanes in their order. A
@@ -1514,7 +1514,7 @@ mod tests {
     /// neighbour's slot.
     #[test]
     fn the_shader_declares_the_lane_counts() {
-        let shader = shader("pen_cam_look.wgsl");
+        let shader = shader("pen_cam_look.wesl");
         let faces = PRINT_LANES - FACE_LANES;
         assert_eq!(FACE_LANES, 2 * 6, "two lanes a face of the cube");
         for declared in [
@@ -2138,7 +2138,7 @@ mod tests {
     }
 
     /// Fields' doses add: where two fields overlap, the band is their summed intensity's, never
-    /// either field's own nor the larger of the two ([`intensity`], `pen_cam_look.wgsl`'s
+    /// either field's own nor the larger of the two ([`intensity`], `pen_cam_look.wesl`'s
     /// `intensity`). The merged volume relies on it. Fixture: two 25° caps of one strength from
     /// origins 0.2 m apart, their axes parallel, read at a point 1 m along the axis between them,
     /// where each lies 5.7° off its own axis; a fixture potency whose mid lies 1.6 times above
@@ -2584,45 +2584,45 @@ mod tests {
 
     /// Every top-level item of the look's and the slice's shaders, `(file, item, digest)`: the
     /// FNV-1a fold of the item's text with comments and whitespace removed. MEASURED from the
-    /// shaders the shipped frames were captured with.
+    /// reviewed WESL interfaces and the algorithms their CPU mirrors implement.
     const SHADER_PINS: [(&str, &str, u64); 33] = [
-        ("pen_cam_look.wgsl", "mode", 0xd884_58c8_42c2_833e),
-        ("pen_cam_look.wgsl", "vertex", 0x0c5f_0c8e_ce2c_65f2),
-        ("pen_cam_look.wgsl", "mask_at", 0x1d10_776f_dc3c_0e87),
-        ("pen_cam_look.wgsl", "orthographic", 0xd848_4040_5cc7_bf5b),
-        ("pen_cam_look.wgsl", "eye_depth", 0x959c_ebcc_5e07_ea9e),
-        ("pen_cam_look.wgsl", "eye_ray", 0x8fbf_c6b6_664e_ae7b),
-        ("pen_cam_look.wgsl", "face_of", 0xb6db_f5f2_a04e_8548),
-        ("pen_cam_look.wgsl", "picture_at", 0x1dd3_126a_b772_9ffd),
-        ("pen_cam_look.wgsl", "cap_share", 0x1bb7_0503_7b18_7581),
-        ("pen_cam_look.wgsl", "sphere_reach", 0x1f4b_6ef2_6075_2f53),
-        ("pen_cam_look.wgsl", "sphere_share", 0x6b86_7e7c_f36d_7a41),
-        ("pen_cam_look.wgsl", "law", 0x2210_7415_8a4f_970d),
-        ("pen_cam_look.wgsl", "field_at", 0x70bc_41a5_41b4_d99d),
-        ("pen_cam_look.wgsl", "intensity", 0xa1d0_858a_a0d0_eea1),
-        ("pen_cam_look.wgsl", "soft_step", 0x05cd_e5fb_8619_f8d0),
-        ("pen_cam_look.wgsl", "inside", 0xbe35_1ba6_c6e3_7355),
-        ("pen_cam_look.wgsl", "footprint", 0x0feb_6029_c26e_2427),
-        ("pen_cam_look.wgsl", "printed", 0xa3ef_69a5_13f1_8034),
-        ("pen_cam_look.wgsl", "stretch", 0xe48e_21f1_fcad_489a),
-        ("pen_cam_look.wgsl", "kept", 0x84fb_64e5_5d35_095e),
-        ("pen_cam_look.wgsl", "visible", 0xcbaa_89dc_4d54_dc8b),
-        ("pen_cam_look.wgsl", "peak", 0x26f9_3c04_5a5a_a711),
-        ("pen_cam_look.wgsl", "strongest", 0x79dc_6f4b_becf_2453),
-        ("pen_cam_look.wgsl", "lines", 0x5560_efe8_d460_738c),
-        ("pen_cam_look.wgsl", "fragment", 0x9d55_ef6b_1f16_a82f),
-        ("pen_cam_look.wgsl", MODULE_SCOPE, 0xb844_ab8b_ef91_56bc),
+        ("pen_cam_look.wesl", "mode", 0xd884_58c8_42c2_833e),
+        ("pen_cam_look.wesl", "vertex", 0x90aa_409d_e733_6a87),
+        ("pen_cam_look.wesl", "mask_at", 0x1d10_776f_dc3c_0e87),
+        ("pen_cam_look.wesl", "orthographic", 0xd848_4040_5cc7_bf5b),
+        ("pen_cam_look.wesl", "eye_depth", 0x959c_ebcc_5e07_ea9e),
+        ("pen_cam_look.wesl", "eye_ray", 0x8fbf_c6b6_664e_ae7b),
+        ("pen_cam_look.wesl", "face_of", 0xb6db_f5f2_a04e_8548),
+        ("pen_cam_look.wesl", "picture_at", 0x1dd3_126a_b772_9ffd),
+        ("pen_cam_look.wesl", "cap_share", 0x1bb7_0503_7b18_7581),
+        ("pen_cam_look.wesl", "sphere_reach", 0x1f4b_6ef2_6075_2f53),
+        ("pen_cam_look.wesl", "sphere_share", 0x6b86_7e7c_f36d_7a41),
+        ("pen_cam_look.wesl", "law", 0x2210_7415_8a4f_970d),
+        ("pen_cam_look.wesl", "field_at", 0x70bc_41a5_41b4_d99d),
+        ("pen_cam_look.wesl", "intensity", 0xa1d0_858a_a0d0_eea1),
+        ("pen_cam_look.wesl", "soft_step", 0x05cd_e5fb_8619_f8d0),
+        ("pen_cam_look.wesl", "inside", 0xbe35_1ba6_c6e3_7355),
+        ("pen_cam_look.wesl", "footprint", 0x0feb_6029_c26e_2427),
+        ("pen_cam_look.wesl", "printed", 0xa3ef_69a5_13f1_8034),
+        ("pen_cam_look.wesl", "stretch", 0xe48e_21f1_fcad_489a),
+        ("pen_cam_look.wesl", "kept", 0x84fb_64e5_5d35_095e),
+        ("pen_cam_look.wesl", "visible", 0xcbaa_89dc_4d54_dc8b),
+        ("pen_cam_look.wesl", "peak", 0x26f9_3c04_5a5a_a711),
+        ("pen_cam_look.wesl", "strongest", 0x79dc_6f4b_becf_2453),
+        ("pen_cam_look.wesl", "lines", 0x5560_efe8_d460_738c),
+        ("pen_cam_look.wesl", "fragment", 0x9d55_ef6b_1f16_a82f),
+        ("pen_cam_look.wesl", MODULE_SCOPE, 0x5ef7_4cdb_7de2_8020),
         (
-            "pen_cam_slice.wgsl",
+            "pen_cam_slice.wesl",
             "behind_the_scene",
             0xd02c_1b1f_4fea_44f0,
         ),
-        ("pen_cam_slice.wgsl", "bayer", 0x101e_1ea8_a796_5e70),
-        ("pen_cam_slice.wgsl", "fragment", 0x8758_36dd_1da3_fde7),
-        ("pen_cam_slice.wgsl", MODULE_SCOPE, 0xbbfa_4d63_379f_a666),
-        ("pen_cam_picture.wgsl", "vertex", 0x5e53_ff03_bd49_2d09),
-        ("pen_cam_picture.wgsl", "fragment", 0xc071_0faa_9da4_a075),
-        ("pen_cam_picture.wgsl", MODULE_SCOPE, 0xefab_c0df_21d2_4ea4),
+        ("pen_cam_slice.wesl", "bayer", 0x101e_1ea8_a796_5e70),
+        ("pen_cam_slice.wesl", "fragment", 0x4617_95ce_14ad_8048),
+        ("pen_cam_slice.wesl", MODULE_SCOPE, 0xa1d4_96fc_0b86_44a6),
+        ("pen_cam_picture.wesl", "vertex", 0x5e53_ff03_bd49_2d09),
+        ("pen_cam_picture.wesl", "fragment", 0xc071_0faa_9da4_a075),
+        ("pen_cam_picture.wesl", MODULE_SCOPE, 0xefab_c0df_21d2_4ea4),
     ];
 
     /// The top-level items of WGSL `source` with comments and whitespace removed: each function by
@@ -2672,7 +2672,7 @@ mod tests {
     /// Lane-count tests check Rust/WGSL agreement; unused search slots retain neutral bounds.
     /// Every other token stays fingerprinted, including the loops that consume the slots.
     fn captured_resource_extent(file: &str, text: &str) -> String {
-        if file != "pen_cam_look.wgsl" {
+        if file != "pen_cam_look.wesl" {
             return text.to_owned();
         }
         // Fixture: the resource extent in the originally captured shader, not a rendering path.
@@ -2702,7 +2702,7 @@ mod tests {
     /// search bound or its neutral initialization must not. Mutants model both shading changes.
     #[test]
     fn resource_extent_normalization_preserves_shading_tripwires() {
-        let file = "pen_cam_look.wgsl";
+        let file = "pen_cam_look.wesl";
         let (_, current) = shader_items(&shader(file))
             .into_iter()
             .find(|(name, _)| name == "peak")
@@ -2723,13 +2723,13 @@ mod tests {
         }
     }
 
-    /// The game's damage-model view keeps the captured shader algorithms: every top-level item
+    /// The game's damage-model view keeps the reviewed shader algorithms: every top-level item
     /// folds to its pin after comments, whitespace and checked resource extents are normalized.
     /// Shading changes still move their item's pin, whatever text remains elsewhere. The colour, band, eye-depth and draw-order promises rely on it: their Rust side
     /// is tested against the WGSL pinned here, and an unpinned item (`orthographic`, a binding)
     /// breaks a pinned one's frame with its text unchanged.
     #[test]
-    fn the_shader_algorithms_match_the_captured_frames() {
+    fn the_shader_algorithms_match_the_reviewed_mirrors() {
         let hex = |d: u64| {
             format!(
                 "0x{:04x}_{:04x}_{:04x}_{:04x}",
@@ -2742,9 +2742,9 @@ mod tests {
         let mut moved = Vec::new();
         let mut found = Vec::new();
         for file in [
-            "pen_cam_look.wgsl",
-            "pen_cam_slice.wgsl",
-            "pen_cam_picture.wgsl",
+            "pen_cam_look.wesl",
+            "pen_cam_slice.wesl",
+            "pen_cam_picture.wesl",
         ] {
             for (item, text) in shader_items(&shader(file)) {
                 let text = captured_resource_extent(file, &text);
@@ -2768,7 +2768,7 @@ mod tests {
             "the pen cam's shaders moved; the moved items' pins:\n{}\nRe-pin only after the Rust \
              mirrors are read against the new WGSL and pass (`potency::tests` for `soft_step`, \
              `picture::tests` for `face_of` and `picture_at` (`Picture::lit`) and for \
-             `pen_cam_picture.wgsl` (`Casters::reach`, its clip and cull), \
+             `pen_cam_picture.wesl` (`Casters::reach`, its clip and cull), \
              `the_law_gives_each_record_direction_its_recorded_strength` for `law`, `cap_share`, \
              `sphere_reach` and `sphere_share`, the painting's tests \
              (`painting`) for `footprint`, `inside` and `printed`, \
@@ -2791,7 +2791,7 @@ mod tests {
         );
     }
 
-    /// `pen_cam_look.wgsl`'s `orthographic`, `eye_depth` and `eye_ray`, read from a view's
+    /// `pen_cam_look.wesl`'s `orthographic`, `eye_depth` and `eye_ray`, read from a view's
     /// `world_from_view` (the camera's `GlobalTransform`) and `clip_from_view` (its projection's)
     /// as Bevy's view uniform hands them to the shader; WGSL's `m[c]` is glam's column `c`.
     struct Eye {
@@ -2889,7 +2889,7 @@ mod tests {
     /// visible points lie 0.05 m or more from it, reduced, while the whole ray holds the origin,
     /// knockout. Tolerance: 1 mm orthographic (DERIVED: there clip `z` and `w` both lie near 1 at
     /// the eye, so their difference keeps `(far − near) 2⁻²³` m, 0.12 mm at the 1 km far),
-    /// `10⁻⁵` m perspective. The volume relies on it (`pen_cam_look.wgsl`, `visible`): a search
+    /// `10⁻⁵` m perspective. The volume relies on it (`pen_cam_look.wesl`, `visible`): a search
     /// from the eye seeds on the hidden origin and colours the pixel knockout where no visible
     /// point is.
     #[test]
@@ -2972,7 +2972,7 @@ mod tests {
     /// 0.02 m, its origin at eye depth −0.05 m on the forward ray, so the field lies at depths
     /// −0.07 to −0.03 m and the ray through its origin reads knockout. Tolerance as
     /// [`the_search_starts_at_the_near_plane`]'s orthographic one. The volume relies on it
-    /// (`pen_cam_look.wgsl`, `visible` and `stretch`): a search held to depths of 0 or more leaves
+    /// (`pen_cam_look.wesl`, `visible` and `stretch`): a search held to depths of 0 or more leaves
     /// the field undrawn where the raster shows it.
     #[test]
     fn the_near_plane_is_the_eye_ray_s_one_front_bound() {
@@ -3009,7 +3009,7 @@ mod tests {
     /// camera looking down `−Z`, near 0.1 m; rays 0° and 30° off its forward; a surface 2 m deep;
     /// cut planes square to the forward 3 m ahead, either way, and planes through the forward 0.5
     /// m either side of the eye, square to `Y`, which both rays run along. Tolerance `10⁻⁴` m.
-    /// The volume relies on it (`pen_cam_look.wgsl`, `visible`): a clip that takes an empty mask
+    /// The volume relies on it (`pen_cam_look.wesl`, `visible`): a clip that takes an empty mask
     /// pixel's 0 for a surface draws no field there, and a cut kept on the wrong side draws the
     /// discarded half.
     #[test]

@@ -1,3 +1,5 @@
+import constants::MATERIAL_BIND_GROUP;
+
 // A construction's holes, drawn without touching its mesh (`construction::view::hole_table`): the surface
 // inside a hole is skipped, and the eye ray through it either leaves through the far side of the
 // chunk (the hole is seen through) or meets the hole's inner wall inside the chunk. The main pass
@@ -13,9 +15,9 @@
 // The depth written stays the face's own: an inner wall is shaded where it is but sorted where
 // the face is, so a body inside the hole's volume hides behind the face it went through.
 
-#import bevy_pbr::{mesh_functions, mesh_view_bindings::view}
+import bevy_pbr::render::{mesh_functions, mesh_view_bindings::view};
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(105) var<storage, read> hole_table: array<vec4<f32>>;
+@group(MATERIAL_BIND_GROUP) @binding(105) var<storage, read> hole_table: array<vec4<f32>>;
 
 // `breakage::HOLES_PER_CHUNK`, the most holes a chunk's header names (a test pins the two equal).
 const HOLES_PER_CHUNK: u32 = 16u;

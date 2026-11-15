@@ -1,3 +1,5 @@
+import constants::MATERIAL_BIND_GROUP;
+
 // The ground's surface blend: bevy's standard PBR fragment for the BASE pack, then three masked
 // layers mixed into its albedo, normal and ARM. The CPU half and every constant this reads out of
 // `blend.blend_law` live in `src/terrain_blend.rs`; the blend law itself lives here.
@@ -23,7 +25,7 @@
 // self-shadow). Both offset the UV and the world position BEFORE the standard PBR input is built,
 // so the base pack and the layers shift together.
 
-#import bevy_pbr::{
+import bevy_pbr::render::{
     forward_io::{VertexOutput, FragmentOutput},
     pbr_fragment::pbr_input_from_standard_material,
     pbr_bindings,
@@ -31,7 +33,7 @@
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     pbr_types,
     mesh_view_bindings as view_bindings,
-}
+};
 
 struct TerrainBlendParams {
     // xyz: each layer's UV multiplier over the mesh's own UV. w: the mesh's UV per world metre.
@@ -62,20 +64,20 @@ struct TerrainBlendParams {
     print_relief: vec4<f32>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> blend: TerrainBlendParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var layer_albedo_texture: texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var layer_albedo_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103) var layer_normal_texture: texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var layer_normal_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(105) var layer_arm_texture: texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(106) var layer_arm_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(107) var masks_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(108) var masks_sampler: sampler;
+@group(MATERIAL_BIND_GROUP) @binding(100) var<uniform> blend: TerrainBlendParams;
+@group(MATERIAL_BIND_GROUP) @binding(101) var layer_albedo_texture: texture_2d_array<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(102) var layer_albedo_sampler: sampler;
+@group(MATERIAL_BIND_GROUP) @binding(103) var layer_normal_texture: texture_2d_array<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(104) var layer_normal_sampler: sampler;
+@group(MATERIAL_BIND_GROUP) @binding(105) var layer_arm_texture: texture_2d_array<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(106) var layer_arm_sampler: sampler;
+@group(MATERIAL_BIND_GROUP) @binding(107) var masks_texture: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(108) var masks_sampler: sampler;
 // The prints' stores. No samplers of their own: the near store wraps, so it is read through the
 // layer albedo's repeating sampler; the world layer is stretched once, like the mask, and read
 // through the mask's.
-@group(#{MATERIAL_BIND_GROUP}) @binding(109) var print_near_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(110) var print_world_texture: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(109) var print_near_texture: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(110) var print_world_texture: texture_2d<f32>;
 
 // Layers, and layers plus the base pack. The mask has three channels; index 0 of the weight set is
 // always the base.
@@ -387,7 +389,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     }
     raw[0] = 1.0 - saturate(covered);
 
-#ifndef TERRAIN_BASE_ONLY
+@if(!TERRAIN_BASE_ONLY) {
     for (var i = 0u; i < LAYERS; i++) {
         let weight = painted[i];
         if weight <= blend.blend_law.z {
@@ -411,7 +413,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         roughness[slot] = roughness_factor * arm.g;
         raw[slot] = weight;
     }
-#endif
+}
 
     // THE BLEND LAW: bias every weight by its own pack's AO, cut everything more than a window
     // behind the leader, normalize.
@@ -448,14 +450,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // standard path above, outside the layer loop.
     //
     // A function of world XZ and nothing else — no camera term, so it does not swim under motion.
-#ifndef TERRAIN_NO_MACRO
+@if(!TERRAIN_NO_MACRO) {
     let macro_uv = in.world_position.xz * blend.macro_tint.x;
     let macro_field = macro_noise(macro_uv) + 0.5 * macro_noise(macro_uv * MACRO_OCTAVE_RATIO);
     // 0..MACRO_PEAK to -1..1, then a gain of 1 ± amplitude. The amplitude is bounded below 1, so
     // the gain is strictly positive whatever the field returns.
     let macro_signed = macro_field * (2.0 / MACRO_PEAK) - 1.0;
     blended_albedo *= 1.0 + blend.macro_tint.y * macro_signed;
-#endif
+}
 
     // The trodden ground's look, by the same painted weights as its depth.
     blended_albedo *= mix(1.0, dot(ground, blend.print_albedo), footprint);
@@ -472,7 +474,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Metallic is not blended: the material's metallic factor is hard zero, so every pack's B
     // channel multiplies out to a dielectric ground whatever the mask says.
 
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    pbr_input.material.base_color = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, pbr_input.material.base_color);
 
     // The rut's self-shadow joins the sun's shadow: it takes the direct sunlight, and only that,
     // where the ground stands over the ray to the sun. It is a sun shadow like any other, so it

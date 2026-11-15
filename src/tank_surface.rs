@@ -24,7 +24,7 @@
 //!   materials as the glb has materials.
 //! - THE REST TABLE IS BUILT ONCE PER VEHICLE and never resized: row 0 is the identity, then one row
 //!   per node path of the first bind. A later instance finds its rows by node path; an untagged mesh
-//!   reads row 0. The shader's rest frame (`assets/shaders/tank_surface.wgsl`) is the mesh-local
+//!   reads row 0. The shader's rest frame (`assets/shaders/tank_surface.wesl`) is the mesh-local
 //!   frame through every node up to, and not including, the first the tank file articulates
 //!   ([`rest_row`]), so plates of one rigid part share it and a moving part carries it.
 //! - A SURFACE IS DRAWN WHILE ITS MAPS LOAD. The dress swaps materials the frame the view lands,
@@ -79,7 +79,7 @@ use crate::world::{MapEncoding, MapTiling, surface_map, surface_sampler};
 /// table).
 pub(crate) type TankSurfaceMaterial = ExtendedMaterial<StandardMaterial, TankSurface>;
 
-const SHADER: &str = "shaders/tank_surface.wgsl";
+const SHADER: &str = "shaders/tank_surface.wesl";
 /// The shared visual library, relative to the asset root.
 const VISUALS_PATH: &str = "materials/visuals.ron";
 /// The selected vehicle's livery, relative to the asset root.
@@ -811,7 +811,13 @@ impl Dress<'_, '_> {
                 rows.insert(path, table.len() as u32);
                 table.push(RestRow::of(rest));
             }
-            let rest_frames = self.buffers.add(ShaderBuffer::from(table));
+            let rest_frames = self.buffers.add(ShaderBuffer::new(
+                table
+                    .into_iter()
+                    .flat_map(|row| [row.x.to_array(), row.y.to_array(), row.z.to_array()])
+                    .collect(),
+                RenderAssetUsages::default(),
+            ));
             self.vehicles.vehicles.insert(
                 scene,
                 Vehicle {
@@ -1632,7 +1638,7 @@ mod tests {
             .get(&vehicle.rest_frames)
             .expect("the table");
         assert_eq!(
-            table.data.as_deref(),
+            table.cast_slice::<u8>(),
             Some(expected.into_inner().as_slice()),
             "row 0 the identity, row 1 the node chain's translation"
         );

@@ -1,3 +1,5 @@
+import constants::MATERIAL_BIND_GROUP;
+
 // The pen cam's plate slice (`src/damage_cam/pen_cam/material.rs`, `SliceCut`): a standard PBR
 // fragment with the eye's side of a plane removed. Removal is a screen-door dissolve: a fragment on
 // the eye's side is discarded when its ordered-dither threshold is below `params.x` (0 keeps all of
@@ -9,13 +11,13 @@
 // pixel's nearest scene surface, a component's kept side or the round whole, 0 where none) holds
 // one.
 
-#import bevy_pbr::{
+import bevy_pbr::render::{
     forward_io::{VertexOutput, FragmentOutput},
     mesh_view_bindings::view,
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT,
-}
+};
 
 struct SliceParams {
     // xyz: unit plane normal toward the eye, w: normal . point.
@@ -25,8 +27,8 @@ struct SliceParams {
     params: vec4<f32>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> slice: SliceParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var part_mask: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(100) var<uniform> slice: SliceParams;
+@group(MATERIAL_BIND_GROUP) @binding(101) var part_mask: texture_2d<f32>;
 
 // Whether the part mask holds a scene surface at the fragment at framebuffer position `frag`.
 fn behind_the_scene(frag: vec2<f32>) -> bool {
@@ -66,7 +68,7 @@ fn fragment(
         out.color = main_pass_post_lighting_processing(pbr_input, vec4(cut, 1.0));
         return out;
     }
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    pbr_input.material.base_color = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, pbr_input.material.base_color);
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         out.color = apply_pbr_lighting(pbr_input);
     } else {

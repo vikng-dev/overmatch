@@ -15,13 +15,13 @@
 //! cropped to the support ([`Crop`]) at the field's pitch (rad a texel, [`pitch_of`]), derived
 //! from the live size of the target a view draws the record into ([`PictureDetail`]). A record's
 //! faces share one atlas ([`Pictures`]), one `R32Float` texture rendered by
-//! `pen_cam_picture.wgsl` ([`Pictures::image`], [`PictureJobs`]); every view of the record shares
+//! `pen_cam_picture.wesl` ([`Pictures::image`], [`PictureJobs`]); every view of the record shares
 //! it ([`RecordAtlas`], `game::RecordPictures`), laid out at the finest pitch any of them needs and
 //! laid out anew, once a frame at most, when what they ask changes. A view draws the newest
 //! pictures whose atlas's job has been encoded and submitted ([`PictureJobs::rendered`]): before
 //! then an atlas holds nothing, so a record's first pictures keep its fields off, and pictures laid
 //! out anew are drawn from the atlas before them until theirs is written. The look reads it
-//! unfiltered (`pen_cam_look.wgsl`, `picture_at`): a point is tested against each of the four
+//! unfiltered (`pen_cam_look.wesl`, `picture_at`): a point is tested against each of the four
 //! texels about its direction, each against its own reach within a tolerance
 //! ([`REACH_TOLERANCE_DIAGONALS`]), and the results weighed bilinearly; [`Picture::lit`] is the
 //! same read on the CPU.
@@ -85,7 +85,7 @@ pub(super) fn require_field_capacity(count: usize) {
 /// A field's face lanes in the look's uniform: two for each face of the cube (`look::pack`).
 pub const FACE_LANES: usize = 12;
 /// The near plane (m along a face's forward): a caster face nearer the origin is not drawn.
-/// `pen_cam_picture.wgsl` declares it; the tests' CPU mirror of the pictures reads this copy.
+/// `pen_cam_picture.wesl` declares it; the tests' CPU mirror of the pictures reads this copy.
 #[cfg(test)]
 pub const NEAR_M: f32 = 1.0e-4;
 /// The caster faces the picture keeps: those a line from the origin meets head-on, every caster
@@ -104,7 +104,7 @@ fn caster_culling() -> Option<RayCullingMode> {
 /// Whether the line from `origin` along unit `direction` (record frame) meets a face of `bodies`
 /// the picture keeps ([`CASTER_CULL`]) within `reach` (m): where it does, the picture ends the
 /// direction on a hard body, and where it does not, on the horizon. The GPU's near plane
-/// (`pen_cam_picture.wgsl`) is not applied: that differs only for a face nearer the origin than
+/// (`pen_cam_picture.wesl`) is not applied: that differs only for a face nearer the origin than
 /// the plane, 10⁻⁴ m along a cube face's forward.
 pub fn meets_a_body(bodies: &HardBodies, origin: Vec3, direction: Vec3, reach: f32) -> bool {
     bodies
@@ -131,7 +131,7 @@ pub fn meets_a_body(bodies: &HardBodies, origin: Vec3, direction: Vec3, reach: f
 pub const REACH_TOLERANCE_DIAGONALS: f32 = 2.0;
 /// A face of the cube about a field's axis, `[right, up, forward]` in the field's local frame
 /// (`u`, `v`, the axis), `right × up = −forward`: a direction is `forward + a right + b up` at
-/// tangent `(a, b)` in `[−1, 1]²` on its face ([`face_of`]). `pen_cam_look.wgsl` declares the
+/// tangent `(a, b)` in `[−1, 1]²` on its face ([`face_of`]). `pen_cam_look.wesl` declares the
 /// same (`face_of`).
 pub const FRAMES: [[Vec3; 3]; 6] = [
     [Vec3::X, Vec3::NEG_Y, Vec3::Z],
@@ -195,7 +195,7 @@ pub fn frame(axis: Vec3) -> [Vec3; 3] {
 }
 
 /// The face of the cube about a field's axis unit `local` (across `u` and `v`, along the axis)
-/// lies on, its index in [`FRAMES`], and its tangent there. `pen_cam_look.wgsl`, `face_of`.
+/// lies on, its index in [`FRAMES`], and its tangent there. `pen_cam_look.wesl`, `face_of`.
 pub fn face_of(local: Vec3) -> (usize, Vec2) {
     let a = local.abs();
     if a.z >= a.x && a.z >= a.y {
@@ -388,7 +388,7 @@ impl Picture {
     /// the face's edge) and no face is blended with its neighbour: a silhouette across a face's
     /// edge is drawn within half a texel of it on either side, so it jogs there by at most a
     /// texel, under a pixel of the live target at the sightings ([`pitch_of`]; design doc §5,
-    /// "Potency colour"). `pen_cam_look.wgsl`'s `picture_at` reads the atlas so; this is the read
+    /// "Potency colour"). `pen_cam_look.wesl`'s `picture_at` reads the atlas so; this is the read
     /// it mirrors, held by the tests.
     pub fn lit(
         &self,
@@ -505,7 +505,7 @@ impl Casters {
     /// ([`CASTER_CULL`]) past the near plane, or the horizon's far side; 0 where the line misses
     /// the horizon. The near plane lies [`NEAR_M`] along the forward of the face of the cube about
     /// `axis` ([`frame`]) the direction lies on ([`face_of`]), so `NEAR_M` over its cosine along
-    /// the direction, as the GPU clips each face (`pen_cam_picture.wgsl`; a crop's one-texel
+    /// the direction, as the GPU clips each face (`pen_cam_picture.wesl`; a crop's one-texel
     /// overhang past its face's edge is clipped along its own face's forward, which moves the near
     /// plane there by at most `NEAR_M √3` pitch, DERIVED). The pictures' CPU mirror, held by the
     /// tests against the record; no test reads the GPU's pictures back. Test oracle: the GPU
@@ -975,7 +975,7 @@ struct PicturePipeline {
     id: CachedRenderPipelineId,
 }
 
-/// One face's uniform (`pen_cam_picture.wgsl`, `Face`): its frame (record frame), the field's
+/// One face's uniform (`pen_cam_picture.wesl`, `Face`): its frame (record frame), the field's
 /// origin and the crop's tangent rectangle `(x0, y0, x1, y1)`.
 #[derive(ShaderType, Clone, Copy, Debug)]
 struct FaceUniform {
@@ -1035,7 +1035,7 @@ fn queue_pipeline(
     cache: Res<PipelineCache>,
     asset_server: Res<AssetServer>,
 ) {
-    let shader = asset_server.load("shaders/pen_cam_picture.wgsl");
+    let shader = asset_server.load("shaders/pen_cam_picture.wesl");
     let layout = BindGroupLayoutDescriptor::new(
         "pen_cam_picture",
         &BindGroupLayoutEntries::single(
@@ -1050,6 +1050,7 @@ fn queue_pipeline(
         vertex: VertexState {
             shader: shader.clone(),
             shader_defs: Vec::new(),
+            constants: default(),
             entry_point: Some("vertex".into()),
             buffers: vec![VertexBufferLayout::from_vertex_formats(
                 VertexStepMode::Vertex,
@@ -1062,6 +1063,7 @@ fn queue_pipeline(
         fragment: Some(FragmentState {
             shader,
             shader_defs: Vec::new(),
+            constants: default(),
             entry_point: Some("fragment".into()),
             targets: vec![Some(reach_target())],
         }),
@@ -1245,7 +1247,13 @@ pub(super) fn render(app: &mut App) {
         .init_resource::<RenderPictureJobs>()
         .add_systems(RenderStartup, queue_pipeline)
         .add_systems(ExtractSchedule, extract_jobs)
-        .add_systems(Render, render_jobs.in_set(RenderSystems::PrepareResources));
+        .add_systems(
+            Render,
+            render_jobs
+                .in_set(RenderSystems::PrepareResources)
+                .after(bevy::render::render_asset::prepare_assets::<GpuImage>)
+                .before(RenderSystems::Render),
+        );
 }
 
 /// The main world's half: the jobs, retired once submitted, then the frame's asks laid out.
@@ -1406,7 +1414,7 @@ pub(super) mod tests {
         }
     }
 
-    /// The vertex clip `pen_cam_picture.wgsl` takes a world point through for face uniform
+    /// The vertex clip `pen_cam_picture.wesl` takes a world point through for face uniform
     /// `face`: tangent `(x, y)` across the crop's rectangle onto `[−1, 1]`, the near plane at
     /// [`NEAR_M`], `w` the depth along the face's forward.
     fn clip(face: &FaceUniform, position: Vec3) -> Vec4 {
@@ -1575,7 +1583,7 @@ pub(super) mod tests {
         );
     }
 
-    /// The near plane lies [`NEAR_M`] along each face's forward, as `pen_cam_picture.wgsl` clips:
+    /// The near plane lies [`NEAR_M`] along each face's forward, as `pen_cam_picture.wesl` clips:
     /// a direction 40° off the axis lies on the axis's face and starts `NEAR_M / cos 40°` out, so
     /// a plate whose near side lies 0.9 `NEAR_M` down the axis is passed (the line starts inside
     /// it and leaves it unstopped) and one 1.1 `NEAR_M` down stops it at that side. A mirror that

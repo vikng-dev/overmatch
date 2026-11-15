@@ -1,3 +1,5 @@
+import constants::MATERIAL_BIND_GROUP;
+
 // The belt's placement: one rigid shoe per material link, read from the belt's block of the shared
 // table.
 //
@@ -12,10 +14,10 @@
 // canonical `+z` onto the unit chord `dir = (b - a) / |b - a|`. A shoe is never stretched to its
 // chord or bent along the route.
 
-#import bevy_pbr::mesh_functions::get_tag
+import bevy_pbr::render::mesh_functions::get_tag;
 
 // One table page: every belt block on it, each record a `vec4`.
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<storage, read> belt_table: array<vec4<f32>>;
+@group(MATERIAL_BIND_GROUP) @binding(100) var<storage, read> belt_table: array<vec4<f32>>;
 
 // One belt's placement constants, and where its spans start.
 struct Belt {

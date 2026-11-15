@@ -3,7 +3,7 @@
 //! vendored renderer as `bevy::pbr::HeightfieldShadow`. Every lit fragment samples it — ground,
 //! tanks, trees and constructions — so a ridge shades what stands under it with no terrain caster in
 //! the cascades. Dynamic casters keep drawing into the cascades; the field multiplies their result
-//! (`vendor/bevy_pbr-0.19.1-scalar-math/src/render/shadows.wgsl`, `fetch_heightfield_shadow`).
+//! (`vendor/bevy_pbr-0.20.1-overmatch/src/render/shadows.wesl`, `fetch_heightfield_shadow`).
 //!
 //! # The record
 //!
@@ -547,16 +547,16 @@ mod tests {
         }
     }
 
-    /// The vendored receiver law (`shadows.wgsl`'s `fetch_heightfield_shadow`) and the field's
+    /// The vendored receiver law (`shadows.wesl`'s `fetch_heightfield_shadow`) and the field's
     /// uniform type, lifted out of the shipped shader text with the view bindings swapped for test
     /// ones: the field's texture at binding 0, its uniform at 1, and the directional lights a
     /// private array pointing toward `lights`. The compute entry `check` writes the law's
     /// visibility at each query of binding 2 (xyz a world position, w a light's index) to
     /// binding 3.
     fn receiver_law_module(lights: &[Vec3]) -> String {
-        let shadows = include_str!("../vendor/bevy_pbr-0.19.1-scalar-math/src/render/shadows.wgsl");
+        let shadows = include_str!("../vendor/bevy_pbr-0.20.1-overmatch/src/render/shadows.wesl");
         let types =
-            include_str!("../vendor/bevy_pbr-0.19.1-scalar-math/src/render/mesh_view_types.wgsl");
+            include_str!("../vendor/bevy_pbr-0.20.1-overmatch/src/render/mesh_view_types.wesl");
         let law = &shadows[shadows
             .find("const HEIGHTFIELD_SHADOW_SAME_LIGHT")
             .expect("the law's light test")
@@ -773,7 +773,9 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
             })
             .expect("headless compute completes");
         receive.recv().unwrap().expect("readback maps");
-        let bytes = readback.get_mapped_range(..);
+        let bytes = readback
+            .get_mapped_range(..)
+            .expect("the completed readback is mapped");
         bytes
             .as_chunks::<4>()
             .0

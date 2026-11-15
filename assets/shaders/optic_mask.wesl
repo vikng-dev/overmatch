@@ -3,7 +3,7 @@
 // handed. The centre is the gun's sight line reprojected, so it is NOT the node's centre except
 // where the camera happens to sit on that line.
 
-#import bevy_ui::ui_vertex_output::UiVertexOutput
+import bevy_ui_render::ui_vertex_output::UiVertexOutput;
 
 struct OpticMask {
     // xy: the glass centre in node UV. z: its radius, w: the half-width of its edge feather — both

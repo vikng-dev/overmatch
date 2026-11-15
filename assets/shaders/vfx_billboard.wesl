@@ -22,11 +22,11 @@
 // pipeline always defines VERTEX_OUTPUT_INSTANCE_INDEX); the material is mounted only by the
 // windowed clients (vfx::plugin), never the headless server.
 
-#import bevy_pbr::forward_io::VertexOutput
-#import bevy_pbr::mesh_functions::get_tag
-#import bevy_pbr::mesh_view_bindings as view_bindings
-#import bevy_pbr::prepass_utils::prepass_depth
-#import bevy_pbr::view_transformations::depth_ndc_to_view_z
+import bevy_pbr::render::forward_io::VertexOutput;
+import bevy_pbr::render::mesh_functions::get_tag;
+import bevy_pbr::render::mesh_view_bindings as view_bindings;
+import bevy_pbr::prepass::utils::prepass_depth;
+import bevy_pbr::render::view_transformations::depth_ndc_to_view_z;
 
 struct VfxParams {
     // x: current flipbook frame (already resolved on the CPU), y: atlas columns, z: atlas rows,
@@ -68,7 +68,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let g = textureSample(lut_texture, lut_sampler, vec2(signal, params.fade.z));
     let rgb = g.rgb * (1.0 + g.a * params.glow.x);
     var cover = alpha * params.fade.w;
-#ifdef DEPTH_PREPASS
+@if(DEPTH_PREPASS) {
     // Soft particles. Both depths go to VIEW space (negative ahead of the camera, so the fragment's
     // is the LESS negative of the two when something is behind it) and the difference is a real
     // world-space metre count — the quad dissolves over params.glow.z of approach. The prepass is
@@ -76,7 +76,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // (`VfxBillboardMaterial::enable_prepass`), so a puff never fades against another puff.
     if params.glow.z > 0.0 {
         var scene_z = depth_ndc_to_view_z(prepass_depth(in.position, 0u));
-#ifdef MULTISAMPLED
+@if(MULTISAMPLED) {
         // Under MSAA the prepass depth is per SAMPLE while this fragment shades once for every
         // sample it covers, so one sample's depth would decide the whole pixel — along a silhouette
         // that is a thin foreground sliver fading a puff that is nowhere near it, and it speckles
@@ -86,14 +86,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         for (var sample = 1u; sample < samples; sample += 1u) {
             scene_z = min(scene_z, depth_ndc_to_view_z(prepass_depth(in.position, sample)));
         }
-#endif
+}
         let fragment_z = depth_ndc_to_view_z(in.position.z);
         cover *= saturate((fragment_z - scene_z) / params.glow.z);
     }
-#endif
+}
     // BOTH blend modes ride Bevy's premultiplied-alpha blend state — `AlphaMode::Add` and
     // `AlphaMode::Blend` map to `BLEND_PREMULTIPLIED_ALPHA` / `BLEND_ALPHA`, and the two differ
-    // ONLY in what this fragment must output (Bevy's own PBR premultiplies in `pbr_functions.wgsl`;
+    // ONLY in what this fragment must output (Bevy's own PBR premultiplies in `pbr_functions.wesl`;
     // our custom fragment must do the equivalent itself). Returning STRAIGHT color under the
     // additive contract added rgb at full weight over the whole quad — the transparent texels' LUT
     // floor glowed as an orange square. glow.y flags the contract:

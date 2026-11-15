@@ -97,7 +97,13 @@ pub(super) fn plugin(app: &mut App) {
     render_app
         .init_resource::<PendingWrites>()
         .add_systems(ExtractSchedule, extract_writes)
-        .add_systems(Render, write_tiles.in_set(RenderSystems::PrepareResources));
+        .add_systems(
+            Render,
+            write_tiles
+                .in_set(RenderSystems::PrepareResources)
+                .after(bevy::render::render_asset::prepare_assets::<GpuImage>)
+                .before(RenderSystems::Render),
+        );
 }
 
 #[cfg(test)]

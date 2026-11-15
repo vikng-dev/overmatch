@@ -1,3 +1,5 @@
+import constants::MATERIAL_BIND_GROUP;
+
 // The tank surface (`src/tank_surface.rs`, `TankSurfaceMaterial`): a material's visual, then the
 // livery's paint and camouflage where the visual takes paint, through bevy's standard PBR lighting.
 // Design: `.agents/docs/design/tank-surfaces.md`.
@@ -18,12 +20,12 @@
 // branch that is not uniform across a quad, so every fetch is `textureSampleGrad` with gradients
 // computed outside it.
 
-#import bevy_pbr::{
+import bevy_pbr::render::{
     forward_io::{VertexOutput, FragmentOutput},
     mesh_functions,
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
-}
+};
 
 struct TankSurfaceParams {
     // rgb: the livery's paint, linear. a: its perceptual roughness (1 − sheen).
@@ -47,8 +49,8 @@ struct RestFrame {
     z: vec4<f32>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> surface: TankSurfaceParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var visual_albedo: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(100) var<uniform> surface: TankSurfaceParams;
+@group(MATERIAL_BIND_GROUP) @binding(101) var visual_albedo: texture_2d<f32>;
 // The one sampler of the extension (repeat, trilinear, anisotropic): every map and the pattern read
 // through it. Bevy takes it from the image at 101, which a finished surface always binds: the
 // visual's albedo, or a stand-in carrying the same sampler where the surface draws none
@@ -56,11 +58,11 @@ struct RestFrame {
 // clamping fallback, but its flags are 0 and nothing below samples through it. Every sampler a
 // material declares counts against the 16 a stage gets (MEASURED: wgpu's default
 // `max_samplers_per_shader_stage`, wgpu-types 29 `limits.rs`).
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var surface_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103) var visual_normal: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var visual_arm: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(105) var camo_pattern: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(106) var<storage, read> rest_frames: array<RestFrame>;
+@group(MATERIAL_BIND_GROUP) @binding(102) var surface_sampler: sampler;
+@group(MATERIAL_BIND_GROUP) @binding(103) var visual_normal: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(104) var visual_arm: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(105) var camo_pattern: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(106) var<storage, read> rest_frames: array<RestFrame>;
 
 // The visual ships maps (`Maps` in `visuals.ron`); without, the standard half's factors are its look.
 const FLAG_MAPS: u32 = 1u;
@@ -209,7 +211,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr_input.diffuse_occlusion *= occlusion;
     pbr_input.N = normalize(transpose(local_m3) * (transpose(rest_from_local) * normal));
 
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    pbr_input.material.base_color = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, pbr_input.material.base_color);
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);

@@ -338,14 +338,14 @@ mod gpu_layout_tests {
         for (rust, wgsl, file, size) in [
             (
                 rust_lanes(&billboard),
-                wgsl_lanes(&shader("vfx_billboard.wgsl"), "VfxParams"),
-                "vfx_billboard.wgsl",
+                wgsl_lanes(&shader("vfx_billboard.wesl"), "VfxParams"),
+                "vfx_billboard.wesl",
                 (size_of::<VfxParams>(), VfxParams::min_size().get() as usize),
             ),
             (
                 rust_lanes(&trail),
-                wgsl_lanes(&shader("vfx_trail.wgsl"), "TrailParams"),
-                "vfx_trail.wgsl",
+                wgsl_lanes(&shader("vfx_trail.wesl"), "TrailParams"),
+                "vfx_trail.wesl",
                 (
                     size_of::<TrailParams>(),
                     TrailParams::min_size().get() as usize,

@@ -95,7 +95,7 @@ pub(crate) struct TrailStationMeshEvidence {
     pub(crate) indices: usize,
 }
 
-/// The trail ribbon material (fragment: `vfx_trail.wgsl`): scrolled tileable noise, per-vertex age
+/// The trail ribbon material (fragment: `vfx_trail.wesl`): scrolled tileable noise, per-vertex age
 /// erosion, gradient-map coloring. ONE instance serves every trail (see the module doc).
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub(crate) struct VfxTrailMaterial {
@@ -109,7 +109,7 @@ pub(crate) struct VfxTrailMaterial {
     pub lut: Handle<Image>,
 }
 
-/// The static uniform block `vfx_trail.wgsl` reads (lane map in the shader).
+/// The static uniform block `vfx_trail.wesl` reads (lane map in the shader).
 #[derive(ShaderType, Debug, Clone)]
 pub(crate) struct TrailParams {
     /// x: noise scale along the trail (1/m), y: scroll speed, z: erosion sharpness, w: alpha.
@@ -120,7 +120,7 @@ pub(crate) struct TrailParams {
 
 impl Material for VfxTrailMaterial {
     fn fragment_shader() -> ShaderRef {
-        "shaders/vfx_trail.wgsl".into()
+        "shaders/vfx_trail.wesl".into()
     }
 
     fn alpha_mode(&self) -> AlphaMode {
