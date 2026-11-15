@@ -42,7 +42,10 @@ pub(super) use pose::replication as pose_replication;
 use super::harness::{LeverError, env_text};
 use super::world_reset::AuthorityWorld;
 use crate::construction::breakage::{Piece, RetirePiece, piece_layers};
-use crate::debris::{DebrisPiece, freeze::Frozen};
+use crate::debris::{
+    DebrisPiece,
+    freeze::{AwakePieces, Frozen},
+};
 use crate::tank::Tank;
 use crate::terrain_grid::HeightGrid;
 
@@ -143,7 +146,7 @@ impl DebrisStress {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct DebrisCensus<'w, 's> {
     stress: Option<Res<'w, DebrisStress>>,
-    live: Query<'w, 's, (), (With<DebrisPiece>, Without<Sleeping>, Without<Frozen>)>,
+    live: AwakePieces<'w, 's>,
     sleeping: Query<'w, 's, (), (With<DebrisPiece>, With<Sleeping>)>,
     frozen: Query<'w, 's, (), (With<DebrisPiece>, With<Frozen>)>,
 }
