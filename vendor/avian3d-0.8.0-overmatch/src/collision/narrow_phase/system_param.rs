@@ -107,6 +107,7 @@ pub struct NarrowPhase<'w, 's, C: AnyCollider> {
     default_friction: Res<'w, DefaultFriction>,
     default_restitution: Res<'w, DefaultRestitution>,
     length_unit: Res<'w, PhysicsLengthUnit>,
+    contact_matcher: Res<'w, super::ContactMatcher>, // OVERMATCH PATCH
 }
 
 /// A bit vector for tracking contact status changes.
@@ -940,11 +941,12 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     // TODO: Cache this?
                     let distance_threshold = 0.1 * self.length_unit.0;
 
-                    for manifold in contacts.manifolds.iter_mut() {
-                        for previous_manifold in old_manifolds.iter() {
-                            manifold.match_contacts(&previous_manifold.points, distance_threshold);
-                        }
-                    }
+                    // OVERMATCH PATCH: the matcher is a hook (`ContactMatcher`).
+                    (self.contact_matcher.0)(
+                        &mut contacts.manifolds,
+                        &old_manifolds,
+                        distance_threshold,
+                    );
                 }
 
                 // Record how many manifolds were added or removed.

@@ -10,9 +10,11 @@
 
 pub mod attachment;
 pub mod child_poses;
+pub mod contact_match;
 pub mod rest_test;
 pub mod sleeping_increments;
 
+use avian3d::collision::narrow_phase::ContactMatcher;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
@@ -23,6 +25,7 @@ pub fn plugin(app: &mut App) {
         app.add_plugins(child_poses::ReenabledPlugin);
     }
     app.add_observer(attachment::refuse_unposed_attachment);
+    app.insert_resource(ContactMatcher(contact_match::match_pair));
     app.get_schedule_mut(PhysicsSchedule)
         .expect("avian_ext::plugin is added after Avian's PhysicsPlugins")
         .add_systems(child_poses::place_child_colliders.in_set(PhysicsStepSystems::First));

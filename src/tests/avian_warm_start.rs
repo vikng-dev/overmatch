@@ -1,13 +1,17 @@
-//! Guards for Avian warm-start matching in the game's environment destruction model, game state
-//! only. The server relies on caches following the closest admissible contact, within a manifold
-//! and across the pair. Drafts: `upstream/avian-unknown-contact-feature-identity.md` and
+//! GUARD for the warm-start matcher hook (`vendor/avian3d-0.8.0-overmatch`, `OVERMATCH_PATCH.md`,
+//! "Warm-start matching") and the game's law behind it, `crate::avian_ext::contact_match`. Game
+//! state only: the server's contacts between bodies. The server relies on warm starts following the
+//! closest admissible contact, within a manifold and across the pair. Drafts:
+//! `upstream/avian-unknown-contact-feature-identity.md` and
 //! `upstream/avian-nearest-warm-start-contact.md`.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-/// The game's environment destruction relies on warm starts belonging to the same contact
-/// point. UNKNOWN feature IDs carry no identity; only nearby anchors may match them.
+use crate::avian_ext::contact_match::match_pair;
+
+/// UNKNOWN feature ids carry no identity; only nearby anchors may match them, and the closest wins.
+/// Upstream's matcher reads two UNKNOWN ids as one identity and takes the first previous point.
 #[test]
 fn unknown_contact_features_match_by_position() {
     // Fixture: two distinct points, both outside and inside a 0.1 m matching radius.
@@ -16,23 +20,33 @@ fn unknown_contact_features_match_by_position() {
         let mut previous = [Vec3::ZERO, at].map(|at| ContactPoint::new(at, at, at, 0.0));
         previous[0].warm_start_normal_impulse = 5.0;
         previous[1].warm_start_normal_impulse = 11.0;
-        let mut next = ContactManifold::new([ContactPoint::new(at, at, at, 0.0)], Vec3::Y);
-        next.match_contacts(&previous, 0.1);
+        let mut next = [ContactManifold::new(
+            [ContactPoint::new(at, at, at, 0.0)],
+            Vec3::Y,
+        )];
+        match_pair(&mut next, &[ContactManifold::new(previous, Vec3::Y)], 0.1);
         assert_eq!(
-            next.points[0].warm_start_normal_impulse, 11.0,
+            next[0].points[0].warm_start_normal_impulse, 11.0,
             "UNKNOWN IDs must select the closest admissible anchors, separation {separation}"
         );
     }
 }
 
-/// The narrow-phase caller must rank predecessors across the pair. Calling once per old
-/// manifold lets a later offset point overwrite a coincident point; either order must keep both
-/// impulse fields from the coincident point. Sensors preserve the cache without solver writes.
+/// The narrow phase must rank predecessors across the pair, through the matcher `avian_ext::plugin`
+/// installs. Upstream's matcher, run once per old manifold, lets a later offset point overwrite a
+/// coincident point; either order must keep both impulse fields from the coincident point. Sensors
+/// preserve the cache without solver writes.
 #[test]
 fn nearest_warm_start_is_selected_across_old_manifolds() {
     for reversed in [false, true] {
         let mut app = super::avian_child_pose_churn::physics_app();
         app.insert_resource(Gravity(Vec3::ZERO));
+        // Recycling off, as the game composes physics (`net::physics`): a recycled pair keeps last
+        // step's manifolds and is never matched.
+        app.insert_resource(NarrowPhaseConfig {
+            recycle_distance: 0.0,
+            ..default()
+        });
         // Fixture: overlapping stationary spheres produce one stable contact.
         let a = app
             .world_mut()

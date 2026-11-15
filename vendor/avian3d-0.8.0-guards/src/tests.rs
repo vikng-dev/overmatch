@@ -30,3 +30,6 @@ mod avian_collider_of_removal;
 
 #[path = "../../../src/tests/avian_moved_lists.rs"]
 mod avian_moved_lists;
+
+#[path = "../../../src/tests/avian_warm_start.rs"]
+mod avian_warm_start;

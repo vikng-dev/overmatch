@@ -244,3 +244,34 @@ outliving the proxy's removal, cannot arise in an indexed list.
 Witness: `src/tests/avian_moved_lists.rs`, 3 of 3 green on unpatched 0.8.0 (MEASURED): both lists
 equal the scanning form after every step of a tick of 2,000 rehomes and 1,000 toggles and of
 20,000 generated operations, and a second mark lists the proxy once.
+
+## Warm-start matching (`src/collision/narrow_phase/mod.rs`, `src/collision/narrow_phase/system_param.rs`): hook
+
+Subject: the game's server physics, contacts between bodies, game state only.
+
+Upstream's matcher has two defects the 0.7 fork patched in place. `ContactManifold::match_contacts`
+reads two `PackedFeatureId::UNKNOWN` ids as one identity, so a new point takes the first previous
+point's warm start at any distance, and its swapped-orientation distance test is not under the
+unknown-feature condition. The narrow phase calls it once per previous manifold, so a later
+manifold overwrites a closer predecessor from an earlier one.
+
+The fork now calls the matcher through `narrow_phase::ContactMatcher`, a resource holding a function
+of the pair's new manifolds, its previous manifolds and the matching distance, where upstream ran
+its loop. Not a field of `NarrowPhaseConfig`, which derives `Reflect`, `PartialEq` and serde; not
+game-side, because the previous manifolds are a local of the private per-pair closure. Its default
+is upstream's loop, and upstream's `match_contacts` keeps its 0.8.0 signature and body. Upstream's
+gate stays: the matcher runs only with `NarrowPhaseConfig::match_contacts` on and at most four new
+manifolds, so a pair with more (a dense trimesh) starts cold, as upstream. 36 fork lines (MEASURED:
+24 in `mod.rs`, 12 at the call site and the field).
+
+The law is the game's (`avian_ext::contact_match::match_pair`, installed by `avian_ext::plugin`):
+each new point takes the closest admissible point among all the pair's previous manifolds; known
+ids admit the same ids in either order, UNKNOWN ids admit only anchors within the distance.
+
+A recycled pair returns before matching and keeps last step's manifolds. The game runs with
+recycling off (`recycle_distance: 0.0`, set where the game composes physics); turning it on stops
+matching for every recycled pair, and the pair guard below goes red (MEASURED).
+
+Guards: `src/tests/avian_warm_start.rs`, 2 tests, both red with upstream's matcher (MEASURED: 5.0
+taken where 11.0 is closest). Local upstream drafts:
+`upstream/avian-unknown-contact-feature-identity.md`, `upstream/avian-nearest-warm-start-contact.md`.
