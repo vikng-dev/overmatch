@@ -1,6 +1,6 @@
 //! GUARD for the shadow-view behaviour `src/render_policy.rs` and `src/track/shadow_proxy.rs` rely on:
 //! every shadow view carries the LIGHT's `RenderLayers`, so a caster on a non-zero layer still
-//! casts from a light whose mask covers that layer. Bevy 0.19.1 ships this (bevyengine/bevy
+//! casts from a light whose mask covers that layer. Bevy ships this from 0.19.1 (bevyengine/bevy
 //! #24797; mechanism record `upstream/bevy-shadow-view-ignores-light-render-layers.md`), and the
 //! `bevy_pbr` this game links is still the path-patched copy in `vendor/`, so a re-vendor that
 //! drops it would silently un-shadow the local tank and the track ribbon.
@@ -8,7 +8,7 @@
 //! ## Why the render-world half is source-scanned rather than executed
 //!
 //! The construction sites live in `prepare_lights`, a render-world system. With
-//! `WgpuSettings { backends: None }` bevy 0.19 does not create the `RenderApp` at all, so no
+//! `WgpuSettings { backends: None }` bevy 0.20.1 does not create the `RenderApp` at all, so no
 //! shadow view is ever built. Executing that half needs a real wgpu adapter, which CI
 //! (`ubuntu-latest`, no GPU) does not have — a GPU-gated test would silently no-op there. So the
 //! render-world half is pinned by scanning the linked source for the fix's anchors, and the
@@ -21,7 +21,7 @@ use bevy::camera::visibility::{CascadesVisibleEntities, RenderLayers, VisibleEnt
 use bevy::prelude::*;
 
 /// The linked `bevy_pbr`'s light module (wired in via `[patch.crates-io]`).
-const LINKED_LIGHT_RS: &str = "vendor/bevy_pbr-0.19.1-scalar-math/src/render/light.rs";
+const LINKED_LIGHT_RS: &str = "vendor/bevy_pbr-0.20.1-overmatch/src/render/light.rs";
 
 fn linked_light_rs() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(LINKED_LIGHT_RS);

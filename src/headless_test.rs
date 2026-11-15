@@ -1477,14 +1477,16 @@ fn a_tank_repaired_at_rest_catches_its_idle_and_its_powered_traverse() {
 /// neighbour's drive demand wakes runs its full pass from the state the tick began with
 /// (`track::sim::settle_rest`). Witness: an in-flight shift's countdown, which every drivetrain
 /// step lowers by one tick (`transmission::advance_shift_window`). Fixture: the scenario's two
-/// tanks parked side by side on flat ground, their hull bounds overlapping 5 mm so a solver
-/// contact joins their islands; an 8-tick shift countdown, so the two ticks read 6 left from a
-/// single step a tick and 5 from a double step; the 8 s rest watchdog.
+/// tanks parked side by side on flat ground, their hulls half Avian's contact tolerance apart so a
+/// touching solver contact joins their islands; an 8-tick shift countdown, so the two ticks read
+/// 6 left from a single step a tick and 5 from a double step; the 8 s rest watchdog.
 #[test]
 fn a_drivetrain_advances_once_per_tick_whatever_wakes_its_island() {
     use crate::track::sim::TankTransmission;
     use avian3d::dynamics::solver::islands::BodyIslandNode;
-    use avian3d::prelude::{ColliderAabb, RigidBodyColliders, Sleeping};
+    use avian3d::prelude::{
+        Collider, Position, RigidBodyColliders, Rotation, SimpleCollider, Sleeping,
+    };
 
     let mut app = booted_driving_grid(driving_plane(0.0));
     start_fixed_clock(&mut app);
@@ -1512,15 +1514,31 @@ fn a_drivetrain_advances_once_per_tick_whatever_wakes_its_island() {
         1,
     );
     app.update();
+    // The hull's own bounds: a collider's `ColliderAabb` is grown by the contact tolerance.
+    let tolerance = app
+        .world()
+        .resource::<avian3d::prelude::NarrowPhaseConfig>()
+        .contact_tolerance;
     let (lo, hi) = app
         .world()
         .get::<RigidBodyColliders>(a)
         .expect("a tank carries its colliders")
         .iter()
         .map(|collider| {
-            app.world()
-                .get::<ColliderAabb>(collider)
-                .expect("a collider carries its bounds")
+            let world = app.world();
+            world
+                .get::<Collider>(collider)
+                .expect("a body's collider membership names live colliders")
+                .aabb(
+                    world
+                        .get::<Position>(collider)
+                        .expect("a collider is posed")
+                        .0,
+                    *world
+                        .get::<Rotation>(collider)
+                        .expect("a collider is posed"),
+                    0.0,
+                )
         })
         .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), aabb| {
             (lo.min(aabb.min), hi.max(aabb.max))
@@ -1528,7 +1546,7 @@ fn a_drivetrain_advances_once_per_tick_whatever_wakes_its_island() {
     drive_load::place(
         &mut app,
         b,
-        Vec3::new(100.0 + (hi.x - lo.x) - 0.005, rest_y, 0.0),
+        Vec3::new(100.0 + (hi.x - lo.x) + tolerance / 2.0, rest_y, 0.0),
         Quat::IDENTITY,
         0.0,
         1,
