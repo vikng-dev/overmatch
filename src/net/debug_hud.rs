@@ -112,7 +112,7 @@ impl ServerTickGaps {
     }
 }
 
-fn reset_tick_gaps(_connected: On<Add, Connected>, mut gaps: ResMut<ServerTickGaps>) {
+fn reset_tick_gaps(_connected: On<Add<Connected>>, mut gaps: ResMut<ServerTickGaps>) {
     *gaps = default();
 }
 

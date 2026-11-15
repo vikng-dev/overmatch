@@ -142,7 +142,7 @@ impl Carried<'_, '_> {
 
 /// A collider about to go: every sleeping body it carries wakes (module doc).
 fn wake_on_collider_gone(
-    gone: On<Discard, ColliderMarker>,
+    gone: On<Discard<ColliderMarker>>,
     carried: Carried,
     mut commands: Commands,
 ) {
@@ -152,7 +152,7 @@ fn wake_on_collider_gone(
 /// A body about to go or change type: every sleeping body any of its colliders carries wakes
 /// (module doc). A body without attached colliders carries nothing.
 fn wake_on_body_gone(
-    gone: On<Discard, RigidBody>,
+    gone: On<Discard<RigidBody>>,
     bodies: Query<&RigidBodyColliders>,
     carried: Carried,
     mut commands: Commands,
@@ -200,7 +200,7 @@ impl Unheld<'_, '_> {
 
 /// A collider disabled: what it carried wakes (module doc).
 fn wake_on_collider_disabled(
-    disabled: On<Add, ColliderDisabled>,
+    disabled: On<Add<ColliderDisabled>>,
     unheld: Unheld,
     mut commands: Commands,
 ) {
@@ -209,7 +209,7 @@ fn wake_on_collider_disabled(
 
 /// A collider turned sensor: what it carried wakes (module doc). A `Sensor` marks a collider;
 /// on any other entity avian reads nothing of it.
-fn wake_on_collider_sensed(sensed: On<Add, Sensor>, unheld: Unheld, mut commands: Commands) {
+fn wake_on_collider_sensed(sensed: On<Add<Sensor>>, unheld: Unheld, mut commands: Commands) {
     if unheld.aabbs.contains(sensed.entity) {
         unheld.wake(sensed.entity, &mut commands);
     }
@@ -218,7 +218,7 @@ fn wake_on_collider_sensed(sensed: On<Add, Sensor>, unheld: Unheld, mut commands
 /// A body disabled: what each of its colliders carried wakes (module doc). A body without
 /// attached colliders carries nothing.
 fn wake_on_body_disabled(
-    disabled: On<Add, RigidBodyDisabled>,
+    disabled: On<Add<RigidBodyDisabled>>,
     bodies: Query<&RigidBodyColliders>,
     unheld: Unheld,
     mut commands: Commands,

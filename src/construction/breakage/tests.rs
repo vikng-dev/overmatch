@@ -5949,7 +5949,7 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
         ));
         install_standing_colliders(&mut app, root);
         app.init_resource::<ShapeInsertions>().add_observer(
-            |_: On<Insert, Collider>, mut insertions: ResMut<ShapeInsertions>| insertions.0 += 1,
+            |_: On<Insert<Collider>>, mut insertions: ResMut<ShapeInsertions>| insertions.0 += 1,
         );
         // Fixture: the upper two members leave together, then split into individual bodies.
         let group = vec![1, 2];

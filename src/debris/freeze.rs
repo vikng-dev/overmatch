@@ -313,7 +313,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
 /// A body going or changing type: each of its colliders an island depends on is checked at the
 /// next thaw, against this body.
 fn body_changed(
-    changed: On<Discard, RigidBody>,
+    changed: On<Discard<RigidBody>>,
     colliders: Query<&RigidBodyColliders>,
     mut islands: ResMut<FrozenIslands>,
 ) {
@@ -324,7 +324,7 @@ fn body_changed(
 
 /// A body disabled: none of its colliders holds anything up.
 fn body_disabled(
-    disabled: On<Add, RigidBodyDisabled>,
+    disabled: On<Add<RigidBodyDisabled>>,
     colliders: Query<&RigidBodyColliders>,
     mut islands: ResMut<FrozenIslands>,
 ) {
@@ -335,7 +335,7 @@ fn body_disabled(
 
 /// An entity disabled whole: a collider, or a body with its colliders.
 fn entity_disabled(
-    disabled: On<Add, Disabled>,
+    disabled: On<Add<Disabled>>,
     colliders: Query<&RigidBodyColliders, Allow<Disabled>>,
     mut islands: ResMut<FrozenIslands>,
 ) {
@@ -346,7 +346,7 @@ fn entity_disabled(
 }
 
 /// A collider going, with a body or without one.
-fn collider_gone(gone: On<Discard, ColliderMarker>, mut islands: ResMut<FrozenIslands>) {
+fn collider_gone(gone: On<Discard<ColliderMarker>>, mut islands: ResMut<FrozenIslands>) {
     islands.note(gone.entity, Change::Lost);
 }
 
@@ -354,7 +354,7 @@ fn collider_gone(gone: On<Discard, ColliderMarker>, mut islands: ResMut<FrozenIs
 /// included, re-inserts `ColliderOf` on the body's colliders (Avian's
 /// `on_collider_body_changed::<RigidBody, true>`), so the thaw checks where the collider is then.
 fn collider_left(
-    left: On<Discard, ColliderOf>,
+    left: On<Discard<ColliderOf>>,
     of: Query<&ColliderOf>,
     mut islands: ResMut<FrozenIslands>,
 ) {
@@ -365,12 +365,12 @@ fn collider_left(
     islands.note(left.entity, Change::Attachment(body));
 }
 
-fn collider_disabled(disabled: On<Add, ColliderDisabled>, mut islands: ResMut<FrozenIslands>) {
+fn collider_disabled(disabled: On<Add<ColliderDisabled>>, mut islands: ResMut<FrozenIslands>) {
     islands.note(disabled.entity, Change::Lost);
 }
 
 /// A sensor holds nothing up.
-fn collider_sensed(sensed: On<Add, Sensor>, mut islands: ResMut<FrozenIslands>) {
+fn collider_sensed(sensed: On<Add<Sensor>>, mut islands: ResMut<FrozenIslands>) {
     islands.note(sensed.entity, Change::Lost);
 }
 

@@ -128,7 +128,7 @@ fn send_traced_shot_explanations(mut send: ExplanationSend, mut trace: ResMut<Sh
 /// A client link connected (`up`) or ended (`down`). `scripts/shot/pencam_latency.py` reads these
 /// rows for the run's precondition: exactly one `up` per client, and no `down` before the last send.
 fn trace_link_up(
-    add: On<Add, Connected>,
+    add: On<Add<Connected>>,
     links: Query<(), With<ClientOf>>,
     timeline: Res<LocalTimeline>,
     mut trace: ResMut<ShotTrace>,
@@ -139,7 +139,7 @@ fn trace_link_up(
 }
 
 fn trace_link_down(
-    remove: On<Remove, Connected>,
+    remove: On<Remove<Connected>>,
     links: Query<(), With<ClientOf>>,
     timeline: Res<LocalTimeline>,
     mut trace: ResMut<ShotTrace>,
@@ -262,7 +262,7 @@ fn presence_name(presence: ImpactPresence) -> &'static str {
 
 /// A new connection is a new match: its shots are not the last one's, and the pen cam is told.
 fn reset_shot_explanations(
-    _connected: On<Add, Connected>,
+    _connected: On<Add<Connected>>,
     mut store: ResMut<ShotExplanations>,
     mut commands: Commands,
 ) {
@@ -271,7 +271,7 @@ fn reset_shot_explanations(
 }
 
 /// The link ended: a corner explaining one of its shots closes with it.
-fn close_corner(_ended: On<Remove, Connected>, mut commands: Commands) {
+fn close_corner(_ended: On<Remove<Connected>>, mut commands: Commands) {
     commands.trigger(CloseCorner);
 }
 

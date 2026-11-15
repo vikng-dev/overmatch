@@ -34,7 +34,7 @@ pub(crate) fn start_fixed_clock(app: &mut App) {
 pub(crate) static BOOT_LEASE: Mutex<()> = Mutex::new(());
 
 fn assert_tank_state_at_add(
-    add: On<Add, Tank>,
+    add: On<Add<Tank>>,
     tanks: Query<(
         Has<TankCommand>,
         Has<crate::track::sim::TrackDrive>,
@@ -74,7 +74,7 @@ fn assert_tank_state_at_add(
 }
 
 fn assert_range_table_at_add(
-    add: On<Add, crate::tank::Weapon>,
+    add: On<Add<crate::tank::Weapon>>,
     weapons: Query<Has<crate::firecontrol::RangeTable>>,
 ) {
     assert!(
@@ -515,7 +515,7 @@ fn sample_server_round_frame(
 }
 
 fn sample_server_round_birth(
-    born: On<Add, crate::ballistics::Projectile>,
+    born: On<Add<crate::ballistics::Projectile>>,
     views: ServerRoundViews,
     mut samples: ResMut<ServerRoundSamples>,
 ) {
@@ -527,7 +527,7 @@ fn sample_server_round_birth(
 }
 
 fn sample_server_round_removal(
-    gone: On<Remove, crate::ballistics::Projectile>,
+    gone: On<Remove<crate::ballistics::Projectile>>,
     views: ServerRoundViews,
     mut samples: ResMut<ServerRoundSamples>,
 ) {

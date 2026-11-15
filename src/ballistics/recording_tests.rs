@@ -942,7 +942,7 @@ fn scoring_world() -> (App, Entity, Entity) {
     app.init_resource::<crate::ShotClock>()
         .init_resource::<KnockoutFacts>()
         .add_observer(
-            |add: On<Add, TankKnockedOut>, mut facts: ResMut<KnockoutFacts>| {
+            |add: On<Add<TankKnockedOut>>, mut facts: ResMut<KnockoutFacts>| {
                 facts.transitions.push(add.entity);
             },
         )

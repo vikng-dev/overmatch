@@ -170,12 +170,12 @@ pub(super) fn seed_births(
 }
 
 /// The game's damage model: a despawned or shape-less collider leaves the table.
-pub(super) fn forget_collider(removed: On<Remove, Collider>, mut history: ResMut<ColliderMotion>) {
+pub(super) fn forget_collider(removed: On<Remove<Collider>>, mut history: ResMut<ColliderMotion>) {
     history.colliders.remove(&removed.entity);
 }
 
 /// The game's damage model: a despawned body, or one that stops being a body, leaves the table.
-pub(super) fn forget_body(removed: On<Remove, RigidBody>, mut history: ResMut<ColliderMotion>) {
+pub(super) fn forget_body(removed: On<Remove<RigidBody>>, mut history: ResMut<ColliderMotion>) {
     history.bodies.remove(&removed.entity);
 }
 

@@ -124,7 +124,7 @@ pub(crate) fn nan_tripwire(
 }
 
 /// Log the first replicated tank marker.
-pub(crate) fn log_connected(add: On<Add, Connected>) {
+pub(crate) fn log_connected(add: On<Add<Connected>>) {
     info!("client: connected (entity {})", add.entity);
 }
 

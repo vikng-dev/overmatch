@@ -862,7 +862,7 @@ fn consume_edges(mut tanks: Query<&mut TankCommand>) {
 
 /// Zero the command when a tank loses `Controlled` (the Tab swap), so it doesn't drive on with
 /// the last gathered input forever.
-fn clear_command_on_release(remove: On<Remove, Controlled>, mut tanks: Query<&mut TankCommand>) {
+fn clear_command_on_release(remove: On<Remove<Controlled>>, mut tanks: Query<&mut TankCommand>) {
     if let Ok(mut command) = tanks.get_mut(remove.entity) {
         *command = TankCommand::default();
     }

@@ -679,7 +679,7 @@ impl ArmourSet {
 /// captured endpoints until the next tick's `motion::seed_births`, so nothing may compose a part it
 /// carries in between: the launch runs in `DamageConsequences`, after the tick's march.
 pub(crate) fn rebase(
-    added: On<Add, RigidBody>,
+    added: On<Add<RigidBody>>,
     frames: Query<&ArmourFrame>,
     mut sets: Query<&mut ArmourSet>,
 ) {

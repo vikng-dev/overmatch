@@ -607,7 +607,7 @@ fn queue_damage(
 }
 
 fn forget_route_on_projectile_removal(
-    remove: On<Remove, Projectile>,
+    remove: On<Remove<Projectile>>,
     shots: Query<&Shot>,
     mut transport: ResMut<ShotTransport>,
 ) {

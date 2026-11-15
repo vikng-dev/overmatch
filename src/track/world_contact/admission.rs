@@ -74,7 +74,7 @@ fn refuse_unsupported(candidate: Candidate<'_>, sources: &Sources) {
 }
 
 fn admit_inserted(
-    inserted: On<Insert, (Collider, CollisionLayers, FieldSurface)>,
+    inserted: On<Insert<(Collider, CollisionLayers, FieldSurface)>>,
     colliders: Query<(
         Entity,
         &Collider,

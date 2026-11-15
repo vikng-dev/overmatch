@@ -21,7 +21,7 @@ struct Attachments(usize);
 fn an_explicit_spawn_attachment_is_installed_once() {
     let mut app = physics_app();
     app.init_resource::<Attachments>()
-        .add_observer(|_: On<Insert, ColliderOf>, mut count: ResMut<Attachments>| count.0 += 1);
+        .add_observer(|_: On<Insert<ColliderOf>>, mut count: ResMut<Attachments>| count.0 += 1);
     let body = app
         .world_mut()
         .spawn((RigidBody::Static, Transform::from_xyz(3.0, 1.0, -2.0)))
@@ -134,7 +134,7 @@ fn collider_mass_changes_request_one_aggregate_only_when_the_owner_uses_it() {
         app.insert_resource(Gravity::ZERO)
             .init_resource::<MassRequests>()
             .add_observer(
-                |insert: On<Insert, RecomputeMassProperties>, mut counts: ResMut<MassRequests>| {
+                |insert: On<Insert<RecomputeMassProperties>>, mut counts: ResMut<MassRequests>| {
                     *counts.0.entry(insert.entity).or_default() += 1;
                 },
             );

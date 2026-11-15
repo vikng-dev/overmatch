@@ -315,7 +315,7 @@ fn spawn_decal(commands: &mut Commands, anchor: Entity, serial: u32, mark: &Hull
 /// The render half: a mark's surface becomes a forward decal wearing its (kind, variant)'s
 /// material, in the flush that spawned it.
 fn dress_surface(
-    add: On<Add, MarkSurface>,
+    add: On<Add<MarkSurface>>,
     surfaces: Query<&MarkSurface>,
     materials: Res<MarkMaterials>,
     mut commands: Commands,

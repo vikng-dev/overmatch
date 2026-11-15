@@ -448,7 +448,7 @@ fn install_reading(app: &mut App) {
                 .before(PhysicsStepSystems::Sleeping),
         )
         .add_observer(
-            |event: On<Add, DebrisPiece>,
+            |event: On<Add<DebrisPiece>>,
              capture: Res<Capture>,
              mut records: ResMut<PieceRecords>,
              pieces: Query<Option<&Piece>>,
@@ -468,7 +468,7 @@ fn install_reading(app: &mut App) {
             },
         )
         .add_observer(
-            |event: On<Remove, DebrisPiece>,
+            |event: On<Remove<DebrisPiece>>,
              capture: Res<Capture>,
              mut records: ResMut<PieceRecords>,
              stages: Res<Stages>,
@@ -489,7 +489,7 @@ fn install_reading(app: &mut App) {
             },
         )
         .add_observer(
-            |event: On<Add, Sleeping>,
+            |event: On<Add<Sleeping>>,
              capture: Res<Capture>,
              mut records: ResMut<PieceRecords>,
              pieces: Query<&BodyIslandNode, With<DebrisPiece>>,

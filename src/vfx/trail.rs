@@ -242,7 +242,7 @@ struct TrailRing(VecDeque<Entity>);
 /// birth tick in whichever schedule spawned it, so a shell whose whole flight resolves between two
 /// rendered frames still has its path captured.
 fn attach_trail(
-    add: On<Add, FlightEffects>,
+    add: On<Add<FlightEffects>>,
     shells: Query<(&ShellPath, Option<&Shot>, &FlightEffects, Has<TrailedShell>)>,
     assets: Res<TrailAssets>,
     time: Res<Time<Fixed>>,
@@ -429,11 +429,11 @@ fn finish_pending_bounces(
     }
 }
 
-/// Bevy 0.19's `On<Remove, T>` runs BEFORE `T` is removed, so a despawning shell's final fixed-tick
+/// Bevy 0.19's `On<Remove<T>>` runs BEFORE `T` is removed, so a despawning shell's final fixed-tick
 /// path is still queryable here. Flush it into the already-detached ribbon synchronously; otherwise a
 /// bounce and terminal between render frames would lose the last segment before `update_trails` saw it.
 fn flush_removed_shell_path(
-    remove: On<Remove, ShellPath>,
+    remove: On<Remove<ShellPath>>,
     shells: Query<(&ShellPath, &PenetrationMarks, Option<&Shot>), With<FlightEffects>>,
     mut trails: Query<&mut TrailRibbon>,
     mut rng: ResMut<ViewRng>,

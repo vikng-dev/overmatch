@@ -89,7 +89,7 @@ pub(crate) struct ModalExtent {
 /// remain overlay content: the held board covers them under `Overlay::SCOREBOARD_Z`; they reserve
 /// no HUD space.
 fn dock_corner_ui(
-    add: On<Add, crate::damage_cam::pen_cam::CornerRig>,
+    add: On<Add<crate::damage_cam::pen_cam::CornerRig>>,
     nodes: Query<(), With<Node>>,
     mut commands: Commands,
 ) {

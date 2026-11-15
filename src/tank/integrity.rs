@@ -6,7 +6,7 @@ use super::model::Rig;
 
 /// Sweep a cooked-off turret when its root goes away; launched turrets are no longer descendants.
 pub(super) fn sweep_launched_turret_on_root_despawn(
-    remove: On<Remove, Rig>,
+    remove: On<Remove<Rig>>,
     rigs: Query<&Rig>,
     mut commands: Commands,
 ) {
@@ -18,7 +18,7 @@ pub(super) fn sweep_launched_turret_on_root_despawn(
 /// The game's damage model: an assembly leaving the tank loses its aim controllers throughout
 /// its subtree. Its held local poses remain valid rig data, including when a view arrives later.
 pub(super) fn stop_detached_assembly_servos(
-    add: On<Add, crate::damage::LaunchedTurret>,
+    add: On<Add<crate::damage::LaunchedTurret>>,
     servos: Query<
         (Entity, &Transform, Option<&super::view::ViewNode>),
         (
@@ -53,7 +53,7 @@ pub struct AuthoredLocalTransform(pub Transform);
 
 /// Remove a newly armed transform writer and restore the authored pose in the same command flush.
 pub(super) fn shield_authored_collider_transform(
-    add: On<Add, ApplyPosToTransform>,
+    add: On<Add<ApplyPosToTransform>>,
     authored: Query<&AuthoredLocalTransform, Without<RigidBody>>,
     mut commands: Commands,
 ) {
@@ -68,7 +68,7 @@ pub(super) fn shield_authored_collider_transform(
 
 /// Mirror the shield when the authored marker is inserted after the transform writer.
 pub(super) fn shield_late_authored_marker(
-    add: On<Add, AuthoredLocalTransform>,
+    add: On<Add<AuthoredLocalTransform>>,
     armed: Query<&AuthoredLocalTransform, (With<ApplyPosToTransform>, Without<RigidBody>)>,
     mut commands: Commands,
 ) {

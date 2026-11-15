@@ -157,7 +157,7 @@ fn tracer_dressing(
 /// Bevy 0.19 writes the entire spawn bundle before it fires `Add`, so the round read here is the
 /// complete one `on_fire_shell` authored — effects and path included.
 fn dress_projectile(
-    add: On<Add, Projectile>,
+    add: On<Add<Projectile>>,
     shells: Query<(
         &Projectile,
         &FlightEffects,

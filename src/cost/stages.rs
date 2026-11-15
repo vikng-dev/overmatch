@@ -213,12 +213,12 @@ pub(crate) type NamedTimes<const N: usize> = NamedValues<N, f64>;
 /// Actual collider lifecycle, including standing refits; rehoming a collider adds no event.
 pub(crate) fn install_lifecycle_counts(app: &mut App) {
     app.add_observer(
-        |_: On<Add, avian3d::prelude::Collider>, stages: Res<Stages>| {
+        |_: On<Add<avian3d::prelude::Collider>>, stages: Res<Stages>| {
             stages.add(Work::CollidersAdded, 1);
         },
     );
     app.add_observer(
-        |_: On<Remove, avian3d::prelude::Collider>, stages: Res<Stages>| {
+        |_: On<Remove<avian3d::prelude::Collider>>, stages: Res<Stages>| {
             stages.add(Work::CollidersRemoved, 1);
         },
     );

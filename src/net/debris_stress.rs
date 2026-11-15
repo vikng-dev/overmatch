@@ -253,7 +253,7 @@ fn refuse_peer_pose(
 /// holds the group's `Piece` too, so its own spawn reaches this observer: it is the carrier
 /// (it has a [`DebrisPose`]), not a piece, and gets none.
 fn carry_construction_piece(
-    added: On<Add, Piece>,
+    added: On<Add<Piece>>,
     pieces: Query<(&Piece, Option<(&Position, &Rotation)>, Has<DebrisPose>)>,
     generation: Res<AuthorityWorld>,
     mut commands: Commands,

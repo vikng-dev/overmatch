@@ -5676,7 +5676,7 @@ pub(crate) mod march_tests {
         struct SpawnedShot(Option<ShotId>);
 
         fn capture(
-            add: On<Add, Projectile>,
+            add: On<Add<Projectile>>,
             shots: Query<&Shot>,
             mut spawned: ResMut<SpawnedShot>,
         ) {
