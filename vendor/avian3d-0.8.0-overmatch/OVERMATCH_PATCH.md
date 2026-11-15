@@ -228,3 +228,19 @@ back itself (upstream #1062, `collider_tree/update.rs`, "Store the new proxy key
 
 Witness: `src/tests/avian_collider_of_removal.rs`, 2 of 2 green on unpatched 0.8.0 (MEASURED).
 Record: `upstream/avian-collider-of-removal-orphan-proxy.md`.
+
+## Moved-list removal by index: dropped
+
+Avian 0.7.0 took a proxy out of a tree's moved list and out of `MovedProxies` by a scan from the
+front, so a tick that rehomed N colliders compared on the order of N² entries; the 0.7 fork
+indexed both lists. Avian 0.8.0 indexes both itself: `ColliderTree::moved_proxies` is a
+`MovedProxyList` (positions by proxy index) and `MovedProxies` keeps each key's position in a map.
+
+One difference stays, named here because it is a fifth outcome by the game's rule: the 0.7 fork
+panicked when a listed proxy was marked moved again, and `MovedProxyList::push` declines it and
+returns `false`, which upstream's callers ignore. The hazard the panic guarded, a second entry
+outliving the proxy's removal, cannot arise in an indexed list.
+
+Witness: `src/tests/avian_moved_lists.rs`, 3 of 3 green on unpatched 0.8.0 (MEASURED): both lists
+equal the scanning form after every step of a tick of 2,000 rehomes and 1,000 toggles and of
+20,000 generated operations, and a second mark lists the proxy once.

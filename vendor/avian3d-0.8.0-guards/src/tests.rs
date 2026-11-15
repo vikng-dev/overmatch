@@ -27,3 +27,6 @@ mod avian_moved_aabb_prune;
 
 #[path = "../../../src/tests/avian_collider_of_removal.rs"]
 mod avian_collider_of_removal;
+
+#[path = "../../../src/tests/avian_moved_lists.rs"]
+mod avian_moved_lists;
