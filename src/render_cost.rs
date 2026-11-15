@@ -456,10 +456,13 @@ fn log_indirect<P: 'static>(phase: &str, buffers: Option<&IndirectParametersBuff
 
 /// `light/camera/subview` for a shadow view, `camera/-/0` for a camera's own view.
 fn view_label(view: &RetainedViewEntity) -> String {
+    // A camera's own view has no auxiliary entity; a shadow view's is its camera.
+    let auxiliary = view
+        .auxiliary_entity
+        .map_or_else(|| "-".to_owned(), |camera| camera.id().to_string());
     format!(
-        "{}/{}/{}",
+        "{}/{auxiliary}/{}",
         view.main_entity.id(),
-        view.auxiliary_entity.id(),
         view.subview_index
     )
 }

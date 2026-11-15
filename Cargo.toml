@@ -27,6 +27,9 @@ publish = false
 # dropping it would silently break any JPG that shows up in a glTF or a future asset.
 bevy = { version = "0.20.1", features = ["debug", "jpeg", "basis-universal"] }
 avian3d = { version = "0.8", features = ["serialize"] }
+# Already in the tree through avian3d (same locked version — this adds no compiled crate); named
+# directly only by `avian_ext::contact_reduction`, whose per-pair scratch stays on the stack.
+smallvec = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Required debris scenario admission reports the precise field alongside the RON source span.
