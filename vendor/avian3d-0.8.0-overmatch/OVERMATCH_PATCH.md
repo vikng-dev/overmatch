@@ -218,3 +218,13 @@ diagnostics).
 Guard: `src/tests/avian_moved_aabb_prune.rs` (standing static colliders are not examined, red with
 the prune bypassed, MEASURED: 4 examined; a static collider moved, rescaled, added or removed
 reaches the collider trees). Record: `upstream/avian-moved-aabb-prune.md`.
+
+## Standalone key write-back: dropped
+
+The 0.7 fork wrote a collider's new `ColliderTreeProxyKey` back when the `Remove<ColliderOf>`
+observer moved it to the standalone tree; without it the stale key let a despawned collider's
+standalone proxy outlive it, pairing with everything it overlapped. Avian 0.8.0 writes the key
+back itself (upstream #1062, `collider_tree/update.rs`, "Store the new proxy key").
+
+Witness: `src/tests/avian_collider_of_removal.rs`, 2 of 2 green on unpatched 0.8.0 (MEASURED).
+Record: `upstream/avian-collider-of-removal-orphan-proxy.md`.

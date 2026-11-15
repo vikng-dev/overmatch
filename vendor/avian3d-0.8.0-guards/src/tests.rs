@@ -24,3 +24,6 @@ mod avian_narrow_phase;
 
 #[path = "../../../src/tests/avian_moved_aabb_prune.rs"]
 mod avian_moved_aabb_prune;
+
+#[path = "../../../src/tests/avian_collider_of_removal.rs"]
+mod avian_collider_of_removal;
