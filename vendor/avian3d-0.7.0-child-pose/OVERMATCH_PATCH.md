@@ -263,6 +263,33 @@ either collider, child rehoming, new neighbors, same-step motion and touching ge
 per-step decision, including the unresolved-target path fixed in `27562bd8`.
 Count evidence, same-input geometry comparison and reproduction: `upstream/avian-still-pairs.md`.
 
+## Resting misses stay in the narrow phase (no source change; a rule for the 0.8 rebase)
+
+Avian 0.7 moves only a sleeping island's touching pairs to the sleeping set. A miss between
+resting sides stays active, and `update_contacts` compares its `StationaryMiss` key, the full
+list of inputs a miss reads, on every visit: a miss is trusted only by the step whose visit
+compared that key. Avian PR #1032 (0.8) moves every pair whose other body rests, misses included,
+as the island sleeps; a held miss skips the visit and needs a second, hand-kept input list. At
+the rebase, make upstream's `sleep_entity_with` refuse every miss. Its holes, each a witness in
+`src/tests/avian_island_sleep.rs` that fails under #1032's transfer:
+- the held update predates the sleeping step's motion
+  (`a_miss_closed_by_the_last_awake_step_links_the_resting_islands`);
+- a sleeping body's collider reshaped
+  (`an_impact_wakes_an_island_that_merges_again_before_the_solver`);
+- an impulse widens a sleeper's speculative margin with no bound changed
+  (`an_impulse_on_a_sleeper_meets_its_neighbour_struck_in_the_same_step`).
+
+The saving forgone: holding resting misses took the shipped server parked on a pile
+(`scripts/perf/pile_park.py pile`) from 430.9 to 335.8 µs of physics per tick (MEASURED,
+2026-11-15, medians of 4 interleaved runs under the build lock, hosted pools).
+
+Where the time is in that case (MEASURED, same day, in-step probe): the narrow phase (252 µs)
+visits 3384 stationary misses a step, 3364 of them cache hits. The other 20 are pairs a contact
+hook rejects, a geometry query each step at about 7 µs. With the misses held those 20 were the
+whole active set, under Avian's floor of 64 pairs for the parallel loop (`update_contacts`,
+`par_for_each`), and ran on one thread: a floor of 1 took that narrow phase from 159-163 µs to
+97-100.
+
 ## Unreadable pair state (`src/collision/narrow_phase/system_param.rs`)
 
 `update_contacts` reads a pair's two colliders and their bodies. It skips a pair whose colliders

@@ -13,12 +13,15 @@ use bevy::prelude::*;
 
 use super::avian_child_pose_churn::physics_app;
 
+/// Fixture: the side of [`body`]'s cube (m).
+const SIDE: f32 = 0.4;
+
 fn body(app: &mut App, position: Vec3) -> Entity {
     app.world_mut()
         .spawn((
             RigidBody::Dynamic,
             Position(position),
-            Collider::cuboid(0.4, 0.4, 0.4),
+            Collider::cuboid(SIDE, SIDE, SIDE),
         ))
         .id()
 }
@@ -49,7 +52,7 @@ fn stationary_contact_does_not_wake_a_resting_island() {
             .id()
     };
     slab(&mut app);
-    let resting = body(&mut app, Vec3::Y * 0.2);
+    let resting = body(&mut app, Vec3::Y * SIDE / 2.0);
     until_asleep(&mut app, resting);
     for _ in 0..64 {
         app.update();
@@ -205,6 +208,9 @@ fn a_linked_body_without_sleep_timer_is_refused() {
 /// Solver users need the wake source to survive every merge in one narrow phase. A mutant
 /// carrying an island ID from the first contact can lose it when a later sleeping contact
 /// merges that island into a larger one, leaving finite-mass bodies asleep during the impact.
+/// The merging pair is a miss between resting sides, met through the sleeper's reshaped collider
+/// in the impact step: a mutant whose misses sleep with the island (avian #1032's transfer)
+/// restores it at the wake with its old miss, and the group stays apart through the impact.
 #[test]
 fn an_impact_wakes_an_island_that_merges_again_before_the_solver() {
     fn no_mixed_island_before_solver(bodies: Query<(&BodyIslandNode, Has<Sleeping>)>) {
@@ -230,7 +236,7 @@ fn an_impact_wakes_an_island_that_merges_again_before_the_solver() {
         .resource::<NarrowPhaseConfig>()
         .contact_tolerance
         * 1.5;
-    let incoming = body(&mut app, Vec3::X * -(0.4 + gap));
+    let incoming = body(&mut app, Vec3::X * -(SIDE + gap));
     app.world_mut()
         .entity_mut(incoming)
         .insert(SleepingDisabled);
@@ -246,7 +252,7 @@ fn an_impact_wakes_an_island_that_merges_again_before_the_solver() {
         "the gap must keep the islands separate"
     );
     let first_id = first_pair.0.id;
-    let group = [0.0, 0.4, 0.8].map(|offset| body(&mut app, Vec3::X * (0.4 + gap + offset)));
+    let group = [1.0, 2.0, 3.0].map(|n| body(&mut app, Vec3::X * (n * SIDE + gap)));
     for resting in group {
         until_asleep(&mut app, resting);
     }
@@ -262,7 +268,7 @@ fn an_impact_wakes_an_island_that_merges_again_before_the_solver() {
     );
     app.world_mut()
         .entity_mut(single)
-        .insert(Collider::cuboid(0.4 + 2.0 * gap, 0.4, 0.4));
+        .insert(Collider::cuboid(SIDE + 2.0 * gap, SIDE, SIDE));
     app.world_mut()
         .entity_mut(incoming)
         .insert(LinearVelocity(Vec3::X));
@@ -288,17 +294,168 @@ fn an_impact_wakes_an_island_that_merges_again_before_the_solver() {
     );
 }
 
+/// The configured contact tolerance (m).
+fn tolerance(app: &App) -> f32 {
+    app.world()
+        .resource::<NarrowPhaseConfig>()
+        .contact_tolerance
+        * app.world().resource::<PhysicsLengthUnit>().0
+}
+
+/// Solver users need a miss that a body's last awake step closed to within the contact tolerance
+/// met at the resting poses, which links the two sleeping islands the step after. A mutant whose
+/// misses sleep with the island (avian #1032's transfer) holds the pair with the update from
+/// before that step's motion: the islands stay apart, and a later impact on one side wakes it
+/// alone, its contact with the other unsolved in that step. Fixture: a body drifting under the
+/// rest speed with a mature rest timer, so it sleeps in the step that carries it across the
+/// tolerance.
+#[test]
+fn a_miss_closed_by_the_last_awake_step_links_the_resting_islands() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let tolerance = tolerance(&app);
+    let dt = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    // Fixture: a quarter of the tolerance per step.
+    let drift = tolerance / 4.0;
+    let anchor = body(&mut app, Vec3::ZERO);
+    until_asleep(&mut app, anchor);
+    // Faces 2.5 drifts outside the tolerance.
+    let drifter = body(&mut app, Vec3::X * (SIDE + tolerance + 2.5 * drift));
+    app.world_mut()
+        .entity_mut(drifter)
+        .insert(LinearVelocity(Vec3::NEG_X * drift / dt));
+    let gap = |app: &App| app.world().get::<Position>(drifter).unwrap().0.x - SIDE;
+    let mature = app.world().resource::<TimeToSleep>().0;
+    let slept = (0..8).find(|_| {
+        if gap(&app) < tolerance + drift {
+            app.world_mut().get_mut::<SleepTimer>(drifter).unwrap().0 = mature;
+        }
+        app.update();
+        app.world().get::<Sleeping>(drifter).is_some()
+    });
+    assert!(slept.is_some(), "the drifter must sleep");
+    assert!(
+        gap(&app) < tolerance,
+        "the fixture's last awake step crosses the tolerance"
+    );
+    let (edge, _) = app
+        .world()
+        .resource::<ContactGraph>()
+        .get(drifter, anchor)
+        .expect("the bounds hold the pair");
+    assert!(
+        !edge.is_touching(),
+        "the last awake update saw the gap outside the tolerance"
+    );
+    app.update();
+    let island = |app: &App, body| app.world().get::<BodyIslandNode>(body).unwrap().island_id();
+    assert_eq!(
+        island(&app, drifter),
+        island(&app, anchor),
+        "the next step links the bodies resting within the tolerance"
+    );
+    assert!(
+        [drifter, anchor].map(|body| app.world().get::<Sleeping>(body).is_some()) == [true; 2],
+        "a contact between resting sides wakes neither"
+    );
+    // Fixture: an awake cube 10 cm beyond the drifter at 2 m/s.
+    let at = Vec3::X * (gap(&app) + 2.0 * SIDE + 0.1);
+    let striker = body(&mut app, at);
+    app.world_mut()
+        .entity_mut(striker)
+        .insert((SleepingDisabled, LinearVelocity(Vec3::NEG_X * 2.0)));
+    let struck = (0..16).find(|_| {
+        app.update();
+        app.world()
+            .resource::<ContactGraph>()
+            .get(striker, drifter)
+            .is_some_and(|(edge, _)| edge.is_touching())
+    });
+    assert!(struck.is_some(), "the striker meets the drifter");
+    let (edge, _) = app
+        .world()
+        .resource::<ContactGraph>()
+        .get(drifter, anchor)
+        .unwrap();
+    assert!(
+        edge.is_touching() && !edge.is_sleeping() && !edge.constraint_handles.is_empty(),
+        "the impact step solves the resting contact"
+    );
+    assert!(
+        app.world().get::<Sleeping>(anchor).is_none(),
+        "the impact wakes the island it shares"
+    );
+}
+
+/// Solver users need an impulse on a sleeping body met in its step: the velocity widens the
+/// pair's speculative margin, with no bound or pose changed, and the body wakes only at the step's
+/// end. A mutant whose misses sleep with the island (avian #1032's transfer) holds the pair, so an
+/// impact on the neighbour in the same step wakes the neighbour alone, the impulse's contact
+/// unsolved in that step. Fixture: cubes 1.5 tolerances apart, the impulse closing twice that gap
+/// in one step, a striker within the tolerance of the neighbour's far face.
+#[test]
+fn an_impulse_on_a_sleeper_meets_its_neighbour_struck_in_the_same_step() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let tolerance = tolerance(&app);
+    let gap = 1.5 * tolerance;
+    let dt = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let pushed = body(&mut app, Vec3::X * -(SIDE + gap));
+    let neighbour = body(&mut app, Vec3::ZERO);
+    until_asleep(&mut app, pushed);
+    until_asleep(&mut app, neighbour);
+    let island = |app: &App, body| app.world().get::<BodyIslandNode>(body).unwrap().island_id();
+    assert_ne!(
+        island(&app, pushed),
+        island(&app, neighbour),
+        "the gap keeps the islands apart"
+    );
+    let striker = body(&mut app, Vec3::X * (SIDE + tolerance / 2.0));
+    app.world_mut()
+        .entity_mut(striker)
+        .insert((SleepingDisabled, LinearVelocity(Vec3::NEG_X)));
+    let impulse =
+        Vec3::X * 2.0 * gap / dt * app.world().get::<ComputedMass>(pushed).unwrap().value();
+    app.world_mut()
+        .run_system_once(move |mut forces: Query<Forces>| {
+            forces
+                .get_mut(pushed)
+                .unwrap()
+                .apply_linear_impulse(impulse);
+        })
+        .unwrap();
+    app.update();
+    let contacts = app.world().resource::<ContactGraph>();
+    assert!(
+        contacts
+            .get(striker, neighbour)
+            .is_some_and(|(edge, _)| edge.is_touching()),
+        "the striker meets the neighbour in the impulse's step"
+    );
+    let (edge, _) = contacts
+        .get(pushed, neighbour)
+        .expect("the bounds hold the pair");
+    assert!(
+        edge.is_touching() && !edge.is_sleeping() && !edge.constraint_handles.is_empty(),
+        "the impulse's step solves its contact"
+    );
+}
+
 /// Server physics relies on the configured contact tolerance retaining quiet contacts. A mutant
 /// that floors only the geometry query, then prunes against velocity alone, loses the inner pair.
 #[test]
 fn stationary_contacts_keep_the_configured_minimum_speculative_margin() {
     let mut app = physics_app();
     app.insert_resource(Gravity::ZERO);
-    let tolerance = app
-        .world()
-        .resource::<avian3d::collision::narrow_phase::NarrowPhaseConfig>()
-        .contact_tolerance
-        * app.world().resource::<PhysicsLengthUnit>().0;
+    let tolerance = tolerance(&app);
     // Fixture: a level support and identical cubes, one inside and one outside the contact band.
     let support = app
         .world_mut()
@@ -308,8 +465,8 @@ fn stationary_contacts_keep_the_configured_minimum_speculative_margin() {
             Collider::cuboid(20.0, 1.0, 20.0),
         ))
         .id();
-    let inside = body(&mut app, Vec3::new(0.0, 0.2 + tolerance / 2.0, 0.0));
-    let outside = body(&mut app, Vec3::new(4.0, 0.2 + 2.0 * tolerance, 0.0));
+    let inside = body(&mut app, Vec3::new(0.0, SIDE / 2.0 + tolerance / 2.0, 0.0));
+    let outside = body(&mut app, Vec3::new(4.0, SIDE / 2.0 + 2.0 * tolerance, 0.0));
     app.update();
     app.update();
     let contacts = app.world().resource::<ContactGraph>();
