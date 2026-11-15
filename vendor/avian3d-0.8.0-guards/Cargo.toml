@@ -1,0 +1,46 @@
+# The guard crate of the avian3d 0.8.0 fork, for the stack cutover only (#355, #361): it builds the
+# fork beside the game-side seam modules (`src/avian_ext/`) and the game's avian guard tests, which
+# it includes by path, without the game crate. Deleted at integration (B5), when the guards run as
+# the game's own tests again.
+#
+# Its own root: the game's workspace manifest and lock are never consulted. Its lock was seeded from
+# the game's, so every shared crate resolves to the game's version.
+#
+# Run: CARGO_TARGET_DIR=<bay>/target/avian-guards scripts/serial-cargo test --profile test \
+#        --manifest-path vendor/avian3d-0.8.0-guards/Cargo.toml
+[package]
+name = "avian3d-guards"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+# The game's feature set less the render-side defaults (`debug-plugin`, `bevy_picking`,
+# `bevy_scene`), which no patch or seam touches. `parallel` stays on: the game builds with it.
+avian3d = { path = "../avian3d-0.8.0-overmatch", default-features = false, features = [
+  "3d",
+  "parry-f32",
+  "parallel",
+  "xpbd_joints",
+  "collider-from-mesh",
+  "serialize",
+] }
+bevy = { version = "0.20.1", default-features = false, features = [
+  "std",
+  "bevy_log",
+  "bevy_asset",
+  "bevy_mesh",
+  "multi_threaded",
+  "serialize",
+] }
+glam = { version = "0.33.12", features = ["serde", "scalar-math"] }
+smallvec = "1"
+
+[profile.test]
+debug = false

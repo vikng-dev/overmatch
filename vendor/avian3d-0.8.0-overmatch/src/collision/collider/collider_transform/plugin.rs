@@ -53,18 +53,13 @@ impl Plugin for ColliderTransformPlugin {
             propagate_collider_transforms.in_set(PhysicsTransformSystems::Propagate),
         );
 
-        let physics_schedule = app
-            .get_schedule_mut(PhysicsSchedule)
-            .expect("add PhysicsSchedule first");
-
-        // Update child collider positions before narrow phase collision detection.
-        // Only traverses trees with `AncestorMarker<ColliderMarker>`.
-        physics_schedule
-            .add_systems(update_child_collider_position.in_set(PhysicsStepSystems::First));
+        // OVERMATCH PATCH: `update_child_collider_position` is not registered. The host places
+        // child collider poses with its own system in `PhysicsStepSystems::First` (Overmatch's
+        // `avian_ext::child_poses`); this one assigned every child pose every step.
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, dead_code)] // OVERMATCH PATCH: unregistered (above).
 pub(crate) fn update_child_collider_position(
     mut collider_query: Query<
         (
