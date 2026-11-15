@@ -1,7 +1,8 @@
 //! Avian resting-contact and island lifecycle guards for the game's server physics: the avian3d
 //! fork's island, rest and sleeping-increment rows (`vendor/avian3d-0.8.0-overmatch`,
-//! `OVERMATCH_PATCH.md`) and the game's rest law (`crate::avian_ext::rest_test`). Resting bodies
-//! require a wake source; joining a sleeper must not erase an awake body's accumulated rest time.
+//! `OVERMATCH_PATCH.md`), the game's wake rule (`crate::avian_ext::island_wake`) and rest law
+//! (`crate::avian_ext::rest_test`). Resting bodies require a wake source; joining a sleeper must
+//! not erase an awake body's accumulated rest time.
 //! Geometry and observation counts below are Fixture data, not settlement targets. Mechanism and
 //! upstream draft: `upstream/avian-island-rest-history.md`.
 
@@ -447,12 +448,13 @@ fn a_miss_closed_by_the_last_awake_step_links_the_resting_islands() {
     );
 }
 
-/// Solver users need an impulse on a sleeping body met in its step: the velocity widens the
-/// pair's speculative margin, with no bound or pose changed, and the body wakes only at the step's
-/// end. A mutant whose misses sleep with the island (avian #1032's transfer) holds the pair, so an
-/// impact on the neighbour in the same step wakes the neighbour alone, the impulse's contact
-/// unsolved in that step. Fixture: cubes 1.5 tolerances apart, the impulse closing twice that gap
-/// in one step, a striker within the tolerance of the neighbour's far face.
+/// Solver users need an impulse on a sleeping body met in its step: for a body with speculative
+/// contacts (`SpeculativeCcd`) the velocity widens the pair's speculative margin, with no bound or
+/// pose changed, and the body wakes only at the step's end. A mutant whose misses sleep with the
+/// island (avian #1032's transfer) holds the pair, so an impact on the neighbour in the same step
+/// wakes the neighbour alone, the impulse's contact unsolved in that step. Fixture: cubes 1.5
+/// tolerances apart, the impulse closing twice that gap in one step, a striker within the tolerance
+/// of the neighbour's far face.
 #[test]
 fn an_impulse_on_a_sleeper_meets_its_neighbour_struck_in_the_same_step() {
     let mut app = physics_app();
@@ -465,6 +467,9 @@ fn an_impulse_on_a_sleeper_meets_its_neighbour_struck_in_the_same_step() {
         .timestep()
         .as_secs_f32();
     let pushed = body(&mut app, Vec3::X * -(SIDE + gap));
+    app.world_mut()
+        .entity_mut(pushed)
+        .insert(SpeculativeCcd::MAX);
     let neighbour = body(&mut app, Vec3::ZERO);
     until_asleep(&mut app, pushed);
     until_asleep(&mut app, neighbour);

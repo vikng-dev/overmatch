@@ -321,7 +321,8 @@ rests, misses included. A held miss skips the narrow phase, so it needs a second
 the inputs a miss reads, and each input the list lacks is a contact found late. Three holes, each a
 witness that fails under the transfer (MEASURED on this fork with the refusal removed): the held
 update predates the sleeping step's motion; a sleeping body's collider reshaped; an impulse widens
-a sleeper's speculative margin with no bound changed.
+a sleeper's speculative margin with no bound changed (for a body with `SpeculativeCcd`: 0.8.0's
+speculative contacts are opt-in, and without them a velocity is no input of a miss).
 
 `ContactGraph::sleep_entity_with`'s `should_sleep` now sees the pair's edge with the other body
 (its signature: `Fn(&ContactEdge, Option<Entity>) -> bool`), and `SleepIslands` passes "touching,
@@ -333,16 +334,47 @@ The saving forgone, measured on 0.7 with the misses held: the shipped server par
 (`scripts/perf/pile_park.py pile`) went from 430.9 to 335.8 µs of physics per tick (MEASURED,
 2026-11-15, medians of 4 interleaved runs).
 
-Guards: in `src/tests/avian_island_sleep.rs`,
-`an_impact_wakes_an_island_that_merges_again_before_the_solver` (green), and
+Guards, all green and all red with the transfer restored (MEASURED): in
+`src/tests/avian_island_sleep.rs`, `an_impact_wakes_an_island_that_merges_again_before_the_solver`,
 `a_miss_closed_by_the_last_awake_step_links_the_resting_islands` and
-`an_impulse_on_a_sleeper_meets_its_neighbour_struck_in_the_same_step`, which also need the wake
-rule; in `src/tests/avian_narrow_phase.rs`, `stationary_miss_retests_when_a_woken_body_moves`. The
-first and the last go red with the transfer restored (MEASURED).
+`an_impulse_on_a_sleeper_meets_its_neighbour_struck_in_the_same_step` (the middle one also needs
+the wake rule, "Island contact waking"); in `src/tests/avian_narrow_phase.rs`,
+`stationary_miss_retests_when_a_woken_body_moves`.
 
 The guards run with recycling off, as the game does: a recycled pair returns before the narrow
 phase's query, so a resting miss closed by a sleeper's last awake step is never found
 (MEASURED: `recycled_count` 1, the islands left apart).
+
+## Island contact waking: game-side
+
+Subject: the game's rigid-body rest, server physics, game state only.
+
+Avian 0.8.0 wakes every sleeping island a new contact links (`apply_contact_status_change`), a
+resting body's new stationary support included. The game's rule: only an awake body wakes a
+resting island. The game holds it in a pass on stock Avian (`avian_ext::island_wake`,
+`link_resting_contacts` in `NarrowPhaseSystems::Last`, after the reduction pass): each queued
+`StartedGeneratingConstraints` whose sides are each in a sleeping island or hold no island (a static
+or disabled body, a standalone collider), at least one in an island, leaves the queue; the pass
+links the contact with `PhysicsIslands::add_contact`, merging the resting islands it bridges, and
+moves the pair to the sleeping set with `ContactGraph::sleep_entity_with`, so the solver gets no
+constraint for it. The island's next wake (`WakeIslands`) returns the pair and pushes its manifolds.
+A merge the pass makes stands when a later entry of the same step wakes the merged island, which then
+holds the pair. Sleep is read from the island (`PhysicsIsland::is_sleeping`, public), not the body's
+`Sleeping` marker.
+
+A predicate inside `apply_contact_status_change` was not enough: by then the pair's manifolds are in
+the constraint graph, and the flush holds the contact graph read-only, so the hook would also have
+to pop them and transfer the pair. The pass does both before the flush, with no fork line.
+
+0 fork lines. Row-5 check, on this fork with the pass off and on (MEASURED): off,
+`stationary_contact_does_not_wake_a_resting_island` and
+`a_miss_closed_by_the_last_awake_step_links_the_resting_islands` fail, and
+`an_impact_wakes_an_island_that_merges_again_before_the_solver`,
+`removing_sleeping_restarts_the_woken_bodys_rest_interval` and
+`an_impulse_on_a_sleeper_meets_its_neighbour_struck_in_the_same_step` pass; on, all five pass.
+Mutants, each red (MEASURED): an awake side counted as resting (the impact test), no transfer to
+the sleeping set (the stationary, closed-miss and impulse tests), no island link (the closed-miss
+test).
 
 ## Body-pair contact reduction: game-side
 

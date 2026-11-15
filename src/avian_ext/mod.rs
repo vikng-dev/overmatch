@@ -12,6 +12,7 @@ pub mod attachment;
 pub mod child_poses;
 pub mod contact_match;
 pub mod contact_reduction;
+pub mod island_wake;
 pub mod rest_test;
 pub mod sleeping_increments;
 
@@ -32,4 +33,5 @@ pub fn plugin(app: &mut App) {
         .add_systems(child_poses::place_child_colliders.in_set(PhysicsStepSystems::First));
     sleeping_increments::plugin(app);
     contact_reduction::plugin(app);
+    island_wake::plugin(app);
 }
