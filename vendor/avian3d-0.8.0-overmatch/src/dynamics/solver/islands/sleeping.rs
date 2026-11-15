@@ -33,7 +33,7 @@ use crate::{
         solver::{
             constraint_graph::ConstraintGraph,
             islands::{BodyIslandNode, IslandId, PhysicsIslands},
-            solver_body::{SolverBodies, SolverBodyIndex},
+            solver_body::{SolverBodies, SolverBody, SolverBodyIndex},
         },
     },
     prelude::*,
@@ -47,6 +47,7 @@ impl Plugin for IslandSleepingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AwakeIslandBitVec>();
         app.init_resource::<TimeToSleep>();
+        app.init_resource::<RestTest>(); // OVERMATCH PATCH
 
         // Insert `SleepThreshold` and `SleepTimer` for each body that has a solver body.
         app.register_required_components::<SolverBodyIndex, SleepThreshold>();
@@ -189,6 +190,49 @@ fn wake_islands_with_sleeping_disabled(
     }
 }
 
+// OVERMATCH PATCH (hook): the rest test.
+/// The test that decides whether an awake body rests this step: passing it advances the body's
+/// [`SleepTimer`], failing it restarts the timer. The default is Avian's own, [`velocity_rest`].
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct RestTest(pub RestTestFn);
+
+/// A rest test of the body's solver state, its [`SleepThreshold`], the [`PhysicsLengthUnit`] and
+/// the body's computed mass, angular inertia and rotation.
+pub type RestTestFn =
+    fn(&SolverBody, &SleepThreshold, f32, ComputedMass, ComputedAngularInertia, Rotation) -> bool;
+
+impl Default for RestTest {
+    fn default() -> Self {
+        Self(velocity_rest)
+    }
+}
+
+/// Avian's rest test: linear speed under [`SleepThreshold::linear`] times the length unit, and
+/// angular speed under [`SleepThreshold::angular`]. A negative threshold keeps its sign and never
+/// passes.
+pub fn velocity_rest(
+    solver_body: &SolverBody,
+    sleep_threshold: &SleepThreshold,
+    length_unit: f32,
+    _: ComputedMass,
+    _: ComputedAngularInertia,
+    _: Rotation,
+) -> bool {
+    let length_unit_squared = length_unit * length_unit;
+    let lin_vel_squared = solver_body.linear_velocity.length_squared();
+    #[cfg(feature = "2d")]
+    let ang_vel_squared = solver_body.angular_velocity * solver_body.angular_velocity;
+    #[cfg(feature = "3d")]
+    let ang_vel_squared = solver_body.angular_velocity.length_squared();
+
+    // Keep signs.
+    let lin_threshold_squared = sleep_threshold.linear * sleep_threshold.linear.abs();
+    let ang_threshold_squared = sleep_threshold.angular * sleep_threshold.angular.abs();
+
+    lin_vel_squared < length_unit_squared * lin_threshold_squared
+        && ang_vel_squared < ang_threshold_squared
+}
+
 fn update_sleeping_states(
     mut awake_island_bit_vec: ResMut<AwakeIslandBitVec>,
     mut islands: ResMut<PhysicsIslands>,
@@ -199,36 +243,38 @@ fn update_sleeping_states(
             &SleepThreshold,
             &SolverBodyIndex,
             &BodyIslandNode,
+            // OVERMATCH PATCH: the rest test's inputs.
+            &ComputedMass,
+            &ComputedAngularInertia,
+            &Rotation,
         ),
         (Without<Sleeping>, Without<SleepingDisabled>),
     >,
     length_unit: Res<PhysicsLengthUnit>,
     time_to_sleep: Res<TimeToSleep>,
     time: Res<Time>,
+    rest_test: Res<RestTest>, // OVERMATCH PATCH
 ) {
-    let length_unit_squared = length_unit.0 * length_unit.0;
     let delta_secs = time.delta_secs();
 
     islands.split_candidate_sleep_timer = 0.0;
 
     // TODO: This would be nice to do in parallel.
-    for (mut sleep_timer, sleep_threshold, index, island_data) in query.iter_mut() {
+    for (mut sleep_timer, sleep_threshold, index, island_data, mass, inertia, rotation) in
+        query.iter_mut()
+    {
         let Some(solver_body) = solver_bodies.get(*index) else {
             continue;
         };
-        let lin_vel_squared = solver_body.linear_velocity.length_squared();
-        #[cfg(feature = "2d")]
-        let ang_vel_squared = solver_body.angular_velocity * solver_body.angular_velocity;
-        #[cfg(feature = "3d")]
-        let ang_vel_squared = solver_body.angular_velocity.length_squared();
-
-        // Keep signs.
-        let lin_threshold_squared = sleep_threshold.linear * sleep_threshold.linear.abs();
-        let ang_threshold_squared = sleep_threshold.angular * sleep_threshold.angular.abs();
-
-        if lin_vel_squared < length_unit_squared * lin_threshold_squared
-            && ang_vel_squared < ang_threshold_squared
-        {
+        // OVERMATCH PATCH: the rest test is a hook.
+        if (rest_test.0)(
+            solver_body,
+            sleep_threshold,
+            length_unit.0,
+            *mass,
+            *inertia,
+            *rotation,
+        ) {
             // Increment the sleep timer.
             sleep_timer.0 += delta_secs;
         } else {

@@ -43,7 +43,11 @@
 // https://github.com/erincatto/box2d/blob/df9787b59e4480135fbd73d275f007b5d931a83f/src/island.c#L57
 
 mod sleeping;
-pub use sleeping::{IslandSleepingPlugin, SleepBody, SleepIslands, WakeBody, WakeIslands};
+// OVERMATCH PATCH: the rest test hook.
+pub use sleeping::{
+    IslandSleepingPlugin, RestTest, RestTestFn, SleepBody, SleepIslands, WakeBody, WakeIslands,
+    velocity_rest,
+};
 
 use bevy::{
     ecs::{

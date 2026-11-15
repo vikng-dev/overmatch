@@ -397,6 +397,30 @@ Guards: in `src/tests/avian_island_sleep.rs`,
 `removing_sleeping_restarts_the_woken_bodys_rest_interval`, red without the hook's reset (MEASURED).
 Record: `upstream/avian-island-rest-history.md`.
 
+## Rest energy (`src/dynamics/solver/islands/sleeping.rs`, `src/dynamics/solver/islands/mod.rs`): hook
+
+Subject: the game's rigid-body rest, server physics and scenery, game state only.
+
+`update_sleeping_states` asks the `RestTest` resource whether each awake body rests this step,
+passing the body's solver state, its `SleepThreshold`, the length unit and its computed mass,
+angular inertia and rotation; passing advances the body's `SleepTimer`, failing restarts it. The
+default is upstream's separate linear and angular test, moved unchanged into `velocity_rest`. The
+game installs its law (`avian_ext::rest_test::at_rest`): upstream's test, or kinetic energy per mass
+under the rest speed's, `v² + ω·I_world·ω/m < (SleepThreshold::linear · PhysicsLengthUnit)²`. The
+law and its account are the 0.7 fork's.
+
+Not carried: the 0.7 fork updated the timers on the compute pool and committed wake bits and the
+split candidate afterward. Upstream's loop stays serial (not re-measured on 0.8).
+
+Kept as a hook: the test sits inside an upstream system. 84 fork lines (MEASURED: 78 in the system's
+file, 6 in the re-export).
+
+Guards: in `src/tests/avian_island_sleep.rs`, the rest tests, all green. Without the game's law
+installed, `rest_depends_on_energy_per_mass_and_spin_axis` and
+`a_supported_bar_rests_through_periodic_one_tick_roll_pulses` fail; with the energy test alone,
+`the_original_velocity_test_still_allows_rest` and
+`a_long_bar_see_sawing_below_the_angular_limit_still_rests` fail (MEASURED).
+
 ## Body-pair contact reduction: game-side
 
 Subject: the game's server physics, contacts between bodies, game state only.

@@ -2,13 +2,37 @@
 //! or when its kinetic energy per mass is under that of its rest speed:
 //! `v² + ω·I_world·ω/m < (SleepThreshold::linear · PhysicsLengthUnit)²`. The separate test misreads
 //! a slender body's roll as motion; the energy test does not, and the separate test stays because
-//! it is the more permissive one for large bodies.
+//! it is the more permissive one for large bodies. Avian calls [`at_rest`] through its `RestTest`
+//! hook, which `avian_ext::plugin` installs.
 //!
 //! Who relies on it: the game's scenery and debris rest (`OVERMATCH_PATCH.md`, "Rest energy"), and
 //! the game's own rest census, which compares with Avian's verdict.
 
+use avian3d::dynamics::solver::islands::velocity_rest;
 use avian3d::dynamics::solver::solver_body::SolverBody;
 use avian3d::prelude::*;
+
+/// Whether the body rests this step: Avian's separate test, or kinetic energy per mass under the
+/// rest speed's. Both comparisons are strict and keep the threshold's sign, so a negative threshold
+/// never passes.
+pub fn at_rest(
+    body: &SolverBody,
+    threshold: &SleepThreshold,
+    length_unit: f32,
+    mass: ComputedMass,
+    angular_inertia: ComputedAngularInertia,
+    rotation: Rotation,
+) -> bool {
+    velocity_rest(
+        body,
+        threshold,
+        length_unit,
+        mass,
+        angular_inertia,
+        rotation,
+    ) || kinetic_speed_squared(body, mass, angular_inertia, rotation)
+        < length_unit * length_unit * threshold.linear * threshold.linear.abs()
+}
 
 /// Twice the body's kinetic energy per mass, in squared speed units: `v² + ω·I·ω/m`, with `I` the
 /// computed inertia turned to the world frame by `rotation`. The factor 1/2 cancels against the
