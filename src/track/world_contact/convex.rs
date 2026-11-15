@@ -114,6 +114,17 @@ pub(crate) struct ClippedFace {
     planes: Vec<Vec3>,
 }
 
+impl ClippedFace {
+    /// How far the face stands inside the rest outer face over the lateral `strip` of a link
+    /// `len` long (m), or `None` where it misses the strip. Depth is linear on the face, so a
+    /// vertex holds the greatest.
+    pub(crate) fn deepest(&self, strip: (f32, f32), len: f32) -> Option<f32> {
+        (in_cell(&self.polygon, strip, (0.0, len)).iter())
+            .map(|p| self.depth.dot(*p))
+            .reduce(f32::max)
+    }
+}
+
 pub(crate) fn clip_faces(triangles: &[[Vec3; 3]], slab: &Slab) -> Vec<ClippedFace> {
     let mut faces = Vec::new();
     for &[a, b, c] in triangles {

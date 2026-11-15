@@ -112,6 +112,7 @@ pub(super) fn apply_belt_support_field(
                 &avian3d::prelude::ComputedCenterOfMass,
             ),
             &'static mut crate::track::sim::TrackDrive,
+            &'static mut crate::track::sim::TrackRise,
         ),
         With<Hull>,
     >,
@@ -148,9 +149,9 @@ pub(super) fn apply_belt_support_field(
 ) {
     let (transmission, mut trans_state, mut telemetry) = transmission_params;
     let (geom, rig_spec, envelope) = rig;
-    let (hull_entity, hull_pos, hull_rot, (mut forces, mass, inertia, com), mut motion) = hull
-        .single_mut()
-        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
+    let (hull_entity, hull_pos, hull_rot, (mut forces, mass, inertia, com), mut motion, mut rise) =
+        hull.single_mut()
+            .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let affine = bevy::math::Affine3A::from_rotation_translation(hull_rot.0, hull_pos.0);
     // The game adapter's hull body (`track::sim::apply_track_forces`).
     let hull_body = crate::track::sim::HullBody {
@@ -310,6 +311,7 @@ pub(super) fn apply_belt_support_field(
         *dynamics.engine.get_mut(side) = tr.forces[si];
         *dynamics.reaction.get_mut(side) = report.belt_reaction;
         *grip.0.get_mut(side) = report.state.grip;
+        rise.0[si] = report.rise;
         // Phase advects at the PRE-update speed (the belt advects before it re-integrates).
         let pre = belt.get(side);
         let advected = phase.get(side) + f64::from(pre * dt);

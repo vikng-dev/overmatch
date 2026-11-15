@@ -149,6 +149,49 @@ Known differences between the channels, none tuned:
   stop. Parry clips a face to its first four vertices (the TODO in
   `ConvexPolyhedron::local_support_feature`, parry 0.27), so a cap contact, its face an N-gon, is
   mostly the lone GJK witness point (DERIVED).
+- **The stop's side slices against standing matter**, a limit with two owners. A slice is a rigid
+  collider one shoe thickness wide that reaches down to the rest belt's outer face. It bears only a
+  contact leaving through its exposed face (`stop_contacts::Bearing`): its inner face is inside the
+  shoe and no surface. And it bears none in the band its belt has vacated
+  (`stop_contacts::BeltFace::stands_at`): where the matter the support samples under a shoe edge
+  stands inside the rest face, the belt there has risen out of the band between them, so a slice's
+  contact in it is that matter, which the stop and the sampled support own. An edge's rise is its
+  own column's, the field at its edge probes and the solids over its strip, deepest along the link,
+  which is rigid (`forces::LinkRise`). It is an intrusion proxy, how far that matter stands inside
+  the rest face along the link's hull-local outward normal, not a measured displacement of the shoe:
+  past the bump travel the full-width stop still bears that matter, and the band still reaches up to
+  it. The hook reads the nearest link's from the last driving pass (`sim::TrackRise`: stale only in
+  the step that wakes its tank, and a moving body's candidate contact wakes a resting tank before
+  the band can erase it), and the construction sweep's witnesses admit by the same rule. Sleep
+  never changes what the band admits: a resting belt bearing a moving body whole would restore the
+  surface the belt has vacated, and would pinch a compound body under both shoe edges. Matter at a
+  slice's inner face came in under the shoe, so it lies in the band too. Without the band, a
+  standing stub under a shoe edge, deeper in the belt than it overlaps the shoe sideways, was born a
+  rigid lateral contact at that overlap, and a shoe come down between two such stubs bore on both
+  exposed faces at once: two opposed rigid contacts against static bodies, which cannot both be
+  satisfied, with normal impulses of 1 to 20 MN·s in a tick. In the straddle, a shoe come down
+  between two sills, each under one edge and running on past it (`track_scorecard::Straddle`), the
+  hook without the band let both slices bear rows from tick 92, when the drivetrain's books missed
+  34 kJ in one tick; with it no tick loads both, and the books close within 6.9 kJ, under the
+  engine's 9.1 kJ. On a brick house at its corner, full pedal from 0.5 m, grades 0 to 6° by four
+  headings by three offsets, no run of 48 takes energy from the contact, nor any of the three from
+  6 m that did; the fastest hull drives at 8.7 m/s and the largest point impulse on the tank is
+  0.13 MN·s. With the exposed-face admission alone 8 of 48 did, the worst leaving at 165 m/s, and
+  before it 17 of 48, the worst at 319 m/s. With the read-back off, the exposed-face admission alone
+  still took energy in some tick of 7 of 12 such runs, up to 1.1 MJ, the worst tick's work mostly
+  the pinch's normal rows; with the band, none of the 12 did (MEASURED 2026-11-15, 57 t fixture
+  hull). What remains:
+  - *One normal per convex pair* (#378). A slice still meets matter beside the shoe with its pair's
+    one normal, and a hull-fixed face, the sprocket's and idler's wraps, records no rise: there a
+    slice bears matter under its edge as the stop does, and the exposed-face admission alone keeps
+    its inner face out. Past the probe's reach (`forces::PROBE_REACH`) the field's rise saturates,
+    and a solid's face wholly past it drops out of the clipped envelope
+    (`world_contact::convex::clip_faces`) rather than saturate: a slice bears that matter at any
+    depth, and other matter deeper in the belt than the reach.
+  - *The read-back* (#353). The hook moves each surface at belt speed, the solver takes that
+    friction against the hull's mass alone, and the transmission reads it back a tick late with no
+    slope (`stop_contacts::reactions`, `sim::feel_tick`). Any opposed rigid pair that remains gives
+    that friction an unbounded limit, and the belt speed runs away and drags the hull.
 - **The law within a step.** A contact's shares and the points that bear are read once, at the
   narrow phase, so its stiffness is exact for a common compression of its links, not for one piece
   retreating alone. The points split the force by `overlap + rest`, so the centre of pressure and

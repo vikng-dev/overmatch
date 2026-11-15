@@ -5,14 +5,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use avian3d::prelude::{
-    ActiveCollisionHooks, ColliderOf, CollisionHooks, ContactPair, Position, Rotation,
+    ActiveCollisionHooks, ColliderOf, CollisionHooks, ContactPair, Position, RigidBody, Rotation,
+    Sleeping,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use super::forces::LinkRise;
 use super::oracle::ContactOracle;
 use super::side::Side;
-use super::sim::TrackDrive;
+use super::sim::{TrackDrive, TrackRise};
 use super::terrain::{FieldSurface, TrackField};
 use crate::contact_transfer::ContactTransfers;
 
@@ -23,15 +25,33 @@ use crate::contact_transfer::ContactTransfers;
 pub(crate) struct BeltFace {
     pub(crate) side: Side,
     outline: Arc<[Vec2]>,
-    lateral_only: bool,
+    bears: Bearing,
+}
+
+/// Which of its collider's contacts a moving face bears.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Bearing {
+    /// Every contact: a stop or a run.
+    Whole,
+    /// A side slice: only contact leaving through its one exposed face, the shoe's true lateral
+    /// face, which looks along this sign of the hull's x. Its other lateral face lies inside the
+    /// shoe's width and is no surface: matter that reaches it came in through the belt's outer
+    /// face, which the stop and the sampled support own.
+    Exposed(f32),
 }
 
 /// Resolution: tolerance for unit-normal components after hull-frame rotation. It separates
 /// lateral planes from radial planes without amplifying roundoff into a belt tangent.
 const LATERAL_NORMAL_MIN_X: f32 = 1.0 - 1e-4;
 
+/// Resolution: a slice's contact on the top edge of matter its belt rose over lies at that rise,
+/// to the roundoff of world points carried into the hull frame (DERIVED: an f32 ulp is 0.12 mm a
+/// kilometre from the origin, and each depth takes a few roundings). A millimetre keeps that edge
+/// in the vacated band and is no feature a shoe edge shows.
+const VACATED_SLACK_M: f32 = 1e-3;
+
 impl BeltFace {
-    pub(crate) fn new(side: Side, mut outline: Vec<Vec2>, lateral_only: bool) -> Self {
+    pub(crate) fn new(side: Side, mut outline: Vec<Vec2>, bears: Bearing) -> Self {
         let first = *outline
             .first()
             .expect("a certified outer shoe outline has points");
@@ -49,13 +69,47 @@ impl BeltFace {
         Self {
             side,
             outline: outline.into(),
-            lateral_only,
+            bears,
         }
     }
 
     /// The represented contact surface in the hull frame, shared by solver and sweep witnesses.
     pub(crate) fn accepts_normal(&self, outward: Vec3) -> bool {
-        !self.lateral_only || outward.x.abs() >= LATERAL_NORMAL_MIN_X
+        match self.bears {
+            Bearing::Whole => true,
+            Bearing::Exposed(sign) => outward.x * sign >= LATERAL_NORMAL_MIN_X,
+        }
+    }
+
+    /// Whether the face is at hull-frame `point`, given its side's `links` from the last driving
+    /// pass. A side slice reaches down to the rest belt's outer face, but where the matter under
+    /// its shoe edge stands inside that face the belt has risen out of the band between them: the
+    /// slice's contact there is the matter the belt rides over, which the stop and the sampled
+    /// support own. The nearest link's rise for the slice's edge bounds that band.
+    pub(crate) fn stands_at(&self, links: &[LinkRise], point: Vec3) -> bool {
+        let Bearing::Exposed(sign) = self.bears else {
+            return true; // A stop or a run is rigid at its own outline.
+        };
+        // The outboard face looks away from the hull's centre, along its side's sign.
+        let edge = usize::from(sign * self.side.sign() > 0.0);
+        let p = Vec2::new(point.z, point.y);
+        let nearest = links.iter().min_by(|a, b| {
+            let distance = |link: &LinkRise| {
+                let [a, b] = link.face;
+                let run = b - a;
+                (a + run * ((p - a).dot(run) / run.length_squared()).clamp(0.0, 1.0))
+                    .distance_squared(p)
+            };
+            distance(a).total_cmp(&distance(b))
+        });
+        let Some(link) = nearest else {
+            return true; // No driving pass has measured matter under this belt: none has risen.
+        };
+        let rise = link.rise[edge];
+        let [a, b] = link.face;
+        let along = (b - a).normalize();
+        let depth = (a - p).dot(Vec2::new(along.y, -along.x));
+        rise <= 0.0 || depth > rise + VACATED_SLACK_M
     }
 
     /// Positive belt travel in the hull frame. Radial contact follows its plane's tangent;
@@ -89,7 +143,18 @@ impl BeltFace {
 pub(crate) struct WorldContacts<'w, 's> {
     sweep: crate::construction::breakage::SweepContacts<'w, 's>,
     faces: Query<'w, 's, (&'static BeltFace, &'static ColliderOf)>,
-    belts: Query<'w, 's, (&'static TrackDrive, &'static Position, &'static Rotation)>,
+    belts: Query<
+        'w,
+        's,
+        (
+            &'static TrackDrive,
+            &'static TrackRise,
+            &'static Position,
+            &'static Rotation,
+            Has<Sleeping>,
+        ),
+    >,
+    bodies: Query<'w, 's, (&'static RigidBody, Has<Sleeping>)>,
     surfaces: Query<'w, 's, (), With<FieldSurface>>,
     field: Option<Res<'w, TrackField>>,
 }
@@ -100,20 +165,39 @@ impl CollisionHooks for WorldContacts<'_, '_> {
             return false;
         }
         // Avian's relative surface velocity is collider 2 minus collider 1.
-        for (collider, other, sign) in [
-            (contacts.collider1, contacts.collider2, -1.0),
-            (contacts.collider2, contacts.collider1, 1.0),
+        for (collider, other, body, sign) in [
+            (contacts.collider1, contacts.collider2, contacts.body2, -1.0),
+            (contacts.collider2, contacts.collider1, contacts.body1, 1.0),
         ] {
             let Ok((face, of)) = self.faces.get(collider) else {
                 continue; // Ordinary collider: its surface stands still on its body.
             };
-            let (drive, position, rotation) = self
+            let (drive, rise, position, rotation, resting) = self
                 .belts
                 .get(of.body)
                 .expect("a moving shoe face hangs on its spawn-built driving body");
+            // A resting tank's band may be stale (`TrackRise`). Past the construction sweep's
+            // filter, the hook runs only for a candidate contact, so a moving body's wakes the tank
+            // (removing `Sleeping` wakes its island), whatever either face's filtering keeps.
+            let moves = |body: Entity| {
+                let (body, rests) = self.bodies.get(body).expect(
+                    "a contact's body keeps its `RigidBody`: Avian drops its pairs with it",
+                );
+                !body.is_static() && !rests
+            };
+            if resting && body.is_some_and(moves) {
+                commands.entity(of.body).remove::<Sleeping>();
+            }
             contacts
                 .manifolds
-                .retain(|m| face.accepts_normal(rotation.0.inverse() * m.normal));
+                .retain(|m| face.accepts_normal(rotation.0.inverse() * (-sign * m.normal)));
+            let links = &rise.0[face.side.index()];
+            for manifold in &mut contacts.manifolds {
+                (manifold.points).retain(|p| {
+                    face.stands_at(links, rotation.0.inverse() * (p.point - position.0))
+                });
+            }
+            contacts.manifolds.retain(|m| !m.points.is_empty());
             for manifold in &mut contacts.manifolds {
                 let centre = manifold.points.iter().map(|p| p.point).sum::<Vec3>()
                     / manifold.points.len() as f32;
@@ -233,7 +317,7 @@ mod tests {
     use avian3d::prelude::{ContactManifold, ContactPoint};
     use bevy::ecs::system::RunSystemOnce;
 
-    fn face(side: Side, lateral: bool) -> BeltFace {
+    fn face(side: Side, bears: Bearing) -> BeltFace {
         // Fixture: a square outer outline, bottom traversed toward +z.
         BeltFace::new(
             side,
@@ -243,7 +327,7 @@ mod tests {
                 Vec2::new(1.0, 1.0),
                 Vec2::new(-1.0, 1.0),
             ],
-            lateral,
+            bears,
         )
     }
 
@@ -290,7 +374,14 @@ mod tests {
                         .id();
                     let shoe = world
                         .spawn((
-                            face(Side::Left, lateral),
+                            face(
+                                Side::Left,
+                                if lateral {
+                                    Bearing::Exposed(outward.x.signum())
+                                } else {
+                                    Bearing::Whole
+                                },
+                            ),
                             Transform::IDENTITY,
                             ColliderOf { body },
                         ))
@@ -338,39 +429,283 @@ mod tests {
         }
     }
 
-    /// Side slices may shove across the shoe width, but their rest-height radial planes
-    /// cannot bypass suspension travel or duplicate the compressed outer-face hard limit.
+    /// A side slice bears only lateral contact through its exposed face ([`Bearing::Exposed`]): its
+    /// rest-height radial planes would bypass suspension travel and duplicate the stop's limit. The
+    /// sweep's witnesses rely on the same admission (`construction::sweep::source`). Fails if a slice
+    /// bears a radial normal or a lateral one of either sign, or ignores its collider's pair order.
     #[test]
-    fn lateral_slices_do_not_supply_radial_hard_support() {
-        let mut world = World::new();
-        world.init_resource::<Time<Fixed>>();
-        let body = world
-            .spawn((
+    fn a_side_slice_bears_only_lateral_contact_through_its_exposed_face() {
+        for (outward, bears) in [(-Vec3::X, true), (Vec3::X, false), (-Vec3::Y, false)] {
+            for first in [false, true] {
+                let mut world = World::new();
+                world.init_resource::<Time<Fixed>>();
+                let body = world
+                    .spawn((
+                        TrackDrive::default(),
+                        Position::default(),
+                        Rotation::default(),
+                        Transform::IDENTITY,
+                    ))
+                    .id();
+                let shoe = world
+                    .spawn((
+                        face(Side::Left, Bearing::Exposed(-1.0)),
+                        Transform::IDENTITY,
+                        ColliderOf { body },
+                    ))
+                    .id();
+                let other = world.spawn_empty().id();
+                let (mut pair, normal) = if first {
+                    (
+                        ContactPair::new(shoe, other, ContactId::PLACEHOLDER),
+                        outward,
+                    )
+                } else {
+                    (
+                        ContactPair::new(other, shoe, ContactId::PLACEHOLDER),
+                        -outward,
+                    )
+                };
+                pair.manifolds.push(ContactManifold::new(
+                    [ContactPoint::new(Vec3::ZERO, Vec3::ZERO, -Vec3::Y, 0.01)],
+                    normal,
+                ));
+                world
+                    .run_system_once(move |hooks: WorldContacts, mut commands: Commands| {
+                        let case =
+                            format!("a normal leaving along {outward}, slice first: {first}");
+                        assert_eq!(
+                            hooks.modify_contacts(&mut pair, &mut commands),
+                            bears,
+                            "{case}"
+                        );
+                        assert_eq!(pair.manifolds.is_empty(), !bears, "{case}");
+                    })
+                    .unwrap();
+            }
+        }
+    }
+
+    /// A side slice bears no contact in the band its belt has risen out of over matter under its
+    /// edge: there it meets the matter the belt rides over, and a lateral normal would shove the
+    /// shoe sideways off what it stands on (`track-contact.md`). Above that band the shoe is there,
+    /// and an edge with nothing under it bears through its exposed face. Each edge reads its own
+    /// rise from its nearest link, on either side, in either pair order, whichever way its belt
+    /// runs; a point on the matter's top edge, at the rise itself, is in the band. Fails if the
+    /// hook ignores the rise, reads the other edge's or the wrong link's, or keeps or drops a whole
+    /// manifold for one point.
+    #[test]
+    fn a_side_slice_bears_nothing_in_the_band_its_belt_has_vacated() {
+        // Fixture: the square's rest outer face along its bottom and its top, both runs travelling
+        // as the outline does; only the bottom ever rises.
+        let link = |face: [Vec2; 2], rise: [f32; 2]| LinkRise { face, rise };
+        let (bottom, top) = (
+            [Vec2::new(-1.0, -1.0), Vec2::new(1.0, -1.0)],
+            [Vec2::new(1.0, 1.0), Vec2::new(-1.0, 1.0)],
+        );
+        let rise = 0.2; // Fixture rise under the risen edge, m.
+        let (position, rotation) = (
+            Vec3::new(3.0, 1.0, -2.0),
+            Quat::from_rotation_y(0.43) * Quat::from_rotation_z(0.31),
+        );
+        for side in Side::ALL {
+            for outboard in [false, true] {
+                let (edge, sign) = (usize::from(outboard), side.sign());
+                let exposed = if outboard { sign } else { -sign };
+                let mut own = [0.0; 2];
+                own[edge] = rise;
+                let mut other = [0.0; 2];
+                other[1 - edge] = rise;
+                // (edge rises, depths of the points into the rest face (m), points that bear).
+                for (rises, depths, kept) in [
+                    (own, vec![0.1], 0),
+                    (own, vec![rise], 0),
+                    (own, vec![0.3], 1),
+                    (own, vec![0.1, 0.3], 1),
+                    (other, vec![0.1], 1),
+                    ([0.0; 2], vec![0.1, 0.3], 2),
+                ] {
+                    for (first, speed) in [(false, 2.0), (true, 2.0), (true, -2.0)] {
+                        let mut world = World::new();
+                        world.init_resource::<Time<Fixed>>();
+                        let mut drive = TrackDrive::default();
+                        drive.sides[side.index()].speed = speed; // Fixture belt speed, m/s.
+                        let mut links = TrackRise::default();
+                        links.0[side.index()] = vec![link(bottom, rises), link(top, [0.0; 2])];
+                        let body = world
+                            .spawn((
+                                drive,
+                                links,
+                                Position(position),
+                                Rotation(rotation),
+                                Transform::IDENTITY,
+                            ))
+                            .id();
+                        let shoe = world
+                            .spawn((
+                                face(side, Bearing::Exposed(exposed)),
+                                Transform::IDENTITY,
+                                ColliderOf { body },
+                            ))
+                            .id();
+                        let other = world.spawn_empty().id();
+                        let outward = rotation * (Vec3::X * exposed);
+                        let (mut pair, normal) = if first {
+                            (
+                                ContactPair::new(shoe, other, ContactId::PLACEHOLDER),
+                                outward,
+                            )
+                        } else {
+                            (
+                                ContactPair::new(other, shoe, ContactId::PLACEHOLDER),
+                                -outward,
+                            )
+                        };
+                        let points = depths.iter().map(|depth| {
+                            let local = Vec3::new(exposed * 0.5, -1.0 + depth, 0.0);
+                            ContactPoint::new(
+                                Vec3::ZERO,
+                                Vec3::ZERO,
+                                position + rotation * local,
+                                0.01,
+                            )
+                        });
+                        pair.manifolds.push(ContactManifold::new(points, normal));
+                        let case = format!(
+                            "{side:?} outboard {outboard}: rises {rises:?}, depths {depths:?}, \
+                             slice first {first}, belt {speed} m/s"
+                        );
+                        world
+                            .run_system_once(move |hooks: WorldContacts, mut commands: Commands| {
+                                assert_eq!(
+                                    hooks.modify_contacts(&mut pair, &mut commands),
+                                    kept > 0,
+                                    "{case}"
+                                );
+                                let left: usize =
+                                    pair.manifolds.iter().map(|m| m.points.len()).sum();
+                                assert_eq!(kept, left, "{case}");
+                                assert!(pair.manifolds.iter().all(|m| !m.points.is_empty()));
+                            })
+                            .unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sleep never changes which points a slice bears. A dynamic or kinematic body's candidate
+    /// contact wakes a resting belt whatever either face's filtering keeps (a moving belt's face
+    /// whose band erases the pair first, or a normal the slice rejects); static matter, a resting
+    /// body or none does not. The belt's next pass then rewrites the band (`TrackRise`). Each case
+    /// runs in both pair orders.
+    #[test]
+    fn sleep_keeps_the_band_and_a_moving_body_wakes_the_belt() {
+        let (side, rise) = (Side::Left, 0.2); // Fixture rise under the outboard edge, m.
+        let band = |rise| {
+            let mut links = TrackRise::default();
+            links.0[side.index()] = vec![LinkRise {
+                face: [Vec2::new(-1.0, -1.0), Vec2::new(1.0, -1.0)],
+                rise,
+            }];
+            links
+        };
+        // (the belt rests; the other body's kind, whether it rests, and whether it is a belt whose
+        // inboard face's band holds both points; the candidate's normal is lateral; the belt
+        // wakes).
+        let cases = [
+            (true, Some((RigidBody::Dynamic, false, false)), true, true),
+            (true, Some((RigidBody::Dynamic, false, true)), true, true),
+            (true, Some((RigidBody::Kinematic, false, false)), true, true),
+            (true, Some((RigidBody::Dynamic, true, false)), true, false),
+            (true, Some((RigidBody::Static, false, false)), true, false),
+            (true, None, true, false),
+            (false, Some((RigidBody::Dynamic, false, false)), true, false),
+            (true, Some((RigidBody::Dynamic, false, false)), false, true),
+        ];
+        for ((resting, other, lateral, wakes), reversed) in
+            (cases.into_iter()).flat_map(|case| [(case, false), (case, true)])
+        {
+            let mut world = World::new();
+            world.init_resource::<Time<Fixed>>();
+            let spawned = (
                 TrackDrive::default(),
+                band([0.0, rise]),
                 Position::default(),
                 Rotation::default(),
-                Transform::IDENTITY,
-            ))
-            .id();
-        let shoe = world
-            .spawn((
-                face(Side::Left, true),
-                Transform::IDENTITY,
-                ColliderOf { body },
-            ))
-            .id();
-        let other = world.spawn_empty().id();
-        let mut pair = ContactPair::new(shoe, other, ContactId::PLACEHOLDER);
-        pair.manifolds.push(ContactManifold::new(
-            [ContactPoint::new(Vec3::ZERO, Vec3::ZERO, -Vec3::Y, 0.01)],
-            -Vec3::Y,
-        ));
-        world
-            .run_system_once(move |hooks: WorldContacts, mut commands: Commands| {
-                assert!(!hooks.modify_contacts(&mut pair, &mut commands));
-                assert!(pair.manifolds.is_empty());
-            })
-            .unwrap();
+            );
+            let mut belt = world.spawn((spawned, RigidBody::Dynamic, Transform::IDENTITY));
+            if resting {
+                belt.insert(Sleeping);
+            }
+            let belt = belt.id();
+            let shoe = world
+                .spawn((
+                    face(side, Bearing::Exposed(side.sign())),
+                    Transform::IDENTITY,
+                    ColliderOf { body: belt },
+                ))
+                .id();
+            let body = other.map(|(kind, rests, belted)| {
+                let mut other = world.spawn((kind, Position::default(), Rotation::default()));
+                if rests {
+                    other.insert(Sleeping);
+                }
+                if belted {
+                    let belt = (TrackDrive::default(), band([2.0 * rise, 0.0]));
+                    other.insert((belt, Transform::IDENTITY));
+                }
+                other.id()
+            });
+            let belted = other.is_some_and(|(_, _, belted)| belted);
+            let struck = match body {
+                Some(body) if belted => world.spawn((
+                    face(side, Bearing::Exposed(-side.sign())),
+                    Transform::IDENTITY,
+                    ColliderOf { body },
+                )),
+                _ => world.spawn_empty(),
+            };
+            let struck = struck.id();
+            let outward = if lateral {
+                Vec3::X * side.sign()
+            } else {
+                Vec3::NEG_Y
+            };
+            let (mut pair, normal) = if reversed {
+                let mut pair = ContactPair::new(struck, shoe, ContactId::PLACEHOLDER);
+                (pair.body1, pair.body2) = (body, Some(belt));
+                (pair, -outward)
+            } else {
+                let mut pair = ContactPair::new(shoe, struck, ContactId::PLACEHOLDER);
+                (pair.body1, pair.body2) = (Some(belt), body);
+                (pair, outward)
+            };
+            // Through the outboard slice's exposed face: halfway up the band, and as far above it.
+            let [inside, above] =
+                [0.5, 1.5].map(|up| Vec3::new(side.sign() * 0.5, -1.0 + up * rise, 0.0));
+            pair.manifolds.push(ContactManifold::new(
+                [inside, above].map(|point| ContactPoint::new(Vec3::ZERO, Vec3::ZERO, point, 0.01)),
+                normal,
+            ));
+            let borne = world
+                .run_system_once(move |hooks: WorldContacts, mut commands: Commands| {
+                    let bears = hooks.modify_contacts(&mut pair, &mut commands);
+                    let points = (pair.manifolds.iter().flat_map(|m| &m.points)).map(|p| p.point);
+                    (bears, points.collect::<Vec<_>>())
+                })
+                .unwrap();
+            let kept = if belted || !lateral {
+                vec![]
+            } else {
+                vec![above]
+            };
+            assert_eq!(
+                (borne, world.entity(belt).contains::<Sleeping>()),
+                ((!kept.is_empty(), kept), resting && !wakes),
+                "belt rests {resting}, other {other:?}, lateral {lateral}, reversed {reversed}"
+            );
+        }
     }
 
     /// The transmission owes only tangential momentum on its own belt, and the Driver's ledger
@@ -383,7 +718,7 @@ mod tests {
             let body = world.spawn(Transform::IDENTITY).id();
             let shoe = world
                 .spawn((
-                    face(Side::Right, false),
+                    face(Side::Right, Bearing::Whole),
                     Transform::IDENTITY,
                     ColliderOf { body },
                 ))

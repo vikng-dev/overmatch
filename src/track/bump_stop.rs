@@ -19,7 +19,7 @@ use super::rig_geom::RigGeom;
 use super::route::build_route;
 use super::side::{PerSide, Side};
 use super::soft_run::RunShape;
-use super::stop_contacts::BeltFace;
+use super::stop_contacts::{Bearing, BeltFace};
 use crate::Layer;
 
 /// One side's bump-stop collider, a child of its body.
@@ -38,7 +38,8 @@ pub(crate) struct TrackColliders {
     /// Inboard then outboard, as in [`RigGeom::grip_columns`].
     side_plates: PerSide<[Collider; 2]>,
     friction: Friction,
-    faces: PerSide<[BeltFace; 2]>,
+    /// Each side's stop face, then its side plates' faces, in `side_plates` order.
+    faces: PerSide<(BeltFace, [BeltFace; 2])>,
     runs: PerSide<RunShape>,
 }
 
@@ -60,10 +61,18 @@ impl TrackColliders {
                 .iter()
                 .map(|&(centre, radius)| (centre, radius + geom.model.pin_to_outer))
                 .collect();
-            [
-                BeltFace::new(side, geom.hard_stop_polyline(side, params), false),
-                BeltFace::new(side, build_route(&rest, 0.0).pts, true),
-            ]
+            // The inboard plate's shoe face looks toward the hull's centre, the outboard's away.
+            let plate = |out: f32| {
+                BeltFace::new(
+                    side,
+                    build_route(&rest, 0.0).pts,
+                    Bearing::Exposed(out * side.sign()),
+                )
+            };
+            (
+                BeltFace::new(side, geom.hard_stop_polyline(side, params), Bearing::Whole),
+                [plate(-1.0), plate(1.0)],
+            )
         }));
         Self {
             colliders,
@@ -199,17 +208,22 @@ pub(crate) fn spawn_replica_track_colliders(
 fn spawn_side_surfaces(commands: &mut Commands, body: Entity, shapes: &TrackColliders, side: Side) {
     commands.spawn((
         BumpStop,
-        shapes.faces.get(side)[0].clone(),
+        shapes.faces.get(side).0.clone(),
         shapes.colliders.get(side).clone(),
         crate::tank::authored_attachment(Transform::IDENTITY),
         CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
         shapes.friction,
         ChildOf(body),
     ));
-    for plate in shapes.side_plates.get(side) {
+    for (plate, face) in shapes
+        .side_plates
+        .get(side)
+        .iter()
+        .zip(&shapes.faces.get(side).1)
+    {
         commands.spawn((
             SidePlate,
-            shapes.faces.get(side)[1].clone(),
+            face.clone(),
             plate.clone(),
             crate::tank::authored_attachment(Transform::IDENTITY),
             side_plate_layers(),

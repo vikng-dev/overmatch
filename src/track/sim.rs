@@ -46,8 +46,8 @@ use crate::bitprobe::BitprobeCapture;
 
 use super::drive::{DriveAxes, DriveIntent, DriveTarget, shape_drive};
 use super::forces::{
-    BeltContact, ForceParams, GripElements, GripParams, PROBE_REACH, SideInput, SideReport,
-    SideState, contact_side,
+    BeltContact, ForceParams, GripElements, GripParams, LinkRise, PROBE_REACH, SideInput,
+    SideReport, SideState, contact_side,
 };
 use super::oracle::TerrainOracle;
 use super::route::build_route;
@@ -63,6 +63,7 @@ use super::transmission::{
 /// Per-tank belt state: server-authoritative, replicated to every client for the track view
 /// (quantised, `net::wire_quant`). Hashed into the determinism trace (`hblt`).
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
+#[require(TrackRise)]
 pub struct TrackDrive {
     /// Per-side belt state, `[left, right]`.
     pub sides: [TrackDriveSide; 2],
@@ -185,6 +186,25 @@ pub(crate) fn apply_explicit_impulse(mut forces: ForcesItem<'_, '_>, impulse: Ve
 /// support it rests on ([`NotResting`]). Never hashed, never rolled back.
 #[derive(Component, Default)]
 pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
+
+/// The last driving pass's links per side, with the rise under each shoe edge ([`LinkRise`]):
+/// the contact hook drops a side slice's contact in the band its belt has risen out of
+/// (`stop_contacts::BeltFace::stands_at`). Rewritten by every pass; a resting tank keeps its last
+/// pass's, as it keeps its hull pose, belt phase and contacts ([`NotResting`]). Empty before a
+/// pass and where no pass runs: nothing has risen. Sleep never changes what the band admits, and
+/// a solver step reads a stale band only in the step that wakes its tank, whatever changed while
+/// the tank rested. While it rests no solver step runs its pairs, a moving body's candidate
+/// contact with one of its faces wakes it (`stop_contacts::WorldContacts`), and a sweep reads no
+/// resting source's. Every awake tank's pass rewrites the band in `FixedUpdate` before Avian's step
+/// in `FixedPostUpdate`, a tank at rest but awake included. So the one stale step is a wake's that
+/// lands after the tick's pass and before its solver: the support index's or the sweep's before
+/// the step, or the narrow phase's (Avian's contact wake or the hook's), which applies at the
+/// sync point before the solver. That step runs on the band and belt the last pass left, hook and
+/// sweep alike, and the tank also runs it without its sampled support's forces, as in every
+/// mid-step wake. A wake at a step's end (an impulse, Avian's sleep pass) leaves the next pass to
+/// rewrite the band first. Never hashed, never rolled back.
+#[derive(Component, Clone, Debug, Default)]
+pub(crate) struct TrackRise(pub(crate) [Vec<LinkRise>; 2]);
 
 /// The contact inputs of one drivetrain step ([`TransmissionInput`]): each belt's reaction and its
 /// slope against its own speed, and the Driver's reading.
@@ -355,6 +375,12 @@ impl TrackGear {
     #[cfg(test)]
     pub(crate) fn grip(&self) -> GripParams {
         self.construction.grip()
+    }
+
+    /// One side's belt translation and reflected wheel inertia (kg).
+    #[cfg(all(test, feature = "bitprobe"))]
+    pub(crate) fn belt_inertia(&self) -> f32 {
+        self.construction.belt_inertia
     }
 
     /// Coupled translation mass for a torque-cut landing: hull plus both belt inertias (kg).
@@ -1078,6 +1104,7 @@ struct DriveTank {
     transmission: &'static mut TankTransmission,
     sense: &'static mut super::driver::DriverSense,
     contacts: &'static mut TrackContacts,
+    rise: &'static mut TrackRise,
     last: &'static mut LastPass,
     forces: Option<Forces>,
     volumes: Option<&'static TankVolumes>,
@@ -1473,6 +1500,7 @@ fn apply_track_forces(
                     .apply_force_at_point(app.force, app.point);
             }
             tank.contacts.0[si] = report.contacts;
+            tank.rise.0[si] = report.rise;
         }
         #[cfg(any(test, feature = "bitprobe"))]
         {
@@ -1659,7 +1687,11 @@ mod tests {
             let mut drive = TrackDrive::default();
             drive.sides.iter_mut().for_each(|side| side.speed = 2.0);
             app.world_mut().entity_mut(root).insert((
-                super::super::stop_contacts::BeltFace::new(Side::Left, outline, false),
+                super::super::stop_contacts::BeltFace::new(
+                    Side::Left,
+                    outline,
+                    super::super::stop_contacts::Bearing::Whole,
+                ),
                 drive,
                 ParsedTankCommand::try_from(crate::command::TankCommand {
                     throttle: 1.0,

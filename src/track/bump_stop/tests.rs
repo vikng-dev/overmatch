@@ -7,14 +7,15 @@ use bevy::time::TimeUpdateStrategy;
 use super::*;
 use crate::contact_transfer::{ContactTransfers, StructureBody};
 
-/// FIXTURE: the game's fixed clock, with no rendering or window plugins.
+/// FIXTURE: the game's fixed clock and its physics, shoe-face hook included, with no rendering or
+/// window plugins.
 fn physics(gravity: Vec3) -> App {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
         bevy::transform::TransformPlugin,
         AssetPlugin::default(),
-        PhysicsPlugins::default(),
+        crate::offline_physics(),
         crate::contact_transfer::sim_plugin,
         super::super::soft_run::plugin,
     ))
@@ -43,7 +44,8 @@ fn points(collider: &Collider) -> &[Vec3] {
 }
 
 /// The same constructor game tanks use, with prescribed pivot motion or a free dynamic body.
-/// Mass and inertia dimensions are fixture data read from the tank's declaration.
+/// Mass and inertia dimensions are fixture data read from the tank's declaration; the belts stand
+/// still, the state the shoe-face hook reads.
 fn body(app: &mut App, geom: &RigGeom, shapes: &TrackColliders, role: RigidBody) -> Entity {
     let spec = super::super::rig_geom::tiger_spec();
     let (x, y, z) = spec.inertia_extents;
@@ -61,6 +63,7 @@ fn body(app: &mut App, geom: &RigGeom, shapes: &TrackColliders, role: RigidBody)
             NoAutoAngularInertia,
             NoAutoCenterOfMass,
             CenterOfMass(Vec3::ZERO),
+            super::super::sim::TrackDrive::default(),
         ))
         .id();
     spawn_track_colliders(&mut app.world_mut().commands(), body, shapes);
@@ -285,8 +288,10 @@ fn a_pivoting_track_shoves_a_piece_without_throwing_it_or_touching_terrain() {
 }
 
 /// The game's environment destruction model reads a plate's structure contacts exactly like a
-/// hull proxy's. A low standing element that only the plate reaches must transfer momentum through
-/// ContactTransfers; a new layer that misses standing structures or bypasses the reader fails.
+/// hull proxy's. A low standing element that only the plate reaches must take momentum through
+/// ContactTransfers away from the shoe's exposed face, the one face a plate bears through; a new
+/// layer that misses standing structures, a reader bypassed, or a plate bearing through its inner
+/// face fails.
 #[test]
 fn side_plate_contacts_reach_the_structure_contact_reader() {
     let geom = super::super::rig_geom::tiger_rig();
@@ -342,12 +347,13 @@ fn side_plate_contacts_reach_the_structure_contact_reader() {
                         .other_collider
                         .is_some_and(|collider| world.get::<SidePlate>(collider).is_some())
             })
-            .map(|(point, ..)| point.impulse.length())
+            // The transfer moves `impulse` into the tank; the wall takes its opposite.
+            .map(|(point, ..)| -point.impulse.x * Side::Right.sign())
             .sum::<f32>();
     }
-    println!("MEASURED plate momentum read by structure: {transferred:.4} N s");
+    println!("MEASURED outward plate momentum read by structure: {transferred:.4} N s");
     assert!(
         transferred > 0.0,
-        "ordinary plate contacts must reach the structure laws"
+        "ordinary plate contacts must reach the structure laws, pressing it outward"
     );
 }
