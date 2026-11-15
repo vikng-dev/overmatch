@@ -81,10 +81,9 @@
 //! The `Changed<…>` filter of `super::wake_on_static_moved` walks every attached collider each
 //! step, about 2 µs per 1,000 colliders on the perf profile (MEASURED), and stays unindexed.
 //!
-//! ADR-0014 EXCEPTION (owner ruling 2026-11-10: settled rubble may rejoin the fixed structure where
-//! that is faster and simpler). A piece's body type and [`Frozen`] change after spawn. Both are
-//! server state alone: no client receives a piece's body (`net::debris_stress`, carriers), and
-//! nothing here rolls back.
+//! ADR-0014 EXCEPTION: settled rubble may rejoin the fixed structure where that is faster and
+//! simpler, so a piece's body type and [`Frozen`] change after spawn. Both are server state alone:
+//! no client receives a piece's body (`net::debris_stress`, carriers), and nothing here rolls back.
 
 use avian3d::dynamics::solver::islands::{BodyIslandNode, IslandId, PhysicsIslands};
 use avian3d::prelude::*;
