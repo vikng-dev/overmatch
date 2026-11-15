@@ -7,26 +7,24 @@
 //! entities and the fix.
 
 use avian3d::prelude::*;
+use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 
 /// Panics when a collider attaches to a body and either has no `GlobalTransform`. Runs after
-/// Avian's insert hook, on the same insertion.
-pub fn refuse_unposed_attachment(
-    attached: On<Insert<ColliderOf>>,
-    colliders: Query<(&ColliderOf, Has<GlobalTransform>)>,
-    posed: Query<(), With<GlobalTransform>>,
-) {
+/// Avian's insert hook, on the same insertion, and reads both entities as that hook does: raw
+/// component reads, which a disabled collider or body passes, as it passes the hook.
+pub fn refuse_unposed_attachment(attached: On<Insert<ColliderOf>>, world: DeferredWorld) {
     let collider = attached.entity;
-    let (&ColliderOf { body }, collider_posed) = colliders
-        .get(collider)
+    let &ColliderOf { body } = world
+        .get::<ColliderOf>(collider)
         .expect("an inserted ColliderOf is on its entity while its observers run");
     assert!(
-        collider_posed,
+        world.get::<GlobalTransform>(collider).is_some(),
         "collider {collider} attaches to body {body} without a GlobalTransform: spawn it with \
          Transform"
     );
     assert!(
-        posed.contains(body),
+        world.get::<GlobalTransform>(body).is_some(),
         "body {body} takes collider {collider} without a GlobalTransform: spawn it with Transform"
     );
 }

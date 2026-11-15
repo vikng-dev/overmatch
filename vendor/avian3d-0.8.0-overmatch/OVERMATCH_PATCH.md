@@ -62,14 +62,15 @@ moved body's colliders through that list, so such a child stays at its birth pos
 disables that plugin, so there a body spawned without `Transform` takes this path silently.
 
 The game refuses it in an observer on `Insert<ColliderOf>` (`avian_ext::attachment`), which runs
-after the hook on the same insertion and panics naming both entities and the fix. The 0.7 fork
-panicked inside the hook. Cost of the observer, MEASURED in the guard crate's unoptimized test
-profile, 10 000 attachments spawned onto 2 000 static bodies, three runs each: 305 to 310 ms
+after the hook on the same insertion and panics naming both entities and the fix. It reads both
+entities raw, as the hook does, so a disabled collider or body passes it as it passes the hook. The
+0.7 fork panicked inside the hook. Cost of the observer, MEASURED in the guard crate's unoptimized
+test profile, 10 000 attachments spawned onto 2 000 static bodies, three runs each: 305 to 310 ms
 without it, 315 to 316 ms with it, about 2%; the hook form is not worth its fork lines.
 
-Guard: `src/tests/avian_child_pose_churn.rs`
-(`a_collider_attached_to_a_body_without_a_global_transform_is_refused`; stock 0.8.0 does not
-panic, MEASURED).
+Guards: `src/tests/avian_child_pose_churn.rs`,
+`a_collider_attached_to_a_body_without_a_global_transform_is_refused` (stock 0.8.0 does not panic,
+MEASURED) and `a_posed_attachment_stands_with_either_side_disabled`.
 
 ## Prepared collider mass (`src/collision/collider/parry/mod.rs`): kept
 

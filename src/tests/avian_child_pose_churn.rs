@@ -385,15 +385,7 @@ fn the_physics_step_carries_a_child_re_enabled_frames_before_the_next_step() {
 #[test]
 #[should_panic(expected = "without a GlobalTransform")]
 fn a_collider_attached_to_a_body_without_a_global_transform_is_refused() {
-    let mut app = App::new();
-    app.add_plugins((
-        MinimalPlugins,
-        AssetPlugin::default(),
-        PhysicsPlugins::default()
-            .build()
-            .disable::<PhysicsTransformPlugin>(),
-    ))
-    .add_plugins(crate::avian_ext::plugin);
+    let mut app = networked_attachment_app();
     let world = app.world_mut();
     let body = world
         .spawn((RigidBody::Static, Position(Vec3::ZERO), Rotation::IDENTITY))
@@ -405,6 +397,59 @@ fn a_collider_attached_to_a_body_without_a_global_transform_is_refused() {
         GlobalTransform::from_translation(Vec3::X),
         ColliderOf { body },
     ));
+}
+
+/// The other half: a posed attachment stands whichever side is disabled, as Avian's hook, whose
+/// raw reads see a disabled entity, attaches it. Fails if the refusal reads either side through a
+/// default-filtered query, which skips a `Disabled` entity and refuses the posed attachment.
+#[test]
+fn a_posed_attachment_stands_with_either_side_disabled() {
+    for (body_disabled, collider_disabled) in [(true, false), (false, true)] {
+        let mut app = networked_attachment_app();
+        let world = app.world_mut();
+        let mut body = world.spawn((
+            RigidBody::Static,
+            Position(Vec3::ZERO),
+            Rotation::IDENTITY,
+            GlobalTransform::IDENTITY,
+        ));
+        if body_disabled {
+            body.insert(Disabled);
+        }
+        let body = body.id();
+        let mut collider = world.spawn((
+            Collider::sphere(0.5),
+            Position(Vec3::X),
+            Rotation::IDENTITY,
+            GlobalTransform::from_translation(Vec3::X),
+        ));
+        if collider_disabled {
+            collider.insert(Disabled);
+        }
+        let collider = collider.insert(ColliderOf { body }).id();
+        assert!(
+            world
+                .get::<RigidBodyColliders>(body)
+                .is_some_and(|colliders| colliders.contains(&collider)),
+            "body disabled {body_disabled}, collider disabled {collider_disabled}: Avian's hook \
+             left the posed collider off its body's list"
+        );
+    }
+}
+
+/// Avian's plugins as the networked composition mounts them (`PhysicsTransformPlugin` disabled),
+/// and the game's seams.
+fn networked_attachment_app() -> App {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin::default(),
+        PhysicsPlugins::default()
+            .build()
+            .disable::<PhysicsTransformPlugin>(),
+    ))
+    .add_plugins(crate::avian_ext::plugin);
+    app
 }
 
 /// ColliderOf is the actual physics attachment, including manually attached colliders without a
