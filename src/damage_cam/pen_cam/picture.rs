@@ -1093,7 +1093,10 @@ fn render_jobs(
     let Some(pipeline) = pipeline else {
         return;
     };
-    let Some(render) = cache.get_render_pipeline(pipeline.id) else {
+    let Some(render) = crate::render_scale::ready_pipeline(
+        cache.get_render_pipeline_state(pipeline.id),
+        "game's damage-model picture",
+    ) else {
         return;
     };
     let layout = cache.get_bind_group_layout(&pipeline.layout);

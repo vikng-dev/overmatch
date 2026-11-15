@@ -116,10 +116,10 @@ use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_
 use bevy::render::render_resource::{
     BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedPipelineState,
     CachedRenderPipelineId, ColorTargetState, ColorWrites, FilterMode, FragmentState, LoadOp,
-    MultisampleState, Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
-    ShaderStages, SpecializedRenderPipeline, SpecializedRenderPipelines, StoreOp, TextureFormat,
-    TextureSampleType,
+    MultisampleState, Operations, Pipeline, PipelineCache, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+    SamplerDescriptor, ShaderStages, SpecializedRenderPipeline, SpecializedRenderPipelines,
+    StoreOp, TextureFormat, TextureSampleType,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
 use bevy::render::view::{
@@ -407,7 +407,7 @@ fn prepare_render_scale(
         // Bevy's own upscaling prepare blocks here for the same reason: a frame that queued a
         // pipeline and then rendered nothing with it is a frame that submitted no GPU work.
         pipeline_cache.block_on_render_pipeline(id);
-        if ready_pipeline(&pipeline_cache, id).is_none() {
+        if ready_pipeline(pipeline_cache.get_render_pipeline_state(id), "render-scale").is_none() {
             clear(&mut commands);
             continue;
         }
@@ -459,15 +459,28 @@ fn announce(state: &mut Local<Option<Option<UVec2>>>, scaled: Option<UVec2>, ful
     }
 }
 
-/// Pending asset loads defer the override; a broken shipped pipeline fails at preparation,
-/// before removing its view markers could make the draw's error path unreachable.
-fn ready_pipeline(cache: &PipelineCache, id: CachedRenderPipelineId) -> Option<&RenderPipeline> {
-    match cache.get_render_pipeline_state(id) {
-        CachedPipelineState::Err(bevy::shader::ShaderCacheError::ProcessShaderError(error))
-        | CachedPipelineState::Err(bevy::shader::ShaderCacheError::CreateShaderModule(error)) => {
-            panic!("the shipped render-scale shader must compile: {error}");
+/// Pending shader loads may defer a pass; a broken shipped shader must fail before its
+/// consumer can silently skip the pass forever.
+pub(crate) fn ready_pipeline<'a>(
+    state: &'a CachedPipelineState,
+    name: &str,
+) -> Option<&'a RenderPipeline> {
+    use bevy::shader::ShaderCacheError;
+    match state {
+        CachedPipelineState::Ok(
+            Pipeline::RenderPipeline(pipeline) | Pipeline::MeshPipeline(pipeline),
+        ) => Some(pipeline),
+        CachedPipelineState::Ok(Pipeline::ComputePipeline(_)) => {
+            panic!("{name} requires a render pipeline")
         }
-        _ => cache.get_render_pipeline(id),
+        CachedPipelineState::Queued
+        | CachedPipelineState::Creating(_)
+        | CachedPipelineState::Err(
+            ShaderCacheError::ShaderNotLoaded(_) | ShaderCacheError::ShaderImportNotYetAvailable,
+        ) => None,
+        CachedPipelineState::Err(error) => {
+            panic!("the shipped {name} shader must compile: {error}");
+        }
     }
 }
 
@@ -488,7 +501,10 @@ fn render_scale_upscale(
     mut ctx: RenderContext,
 ) {
     let (target, upscale_id, view_offset) = view.into_inner();
-    let Some(pipeline) = ready_pipeline(&pipeline_cache, upscale_id.0) else {
+    let Some(pipeline) = ready_pipeline(
+        pipeline_cache.get_render_pipeline_state(upscale_id.0),
+        "render-scale",
+    ) else {
         return; // The shader or one of its imports has not loaded yet.
     };
     let Some(view_binding) = view_uniforms.uniforms.binding() else {
@@ -550,6 +566,40 @@ fn render_scale_upscale(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's damage-model picture and the upscale pass must distinguish a
+    /// pending shader from a terminal failure, without needing a GPU to test that policy.
+    #[test]
+    fn shipped_render_pipeline_errors_fail_loudly() {
+        use bevy::shader::ShaderCacheError;
+        for name in ["render-scale", "game's damage-model picture"] {
+            for error in [
+                ShaderCacheError::ProcessShaderError("fixture invalid source".into()),
+                ShaderCacheError::CreateShaderModule("fixture invalid module".into()),
+            ] {
+                let state = CachedPipelineState::Err(error);
+                let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    ready_pipeline(&state, name);
+                }))
+                .expect_err("a terminal shader error must fail the consuming pass");
+                assert!(failure.downcast_ref::<String>().unwrap().contains(name));
+            }
+        }
+    }
+
+    #[test]
+    fn pending_render_shaders_defer_the_pass() {
+        use bevy::shader::{Shader, ShaderCacheError};
+        for state in [
+            CachedPipelineState::Queued,
+            CachedPipelineState::Err(ShaderCacheError::ShaderNotLoaded(
+                Handle::<Shader>::default().id(),
+            )),
+            CachedPipelineState::Err(ShaderCacheError::ShaderImportNotYetAvailable),
+        ] {
+            assert!(ready_pipeline(&state, "fixture pass").is_none());
+        }
+    }
 
     /// The shipped default is native, and native means NO override — the zero-cost path. `Some(full)`
     /// would be a different, worse answer: it still schedules the upscale pass, and
