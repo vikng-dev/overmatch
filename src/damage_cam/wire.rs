@@ -818,6 +818,40 @@ struct WireComponent {
 
 // --- Build and project ----------------------------------------------------------------------------
 
+/// The game's damage-model report bound to a vocabulary, ready for offline replay identities.
+#[derive(Clone, Debug)]
+pub(crate) struct EncodedReport {
+    record: Record,
+}
+
+impl EncodedReport {
+    pub(crate) fn build(
+        vocabulary: &ShotVocabulary,
+        report: &PenetrationReport,
+    ) -> Result<Self, CodecError> {
+        Ok(Self {
+            record: encode(vocabulary, report)?,
+        })
+    }
+
+    /// An offline first encounter at `shot`'s tick, with no world impact or hull pose.
+    pub(crate) fn replay(self, shot: ShotId, struck: TankLife) -> BuiltExplanation {
+        BuiltExplanation {
+            full: ShotExplanation {
+                shot,
+                encounter: 0,
+                struck,
+                contact_tick: shot.fire_tick,
+                completion_tick: shot.fire_tick,
+                outcome: None,
+                audience: Audience::Victim,
+                hull: None,
+                record: self.record,
+            },
+        }
+    }
+}
+
 /// An explanation built once on the authority: the full record, before any recipient's projection.
 #[derive(Clone, Debug)]
 pub(crate) struct BuiltExplanation {
@@ -1074,7 +1108,11 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
         vocabulary: vocabulary.fingerprint.to_le_bytes(),
         vehicle: vehicle_index,
         round: ShotVocabulary::named(&vocabulary.rounds, &report.round, "round")?,
-        weapon: ShotVocabulary::named(&vocabulary.weapons, &report.projectile.name, "weapon")?,
+        weapon: ShotVocabulary::named(
+            &vocabulary.weapons,
+            &report.projectile.name,
+            "projectile.name",
+        )?,
         servos,
         origin: Mm::of(report.origin)?,
         muzzle: report.muzzle.map(Mm::of).transpose()?,

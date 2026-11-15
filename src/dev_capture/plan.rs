@@ -18,7 +18,7 @@ pub(crate) const VARIABLE: &str = "OVERMATCH_CAPTURE";
 /// A capture run: the frames it takes, the keys it holds, and the scripted events it raises.
 /// Every windowed root takes `frames` and `keys`; every other field is a cue a root mounts only
 /// where its event has an authority to raise it.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CapturePlan {
     /// The frames to disk, and the conditions they imply (module doc of `dev_capture`). Absent,
@@ -53,10 +53,10 @@ pub(crate) struct CapturePlan {
 
 /// The game's damage-model shader evidence: a recorded report, replayed at app second `at`.
 /// This cue presents game state only; it applies no dose and changes no simulated HP pool.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CornerReplay {
-    pub(crate) report: PathBuf,
+    pub(crate) report: super::corner::ReplayReport,
     pub(crate) at: f32,
 }
 
@@ -766,6 +766,37 @@ pub(crate) fn plan() -> Option<&'static CapturePlan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's damage-model capture refuses an incompatible replay before play, naming its
+    /// report path and field so the operator can repair it before any timed cue runs.
+    #[test]
+    fn an_incompatible_replay_is_refused_before_play_naming_path_and_field() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/capture")
+            .join(format!("incompatible-replay-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let report_path = directory.join("report.ron");
+        let plan_path = directory.join("plan.ron");
+        let mut report = crate::damage_cam::delivery::tests::report("s8b_mg_stopped");
+        // Fixture: a weapon absent from the current game's vocabulary, at a future cue.
+        report.projectile.name = "unknown capture weapon".into();
+        std::fs::write(&report_path, ron::to_string(&report).unwrap()).unwrap();
+        std::fs::write(
+            &plan_path,
+            format!(r#"(corner: (report: {:?}, at: 10.0))"#, report_path),
+        )
+        .unwrap();
+        let error = CapturePlan::load(&plan_path)
+            .expect_err("an incompatible replay must refuse startup before play")
+            .to_string();
+        for required in [
+            report_path.to_str().unwrap(),
+            "projectile.name",
+            "use a report from this build",
+        ] {
+            assert!(error.contains(required), "{error} must name {required}");
+        }
+    }
 
     // The game's damage model: Fixture charge inputs must be refused before a cue exists.
     fn charge_refusal(kg: &str, core: &str, field: &str, fix: &str) {

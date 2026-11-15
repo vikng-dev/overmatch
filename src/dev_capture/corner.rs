@@ -1,20 +1,66 @@
 //! The game's damage-model view, game state only: offline replay evidence for corner shaders.
-//! A report is parsed once at mount, then addressed to the current shooter and opponent through
-//! the normal projection/store path. No round flies and no simulated HP pool changes.
+//! A report is parsed and encoded once at plan admission, then addressed to the current shooter
+//! and opponent through the normal projection/store path. No round flies and no simulated HP pool changes.
 
 use bevy::prelude::*;
+use serde::Deserialize;
+use std::path::PathBuf;
 
+use crate::ballistics::spall_cone::{BurstFields, ConeShape};
 use crate::damage_cam::PenetrationReport;
 use crate::damage_cam::delivery::{Receipt, ShotExplanations};
-use crate::damage_cam::recorder::RecordedShot;
-use crate::damage_cam::wire::{BuiltExplanation, ShotVocabulary, TankLife};
+use crate::damage_cam::wire::{EncodedReport, ShotVocabulary, TankLife};
+use crate::rounds::RoundRegistry;
 use crate::tank::{Controlled, Tank};
 use crate::{CombatantId, CombatantLife, ShotClock, ShotId};
+
+/// The game's damage-model replay payload, admitted against this build before play.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(try_from = "PathBuf")]
+pub(crate) struct ReplayReport {
+    path: PathBuf,
+    payload: EncodedReport,
+    vocabulary: ShotVocabulary,
+}
+
+impl TryFrom<PathBuf> for ReplayReport {
+    type Error = String;
+
+    fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
+        let refusal = |error| {
+            format!(
+                "corner.report {}: {error}; use a report from this build's tank and round vocabulary",
+                path.display()
+            )
+        };
+        let report = PenetrationReport::load(&path).map_err(refusal)?;
+        let spec = crate::bake::selected_spec();
+        let geometry = crate::bake::extract_tank_geometry(
+            &crate::assets::asset_root().join(crate::tank::TANK_SIM_GLB_PATH),
+            spec,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .map_err(|findings| refusal(crate::bake::render(&findings)))?;
+        let vocabulary = ShotVocabulary::new(
+            [(crate::tank::TANK_SPEC_PATH, &geometry, spec)],
+            RoundRegistry::shipped(),
+            ConeShape::shipped(),
+            BurstFields::shipped(),
+        );
+        let payload = EncodedReport::build(&vocabulary, &report)
+            .map_err(|error| refusal(error.to_string()))?;
+        Ok(Self {
+            path,
+            payload,
+            vocabulary,
+        })
+    }
+}
 
 #[derive(Resource)]
 struct Replay {
     at: f32,
-    report: Option<PenetrationReport>,
+    report: Option<ReplayReport>,
 }
 
 pub(crate) fn offline_corner_plugin(app: &mut App) {
@@ -25,24 +71,14 @@ pub(crate) fn offline_corner_plugin(app: &mut App) {
 }
 
 fn install(app: &mut App, cue: &super::plan::CornerReplay) {
-    let report = PenetrationReport::load(&cue.report).unwrap_or_else(|error| {
-        super::plan::refuse(super::plan::PlanError::Field(format!(
-            "corner.report: {error}"
-        )))
-    });
-    if report.synthetic || report.vehicle.is_none() {
-        super::plan::refuse(super::plan::PlanError::Field(
-            "corner.report: use a simulated report naming its vehicle".into(),
-        ));
-    }
     info!(
         "capture: game's damage-model corner replay {} at {} s",
-        cue.report.display(),
+        cue.report.path.display(),
         cue.at
     );
     app.insert_resource(Replay {
         at: cue.at,
-        report: Some(report),
+        report: Some(cue.report.clone()),
     })
     .add_systems(
         Update,
@@ -54,7 +90,6 @@ fn replay(
     time: Res<Time>,
     clock: Res<ShotClock>,
     mut cue: ResMut<Replay>,
-    vocabulary: Option<Res<ShotVocabulary>>,
     player: Query<&CombatantId, With<Controlled>>,
     opponent: Query<(&CombatantId, &CombatantLife), (With<Tank>, Without<Controlled>)>,
     mut store: ResMut<ShotExplanations>,
@@ -73,31 +108,19 @@ fn replay(
     let report = cue
         .report
         .take()
-        .expect("an unfired replay holds its parsed report");
-    let recorded = RecordedShot {
-        life: Some(TankLife { combatant, life }),
-        shot: Some(ShotId {
+        .expect("an unfired replay holds its admitted payload");
+    let built = report.payload.replay(
+        ShotId {
             combatant: shooter,
             weapon: 0,
             fire_tick: clock.0.raw(),
-        }),
-        encounter: 0,
-        contact_tick: clock.0.raw(),
-        completion_tick: clock.0.raw(),
-        outcome: None,
-        hull: None,
-        report,
-    };
-    let vocabulary = vocabulary.expect("the offline duel builds its vocabulary before possession");
-    let built = BuiltExplanation::build(&vocabulary, &recorded).unwrap_or_else(|error| {
-        super::plan::refuse(super::plan::PlanError::Field(format!(
-            "corner.report: {error}; use a report from this build's tank and round vocabulary"
-        )))
-    });
+        },
+        TankLife { combatant, life },
+    );
     for (recipient, explanation) in built.projections() {
         if recipient == shooter {
             assert_eq!(
-                store.receive_drawn(explanation, &vocabulary, time.elapsed_secs_f64()),
+                store.receive_drawn(explanation, &report.vocabulary, time.elapsed_secs_f64()),
                 Receipt::Stored,
                 "a fresh offline replay decodes against the vocabulary that encoded it"
             );
@@ -109,7 +132,7 @@ fn replay(
 mod tests {
     use super::*;
     use crate::damage_cam::delivery::ImpactPresence;
-    use crate::damage_cam::delivery::tests::{SHOOTER, STRUCK, vocabulary};
+    use crate::damage_cam::delivery::tests::{SHOOTER, STRUCK};
     use crate::damage_cam::wire::Audience;
 
     /// The game's damage-model capture must reach the real shooter's store once at its cue,
@@ -126,8 +149,6 @@ mod tests {
             .init_resource::<ShotClock>()
             .init_resource::<ShotExplanations>();
         install(&mut app, &cue);
-        let words = vocabulary(app.world().resource::<Replay>().report.as_ref().unwrap());
-        app.insert_resource(words);
         app.world_mut().spawn((Controlled, SHOOTER));
         app.world_mut().spawn((Tank, STRUCK, CombatantLife(0)));
         app.update();
