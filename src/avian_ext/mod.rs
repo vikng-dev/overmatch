@@ -11,6 +11,7 @@
 pub mod attachment;
 pub mod child_poses;
 pub mod rest_test;
+pub mod sleeping_increments;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -25,4 +26,5 @@ pub fn plugin(app: &mut App) {
     app.get_schedule_mut(PhysicsSchedule)
         .expect("avian_ext::plugin is added after Avian's PhysicsPlugins")
         .add_systems(child_poses::place_child_colliders.in_set(PhysicsStepSystems::First));
+    sleeping_increments::plugin(app);
 }

@@ -187,6 +187,53 @@ fn a_woken_body_takes_only_its_first_steps_gravity() {
     );
 }
 
+/// A force written to a sleeping body acts in its first step awake. The waking `Forces` call wakes
+/// the island only after that step's solve, so the body sits that step out; who relies on it: any
+/// force the server writes to a resting body. A mutant that clears a sleeper's increments at the
+/// step's end loses the force; stock Avian scales it by the substep before the body wakes.
+/// Fixture: a free body held asleep under no gravity, one force for one step.
+#[test]
+fn a_force_on_a_sleeper_acts_in_its_first_step_awake() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let free = body(&mut app, Vec3::ZERO);
+    app.update();
+    app.update();
+    app.world_mut().entity_mut(free).insert(Sleeping);
+    for _ in 0..4 {
+        app.update();
+    }
+    let force = Vec3::X * 10.0;
+    app.world_mut()
+        .run_system_once(move |mut bodies: Query<Forces>| {
+            bodies
+                .get_mut(free)
+                .expect("the fixture body takes forces")
+                .apply_force(force);
+        })
+        .expect("the force applies");
+    app.update();
+    app.update();
+    assert!(app.world().get::<Sleeping>(free).is_none());
+    let step = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let mass = app
+        .world()
+        .get::<ComputedMass>(free)
+        .expect("a dynamic body")
+        .value();
+    let gained = app.world().get::<LinearVelocity>(free).unwrap().0;
+    let expected = force / mass * step;
+    // Resolution: f32 summation over the substeps.
+    assert!(
+        (gained - expected).length() <= 1e-4 * expected.length(),
+        "the woken body gained {gained}, the force gives {expected}"
+    );
+}
+
 /// Physics users need corrupt island membership refused rather than a partly woken island.
 /// Missing required body state must not terminate the linked-list walk silently.
 #[test]
