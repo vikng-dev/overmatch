@@ -1523,7 +1523,7 @@ mod tests {
     /// field gets a distinct sample, so a missing push or crossed window fails. Off fetches no
     /// physics resources. The subprocess isolates the operator's environment from other tests.
     #[test]
-    fn install_records_the_freeze_bracket_only_when_armed() {
+    fn install_records_the_freeze_upper_bound_only_when_armed() {
         use crate::debris::DebrisPiece;
         use avian3d::prelude::*;
         use bevy::ecs::system::RunSystemOnce;
@@ -1534,7 +1534,7 @@ mod tests {
                 let mut command = std::process::Command::new(std::env::current_exe().unwrap());
                 command.args([
                     "--exact",
-                    "net::server_stats::tests::install_records_the_freeze_bracket_only_when_armed",
+                    "net::server_stats::tests::install_records_the_freeze_upper_bound_only_when_armed",
                     "--nocapture",
                 ]).env(CHILD, if armed { "on" } else { "off" }).env_remove("OVERMATCH_RAM");
                 if armed {

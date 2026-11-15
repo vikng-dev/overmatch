@@ -74,8 +74,9 @@
 //! when the body has a solid collider (`Reach::of`); it evaluates each awake body that is not
 //! static, and each piece the thaw frees. The freeze and the thaw evaluate it serially; whether
 //! splitting that evaluation over the compute pool pays on the hosted allocation is unmeasured.
-//! With server stats armed, [`census`] brackets awake rested pieces outside the tick, evaluating
-//! reach in parallel. With no server stats recorder, that census fetches nothing and casts no query.
+//! With server stats armed, [`census`] gives an upper bound on freezable awake pieces outside the
+//! tick, evaluating reach in parallel. With no server stats recorder, that census fetches nothing
+//! and casts no query.
 //! Diagnostic queries do not enter the freeze/thaw work tally.
 //! The `Changed<…>` filter of `super::wake_on_static_moved` walks every attached collider each
 //! step, about 2 µs per 1,000 colliders on the perf profile (MEASURED), and stays unindexed.
@@ -497,6 +498,7 @@ pub(crate) struct Census<'w, 's> {
     time_to_sleep: Res<'w, TimeToSleep>,
     reach: Reach<'w, 's>,
     counts: ResMut<'w, FreezeCounts>,
+    classified: Local<'s, Parallel<(usize, BTreeSet<Entity>)>>,
     reached_by_moving: Local<'s, Parallel<BTreeSet<Entity>>>,
 }
 
@@ -507,9 +509,8 @@ pub(crate) struct Census<'w, 's> {
 /// clock fixed throughout `FixedMain`, so reach also uses the same dt.
 ///
 /// Temporary instrument for the #379 decision: measuring the freezable fraction on the hosted
-/// ram scene; delete it when that decision is made. Classification is serial because it runs
-/// outside the timed tick over at most the awake pieces. Spatial queries run in parallel,
-/// with thread-local hits reduced here.
+/// ram scene; delete it when that decision is made. Classification and spatial queries run in
+/// parallel, with worker-local outputs reduced before their consumers.
 /// Avian's `BodyIslandNode` excludes disabled and static movers by construction (`Reach::movers`).
 pub(crate) fn census(p: Census) {
     let Census {
@@ -518,15 +519,25 @@ pub(crate) fn census(p: Census) {
         time_to_sleep,
         reach,
         mut counts,
+        mut classified,
         mut reached_by_moving,
     } = p;
+    let outputs = &*classified;
+    awake.pieces.par_iter().for_each(|(piece, body, timer)| {
+        if body.is_dynamic() {
+            outputs.scope(|(awake, rested)| {
+                *awake += 1;
+                if timer.0 >= time_to_sleep.0 {
+                    rested.insert(piece);
+                }
+            });
+        }
+    });
     let mut awake_count = 0;
     let mut rested = BTreeSet::new();
-    for (piece, timer) in awake.iter() {
-        awake_count += 1;
-        if timer.0 >= time_to_sleep.0 {
-            rested.insert(piece);
-        }
+    for (count, pieces) in classified.iter_mut() {
+        awake_count += std::mem::take(count);
+        rested.append(pieces);
     }
     let rested_count = rested.len();
     if !rested.is_empty() {
