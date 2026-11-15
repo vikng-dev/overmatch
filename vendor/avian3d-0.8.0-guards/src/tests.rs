@@ -15,3 +15,9 @@ mod avian_broad_phase_layers;
 
 #[path = "../../../src/tests/avian_island_sleep.rs"]
 mod avian_island_sleep;
+
+#[path = "../../../src/tests/avian_body_query_gap.rs"]
+mod avian_body_query_gap;
+
+#[path = "../../../src/tests/avian_narrow_phase.rs"]
+mod avian_narrow_phase;

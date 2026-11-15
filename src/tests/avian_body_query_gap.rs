@@ -1,19 +1,19 @@
-//! UPSTREAM TRIPWIRE for the avian3d 0.7 narrow-phase defect that the net client's all-static
+//! UPSTREAM TRIPWIRE for the avian3d narrow-phase defect that the net client's all-static
 //! physics world routes around (`apply_launched_turret_pose` in `net::protocol` launches the
 //! client's turret as a static body). Full decode and suggested upstream fix:
 //! `upstream/avian-body-query-gap-stale-constraints.md`.
 //!
-//! The mechanism, in avian3d 0.7 (`collision/narrow_phase/system_param.rs`, `update_contacts` and
-//! `update`): a pair generates contact constraints only while both colliders' bodies match the
-//! narrow phase's body query, whose `RigidBodyQuery` needs the body's `Position`. When a body
-//! leaves that query, its pairs' generate-constraints flag clears but the constraint graph keeps
-//! their manifold handles. When the body comes back, the pair's started-generating status pushes
-//! one handle per manifold again on top of the kept ones. `prepare_contact_constraints`
-//! (`dynamics/solver/plugin.rs:398`) indexes the pair's manifolds with every handle before it looks
-//! at the flag, so the first handle past the end panics: "index out of bounds: the len is 1 but the
-//! index is 1". The gap staged here is the one lightyear's interpolation makes on the client: at a
-//! resync of its timeline it removes `Position` from every interpolated body for a frame, then
-//! inserts it again.
+//! The mechanism, in avian3d 0.8.0 as in 0.7 (`collision/narrow_phase/system_param.rs`,
+//! `update_contacts` and `update`): a pair generates contact constraints only while both colliders'
+//! bodies match the narrow phase's body query, whose `RigidBodyQuery` needs the body's `Position`.
+//! When a body leaves that query, its pairs' generate-constraints flag clears but the constraint
+//! graph keeps their manifold handles. When the body comes back, the pair's started-generating
+//! status pushes one handle per manifold again on top of the kept ones.
+//! `prepare_contact_constraints` (`dynamics/solver/plugin.rs`) indexes the pair's manifolds with
+//! every handle before it looks at the flag, so the first handle past the end panics: "index out of
+//! bounds: the len is 1 but the index is 1". The gap staged here is the one lightyear's
+//! interpolation makes on the client: at a resync of its timeline it removes `Position` from every
+//! interpolated body for a frame, then inserts it again.
 //!
 //! **IF `a_body_query_gap_still_panics_the_solver` FAILS, avian fixed the bookkeeping.** The test
 //! is inverted on purpose: it passes while upstream is broken, so its failure is the retirement
@@ -22,12 +22,13 @@
 //! fix.
 //!
 //! `IslandPlugin` is off. With it on, a build with debug assertions stops one call earlier on the
-//! same double add, at the island manager's `debug_assert!(contact.island.is_none())`
-//! (`dynamics/solver/islands/mod.rs:518`); a release build, the shipped client, goes on to the
-//! solver's index panic.
+//! same double add, at the island manager's
+//! `debug_assert!(self.contact_node(contact_id).is_none())` (`dynamics/solver/islands/mod.rs`,
+//! MEASURED on 0.8.0); a release build, the shipped client, goes on to the solver's index panic.
 //!
 //! The panic is raised on a compute-pool thread and resumed on this one, so `catch_unwind` observes
-//! it. A `thread ... panicked at ... plugin.rs:398` line in the test output is EXPECTED here.
+//! it. A `thread ... panicked at ... dynamics/solver/plugin.rs` line in the test output is EXPECTED
+//! here.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Duration;
@@ -111,6 +112,6 @@ fn a_body_query_gap_still_panics_the_solver() {
         .unwrap_or_else(|| "<non-string panic payload>".into());
     assert!(
         message.contains("index out of bounds: the len is 1 but the index is 1"),
-        "expected the plugin.rs:398 manifold-index panic, got a different one: {message}",
+        "expected the solver's manifold-index panic, got a different one: {message}",
     );
 }

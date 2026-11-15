@@ -161,3 +161,21 @@ unscaled, in its first step awake. A clear alone loses that force: MEASURED, the
 Guards: `src/tests/avian_island_sleep.rs` (`a_woken_body_takes_only_its_first_steps_gravity`,
 `a_force_on_a_sleeper_acts_in_its_first_step_awake`). Local upstream draft:
 `upstream/avian-sleeping-velocity-increments.md`.
+
+## Unreadable pair state (`src/collision/narrow_phase/system_param.rs`): kept
+
+`update_contacts` reads a pair's two colliders and their bodies. It skips a pair whose colliders it
+cannot fetch only when one is of another collider type (that type's narrow phase updates the pair)
+or unposed (a client's replication lifted its pose for a frame); disabled and removed colliders
+lose their pairs first (`remove_collider_on`). It reads a body outside its body query as no body
+only when the body is disabled (`RigidBodyDisabled` or `Disabled`, whose pairs generate no
+constraints) or unposed. Anything else has lost a component every collider or body carries, and
+panics naming the pair or the body; upstream skips the pair or reads the body as absent, unseen.
+
+Kept: both reads are inside the private per-pair closure. 57 fork lines (MEASURED; two filter
+queries on `NarrowPhase` and the two checks).
+
+Guards: `src/tests/avian_narrow_phase.rs` (two refusals, red on stock 0.8.0, MEASURED; two
+legitimate absences). Upstream's own defect on the same path, a body leaving and re-entering the
+body query, still panics the solver on 0.8.0 (MEASURED by the tripwire
+`src/tests/avian_body_query_gap.rs`); record: `upstream/avian-body-query-gap-stale-constraints.md`.
