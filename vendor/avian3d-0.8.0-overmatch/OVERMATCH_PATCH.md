@@ -179,3 +179,12 @@ Guards: `src/tests/avian_narrow_phase.rs` (two refusals, red on stock 0.8.0, MEA
 legitimate absences). Upstream's own defect on the same path, a body leaving and re-entering the
 body query, still panics the solver on 0.8.0 (MEASURED by the tripwire
 `src/tests/avian_body_query_gap.rs`); record: `upstream/avian-body-query-gap-stale-constraints.md`.
+
+## Disabled colliders in continuous collision (`src/dynamics/ccd/mod.rs`): kept until upstream releases #1101
+
+`solve_continuous` fetches each fast body's colliders through a query without
+`Without<ColliderDisabled>`, so a disabled collider still attached to a fast body (its
+`RigidBodyColliders` keeps it) is swept and can stop the body at an impact it does not take part in.
+Upstream fixed it after 0.8.0 (avian #1101) by adding the filter; the fork carries that line. 6 fork
+lines (MEASURED, the query reformatted). No guard of the game's; drop the patch with the release
+that carries #1101.
