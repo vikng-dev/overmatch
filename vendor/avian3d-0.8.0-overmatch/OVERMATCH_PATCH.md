@@ -188,3 +188,33 @@ body query, still panics the solver on 0.8.0 (MEASURED by the tripwire
 Upstream fixed it after 0.8.0 (avian #1101) by adding the filter; the fork carries that line. 6 fork
 lines (MEASURED, the query reformatted). No guard of the game's; drop the patch with the release
 that carries #1101.
+
+## Moved-collider bounds prune (`src/collider_tree/update.rs`, `src/collider_tree/diagnostics.rs`): kept
+
+`update_moved_collider_aabbs` (`ColliderTreeSystems::UpdateAabbs`, every physics step) fetches
+every enabled collider's pose, shape, bounds and proxy key, then skips those whose `Position`,
+`Rotation` and shape ticks are not newer than `LastPhysicsTick`. On the product map that is
+thousands of standing static colliders fetched every step for nothing.
+
+The patch adds a third query to the system's `ParamSet`, the same data filtered
+`Or<(Changed<Position>, Changed<Rotation>, Changed<C>)>`, so a collider whose ticks did not move
+since the system's previous run costs the filter's three tick reads. Upstream's per-collider body,
+its `LastPhysicsTick` check included, is unchanged and runs for every collider the filter passes.
+That is exact while `LastPhysicsTick` is newer than the system's previous run: every tick newer
+than `LastPhysicsTick` is then newer than that run, so the filter passes every collider the check
+accepts. `update_last_physics_tick` runs after this system in every step, so inside the physics
+schedule it always holds; the game's other runs of the system (ballistics and the construction's
+refit, between steps) take the unfiltered query whenever it does not. The filtered query iterates
+with Bevy's `par_iter_mut` directly: Avian's `par_for_each_mut` counts its query first, which for
+a change filter is a second pass over every collider.
+
+`ColliderTreeDiagnostics::moved_aabb_candidates` counts the colliders the pass examined this step,
+per thread and summed once; it is the one observable of the prune.
+
+Kept: a query filter inside one upstream system, which has no extension point; replacing the
+system means replacing the plugin. 72 fork lines (MEASURED: 63 in the update, 9 in the
+diagnostics).
+
+Guard: `src/tests/avian_moved_aabb_prune.rs` (standing static colliders are not examined, red with
+the prune bypassed, MEASURED: 4 examined; a static collider moved, rescaled, added or removed
+reaches the collider trees). Record: `upstream/avian-moved-aabb-prune.md`.

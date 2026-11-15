@@ -21,3 +21,6 @@ mod avian_body_query_gap;
 
 #[path = "../../../src/tests/avian_narrow_phase.rs"]
 mod avian_narrow_phase;
+
+#[path = "../../../src/tests/avian_moved_aabb_prune.rs"]
+mod avian_moved_aabb_prune;

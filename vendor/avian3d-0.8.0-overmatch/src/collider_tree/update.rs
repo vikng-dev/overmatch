@@ -18,7 +18,7 @@ use bevy::{
     ecs::{
         change_detection::Tick,
         entity_disabling::Disabled,
-        query::QueryFilter,
+        query::{QueryFilter, QueryItem},
         system::{StaticSystemParam, SystemChangeTick},
     },
     platform::collections::HashMap,
@@ -858,24 +858,32 @@ fn update_solver_body_aabbs<C: AnyCollider>(
     diagnostics.update += start.elapsed();
 }
 
+// OVERMATCH PATCH: the data `update_moved_collider_aabbs` reads per collider.
+type MovedCollider<C> = (
+    Entity,
+    Ref<'static, Position>,
+    Ref<'static, Rotation>,
+    &'static mut ColliderAabb,
+    &'static mut EnlargedAabb,
+    &'static mut ColliderAabbMargin,
+    Ref<'static, C>,
+    Option<&'static CollisionMargin>,
+    &'static ColliderTreeProxyKey,
+);
+
 /// Updates the AABBs of colliders that have been manually moved after the previous physics step.
 pub fn update_moved_collider_aabbs<C: AnyCollider>(
     mut colliders: ParamSet<(
-        Query<
-            (
-                Entity,
-                Ref<Position>,
-                Ref<Rotation>,
-                &mut ColliderAabb,
-                &mut EnlargedAabb,
-                &mut ColliderAabbMargin,
-                Ref<C>,
-                Option<&CollisionMargin>,
-                &ColliderTreeProxyKey,
-            ),
-            Without<ColliderDisabled>,
-        >,
+        Query<MovedCollider<C>, Without<ColliderDisabled>>,
         Query<&EnlargedAabb, Without<ColliderDisabled>>,
+        // OVERMATCH PATCH: the same colliders, pruned on their change ticks alone.
+        Query<
+            MovedCollider<C>,
+            (
+                Without<ColliderDisabled>,
+                Or<(Changed<Position>, Changed<Rotation>, Changed<C>)>,
+            ),
+        >,
     )>,
     narrow_phase_config: Res<NarrowPhaseConfig>,
     length_unit: Res<PhysicsLengthUnit>,
@@ -910,11 +918,16 @@ pub fn update_moved_collider_aabbs<C: AnyCollider>(
 
     // TODO: This doesn't do velocity-based enlargement like the dynamic/kinematic AABB update.
     //       We should overall rework CCD to not rely on velocity-based AABB enlargement for all bodies.
-    // TODO: par-iter over all colliders, check if they have actually changed since the `LastPhysicsTick`
-    let mut collider_query = colliders.p0();
-    collider_query.par_for_each_mut(
-        MIN_PAR_ITER_ENTITIES,
-        |(
+    // OVERMATCH PATCH: examine only the colliders whose pose or shape changed since this system's
+    // previous run, pruned by the query's change filter, so a standing collider costs its three
+    // tick reads. Exact while `LastPhysicsTick` is newer than that run, as
+    // `update_last_physics_tick`, running after this system in every step, makes it: every collider
+    // the tick check below accepts then passes the filter. Any other run examines every collider.
+    let examined = ThreadLocal::<core::cell::Cell<u32>>::new();
+    let update_moved = |item: QueryItem<'_, '_, MovedCollider<C>>| {
+        let count = examined.get_or_default();
+        count.set(count.get() + 1);
+        let (
             entity,
             pos,
             rot,
@@ -924,7 +937,9 @@ pub fn update_moved_collider_aabbs<C: AnyCollider>(
             collider,
             collision_margin,
             proxy_key,
-        )| {
+        ) = item;
+        // OVERMATCH PATCH: upstream's per-collider body, unchanged.
+        {
             // Skip if the collider's AABB can't have changed since the last physics tick.
             let collider_changed = collider.last_changed().is_newer_than(last_tick.0, this_run);
             if !pos.last_changed().is_newer_than(last_tick.0, this_run)
@@ -980,8 +995,16 @@ pub fn update_moved_collider_aabbs<C: AnyCollider>(
 
                 thread_local_bit_vec.set(proxy_key.id().index());
             }
-        },
-    );
+        }
+    };
+    if last_tick.0.is_newer_than(system_tick.last_run(), this_run) {
+        colliders.p2().par_iter_mut().for_each(update_moved);
+    } else {
+        colliders
+            .p0()
+            .par_for_each_mut(MIN_PAR_ITER_ENTITIES, update_moved);
+    }
+    diagnostics.moved_aabb_candidates += examined.into_iter().map(|n| n.into_inner()).sum::<u32>();
 
     // Reinsert moved proxies in each tree.
     let aabb_query = colliders.p1();
