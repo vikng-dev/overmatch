@@ -994,8 +994,7 @@ pub fn run_bitprobe() -> Result<(), BitprobeError> {
 mod tests {
     use super::*;
 
-    /// The differential instrument needs a fresh real driving pass every fixed tick, including
-    /// neutral settling that would otherwise let the hull sleep.
+    /// The differential instrument relies on `spawn_fixture`'s every-tick driving contract.
     #[test]
     fn fixture_captures_one_driving_pass_per_settling_tick() {
         let mut app = build_app();
