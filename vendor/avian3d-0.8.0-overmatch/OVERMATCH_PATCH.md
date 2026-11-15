@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 722 in all (MEASURED), 644 in upstream files and 78 in the
+of `src/` against the published crate: 724 in all (MEASURED), 646 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -452,9 +452,12 @@ the floor Avian 0.8.0 gives its other per-body loops (`MIN_PAR_ITER_ENTITIES`, 4
 the 0.7 fork's measured 1,500 is not carried). Each body hands its island and rest time to a
 per-thread list; the islands' effects then commit in any order to one result: the wake bits are a
 union, and the split candidate is the sleepiest island, a tie going to the lesser island id
-(upstream's serial loop kept the first in query order).
+(upstream's serial loop kept the first in query order). A body whose `SolverBodyIndex` names no
+live `SolverBodies` slot panics ("every indexed awake body has a live SolverBodies slot"), where
+upstream skipped it unseen, its timer and its island's wake vote with it: an index is inserted after
+its slot is pushed and removed with it.
 
-Kept as a hook: the test sits inside an upstream system. 141 fork lines (MEASURED: 135 in the
+Kept as a hook: the test sits inside an upstream system. 143 fork lines (MEASURED: 137 in the
 system's file, the loop body re-indented under the parallel pass, and 6 in the re-export).
 
 Guards: in `src/tests/avian_island_sleep.rs`, the rest tests, all green. Without the game's law

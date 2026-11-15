@@ -268,9 +268,11 @@ fn update_sleeping_states(
     query.par_for_each_mut(
         MIN_PAR_ITER_ENTITIES,
         |(mut sleep_timer, sleep_threshold, index, island_data, mass, inertia, rotation)| {
-            let Some(solver_body) = solver_bodies.get(*index) else {
-                return;
-            };
+            // OVERMATCH PATCH: an index is inserted after its slot is pushed and removed with it,
+            // so a miss is broken bookkeeping, not a body to skip.
+            let solver_body = solver_bodies
+                .get(*index)
+                .expect("every indexed awake body has a live SolverBodies slot");
             // OVERMATCH PATCH: the rest test is a hook.
             if (rest_test.0)(
                 solver_body,
