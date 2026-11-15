@@ -121,6 +121,12 @@ fn wake_on_remove_sleeping(mut world: DeferredWorld, ctx: HookContext) {
         return;
     }
 
+    // OVERMATCH PATCH: this body has lost `Sleeping` by the time the queued wake runs, which
+    // restarts only sleeping bodies' rest intervals.
+    world
+        .get_mut::<SleepTimer>(ctx.entity)
+        .expect("every island body retains its SleepTimer")
+        .0 = 0.0;
     world.commands().queue_silenced(WakeBody(ctx.entity));
 }
 
@@ -459,6 +465,7 @@ struct CachedIslandWakingSystemState(
             &'static BodyIslandNode,
             &'static mut SleepTimer,
             Option<&'static RigidBodyColliders>,
+            Has<Sleeping>, // OVERMATCH PATCH
         )>,
         SResMut<PhysicsIslands>,
         SResMut<ContactGraph>,
@@ -516,11 +523,12 @@ impl Command for WakeIslands {
                     let mut body = island.head_body;
 
                     while let Some(entity) = body {
-                        let Ok((body_island, mut sleep_timer, colliders)) = bodies.get_mut(entity)
-                        else {
-                            body = None;
-                            continue;
-                        };
+                        // OVERMATCH PATCH: a broken link panics rather than leave the island
+                        // partly awake.
+                        let (body_island, mut sleep_timer, colliders, was_sleeping) =
+                            bodies.get_mut(entity).expect(
+                                "every linked island body retains BodyIslandNode and SleepTimer",
+                            );
 
                         // Transfer the contact pairs to the awake set, and add touching contacts to the constraint graph.
                         if let Some(colliders) = colliders {
@@ -541,7 +549,10 @@ impl Command for WakeIslands {
 
                         bodies_to_wake.push(entity);
                         body = body_island.next;
-                        sleep_timer.0 = 0.0;
+                        // OVERMATCH PATCH: a merged island's awake members keep their rest time.
+                        if was_sleeping {
+                            sleep_timer.0 = 0.0;
+                        }
                     }
                 }
             }

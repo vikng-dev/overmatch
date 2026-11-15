@@ -376,6 +376,27 @@ Mutants, each red (MEASURED): an awake side counted as resting (the impact test)
 the sleeping set (the stationary, closed-miss and impulse tests), no island link (the closed-miss
 test).
 
+## Island rest history (`src/dynamics/solver/islands/sleeping.rs`): kept
+
+Subject: the game's rigid-body rest, server physics, game state only.
+
+Rest history belongs to each body. `WakeIslands` restarts the rest interval (`SleepTimer`) of the
+bodies that were sleeping only: an island merged from an awake and a sleeping one is marked sleeping
+(`merge_islands`), and upstream's wake zeroed the awake members' timers with the rest. The removal
+hook of `Sleeping` restarts its own body's interval, which has lost the marker by the time its
+queued wake runs. A linked body without `BodyIslandNode` or `SleepTimer` panics in the wake
+("every linked island body retains BodyIslandNode and SleepTimer"), where upstream ended the walk
+and left the island partly awake.
+
+Kept: the timer reset and the walk sit inside an upstream command and hook. 23 fork lines
+(MEASURED).
+
+Guards: in `src/tests/avian_island_sleep.rs`,
+`waking_a_merged_island_preserves_already_awake_rest_time` and
+`a_linked_body_without_sleep_timer_is_refused`, both red on upstream 0.8.0 (MEASURED), and
+`removing_sleeping_restarts_the_woken_bodys_rest_interval`, red without the hook's reset (MEASURED).
+Record: `upstream/avian-island-rest-history.md`.
+
 ## Body-pair contact reduction: game-side
 
 Subject: the game's server physics, contacts between bodies, game state only.
