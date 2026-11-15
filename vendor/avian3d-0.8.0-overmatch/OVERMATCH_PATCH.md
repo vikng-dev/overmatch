@@ -39,7 +39,8 @@ child collider's `Position` and `Rotation` through `Mut` every step, changed or 
 collider of every body, static bodies included, was marked changed every step, and
 `update_moved_collider_aabbs`, which skips a collider whose pose and shape ticks did not move,
 recomputed all their bounds. On the product map that is every building element and tree segment,
-none of which moves. The function stays, unregistered, so the edit is the registration alone.
+none of which moves. The function stays, unregistered, so the edit is the registration alone
+(13 fork lines, MEASURED).
 
 The placement law is the game's (`avian_ext::child_poses`): `place_child_colliders`, which the game
 runs in `PhysicsStepSystems::First` (the slot upstream used) and at the frame boundary where
@@ -68,3 +69,19 @@ without it, 315 to 316 ms with it, about 2%; the hook form is not worth its fork
 Guard: `src/tests/avian_child_pose_churn.rs`
 (`a_collider_attached_to_a_body_without_a_global_transform_is_refused`; stock 0.8.0 does not
 panic, MEASURED).
+
+## Prepared collider mass (`src/collision/collider/parry/mod.rs`): kept
+
+`Collider::with_mass_properties_cache(density)` computes the current scaled shape's mass
+properties before insertion; `ComputeMassProperties::mass_properties` returns that value for the
+same density, and shape mutation, shape replacement and a changed scale drop it. The cache is cloned
+with the collider and skipped by serde. Sensors still install zero mass.
+
+Kept, because the value has to ride the collider into Avian's insertion hook: the `C` insert hook
+in `collision/collider/backend.rs` computes `C::mass_properties` and overwrites any
+`ColliderMassProperties` already on the entity, so a precomputed component is no attachment point,
+and short of a custom `AnyCollider` there is none. 21 fork lines (MEASURED).
+
+The game prepares the cache off the system thread for each construction chunk collider that is no
+sensor. Guard: `src/tests/avian_prepared_mass.rs` (it fails with the scale invalidation removed,
+MEASURED). Local upstream draft: `upstream/avian-prepared-collider-mass.md`.

@@ -3,3 +3,6 @@
 
 #[path = "../../../src/tests/avian_child_pose_churn.rs"]
 mod avian_child_pose_churn;
+
+#[path = "../../../src/tests/avian_prepared_mass.rs"]
+mod avian_prepared_mass;
