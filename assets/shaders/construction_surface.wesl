@@ -51,9 +51,9 @@ struct SurfaceParams {
 fn vertex(vertex_in: Vertex) -> VertexOutput {
     let vertex = decompress_vertex(vertex_in, vertex_in.instance_index);
     var out: VertexOutput;
-    let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
+    let world_from_local = mesh_functions::get_world_from_local(vertex_in.instance_index);
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
-        vertex.normal, vertex.instance_index);
+        vertex.normal, vertex_in.instance_index);
     out.world_position = mesh_functions::mesh_position_local_to_world(
         world_from_local, vec4(vertex.position, 1.0));
     out.position = position_world_to_clip(out.world_position.xyz);
@@ -67,14 +67,14 @@ fn vertex(vertex_in: Vertex) -> VertexOutput {
     out.color = vertex.color;
 }
     out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
-        world_from_local, vertex.tangent, vertex.instance_index);
+        world_from_local, vertex.tangent, vertex_in.instance_index);
 
 @if(VERTEX_OUTPUT_INSTANCE_INDEX) {
-    out.instance_index = vertex.instance_index;
+    out.instance_index = vertex_in.instance_index;
 }
 @if(VISIBILITY_RANGE_DITHER) {
     out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(
-        vertex.instance_index, world_from_local[3]);
+        vertex_in.instance_index, world_from_local[3]);
 }
     return out;
 }

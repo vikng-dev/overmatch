@@ -21,7 +21,7 @@ struct OutlineParams {
 @vertex
 fn vertex(vertex_in: Vertex) -> @builtin(position) vec4<f32> {
     let vertex = decompress_vertex(vertex_in, vertex_in.instance_index);
-    let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
+    let world_from_local = mesh_functions::get_world_from_local(vertex_in.instance_index);
     let world = world_from_local * vec4(vertex.position, 1.0);
     let center = world_from_local * vec4(outline.center.xyz, 1.0);
     var clip = view.clip_from_world * world;
