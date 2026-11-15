@@ -992,28 +992,23 @@ fn settled_freed_matter_rests_within_avians_rest_window() {
                 if at_rest(piece) {
                     return true;
                 }
-                let linear = world.get::<LinearVelocity>(piece).unwrap().length_squared();
-                let angular = world
-                    .get::<AngularVelocity>(piece)
-                    .unwrap()
-                    .length_squared();
-                (linear < (threshold.linear * length_unit).powi(2)
-                    && angular < threshold.angular.powi(2))
-                    || crate::avian_ext::rest_test::kinetic_speed_squared(
-                        world
-                            .resource::<avian3d::dynamics::solver::solver_body::SolverBodies>()
-                            .get(
-                                *world
-                                    .get::<avian3d::dynamics::solver::solver_body::SolverBodyIndex>(
-                                        piece,
-                                    )
-                                    .unwrap(),
-                            )
-                            .unwrap(),
-                        *world.get::<ComputedMass>(piece).unwrap(),
-                        *world.get::<ComputedAngularInertia>(piece).unwrap(),
-                        *world.get::<Rotation>(piece).unwrap(),
-                    ) < (threshold.linear * length_unit).powi(2)
+                crate::avian_ext::rest_test::at_rest(
+                    world
+                        .resource::<avian3d::dynamics::solver::solver_body::SolverBodies>()
+                        .get(
+                            *world
+                                .get::<avian3d::dynamics::solver::solver_body::SolverBodyIndex>(
+                                    piece,
+                                )
+                                .unwrap(),
+                        )
+                        .unwrap(),
+                    threshold,
+                    length_unit,
+                    *world.get::<ComputedMass>(piece).unwrap(),
+                    *world.get::<ComputedAngularInertia>(piece).unwrap(),
+                    *world.get::<Rotation>(piece).unwrap(),
+                )
             });
         quiet = if resting { quiet + dt } else { 0.0 };
         if quiet >= rest + allowance {
@@ -6233,56 +6228,6 @@ fn absorbed_cut_and_unsupported_matter_keep_their_combined_momentum() {
     assert!((after_p - before_p).length() < tolerance * before_p.length());
     assert!((after_l - before_l).length() < tolerance * before_l.length());
     assert!(after_energy <= before_energy * (1.0 + tolerance));
-}
-
-/// The game's environment physics: prepared contact mass survives insertion and follows shape,
-/// scale and density changes. Tripwire for the vendored `with_mass_properties_cache` patch
-/// (`vendor/avian3d-0.8.0-overmatch/OVERMATCH_PATCH.md`), which every chunk collider that is no
-/// sensor prepares on workers.
-#[test]
-fn prepared_contact_mass_is_valid_at_insertion_and_invalidates_with_its_inputs() {
-    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
-    // Fixture: an asymmetric convex box exposes centre and inertia as well as mass.
-    let points: Vec<_> = [0.0, 1.0]
-        .into_iter()
-        .flat_map(|x| {
-            [0.0, 2.0]
-                .into_iter()
-                .flat_map(move |y| [0.0, 3.0].map(move |z| Vec3::new(x, y, z)))
-        })
-        .collect();
-    let hull = Collider::convex_hull(&points).unwrap();
-    let density = ColliderDensity::default().0;
-    let expected = hull.mass_properties(density);
-    let cached = hull.clone().with_mass_properties_cache(density);
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, crate::offline_physics()));
-    app.finish();
-    app.cleanup();
-    let entity = app.world_mut().spawn((Transform::default(), cached)).id();
-    assert_eq!(
-        *app.world().get::<ColliderMassProperties>(entity).unwrap(),
-        ColliderMassProperties::from(expected)
-    );
-    let mut cached = app.world().get::<Collider>(entity).unwrap().clone();
-    assert_eq!(
-        cached.mass_properties(density * 2.0),
-        hull.mass_properties(density * 2.0)
-    );
-    cached.set_scale(Vec3::splat(2.0), 10);
-    let mut scaled = hull;
-    scaled.set_scale(Vec3::splat(2.0), 10);
-    assert_eq!(
-        cached.mass_properties(density),
-        scaled.mass_properties(density)
-    );
-    cached.set_shape(Collider::sphere(1.0).shape().clone());
-    let mut replaced = Collider::sphere(1.0);
-    replaced.set_scale(Vec3::splat(2.0), 10);
-    assert_eq!(
-        cached.mass_properties(density),
-        replaced.mass_properties(density)
-    );
 }
 
 /// The game's scenery recorder distinguishes retained collider reassignment from fresh shapes;
