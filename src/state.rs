@@ -66,7 +66,7 @@ pub(crate) fn primary_window<T>(result: Result<T, QuerySingleError>) -> Option<T
 
 /// Run condition: the primary window's cursor is captured (`grab_mode == Locked`). This is the
 /// license [`PlayerInputSet`] gates on — release the cursor (menu, pause, alt-tab) and every
-/// device-reading system idles, so the tank coasts instead of being driven by a freed cursor.
+/// device-reading system idles, so no freed cursor or key drives the tank.
 ///
 /// Returns `true` when there is NO primary window: the headless scripted harness has no cursor and
 /// drives the tank by writing `ActionState` directly (`net::harness::buffer_input`), and it never

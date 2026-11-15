@@ -440,7 +440,8 @@ pub struct AxisKeys {
 }
 
 /// Client-only persistent levers. Ownership changes discard both axes so a respawn or Tab swap
-/// cannot inherit a previous tank's cruise command. Repair brakes mask the request without
+/// cannot inherit a previous tank's cruise command; a window losing focus discards neither
+/// ([`Self::set_notches`]). Repair brakes mask the request without
 /// moving these levers. The game's damage model: an empty Driver station also masks the
 /// request without discarding it; staffing resumes the latest notch, including taps made while absent.
 /// No field is replicated.
@@ -461,6 +462,16 @@ impl DriveInput {
 
     pub(crate) fn notches(&self) -> crate::track::drive::DriveAxes {
         self.effective
+    }
+
+    /// The levers with every key up, for a window that has lost the keyboard: a set notch
+    /// stands until the player moves it. A lever still mid-press reads neutral, because the
+    /// release that decides between its tap and its hold was never gathered.
+    pub(crate) fn set_notches(&self) -> crate::track::drive::DriveAxes {
+        crate::track::drive::DriveAxes {
+            throttle: self.throttle.set_notch(),
+            steer: self.steer.set_notch(),
+        }
     }
 }
 
@@ -498,6 +509,13 @@ struct LeverPress {
 }
 
 impl AxisLever {
+    fn set_notch(&self) -> f32 {
+        match self.press {
+            Some(_) => 0.0,
+            None => self.notch,
+        }
+    }
+
     fn sample(&mut self, binding: &AxisKeys, keys: &ButtonInput<KeyCode>, now: f64) -> f32 {
         let feel = crate::track::drive::drive_feel();
         let (pos, neg) = (keys.pressed(binding.pos), keys.pressed(binding.neg));

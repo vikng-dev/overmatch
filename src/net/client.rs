@@ -2288,37 +2288,53 @@ pub(super) fn install_device_feed(app: &mut App) {
     );
 }
 
-/// File render-rate [`DeviceCommand`] into each tick's controlled `ActionState`; unowned slots
-/// or blocked input file idle so tanks coast and menu clicks do not fire. Device writers include
-/// drive/aim/range/crew UI; death flow neutralizes their device. Levels repeat across the frame,
-/// edges clear after its first tick. The reverse protocol bridge returns buffered input to
-/// `TankCommand`, never read here.
+/// File render-rate [`DeviceCommand`] into each tick's controlled `ActionState`. Unowned slots, a
+/// closed window, off-match screens and blocking overlays file idle, so tanks coast and menu
+/// clicks do not fire. An unfocused window files the drive levers' set notches and nothing else:
+/// cruise holds its pedal, and no key or button held at the focus loss stays on the wire. Device
+/// writers include drive/aim/range/crew UI; death flow neutralizes their device. Levels repeat
+/// across the frame, edges clear after its first tick. The reverse protocol bridge returns
+/// buffered input to `TankCommand`, never read here.
 fn feed_action_state(
     overlays: Res<crate::overlay::Overlays>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    drive_input: Res<crate::command::DriveInput>,
     mut device: ResMut<DeviceCommand>,
     mut slots: Query<
         (&mut ActionState<TankCommand>, Has<GameControlled>),
         With<InputMarker<TankCommand>>,
     >,
 ) {
-    // `overlay::input_blocked` also releases the cursor and gates `PlayerInputSet` through
-    // `state::cursor_locked`: drive/aim/respawn cannot latch while this idles commands, with
-    // no second inference to synchronize (menu/connect screen or unfocused window).
+    // `overlay::input_blocked` reads the same terms to release the cursor and gate
+    // `PlayerInputSet` through `state::cursor_locked`, so drive/aim/respawn cannot latch while
+    // this files no device, with no second inference to synchronize.
     let focused = match windows.single() {
-        Ok(window) => window.focused,
-        // The primary window has closed at exit: no device has focus, so file idle commands.
-        Err(QuerySingleError::NoEntities(_)) => false,
+        Ok(window) => Some(window.focused),
+        // The primary window has closed at exit: no player is left to drive for.
+        Err(QuerySingleError::NoEntities(_)) => None,
         Err(error @ QuerySingleError::MultipleEntities(_)) => {
             panic!("the device feed has exactly one primary window until exit: {error}")
         }
     };
-    let idle = crate::overlay::input_blocked(&overlays, focused);
+    let command = match focused {
+        None => TankCommand::default(),
+        // Off-match or under a blocking overlay, whatever the focus.
+        Some(_) if crate::overlay::input_blocked(&overlays, true) => TankCommand::default(),
+        Some(true) => device.0,
+        Some(false) => {
+            let set = drive_input.set_notches();
+            TankCommand {
+                throttle: set.throttle,
+                steer: set.steer,
+                ..default()
+            }
+        }
+    };
     for (mut state, controlled) in &mut slots {
-        state.0 = if idle || !controlled {
-            TankCommand::default()
+        state.0 = if controlled {
+            command
         } else {
-            device.0
+            TankCommand::default()
         };
     }
     device.0.clear_edges();
@@ -2476,6 +2492,7 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         world.init_resource::<crate::overlay::Overlays>();
+        world.init_resource::<crate::command::DriveInput>();
         world.init_resource::<DeviceCommand>();
         for _ in 0..2 {
             world.spawn((PrimaryWindow, Window::default()));
@@ -2484,12 +2501,26 @@ mod tests {
     }
 
     /// A closed window files neutral input and consumes the frame's edges, so a closing client
-    /// cannot keep its last drive level or replay a click when no window owns the device.
+    /// cannot keep its last drive level, a set cruise notch included, or replay a click when no
+    /// window owns the device. Mutant: a closed window taken for an unfocused one files the notch.
     #[test]
     fn device_feed_files_idle_when_the_window_has_closed() {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
-        world.init_resource::<crate::overlay::Overlays>();
+        let mut overlays = crate::overlay::Overlays::default();
+        overlays.declare_in_match(true);
+        world.insert_resource(overlays);
+        // One throttle tap through the shipped gather sets a notch.
+        let bindings = crate::command::Bindings::default();
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(bindings.throttle.pos);
+        keys.release(bindings.throttle.pos);
+        world.insert_resource(bindings);
+        world.insert_resource(keys);
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<crate::firecontrol::Ranging>();
+        world.init_resource::<Time<Real>>();
+        world.init_resource::<crate::command::DriveInput>();
         world.insert_resource(DeviceCommand(TankCommand {
             throttle: 1.0,
             fire_primary: true,
@@ -2503,8 +2534,20 @@ mod tests {
                 }),
                 InputMarker::<TankCommand>::default(),
                 GameControlled,
+                TankCommand::default(),
             ))
             .id();
+        world
+            .run_system_once(crate::command::gather_commands)
+            .unwrap();
+        assert_ne!(
+            world
+                .resource::<crate::command::DriveInput>()
+                .set_notches()
+                .throttle,
+            0.0,
+            "the tap sets a notch"
+        );
         world.run_system_once(feed_action_state).unwrap();
         assert_eq!(
             world.get::<ActionState<TankCommand>>(slot).unwrap().0,

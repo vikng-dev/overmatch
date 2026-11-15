@@ -259,8 +259,9 @@ fn step(server: &mut App, client: &mut App) -> Vec<(u32, TankCommand)> {
 }
 
 /// A connected server and client with W, D and Space held, once the client has filed more than
-/// twice the input delay and the server has received input, on frames of `frame_ticks` fixed
-/// ticks. The server, the client and the tank.
+/// twice the input delay, the server has received input, and the keys have been held for more
+/// whole frames than the authored tap window spans, so each is a hold at full level. On frames of
+/// `frame_ticks` fixed ticks. The server, the client and the tank.
 fn connected(frame_ticks: u32) -> (App, App, Entity) {
     let port = free_port();
     let mut server = build_server(port);
@@ -277,6 +278,16 @@ fn connected(frame_ticks: u32) -> (App, App, Entity) {
         if client.world().resource::<Filed>().0.len() > 2 * delay
             && !server.world().resource::<Received>().0.is_empty()
         {
+            // No input plugin clears the press's edges: the keys keep only their held level.
+            client
+                .world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .clear();
+            let frame_s = (TICK * frame_ticks).as_secs_f64();
+            let tap_window_s = crate::track::drive::drive_feel().tap_window_s.0;
+            for _ in 0..=(tap_window_s / frame_s) as u32 {
+                step(&mut server, &mut client);
+            }
             return (server, client, tank);
         }
     }
@@ -513,6 +524,91 @@ fn every_tick_of_a_frame_files_the_devices_command() {
         1,
         "the server receives the click attested on one tick"
     );
+}
+
+/// A cruise notch is the player's standing setting, a held key is not: while the window is
+/// unfocused every tick files, and the server receives, the set throttle notch and nothing else,
+/// whatever keys the device still reports held; with focus back the same notch is filed, not a
+/// fresh one. Mutants: an unfocused feed that files idle drops the pedal; one that files the
+/// device's command keeps the held steer and sustained fire on the wire.
+#[test]
+fn a_set_cruise_notch_outlasts_a_focus_loss_and_held_keys_do_not() {
+    /// One client frame after `edit` to the keys. No input plugin clears their edges, so this does.
+    fn keyed_step(
+        server: &mut App,
+        client: &mut App,
+        edit: impl FnOnce(&mut ButtonInput<KeyCode>),
+    ) -> Vec<(u32, TankCommand)> {
+        edit(&mut client.world_mut().resource_mut::<ButtonInput<KeyCode>>());
+        let filed = step(server, client);
+        client
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        filed
+    }
+
+    let _udp = lock_real_udp_test();
+    let (mut server, mut client, _) = connected(TICKS_PER_FRAME);
+    // W's release ends its hold; D and Space stay held.
+    keyed_step(&mut server, &mut client, |keys| keys.release(KeyCode::KeyW));
+    // Pressed and released within one frame, a tap is a tap whatever the authored window.
+    let focused = keyed_step(&mut server, &mut client, |keys| {
+        keys.press(KeyCode::KeyW);
+        keys.release(KeyCode::KeyW);
+    });
+    let notch = crate::track::drive::drive_feel().notch_step();
+    let cruising = |command: &TankCommand| {
+        command.throttle == notch && command.steer == 1.0 && command.fire_secondary
+    };
+    assert!(
+        focused.iter().all(|(_, command)| cruising(command)),
+        "focused, the notch and the held keys are filed: {focused:?}"
+    );
+
+    let set_focus = |client: &mut App, focused: bool| {
+        let world = client.world_mut();
+        world
+            .query_filtered::<&mut Window, With<PrimaryWindow>>()
+            .single_mut(world)
+            .expect("the client has its one primary window")
+            .focused = focused;
+    };
+    set_focus(&mut client, false);
+    let mut unfocused = Vec::new();
+    for _ in 0..PHASE_FRAMES {
+        unfocused.extend(step(&mut server, &mut client));
+    }
+    let pedal_only = |command: &TankCommand| {
+        *command
+            == TankCommand {
+                throttle: notch,
+                for_tick: command.for_tick,
+                ..default()
+            }
+    };
+    for (tick, command) in &unfocused {
+        assert!(
+            pedal_only(command),
+            "tick {tick} filed {command:?} unfocused"
+        );
+    }
+
+    set_focus(&mut client, true);
+    let refocused = step(&mut server, &mut client);
+    assert!(
+        refocused.iter().all(|(_, command)| cruising(command)),
+        "focused again, the same notch is filed: {refocused:?}"
+    );
+    for _ in 0..PHASE_FRAMES {
+        step(&mut server, &mut client);
+    }
+    for (tick, command) in received_on(&server, &ticks(&unfocused)) {
+        assert!(
+            pedal_only(&command),
+            "the server received {command:?} for unfocused tick {tick}"
+        );
+    }
 }
 
 /// On frames of one tick, where every tick is a frame's last: the click the bridge restores, on

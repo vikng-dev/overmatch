@@ -158,8 +158,9 @@ impl Overlays {
 
 /// Shared input license for cursor ownership, `state::cursor_locked`/`PlayerInputSet` and
 /// `feed_action_state`: unfocused, off-match (lobby/connect), or [`Overlay::blocks_input`] means
-/// release the cursor and send default commands, coasting instead of holding the last input.
-/// Pass live focus separately so the fixed-schedule consumer need not use a stale set value.
+/// release the cursor and read no device; `feed_action_state` decides what the wire carries
+/// instead. Pass live focus separately so the fixed-schedule consumer need not use a stale set
+/// value.
 pub(crate) fn input_blocked(overlays: &Overlays, window_focused: bool) -> bool {
     !window_focused || !overlays.in_match || overlays.active.iter().any(|o| o.blocks_input())
 }
