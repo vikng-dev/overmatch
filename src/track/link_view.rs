@@ -1015,7 +1015,7 @@ fn canonical_frame(pin_start: Vec3, pin_end: Vec3, shoe_offset: f32) -> LinkFram
 /// so the whole "where is this mesh's nose" question is answered once at build time and never in the
 /// hot loop.
 ///
-/// The belt's vertex shader (`shaders/track_belt.wgsl`, `link_position`) evaluates the same
+/// The belt's vertex shader (`shaders/track_belt.wesl`, `link_position`) evaluates the same
 /// placement per vertex from the same span: `swing(correction · (p − origin)) + anchor`, the swing
 /// built from the normalised chord rather than an angle. The two agree to float rounding, and
 /// `the_shader_placement_is_the_cpu_placement` holds them together.
@@ -2513,7 +2513,7 @@ mod tests {
         }
     }
 
-    /// THE SHADER PLACES WHAT THE CPU PLACES. The belt's vertex stage (`track_belt.wgsl`,
+    /// THE SHADER PLACES WHAT THE CPU PLACES. The belt's vertex stage (`track_belt.wesl`,
     /// `link_position`) and the CPU readers ([`BeltFrames::pose`]: the prints, the rung selector)
     /// read the same span and must put every vertex in the same place, or the prints stamp shoes
     /// the player does not see. This mirrors the WGSL expression term for term — the swing from

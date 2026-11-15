@@ -754,22 +754,17 @@ impl ContactCensus<'_, '_> {
             if !sleeping {
                 record.awake_ticks += 1;
                 record.changed = true;
-                let linear_limit = unit * unit * rest.linear * rest.linear.abs();
                 let (mass, inertia, rotation, body) = self
                     .mass_properties
                     .get(entity)
                     .expect("every simulated piece retains computed mass and solver state");
-                let angular_limit = rest.angular * rest.angular.abs();
-                let original_rest = velocity.length_squared() < linear_limit
-                    && spin.length_squared() < angular_limit;
                 let body = self
                     .solver_bodies
                     .get(*body)
                     .expect("an awake piece's solver index addresses its state");
-                let energy_rest = crate::avian_ext::rest_test::kinetic_speed_squared(
-                    body, *mass, *inertia, *rotation,
-                ) < linear_limit;
-                if !(original_rest || energy_rest) {
+                if !crate::avian_ext::rest_test::at_rest(
+                    body, rest, unit, *mass, *inertia, *rotation,
+                ) {
                     record.last_fast = Some(tick);
                 }
             }

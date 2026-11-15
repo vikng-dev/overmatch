@@ -42,7 +42,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// at, and a whole copy only to a client without one or behind the retained history; the hull
 /// marks replicate whole. The owner's ahead-running aim integrates the authority's servo law
 /// (`tank::servo`), so a change to that law changes this revision too.
-pub const PROTOCOL_REV: u32 = 97;
+pub const PROTOCOL_REV: u32 = 98;
 
 /// The compatibility record's wire term: the pinned wire manifest, [`PROTOCOL_REV`] and the crate
 /// version.
@@ -853,7 +853,7 @@ const WIRE_TYPES_HASH: u64 = 0x3eb96ab25763d065;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol; replicon's
-/// replication messages and diff delivery, which lightyear 0.30 replicates through). A bump of any
+/// replication messages and diff delivery, which lightyear 0.31 replicates through). A bump of any
 /// can change the on-wire bytes or what a receiver makes of them without touching any source in
 /// this tree. Re-pinning any version changes the handshake directly; house process also bumps
 /// [`PROTOCOL_REV`].

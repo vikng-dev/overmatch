@@ -20,7 +20,7 @@
 //! 3. **The stores** ([`store`]). Each stamp is rasterised once into the history; the near store's
 //!    GPU copy (which follows the eye, [`follow_eye`]) and the world layer are fed from it.
 //! 4. **The upload** ([`upload`]). Each frame's written tiles go to the two GPU images.
-//! 5. **The shader** (`terrain_blend.wgsl`). Each pack names a ground type
+//! 5. **The shader** (`terrain_blend.wesl`). Each pack names a ground type
 //!    ([`crate::ground_types`]); the sole, the shoe's lowest face, sinks by that ground's
 //!    `softness × pressure`, capped, under the share of its tank's pressure the press has put on
 //!    it, and a texel prints that sinkage less the shoe's baked clearance over its sole there, so a
@@ -801,7 +801,7 @@ mod tests {
             root.join("src/track_prints.rs"),
             root.join("src/ground_types.rs"),
             root.join("src/terrain_blend.rs"),
-            root.join("assets/shaders/terrain_blend.wgsl"),
+            root.join("assets/shaders/terrain_blend.wesl"),
             root.join("assets")
                 .join(crate::ground_types::GROUND_TYPES_PATH),
         ];

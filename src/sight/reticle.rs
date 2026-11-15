@@ -488,7 +488,7 @@ fn mask_rim(viewport: Vec2) -> (f32, f32) {
 /// Resolution: finite seed for the hidden material; placement overwrites it before visibility.
 const OPTIC_GLASS_UNPLACED: f32 = 16.0;
 
-/// The uniform block `assets/shaders/optic_mask.wgsl` reads (lane map in the shader).
+/// The uniform block `assets/shaders/optic_mask.wesl` reads (lane map in the shader).
 #[derive(ShaderType, Clone, Copy, Debug)]
 struct OpticMaskParams {
     /// xy: the glass centre in node UV. z: its radius, w: the edge feather's half-width — both as
@@ -508,7 +508,7 @@ struct OpticMaskMaterial {
 
 impl UiMaterial for OpticMaskMaterial {
     fn fragment_shader() -> ShaderRef {
-        "shaders/optic_mask.wgsl".into()
+        "shaders/optic_mask.wesl".into()
     }
 }
 
@@ -1736,7 +1736,7 @@ mod tests {
         }
 
         /// Where a world point falls relative to the glass centre, in the units
-        /// `assets/shaders/optic_mask.wgsl` compares against the radius: node UV, stretched by the
+        /// `assets/shaders/optic_mask.wesl` compares against the radius: node UV, stretched by the
         /// node's aspect on x so the hole is a circle at any aspect ratio.
         fn glass_offset(&self, glass: &OpticGlass, world: Vec3) -> Vec2 {
             let uv = self

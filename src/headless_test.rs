@@ -25,7 +25,8 @@ const BOOT_DEADLINE: Duration = Duration::from_secs(60);
 pub(crate) const FIXED_TICKS_PER_SECOND: usize = 64;
 
 pub(crate) fn start_fixed_clock(app: &mut App) {
-    // Verified against Bevy 0.19: one `App::update` runs exactly one fixed loop.
+    // One `App::update` runs exactly one fixed loop (bevy_time 0.20.1,
+    // `TimeUpdateStrategy::FixedTimesteps`).
     app.insert_resource(TimeUpdateStrategy::FixedTimesteps(1));
 }
 

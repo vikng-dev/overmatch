@@ -28,10 +28,10 @@ use crate::world::{MapEncoding, MapTiling, surface_map};
 pub(crate) type ConstructionMaterial = ExtendedMaterial<StandardMaterial, Surface>;
 
 /// The vertex stage (face units to metres) and the fragment (the secondary swap, a hole), one file.
-const SHADER: &str = "shaders/construction_surface.wgsl";
+const SHADER: &str = "shaders/construction_surface.wesl";
 
 /// The prepass fragment, which bevy runs only for a [`holed`] material: a hole's discard.
-const PREPASS_SHADER: &str = "shaders/construction_surface_prepass.wgsl";
+const PREPASS_SHADER: &str = "shaders/construction_surface_prepass.wesl";
 
 /// The two lanes the construction shader binds; visuals.ron names their current maps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]

@@ -7,7 +7,7 @@
 //! # Why not `SpatialQuery::ray_hits`
 //!
 //! Avian's "all hits" query cannot express §13.4's all-hits collection, for three independent
-//! reasons (verified against `avian3d-0.7.0/src/spatial_query/system_param.rs:277,354`):
+//! reasons (verified against `avian3d-0.8.0/src/spatial_query/system_param.rs:301,386`):
 //!
 //! - It calls `collider.cast_ray` ONCE per collider, which for a trimesh returns the nearest
 //!   triangle of that collider — the entry face, never the exit. Half of every crossing is missing.
