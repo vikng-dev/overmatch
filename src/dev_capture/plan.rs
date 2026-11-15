@@ -777,24 +777,35 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let report_path = directory.join("report.ron");
         let plan_path = directory.join("plan.ron");
-        let mut report = crate::damage_cam::delivery::tests::report("s8b_mg_stopped");
-        // Fixture: a weapon absent from the current game's vocabulary, at a future cue.
-        report.projectile.name = "unknown capture weapon".into();
-        std::fs::write(&report_path, ron::to_string(&report).unwrap()).unwrap();
         std::fs::write(
             &plan_path,
             format!(r#"(corner: (report: {:?}, at: 10.0))"#, report_path),
         )
         .unwrap();
-        let error = CapturePlan::load(&plan_path)
-            .expect_err("an incompatible replay must refuse startup before play")
-            .to_string();
-        for required in [
-            report_path.to_str().unwrap(),
-            "projectile.name",
-            "use a report from this build",
+        let report = crate::damage_cam::delivery::tests::report("s8b_mg_stopped");
+        // Fixture: an unknown weapon, then an undosed resting component removed by projection.
+        let mut unknown_weapon = report.clone();
+        unknown_weapon.projectile.name = "unknown capture weapon".into();
+        let mut undosed_rest = report;
+        undosed_rest.end = crate::damage_cam::RoundEnd::Rest {
+            volume: "Breech".into(),
+        };
+        undosed_rest.doses.clear();
+        for (report, field) in [
+            (unknown_weapon, "projectile.name"),
+            (undosed_rest, "end.volume"),
         ] {
-            assert!(error.contains(required), "{error} must name {required}");
+            std::fs::write(&report_path, ron::to_string(&report).unwrap()).unwrap();
+            let error = CapturePlan::load(&plan_path)
+                .expect_err("an incompatible replay must refuse startup before play")
+                .to_string();
+            for required in [
+                report_path.to_str().unwrap(),
+                field,
+                "use a report from this build",
+            ] {
+                assert!(error.contains(required), "{error} must name {required}");
+            }
         }
     }
 

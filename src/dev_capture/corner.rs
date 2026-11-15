@@ -1,6 +1,6 @@
 //! The game's damage-model view, game state only: offline replay evidence for corner shaders.
-//! A report is parsed and encoded once at plan admission, then addressed to the current shooter
-//! and opponent through the normal projection/store path. No round flies and no simulated HP pool changes.
+//! The shooter projection is encoded and decoded at plan admission, then stored at its cue.
+//! No round flies and no simulated HP pool changes.
 
 use bevy::prelude::*;
 use serde::Deserialize;
@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use crate::ballistics::spall_cone::{BurstFields, ConeShape};
 use crate::damage_cam::PenetrationReport;
-use crate::damage_cam::delivery::{Receipt, ShotExplanations};
-use crate::damage_cam::wire::{EncodedReport, ShotVocabulary, TankLife};
+use crate::damage_cam::delivery::ShotExplanations;
+use crate::damage_cam::wire::{ShooterReplay, ShotVocabulary, TankLife};
 use crate::rounds::RoundRegistry;
 use crate::tank::{Controlled, Tank};
 use crate::{CombatantId, CombatantLife, ShotClock, ShotId};
@@ -19,8 +19,7 @@ use crate::{CombatantId, CombatantLife, ShotClock, ShotId};
 #[serde(try_from = "PathBuf")]
 pub(crate) struct ReplayReport {
     path: PathBuf,
-    payload: EncodedReport,
-    vocabulary: ShotVocabulary,
+    payload: ShooterReplay,
 }
 
 impl TryFrom<PathBuf> for ReplayReport {
@@ -47,13 +46,9 @@ impl TryFrom<PathBuf> for ReplayReport {
             ConeShape::shipped(),
             BurstFields::shipped(),
         );
-        let payload = EncodedReport::build(&vocabulary, &report)
+        let payload = ShooterReplay::build(&vocabulary, &report)
             .map_err(|error| refusal(error.to_string()))?;
-        Ok(Self {
-            path,
-            payload,
-            vocabulary,
-        })
+        Ok(Self { path, payload })
     }
 }
 
@@ -109,23 +104,16 @@ fn replay(
         .report
         .take()
         .expect("an unfired replay holds its admitted payload");
-    let built = report.payload.replay(
+    store.replay_drawn(
+        report.payload,
         ShotId {
             combatant: shooter,
             weapon: 0,
             fire_tick: clock.0.raw(),
         },
         TankLife { combatant, life },
+        time.elapsed_secs_f64(),
     );
-    for (recipient, explanation) in built.projections() {
-        if recipient == shooter {
-            assert_eq!(
-                store.receive_drawn(explanation, &report.vocabulary, time.elapsed_secs_f64()),
-                Receipt::Stored,
-                "a fresh offline replay decodes against the vocabulary that encoded it"
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -139,11 +127,12 @@ mod tests {
     /// already presented, so the corner's ordinary admission can show it without a world impact.
     #[test]
     fn the_replay_addresses_only_the_shooter_once_at_its_cue() {
-        let plan = super::super::plan::CapturePlan::parse(include_str!(
-            "../../scripts/capture/pen-cam-slice.ron"
-        ))
-        .unwrap();
-        let cue = plan.corner.unwrap();
+        // Fixture: a positive cue independent of the shipped capture recipe.
+        let cue = super::super::plan::CornerReplay {
+            at: 2.0,
+            report: ReplayReport::try_from(PathBuf::from("assets/dev/pen_cam/s8b_mg_stopped.ron"))
+                .unwrap(),
+        };
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<ShotClock>()

@@ -818,37 +818,43 @@ struct WireComponent {
 
 // --- Build and project ----------------------------------------------------------------------------
 
-/// The game's damage-model report bound to a vocabulary, ready for offline replay identities.
+/// The game's damage-model shooter projection, encoded and decoded before its offline cue.
 #[derive(Clone, Debug)]
-pub(crate) struct EncodedReport {
+pub(crate) struct ShooterReplay {
     record: Record,
+    report: PenetrationReport,
 }
 
-impl EncodedReport {
+impl ShooterReplay {
     pub(crate) fn build(
         vocabulary: &ShotVocabulary,
         report: &PenetrationReport,
     ) -> Result<Self, CodecError> {
-        Ok(Self {
-            record: encode(vocabulary, report)?,
-        })
+        let record = shooter_view(&encode(vocabulary, report)?);
+        let report = decode(vocabulary, &record)?;
+        Ok(Self { record, report })
     }
 
     /// An offline first encounter at `shot`'s tick, with no world impact or hull pose.
-    pub(crate) fn replay(self, shot: ShotId, struck: TankLife) -> BuiltExplanation {
-        BuiltExplanation {
-            full: ShotExplanation {
+    pub(crate) fn bind(
+        self,
+        shot: ShotId,
+        struck: TankLife,
+    ) -> (ShotExplanation, PenetrationReport) {
+        (
+            ShotExplanation {
                 shot,
                 encounter: 0,
                 struck,
                 contact_tick: shot.fire_tick,
                 completion_tick: shot.fire_tick,
                 outcome: None,
-                audience: Audience::Victim,
+                audience: Audience::Shooter,
                 hull: None,
                 record: self.record,
             },
-        }
+            self.report,
+        )
     }
 }
 
