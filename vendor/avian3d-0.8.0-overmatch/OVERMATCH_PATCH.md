@@ -219,6 +219,33 @@ Guard: `src/tests/avian_moved_aabb_prune.rs` (standing static colliders are not 
 the prune bypassed, MEASURED: 4 examined; a static collider moved, rescaled, added or removed
 reaches the collider trees). Record: `upstream/avian-moved-aabb-prune.md`.
 
+## Contact recycling: off in the game
+
+Not a patch: a configuration several patches and game seams rely on. A pair Avian recycles
+(`NarrowPhaseConfig::recycle_distance` above zero, its bodies' relative motion small) returns from
+the narrow phase's per-pair update before the geometry query, warm-start matching, the
+stationary-miss cache and the pair's collision hooks, keeping last step's manifolds. The game runs
+with recycling off, set where the game composes physics (`src/net/physics.rs`, guard
+`shared_physics_keeps_contact_recycling_off`); the guard fixtures here do the same. Turning it on
+stops warm-start matching and the stationary cache for recycled pairs, leaves a reduced pair's lost
+manifolds unregenerated while it rests, and skips the belt's `WorldContacts::modify_contacts`
+(`src/track/stop_contacts.rs`), which must run every step for every candidate belt-face pair: those
+pairs at least would have to stay exempt.
+
+## Minimum speculative margin: dropped
+
+The 0.7 fork floored the speculative margin shared by the geometry query and point pruning at the
+configured `contact_tolerance`. Avian 0.8.0 clamps it itself ("Ensure that the speculative distance
+is at least as large as the contact tolerance"). Witness:
+`stationary_contacts_keep_the_configured_minimum_speculative_margin` in
+`src/tests/avian_island_sleep.rs`, green on this fork, which carries no line for it (MEASURED).
+
+## Serial small loops: dropped
+
+The 0.7 fork ran a few parallel loops serially below measured body and manifold counts. Avian
+0.8.0 has its own floors (upstream #1035); the 0.7 thresholds are not carried and not re-measured
+here. No witness: a measurement, for the stack's cost pass.
+
 ## Standalone key write-back: dropped
 
 The 0.7 fork wrote a collider's new `ColliderTreeProxyKey` back when the `Remove<ColliderOf>`
