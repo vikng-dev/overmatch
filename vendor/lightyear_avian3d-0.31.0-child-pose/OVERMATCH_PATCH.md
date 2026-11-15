@@ -21,6 +21,9 @@ This crate names no fork-only Avian API. `rollback.rs` is pristine: Avian 0.8 ow
 list and the fork adds no fields to the trees or that list. Transform mode's placement remains
 upstream's; the game selects Position mode.
 
-Witnesses: `src/tests/avian_child_pose_churn.rs` and `src/ballistics/recording_tests.rs` in the game.
+Witnesses in the game: `lightyear_position_mode_leaves_the_frame_boundary_to_the_game` in
+`src/tests/avian_child_pose_churn.rs`, which mounts this plugin as the game composes it and fails
+with the registration restored (MEASURED); the rest of that file, for the game's pass; and
+`src/ballistics/recording_tests.rs`.
 Standalone validation uses `check` (default 3d/parry-f32 features) and a command-line
 `patch.crates-io.avian3d.path` pointing at the trunk's fork.

@@ -12,7 +12,9 @@
 //! tank's armour, child colliders too, at the pose this pass leaves between steps. A dependency
 //! bump that registers Avian's own child pass again fails every physics test here (MEASURED on
 //! stock 0.8.0): both passes write child poses in `PhysicsStepSystems::First`, and Avian's
-//! `PhysicsSchedule` refuses that ambiguity when it initializes.
+//! `PhysicsSchedule` refuses that ambiguity when it initializes. One that registers
+//! lightyear_avian's own pass at the frame boundary again fails
+//! `lightyear_position_mode_leaves_the_frame_boundary_to_the_game` (MEASURED).
 //!
 //! The poses, box dimensions and update counts below are fixture data: any off-origin, turned pose
 //! and any count of settling and observed updates exercise the same invariants.
@@ -486,4 +488,37 @@ fn a_manually_attached_child_follows_its_body_without_transform_children() {
     app.world_mut().get_mut::<Position>(body).unwrap().0 += Vec3::Z;
     run(&mut app, pass);
     assert_eq!(pose(app.world(), child).0, Vec3::X + Vec3::Z);
+}
+
+/// Lightyear's Position mode, composed as the game composes it (`net::protocol`, mounted beside
+/// `net::physics`), registers no child-pose pass of its own in `RunFixedMainLoop`: the frame
+/// boundary's slot holds the game's pass alone. Fails if the registration of
+/// `LightyearAvianPlugin::update_child_collider_position` the vendored crate drops
+/// (`vendor/lightyear_avian3d-0.31.0-child-pose`, `OVERMATCH_PATCH.md`) returns: that pass writes
+/// every child's pose through `Mut` each frame, so no change tick survives it.
+#[test]
+fn lightyear_position_mode_leaves_the_frame_boundary_to_the_game() {
+    use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
+    let mut app = App::new();
+    app.add_plugins(LightyearAvianPlugin {
+        replication_mode: AvianReplicationMode::Position {
+            sync_to_transform: false,
+        },
+        register_physics_components: false,
+        ..default()
+    });
+    crate::net::physics::plugin(&mut app);
+    let sets = &app
+        .get_schedule(RunFixedMainLoop)
+        .expect("the game's pass registers in RunFixedMainLoop")
+        .graph()
+        .system_sets;
+    assert!(
+        sets.contains(place_child_colliders.into_system_set()),
+        "fixture: the game's pass holds the frame boundary"
+    );
+    assert!(
+        !sets.contains(LightyearAvianPlugin::update_child_collider_position.into_system_set()),
+        "lightyear registers its own child-pose pass at the frame boundary"
+    );
 }
