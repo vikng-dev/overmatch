@@ -385,3 +385,26 @@ three for the pass: one constraint per kept manifold through settling, a lift an
 enough groups for the parallel path (a mutant queueing beside Avian's entry, or none, trips Avian's
 `push_manifold` assertion, MEASURED); a landing judged at the slower body's rest speed (judged at the
 faster one it fails, MEASURED); and a recycled pair regenerated after reduction (the sink above).
+
+## Solver contact visits (`src/dynamics/solver/plugin.rs`, `src/dynamics/solver/diagnostics.rs`, `src/utils.rs`): kept
+
+Subject: the game's server physics, contacts between bodies, game state only.
+
+`SolverDiagnostics::{serial_contact_visits, parallel_contact_visits}` count the contact constraints
+each contact pass dispatches (warm start, the biased solve and the relaxation in every substep, and
+restitution once a step), serially or through parallel chunks; zero-restitution no-ops count. Each
+step's diagnostics reset clears them. Overflow constraints are serial; a color counts as its
+`par_for_each` dispatched it, which now returns that decision (the single-worker and short-slice
+serial cases included) without changing its thresholds, iteration or chunking. No counter feeds a
+physics decision. The game's work account reads them (`src/net/ram.rs`, `src/cost.rs`).
+
+Kept: counters inside three upstream systems and the dispatch decision of an upstream helper; no
+extension point sees either. 64 fork lines (MEASURED: 26 in the solver, 31 in the diagnostics, 7 in
+`par_for_each`).
+
+Guard: the game's `src/net/ram/avian_tests.rs` (`contact_visits_cover_each_pass_and_reset_each_step`
+and the overflow star), which reads them through the game's work account and so runs when the game
+builds on 0.8 again; the guard crate does not build that account. The identity it asserts, visits =
+constraints × (3 × substeps + 1), held on this fork once (MEASURED, a scratch test in the guard
+crate, 4 compute threads, 6 substeps: 4 floor contacts, 76 serial and 0 parallel; 128, 0 serial and
+2,432 parallel; an overflow star of 25 constraints, 3 in overflow, 475 serial).
