@@ -219,8 +219,6 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                 (Metric::Fps, "FPS"),
                 (Metric::Frame, "Frame"),
             ] {
-                // One row per metric: label pinned left, value pinned right (SpaceBetween). Pinning
-                // the value's right edge is what right-aligns the numbers.
                 card.spawn(Node {
                     width: Val::Percent(100.0),
                     justify_content: JustifyContent::SpaceBetween,
