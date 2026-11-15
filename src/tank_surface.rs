@@ -833,7 +833,7 @@ impl Dress<'_, '_> {
             self.commands
                 .entity(entity)
                 .remove::<MeshMaterial3d<StandardMaterial>>()
-                .insert((MeshMaterial3d(handle), MeshTag(row)));
+                .insert((MeshMaterial3d(handle), MeshTag::new(row)));
         }
     }
 
@@ -1601,7 +1601,7 @@ mod tests {
             );
             assert_eq!(
                 world.get::<MeshTag>(worn),
-                Some(&MeshTag(1)),
+                Some(&MeshTag::new(1)),
                 "its rest row"
             );
             assert!(surface(decor).is_none(), "decor keeps its own material");

@@ -705,7 +705,7 @@ impl BeltAssets<'_> {
         Some((
             Mesh3d(mesh),
             MeshMaterial3d(material),
-            MeshTag(block.start),
+            MeshTag::new(block.start),
             BeltDraw { page, block, reach },
             NoAutoAabb,
             Aabb::from_min_max(low, high),
@@ -969,7 +969,7 @@ mod tests {
             "one count, rung and side, one mesh"
         );
 
-        let tag = |world: &World, belt: Entity| world.get::<MeshTag>(belt).expect("a tag").0;
+        let tag = |world: &World, belt: Entity| world.get::<MeshTag>(belt).expect("a tag").value;
         let page = world.resource::<BeltTable>().pages[0].buffer.clone();
         let bytes = world
             .resource::<Assets<ShaderBuffer>>()
@@ -1109,7 +1109,7 @@ mod tests {
             vec![page],
             "the page reaches the render world in the frame its table changed, once",
         );
-        let block = app.world().get::<MeshTag>(belt).expect("a tag").0;
+        let block = app.world().get::<MeshTag>(belt).expect("a tag").value;
         let bytes = app
             .world()
             .resource::<Assets<ShaderBuffer>>()

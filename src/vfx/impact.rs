@@ -1548,7 +1548,7 @@ mod tests {
         let slots: std::collections::BTreeSet<u32> = ring
             .live
             .iter()
-            .map(|&scar| app.world().get::<MeshTag>(scar).expect("a live scar").0)
+            .map(|&scar| app.world().get::<MeshTag>(scar).expect("a live scar").value)
             .collect();
         assert_eq!(slots.len(), GROUND_MARK_CAP, "one slot per live scar");
         assert!(

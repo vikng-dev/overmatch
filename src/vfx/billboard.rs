@@ -320,7 +320,7 @@ impl BillboardRing {
 
     /// The slot the next spawn takes.
     fn slot(&self) -> MeshTag {
-        MeshTag((self.first_slot + self.next) as u32)
+        MeshTag::new((self.first_slot + self.next) as u32)
     }
 }
 
@@ -525,7 +525,7 @@ fn upload_billboard_lanes(
         .expect("the billboard lane table retains its CPU storage for per-frame uploads");
     let stride = lane_stride();
     for (slot, billboard) in &changed {
-        let start = slot.0 as usize * stride;
+        let start = slot.value as usize * stride;
         encase::StorageBuffer::new(&mut bytes[start..start + stride])
             .write(&billboard.lanes)
             .expect("a lane block fills exactly one slot");
@@ -921,7 +921,7 @@ mod tests {
             .expect("the lane table keeps its CPU copy");
         let stride = lane_stride();
         for billboard in billboards {
-            let slot = world.get::<MeshTag>(billboard).expect("a slot").0 as usize;
+            let slot = world.get::<MeshTag>(billboard).expect("a slot").value as usize;
             let lanes = lanes(&app, billboard);
             assert!(lanes.fade.z > 0.0, "the billboard aged");
             let mut expected = encase::StorageBuffer::new(Vec::<u8>::new());
@@ -976,7 +976,7 @@ mod tests {
             .world_mut()
             .query_filtered::<&MeshTag, With<Billboard>>()
             .iter(app.world())
-            .map(|tag| tag.0)
+            .map(|tag| tag.value)
             .collect();
         assert_eq!(
             slots.len(),
