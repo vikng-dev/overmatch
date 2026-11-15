@@ -536,7 +536,7 @@ impl Motion<'_> {
                 target.shape_scaled().0.as_ref(),
                 ShapeCastOptions {
                     max_time_of_impact: dt,
-                    // Parry 0.27 otherwise turns a near-zero hit into a miss if contact fails.
+                    // Parry 0.31 otherwise turns a near-zero hit into a miss if contact fails.
                     // Refine overlaps below so a geometry failure remains an occupied target.
                     compute_impact_geometry_on_penetration: false,
                     ..default()
@@ -554,8 +554,11 @@ impl Motion<'_> {
             )
         }
         .expect("construction sweeps require supported collider shapes")?;
+        // A cast that starts touching has no direction of approach, so its GJK normal is
+        // arbitrary: parry 0.31 reports a touching start as `Converged` at zero reach, a
+        // penetrating one as `PenetratingOrWithinTargetDist`. Both read the contact instead.
         let missing_geometry = hit.status == ShapeCastStatus::PenetratingOrWithinTargetDist
-            || (hit.status == ShapeCastStatus::Failed && hit.time_of_impact == 0.0);
+            || hit.time_of_impact == 0.0;
         let (normal, point) = if spin != Vec3::ZERO || missing_geometry {
             let at = moving.position_at_time(hit.time_of_impact);
             work.queries += 1;
@@ -567,7 +570,7 @@ impl Motion<'_> {
                 f32::MAX,
             )
             .expect("construction sweeps require supported contact shapes");
-            // Parry 0.27 can return None after EPA failure or GJK's iteration limit. Retain the
+            // Parry 0.31 can return None after EPA failure or GJK's iteration limit. Retain the
             // cast's separating geometry when it has any; an initial hit may have none. The
             // fixed target's witness and normal already use this cast's construction frame.
             match contact {
