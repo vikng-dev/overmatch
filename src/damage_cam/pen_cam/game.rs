@@ -607,15 +607,18 @@ mod tests {
     pub(super) const STEP_S: f32 = 1.0 / 30.0;
 
     /// The corner's systems over a headless app, the player's tank (the shooter's combatant), an
-    /// empty store and bevy's shared default image ([`default_image_kept`]), one frame run.
+    /// empty store, an idle keyboard and mouse, no turret pivot, empty collider
+    /// trees and bevy's shared default image ([`default_image_kept`]), one frame run.
     fn corner_app(settings: Settings) -> (App, Entity) {
-        corner_app_with(settings, |_| {})
+        corner_app_with(settings, |_| {}, |_, _| {})
     }
 
-    /// [`corner_app`] with `mount` run among its plugins, before the app finishes.
+    /// [`corner_app`] with `mount` run among its plugins, before the app finishes, and `world`
+    /// given the app and the player's tank before the first frame.
     pub(super) fn corner_app_with(
         settings: Settings,
         mount: impl FnOnce(&mut App),
+        world: impl FnOnce(&mut App, Entity),
     ) -> (App, Entity) {
         let mut app = App::new();
         app.set_error_handler(bevy::ecs::error::match_severity);
@@ -643,6 +646,10 @@ mod tests {
             .init_resource::<Time>()
             .init_resource::<Time<Real>>()
             .init_resource::<ShotExplanations>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<crate::camera::TurretPivot>()
+            .init_resource::<avian3d::collider_tree::ColliderTrees>()
             .insert_resource(settings);
         app.world_mut()
             .resource_mut::<Assets<Image>>()
@@ -658,6 +665,7 @@ mod tests {
             .world_mut()
             .spawn((SHOOTER, CombatantLife(0), Controlled))
             .id();
+        world(&mut app, player);
         app.update();
         (app, player)
     }
@@ -667,9 +675,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "fixture routed panic")]
     fn the_corner_resumes_routed_panics() {
-        drop(corner_app_with(Settings::default(), |app| {
-            app.add_systems(Update, || panic!("fixture routed panic"));
-        }));
+        drop(corner_app_with(
+            Settings::default(),
+            |app| {
+                app.add_systems(Update, || panic!("fixture routed panic"));
+            },
+            |_, _| {},
+        ));
     }
 
     /// A stage view of `report`'s tank file standing in for its glb: the root and the hull node.
@@ -683,8 +695,26 @@ mod tests {
         );
     }
 
-    /// A stage view of tank file `vehicle` standing in for its glb.
+    /// A stage view of tank file `vehicle` standing in for its glb, beside the corner it draws in:
+    /// the slot rigs the inset and the corner whenever it stages a view (`Rig::ready`), and the
+    /// stage's systems read both.
     pub(super) fn stage_of(app: &mut App, vehicle: &str) {
+        use bevy::ecs::system::RunSystemOnce;
+        app.world_mut()
+            .run_system_once(
+                |mut commands: Commands,
+                 mut images: ResMut<Assets<Image>>,
+                 mut stage: ResMut<Stage>,
+                 mut slot: ResMut<Slot>| {
+                    if !slot.rigged {
+                        *stage = Stage::default();
+                        stage::spawn_inset(&mut commands, &mut images, &mut stage);
+                        hud::spawn_corner(&mut commands, &mut images);
+                        slot.rigged = true;
+                    }
+                },
+            )
+            .expect("the corner fixture holds the slot and the stage");
         let vehicle = vehicle.to_owned();
         let path = crate::assets::asset_root().join(&vehicle);
         let spec: TankSpec = crate::provenance::from_shipped_str(
@@ -1304,9 +1334,7 @@ mod tests {
         use bevy::render::render_resource::TextureFormat;
 
         let (mut app, player) = xray_app(Settings::default());
-        app.insert_resource(Bindings::default())
-            .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<ButtonInput<MouseButton>>();
+        app.insert_resource(Bindings::default());
         let component = report("s9_breech_and_loader").components[0].name.clone();
         let world = app.world_mut();
         let standard = world

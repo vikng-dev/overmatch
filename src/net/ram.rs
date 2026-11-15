@@ -712,6 +712,7 @@ mod tests {
         world.init_resource::<avian3d::collider_tree::ColliderTreeDiagnostics>();
         world.init_resource::<avian3d::prelude::ContactGraph>();
         world.init_resource::<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>();
+        world.init_resource::<crate::avian_ext::contact_reduction::ReductionCounts>();
         world.init_resource::<avian3d::prelude::PhysicsLengthUnit>();
         world.init_resource::<avian3d::prelude::TimeToSleep>();
         world.init_resource::<StepSnapshot>();

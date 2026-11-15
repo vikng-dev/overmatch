@@ -126,37 +126,49 @@ fn replay_settings() -> Settings {
 /// The kill cam's app: [`corner_app`](super::super::tests::corner_app) with fixture keys, the
 /// Esc router and the player's camera.
 fn app(settings: Settings) -> (App, Entity, Entity) {
-    app_with(settings, crate::state::escape_router)
+    app_with(settings, crate::state::escape_router, |_, _, _| {})
 }
 
-/// [`app`] with `mount` supplying its input owner before the app finishes.
-fn app_with(settings: Settings, mount: impl FnOnce(&mut App)) -> (App, Entity, Entity) {
-    let (mut app, player) = corner_app_with(settings, mount);
-    // Fixture controls stay independent of the player's default bindings.
-    app.insert_resource(Bindings {
-        throttle: AxisKeys {
-            pos: KeyCode::KeyW,
-            neg: KeyCode::KeyS,
-        },
-        steer: AxisKeys {
-            pos: KeyCode::KeyD,
-            neg: KeyCode::KeyA,
-        },
-        fire_primary: ButtonBinding::Mouse(MouseButton::Left),
-        fire_secondary: ButtonBinding::Key(KeyCode::Space),
-        xray: ButtonBinding::Key(KeyCode::KeyX),
-        kill_cam_hold: ButtonBinding::Key(KeyCode::KeyC),
-        kill_cam_replay: ButtonBinding::Key(KeyCode::Space),
-        ..default()
-    })
-    .init_resource::<ButtonInput<KeyCode>>()
-    .init_resource::<ButtonInput<MouseButton>>();
-    let camera = app
-        .world_mut()
-        .spawn((PlayerView, CameraProfile::BattlefieldThirdPerson))
-        .id();
+/// [`app`] with `mount` supplying its input owner before the app finishes, and `world` given the
+/// player's tank and camera before the first frame: the client constructs its camera before it
+/// enters a match.
+fn app_with(
+    settings: Settings,
+    mount: impl FnOnce(&mut App),
+    world: impl FnOnce(&mut App, Entity, Entity),
+) -> (App, Entity, Entity) {
+    let mut camera = None;
+    let (mut app, player) = corner_app_with(settings, mount, |app, player| {
+        // Fixture controls stay independent of the player's default bindings.
+        app.insert_resource(Bindings {
+            throttle: AxisKeys {
+                pos: KeyCode::KeyW,
+                neg: KeyCode::KeyS,
+            },
+            steer: AxisKeys {
+                pos: KeyCode::KeyD,
+                neg: KeyCode::KeyA,
+            },
+            fire_primary: ButtonBinding::Mouse(MouseButton::Left),
+            fire_secondary: ButtonBinding::Key(KeyCode::Space),
+            xray: ButtonBinding::Key(KeyCode::KeyX),
+            kill_cam_hold: ButtonBinding::Key(KeyCode::KeyC),
+            kill_cam_replay: ButtonBinding::Key(KeyCode::Space),
+            ..default()
+        });
+        let spawned = app
+            .world_mut()
+            .spawn((PlayerView, CameraProfile::BattlefieldThirdPerson))
+            .id();
+        world(app, player, spawned);
+        camera = Some(spawned);
+    });
     app.update();
-    (app, player, camera)
+    (
+        app,
+        player,
+        camera.expect("the fixture spawns the camera before the first frame"),
+    )
 }
 
 fn knock_out(app: &mut App, player: Entity) {
@@ -545,12 +557,16 @@ fn the_slot_stays_closed_under_the_kill_cam() {
 /// death screen and respawn key, and the spawn map, under the shipped overlay plugin. The
 /// player's tank takes commands.
 fn composed() -> (App, Entity, Entity) {
-    let (mut app, player, camera) = app_with(replay_settings(), |app| {
-        app.add_plugins(bevy::state::app::StatesPlugin)
-            .add_message::<bevy::window::WindowFocused>();
-        crate::flow::in_match_plugin(app);
-        crate::overlay::plugin(app);
-    });
+    let (mut app, player, camera) = app_with(
+        replay_settings(),
+        |app| {
+            app.add_plugins(bevy::state::app::StatesPlugin)
+                .add_message::<bevy::window::WindowFocused>();
+            crate::flow::in_match_plugin(app);
+            crate::overlay::plugin(app);
+        },
+        |_, _, _| {},
+    );
     // The death screen's countdown reads the fixed timestep.
     app.init_resource::<Time<Fixed>>().insert_resource(UiFonts {
         hud: Handle::default(),
@@ -650,8 +666,7 @@ fn esc_skips_the_run_before_it_reaches_the_menu() {
 fn each_beats_channels_resolve_on_its_first_frame() {
     let (mut app, player, camera) = app(replay_settings());
     crate::render_policy::plugin(&mut app);
-    app.init_resource::<avian3d::collider_tree::ColliderTrees>()
-        .insert_resource(TurretPivot::at(Vec3::Y));
+    app.insert_resource(TurretPivot::at(Vec3::Y));
     app.world_mut().entity_mut(player).insert((
         Tank,
         Transform::IDENTITY,
@@ -686,7 +701,7 @@ fn read_device(mut read: ResMut<DeviceRead>, own: Query<Option<&TankCommand>, Wi
 /// The player's device on its real systems beside the kill cam: the gather, the sight toggle, the
 /// third-person aim commit, the crew swap and the trigger click, and what the frame's device read
 /// leaves ([`DeviceRead`]). Mounted before the app finishes ([`app_with`]); [`device`] gives them
-/// their world.
+/// their world before the first frame.
 fn mount_device(app: &mut App) {
     crate::state::escape_router(app);
     // Fixture handles: device ownership reads the widgets without shaping or rendering text.
@@ -695,7 +710,9 @@ fn mount_device(app: &mut App) {
         body: Handle::default(),
     })
     .init_resource::<Time<Fixed>>()
-    .init_resource::<crate::WeaponClock>();
+    .init_resource::<crate::WeaponClock>()
+    .init_resource::<crate::firecontrol::Ranging>()
+    .init_resource::<bevy::input::mouse::AccumulatedMouseMotion>();
     bevy::state::app::StatesPlugin.build(app);
     crate::flow::in_match_plugin(app);
     crate::command::client_plugin(app);
@@ -713,13 +730,10 @@ fn mount_device(app: &mut App) {
     );
 }
 
-/// The world of [`mount_device`]'s systems: their resources, a window and the player's camera to
-/// pick through, and a player tank whose views are all open and whose first two crew bar keys are
-/// the commander's and the gunner's seats (fixture data).
+/// The world of [`mount_device`]'s systems: a window and the player's camera to pick through, and
+/// a player tank whose views are all open and whose first two crew bar keys are the commander's
+/// and the gunner's seats (fixture data).
 fn device(app: &mut App, player: Entity, camera: Entity) {
-    app.init_resource::<crate::firecontrol::Ranging>()
-        .init_resource::<avian3d::collider_tree::ColliderTrees>()
-        .init_resource::<bevy::input::mouse::AccumulatedMouseMotion>();
     let world = app.world_mut();
     world.spawn(Window::default());
     let [hull, turret, gun, muzzle] = std::array::from_fn(|_| {
@@ -847,9 +861,8 @@ fn the_death_flow_owns_the_device() {
         ButtonBinding::Key(KeyCode::Space),
         ButtonBinding::Mouse(MouseButton::Left),
     ] {
-        let (mut app, player, camera) = app_with(replay_settings(), mount_device);
+        let (mut app, player, camera) = app_with(replay_settings(), mount_device, device);
         app.world_mut().resource_mut::<Bindings>().kill_cam_replay = replay;
-        device(&mut app, player, camera);
         let command = |app: &App| *app.world().get::<TankCommand>(player).unwrap();
         let mode = |app: &App| *app.world().resource::<SightMode>();
         let clicks = |app: &mut App| {
@@ -953,17 +966,21 @@ fn esc_on_the_frame_a_run_starts_is_the_runs() {
 fn esc_on_the_frame_a_run_starts_does_not_pause() {
     use crate::state::AppState;
 
-    let (mut app, player, _) = app_with(replay_settings(), |app| {
-        app.add_plugins(bevy::state::app::StatesPlugin)
-            .add_message::<bevy::window::WindowFocused>()
-            .init_resource::<Time<avian3d::prelude::Physics>>()
-            .insert_resource(UiFonts {
-                hud: Handle::default(),
-                body: Handle::default(),
-            });
-        crate::state::sim_plugin(app);
-        crate::state::client_plugin(app);
-    });
+    let (mut app, player, _) = app_with(
+        replay_settings(),
+        |app| {
+            app.add_plugins(bevy::state::app::StatesPlugin)
+                .add_message::<bevy::window::WindowFocused>()
+                .init_resource::<Time<avian3d::prelude::Physics>>()
+                .insert_resource(UiFonts {
+                    hud: Handle::default(),
+                    body: Handle::default(),
+                });
+            crate::state::sim_plugin(app);
+            crate::state::client_plugin(app);
+        },
+        |_, _, _| {},
+    );
     app.world_mut()
         .resource_mut::<NextState<AppState>>()
         .set(AppState::Playing);
