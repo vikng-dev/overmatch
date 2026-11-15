@@ -41,12 +41,6 @@ fn nearest_warm_start_is_selected_across_old_manifolds() {
     for reversed in [false, true] {
         let mut app = super::avian_child_pose_churn::physics_app();
         app.insert_resource(Gravity(Vec3::ZERO));
-        // Recycling off, as the game composes physics (`net::physics`): a recycled pair keeps last
-        // step's manifolds and is never matched.
-        app.insert_resource(NarrowPhaseConfig {
-            recycle_distance: 0.0,
-            ..default()
-        });
         // Fixture: overlapping stationary spheres produce one stable contact.
         let a = app
             .world_mut()

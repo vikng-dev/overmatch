@@ -11,17 +11,12 @@ use super::avian_child_pose_churn::physics_app;
 
 /// Fixture: separated spheres with overlapping AABBs, at a scale whose gap exceeds the configured
 /// contact tolerance. Sensors keep contact tests independent of solver response. One fixed step per
-/// update, at whatever the fixed timestep is. Recycling off, as the game composes physics
-/// (`net::physics`): a recycled pair returns before both the cache and the query. Returns the app,
-/// the static sphere, the dynamic sphere and their radius (m).
+/// update, at whatever the fixed timestep is. Returns the app, the static sphere, the dynamic sphere
+/// and their radius (m).
 fn stationary_pair() -> (App, Entity, Entity, f32) {
     let mut app = physics_app();
     crate::headless_test::start_fixed_clock(&mut app);
     app.insert_resource(Gravity::ZERO);
-    app.insert_resource(NarrowPhaseConfig {
-        recycle_distance: 0.0,
-        ..default()
-    });
     let tolerance = app
         .world()
         .resource::<NarrowPhaseConfig>()

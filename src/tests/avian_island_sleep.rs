@@ -361,9 +361,9 @@ fn tolerance(app: &App) -> f32 {
 /// met at the resting poses, which links the two sleeping islands the step after. A mutant whose
 /// misses sleep with the island (avian #1032's transfer) holds the pair with the update from
 /// before that step's motion: the islands stay apart, and a later impact on one side wakes it
-/// alone, its contact with the other unsolved in that step. Fixture: a body drifting under the
-/// rest speed with a mature rest timer, so it sleeps in the step that carries it across the
-/// tolerance.
+/// alone, its contact with the other unsolved in that step. Fixture: a body drifting at half
+/// Avian's default rest speed with a mature rest timer, so it sleeps in the step that carries it
+/// across the tolerance.
 #[test]
 fn a_miss_closed_by_the_last_awake_step_links_the_resting_islands() {
     let mut app = physics_app();
@@ -374,8 +374,9 @@ fn a_miss_closed_by_the_last_awake_step_links_the_resting_islands() {
         .resource::<Time<Fixed>>()
         .timestep()
         .as_secs_f32();
-    // Fixture: a quarter of the tolerance per step.
-    let drift = tolerance / 4.0;
+    let rest_speed =
+        SleepThreshold::default().linear * app.world().resource::<PhysicsLengthUnit>().0;
+    let drift = 0.5 * rest_speed * dt;
     let anchor = body(&mut app, Vec3::ZERO);
     until_asleep(&mut app, anchor);
     // Faces 2.5 drifts outside the tolerance.

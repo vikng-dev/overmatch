@@ -29,7 +29,9 @@ use bevy::time::TimeUpdateStrategy;
 use crate::avian_ext::child_poses::{ReenabledPlugin, place_child_colliders};
 
 /// Avian's default plugins and the game's half of the fork, one 64 Hz step per `update`: the manual
-/// clock advances 15 625 µs per update, DERIVED as 1 s / 64.
+/// clock advances 15 625 µs per update, DERIVED as 1 s / 64. Contact recycling is off, as the game
+/// composes physics (`net::physics`): a recycled pair keeps last step's contacts and skips the
+/// narrow phase's matching, cache and hooks.
 pub(super) fn physics_app() -> App {
     physics_app_on(App::new())
 }
@@ -44,6 +46,10 @@ pub(super) fn physics_app_on(mut app: App) -> App {
         PhysicsPlugins::default(),
     ))
     .add_plugins(crate::avian_ext::plugin)
+    .insert_resource(NarrowPhaseConfig {
+        recycle_distance: 0.0,
+        ..default()
+    })
     .init_asset::<Mesh>()
     .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
         15_625,

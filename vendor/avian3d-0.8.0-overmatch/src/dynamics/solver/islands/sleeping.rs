@@ -440,7 +440,9 @@ impl Command for SleepIslands {
                             constraint_graph.remove_contact(contact_pair.contact_id, body1, body2);
                         }
                     },
-                    is_other_body_asleep,
+                    // OVERMATCH PATCH: a miss stays active, so the narrow phase reads its inputs
+                    // every step.
+                    |edge, other| edge.is_touching() && is_other_body_asleep(other),
                 );
             }
 

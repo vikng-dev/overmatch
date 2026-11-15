@@ -778,14 +778,14 @@ impl ContactGraph {
     /// Transfers the contacts of a body from the active contacts to the sleeping contacts,
     /// calling the given callback for each [`ContactPair`] that is moved to sleeping contacts.
     ///
-    /// A contact is only moved to the sleeping set if `should_sleep` returns `true` for the
-    /// other body in the pair. This prevents a non-touching pair between this body and a still-awake
+    /// A contact is only moved to the sleeping set if `should_sleep` returns `true` for its edge
+    /// and the other body in the pair. This prevents a non-touching pair between this body and a still-awake
     /// body from being put to sleep. A pair may sleep only once *both* of its bodies are asleep or immovable.
     #[inline]
     pub fn sleep_entity_with<F, S>(&mut self, entity: Entity, mut pair_callback: F, should_sleep: S)
     where
         F: FnMut(&mut ContactGraph, &ContactPair),
-        S: Fn(Option<Entity>) -> bool,
+        S: Fn(&ContactEdge, Option<Entity>) -> bool, // OVERMATCH PATCH: sees the edge.
     {
         // Get the index of the entity in the graph.
         let Some(index) = self.entity_to_node(entity) else {
@@ -814,7 +814,7 @@ impl ContactGraph {
             } else {
                 edge.body1
             };
-            if !should_sleep(other_body) {
+            if !should_sleep(edge, other_body) {
                 continue;
             }
 

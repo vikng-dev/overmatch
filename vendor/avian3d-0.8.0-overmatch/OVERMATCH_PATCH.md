@@ -309,5 +309,37 @@ motion and touching pairs, each key input, a wake with and without motion, a new
 child's motion and rehoming, a hook rejection. With the cache bypassed five fail (MEASURED); a key
 kept through a hook rejection fails the hook test (MEASURED). The wake test also needs a sleeping
 side's miss to stay active, which Avian 0.8.0's island sleep breaks (it moves every pair whose
-other body rests to the sleeping set); see "Resting misses stay active". Count evidence and
+other body rests to the sleeping set); see "Resting misses stay active", which keeps it. Count evidence and
 reproduction: `upstream/avian-still-pairs.md`.
+
+## Resting misses stay active (`src/collision/contact_types/contact_graph.rs`, `src/dynamics/solver/islands/sleeping.rs`): hook
+
+Subject: the game's rigid-body rest, server physics, game state only.
+
+Avian 0.8.0 (#1032) moves to the sleeping set every pair of a sleeping island whose other body
+rests, misses included. A held miss skips the narrow phase, so it needs a second, hand-kept list of
+the inputs a miss reads, and each input the list lacks is a contact found late. Three holes, each a
+witness that fails under the transfer (MEASURED on this fork with the refusal removed): the held
+update predates the sleeping step's motion; a sleeping body's collider reshaped; an impulse widens
+a sleeper's speculative margin with no bound changed.
+
+`ContactGraph::sleep_entity_with`'s `should_sleep` now sees the pair's edge with the other body
+(its signature: `Fn(&ContactEdge, Option<Entity>) -> bool`), and `SleepIslands` passes "touching,
+and the other body rests". A miss stays active and the narrow phase reads its inputs every step,
+the stationary-miss cache making that cheap. Touching pairs sleep as upstream. 12 fork lines
+(MEASURED: 8 in the graph, 4 at the caller).
+
+The saving forgone, measured on 0.7 with the misses held: the shipped server parked on a pile
+(`scripts/perf/pile_park.py pile`) went from 430.9 to 335.8 µs of physics per tick (MEASURED,
+2026-11-15, medians of 4 interleaved runs).
+
+Guards: in `src/tests/avian_island_sleep.rs`,
+`an_impact_wakes_an_island_that_merges_again_before_the_solver` (green), and
+`a_miss_closed_by_the_last_awake_step_links_the_resting_islands` and
+`an_impulse_on_a_sleeper_meets_its_neighbour_struck_in_the_same_step`, which also need the wake
+rule; in `src/tests/avian_narrow_phase.rs`, `stationary_miss_retests_when_a_woken_body_moves`. The
+first and the last go red with the transfer restored (MEASURED).
+
+The guards run with recycling off, as the game does: a recycled pair returns before the narrow
+phase's query, so a resting miss closed by a sleeper's last awake step is never found
+(MEASURED: `recycled_count` 1, the islands left apart).
