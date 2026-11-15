@@ -85,25 +85,28 @@ position.
 
 Known differences between the channels, none tuned:
 
-- **The datum.** The sampled support's zero-force datum is the droop envelope, so the tank's weight
-  holds it at its rest pose on ground. The run's is the rest outer face, so a piece's force adds to
-  the ground's under the same belt, both springs acting: a hull on a loose slab `h` high rises `h/2`
-  where the same slab fixed lifts it `h`, at twice the link's stiffness, and a tank carried on
-  pieces alone rides one free travel lower against them than on ground (DERIVED: the same `k'` from
-  a datum one free travel higher). The drawn belt follows the drawn pieces (`track::view`). The
-  datum at the droop envelope, past the ground's own intrusion at each link, measured worse
-  (MEASURED 2026-11-14): the stop's lift share fell to 0.21–0.25, but the straight drive's heave
-  peak rose from 14.9 to 24.1 m/s², the hull's rise from 0.15–0.18 to 0.26–0.39 m, creep crossings
-  fell from 5/12 to 2/12, and a tank asleep on pieces no longer woke on drive demand. Its rise is
-  about one free travel (0.173 m), the datum working; its law, a secant stiffness, explains at most
-  8 % less damping (DERIVED, below); its heave and creep changes were never isolated from the moved
-  geometry and the higher ride; and the lost wake was a rest judgement, the tank sleeping while its
-  pitch settled. What would settle it: the run kept at the rest face with a collision margin of the
-  travel's reach, each link's rest length a dead band of the ground's own intrusion there, so a
-  piece carries only its excess past the ground (the whole link where no ground reaches) and the
-  hull rises `h` on the loose slab as on the fixed one. It moves the ride height on heaps, so it
-  goes to the owner as a proposal first; it would round the reach beside the shoe's edge, where the
-  margin is a sphere's.
+- **The datum**, a limit (#354). The sampled support reads no collider a run meets
+  (`rubble::RubbleQuery::supports`), so the ground under a loose piece keeps its support at the
+  sampled datum, the droop envelope, where the tank's weight holds it at its rest pose. The run's
+  datum is the rest outer face, so a piece's force adds to the ground's under the same belt, both
+  springs acting: a hull on a broad loose slab `h` high rises about `h/2` where the same slab fixed
+  lifts it `h`, at twice the link's stiffness, and a tank carried on pieces alone rides one free
+  travel lower against them than on ground (DERIVED: the same `k'` from a datum one free travel
+  higher). The law that removes it derives both channels from one suspension displacement and one
+  load budget per link; the collision margin below is one build of it. The drawn belt follows the
+  drawn pieces (`track::view`). The datum at the droop envelope, past the ground's own intrusion at
+  each link, measured worse (MEASURED 2026-11-14): the stop's lift share fell to 0.21–0.25, but the
+  straight drive's heave peak rose from 14.9 to 24.1 m/s², the hull's rise from 0.15–0.18 to
+  0.26–0.39 m, creep crossings fell from 5/12 to 2/12, and a tank asleep on pieces no longer woke on
+  drive demand. Its rise is about one free travel (0.173 m), the datum working; its law, a secant
+  stiffness, explains at most 8 % less damping (DERIVED, below); its heave and creep changes were
+  never isolated from the moved geometry and the higher ride; and the lost wake was a rest
+  judgement, the tank sleeping while its pitch settled. The collision margin: the run kept at the
+  rest face with a margin of the travel's reach, each link's rest length a dead band of the ground's
+  own intrusion there, so a piece carries only its excess past the ground (the whole link where no
+  ground reaches) and the hull rises `h` on the loose slab as on the fixed one. It moves the ride
+  height on heaps, so it goes to the owner as a proposal first; it would round the reach beside the
+  shoe's edge, where the margin is a sphere's.
 - **Partial coverage.** Over ground the sampled support is a column quadrature, so a curb under one
   edge takes that column's share. A loose piece under part of the width carries the rigid plate
   whole: its link takes its whole law. Width enters only the sampled channel's ground.
@@ -118,24 +121,34 @@ Known differences between the channels, none tuned:
   point need not lie on the run's face: a run witness at (z, y) = (3, 3), outward normal (0.6, 0.8)
   and 0.1 m of overlap expose (2.97, 2.96), inside the outline. The reader selects one face from the
   normal and projects every exposed point onto it, so a piece bearing across a corner of the outline
-  loads that face alone; the belt past the corner takes nothing from it that step. At an exact tie
-  between two edges the run may take the one parry did not, and the feet then clamp onto their
-  shared corner.
-- **The cap law** is a `StandIn`. A contact on a lateral cap carries one link's `k'` and `c'` along
-  its normal, split over its points in overlap however many parry gives it, outside the links'
-  budget, so a piece against the shoe's side takes no support from the rim's links. It continues the
-  rim's law across a flip, where parry's two depths are equal: a piece within one link, bearing at
-  one point, carries the same force on either face, and one reaching `n` links on the rim `1/n` of
-  it on the cap (DERIVED). The truth beside a shoe is steel, and the stop gives it above the
-  compression wrap, sharing the run's lateral faces and meeting every layer (`bump_stop`): the stop
-  is the lateral limit. Two cases meet a cap: a pivot sweeping the shoe's side into pieces, and a
-  piece under the shoe's edge whose least overlap is sideways, an artefact of one normal per convex
-  pair whose truth is the radial law, which no cap law gives. A rigid cap would eject by their
-  lateral overlap the pieces the soft run leaves inside the solid; the nearest measurement is the
-  belt segments' side plates below, 28.5 reversals (related, not the same, since a piece there sat
-  in two colliders at once). An inert cap would hand those pieces to the rigid stop. Parry clips a
-  face to its first four vertices (the TODO in `ConvexPolyhedron::local_support_feature`, parry
-  0.27), so a cap contact, its face an N-gon, is mostly the lone GJK witness point (DERIVED).
+  loads that face alone; the belt past the corner takes nothing from it that step. An exact tie
+  between two edges goes by the outline's shape, never its numbering (`SoftRun::facing`). Parry may
+  take the other edge; each point's foot on the reader's then lies within half the point's overlap
+  of the corner the two share, where that corner turns at most a right angle (DERIVED: the point
+  sits half its overlap inside the run, along a normal bisecting the two edges').
+- **The cap law** is a `StandIn`, and a limit (#354). A contact on a lateral cap carries one link's
+  `k'` and `c'` along its normal, split over its points in overlap however many parry gives it,
+  outside the links' budget, so a piece against the shoe's side takes no support from the rim's
+  links. Across a flip, where parry's two depths are equal, it continues the rim's law only for a
+  piece alone on its links: one bearing at one point within one link carries the same force on
+  either face, and one reaching `n` links at a common depth carries `1/n` of its rim force on the
+  cap (DERIVED). A piece sharing a link jumps: two pieces `d` deep, each at one point on one link,
+  carry `K·d/2` each on the rim; move one to the cap and it carries `K·d` outside the budget while
+  the other takes the link's whole `K·d` (DERIVED, `K = k' × link`). It is compensation: radial
+  suspension stiffness stands in for lateral compliance, and a slab against the cap split into
+  coplanar pieces brings one link-sized spring per piece (DERIVED). The law that removes it takes
+  lateral contact from the shoe's material and deflected boundary and radial support from the
+  suspension's compression alone, with no cap spring. The truth beside a shoe is steel, and the stop
+  gives it above the compression wrap, sharing the run's lateral faces and meeting every layer
+  (`bump_stop`): the stop is the lateral limit. Two cases meet a cap: a pivot sweeping the shoe's
+  side into pieces, and a piece under the shoe's edge whose least overlap is sideways, an artefact
+  of one normal per convex pair whose truth is the radial law, which no cap law gives. A rigid cap
+  would eject by their lateral overlap the pieces the soft run leaves inside the solid; the nearest
+  measurement is the belt segments' side plates below, 28.5 reversals (related, not the same, since
+  a piece there sat in two colliders at once). An inert cap would hand those pieces to the rigid
+  stop. Parry clips a face to its first four vertices (the TODO in
+  `ConvexPolyhedron::local_support_feature`, parry 0.27), so a cap contact, its face an N-gon, is
+  mostly the lone GJK witness point (DERIVED).
 - **The law within a step.** A contact's shares and the points that bear are read once, at the
   narrow phase, so its stiffness is exact for a common compression of its links, not for one piece
   retreating alone. The points split the force by `overlap + rest`, so the centre of pressure and
@@ -144,7 +157,9 @@ Known differences between the channels, none tuned:
 - **The secant it replaced** was a damping error, not a feel defect: within a step a secant `k_sec`
   in place of the tangent `K` acts as a damper of `(k_sec − K)·dt/2`, about `0.084·(k_sec/K − 1)` of
   the link's damping for the shipped law (DERIVED: `c'/k' = 2ζ/ω = 0.093 s` unless the travel is
-  chain-clamped, at 64 Hz), +4 % for a piece `d` and `3d` deep across one link.
+  chain-clamped, at 64 Hz), +4 % for a piece `d` and `3d` deep across one link. Over the soft-run
+  probe's four cases, 12 starts each, its force-weighted `k_sec/K` read 1.08–1.18: +0.7 to +1.5 %
+  damping (MEASURED).
 - **Restitution** above zero would take a rigid impulse on a compliant point
   (`ContactConstraint::apply_restitution`); pieces and runs set none, and Avian's default is zero.
 

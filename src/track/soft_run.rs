@@ -23,8 +23,9 @@
 //!   step's start, so its law is affine and its tangent stiffness the links' own; the solver leaves
 //!   its other points inert. A contact on a lateral cap carries one link's law along its normal,
 //!   outside the links' budget ([`Face::Cap`]). The datum is the rest face, so a piece's force adds
-//!   to the ground's under the same belt, which the sampled support carries. The reading's limits
-//!   are the design doc's (`.agents/docs/design/track-model/track-contact.md`).
+//!   to the ground's under the same belt, which the sampled support carries: a limit (#354), as
+//!   the cap law is. The reading's limits are the design doc's
+//!   (`.agents/docs/design/track-model/track-contact.md`).
 //! - **Drivetrain.** A run carries its side's `BeltFace`, so the shared hook moves its surface at
 //!   belt speed and `stop_contacts::by_owner` reads its friction into the transmission.
 //!
@@ -58,7 +59,6 @@ pub(crate) struct RunShape {
 }
 
 impl RunShape {
-    /// `side`'s run, from the measured running gear `geom`.
     pub(crate) fn build(geom: &RigGeom, side: Side) -> Self {
         let outline = outline(geom, side);
         Self {
@@ -83,7 +83,6 @@ impl RunShape {
     }
 }
 
-/// What a run meets: loose pieces only.
 pub(crate) fn run_layers() -> CollisionLayers {
     CollisionLayers::new([Layer::TrackBelt], [Layer::Debris])
 }
@@ -128,7 +127,7 @@ pub(crate) enum Face {
     Rim(usize),
     /// Either lateral cap. `StandIn`: a cap contact carries one link's law along its normal, split
     /// over its points in overlap, outside the links' budget: the solid's lateral continuation,
-    /// the rim's own at a flip for a piece within one link. The stop is the lateral limit
+    /// the rim's own at a flip for a piece alone on one link. The stop is the lateral limit
     /// (`.agents/docs/design/track-model/track-contact.md`).
     Cap,
 }
@@ -175,12 +174,19 @@ impl SoftRun {
 
     /// The face a manifold whose normal leaves the run along body-frame `out` is read on, by the
     /// narrow phase's own rule (parry's `ConvexPolyhedron::local_support_feature`): the face whose
-    /// outward normal lies nearest `out`. At an exact tie between two edges the last wins, where
-    /// parry may pick the other; the feet then clamp onto the corner they share.
+    /// outward normal lies nearest `out`. An exact tie between two edges goes to the one whose
+    /// outward normal points lowest in the side plane, then toward least `z`: a key of the
+    /// outline's shape, so the law does not depend on where its numbering starts. Parry may take
+    /// the other (`track-contact.md`, "One face per piece", bounds where its points then land).
     pub(crate) fn facing(&self, out: Vec3) -> Face {
         let side = Vec2::new(out.z, out.y);
         let (rim, nearest) = (self.edges.iter().map(|edge| edge.out.dot(side)).enumerate())
-            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .max_by(|a, b| {
+                let (ka, kb) = (self.edges[a.0].out, self.edges[b.0].out);
+                (a.1.total_cmp(&b.1))
+                    .then(kb.y.total_cmp(&ka.y))
+                    .then(kb.x.total_cmp(&ka.x))
+            })
             .expect("a run outline has edges");
         if out.x.abs() > nearest {
             Face::Cap
@@ -591,10 +597,13 @@ mod tests {
     /// One manifold given by its face and its points `(arc, overlap)` on the fixture run.
     type Given<'a> = (Face, &'a [(f32, f32)]);
 
-    /// A world holding the fixture run on a body at the origin under the fixture law, touching one
-    /// piece per manifold; each manifold's points stand on the outline at their arcs, its normal
-    /// leaving the run through its face. Returns the world and the manifolds' pairs, in order.
-    fn world(manifolds: &[Given]) -> (World, Vec<ContactId>) {
+    /// One manifold by its normal leaving the run and its exposed points `(point, overlap)`, in
+    /// the run's body frame.
+    type Exposed = (Vec3, Vec<(Vec3, f32)>);
+
+    /// A world holding `run` on a body at the origin under the fixture law, touching one piece per
+    /// manifold. Returns the world and the manifolds' pairs, in order.
+    fn world_on(run: SoftRun, manifolds: &[Exposed]) -> (World, Vec<ContactId>) {
         ComputeTaskPool::get_or_init(TaskPool::default);
         let mut world = World::new();
         world.insert_resource(LAW);
@@ -605,12 +614,32 @@ mod tests {
                 Transform::IDENTITY,
             ))
             .id();
-        let run = SoftRun::fixture();
         let collider = world
-            .spawn((ColliderOf { body }, run.clone(), Transform::IDENTITY))
+            .spawn((ColliderOf { body }, run, Transform::IDENTITY))
             .id();
         let mut graph = ContactGraph::default();
         let pairs = manifolds
+            .iter()
+            .map(|(normal, points)| {
+                let points =
+                    (points.iter()).map(|&(at, overlap)| ContactPoint::new(at, at, at, overlap));
+                let manifold = ContactManifold::new(points, *normal);
+                let mut edge = ContactEdge::new(collider, world.spawn_empty().id());
+                edge.flags.insert(ContactEdgeFlags::TOUCHING);
+                graph
+                    .add_edge_with(edge, |pair| pair.manifolds.push(manifold.clone()))
+                    .expect("each piece meets the run once")
+            })
+            .collect();
+        world.insert_resource(graph);
+        (world, pairs)
+    }
+
+    /// [`world_on`] the fixture run, each manifold's points standing on the outline at their arcs,
+    /// its normal leaving the run through its face.
+    fn world(manifolds: &[Given]) -> (World, Vec<ContactId>) {
+        let run = SoftRun::fixture();
+        let exposed: Vec<Exposed> = manifolds
             .iter()
             .map(|&(face, points)| {
                 let normal = match face {
@@ -626,19 +655,12 @@ mod tests {
                         .rfind(|edge| edge.arc <= s)
                         .expect("the first edge starts at arc zero");
                     let p = edge.start + edge.dir * (s - edge.arc);
-                    let at = Vec3::new(0.0, p.y, p.x);
-                    ContactPoint::new(at, at, at, overlap)
+                    (Vec3::new(0.0, p.y, p.x), overlap)
                 });
-                let manifold = ContactManifold::new(points, normal);
-                let mut edge = ContactEdge::new(collider, world.spawn_empty().id());
-                edge.flags.insert(ContactEdgeFlags::TOUCHING);
-                graph
-                    .add_edge_with(edge, |pair| pair.manifolds.push(manifold.clone()))
-                    .expect("each piece meets the run once")
+                (normal, points.collect())
             })
             .collect();
-        world.insert_resource(graph);
-        (world, pairs)
+        world_on(run, &exposed)
     }
 
     /// Each manifold's law as `read_runs` reads it, in `pairs` order.
@@ -842,11 +864,57 @@ mod tests {
         }
     }
 
+    /// An exact tie between two faces goes by the outline's shape, not its numbering: the law is the
+    /// same whichever vertex the outline starts from. On the square, a piece `d` deep whose normal
+    /// bisects the corner at the origin, its point exposed half the overlap inside, and a piece
+    /// pressing the bottom face beside that corner carry the same force, stiffness and damping
+    /// under each of the outline's four numberings, the seam 24 links further on each time. Fails
+    /// if a tie goes to the last edge: one numbering then reads the bisecting piece on the left
+    /// face, at link 95, and the two pieces carry twice what they carry sharing link 0.
+    #[test]
+    fn a_tie_between_faces_goes_by_the_outline_not_its_numbering() {
+        let d = 0.1;
+        let corners =
+            [(0.0, 0.0), (3.0, 0.0), (3.0, 3.0), (0.0, 3.0)].map(|(z, y)| Vec2::new(z, y));
+        let inside = d / 2.0 * std::f32::consts::FRAC_1_SQRT_2;
+        let manifolds: [Exposed; 2] = [
+            (
+                Vec3::new(0.0, -1.0, -1.0).normalize(),
+                vec![(Vec3::new(0.0, inside, inside), d)],
+            ),
+            (Vec3::NEG_Y, vec![(Vec3::new(0.0, 0.0, 0.0625), d)]),
+        ];
+        let carried = |start: usize| {
+            let outline: Vec<Vec2> = (0..4).map(|k| corners[(start + k) % 4]).collect();
+            let (mut world, pairs) = world_on(SoftRun::new(&outline, 0.125), &manifolds);
+            let laws = read(&mut world, &pairs);
+            laws.iter()
+                .zip(&manifolds)
+                .fold([0.0; 3], |sum, (law, (_, points))| {
+                    let points: Vec<(f32, f32)> =
+                        points.iter().map(|&(_, overlap)| (0.0, overlap)).collect();
+                    let [f, k, c] = carries(law, &points);
+                    [sum[0] + f, sum[1] + k, sum[2] + c]
+                })
+        };
+        let first = carried(0);
+        assert!(first[0] > 0.0, "the pieces carry nothing");
+        for start in 1..4 {
+            let got = carried(start);
+            assert!(
+                close(got, first),
+                "the outline from vertex {start}: {got:?} against {first:?} from vertex 0"
+            );
+        }
+    }
+
     /// A cap contact carries one link's law along its normal, split over its points in overlap
     /// however many parry gives it, and leaves the rim's links alone. Two points `d` deep, and three
-    /// with a fourth apart, carry `k'·d`, `k'` and `c'` per metre of one link, and a rim contact
-    /// on the links they stand by carries what it carries without them. Fails if a cap's law grows
-    /// with its points, or if a cap takes a share of a link's budget from the rim.
+    /// with a fourth apart, carry `k'·d`, `k'` and `c'` per metre of one link, as one point `d`
+    /// deep alone on its link carries on the rim, where a piece reaching three links at that depth
+    /// carries three times as much; and a rim contact on the links they stand by carries what it
+    /// carries without them. Fails if a cap's law grows with its points, or if a cap takes a share
+    /// of a link's budget from the rim.
     #[test]
     fn a_cap_contact_carries_one_links_law_outside_the_links() {
         let d = 0.04;
@@ -856,6 +924,17 @@ mod tests {
             LAW.stiffness_per_m * link,
             LAW.damping_per_m * link,
         ];
+        for (n, points) in [
+            (1.0, &[(at(12.5), d)][..]),
+            (3.0, &[(at(12.5), d), (at(14.5), d)]),
+        ] {
+            let got = carried(&[(Face::Rim(0), points)]);
+            let want = one.map(|v| n * v);
+            assert!(
+                close(got, want),
+                "{n} links on the rim: {got:?} against {want:?}"
+            );
+        }
         let rim: &[(f32, f32)] = &[(at(12.0), d), (at(13.0), d)];
         let alone = carried(&[(Face::Rim(0), rim)]);
         let two: &[(f32, f32)] = &[(at(12.5), d), (at(60.5), d)];
