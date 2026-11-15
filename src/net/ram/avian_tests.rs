@@ -31,11 +31,24 @@ fn snapshot(app: &mut App) -> crate::cost::AvianStep {
 
 /// Omitting a contact pass, multiplying by points or accumulating across steps breaks the
 /// collapse reader's work account. DERIVED visits: warm start, biased solve and relaxation
-/// per substep, plus one restitution pass, including its zero-restitution no-ops.
+/// per substep, plus one restitution pass, including its zero-restitution no-ops. On a compute
+/// pool of more than one thread the fork's solver dispatches a color through parallel chunks from
+/// 64 constraints (`par_for_each(.., 64, ..)` in its `dynamics/solver/plugin.rs`), so a small batch's
+/// visits are all serial and a large one's all parallel; a dispatch counted in the other column
+/// breaks the classification.
 #[test]
 fn contact_visits_cover_each_pass_and_reset_each_step() {
-    // Fixture sizes exercise small and large independent contact batches.
-    for count in [4, 128] {
+    // Fixture: a pool of four threads, unless another test of this process built the global pool
+    // first; Bevy's defaults give more than one compute thread from four cores.
+    let pool = bevy::tasks::ComputeTaskPool::get_or_init(|| {
+        bevy::tasks::TaskPoolBuilder::new().num_threads(4).build()
+    });
+    assert!(
+        pool.thread_num() > 1,
+        "fixture: classifying the dispatch needs a compute pool of more than one thread"
+    );
+    // Fixture sizes: one batch below the parallel floor, one above it.
+    for (count, parallel) in [(4, false), (128, true)] {
         let mut app = physics_app();
         app.world_mut().spawn((
             RigidBody::Static,
@@ -63,13 +76,13 @@ fn contact_visits_cover_each_pass_and_reset_each_step() {
                 step.max_dynamic_manifold_degree, 1,
                 "each dynamic cube owns one manifold; the shared static floor must be excluded"
             );
+            let visits = step.constraints * (3 * substeps + 1);
+            let expected = if parallel { (0, visits) } else { (visits, 0) };
             assert_eq!(
-                step.serial_contact_visits + step.parallel_contact_visits,
-                step.constraints * (3 * substeps + 1)
+                (step.serial_contact_visits, step.parallel_contact_visits),
+                expected,
+                "{count} contacts: (serial, parallel) visits"
             );
-            if bevy::tasks::ComputeTaskPool::get().thread_num() == 1 {
-                assert_eq!(step.parallel_contact_visits, 0);
-            }
         }
     }
 }

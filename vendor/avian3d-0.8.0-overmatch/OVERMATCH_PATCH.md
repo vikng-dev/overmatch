@@ -558,9 +558,8 @@ Kept: counters inside three upstream systems and the dispatch decision of an ups
 extension point sees either. 65 fork lines (MEASURED: 26 in the solver, 32 in the diagnostics, 7 in
 `par_for_each`).
 
-Guard: the game's `src/net/ram/avian_tests.rs` (`contact_visits_cover_each_pass_and_reset_each_step`
-and the overflow star), which reads them through the game's work account and so runs when the game
-builds on 0.8 again; the guard crate does not build that account. The identity it asserts, visits =
-constraints × (3 × substeps + 1), held on this fork once (MEASURED, a scratch test in the guard
-crate, 4 compute threads, 6 substeps: 4 floor contacts, 76 serial and 0 parallel; 128, 0 serial and
-2,432 parallel; an overflow star of 25 constraints, 3 in overflow, 475 serial).
+Guard: the game's `src/net/ram/avian_tests.rs`, which reads them through the game's work account.
+`contact_visits_cover_each_pass_and_reset_each_step` asserts visits = constraints × (3 × substeps +
+1) and, on a compute pool of more than one thread, the classification: 4 floor contacts, every visit
+serial; 128, every visit parallel. Red with every dispatch counted serial (MEASURED: 2,432 serial
+where 2,432 parallel are due). The overflow star checks overflow's serial visits.
