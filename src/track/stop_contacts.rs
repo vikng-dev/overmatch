@@ -360,50 +360,17 @@ mod tests {
         }
     }
 
-    /// Side slices may shove across the shoe width, but their rest-height radial planes
-    /// cannot bypass suspension travel or duplicate the compressed outer-face hard limit.
+    /// A side slice bears only lateral contact through its exposed face, the shoe's own. Its
+    /// rest-height radial planes cannot bypass suspension travel or duplicate the compressed
+    /// outer-face hard limit. Its inner face lies inside the shoe's width: matter the belt rides
+    /// over reaches through the slice, a convex pair's one normal then leaves by whichever lateral
+    /// face is nearer, and by the inner one it would shove the shoe sideways out of matter it
+    /// stands on. The sweep's witnesses rely on the same admission (`construction::sweep::source`).
+    /// Fails if a slice bears a radial normal or a lateral one of either sign, or reads the pair's
+    /// normal without its collider's order in the pair.
     #[test]
-    fn lateral_slices_do_not_supply_radial_hard_support() {
-        let mut world = World::new();
-        world.init_resource::<Time<Fixed>>();
-        let body = world
-            .spawn((
-                TrackDrive::default(),
-                Position::default(),
-                Rotation::default(),
-                Transform::IDENTITY,
-            ))
-            .id();
-        let shoe = world
-            .spawn((
-                face(Side::Left, Bearing::Exposed(-1.0)),
-                Transform::IDENTITY,
-                ColliderOf { body },
-            ))
-            .id();
-        let other = world.spawn_empty().id();
-        let mut pair = ContactPair::new(shoe, other, ContactId::PLACEHOLDER);
-        pair.manifolds.push(ContactManifold::new(
-            [ContactPoint::new(Vec3::ZERO, Vec3::ZERO, -Vec3::Y, 0.01)],
-            -Vec3::Y,
-        ));
-        world
-            .run_system_once(move |hooks: WorldContacts, mut commands: Commands| {
-                assert!(!hooks.modify_contacts(&mut pair, &mut commands));
-                assert!(pair.manifolds.is_empty());
-            })
-            .unwrap();
-    }
-
-    /// A side slice bears only through its exposed face, the shoe's own. Matter the belt rides
-    /// over reaches through the slice, and a convex pair's one normal then leaves it by whichever
-    /// lateral face is nearer: by the inner one, inside the shoe's width, the contact would shove
-    /// the shoe sideways out of matter it stands on. The sweep's witnesses rely on the same
-    /// admission (`construction::sweep::source`). Fails if a slice admits a lateral normal of
-    /// either sign, or reads the pair's normal without its collider's order in the pair.
-    #[test]
-    fn a_side_slice_bears_only_through_its_exposed_face() {
-        for (outward, bears) in [(-Vec3::X, true), (Vec3::X, false)] {
+    fn a_side_slice_bears_only_lateral_contact_through_its_exposed_face() {
+        for (outward, bears) in [(-Vec3::X, true), (Vec3::X, false), (-Vec3::Y, false)] {
             for first in [false, true] {
                 let mut world = World::new();
                 world.init_resource::<Time<Fixed>>();
@@ -440,11 +407,14 @@ mod tests {
                 ));
                 world
                     .run_system_once(move |hooks: WorldContacts, mut commands: Commands| {
+                        let case =
+                            format!("a normal leaving along {outward}, slice first: {first}");
                         assert_eq!(
                             hooks.modify_contacts(&mut pair, &mut commands),
                             bears,
-                            "a normal leaving the slice along {outward}, the slice first: {first}"
+                            "{case}"
                         );
+                        assert_eq!(pair.manifolds.is_empty(), !bears, "{case}");
                     })
                     .unwrap();
             }

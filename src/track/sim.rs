@@ -357,6 +357,12 @@ impl TrackGear {
         self.construction.grip()
     }
 
+    /// One side's belt translation and reflected wheel inertia (kg).
+    #[cfg(all(test, feature = "bitprobe"))]
+    pub(crate) fn belt_inertia(&self) -> f32 {
+        self.construction.belt_inertia
+    }
+
     /// Coupled translation mass for a torque-cut landing: hull plus both belt inertias (kg).
     #[cfg(all(test, feature = "bitprobe"))]
     pub(crate) fn landing_mass(&self) -> f32 {
