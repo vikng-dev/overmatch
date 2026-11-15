@@ -18,6 +18,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use lightyear::link::prelude::Endpoint;
 use lightyear::prelude::server::{ClientOf, Server};
 use lightyear::prelude::*;
 use serde_json::json;
@@ -68,7 +69,7 @@ pub(super) fn install_client(app: &mut App) {
 struct ExplanationSend<'w, 's> {
     records: MessageReader<'w, 's, RecordedShot>,
     vocabulary: Res<'w, ShotVocabulary>,
-    servers: Query<'w, 's, &'static Server>,
+    servers: Query<'w, 's, &'static Endpoint, With<Server>>,
     tanks: Query<'w, 's, (&'static CombatantId, &'static ControlledBy), With<NetTank>>,
     sender: ServerMultiMessageSender<'w, 's>,
 }

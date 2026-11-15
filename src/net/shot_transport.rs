@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 
 use bevy::prelude::*;
+use lightyear::link::prelude::Endpoint;
 use lightyear::prelude::server::{ClientOf, Server};
 use lightyear::prelude::*;
 use lightyear_transport::channel::registry::ChannelKind;
@@ -687,7 +688,7 @@ fn observe_reliable_outbox(
 }
 
 fn flush_shot_transport(
-    servers: Query<&Server>,
+    servers: Query<&Endpoint, With<Server>>,
     timeline: Res<LocalTimeline>,
     mut transport: ResMut<ShotTransport>,
     mut metrics: ResMut<ShotTransportMetrics>,
