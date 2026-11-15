@@ -212,6 +212,7 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
             BackgroundColor(PANEL_BG),
         ))
         .with_children(|card| {
+            // Both columns of a metric row use the Regular weight: the rows are dense.
             for (metric, label) in [
                 (Metric::Ping, "Ping"),
                 (Metric::Jitter, "Jitter"),
@@ -229,7 +230,6 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                     row.spawn((
                         Text::new(label),
                         TextFont {
-                            // Regular: a dense metric row label.
                             font: fonts.body.clone().into(),
                             font_size: FontSize::Px(15.0),
                             ..default()
@@ -241,7 +241,6 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                         // Placeholder until the first ~1 Hz refresh populates real numbers.
                         Text::new("--"),
                         TextFont {
-                            // Regular: a dense metric row value.
                             font: fonts.body.clone().into(),
                             font_size: FontSize::Px(15.0),
                             ..default()

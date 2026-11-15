@@ -259,8 +259,9 @@ fn step(server: &mut App, client: &mut App) -> Vec<(u32, TankCommand)> {
 }
 
 /// A connected server and client with W, D and Space held, once the client has filed more than
-/// twice the input delay and the server has received input, on frames of `frame_ticks` fixed
-/// ticks. The server, the client and the tank.
+/// twice the input delay, the server has received input, and the keys have been held for more
+/// whole frames than the authored tap window spans, so each is a hold at full level. On frames of
+/// `frame_ticks` fixed ticks. The server, the client and the tank.
 fn connected(frame_ticks: u32) -> (App, App, Entity) {
     let port = free_port();
     let mut server = build_server(port);
@@ -277,6 +278,16 @@ fn connected(frame_ticks: u32) -> (App, App, Entity) {
         if client.world().resource::<Filed>().0.len() > 2 * delay
             && !server.world().resource::<Received>().0.is_empty()
         {
+            // No input plugin clears the press's edges: the keys keep only their held level.
+            client
+                .world_mut()
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .clear();
+            let frame_s = (TICK * frame_ticks).as_secs_f64();
+            let tap_window_s = crate::track::drive::drive_feel().tap_window_s.0;
+            for _ in 0..=(tap_window_s / frame_s) as u32 {
+                step(&mut server, &mut client);
+            }
             return (server, client, tank);
         }
     }
@@ -539,20 +550,14 @@ fn a_set_cruise_notch_outlasts_a_focus_loss_and_held_keys_do_not() {
 
     let _udp = lock_real_udp_test();
     let (mut server, mut client, _) = connected(TICKS_PER_FRAME);
-    let feel = crate::track::drive::drive_feel();
-    // W, D and Space, held since the connection, stay held for more whole frames than the authored
-    // tap window spans: W's release then ends a hold, and D holds full steer.
-    let frame_s = (TICK * TICKS_PER_FRAME).as_secs_f64();
-    for _ in 0..=(feel.tap_window_s.0 / frame_s) as u32 {
-        keyed_step(&mut server, &mut client, |_| {});
-    }
+    // W's release ends its hold; D and Space stay held.
     keyed_step(&mut server, &mut client, |keys| keys.release(KeyCode::KeyW));
     // Pressed and released within one frame, a tap is a tap whatever the authored window.
     let focused = keyed_step(&mut server, &mut client, |keys| {
         keys.press(KeyCode::KeyW);
         keys.release(KeyCode::KeyW);
     });
-    let notch = feel.notch_step();
+    let notch = crate::track::drive::drive_feel().notch_step();
     let cruising = |command: &TankCommand| {
         command.throttle == notch && command.steer == 1.0 && command.fire_secondary
     };
