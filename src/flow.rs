@@ -5,9 +5,9 @@
 //!   [`crate::state::AppState`], so a client on a menu screen keeps ticking and keeps sending its
 //!   (zeroed) command.
 //! - **Derived, one writer per root.** Each windowed root writes [`flow_of`] of its facts every frame
-//!   with `NextState::set_if_neq`, so a frame that changes nothing transitions nothing: the offline
-//!   root from `AppState` ([`offline_plugin`]), the net client from its link (`net::client`). A
-//!   root that is always in a match — a sandbox — inserts [`Flow::InMatch`] once
+//!   with `NextState::set_if_different`, so a frame that changes nothing transitions nothing: the
+//!   offline root from `AppState` ([`offline_plugin`]), the net client from its link
+//!   (`net::client`). A root that is always in a match — a sandbox — inserts [`Flow::InMatch`] once
 //!   ([`in_match_plugin`]).
 //! - **The transition lands one frame after the facts change**: the writer runs in `Update`, and
 //!   `StateTransition` applies it before the next frame's `Update`.
@@ -70,10 +70,10 @@ pub(crate) fn flow_of(facts: FlowFacts) -> Flow {
     }
 }
 
-/// Write the derived screen. `set_if_neq`: `set` re-runs `OnExit`/`OnEnter` even for the same
+/// Write the derived screen. `set_if_different`: `set` re-runs `OnExit`/`OnEnter` even for the same
 /// state, which would rebuild every scoped tree every frame.
 pub(crate) fn write(next: &mut NextState<Flow>, facts: FlowFacts) {
-    next.set_if_neq(flow_of(facts));
+    next.set_if_different(flow_of(facts));
 }
 
 /// The view systems that run only on the match screen, in `Update` and `PostUpdate`. Never a
