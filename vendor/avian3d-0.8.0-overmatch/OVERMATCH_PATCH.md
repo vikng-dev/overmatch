@@ -389,7 +389,9 @@ moves the pair to the sleeping set with `ContactGraph::sleep_entity_with`, so th
 constraint for it. The island's next wake (`WakeIslands`) returns the pair and pushes its manifolds.
 A merge the pass makes stands when a later entry of the same step wakes the merged island, which then
 holds the pair. Sleep is read from the island (`PhysicsIsland::is_sleeping`, public), not the body's
-`Sleeping` marker.
+`Sleeping` marker. Upstream composes without `IslandPlugin` too; the game's does not (no app in the
+tree installs the seams without it), and `avian_ext::plugin` refuses such a composition as it is
+built, naming the plugin (guard: `the_seams_refuse_a_composition_without_islands`).
 
 A predicate inside `apply_contact_status_change` was not enough: by then the pair's manifolds are in
 the constraint graph, and the flush holds the contact graph read-only, so the hook would also have

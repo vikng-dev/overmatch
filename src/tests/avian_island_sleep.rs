@@ -9,7 +9,7 @@
 use avian3d::collision::contact_types::ContactId;
 use avian3d::dynamics::solver::{
     constraint_graph::ConstraintGraph,
-    islands::{BodyIslandNode, PhysicsIslands, WakeIslands},
+    islands::{BodyIslandNode, IslandPlugin, PhysicsIslands, WakeIslands},
 };
 use avian3d::prelude::*;
 use bevy::ecs::{entity_disabling::Disabled, system::RunSystemOnce};
@@ -91,6 +91,21 @@ fn stationary_contact_does_not_wake_a_resting_island() {
         solved(&app, edge.id) == 0,
         "a sleeping contact must leave no solver handles"
     );
+}
+
+/// The wake rule links resting contacts into Avian's islands, so the game's seams refuse a physics
+/// composition without `IslandPlugin` as they are built, naming the plugin, not inside the pass on
+/// the first step. No composition of the game's physics disables it.
+#[test]
+#[should_panic(expected = "compose physics with Avian's IslandPlugin")]
+fn the_seams_refuse_a_composition_without_islands() {
+    App::new()
+        .add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            PhysicsPlugins::default().build().disable::<IslandPlugin>(),
+        ))
+        .add_plugins(crate::avian_ext::plugin);
 }
 
 /// Island users rely on rest history belonging to each body. A mutant that resets every member

@@ -15,12 +15,19 @@
 use avian3d::collision::narrow_phase::{
     ContactStatusChange, ContactStatusChangeQueue, NarrowPhaseSystems,
 };
-use avian3d::dynamics::solver::islands::{BodyIslandNode, PhysicsIslands};
+use avian3d::dynamics::solver::islands::{BodyIslandNode, IslandPlugin, PhysicsIslands};
 use avian3d::prelude::*;
 use bevy::ecs::entity_disabling::Disabled;
 use bevy::prelude::*;
 
+/// Refused without Avian's `IslandPlugin`, whose islands the pass links into: every composition
+/// of the game's physics keeps it.
 pub(super) fn plugin(app: &mut App) {
+    assert!(
+        app.is_plugin_added::<IslandPlugin>(),
+        "avian_ext::island_wake links resting contacts into Avian's islands: compose physics with \
+         Avian's IslandPlugin, before avian_ext::plugin"
+    );
     app.get_schedule_mut(PhysicsSchedule)
         .expect("avian_ext::plugin is added after Avian's PhysicsPlugins")
         .add_systems(
