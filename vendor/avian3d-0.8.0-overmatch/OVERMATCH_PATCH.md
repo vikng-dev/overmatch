@@ -117,3 +117,23 @@ bundle's attachment is installed 4 times, not once, and a change to two children
 aggregates for one body. The other two guard upstream behaviour the patch keeps (a late body's
 repair; a self-attached explicit body's edits). The construction's
 `departure_and_split_preserve_each_chunks_collider_contract` guards the game's use.
+
+## Pairless-layer broad-phase prune (`src/collision/broad_phase/bvh_broad_phase.rs`, `src/collision/diagnostics.rs`): kept
+
+`collect_collision_pairs` skips a moved proxy's tree traversals when its collision-layer
+memberships or filters are empty: either empty term makes `CollisionLayers::interacts_with` false
+for every partner. The proxy stays in its one collider tree, so spatial queries still find it.
+Eligibility reads the proxy's current layers each step, sensor and standalone proxies included.
+The system reads `ColliderTrees` as `Res` (upstream asks `ResMut` and writes nothing), and a live
+moved proxy without bounds panics where upstream skipped it unseen. Upstream's own `unwrap`s stay.
+
+`CollisionDiagnostics::broad_phase_candidates` counts non-self BVH leaf visits before duplicate,
+layer and body filtering, summed from per-chunk counts; a candidate can be visited from both
+endpoints. The game's tick trace reads it for the ram and scheduled-collapse instruments.
+
+Kept: the prune sits inside the broad phase's private per-proxy loop, so the alternative is
+replacing the whole broad-phase plugin. 33 fork lines (MEASURED: 28 in the broad phase, 5 in the
+diagnostics).
+
+Guard: `src/tests/avian_broad_phase_layers.rs` (with the prune removed it fails: 2 candidates
+visited, not 0, MEASURED). Counts and reproduction: `upstream/avian-pairless-broad-phase.md`.

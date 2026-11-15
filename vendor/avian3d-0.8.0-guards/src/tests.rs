@@ -9,3 +9,6 @@ mod avian_prepared_mass;
 
 #[path = "../../../src/tests/avian_spawn_batch.rs"]
 mod avian_spawn_batch;
+
+#[path = "../../../src/tests/avian_broad_phase_layers.rs"]
+mod avian_broad_phase_layers;

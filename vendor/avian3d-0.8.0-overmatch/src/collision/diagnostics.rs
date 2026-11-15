@@ -13,6 +13,9 @@ use crate::diagnostics::{PhysicsDiagnostics, impl_diagnostic_paths};
 pub struct CollisionDiagnostics {
     /// Time spent finding potential collision pairs in the [broad phase](crate::collision::broad_phase).
     pub broad_phase: Duration,
+    /// OVERMATCH PATCH: non-self leaf candidates visited before duplicate, layer and body
+    /// filtering. A candidate can be visited from both endpoints.
+    pub broad_phase_candidates: u32,
     /// Time spent updating contacts in the [narrow phase](crate::collision::narrow_phase).
     pub narrow_phase: Duration,
     /// The number of contacts.
@@ -33,6 +36,7 @@ impl PhysicsDiagnostics for CollisionDiagnostics {
         vec![
             (Self::CONTACT_COUNT, self.contact_count),
             (Self::RECYCLED_COUNT, self.recycled_count),
+            (Self::BROAD_PHASE_CANDIDATES, self.broad_phase_candidates),
         ]
     }
 }
@@ -43,5 +47,6 @@ impl_diagnostic_paths! {
         NARROW_PHASE: "avian/collision/update_contacts",
         CONTACT_COUNT: "avian/collision/contact_count",
         RECYCLED_COUNT: "avian/collision/recycled_count",
+        BROAD_PHASE_CANDIDATES: "avian/collision/broad_phase_candidates",
     }
 }
