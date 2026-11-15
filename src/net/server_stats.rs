@@ -70,9 +70,12 @@
 //!   Linux or where the file is unreadable;
 //! - `construction`: unique recorded joint cracks and separations, and original construction
 //!   chunks departed. These are correctness counts, independent of time brackets.
-//! - `debris`: the `live` (awake) and `sleeping` loose pieces at the line, a construction's and the
-//!   debris stress lever's (`net::debris_stress`); while the lever is armed also its cumulative
-//!   `breaches` and `released`.
+//! - `debris`: `live`, `sleeping`, `frozen` loose pieces at the line; `awake`, `rested`, and
+//!   `rested_unreached` have the per-tick summary shape in piece counts (including zero). Rested
+//!   means Avian's sleep timer reached `TimeToSleep`; unreached excludes the existing freeze
+//!   reach of any non-static zero-timer body. Divide `rested_unreached.total` by `awake.total`
+//!   for the period's candidate fraction when any piece was awake. The debris stress lever
+//!   (`net::debris_stress`), while armed, also adds cumulative `breaches` and `released`.
 //!
 //! RSS and throttle fields are null where the platform gives no reading. A process CPU clock
 //! failure visibly refuses the armed instrument rather than emitting an idle-core reading.
@@ -139,6 +142,7 @@ use crate::cost::{
     stages::{COUNT, NAMES, Stages},
 };
 use crate::damage_cam::recorder::ShotRecorder;
+use crate::debris::freeze::FreezeCounts;
 use crate::scatter::MapInstance;
 use crate::tank::Tank;
 
@@ -282,11 +286,13 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         period.as_secs_f64()
     );
     arm_tick_clock(app);
+    app.init_resource::<FreezeCounts>();
     #[cfg(target_os = "linux")]
     linux::log_startup();
     app.insert_resource(ServerStats {
         period: Period::new(period, Instant::now()),
         ticks: TickWindow::default(),
+        freeze_counts: std::array::from_fn(|_| TickWindow::default()),
         physics: TickWindow::default(),
         sleep: TickWindow::default(),
         collector: TickWindow::default(),
@@ -446,6 +452,7 @@ pub(super) fn period_from(value: Option<&str>) -> Result<Option<Duration>, Lever
 struct ServerStats {
     period: Period,
     ticks: TickWindow,
+    freeze_counts: [TickWindow; 3],
     /// The period's avian steps, wall micros.
     physics: TickWindow,
     sleep: TickWindow,
@@ -525,7 +532,7 @@ impl Period {
     }
 }
 
-/// One period's wall-microsecond samples.
+/// One period's per-tick samples.
 #[derive(Default)]
 struct TickWindow(Vec<f64>);
 
@@ -587,6 +594,7 @@ struct Snapshot {
     elapsed: Duration,
     budget_us: f64,
     ticks: Option<TickSummary>,
+    freeze_counts: [Option<TickSummary>; 3],
     physics: Option<TickSummary>,
     sleep: Option<TickSummary>,
     collector: Option<TickSummary>,
@@ -713,6 +721,12 @@ fn stats_line(snapshot: &Snapshot) -> String {
         body["linux_host"] = snapshot.host.clone();
     }
     body["debris"] = snapshot.debris.clone();
+    for (name, summary) in ["awake", "rested", "rested_unreached"]
+        .into_iter()
+        .zip(&snapshot.freeze_counts)
+    {
+        body["debris"][name] = percentiles(summary.as_ref());
+    }
     body["construction"] = snapshot.construction.clone();
     if let Some(workload) = &snapshot.workload {
         body["loadtest"] = workload.clone();
@@ -725,7 +739,7 @@ fn stats_line(snapshot: &Snapshot) -> String {
 
 /// `FixedMain`, after all fixed schedules and their final flushes close.
 fn record_tick(
-    clock: Res<TickClock>,
+    (clock, freeze_counts): (Res<TickClock>, Res<FreezeCounts>),
     stages: Res<Stages>,
     phases: Res<Phases>,
     mut stats: ResMut<ServerStats>,
@@ -737,6 +751,9 @@ fn record_tick(
     if let Some(closed) = clock.closed() {
         let collect_start = Instant::now();
         stats.ticks.push(closed.us);
+        for (window, count) in stats.freeze_counts.iter_mut().zip(freeze_counts.0) {
+            window.push(count as f64);
+        }
         let measured = stages.take_us();
         let cpu = stages.take_cpu_us();
         let phases_cpu = phases.cpu_times();
@@ -1011,6 +1028,7 @@ fn emit_line(
         elapsed,
         budget_us,
         ticks: stats.ticks.drain(budget_us),
+        freeze_counts: std::array::from_fn(|i| stats.freeze_counts[i].drain(f64::INFINITY)),
         physics: stats.physics.drain(budget_us),
         sleep: stats.sleep.drain(budget_us),
         collector: stats.collector.drain(budget_us),
@@ -1126,6 +1144,7 @@ mod tests {
         ServerStats {
             period: Period::new(Duration::from_secs(1), Instant::now()),
             ticks: TickWindow::default(),
+            freeze_counts: std::array::from_fn(|_| TickWindow::default()),
             physics: TickWindow::default(),
             sleep: TickWindow::default(),
             collector: TickWindow::default(),
@@ -1574,6 +1593,10 @@ mod tests {
                 max: 16_000.0,
                 overruns: 1,
             }),
+            // Fixture: per-tick piece counts, independent of the duration windows.
+            freeze_counts: std::array::from_fn(|_| {
+                TickWindow(vec![0.0, 1.0, 2.0]).drain(f64::INFINITY)
+            }),
             physics: Some(TickSummary {
                 ticks: 640,
                 p50: 301.04,
@@ -1675,6 +1698,10 @@ mod tests {
             "debris": {"live": 35, "sleeping": 140},
             "construction": {"cracked_joints": 0, "separated_joints": 0, "departed_chunks": 0},
         });
+        for name in ["awake", "rested", "rested_unreached"] {
+            expected["debris"][name] =
+                json!({"p50": 1.0, "p95": 2.0, "p99": 2.0, "total": 3.0, "max": 2.0});
+        }
         for name in NAMES {
             expected[name] = Value::Null;
         }
@@ -1693,6 +1720,7 @@ mod tests {
         );
 
         let empty = Snapshot {
+            freeze_counts: std::array::from_fn(|_| None),
             ticks: None,
             physics: None,
             send: None,
@@ -1714,7 +1742,7 @@ mod tests {
         assert_eq!(value["nr_throttled"], Value::Null);
         assert_eq!(
             value["debris"],
-            json!({"live": 35, "sleeping": 140}),
+            json!({"live": 35, "sleeping": 140, "awake": null, "rested": null, "rested_unreached": null}),
             "the piece count prints with no lever armed"
         );
     }

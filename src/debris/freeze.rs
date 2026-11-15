@@ -74,6 +74,9 @@
 //! when the body has a solid collider (`Reach::of`); it evaluates each awake body that is not
 //! static, and each piece the thaw frees. The freeze and the thaw evaluate it serially; whether
 //! splitting that evaluation over the compute pool pays on the hosted allocation is unmeasured.
+//! With server stats armed, awake rested pieces also trigger one reach evaluation per enabled
+//! non-static zero-timer body, in parallel, with thread-local hits reduced before publishing counts.
+//! With none, that census casts no query. Diagnostic queries do not enter the freeze/thaw work tally.
 //! The `Changed<…>` filter of `super::wake_on_static_moved` walks every attached collider each
 //! step, about 2 µs per 1,000 colliders on the perf profile (MEASURED), and stays unindexed.
 //!
@@ -91,6 +94,7 @@ use bevy::ecs::entity_disabling::Disabled;
 use bevy::ecs::query::Allow;
 use bevy::ecs::system::{SystemChangeTick, SystemParam};
 use bevy::prelude::*;
+use bevy::utils::Parallel;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::DebrisPiece;
@@ -99,6 +103,10 @@ use crate::cost::stages::{Stages, Work};
 /// Resolution: whole pieces switched to static per tick, so islands that settle together spread
 /// their switches over ticks; one island of any size passes alone, so none waits on its own size.
 const FREEZE_PIECE_BUDGET: usize = 8;
+
+/// Awake, rested, and rested-unreached piece counts from the last freeze pass; stats alone arms it.
+#[derive(Resource, Default)]
+pub(crate) struct FreezeCounts(pub(crate) [usize; 3]);
 
 /// A frozen piece, in frozen island `island` of [`FrozenIslands`], at the pose bits it froze at.
 #[derive(Component, Debug)]
@@ -437,6 +445,21 @@ impl Reach<'_, '_> {
 
 #[derive(SystemParam)]
 struct Freeze<'w, 's> {
+    awake: Query<
+        'w,
+        's,
+        (Entity, &'static RigidBody, &'static SleepTimer),
+        (With<DebrisPiece>, Without<Sleeping>, Without<Frozen>),
+    >,
+    moving: Query<
+        'w,
+        's,
+        (Entity, &'static RigidBody, &'static SleepTimer),
+        Without<RigidBodyDisabled>,
+    >,
+    time_to_sleep: Res<'w, TimeToSleep>,
+    counts: Option<ResMut<'w, FreezeCounts>>,
+    reached_by_moving: Local<'s, Parallel<BTreeSet<Entity>>>,
     sleeping: Query<
         'w,
         's,
@@ -463,6 +486,11 @@ struct Freeze<'w, 's> {
 /// and that nothing has woken since the step, within the tick's budget (module doc).
 fn freeze(p: Freeze, mut commands: Commands) {
     let Freeze {
+        awake,
+        moving,
+        time_to_sleep,
+        counts,
+        mut reached_by_moving,
         sleeping,
         frozen,
         physics,
@@ -473,6 +501,35 @@ fn freeze(p: Freeze, mut commands: Commands) {
         tick,
         stages,
     } = p;
+    // Stats off is a legitimate absence; the freeze law does not need this census.
+    if let Some(mut counts) = counts {
+        let mut awake_count = 0;
+        let mut rested = BTreeSet::new();
+        for (piece, body, timer) in &awake {
+            if body.is_dynamic() {
+                awake_count += 1;
+                if timer.0 >= time_to_sleep.0 {
+                    rested.insert(piece);
+                }
+            }
+        }
+        let rested_count = rested.len();
+        if !rested.is_empty() {
+            let reached = &*reached_by_moving;
+            moving.par_iter().for_each(|(body, kind, timer)| {
+                if !kind.is_static() && timer.0 == 0.0 {
+                    reached.scope(|out| {
+                        reach.of(body, |p| rested.contains(&p), out, &mut Tally::default());
+                    });
+                }
+            });
+            for reached in reached_by_moving.iter_mut() {
+                rested.retain(|piece| !reached.contains(piece));
+                reached.clear();
+            }
+        }
+        counts.0 = [awake_count, rested_count, rested.len()];
+    }
     let since_step = |at: Tick| at.is_newer_than(last_step.0, tick.this_run());
     let mut members: BTreeMap<u32, Vec<Entity>> = BTreeMap::new();
     let mut woken = BTreeSet::new();
@@ -786,6 +843,60 @@ mod tests {
             ColliderDensity(1000.0),
             LinearVelocity(Vec3::X * speed),
         ))
+    }
+
+    /// The operator's freeze-candidate fraction nests within awake debris and excludes exactly
+    /// the rested pieces reached by zero-timer non-static bodies, not by merely awake bodies.
+    #[test]
+    fn freeze_candidate_counts_nest_and_exclude_moving_reach() {
+        let mut app = settling(Vec3::ZERO);
+        app.init_resource::<FreezeCounts>();
+        // Fixture: separated cubes and overlapping movers whose layers prevent solver contacts.
+        let pieces = [0.0, 10.0, 20.0, 30.0, 40.0].map(|x| piece(&mut app, Vec3::X * x));
+        let [isolated, reached, unrested, sleeping, frozen] = pieces;
+        for piece in pieces {
+            app.world_mut().entity_mut(piece).insert(SleepingDisabled);
+        }
+        let moving = mover(&mut app, Vec3::X * 10.0, 0.0)
+            .insert((SleepingDisabled, CollisionLayers::NONE))
+            .id();
+        let resting = mover(&mut app, Vec3::ZERO, 0.0)
+            .insert((SleepingDisabled, CollisionLayers::NONE))
+            .id();
+        let fixed = app
+            .world_mut()
+            .spawn((
+                RigidBody::Static,
+                Position(Vec3::ZERO),
+                Collider::cuboid(SIDE, SIDE, SIDE),
+                CollisionLayers::NONE,
+                SleepTimer(0.0),
+            ))
+            .id();
+        app.update();
+        app.update();
+        let world = app.world_mut();
+        let rest_window = world.resource::<TimeToSleep>().0;
+        for body in [isolated, reached, sleeping, frozen, resting] {
+            world.entity_mut(body).insert(SleepTimer(rest_window));
+        }
+        for body in [unrested, moving, fixed] {
+            world.entity_mut(body).insert(SleepTimer(0.0));
+        }
+        world.entity_mut(sleeping).insert(Sleeping);
+        world
+            .entity_mut(frozen)
+            .insert((RigidBody::Static, Frozen::fixture()));
+        world.run_system_cached(freeze).unwrap();
+        let [awake, rested, unreached] = world.resource::<FreezeCounts>().0;
+        assert!(unreached <= rested && rested <= awake && awake <= pieces.len());
+        assert_eq!(awake, [isolated, reached, unrested].len());
+        assert_eq!(rested, [isolated, reached].len());
+        assert_eq!(unreached, [isolated].len());
+        // Reusing the system must not retain earlier reach hits or counters.
+        world.entity_mut(moving).insert(SleepTimer(rest_window));
+        world.run_system_cached(freeze).unwrap();
+        assert_eq!(world.resource::<FreezeCounts>().0, [awake, rested, rested]);
     }
 
     /// Every frozen island touched something as it froze, and all of it stands: it exists, is
