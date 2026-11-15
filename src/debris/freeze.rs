@@ -48,7 +48,7 @@
 //! - met: the freeze found a sleeping island touching it. Turned dynamic, its pieces lose their
 //!   contacts (`collision/narrow_phase/mod.rs`, `remove_body_on`), and each touch made anew with an
 //!   awake body that is not static links and wakes the island touched
-//!   (`collision/narrow_phase/system_param.rs`, `link_contact_to_island`), so the two rest and
+//!   (`dynamics/solver/plugin.rs`, `apply_contact_status_changes` at solver start), so the two rest and
 //!   freeze as one;
 //! - support: a collider the island depends on goes, leaves its body, is disabled, turns sensor,
 //!   or is re-posed, reshaped or re-layered in place (`super::wake_on_static_moved` notes those);
