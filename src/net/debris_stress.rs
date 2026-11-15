@@ -522,10 +522,6 @@ fn publish_poses(
     updates.clear();
     for (carrier, position, rotation) in &pieces {
         assert!(
-            carriers.contains(carrier.0),
-            "every live body's Carrier retains its DebrisPose until the body is retired"
-        );
-        assert!(
             updates
                 .insert(
                     carrier.0,
@@ -543,7 +539,10 @@ fn publish_poses(
     let updates = &*updates;
     carriers
         .par_iter_many_unique_mut(updates.keys())
-        .for_each(|(entity, mut pose)| {
+        .for_each(|candidate| {
+            let (entity, mut pose) = candidate.expect(
+                "every live body's Carrier retains its DebrisPose until the body is retired",
+            );
             pose.set_if_neq(updates[&entity]);
         });
 }
@@ -927,7 +926,7 @@ mod tests {
             bevy::transform::TransformPlugin,
             // Avian's collider cache reads `AssetEvent<Mesh>`.
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
             crate::debris::sim_plugin,
         ))
         .init_asset::<Mesh>()

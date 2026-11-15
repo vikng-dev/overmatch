@@ -89,6 +89,8 @@ pub(crate) struct AvianStep {
     /// Counts active non-touching pairs examined, then their admitted geometry queries.
     pub(crate) stationary_non_touching_pairs: u32,
     pub(crate) stationary_non_touching_queries: u32,
+    /// Reused narrow-phase pairs; zero while the shared physics policy disables recycling.
+    pub(crate) recycled_pairs: u32,
     /// Body-pair reduction: groups offered, those left whole for a landing, the normal ceiling or
     /// an overlap; then the warm-start selection counters, points that held a warm start and were
     /// removed and points kept with none.
@@ -147,6 +149,7 @@ impl TickSample {
                 max_dynamic_manifold_degree: 0,
                 stationary_non_touching_pairs: 0,
                 stationary_non_touching_queries: 0,
+                recycled_pairs: 0,
                 reduction_groups: 0,
                 reduction_landing_whole: 0,
                 reduction_ceiling_whole: 0,

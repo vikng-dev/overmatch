@@ -435,7 +435,11 @@ mod tests {
         world.spawn((
             Camera {
                 computed: ComputedCameraValues {
-                    clip_from_view: Mat4::perspective_infinite_reverse_rh(1.0, 16.0 / 9.0, 0.1),
+                    clip_from_view: glam::camera::rh::proj::directx::perspective_infinite_reverse(
+                        1.0,
+                        16.0 / 9.0,
+                        0.1,
+                    ),
                     target_info: Some(RenderTargetInfo {
                         physical_size: UVec2::new(1280, 720),
                         scale_factor: 1.0,
@@ -507,7 +511,11 @@ mod tests {
         world.spawn((
             Camera {
                 computed: ComputedCameraValues {
-                    clip_from_view: Mat4::perspective_infinite_reverse_rh(1.0, 16.0 / 9.0, 0.1),
+                    clip_from_view: glam::camera::rh::proj::directx::perspective_infinite_reverse(
+                        1.0,
+                        16.0 / 9.0,
+                        0.1,
+                    ),
                     target_info: Some(RenderTargetInfo {
                         physical_size: UVec2::new(1280, 720),
                         scale_factor: 1.0,
@@ -544,7 +552,11 @@ mod tests {
         world.spawn((
             Camera {
                 computed: ComputedCameraValues {
-                    clip_from_view: Mat4::perspective_infinite_reverse_rh(1.0, 16.0 / 9.0, 0.1),
+                    clip_from_view: glam::camera::rh::proj::directx::perspective_infinite_reverse(
+                        1.0,
+                        16.0 / 9.0,
+                        0.1,
+                    ),
                     target_info: Some(RenderTargetInfo {
                         physical_size: UVec2::new(1280, 720),
                         scale_factor: 1.0,

@@ -1,6 +1,6 @@
 //! Settled loose pieces turned static ("frozen") and back ("thawed"), in the game's environment
 //! destruction (game state only), on the authority alone. Paths below are under
-//! `vendor/avian3d-0.7.0-child-pose/src/`.
+//! `vendor/avian3d-0.8.0-overmatch/src/`.
 //!
 //! WHY. A sleeping island keeps every pair that overlaps in bounds without touching active, and
 //! the narrow phase recomputes those every tick ([`super`] module doc). The broad phase pairs no
@@ -462,7 +462,11 @@ impl Reach<'_, '_> {
                 continue; // A sensor or a disabled collider makes no contact.
             };
             let margin = margin.or(body_margin).map_or(0.0, |margin| margin.0);
-            boxes.push(shape.aabb(at.0, *turn).grow(Vec3::splat(travel + margin)));
+            boxes.push(
+                shape
+                    .aabb(at.0, *turn, 0.0)
+                    .grow(Vec3::splat(travel + margin)),
+            );
         }
         let Some(union) = boxes.iter().copied().reduce(ColliderAabb::merged) else {
             return; // A body with no solid collider touches nothing.
@@ -543,7 +547,7 @@ pub(crate) fn census(p: Census) {
         let reached = &*reached_by_moving;
         reach.movers.par_iter().for_each(|body| {
             let (timer, debris) = moving.get(body).expect(
-                "every enabled non-static awake body carries SleepTimer through Avian's SolverBody",
+                "every enabled non-static awake body carries SleepTimer through Avian's SolverBodyIndex",
             );
             if timer.0 < time_to_sleep.0 && (!debris || timer.0 == 0.0) {
                 reached.scope(|out| {

@@ -38,11 +38,11 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// The game's environment destruction model carries shared causes and chunk-addressed groups;
 /// replacement and departure derive from the admitted graph on each peer; a crumble's light
 /// fragments reach players as decoration events. The construction ledger reaches a client as the
-/// diffs past its acknowledged cursor (bevy_replicon 0.44.3), each naming the position it lands
+/// diffs past its acknowledged cursor (bevy_replicon 0.45.5), each naming the position it lands
 /// at, and a whole copy only to a client without one or behind the retained history; the hull
 /// marks replicate whole. The owner's ahead-running aim integrates the authority's servo law
 /// (`tank::servo`), so a change to that law changes this revision too.
-pub const PROTOCOL_REV: u32 = 96;
+pub const PROTOCOL_REV: u32 = 97;
 
 /// The compatibility record's wire term: the pinned wire manifest, [`PROTOCOL_REV`] and the crate
 /// version.
@@ -857,9 +857,9 @@ const WIRE_TYPES_HASH: u64 = 0x3eb96ab25763d065;
 /// can change the on-wire bytes or what a receiver makes of them without touching any source in
 /// this tree. Re-pinning any version changes the handshake directly; house process also bumps
 /// [`PROTOCOL_REV`].
-const WIRE_DEP_AVIAN3D: &str = "0.7.0";
-const WIRE_DEP_LIGHTYEAR: &str = "0.30.1";
-const WIRE_DEP_REPLICON: &str = "0.44.3";
+const WIRE_DEP_AVIAN3D: &str = "0.8.0";
+const WIRE_DEP_LIGHTYEAR: &str = "0.31.0";
+const WIRE_DEP_REPLICON: &str = "0.45.5";
 
 /// Register the exact shared wire surface represented by [`WIRE_SURFACE`].
 pub(crate) fn plugin(app: &mut App) {

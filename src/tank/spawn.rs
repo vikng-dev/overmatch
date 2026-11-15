@@ -1584,7 +1584,7 @@ mod proxy_tests {
         let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
         for (entity, collider, at) in hierarchy_armour(&mut world, replica, &blueprint.geometry) {
             if turret(&world, entity) {
-                let bounds = collider.aabb(at.translation, at.rotation);
+                let bounds = collider.aabb(at.translation, at.rotation, 0.0);
                 lo = lo.min(bounds.min);
                 hi = hi.max(bounds.max);
             }

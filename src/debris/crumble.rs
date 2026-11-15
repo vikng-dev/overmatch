@@ -669,66 +669,65 @@ fn crumble_landings(
     groups
         .par_iter_many_unique_mut(landings.keys())
         .batching_strategy(bevy::ecs::batching::BatchingStrategy::fixed(1))
-        .for_each(
-            |(entity, piece, mut breakage, pose, (velocity, spin, centre), _)| {
-                let (energy, touches) = &landings[&entity];
-                let owned: Vec<usize> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
-                let frame = breakage.physics_frame(pose);
-                let kernels = breakage.kind.equilibrium.kernels.clone();
-                let live = breakage.live.as_mut();
-                let solve_bracket = Stages::detail(stages.as_deref(), Detail::CrumbleSolve);
-                let mut result =
-                    crate::construction::fracture::parts::record_factors(stages.as_deref(), || {
-                        crumble(
-                            &live.structure,
-                            &live.state,
-                            &kernels,
-                            &owned,
-                            touches,
-                            *energy,
-                        )
-                    });
-                drop(solve_bracket);
-                let _split_bracket = Stages::detail(stages.as_deref(), Detail::CrumbleSplit);
-                if let Some(stages) = stages.as_deref() {
-                    stages.add(Work::Landings, 1);
-                    stages.add(Work::LandingPasses, result.passes as u64);
-                    stages.add(Work::LandingOps, result.work);
-                }
-                result.fragments = merge_fragments(
-                    &live.structure,
-                    result.fragments,
-                    &result.separated,
-                    &mut live.rubble_joints,
-                );
-                for &j in &result.cracked {
-                    live.state.cracked[j] = true;
-                }
-                for &j in &result.separated {
-                    live.state.separated[j] = true;
-                }
-                if result.fragments.len() == 1 && server_body(&live.structure, &result.fragments[0])
-                {
-                    return; // Still one body: its seams took the energy, or none could.
-                }
-                let motion = ReleasedMotion {
-                    velocity: velocity.0,
-                    spin: spin.0,
-                    centre: pose.0.0 + pose.1.0 * centre.0,
-                };
-                let mut record = Record::default();
-                let (kept, sheds) = route(
-                    &live.structure,
-                    (piece.construction, frame),
-                    result.fragments,
-                    |light| vec![motion; light.len()],
-                    tick,
-                    &mut record,
-                );
-                let pending = PendingSplit::of(&breakage, kept, tick);
-                prepared.scope(|local| local.push((entity, pending, sheds, record.entries)));
-            },
-        );
+        .for_each(|candidate| {
+            let (entity, piece, mut breakage, pose, (velocity, spin, centre), _) =
+                candidate.expect("a landing's group passed this system's own groups.get");
+            let (energy, touches) = &landings[&entity];
+            let owned: Vec<usize> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
+            let frame = breakage.physics_frame(pose);
+            let kernels = breakage.kind.equilibrium.kernels.clone();
+            let live = breakage.live.as_mut();
+            let solve_bracket = Stages::detail(stages.as_deref(), Detail::CrumbleSolve);
+            let mut result =
+                crate::construction::fracture::parts::record_factors(stages.as_deref(), || {
+                    crumble(
+                        &live.structure,
+                        &live.state,
+                        &kernels,
+                        &owned,
+                        touches,
+                        *energy,
+                    )
+                });
+            drop(solve_bracket);
+            let _split_bracket = Stages::detail(stages.as_deref(), Detail::CrumbleSplit);
+            if let Some(stages) = stages.as_deref() {
+                stages.add(Work::Landings, 1);
+                stages.add(Work::LandingPasses, result.passes as u64);
+                stages.add(Work::LandingOps, result.work);
+            }
+            result.fragments = merge_fragments(
+                &live.structure,
+                result.fragments,
+                &result.separated,
+                &mut live.rubble_joints,
+            );
+            for &j in &result.cracked {
+                live.state.cracked[j] = true;
+            }
+            for &j in &result.separated {
+                live.state.separated[j] = true;
+            }
+            if result.fragments.len() == 1 && server_body(&live.structure, &result.fragments[0]) {
+                return; // Still one body: its seams took the energy, or none could.
+            }
+            let motion = ReleasedMotion {
+                velocity: velocity.0,
+                spin: spin.0,
+                centre: pose.0.0 + pose.1.0 * centre.0,
+            };
+            let mut record = Record::default();
+            let (kept, sheds) = route(
+                &live.structure,
+                (piece.construction, frame),
+                result.fragments,
+                |light| vec![motion; light.len()],
+                tick,
+                &mut record,
+            );
+            let pending = PendingSplit::of(&breakage, kept, tick);
+            prepared.scope(|local| local.push((entity, pending, sheds, record.entries)));
+        });
     let mut prepared: Vec<_> = prepared.drain().collect();
     if prepared.is_empty() {
         return;

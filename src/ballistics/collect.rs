@@ -2993,7 +2993,7 @@ mod tests {
     }
 
     fn twelve_gon_frustum() -> Collider {
-        let points = TWELVE_GON
+        let points: Vec<_> = TWELVE_GON
             .iter()
             .flat_map(|&(c, s)| {
                 [
@@ -3002,7 +3002,7 @@ mod tests {
                 ]
             })
             .collect();
-        Collider::convex_hull(points).expect("two rings of positive radius at distinct heights")
+        Collider::convex_hull(&points).expect("two rings of positive radius at distinct heights")
     }
 
     /// The clip of one collider's shape: the faces it enters and leaves through.
@@ -3431,7 +3431,7 @@ mod tests {
     /// a positive chord through a solid, and its dose, lost.
     #[test]
     fn a_face_whose_f64_rate_cancels_to_zero_is_still_crossed_at_its_exact_parameter() {
-        let tetrahedron = Collider::convex_hull(vec![
+        let tetrahedron = Collider::convex_hull(&vec![
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(1.0, 1.0, -1.0),
             Vec3::new(-1.0, 0.0, 1.0e-9),

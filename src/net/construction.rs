@@ -21,6 +21,7 @@ use bevy::ecs::error::Result;
 use bevy::prelude::*;
 use bevy_replicon::prelude::{DiffIndex, Diffable, EntityCommandsDiffExt};
 use lightyear::interpolation::timeline::InterpolationTimeline;
+use lightyear::link::prelude::Endpoint;
 use lightyear::prelude::server::Server;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -158,7 +159,7 @@ pub(super) fn install_client(app: &mut App) {
 fn publish_sheds(
     mut sheds: MessageReader<Shed>,
     world: Option<Res<AuthorityWorld>>,
-    servers: Query<&Server>,
+    servers: Query<&Endpoint, With<Server>>,
     mut sender: ServerMultiMessageSender,
 ) {
     if sheds.is_empty() {

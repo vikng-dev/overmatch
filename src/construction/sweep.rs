@@ -187,7 +187,7 @@ impl Geometry {
                 ));
             }
             let about = |origin: Vec3| {
-                Collider::convex_hull(block.points.iter().map(|p| *p - origin).collect())
+                Collider::convex_hull(&block.points.iter().map(|p| *p - origin).collect::<Vec<_>>())
                     .expect("admitted chunk hulls stay solid about any origin")
             };
             // Occupied physics mass uses the same centroid-centred hull as the departure path.
@@ -957,7 +957,7 @@ pub(super) mod tests {
     pub(in crate::construction) fn failed_contact_kind() -> Arc<ConstructionKind> {
         use super::super::attachments::Attachments;
         let (_, target) = failed_contact_hulls();
-        let bounds = target.aabb(Vec3::ZERO, Quat::IDENTITY);
+        let bounds = target.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0);
         let size = bounds.size();
         let points = target
             .shape()
@@ -1091,7 +1091,7 @@ pub(super) mod tests {
         let (structure, mut geometry) = wall(1.0);
         let mut state = State::new(&structure);
         // Fixture: only the middle chunk participates in this query.
-        geometry.tree = tree(&[target.aabb(Vec3::ZERO, Quat::IDENTITY)]);
+        geometry.tree = tree(&[target.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0)]);
         geometry.tree[0].chunk = 4;
         geometry.hulls[4] = target;
         geometry.centres[4] = Vec3::ZERO;
@@ -1596,7 +1596,7 @@ pub(super) mod tests {
                 let position = motion.centre
                     + motion.velocity * time
                     + turn * (motion.position - motion.centre);
-                let at = hull.aabb(position, turn * motion.rotation);
+                let at = hull.aabb(position, turn * motion.rotation, 0.0);
                 assert!(
                     at.min.cmpge(bounds.min - tolerance).all()
                         && at.max.cmple(bounds.max + tolerance).all(),

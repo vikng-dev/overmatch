@@ -2058,8 +2058,8 @@ mod tests {
             .get(&material.extension.holes)
             .unwrap();
         assert_eq!(
-            bound.data,
-            ShaderBuffer::from(table).data,
+            bound.cast_slice::<Vec4>().unwrap(),
+            table.as_slice(),
             "it binds the construction's table"
         );
 
@@ -2151,7 +2151,7 @@ mod tests {
             .resource::<Assets<ShaderBuffer>>()
             .get(&material.extension.holes)
             .unwrap();
-        assert_eq!(bound.data, ShaderBuffer::from(table.clone()).data);
+        assert_eq!(bound.cast_slice::<Vec4>().unwrap(), table.as_slice());
 
         let centroid = Vec3::from_array(asset.chunks[layout.chunks[holed] as usize].centroid);
         assert_eq!(

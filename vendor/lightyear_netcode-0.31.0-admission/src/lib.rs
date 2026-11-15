@@ -67,7 +67,7 @@ pub use client_plugin::NetcodeClient;
 pub use crypto::{Key, generate_key, try_generate_key};
 pub use error::{Error, Result};
 #[cfg(feature = "server")]
-pub use server::{Callback, ConnectCallback, Server, ServerConfig};
+pub use server::{Callback, ConnectCallback, ForeignProtocolHandler, Server, ServerConfig};
 #[cfg(feature = "server")]
 pub use server_plugin::{NetcodeServer, NetcodeServerError, TokenUserData};
 pub use token::{ConnectToken, ConnectTokenBuilder, InvalidTokenError};

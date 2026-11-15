@@ -111,7 +111,7 @@ mod tests {
     /// their birth. Fixture geometry sweeps hull edges within world-coordinate rounding.
     #[test]
     fn grazing_a_source_proxy_never_loses_one_end_of_its_interval() {
-        let points = [-1.0, 1.0]
+        let points: Vec<_> = [-1.0, 1.0]
             .into_iter()
             .flat_map(|x| {
                 [-1.0, 1.0]
@@ -119,7 +119,7 @@ mod tests {
                     .flat_map(move |y| [-1.0, 1.0].into_iter().map(move |z| Vec3::new(x, y, z)))
             })
             .collect();
-        let hull = Collider::convex_hull(points).expect("fixture cube has volume");
+        let hull = Collider::convex_hull(&points).expect("fixture cube has volume");
         for at in [Vec3::ZERO, Vec3::new(1600.0, 20.0, -1200.0)] {
             for step in 0..64 {
                 let angle = step as f32 * 0.097;

@@ -851,7 +851,7 @@ mod tests {
                     );
                     assert_eq!(
                         layout.glyphs.last().unwrap().line_index,
-                        rows,
+                        rows as u32,
                         "soft wrapping must not add standing lines"
                     );
                 }

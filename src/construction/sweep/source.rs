@@ -35,7 +35,7 @@ impl SourceBounds {
         hulls
             .map(|(hull, position, rotation)| {
                 rotation_bounds(
-                    hull.aabb(Vec3::ZERO, Quat::IDENTITY),
+                    hull.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0),
                     position,
                     rotation,
                     Vec3::ZERO,
@@ -90,7 +90,7 @@ impl SourceTree {
         let nodes = tree(
             &hulls
                 .iter()
-                .map(|h| h.hull.aabb(h.position, h.rotation))
+                .map(|h| h.hull.aabb(h.position, h.rotation, 0.0))
                 .collect::<Vec<_>>(),
         );
         Self {
@@ -113,7 +113,7 @@ impl SourceTree {
     fn envelope(&self, hull: usize, motion: RigidMotion) -> ColliderAabb {
         let leaf = motion.leaf(&self.hulls[hull]);
         rotation_bounds(
-            leaf.hull.aabb(Vec3::ZERO, Quat::IDENTITY),
+            leaf.hull.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0),
             leaf.position,
             leaf.rotation,
             motion.centre,
@@ -133,7 +133,7 @@ impl SourceTree {
             } else {
                 envelopes[i] = self.envelope(self.nodes[i].chunk, motion);
                 let leaf = motion.leaf(&self.hulls[self.nodes[i].chunk]);
-                starts[i] = leaf.hull.aabb(leaf.position, leaf.rotation);
+                starts[i] = leaf.hull.aabb(leaf.position, leaf.rotation, 0.0);
                 radii[i] = (starts[i].min - motion.centre)
                     .abs()
                     .max((starts[i].max - motion.centre).abs())

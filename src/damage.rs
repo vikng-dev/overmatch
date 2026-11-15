@@ -1420,7 +1420,7 @@ mod tests {
     /// FIXTURE DATA: a 1000 kg turret, the RHA row, a 20° slope, 30 s of 16 ms frames.
     #[test]
     fn a_launched_turret_comes_to_rest_on_a_slope() {
-        use avian3d::prelude::{Collider, CollisionLayers, LayerMask, PhysicsPlugins, RigidBody};
+        use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody};
         use bevy::time::TimeUpdateStrategy;
         use std::time::Duration;
 
@@ -1429,7 +1429,7 @@ mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
         ))
         .init_asset::<Mesh>()
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
@@ -1526,7 +1526,7 @@ mod tests {
     /// so the test cannot pass vacuously).
     #[test]
     fn a_launched_turret_keeps_its_armour_at_unit_scale() {
-        use avian3d::prelude::{Collider, PhysicsPlugins, RigidBody};
+        use avian3d::prelude::{Collider, RigidBody};
         use bevy::time::TimeUpdateStrategy;
         use std::time::Duration;
 
@@ -1536,7 +1536,7 @@ mod tests {
             bevy::transform::TransformPlugin,
             // Avian's collider cache reads `AssetEvent<Mesh>`.
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
         ))
         .init_asset::<Mesh>()
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(

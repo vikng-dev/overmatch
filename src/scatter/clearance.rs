@@ -58,7 +58,7 @@ struct Solid {
 
 impl Solid {
     fn new(collider: Collider, position: Vec3, rotation: Quat) -> Self {
-        let bounds = collider.aabb(position, rotation);
+        let bounds = collider.aabb(position, rotation, 0.0);
         Self {
             collider,
             position,

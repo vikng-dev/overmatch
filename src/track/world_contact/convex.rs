@@ -932,7 +932,7 @@ mod tests {
                     ));
                 }
             }
-            Collider::convex_hull(points).unwrap()
+            Collider::convex_hull(&points).unwrap()
         } else {
             Collider::cuboid(1.0, 1.0, 1.0)
         };
@@ -1305,7 +1305,7 @@ mod tests {
             let rotation = Quat::from_euler(EulerRot::XYZ, 0.71 * t, 1.13 * t, 2.39 * t);
             let centre = Vec3::from_array(chunk.centroid);
             let collider = avian3d::prelude::Collider::convex_hull(
-                chunk
+                &chunk
                     .hull
                     .into_iter()
                     .map(|p| Vec3::from_array(p) - centre)
@@ -1343,7 +1343,7 @@ mod tests {
                 [Vec3::new(x, y, -0.5), Vec3::new(x, y, top)]
             })
             .collect();
-        let collider = avian3d::prelude::Collider::convex_hull(points).unwrap();
+        let collider = avian3d::prelude::Collider::convex_hull(&points).unwrap();
         let hull = collider.shape_scaled();
         assert_eq!(
             hull.as_convex_polyhedron().unwrap().faces().len(),

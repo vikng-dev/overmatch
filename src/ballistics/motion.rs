@@ -5,7 +5,7 @@
 //! Avian's solver has no public previous collider pose. This history therefore retains the
 //! composed physics pose seen by the walk, independently of rendering or frame count.
 
-use avian3d::collision::collider::collider_transform::Reenabled;
+use crate::avian_ext::child_poses::Reenabled;
 use avian3d::prelude::{
     Collider, ColliderOf, ColliderTransform, Position, RigidBody, RigidBodyColliders, Rotation,
     SimpleCollider,
@@ -78,7 +78,7 @@ fn composed_pose(
         let local = local.expect("ColliderOf requires ColliderTransform");
         Pose {
             position: body_position.0 + body_rotation.0 * local.translation,
-            rotation: (body_rotation.0 * local.rotation.0).normalize(),
+            rotation: (body_rotation.0 * local.rotation).normalize(),
         }
     } else {
         Pose {
@@ -180,9 +180,9 @@ pub(super) fn forget_body(removed: On<Remove<RigidBody>>, mut history: ResMut<Co
 }
 
 /// The game's damage model: refresh child physics poses after the solver moved their body.
-/// Avian's own child placement runs before its solver; the walk reads the completed interval.
+/// The shared child placement runs before the solver; the walk reads the completed interval.
 pub(super) fn place_children(
-    mut poses: avian3d::collision::collider::collider_transform::ChildColliderPoses,
+    mut poses: crate::avian_ext::child_poses::ChildColliderPoses,
     stages: Option<Res<crate::cost::stages::Stages>>,
 ) {
     let _bracket = crate::cost::stages::Stages::start(
@@ -318,7 +318,7 @@ pub(super) fn snapshot(
 /// `sin(theta / 2)` from above. Thus `2 r min(d, 1)` bounds every rotational chord, without
 /// an inverse cosine whose rounded dot product can erase a small but real turn.
 fn point_motion_bound(poses: Poses, collider: &Collider) -> f32 {
-    let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
+    let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0);
     outward(chord_bound(poses, box_radius(bounds.min, bounds.max)))
 }
 
@@ -488,7 +488,7 @@ pub(super) fn sweep_collider(
     // already holding the start, without inventing relative motion.
     let axis = Dir3::new(relative).map_or(Vec3::Z, |axis| *axis);
     let distance = relative.length();
-    let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
+    let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0);
     let far = (bounds.min - a).abs().max((bounds.max - a).abs()).length();
     let behind = (far + super::MARCH_EPS).next_up();
     let length = (behind + distance.max(behind)).next_up();
@@ -549,7 +549,7 @@ pub(super) fn sweep_collider(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use avian3d::collision::collider::collider_transform::ReenabledPlugin;
+    use crate::avian_ext::child_poses::ReenabledPlugin;
 
     /// The game's damage model: the collider-local chord finds an overtaking piece as an
     /// ordinary entering face. A world-only ray misses it; subsequent discovery relies on this.
@@ -789,7 +789,7 @@ mod tests {
         let local_turn = Quat::from_rotation_x(0.25);
         app.world_mut().entity_mut(child).insert(ColliderTransform {
             translation: Vec3::X * 2.0,
-            rotation: Rotation(local_turn),
+            rotation: local_turn,
             ..default()
         });
         app.world_mut().run_system_once(snapshot).unwrap();
@@ -872,7 +872,7 @@ mod tests {
                     let (at, turn) = pose_of(owner.body);
                     Pose {
                         position: at + turn * local.translation,
-                        rotation: (turn * local.rotation.0).normalize(),
+                        rotation: (turn * local.rotation).normalize(),
                     }
                 }
                 None => {
@@ -977,7 +977,7 @@ mod tests {
                 Box::new(move |world| {
                     world.entity_mut(left).insert(ColliderTransform {
                         translation: Vec3::new(-1.0, 0.5, 0.0),
-                        rotation: Rotation(Quat::from_rotation_x(0.2)),
+                        rotation: Quat::from_rotation_x(0.2),
                         ..default()
                     });
                 }),

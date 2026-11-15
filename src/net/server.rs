@@ -117,7 +117,7 @@ pub fn run() {
             Name::new("Server"),
             netcode_server(hosted.as_ref(), admission),
             LocalAddr(SocketAddr::new(bind.into(), PORT)),
-            ServerUdpIo::default(),
+            ServerUdpIo,
         ))
         .id();
     app.add_systems(

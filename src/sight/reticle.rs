@@ -1025,11 +1025,12 @@ mod tests {
                 .spawn((
                     Camera {
                         computed: ComputedCameraValues {
-                            clip_from_view: Mat4::perspective_infinite_reverse_rh(
-                                FOV,
-                                VIEWPORT.x as f32 / VIEWPORT.y as f32,
-                                0.1,
-                            ),
+                            clip_from_view:
+                                glam::camera::rh::proj::directx::perspective_infinite_reverse(
+                                    FOV,
+                                    VIEWPORT.x as f32 / VIEWPORT.y as f32,
+                                    0.1,
+                                ),
                             target_info: Some(RenderTargetInfo {
                                 physical_size: VIEWPORT,
                                 scale_factor: 1.0,
@@ -1703,7 +1704,10 @@ mod tests {
             Self {
                 camera: Camera {
                     computed: ComputedCameraValues {
-                        clip_from_view: Mat4::perspective_infinite_reverse_rh(fov, aspect, 0.1),
+                        clip_from_view:
+                            glam::camera::rh::proj::directx::perspective_infinite_reverse(
+                                fov, aspect, 0.1,
+                            ),
                         target_info: Some(RenderTargetInfo {
                             physical_size: viewport,
                             scale_factor: 1.0,

@@ -76,7 +76,7 @@ mod tests {
             bevy::transform::TransformPlugin,
             // Avian's collider cache reads `AssetEvent<Mesh>`.
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
         ))
         .init_asset::<Mesh>()
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(

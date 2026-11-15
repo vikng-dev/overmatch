@@ -1348,7 +1348,7 @@ mod tests {
         let server = app.world_mut().spawn_empty().id();
         app.world_mut()
             .entity_mut(link)
-            .insert(lightyear::link::prelude::LinkOf { server });
+            .insert(lightyear::link::prelude::LinkOf { endpoint: server });
         app.update();
         for (offset, target) in targets {
             let buffer = app
@@ -1566,7 +1566,7 @@ mod tests {
         app.add_plugins((
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
         ))
         .init_asset::<Mesh>()
         .init_resource::<crate::contact_transfer::ContactTransfers>()

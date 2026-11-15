@@ -3,9 +3,9 @@
 //! and the debris stress lever's fixture fragments (`net::debris_stress`). The authority
 //! alone simulates a piece; a replica draws it at the pose the network carries. A piece is a body
 //! with [`DebrisPiece`]; its colliders are the body's own ([`RigidBodyColliders`]). Paths below
-//! are under `vendor/avian3d-0.7.0-child-pose/src/`.
+//! are under `vendor/avian3d-0.8.0-overmatch/src/`.
 //!
-//! REST IS AVIAN'S ISLAND SLEEP, THEN A FREEZE. A piece spawns a dynamic body. Avian 0.7 links
+//! REST IS AVIAN'S ISLAND SLEEP, THEN A FREEZE. A piece spawns a dynamic body. Avian 0.8 links
 //! dynamic bodies through touching contacts into islands and puts an island to sleep once every
 //! member has passed its rest test for `TimeToSleep`: either both velocity thresholds pass or
 //! kinetic energy per mass is below the linear rest-speed energy (see the vendor's
@@ -42,8 +42,7 @@
 //! * changes in place ([`wake_on_static_moved`]: a collider of a static body or of none re-posed,
 //!   by its own [`Position`] or [`Rotation`] or by its body's, reshaped or re-layered), read inside
 //!   the step before the broad phase, while the last step's pairs still stand. It relies on the
-//!   vendored avian and lightyear child-pose writers (`vendor/avian3d-0.7.0-child-pose`,
-//!   `vendor/lightyear_avian3d-0.30.1-child-pose`) writing a child collider's pose only when its
+//!   game-owned child-pose writer (`avian_ext::child_poses`) writing a child collider's pose only when its
 //!   bits change, and on avian rescaling a collider only when its scale changes
 //!   (`collision/collider/backend.rs`, `update_collider_scale`): a writer that rewrote either
 //!   every step would wake every sleeper touching a construction every step.
@@ -418,7 +417,7 @@ mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
             sim_plugin,
         ))
         .init_asset::<Mesh>()
