@@ -17,6 +17,7 @@
 //!
 //! [`ContactConstraint`]: dynamics::solver::contact::ContactConstraint
 
+pub(crate) mod stationary_miss; // OVERMATCH PATCH
 mod system_param;
 use system_param::ContactStatusBits;
 #[cfg(feature = "parallel")]

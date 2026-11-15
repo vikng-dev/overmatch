@@ -275,3 +275,39 @@ matching for every recycled pair, and the pair guard below goes red (MEASURED).
 Guards: `src/tests/avian_warm_start.rs`, 2 tests, both red with upstream's matcher (MEASURED: 5.0
 taken where 11.0 is closest). Local upstream drafts:
 `upstream/avian-unknown-contact-feature-identity.md`, `upstream/avian-nearest-warm-start-contact.md`.
+
+## Stationary non-touching pair cache (`src/collision/narrow_phase/stationary_miss.rs`, `src/collision/narrow_phase/system_param.rs`, `src/collision/contact_types/mod.rs`, `src/collision/diagnostics.rs`): module
+
+Subject: the game's server physics, contacts between bodies, game state only.
+
+A pair of built-in colliders whose geometry query found no contact while both sides held still
+keeps every input that query and its point pruning read, boxed on the pair (`ContactPair`'s
+`pub(crate)` `stationary_miss`, skipped by serde). A later visit of the same non-touching, still pair
+with equal inputs skips the query: the query is a pure function of them. Touching pairs, pairs a
+hook rejected (the key is kept only when the geometry itself found no manifold) and custom collider
+backends, whose `Context` may feed the query, always query. A side holds still when standalone, or
+when its body is static, sleeping or at exactly zero velocity; a body the narrow phase reads as
+absent is unknown, never still. The inputs: both colliders' poses, shape change ticks and owners,
+the summed collision margin, the speculative distance (contact tolerance and speculative CCD
+included), the relative linear velocity, both angular velocities, the collider offsets and rotated
+centers of mass, and the step length.
+
+`CollisionDiagnostics::{stationary_non_touching_pairs, stationary_non_touching_queries}` count the
+step's still non-touching pairs visited and the queries they made, the query count beside the
+query; the game's tick trace reads them.
+
+Recycling (`recycle_distance > 0`) returns before the cache, so with it on a recycled miss is
+counted neither as a pair nor as a query.
+
+Module: the key, the tallies and their rules live in the fork-only `stationary_miss.rs` (78 lines);
+not game-side, because the check runs inside the private per-pair closure before the geometry query.
+74 lines in upstream files (MEASURED: 56 in `system_param.rs`, the key built inline from the
+closure's locals; 12 in the diagnostics; 5 for the field; 1 for the module).
+
+Guards: `src/tests/avian_narrow_phase.rs`, the seven `stationary_*` tests: reuse and per-step reset,
+motion and touching pairs, each key input, a wake with and without motion, a new neighbour, a
+child's motion and rehoming, a hook rejection. With the cache bypassed five fail (MEASURED); a key
+kept through a hook rejection fails the hook test (MEASURED). The wake test also needs a sleeping
+side's miss to stay active, which Avian 0.8.0's island sleep breaks (it moves every pair whose
+other body rests to the sleeping set); see "Resting misses stay active". Count evidence and
+reproduction: `upstream/avian-still-pairs.md`.

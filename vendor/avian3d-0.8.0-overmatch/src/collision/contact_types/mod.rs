@@ -168,6 +168,10 @@ pub struct ContactPair {
     pub recycling_cache: Option<ContactRecyclingCache>,
     /// Flag indicating the status and type of the contact pair.
     pub flags: ContactPairFlags,
+    // OVERMATCH PATCH: the stationary-miss key, transient (`narrow_phase::stationary_miss`).
+    #[cfg_attr(feature = "serialize", serde(skip))]
+    pub(crate) stationary_miss:
+        Option<Box<crate::collision::narrow_phase::stationary_miss::StationaryMiss>>,
 }
 
 /// A cache of data used for recycling contacts across timesteps.
@@ -230,6 +234,7 @@ impl ContactPair {
             speculative_distance: 0.0,
             recycling_cache: None,
             flags: ContactPairFlags::empty(),
+            stationary_miss: None, // OVERMATCH PATCH
         }
     }
 

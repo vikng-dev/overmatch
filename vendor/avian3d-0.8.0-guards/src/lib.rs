@@ -8,11 +8,20 @@ pub mod avian_ext;
 #[cfg(test)]
 mod tests;
 
-/// The game's fixture clock (`headless_test::start_fixed_clock`): one fixed loop per `update`.
+/// The game's fixture helpers (`headless_test`): one fixed loop per `update`, and the plugin finish.
 #[cfg(test)]
 mod headless_test {
     pub(crate) fn start_fixed_clock(app: &mut bevy::prelude::App) {
         app.insert_resource(bevy::time::TimeUpdateStrategy::FixedTimesteps(1));
+    }
+
+    /// The game's plugin finish (`headless_test::finish_plugins`).
+    pub(crate) fn finish_plugins(app: &mut bevy::prelude::App) {
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
     }
 }
 

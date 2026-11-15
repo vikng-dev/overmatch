@@ -22,6 +22,11 @@ pub struct CollisionDiagnostics {
     pub contact_count: u32,
     /// The number of contacts that were recycled from the previous timestep.
     pub recycled_count: u32,
+    /// OVERMATCH PATCH: still, non-touching pairs visited with overlapping bounds
+    /// (`narrow_phase::stationary_miss`).
+    pub stationary_non_touching_pairs: u32,
+    /// OVERMATCH PATCH: the geometry queries those pairs made, their inputs having changed.
+    pub stationary_non_touching_queries: u32,
 }
 
 impl PhysicsDiagnostics for CollisionDiagnostics {
@@ -37,6 +42,11 @@ impl PhysicsDiagnostics for CollisionDiagnostics {
             (Self::CONTACT_COUNT, self.contact_count),
             (Self::RECYCLED_COUNT, self.recycled_count),
             (Self::BROAD_PHASE_CANDIDATES, self.broad_phase_candidates),
+            (Self::STATIONARY_PAIRS, self.stationary_non_touching_pairs),
+            (
+                Self::STATIONARY_QUERIES,
+                self.stationary_non_touching_queries,
+            ),
         ]
     }
 }
@@ -48,5 +58,7 @@ impl_diagnostic_paths! {
         CONTACT_COUNT: "avian/collision/contact_count",
         RECYCLED_COUNT: "avian/collision/recycled_count",
         BROAD_PHASE_CANDIDATES: "avian/collision/broad_phase_candidates",
+        STATIONARY_PAIRS: "avian/collision/stationary_non_touching_pairs",
+        STATIONARY_QUERIES: "avian/collision/stationary_non_touching_queries",
     }
 }

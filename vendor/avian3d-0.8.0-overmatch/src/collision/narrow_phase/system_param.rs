@@ -1,6 +1,7 @@
 #[cfg(feature = "parallel")]
 use core::cell::RefCell;
 
+use super::stationary_miss::{self, StationaryMiss}; // OVERMATCH PATCH
 use crate::{
     collision::{
         CollisionDiagnostics,
@@ -26,7 +27,7 @@ use thread_local::ThreadLocal;
 struct ColliderQuery<C: AnyCollider> {
     entity: Entity,
     of: Option<Read<ColliderOf>>,
-    shape: Read<C>,
+    shape: Ref<'static, C>, // OVERMATCH PATCH: its change tick keys a stationary miss.
     enlarged_aabb: Read<EnlargedAabb>,
     position: Read<Position>,
     rotation: Read<Rotation>,
@@ -47,6 +48,7 @@ struct RigidBodyQuery {
     center_of_mass: Read<ComputedCenterOfMass>,
     linear_velocity: Read<LinearVelocity>,
     angular_velocity: Read<AngularVelocity>,
+    sleeping: Has<Sleeping>, // OVERMATCH PATCH: a sleeping side holds still.
     // TODO: We should define these as purely collider components and not query for them here.
     friction: Option<Read<Friction>>,
     restitution: Option<Read<Restitution>>,
@@ -108,6 +110,7 @@ pub struct NarrowPhase<'w, 's, C: AnyCollider> {
     default_restitution: Res<'w, DefaultRestitution>,
     length_unit: Res<'w, PhysicsLengthUnit>,
     contact_matcher: Res<'w, super::ContactMatcher>, // OVERMATCH PATCH
+    miss_work: Local<'s, stationary_miss::MissWork>, // OVERMATCH PATCH
 }
 
 /// A bit vector for tracking contact status changes.
@@ -843,6 +846,46 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 // The maximum distance at which contacts are detected.
                 let max_contact_distance = collision_margin_sum + speculative_distance;
 
+                // OVERMATCH PATCH: a still, non-touching pair whose query inputs are unchanged
+                // skips its query (`stationary_miss`).
+                let still = !was_touching
+                    && [(collider1.of, &body1_bundle), (collider2.of, &body2_bundle)]
+                        .into_iter()
+                        .all(|(of, body)| {
+                            of.is_none()
+                                || body.as_ref().is_some_and(|body| {
+                                    body.rb.is_static()
+                                        || body.sleeping
+                                        || (*body.linear_velocity == LinearVelocity::ZERO
+                                            && *body.angular_velocity == AngularVelocity::ZERO)
+                                })
+                        });
+                let miss_key =
+                    (still && stationary_miss::cacheable::<C>()).then(|| StationaryMiss {
+                        poses: [
+                            (*collider1.position, *collider1.rotation),
+                            (*collider2.position, *collider2.rotation),
+                        ],
+                        shapes: [
+                            collider1.shape.last_changed(),
+                            collider2.shape.last_changed(),
+                        ],
+                        owners: [
+                            collider1.of.map(|of| of.body),
+                            collider2.of.map(|of| of.body),
+                        ],
+                        collision_margin: collision_margin_sum,
+                        speculative_distance,
+                        relative_linear_velocity,
+                        angular_velocities: [AngularVelocity(ang_vel1), AngularVelocity(ang_vel2)],
+                        anchor_inputs: [collider_offset1, collider_offset2, world_com1, world_com2],
+                        delta_secs,
+                    });
+                self.miss_work.count(still, false);
+                if miss_key.is_some() && contacts.stationary_miss.as_deref() == miss_key.as_ref() {
+                    return;
+                }
+
                 // Save the old manifolds for warm starting.
                 let old_manifolds = contacts.manifolds.clone();
 
@@ -851,8 +894,9 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 // Compute the contact manifolds.
                 let context =
                     ColliderPairContext::new(collider1.entity, collider2.entity, collider_context);
+                self.miss_work.count(false, still); // OVERMATCH PATCH
                 collider1.shape.contact_manifolds_with_context(
-                    collider2.shape,
+                    &*collider2.shape,
                     collider1.position.0,
                     *collider1.rotation,
                     collider2.position.0,
@@ -921,6 +965,8 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
 
                 // Check if the colliders are now touching.
                 let mut touching = !contacts.manifolds.is_empty();
+                // OVERMATCH PATCH: a geometry miss keeps its key; a hook rejection does not.
+                contacts.stationary_miss = miss_key.filter(|_| !touching).map(Box::new);
 
                 if touching && contacts.flags.contains(ContactPairFlags::MODIFY_CONTACTS) {
                     par_commands.command_scope(|mut commands| {
@@ -971,6 +1017,12 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 }
             };
         });
+
+        // OVERMATCH PATCH: the step's stationary-miss tallies.
+        [
+            diagnostics.stationary_non_touching_pairs,
+            diagnostics.stationary_non_touching_queries,
+        ] = self.miss_work.take();
 
         #[cfg(feature = "parallel")]
         {
