@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use avian3d::prelude::{
     AngularVelocity, LinearVelocity, PhysicsInterpolationPlugin, Position, RigidBody, Rotation,
+    SleepingDisabled,
 };
 use bevy::app::PluginsState;
 use bevy::prelude::*;
@@ -420,6 +421,8 @@ fn spawn_fixture(
             Transform::from_translation(SPAWN_TRANSLATION).with_rotation(SPAWN_ROTATION),
             Name::new("bitprobe Tiger I"),
             RigidBody::Dynamic,
+            // Every recorded tick must exercise the full driving pass, even at neutral rest.
+            SleepingDisabled,
             Controlled,
         ),
     );
@@ -990,6 +993,40 @@ pub fn run_bitprobe() -> Result<(), BitprobeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The differential instrument needs a fresh real driving pass every fixed tick, including
+    /// neutral settling that would otherwise let the hull sleep.
+    #[test]
+    fn fixture_captures_one_driving_pass_per_settling_tick() {
+        let mut app = build_app();
+        wait_for_plugins(&mut app).expect("the probe's plugins initialize");
+        let tank = prepare_fixture(&mut app);
+        app.world_mut()
+            .resource_mut::<Time<Fixed>>()
+            .set_timestep_hz(TICK_HZ);
+        app.insert_resource(TimeUpdateStrategy::FixedTimesteps(1));
+
+        for tick in 0..SETTLE_END {
+            let (throttle, steer) = scripted_input(tick);
+            {
+                let mut command = app
+                    .world_mut()
+                    .get_mut::<TankCommand>(tank)
+                    .expect("the fixture retains its spawn-time command");
+                command.throttle = throttle;
+                command.steer = steer;
+            }
+            app.world_mut()
+                .resource_mut::<BitprobeCapture>()
+                .clear_tick();
+            app.update();
+            assert_eq!(
+                app.world().resource::<BitprobeCapture>().tanks_seen,
+                1,
+                "settling tick {tick} must capture exactly one fresh driving pass"
+            );
+        }
+    }
 
     /// Each seam's payload is exactly as wide as the header's schema declares it: the invariant
     /// `scripts/bitprobe/diff.py` checks on every tick of every seam before it compares a word. A

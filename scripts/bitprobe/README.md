@@ -5,6 +5,9 @@ raw startup values plus raw per-tick payloads at seven simulation seams. It is a
 instrument: it identifies the first bit that differs between two builds, then shows when each
 downstream seam diverges and how its f32 error grows.
 
+The fixture keeps its tank awake so every tick runs the real driving pass, including neutral
+settling. The library test checks for a fresh capture on every settling tick in ordinary CI.
+
 ## Run the pair
 
 From the repository root on macOS aarch64, with the fixture's Git LFS asset present:
