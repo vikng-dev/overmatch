@@ -194,9 +194,6 @@ fn prepare(
             } else {
                 4
             };
-            let (_, pair) = contacts
-                .get_by_id(constraint.contact_id)
-                .expect("a solver constraint retains its contact graph pair");
             let manifold = &pair.manifolds[constraint.manifold_index];
             assert_eq!(constraint.points.len(), manifold.points.len());
             for (slot, (point, geometry)) in
