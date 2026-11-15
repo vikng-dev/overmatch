@@ -10,7 +10,7 @@ use bevy::pbr::{
     GpuClusteredLight, MeshCullingData, MeshInputUniform, MeshUniform,
     decal::clustered::RenderClusteredDecal,
 };
-use bevy::render::render_resource::ShaderType;
+use bevy::render::{mesh::MeshMetadata, render_resource::ShaderType};
 
 fn assert_rust_upload_matches_shader<T: ShaderType>() {
     assert_eq!(
@@ -24,6 +24,7 @@ fn assert_rust_upload_matches_shader<T: ShaderType>() {
 #[test]
 fn rust_repr_gpu_uploads_match_shader_layout_sizes() {
     // The audited Rust-repr uploads must agree with their Bevy 0.20.1 shader layouts.
+    assert_rust_upload_matches_shader::<MeshMetadata>();
     assert_rust_upload_matches_shader::<MeshUniform>();
     assert_rust_upload_matches_shader::<MeshInputUniform>();
     assert_rust_upload_matches_shader::<MeshCullingData>();
