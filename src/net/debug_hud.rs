@@ -20,10 +20,11 @@
 //! Fixed-width `SpaceBetween` rows pin each value to the right padding; Barlow's proportional
 //! digits cannot align through spaces. Refresh cadence comes from UI taste data. FPS and frame
 //! time use rolling averages; server tick uses the
-//! reciprocal of the longest gap between advancing packet ticks in the last refresh interval,
-//! including the gap still in progress. Catch-up cannot erase a stall. This is client-observed
-//! delivery cadence: network delays and client frame stalls also lower it, and packets drained
-//! together share a frame timestamp. It does not measure the server's CPU time.
+//! reciprocal of the longest silence between advancing packet ticks in the last refresh interval,
+//! including the silence still in progress. Catch-up cannot erase a stall. The client reads the
+//! socket once a frame, so a silence splits in two ([`Cadence`]): the part the client watched go
+//! by, which is the server's or the network's, and the frame that received the tick, which is the
+//! client's own and is shown as a client stall. It does not measure the server's CPU time.
 
 use core::time::Duration;
 use std::collections::VecDeque;
@@ -43,42 +44,71 @@ use crate::ui_font::{
 
 use super::sync_margin::ArrivalDelay;
 
+/// One advancing tick's arrival, stamped with the frame that read it.
+struct Gap {
+    end: Duration,
+    /// Silence the client's earlier reads saw through: the arrival gap less [`Self::frame`], the
+    /// least the real gap can have been.
+    watched: Duration,
+    /// How long before this read the client last read the socket.
+    frame: Duration,
+}
+
+/// The slowest delivery in the last refresh interval, by the side it belongs to.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Cadence {
+    /// Longest [`Gap::watched`], or the silence in progress: the server or the network.
+    watched: Duration,
+    /// Longest [`Gap::frame`]: the client.
+    frame: Duration,
+}
+
 /// First packets carrying strictly newer ticks define gaps; duplicates and reordered packets do
 /// not end a stall. Retention is by the gap's end, so catch-up keeps the whole stalled interval.
 #[derive(Resource, Default)]
 struct ServerTickGaps {
     latest: Option<(Tick, Duration)>,
-    gaps: VecDeque<(Duration, Duration)>,
+    gaps: VecDeque<Gap>,
 }
 
 impl ServerTickGaps {
-    fn record(&mut self, tick: Tick, now: Duration) {
+    /// `frame` is the real time from the previous frame's read to this one, at `now`.
+    fn record(&mut self, tick: Tick, now: Duration, frame: Duration) {
         if let Some((latest, at)) = self.latest {
             if tick <= latest {
                 return;
             }
-            self.gaps.push_back((now, now - at));
+            self.gaps.push_back(Gap {
+                end: now,
+                watched: (now - at).saturating_sub(frame),
+                frame,
+            });
         }
         self.latest = Some((tick, now));
         while self
             .gaps
             .front()
-            .is_some_and(|(end, _)| now - *end > REFRESH_INTERVAL)
+            .is_some_and(|gap| now - gap.end > REFRESH_INTERVAL)
         {
             self.gaps.pop_front();
         }
     }
 
-    fn longest_gap(&self, now: Duration) -> Option<Duration> {
+    fn cadence(&self, now: Duration) -> Option<Cadence> {
         // No server tick has arrived on this connection yet.
         let (_, at) = self.latest?;
-        Some(
+        let recent = || {
             self.gaps
                 .iter()
-                .filter(|(end, _)| now - *end <= REFRESH_INTERVAL)
-                .map(|(_, gap)| *gap)
+                .filter(|gap| now - gap.end <= REFRESH_INTERVAL)
+        };
+        Some(Cadence {
+            // Every frame since `at` read the socket and found no newer tick.
+            watched: recent()
+                .map(|gap| gap.watched)
                 .fold(now - at, Duration::max),
-        )
+            frame: recent().map(|gap| gap.frame).max().unwrap_or_default(),
+        })
     }
 }
 
@@ -96,7 +126,7 @@ fn record_tick_arrival(
 ) {
     // Packets before connection or after disconnect do not belong to the displayed session.
     if connected.contains(packet.entity) {
-        gaps.record(packet.remote_tick, time.elapsed());
+        gaps.record(packet.remote_tick, time.elapsed(), time.delta());
     }
 }
 
@@ -159,8 +189,9 @@ pub(crate) fn mount_layout_test(app: &mut App) {
 fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
     // Bottom-right — a subtle dark card mirroring `crew_ui`'s status panel (top-left), so the
     // corners read as one UI family. Fixed width sized to the widest realistic row
-    // ("Frame  999.9 ms") at font_size 15px; Bevy UI Nodes are border-box, so this includes the 8px
-    // horizontal padding.
+    // ("Server tick  client 9999 ms": DERIVED 137 px of the 144 px content box, from the Regular
+    // weight's advance widths at 15px plus the column gap); Bevy UI Nodes are border-box, so the
+    // width includes the 8px horizontal padding.
     commands
         .spawn((
             FlowScoped(Flow::InMatch),
@@ -264,14 +295,25 @@ fn jitter_readout(spread: Duration, tick: Duration) -> (String, Color) {
     )
 }
 
-/// Jitter and cadence share the authored excess-budget bands. Cap at the nominal rate:
-/// coalesced arrivals cannot establish a faster server. Never divide a gap by skipped ticks:
-/// catch-up would conceal stalls.
-fn server_tick_readout(gap: Duration, tick: Duration) -> (String, Color) {
-    (
-        format!("{:.1} Hz", gap.max(tick).as_secs_f64().recip()),
-        excess_colour(gap.saturating_sub(tick), tick),
-    )
+/// Jitter and cadence share the authored excess-budget bands. A client frame past the warning
+/// budget that outlasts every watched silence is named as the client's stall: the server's rate
+/// over it is unknown, not low. Otherwise the server's rate, from the watched silence. Cap at the
+/// nominal rate: coalesced arrivals cannot establish a faster server. Never divide a gap by
+/// skipped ticks: catch-up would conceal stalls.
+fn server_tick_readout(cadence: Cadence, tick: Duration) -> (String, Color) {
+    let Cadence { watched, frame } = cadence;
+    let stall = frame.saturating_sub(tick);
+    if frame > watched && stall >= tick * WARN_EXCESS_TICKS {
+        (
+            format!("client {:.0} ms", frame.as_secs_f64() * 1000.0),
+            excess_colour(stall, tick),
+        )
+    } else {
+        (
+            format!("{:.1} Hz", watched.max(tick).as_secs_f64().recip()),
+            excess_colour(watched.saturating_sub(tick), tick),
+        )
+    }
 }
 
 #[expect(
@@ -325,8 +367,8 @@ fn update_debug_hud(
     let jitter = (*armed == Some(estimator.link()))
         .then(|| jitter_readout(estimator.stats.spread(), tick.0));
     let server_tick = tick_gaps
-        .longest_gap(time.elapsed())
-        .map(|gap| server_tick_readout(gap, tick.0));
+        .cadence(time.elapsed())
+        .map(|cadence| server_tick_readout(cadence, tick.0));
     // Rolling averages over the diagnostic history buffer (not the raw per-frame value), so a single
     // slow frame doesn't make the number jump. FRAME_TIME is already in milliseconds.
     let fps = diagnostics
@@ -374,12 +416,15 @@ mod tests {
         (app, link, tick)
     }
 
-    fn arrive(app: &mut App, link: Entity, tick: u32, at: Duration) {
+    /// One client frame beginning at `at`, reading the socket for `ticks` in order.
+    fn frame(app: &mut App, link: Entity, at: Duration, ticks: impl IntoIterator<Item = u32>) {
         app.world_mut().resource_mut::<Time<Real>>().advance_to(at);
-        app.world_mut().trigger(PacketReceived {
-            entity: link,
-            remote_tick: Tick(tick),
-        });
+        for tick in ticks {
+            app.world_mut().trigger(PacketReceived {
+                entity: link,
+                remote_tick: Tick(tick),
+            });
+        }
         app.world_mut().flush();
     }
 
@@ -387,59 +432,106 @@ mod tests {
         let world = app.world();
         world
             .resource::<ServerTickGaps>()
-            .longest_gap(world.resource::<Time<Real>>().elapsed())
-            .map(|gap| server_tick_readout(gap, world.resource::<TickDuration>().0))
+            .cadence(world.resource::<Time<Real>>().elapsed())
+            .map(|cadence| server_tick_readout(cadence, world.resource::<TickDuration>().0))
     }
 
-    /// Players see the nominal rate on evenly spaced tick advances.
+    fn hz(gap: Duration) -> String {
+        format!("{:.1} Hz", gap.as_secs_f64().recip())
+    }
+
+    /// Players see the nominal rate on evenly spaced tick advances, whether the client's frames
+    /// are as long as a tick or shorter, so most frames read no tick at all.
     #[test]
     fn steady_ticks_are_healthy() {
-        let (mut app, link, tick) = tick_app();
-        assert_eq!(readout(&app), None, "no packet yet is a placeholder");
-        // Fixture: two seconds of steady arrivals, crossing the retention boundary.
-        let mut at = Duration::ZERO;
-        let mut remote = 0;
-        while at <= REFRESH_INTERVAL * 2 {
-            arrive(&mut app, link, remote, at);
-            remote += 1;
-            at += tick;
+        // Fixture: frames per tick.
+        for frames_per_tick in [1, 2] {
+            let (mut app, link, tick) = tick_app();
+            assert_eq!(readout(&app), None, "no packet yet is a placeholder");
+            // Fixture: two seconds of steady arrivals, crossing the retention boundary.
+            let mut at = Duration::ZERO;
+            let mut remote = 0;
+            while at <= REFRESH_INTERVAL * 2 {
+                frame(&mut app, link, at, [remote]);
+                for part in 1..frames_per_tick {
+                    frame(&mut app, link, at + tick * part / frames_per_tick, []);
+                }
+                remote += 1;
+                at += tick;
+            }
+            assert_eq!(readout(&app), Some((hz(tick), TEXT)));
         }
-        assert_eq!(
-            readout(&app),
-            Some((format!("{:.1} Hz", tick.as_secs_f64().recip()), TEXT))
-        );
     }
 
-    /// Averages hide a freeze followed by catch-up. Players must see the stall while it is in
-    /// progress and for the next refresh interval after receipt, then see recovery.
+    /// Averages hide a freeze followed by catch-up. While the client keeps reading and no tick
+    /// comes, players must see the server's stall while it is in progress and for the next refresh
+    /// interval after receipt, then see recovery.
     #[test]
     fn a_stall_then_a_catch_up_burst_stays_visible() {
         let (mut app, link, tick) = tick_app();
-        arrive(&mut app, link, 0, Duration::ZERO);
-        arrive(&mut app, link, 1, tick);
+        frame(&mut app, link, Duration::ZERO, [0]);
+        frame(&mut app, link, tick, [1]);
         // Fixture: a freeze above the authored alarm, then a burst of coalesced ticks.
-        let stall = tick * ALARM_EXCESS_TICKS + tick * 2;
-        let resumed = tick + stall;
-        app.world_mut()
-            .resource_mut::<Time<Real>>()
-            .advance_to(resumed);
-        let stalled = Some((format!("{:.1} Hz", stall.as_secs_f64().recip()), NET_ALARM));
-        assert_eq!(readout(&app), stalled, "silence is already a slowdown");
-        let missed = (stall.as_nanos() / tick.as_nanos()) as u32;
-        for remote in missed..=missed + 2 {
-            arrive(&mut app, link, remote, resumed);
+        let silent_frames = ALARM_EXCESS_TICKS + 2;
+        for n in 1..=silent_frames {
+            frame(&mut app, link, tick + tick * n, []);
         }
+        let stalled = Some((hz(tick * silent_frames), NET_ALARM));
+        assert_eq!(readout(&app), stalled, "silence is already a slowdown");
+        let resumed = tick * (silent_frames + 2);
+        frame(&mut app, link, resumed, silent_frames..=silent_frames + 2);
         assert_eq!(readout(&app), stalled, "catch-up must not erase the gap");
         let mut elapsed = tick;
-        let mut remote = missed + 3;
+        let mut remote = silent_frames + 3;
         while elapsed <= REFRESH_INTERVAL {
-            arrive(&mut app, link, remote, resumed + elapsed);
+            frame(&mut app, link, resumed + elapsed, [remote]);
             assert_eq!(readout(&app), stalled, "retain for a panel refresh");
             elapsed += tick;
             remote += 1;
         }
-        arrive(&mut app, link, remote, resumed + elapsed);
-        assert_eq!(readout(&app).unwrap().1, TEXT, "expired gaps recover");
+        frame(&mut app, link, resumed + elapsed, [remote]);
+        assert_eq!(
+            readout(&app),
+            Some((hz(tick), TEXT)),
+            "expired gaps recover"
+        );
+    }
+
+    /// A client frame that reads nothing while it runs is the client's stall: the ticks it then
+    /// reads at once say nothing against the server, so the panel names the client and its frame,
+    /// for the same refresh interval a server stall is kept, and never a low server rate. Frames
+    /// shorter than a tick, so the last tick before the stall was read frames earlier. Mutants:
+    /// timing the whole arrival gap against the server; calling a gap the client's only when no
+    /// frame fell inside it.
+    #[test]
+    fn a_client_frame_stall_is_not_the_servers() {
+        let (mut app, link, tick) = tick_app();
+        frame(&mut app, link, Duration::ZERO, [0]);
+        frame(&mut app, link, tick, [1]);
+        frame(&mut app, link, tick + tick / 2, []);
+        // Fixture: one client frame above the authored alarm; the server kept its cadence.
+        let stall = tick * (ALARM_EXCESS_TICKS + 2);
+        let resumed = tick + tick / 2 + stall;
+        frame(&mut app, link, resumed, 2..=ALARM_EXCESS_TICKS + 3);
+        let stalled = Some((
+            format!("client {:.0} ms", stall.as_secs_f64() * 1000.0),
+            NET_ALARM,
+        ));
+        assert_eq!(readout(&app), stalled);
+        let mut elapsed = tick;
+        let mut remote = ALARM_EXCESS_TICKS + 4;
+        while elapsed <= REFRESH_INTERVAL {
+            frame(&mut app, link, resumed + elapsed, [remote]);
+            assert_eq!(readout(&app), stalled, "retain for a panel refresh");
+            elapsed += tick;
+            remote += 1;
+        }
+        frame(&mut app, link, resumed + elapsed, [remote]);
+        assert_eq!(
+            readout(&app),
+            Some((hz(tick), TEXT)),
+            "expired stalls recover"
+        );
     }
 
     /// Only new server ticks end a player's observed gap. A reconnect may restart its tick
@@ -447,18 +539,19 @@ mod tests {
     #[test]
     fn duplicates_do_not_end_silence_and_a_reconnect_resets_history() {
         let (mut app, link, tick) = tick_app();
-        arrive(&mut app, link, 10, Duration::ZERO);
-        arrive(&mut app, link, 11, tick);
+        frame(&mut app, link, Duration::ZERO, [10]);
+        frame(&mut app, link, tick, [11]);
         let at = tick * 5;
-        for remote in [11, 10] {
-            arrive(&mut app, link, remote, at);
-        }
+        frame(&mut app, link, at, [11, 10]);
         assert_eq!(
-            app.world().resource::<ServerTickGaps>().longest_gap(at),
+            app.world()
+                .resource::<ServerTickGaps>()
+                .cadence(at)
+                .map(|cadence| cadence.watched),
             Some(tick * 4)
         );
         app.world_mut().entity_mut(link).remove::<Connected>();
-        arrive(&mut app, link, 12, at);
+        frame(&mut app, link, at, [12]);
         assert_eq!(
             app.world().resource::<ServerTickGaps>().latest,
             Some((Tick(11), tick)),
@@ -467,8 +560,8 @@ mod tests {
         app.world_mut().entity_mut(link).insert(Connected);
         app.world_mut().flush();
         assert_eq!(readout(&app), None, "a new session has no samples yet");
-        arrive(&mut app, link, 0, at);
-        arrive(&mut app, link, 1, at + tick);
+        frame(&mut app, link, at, [0]);
+        frame(&mut app, link, at + tick, [1]);
         assert_eq!(readout(&app).unwrap().1, TEXT);
     }
 
@@ -494,7 +587,18 @@ mod tests {
             ),
         ] {
             assert_eq!(jitter_readout(excess, tick).1, colour);
-            assert_eq!(server_tick_readout(excess + tick, tick).1, colour);
+            for cadence in [
+                Cadence {
+                    watched: excess + tick,
+                    frame: tick,
+                },
+                Cadence {
+                    watched: tick,
+                    frame: excess + tick,
+                },
+            ] {
+                assert_eq!(server_tick_readout(cadence, tick).1, colour);
+            }
         }
     }
 }
