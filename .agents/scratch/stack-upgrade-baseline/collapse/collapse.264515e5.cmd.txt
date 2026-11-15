@@ -1,0 +1,14 @@
+commit: 264515e50b0da455b9ba05e26f477b0fbfd0018a (v0.7.0-alpha.17 = b8baa8e4 plus one docs-only commit)
+cwd: the bay root (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+command: scripts/perf/collapse.sh --target local --schedule scripts/perf/match-collapse.json --rehearsal --tanks 30 --clients 1 --out target/collapse-1client-264515e5
+started: 2026-11-16T01:53:23+0700
+load averages before start (1, 5, 15 min; MEASURED, uptime): 3.95 8.01 7.38
+exit: 0 wall 64s END 2026-11-16T01:54:27+0700
+wall time includes any wait for the machine lock (/tmp/overmatch-cargo.lock).
+note: the plan's command plus --tanks 30 --clients 1 (29 bots and one real window-less client), the workload of the hosted collapse runs before it; the plan's default, 30 real clients, failed twice on this machine (collapse-debug-attempt and collapse-release-attempt beside this file): every client missed the harness's 20 s launch watchdog. The after set must use these same flags
+note: binaries: target/debug (the default), built by scripts/serial-cargo build --locked --features dev_ui,bitprobe --bin overmatch --bin overmatch-server; collapse.py's own freshness check through scripts/serial-cargo found them fresh (0.83 s)
+note: result: COMPLETE, 30 tanks, 1 real link, 709 constructions, 59 complete windows, 3 events; server_over_budget=True, measured rate 58.219 Hz, capacity_supported=False (the runner's MEASURED lines; an unpriced local rehearsal on a debug server, never a capacity verdict)
+note: the timing gate waited 105 s, then passed: no rustc running, 1-minute load 3.95 (MEASURED)
+note: machine build lock: held for the run; collapse.py checks the build through scripts/serial-cargo, then re-runs itself under /usr/bin/lockf on /tmp/overmatch-cargo.lock (collapse.py:1161) for the match
+note: collapse.264515e5.txt is the runner's printed output (the per-window phase table and the instrument table); counts.264515e5.json its client and house counts; /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/collapse/tick-attribution.264515e5.json.gz (outside git) the stage account (gzip -9 of the run's 42 MB tick-attribution.json)
+note: the whole run directory (rows.json 49 MB, server.log 26 MB, tick-attribution.json 42 MB) is kept at /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/collapse-run/

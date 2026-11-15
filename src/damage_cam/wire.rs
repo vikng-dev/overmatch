@@ -818,6 +818,46 @@ struct WireComponent {
 
 // --- Build and project ----------------------------------------------------------------------------
 
+/// The game's damage-model shooter projection, encoded and decoded before its offline cue.
+#[derive(Clone, Debug)]
+pub(crate) struct ShooterReplay {
+    record: Record,
+    report: PenetrationReport,
+}
+
+impl ShooterReplay {
+    pub(crate) fn build(
+        vocabulary: &ShotVocabulary,
+        report: &PenetrationReport,
+    ) -> Result<Self, CodecError> {
+        let record = shooter_view(&encode(vocabulary, report)?);
+        let report = decode(vocabulary, &record)?;
+        Ok(Self { record, report })
+    }
+
+    /// An offline first encounter at `shot`'s tick, with no world impact or hull pose.
+    pub(crate) fn bind(
+        self,
+        shot: ShotId,
+        struck: TankLife,
+    ) -> (ShotExplanation, PenetrationReport) {
+        (
+            ShotExplanation {
+                shot,
+                encounter: 0,
+                struck,
+                contact_tick: shot.fire_tick,
+                completion_tick: shot.fire_tick,
+                outcome: None,
+                audience: Audience::Shooter,
+                hull: None,
+                record: self.record,
+            },
+            self.report,
+        )
+    }
+}
+
 /// An explanation built once on the authority: the full record, before any recipient's projection.
 #[derive(Clone, Debug)]
 pub(crate) struct BuiltExplanation {
@@ -1074,7 +1114,11 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
         vocabulary: vocabulary.fingerprint.to_le_bytes(),
         vehicle: vehicle_index,
         round: ShotVocabulary::named(&vocabulary.rounds, &report.round, "round")?,
-        weapon: ShotVocabulary::named(&vocabulary.weapons, &report.projectile.name, "weapon")?,
+        weapon: ShotVocabulary::named(
+            &vocabulary.weapons,
+            &report.projectile.name,
+            "projectile.name",
+        )?,
         servos,
         origin: Mm::of(report.origin)?,
         muzzle: report.muzzle.map(Mm::of).transpose()?,

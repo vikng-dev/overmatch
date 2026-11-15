@@ -972,6 +972,7 @@ pub fn run_offline() {
         dev_capture::offline_shot_plugin,
         dev_capture::offline_wall_plugin,
         dev_capture::offline_repair_plugin,
+        dev_capture::offline_corner_plugin,
     ));
     // The scripted-trigger capture hook (`SPIKE_AUTO_FIRE`), mounted HERE and nowhere else: this
     // offline root has no netcode at all — no lightyear plugins, no connection entity — so the

@@ -1,0 +1,39 @@
+2026-11-15T17:39:45.522234Z  INFO bevy_diagnostic::system_information_diagnostics_plugin::internal: SystemInfo { os: "macOS 26.5.2", kernel: "25.5.0", cpu: "Apple M4", core_count: "10", memory: "16.0 GiB" }
+2026-11-15T17:39:45.522515Z  INFO bevy_app::terminal_ctrl_c_handler: Skipping installing `Ctrl+C` handler as one was already installed. Please call `TerminalCtrlCHandlerPlugin::gracefully_exit` in your own `Ctrl+C` handler if you want Bevy to gracefully exit on `Ctrl+C`.
+2026-11-15T17:39:45.568057Z  INFO bevy_render::renderer: AdapterInfo { name: "Apple M4", vendor: 0, device: 0, device_type: IntegratedGpu, device_pci_bus_id: "", driver: "", driver_info: "", backend: Metal, subgroup_min_size: 4, subgroup_max_size: 64, transient_saves_memory: true }
+2026-11-15T17:39:45.656851Z  INFO overmatch::run_window: window: hidden
+2026-11-15T17:39:45.656960Z  INFO overmatch::unattended: unattended: OVERMATCH_UNATTENDED — silent, a focus loss never pauses
+2026-11-15T17:39:45.737536Z  INFO bevy_pbr::cluster: GPU clustering is supported on this device.
+2026-11-15T17:39:45.737579Z  INFO bevy_render::batching::gpu_preprocessing: GPU preprocessing is fully supported on this device.
+2026-11-15T17:39:45.737990Z  WARN bevy_egui::render: Bindless textures are not yet supported on metal. Disabling bindless mode. See https://github.com/bevyengine/bevy/issues/18149 for more information
+2026-11-15T17:39:45.752683Z  INFO bevy_winit::system: Creating new window Overmatch - offline (68v0)
+2026-11-15T17:39:45.793733Z  INFO overmatch::settings: settings: no /var/folders/st/6bfb53p95z1372ym5c5mqgx00000gp/T/overmatch-shader-cfg.NnACxO4yli/video.ron yet — first launch, using defaults
+2026-11-15T17:39:45.801040Z  INFO overmatch::geometry_lod: geometry_lod: certificate loaded — 62 chain(s) over 59 scene mesh(es), sim artifact verified
+2026-11-15T17:39:45.803522Z  INFO overmatch::ground_field: ground field: masks 1024x1024 decoded for the sim in 9.4 ms (3072 KiB)
+2026-11-15T17:39:45.814668Z  INFO overmatch::vfx::hull_marks: hull marks: 9 texture sets of 256x256 generated in 20.7 ms
+2026-11-15T17:39:45.932048Z  INFO overmatch::terrain_grid: terrain: height grid 1025x1025 decoded (1500 m span, 0..50 m)
+2026-11-15T17:39:45.936808Z  INFO overmatch::track_prints: track prints: near store 2048² Rg8 over 96 m (4.69 cm texels), world layer 4096² R8 over 1500 m (36.6 cm texels, 13 levels), 6 ground types
+2026-11-15T17:39:45.936834Z  INFO overmatch::world: terrain surface: base pack every 15 m, masks maps/kalinovo/terrain_masks.png at [1024, 1024], blend layers 0=dirt_aerial_03 every 25 m (uv x0.600), 1=coast_sand_05 every 25 m (uv x0.600), 2=aerial_mud_1 every 8 m (uv x1.875)
+2026-11-15T17:39:46.282077Z  INFO overmatch::terrain_shadow: terrain shadow: 1025² field, 1.465 m texel, 7 nodes in shadow, baked in 345 ms
+2026-11-15T17:39:46.971615Z  INFO overmatch::terrain_lod: terrain LOD: rung δ ≤ 0.00 m — 64 tiles, 2097152 tris, measured worst δ 0.0000 m, out of range until the view is read
+2026-11-15T17:39:46.971652Z  INFO overmatch::terrain_lod: terrain LOD: rung δ ≤ 0.05 m — 54 tiles, 407416 tris, measured worst δ 0.0493 m, out of range until the view is read
+2026-11-15T17:39:46.971659Z  INFO overmatch::terrain_lod: terrain LOD: rung δ ≤ 0.10 m — 64 tiles, 250710 tris, measured worst δ 0.0918 m, out of range until the view is read
+2026-11-15T17:39:46.971663Z  INFO overmatch::terrain_lod: terrain LOD: rung δ ≤ 0.25 m — 64 tiles, 167298 tris, measured worst δ 0.2449 m, out of range until the view is read
+2026-11-15T17:39:46.971675Z  INFO overmatch::terrain_lod: terrain LOD: rung δ ≤ 0.50 m — 63 tiles, 128988 tris, measured worst δ 0.4986 m, out of range until the view is read
+2026-11-15T17:39:46.971679Z  INFO overmatch::terrain_lod: terrain LOD: 64 tiles → 309 entities, generated in 130 ms (+534 ms tangents), radius 133.4 m, no view read yet — every tile at its finest level until the first frame with facts
+2026-11-15T17:39:47.004108Z  INFO overmatch::scatter: scatter: 709 instances placed on the live surface — 0 graybox constructions, 709 constructions (a collider per element)
+2026-11-15T17:39:47.025518Z  INFO overmatch::track::sim: envelope law: travel 172.6 mm (spring-limited), k 411 kN/m per m, c 38.18 kN·s/m per m (ride 1.20 Hz, ζ 0.35)
+2026-11-15T17:39:47.025543Z  INFO overmatch::track::sim: declared transmission: 8F/4R
+2026-11-15T17:39:47.025553Z  INFO overmatch::track::sim: grip law: hull coupling 1.695, shortest shear length 6.88 mm per unit grip at the fixed step
+2026-11-15T17:39:47.029974Z  INFO overmatch::flow: flow: Boot
+2026-11-15T17:39:47.030206Z  INFO overmatch::settings::displays: settings: display ladder = [Auto "AUTO", Primary "* BUILT-IN RETINA DISPLAY"]
+2026-11-15T17:39:47.030289Z  INFO overmatch::settings: render_cost: cascades applied bounds=[40.0, 118.3216, 350.00003] overlap=0.2 minimum=0.1
+2026-11-15T17:39:47.076470Z  INFO overmatch::view: view: 0.7854 rad × 1440 px — every LOD ladder reselects
+2026-11-15T17:39:47.119799Z  INFO overmatch::state: state: focus lost — pause suppressed (unattended run)
+2026-11-15T17:39:47.121100Z  INFO overmatch::terrain_lod: terrain LOD: view profile → fov 0.785 rad × 1440 px, thresholds rewritten
+2026-11-15T17:39:47.121148Z  INFO overmatch::geometry_lod: geometry_lod: 62 chain(s) resolved against tiger_1/tiger_1.glb, 172 rung mesh(es) bound; 167 scene primitive(s) render at source detail
+2026-11-15T17:39:47.123661Z  INFO overmatch::geometry_lod: geometry_lod: view profile → 0.7854 rad × 1440 px at 1.00 px budget, bands rewritten
+2026-11-15T17:39:47.211925Z  INFO overmatch::settings::probe: settings: present-mode probe — vsync rungs offered: OFF/ON
+2026-11-15T17:39:47.291534Z  INFO overmatch::flow: flow: InMatch
+2026-11-15T17:39:47.292306Z  INFO overmatch::track_prints: track prints: shoe stamp baked from 1520 triangles into 145x36 cells of 5 mm (0.725 x 0.180 m, relief 62.0 mm, 76 % covered) and pooled to the near texel in 519 µs MEASURED; ground pressure 107.0 kPa DERIVED
+2026-11-15T17:39:47.479278Z  INFO overmatch::sky: sky light: filtered once; the filter is retired and the views share its maps

@@ -1,0 +1,10 @@
+commit: 264515e50b0da455b9ba05e26f477b0fbfd0018a (v0.7.0-alpha.17 = b8baa8e4 plus one docs-only commit)
+cwd: the bay root (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+command: scripts/track-scorecard
+started: 2026-11-16T00:26:31+0700
+load averages before start (1, 5, 15 min; MEASURED, uptime): 8.25 11.76 8.53
+exit: 0 wall 765s END 2026-11-16T00:39:16+0700
+wall time includes any wait for the machine lock (/tmp/overmatch-cargo.lock).
+note: the script sets OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 and runs: scripts/serial-cargo test --lib --features dev_ui,bitprobe headless_test::track_scorecard::track_scorecard -- --ignored --nocapture (edit profile); outputs copied from target/track-scorecard.{md,json}
+note: test result: ok. 1 passed; finished in 86.80s (MEASURED); every number in the scorecard is an observation unless its line says law check
+note: machine build lock: held for the whole run; scripts/serial-cargo holds /tmp/overmatch-cargo.lock across the cargo invocation, the test binary's run included

@@ -316,7 +316,7 @@ fn check_path(report: &PenetrationReport) -> Result<(), ValidationError> {
                     .any(|p| p.name == *volume && p.exit.is_none()) =>
         {
             return Err(ValidationError::Path(
-                "the resting volume must be a component or retaining plate",
+                "end.volume must name a declared component or retaining plate",
             ));
         }
         _ => {}

@@ -1,0 +1,2610 @@
+{
+ "head": "264515e5",
+ "bin": "/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1/target/release",
+ "args": {
+  "out": "target/pile-park-264515e5",
+  "bin": "/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1/target/release",
+  "conditions": "['pile', 'flat', 'rubble', 'rubble', 'flat', 'pile']",
+  "runup_m": "30.0",
+  "throttle_ticks": "640",
+  "flat_pose": "(680.0, -520.0)",
+  "fell_at_s": "1.0",
+  "settle_s": "10.0",
+  "park_s": "30.0",
+  "quiet_wait_s": "2400.0"
+ },
+ "poses": {
+  "pile": [
+   [
+    -634.152183196548,
+    33.2813868491324,
+    47.03311663132894
+   ],
+   [
+    0.0,
+    -0.03417561720268275,
+    0.0,
+    0.9994158429746928
+   ]
+  ],
+  "flat": [
+   [
+    680.0,
+    12.766860456242714,
+    -520.0
+   ],
+   [
+    0.0,
+    0.0,
+    0.0,
+    1.0
+   ]
+  ],
+  "rubble": [
+   [
+    680.0,
+    12.766860456242714,
+    -520.0
+   ],
+   [
+    0.0,
+    0.0,
+    0.0,
+    1.0
+   ]
+  ]
+ },
+ "runs": [
+  {
+   "run": "r01-pile",
+   "condition": "pile",
+   "pose": [
+    [
+     -634.152183196548,
+     33.2813868491324,
+     47.03311663132894
+    ],
+    [
+     0.0,
+     -0.03417561720268275,
+     0.0,
+     0.9994158429746928
+    ]
+   ],
+   "drive": "Park(throttle_ticks: 640)",
+   "recorder": {
+    "tanks": 1,
+    "events": [
+     {
+      "at_s": 1000000.0,
+      "instances": [
+       "house_0037"
+      ]
+     }
+    ]
+   },
+   "window_s": [
+    22.0,
+    52.0
+   ],
+   "loadavg_before": [
+    4.0244140625,
+    5.79638671875,
+    6.44189453125
+   ],
+   "quiet_wait_s": 0.01450291695073247,
+   "seconds_with_rustc_running": 0,
+   "loadavg_after": [
+    3.7333984375,
+    5.39013671875,
+    6.2470703125
+   ],
+   "awake_bodies_per_line": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "window": {
+    "ticks": 1921,
+    "awake": {
+     "mean": 0.0
+    },
+    "avian.pairs": {
+     "mean": 5428.0
+    },
+    "avian.touching_pairs": {
+     "mean": 0.0
+    },
+    "avian.points": {
+     "mean": 0.0
+    },
+    "avian.constraints": {
+     "mean": 0.0
+    },
+    "avian.colors": {
+     "mean": 0.0
+    },
+    "avian.broad_phase_candidates": {
+     "mean": 0.0
+    },
+    "work.contact_points": {
+     "mean": 0.0
+    },
+    "work.belt_near_colliders": {
+     "mean": 0.0
+    },
+    "work.belt_candidates": {
+     "mean": 0.0
+    },
+    "work.belt_slab_checks": {
+     "mean": 0.0
+    },
+    "work.belt_slab_aabb_passes": {
+     "mean": 0.0
+    },
+    "work.belt_overlaps": {
+     "mean": 0.0
+    },
+    "work.belt_dynamic_contacts": {
+     "mean": 0.0
+    },
+    "work.belt_dispatches": {
+     "mean": 0.0
+    },
+    "work.belt_partition_faces": {
+     "mean": 0.0
+    },
+    "work.belt_partition_cells": {
+     "mean": 0.0
+    },
+    "work.belt_partition_patches": {
+     "mean": 0.0
+    },
+    "work.belt_terrain_samples": {
+     "mean": 0.0
+    },
+    "sweep_casts": {
+     "mean": 0.0
+    },
+    "tick_us": {
+     "mean": 1307.866321707444,
+     "p50": 1305.875,
+     "p95": 1684.125,
+     "p99": 1983.375,
+     "max": 3101.459
+    },
+    "net_us": {
+     "mean": 1291.8163383654348,
+     "p50": 1291.0,
+     "p95": 1665.4170000000001,
+     "p99": 1964.4599999999998,
+     "max": 3066.5429999999997
+    },
+    "physics_us": {
+     "mean": 454.99640499739724,
+     "p50": 448.709,
+     "p95": 566.5,
+     "p99": 686.292,
+     "max": 1446.417
+    },
+    "sleep_us": {
+     "mean": 5.59838261322228,
+     "p50": 4.875,
+     "p95": 10.125,
+     "p99": 15.542000000000002,
+     "max": 35.0
+    },
+    "tick_cpu_us": {
+     "mean": 2712.081728266528,
+     "p50": 2740.0,
+     "p95": 3471.0,
+     "p99": 3833.0,
+     "max": 4483.0
+    },
+    "belt_contacts_us": {
+     "mean": 2.807546069755336,
+     "p50": 2.625,
+     "p95": 4.209,
+     "p99": 7.0,
+     "max": 17.583
+    },
+    "contacts_us": {
+     "mean": 27.546022384174908,
+     "p50": 25.875,
+     "p95": 42.792,
+     "p99": 56.458,
+     "max": 93.291
+    },
+    "sweep_us": {
+     "mean": 17.365868297761583,
+     "p50": 15.375,
+     "p95": 32.5,
+     "p99": 43.25,
+     "max": 69.417
+    },
+    "contact_census_us": {
+     "mean": 15.186463820926601,
+     "p50": 14.0,
+     "p95": 25.666,
+     "p99": 35.542,
+     "max": 62.125
+    },
+    "phases_us.driving_us": {
+     "mean": 68.19884903695991,
+     "p50": 65.251,
+     "p95": 104.918,
+     "p99": 134.0,
+     "max": 181.583
+    },
+    "phases_us.physics_step_us": {
+     "mean": 472.62117230609056,
+     "p50": 467.669,
+     "p95": 590.126,
+     "p99": 701.252,
+     "max": 1465.292
+    },
+    "phases_us.post_physics_us": {
+     "mean": 12.893915148360229,
+     "p50": 12.875,
+     "p95": 22.334,
+     "p99": 28.25,
+     "max": 38.584
+    },
+    "phases_us.fixed_update_us": {
+     "mean": 20.794940135346174,
+     "p50": 20.084,
+     "p95": 33.792,
+     "p99": 43.958,
+     "max": 59.5
+    },
+    "phases_us.fixed_gameplay_us": {
+     "mean": 22.073483081728266,
+     "p50": 19.833,
+     "p95": 40.125,
+     "p99": 55.334,
+     "max": 101.166
+    },
+    "avian.narrow_phase_us": {
+     "mean": 264.23100260281103,
+     "p50": 261.54200000000003,
+     "p95": 333.29200000000003,
+     "p99": 390.83299999999997,
+     "max": 1018.917
+    },
+    "avian.broad_phase_us": {
+     "mean": 0.42165903175429464,
+     "p50": 0.334,
+     "p95": 0.834,
+     "p99": 1.209,
+     "max": 10.334
+    },
+    "avian.prepare_constraints_us": {
+     "mean": 0.23520458094742322,
+     "p50": 0.20900000000000002,
+     "p95": 0.458,
+     "p99": 0.667,
+     "max": 1.75
+    },
+    "avian.solve_constraints_us": {
+     "mean": 0.2711743883394066,
+     "p50": 0.251,
+     "p95": 0.417,
+     "p99": 0.625,
+     "max": 0.874
+    },
+    "avian.warm_start_us": {
+     "mean": 0.31053409682457056,
+     "p50": 0.291,
+     "p95": 0.501,
+     "p99": 0.709,
+     "max": 2.9170000000000003
+    },
+    "avian.relax_velocities_us": {
+     "mean": 0.3149875065070276,
+     "p50": 0.29200000000000004,
+     "p95": 0.499,
+     "p99": 0.709,
+     "max": 1.207
+    },
+    "avian.integrate_velocities_us": {
+     "mean": 0.8903394065590838,
+     "p50": 0.875,
+     "p95": 1.207,
+     "p99": 1.418,
+     "max": 5.711
+    },
+    "avian.integrate_positions_us": {
+     "mean": 0.30527017178552834,
+     "p50": 0.291,
+     "p95": 0.499,
+     "p99": 0.7080000000000001,
+     "max": 1.582
+    },
+    "avian.collider_tree_update_us": {
+     "mean": 89.05076210307132,
+     "p50": 87.625,
+     "p95": 118.583,
+     "p99": 144.041,
+     "max": 204.458
+    },
+    "avian.finalize_us": {
+     "mean": 0.13208693388859968,
+     "p50": 0.125,
+     "p95": 0.29200000000000004,
+     "p99": 0.458,
+     "max": 1.0
+    }
+   },
+   "settle_end_piece_lift_ns": 712.7909545898438
+  },
+  {
+   "run": "r02-flat",
+   "condition": "flat",
+   "pose": [
+    [
+     680.0,
+     12.766860456242714,
+     -520.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "drive": "Idle",
+   "recorder": {
+    "tanks": 1,
+    "events": [
+     {
+      "at_s": 1000000.0,
+      "instances": [
+       "house_0037"
+      ]
+     }
+    ]
+   },
+   "window_s": [
+    22.0,
+    52.0
+   ],
+   "loadavg_before": [
+    3.7333984375,
+    5.39013671875,
+    6.2470703125
+   ],
+   "quiet_wait_s": 0.012711041141301394,
+   "seconds_with_rustc_running": 0,
+   "loadavg_after": [
+    2.580078125,
+    4.779296875,
+    5.96044921875
+   ],
+   "awake_bodies_per_line": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "window": {
+    "ticks": 1920,
+    "awake": {
+     "mean": 0.0
+    },
+    "avian.pairs": {
+     "mean": 5.0
+    },
+    "avian.touching_pairs": {
+     "mean": 0.0
+    },
+    "avian.points": {
+     "mean": 0.0
+    },
+    "avian.constraints": {
+     "mean": 0.0
+    },
+    "avian.colors": {
+     "mean": 0.0
+    },
+    "avian.broad_phase_candidates": {
+     "mean": 0.0
+    },
+    "work.contact_points": {
+     "mean": 0.0
+    },
+    "work.belt_near_colliders": {
+     "mean": 0.0
+    },
+    "work.belt_candidates": {
+     "mean": 0.0
+    },
+    "work.belt_slab_checks": {
+     "mean": 0.0
+    },
+    "work.belt_slab_aabb_passes": {
+     "mean": 0.0
+    },
+    "work.belt_overlaps": {
+     "mean": 0.0
+    },
+    "work.belt_dynamic_contacts": {
+     "mean": 0.0
+    },
+    "work.belt_dispatches": {
+     "mean": 0.0
+    },
+    "work.belt_partition_faces": {
+     "mean": 0.0
+    },
+    "work.belt_partition_cells": {
+     "mean": 0.0
+    },
+    "work.belt_partition_patches": {
+     "mean": 0.0
+    },
+    "work.belt_terrain_samples": {
+     "mean": 0.0
+    },
+    "sweep_casts": {
+     "mean": 0.0
+    },
+    "tick_us": {
+     "mean": 990.0583499999999,
+     "p50": 977.3340000000001,
+     "p95": 1416.917,
+     "p99": 1684.416,
+     "max": 2072.792
+    },
+    "net_us": {
+     "mean": 978.715784375,
+     "p50": 966.999,
+     "p95": 1398.1250000000002,
+     "p99": 1668.3319999999999,
+     "max": 2032.542
+    },
+    "physics_us": {
+     "mean": 124.790384375,
+     "p50": 118.042,
+     "p95": 207.583,
+     "p99": 279.79200000000003,
+     "max": 357.959
+    },
+    "sleep_us": {
+     "mean": 6.168677604166667,
+     "p50": 5.0,
+     "p95": 14.75,
+     "p99": 23.458000000000002,
+     "max": 31.041999999999998
+    },
+    "tick_cpu_us": {
+     "mean": 1514.5375,
+     "p50": 1497.0,
+     "p95": 2165.0,
+     "p99": 2380.0,
+     "max": 3106.0
+    },
+    "belt_contacts_us": {
+     "mean": 3.4788354166666666,
+     "p50": 2.917,
+     "p95": 6.791,
+     "p99": 15.25,
+     "max": 32.875
+    },
+    "contacts_us": {
+     "mean": 7.220791666666667,
+     "p50": 7.0,
+     "p95": 10.794,
+     "p99": 13.791,
+     "max": 48.959
+    },
+    "sweep_us": {
+     "mean": 17.80421875,
+     "p50": 14.834,
+     "p95": 37.957,
+     "p99": 52.875,
+     "max": 101.709
+    },
+    "contact_census_us": {
+     "mean": 10.316871875,
+     "p50": 9.041,
+     "p95": 20.375,
+     "p99": 35.875,
+     "max": 52.458
+    },
+    "phases_us.driving_us": {
+     "mean": 82.61285677083333,
+     "p50": 78.917,
+     "p95": 134.584,
+     "p99": 163.999,
+     "max": 210.251
+    },
+    "phases_us.physics_step_us": {
+     "mean": 163.102396875,
+     "p50": 154.667,
+     "p95": 261.708,
+     "p99": 339.125,
+     "max": 425.708
+    },
+    "phases_us.post_physics_us": {
+     "mean": 6.7305869791666675,
+     "p50": 5.875,
+     "p95": 13.334,
+     "p99": 19.834,
+     "max": 42.208
+    },
+    "phases_us.fixed_update_us": {
+     "mean": 20.79078333333333,
+     "p50": 19.875,
+     "p95": 34.417,
+     "p99": 51.208,
+     "max": 75.208
+    },
+    "phases_us.fixed_gameplay_us": {
+     "mean": 27.667368749999998,
+     "p50": 24.834,
+     "p95": 50.916,
+     "p99": 69.958,
+     "max": 148.209
+    },
+    "avian.narrow_phase_us": {
+     "mean": 3.4731947916666663,
+     "p50": 2.875,
+     "p95": 8.125,
+     "p99": 12.25,
+     "max": 16.792
+    },
+    "avian.broad_phase_us": {
+     "mean": 0.5002901041666666,
+     "p50": 0.375,
+     "p95": 1.167,
+     "p99": 1.75,
+     "max": 3.0
+    },
+    "avian.prepare_constraints_us": {
+     "mean": 0.264890625,
+     "p50": 0.20800000000000002,
+     "p95": 0.7080000000000001,
+     "p99": 1.042,
+     "max": 2.542
+    },
+    "avian.solve_constraints_us": {
+     "mean": 0.33593645833333335,
+     "p50": 0.293,
+     "p95": 0.585,
+     "p99": 0.875,
+     "max": 1.4589999999999999
+    },
+    "avian.warm_start_us": {
+     "mean": 0.34391145833333336,
+     "p50": 0.293,
+     "p95": 0.626,
+     "p99": 0.916,
+     "max": 1.793
+    },
+    "avian.relax_velocities_us": {
+     "mean": 0.3497953125,
+     "p50": 0.332,
+     "p95": 0.626,
+     "p99": 0.9169999999999999,
+     "max": 1.956
+    },
+    "avian.integrate_velocities_us": {
+     "mean": 0.8541744791666667,
+     "p50": 0.83,
+     "p95": 1.378,
+     "p99": 1.79,
+     "max": 8.999
+    },
+    "avian.integrate_positions_us": {
+     "mean": 0.309965625,
+     "p50": 0.29200000000000004,
+     "p95": 0.541,
+     "p99": 0.709,
+     "max": 1.7069999999999999
+    },
+    "avian.collider_tree_update_us": {
+     "mean": 48.98568020833333,
+     "p50": 48.084,
+     "p95": 72.91600000000001,
+     "p99": 92.87400000000001,
+     "max": 121.458
+    },
+    "avian.finalize_us": {
+     "mean": 0.16040364583333336,
+     "p50": 0.125,
+     "p95": 0.375,
+     "p99": 0.625,
+     "max": 1.916
+    }
+   },
+   "settle_end_piece_lift_ns": 0.0
+  },
+  {
+   "run": "r03-rubble",
+   "condition": "rubble",
+   "pose": [
+    [
+     680.0,
+     12.766860456242714,
+     -520.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "drive": "Idle",
+   "recorder": {
+    "tanks": 1,
+    "events": [
+     {
+      "at_s": 1.0,
+      "instances": [
+       "house_0001"
+      ]
+     }
+    ]
+   },
+   "window_s": [
+    22.0,
+    52.0
+   ],
+   "loadavg_before": [
+    2.580078125,
+    4.779296875,
+    5.96044921875
+   ],
+   "quiet_wait_s": 0.013536875136196613,
+   "seconds_with_rustc_running": 0,
+   "loadavg_after": [
+    2.3291015625,
+    4.33984375,
+    5.7216796875
+   ],
+   "awake_bodies_per_line": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "window": {
+    "ticks": 1920,
+    "awake": {
+     "mean": 0.0
+    },
+    "avian.pairs": {
+     "mean": 5.0
+    },
+    "avian.touching_pairs": {
+     "mean": 0.0
+    },
+    "avian.points": {
+     "mean": 0.0
+    },
+    "avian.constraints": {
+     "mean": 0.0
+    },
+    "avian.colors": {
+     "mean": 0.0
+    },
+    "avian.broad_phase_candidates": {
+     "mean": 0.0
+    },
+    "work.contact_points": {
+     "mean": 0.0
+    },
+    "work.belt_near_colliders": {
+     "mean": 0.0
+    },
+    "work.belt_candidates": {
+     "mean": 0.0
+    },
+    "work.belt_slab_checks": {
+     "mean": 0.0
+    },
+    "work.belt_slab_aabb_passes": {
+     "mean": 0.0
+    },
+    "work.belt_overlaps": {
+     "mean": 0.0
+    },
+    "work.belt_dynamic_contacts": {
+     "mean": 0.0
+    },
+    "work.belt_dispatches": {
+     "mean": 0.0
+    },
+    "work.belt_partition_faces": {
+     "mean": 0.0
+    },
+    "work.belt_partition_cells": {
+     "mean": 0.0
+    },
+    "work.belt_partition_patches": {
+     "mean": 0.0
+    },
+    "work.belt_terrain_samples": {
+     "mean": 0.0
+    },
+    "sweep_casts": {
+     "mean": 0.0
+    },
+    "tick_us": {
+     "mean": 978.5643135416667,
+     "p50": 970.8330000000001,
+     "p95": 1360.792,
+     "p99": 1563.708,
+     "max": 3661.4579999999996
+    },
+    "net_us": {
+     "mean": 968.3513177083333,
+     "p50": 960.167,
+     "p95": 1348.4579999999999,
+     "p99": 1550.375,
+     "max": 3631.374
+    },
+    "physics_us": {
+     "mean": 130.76503177083333,
+     "p50": 128.375,
+     "p95": 181.959,
+     "p99": 230.708,
+     "max": 1283.041
+    },
+    "sleep_us": {
+     "mean": 5.219913541666667,
+     "p50": 4.5,
+     "p95": 9.5,
+     "p99": 15.792,
+     "max": 32.5
+    },
+    "tick_cpu_us": {
+     "mean": 1522.6625,
+     "p50": 1510.0,
+     "p95": 2088.0,
+     "p99": 2310.0,
+     "max": 2718.0
+    },
+    "belt_contacts_us": {
+     "mean": 2.80485,
+     "p50": 2.584,
+     "p95": 4.292,
+     "p99": 6.917,
+     "max": 21.208
+    },
+    "contacts_us": {
+     "mean": 6.278631770833333,
+     "p50": 6.208,
+     "p95": 8.5,
+     "p99": 10.541,
+     "max": 17.46
+    },
+    "sweep_us": {
+     "mean": 19.918871874999997,
+     "p50": 17.75,
+     "p95": 36.208,
+     "p99": 52.5,
+     "max": 91.416
+    },
+    "contact_census_us": {
+     "mean": 9.3307078125,
+     "p50": 8.208,
+     "p95": 18.625,
+     "p99": 27.75,
+     "max": 56.208
+    },
+    "phases_us.driving_us": {
+     "mean": 70.91926927083334,
+     "p50": 67.084,
+     "p95": 111.291,
+     "p99": 140.667,
+     "max": 379.833
+    },
+    "phases_us.physics_step_us": {
+     "mean": 176.36634843750002,
+     "p50": 172.75,
+     "p95": 246.998,
+     "p99": 293.292,
+     "max": 1445.166
+    },
+    "phases_us.post_physics_us": {
+     "mean": 13.448269270833332,
+     "p50": 12.75,
+     "p95": 24.375,
+     "p99": 33.583,
+     "max": 56.042
+    },
+    "phases_us.fixed_update_us": {
+     "mean": 21.444775,
+     "p50": 20.292,
+     "p95": 35.708,
+     "p99": 47.709,
+     "max": 85.625
+    },
+    "phases_us.fixed_gameplay_us": {
+     "mean": 23.12472239583333,
+     "p50": 20.542,
+     "p95": 42.416,
+     "p99": 61.417,
+     "max": 95.334
+    },
+    "avian.narrow_phase_us": {
+     "mean": 8.458649479166667,
+     "p50": 8.208,
+     "p95": 12.042,
+     "p99": 16.375,
+     "max": 28.084
+    },
+    "avian.broad_phase_us": {
+     "mean": 0.4367536458333333,
+     "p50": 0.375,
+     "p95": 0.875,
+     "p99": 1.333,
+     "max": 3.0
+    },
+    "avian.prepare_constraints_us": {
+     "mean": 0.24333177083333332,
+     "p50": 0.20800000000000002,
+     "p95": 0.5419999999999999,
+     "p99": 0.75,
+     "max": 2.75
+    },
+    "avian.solve_constraints_us": {
+     "mean": 0.28865416666666666,
+     "p50": 0.252,
+     "p95": 0.459,
+     "p99": 0.626,
+     "max": 7.417000000000001
+    },
+    "avian.warm_start_us": {
+     "mean": 0.308940625,
+     "p50": 0.29200000000000004,
+     "p95": 0.5,
+     "p99": 0.627,
+     "max": 1.083
+    },
+    "avian.relax_velocities_us": {
+     "mean": 0.3194020833333333,
+     "p50": 0.29200000000000004,
+     "p95": 0.501,
+     "p99": 0.7080000000000001,
+     "max": 10.584000000000001
+    },
+    "avian.integrate_velocities_us": {
+     "mean": 0.9580359375,
+     "p50": 0.9569999999999999,
+     "p95": 1.336,
+     "p99": 1.627,
+     "max": 2.169
+    },
+    "avian.integrate_positions_us": {
+     "mean": 0.31300885416666663,
+     "p50": 0.29200000000000004,
+     "p95": 0.501,
+     "p99": 0.75,
+     "max": 1.207
+    },
+    "avian.collider_tree_update_us": {
+     "mean": 60.82802395833333,
+     "p50": 59.418,
+     "p95": 89.542,
+     "p99": 108.375,
+     "max": 160.084
+    },
+    "avian.finalize_us": {
+     "mean": 0.14246770833333333,
+     "p50": 0.125,
+     "p95": 0.33299999999999996,
+     "p99": 0.5,
+     "max": 1.208
+    }
+   },
+   "settle_end_piece_lift_ns": 0.0
+  },
+  {
+   "run": "r04-rubble",
+   "condition": "rubble",
+   "pose": [
+    [
+     680.0,
+     12.766860456242714,
+     -520.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "drive": "Idle",
+   "recorder": {
+    "tanks": 1,
+    "events": [
+     {
+      "at_s": 1.0,
+      "instances": [
+       "house_0001"
+      ]
+     }
+    ]
+   },
+   "window_s": [
+    22.0,
+    52.0
+   ],
+   "loadavg_before": [
+    2.3291015625,
+    4.33984375,
+    5.7216796875
+   ],
+   "quiet_wait_s": 0.01342766685411334,
+   "seconds_with_rustc_running": 0,
+   "loadavg_after": [
+    2.18115234375,
+    3.95068359375,
+    5.4814453125
+   ],
+   "awake_bodies_per_line": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "window": {
+    "ticks": 1920,
+    "awake": {
+     "mean": 0.0
+    },
+    "avian.pairs": {
+     "mean": 5.0
+    },
+    "avian.touching_pairs": {
+     "mean": 0.0
+    },
+    "avian.points": {
+     "mean": 0.0
+    },
+    "avian.constraints": {
+     "mean": 0.0
+    },
+    "avian.colors": {
+     "mean": 0.0
+    },
+    "avian.broad_phase_candidates": {
+     "mean": 0.0
+    },
+    "work.contact_points": {
+     "mean": 0.0
+    },
+    "work.belt_near_colliders": {
+     "mean": 0.0
+    },
+    "work.belt_candidates": {
+     "mean": 0.0
+    },
+    "work.belt_slab_checks": {
+     "mean": 0.0
+    },
+    "work.belt_slab_aabb_passes": {
+     "mean": 0.0
+    },
+    "work.belt_overlaps": {
+     "mean": 0.0
+    },
+    "work.belt_dynamic_contacts": {
+     "mean": 0.0
+    },
+    "work.belt_dispatches": {
+     "mean": 0.0
+    },
+    "work.belt_partition_faces": {
+     "mean": 0.0
+    },
+    "work.belt_partition_cells": {
+     "mean": 0.0
+    },
+    "work.belt_partition_patches": {
+     "mean": 0.0
+    },
+    "work.belt_terrain_samples": {
+     "mean": 0.0
+    },
+    "sweep_casts": {
+     "mean": 0.0
+    },
+    "tick_us": {
+     "mean": 1003.6731645833333,
+     "p50": 992.083,
+     "p95": 1391.542,
+     "p99": 1562.0,
+     "max": 2066.334
+    },
+    "net_us": {
+     "mean": 992.6820984375,
+     "p50": 982.251,
+     "p95": 1371.668,
+     "p99": 1548.542,
+     "max": 2036.7509999999997
+    },
+    "physics_us": {
+     "mean": 134.58127031249998,
+     "p50": 132.333,
+     "p95": 186.584,
+     "p99": 227.584,
+     "max": 349.95799999999997
+    },
+    "sleep_us": {
+     "mean": 5.102313020833334,
+     "p50": 4.458,
+     "p95": 9.583,
+     "p99": 13.875,
+     "max": 36.375
+    },
+    "tick_cpu_us": {
+     "mean": 1571.5364583333333,
+     "p50": 1558.0,
+     "p95": 2183.0,
+     "p99": 2381.0,
+     "max": 3016.0
+    },
+    "belt_contacts_us": {
+     "mean": 2.7645307291666668,
+     "p50": 2.542,
+     "p95": 4.292,
+     "p99": 6.625,
+     "max": 22.417
+    },
+    "contacts_us": {
+     "mean": 6.512366666666667,
+     "p50": 6.417,
+     "p95": 8.835,
+     "p99": 10.833,
+     "max": 24.25
+    },
+    "sweep_us": {
+     "mean": 19.9009125,
+     "p50": 17.875,
+     "p95": 35.999,
+     "p99": 47.833,
+     "max": 82.666
+    },
+    "contact_census_us": {
+     "mean": 10.123944270833334,
+     "p50": 8.625,
+     "p95": 21.416,
+     "p99": 33.959,
+     "max": 60.916
+    },
+    "phases_us.driving_us": {
+     "mean": 71.582634375,
+     "p50": 68.459,
+     "p95": 111.541,
+     "p99": 138.041,
+     "max": 183.084
+    },
+    "phases_us.physics_step_us": {
+     "mean": 181.44103385416665,
+     "p50": 179.085,
+     "p95": 248.083,
+     "p99": 294.791,
+     "max": 402.042
+    },
+    "phases_us.post_physics_us": {
+     "mean": 13.914123437499999,
+     "p50": 13.5,
+     "p95": 24.334,
+     "p99": 32.167,
+     "max": 72.292
+    },
+    "phases_us.fixed_update_us": {
+     "mean": 21.50651302083333,
+     "p50": 20.292,
+     "p95": 36.0,
+     "p99": 47.125,
+     "max": 64.125
+    },
+    "phases_us.fixed_gameplay_us": {
+     "mean": 23.02354635416667,
+     "p50": 20.792,
+     "p95": 42.667,
+     "p99": 59.666,
+     "max": 83.5
+    },
+    "avian.narrow_phase_us": {
+     "mean": 8.870793749999999,
+     "p50": 8.542,
+     "p95": 12.833,
+     "p99": 16.416,
+     "max": 23.958
+    },
+    "avian.broad_phase_us": {
+     "mean": 0.40939375000000006,
+     "p50": 0.33299999999999996,
+     "p95": 0.875,
+     "p99": 1.25,
+     "max": 4.082999999999999
+    },
+    "avian.prepare_constraints_us": {
+     "mean": 0.19924583333333334,
+     "p50": 0.167,
+     "p95": 0.458,
+     "p99": 0.6659999999999999,
+     "max": 1.125
+    },
+    "avian.solve_constraints_us": {
+     "mean": 0.27894166666666664,
+     "p50": 0.251,
+     "p95": 0.41800000000000004,
+     "p99": 0.626,
+     "max": 1.209
+    },
+    "avian.warm_start_us": {
+     "mean": 0.30350416666666663,
+     "p50": 0.291,
+     "p95": 0.499,
+     "p99": 0.626,
+     "max": 2.2079999999999997
+    },
+    "avian.relax_velocities_us": {
+     "mean": 0.305421875,
+     "p50": 0.29200000000000004,
+     "p95": 0.45999999999999996,
+     "p99": 0.667,
+     "max": 1.4160000000000001
+    },
+    "avian.integrate_velocities_us": {
+     "mean": 0.9868718750000001,
+     "p50": 0.9969999999999999,
+     "p95": 1.335,
+     "p99": 1.584,
+     "max": 7.754999999999999
+    },
+    "avian.integrate_positions_us": {
+     "mean": 0.3116932291666667,
+     "p50": 0.29200000000000004,
+     "p95": 0.501,
+     "p99": 0.709,
+     "max": 1.04
+    },
+    "avian.collider_tree_update_us": {
+     "mean": 64.15012708333333,
+     "p50": 63.001000000000005,
+     "p95": 94.083,
+     "p99": 110.376,
+     "max": 152.625
+    },
+    "avian.finalize_us": {
+     "mean": 0.11464479166666666,
+     "p50": 0.08399999999999999,
+     "p95": 0.25,
+     "p99": 0.5,
+     "max": 1.167
+    }
+   },
+   "settle_end_piece_lift_ns": 0.0
+  },
+  {
+   "run": "r05-flat",
+   "condition": "flat",
+   "pose": [
+    [
+     680.0,
+     12.766860456242714,
+     -520.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "drive": "Idle",
+   "recorder": {
+    "tanks": 1,
+    "events": [
+     {
+      "at_s": 1000000.0,
+      "instances": [
+       "house_0037"
+      ]
+     }
+    ]
+   },
+   "window_s": [
+    22.0,
+    52.0
+   ],
+   "loadavg_before": [
+    2.18115234375,
+    3.95068359375,
+    5.4814453125
+   ],
+   "quiet_wait_s": 0.01463079173117876,
+   "seconds_with_rustc_running": 0,
+   "loadavg_after": [
+    2.58447265625,
+    3.720703125,
+    5.2880859375
+   ],
+   "awake_bodies_per_line": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "window": {
+    "ticks": 1920,
+    "awake": {
+     "mean": 0.0
+    },
+    "avian.pairs": {
+     "mean": 5.0
+    },
+    "avian.touching_pairs": {
+     "mean": 0.0
+    },
+    "avian.points": {
+     "mean": 0.0
+    },
+    "avian.constraints": {
+     "mean": 0.0
+    },
+    "avian.colors": {
+     "mean": 0.0
+    },
+    "avian.broad_phase_candidates": {
+     "mean": 0.0
+    },
+    "work.contact_points": {
+     "mean": 0.0
+    },
+    "work.belt_near_colliders": {
+     "mean": 0.0
+    },
+    "work.belt_candidates": {
+     "mean": 0.0
+    },
+    "work.belt_slab_checks": {
+     "mean": 0.0
+    },
+    "work.belt_slab_aabb_passes": {
+     "mean": 0.0
+    },
+    "work.belt_overlaps": {
+     "mean": 0.0
+    },
+    "work.belt_dynamic_contacts": {
+     "mean": 0.0
+    },
+    "work.belt_dispatches": {
+     "mean": 0.0
+    },
+    "work.belt_partition_faces": {
+     "mean": 0.0
+    },
+    "work.belt_partition_cells": {
+     "mean": 0.0
+    },
+    "work.belt_partition_patches": {
+     "mean": 0.0
+    },
+    "work.belt_terrain_samples": {
+     "mean": 0.0
+    },
+    "sweep_casts": {
+     "mean": 0.0
+    },
+    "tick_us": {
+     "mean": 972.7821395833333,
+     "p50": 948.375,
+     "p95": 1416.125,
+     "p99": 1595.0,
+     "max": 2017.9170000000001
+    },
+    "net_us": {
+     "mean": 961.5363598958334,
+     "p50": 937.6659999999999,
+     "p95": 1396.624,
+     "p99": 1568.5829999999999,
+     "max": 2002.7920000000001
+    },
+    "physics_us": {
+     "mean": 122.67621927083333,
+     "p50": 115.583,
+     "p95": 214.29199999999997,
+     "p99": 291.29200000000003,
+     "max": 372.5
+    },
+    "sleep_us": {
+     "mean": 6.0230140625,
+     "p50": 4.833,
+     "p95": 14.167,
+     "p99": 24.041,
+     "max": 36.875
+    },
+    "tick_cpu_us": {
+     "mean": 1491.5994791666667,
+     "p50": 1466.0,
+     "p95": 2162.0,
+     "p99": 2399.0,
+     "max": 2855.0
+    },
+    "belt_contacts_us": {
+     "mean": 3.1924473958333333,
+     "p50": 2.75,
+     "p95": 6.709,
+     "p99": 10.083,
+     "max": 23.625
+    },
+    "contacts_us": {
+     "mean": 6.8033307291666665,
+     "p50": 6.541,
+     "p95": 10.833,
+     "p99": 13.874,
+     "max": 34.084
+    },
+    "sweep_us": {
+     "mean": 16.993139583333335,
+     "p50": 14.291,
+     "p95": 35.167,
+     "p99": 49.291,
+     "max": 78.083
+    },
+    "contact_census_us": {
+     "mean": 10.325985416666667,
+     "p50": 8.916,
+     "p95": 21.709,
+     "p99": 32.375,
+     "max": 49.5
+    },
+    "phases_us.driving_us": {
+     "mean": 80.87865729166667,
+     "p50": 76.874,
+     "p95": 133.583,
+     "p99": 162.917,
+     "max": 213.542
+    },
+    "phases_us.physics_step_us": {
+     "mean": 160.20622708333335,
+     "p50": 152.75,
+     "p95": 261.874,
+     "p99": 345.46,
+     "max": 427.417
+    },
+    "phases_us.post_physics_us": {
+     "mean": 6.714111979166666,
+     "p50": 6.084,
+     "p95": 12.292,
+     "p99": 18.334,
+     "max": 33.667
+    },
+    "phases_us.fixed_update_us": {
+     "mean": 20.363559375,
+     "p50": 19.666,
+     "p95": 33.792,
+     "p99": 45.625,
+     "max": 72.5
+    },
+    "phases_us.fixed_gameplay_us": {
+     "mean": 26.85060885416667,
+     "p50": 24.667,
+     "p95": 48.916,
+     "p99": 70.958,
+     "max": 106.625
+    },
+    "avian.narrow_phase_us": {
+     "mean": 3.3998015625,
+     "p50": 2.75,
+     "p95": 8.416,
+     "p99": 13.332999999999998,
+     "max": 21.041999999999998
+    },
+    "avian.broad_phase_us": {
+     "mean": 0.46924166666666667,
+     "p50": 0.375,
+     "p95": 1.167,
+     "p99": 1.708,
+     "max": 3.833
+    },
+    "avian.prepare_constraints_us": {
+     "mean": 0.2811328125,
+     "p50": 0.20900000000000002,
+     "p95": 0.7080000000000001,
+     "p99": 1.042,
+     "max": 2.041
+    },
+    "avian.solve_constraints_us": {
+     "mean": 0.32901145833333334,
+     "p50": 0.29200000000000004,
+     "p95": 0.585,
+     "p99": 0.874,
+     "max": 1.251
+    },
+    "avian.warm_start_us": {
+     "mean": 0.32988958333333335,
+     "p50": 0.29200000000000004,
+     "p95": 0.626,
+     "p99": 0.916,
+     "max": 1.582
+    },
+    "avian.relax_velocities_us": {
+     "mean": 0.34782708333333334,
+     "p50": 0.332,
+     "p95": 0.625,
+     "p99": 0.918,
+     "max": 1.9589999999999999
+    },
+    "avian.integrate_velocities_us": {
+     "mean": 0.8204463541666667,
+     "p50": 0.792,
+     "p95": 1.2950000000000002,
+     "p99": 1.7510000000000001,
+     "max": 2.708
+    },
+    "avian.integrate_positions_us": {
+     "mean": 0.30617239583333333,
+     "p50": 0.291,
+     "p95": 0.5419999999999999,
+     "p99": 0.75,
+     "max": 8.541
+    },
+    "avian.collider_tree_update_us": {
+     "mean": 48.2106890625,
+     "p50": 46.708,
+     "p95": 73.25,
+     "p99": 92.457,
+     "max": 149.875
+    },
+    "avian.finalize_us": {
+     "mean": 0.14695989583333333,
+     "p50": 0.125,
+     "p95": 0.375,
+     "p99": 0.583,
+     "max": 1.875
+    }
+   },
+   "settle_end_piece_lift_ns": 0.0
+  },
+  {
+   "run": "r06-pile",
+   "condition": "pile",
+   "pose": [
+    [
+     -634.152183196548,
+     33.2813868491324,
+     47.03311663132894
+    ],
+    [
+     0.0,
+     -0.03417561720268275,
+     0.0,
+     0.9994158429746928
+    ]
+   ],
+   "drive": "Park(throttle_ticks: 640)",
+   "recorder": {
+    "tanks": 1,
+    "events": [
+     {
+      "at_s": 1000000.0,
+      "instances": [
+       "house_0037"
+      ]
+     }
+    ]
+   },
+   "window_s": [
+    22.0,
+    52.0
+   ],
+   "loadavg_before": [
+    2.58447265625,
+    3.720703125,
+    5.2880859375
+   ],
+   "quiet_wait_s": 0.015098500065505505,
+   "seconds_with_rustc_running": 0,
+   "loadavg_after": [
+    2.42041015625,
+    3.5,
+    5.10791015625
+   ],
+   "awake_bodies_per_line": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "window": {
+    "ticks": 1920,
+    "awake": {
+     "mean": 0.0
+    },
+    "avian.pairs": {
+     "mean": 5317.0
+    },
+    "avian.touching_pairs": {
+     "mean": 0.0
+    },
+    "avian.points": {
+     "mean": 0.0
+    },
+    "avian.constraints": {
+     "mean": 0.0
+    },
+    "avian.colors": {
+     "mean": 0.0
+    },
+    "avian.broad_phase_candidates": {
+     "mean": 0.0
+    },
+    "work.contact_points": {
+     "mean": 0.0
+    },
+    "work.belt_near_colliders": {
+     "mean": 0.0
+    },
+    "work.belt_candidates": {
+     "mean": 0.0
+    },
+    "work.belt_slab_checks": {
+     "mean": 0.0
+    },
+    "work.belt_slab_aabb_passes": {
+     "mean": 0.0
+    },
+    "work.belt_overlaps": {
+     "mean": 0.0
+    },
+    "work.belt_dynamic_contacts": {
+     "mean": 0.0
+    },
+    "work.belt_dispatches": {
+     "mean": 0.0
+    },
+    "work.belt_partition_faces": {
+     "mean": 0.0
+    },
+    "work.belt_partition_cells": {
+     "mean": 0.0
+    },
+    "work.belt_partition_patches": {
+     "mean": 0.0
+    },
+    "work.belt_terrain_samples": {
+     "mean": 0.0
+    },
+    "sweep_casts": {
+     "mean": 0.0
+    },
+    "tick_us": {
+     "mean": 1273.1487364583334,
+     "p50": 1269.791,
+     "p95": 1674.542,
+     "p99": 1878.9589999999998,
+     "max": 2503.916
+    },
+    "net_us": {
+     "mean": 1258.0096359375,
+     "p50": 1253.959,
+     "p95": 1657.0410000000002,
+     "p99": 1860.7089999999998,
+     "max": 2482.291
+    },
+    "physics_us": {
+     "mean": 445.9836223958334,
+     "p50": 444.5,
+     "p95": 565.084,
+     "p99": 633.0840000000001,
+     "max": 1200.0
+    },
+    "sleep_us": {
+     "mean": 5.295052083333333,
+     "p50": 4.792,
+     "p95": 9.042000000000002,
+     "p99": 13.583,
+     "max": 24.334
+    },
+    "tick_cpu_us": {
+     "mean": 2608.2364583333333,
+     "p50": 2612.0,
+     "p95": 3430.0,
+     "p99": 3706.0,
+     "max": 4574.0
+    },
+    "belt_contacts_us": {
+     "mean": 2.542090625,
+     "p50": 2.375,
+     "p95": 3.792,
+     "p99": 5.958,
+     "max": 15.917
+    },
+    "contacts_us": {
+     "mean": 28.393301562500003,
+     "p50": 26.584,
+     "p95": 45.207,
+     "p99": 56.458,
+     "max": 82.71
+    },
+    "sweep_us": {
+     "mean": 16.558045833333335,
+     "p50": 14.875,
+     "p95": 29.667,
+     "p99": 43.209,
+     "max": 72.832
+    },
+    "contact_census_us": {
+     "mean": 14.318255729166667,
+     "p50": 13.125,
+     "p95": 24.667,
+     "p99": 35.166,
+     "max": 48.542
+    },
+    "phases_us.driving_us": {
+     "mean": 65.73300677083334,
+     "p50": 62.542,
+     "p95": 102.084,
+     "p99": 131.126,
+     "max": 170.833
+    },
+    "phases_us.physics_step_us": {
+     "mean": 462.13652031249995,
+     "p50": 460.542,
+     "p95": 585.998,
+     "p99": 658.957,
+     "max": 1243.124
+    },
+    "phases_us.post_physics_us": {
+     "mean": 12.588914583333333,
+     "p50": 12.458,
+     "p95": 22.916,
+     "p99": 28.5,
+     "max": 83.041
+    },
+    "phases_us.fixed_update_us": {
+     "mean": 20.249838020833334,
+     "p50": 19.125,
+     "p95": 33.0,
+     "p99": 45.041,
+     "max": 64.0
+    },
+    "phases_us.fixed_gameplay_us": {
+     "mean": 21.164356770833333,
+     "p50": 19.042,
+     "p95": 38.5,
+     "p99": 51.125,
+     "max": 77.0
+    },
+    "avian.narrow_phase_us": {
+     "mean": 260.17539479166663,
+     "p50": 258.66700000000003,
+     "p95": 334.16700000000003,
+     "p99": 377.0,
+     "max": 860.416
+    },
+    "avian.broad_phase_us": {
+     "mean": 0.3567604166666667,
+     "p50": 0.29200000000000004,
+     "p95": 0.75,
+     "p99": 1.0,
+     "max": 2.584
+    },
+    "avian.prepare_constraints_us": {
+     "mean": 0.23781927083333335,
+     "p50": 0.20800000000000002,
+     "p95": 0.5,
+     "p99": 0.792,
+     "max": 1.541
+    },
+    "avian.solve_constraints_us": {
+     "mean": 0.2578973958333333,
+     "p50": 0.25,
+     "p95": 0.41600000000000004,
+     "p99": 0.541,
+     "max": 1.624
+    },
+    "avian.warm_start_us": {
+     "mean": 0.2635635416666667,
+     "p50": 0.25,
+     "p95": 0.417,
+     "p99": 0.625,
+     "max": 1.042
+    },
+    "avian.relax_velocities_us": {
+     "mean": 0.27572500000000005,
+     "p50": 0.251,
+     "p95": 0.41800000000000004,
+     "p99": 0.585,
+     "max": 1.25
+    },
+    "avian.integrate_velocities_us": {
+     "mean": 0.8328270833333333,
+     "p50": 0.8320000000000001,
+     "p95": 1.167,
+     "p99": 1.3760000000000001,
+     "max": 5.292000000000001
+    },
+    "avian.integrate_positions_us": {
+     "mean": 0.29365364583333337,
+     "p50": 0.29,
+     "p95": 0.45999999999999996,
+     "p99": 0.668,
+     "max": 1.3760000000000001
+    },
+    "avian.collider_tree_update_us": {
+     "mean": 87.32239635416666,
+     "p50": 86.376,
+     "p95": 118.0,
+     "p99": 138.709,
+     "max": 164.958
+    },
+    "avian.finalize_us": {
+     "mean": 0.13711614583333334,
+     "p50": 0.125,
+     "p95": 0.29200000000000004,
+     "p99": 0.417,
+     "max": 1.0410000000000001
+    }
+   },
+   "settle_end_piece_lift_ns": 704.6962280273438
+  }
+ ],
+ "pooled": {
+  "pile": {
+   "ticks": 3841,
+   "awake": {
+    "mean": 0.0
+   },
+   "avian.pairs": {
+    "mean": 5372.514449362146
+   },
+   "avian.touching_pairs": {
+    "mean": 0.0
+   },
+   "avian.points": {
+    "mean": 0.0
+   },
+   "avian.constraints": {
+    "mean": 0.0
+   },
+   "avian.colors": {
+    "mean": 0.0
+   },
+   "avian.broad_phase_candidates": {
+    "mean": 0.0
+   },
+   "work.contact_points": {
+    "mean": 0.0
+   },
+   "work.belt_near_colliders": {
+    "mean": 0.0
+   },
+   "work.belt_candidates": {
+    "mean": 0.0
+   },
+   "work.belt_slab_checks": {
+    "mean": 0.0
+   },
+   "work.belt_slab_aabb_passes": {
+    "mean": 0.0
+   },
+   "work.belt_overlaps": {
+    "mean": 0.0
+   },
+   "work.belt_dynamic_contacts": {
+    "mean": 0.0
+   },
+   "work.belt_dispatches": {
+    "mean": 0.0
+   },
+   "work.belt_partition_faces": {
+    "mean": 0.0
+   },
+   "work.belt_partition_cells": {
+    "mean": 0.0
+   },
+   "work.belt_partition_patches": {
+    "mean": 0.0
+   },
+   "work.belt_terrain_samples": {
+    "mean": 0.0
+   },
+   "sweep_casts": {
+    "mean": 0.0
+   },
+   "tick_us": {
+    "mean": 1290.5120484248894,
+    "p50": 1287.4589999999998,
+    "p95": 1679.5,
+    "p99": 1951.5839999999998,
+    "max": 3101.459
+   },
+   "net_us": {
+    "mean": 1274.9173879198124,
+    "p50": 1271.9170000000001,
+    "p95": 1659.792,
+    "p99": 1930.5849999999998,
+    "max": 3066.5429999999997
+   },
+   "physics_us": {
+    "mean": 450.49118693048683,
+    "p50": 446.25,
+    "p95": 566.5,
+    "p99": 659.042,
+    "max": 1446.417
+   },
+   "sleep_us": {
+    "mean": 5.446756834157771,
+    "p50": 4.833,
+    "p95": 9.707999999999998,
+    "p99": 14.166,
+    "max": 35.0
+   },
+   "tick_cpu_us": {
+    "mean": 2660.172611299141,
+    "p50": 2677.0,
+    "p95": 3447.0,
+    "p99": 3782.0,
+    "max": 4574.0
+   },
+   "belt_contacts_us": {
+    "mean": 2.6748529028898727,
+    "p50": 2.5,
+    "p95": 4.0,
+    "p99": 6.417,
+    "max": 17.583
+   },
+   "contacts_us": {
+    "mean": 27.969551679250195,
+    "p50": 26.25,
+    "p95": 44.292,
+    "p99": 56.458,
+    "max": 93.291
+   },
+   "sweep_us": {
+    "mean": 16.96206222337933,
+    "p50": 15.125,
+    "p95": 31.292,
+    "p99": 43.25,
+    "max": 72.832
+   },
+   "contact_census_us": {
+    "mean": 14.752472793543348,
+    "p50": 13.584,
+    "p95": 25.083,
+    "p99": 35.5,
+    "max": 62.125
+   },
+   "phases_us.driving_us": {
+    "mean": 66.96624889351732,
+    "p50": 63.834,
+    "p95": 103.583,
+    "p99": 132.5,
+    "max": 181.583
+   },
+   "phases_us.physics_step_us": {
+    "mean": 467.38021114293156,
+    "p50": 464.209,
+    "p95": 587.497,
+    "p99": 673.625,
+    "max": 1465.292
+   },
+   "phases_us.post_physics_us": {
+    "mean": 12.741454569122626,
+    "p50": 12.666,
+    "p95": 22.625,
+    "p99": 28.375,
+    "max": 83.041
+   },
+   "phases_us.fixed_update_us": {
+    "mean": 20.52246003644884,
+    "p50": 19.583,
+    "p95": 33.334,
+    "p99": 44.041,
+    "max": 64.0
+   },
+   "phases_us.fixed_gameplay_us": {
+    "mean": 21.619038271283518,
+    "p50": 19.5,
+    "p95": 39.25,
+    "p99": 53.667,
+    "max": 101.166
+   },
+   "avian.narrow_phase_us": {
+    "mean": 262.20372663368914,
+    "p50": 259.875,
+    "p95": 333.29200000000003,
+    "p99": 380.79200000000003,
+    "max": 1018.917
+   },
+   "avian.broad_phase_us": {
+    "mean": 0.3892181723509503,
+    "p50": 0.33299999999999996,
+    "p95": 0.792,
+    "p99": 1.125,
+    "max": 10.334
+   },
+   "avian.prepare_constraints_us": {
+    "mean": 0.23651158552460297,
+    "p50": 0.20800000000000002,
+    "p95": 0.5,
+    "p99": 0.75,
+    "max": 1.75
+   },
+   "avian.solve_constraints_us": {
+    "mean": 0.2645376204113512,
+    "p50": 0.25,
+    "p95": 0.417,
+    "p99": 0.5840000000000001,
+    "max": 1.624
+   },
+   "avian.warm_start_us": {
+    "mean": 0.2870549336110388,
+    "p50": 0.251,
+    "p95": 0.459,
+    "p99": 0.667,
+    "max": 2.9170000000000003
+   },
+   "avian.relax_velocities_us": {
+    "mean": 0.2953613642280656,
+    "p50": 0.291,
+    "p95": 0.459,
+    "p99": 0.665,
+    "max": 1.25
+   },
+   "avian.integrate_velocities_us": {
+    "mean": 0.8615907315803176,
+    "p50": 0.8360000000000001,
+    "p95": 1.169,
+    "p99": 1.417,
+    "max": 5.711
+   },
+   "avian.integrate_positions_us": {
+    "mean": 0.2994634209841187,
+    "p50": 0.291,
+    "p95": 0.499,
+    "p99": 0.7080000000000001,
+    "max": 1.582
+   },
+   "avian.collider_tree_update_us": {
+    "mean": 88.18680421765166,
+    "p50": 87.0,
+    "p95": 118.21,
+    "p99": 140.417,
+    "max": 204.458
+   },
+   "avian.finalize_us": {
+    "mean": 0.13460088518614946,
+    "p50": 0.125,
+    "p95": 0.29200000000000004,
+    "p99": 0.458,
+    "max": 1.0410000000000001
+   }
+  },
+  "flat": {
+   "ticks": 3840,
+   "awake": {
+    "mean": 0.0
+   },
+   "avian.pairs": {
+    "mean": 5.0
+   },
+   "avian.touching_pairs": {
+    "mean": 0.0
+   },
+   "avian.points": {
+    "mean": 0.0
+   },
+   "avian.constraints": {
+    "mean": 0.0
+   },
+   "avian.colors": {
+    "mean": 0.0
+   },
+   "avian.broad_phase_candidates": {
+    "mean": 0.0
+   },
+   "work.contact_points": {
+    "mean": 0.0
+   },
+   "work.belt_near_colliders": {
+    "mean": 0.0
+   },
+   "work.belt_candidates": {
+    "mean": 0.0
+   },
+   "work.belt_slab_checks": {
+    "mean": 0.0
+   },
+   "work.belt_slab_aabb_passes": {
+    "mean": 0.0
+   },
+   "work.belt_overlaps": {
+    "mean": 0.0
+   },
+   "work.belt_dynamic_contacts": {
+    "mean": 0.0
+   },
+   "work.belt_dispatches": {
+    "mean": 0.0
+   },
+   "work.belt_partition_faces": {
+    "mean": 0.0
+   },
+   "work.belt_partition_cells": {
+    "mean": 0.0
+   },
+   "work.belt_partition_patches": {
+    "mean": 0.0
+   },
+   "work.belt_terrain_samples": {
+    "mean": 0.0
+   },
+   "sweep_casts": {
+    "mean": 0.0
+   },
+   "tick_us": {
+    "mean": 981.4202447916667,
+    "p50": 960.833,
+    "p95": 1416.5,
+    "p99": 1616.0829999999999,
+    "max": 2072.792
+   },
+   "net_us": {
+    "mean": 970.1260721354167,
+    "p50": 948.292,
+    "p95": 1398.1250000000002,
+    "p99": 1594.0839999999998,
+    "max": 2032.542
+   },
+   "physics_us": {
+    "mean": 123.73330182291667,
+    "p50": 116.708,
+    "p95": 210.167,
+    "p99": 288.416,
+    "max": 372.5
+   },
+   "sleep_us": {
+    "mean": 6.095845833333333,
+    "p50": 4.917,
+    "p95": 14.666,
+    "p99": 23.959,
+    "max": 36.875
+   },
+   "tick_cpu_us": {
+    "mean": 1503.0684895833333,
+    "p50": 1479.0,
+    "p95": 2164.0,
+    "p99": 2399.0,
+    "max": 3106.0
+   },
+   "belt_contacts_us": {
+    "mean": 3.3356414062499997,
+    "p50": 2.833,
+    "p95": 6.75,
+    "p99": 12.25,
+    "max": 32.875
+   },
+   "contacts_us": {
+    "mean": 7.012061197916666,
+    "p50": 6.751,
+    "p95": 10.833,
+    "p99": 13.831,
+    "max": 48.959
+   },
+   "sweep_us": {
+    "mean": 17.398679166666668,
+    "p50": 14.584,
+    "p95": 36.333,
+    "p99": 50.875,
+    "max": 101.709
+   },
+   "contact_census_us": {
+    "mean": 10.321428645833333,
+    "p50": 8.958,
+    "p95": 21.375,
+    "p99": 33.5,
+    "max": 52.458
+   },
+   "phases_us.driving_us": {
+    "mean": 81.74575703125,
+    "p50": 77.542,
+    "p95": 134.333,
+    "p99": 163.417,
+    "max": 213.542
+   },
+   "phases_us.physics_step_us": {
+    "mean": 161.65431197916666,
+    "p50": 153.706,
+    "p95": 261.874,
+    "p99": 344.209,
+    "max": 427.417
+   },
+   "phases_us.post_physics_us": {
+    "mean": 6.722349479166667,
+    "p50": 5.958,
+    "p95": 12.792,
+    "p99": 19.208,
+    "max": 42.208
+   },
+   "phases_us.fixed_update_us": {
+    "mean": 20.57717135416667,
+    "p50": 19.791,
+    "p95": 34.208,
+    "p99": 48.459,
+    "max": 75.208
+   },
+   "phases_us.fixed_gameplay_us": {
+    "mean": 27.258988802083334,
+    "p50": 24.792,
+    "p95": 49.875,
+    "p99": 70.083,
+    "max": 148.209
+   },
+   "avian.narrow_phase_us": {
+    "mean": 3.4364981770833336,
+    "p50": 2.7920000000000003,
+    "p95": 8.292,
+    "p99": 12.875,
+    "max": 21.041999999999998
+   },
+   "avian.broad_phase_us": {
+    "mean": 0.48476588541666665,
+    "p50": 0.375,
+    "p95": 1.167,
+    "p99": 1.75,
+    "max": 3.833
+   },
+   "avian.prepare_constraints_us": {
+    "mean": 0.27301171875,
+    "p50": 0.20900000000000002,
+    "p95": 0.7080000000000001,
+    "p99": 1.042,
+    "max": 2.542
+   },
+   "avian.solve_constraints_us": {
+    "mean": 0.3324739583333333,
+    "p50": 0.293,
+    "p95": 0.585,
+    "p99": 0.875,
+    "max": 1.4589999999999999
+   },
+   "avian.warm_start_us": {
+    "mean": 0.3369005208333334,
+    "p50": 0.29200000000000004,
+    "p95": 0.626,
+    "p99": 0.916,
+    "max": 1.793
+   },
+   "avian.relax_velocities_us": {
+    "mean": 0.34881119791666665,
+    "p50": 0.332,
+    "p95": 0.625,
+    "p99": 0.9169999999999999,
+    "max": 1.9589999999999999
+   },
+   "avian.integrate_velocities_us": {
+    "mean": 0.8373104166666666,
+    "p50": 0.7929999999999999,
+    "p95": 1.371,
+    "p99": 1.753,
+    "max": 8.999
+   },
+   "avian.integrate_positions_us": {
+    "mean": 0.3080690104166666,
+    "p50": 0.291,
+    "p95": 0.5419999999999999,
+    "p99": 0.749,
+    "max": 8.541
+   },
+   "avian.collider_tree_update_us": {
+    "mean": 48.59818463541667,
+    "p50": 47.5,
+    "p95": 73.08399999999999,
+    "p99": 92.87400000000001,
+    "max": 149.875
+   },
+   "avian.finalize_us": {
+    "mean": 0.15368177083333334,
+    "p50": 0.125,
+    "p95": 0.375,
+    "p99": 0.5840000000000001,
+    "max": 1.916
+   }
+  },
+  "rubble": {
+   "ticks": 3840,
+   "awake": {
+    "mean": 0.0
+   },
+   "avian.pairs": {
+    "mean": 5.0
+   },
+   "avian.touching_pairs": {
+    "mean": 0.0
+   },
+   "avian.points": {
+    "mean": 0.0
+   },
+   "avian.constraints": {
+    "mean": 0.0
+   },
+   "avian.colors": {
+    "mean": 0.0
+   },
+   "avian.broad_phase_candidates": {
+    "mean": 0.0
+   },
+   "work.contact_points": {
+    "mean": 0.0
+   },
+   "work.belt_near_colliders": {
+    "mean": 0.0
+   },
+   "work.belt_candidates": {
+    "mean": 0.0
+   },
+   "work.belt_slab_checks": {
+    "mean": 0.0
+   },
+   "work.belt_slab_aabb_passes": {
+    "mean": 0.0
+   },
+   "work.belt_overlaps": {
+    "mean": 0.0
+   },
+   "work.belt_dynamic_contacts": {
+    "mean": 0.0
+   },
+   "work.belt_dispatches": {
+    "mean": 0.0
+   },
+   "work.belt_partition_faces": {
+    "mean": 0.0
+   },
+   "work.belt_partition_cells": {
+    "mean": 0.0
+   },
+   "work.belt_partition_patches": {
+    "mean": 0.0
+   },
+   "work.belt_terrain_samples": {
+    "mean": 0.0
+   },
+   "sweep_casts": {
+    "mean": 0.0
+   },
+   "tick_us": {
+    "mean": 991.1187390625,
+    "p50": 980.6249999999999,
+    "p95": 1375.834,
+    "p99": 1563.708,
+    "max": 3661.4579999999996
+   },
+   "net_us": {
+    "mean": 980.5167080729167,
+    "p50": 971.125,
+    "p95": 1362.708,
+    "p99": 1550.375,
+    "max": 3631.374
+   },
+   "physics_us": {
+    "mean": 132.67315104166667,
+    "p50": 130.208,
+    "p95": 184.16600000000003,
+    "p99": 229.541,
+    "max": 1283.041
+   },
+   "sleep_us": {
+    "mean": 5.16111328125,
+    "p50": 4.5,
+    "p95": 9.542,
+    "p99": 14.458,
+    "max": 36.375
+   },
+   "tick_cpu_us": {
+    "mean": 1547.0994791666667,
+    "p50": 1536.0,
+    "p95": 2131.0,
+    "p99": 2352.0,
+    "max": 3016.0
+   },
+   "belt_contacts_us": {
+    "mean": 2.784690364583333,
+    "p50": 2.583,
+    "p95": 4.292,
+    "p99": 6.792,
+    "max": 22.417
+   },
+   "contacts_us": {
+    "mean": 6.39549921875,
+    "p50": 6.333,
+    "p95": 8.667,
+    "p99": 10.709,
+    "max": 24.25
+   },
+   "sweep_us": {
+    "mean": 19.909892187500002,
+    "p50": 17.833,
+    "p95": 36.084,
+    "p99": 50.292,
+    "max": 91.416
+   },
+   "contact_census_us": {
+    "mean": 9.727326041666666,
+    "p50": 8.417,
+    "p95": 19.833,
+    "p99": 31.125,
+    "max": 60.916
+   },
+   "phases_us.driving_us": {
+    "mean": 71.25095182291668,
+    "p50": 67.875,
+    "p95": 111.541,
+    "p99": 139.292,
+    "max": 379.833
+   },
+   "phases_us.physics_step_us": {
+    "mean": 178.90369114583333,
+    "p50": 176.416,
+    "p95": 247.873,
+    "p99": 294.791,
+    "max": 1445.166
+   },
+   "phases_us.post_physics_us": {
+    "mean": 13.681196354166667,
+    "p50": 13.084,
+    "p95": 24.375,
+    "p99": 33.208,
+    "max": 72.292
+   },
+   "phases_us.fixed_update_us": {
+    "mean": 21.475644010416666,
+    "p50": 20.292,
+    "p95": 35.833,
+    "p99": 47.541,
+    "max": 85.625
+   },
+   "phases_us.fixed_gameplay_us": {
+    "mean": 23.074134375000003,
+    "p50": 20.667,
+    "p95": 42.542,
+    "p99": 59.667,
+    "max": 95.334
+   },
+   "avian.narrow_phase_us": {
+    "mean": 8.664721614583334,
+    "p50": 8.375,
+    "p95": 12.542,
+    "p99": 16.416,
+    "max": 28.084
+   },
+   "avian.broad_phase_us": {
+    "mean": 0.42307369791666666,
+    "p50": 0.334,
+    "p95": 0.875,
+    "p99": 1.291,
+    "max": 4.082999999999999
+   },
+   "avian.prepare_constraints_us": {
+    "mean": 0.22128880208333335,
+    "p50": 0.20800000000000002,
+    "p95": 0.5,
+    "p99": 0.75,
+    "max": 2.75
+   },
+   "avian.solve_constraints_us": {
+    "mean": 0.2837979166666667,
+    "p50": 0.251,
+    "p95": 0.458,
+    "p99": 0.626,
+    "max": 7.417000000000001
+   },
+   "avian.warm_start_us": {
+    "mean": 0.3062223958333333,
+    "p50": 0.29200000000000004,
+    "p95": 0.5,
+    "p99": 0.627,
+    "max": 2.2079999999999997
+   },
+   "avian.relax_velocities_us": {
+    "mean": 0.3124119791666667,
+    "p50": 0.29200000000000004,
+    "p95": 0.5,
+    "p99": 0.706,
+    "max": 10.584000000000001
+   },
+   "avian.integrate_velocities_us": {
+    "mean": 0.9724539062499999,
+    "p50": 0.9590000000000001,
+    "p95": 1.335,
+    "p99": 1.625,
+    "max": 7.754999999999999
+   },
+   "avian.integrate_positions_us": {
+    "mean": 0.3123510416666667,
+    "p50": 0.29200000000000004,
+    "p95": 0.501,
+    "p99": 0.749,
+    "max": 1.207
+   },
+   "avian.collider_tree_update_us": {
+    "mean": 62.48907552083333,
+    "p50": 61.085,
+    "p95": 92.167,
+    "p99": 108.916,
+    "max": 160.084
+   },
+   "avian.finalize_us": {
+    "mean": 0.12855625,
+    "p50": 0.08399999999999999,
+    "p95": 0.29200000000000004,
+    "p99": 0.5,
+    "max": 1.208
+   }
+  }
+ }
+}

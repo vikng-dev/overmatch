@@ -1,0 +1,6 @@
+START 2026-11-16T00:28:20+0700 load: 3.45 8.92 7.80
+CMD /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_UNATTENDED=1 OVERMATCH_MUTE=1 scripts/render/verify-shader-compile.sh 30
+== booting /Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1/target/debug/overmatch hidden for 30s (log: /var/folders/st/6bfb53p95z1372ym5c5mqgx00000gp/T/overmatch-shader-compile.6gipqjMZol)
+OK — every pipeline the first 30s created compiled; no rendering errors.
+2026-11-15T17:39:45.936834Z  INFO overmatch::world: terrain surface: base pack every 15 m, masks maps/kalinovo/terrain_masks.png at [1024, 1024], blend layers 0=dirt_aerial_03 every 25 m (uv x0.600), 1=coast_sand_05 every 25 m (uv x0.600), 2=aerial_mud_1 every 8 m (uv x1.875)
+EXIT 0 wall 715s END 2026-11-16T00:40:15+0700

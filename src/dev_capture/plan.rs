@@ -18,7 +18,7 @@ pub(crate) const VARIABLE: &str = "OVERMATCH_CAPTURE";
 /// A capture run: the frames it takes, the keys it holds, and the scripted events it raises.
 /// Every windowed root takes `frames` and `keys`; every other field is a cue a root mounts only
 /// where its event has an authority to raise it.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CapturePlan {
     /// The frames to disk, and the conditions they imply (module doc of `dev_capture`). Absent,
@@ -43,9 +43,21 @@ pub(crate) struct CapturePlan {
     /// The game's damage model: offline module-repair panel evidence.
     #[serde(default)]
     pub(crate) repair: Option<Repair>,
+    /// The game's damage-model view: replay a recorded hit through the offline shooter's corner.
+    #[serde(default)]
+    pub(crate) corner: Option<CornerReplay>,
     /// What the root sets the scene up as ([`Scene`]).
     #[serde(default)]
     pub(crate) scene: Scene,
+}
+
+/// The game's damage-model shader evidence: a recorded report, replayed at app second `at`.
+/// This cue presents game state only; it applies no dose and changes no simulated HP pool.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CornerReplay {
+    pub(crate) report: super::corner::ReplayReport,
+    pub(crate) at: f32,
 }
 
 /// The game's damage model: empty the named module functions and issue one repair command.
@@ -670,6 +682,12 @@ impl CapturePlan {
         if let Some(shot) = &self.shot {
             finite_at("shot.at", shot.at)?;
         }
+        if let Some(corner) = &self.corner {
+            finite_at("corner.at", corner.at)?;
+            if self.shot.is_some() {
+                return Err("corner: replay uses app time; remove the burst-timed shot cue".into());
+            }
+        }
         let scene = &self.scene;
         if let Some(degrees) = scene.sun_elevation_deg
             && !(degrees > 0.0 && degrees < 90.0)
@@ -748,6 +766,48 @@ pub(crate) fn plan() -> Option<&'static CapturePlan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's damage-model capture refuses an incompatible replay before play, naming its
+    /// report path and field so the operator can repair it before any timed cue runs.
+    #[test]
+    fn an_incompatible_replay_is_refused_before_play_naming_path_and_field() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/capture")
+            .join(format!("incompatible-replay-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let report_path = directory.join("report.ron");
+        let plan_path = directory.join("plan.ron");
+        std::fs::write(
+            &plan_path,
+            format!(r#"(corner: (report: {:?}, at: 10.0))"#, report_path),
+        )
+        .unwrap();
+        let report = crate::damage_cam::delivery::tests::report("s8b_mg_stopped");
+        // Fixture: an unknown weapon, then an undosed resting component removed by projection.
+        let mut unknown_weapon = report.clone();
+        unknown_weapon.projectile.name = "unknown capture weapon".into();
+        let mut undosed_rest = report;
+        undosed_rest.end = crate::damage_cam::RoundEnd::Rest {
+            volume: "Breech".into(),
+        };
+        undosed_rest.doses.clear();
+        for (report, field) in [
+            (unknown_weapon, "projectile.name"),
+            (undosed_rest, "end.volume"),
+        ] {
+            std::fs::write(&report_path, ron::to_string(&report).unwrap()).unwrap();
+            let error = CapturePlan::load(&plan_path)
+                .expect_err("an incompatible replay must refuse startup before play")
+                .to_string();
+            for required in [
+                report_path.to_str().unwrap(),
+                field,
+                "use a report from this build",
+            ] {
+                assert!(error.contains(required), "{error} must name {required}");
+            }
+        }
+    }
 
     // The game's damage model: Fixture charge inputs must be refused before a cue exists.
     fn charge_refusal(kg: &str, core: &str, field: &str, fix: &str) {

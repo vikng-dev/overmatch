@@ -1,0 +1,25 @@
+START 2026-11-16T01:58:11+0700 load: 5.58 6.36 6.77
+CMD scripts/serial-cargo run --release --locked --features bitprobe --bin bitprobe -- .agents/scratch/stack-upgrade-baseline/bitprobe-macos-aarch64.9c766de6.obp.gz
+   Compiling overmatch v0.7.0-alpha.17 (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+warning: function `occupied_mass` is never used
+  --> src/debris/launch.rs:26:15
+   |
+26 | pub(crate) fn occupied_mass(hull: &Collider, density: f32) -> (Mass, AngularInertia, CenterOfMass) {
+   |               ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `overmatch` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 7m 53s
+     Running `target/release/bitprobe .agents/scratch/stack-upgrade-baseline/bitprobe-macos-aarch64.9c766de6.obp.gz`
+2026-11-15T19:06:40.201167Z  INFO bevy_diagnostic::system_information_diagnostics_plugin::internal: SystemInfo { os: "macOS 26.5.2", kernel: "25.5.0", cpu: "Apple M4", core_count: "10", memory: "16.0 GiB" }
+2026-11-15T19:06:40.203016Z  INFO bevy_app::terminal_ctrl_c_handler: Skipping installing `Ctrl+C` handler as one was already installed. Please call `TerminalCtrlCHandlerPlugin::gracefully_exit` in your own `Ctrl+C` handler if you want Bevy to gracefully exit on `Ctrl+C`.
+2026-11-15T19:06:40.206388Z ERROR bevy_render::extract_resource: Render app did not exist when trying to add `extract_resource` for <bevy_camera::clear_color::ClearColor>.
+2026-11-15T19:06:40.333083Z  WARN bevy_render::texture: CompressedImageFormatSupport resource not found. It should either be initialized in finish() of RenderPlugin, or manually if not using the RenderPlugin or the WGPU backend.
+2026-11-15T19:06:40.333122Z  WARN bevy_gltf: CompressedImageFormatSupport resource not found. It should either be initialized in finish() of RenderPlugin, or manually if not using the RenderPlugin or the WGPU backend.
+2026-11-15T19:06:40.334542Z  INFO overmatch::terrain_grid: terrain: ForceFlatWorld set — keeping the flat slab + authored course
+2026-11-15T19:06:40.338292Z  INFO overmatch::geometry_lod: geometry_lod: certificate loaded — 62 chain(s) over 59 scene mesh(es), sim artifact verified
+2026-11-15T19:06:40.421621Z  INFO overmatch::track::sim: envelope law: travel 172.6 mm (spring-limited), k 411 kN/m per m, c 38.18 kN·s/m per m (ride 1.20 Hz, ζ 0.35)
+2026-11-15T19:06:40.421639Z  INFO overmatch::track::sim: declared transmission: 8F/4R
+2026-11-15T19:06:40.421646Z  INFO overmatch::track::sim: grip law: hull coupling 1.695, shortest shear length 6.88 mm per unit grip at the fixed step
+EXIT 0 wall 515s END 2026-11-16T02:06:46+0700

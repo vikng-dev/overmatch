@@ -1,0 +1,11 @@
+runs: left={'arch': 'aarch64', 'os': 'macos', 'profile': 'release'} right={'arch': 'x86_64', 'os': 'linux', 'profile': 'release'}
+startup dump: IDENTICAL (1803 named raw values)
+tick payloads: IDENTICAL (3072 ticks)
+per-seam first divergence:
+  contact_input          identical
+  element_output         identical
+  belt_reaction          identical
+  transmission_input     identical
+  clutch_engine          identical
+  transmission_state     identical
+  pose_velocity          identical

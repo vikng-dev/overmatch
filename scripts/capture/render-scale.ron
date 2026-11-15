@@ -1,0 +1,15 @@
+// A capture plan (`dev_capture::plan::CapturePlan`): `surroundings/hull-closeup.ron`'s frame at
+// the settings page's lowest render scale, so the 3D main pass is drawn at half the target's size
+// and stretched by the upscale pass (`render_scale`, `render_scale_upscale.wgsl`). At the shipped
+// 100% that pass never runs, so no other plan shows it. The scale is a player setting, read from
+// the config directory, never from the plan. From the checkout root, hidden and silent under the
+// machine's build lock:
+//
+//   cfg=$(mktemp -d); printf '(version: 1, render_scale: Percent50)\n' >"$cfg/video.ron"
+//   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_START=599.9,-599.9,195 \
+//     OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CONFIG_DIR="$cfg" \
+//     OVERMATCH_CAPTURE=scripts/capture/render-scale.ron target/debug/overmatch --offline
+//
+// writes target/capture/render-scale.png and logs "render scale: 3D main pass 640x360 inside a
+// 1280x720 target". Pose, time, size and step are capture configuration (ASSUMED), not game data.
+(frames: (out: "target/capture/render-scale.png", at: [12.0], size: (1280, 720), scale_factor: 1.0, ui: false, gizmos: false, step_s: 0.015625, camera: Follow(offset: (6.0, 2.5, -6.0))))

@@ -1,0 +1,24 @@
+
+=== idle1  (role=client) ===
+  ticks 2184  (34.1 s)   tanks 1-1   entities 6494-6494   march re-runs(mc>1): 0
+  projectiles alive/tick: mean 0.00  p50 0  p99 0  max 0
+  metric                       p50       p90       p99       max      mean
+  FixedUpdate tick us       709.79    874.17   1117.82   1365.50    697.40
+  march (mus)                0.000     0.000     0.000     0.000     0.000
+  march share of tick (mean): 0.00 %
+
+=== fire1  (role=client) ===
+  ticks 2180  (34.1 s)   tanks 1-1   entities 6494-6556   march re-runs(mc>1): 0
+  projectiles alive/tick: mean 45.23  p50 56  p99 58  max 62
+  metric                       p50       p90       p99       max      mean
+  FixedUpdate tick us       687.44    860.06   1106.27   1397.58    688.82
+  march (mus)                0.000     0.000     0.000     0.000     0.000
+  march share of tick (mean): 0.00 %
+  march vs live-projectile fit: 0.0000 µs/projectile  (+ 0.000 µs empty)   [np 0..62]
+      → np= 10: march ≈    0.00 µs/tick
+      → np= 30: march ≈    0.00 µs/tick
+      → np= 60: march ≈    0.00 µs/tick
+
+=== DELTA vs baseline 'idle1' (each scenario minus idle) ===
+  scenario              Δtick us p50  Δtick us mean   Δmarch mean   per-round march
+  fire1                       -22.35          -8.58         0.000             nan µs

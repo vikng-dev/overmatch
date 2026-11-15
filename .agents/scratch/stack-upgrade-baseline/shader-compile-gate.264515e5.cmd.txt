@@ -1,0 +1,10 @@
+commit: 264515e50b0da455b9ba05e26f477b0fbfd0018a (v0.7.0-alpha.17 = b8baa8e4 plus one docs-only commit)
+cwd: the bay root (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+command: /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_UNATTENDED=1 OVERMATCH_MUTE=1 scripts/render/verify-shader-compile.sh 30
+started: 2026-11-16T00:28:20+0700
+load averages before start (1, 5, 15 min; MEASURED, uptime): 3.45 8.92 7.80
+exit: 0 wall 715s END 2026-11-16T00:40:15+0700
+wall time includes any wait for the machine lock (/tmp/overmatch-cargo.lock).
+note: result: OK, every pipeline the first 30 s created compiled; no rendering errors (MEASURED: 0 ERROR lines in the client log)
+note: the client log the script wrote to a mktemp path is copied beside this file as shader-compile-gate.264515e5.client.log
+note: the script boots target/debug/overmatch --offline with OVERMATCH_WINDOW=hidden and an isolated OVERMATCH_CONFIG_DIR; binary built by scripts/serial-cargo build --locked --features dev_ui,bitprobe --bin overmatch --bin overmatch-server

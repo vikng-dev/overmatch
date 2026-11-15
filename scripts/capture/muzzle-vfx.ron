@@ -1,0 +1,26 @@
+// A capture plan (`dev_capture::plan::CapturePlan`), the game's damage-model view (game state
+// only): the player's own guns firing at the offline target, so the muzzle dressing's sprites
+// (`vfx::muzzle`, `vfx_billboard.wgsl`) are on screen. The offline target scenario
+// `OVERMATCH_TARGET=ahead` parks a target broadside ahead and `SPIKE_AUTO_FIRE=1` holds the
+// machine guns' triggers from 20 to 50 s and the main gun's from 60 to 75 s (`command`); both run
+// on their own clocks, so this plan fixes no frame step and its frames land a little differently
+// run to run. The 88's flash, fireball and ground blast at 60 s were still on screen at 63 s in one
+// run (MEASURED). The aim is picked through the window's centre, so the frame keeps the hidden
+// window's logical size. From the checkout root, hidden and silent under the machine's build lock:
+//
+//   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_TARGET=ahead SPIKE_AUTO_FIRE=1 \
+//     OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 \
+//     OVERMATCH_CAPTURE=scripts/capture/muzzle-vfx.ron target/debug/overmatch --offline
+//
+// writes target/capture/muzzle-vfx-<second>.png at each frame second, then exits. Times and size
+// are capture configuration (ASSUMED), not game data.
+(
+    frames: (
+        out: "target/capture/muzzle-vfx.png",
+        at: [30.0, 61.0, 63.0],
+        size: (1280, 720),
+        scale_factor: 1.0,
+        ui: false,
+        gizmos: false,
+    ),
+)

@@ -1,0 +1,11 @@
+commit: 264515e50b0da455b9ba05e26f477b0fbfd0018a (v0.7.0-alpha.17 = b8baa8e4 plus one docs-only commit)
+cwd: the bay root (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+command: env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 scripts/serial-cargo test --lib --features dev_ui,bitprobe rubble_climb_probe -- --ignored --nocapture
+started: 2026-11-16T00:46:31+0700
+load averages before start (1, 5, 15 min; MEASURED, uptime): 13.33 9.07 7.77
+exit: 0 wall 1125s END 2026-11-16T01:05:16+0700
+wall time includes any wait for the machine lock (/tmp/overmatch-cargo.lock).
+note: result: ok, 1 passed, finished in 501.27 s (MEASURED); 51 RUBBLECLIMB lines
+note: the .txt beside this file is the run's stdout with INFO/WARN log lines removed
+note: the 51 per-tick CSVs it wrote to target/rubble-climb/ (13 MB) are kept out of git at ~/.cache/overmatch/stack-upgrade-baseline/264515e5/rubble-climb-csv/
+note: machine build lock: held for the whole run; scripts/serial-cargo holds /tmp/overmatch-cargo.lock across the cargo invocation, the test binary's run included

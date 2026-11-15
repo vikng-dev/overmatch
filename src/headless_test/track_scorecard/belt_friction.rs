@@ -123,6 +123,7 @@ struct PieceTrack {
     /// The speed under which Avian may put it to rest: its sleep threshold (m/s).
     rest: f32,
     samples: Vec<PieceSample>,
+    absent_at: Option<usize>,
 }
 
 /// The longest side of a body's bounding box in its own frame, over all its colliders (m).
@@ -173,10 +174,17 @@ fn track_pieces(bed: &Bed, tick: usize, pieces: &mut BTreeMap<Entity, PieceTrack
         );
         let reference = (point.reference, point.reference_collider);
         for ((body, face), (piece, _)) in [(reference, other), (other, reference)] {
-            if body != bed.tank
-                || !world.entity(face).contains::<BeltFace>()
-                || !world.entity(piece).contains::<crate::debris::DebrisPiece>()
-            {
+            if body != bed.tank || world.get::<BeltFace>(face).is_none() {
+                continue;
+            }
+            let Ok(body) = world.get_entity(piece) else {
+                // A completed-step contact can name a parent retired by the same tick's split.
+                println!(
+                    "BELTFRICTION_ABSENT {{\"tick\":{tick},\"piece\":\"{piece}\",\"state\":\"retired_before_contact_read\"}}"
+                );
+                continue;
+            };
+            if !body.contains::<crate::debris::DebrisPiece>() {
                 continue;
             }
             pieces.entry(piece).or_insert_with(|| PieceTrack {
@@ -191,17 +199,23 @@ fn track_pieces(bed: &Bed, tick: usize, pieces: &mut BTreeMap<Entity, PieceTrack
                     .linear
                     * world.resource::<PhysicsLengthUnit>().0,
                 samples: Vec::new(),
+                absent_at: None,
             });
         }
     }
     let forward = bed.hull().forward();
     for (&piece, track) in pieces.iter_mut() {
-        let (Some(position), Some(velocity)) = (
-            world.get::<Position>(piece),
-            world.get::<LinearVelocity>(piece),
-        ) else {
-            continue; // The piece left the world (despawned or merged): its track ends.
+        let Ok(body) = world.get_entity(piece) else {
+            // A retired body's motion series ends; no position or velocity exists to sample.
+            track.absent_at.get_or_insert(tick);
+            continue;
         };
+        let position = body
+            .get::<Position>()
+            .expect("a live piece has a body pose");
+        let velocity = body
+            .get::<LinearVelocity>()
+            .expect("a live piece has a body velocity");
         track.samples.push(PieceSample {
             tick,
             position: position.0,
@@ -249,6 +263,7 @@ fn piece_motion(pieces: &BTreeMap<Entity, PieceTrack>, runs: &[Range<usize>]) ->
             .map(|w| (w[1].position - (w[0].position + w[2].position) / 2.0).length())
             .fold(0.0, f32::max);
         Some(json!({
+            "absent_at_tick": piece.absent_at,
             "mass_kg": piece.mass,
             "size_m": piece.size,
             "rest_m_s": piece.rest,
@@ -639,4 +654,20 @@ fn belt_friction_probe() {
     for case in selected {
         run(case, &tag);
     }
+}
+
+/// Completed-step contacts can outlive their piece; the probe must end its motion series rather
+/// than read a retired body or invent a stationary sample for downstream comparisons.
+#[test]
+fn a_retired_piece_ends_its_probe_track() {
+    let mut bed = slab_bed();
+    bed.tick(0.0, 1.0);
+    let mut pieces = BTreeMap::new();
+    track_pieces(&bed, 0, &mut pieces);
+    let (&piece, track) = pieces.first_key_value().expect("the slab bears the belts");
+    let samples = track.samples.len();
+    assert!(bed.app.world_mut().despawn(piece));
+    track_pieces(&bed, 1, &mut pieces);
+    assert_eq!(pieces[&piece].samples.len(), samples);
+    assert_eq!(pieces[&piece].absent_at, Some(1));
 }
