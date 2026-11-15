@@ -78,8 +78,33 @@ struct RigidBodyQuery {
 #[expect(missing_docs)]
 pub struct NarrowPhase<'w, 's, C: AnyCollider> {
     collider_query: Query<'w, 's, ColliderQuery<C>, Without<ColliderDisabled>>,
+    // OVERMATCH PATCH: the enabled, posed colliders of this type, whose pairs this narrow phase
+    // must read.
+    posed_colliders: Query<
+        'w,
+        's,
+        (),
+        (
+            With<C>,
+            With<Position>,
+            With<Rotation>,
+            Without<ColliderDisabled>,
+        ),
+    >,
     colliding_entities_query: Query<'w, 's, &'static mut CollidingEntities>,
     body_query: Query<'w, 's, RigidBodyQuery, Without<RigidBodyDisabled>>,
+    // OVERMATCH PATCH: the bodies `body_query` may legitimately miss: disabled or unposed.
+    unread_bodies: Query<
+        'w,
+        's,
+        (),
+        Or<(
+            With<RigidBodyDisabled>,
+            With<Disabled>,
+            Without<Position>,
+            Without<Rotation>,
+        )>,
+    >,
     body_islands:
         Query<'w, 's, &'static mut BodyIslandNode, Or<(With<Disabled>, Without<Disabled>)>>,
     pub contact_graph: ResMut<'w, ContactGraph>,
@@ -654,7 +679,6 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
         // are unstable and can be invalidated when pairs are removed.
         let bit_count = self.contact_graph.edges.raw_edges().len();
 
-        // Clear the bit vector used to track status changes for each contact pair.
         self.contact_status_bits.set_bit_count_and_clear(bit_count);
 
         #[cfg(feature = "parallel")]
@@ -688,12 +712,9 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
 
             // TODO: Move this out of the chunk iteration? Requires refactoring `par_for_each!`.
             #[cfg(feature = "parallel")]
-            // Get the thread-local narrow phase context.
             let mut thread_context = self
                 .thread_local_contact_status_bits
                 .get_or(|| {
-                    // No thread-local bit vector exists for this thread yet.
-                    // Create a new one with the same capacity as the global bit vector.
                     let mut contact_status_bits = BitVec::new(bit_count);
                     contact_status_bits.set_bit_count_and_clear(bit_count);
                     RefCell::new(contact_status_bits)
@@ -702,22 +723,43 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
             #[cfg(feature = "parallel")]
             let status_change_bits = &mut *thread_context;
 
-            // Get the colliders for the contact pair.
             let Ok([collider1, collider2]) = self
                 .collider_query
                 .get_many([contacts.collider1, contacts.collider2])
             else {
+                // OVERMATCH PATCH: two absences are legitimate. The broad phase pairs colliders
+                // of every type, and another type's narrow phase updates their pairs; a client's
+                // replication may lift a body's pose for a frame (Overmatch's
+                // `src/tests/avian_body_query_gap.rs`). Disabled and removed colliders lose their
+                // pairs first (`remove_collider_on`).
+                assert!(
+                    !self.posed_colliders.contains(contacts.collider1)
+                        || !self.posed_colliders.contains(contacts.collider2),
+                    "{:?}: a pair's posed colliders keep the state the narrow phase reads",
+                    contacts.contact_id
+                );
                 return;
             };
 
+            // OVERMATCH PATCH: a body outside the body query reads as no body when it is
+            // disabled, whose pairs generate no constraints, or when a client's replication
+            // lifted its pose for a frame (Overmatch's `src/tests/avian_body_query_gap.rs`).
+            let body_state = |of: Option<&ColliderOf>| {
+                of.and_then(|&ColliderOf { body }| match self.body_query.get(body) {
+                    Ok(state) => Some(state),
+                    Err(_) => {
+                        assert!(
+                            self.unread_bodies.contains(body),
+                            "{body}: a collider's body keeps the state the narrow phase reads"
+                        );
+                        None
+                    }
+                })
+            };
             // OVERMATCH PATCH: stationarity is evaluated before this pair's geometry query.
             // Standalone colliders are static. A body-query gap is unknown, not stationary.
-            let body1_bundle = collider1
-                .of
-                .and_then(|&ColliderOf { body }| self.body_query.get(body).ok());
-            let body2_bundle = collider2
-                .of
-                .and_then(|&ColliderOf { body }| self.body_query.get(body).ok());
+            let body1_bundle = body_state(collider1.of);
+            let body2_bundle = body_state(collider2.of);
             let stationary_miss = !contacts.is_touching()
                 && [
                     (collider1.of, body1_bundle.as_ref()),

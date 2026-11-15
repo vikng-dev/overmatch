@@ -395,6 +395,73 @@ fn stationary_miss_retests_when_a_woken_body_moves() {
     }
 }
 
+/// Contact users need a pair whose collider lost state the narrow phase reads refused, not left
+/// with its last update. A mutant that skips every pair it cannot read keeps it silently.
+#[test]
+#[should_panic(expected = "a pair's posed colliders keep the state the narrow phase reads")]
+fn a_pair_whose_collider_lost_its_layers_is_refused() {
+    let (mut app, fixed, _, _) = stationary_pair();
+    app.world_mut()
+        .entity_mut(fixed)
+        .remove::<CollisionLayers>();
+    app.update();
+}
+
+/// The client's replication may lift a body's pose for a frame (`crate::tests::avian_body_query_gap`),
+/// and the narrow phase skips its pairs for that frame. A mutant that refuses every pair it cannot
+/// read stops the client there.
+#[test]
+fn a_pair_whose_collider_lost_its_pose_is_skipped() {
+    let (mut app, fixed, moving, _) = stationary_pair();
+    let pose = *app.world().get::<Position>(fixed).unwrap();
+    app.world_mut().entity_mut(fixed).remove::<Position>();
+    app.update();
+    app.world_mut().entity_mut(fixed).insert(pose);
+    app.update();
+    assert!(
+        app.world()
+            .resource::<ContactGraph>()
+            .get(fixed, moving)
+            .is_some()
+    );
+}
+
+/// Contact users need a pair whose body lost state the narrow phase reads refused, not read as
+/// bodiless. A mutant that reads every body it cannot fetch as absent keeps it silently.
+#[test]
+#[should_panic(expected = "a collider's body keeps the state the narrow phase reads")]
+fn a_pair_whose_body_lost_its_velocity_is_refused() {
+    let (mut app, _, moving, _) = stationary_pair();
+    app.world_mut()
+        .entity_mut(moving)
+        .remove::<LinearVelocity>();
+    app.update();
+}
+
+/// A disabled body's pairs generate no constraints, and the narrow phase reads the body as absent
+/// (as it does a client body whose pose replication lifted: `crate::tests::avian_body_query_gap`).
+/// A mutant that refuses every body it cannot fetch stops there.
+#[test]
+fn a_pair_whose_body_is_disabled_reads_it_as_absent() {
+    let (mut app, fixed, _, radius) = stationary_pair();
+    let disabled = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            RigidBodyDisabled,
+            Transform::from_xyz(-1.5 * radius, 0.0, 0.0),
+            Collider::sphere(radius),
+        ))
+        .id();
+    app.update();
+    let (_, pair) = app
+        .world()
+        .resource::<ContactGraph>()
+        .get(fixed, disabled)
+        .expect("the broad phase pairs a disabled body's collider");
+    assert!(pair.is_touching() && !pair.generates_constraints());
+}
+
 /// A stationary miss belongs to one pair; a newly inserted neighbor must still discover contact.
 #[test]
 fn stationary_miss_does_not_hide_a_new_neighbor() {
