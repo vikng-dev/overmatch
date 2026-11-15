@@ -455,6 +455,10 @@ impl BorrowMut<PairManifolds> for Taken {
 /// entry, the entry dropped at zero, or a new entry where Avian queued none; never a second entry,
 /// whose flush would push constraints for manifolds the pair no longer has. A pair starting to
 /// generate constraints needs none: the flush reads its reduced count.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system reading the contact graph and queue, the marked bodies, the step, the narrow phase's tolerance and unit, and writing the counts"
+)]
 pub(crate) fn reduce_contacts(
     mut graph: ResMut<ContactGraph>,
     mut queue: ResMut<ContactStatusChangeQueue>,
