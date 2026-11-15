@@ -356,7 +356,7 @@ pub(crate) fn server_plugin_floor() -> bevy::app::PluginGroupBuilder {
         .disable::<ui_widgets::ScrollAreaPlugin>()
         .disable::<ui_widgets::ScrollbarPlugin>()
         .disable::<ui_widgets::SliderPlugin>()
-        .disable::<ui_widgets::EditableTextInputPlugin>()
+        .disable::<ui_widgets::TextInputPlugin>()
         .disable::<text::TextPlugin>()
         .disable::<sprite::SpritePlugin>()
         .disable::<sprite_render::SpriteRenderPlugin>()
