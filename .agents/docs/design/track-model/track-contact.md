@@ -149,6 +149,22 @@ Known differences between the channels, none tuned:
   stop. Parry clips a face to its first four vertices (the TODO in
   `ConvexPolyhedron::local_support_feature`, parry 0.27), so a cap contact, its face an N-gon, is
   mostly the lone GJK witness point (DERIVED).
+- **The stop's side slices against standing matter**, a limit (#353). A slice is a rigid collider
+  one shoe thickness wide, and it bears only a contact leaving through its exposed face
+  (`stop_contacts::Bearing`): its inner face is inside the shoe and no surface. Two failures remain,
+  both the artefact of one normal per convex pair. A standing stub under the shoe's edge, deeper in
+  the belt than it overlaps the shoe sideways, is born a rigid lateral contact at that overlap; and
+  a shoe that comes down between two stubs bears on both exposed faces at once. Either way two
+  opposed rigid contacts against static bodies cannot both be satisfied, and their normal impulses
+  reach 1 to 20 MN·s in a tick. The belt then amplifies it: the hook moves each surface at belt
+  speed, the solver takes that friction against the hull's mass alone, and the transmission reads
+  it back a tick late with no slope (`stop_contacts::reactions`, `sim::feel_tick`), so with the
+  friction limit unbounded the belt speed runs away and drags the hull. On a brick house at its
+  corner, full pedal from 0.5 m, grades 0 to 6° by four headings by three offsets, 8 of 48 runs
+  still took energy from the contact, the worst leaving at 165 m/s; before the
+  exposed-face admission 17 of 48 did, the worst at 319 m/s. With the read-back off the same pinch
+  moved the hull at 3 to 7 m/s; with the slices bearing nothing, 5 of 5 runs were clean (MEASURED
+  2026-11-15, 57 t fixture hull).
 - **The law within a step.** A contact's shares and the points that bear are read once, at the
   narrow phase, so its stiffness is exact for a common compression of its links, not for one piece
   retreating alone. The points split the force by `overlap + rest`, so the centre of pressure and

@@ -2745,6 +2745,101 @@ fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
     }
 }
 
+/// A hull gains no energy from standing matter it rides onto. Over a tick its kinetic energy rises by no more
+/// than the work of its sampled support and of gravity (each force over the hull's mean motion
+/// through the tick), the most its engine can do (its greatest torque at its crank limit, over
+/// the tick) and the most the solver's overlap correction can leave it with (the hull's mass at
+/// `SolverConfig::max_overlap_solve_speed`, DERIVED: the correction's bias is capped there). More
+/// than that came out of a contact. Fixture: the left track climbs a standing sill under its
+/// outboard half, taller than the bump travel, so the stop carries the shoe at full travel and
+/// the belt's rest face stands deeper in the sill than a side slice is thick; a standing post
+/// beside it stands half a slice's thickness off the shoe's outboard face. The matter is on a
+/// construction element's layers, which the side slices meet. Fails if a side slice bears
+/// through its inner face: the sill shoves the shoe outward into the post, the two opposed rigid
+/// contacts' normal impulses and with them their friction limit rise without bound, and the
+/// belt's reaction, read a tick late against its own inertia alone, runs away with the hull
+/// (MEASURED: 2.1 MJ in one tick on this fixture, against 3.7 kJ at most with the admission).
+/// The invariant holds on this fixture, not yet everywhere: `track-contact.md` names the pinch
+/// through two exposed faces that still breaks it.
+#[test]
+fn a_hull_gains_no_energy_from_standing_matter() {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    let geom = bed.geom();
+    let [_, (centre, _), (outboard, _)] = geom.grip_columns(Side::Left);
+    let front = front_z(geom);
+    let slice = geom.thickness.min(geom.model.width / 2.0);
+    let bump = shipped_spec().track.suspension.params().bump_stop;
+    assert!(
+        bump > slice,
+        "the fixture needs a belt that travels further than its side slices are thick"
+    );
+    // Fixture: a sill 1 m long, half again as tall as the bump travel, half a metre ahead of the
+    // belt; a post 1.5 m tall and 1 m wide beside it.
+    let (length, height, post) = (1.0, 1.5 * bump, 1.5);
+    let z = front - 0.5 - length / 2.0;
+    let standing = |bed: &mut Bed, center: Vec3, size: Vec3| {
+        let block = bed.spawn_static(center, size);
+        bed.app
+            .world_mut()
+            .entity_mut(block)
+            .insert(crate::construction::element_layers());
+        block
+    };
+    let sill = standing(
+        &mut bed,
+        Vec3::new((outboard + centre) / 2.0, height / 2.0, z),
+        Vec3::new(centre - outboard, height, length),
+    );
+    standing(
+        &mut bed,
+        Vec3::new(outboard - slice / 2.0 - 0.5, post / 2.0, z),
+        Vec3::new(1.0, post, length),
+    );
+    bed.place(Vec3::ZERO, Quat::IDENTITY);
+    bed.start();
+
+    let world = bed.app.world();
+    let trans = world.resource::<crate::track::sim::TrackGear>().trans();
+    let torque =
+        (trans.engine.torque_nm.iter()).fold(0.0_f32, |most, &(_, torque)| most.max(torque));
+    let engine =
+        torque * trans.engine.crank_limit_rpm * crate::track::transmission::RPM_TO_RAD * DT;
+    let correction = world
+        .resource::<avian3d::dynamics::solver::SolverConfig>()
+        .max_overlap_solve_speed
+        * world.resource::<PhysicsLengthUnit>().0;
+    let mut carried = false;
+    // Fixture: 8 s at full pedal, long enough to cross the sill in first gear.
+    for tick in 0..8 * TICKS {
+        let (before, com, energy) = (bed.hull(), bed.center_of_mass(), bed.kinetic_energy());
+        bed.tick(1.0, 0.0);
+        let after = bed.hull();
+        let (linear, angular) = (
+            (before.velocity + after.velocity) / 2.0,
+            (before.angular + after.angular) / 2.0,
+        );
+        let sampled: f32 = bed
+            .spring_forces()
+            .iter()
+            .map(|f| f.force.dot(linear + angular.cross(f.point - com)))
+            .sum::<f32>()
+            * DT;
+        let gravity = -bed.weight() * linear.y * DT;
+        let excess = bed.kinetic_energy() - energy - sampled - gravity;
+        carried |= bed
+            .touching_colliders(sill)
+            .iter()
+            .any(|role| role.starts_with("bump stop"));
+        let allowed = engine + 0.5 * bed.mass() * correction * correction;
+        assert!(
+            excess <= allowed,
+            "tick {tick}: the hull gained {excess} J beyond its support's and gravity's work, \
+             over the {allowed} J its engine and the overlap correction can give"
+        );
+    }
+    assert!(carried, "the stop never carried the shoe on the sill");
+}
+
 /// One broad heavy slab under the whole tank, the tank settled a second on it. Fixture.
 fn slab_bed() -> Bed {
     let mut bed = Bed::on_ground(Some(base_ground()), flat());

@@ -1659,7 +1659,11 @@ mod tests {
             let mut drive = TrackDrive::default();
             drive.sides.iter_mut().for_each(|side| side.speed = 2.0);
             app.world_mut().entity_mut(root).insert((
-                super::super::stop_contacts::BeltFace::new(Side::Left, outline, false),
+                super::super::stop_contacts::BeltFace::new(
+                    Side::Left,
+                    outline,
+                    super::super::stop_contacts::Bearing::Whole,
+                ),
                 drive,
                 ParsedTankCommand::try_from(crate::command::TankCommand {
                     throttle: 1.0,

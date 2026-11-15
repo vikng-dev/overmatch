@@ -1842,7 +1842,10 @@ pub(super) mod tests {
     /// slice descending 60 mm and moving 10 mm sideways during the tick.
     #[test]
     fn a_diagonal_side_slice_reaches_its_lateral_contact_on_the_next_tick() {
-        use crate::track::{side::Side as TrackSide, stop_contacts::BeltFace};
+        use crate::track::{
+            side::Side as TrackSide,
+            stop_contacts::{Bearing, BeltFace},
+        };
         let (structure, geometry) = wall(1.0);
         let mut state = State::new(&structure);
         for c in 0..structure.chunks.len() {
@@ -1853,7 +1856,7 @@ pub(super) mod tests {
         let face = BeltFace::new(
             TrackSide::Right,
             vec![Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y],
-            true,
+            Bearing::Exposed(1.0),
         );
         let tree = SourceTree::new(vec![Hull {
             surface: Some(face.clone()),

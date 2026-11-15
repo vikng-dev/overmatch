@@ -46,7 +46,7 @@ use super::forces::SupportLaw;
 use super::rig_geom::RigGeom;
 use super::route::build_route;
 use super::side::Side;
-use super::stop_contacts::BeltFace;
+use super::stop_contacts::{Bearing, BeltFace};
 use crate::Layer;
 
 /// One side's run as a tank kind's track shapes cache it (`bump_stop::TrackColliders`): its
@@ -64,7 +64,7 @@ impl RunShape {
         Self {
             collider: super::bump_stop::across_shoe(geom, side, &outline),
             run: SoftRun::new(&outline, geom.pitch),
-            face: BeltFace::new(side, outline, false),
+            face: BeltFace::new(side, outline, Bearing::Whole),
         }
     }
 

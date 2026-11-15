@@ -1641,7 +1641,10 @@ mod tests {
     /// approach still has a witness. Drivers rely on suspension travel preceding the hard stop.
     #[test]
     fn side_slice_sweeps_admit_lateral_but_not_radial_witnesses() {
-        use crate::track::{side::Side, stop_contacts::BeltFace};
+        use crate::track::{
+            side::Side,
+            stop_contacts::{Bearing, BeltFace},
+        };
         use avian3d::prelude::{GravityScale, LinearVelocity, Mass, NoAutoMass};
         use bevy::ecs::system::RunSystemOnce;
 
@@ -1694,7 +1697,7 @@ mod tests {
                                 Vec2::new(0.1, 0.1),
                                 Vec2::new(-0.1, 0.1),
                             ],
-                            true,
+                            Bearing::Exposed(-1.0),
                         ),
                     ))
                     .id();

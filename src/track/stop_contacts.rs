@@ -23,7 +23,19 @@ use crate::contact_transfer::ContactTransfers;
 pub(crate) struct BeltFace {
     pub(crate) side: Side,
     outline: Arc<[Vec2]>,
-    lateral_only: bool,
+    bears: Bearing,
+}
+
+/// Which of its collider's contacts a moving face bears.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Bearing {
+    /// Every contact: a stop or a run.
+    Whole,
+    /// A side slice: only contact leaving through its one exposed face, the shoe's true lateral
+    /// face, which looks along this sign of the hull's x. Its other lateral face lies inside the
+    /// shoe's width and is no surface: matter that reaches it came in through the belt's outer
+    /// face, which the stop and the sampled support own.
+    Exposed(f32),
 }
 
 /// Resolution: tolerance for unit-normal components after hull-frame rotation. It separates
@@ -31,7 +43,7 @@ pub(crate) struct BeltFace {
 const LATERAL_NORMAL_MIN_X: f32 = 1.0 - 1e-4;
 
 impl BeltFace {
-    pub(crate) fn new(side: Side, mut outline: Vec<Vec2>, lateral_only: bool) -> Self {
+    pub(crate) fn new(side: Side, mut outline: Vec<Vec2>, bears: Bearing) -> Self {
         let first = *outline
             .first()
             .expect("a certified outer shoe outline has points");
@@ -49,13 +61,16 @@ impl BeltFace {
         Self {
             side,
             outline: outline.into(),
-            lateral_only,
+            bears,
         }
     }
 
     /// The represented contact surface in the hull frame, shared by solver and sweep witnesses.
     pub(crate) fn accepts_normal(&self, outward: Vec3) -> bool {
-        !self.lateral_only || outward.x.abs() >= LATERAL_NORMAL_MIN_X
+        match self.bears {
+            Bearing::Whole => true,
+            Bearing::Exposed(sign) => outward.x * sign >= LATERAL_NORMAL_MIN_X,
+        }
     }
 
     /// Positive belt travel in the hull frame. Radial contact follows its plane's tangent;
@@ -113,7 +128,7 @@ impl CollisionHooks for WorldContacts<'_, '_> {
                 .expect("a moving shoe face hangs on its spawn-built driving body");
             contacts
                 .manifolds
-                .retain(|m| face.accepts_normal(rotation.0.inverse() * m.normal));
+                .retain(|m| face.accepts_normal(rotation.0.inverse() * (-sign * m.normal)));
             for manifold in &mut contacts.manifolds {
                 let centre = manifold.points.iter().map(|p| p.point).sum::<Vec3>()
                     / manifold.points.len() as f32;
@@ -233,7 +248,7 @@ mod tests {
     use avian3d::prelude::{ContactManifold, ContactPoint};
     use bevy::ecs::system::RunSystemOnce;
 
-    fn face(side: Side, lateral: bool) -> BeltFace {
+    fn face(side: Side, bears: Bearing) -> BeltFace {
         // Fixture: a square outer outline, bottom traversed toward +z.
         BeltFace::new(
             side,
@@ -243,7 +258,7 @@ mod tests {
                 Vec2::new(1.0, 1.0),
                 Vec2::new(-1.0, 1.0),
             ],
-            lateral,
+            bears,
         )
     }
 
@@ -290,7 +305,14 @@ mod tests {
                         .id();
                     let shoe = world
                         .spawn((
-                            face(Side::Left, lateral),
+                            face(
+                                Side::Left,
+                                if lateral {
+                                    Bearing::Exposed(outward.x.signum())
+                                } else {
+                                    Bearing::Whole
+                                },
+                            ),
                             Transform::IDENTITY,
                             ColliderOf { body },
                         ))
@@ -354,7 +376,7 @@ mod tests {
             .id();
         let shoe = world
             .spawn((
-                face(Side::Left, true),
+                face(Side::Left, Bearing::Exposed(-1.0)),
                 Transform::IDENTITY,
                 ColliderOf { body },
             ))
@@ -373,6 +395,62 @@ mod tests {
             .unwrap();
     }
 
+    /// A side slice bears only through its exposed face, the shoe's own. Matter the belt rides
+    /// over reaches through the slice, and a convex pair's one normal then leaves it by whichever
+    /// lateral face is nearer: by the inner one, inside the shoe's width, the contact would shove
+    /// the shoe sideways out of matter it stands on. The sweep's witnesses rely on the same
+    /// admission (`construction::sweep::source`). Fails if a slice admits a lateral normal of
+    /// either sign, or reads the pair's normal without its collider's order in the pair.
+    #[test]
+    fn a_side_slice_bears_only_through_its_exposed_face() {
+        for (outward, bears) in [(-Vec3::X, true), (Vec3::X, false)] {
+            for first in [false, true] {
+                let mut world = World::new();
+                world.init_resource::<Time<Fixed>>();
+                let body = world
+                    .spawn((
+                        TrackDrive::default(),
+                        Position::default(),
+                        Rotation::default(),
+                        Transform::IDENTITY,
+                    ))
+                    .id();
+                let shoe = world
+                    .spawn((
+                        face(Side::Left, Bearing::Exposed(-1.0)),
+                        Transform::IDENTITY,
+                        ColliderOf { body },
+                    ))
+                    .id();
+                let other = world.spawn_empty().id();
+                let (mut pair, normal) = if first {
+                    (
+                        ContactPair::new(shoe, other, ContactId::PLACEHOLDER),
+                        outward,
+                    )
+                } else {
+                    (
+                        ContactPair::new(other, shoe, ContactId::PLACEHOLDER),
+                        -outward,
+                    )
+                };
+                pair.manifolds.push(ContactManifold::new(
+                    [ContactPoint::new(Vec3::ZERO, Vec3::ZERO, -Vec3::Y, 0.01)],
+                    normal,
+                ));
+                world
+                    .run_system_once(move |hooks: WorldContacts, mut commands: Commands| {
+                        assert_eq!(
+                            hooks.modify_contacts(&mut pair, &mut commands),
+                            bears,
+                            "a normal leaving the slice along {outward}, the slice first: {first}"
+                        );
+                    })
+                    .unwrap();
+            }
+        }
+    }
+
     /// The transmission owes only tangential momentum on its own belt, and the Driver's ledger
     /// feels that friction as the hull received it. Reversing Avian's canonical pair orientation
     /// must preserve both and exclude the normal impulse.
@@ -383,7 +461,7 @@ mod tests {
             let body = world.spawn(Transform::IDENTITY).id();
             let shoe = world
                 .spawn((
-                    face(Side::Right, false),
+                    face(Side::Right, Bearing::Whole),
                     Transform::IDENTITY,
                     ColliderOf { body },
                 ))
