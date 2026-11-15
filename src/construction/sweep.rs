@@ -16,7 +16,7 @@ use crate::contact_law::{Contactor, peak_force, peak_speed};
 
 mod mincut;
 mod source;
-pub(crate) use source::{Hull, RigidMotion, SourceBounds, SourceShape, SourceTree};
+pub(crate) use source::{Hull, RigidMotion, SourceBounds, SourceShape, SourceTree, Surface};
 
 /// The farthest a chunk hull's vertex may lie from its bounds' centre on any axis, m: ADR-0015's
 /// 10 m figure on the support coordinates of the only colliders a sweep casts against, each cast
@@ -1859,7 +1859,11 @@ pub(super) mod tests {
             Bearing::Exposed(1.0),
         );
         let tree = SourceTree::new(vec![Hull {
-            surface: Some(face.clone()),
+            // No driving pass: nothing under the slice has risen.
+            surface: Some(Surface {
+                face: face.clone(),
+                links: Vec::new(),
+            }),
             hull: Collider::cuboid(0.04, 0.2, 0.4),
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,

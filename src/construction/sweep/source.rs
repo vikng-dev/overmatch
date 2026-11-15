@@ -6,10 +6,18 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub(crate) struct Hull {
     /// A collider's contact restriction in the source body's frame; absent on ordinary hulls.
-    pub(crate) surface: Option<crate::track::stop_contacts::BeltFace>,
+    pub(crate) surface: Option<Surface>,
     pub(crate) hull: Collider,
     pub(crate) position: Vec3,
     pub(crate) rotation: Quat,
+}
+
+/// A moving shoe face, with its side's links from the last driving pass
+/// (`crate::track::sim::TrackRise`): a witness admits what the contact hook bears.
+#[derive(Clone, Debug)]
+pub(crate) struct Surface {
+    pub(crate) face: crate::track::stop_contacts::BeltFace,
+    pub(crate) links: Vec<crate::track::forces::LinkRise>,
 }
 
 /// Immutable geometry prepared with a free group's spawn/split, independently of ECS insertion.
@@ -322,9 +330,15 @@ impl QueryTree<'_> {
                 None => continue,
             };
             if let Some(surface) = &leaf.surface {
-                let rotation =
-                    Quat::from_scaled_axis(self.motion.spin * reach) * self.motion.rotation;
-                if !surface.accepts_normal(rotation.inverse() * normal) {
+                let turn = Quat::from_scaled_axis(self.motion.spin * reach);
+                let rotation = turn * self.motion.rotation;
+                // The body's origin at the hit: its COM travels the cast, the spin turns it.
+                let origin = self.motion.centre
+                    + self.motion.velocity * reach
+                    + turn * (self.motion.position - self.motion.centre);
+                if !surface.face.accepts_normal(rotation.inverse() * normal)
+                    || !(surface.face).stands_at(&surface.links, rotation.inverse() * (at - origin))
+                {
                     // An unrepresented surface cannot seed or prune an occupied patch. A
                     // diagonal descent can touch radially before developing lateral contact.
                     // DERIVED: a lateral overlap present at the next tick's start is found by

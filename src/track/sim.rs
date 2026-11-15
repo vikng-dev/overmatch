@@ -46,8 +46,8 @@ use crate::bitprobe::BitprobeCapture;
 
 use super::drive::{DriveAxes, DriveIntent, DriveTarget, shape_drive};
 use super::forces::{
-    BeltContact, ForceParams, GripElements, GripParams, PROBE_REACH, SideInput, SideReport,
-    SideState, contact_side,
+    BeltContact, ForceParams, GripElements, GripParams, LinkRise, PROBE_REACH, SideInput,
+    SideReport, SideState, contact_side,
 };
 use super::oracle::TerrainOracle;
 use super::route::build_route;
@@ -63,6 +63,7 @@ use super::transmission::{
 /// Per-tank belt state: server-authoritative, replicated to every client for the track view
 /// (quantised, `net::wire_quant`). Hashed into the determinism trace (`hblt`).
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
+#[require(TrackRise)]
 pub struct TrackDrive {
     /// Per-side belt state, `[left, right]`.
     pub sides: [TrackDriveSide; 2],
@@ -185,6 +186,14 @@ pub(crate) fn apply_explicit_impulse(mut forces: ForcesItem<'_, '_>, impulse: Ve
 /// support it rests on ([`NotResting`]). Never hashed, never rolled back.
 #[derive(Component, Default)]
 pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
+
+/// The last driving pass's links per side, with the rise under each shoe edge ([`LinkRise`]):
+/// the contact hook drops a side slice's contact in the band its belt has risen out of
+/// (`stop_contacts::BeltFace::stands_at`). Rewritten by every pass; a resting tank keeps its last
+/// pass's, as it keeps its hull pose, belt phase and contacts ([`NotResting`]). Empty before a
+/// pass and where no pass runs: nothing has risen. Never hashed, never rolled back.
+#[derive(Component, Clone, Debug, Default)]
+pub(crate) struct TrackRise(pub(crate) [Vec<LinkRise>; 2]);
 
 /// The contact inputs of one drivetrain step ([`TransmissionInput`]): each belt's reaction and its
 /// slope against its own speed, and the Driver's reading.
@@ -1084,6 +1093,7 @@ struct DriveTank {
     transmission: &'static mut TankTransmission,
     sense: &'static mut super::driver::DriverSense,
     contacts: &'static mut TrackContacts,
+    rise: &'static mut TrackRise,
     last: &'static mut LastPass,
     forces: Option<Forces>,
     volumes: Option<&'static TankVolumes>,
@@ -1479,6 +1489,7 @@ fn apply_track_forces(
                     .apply_force_at_point(app.force, app.point);
             }
             tank.contacts.0[si] = report.contacts;
+            tank.rise.0[si] = report.rise;
         }
         #[cfg(any(test, feature = "bitprobe"))]
         {

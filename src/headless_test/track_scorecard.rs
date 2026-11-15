@@ -2758,15 +2758,17 @@ fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
 /// allowance, DERIVED from constraint work: against a static body a rigid row without bias only
 /// stops approach, so whatever positive work the tank's rows do is the correction's push-out.
 ///
-/// Fixture: the left track climbs a standing sill taller than the bump travel, so the stop
-/// carries the shoe at full travel and the belt's rest face stands the travel deep in the sill.
-/// The sill's outer edge lies under the outboard side slice, which overlaps it sideways by half
-/// the lesser of its thickness and the travel: less than its overlap from above, whatever the
-/// tank. A standing post stands half that sideways overlap off the shoe's outboard face. Both are
-/// on a construction element's layers, which the slices meet. Fails if a slice bears through its
-/// inner face: the pinch and belt runaway of `track-contact.md` (MEASURED: 7.2 MJ in one tick,
-/// against 6.9 kJ at most with the admission, under the engine's 9.1 kJ). It holds here, not yet
-/// everywhere: `track-contact.md` names the cases that still break it.
+/// Fixture: the left shoe comes down between two standing sills taller than the bump travel, each
+/// under one of its edges and running on past that edge's exposed face, so the stop carries the
+/// shoe at full travel on both and each edge's rest face stands the travel deep in its sill. Each
+/// overlaps its side slice sideways by half the lesser of the slice's thickness and the travel:
+/// less than its overlap from above, whatever the tank. Both are on a construction element's
+/// layers, which the slices meet. Fails if a slice bears in the band its belt has vacated: the two
+/// exposed faces' opposed rigid contacts, the pinch of `track-contact.md` (MEASURED: 34 kJ in one
+/// tick, against 6.9 kJ at most with the admission, under the engine's 9.1 kJ). The inner-face
+/// admission (`stop_contacts::Bearing`) is not what holds here: matter at a slice's inner face came
+/// in under the shoe, so it lies in the vacated band. It holds here, not yet everywhere:
+/// `track-contact.md` names what still breaks it.
 #[cfg(feature = "bitprobe")]
 #[test]
 fn a_tank_takes_no_energy_from_standing_matter() {
@@ -2774,9 +2776,10 @@ fn a_tank_takes_no_energy_from_standing_matter() {
     use crate::track::stop_contacts::BeltFace;
     let mut bed = Bed::on_ground(Some(base_ground()), flat());
     let (tank, sign) = (bed.tank, Side::Left.sign());
-    // `u` runs outward from the hull along the left side: the outboard slice's faces, read from
-    // its collider.
-    let (exposed, inner) = {
+    // `u` runs outward from the hull along the left side. Each slice's span, read from its
+    // collider, inboard then outboard: the inboard slice's exposed face is its least `u`, the
+    // outboard's its greatest.
+    let mut slices: Vec<(f32, f32)> = {
         let world = bed.app.world_mut();
         world
             .query_filtered::<(&BeltFace, &Collider, &ChildOf), With<SidePlate>>()
@@ -2791,22 +2794,22 @@ fn a_tank_takes_no_energy_from_standing_matter() {
                     .iter()
                     .map(|p| sign * p.x);
                 (
-                    u.clone().fold(f32::MIN, f32::max),
-                    u.fold(f32::MAX, f32::min),
+                    u.clone().fold(f32::MAX, f32::min),
+                    u.fold(f32::MIN, f32::max),
                 )
             })
-            .max_by(|a, b| a.0.total_cmp(&b.0))
-            .expect("a track carries side slices")
+            .collect()
     };
-    let centre = sign * bed.geom().grip_columns(Side::Left)[1].0;
+    slices.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let [inboard, outboard] = <[_; 2]>::try_from(slices).expect("a track carries two side slices");
     let front = front_z(bed.geom());
     let bump = shipped_spec().track.suspension.params().bump_stop;
-    let overlap = (exposed - inner).min(bump) / 2.0;
-    // Fixture: a sill 1 m long and half again as tall as the travel, half a metre ahead of the
-    // belt; a post 1 m wide and 1.5 m tall.
+    let overlap = (outboard.1 - outboard.0).min(bump) / 2.0;
+    // Fixture: sills 1 m long, half again as tall as the travel and half a metre wide past their
+    // edges, half a metre ahead of the belt.
     let (length, height) = (1.0, 1.5 * bump);
     let z = front - 0.5 - length / 2.0;
-    let mut standing = |from: f32, to: f32, height: f32| {
+    let mut standing = |from: f32, to: f32| {
         let block = bed.spawn_static(
             Vec3::new(sign * (from + to) / 2.0, height / 2.0, z),
             Vec3::new(to - from, height, length),
@@ -2817,8 +2820,10 @@ fn a_tank_takes_no_energy_from_standing_matter() {
             .insert(crate::construction::element_layers());
         block
     };
-    let sill = standing(centre, inner + overlap, height);
-    standing(exposed + overlap / 2.0, exposed + overlap / 2.0 + 1.0, 1.5);
+    let sills = [
+        standing(inboard.0 - 0.5, inboard.0 + overlap),
+        standing(outboard.1 - overlap, outboard.1 + 0.5),
+    ];
     bed.place(Vec3::ZERO, Quat::IDENTITY);
     bed.start();
 
@@ -2843,8 +2848,8 @@ fn a_tank_takes_no_energy_from_standing_matter() {
     };
     // `read`: the solver's bill each belt pays this tick (N); `bill`: its energy at the speeds the
     // solver ran the belt surfaces at (J).
-    let (mut carried, mut read, mut bill) = (false, [0.0_f32; 2], 0.0);
-    // Fixture: 8 s at full pedal, long enough to cross the sill in first gear.
+    let (mut carried, mut read, mut bill, mut most) = (false, [0.0_f32; 2], 0.0, f32::MIN);
+    // Fixture: 8 s at full pedal, long enough to cross the sills in first gear.
     for tick in 0..8 * TICKS {
         let (before, com, held) = (bed.hull(), bed.center_of_mass(), energy(&bed));
         bed.tick(1.0, 0.0);
@@ -2876,17 +2881,18 @@ fn a_tank_takes_no_energy_from_standing_matter() {
         let charge = (read[0] * probe.next_speeds[0] + read[1] * probe.next_speeds[1]) * DT;
         let excess = energy(&bed) - held - (gravity + support - paid + rows) * DT - charge + bill;
         bill = charge;
-        carried |= bed
-            .touching_colliders(sill)
-            .iter()
-            .any(|role| role.starts_with("bump stop"));
+        most = most.max(excess);
+        carried |= sills.iter().all(|&sill| {
+            (bed.touching_colliders(sill).iter()).any(|role| role.starts_with("bump stop"))
+        });
         assert!(
             excess <= engine,
             "tick {tick}: the tank gained {excess} J beyond the work of gravity, its support and \
              the solver's normal rows, over the {engine} J its engine can do"
         );
     }
-    assert!(carried, "the stop never carried the shoe on the sill");
+    println!("MEASURED the most gained in a tick: {most} J, against the engine's {engine} J");
+    assert!(carried, "the stop never carried the shoe on both sills");
 }
 
 /// One broad heavy slab under the whole tank, the tank settled a second on it. Fixture.

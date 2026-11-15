@@ -561,6 +561,16 @@ impl ReactionSlope {
     }
 }
 
+/// One link's rest outer face, hull-local `(z, y)` in metres, and how far the matter its support
+/// samples under each shoe edge stands inside that face, inboard then outboard (m, at least
+/// zero): the band the belt there has risen out of. An edge's matter is its column's: the field
+/// at its edge probes and the solids over its strip, deepest along the link, which is rigid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LinkRise {
+    pub(crate) face: [Vec2; 2],
+    pub(crate) rise: [f32; 2],
+}
+
 /// What one side's tick produced.
 #[derive(Default)]
 pub struct SideReport {
@@ -580,6 +590,8 @@ pub struct SideReport {
     /// The rolling resistance its contacts apply to a hull travelling forward past the fade
     /// (N, world): each contact's [`BeltContact::rolling_force`] unfaded, `-long_dir r N`.
     pub rolling_budget: Vec3,
+    /// Every link with a footprint, in station order: a hull-fixed face rises zero.
+    pub(crate) rise: Vec<LinkRise>,
     /// Material-station depth probes; surface quadrature casts are not recorded.
     #[cfg(feature = "bitprobe")]
     pub(crate) bitprobe_contacts: Vec<ContactInputProbe>,
@@ -922,6 +934,11 @@ fn collect_column_contacts<O: TerrainOracle>(
         }
         let tan2 = seg / len;
         let out2 = Vec2::new(tan2.y, -tan2.x);
+        let link = report.rise.len();
+        report.rise.push(LinkRise {
+            face: [a, b].map(|pin| pin + out2 * params.face_offset),
+            rise: [0.0; 2],
+        });
 
         let wa = affine.transform_point3(Vec3::new(input.plane_x, a.y, a.x));
         let wb = affine.transform_point3(Vec3::new(input.plane_x, b.y, b.x));
@@ -954,11 +971,11 @@ fn collect_column_contacts<O: TerrainOracle>(
             travel: travel.into_iter().fold(0.0_f32, f32::max),
         };
         slabs.push(slab);
-        links.push((i, travel, tan2, wb));
+        links.push((i, travel, tan2, wb, link));
     }
     let overlaps = pieces.in_slabs(&slabs);
     let mut partition = super::world_contact::convex::PartitionScratch::default();
-    for ((slab, (i, travel, tan2, wb)), overlaps) in slabs.iter().zip(links).zip(overlaps) {
+    for ((slab, (i, travel, tan2, wb, link)), overlaps) in slabs.iter().zip(links).zip(overlaps) {
         let (wa, axis, out) = (slab.origin, slab.axis, slab.out);
         // A global facet-gradient bound can reject terrain without sampling it. Solids still
         // query the whole outline, and analytic ceilings retain their contact.
@@ -1033,6 +1050,13 @@ fn collect_column_contacts<O: TerrainOracle>(
             let ascending = samples[0].0 < samples[samples.len() - 1].0;
             let strip = column_strip(lateral, (share, weight), ascending);
             share += weight;
+            if let Some(edge) = [0, samples.len() - 1].iter().position(|&e| e == ci) {
+                // `pen` reads from the droop envelope, `travel` outside the rest face.
+                let field = (0..3).map(|k| pen[k] - travel[k]);
+                let solids = (overlaps.iter().flat_map(|hit| &hit.faces))
+                    .filter_map(|face| face.deepest(strip, slab.len));
+                report.rise[link].rise[edge] = field.chain(solids).fold(0.0, f32::max);
+            }
             for patch in patches(
                 PatchQuery {
                     slab,
@@ -1751,6 +1775,73 @@ mod tests {
             report.contacts.is_empty(),
             "a zero-travel return face is carried by its rigid collider"
         );
+    }
+
+    /// Each shoe edge rises by its own column's intrusion past the rest outer face, never below
+    /// zero, and a face without suspension travel rises not at all: the contact hook bounds the
+    /// band a side slice's belt has vacated with it (`stop_contacts::BeltFace::stands_at`).
+    /// Fixture: ground rolled across the shoe, below the rest face at the inboard edge and above
+    /// it at the outboard. Fails if an edge reads another column, the envelope's depth for the
+    /// rest face's, or a negative intrusion, or if the return run or its ends rise.
+    #[test]
+    fn each_shoe_edge_rises_by_its_own_columns_intrusion() {
+        struct RolledGround;
+        impl DepthOracle for RolledGround {
+            fn depth_along(&self, station: Vec3, _out: Vec3, reach: f32) -> f32 {
+                (0.1 * station.x - station.y).min(reach)
+            }
+        }
+        impl ContactOracle for RolledGround {
+            fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
+                if out.y >= 0.0 {
+                    return TerrainContact::Miss;
+                }
+                TerrainContact::Hit {
+                    depth: self.depth_along(station, out, reach),
+                    normal: bevy::math::Dir3::Y,
+                }
+            }
+        }
+        let params = rig_params();
+        let loop_pts = rect_loop(0.02);
+        let rest = 0.02 - params.face_offset;
+        let report = contact_side(
+            &SideInput {
+                loop_pts: &loop_pts,
+                count: 25,
+                plane_x: 0.0,
+                columns: TEST_COLUMNS.into(),
+                travel: TravelField { knots: &PAD_TRAVEL },
+            },
+            SideState::default(),
+            Affine3A::IDENTITY,
+            1.0 / 64.0,
+            &params,
+            &RolledGround,
+            &RubbleBodies::default(),
+            |_| Vec3::ZERO,
+            &mut GripElements::for_stations(25, 3),
+        );
+        let edges = [TEST_COLUMNS[0].0, TEST_COLUMNS[2].0];
+        let bottom = edges.map(|x| (0.1 * x - rest).max(0.0));
+        assert!(
+            bottom[0] == 0.0 && bottom[1] > 0.0,
+            "the fixture rises one edge"
+        );
+        let mut risen = 0;
+        for link in &report.rise {
+            let on_bottom = link.face.iter().all(|p| (p.y - rest).abs() < 1e-6);
+            let expected = if on_bottom { bottom } else { [0.0; 2] };
+            risen += usize::from(on_bottom);
+            for (edge, (rise, expected)) in link.rise.iter().zip(expected).enumerate() {
+                assert!(
+                    (rise - expected).abs() < 1e-6,
+                    "link {:?} edge {edge}: rise {rise} against {expected}",
+                    link.face
+                );
+            }
+        }
+        assert!(risen > 0, "no link lies on the bottom run");
     }
 
     /// The rigid face owns zero-travel contact. Driving must neither double its load nor

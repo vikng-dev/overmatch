@@ -345,6 +345,7 @@ pub(super) struct Intake<'w, 's> {
     bodies: Bodies<'w, 's>,
     drives: Drives<'w, 's>,
     colliders: Hulls<'w, 's>,
+    rises: Query<'w, 's, &'static crate::track::sim::TrackRise>,
     /// The bodies that can be sources. Standing constructions and sleeping bodies never are:
     /// leaving them out by archetype lets default batching follow the awake movers, not the
     /// static population.
@@ -614,6 +615,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
         ref constructions,
         ref bodies,
         ref colliders,
+        ref rises,
         ref movers,
         ref drives,
         ref spatial,
@@ -702,7 +704,14 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                     None => Arc::new(super::super::sweep::SourceTree::new(
                         admitted()
                             .map(|(hull, local, surface)| super::super::sweep::Hull {
-                                surface: surface.cloned(),
+                                surface: surface.map(|face| super::super::sweep::Surface {
+                                    face: face.clone(),
+                                    links: rises
+                                        .get(body_entity)
+                                        .expect("a moving shoe face hangs on its driving body")
+                                        .0[face.side.index()]
+                                    .clone(),
+                                }),
                                 hull: hull.clone(),
                                 position: local.translation,
                                 rotation: local.rotation.0,
@@ -1637,12 +1646,16 @@ mod tests {
     }
 
     /// The game's environment destruction: a sweep must admit the same surfaces as the contact
-    /// hook. Standing matter gets no rigid demand from a side slice's radial face; lateral
-    /// approach still has a witness. Drivers rely on suspension travel preceding the hard stop.
+    /// hook. Standing matter gets no rigid demand from a side slice's radial face, nor from its
+    /// lateral face in the band its belt has vacated; lateral approach elsewhere still has a
+    /// witness, whatever the other edge's rise. Drivers rely on suspension travel preceding the
+    /// hard stop. Fails if the sweep ignores the rise or reads it at the wrong edge.
     #[test]
     fn side_slice_sweeps_admit_lateral_but_not_radial_witnesses() {
         use crate::track::{
+            forces::LinkRise,
             side::Side,
+            sim::{TrackDrive, TrackRise},
             stop_contacts::{Bearing, BeltFace},
         };
         use avian3d::prelude::{GravityScale, LinearVelocity, Mass, NoAutoMass};
@@ -1657,10 +1670,16 @@ mod tests {
                 ..default()
             };
             let mut owner = Breakage::new(kind.clone(), 0);
-            for (position, velocity, lateral) in [
-                (Vec3::new(0.0, 4.0, 0.0), Vec3::NEG_Y * 2.0, false),
-                (Vec3::new(1.0, 2.5, 0.0), Vec3::NEG_X * 2.0, true),
+            // Fixture: the slice's rest outer face along its outline's bottom, and a rise past
+            // the slice's whole height under the edge of its exposed face, or under the other.
+            let (risen, other) = ([0.0, 1.0], [1.0, 0.0]);
+            for (position, velocity, rise, witnessed) in [
+                (Vec3::new(0.0, 4.0, 0.0), Vec3::NEG_Y * 2.0, [0.0; 2], false),
+                (Vec3::new(1.0, 2.5, 0.0), Vec3::NEG_X * 2.0, [0.0; 2], true),
+                (Vec3::new(1.0, 2.5, 0.0), Vec3::NEG_X * 2.0, risen, false),
+                (Vec3::new(1.0, 2.5, 0.0), Vec3::NEG_X * 2.0, other, true),
             ] {
+                let lateral = velocity.y == 0.0;
                 let mut app = booted_driving_grid(driving_plane(0.0));
                 start_fixed_clock(&mut app);
                 let root = crate::construction::spawn(
@@ -1699,6 +1718,14 @@ mod tests {
                             ],
                             Bearing::Exposed(-1.0),
                         ),
+                        TrackDrive::default(),
+                        TrackRise([
+                            vec![LinkRise {
+                                face: [Vec2::new(-0.1, -0.1), Vec2::new(0.1, -0.1)],
+                                rise,
+                            }],
+                            Vec::new(),
+                        ]),
                     ))
                     .id();
                 app.update();
@@ -1715,11 +1742,12 @@ mod tests {
                 let swept = &sweeps[0].1;
                 assert_eq!(
                     swept.witness.is_some(),
-                    lateral,
-                    "only the side slice's eligible surface can seed rigid demand: {:?}",
+                    witnessed,
+                    "only the side slice's eligible surface can seed rigid demand, rise {rise:?}: \
+                     {:?}",
                     swept.witness
                 );
-                assert_eq!(swept.verdict.is_some(), lateral);
+                assert_eq!(swept.verdict.is_some(), witnessed);
                 if !lateral {
                     // Fixture: a full-surface compression stop half a metre behind the side slice.
                     // Rejecting the earlier radial hit must leave this later valid witness visible.
