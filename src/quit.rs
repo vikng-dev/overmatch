@@ -28,9 +28,16 @@ use bevy::prelude::*;
 ///
 /// The headless server has no render app and no application menu, so there is nothing here for it
 /// to do; it is the one root that does not mount this.
-pub(crate) fn plugin(_app: &mut App) {
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(
+        unused_variables,
+        reason = "only macOS has an application-menu quit route"
+    )
+)]
+pub(crate) fn plugin(app: &mut App) {
     #[cfg(target_os = "macos")]
-    _app.add_plugins(terminate::TerminateRoute);
+    app.add_plugins(terminate::TerminateRoute);
 }
 
 /// The macOS `Cmd+Q` half: teach winit's application delegate to ANSWER the terminate request, and

@@ -21,8 +21,8 @@
 //! gouge lies along the shot. [`dress_surface`], the render half, gives the surface its
 //! `ForwardDecal` and its material, shared per (kind, variant, substance response).
 //!
-//! # What the forward decal cannot do (DERIVED from bevy_pbr 0.19's `forward.rs` and
-//! `forward_decal.wesl`)
+//! # What the forward decal cannot do (DERIVED from bevy_pbr 0.20.1's `decal/forward.rs` and
+//! `decal/forward.wesl`)
 //!
 //! It is an overlay: `AlphaMode::Blend`, no shadows, depth test `Always`. It is lit with the quad's
 //! normal, not the hull's, and cannot cut a real hole (issue 124's step 2 moves the profile into

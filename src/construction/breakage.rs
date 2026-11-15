@@ -1953,7 +1953,7 @@ fn apply_deposits(mut p: DepositParam) {
                 .batching_strategy(bevy::ecs::batching::BatchingStrategy::fixed(1))
                 .for_each(|candidate| {
                     let (root, transform, mut breakage, piece) = candidate.expect(
-                        "a deposit names a construction that is live when its deposits apply",
+                        "sweep_intake queues changed roots for LawSet in the same tick, before retirement",
                     );
                     let taken = &batch[&root];
                     let construction = breakage.physics_frame(transform);

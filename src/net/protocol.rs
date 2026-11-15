@@ -1294,7 +1294,7 @@ mod tests {
                 },
             ],
         };
-        // What this does NOT pin: WHICH fn is registered. Lightyear 0.30 keeps a rule's
+        // What this does NOT pin: WHICH fn is registered. Lightyear 0.31 keeps a rule's
         // interpolation fn crate-private, so a swap to `.add_linear_interpolation()` at the
         // registration would still pass here. This pins that TrackDrive is interpolated at all
         // (above) and the law `track_drive_lerp` computes (below).

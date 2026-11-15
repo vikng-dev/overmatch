@@ -11,19 +11,19 @@
 //! kinetic energy per mass is below the linear rest-speed energy (see the vendor's
 //! `OVERMATCH_PATCH.md`). A sleeping body leaves the solver and keeps its mass, so what touches it
 //! next meets finite mass. Only its touching contact pairs move to the sleeping set the narrow
-//! phase skips (`collision/contact_types/contact_graph.rs:797`); a pair that overlaps in bounds
-//! without touching stays active and is recomputed every tick
-//! (`collision/narrow_phase/system_param.rs:480`). A sleeping island of pieces alone that rests on
-//! fixed matter turns static, and turns dynamic again before anything can touch it or as its
-//! support changes ([`freeze`]). An awake body that starts touching a sleeping one wakes its whole island
-//! (`collision/narrow_phase/system_param.rs:247-261`), as does a body or a body's collider of that
-//! island going (`collision/narrow_phase/mod.rs:484,528`). An island sleeps whole: a piece touching
-//! an awake body that is no piece (a driven tank) shares its island and stays awake while it
-//! touches, with every piece that touches it in turn. A tank's sampled support is applied without
-//! the waking force call (`dynamics/rigid_body/forces/query_data.rs:153,797`); its driving pass
-//! alone judges whether it rests (`track::sim::apply_track_forces`), so a parked tank rests with
-//! its pile whatever carries it, and drive demand or a drivetrain step that no longer holds its
-//! belts ends that rest (`track::sim::wake_driven_tanks`).
+//! phase skips (`dynamics/solver/islands/sleeping.rs`, `sleep_islands`); a pair that overlaps in
+//! bounds without touching stays active and its inputs are checked every tick
+//! (`collision/narrow_phase/system_param.rs`, `update_contacts`). A sleeping island of pieces alone
+//! that rests on fixed matter turns static, and turns dynamic again before anything can touch it
+//! or as its support changes ([`freeze`]). An awake body that starts touching a sleeping one queues
+//! its island's wake at solver start (`dynamics/solver/plugin.rs`, `apply_contact_status_changes`),
+//! as does a body or a body's collider of that island going (`collision/narrow_phase/mod.rs`,
+//! `remove_body_on`, `remove_collider_on`). An island sleeps whole: a piece touching an awake body
+//! that is no piece (a driven tank) shares its island and stays awake while it touches, with every
+//! piece that touches it in turn. A tank's sampled support uses `Forces::non_waking`
+//! (`dynamics/rigid_body/forces/query_data.rs`); its driving pass alone judges whether it rests
+//! (`track::sim::apply_track_forces`), so a parked tank rests with its pile whatever carries it,
+//! and drive demand or a drivetrain step that no longer holds its belts ends that rest (`track::sim::wake_driven_tanks`).
 //!
 //! THE WAKES AVIAN LACKS. Avian wakes no body when a support with no dynamic body of its own goes,
 //! is disabled or moves (the TODO in `collision/narrow_phase/mod.rs`, `remove_collider`), so a

@@ -4196,8 +4196,8 @@ fn prepare_mesh_bind_groups_for_phase(
 
                 _ => {
                     error!(
-                        "Mismatched render morph target allocator and mesh morph target bind groups"
-                    );
+                    "Mismatched render morph target allocator and mesh morph target bind groups"
+                );
                 }
             }
         }

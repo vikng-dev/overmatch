@@ -178,9 +178,10 @@ impl CollisionHooks for WorldContacts<'_, '_> {
                 .expect("a moving shoe face hangs on its spawn-built driving body");
             // A resting tank's band may be stale (`TrackRise`). Past the construction sweep's
             // filter, the hook runs for each fresh candidate (recycling is disabled by the shared
-            // physics policy). NarrowPhaseSystems::Update's ParallelCommands flush before the
-            // solver: removing Sleeping queues WakeBody through its on-remove hook, waking the
-            // island before solver bodies and constraints prepare, whatever face filtering keeps.
+            // physics policy). NarrowPhaseSystems::Update's ParallelCommands flush at the automatic
+            // ApplyDeferred sync point before PhysicsStepSystems::Solver: removing Sleeping
+            // queues WakeBody through its on-remove hook, waking the island before solver bodies
+            // and constraints prepare, whatever face filtering keeps.
             let moves = |body: Entity| {
                 let (body, rests) = self.bodies.get(body).expect(
                     "a contact's body keeps its `RigidBody`: Avian drops its pairs with it",

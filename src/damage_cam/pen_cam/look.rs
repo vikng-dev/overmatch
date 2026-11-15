@@ -627,7 +627,7 @@ pub fn own(
                         scale_factor: scale,
                     }),
                     Hdr,
-                    Tonemapping::Linear,
+                    Tonemapping::None,
                     DebandDither::Disabled,
                     Msaa::Off,
                     Projection::Perspective(default()),
@@ -2587,7 +2587,7 @@ mod tests {
     /// reviewed WESL interfaces and the algorithms their CPU mirrors implement.
     const SHADER_PINS: [(&str, &str, u64); 33] = [
         ("pen_cam_look.wesl", "mode", 0xd884_58c8_42c2_833e),
-        ("pen_cam_look.wesl", "vertex", 0x90aa_409d_e733_6a87),
+        ("pen_cam_look.wesl", "vertex", 0x1118_5abc_fdb3_7653),
         ("pen_cam_look.wesl", "mask_at", 0x1d10_776f_dc3c_0e87),
         ("pen_cam_look.wesl", "orthographic", 0xd848_4040_5cc7_bf5b),
         ("pen_cam_look.wesl", "eye_depth", 0x959c_ebcc_5e07_ea9e),

@@ -57,7 +57,7 @@ struct RestFrame {
 // (`src/tank_surface.rs`). A surface waiting for its maps binds nothing there, so this is bevy's
 // clamping fallback, but its flags are 0 and nothing below samples through it. Every sampler a
 // material declares counts against the 16 a stage gets (MEASURED: wgpu's default
-// `max_samplers_per_shader_stage`, wgpu-types 29 `limits.rs`).
+// `max_samplers_per_shader_stage`, wgpu-types 30 `limits.rs`).
 @group(MATERIAL_BIND_GROUP) @binding(102) var surface_sampler: sampler;
 @group(MATERIAL_BIND_GROUP) @binding(103) var visual_normal: texture_2d<f32>;
 @group(MATERIAL_BIND_GROUP) @binding(104) var visual_arm: texture_2d<f32>;

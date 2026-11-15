@@ -341,7 +341,11 @@ impl AvianDiagnostics<'_, '_> {
                     ..constraints.len() * (worker + 1) / workers]
                 {
                     let Some((_, pair)) = graph.get_by_id(constraint.contact_id) else {
-                        continue; // Retirement can remove the pair before this post-step census.
+                        // Retirement removes pairs before this post-step census, so the
+                        // degree excludes their surviving dynamic partners on retirement ticks.
+                        // Solver indices cannot recover them: retirement swap-removes bodies
+                        // (`avian3d` 0.8.0 `solver_body/plugin.rs`, `remove_solver_body_inner`).
+                        continue;
                     };
                     for body in [pair.body1, pair.body2].map(|body| {
                         body.expect("a prepared constraint retains both rigid-body owners")
