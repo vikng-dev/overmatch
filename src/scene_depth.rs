@@ -74,6 +74,7 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 /// pass, and no prepass draws (module doc). Requires `DepthPrepass`, the component the readers'
 /// bindings key on.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
+#[extract_app(RenderApp)]
 #[require(DepthPrepass)]
 pub(crate) struct MainPassDepth;
 

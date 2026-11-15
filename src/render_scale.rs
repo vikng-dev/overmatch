@@ -145,6 +145,7 @@ const MIN_SCALE: f32 = 0.25;
 /// replicated, never part of a command, never read by the sim** — it is a view-layer number in the
 /// ADR-0014 sense, and two players at different render scales must see the same battle.
 #[derive(Resource, Clone, Copy, PartialEq, Debug, ExtractResource)]
+#[extract_app(RenderApp)]
 pub(crate) struct RenderScale(pub(crate) f32);
 
 impl Default for RenderScale {
@@ -179,6 +180,7 @@ impl RenderScale {
 /// pen cam's inset and its mask cameras, whose images are sampled against one another pixel for
 /// pixel, so one scaled alone would misregister them.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
+#[extract_app(RenderApp)]
 pub(crate) struct NativeResolution;
 
 /// The resource + the render-app half. Mounted BY `settings::plugin`, not beside it: `apply_settings`
