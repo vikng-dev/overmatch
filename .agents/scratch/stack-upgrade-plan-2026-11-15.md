@@ -328,7 +328,7 @@ row-5 check. The wake hook, if the pass fails, adds about half a bay-day.
   returns `Result`), `ShaderBuffer` constructors, wgpu 30, and an explicit `.before`/`.after` on
   the two `Res<RenderQueue>` uploads (`track_prints/upload.rs`, `pen_cam/picture.rs`) now that
   render sets order weakly.
-- Pen-cam `Tonemapping::None` becomes `Tonemapping::Linear` (question F5), which is 0.19's meaning.
+- The game's damage-model depth masks keep `Tonemapping::None`: both 0.19.1 and 0.20.1 skip the pass (`bevy_core_pipeline/src/tonemapping/node.rs:46`, DERIVED).
 - **Checkpoint (not green):** the vendored `bevy_pbr` builds standalone against Bevy 0.20.1; no
   `.wgsl` with `#import`, `#ifdef` or `#{..}` remains; no compiler error in owned files at the
   current frontier. The real gate is at B5: `scripts/render/verify-shader-compile.sh`, then the
@@ -434,7 +434,7 @@ Emergent numbers that moved are observations for the owner, not regressions and 
 | Upstream's parallel floors (#1035) replace patch 18 | Timing only: small loops may go parallel or serial at different sizes | Measured in D2 |
 | Patch 7 and patch 16 replaced by upstream's versions | Margin clamp: equal by reading. Moved list: a second entry is ignored, no panic | None |
 | glam 0.33, parry 0.31, obvhs 0.4 (now under `scalar-math`) | Last-bit differences everywhere; tree shapes | None |
-| `Tonemapping::None` meaning (Bevy scout) | Pen-cam picture, unless set to `Linear` | F5 |
+| `Tonemapping::None` skips the pass on both versions | The game's damage-model depth masks keep `None` | F5, settled |
 | Weakly ordered render sets (Bevy scout) | A texture one frame late, if an upload lost its order | Explicit ordering in B3 |
 
 **Agent-compared, in the report:** scorecard lines and probes; `pile_park` physics microseconds
@@ -613,9 +613,8 @@ Each is phrased so that "yes" accepts the recommendation. Most consequential fir
 4. **Do the guards of dropped patches (4, 7, 16) stay, as tests of upstream behaviour we rely
    on?** Recommended: they are the tripwire on the next rebase. The one that asserted our panic
    in patch 16 is rewritten or deleted.
-5. **Does the pen-cam switch to `Tonemapping::Linear`, which is what `None` meant on 0.19?**
-   Recommended: same picture, no decision by accident. Still open after my reading: it is a
-   choice of look.
+5. **Settled: the game's damage-model depth masks keep `Tonemapping::None`.** Both versions
+   skip the pass; `Linear` would add one. See B3's source citation.
 6. **Does the heightfield shadow stay a `bevy_pbr` fork through this cutover, with its move to
    per-material sampling measured afterwards (D4)?** Recommended: one more variable in the render
    pass is not worth it now. Still open: the fork is the costliest vendored item at every Bevy
@@ -654,9 +653,10 @@ Labels: `epic`
 > - The belt fix (#353) follows the upgrade as its own change, as friction rows the game owns. (#353)
 > - Contact reduction and belt friction both run on unpatched Avian 0.8.0 (prototyped). (#T2, #T3)
 >
+> - The game's damage-model mask tonemapping is settled: `None` skips the pass on both versions.
+>
 > **Not yet specified**
 > - Whether dynamic bodies opt into speculative contacts at the cutover.
-> - The pen-cam's tonemapping after `Tonemapping::None` changed meaning.
 > - Whether the heightfield shadow stays a `bevy_pbr` fork.
 >
 > **Out of scope.** Bevy 0.21. Adopting new Bevy features (schedule shuffle seeds, weak chains,

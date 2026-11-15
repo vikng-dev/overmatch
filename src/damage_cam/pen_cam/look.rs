@@ -627,7 +627,7 @@ pub fn own(
                         scale_factor: scale,
                     }),
                     Hdr,
-                    Tonemapping::Linear,
+                    Tonemapping::None,
                     DebandDither::Disabled,
                     Msaa::Off,
                     Projection::Perspective(default()),

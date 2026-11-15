@@ -1880,6 +1880,23 @@ mod tests {
         }
     }
 
+    /// The game's damage-model view reads mask depths directly; a tone-mapping pass
+    /// would transform those values before the look shader samples them.
+    #[test]
+    fn mask_depth_cameras_bypass_tonemapping() {
+        use super::super::look::MaskCamera;
+        use bevy::core_pipeline::tonemapping::Tonemapping;
+
+        let (mut app, _, _, _) = world_xray_app();
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        let world = app.world_mut();
+        let mut cameras = world.query_filtered::<&Tonemapping, With<MaskCamera>>();
+        let modes: Vec<_> = cameras.iter(world).copied().collect();
+        assert_eq!(modes.len(), 2, "the viewer owns both depth masks");
+        assert!(modes.iter().all(|mode| *mode == Tonemapping::None));
+    }
+
     /// A corner that needs masks opening while the x-ray is on: two mask sets, each on its own
     /// viewer, their images distinct, and every mesh the x-ray dresses masked by the player's
     /// camera's set and no other; the corner's close releases its own and the x-ray keeps the
