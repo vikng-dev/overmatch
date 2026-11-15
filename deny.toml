@@ -15,9 +15,6 @@ features = ["dev_ui", "bitprobe"]
 # its warn level is set on the command line (`-W unmaintained`), in CI and locally alike.
 yanked = "warn"
 unmaintained = "all"
-ignore = [
-    { id = "RUSTSEC-2026-0344", reason = "ruzstd 0.8 is pinned by bevy_image 0.19, which decodes only our own shipped KTX2 textures with it" },
-]
 
 [licenses]
 # Exactly the licenses the dependency tree uses (`cargo deny list -l license`); a new one fails
