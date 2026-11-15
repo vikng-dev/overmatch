@@ -1,0 +1,27 @@
+// A capture plan (`dev_capture::plan::CapturePlan`), the game's damage-model view (game state
+// only): `example.ron`'s shot at the house wall nearest the map's centre, framed in the second
+// after the strike, while the impact's sprites (`vfx_billboard.wgsl`) and the round's flight smoke
+// (`vfx_trail.wgsl`) are still on screen. From the checkout root, hidden and silent under the
+// machine's build lock:
+//
+//   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_UNATTENDED=1 \
+//     OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/impact-vfx.ron \
+//     target/debug/overmatch --offline
+//
+// writes target/capture/impact-vfx-<second>.png at each frame second, then exits. The fixed frame
+// step makes the frames land on the same sprites every run (the capture seeds the view RNG). Times,
+// size and step are capture configuration (ASSUMED), not game data.
+(
+    frames: (
+        out: "target/capture/impact-vfx.png",
+        at: [10.05, 10.1, 10.3, 11.0],
+        size: (1280, 720),
+        scale_factor: 1.0,
+        ui: false,
+        gizmos: false,
+        step_s: 0.015625,
+    ),
+    wall: (
+        shots: [Round(round: "88mm_AP", at: 10.0)],
+    ),
+)

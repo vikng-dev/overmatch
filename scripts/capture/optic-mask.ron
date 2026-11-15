@@ -1,0 +1,16 @@
+// A capture plan (`dev_capture::plan::CapturePlan`): `surroundings/p2-sight.ron`'s gunner optic
+// with the UI drawn, so the optic's surround (`sight::reticle`, a UI material node,
+// `optic_mask.wgsl`) rings the glass. With `ui: false`, as in the surroundings plans, the UI pass
+// and the mask with it are not drawn. The optic opens two seconds before the first frame, at 10 s.
+// The glass sits on the gun's sight line, and the gun is still traversing to the camera's aim for
+// some seconds after that: at 12 s the glass is off the frame and the surround fills it, at 30 s
+// the glass is centred (MEASURED, one run). From the checkout root, hidden and silent under the
+// machine's build lock:
+//
+//   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_START=599.9,-599.9,195 \
+//     OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 \
+//     OVERMATCH_CAPTURE=scripts/capture/optic-mask.ron target/debug/overmatch --offline
+//
+// writes target/capture/optic-mask-<second>.png at each frame second, then exits. Pose, times,
+// size and step are capture configuration (ASSUMED), not game data.
+(frames: (out: "target/capture/optic-mask.png", at: [12.0, 30.0], size: (1280, 720), scale_factor: 1.0, ui: true, gizmos: false, sight: true, step_s: 0.015625))
