@@ -79,8 +79,8 @@ its parameters are. The two nursery lints were enabled on their findings, MEASUR
 `nursery`, `restriction` and `cargo` stay off. (VERIFIED against the clippy lint index — §E.)
 
 **cargo-deny** (`deny.toml`, job `deny`): a vulnerability advisory fails; an unmaintained or yanked
-crate warns; a license outside the allow-list fails; a second glam outside the audited split fails
-(the same rule `src/tests/determinism_deps.rs` asserts; the two must agree); an unknown registry or
+crate warns; a license outside the allow-list fails; a second glam fails (the same rule
+`src/tests/determinism_deps.rs` asserts; the two must agree); an unknown registry or
 git source fails. Mutation testing (`.github/workflows/mutants.yml`) is an on-demand instrument,
 never a gate.
 

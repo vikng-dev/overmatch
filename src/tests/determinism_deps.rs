@@ -20,7 +20,7 @@ struct Package {
     dependencies: Vec<String>,
 }
 
-/// Parse Cargo.lock's stable v3 format: `[[package]]` blocks with `name`, `version`, and an
+/// Parse Cargo.lock (lock format 4): `[[package]]` blocks with `name`, `version`, and an
 /// optional `dependencies = [ ... ]` list whose entries are `"name"` or `"name version"` (the
 /// qualified form appears exactly when multiple versions of `name` exist in the graph).
 fn parse_lock(lock: &str) -> Vec<Package> {
@@ -88,21 +88,11 @@ fn resolve_dep<'a>(entry: &'a str, versions: &'a [String]) -> Option<&'a str> {
     }
 }
 
-/// Packages AUDITED to legitimately carry a private, split glam instance that never feeds the
-/// deterministic sim's float path. MUST AGREE with the glam `wrappers` in `deny.toml`'s
-/// `[bans] deny`, which CI's `deny` job enforces on the same graph; a change to either list
-/// changes both. Keep this list SHORT and justified:
-///
-/// * `obvhs` — avian's internal BVH (broadphase acceleration). It pins its own older glam and
-///   never touches parry's raycast/narrowphase arithmetic nor bevy_math; audited 2026-07-26.
-///   (Our own terrain raycasts bypass parry entirely — `HeightGrid::cast_ray` — precisely so no
-///   third-party float path sits under the sim's world-spanning ground queries.)
-const AUDITED_SPLIT_GLAM: &[&str] = &["obvhs"];
-
-/// FAILS LOUDLY when a dependency bump splits glam for any UNAUDITED package — the parry-SIMD
-/// desync mechanism described in the module doc. On the next Avian/bevy bump, if parry's math
-/// shim (`glamx`) or bevy_math lands on a different glam than the one Cargo.toml pins
-/// `scalar-math` onto, this is the test that catches it before a cross-platform desync does.
+/// FAILS LOUDLY when a dependency bump splits glam — the parry-SIMD desync mechanism described in
+/// the module doc. Every glam user in the graph must sit on the one glam Cargo.toml pins
+/// `scalar-math` onto; `deny.toml`'s `[bans] deny` holds CI's graph to the same rule. On the next
+/// Avian/bevy bump, if parry's math shim (`glamx`), bevy_math or Avian's BVH (`obvhs`) lands on
+/// another glam, this is the test that catches it before a cross-platform desync does.
 #[test]
 fn glam_is_one_feature_unified_instance_for_the_sim_float_path() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -129,19 +119,16 @@ fn glam_is_one_feature_unified_instance_for_the_sim_float_path() {
         })
         .expect("overmatch must depend on glam directly (the scalar-math pin)");
 
-    // Every package whose glam is NOT ours must be on the audited allowlist.
+    // Every package that depends on glam depends on ours.
     let mut sim_glam_users = 0usize;
     for package in &packages {
         for entry in &package.dependencies {
             let Some(version) = resolve_dep(entry, &glam_versions) else {
                 continue;
             };
-            if version == ours {
-                sim_glam_users += 1;
-                continue;
-            }
-            assert!(
-                AUDITED_SPLIT_GLAM.contains(&package.name.as_str()),
+            assert_eq!(
+                version,
+                ours,
                 "GLAM VERSION SPLIT: `{name} {pkg_version}` depends on glam {version}, but the \
                  sim's float path is pinned to glam {ours} (Cargo.toml's `scalar-math` feature). \
                  Cargo features unify only WITHIN one package instance, so this split means \
@@ -149,12 +136,13 @@ fn glam_is_one_feature_unified_instance_for_the_sim_float_path() {
                  re-associate dot products, parry's raycasts ride on glam (parry ≤ 0.29 was \
                  measurably non-reproducible across platforms — parry 0.29 changelog), and the \
                  deterministic sim desyncs with no compile error. Fix: bump/pin our glam so the \
-                 whole sim graph (parry's `glamx` shim, `bevy_math`, us) shares ONE glam version \
-                 — or, only if `{name}` verifiably never feeds sim float paths, add it to \
-                 AUDITED_SPLIT_GLAM with a justification.",
+                 whole graph (parry's `glamx` shim, `bevy_math`, `obvhs`, us) shares ONE glam \
+                 version; where `{name}`'s range admits ours, `cargo update -p \
+                 glam@{version} --precise {ours}` does it.",
                 name = package.name,
                 pkg_version = package.version,
             );
+            sim_glam_users += 1;
         }
     }
     assert!(

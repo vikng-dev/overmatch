@@ -51,14 +51,12 @@ ignore = true
 # Duplicate versions are banned only where they break an invariant: the glam entries below.
 multiple-versions = "allow"
 wildcards = "warn"
-# The glam split guard. MUST AGREE with `src/tests/determinism_deps.rs` (`AUDITED_SPLIT_GLAM`): the
-# glam that carries Cargo.toml's `scalar-math` pin (0.32.1) is the one glam the graph may hold,
-# except a second, private glam under an audited package. `wrappers` is that audited list; a
-# change to either list changes both, and a glam bump moves both version bounds here. While no
-# glam newer than ours is in the graph, the second entry reports `unused-wrapper`; that is expected.
+# The glam split guard, the rule `src/tests/determinism_deps.rs` also asserts: the glam that carries
+# Cargo.toml's `scalar-math` pin (0.33.12) is the one glam the graph may hold. A glam bump moves both
+# version bounds here.
 deny = [
-    { crate = "glam:<0.32.1", wrappers = ["obvhs"], reason = "a second glam escapes the scalar-math pin; only audited obvhs may hold one" },
-    { crate = "glam:>0.32.1", wrappers = ["obvhs"], reason = "a second glam escapes the scalar-math pin; only audited obvhs may hold one" },
+    { crate = "glam:<0.33.12", reason = "a second glam escapes the scalar-math pin" },
+    { crate = "glam:>0.33.12", reason = "a second glam escapes the scalar-math pin" },
 ]
 
 [sources]
