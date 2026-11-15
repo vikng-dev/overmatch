@@ -160,9 +160,11 @@ Known differences between the channels, none tuned:
   which is rigid (`forces::LinkRise`). It is an intrusion proxy, how far that matter stands inside
   the rest face along the link's hull-local outward normal, not a measured displacement of the shoe:
   past the bump travel the full-width stop still bears that matter, and the band still reaches up to
-  it. The hook reads the nearest link's from the last driving pass (`sim::TrackRise`: at most one
-  awake step stale, and a resting tank's slice bears a moving body whole), and the construction
-  sweep's witnesses admit by the same rule. Matter at a
+  it. The hook reads the nearest link's from the last driving pass (`sim::TrackRise`: stale only in
+  the step that wakes its tank, and a moving body's candidate contact wakes a resting tank before
+  the band can erase it), and the construction sweep's witnesses admit by the same rule. Sleep
+  never changes what the band admits: a resting belt bearing a moving body whole would restore the
+  surface the belt has vacated, and would pinch a compound body under both shoe edges. Matter at a
   slice's inner face came in under the shoe, so it lies in the band too. Without the band, a
   standing stub under a shoe edge, deeper in the belt than it overlaps the shoe sideways, was born a
   rigid lateral contact at that overlap, and a shoe come down between two such stubs bore on both

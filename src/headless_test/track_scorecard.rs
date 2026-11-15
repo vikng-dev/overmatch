@@ -52,6 +52,20 @@ const TICKS: usize = FIXED_TICKS_PER_SECOND;
 /// The shipped material the card's static fixtures and pieces are made of.
 const FIXTURE_SUBSTANCE: &str = "Brick";
 
+/// [`FIXTURE_SUBSTANCE`]'s shipped density (kg/m³) and contact friction.
+fn fixture_substance() -> (f32, Friction) {
+    let registry = crate::substances::SubstanceRegistry::shipped_static();
+    let density = registry
+        .hard(FIXTURE_SUBSTANCE)
+        .expect("the fixture substance is a hard substance")
+        .density()
+        .expect("the fixture substance states a density") as f32;
+    let friction = registry
+        .contact_friction(FIXTURE_SUBSTANCE)
+        .expect("the fixture substance states a friction");
+    (density, friction)
+}
+
 type Row = Vec<(&'static str, Value)>;
 
 struct Line {
@@ -385,16 +399,8 @@ impl Bed {
 
     /// A dynamic box of the fixture substance on `layers`: centre and full size (m).
     fn spawn_body(&mut self, center: Vec3, size: Vec3, layers: CollisionLayers) -> Entity {
-        let registry = crate::substances::SubstanceRegistry::shipped_static();
-        let density = registry
-            .hard(FIXTURE_SUBSTANCE)
-            .expect("the fixture substance is a hard substance")
-            .density()
-            .expect("the fixture substance states a density") as f32;
+        let (density, friction) = fixture_substance();
         let mass = density * size.x * size.y * size.z;
-        let friction = registry
-            .contact_friction(FIXTURE_SUBSTANCE)
-            .expect("the fixture substance states a friction");
         let shape = Cuboid::new(size.x, size.y, size.z);
         self.app
             .world_mut()
@@ -2292,9 +2298,7 @@ const SLAB: Vec3 = Vec3::new(20.0, 0.5, 20.0);
 
 /// A fixed block's collider of the fixture substance on the terrain layer: centre and full size (m).
 fn fixed_block(center: Vec3, size: Vec3) -> impl Bundle {
-    let friction = crate::substances::SubstanceRegistry::shipped_static()
-        .contact_friction(FIXTURE_SUBSTANCE)
-        .expect("the fixture substance states a friction");
+    let (_, friction) = fixture_substance();
     (
         Name::new("track scorecard fixture"),
         Transform::from_translation(center),
@@ -2786,6 +2790,37 @@ fn standing(bed: &mut Bed, span: (f32, f32), height: f32, (z, length): (f32, f32
     block
 }
 
+/// The left side's band (`sim::TrackRise`) has risen past `depth` under both edges, each at some
+/// link.
+fn risen_past(bed: &Bed, depth: f32) -> bool {
+    use crate::track::sim::TrackRise;
+    let rise = bed
+        .app
+        .world()
+        .get::<TrackRise>(bed.tank)
+        .expect("a driving tank");
+    let links = &rise.0[Side::Left.index()];
+    (0..2).all(|edge| links.iter().any(|link| link.rise[edge] > depth))
+}
+
+/// A solver row with normal force on one of `slices` stands in its vacated band: the band the
+/// hook read in this tick's step (`sim::TrackRise`), at `hull`, the pose the step began from.
+fn bears_in_band(bed: &Bed, hull: &Hull, slices: &[Entity]) -> bool {
+    use crate::track::sim::TrackRise;
+    use crate::track::stop_contacts::BeltFace;
+    let world = bed.app.world();
+    let rise = world.get::<TrackRise>(bed.tank).expect("a driving tank");
+    let (band, points) = (&rise.0[Side::Left.index()], bed.solver_points());
+    slices.iter().any(|&slice| {
+        let face = world.get::<BeltFace>(slice).expect("a side slice's face");
+        points.iter().any(|(point, force)| {
+            let on = point.reference_collider == slice || point.other_collider == Some(slice);
+            let local = hull.rotation.inverse() * (point.point - hull.position);
+            on && force.dot(point.normal) != 0.0 && !face.stands_at(band, local)
+        })
+    })
+}
+
 /// The left shoe comes down between two standing sills taller than the bump travel, each under one
 /// of its edges and running on past that edge's exposed face, so the stop carries the shoe at full
 /// travel on both and each edge's rest face stands the travel deep in its sill. Each overlaps its
@@ -2927,31 +2962,18 @@ fn the_drivetrains_books_close_over_standing_matter() {
 /// laterally. Fails if the hook reads no band.
 #[test]
 fn no_side_slice_bears_a_row_in_its_vacated_band() {
-    use crate::track::sim::TrackRise;
-    use crate::track::stop_contacts::BeltFace;
     let mut straddle = Straddle::new();
-    let (tank, overlap) = (straddle.bed.tank, straddle.overlap);
     let (mut carried, mut banded) = (false, false);
     for tick in 0..8 * TICKS {
         let hull = straddle.bed.hull();
         straddle.bed.tick(1.0, 0.0);
-        let world = straddle.bed.app.world();
-        let band = &world.get::<TrackRise>(tank).expect("a driving tank").0[Side::Left.index()];
-        let points = straddle.bed.solver_points();
-        for slice in straddle.slices {
-            let face = world.get::<BeltFace>(slice).expect("a side slice's face");
-            for (point, force) in &points {
-                let on = point.reference_collider == slice || point.other_collider == Some(slice);
-                let local = hull.rotation.inverse() * (point.point - hull.position);
-                assert!(
-                    !on || force.dot(point.normal) == 0.0 || face.stands_at(band, local),
-                    "tick {tick}: a side slice carries a normal row in its vacated band"
-                );
-            }
-        }
+        assert!(
+            !bears_in_band(&straddle.bed, &hull, &straddle.slices),
+            "tick {tick}: a side slice carries a normal row in its vacated band"
+        );
         if straddle.carried() {
             carried = true;
-            banded |= (0..2).all(|edge| band.iter().any(|link| link.rise[edge] > overlap));
+            banded |= risen_past(&straddle.bed, straddle.overlap);
         }
     }
     assert!(carried, "the stop never carried the shoe on both sills");
@@ -2961,29 +2983,41 @@ fn no_side_slice_bears_a_row_in_its_vacated_band() {
     );
 }
 
-/// A side slice's vacated band (`sim::TrackRise`) is at most one awake step stale, whatever changed
-/// while its tank rested. Fixture: the left shoe parks with its outboard edge on a block as wide as
-/// its slice and half the bump travel tall; beside the shoe, half Avian's contact tolerance outside
-/// it, stands a block as tall, in the band. The first block goes two ways. Where the construction
-/// sweep removes matter, after the tick's driving passes and before the step: its going wakes the
-/// tank through the support index (`sim::SampledSupports`). And between ticks with the index
-/// forgetting the tank, as when the pass it rested under clipped the block's damped load to zero:
-/// its going wakes nothing, and the tank rests half a second before a push worth twice Avian's
-/// rest speed wakes it. Fails if an awake step after the first reads the gone block's band: a pass
-/// ordered after the step, or one skipped for an awake tank.
+/// A side slice's vacated band (`sim::TrackRise`) is read stale only in the step that wakes its
+/// tank, whatever changed while the tank rested. Fixture: the left shoe parks with its outboard
+/// edge on a block as wide as its slice and half the bump travel tall, which puts in the band a
+/// point beside the shoe, half Avian's contact tolerance outside it, at half the block's height.
+/// The block goes, and the tank learns it three ways ([`Wake`]); each step is read
+/// between the narrow phase and the solver, after that step's wakes. Fails unless the tank steps
+/// awake twice, or if an awake step after the first still has the point in the gone block's band:
+/// a pass ordered after the step, or one skipped for an awake tank.
 #[test]
-fn a_vacated_band_is_at_most_one_awake_step_stale() {
-    use crate::track::forces::LinkRise;
+fn a_vacated_band_is_read_stale_only_in_the_step_that_wakes_its_tank() {
     use crate::track::sim::TrackRise;
     use crate::track::stop_contacts::BeltFace;
+    /// How the resting tank learns its block went. Past the index, the index forgets the tank, as
+    /// when the pass it rested under clipped the block's damped load to zero: the going wakes
+    /// nothing, and the tank rests half a second first.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Wake {
+        /// The support index (`sim::SampledSupports`), where the construction sweep removes
+        /// matter: after the tick's driving passes, before the step.
+        Index,
+        /// An awake body arriving at the point, in the narrow phase.
+        Arrival,
+        /// A push worth twice Avian's rest speed, at the step's end.
+        Push,
+    }
     #[derive(Resource)]
     struct Collapse {
         tank: Entity,
         support: Entity,
+        slice: Entity,
+        /// The point beside the shoe, hull-local.
+        point: Vec3,
         armed: bool,
-        band: Vec<LinkRise>,
-        /// Each step since the support went: whether the tank is awake, and whether the hook reads
-        /// the gone support's band.
+        /// Each step since the block went: whether the tank is awake, and whether the point stands
+        /// in the band the hook reads.
         steps: Vec<(bool, bool)>,
     }
     fn collapse(mut collapse: ResMut<Collapse>, mut commands: Commands) {
@@ -2993,57 +3027,57 @@ fn a_vacated_band_is_at_most_one_awake_step_stale() {
     }
     fn read(
         mut collapse: ResMut<Collapse>,
-        rises: Query<(&TrackRise, Has<Sleeping>)>,
+        tanks: Query<(&TrackRise, Has<Sleeping>)>,
+        faces: Query<&BeltFace>,
         colliders: Query<(), With<Collider>>,
     ) {
         if colliders.contains(collapse.support) {
             return;
         }
-        let (rise, resting) = rises.get(collapse.tank).expect("a driving tank");
-        let stale = rise.0[Side::Left.index()] == collapse.band;
+        let (rise, resting) = tanks.get(collapse.tank).expect("a driving tank");
+        let face = faces.get(collapse.slice).expect("a side slice's face");
+        let stale = !face.stands_at(&rise.0[Side::Left.index()], collapse.point);
         collapse.steps.push((!resting, stale));
     }
 
-    for forgotten in [false, true] {
+    for wake in [Wake::Index, Wake::Arrival, Wake::Push] {
         let mut bed = Bed::on_ground(Some(base_ground()), flat());
         let [_, (slice, outboard)] = left_slices(&mut bed);
         let height = shipped_spec().track.suspension.params().bump_stop / 2.0;
         let config = bed.app.world().resource::<NarrowPhaseConfig>();
         let beside = outboard.1 + config.contact_tolerance / 2.0;
-        // Fixture: 1 m blocks under the middle of the ground run, the one beside half a metre wide.
+        // Fixture: a 1 m block under the middle of the ground run.
         let along = (0.0, 1.0);
         let support = standing(&mut bed, outboard, height, along);
-        standing(&mut bed, (beside, beside + 0.5), height, along);
         bed.place(Vec3::ZERO, Quat::IDENTITY);
         bed.start();
         until_resting(&mut bed);
 
         let (tank, hull) = (bed.tank, bed.hull());
         let world = bed.app.world();
-        let band =
-            world.get::<TrackRise>(tank).expect("a driving tank").0[Side::Left.index()].clone();
-        let edge = Vec3::new(Side::Left.sign() * beside, height, along.0);
+        let point = hull.rotation.inverse()
+            * (Vec3::new(Side::Left.sign() * beside, height / 2.0, along.0) - hull.position);
+        let band = &world.get::<TrackRise>(tank).expect("a driving tank").0[Side::Left.index()];
         assert!(
-            !(world.get::<BeltFace>(slice).expect("a side slice's face"))
-                .stands_at(&band, hull.rotation.inverse() * (edge - hull.position)),
-            "the block beside the shoe stands in the band its neighbour raised"
+            !(world.get::<BeltFace>(slice).expect("a side slice's face")).stands_at(band, point),
+            "the point beside the shoe stands in the band the block raised"
         );
         bed.app.insert_resource(Collapse {
             tank,
             support,
-            armed: !forgotten,
-            band,
+            slice,
+            point,
+            armed: wake == Wake::Index,
             steps: Vec::new(),
         });
-        bed.app.add_systems(
-            FixedPostUpdate,
-            (
-                collapse.before(PhysicsSystems::Prepare),
-                read.after(PhysicsSystems::Prepare)
-                    .before(PhysicsSystems::StepSimulation),
-            ),
-        );
-        if forgotten {
+        bed.app
+            .add_systems(FixedPostUpdate, collapse.before(PhysicsSystems::Prepare))
+            .add_systems(
+                PhysicsSchedule,
+                read.after(PhysicsStepSystems::NarrowPhase)
+                    .before(PhysicsStepSystems::Solver),
+            );
+        if wake != Wake::Index {
             let mut entity = bed.app.world_mut().entity_mut(tank);
             let contacts = entity.take::<TrackContacts>().expect("a driving tank");
             entity.insert(contacts);
@@ -3052,6 +3086,13 @@ fn a_vacated_band_is_at_most_one_awake_step_stale() {
                 bed.tick(0.0, 0.0);
             }
             assert!(is_asleep(&bed), "the unindexed block's going woke the tank");
+        }
+        if wake == Wake::Arrival {
+            let layers = CollisionLayers::new([Layer::Vehicle], LayerMask::ALL);
+            let center = Vec3::new(Side::Left.sign() * (beside + 0.25), height / 2.0, along.0);
+            bed.spawn_body(center, Vec3::new(0.5, height, along.1), layers);
+        }
+        if wake == Wake::Push {
             let rest = (bed.app.world().get::<SleepThreshold>(tank))
                 .expect("a dynamic tank carries its rest threshold")
                 .linear;
@@ -3063,26 +3104,101 @@ fn a_vacated_band_is_at_most_one_awake_step_stale() {
                 .expect("a dynamic tank takes forces");
             crate::track::sim::apply_explicit_impulse(forces, push, at);
         }
-        // Fixture: a second after the block goes or the push.
+        // Fixture: a second after the block goes, the body arrives or the push.
         for _ in 0..TICKS {
             bed.tick(0.0, 0.0);
         }
         let steps = &bed.app.world().resource::<Collapse>().steps;
-        assert!(
-            steps.iter().any(|&(awake, _)| awake),
-            "the tank never woke (index forgotten: {forgotten})"
-        );
-        let late: Vec<_> = (steps.iter().enumerate())
+        let awake: Vec<_> = (steps.iter().enumerate())
             .filter(|(_, (awake, _))| *awake)
-            .skip(1)
+            .collect();
+        assert!(
+            awake.len() > 1,
+            "{wake:?}: the tank never stepped awake twice"
+        );
+        let late: Vec<_> = (awake[1..].iter())
             .filter(|(_, (_, stale))| *stale)
             .map(|(step, _)| step)
             .collect();
         assert!(
             late.is_empty(),
-            "index forgotten {forgotten}: awake steps {late:?} read the gone block's band"
+            "{wake:?}: awake steps {late:?} have the point in the gone block's band"
         );
     }
+}
+
+/// Sleep never changes which points a side slice bears: an awake body arriving under a resting
+/// tank's raised shoe edges meets the band the tank's last pass measured, and wakes the tank.
+/// Fixture: the left shoe parks with each edge on a block half the bump travel tall, under its
+/// slice by a quarter of the lesser of the slice's thickness and the travel and half a metre past
+/// it; the support index forgets the tank, the blocks go, and an awake vehicle-layer body with a
+/// prong in each block's place arrives, as a hull proxy of several convex parts might
+/// (`tank::spawn::spawn_proxy_parts`). Only the side slices meet it, so only the hook can wake the
+/// tank. Fails if the tank stays asleep, or if a slice bears a prong in its band: a resting belt
+/// that bore the body whole would pinch it between the two exposed faces.
+#[test]
+fn a_body_arriving_under_a_resting_shoe_wakes_it_and_stays_out_of_its_band() {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    let [(inner, inboard), (outer, outboard)] = left_slices(&mut bed);
+    let bump = shipped_spec().track.suspension.params().bump_stop;
+    let (overlap, height) = ((outboard.1 - outboard.0).min(bump) / 4.0, bump / 2.0);
+    let spans = [
+        (inboard.0 - 0.5, inboard.0 + overlap),
+        (outboard.1 - overlap, outboard.1 + 0.5),
+    ];
+    // Fixture: 1 m blocks under the middle of the ground run.
+    let along = (0.0, 1.0);
+    let blocks = spans.map(|span| standing(&mut bed, span, height, along));
+    bed.place(Vec3::ZERO, Quat::IDENTITY);
+    bed.start();
+    until_resting(&mut bed);
+    assert!(
+        risen_past(&bed, overlap),
+        "the blocks stand in both edges' bands deeper than they overlap the slices"
+    );
+
+    let world = bed.app.world_mut();
+    let mut tank = world.entity_mut(bed.tank);
+    let contacts = tank.take::<TrackContacts>().expect("a driving tank");
+    tank.insert(contacts);
+    for block in blocks {
+        world.despawn(block);
+    }
+    bed.tick(0.0, 0.0);
+    assert!(is_asleep(&bed), "the unindexed blocks' going woke the tank");
+    let (density, friction) = fixture_substance();
+    let center = Vec3::new(0.0, height / 2.0, along.0);
+    let world = bed.app.world_mut();
+    let body = (world.spawn((
+        Transform::from_translation(center),
+        Position(center),
+        Rotation::default(),
+        RigidBody::Dynamic,
+    )))
+    .id();
+    for (start, end) in spans {
+        let prong = Vec3::X * Side::Left.sign() * (start + end) / 2.0;
+        world.spawn((
+            ChildOf(body),
+            crate::tank::authored_attachment(Transform::from_translation(prong)),
+            Collider::cuboid(end - start, height, along.1),
+            ColliderDensity(density),
+            friction,
+            CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+        ));
+    }
+    let (slices, mut woke) = ([inner, outer], false);
+    // Fixture: a second after the body arrives.
+    for tick in 0..TICKS {
+        let hull = bed.hull();
+        bed.tick(0.0, 0.0);
+        woke |= !is_asleep(&bed);
+        assert!(
+            !bears_in_band(&bed, &hull, &slices),
+            "tick {tick}: a side slice bears a prong in its band"
+        );
+    }
+    assert!(woke, "the arriving body left the tank asleep");
 }
 
 /// One broad heavy slab under the whole tank, the tank settled a second on it. Fixture.

@@ -191,14 +191,17 @@ pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
 /// the contact hook drops a side slice's contact in the band its belt has risen out of
 /// (`stop_contacts::BeltFace::stands_at`). Rewritten by every pass; a resting tank keeps its last
 /// pass's, as it keeps its hull pose, belt phase and contacts ([`NotResting`]). Empty before a
-/// pass and where no pass runs: nothing has risen. A band is at most one awake step stale,
-/// whatever changed while its tank rested. While it rests the band moves nothing: no solver step
-/// runs on a resting tank's pairs with static matter or resting bodies, and the hook bears a
-/// moving body whole there, so the contact wakes the tank (`stop_contacts::WorldContacts`); a
-/// sweep reads no resting source's. Once awake, every pass rewrites it in `FixedUpdate` before Avian's step in
-/// `FixedPostUpdate`, a tank at rest but awake included, so only a tank woken after its pass and
-/// before the step reads it stale, in that step alone, hook and sweep alike, on the belt the last
-/// pass left. Never hashed, never rolled back.
+/// pass and where no pass runs: nothing has risen. Sleep never changes what the band admits, and
+/// a solver step reads a stale band only in the step that wakes its tank, whatever changed while
+/// the tank rested. While it rests no solver step runs its pairs, a moving body's candidate
+/// contact with one of its faces wakes it (`stop_contacts::WorldContacts`), and a sweep reads no
+/// resting source's. Every awake tank's pass rewrites the band in `FixedUpdate` before Avian's step
+/// in `FixedPostUpdate`, a tank at rest but awake included. So the one stale step is a wake's that
+/// lands after the tick's pass and before its solver: the support index's or the sweep's before
+/// the step, or the narrow phase's (Avian's contact wake or the hook's), which applies at the
+/// sync point before the solver. That step runs on the band and belt the last pass left, hook and
+/// sweep alike; a wake at a step's end (an impulse, Avian's sleep pass) leaves the next pass to
+/// rewrite the band first. Never hashed, never rolled back.
 #[derive(Component, Clone, Debug, Default)]
 pub(crate) struct TrackRise(pub(crate) [Vec<LinkRise>; 2]);
 

@@ -176,22 +176,26 @@ impl CollisionHooks for WorldContacts<'_, '_> {
                 .belts
                 .get(of.body)
                 .expect("a moving shoe face hangs on its spawn-built driving body");
+            // A resting tank's band may be stale (`TrackRise`). The hook runs only for a candidate
+            // contact, so a moving body's wakes the tank (removing `Sleeping` wakes its island),
+            // whatever either face of the pair then keeps.
+            let moves = |body: Entity| {
+                let (body, rests) = self.bodies.get(body).expect(
+                    "a contact's body keeps its `RigidBody`: Avian drops its pairs with it",
+                );
+                !body.is_static() && !rests
+            };
+            if resting && body.is_some_and(moves) {
+                commands.entity(of.body).remove::<Sleeping>();
+            }
             contacts
                 .manifolds
                 .retain(|m| face.accepts_normal(rotation.0.inverse() * (-sign * m.normal)));
-            // A resting tank's band is the pass it rested under (`TrackRise`). No solver step runs
-            // on its pairs with static matter or resting bodies, but a moving body can stand
-            // anywhere, so the slice bears it whole and the contact wakes the tank (Avian's island
-            // wake).
-            let moving = (body.and_then(|body| self.bodies.get(body).ok()))
-                .is_some_and(|(body, rests)| !body.is_static() && !rests);
-            if !(resting && moving) {
-                let links = &rise.0[face.side.index()];
-                for manifold in &mut contacts.manifolds {
-                    (manifold.points).retain(|p| {
-                        face.stands_at(links, rotation.0.inverse() * (p.point - position.0))
-                    });
-                }
+            let links = &rise.0[face.side.index()];
+            for manifold in &mut contacts.manifolds {
+                (manifold.points).retain(|p| {
+                    face.stands_at(links, rotation.0.inverse() * (p.point - position.0))
+                });
             }
             contacts.manifolds.retain(|m| !m.points.is_empty());
             for manifold in &mut contacts.manifolds {
@@ -590,72 +594,106 @@ mod tests {
         }
     }
 
-    /// A resting tank's band is the pass it rested under, which nothing rereads while it rests, so
-    /// its slice bears a moving body in the band whole and the contact wakes it; static matter and a
-    /// resting body, on whose pairs with it no solver step runs, stay out, and an awake tank's band
-    /// holds for every body. Fails if a resting belt drops a moving body's contact in its band, or
-    /// bears static matter or a resting body there.
+    /// Sleep never changes which points a slice bears, and a moving body's candidate contact wakes
+    /// a resting belt whatever either face of the pair keeps; its next pass then rewrites the band
+    /// (`TrackRise`). Each case runs in both pair orders. Fails if a resting belt bears a point in
+    /// its band, if a dynamic or kinematic body leaves it asleep, a moving belt's face whose band
+    /// erases the pair first included, or if static matter, a resting body or nothing wakes it.
     #[test]
-    fn a_resting_belt_bears_a_moving_body_in_its_band() {
+    fn sleep_keeps_the_band_and_a_moving_body_wakes_the_belt() {
         let (side, rise) = (Side::Left, 0.2); // Fixture rise under the outboard edge, m.
-        // (the belt rests, the other body and whether it rests, the point bears).
-        for (resting, other, bears) in [
-            (true, Some((RigidBody::Dynamic, false)), true),
-            (true, Some((RigidBody::Dynamic, true)), false),
-            (true, Some((RigidBody::Static, false)), false),
-            (true, None, false),
-            (false, Some((RigidBody::Dynamic, false)), false),
-        ] {
-            let mut world = World::new();
-            world.init_resource::<Time<Fixed>>();
+        let band = |rise| {
             let mut links = TrackRise::default();
             links.0[side.index()] = vec![LinkRise {
                 face: [Vec2::new(-1.0, -1.0), Vec2::new(1.0, -1.0)],
-                rise: [0.0, rise],
+                rise,
             }];
+            links
+        };
+        // (the belt rests; the other body's kind, whether it rests, and whether it is a belt whose
+        // inboard face's band holds both points; the belt wakes).
+        let cases = [
+            (true, Some((RigidBody::Dynamic, false, false)), true),
+            (true, Some((RigidBody::Dynamic, false, true)), true),
+            (true, Some((RigidBody::Kinematic, false, false)), true),
+            (true, Some((RigidBody::Dynamic, true, false)), false),
+            (true, Some((RigidBody::Static, false, false)), false),
+            (true, None, false),
+            (false, Some((RigidBody::Dynamic, false, false)), false),
+        ];
+        for ((resting, other, wakes), reversed) in
+            (cases.into_iter()).flat_map(|case| [(case, false), (case, true)])
+        {
+            let mut world = World::new();
+            world.init_resource::<Time<Fixed>>();
             let spawned = (
                 TrackDrive::default(),
-                links,
+                band([0.0, rise]),
                 Position::default(),
                 Rotation::default(),
             );
-            let mut body = world.spawn((spawned, Transform::IDENTITY));
+            let mut belt = world.spawn((spawned, RigidBody::Dynamic, Transform::IDENTITY));
             if resting {
-                body.insert(Sleeping);
+                belt.insert(Sleeping);
             }
-            let body = body.id();
+            let belt = belt.id();
             let shoe = world
                 .spawn((
                     face(side, Bearing::Exposed(side.sign())),
                     Transform::IDENTITY,
-                    ColliderOf { body },
+                    ColliderOf { body: belt },
                 ))
                 .id();
-            let mut pair = ContactPair::new(shoe, world.spawn_empty().id(), ContactId::PLACEHOLDER);
-            pair.body1 = Some(body);
-            pair.body2 = other.map(|(kind, rests)| {
+            let body = other.map(|(kind, rests, belted)| {
                 let mut other = world.spawn((kind, Position::default(), Rotation::default()));
                 if rests {
                     other.insert(Sleeping);
                 }
+                if belted {
+                    let belt = (TrackDrive::default(), band([2.0 * rise, 0.0]));
+                    other.insert((belt, Transform::IDENTITY));
+                }
                 other.id()
             });
-            // Halfway up the band, through the outboard slice's exposed face.
-            let point = Vec3::new(side.sign() * 0.5, -1.0 + rise / 2.0, 0.0);
+            let belted = other.is_some_and(|(_, _, belted)| belted);
+            let struck = match body {
+                Some(body) if belted => world.spawn((
+                    face(side, Bearing::Exposed(-side.sign())),
+                    Transform::IDENTITY,
+                    ColliderOf { body },
+                )),
+                _ => world.spawn_empty(),
+            };
+            let (struck, outward) = (struck.id(), Vec3::X * side.sign());
+            let (mut pair, normal) = if reversed {
+                let mut pair = ContactPair::new(struck, shoe, ContactId::PLACEHOLDER);
+                (pair.body1, pair.body2) = (body, Some(belt));
+                (pair, -outward)
+            } else {
+                let mut pair = ContactPair::new(shoe, struck, ContactId::PLACEHOLDER);
+                (pair.body1, pair.body2) = (Some(belt), body);
+                (pair, outward)
+            };
+            // Through the outboard slice's exposed face: halfway up the band, and as far above it.
+            let [inside, above] =
+                [0.5, 1.5].map(|up| Vec3::new(side.sign() * 0.5, -1.0 + up * rise, 0.0));
             pair.manifolds.push(ContactManifold::new(
-                [ContactPoint::new(Vec3::ZERO, Vec3::ZERO, point, 0.01)],
-                Vec3::X * side.sign(),
+                [inside, above].map(|point| ContactPoint::new(Vec3::ZERO, Vec3::ZERO, point, 0.01)),
+                normal,
             ));
-            let case = format!("belt rests {resting}, other {other:?}");
-            world
+            let borne = world
                 .run_system_once(move |hooks: WorldContacts, mut commands: Commands| {
-                    assert_eq!(
-                        hooks.modify_contacts(&mut pair, &mut commands),
-                        bears,
-                        "{case}"
-                    );
+                    let bears = hooks.modify_contacts(&mut pair, &mut commands);
+                    let points = (pair.manifolds.iter().flat_map(|m| &m.points)).map(|p| p.point);
+                    (bears, points.collect::<Vec<_>>())
                 })
                 .unwrap();
+            let kept = if belted { vec![] } else { vec![above] };
+            assert_eq!(
+                (borne, world.entity(belt).contains::<Sleeping>()),
+                ((!kept.is_empty(), kept), resting && !wakes),
+                "belt rests {resting}, other {other:?}, reversed {reversed}"
+            );
         }
     }
 
