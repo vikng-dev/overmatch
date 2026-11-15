@@ -5,6 +5,7 @@
 //! `upstream/avian-unknown-contact-feature-identity.md` and
 //! `upstream/avian-nearest-warm-start-contact.md`.
 
+use avian3d::collision::contact_types::PackedFeatureId;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
@@ -28,6 +29,58 @@ fn unknown_contact_features_match_by_position() {
         assert_eq!(
             next[0].points[0].warm_start_normal_impulse, 11.0,
             "UNKNOWN IDs must select the closest admissible anchors, separation {separation}"
+        );
+    }
+}
+
+/// A point with no admissible predecessor starts cold: an UNKNOWN point whose only predecessor lies
+/// beyond the matching radius, and a known point whose only predecessor holds other feature ids,
+/// its anchors coincident in either orientation. Fails if UNKNOWN ids admit by identity (upstream's
+/// first point at any distance), or known ids admit by distance in either orientation.
+#[test]
+fn a_point_without_an_admissible_predecessor_starts_cold() {
+    // Fixture: two distinct anchors, 1 m apart, against a 0.1 m matching radius.
+    let (near, far) = (Vec3::ZERO, Vec3::Y);
+    let point = |anchor1: Vec3, anchor2: Vec3, ids: Option<[u32; 2]>| {
+        let mut point = ContactPoint::new(anchor1, anchor2, anchor1, 0.0);
+        if let Some([id1, id2]) = ids {
+            point.feature_id1 = PackedFeatureId::face(id1);
+            point.feature_id2 = PackedFeatureId::face(id2);
+        }
+        point
+    };
+    // Each case: the new point, then its predecessor, as (anchor1, anchor2, feature ids).
+    let cases = [
+        (
+            "UNKNOWN, 1 m away",
+            point(near + Vec3::X, far + Vec3::X, None),
+            point(near, far, None),
+        ),
+        (
+            "other ids, coincident",
+            point(near, far, Some([1, 2])),
+            point(near, far, Some([3, 4])),
+        ),
+        (
+            "other ids, swapped",
+            point(near, far, Some([1, 2])),
+            point(far, near, Some([3, 4])),
+        ),
+    ];
+    for (case, new, mut previous) in cases {
+        // Fixture: a cached impulse, N s.
+        previous.warm_start_normal_impulse = 11.0;
+        previous.warm_start_tangent_impulse = Vec2::new(7.0, 13.0);
+        let mut next = [ContactManifold::new([new], Vec3::Y)];
+        match_pair(&mut next, &[ContactManifold::new([previous], Vec3::Y)], 0.1);
+        let started = next[0].points[0];
+        assert_eq!(
+            (
+                started.warm_start_normal_impulse,
+                started.warm_start_tangent_impulse
+            ),
+            (0.0, Vec2::ZERO),
+            "{case}: a point without an admissible predecessor took its impulses"
         );
     }
 }

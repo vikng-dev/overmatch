@@ -301,8 +301,12 @@ A recycled pair returns before matching and keeps last step's manifolds. The gam
 recycling off (`recycle_distance: 0.0`, set where the game composes physics); turning it on stops
 matching for every recycled pair, and the pair guard below goes red (MEASURED).
 
-Guards: `src/tests/avian_warm_start.rs`, 2 tests, both red with upstream's matcher (MEASURED: 5.0
-taken where 11.0 is closest). Local upstream drafts:
+Guards: `src/tests/avian_warm_start.rs`, 3 tests. The two that rank predecessors are red with
+upstream's matcher (MEASURED: 5.0 taken where 11.0 is closest). The third requires a cold start
+with no admissible predecessor (an UNKNOWN point 1 m from its only one; a known point whose only
+one holds other ids, its anchors coincident in either orientation), red under each of three
+mutants of the law (MEASURED): UNKNOWN ids admitted at any distance, known ids admitted by distance,
+and known ids admitted by distance in the swapped orientation only, upstream's. Local upstream drafts:
 `upstream/avian-unknown-contact-feature-identity.md`, `upstream/avian-nearest-warm-start-contact.md`.
 
 ## Stationary non-touching pair cache (`src/collision/narrow_phase/stationary_miss.rs`, `src/collision/narrow_phase/system_param.rs`, `src/collision/contact_types/mod.rs`, `src/collision/diagnostics.rs`): module
