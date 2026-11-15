@@ -1253,7 +1253,7 @@ fn keyboard_input(
     reason = "an observer spanning arrows, tracks, tabs, window, capabilities, ladder, page, drag, settings and save"
 )]
 fn page_pressed(
-    mut press: On<Pointer<Press>>,
+    mut press: On<PointerPress>,
     arrows: Query<&ArrowGlyph>,
     tracks: Query<(&SliderTrack, &ComputedNode, &UiGlobalTransform)>,
     tabs: Query<&TabLabel>,
@@ -1313,7 +1313,7 @@ fn scrub(active: ActiveDrag, cursor_x: f32, settings: &mut ResMut<Settings>) {
 }
 
 /// Per-frame mouse work: carry a grabbed slider and select hovered rows. Press/release without
-/// motion emits no Pointer<Drag>; closing the page under a held button must release too.
+/// motion emits no PointerDrag; closing the page under a held button must release too.
 ///
 /// Hovered includes descendants (CSS :hover) and changes only on enter/leave, so crossing an
 /// arrow selects its row without per-frame hover changes.
