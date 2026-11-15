@@ -85,8 +85,9 @@ in `collision/collider/backend.rs` computes `C::mass_properties` and overwrites 
 and short of a custom `AnyCollider` there is none. 21 fork lines (MEASURED).
 
 The game prepares the cache off the system thread for each construction chunk collider that is no
-sensor. Guard: `src/tests/avian_prepared_mass.rs` (it fails with the scale invalidation removed,
-MEASURED). Local upstream draft: `upstream/avian-prepared-collider-mass.md`.
+sensor. Guard: `src/tests/avian_prepared_mass.rs`, which replaces the shape of a freshly prepared
+collider, so each invalidation stands alone (it fails with the scale invalidation removed and with
+the shape replacement's removed, MEASURED). Local upstream draft: `upstream/avian-prepared-collider-mass.md`.
 
 ## Complete collider batches and explicit mass ownership (`src/collision/collider/collider_hierarchy/plugin.rs`, `src/dynamics/rigid_body/mass_properties/`, `src/lib.rs`): kept
 

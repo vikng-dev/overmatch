@@ -49,18 +49,19 @@ fn prepared_contact_mass_is_valid_at_insertion_and_invalidates_with_its_inputs()
         "a prepared value was returned for another density"
     );
     prepared.set_scale(Vec3::splat(2.0), 10);
-    let mut scaled = hull;
+    let mut scaled = hull.clone();
     scaled.set_scale(Vec3::splat(2.0), 10);
     assert_eq!(
         prepared.mass_properties(density),
         scaled.mass_properties(density),
         "a prepared value outlived a change of scale"
     );
-    prepared.set_shape(Collider::sphere(1.0).shape().clone());
-    let mut replaced = Collider::sphere(1.0);
-    replaced.set_scale(Vec3::splat(2.0), 10);
+    // A fresh prepared value: the scale change above has dropped the first.
+    let mut reshaped = hull.with_mass_properties_cache(density);
+    let replaced = Collider::sphere(1.0);
+    reshaped.set_shape(replaced.shape().clone());
     assert_eq!(
-        prepared.mass_properties(density),
+        reshaped.mass_properties(density),
         replaced.mass_properties(density),
         "a prepared value outlived a change of shape"
     );
