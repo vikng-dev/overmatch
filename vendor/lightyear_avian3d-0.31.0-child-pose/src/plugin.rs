@@ -332,13 +332,8 @@ impl Plugin for LightyearAvianPlugin {
                     // It observes the final frame-interpolated and corrected physics pose.
                     LightyearAvianPlugin::sync_position_to_transform(app, PostUpdate);
                 }
-                // We need to manually update the Position of child colliders after physics run
-                // since avian doesn't do it
-                app.add_systems(
-                    RunFixedMainLoop,
-                    LightyearAvianPlugin::update_child_collider_position
-                        .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
-                );
+                // OVERMATCH PATCH: the game registers its changed-input child-pose pass in
+                // RunFixedMainLoopSystems::AfterFixedMainLoop instead.
 
                 app.configure_sets(
                     FixedPostUpdate,
