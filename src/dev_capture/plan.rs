@@ -43,9 +43,21 @@ pub(crate) struct CapturePlan {
     /// The game's damage model: offline module-repair panel evidence.
     #[serde(default)]
     pub(crate) repair: Option<Repair>,
+    /// The game's damage-model view: replay a recorded hit through the offline shooter's corner.
+    #[serde(default)]
+    pub(crate) corner: Option<CornerReplay>,
     /// What the root sets the scene up as ([`Scene`]).
     #[serde(default)]
     pub(crate) scene: Scene,
+}
+
+/// The game's damage-model shader evidence: a recorded report, replayed at app second `at`.
+/// This cue presents game state only; it applies no dose and changes no simulated HP pool.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CornerReplay {
+    pub(crate) report: PathBuf,
+    pub(crate) at: f32,
 }
 
 /// The game's damage model: empty the named module functions and issue one repair command.
@@ -669,6 +681,12 @@ impl CapturePlan {
         }
         if let Some(shot) = &self.shot {
             finite_at("shot.at", shot.at)?;
+        }
+        if let Some(corner) = &self.corner {
+            finite_at("corner.at", corner.at)?;
+            if self.shot.is_some() {
+                return Err("corner: replay uses app time; remove the burst-timed shot cue".into());
+            }
         }
         let scene = &self.scene;
         if let Some(degrees) = scene.sun_elevation_deg

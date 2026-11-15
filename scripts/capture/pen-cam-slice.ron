@@ -1,0 +1,23 @@
+// The game's damage-model view, game state only: replay a recorded NonPen encounter through
+// the offline shooter's store and corner. No simulated HP pool changes. The stopped round's
+// plate cut draws pen_cam_slice.wgsl; UI must remain enabled because the corner is an image node.
+// From the checkout root, with an empty config directory, hidden and silent under the build lock:
+//
+//   scripts/build-lock env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 \
+//     OVERMATCH_CONFIG_DIR=/tmp/overmatch-slice-empty-config \
+//     OVERMATCH_CAPTURE=scripts/capture/pen-cam-slice.ron target/debug/overmatch --offline
+//
+// DERIVED: the 12 s frame falls in the slice's hold after the 10 s replay, 0.2 s opening latency
+// and 1.28 s minimum hold start. Times, size and fixed step are capture configuration.
+(
+    corner: (report: "assets/dev/pen_cam/s8b_mg_stopped.ron", at: 10.0),
+    frames: (
+        out: "target/capture/pen-cam-slice.png",
+        at: [12.0],
+        size: (1280, 720),
+        scale_factor: 1.0,
+        ui: true,
+        gizmos: false,
+        step_s: 0.015625,
+    ),
+)
