@@ -382,11 +382,13 @@ Avian 0.8.0 wakes every sleeping island a new contact links (`apply_contact_stat
 resting body's new stationary support included. The game's rule: only an awake body wakes a
 resting island. The game holds it in a pass on stock Avian (`avian_ext::island_wake`,
 `link_resting_contacts` in `NarrowPhaseSystems::Last`, after the reduction pass): each queued
-`StartedGeneratingConstraints` whose sides are each in a sleeping island or hold no island (a static
-or disabled body, a standalone collider), at least one in an island, leaves the queue; the pass
-links the contact with `PhysicsIslands::add_contact`, merging the resting islands it bridges, and
-moves the pair to the sleeping set with `ContactGraph::sleep_entity_with`, so the solver gets no
-constraint for it. The island's next wake (`WakeIslands`) returns the pair and pushes its manifolds.
+`StartedGeneratingConstraints` whose sides are each in a sleeping island or hold no island (a
+standalone collider, or a body out of the solver without a node: static, disabled, or asleep since
+its spawn), at least one in an island, leaves the queue; a body in the solver without a node has
+lost state `IslandPlugin` requires and is refused (guard:
+`an_awake_body_without_its_island_node_is_refused`). The pass links the contact with
+`PhysicsIslands::add_contact`, merging the resting islands it bridges, and moves the pair to the
+sleeping set with `ContactGraph::sleep_entity_with`, so the solver gets no constraint for it. The island's next wake (`WakeIslands`) returns the pair and pushes its manifolds.
 A merge the pass makes stands when a later entry of the same step wakes the merged island, which then
 holds the pair. Sleep is read from the island (`PhysicsIsland::is_sleeping`, public), not the body's
 `Sleeping` marker. Upstream composes without `IslandPlugin` too; the game's does not (no app in the

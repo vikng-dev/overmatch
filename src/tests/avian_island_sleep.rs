@@ -93,6 +93,28 @@ fn stationary_contact_does_not_wake_a_resting_island() {
     );
 }
 
+/// A body in the solver holds an island node (Avian's `IslandPlugin` requires one with
+/// `SolverBodyIndex`), so the wake rule refuses one without it instead of reading it as immovable:
+/// so read, an awake body meeting a sleeper has their new contact put to sleep, unsolved. Fails if a
+/// lost node reads as a side that holds no island.
+#[test]
+#[should_panic(expected = "a body in the solver holds an island node")]
+fn an_awake_body_without_its_island_node_is_refused() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let resting = body(&mut app, Vec3::ZERO);
+    until_asleep(&mut app, resting);
+    // Fixture: an awake cube 10 cm off the sleeper's face, closing at 2 m/s.
+    let striker = body(&mut app, Vec3::X * (SIDE + 0.1));
+    app.world_mut()
+        .entity_mut(striker)
+        .insert(LinearVelocity(Vec3::NEG_X * 2.0))
+        .remove::<BodyIslandNode>();
+    for _ in 0..16 {
+        app.update();
+    }
+}
+
 /// The wake rule links resting contacts into Avian's islands, so the game's seams refuse a physics
 /// composition without `IslandPlugin` as they are built, naming the plugin, not inside the pass on
 /// the first step. No composition of the game's physics disables it.
