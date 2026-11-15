@@ -2795,6 +2795,8 @@ fn standing(bed: &mut Bed, span: (f32, f32), height: f32, (z, length): (f32, f32
 struct Straddle {
     bed: Bed,
     sills: [Entity; 2],
+    /// Each sill's sideways overlap with its slice (m).
+    overlap: f32,
     /// The left shoe's side slices, inboard then outboard.
     slices: [Entity; 2],
 }
@@ -2817,6 +2819,7 @@ impl Straddle {
         Self {
             bed,
             sills,
+            overlap,
             slices: [inner, outer],
         }
     }
@@ -2839,10 +2842,10 @@ impl Straddle {
 /// friction's bill reaches its belt a tick late (`sim::feel_tick`), so each tick charges the belt
 /// its own friction's bill at the belt speed the solver moved the surface at, and returns the bill
 /// it paid. The normal rows' work is booked as the solver did it: whether their push was owed is
-/// [`matter_under_both_edges_of_a_shoe_never_pinches_it`]'s. Fixture: [`Straddle`], 8 s at full
-/// pedal, long enough to cross the sills in first gear. Fails under a pinch, whose friction the
-/// read-back cannot settle within a tick (#353): `track-contact.md`, the side slices against
-/// standing matter.
+/// [`no_side_slice_bears_a_row_in_its_vacated_band`]'s. Fixture: [`Straddle`], 8 s at full pedal,
+/// long enough to cross the sills in first gear. Fails under a pinch, whose friction the read-back
+/// cannot settle within a tick (#353): `track-contact.md`, the side slices against standing
+/// matter.
 #[cfg(feature = "bitprobe")]
 #[test]
 fn the_drivetrains_books_close_over_standing_matter() {
@@ -2915,44 +2918,61 @@ fn the_drivetrains_books_close_over_standing_matter() {
     assert!(carried, "the stop never carried the shoe on both sills");
 }
 
-/// Matter under both edges of one shoe never pinches it: in no tick do both of its side slices
-/// carry the solver's normal rows. Each bears only through its exposed face, so two such rows push
-/// the shoe from both sides at once against static bodies, which no motion satisfies; matter under
-/// the shoe is the stop's and the sampled support's. Fixture: [`Straddle`], 8 s at full pedal.
-/// Fails if a slice bears in the band its belt has vacated (`stop_contacts::BeltFace::stands_at`):
-/// `track-contact.md`, the side slices against standing matter.
+/// No side-slice point inside its link's vacated band carries a normal row, through the shipped
+/// composition: there a slice meets matter its belt rides over, which the stop and the sampled
+/// support own (`stop_contacts::BeltFace::stands_at`); rows anywhere else are the law's. The band
+/// is the one the hook reads: this tick's pass's (`sim::TrackRise`), at the hull's pose as the step
+/// begins. Fixture: [`Straddle`], 8 s at full pedal, the stop carrying the shoe on both sills
+/// while each stands in its edge's band deeper than it overlaps the slice, where a slice meets it
+/// laterally. Fails if the hook reads no band.
 #[test]
-fn matter_under_both_edges_of_a_shoe_never_pinches_it() {
+fn no_side_slice_bears_a_row_in_its_vacated_band() {
+    use crate::track::sim::TrackRise;
+    use crate::track::stop_contacts::BeltFace;
     let mut straddle = Straddle::new();
-    let mut carried = false;
+    let (tank, overlap) = (straddle.bed.tank, straddle.overlap);
+    let (mut carried, mut banded) = (false, false);
     for tick in 0..8 * TICKS {
+        let hull = straddle.bed.hull();
         straddle.bed.tick(1.0, 0.0);
+        let world = straddle.bed.app.world();
+        let band = &world.get::<TrackRise>(tank).expect("a driving tank").0[Side::Left.index()];
         let points = straddle.bed.solver_points();
-        let rows = straddle.slices.map(|slice| {
-            points.iter().any(|(point, force)| {
-                (point.reference_collider == slice || point.other_collider == Some(slice))
-                    && force.dot(point.normal) != 0.0
-            })
-        });
-        assert!(
-            rows != [true; 2],
-            "tick {tick}: both of the left shoe's side slices carry normal rows"
-        );
-        carried |= straddle.carried();
+        for slice in straddle.slices {
+            let face = world.get::<BeltFace>(slice).expect("a side slice's face");
+            for (point, force) in &points {
+                let on = point.reference_collider == slice || point.other_collider == Some(slice);
+                let local = hull.rotation.inverse() * (point.point - hull.position);
+                assert!(
+                    !on || force.dot(point.normal) == 0.0 || face.stands_at(band, local),
+                    "tick {tick}: a side slice carries a normal row in its vacated band"
+                );
+            }
+        }
+        if straddle.carried() {
+            carried = true;
+            banded |= (0..2).all(|edge| band.iter().any(|link| link.rise[edge] > overlap));
+        }
     }
     assert!(carried, "the stop never carried the shoe on both sills");
+    assert!(
+        banded,
+        "the sills never stood in both edges' bands deeper than their overlap"
+    );
 }
 
-/// The contact hook reads a side slice's vacated band from its tank's last driving pass, so the
-/// band outlives the matter that raised it by the physics step that matter goes in, and no more
-/// (`sim::TrackRise` says why). Fixture: the left shoe parks with its outboard edge on a block as
-/// wide as its slice and half the bump travel tall; beside the shoe, half Avian's contact tolerance
-/// outside it, stands a block as tall, in the band. The first block goes where the construction
-/// sweep removes matter: after the tick's driving passes, before the step. Fails if the hook reads
-/// the gone block's band in a later step: a pass ordered after the step, or a resting tank left
-/// asleep.
+/// A side slice's vacated band (`sim::TrackRise`) is at most one awake step stale, whatever changed
+/// while its tank rested. Fixture: the left shoe parks with its outboard edge on a block as wide as
+/// its slice and half the bump travel tall; beside the shoe, half Avian's contact tolerance outside
+/// it, stands a block as tall, in the band. The first block goes two ways. Where the construction
+/// sweep removes matter, after the tick's driving passes and before the step: its going wakes the
+/// tank through the support index (`sim::SampledSupports`). And between ticks with the index
+/// forgetting the tank, as when the pass it rested under clipped the block's damped load to zero:
+/// its going wakes nothing, and the tank rests half a second before a push worth twice Avian's
+/// rest speed wakes it. Fails if an awake step after the first reads the gone block's band: a pass
+/// ordered after the step, or one skipped for an awake tank.
 #[test]
-fn a_vacated_band_outlives_its_matter_by_the_step_it_goes_in() {
+fn a_vacated_band_is_at_most_one_awake_step_stale() {
     use crate::track::forces::LinkRise;
     use crate::track::sim::TrackRise;
     use crate::track::stop_contacts::BeltFace;
@@ -2962,8 +2982,9 @@ fn a_vacated_band_outlives_its_matter_by_the_step_it_goes_in() {
         support: Entity,
         armed: bool,
         band: Vec<LinkRise>,
-        /// Each step since the support went: whether the hook reads its band.
-        stale: Vec<bool>,
+        /// Each step since the support went: whether the tank is awake, and whether the hook reads
+        /// the gone support's band.
+        steps: Vec<(bool, bool)>,
     }
     fn collapse(mut collapse: ResMut<Collapse>, mut commands: Commands) {
         if std::mem::take(&mut collapse.armed) {
@@ -2972,67 +2993,96 @@ fn a_vacated_band_outlives_its_matter_by_the_step_it_goes_in() {
     }
     fn read(
         mut collapse: ResMut<Collapse>,
-        rises: Query<&TrackRise>,
+        rises: Query<(&TrackRise, Has<Sleeping>)>,
         colliders: Query<(), With<Collider>>,
     ) {
         if colliders.contains(collapse.support) {
             return;
         }
-        let rise = rises.get(collapse.tank).expect("a driving tank");
+        let (rise, resting) = rises.get(collapse.tank).expect("a driving tank");
         let stale = rise.0[Side::Left.index()] == collapse.band;
-        collapse.stale.push(stale);
+        collapse.steps.push((!resting, stale));
     }
 
-    let mut bed = Bed::on_ground(Some(base_ground()), flat());
-    let [_, (slice, outboard)] = left_slices(&mut bed);
-    let height = shipped_spec().track.suspension.params().bump_stop / 2.0;
-    let config = bed.app.world().resource::<NarrowPhaseConfig>();
-    let beside = outboard.1 + config.contact_tolerance / 2.0;
-    // Fixture: 1 m blocks under the middle of the ground run, the one beside half a metre wide.
-    let along = (0.0, 1.0);
-    let support = standing(&mut bed, outboard, height, along);
-    standing(&mut bed, (beside, beside + 0.5), height, along);
-    bed.place(Vec3::ZERO, Quat::IDENTITY);
-    bed.start();
-    until_resting(&mut bed);
+    for forgotten in [false, true] {
+        let mut bed = Bed::on_ground(Some(base_ground()), flat());
+        let [_, (slice, outboard)] = left_slices(&mut bed);
+        let height = shipped_spec().track.suspension.params().bump_stop / 2.0;
+        let config = bed.app.world().resource::<NarrowPhaseConfig>();
+        let beside = outboard.1 + config.contact_tolerance / 2.0;
+        // Fixture: 1 m blocks under the middle of the ground run, the one beside half a metre wide.
+        let along = (0.0, 1.0);
+        let support = standing(&mut bed, outboard, height, along);
+        standing(&mut bed, (beside, beside + 0.5), height, along);
+        bed.place(Vec3::ZERO, Quat::IDENTITY);
+        bed.start();
+        until_resting(&mut bed);
 
-    let world = bed.app.world();
-    let band =
-        world.get::<TrackRise>(bed.tank).expect("a driving tank").0[Side::Left.index()].clone();
-    let hull = bed.hull();
-    let edge = Vec3::new(Side::Left.sign() * beside, height, along.0);
-    assert!(
-        !(world.get::<BeltFace>(slice).expect("a side slice's face"))
-            .stands_at(&band, hull.rotation.inverse() * (edge - hull.position)),
-        "the block beside the shoe stands in the band its neighbour raised"
-    );
-    let tank = bed.tank;
-    bed.app.insert_resource(Collapse {
-        tank,
-        support,
-        armed: true,
-        band,
-        stale: Vec::new(),
-    });
-    bed.app.add_systems(
-        FixedPostUpdate,
-        (
-            collapse.before(PhysicsSystems::Prepare),
-            read.after(PhysicsSystems::Prepare)
-                .before(PhysicsSystems::StepSimulation),
-        ),
-    );
-    // Fixture: a second after the block goes.
-    for _ in 0..TICKS {
-        bed.tick(0.0, 0.0);
+        let (tank, hull) = (bed.tank, bed.hull());
+        let world = bed.app.world();
+        let band =
+            world.get::<TrackRise>(tank).expect("a driving tank").0[Side::Left.index()].clone();
+        let edge = Vec3::new(Side::Left.sign() * beside, height, along.0);
+        assert!(
+            !(world.get::<BeltFace>(slice).expect("a side slice's face"))
+                .stands_at(&band, hull.rotation.inverse() * (edge - hull.position)),
+            "the block beside the shoe stands in the band its neighbour raised"
+        );
+        bed.app.insert_resource(Collapse {
+            tank,
+            support,
+            armed: !forgotten,
+            band,
+            steps: Vec::new(),
+        });
+        bed.app.add_systems(
+            FixedPostUpdate,
+            (
+                collapse.before(PhysicsSystems::Prepare),
+                read.after(PhysicsSystems::Prepare)
+                    .before(PhysicsSystems::StepSimulation),
+            ),
+        );
+        if forgotten {
+            let mut entity = bed.app.world_mut().entity_mut(tank);
+            let contacts = entity.take::<TrackContacts>().expect("a driving tank");
+            entity.insert(contacts);
+            bed.app.world_mut().despawn(support);
+            for _ in 0..TICKS / 2 {
+                bed.tick(0.0, 0.0);
+            }
+            assert!(is_asleep(&bed), "the unindexed block's going woke the tank");
+            let rest = (bed.app.world().get::<SleepThreshold>(tank))
+                .expect("a dynamic tank carries its rest threshold")
+                .linear;
+            let push = bed.hull().forward() * 2.0 * rest * bed.mass();
+            let (at, world) = (bed.center_of_mass(), bed.app.world_mut());
+            let mut bodies = world.query::<Forces>();
+            let forces = bodies
+                .get_mut(world, tank)
+                .expect("a dynamic tank takes forces");
+            crate::track::sim::apply_explicit_impulse(forces, push, at);
+        }
+        // Fixture: a second after the block goes or the push.
+        for _ in 0..TICKS {
+            bed.tick(0.0, 0.0);
+        }
+        let steps = &bed.app.world().resource::<Collapse>().steps;
+        assert!(
+            steps.iter().any(|&(awake, _)| awake),
+            "the tank never woke (index forgotten: {forgotten})"
+        );
+        let late: Vec<_> = (steps.iter().enumerate())
+            .filter(|(_, (awake, _))| *awake)
+            .skip(1)
+            .filter(|(_, (_, stale))| *stale)
+            .map(|(step, _)| step)
+            .collect();
+        assert!(
+            late.is_empty(),
+            "index forgotten {forgotten}: awake steps {late:?} read the gone block's band"
+        );
     }
-    let stale = &bed.app.world().resource::<Collapse>().stale;
-    assert_eq!(stale.len(), TICKS, "the block went before the first step");
-    let late: Vec<_> = (1..TICKS).filter(|&step| stale[step]).collect();
-    assert!(
-        late.is_empty(),
-        "the hook read the gone block's band in steps {late:?} after the one it went in"
-    );
 }
 
 /// One broad heavy slab under the whole tank, the tank settled a second on it. Fixture.

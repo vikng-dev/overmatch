@@ -191,11 +191,14 @@ pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
 /// the contact hook drops a side slice's contact in the band its belt has risen out of
 /// (`stop_contacts::BeltFace::stands_at`). Rewritten by every pass; a resting tank keeps its last
 /// pass's, as it keeps its hull pose, belt phase and contacts ([`NotResting`]). Empty before a
-/// pass and where no pass runs: nothing has risen. A band outlives its matter by at most the
-/// physics step that matter goes in: every awake tank's pass runs in `FixedUpdate`, before Avian's
-/// step in `FixedPostUpdate`, and a support that goes wakes the resting tank it carries at that
-/// change's sync point (`crate::debris`). That step runs on the belt the last pass left, which no
-/// pass has yet moved. Never hashed, never rolled back.
+/// pass and where no pass runs: nothing has risen. A band is at most one awake step stale,
+/// whatever changed while its tank rested. While it rests the band moves nothing: no solver step
+/// runs on a resting tank's pairs with static matter or resting bodies, and the hook bears a
+/// moving body whole there, so the contact wakes the tank (`stop_contacts::WorldContacts`); a
+/// sweep reads no resting source's. Once awake, every pass rewrites it in `FixedUpdate` before Avian's step in
+/// `FixedPostUpdate`, a tank at rest but awake included, so only a tank woken after its pass and
+/// before the step reads it stale, in that step alone, hook and sweep alike, on the belt the last
+/// pass left. Never hashed, never rolled back.
 #[derive(Component, Clone, Debug, Default)]
 pub(crate) struct TrackRise(pub(crate) [Vec<LinkRise>; 2]);
 

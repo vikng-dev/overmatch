@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use avian3d::prelude::{
-    ActiveCollisionHooks, ColliderOf, CollisionHooks, ContactPair, Position, Rotation,
+    ActiveCollisionHooks, ColliderOf, CollisionHooks, ContactPair, Position, RigidBody, Rotation,
+    Sleeping,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -150,8 +151,10 @@ pub(crate) struct WorldContacts<'w, 's> {
             &'static TrackRise,
             &'static Position,
             &'static Rotation,
+            Has<Sleeping>,
         ),
     >,
+    bodies: Query<'w, 's, (&'static RigidBody, Has<Sleeping>)>,
     surfaces: Query<'w, 's, (), With<FieldSurface>>,
     field: Option<Res<'w, TrackField>>,
 }
@@ -162,25 +165,33 @@ impl CollisionHooks for WorldContacts<'_, '_> {
             return false;
         }
         // Avian's relative surface velocity is collider 2 minus collider 1.
-        for (collider, other, sign) in [
-            (contacts.collider1, contacts.collider2, -1.0),
-            (contacts.collider2, contacts.collider1, 1.0),
+        for (collider, other, body, sign) in [
+            (contacts.collider1, contacts.collider2, contacts.body2, -1.0),
+            (contacts.collider2, contacts.collider1, contacts.body1, 1.0),
         ] {
             let Ok((face, of)) = self.faces.get(collider) else {
                 continue; // Ordinary collider: its surface stands still on its body.
             };
-            let (drive, rise, position, rotation) = self
+            let (drive, rise, position, rotation, resting) = self
                 .belts
                 .get(of.body)
                 .expect("a moving shoe face hangs on its spawn-built driving body");
-            let links = &rise.0[face.side.index()];
             contacts
                 .manifolds
                 .retain(|m| face.accepts_normal(rotation.0.inverse() * (-sign * m.normal)));
-            for manifold in &mut contacts.manifolds {
-                (manifold.points).retain(|p| {
-                    face.stands_at(links, rotation.0.inverse() * (p.point - position.0))
-                });
+            // A resting tank's band is the pass it rested under (`TrackRise`). No solver step runs
+            // on its pairs with static matter or resting bodies, but a moving body can stand
+            // anywhere, so the slice bears it whole and the contact wakes the tank (Avian's island
+            // wake).
+            let moving = (body.and_then(|body| self.bodies.get(body).ok()))
+                .is_some_and(|(body, rests)| !body.is_static() && !rests);
+            if !(resting && moving) {
+                let links = &rise.0[face.side.index()];
+                for manifold in &mut contacts.manifolds {
+                    (manifold.points).retain(|p| {
+                        face.stands_at(links, rotation.0.inverse() * (p.point - position.0))
+                    });
+                }
             }
             contacts.manifolds.retain(|m| !m.points.is_empty());
             for manifold in &mut contacts.manifolds {
@@ -576,6 +587,75 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A resting tank's band is the pass it rested under, which nothing rereads while it rests, so
+    /// its slice bears a moving body in the band whole and the contact wakes it; static matter and a
+    /// resting body, on whose pairs with it no solver step runs, stay out, and an awake tank's band
+    /// holds for every body. Fails if a resting belt drops a moving body's contact in its band, or
+    /// bears static matter or a resting body there.
+    #[test]
+    fn a_resting_belt_bears_a_moving_body_in_its_band() {
+        let (side, rise) = (Side::Left, 0.2); // Fixture rise under the outboard edge, m.
+        // (the belt rests, the other body and whether it rests, the point bears).
+        for (resting, other, bears) in [
+            (true, Some((RigidBody::Dynamic, false)), true),
+            (true, Some((RigidBody::Dynamic, true)), false),
+            (true, Some((RigidBody::Static, false)), false),
+            (true, None, false),
+            (false, Some((RigidBody::Dynamic, false)), false),
+        ] {
+            let mut world = World::new();
+            world.init_resource::<Time<Fixed>>();
+            let mut links = TrackRise::default();
+            links.0[side.index()] = vec![LinkRise {
+                face: [Vec2::new(-1.0, -1.0), Vec2::new(1.0, -1.0)],
+                rise: [0.0, rise],
+            }];
+            let spawned = (
+                TrackDrive::default(),
+                links,
+                Position::default(),
+                Rotation::default(),
+            );
+            let mut body = world.spawn((spawned, Transform::IDENTITY));
+            if resting {
+                body.insert(Sleeping);
+            }
+            let body = body.id();
+            let shoe = world
+                .spawn((
+                    face(side, Bearing::Exposed(side.sign())),
+                    Transform::IDENTITY,
+                    ColliderOf { body },
+                ))
+                .id();
+            let mut pair = ContactPair::new(shoe, world.spawn_empty().id(), ContactId::PLACEHOLDER);
+            pair.body1 = Some(body);
+            pair.body2 = other.map(|(kind, rests)| {
+                let mut other = world.spawn((kind, Position::default(), Rotation::default()));
+                if rests {
+                    other.insert(Sleeping);
+                }
+                other.id()
+            });
+            // Halfway up the band, through the outboard slice's exposed face.
+            let point = Vec3::new(side.sign() * 0.5, -1.0 + rise / 2.0, 0.0);
+            pair.manifolds.push(ContactManifold::new(
+                [ContactPoint::new(Vec3::ZERO, Vec3::ZERO, point, 0.01)],
+                Vec3::X * side.sign(),
+            ));
+            let case = format!("belt rests {resting}, other {other:?}");
+            world
+                .run_system_once(move |hooks: WorldContacts, mut commands: Commands| {
+                    assert_eq!(
+                        hooks.modify_contacts(&mut pair, &mut commands),
+                        bears,
+                        "{case}"
+                    );
+                })
+                .unwrap();
         }
     }
 
