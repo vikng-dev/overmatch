@@ -74,6 +74,10 @@
 //! when the body has a solid collider (`Reach::of`); it evaluates each awake body that is not
 //! static, and each piece the thaw frees. The freeze and the thaw evaluate it serially; whether
 //! splitting that evaluation over the compute pool pays on the hosted allocation is unmeasured.
+//! With server stats armed, [`census`] gives an upper bound on freezable awake pieces outside the
+//! tick, evaluating reach in parallel. With no server stats recorder, that census fetches nothing
+//! and casts no query.
+//! Diagnostic queries do not enter the freeze/thaw work tally.
 //! The `Changed<…>` filter of `super::wake_on_static_moved` walks every attached collider each
 //! step, about 2 µs per 1,000 colliders on the perf profile (MEASURED), and stays unindexed.
 //!
@@ -91,6 +95,7 @@ use bevy::ecs::entity_disabling::Disabled;
 use bevy::ecs::query::Allow;
 use bevy::ecs::system::{SystemChangeTick, SystemParam};
 use bevy::prelude::*;
+use bevy::utils::Parallel;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::DebrisPiece;
@@ -99,6 +104,57 @@ use crate::cost::stages::{Stages, Work};
 /// Resolution: whole pieces switched to static per tick, so islands that settle together spread
 /// their switches over ticks; one island of any size passes alone, so none waits on its own size.
 const FREEZE_PIECE_BUDGET: usize = 8;
+
+/// Per-tick counts; sampling windows and summaries share these field names.
+#[derive(Resource, Default, Debug, PartialEq, serde::Serialize)]
+pub(crate) struct FreezeCounts<T = usize> {
+    /// Denominator: awake dynamic debris, the same population as the line's `live` census.
+    pub(crate) awake: T,
+    /// Upper bound before reach: awake pieces whose timer has reached `TimeToSleep`.
+    pub(crate) rested: T,
+    /// Rested pieces unreached by non-static unrested non-debris bodies or zero-timer debris.
+    /// Divided by `awake`, an upper bound on the fraction #379 could freeze: it uses that
+    /// redesign's mover rule (rested pieces are never movers) but omits its hold-up condition
+    /// (a piece held up by a dynamic body cannot freeze), so the true fraction is at or below it.
+    pub(crate) rested_unreached: T,
+}
+
+impl<T> FreezeCounts<T> {
+    pub(crate) fn map<U>(&self, mut f: impl FnMut(&T) -> U) -> FreezeCounts<U> {
+        FreezeCounts {
+            awake: f(&self.awake),
+            rested: f(&self.rested),
+            rested_unreached: f(&self.rested_unreached),
+        }
+    }
+
+    pub(crate) fn map_mut<U>(&mut self, mut f: impl FnMut(&mut T) -> U) -> FreezeCounts<U> {
+        FreezeCounts {
+            awake: f(&mut self.awake),
+            rested: f(&mut self.rested),
+            rested_unreached: f(&mut self.rested_unreached),
+        }
+    }
+}
+
+/// The population shared by the per-tick denominator and the line's `live` count.
+#[derive(SystemParam)]
+pub(crate) struct AwakePieces<'w, 's> {
+    pieces: Query<
+        'w,
+        's,
+        (Entity, &'static RigidBody, &'static SleepTimer),
+        (With<DebrisPiece>, Without<Sleeping>, Without<Frozen>),
+    >,
+}
+
+impl AwakePieces<'_, '_> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (Entity, &SleepTimer)> {
+        self.pieces
+            .iter()
+            .filter_map(|(piece, body, timer)| body.is_dynamic().then_some((piece, timer)))
+    }
+}
 
 /// A frozen piece, in frozen island `island` of [`FrozenIslands`], at the pose bits it froze at.
 #[derive(Component, Debug)]
@@ -433,6 +489,79 @@ impl Reach<'_, '_> {
             });
         tally.finds += u64::from(reached.len() > found);
     }
+}
+
+#[derive(SystemParam)]
+pub(crate) struct Census<'w, 's> {
+    awake: AwakePieces<'w, 's>,
+    moving: Query<'w, 's, (&'static SleepTimer, Has<DebrisPiece>)>,
+    time_to_sleep: Res<'w, TimeToSleep>,
+    reach: Reach<'w, 's>,
+    counts: ResMut<'w, FreezeCounts>,
+    classified: Local<'s, Parallel<(usize, BTreeSet<Entity>)>>,
+    reached_by_moving: Local<'s, Parallel<BTreeSet<Entity>>>,
+}
+
+/// Stats-only census after `TickClosed`, before the recorder. The freeze changes sleeping
+/// islands only; after it, publication copies poses to carriers and `FixedLast` only records
+/// state or advances the weapon clock. Awake membership, timers, collider shapes, placed poses,
+/// bounds and velocities therefore remain those the freeze read. Bevy 0.19.1 keeps the generic
+/// clock fixed throughout `FixedMain`, so reach also uses the same dt.
+///
+/// Temporary instrument for the #379 decision: measuring the freezable fraction on the hosted
+/// ram scene; delete it when that decision is made. Classification and spatial queries run in
+/// parallel, with worker-local outputs reduced before their consumers.
+/// Avian's `BodyIslandNode` excludes disabled and static movers by construction (`Reach::movers`).
+pub(crate) fn census(p: Census) {
+    let Census {
+        awake,
+        moving,
+        time_to_sleep,
+        reach,
+        mut counts,
+        mut classified,
+        mut reached_by_moving,
+    } = p;
+    let outputs = &*classified;
+    awake.pieces.par_iter().for_each(|(piece, body, timer)| {
+        if body.is_dynamic() {
+            outputs.scope(|(awake, rested)| {
+                *awake += 1;
+                if timer.0 >= time_to_sleep.0 {
+                    rested.insert(piece);
+                }
+            });
+        }
+    });
+    let mut awake_count = 0;
+    let mut rested = BTreeSet::new();
+    for (count, pieces) in classified.iter_mut() {
+        awake_count += std::mem::take(count);
+        rested.append(pieces);
+    }
+    let rested_count = rested.len();
+    if !rested.is_empty() {
+        let reached = &*reached_by_moving;
+        reach.movers.par_iter().for_each(|body| {
+            let (timer, debris) = moving.get(body).expect(
+                "every enabled non-static awake body carries SleepTimer through Avian's SolverBody",
+            );
+            if timer.0 < time_to_sleep.0 && (!debris || timer.0 == 0.0) {
+                reached.scope(|out| {
+                    reach.of(body, |p| rested.contains(&p), out, &mut Tally::default());
+                });
+            }
+        });
+        for reached in reached_by_moving.iter_mut() {
+            rested.retain(|piece| !reached.contains(piece));
+            reached.clear();
+        }
+    }
+    *counts = FreezeCounts {
+        awake: awake_count,
+        rested: rested_count,
+        rested_unreached: rested.len(),
+    };
 }
 
 #[derive(SystemParam)]
@@ -786,6 +915,151 @@ mod tests {
             ColliderDensity(1000.0),
             LinearVelocity(Vec3::X * speed),
         ))
+    }
+
+    /// For the #379 decision, partly rested debris must not reach, while a driven hull with
+    /// timer = dt must. Disabled/static/sleeping sources cannot reach, and
+    /// frozen/sleeping/non-dynamic pieces cannot enter the denominator.
+    #[test]
+    fn freeze_counts_distinguish_resting_debris_and_driven_bodies() {
+        let mut app = settling(Vec3::ZERO);
+        app.init_resource::<FreezeCounts>();
+        // Fixture: separated targets, with overlapping sources that make no solver contacts.
+        let pieces = [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0]
+            .map(|x| piece(&mut app, Vec3::X * x));
+        let [
+            isolated,
+            by_zero,
+            by_partial,
+            by_driven,
+            unrested,
+            sleeping,
+            frozen,
+            fixed,
+            kinematic,
+            by_disabled,
+        ] = pieces;
+        for piece in pieces {
+            app.world_mut().entity_mut(piece).insert(SleepingDisabled);
+        }
+        let mut source = |x| {
+            mover(&mut app, Vec3::X * x, 0.0)
+                .insert((SleepingDisabled, CollisionLayers::NONE))
+                .id()
+        };
+        let [
+            zero,
+            partial,
+            driven,
+            disabled,
+            resting,
+            sleeping_source,
+            static_source,
+        ] = [10.0, 20.0, 30.0, 90.0, 0.0, 0.0, 0.0].map(&mut source);
+        for debris in [zero, partial] {
+            app.world_mut().entity_mut(debris).insert(DebrisPiece);
+        }
+        app.update();
+        app.update();
+        let world = app.world_mut();
+        let rest_window = world.resource::<TimeToSleep>().0;
+        let dt = world.resource::<Time<Fixed>>().timestep().as_secs_f32();
+        assert!(
+            0.0 < dt && dt < rest_window,
+            "fixture represents the driven hull's post-step timer"
+        );
+        for body in pieces.into_iter().chain([resting]) {
+            world.entity_mut(body).insert(SleepTimer(rest_window));
+        }
+        for body in [unrested, zero, disabled, sleeping_source, static_source] {
+            world.entity_mut(body).insert(SleepTimer(0.0));
+        }
+        world
+            .entity_mut(partial)
+            .insert(SleepTimer(rest_window / 2.0));
+        world.entity_mut(driven).insert(SleepTimer(dt));
+        world.entity_mut(disabled).insert(RigidBodyDisabled);
+        assert!(world.get::<BodyIslandNode>(disabled).is_none());
+        world.entity_mut(sleeping_source).insert(Sleeping);
+        world.entity_mut(static_source).insert(RigidBody::Static);
+        world.entity_mut(sleeping).insert(Sleeping);
+        // A reader-only marker on a dynamic fixture distinguishes Without<Frozen> from is_dynamic.
+        world.entity_mut(frozen).insert(Frozen::fixture());
+        world.entity_mut(fixed).insert(RigidBody::Static);
+        world.entity_mut(kinematic).insert(RigidBody::Kinematic);
+        world.run_system_cached(census).unwrap();
+        let awake = [
+            isolated,
+            by_zero,
+            by_partial,
+            by_driven,
+            unrested,
+            by_disabled,
+            zero,
+            partial,
+        ]
+        .len();
+        let rested = [isolated, by_zero, by_partial, by_driven, by_disabled].len();
+        assert_eq!(
+            *world.resource::<FreezeCounts>(),
+            FreezeCounts {
+                awake,
+                rested,
+                rested_unreached: [isolated, by_partial, by_disabled].len(),
+            }
+        );
+        // Reusing the system must not retain hits or counters from the previous sample.
+        for body in [zero, partial, driven] {
+            world.entity_mut(body).insert(SleepTimer(rest_window));
+        }
+        world.run_system_cached(census).unwrap();
+        assert_eq!(
+            *world.resource::<FreezeCounts>(),
+            FreezeCounts {
+                awake,
+                rested: rested + [zero, partial].len(),
+                rested_unreached: rested + [zero, partial].len(),
+            }
+        );
+        for body in pieces.into_iter().chain([zero, partial]) {
+            world.entity_mut(body).insert(SleepTimer(0.0));
+        }
+        world.run_system_cached(census).unwrap();
+        assert_eq!(
+            *world.resource::<FreezeCounts>(),
+            FreezeCounts { awake, ..default() }
+        );
+    }
+
+    /// The #379 decision must fail visibly if a mover lacks its required timer; skipping it
+    /// could count pieces in its reach as freezable.
+    #[test]
+    #[should_panic(expected = "every enabled non-static awake body carries SleepTimer")]
+    fn freeze_census_requires_every_movers_timer() {
+        let mut app = settling(Vec3::ZERO);
+        app.init_resource::<FreezeCounts>();
+        let target = piece(&mut app, Vec3::ZERO);
+        let source = mover(&mut app, Vec3::ZERO, 0.0)
+            .insert((SleepingDisabled, CollisionLayers::NONE))
+            .id();
+        app.world_mut().entity_mut(target).insert(SleepingDisabled);
+        app.update();
+        let world = app.world_mut();
+        let rest_window = world.resource::<TimeToSleep>().0;
+        world.entity_mut(target).insert(SleepTimer(rest_window));
+        world.entity_mut(source).remove::<SleepTimer>();
+        world.run_system_cached(census).unwrap();
+    }
+
+    /// Stats off cannot make the freeze law depend on the census's rest threshold or counters.
+    #[test]
+    fn freeze_needs_no_census_resources() {
+        let mut app = settling(Vec3::ZERO);
+        app.update();
+        let world = app.world_mut();
+        world.remove_resource::<TimeToSleep>();
+        assert!(!world.contains_resource::<FreezeCounts>());
+        world.run_system_once(freeze).unwrap();
     }
 
     /// Every frozen island touched something as it froze, and all of it stands: it exists, is

@@ -58,7 +58,7 @@
 //! - `one_thread_estimate_us`: the derived two-state estimate (see `one_thread_estimate`),
 //!   summarized per tick. It does not measure actual single-thread wall time.
 //! - `collector_us`: stats tick sampling after `TickClosed`, outside `tick_us`; includes the
-//!   armed ram census. Clock-read/bracket cost remains inside the measured stages.
+//!   armed ram and freeze censuses. Clock-read/bracket cost remains inside the measured stages.
 //! - `sleep_us`: Avian's island-sleep bracket, included in `physics_us`. Physics covers all
 //!   bodies, including tanks: a shared solver cannot attribute its cost exclusively to loose pieces.
 //! - `send_us`: the same summary of the outbound path, one sample per frame that replicated:
@@ -70,9 +70,10 @@
 //!   Linux or where the file is unreadable;
 //! - `construction`: unique recorded joint cracks and separations, and original construction
 //!   chunks departed. These are correctness counts, independent of time brackets.
-//! - `debris`: the `live` (awake) and `sleeping` loose pieces at the line, a construction's and the
-//!   debris stress lever's (`net::debris_stress`); while the lever is armed also its cumulative
-//!   `breaches` and `released`.
+//! - `debris`: `live`, `sleeping`, `frozen` loose pieces at the line; the three [`FreezeCounts`]
+//!   fields have the per-tick summary shape in piece counts (including zero). Divide
+//!   `rested_unreached.total` by `awake.total` for the period's fraction when any piece was awake.
+//!   The debris stress lever (`net::debris_stress`), while armed, adds `breaches` and `released`.
 //!
 //! RSS and throttle fields are null where the platform gives no reading. A process CPU clock
 //! failure visibly refuses the armed instrument rather than emitting an idle-core reading.
@@ -139,6 +140,7 @@ use crate::cost::{
     stages::{COUNT, NAMES, Stages},
 };
 use crate::damage_cam::recorder::ShotRecorder;
+use crate::debris::freeze::{self, FreezeCounts};
 use crate::scatter::MapInstance;
 use crate::tank::Tank;
 
@@ -282,11 +284,13 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         period.as_secs_f64()
     );
     arm_tick_clock(app);
+    app.init_resource::<FreezeCounts>();
     #[cfg(target_os = "linux")]
     linux::log_startup();
     app.insert_resource(ServerStats {
         period: Period::new(period, Instant::now()),
         ticks: TickWindow::default(),
+        freeze_counts: FreezeCounts::default(),
         physics: TickWindow::default(),
         sleep: TickWindow::default(),
         collector: TickWindow::default(),
@@ -323,7 +327,16 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
     super::contact_census::install(app);
     phases::install(app);
     crate::cost::stages::install_lifecycle_counts(app);
-    app.add_systems(FixedMain, record_tick.after(TickClosed));
+    app.add_systems(
+        FixedMain,
+        (
+            |mut starts: ResMut<PhaseStarts>| starts.collect_start = Some(Instant::now()),
+            freeze::census,
+            record_tick,
+        )
+            .chain()
+            .after(TickClosed),
+    );
     app.add_systems(
         PhysicsSchedule,
         (
@@ -446,6 +459,7 @@ pub(super) fn period_from(value: Option<&str>) -> Result<Option<Duration>, Lever
 struct ServerStats {
     period: Period,
     ticks: TickWindow,
+    freeze_counts: FreezeCounts<TickWindow>,
     /// The period's avian steps, wall micros.
     physics: TickWindow,
     sleep: TickWindow,
@@ -496,6 +510,7 @@ struct PhaseStarts {
     frame: Option<Instant>,
     post_update: Option<Instant>,
     send_census_us: f64,
+    collect_start: Option<Instant>,
 }
 
 /// The wall-clock period gate.
@@ -525,7 +540,7 @@ impl Period {
     }
 }
 
-/// One period's wall-microsecond samples.
+/// One period's per-tick samples.
 #[derive(Default)]
 struct TickWindow(Vec<f64>);
 
@@ -587,6 +602,7 @@ struct Snapshot {
     elapsed: Duration,
     budget_us: f64,
     ticks: Option<TickSummary>,
+    freeze_counts: FreezeCounts<Option<TickSummary>>,
     physics: Option<TickSummary>,
     sleep: Option<TickSummary>,
     collector: Option<TickSummary>,
@@ -713,6 +729,17 @@ fn stats_line(snapshot: &Snapshot) -> String {
         body["linux_host"] = snapshot.host.clone();
     }
     body["debris"] = snapshot.debris.clone();
+    let summaries = json!(
+        snapshot
+            .freeze_counts
+            .map(|summary| percentiles(summary.as_ref()))
+    );
+    for (name, summary) in summaries
+        .as_object()
+        .expect("FreezeCounts serializes as an object")
+    {
+        body["debris"][name] = summary.clone();
+    }
     body["construction"] = snapshot.construction.clone();
     if let Some(workload) = &snapshot.workload {
         body["loadtest"] = workload.clone();
@@ -725,18 +752,27 @@ fn stats_line(snapshot: &Snapshot) -> String {
 
 /// `FixedMain`, after all fixed schedules and their final flushes close.
 fn record_tick(
-    clock: Res<TickClock>,
+    (clock, freeze_counts): (Res<TickClock>, Res<FreezeCounts>),
     stages: Res<Stages>,
     phases: Res<Phases>,
     mut stats: ResMut<ServerStats>,
-    starts: Res<PhaseStarts>,
+    mut starts: ResMut<PhaseStarts>,
     mut traces: (super::ram::Census, Option<ResMut<Loadtest>>),
     fixed: Res<Time<Fixed>>,
 ) {
     let (census, load) = &mut traces;
     if let Some(closed) = clock.closed() {
-        let collect_start = Instant::now();
+        let collect_start = starts
+            .collect_start
+            .take()
+            .expect("the collector bracket opens before the freeze census and record_tick");
         stats.ticks.push(closed.us);
+        stats.freeze_counts.awake.push(freeze_counts.awake as f64);
+        stats.freeze_counts.rested.push(freeze_counts.rested as f64);
+        stats
+            .freeze_counts
+            .rested_unreached
+            .push(freeze_counts.rested_unreached as f64);
         let measured = stages.take_us();
         let cpu = stages.take_cpu_us();
         let phases_cpu = phases.cpu_times();
@@ -1011,6 +1047,9 @@ fn emit_line(
         elapsed,
         budget_us,
         ticks: stats.ticks.drain(budget_us),
+        freeze_counts: stats
+            .freeze_counts
+            .map_mut(|window| window.drain(f64::INFINITY)),
         physics: stats.physics.drain(budget_us),
         sleep: stats.sleep.drain(budget_us),
         collector: stats.collector.drain(budget_us),
@@ -1126,6 +1165,7 @@ mod tests {
         ServerStats {
             period: Period::new(Duration::from_secs(1), Instant::now()),
             ticks: TickWindow::default(),
+            freeze_counts: FreezeCounts::default(),
             physics: TickWindow::default(),
             sleep: TickWindow::default(),
             collector: TickWindow::default(),
@@ -1479,6 +1519,136 @@ mod tests {
         );
     }
 
+    /// Operators rely on the shipped installer to push every field after the tick closes. Each
+    /// field gets a distinct sample, so a missing push or crossed window fails. Off fetches no
+    /// physics resources. The subprocess isolates the operator's environment from other tests.
+    #[test]
+    fn install_records_the_freeze_upper_bound_only_when_armed() {
+        use crate::debris::DebrisPiece;
+        use avian3d::prelude::*;
+        use bevy::ecs::system::RunSystemOnce;
+
+        const CHILD: &str = "OVERMATCH_TEST_FREEZE_RECORDER";
+        let Some(mode) = std::env::var_os(CHILD) else {
+            for armed in [false, true] {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command.args([
+                    "--exact",
+                    "net::server_stats::tests::install_records_the_freeze_upper_bound_only_when_armed",
+                    "--nocapture",
+                ]).env(CHILD, if armed { "on" } else { "off" }).env_remove("OVERMATCH_RAM");
+                if armed {
+                    // Fixture: long enough that no periodic line is emitted by this test.
+                    command.env(LEVER, "3600");
+                } else {
+                    command.env_remove(LEVER);
+                }
+                let output = command.output().unwrap();
+                assert!(
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                    "armed={armed}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        if mode == "off" {
+            install(&mut app).unwrap();
+            app.world_mut().run_schedule(FixedMain);
+            assert!(!app.world().contains_resource::<FreezeCounts>());
+            assert!(!app.world().contains_resource::<ServerStats>());
+            return;
+        }
+        app.add_plugins((
+            bevy::transform::TransformPlugin,
+            AssetPlugin::default(),
+            PhysicsPlugins::default(),
+        ))
+        .init_asset::<Mesh>()
+        .init_resource::<crate::contact_transfer::ContactTransfers>()
+        .init_resource::<crate::construction::breakage::SweepAccount>()
+        .init_resource::<LocalTimeline>()
+        .insert_resource(Gravity(Vec3::ZERO));
+        install(&mut app).unwrap();
+        app.finish();
+        app.cleanup();
+        let fixed = app.world_mut().resource_mut::<Time<Fixed>>().into_inner();
+        let dt = fixed.timestep();
+        fixed.advance_by(dt);
+        let time = fixed.as_generic();
+        app.insert_resource(time);
+        let rest_window = app.world().resource::<TimeToSleep>().0;
+        // Fixture: four rested targets, one unrested piece, and three overlapping sources:
+        // zero-timer debris, partially rested debris, and a driven-hull stand-in with timer = dt.
+        let mut readings = Vec::new();
+        for (x, debris, timer) in [
+            (0.0, true, rest_window),
+            (10.0, true, rest_window),
+            (20.0, true, rest_window),
+            (30.0, true, rest_window),
+            (40.0, true, dt.as_secs_f32()),
+            (10.0, true, 0.0),
+            (20.0, true, rest_window / 2.0),
+            (30.0, false, dt.as_secs_f32()),
+        ] {
+            let mut body = app.world_mut().spawn((
+                RigidBody::Dynamic,
+                Position(Vec3::X * x),
+                Rotation::default(),
+                Collider::cuboid(1.0, 1.0, 1.0),
+                SleepingDisabled,
+                CollisionLayers::NONE,
+            ));
+            if debris {
+                body.insert(DebrisPiece);
+            }
+            readings.push((body.id(), timer));
+        }
+        // Place fixture readings at the final child schedule, before the installed collectors.
+        app.add_systems(FixedLast, move |mut timers: Query<&mut SleepTimer>| {
+            for &(body, timer) in &readings {
+                timers.get_mut(body).unwrap().0 = timer;
+            }
+        });
+        app.world_mut().run_schedule(FixedMain);
+        let stats = app.world().resource::<ServerStats>();
+        assert!(
+            app.world()
+                .resource::<PhaseStarts>()
+                .collect_start
+                .is_none()
+        );
+        assert_eq!(stats.ticks.0.len(), 1);
+        assert_eq!(stats.freeze_counts.awake.0, [7.0]);
+        assert_eq!(stats.freeze_counts.rested.0, [4.0]);
+        assert_eq!(stats.freeze_counts.rested_unreached.0, [2.0]);
+        let line_census = app
+            .world_mut()
+            .run_system_once(|census: DebrisCensus| census.json())
+            .unwrap();
+        assert_eq!(
+            line_census["live"],
+            json!(app.world().resource::<FreezeCounts>().awake)
+        );
+        let summaries = app
+            .world_mut()
+            .resource_mut::<ServerStats>()
+            .freeze_counts
+            .map_mut(|window| window.drain(f64::INFINITY).unwrap().total);
+        assert_eq!(
+            summaries,
+            FreezeCounts {
+                awake: 7.0,
+                rested: 4.0,
+                rested_unreached: 2.0,
+            }
+        );
+    }
+
     /// The lever's two readings: unset is off, a positive period is that period. A mutant that
     /// turns an unset lever on prints a line from every server; one that reads a word or a zero as
     /// off or as a default runs a host its operator configured otherwise, unseen.
@@ -1574,6 +1744,12 @@ mod tests {
                 max: 16_000.0,
                 overruns: 1,
             }),
+            // Fixture: per-tick piece counts, independent of the duration windows.
+            freeze_counts: FreezeCounts {
+                awake: TickWindow(vec![0.0, 7.0, 8.0]).drain(f64::INFINITY),
+                rested: TickWindow(vec![0.0, 5.0, 6.0]).drain(f64::INFINITY),
+                rested_unreached: TickWindow(vec![0.0, 3.0, 4.0]).drain(f64::INFINITY),
+            },
             physics: Some(TickSummary {
                 ticks: 640,
                 p50: 301.04,
@@ -1675,6 +1851,14 @@ mod tests {
             "debris": {"live": 35, "sleeping": 140},
             "construction": {"cracked_joints": 0, "separated_joints": 0, "departed_chunks": 0},
         });
+        for (name, p50, max) in [
+            ("awake", 7.0, 8.0),
+            ("rested", 5.0, 6.0),
+            ("rested_unreached", 3.0, 4.0),
+        ] {
+            expected["debris"][name] =
+                json!({"p50": p50, "p95": max, "p99": max, "total": p50 + max, "max": max});
+        }
         for name in NAMES {
             expected[name] = Value::Null;
         }
@@ -1693,6 +1877,7 @@ mod tests {
         );
 
         let empty = Snapshot {
+            freeze_counts: FreezeCounts::default(),
             ticks: None,
             physics: None,
             send: None,
@@ -1714,7 +1899,7 @@ mod tests {
         assert_eq!(value["nr_throttled"], Value::Null);
         assert_eq!(
             value["debris"],
-            json!({"live": 35, "sleeping": 140}),
+            json!({"live": 35, "sleeping": 140, "awake": null, "rested": null, "rested_unreached": null}),
             "the piece count prints with no lever armed"
         );
     }
