@@ -1,8 +1,11 @@
 //! Compliant contact: an absolute spring-damper law per point along a manifold's normal,
 //! `F = k·(overlap + rest) + c·closing` while `overlap + rest` is above zero, in place of Avian's
 //! global contact softness. Absolute units let laws compose by summation whatever the bodies'
-//! masses. A writer sets a manifold's law in [`Laws`] after the narrow phase and before the solver;
-//! the store is cleared at the start of every physics step, so a law never outlives its step.
+//! masses. A writer sets a manifold's law in [`Laws`] before Avian prepares the step's contact
+//! constraints (`SolverSystems::PrepareContactConstraints`), and, if its pairs can sleep, after the
+//! solver's start has woken islands (before `SolverSystems::PrepareSolverBodies`): a pair woken
+//! there is solved that step with the manifold it slept with. The store is cleared at the start of
+//! every physics step, so a law never outlives its step.
 //!
 //! [`apply_laws`] runs after Avian prepares the step's contact constraints and hands each point of
 //! a manifold with a law to the fork's `ContactNormalPart::{compliant, spring}` hook (the fork's

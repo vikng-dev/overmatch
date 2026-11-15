@@ -30,7 +30,10 @@
 //!   belt speed and `stop_contacts::by_owner` reads its friction into the transmission.
 //!
 //! Each run's laws come from a shared read of the contact graph, every run apart ([`read_runs`]);
-//! one short step publishes them in the step-local law store ([`write_runs`]).
+//! one short step publishes them in the step-local law store ([`write_runs`]). Both run in the
+//! solver, after Avian's solver-start wake and before it prepares the step's contact constraints:
+//! a pair whose island a new contact wakes there is solved that step with the manifold it slept
+//! with, so it is read then, not skipped as asleep.
 
 use std::ops::Range;
 
@@ -38,7 +41,7 @@ use crate::avian_ext::compliance::{ContactCompliance, Laws};
 use avian3d::collision::contact_types::{ContactId, ContactManifold};
 use avian3d::prelude::{
     Collider, ColliderOf, CollisionLayers, ContactGraph, PhysicsSchedule, PhysicsStepSystems,
-    Position, Rotation,
+    Position, Rotation, SolverSystems,
 };
 use bevy::prelude::*;
 
@@ -499,6 +502,7 @@ fn read_runs(
                 .get(of.body)
                 .expect("a run hangs on its spawn-built body");
             for edge in graph.contact_edges_with(run) {
+                // A pair still asleep after the solver-start wake is not solved this step.
                 if !edge.is_touching() || edge.is_sleeping() {
                     continue;
                 }
@@ -536,8 +540,9 @@ pub(crate) fn plugin(app: &mut App) {
         PhysicsSchedule,
         (read_runs, write_runs)
             .chain()
-            .after(PhysicsStepSystems::NarrowPhase)
-            .before(PhysicsStepSystems::Solver),
+            .in_set(PhysicsStepSystems::Solver)
+            .after(SolverSystems::PrepareSolverBodies)
+            .before(SolverSystems::PrepareContactConstraints),
     );
 }
 
@@ -955,12 +960,120 @@ mod tests {
         }
     }
 
+    /// A pair asleep at the narrow phase and woken by Avian at the solver's start takes its law in
+    /// the step it is solved in: the run reads its kept manifold once the wake has returned it to
+    /// the solver. Fixture: a piece resting on a hull's run, both asleep, and a striker meeting the
+    /// hull's skid, which wakes their island at the solver's start. Fails if the laws are read
+    /// before that wake: the woken pair is skipped as asleep and solved as a rigid contact.
+    #[test]
+    fn a_pair_woken_at_the_solvers_start_takes_its_law() {
+        use avian3d::dynamics::solver::constraint_graph::ConstraintGraph;
+        use avian3d::prelude::{LinearVelocity, RigidBody, Sleeping};
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            TransformPlugin,
+            AssetPlugin::default(),
+            crate::offline_physics(),
+            crate::contact_transfer::sim_plugin,
+        ))
+        .init_asset::<Mesh>()
+        .insert_resource(LAW);
+        plugin(&mut app);
+        crate::headless_test::start_fixed_clock(&mut app);
+        crate::headless_test::finish_plugins(&mut app);
+        let world = app.world_mut();
+        // Fixture: ground whose top is y = 0; a hull on a 1 × 0.2 × 3 m skid, its run a 1 m wide
+        // box over the fixture outline (z, y in [0, 3]) above the skid; a 0.4 m piece on the run.
+        world.spawn((
+            RigidBody::Static,
+            Collider::cuboid(20.0, 1.0, 20.0),
+            Transform::from_xyz(0.0, -0.5, 0.0),
+        ));
+        let hull = world
+            .spawn((RigidBody::Dynamic, Transform::from_xyz(0.0, 0.2, 0.0)))
+            .id();
+        world.spawn((
+            ChildOf(hull),
+            Collider::cuboid(1.0, 0.2, 3.0),
+            Transform::from_xyz(0.0, -0.1, 1.5),
+        ));
+        let run = world
+            .spawn((
+                ChildOf(hull),
+                SoftRun::fixture(),
+                Collider::cuboid(1.0, 3.0, 3.0),
+                run_layers(),
+                Transform::from_xyz(0.0, 1.5, 1.5),
+            ))
+            .id();
+        let piece = world
+            .spawn((
+                RigidBody::Dynamic,
+                Collider::cuboid(0.4, 0.4, 0.4),
+                crate::construction::breakage::piece_layers(),
+                Transform::from_xyz(0.0, 3.4, 1.5),
+            ))
+            .id();
+        let asleep = |app: &App| {
+            let world = app.world();
+            [hull, piece].map(|body| world.get::<Sleeping>(body).is_some()) == [true, true]
+        };
+        for _ in 0..640 {
+            app.update();
+            if asleep(&app) {
+                break;
+            }
+        }
+        assert!(
+            asleep(&app),
+            "fixture: the hull and the piece must come to rest"
+        );
+        let (edge, _) = (app.world().resource::<ContactGraph>())
+            .get(run, piece)
+            .expect("fixture: the piece rests on the run");
+        assert!(edge.is_sleeping(), "fixture: the run and the piece sleep");
+        let contact = edge.id;
+        // Fixture: a striker 5 mm into the skid's side, closing on it.
+        app.world_mut().spawn((
+            RigidBody::Dynamic,
+            Collider::cuboid(0.2, 0.2, 0.2),
+            Transform::from_xyz(0.595, 0.1, 1.5),
+            LinearVelocity(Vec3::NEG_X),
+        ));
+        for _ in 0..4 {
+            app.update();
+            if app.world().get::<Sleeping>(hull).is_none() {
+                break;
+            }
+        }
+        let world = app.world();
+        assert!(
+            world.get::<Sleeping>(hull).is_none(),
+            "fixture: the striker wakes the hull"
+        );
+        let points: Vec<bool> = (world.resource::<ConstraintGraph>().colors.iter())
+            .flat_map(|color| &color.contact_constraints)
+            .filter(|constraint| constraint.contact_id == contact)
+            .flat_map(|constraint| &constraint.points)
+            .map(|point| point.normal_part.compliant)
+            .collect();
+        assert!(
+            !points.is_empty(),
+            "fixture: the woken pair is solved in the step it wakes"
+        );
+        assert!(
+            points.iter().all(|&compliant| compliant),
+            "the woken pair was solved rigid: {points:?}"
+        );
+    }
+
     /// Handing a manifold its law changes none of its points, so the law is a function of the
-    /// manifold as the narrow phase left it, as one kept through a sleep needs: read again after
-    /// the hand-over, it is the same bit for bit. A manifold out of overlap takes the zero law,
-    /// never none, which the solver would read as a rigid contact. Fails if the hand-over drops a
-    /// point at or past zero overlap (the profile through it, and so the law, moves), or leaves a
-    /// manifold without a law.
+    /// manifold as the narrow phase left it, as a pair woken at the solver's start needs: read
+    /// again after the hand-over, it is the same bit for bit. A manifold out of overlap takes the
+    /// zero law, never none, which the solver would read as a rigid contact. Fails if the hand-over
+    /// drops a point at or past zero overlap (the profile through it, and so the law, moves), or
+    /// leaves a manifold without a law.
     #[test]
     fn handing_a_law_over_leaves_the_manifold_it_was_read_from() {
         let touching: &[(f32, f32)] = &[(at(26.0), 0.04), (at(30.5), 0.0), (at(34.0), -0.01)];
