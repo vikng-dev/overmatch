@@ -15,7 +15,7 @@ Subject: the game's server physics (rigid bodies, contacts, rest). Game state on
 Each patch takes one form, named in its section:
 
 - **hook**: a narrow extension point inside an upstream file; the law it serves lives in the game
-  (`src/avian_ext/`, one file per seam, installed by `avian_ext::AvianExtPlugin` after
+  (`src/avian_ext/`, one file per seam, installed by `avian_ext::plugin` after
   `PhysicsPlugins`).
 - **module**: a self-contained fork file with a few call sites in upstream files.
 - **game-side**: no fork line; the game attaches through public schedule slots, components and

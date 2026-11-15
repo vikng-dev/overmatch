@@ -43,7 +43,7 @@ pub(super) fn physics_app_on(mut app: App) -> App {
         AssetPlugin::default(),
         PhysicsPlugins::default(),
     ))
-    .add_plugins(crate::avian_ext::AvianExtPlugin)
+    .add_plugins(crate::avian_ext::plugin)
     .init_asset::<Mesh>()
     .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
         15_625,
@@ -387,7 +387,7 @@ fn a_collider_attached_to_a_body_without_a_global_transform_is_refused() {
             .build()
             .disable::<PhysicsTransformPlugin>(),
     ))
-    .add_plugins(crate::avian_ext::AvianExtPlugin);
+    .add_plugins(crate::avian_ext::plugin);
     let world = app.world_mut();
     let body = world
         .spawn((RigidBody::Static, Position(Vec3::ZERO), Rotation::IDENTITY))

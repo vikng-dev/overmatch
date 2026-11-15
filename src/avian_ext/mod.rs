@@ -6,8 +6,7 @@
 //! These modules depend on Avian and Bevy only, never on the rest of the game, so the fork's guard
 //! crate can build them beside it.
 //!
-//! [`AvianExtPlugin`] installs every seam; each composition of Avian's `PhysicsPlugins` adds it
-//! after them.
+//! [`plugin`] installs every seam; each composition of Avian's `PhysicsPlugins` adds it after them.
 
 pub mod attachment;
 pub mod child_poses;
@@ -17,16 +16,12 @@ use bevy::prelude::*;
 
 /// Every seam of the game's half of the fork, installed into Avian's `PhysicsSchedule`. Added after
 /// `PhysicsPlugins`, whose schedule it extends.
-pub struct AvianExtPlugin;
-
-impl Plugin for AvianExtPlugin {
-    fn build(&self, app: &mut App) {
-        if !app.is_plugin_added::<child_poses::ReenabledPlugin>() {
-            app.add_plugins(child_poses::ReenabledPlugin);
-        }
-        app.add_observer(attachment::refuse_unposed_attachment);
-        app.get_schedule_mut(PhysicsSchedule)
-            .expect("AvianExtPlugin is added after Avian's PhysicsPlugins")
-            .add_systems(child_poses::place_child_colliders.in_set(PhysicsStepSystems::First));
+pub fn plugin(app: &mut App) {
+    if !app.is_plugin_added::<child_poses::ReenabledPlugin>() {
+        app.add_plugins(child_poses::ReenabledPlugin);
     }
+    app.add_observer(attachment::refuse_unposed_attachment);
+    app.get_schedule_mut(PhysicsSchedule)
+        .expect("avian_ext::plugin is added after Avian's PhysicsPlugins")
+        .add_systems(child_poses::place_child_colliders.in_set(PhysicsStepSystems::First));
 }
