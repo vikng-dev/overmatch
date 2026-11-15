@@ -2,9 +2,9 @@
 //! `step` runs the Driver's controls, then solves clutch and steering torque, work, belt
 //! acceleration and crank settlement. `TransmissionState` is its mechanical state. The Driver's
 //! gear choice and the ledger it reads are [`super::driver`]; the pulls it judges gears by,
-//! [`viable_pull`] and [`candidate_pull`], are the drivetrain's and live here. Forces are N,
-//! torques N m, belt speeds m/s and crank speed rad/s. The design narrative lives in track-model
-//! architecture section 5a.
+//! [`viable_pull`], [`landing_pull`] and [`candidate_pull`], are the drivetrain's and live here.
+//! Forces are N, torques N m, belt speeds m/s and crank speed rad/s. The design narrative lives in
+//! track-model architecture section 5a.
 //!
 //! The rejected `STEER_SERVO_BAND` proportional servo loses authority with vehicle scale;
 //! the steering law instead solves its capacity-limited constraint semi-implicitly.
@@ -467,7 +467,33 @@ impl TransmissionParams {
         };
         derived.peak_torque_rpm = derived.delivered_peak_rpm();
         derived.check_derived(a.belt_inertia)?;
+        derived.check_launch(a.forward_speeds_kmh, a.reverse_speeds_kmh)?;
         Ok(derived)
+    }
+
+    /// The Driver launches from out at any speed inside the parking tolerance (`driver::choose`),
+    /// so each ladder, authored at `forward` and `reverse` (km/h), needs a launch gear whose clutch
+    /// closes there inside the crank limit; the highest launch gear turns slowest.
+    fn check_launch(&self, forward: &[f32], reverse: &[f32]) -> Result<(), BevyError> {
+        let limit = self.engine.crank_limit_rpm * RPM_TO_RAD;
+        for (field, speeds, gears) in [
+            ("forward_speeds_kmh", forward, &self.gears_fwd),
+            ("reverse_speeds_kmh", reverse, &self.gears_rev),
+        ] {
+            let highest = usize::from(self.launch_gears).min(gears.len());
+            let shaft = PARK_ENGAGE_SPEED * gears[highest - 1] / self.sprocket_radius;
+            if shaft > limit {
+                return Err(format!(
+                    "track.powertrain.transmission: gearbox.{field}: launch gear {highest} turns the \
+                     crank past engine.crank_limit_rpm inside the {PARK_ENGAGE_SPEED} m/s parking \
+                     tolerance, so no launch gear can take up from rest; author its speed at least \
+                     {:.4} km/h, or raise launch_gears or crank_limit_rpm",
+                    speeds[highest - 1] * shaft / limit
+                )
+                .into());
+            }
+        }
+        Ok(())
     }
 
     /// The authored scalars can each be finite while their ratios, squared coupling terms or
@@ -1166,13 +1192,11 @@ pub(super) fn candidate_pull(
     gear_force(tp, fp, supply, at, ratio, command, load, clutch)
 }
 
-/// The most a gear holds on the pedal's own fuel (N, before the grip cap), its shaft at `at` (m/s
-/// along the ladder) and its clutch closing from `prior` as delivery engages it ([`engagement`]).
-/// A slipping clutch holds the crank at the launch rpm until the shaft reaches the launch speed,
-/// so the gear holds its slip pull. A held clutch keeps the crank on the shaft as the hull slows,
-/// lugging down to the idle guard ([`crank_guards`]), so the gear holds a speed wherever its pull
-/// at or below `at` meets the load: the most any crank speed down there gives. The idle catch
-/// fuels past the pedal and counts for nothing; the clutch caps the torque.
+/// What the engaged gear holds on the pedal's own fuel (N, before the grip cap), its shaft at `at`
+/// (m/s along the ladder) and its clutch `prior` engaging as delivery reads it ([`engagement`]):
+/// slipping below the launch speed, its pull at the launch rpm; held, the most it nets from `at`
+/// down to the idle guard ([`crank_guards`]), since the slowing hull lugs the crank down with it.
+/// The idle catch counts for nothing; the clutch caps the torque.
 pub(crate) fn viable_pull(
     tp: &TransmissionParams,
     supply: DriveSupply,
@@ -1193,8 +1217,46 @@ pub(crate) fn viable_pull(
             floor..=shaft.max(floor)
         }
     };
+    pedal_pull(tp, supply, command, crank, ratio)
+}
+
+/// What a gear pulls on the pedal's own fuel (N, before the grip cap) as its clutch closes from out
+/// with its shaft at `at` (m/s along the ladder): below the launch speed it slips with the crank at
+/// the launch rpm ([`engagement`]), else the crank turns with the shaft, no slower than the idle
+/// guard. A gear reaches a slower crank only once the hull has slowed, so it is priced where it
+/// lands. `None` where the shaft would turn the crank past the engine's crank limit: the Driver
+/// opens no cut toward a gear forecast to land there, and one that closes past it anyway is an
+/// engaged over-rev ([`crank_guards`], [`apply_ceiling_brakes`]). The idle catch counts for
+/// nothing; the clutch caps the torque.
+pub(crate) fn landing_pull(
+    tp: &TransmissionParams,
+    supply: DriveSupply,
+    at: f32,
+    ratio: f32,
+    command: f32,
+) -> Option<f32> {
+    let shaft = at * ratio / tp.sprocket_radius;
+    let at_rest = at.abs() < PARK_ENGAGE_SPEED;
+    let crank = match engagement(tp, ClutchState::Out, at_rest, shaft, command) {
+        ClutchState::Slip => tp.launch_omega(command),
+        _ if shaft > tp.engine.crank_limit_rpm * RPM_TO_RAD => return None,
+        // An unguarded crank lands where the shaft turns it.
+        _ => shaft.max(idle_floor(tp, supply, 0.0).unwrap_or(0.0)),
+    };
+    Some(pedal_pull(tp, supply, command, crank..=crank, ratio))
+}
+
+/// The pull (N) through `ratio` of the most the pedal's own fuel nets over crank speeds `crank`
+/// (rad/s), the clutch capping the torque either way.
+fn pedal_pull(
+    tp: &TransmissionParams,
+    supply: DriveSupply,
+    command: f32,
+    crank: std::ops::RangeInclusive<f32>,
+    ratio: f32,
+) -> f32 {
     let capacity = supply.transmission_condition * tp.clutch_capacity;
-    pedal_peak(tp, supply, command, crank).min(capacity) * ratio / tp.sprocket_radius
+    pedal_peak(tp, supply, command, crank).clamp(-capacity, capacity) * ratio / tp.sprocket_radius
 }
 
 /// The most torque the pedal's own fuel nets at the crank over crank speeds `crank` (rad/s, N m).

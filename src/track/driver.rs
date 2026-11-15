@@ -39,7 +39,7 @@ use super::stop_contacts::HardReaction;
 use super::transmission::{
     ClutchState, DriveConstruction, PARK_ENGAGE_SPEED, TransmissionInput, TransmissionParams,
     TransmissionReport, TransmissionState, candidate_pull, coupled_mass, force_margin,
-    fuel_beats_drag, steer_ratio, viable_pull,
+    fuel_beats_drag, landing_pull, steer_ratio, viable_pull,
 };
 
 /// Resolution: the fewest driven ticks a reading spans, since one gives a mean but no sample
@@ -485,16 +485,18 @@ impl DriverSense {
 /// gear carries the load `L`: `R` less the rolling the contacts delivered, at a stall no less than
 /// the stall's bound ([`Stall::bound`]), plus the contacts' whole rolling ([`Sensed::rolling`]) and
 /// the gear's detent share of the belt push difference, `s·κ·ΔR`
-/// (`transmission::BeltTick::tied_mean`). A gear *holds* the most it pulls on the pedal's own fuel
-/// ([`viable_pull`]), capped by the contacts' grip budget ([`Sensed::grip`]).
+/// (`transmission::BeltTick::tied_mean`). A gear *holds* what it pulls on the pedal's own fuel,
+/// capped by the contacts' grip budget ([`Sensed::grip`]).
 ///
 /// `L` is a mean over driven ticks, known to their sample standard error `u`
 /// ([`Evidence::error`]). A gear is *viable* when it holds at least `L + u` and *short* when it
 /// holds less than `L − u`; between them its verdict is open, and an engaged gear whose verdict is
-/// open is not stepped down. The engaged gear is judged as it runs, at `v` with its clutch as it is, over a
-/// window it pulled whole ([`Sensed::pulled`]). Any other gear is judged where the cut lands,
-/// `v − R·t_cut/M_c` and no lower than rest, its clutch closing from out. Reach is `max_step`
-/// either way, within the ladder.
+/// open is not stepped down. The engaged gear is judged as it runs, at `v` with its clutch as it
+/// is, over a window it pulled whole ([`Sensed::pulled`]), holding the most it nets lugging down
+/// ([`viable_pull`]). Any other gear is judged where its clutch closes from out, at the crank speed
+/// it lands on ([`landing_pull`]): where the cut lands, `v − R·t_cut/M_c` and no lower than rest,
+/// or at `v` for a launch. No clause admits a gear whose crank is forecast to land past the
+/// engine's crank limit. Reach is `max_step` either way, within the ladder.
 ///
 /// 1. Clutch out at hull rest: the highest viable launch gear, else the launch gear that holds
 ///    most; at a stall the launch gear that holds most. Free.
@@ -547,29 +549,37 @@ pub(super) fn choose(
         )
     };
     let window = sensed.window();
-    let viable = |holds: f32, gear: u8| verdict(holds, carried(&window, gear)) == Verdict::Viable;
     let ratio = |gear: u8| ladder[usize::from(gear - 1)];
-    let holds = |gear: u8, at: f32, prior: ClutchState| {
-        viable_pull(tp, inp.supply, at, ratio(gear), command, prior).min(sensed.grip)
+    let lands = |gear: u8, at: f32| {
+        landing_pull(tp, inp.supply, at, ratio(gear), command).map(|pull| pull.min(sensed.grip))
     };
-    // The gear of `gears` that holds most, the higher on a tie, and what it holds.
-    let strongest = |gears: std::ops::RangeInclusive<u8>, holds: &dyn Fn(u8) -> f32| {
+    let admits = |gear: u8, at: f32| {
+        lands(gear, at)
+            .is_some_and(|holds| verdict(holds, carried(&window, gear)) == Verdict::Viable)
+    };
+    // The gear of `gears` that holds most, the higher on a tie, and what it holds; `None` where
+    // none lands.
+    let strongest = |gears: std::ops::RangeInclusive<u8>, holds: &dyn Fn(u8) -> Option<f32>| {
         gears
-            .map(|gear| (gear, holds(gear)))
+            .filter_map(|gear| Some((gear, holds(gear)?)))
             .max_by(|a, b| a.1.total_cmp(&b.1))
-            .expect("a reach holds at least the engaged gear")
     };
     if st.clutch == ClutchState::Out && speed < PARK_ENGAGE_SPEED {
         let launches = 1..=tp.launch_gears.min(top);
-        let at_rest = |gear: u8| holds(gear, speed, st.clutch);
+        let at_rest = |gear: u8| lands(gear, speed);
+        let strongest_launch = || {
+            strongest(launches.clone(), &at_rest)
+                .expect("admission keeps a launch gear inside the crank limit at parking speeds")
+                .0
+        };
         st.gear = if stall.is_some() {
-            strongest(launches, &at_rest).0
+            strongest_launch()
         } else {
             launches
                 .clone()
                 .rev()
-                .find(|&gear| viable(at_rest(gear), gear))
-                .unwrap_or_else(|| strongest(launches, &at_rest).0)
+                .find(|&gear| admits(gear, speed))
+                .unwrap_or_else(strongest_launch)
         };
         return;
     }
@@ -578,18 +588,20 @@ pub(super) fn choose(
         (speed - resistance * f32::from(tp.shift_ticks.get()) * inp.dt / coupled_mass(fp)).max(0.0);
     let reach =
         st.gear.saturating_sub(tp.max_step).max(1)..=st.gear.saturating_add(tp.max_step).min(top);
+    let held =
+        viable_pull(tp, inp.supply, speed, ratio(st.gear), command, st.clutch).min(sensed.grip);
     let offer = |gear: u8| {
         if gear == st.gear {
-            holds(gear, speed, st.clutch)
+            Some(held)
         } else {
-            holds(gear, landing, ClutchState::Out)
+            lands(gear, landing)
         }
     };
-    let held = offer(st.gear);
     // The gear in reach that holds most, where it holds more than the engaged gear: on equal
     // capacity a cut buys nothing.
     let stronger = || {
-        let (best, holds) = strongest(reach.clone(), &offer);
+        let (best, holds) =
+            strongest(reach.clone(), &offer).expect("a reach holds the engaged gear");
         (holds > held).then_some(best)
     };
     // A stall bounds the load from below only, so no gear can be shown viable against it.
@@ -603,7 +615,7 @@ pub(super) fn choose(
             .clone()
             .rev()
             .filter(|&gear| gear != st.gear)
-            .find(|&gear| viable(offer(gear), gear))
+            .find(|&gear| admits(gear, landing))
             .or_else(stronger)
     } else if sensed.observed
         && st.steer_step == 0
@@ -614,7 +626,7 @@ pub(super) fn choose(
         let margin = force_margin(tp);
         // A detent turn's radius belongs to its gear: no upshift changes it.
         (st.gear + 1..=*reach.end())
-            .filter(|&gear| viable(offer(gear), gear))
+            .filter(|&gear| admits(gear, landing))
             .map(|gear| {
                 let pull = candidate_pull(
                     tp,
@@ -1089,16 +1101,14 @@ mod tests {
         let (fp, tp) = (lab_fp(), lab_tp());
         let (mut state, inp) = carried_top_gear(&tp);
         let sensed = felt(&inp);
-        let holds = |gear: u8, at: f32, prior: ClutchState| {
-            let ratio = tp.gears_fwd[usize::from(gear - 1)];
-            viable_pull(&tp, DriveSupply::WHOLE, at, ratio, 0.25, prior)
-        };
         let top = state.gear;
         let landing = sensed.speed
             - sensed.resistance * f32::from(tp.shift_ticks.get()) * inp.dt
                 / coupled_mass(&construction(&fp));
+        let ratio = tp.gears_fwd[usize::from(top - 2)];
         assert!(
-            holds(top - 1, landing, ClutchState::Out) >= sensed.resistance,
+            landing_pull(&tp, DriveSupply::WHOLE, landing, ratio, 0.25)
+                .is_some_and(|pull| pull >= sensed.resistance),
             "the fixture's next gear down is viable where it lands"
         );
         choose(&mut state, &tp, &construction(&fp), &inp, 0.25, sensed);
@@ -1525,6 +1535,75 @@ mod tests {
             assert_eq!(
                 state.gear, 1,
                 "a stalled push ends in first gear: {gears:?}"
+            );
+        }
+    }
+
+    /// The game's driving model: no clause admits a gear whose crank is forecast to land past the
+    /// engine's crank limit or on a crank its fuel cannot drive, so a climb that slows the hull out
+    /// of top gear holds that gear until a lower one lands where its pedal pulls. The Driver relies
+    /// on it not to brake a climbing hull at the ceiling. Mutants: crediting a landing gear the
+    /// most it nets at a slower crank closes a clutch on a crank its fuel cannot drive, at once,
+    /// and bounded at the limit later in the climb. Fixture: each class drivetrain's top gear at
+    /// its governed speed and full pedal, against a load half way between what top gear and the
+    /// next gear down hold at their governed speeds, read without error, for 60 s; the hull rides
+    /// its belts.
+    #[test]
+    fn a_climb_out_of_top_gear_engages_no_gear_past_the_crank_limit() {
+        for (fp, tp) in class_drivetrains() {
+            let construction = construction(&fp);
+            let top = tp.gears_fwd.len() as u8;
+            let ratio = |gear: u8| tp.gears_fwd[usize::from(gear - 1)];
+            let governed = tp.engine.governed_rpm * RPM_TO_RAD;
+            let speed_at = |gear: u8, omega: f32| omega * tp.sprocket_radius / ratio(gear);
+            let hold = |gear: u8| {
+                let at = speed_at(gear, governed);
+                viable_pull(
+                    &tp,
+                    DriveSupply::WHOLE,
+                    at,
+                    ratio(gear),
+                    1.0,
+                    ClutchState::In,
+                )
+            };
+            let load = 0.5 * (hold(top) + hold(top - 1));
+            let hull = construction.weight_n() / super::super::derive::G;
+            let limit = tp.engine.crank_limit_rpm * RPM_TO_RAD;
+            let mut st = TransmissionState {
+                gear: top,
+                clutch: ClutchState::In,
+                omega_e: governed,
+                ..fresh(&tp)
+            };
+            let mut speed = speed_at(top, governed);
+            let mut gears = vec![top];
+            for tick in 0..64 * 60 {
+                let mut inp = driver_input(speed, load, 1.0);
+                // Each belt meets half the load and carries half the hull, which moves with it.
+                inp.reactions = [0.5 * load; 2];
+                inp.reaction_slopes = [0.5 * hull / inp.dt; 2];
+                let prior = st.clutch;
+                let report = step(&fp, &tp, &mut st, &inp);
+                speed = 0.5 * (report.next_speeds[0] + report.next_speeds[1]);
+                let rpm = st.omega_e / RPM_TO_RAD;
+                assert!(
+                    st.omega_e <= limit,
+                    "tick {tick}: gear {} turns the crank past the limit, {rpm} rpm",
+                    st.gear
+                );
+                if prior == ClutchState::Out && st.clutch != ClutchState::Out {
+                    assert!(
+                        fuel_beats_drag(&tp, DriveSupply::WHOLE, st.omega_e, 1.0),
+                        "tick {tick}: gear {} closes on {rpm} rpm, past fuel",
+                        st.gear
+                    );
+                    gears.push(st.gear);
+                }
+            }
+            assert!(
+                gears.len() > 1 && speed >= PARK_ENGAGE_SPEED,
+                "the climb leaves top gear and moves on: {gears:?} at {speed} m/s"
             );
         }
     }
