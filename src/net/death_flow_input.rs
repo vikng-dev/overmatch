@@ -522,30 +522,40 @@ fn every_tick_of_a_frame_files_the_devices_command() {
 /// device's command keeps the held steer and sustained fire on the wire.
 #[test]
 fn a_set_cruise_notch_outlasts_a_focus_loss_and_held_keys_do_not() {
+    /// One client frame after `edit` to the keys. No input plugin clears their edges, so this does.
+    fn keyed_step(
+        server: &mut App,
+        client: &mut App,
+        edit: impl FnOnce(&mut ButtonInput<KeyCode>),
+    ) -> Vec<(u32, TankCommand)> {
+        edit(&mut client.world_mut().resource_mut::<ButtonInput<KeyCode>>());
+        let filed = step(server, client);
+        client
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        filed
+    }
+
     let _udp = lock_real_udp_test();
     let (mut server, mut client, _) = connected(TICKS_PER_FRAME);
-    // W's hold ends, then one tap sets the first notch; D and Space stay held throughout.
-    let notch = crate::track::drive::drive_feel().notch_step();
-    // The harness mounts no input plugin, so each frame's key edges are cleared by hand.
-    let mut keys = client.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-    keys.clear();
-    keys.release(KeyCode::KeyW);
-    step(&mut server, &mut client);
-    let mut keys = client.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-    keys.clear();
-    keys.press(KeyCode::KeyW);
-    step(&mut server, &mut client);
-    let mut keys = client.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-    keys.clear();
-    keys.release(KeyCode::KeyW);
+    let feel = crate::track::drive::drive_feel();
+    // W, D and Space, held since the connection, stay held for more whole frames than the authored
+    // tap window spans: W's release then ends a hold, and D holds full steer.
+    let frame_s = (TICK * TICKS_PER_FRAME).as_secs_f64();
+    for _ in 0..=(feel.tap_window_s.0 / frame_s) as u32 {
+        keyed_step(&mut server, &mut client, |_| {});
+    }
+    keyed_step(&mut server, &mut client, |keys| keys.release(KeyCode::KeyW));
+    // Pressed and released within one frame, a tap is a tap whatever the authored window.
+    let focused = keyed_step(&mut server, &mut client, |keys| {
+        keys.press(KeyCode::KeyW);
+        keys.release(KeyCode::KeyW);
+    });
+    let notch = feel.notch_step();
     let cruising = |command: &TankCommand| {
         command.throttle == notch && command.steer == 1.0 && command.fire_secondary
     };
-    let focused = step(&mut server, &mut client);
-    client
-        .world_mut()
-        .resource_mut::<ButtonInput<KeyCode>>()
-        .clear();
     assert!(
         focused.iter().all(|(_, command)| cruising(command)),
         "focused, the notch and the held keys are filed: {focused:?}"
