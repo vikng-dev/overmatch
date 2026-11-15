@@ -38,6 +38,8 @@ use crate::{
     },
     prelude::*,
     schedule::{LastPhysicsTick, is_changed_after_tick},
+    // OVERMATCH PATCH: the rest test runs per body on the compute pool.
+    utils::{MIN_PAR_ITER_ENTITIES, ParallelQueryForEach},
 };
 
 /// A plugin for managing sleeping and waking of [`PhysicsIsland`](super::PhysicsIsland)s.
@@ -254,47 +256,64 @@ fn update_sleeping_states(
     time_to_sleep: Res<TimeToSleep>,
     time: Res<Time>,
     rest_test: Res<RestTest>, // OVERMATCH PATCH
+    // OVERMATCH PATCH: each body's island and rest time, committed after the parallel pass.
+    mut rested: Local<bevy::utils::Parallel<Vec<(IslandId, f32)>>>,
 ) {
     let delta_secs = time.delta_secs();
 
     islands.split_candidate_sleep_timer = 0.0;
 
-    // TODO: This would be nice to do in parallel.
-    for (mut sleep_timer, sleep_threshold, index, island_data, mass, inertia, rotation) in
-        query.iter_mut()
-    {
-        let Some(solver_body) = solver_bodies.get(*index) else {
-            continue;
-        };
-        // OVERMATCH PATCH: the rest test is a hook.
-        if (rest_test.0)(
-            solver_body,
-            sleep_threshold,
-            length_unit.0,
-            *mass,
-            *inertia,
-            *rotation,
-        ) {
-            // Increment the sleep timer.
-            sleep_timer.0 += delta_secs;
-        } else {
-            // Reset the sleep timer if the body is moving.
-            sleep_timer.0 = 0.0;
-        }
-
-        if sleep_timer.0 < time_to_sleep.0 {
-            // Keep the island awake.
-            awake_island_bit_vec.set_and_grow(island_data.island_id.0 as usize);
-        } else if let Some(island) = islands.get(island_data.island_id)
-            && island.constraints_removed > 0
-        {
-            // The body wants to sleep, but its island needs splitting first.
-            if sleep_timer.0 > islands.split_candidate_sleep_timer {
-                // This island is now the sleepiest candidate for splitting.
-                islands.split_candidate = Some(island_data.island_id);
-                islands.split_candidate_sleep_timer = sleep_timer.0;
+    // OVERMATCH PATCH: a body's timer is its own, so the rest test runs per body on the compute
+    // pool, above upstream's floor for its per-body loops.
+    query.par_for_each_mut(
+        MIN_PAR_ITER_ENTITIES,
+        |(mut sleep_timer, sleep_threshold, index, island_data, mass, inertia, rotation)| {
+            let Some(solver_body) = solver_bodies.get(*index) else {
+                return;
+            };
+            // OVERMATCH PATCH: the rest test is a hook.
+            if (rest_test.0)(
+                solver_body,
+                sleep_threshold,
+                length_unit.0,
+                *mass,
+                *inertia,
+                *rotation,
+            ) {
+                // Increment the sleep timer.
+                sleep_timer.0 += delta_secs;
+            } else {
+                // Reset the sleep timer if the body is moving.
+                sleep_timer.0 = 0.0;
             }
+            rested.scope(|out| out.push((island_data.island_id, sleep_timer.0)));
+        },
+    );
+
+    // OVERMATCH PATCH: the islands' effects commit here, in any order to the same result: the wake
+    // bits are a union, and the split candidate is the sleepiest island, a tie going to the lesser
+    // island id. It replaces the standing candidate under upstream's condition.
+    let mut sleepiest: Option<(f32, IslandId)> = None;
+    for (island_id, rested) in rested.drain() {
+        if rested < time_to_sleep.0 {
+            // Keep the island awake.
+            awake_island_bit_vec.set_and_grow(island_id.0 as usize);
+        } else if let Some(island) = islands.get(island_id)
+            // The body wants to sleep, but its island needs splitting first.
+            && island.constraints_removed > 0
+            && sleepiest.is_none_or(|(timer, id)| {
+                rested > timer || (rested == timer && island_id < id)
+            })
+        {
+            sleepiest = Some((rested, island_id));
         }
+    }
+    if let Some((rested, island_id)) = sleepiest
+        && rested > islands.split_candidate_sleep_timer
+    {
+        // This island is now the sleepiest candidate for splitting.
+        islands.split_candidate = Some(island_id);
+        islands.split_candidate_sleep_timer = rested;
     }
 }
 

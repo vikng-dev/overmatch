@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 665 in all (MEASURED), 587 in upstream files and 78 in the
+of `src/` against the published crate: 722 in all (MEASURED), 644 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run in `vendor/avian3d-0.8.0-guards`, a crate beside this one that builds the fork with the
@@ -442,17 +442,23 @@ game installs its law (`avian_ext::rest_test::at_rest`): upstream's test, or kin
 under the rest speed's, `v² + ω·I_world·ω/m < (SleepThreshold::linear · PhysicsLengthUnit)²`. The
 law and its account are the 0.7 fork's.
 
-Not carried: the 0.7 fork updated the timers on the compute pool and committed wake bits and the
-split candidate afterward. Upstream's loop stays serial (not re-measured on 0.8).
+A body's timer is its own, so the test runs per body on the compute pool, as on the 0.7 fork, from
+the floor Avian 0.8.0 gives its other per-body loops (`MIN_PAR_ITER_ENTITIES`, 4,096 awake bodies;
+the 0.7 fork's measured 1,500 is not carried). Each body hands its island and rest time to a
+per-thread list; the islands' effects then commit in any order to one result: the wake bits are a
+union, and the split candidate is the sleepiest island, a tie going to the lesser island id
+(upstream's serial loop kept the first in query order).
 
-Kept as a hook: the test sits inside an upstream system. 84 fork lines (MEASURED: 78 in the system's
-file, 6 in the re-export).
+Kept as a hook: the test sits inside an upstream system. 141 fork lines (MEASURED: 135 in the
+system's file, the loop body re-indented under the parallel pass, and 6 in the re-export).
 
 Guards: in `src/tests/avian_island_sleep.rs`, the rest tests, all green. Without the game's law
 installed, `rest_depends_on_energy_per_mass_and_spin_axis` and
 `a_supported_bar_rests_through_periodic_one_tick_roll_pulses` fail; with the energy test alone,
 `the_original_velocity_test_still_allows_rest` and
-`a_long_bar_see_sawing_below_the_angular_limit_still_rests` fail (MEASURED).
+`a_long_bar_see_sawing_below_the_angular_limit_still_rests` fail (MEASURED). On the parallel pass,
+`rest_on_the_compute_pool_commits_every_body` (4,097 bodies on a pool of more than one thread) is
+red with a body's commit dropped and with its timer held at zero (MEASURED).
 
 ## Compliant contact (`src/dynamics/solver/contact/normal_part.rs`): hook
 

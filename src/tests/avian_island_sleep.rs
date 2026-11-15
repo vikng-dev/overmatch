@@ -707,6 +707,64 @@ fn the_original_velocity_test_still_allows_rest() {
     assert!(app.world().get::<Sleeping>(resting).is_some());
 }
 
+/// From Avian's floor for its per-body loops (`utils::MIN_PAR_ITER_ENTITIES`, 4,096 awake bodies,
+/// crate-private) the rest test runs per body on the compute pool, and every body's island still
+/// commits: the still bodies' islands sleep and a drifting body's stays awake. Fixture: 4,096 still
+/// cubes apart in zero gravity and one drifting at 1 m/s, over a compute pool of more than one
+/// thread. Fails if the parallel pass drops a body's commit (the drifting body's island sleeps) or
+/// its timer (no island sleeps).
+#[test]
+fn rest_on_the_compute_pool_commits_every_body() {
+    // Fixture: a pool of four threads, unless another test of this process built the global pool
+    // first; Bevy's defaults give more than one compute thread from four cores.
+    let pool = bevy::tasks::ComputeTaskPool::get_or_init(|| {
+        bevy::tasks::TaskPoolBuilder::new().num_threads(4).build()
+    });
+    assert!(
+        pool.thread_num() > 1,
+        "fixture: the parallel rest pass needs a compute pool of more than one thread"
+    );
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    // Fixture: a 64 × 64 grid of cubes 2 m apart, none touching.
+    let still: Vec<Entity> = (0..4096)
+        .map(|i| {
+            let (row, column) = ((i / 64) as f32, (i % 64) as f32);
+            body(&mut app, Vec3::new(2.0 * column, 0.0, 2.0 * row))
+        })
+        .collect();
+    let drifting = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Position(Vec3::Y * 4.0),
+            LinearVelocity(Vec3::X),
+            Collider::cuboid(SIDE, SIDE, SIDE),
+        ))
+        .id();
+    app.update();
+    let dt = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let ticks = (app.world().resource::<TimeToSleep>().0 / dt).ceil() as usize;
+    // Allow one step to expose the first fixed tick and one to commit sleeping.
+    for _ in 0..ticks + 2 {
+        app.update();
+    }
+    let world = app.world();
+    let awake = still
+        .iter()
+        .filter(|&&body| world.get::<Sleeping>(body).is_none())
+        .count();
+    assert_eq!(awake, 0, "still bodies' islands stayed awake");
+    assert!(
+        world.get::<Sleeping>(drifting).is_none(),
+        "the drifting body's island slept"
+    );
+}
+
 /// The engine's angular limit must retain the resting see-saw case for large scenery pieces;
 /// energy alone would reject this transverse motion despite both original limits passing.
 #[test]
