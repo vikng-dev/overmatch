@@ -863,7 +863,7 @@ pub fn spawn_glass(
         use bevy::camera::primitives::MeshAabb;
         let center = meshes
             .get(&component.mesh)
-            .and_then(|mesh| mesh.compute_aabb())
+            .and_then(|mesh| mesh.get_aabb())
             .map_or(Vec3::ZERO, |aabb| Vec3::from(aabb.center));
         let mut outline =
             OutlineMaterial::new(timeline::STATE_RED.into(), look::STATE_OUTLINE_PX, center);
@@ -3439,7 +3439,7 @@ mod tests {
                 indices: shape.indices.clone(),
             }
             .mesh();
-            let Some(aabb) = mesh.compute_aabb() else {
+            let Some(aabb) = mesh.get_aabb() else {
                 continue;
             };
             let local = (Vec3::from(aabb.min()), Vec3::from(aabb.max()));
@@ -3618,7 +3618,7 @@ mod tests {
                 let images = world.resource::<Assets<Image>>();
                 for (mesh, pose, handle) in &fields {
                     use bevy::camera::primitives::MeshAabb;
-                    let aabb = meshes.get(mesh).and_then(|m| m.compute_aabb()).unwrap();
+                    let aabb = meshes.get(mesh).and_then(|m| m.get_aabb()).unwrap();
                     let (lo, hi) = (
                         pose.transform_point(Vec3::from(aabb.min())),
                         pose.transform_point(Vec3::from(aabb.max())),
