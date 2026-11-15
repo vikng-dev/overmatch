@@ -1,7 +1,8 @@
 //! The game's server physics: batch installation must retain every attachment, and fully
-//! explicit mass properties must stay independent of child colliders. These guard the Avian
-//! 0.7 patches in `OVERMATCH_PATCH.md`; automatic and partially explicit bodies still aggregate.
-//! All dimensions, densities, properties and observation steps below are Fixture data.
+//! explicit mass properties must stay independent of child colliders. These guard the avian3d
+//! fork's "Complete collider batches and explicit mass ownership" (`vendor/avian3d-0.8.0-overmatch`,
+//! `OVERMATCH_PATCH.md`); automatic and partially explicit bodies still aggregate. All dimensions,
+//! densities, properties and observation steps below are Fixture data.
 
 use std::collections::BTreeMap;
 

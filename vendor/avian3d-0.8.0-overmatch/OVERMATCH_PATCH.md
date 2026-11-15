@@ -85,3 +85,35 @@ and short of a custom `AnyCollider` there is none. 21 fork lines (MEASURED).
 The game prepares the cache off the system thread for each construction chunk collider that is no
 sensor. Guard: `src/tests/avian_prepared_mass.rs` (it fails with the scale invalidation removed,
 MEASURED). Local upstream draft: `upstream/avian-prepared-collider-mass.md`.
+
+## Complete collider batches and explicit mass ownership (`src/collision/collider/collider_hierarchy/plugin.rs`, `src/dynamics/rigid_body/mass_properties/`, `src/lib.rs`): kept
+
+`collider_hierarchy/plugin.rs` keeps an existing `ColliderOf` on a hierarchy change when it
+already names the nearest body, so a complete spawn bundle supplies the attachment beside its shape
+and enters the body's collider tree once. Upstream's `On<Insert<(ChildOf, RigidBody,
+AncestorMarker<ColliderMarker>)>>` observer is split in two instances of one generic function:
+`ChildOf` and `AncestorMarker` skip an attachment that already names the body; `RigidBody` keeps
+upstream's unconditional re-insert, which repairs colliders that arrived before their body.
+`AncestorMarker` is re-exported from `lib.rs` so a prepared group marks its collider ancestry at
+spawn instead of by a deferred write and subtree walk per member.
+
+The game's group constructor inserts the body, with an empty `RigidBodyColliders`, before any of
+its colliders; Avian's relationship hook then appends each collider directly. Bevy 0.20's
+`spawn_batch` and `insert_batch` keep per-entity hooks and observers: no hook, shape initialization
+or tree leaf is bypassed.
+
+`mass_properties/` treats a body as fully explicit only when `Mass`, `AngularInertia`,
+`CenterOfMass` and the three matching `NoAuto*` markers are all present. Its membership changes do
+not recompute those outputs, its update does not aggregate descendants whose contributions would all
+be replaced, and collider changes queue one request per other owner; a self-attached collider still
+queues its owner's own explicit edits. Partially explicit and automatic bodies aggregate as
+upstream.
+
+Kept: it changes what Avian's own observers and mass systems do, and none of them has an extension
+point. 66 fork lines (MEASURED).
+
+Guards: `src/tests/avian_spawn_batch.rs`, 4 tests. On stock 0.8.0 two fail (MEASURED): a complete
+bundle's attachment is installed 4 times, not once, and a change to two children's mass queues 2
+aggregates for one body. The other two guard upstream behaviour the patch keeps (a late body's
+repair; a self-attached explicit body's edits). The construction's
+`departure_and_split_preserve_each_chunks_collider_contract` guards the game's use.

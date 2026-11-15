@@ -7,3 +7,11 @@ pub mod avian_ext;
 
 #[cfg(test)]
 mod tests;
+
+/// The game's fixture clock (`headless_test::start_fixed_clock`): one fixed loop per `update`.
+#[cfg(test)]
+mod headless_test {
+    pub(crate) fn start_fixed_clock(app: &mut bevy::prelude::App) {
+        app.insert_resource(bevy::time::TimeUpdateStrategy::FixedTimesteps(1));
+    }
+}

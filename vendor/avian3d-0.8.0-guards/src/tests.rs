@@ -6,3 +6,6 @@ mod avian_child_pose_churn;
 
 #[path = "../../../src/tests/avian_prepared_mass.rs"]
 mod avian_prepared_mass;
+
+#[path = "../../../src/tests/avian_spawn_batch.rs"]
+mod avian_spawn_batch;

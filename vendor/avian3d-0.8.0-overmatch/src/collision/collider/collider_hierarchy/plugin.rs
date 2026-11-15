@@ -17,6 +17,7 @@ impl Plugin for ColliderHierarchyPlugin {
              mut commands: Commands,
              query: Query<(), With<ColliderMarker>>,
              rb_query: Query<Entity, With<RigidBody>>,
+             attachments: Query<&ColliderOf>,
              parent_query: Query<&ChildOf>| {
                 let entity = trigger.entity;
 
@@ -34,6 +35,10 @@ impl Plugin for ColliderHierarchyPlugin {
                     },
                     Some,
                 ) {
+                    // OVERMATCH PATCH: a spawn may already supply its physics attachment.
+                    if attachments.get(entity).is_ok_and(|of| of.body == body) {
+                        return;
+                    }
                     commands.entity(entity).insert(ColliderOf { body });
                 }
             },
@@ -54,7 +59,11 @@ impl Plugin for ColliderHierarchyPlugin {
         );
 
         // Update `ColliderOf` components for colliders when their ancestors change.
-        app.add_observer(on_collider_body_changed);
+        app.add_observer(
+            on_collider_body_changed::<(ChildOf, AncestorMarker<ColliderMarker>), false>,
+        );
+        // OVERMATCH PATCH: a late body must repair attachments skipped before it existed.
+        app.add_observer(on_collider_body_changed::<RigidBody, true>);
 
         // Remove `ColliderOf` from colliders when their rigid bodies are removed.
         app.add_observer(on_body_removed);
@@ -63,8 +72,8 @@ impl Plugin for ColliderHierarchyPlugin {
 
 /// Updates [`ColliderOf`] components for colliders when their ancestors change
 /// or when a rigid body is added to the hierarchy.
-fn on_collider_body_changed(
-    trigger: On<Insert<(ChildOf, RigidBody, AncestorMarker<ColliderMarker>)>>,
+fn on_collider_body_changed<B: Bundle, const BODY_INSERTED: bool>(
+    trigger: On<Insert<B>>,
     mut commands: Commands,
     query: Query<
         Has<ColliderMarker>,
@@ -74,6 +83,7 @@ fn on_collider_body_changed(
     parent_query: Query<&ChildOf>,
     body_query: Query<Entity, With<RigidBody>>,
     collider_query: Query<(), With<ColliderMarker>>,
+    attachments: Query<&ColliderOf>,
 ) {
     let entity = trigger.entity;
 
@@ -94,8 +104,9 @@ fn on_collider_body_changed(
         return;
     };
 
+    // OVERMATCH PATCH: only hierarchy changes can skip an already installed attachment.
     // Insert `ColliderOf` for the new child entity.
-    if is_collider {
+    if is_collider && (BODY_INSERTED || !attachments.get(entity).is_ok_and(|of| of.body == body)) {
         commands.entity(entity).insert(ColliderOf { body });
     }
 
@@ -109,7 +120,9 @@ fn on_collider_body_changed(
         }
 
         // Update the `ColliderOf` component.
-        if collider_query.contains(child) {
+        if collider_query.contains(child)
+            && (BODY_INSERTED || !attachments.get(child).is_ok_and(|of| of.body == body))
+        {
             commands.entity(child).insert(ColliderOf { body });
         }
     }

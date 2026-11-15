@@ -12,6 +12,7 @@ use bevy::{
 /// [mass properties]: crate::dynamics::rigid_body::mass_properties
 #[derive(SystemParam)]
 pub struct MassPropertyHelper<'w, 's> {
+    pub(super) explicit: Query<'w, 's, (), super::ExplicitMassProperties>,
     query: Query<
         'w,
         's,
@@ -58,8 +59,13 @@ impl MassPropertyHelper<'_, '_> {
     /// This takes into account the mass properties of descendants, unless the given entity has the [`NoAutoMass`],
     /// [`NoAutoAngularInertia`], or [`NoAutoCenterOfMass`] marker components.
     pub fn update_mass_properties(&mut self, entity: Entity) {
-        // Compute the total mass properties of the entity and its descendants.
-        let mut mass_props = self.total_mass_properties(entity);
+        // OVERMATCH PATCH: every output will be replaced by the owner's explicit value.
+        let mut mass_props = if self.explicit.contains(entity) {
+            MassProperties::ZERO
+        } else {
+            // Compute the total mass properties of the entity and its descendants.
+            self.total_mass_properties(entity)
+        };
 
         let Ok((
             mut computed_mass,
