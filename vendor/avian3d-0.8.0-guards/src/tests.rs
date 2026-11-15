@@ -33,3 +33,6 @@ mod avian_moved_lists;
 
 #[path = "../../../src/tests/avian_warm_start.rs"]
 mod avian_warm_start;
+
+#[path = "../../../src/tests/avian_contact_reduction.rs"]
+mod avian_contact_reduction;

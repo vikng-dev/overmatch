@@ -343,3 +343,45 @@ first and the last go red with the transfer restored (MEASURED).
 The guards run with recycling off, as the game does: a recycled pair returns before the narrow
 phase's query, so a resting miss closed by a sleeper's last awake step is never found
 (MEASURED: `recycled_count` 1, the islands left apart).
+
+## Body-pair contact reduction: game-side
+
+Subject: the game's server physics, contacts between bodies, game state only.
+
+Two bodies touching through many collider pairs (a broken piece's chunk hulls along a seam) carry
+one manifold per hull pair. The game reduces them in a pass on stock Avian
+(`avian_ext::contact_reduction`, `reduce_contacts` in `NarrowPhaseSystems::Last`): after the narrow
+phase has regenerated, matched and queued every pair, before the solver drains the queue. It groups
+the touching, constraint-generating, hook-free pairs of each two non-static `ReducibleContacts`
+bodies, clusters their contacts by support normal and keeps, per normal, the vertices of the hull of
+the points that bear and of the hull of the points that carried load last step, each to within
+`HULL_TOLERANCE`. A group stays whole for the step when a point closes faster than the slower body's
+`SleepThreshold::linear` (a landing), when it spans more than `MAX_NORMALS`, or when a point it would
+remove overlaps deeper than the deepest kept point of its normal by more than the contact tolerance.
+The law, its numbers and its measured account are the 0.7 fork's, moved unchanged but for the math
+types (`f32`, `Vec3`, `Vec2`); the module states what the code holds.
+
+The pass puts the kept manifolds back and corrects the solver's queue: a pair whose count it changed
+has its change folded into Avian's queued `ManifoldCountChanged` (dropped at zero), or a new entry
+where Avian queued none, never a second one; a pair starting to generate constraints needs none, the
+flush reading its reduced count. Groups own disjoint pairs and reduce in parallel from eight groups
+up (the 0.7 fork's floor, not re-measured); their effects commit in pair order. A taken pair loses
+its recycling cache: with recycling on, a pair reduced to no manifold and then recycled keeps none
+while its body moves less than the recycle distance (MEASURED: a 5 cm drop sank 7.2 cm through it
+without the clear). `ReducibleContacts` requires a `SleepThreshold`, Avian's default when the body
+sets none, so every marked body has the landing speed Avian's rest test reads.
+
+Dropped from the 0.7 fork with nothing in their place: the `REDUCIBLE_CONTACTS` pair flag (the pass
+queries the marker), the two status-site tolerances for a touching pair with no manifold, and the
+island walk over contacts without constraint handles: 0.8.0 links a contact to its island when it
+starts touching and unlinks it when it stops, whatever its manifold count. The six reduction
+counters leave `CollisionDiagnostics` for the game's `ReductionCounts` resource, the last step's
+totals.
+
+0 fork lines. Guards: `src/tests/avian_contact_reduction.rs`, 24 tests, all green: the 21 of the
+0.7 fork (14 of the law alone; world-level, among them a body held by its fifth corner, a reduced
+body resting on its loaded supports and sleeping, and only marked non-static pairs reducing), and
+three for the pass: one constraint per kept manifold through settling, a lift and a drop, with
+enough groups for the parallel path (a mutant queueing beside Avian's entry, or none, trips Avian's
+`push_manifold` assertion, MEASURED); a landing judged at the slower body's rest speed (judged at the
+faster one it fails, MEASURED); and a recycled pair regenerated after reduction (the sink above).
