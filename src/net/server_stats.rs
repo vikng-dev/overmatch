@@ -58,8 +58,7 @@
 //! - `one_thread_estimate_us`: the derived two-state estimate (see `one_thread_estimate`),
 //!   summarized per tick. It does not measure actual single-thread wall time.
 //! - `collector_us`: stats tick sampling after `TickClosed`, outside `tick_us`; includes the
-//!   armed ram census. The freeze census precedes this bracket, also outside `tick_us` and inside
-//!   `frame_us`. Clock-read/bracket cost remains inside the measured stages.
+//!   armed ram and freeze censuses. Clock-read/bracket cost remains inside the measured stages.
 //! - `sleep_us`: Avian's island-sleep bracket, included in `physics_us`. Physics covers all
 //!   bodies, including tanks: a shared solver cannot attribute its cost exclusively to loose pieces.
 //! - `send_us`: the same summary of the outbound path, one sample per frame that replicated:
@@ -71,15 +70,9 @@
 //!   Linux or where the file is unreadable;
 //! - `construction`: unique recorded joint cracks and separations, and original construction
 //!   chunks departed. These are correctness counts, independent of time brackets.
-//! - `debris`: `live`, `sleeping`, `frozen` loose pieces at the line; the four fields below have
-//!   the per-tick summary shape in piece counts (including zero); see [`FreezeCounts`].
-//! - `debris.awake`: denominator, awake dynamic pieces, using the same definition as `debris.live`.
-//! - `debris.rested`: upper bound before reach, awake pieces whose timer reached `TimeToSleep`.
-//! - `debris.rested_unreached_floor`: lower bound left frozen by today's reach, excluding reach
-//!   from every non-static unrested body (`SleepTimer < TimeToSleep`).
-//! - `debris.rested_unreached_ceiling`: upper bound, excluding reach from unrested non-debris
-//!   and zero-timer debris; resting debris may freeze together, while a driven hull still reaches.
-//!   Divide each bound's `total` by `awake.total` for the period's bracket when any piece was awake.
+//! - `debris`: `live`, `sleeping`, `frozen` loose pieces at the line; the three [`FreezeCounts`]
+//!   fields have the per-tick summary shape in piece counts (including zero). Divide
+//!   `rested_unreached.total` by `awake.total` for the period's fraction when any piece was awake.
 //!   The debris stress lever (`net::debris_stress`), while armed, adds `breaches` and `released`.
 //!
 //! RSS and throttle fields are null where the platform gives no reading. A process CPU clock
@@ -337,7 +330,8 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
     app.add_systems(
         FixedMain,
         (
-            freeze::census.run_if(resource_exists::<FreezeCounts>),
+            |mut starts: ResMut<PhaseStarts>| starts.collect_start = Some(Instant::now()),
+            freeze::census,
             record_tick,
         )
             .chain()
@@ -516,6 +510,7 @@ struct PhaseStarts {
     frame: Option<Instant>,
     post_update: Option<Instant>,
     send_census_us: f64,
+    collect_start: Option<Instant>,
 }
 
 /// The wall-clock period gate.
@@ -761,24 +756,23 @@ fn record_tick(
     stages: Res<Stages>,
     phases: Res<Phases>,
     mut stats: ResMut<ServerStats>,
-    starts: Res<PhaseStarts>,
+    mut starts: ResMut<PhaseStarts>,
     mut traces: (super::ram::Census, Option<ResMut<Loadtest>>),
     fixed: Res<Time<Fixed>>,
 ) {
     let (census, load) = &mut traces;
     if let Some(closed) = clock.closed() {
-        let collect_start = Instant::now();
+        let collect_start = starts
+            .collect_start
+            .take()
+            .expect("the collector bracket opens before the freeze census and record_tick");
         stats.ticks.push(closed.us);
         stats.freeze_counts.awake.push(freeze_counts.awake as f64);
         stats.freeze_counts.rested.push(freeze_counts.rested as f64);
         stats
             .freeze_counts
-            .rested_unreached_floor
-            .push(freeze_counts.rested_unreached_floor as f64);
-        stats
-            .freeze_counts
-            .rested_unreached_ceiling
-            .push(freeze_counts.rested_unreached_ceiling as f64);
+            .rested_unreached
+            .push(freeze_counts.rested_unreached as f64);
         let measured = stages.take_us();
         let cpu = stages.take_cpu_us();
         let phases_cpu = phases.cpu_times();
@@ -1551,7 +1545,8 @@ mod tests {
                 }
                 let output = command.output().unwrap();
                 assert!(
-                    output.status.success(),
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
                     "armed={armed}: {}\n{}",
                     String::from_utf8_lossy(&output.stdout),
                     String::from_utf8_lossy(&output.stderr)
@@ -1621,11 +1616,16 @@ mod tests {
         });
         app.world_mut().run_schedule(FixedMain);
         let stats = app.world().resource::<ServerStats>();
+        assert!(
+            app.world()
+                .resource::<PhaseStarts>()
+                .collect_start
+                .is_none()
+        );
         assert_eq!(stats.ticks.0.len(), 1);
         assert_eq!(stats.freeze_counts.awake.0, [7.0]);
         assert_eq!(stats.freeze_counts.rested.0, [4.0]);
-        assert_eq!(stats.freeze_counts.rested_unreached_floor.0, [1.0]);
-        assert_eq!(stats.freeze_counts.rested_unreached_ceiling.0, [2.0]);
+        assert_eq!(stats.freeze_counts.rested_unreached.0, [2.0]);
         let line_census = app
             .world_mut()
             .run_system_once(|census: DebrisCensus| census.json())
@@ -1644,8 +1644,7 @@ mod tests {
             FreezeCounts {
                 awake: 7.0,
                 rested: 4.0,
-                rested_unreached_floor: 1.0,
-                rested_unreached_ceiling: 2.0,
+                rested_unreached: 2.0,
             }
         );
     }
@@ -1749,8 +1748,7 @@ mod tests {
             freeze_counts: FreezeCounts {
                 awake: TickWindow(vec![0.0, 7.0, 8.0]).drain(f64::INFINITY),
                 rested: TickWindow(vec![0.0, 5.0, 6.0]).drain(f64::INFINITY),
-                rested_unreached_floor: TickWindow(vec![0.0, 1.0, 2.0]).drain(f64::INFINITY),
-                rested_unreached_ceiling: TickWindow(vec![0.0, 3.0, 4.0]).drain(f64::INFINITY),
+                rested_unreached: TickWindow(vec![0.0, 3.0, 4.0]).drain(f64::INFINITY),
             },
             physics: Some(TickSummary {
                 ticks: 640,
@@ -1856,8 +1854,7 @@ mod tests {
         for (name, p50, max) in [
             ("awake", 7.0, 8.0),
             ("rested", 5.0, 6.0),
-            ("rested_unreached_floor", 1.0, 2.0),
-            ("rested_unreached_ceiling", 3.0, 4.0),
+            ("rested_unreached", 3.0, 4.0),
         ] {
             expected["debris"][name] =
                 json!({"p50": p50, "p95": max, "p99": max, "total": p50 + max, "max": max});
@@ -1902,7 +1899,7 @@ mod tests {
         assert_eq!(value["nr_throttled"], Value::Null);
         assert_eq!(
             value["debris"],
-            json!({"live": 35, "sleeping": 140, "awake": null, "rested": null, "rested_unreached_floor": null, "rested_unreached_ceiling": null}),
+            json!({"live": 35, "sleeping": 140, "awake": null, "rested": null, "rested_unreached": null}),
             "the piece count prints with no lever armed"
         );
     }

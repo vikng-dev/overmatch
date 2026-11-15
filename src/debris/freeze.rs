@@ -104,17 +104,18 @@ use crate::cost::stages::{Stages, Work};
 /// their switches over ticks; one island of any size passes alone, so none waits on its own size.
 const FREEZE_PIECE_BUDGET: usize = 8;
 
-/// The per-tick bracket; counts, sampling windows and summaries share these field names.
+/// Per-tick counts; sampling windows and summaries share these field names.
 #[derive(Resource, Default, Debug, PartialEq, serde::Serialize)]
 pub(crate) struct FreezeCounts<T = usize> {
     /// Denominator: awake dynamic debris, the same population as the line's `live` census.
     pub(crate) awake: T,
     /// Upper bound before reach: awake pieces whose timer has reached `TimeToSleep`.
     pub(crate) rested: T,
-    /// Lower bound: rested pieces unreached by any unrested body, so today's reach would leave them frozen.
-    pub(crate) rested_unreached_floor: T,
-    /// Upper bound: rested pieces unreached by unrested non-debris or zero-timer debris, allowing resting debris to freeze together.
-    pub(crate) rested_unreached_ceiling: T,
+    /// Rested pieces unreached by non-static unrested non-debris bodies or zero-timer debris.
+    /// Divided by `awake`, an upper bound on the fraction #379 could freeze: it uses that
+    /// redesign's mover rule (rested pieces are never movers) but omits its hold-up condition
+    /// (a piece held up by a dynamic body cannot freeze), so the true fraction is at or below it.
+    pub(crate) rested_unreached: T,
 }
 
 impl<T> FreezeCounts<T> {
@@ -122,8 +123,7 @@ impl<T> FreezeCounts<T> {
         FreezeCounts {
             awake: f(&self.awake),
             rested: f(&self.rested),
-            rested_unreached_floor: f(&self.rested_unreached_floor),
-            rested_unreached_ceiling: f(&self.rested_unreached_ceiling),
+            rested_unreached: f(&self.rested_unreached),
         }
     }
 
@@ -131,8 +131,7 @@ impl<T> FreezeCounts<T> {
         FreezeCounts {
             awake: f(&mut self.awake),
             rested: f(&mut self.rested),
-            rested_unreached_floor: f(&mut self.rested_unreached_floor),
-            rested_unreached_ceiling: f(&mut self.rested_unreached_ceiling),
+            rested_unreached: f(&mut self.rested_unreached),
         }
     }
 }
@@ -491,20 +490,14 @@ impl Reach<'_, '_> {
     }
 }
 
-#[derive(Default)]
-struct Reached {
-    floor: BTreeSet<Entity>,
-    ceiling: BTreeSet<Entity>,
-}
-
 #[derive(SystemParam)]
 pub(crate) struct Census<'w, 's> {
     awake: AwakePieces<'w, 's>,
-    moving: Query<'w, 's, (Entity, &'static SleepTimer, Has<DebrisPiece>)>,
+    moving: Query<'w, 's, (&'static SleepTimer, Has<DebrisPiece>)>,
     time_to_sleep: Res<'w, TimeToSleep>,
     reach: Reach<'w, 's>,
     counts: ResMut<'w, FreezeCounts>,
-    reached_by_moving: Local<'s, Parallel<Reached>>,
+    reached_by_moving: Local<'s, Parallel<BTreeSet<Entity>>>,
 }
 
 /// Stats-only census after `TickClosed`, before the recorder. The freeze changes sleeping
@@ -513,9 +506,10 @@ pub(crate) struct Census<'w, 's> {
 /// bounds and velocities therefore remain those the freeze read. Bevy 0.19.1 keeps the generic
 /// clock fixed throughout `FixedMain`, so reach also uses the same dt.
 ///
-/// Classification is serial, outside the tick, over at most the awake pieces: `src/debris.rs`
-/// records MEASURED `par_iter` startup overhead of 9 to 13 µs on the M4 server (pile and flat,
-/// nothing changed). The spatial queries run in parallel, with thread-local hits reduced here.
+/// Temporary instrument for the #379 decision: measuring the freezable fraction on the hosted
+/// ram scene; delete it when that decision is made. Classification is serial because it runs
+/// outside the timed tick over at most the awake pieces. Spatial queries run in parallel,
+/// with thread-local hits reduced here.
 /// Avian's `BodyIslandNode` excludes disabled and static movers by construction (`Reach::movers`).
 pub(crate) fn census(p: Census) {
     let Census {
@@ -535,41 +529,27 @@ pub(crate) fn census(p: Census) {
         }
     }
     let rested_count = rested.len();
-    let mut floor = rested.clone();
     if !rested.is_empty() {
         let reached = &*reached_by_moving;
-        // Every enabled non-static awake body carries SleepTimer through Avian's SolverBody.
-        moving
-            .par_iter_many(reach.movers())
-            .for_each(|(body, timer, debris)| {
-                if timer.0 < time_to_sleep.0 {
-                    reached.scope(|out| {
-                        let mut hits = BTreeSet::new();
-                        reach.of(
-                            body,
-                            |p| rested.contains(&p),
-                            &mut hits,
-                            &mut Tally::default(),
-                        );
-                        out.floor.extend(hits.iter().copied());
-                        if !debris || timer.0 == 0.0 {
-                            out.ceiling.extend(hits);
-                        }
-                    });
-                }
-            });
+        reach.movers.par_iter().for_each(|body| {
+            let (timer, debris) = moving.get(body).expect(
+                "every enabled non-static awake body carries SleepTimer through Avian's SolverBody",
+            );
+            if timer.0 < time_to_sleep.0 && (!debris || timer.0 == 0.0) {
+                reached.scope(|out| {
+                    reach.of(body, |p| rested.contains(&p), out, &mut Tally::default());
+                });
+            }
+        });
         for reached in reached_by_moving.iter_mut() {
-            floor.retain(|piece| !reached.floor.contains(piece));
-            rested.retain(|piece| !reached.ceiling.contains(piece));
-            reached.floor.clear();
-            reached.ceiling.clear();
+            rested.retain(|piece| !reached.contains(piece));
+            reached.clear();
         }
     }
     *counts = FreezeCounts {
         awake: awake_count,
         rested: rested_count,
-        rested_unreached_floor: floor.len(),
-        rested_unreached_ceiling: rested.len(),
+        rested_unreached: rested.len(),
     };
 }
 
@@ -926,11 +906,11 @@ mod tests {
         ))
     }
 
-    /// Operators need both bounds: partly rested debris still thaws under today's reach, while
-    /// a driven hull with timer = dt reaches under both. Disabled/static/sleeping sources reach
-    /// neither, and frozen/sleeping/non-dynamic pieces cannot enter the denominator.
+    /// For the #379 decision, partly rested debris must not reach, while a driven hull with
+    /// timer = dt must. Disabled/static/sleeping sources cannot reach, and
+    /// frozen/sleeping/non-dynamic pieces cannot enter the denominator.
     #[test]
-    fn freeze_bracket_distinguishes_resting_debris_and_driven_bodies() {
+    fn freeze_counts_distinguish_resting_debris_and_driven_bodies() {
         let mut app = settling(Vec3::ZERO);
         app.init_resource::<FreezeCounts>();
         // Fixture: separated targets, with overlapping sources that make no solver contacts.
@@ -1014,8 +994,7 @@ mod tests {
             FreezeCounts {
                 awake,
                 rested,
-                rested_unreached_floor: [isolated, by_disabled].len(),
-                rested_unreached_ceiling: [isolated, by_partial, by_disabled].len(),
+                rested_unreached: [isolated, by_partial, by_disabled].len(),
             }
         );
         // Reusing the system must not retain hits or counters from the previous sample.
@@ -1028,8 +1007,7 @@ mod tests {
             FreezeCounts {
                 awake,
                 rested: rested + [zero, partial].len(),
-                rested_unreached_floor: rested + [zero, partial].len(),
-                rested_unreached_ceiling: rested + [zero, partial].len(),
+                rested_unreached: rested + [zero, partial].len(),
             }
         );
         for body in pieces.into_iter().chain([zero, partial]) {
@@ -1040,6 +1018,26 @@ mod tests {
             *world.resource::<FreezeCounts>(),
             FreezeCounts { awake, ..default() }
         );
+    }
+
+    /// The #379 decision must fail visibly if a mover lacks its required timer; skipping it
+    /// could count pieces in its reach as freezable.
+    #[test]
+    #[should_panic(expected = "every enabled non-static awake body carries SleepTimer")]
+    fn freeze_census_requires_every_movers_timer() {
+        let mut app = settling(Vec3::ZERO);
+        app.init_resource::<FreezeCounts>();
+        let target = piece(&mut app, Vec3::ZERO);
+        let source = mover(&mut app, Vec3::ZERO, 0.0)
+            .insert((SleepingDisabled, CollisionLayers::NONE))
+            .id();
+        app.world_mut().entity_mut(target).insert(SleepingDisabled);
+        app.update();
+        let world = app.world_mut();
+        let rest_window = world.resource::<TimeToSleep>().0;
+        world.entity_mut(target).insert(SleepTimer(rest_window));
+        world.entity_mut(source).remove::<SleepTimer>();
+        world.run_system_cached(census).unwrap();
     }
 
     /// Stats off cannot make the freeze law depend on the census's rest threshold or counters.
