@@ -176,9 +176,9 @@ impl CollisionHooks for WorldContacts<'_, '_> {
                 .belts
                 .get(of.body)
                 .expect("a moving shoe face hangs on its spawn-built driving body");
-            // A resting tank's band may be stale (`TrackRise`). The hook runs only for a candidate
-            // contact, so a moving body's wakes the tank (removing `Sleeping` wakes its island),
-            // whatever either face of the pair then keeps.
+            // A resting tank's band may be stale (`TrackRise`). Past the construction sweep's
+            // filter, the hook runs only for a candidate contact, so a moving body's wakes the tank
+            // (removing `Sleeping` wakes its island), whatever either face's filtering keeps.
             let moves = |body: Entity| {
                 let (body, rests) = self.bodies.get(body).expect(
                     "a contact's body keeps its `RigidBody`: Avian drops its pairs with it",
@@ -595,10 +595,11 @@ mod tests {
     }
 
     /// Sleep never changes which points a slice bears, and a moving body's candidate contact wakes
-    /// a resting belt whatever either face of the pair keeps; its next pass then rewrites the band
+    /// a resting belt whatever either face's filtering keeps; its next pass then rewrites the band
     /// (`TrackRise`). Each case runs in both pair orders. Fails if a resting belt bears a point in
-    /// its band, if a dynamic or kinematic body leaves it asleep, a moving belt's face whose band
-    /// erases the pair first included, or if static matter, a resting body or nothing wakes it.
+    /// its band, if a dynamic or kinematic body leaves it asleep (a moving belt's face whose band
+    /// erases the pair first, or a normal the slice rejects, included), or if static matter, a
+    /// resting body or nothing wakes it.
     #[test]
     fn sleep_keeps_the_band_and_a_moving_body_wakes_the_belt() {
         let (side, rise) = (Side::Left, 0.2); // Fixture rise under the outboard edge, m.
@@ -611,17 +612,19 @@ mod tests {
             links
         };
         // (the belt rests; the other body's kind, whether it rests, and whether it is a belt whose
-        // inboard face's band holds both points; the belt wakes).
+        // inboard face's band holds both points; the candidate's normal is lateral; the belt
+        // wakes).
         let cases = [
-            (true, Some((RigidBody::Dynamic, false, false)), true),
-            (true, Some((RigidBody::Dynamic, false, true)), true),
-            (true, Some((RigidBody::Kinematic, false, false)), true),
-            (true, Some((RigidBody::Dynamic, true, false)), false),
-            (true, Some((RigidBody::Static, false, false)), false),
-            (true, None, false),
-            (false, Some((RigidBody::Dynamic, false, false)), false),
+            (true, Some((RigidBody::Dynamic, false, false)), true, true),
+            (true, Some((RigidBody::Dynamic, false, true)), true, true),
+            (true, Some((RigidBody::Kinematic, false, false)), true, true),
+            (true, Some((RigidBody::Dynamic, true, false)), true, false),
+            (true, Some((RigidBody::Static, false, false)), true, false),
+            (true, None, true, false),
+            (false, Some((RigidBody::Dynamic, false, false)), true, false),
+            (true, Some((RigidBody::Dynamic, false, false)), false, true),
         ];
-        for ((resting, other, wakes), reversed) in
+        for ((resting, other, lateral, wakes), reversed) in
             (cases.into_iter()).flat_map(|case| [(case, false), (case, true)])
         {
             let mut world = World::new();
@@ -664,7 +667,12 @@ mod tests {
                 )),
                 _ => world.spawn_empty(),
             };
-            let (struck, outward) = (struck.id(), Vec3::X * side.sign());
+            let struck = struck.id();
+            let outward = if lateral {
+                Vec3::X * side.sign()
+            } else {
+                Vec3::NEG_Y
+            };
             let (mut pair, normal) = if reversed {
                 let mut pair = ContactPair::new(struck, shoe, ContactId::PLACEHOLDER);
                 (pair.body1, pair.body2) = (body, Some(belt));
@@ -688,11 +696,15 @@ mod tests {
                     (bears, points.collect::<Vec<_>>())
                 })
                 .unwrap();
-            let kept = if belted { vec![] } else { vec![above] };
+            let kept = if belted || !lateral {
+                vec![]
+            } else {
+                vec![above]
+            };
             assert_eq!(
                 (borne, world.entity(belt).contains::<Sleeping>()),
                 ((!kept.is_empty(), kept), resting && !wakes),
-                "belt rests {resting}, other {other:?}, reversed {reversed}"
+                "belt rests {resting}, other {other:?}, lateral {lateral}, reversed {reversed}"
             );
         }
     }

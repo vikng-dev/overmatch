@@ -200,7 +200,8 @@ pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
 /// lands after the tick's pass and before its solver: the support index's or the sweep's before
 /// the step, or the narrow phase's (Avian's contact wake or the hook's), which applies at the
 /// sync point before the solver. That step runs on the band and belt the last pass left, hook and
-/// sweep alike; a wake at a step's end (an impulse, Avian's sleep pass) leaves the next pass to
+/// sweep alike, and the tank also runs it without its sampled support's forces, as in every
+/// mid-step wake. A wake at a step's end (an impulse, Avian's sleep pass) leaves the next pass to
 /// rewrite the band first. Never hashed, never rolled back.
 #[derive(Component, Clone, Debug, Default)]
 pub(crate) struct TrackRise(pub(crate) [Vec<LinkRise>; 2]);
