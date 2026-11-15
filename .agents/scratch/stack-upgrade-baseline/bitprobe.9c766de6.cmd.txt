@@ -1,0 +1,34 @@
+result: IDENTICAL. startup dump IDENTICAL (1803 named raw values); tick payloads IDENTICAL (3072 ticks); every
+  per-seam first divergence "identical" (MEASURED, bitprobe-diff.9c766de6.txt)
+cwd: the bay root (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+
+Why this commit: both legs panic at alpha.17 (bitprobe.264515e5.cmd.txt). The coordinator's fix is on main at
+eaac2a66ef4ff535378b5070def0e7dfe2886628 (the fixture's tank carries SleepingDisabled; no production code changed
+since b8baa8e4). The lane merged main into its branch as 9c766de6ccd763a82ca33095f85815a28f6b1019, a local commit since
+rewritten away: the branch was rebuilt on eaac2a66 without it, so 9c766de6 is in no pushed history. Its tree differs
+from eaac2a66's only outside the code (git diff eaac2a66 9c766de6 -- src Cargo.toml Cargo.lock assets vendor
+build.rs crates is empty, MEASURED): the two legs ran the same code.
+
+macOS leg, at 9c766de6:
+command: scripts/serial-cargo run --release --locked --features bitprobe --bin bitprobe -- .agents/scratch/stack-upgrade-baseline/bitprobe-macos-aarch64.9c766de6.obp.gz
+started: 2026-11-16T01:58:11+0700
+load averages before start (1, 5, 15 min; MEASURED, uptime): 5.58 6.36 6.77 (a deterministic dump, not a timing run)
+exit: 0, wall 515 s including the release build (7 m 53 s) and any lock wait
+machine build lock: held for the build and the run (scripts/serial-cargo holds /tmp/overmatch-cargo.lock across both)
+log: bitprobe-macos-aarch64.9c766de6.log (ANSI colour codes stripped)
+
+Linux leg, at eaac2a66 (dispatched on main by the coordinator, not by this lane):
+run: 43747219902, head eaac2a66ef4ff535378b5070def0e7dfe2886628, conclusion success
+command: gh run download 43747219902 --repo vikng-dev/overmatch --dir <a new empty directory under the baseline directory>
+log: bitprobe-linux-x86_64.eaac2a66.ci-run-43747219902.log (the build, fixture and upload steps of gh run view --log --job=132913077559, ANSI stripped)
+
+compare:
+command: python3 -I scripts/bitprobe/diff.py <mac dump> <linux dump>; exit 0
+verdict: bitprobe-diff.9c766de6.txt
+
+dumps (26 MB each, kept out of git) at /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/bitprobe/:
+  bitprobe-macos-aarch64.9c766de6.obp.gz                     26364966 bytes, sha256 e0acb05f934cb89b44fb49da4fa87b997f72939a5589dcfaddc25b3a7fe2d478
+  bitprobe-linux-x86_64.eaac2a66.ci-run-43747219902.obp.gz   26364365 bytes, sha256 5818c46130099c54a4d16f8a77d8939d5110ff4704d207951b0d64d20144e6c5
+  The files differ byte for byte (each names its own platform: the diff's "runs:" line); the startup dump and
+  the tick payloads compare IDENTICAL above. The macOS dump was written at the path in its command line, then
+  moved here.

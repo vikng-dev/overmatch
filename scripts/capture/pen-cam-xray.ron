@@ -1,0 +1,15 @@
+// A capture plan (`dev_capture::plan::CapturePlan`), the game's damage-model view (game state
+// only): `surroundings/hull-closeup.ron`'s frame with the x-ray held on, so the player's own live
+// tank wears the glass look (`pen_cam_look.wgsl`) and its belts the belt look
+// (`pen_cam_look_belt.wgsl`). With no shot recorded on the tank the look carries the live tint
+// alone (`pen_cam::game::xray`). The x-ray window is the scripted preference `OVERMATCH_XRAY`, an
+// offline-only lever, never the plan. From the checkout root, hidden and silent under the
+// machine's build lock:
+//
+//   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_START=599.9,-599.9,195 \
+//     OVERMATCH_XRAY=8-20 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 \
+//     OVERMATCH_CAPTURE=scripts/capture/pen-cam-xray.ron target/debug/overmatch --offline
+//
+// writes target/capture/pen-cam-xray.png. Pose, x-ray window, time, size and step are capture
+// configuration (ASSUMED), not game data.
+(frames: (out: "target/capture/pen-cam-xray.png", at: [12.0], size: (1280, 720), scale_factor: 1.0, ui: false, gizmos: false, step_s: 0.015625, camera: Follow(offset: (6.0, 2.5, -6.0))))

@@ -1,0 +1,13 @@
+commit: 264515e50b0da455b9ba05e26f477b0fbfd0018a (v0.7.0-alpha.17 = b8baa8e4 plus one docs-only commit)
+cwd: the bay root (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+command: scripts/perf/collapse.sh --target local --schedule scripts/perf/match-collapse.json --rehearsal --out target/collapse-264515e5
+started: 2026-11-16T01:37:59+0700
+load averages before start (1, 5, 15 min; MEASURED, uptime): 2.42 3.50 5.11
+exit: 1 wall 24s END 2026-11-16T01:38:23+0700
+wall time includes any wait for the machine lock (/tmp/overmatch-cargo.lock).
+note: result: MATCH RUN INVALID, 'server or load client exited before the window closed'. The plan's command, on its default binaries (target/debug)
+note: cause (MEASURED from the run's logs): all 30 debug clients, launched together, logged 'client: watchdog timeout — connection, input slot or combat release stalled' about 21 s after launch; the harness bounds launch to admission at WATCHDOG_SLACK = 20 s (src/net/harness.rs:358). client0's log shows 12.9 s between its ground-field and terrain-grid lines under the shared load; the server logged one client connected, at 18:38:20.68 UTC, about 20 s after the clients launched
+note: the timing gate passed at once: no rustc running, 1-minute load 2.42 (MEASURED)
+note: the run directory (384 KB of logs) is kept at /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/collapse-debug-attempt/
+note: the row is recorded from the rerun on the release binaries of the same commit and features: collapse.264515e5.cmd.txt
+note: machine build lock: held for the run; collapse.py checks the build through scripts/serial-cargo, then re-runs itself under /usr/bin/lockf on /tmp/overmatch-cargo.lock (collapse.py:1161) for the match

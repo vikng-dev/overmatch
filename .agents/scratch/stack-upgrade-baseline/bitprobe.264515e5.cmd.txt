@@ -1,0 +1,20 @@
+commit: 264515e50b0da455b9ba05e26f477b0fbfd0018a (v0.7.0-alpha.17 = b8baa8e4 plus one docs-only commit)
+cwd: the bay root (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+status: both legs panic at this commit. The pair was rerun at the fixture fix: bitprobe.9c766de6.cmd.txt (IDENTICAL).
+
+macOS leg:
+command: scripts/serial-cargo run --release --locked --features bitprobe --bin bitprobe -- .agents/scratch/stack-upgrade-baseline/bitprobe-macos-aarch64.264515e5.obp.gz
+started: 2026-11-16T00:04:37+0700
+load averages before start (1, 5, 15 min; MEASURED, uptime): 15.46 8.26 6.01 (a build, not a timing run)
+exit: 101, wall 473 s including the release build and lock wait
+panic: src/bitprobe.rs:909, "the differential fixture captures exactly one tank", left: 0, right: 1
+log: bitprobe-macos-aarch64.264515e5.log (ANSI colour codes stripped)
+dump: /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/bitprobe-macos-aarch64.264515e5.obp.gz (outside git, MANIFEST.sha256) is the partial dump the probe wrote before the panic:
+  123 ticks (MEASURED, diff.py), inside the settle phase. Not a baseline; kept as evidence.
+
+Linux leg:
+command: gh workflow run bitprobe.yml --ref main (main's head was b8baa8e4b6e5c4df89bc1f09b074e207f23226c7)
+run: 43738437479, failed with the same panic; no artifact was uploaded
+log: bitprobe-linux-x86_64.264515e5.ci-run-43738437479.log
+
+compare: python3 scripts/bitprobe/diff.py <mac> <linux> was not run: there is no Linux dump.

@@ -1,0 +1,168 @@
+{
+  "links": {
+    "11046v0": {
+      "bytes": 10609007,
+      "periods": 59,
+      "seconds": 59.63725591700001,
+      "bytes_per_s": 177892.27282296584,
+      "all_windows": true
+    }
+  },
+  "targets": {
+    "house_0001": {
+      "since_s": 11.673433917,
+      "awake": 0,
+      "chunks": 1122,
+      "dust": 160,
+      "falls": 962,
+      "frozen": 39,
+      "id": "house_0001",
+      "sleeping": 0,
+      "quiet_s": 48.55415120799999
+    },
+    "house_0002": {
+      "since_s": 14.701627542,
+      "awake": 0,
+      "chunks": 1122,
+      "dust": 160,
+      "falls": 962,
+      "frozen": 34,
+      "id": "house_0002",
+      "sleeping": 0,
+      "quiet_s": 45.52595758299999
+    },
+    "house_0003": {
+      "since_s": 24.785015125,
+      "awake": 0,
+      "chunks": 1122,
+      "dust": 160,
+      "falls": 962,
+      "frozen": 40,
+      "id": "house_0003",
+      "sleeping": 0,
+      "quiet_s": 35.442569999999996
+    },
+    "house_0004": {
+      "since_s": 22.754038667,
+      "awake": 0,
+      "chunks": 1122,
+      "dust": 160,
+      "falls": 962,
+      "frozen": 41,
+      "id": "house_0004",
+      "sleeping": 0,
+      "quiet_s": 37.473546458
+    },
+    "house_0005": {
+      "since_s": 22.754038667,
+      "awake": 0,
+      "chunks": 1122,
+      "dust": 160,
+      "falls": 962,
+      "frozen": 42,
+      "id": "house_0005",
+      "sleeping": 0,
+      "quiet_s": 37.473546458
+    },
+    "house_0006": {
+      "since_s": 21.743934167,
+      "awake": 0,
+      "chunks": 1122,
+      "dust": 160,
+      "falls": 962,
+      "frozen": 40,
+      "id": "house_0006",
+      "sleeping": 0,
+      "quiet_s": 38.483650958
+    },
+    "house_0007": {
+      "since_s": 32.89851725,
+      "awake": 0,
+      "chunks": 1122,
+      "dust": 160,
+      "falls": 962,
+      "frozen": 35,
+      "id": "house_0007",
+      "sleeping": 0,
+      "quiet_s": 27.329067875
+    },
+    "house_0008": {
+      "since_s": 39.998003333,
+      "awake": 0,
+      "chunks": 1122,
+      "dust": 160,
+      "falls": 962,
+      "frozen": 40,
+      "id": "house_0008",
+      "sleeping": 0,
+      "quiet_s": 20.229581791999998
+    },
+    "house_0009": {
+      "since_s": 45.056300667,
+      "awake": 0,
+      "chunks": 1122,
+      "dust": 160,
+      "falls": 962,
+      "frozen": 48,
+      "id": "house_0009",
+      "sleeping": 0,
+      "quiet_s": 15.171284457999995
+    },
+    "house_0010": {
+      "since_s": 45.056300667,
+      "awake": 0,
+      "chunks": 1122,
+      "dust": 160,
+      "falls": 962,
+      "frozen": 38,
+      "id": "house_0010",
+      "sleeping": 0,
+      "quiet_s": 15.171284457999995
+    },
+    "house_0011": {
+      "since_s": 39.998003333,
+      "awake": 0,
+      "chunks": 1122,
+      "dust": 160,
+      "falls": 962,
+      "frozen": 48,
+      "id": "house_0011",
+      "sleeping": 0,
+      "quiet_s": 20.229581791999998
+    },
+    "house_0012": {
+      "since_s": 44.040162917,
+      "awake": 0,
+      "chunks": 1122,
+      "dust": 160,
+      "falls": 962,
+      "frozen": 40,
+      "id": "house_0012",
+      "sleeping": 0,
+      "quiet_s": 16.187422207999994
+    }
+  },
+  "clients": {
+    "client0": {
+      "frames": 15074,
+      "span_s": 55.992074584,
+      "frames_per_s": 269.2166723950512,
+      "within_tick": 15072,
+      "over_tick": 3,
+      "covered_tick_slots": 3583,
+      "expected_tick_slots": 3584,
+      "keeping_up": true
+    }
+  },
+  "all_clients_keeping_up": true,
+  "capacity": {
+    "valid": true,
+    "tick_hz": 58.21864112648219,
+    "server_keeping_up": false,
+    "server_over_budget": true,
+    "capacity_supported": false,
+    "clients_keeping_up": 1,
+    "clients": 1,
+    "links_complete": true
+  }
+}

@@ -1,0 +1,3 @@
+commit: ed9eccce4a12877e8031acd8659ddb6ddcd46b9e
+command: scripts/perf/tick-trace.sh /Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1/target/tick-trace-264515e5 264515e5
+BIN=target/perf BOTS=29 EMPTY=5+30 COMBAT=15+120

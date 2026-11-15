@@ -1,0 +1,28 @@
+// A capture plan (`dev_capture::plan::CapturePlan`), the game's damage-model view (game state
+// only): the kill cam's lesson, the player's own tank knocked out and shown in the glass look over
+// the live world, its components tinted and the record's fields drawn as one volume
+// (`pen_cam_look.wgsl`, reading the fields' depth pictures that `pen_cam_picture.wgsl` renders),
+// with the record's elements (`pen_cam_glow.wgsl`) and the struck components' outlines
+// (`pen_cam_outline.wgsl`). The offline target scenario `OVERMATCH_TARGET=kills` parks a target
+// that fires into the player's tank from 25 s, every 10 s, until the knockout (`tank::scenario`;
+// its trigger runs on `Time<Real>`, so this plan fixes no frame step and its frames land a little
+// differently run to run). The frame times assume the first round knocks the tank out (ASSUMED);
+// a later knockout moves the lesson past them. From the checkout root, hidden and silent under the
+// machine's build lock:
+//
+//   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_TARGET=kills \
+//     OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 \
+//     OVERMATCH_CAPTURE=scripts/capture/pen-cam-killcam.ron target/debug/overmatch --offline
+//
+// writes target/capture/pen-cam-killcam-<second>.png at each frame second, then exits. Times and
+// size are capture configuration (ASSUMED), not game data.
+(
+    frames: (
+        out: "target/capture/pen-cam-killcam.png",
+        at: [26.5, 28.0, 29.5],
+        size: (1280, 720),
+        scale_factor: 1.0,
+        ui: false,
+        gizmos: false,
+    ),
+)

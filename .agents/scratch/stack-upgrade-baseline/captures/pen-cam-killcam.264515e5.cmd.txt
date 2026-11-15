@@ -1,0 +1,11 @@
+commit: 264515e50b0da455b9ba05e26f477b0fbfd0018a (v0.7.0-alpha.17 = b8baa8e4 plus one docs-only commit)
+cwd: the bay root (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+command: /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env -u OVERMATCH_START OVERMATCH_TARGET=kills OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CONFIG_DIR=/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/bl356/cfg-empty OVERMATCH_CAPTURE=scripts/capture/pen-cam-killcam.ron target/debug/overmatch --offline
+started: 2026-11-16T01:28:38+0700
+load averages before start (1, 5, 15 min; MEASURED, uptime): 6.84 6.73 6.84
+exit: 0 wall 37s END 2026-11-16T01:29:15+0700
+wall time includes any wait for the machine lock (/tmp/overmatch-cargo.lock).
+note: outputs: pen-cam-killcam-000{26.5000,28.0000,29.5000}s.264515e5.png, from the new tracked plan scripts/capture/pen-cam-killcam.ron
+note: the client logged: target kills: the player's tank is knocked out at 25.03 s (Time<Real>), the first round (MEASURED); the 26.5 and 28 s frames show the kill cam's lesson, the 29.5 s frame the view after it
+note: OVERMATCH_CONFIG_DIR points at an empty directory so the owner's own settings never enter a baseline
+note: the frames named above are kept out of git, at /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/captures/ (sizes and sha256 in ../MANIFEST.sha256)

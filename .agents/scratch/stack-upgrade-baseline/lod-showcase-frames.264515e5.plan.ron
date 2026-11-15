@@ -1,0 +1,15 @@
+// `scripts/capture/lod-showcase.ron` with frames added for the stack upgrade's before/after set:
+// the tracked plan requests none ("the orchestrator's capture batch supplies its own frame
+// times"). Times and size are capture configuration (ASSUMED), not game data.
+(
+    frames: (
+        out: "target/capture/baseline/lod-showcase.png",
+        at: [10.0, 14.0],
+        size: (1280, 720),
+        scale_factor: 1.0,
+        ui: false,
+        gizmos: false,
+        step_s: 0.015625,
+    ),
+    scene: (demo: LodShowcase),
+)
