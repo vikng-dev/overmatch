@@ -24,7 +24,8 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate.
+of `src/` against the published crate: 665 in all (MEASURED), 587 in upstream files and 78 in the
+fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run in `vendor/avian3d-0.8.0-guards`, a crate beside this one that builds the fork with the
 game's `src/avian_ext/` and the game's `src/tests/avian_*.rs` included by path, without the game
@@ -533,7 +534,7 @@ serial cases included) without changing its thresholds, iteration or chunking. N
 physics decision. The game's work account reads them (`src/net/ram.rs`, `src/cost.rs`).
 
 Kept: counters inside three upstream systems and the dispatch decision of an upstream helper; no
-extension point sees either. 64 fork lines (MEASURED: 26 in the solver, 31 in the diagnostics, 7 in
+extension point sees either. 65 fork lines (MEASURED: 26 in the solver, 32 in the diagnostics, 7 in
 `par_for_each`).
 
 Guard: the game's `src/net/ram/avian_tests.rs` (`contact_visits_cover_each_pass_and_reset_each_step`
