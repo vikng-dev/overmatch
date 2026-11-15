@@ -291,6 +291,7 @@ pub(super) struct AvianDiagnostics<'w, 's> {
     tree: Res<'w, avian3d::collider_tree::ColliderTreeDiagnostics>,
     graph: Res<'w, avian3d::prelude::ContactGraph>,
     constraints: Res<'w, avian3d::dynamics::solver::constraint_graph::ConstraintGraph>,
+    reduction: Res<'w, crate::avian_ext::contact_reduction::ReductionCounts>,
     bodies: Query<'w, 's, &'static avian3d::prelude::RigidBody>,
     degrees: Local<'s, bevy::ecs::entity::EntityHashMap<u32>>,
     workers: Local<'s, Vec<AvianContactWork>>,
@@ -311,7 +312,8 @@ impl AvianDiagnostics<'_, '_> {
         let us = |d: std::time::Duration| d.as_secs_f64() * 1.0e6;
         let (s, c) = (&*self.solver, &*self.collision);
         let colors = &self.constraints.colors;
-        let pairs = self.graph.active_pairs();
+        let graph = &*self.graph;
+        let pairs = graph.active_pairs();
         let bodies = &self.bodies;
         let pool = ComputeTaskPool::get();
         let workers = pool.thread_num();
@@ -338,7 +340,12 @@ impl AvianDiagnostics<'_, '_> {
                 for constraint in &constraints[constraints.len() * worker / workers
                     ..constraints.len() * (worker + 1) / workers]
                 {
-                    for body in [constraint.body1, constraint.body2] {
+                    let Some((_, pair)) = graph.get_by_id(constraint.contact_id) else {
+                        continue; // Retirement can remove the pair before this post-step census.
+                    };
+                    for body in [pair.body1, pair.body2].map(|body| {
+                        body.expect("a prepared constraint retains both rigid-body owners")
+                    }) {
                         // Retired bodies can leave the world after solving and before collection.
                         if bodies
                             .get(body)
@@ -392,12 +399,13 @@ impl AvianDiagnostics<'_, '_> {
             max_dynamic_manifold_degree: self.degrees.values().copied().max().unwrap_or(0),
             stationary_non_touching_pairs: c.stationary_non_touching_pairs,
             stationary_non_touching_queries: c.stationary_non_touching_queries,
-            reduction_groups: c.reduction_groups,
-            reduction_landing_whole: c.reduction_landing_whole,
-            reduction_ceiling_whole: c.reduction_ceiling_whole,
-            reduction_overlap_whole: c.reduction_overlap_whole,
-            reduction_warm_points_removed: c.reduction_warm_points_removed,
-            reduction_cold_points_kept: c.reduction_cold_points_kept,
+            recycled_pairs: c.recycled_count,
+            reduction_groups: self.reduction.groups,
+            reduction_landing_whole: self.reduction.landing_whole,
+            reduction_ceiling_whole: self.reduction.ceiling_whole,
+            reduction_overlap_whole: self.reduction.overlap_whole,
+            reduction_warm_points_removed: self.reduction.warm_removed,
+            reduction_cold_points_kept: self.reduction.cold_kept,
         }
     }
 }

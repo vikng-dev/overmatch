@@ -687,7 +687,7 @@ impl Bed {
                 continue; // A piece the destruction model removed has no depth.
             };
             for &point in &points {
-                let (surface, inside) = shape.project_point(*at, *rot, point, false);
+                let (surface, inside) = shape.project_point(at.0, rot.0, point, false);
                 if inside {
                     deepest = deepest.max(surface.distance(point));
                 }
@@ -2643,6 +2643,7 @@ fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
             .map(|(run, face, soft)| (face.side, run, soft.clone()))
             .collect();
         let graph = world.resource::<ContactGraph>();
+        let laws = world.resource::<crate::avian_ext::compliance::Laws>();
         let carried = Side::ALL.map(|side| {
             let (_, run, soft) = runs
                 .iter()
@@ -2650,10 +2651,15 @@ fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
                 .expect("a driving tank hangs a run on each side");
             let (spring, contacts) = graph
                 .contact_pairs_with(*run)
-                .flat_map(|pair| &pair.manifolds)
-                .map(|manifold| {
-                    let law = manifold
-                        .compliance
+                .flat_map(|pair| {
+                    pair.manifolds
+                        .iter()
+                        .enumerate()
+                        .map(move |(index, manifold)| (pair.contact_id, index, manifold))
+                })
+                .map(|(contact, index, manifold)| {
+                    let law = laws
+                        .get(contact, index)
                         .expect("every contact of a run takes the running gear's law");
                     let force: f32 = (manifold.points.iter())
                         .map(|p| law.stiffness * (p.penetration + law.rest).max(0.0))

@@ -335,13 +335,13 @@ impl RubbleBodies<'_> {
                         let (inverse_mass, inverse_inertia) = if kind.is_dynamic() {
                             (
                                 mass.inverse(),
-                                inertia.rotated(forces.rotation().0).inverse().to_mat3(),
+                                inertia.rotated(forces.rotation()).inverse().to_mat3(),
                             )
                         } else {
                             (0.0, Mat3::ZERO)
                         };
                         Some(SurfaceMotion {
-                            com: forces.position().0 + forces.rotation().0 * com.0,
+                            com: forces.position() + forces.rotation() * com.0,
                             linear: forces.linear_velocity(),
                             angular: forces.angular_velocity(),
                             inverse_mass,
@@ -667,8 +667,7 @@ mod tests {
     use std::time::Duration;
 
     use avian3d::prelude::{
-        Collider, ColliderDensity, Gravity, LayerMask, LinearVelocity, PhysicsPlugins, Position,
-        Rotation,
+        Collider, ColliderDensity, Gravity, LayerMask, LinearVelocity, Position, Rotation,
     };
     use bevy::ecs::system::RunSystemOnce;
     use bevy::math::{Affine3A, Quat, Vec2};
@@ -694,7 +693,7 @@ mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
             crate::contact_transfer::sim_plugin,
             super::super::world_contact::plugin,
         ))
@@ -883,7 +882,7 @@ mod tests {
             .world_mut()
             .spawn((
                 Transform::IDENTITY,
-                Collider::convex_hull(vertices).expect("fixture ramp is a finite convex prism"),
+                Collider::convex_hull(&vertices).expect("fixture ramp is a finite convex prism"),
                 contact_friction(0.7),
             ))
             .id();
@@ -1209,7 +1208,7 @@ mod tests {
             })
         };
         let points: Vec<Vec3> = ring(0.4, -0.3).chain(ring(0.35, 0.3)).collect();
-        let trunk = Collider::convex_hull(points).expect("two rings at distinct heights");
+        let trunk = Collider::convex_hull(&points).expect("two rings at distinct heights");
         fixed_surface_reaction(trunk, 0.0);
     }
 

@@ -619,7 +619,7 @@ pub(crate) fn certified_samples(
     let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
     for (node, primitive) in candidates(context, not_own, at + origin, axis, 0.0, reach) {
         let (pose, collider, _) = context.world.geometry(primitive);
-        let bounds = collider.aabb(pose.position, pose.rotation);
+        let bounds = collider.aabb(pose.position, pose.rotation, 0.0);
         let (min, max) = (bounds.min - at, bounds.max - at);
         let margin = Vec3::splat(PROBE_MARGIN);
         if !offsets
@@ -805,7 +805,7 @@ impl Reached {
     fn bounds(&self, context: &ResolveContext<'_, '_, '_>) -> ColliderAabb {
         *self.bounds.get_or_init(|| {
             let (pose, collider, _) = context.world.geometry(self.primitive);
-            collider.aabb(pose.position, pose.rotation)
+            collider.aabb(pose.position, pose.rotation, 0.0)
         })
     }
 }
@@ -2590,7 +2590,7 @@ pub(crate) fn body_completion(
         .iter()
         .map(|&(_, primitive)| {
             let (pose, collider, _) = context.world.geometry(primitive);
-            let bounds = collider.aabb(pose.position, pose.rotation);
+            let bounds = collider.aabb(pose.position, pose.rotation, 0.0);
             let a =
                 ((bounds.min.as_dvec3() - anchor.as_dvec3()) - origin.as_dvec3()) * axis.as_dvec3();
             let b =

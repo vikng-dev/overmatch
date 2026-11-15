@@ -1566,7 +1566,7 @@ mod tests {
         app.add_plugins((
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
         ))
         .init_asset::<Mesh>()
         .init_resource::<crate::contact_transfer::ContactTransfers>()

@@ -177,6 +177,7 @@ mod tests {
                     let bounds = world.get::<Collider>(piece).unwrap().aabb(
                         world.get::<Position>(piece).unwrap().0,
                         *world.get::<Rotation>(piece).unwrap(),
+                        0.0,
                     );
                     let overrun = bounds
                         .min
@@ -300,7 +301,7 @@ mod tests {
             .iter()
             .map(|bits| Vec3::from_array(bits.map(f32::from_bits)))
             .collect();
-        let hull = Collider::convex_hull(points.clone()).unwrap();
+        let hull = Collider::convex_hull(&points).unwrap();
         let mut seed = 0x2545_f491_4f6c_dd1d_u64;
         let mut unit = move || {
             seed ^= seed << 13;

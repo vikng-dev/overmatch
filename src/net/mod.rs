@@ -57,7 +57,7 @@ mod link_drop;
 pub(crate) mod loadtest;
 /// The pre-connect Join menu against the matchmaking Worker (matchmaking mode only).
 mod matchmaking;
-mod physics;
+pub(crate) mod physics;
 mod protocol;
 mod ram;
 mod resync;

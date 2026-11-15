@@ -91,7 +91,7 @@ impl TrackColliders {
             .chain(self.side_plates.values().flat_map(|pair| pair.iter()))
             .chain(self.runs.values().map(RunShape::collider))
             .map(|collider| {
-                let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
+                let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0);
                 bounds.min.abs().max(bounds.max.abs()).length()
             })
             .fold(0.0, f32::max)
@@ -155,7 +155,7 @@ fn extrude(profile: &[Vec2], x0: f32, x1: f32) -> Vec<Vec3> {
 }
 
 fn hull(points: Vec<Vec3>, side: Side) -> Collider {
-    Collider::convex_hull(points).unwrap_or_else(|| {
+    Collider::convex_hull(&points).unwrap_or_else(|| {
         panic!(
             "the {side:?} track collider is degenerate: a running gear with a sprocket and an \
              idler encloses area, and Link_Box must supply positive finite shoe dimensions"

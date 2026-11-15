@@ -661,7 +661,7 @@ pub(crate) mod tests {
         // Fixture: a finite perspective camera and points in front, beyond each edge, and behind.
         let camera = Camera {
             computed: ComputedCameraValues {
-                clip_from_view: Mat4::perspective_infinite_reverse_rh(
+                clip_from_view: glam::camera::rh::proj::directx::perspective_infinite_reverse(
                     std::f32::consts::FRAC_PI_2,
                     16.0 / 9.0,
                     0.1,
@@ -808,11 +808,12 @@ pub(crate) mod tests {
                 .spawn((
                     Camera {
                         computed: ComputedCameraValues {
-                            clip_from_view: Mat4::perspective_infinite_reverse_rh(
-                                0.9,
-                                16.0 / 9.0,
-                                0.1,
-                            ),
+                            clip_from_view:
+                                glam::camera::rh::proj::directx::perspective_infinite_reverse(
+                                    0.9,
+                                    16.0 / 9.0,
+                                    0.1,
+                                ),
                             target_info: Some(RenderTargetInfo {
                                 physical_size: UVec2::new(1280, 720),
                                 scale_factor: 1.0,

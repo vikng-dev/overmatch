@@ -8,7 +8,10 @@
 //! Only awake touching pairs count (the active set); a sleeping pair is outside the solver.
 //! Sensors are excluded: only pairs that generate constraints count.
 
-use avian3d::dynamics::solver::{islands::BodyIslandNode, solver_body::SolverBody};
+use avian3d::dynamics::solver::{
+    islands::BodyIslandNode,
+    solver_body::{SolverBodies, SolverBodyIndex},
+};
 use avian3d::prelude::{
     AngularVelocity, Collider, ColliderTransform, ComputedAngularInertia, ComputedMass,
     ContactGraph, ContactPair, LinearVelocity, PhysicsLengthUnit, Position, RigidBody,
@@ -607,9 +610,10 @@ pub(super) struct ContactCensus<'w, 's> {
             &'static ComputedMass,
             &'static ComputedAngularInertia,
             &'static Rotation,
-            &'static SolverBody,
+            &'static SolverBodyIndex,
         ),
     >,
+    solver_bodies: Res<'w, SolverBodies>,
     length_unit: Res<'w, PhysicsLengthUnit>,
     time_to_sleep: Res<'w, TimeToSleep>,
     records: ResMut<'w, PieceRecords>,
@@ -738,7 +742,7 @@ impl ContactCensus<'_, '_> {
                                 .colliders
                                 .get(collider)
                                 .expect("a body's collider membership names live colliders");
-                            let bounds = shape.aabb(pose.translation, pose.rotation);
+                            let bounds = shape.aabb(pose.translation, pose.rotation, 0.0);
                             bounds.min.abs().max(bounds.max.abs()).length()
                         })
                         .fold(0.0, f32::max)
@@ -758,8 +762,13 @@ impl ContactCensus<'_, '_> {
                 let angular_limit = rest.angular * rest.angular.abs();
                 let original_rest = velocity.length_squared() < linear_limit
                     && spin.length_squared() < angular_limit;
-                let energy_rest =
-                    body.kinetic_speed_squared(*mass, *inertia, *rotation) < linear_limit;
+                let body = self
+                    .solver_bodies
+                    .get(*body)
+                    .expect("an awake piece's solver index addresses its state");
+                let energy_rest = crate::avian_ext::rest_test::kinetic_speed_squared(
+                    body, *mass, *inertia, *rotation,
+                ) < linear_limit;
                 if !(original_rest || energy_rest) {
                     record.last_fast = Some(tick);
                 }

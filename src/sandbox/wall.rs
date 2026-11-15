@@ -864,7 +864,7 @@ fn chunk_mesh(block: &Block) -> Mesh {
 /// volume, so its mass and inertia at the brick's density are the cut's.
 fn chunk_collider(block: &Block) -> Collider {
     let centre = block.center();
-    Collider::convex_hull(block.points.iter().map(|p| *p - centre).collect())
+    Collider::convex_hull(&block.points.iter().map(|p| *p - centre).collect::<Vec<_>>())
         .expect("a bake chunk has volume")
 }
 

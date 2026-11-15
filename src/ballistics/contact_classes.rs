@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 
 use avian3d::parry::shape::TypedShape;
 use avian3d::prelude::{
-    AngularVelocity, Collider, CollisionLayers, LayerMask, LinearVelocity, PhysicsPlugins,
-    Position, RigidBody, Rotation,
+    AngularVelocity, Collider, CollisionLayers, LayerMask, LinearVelocity, Position, RigidBody,
+    Rotation,
 };
 use bevy::ecs::system::RunSystemOnce;
 use bevy::time::TimeUpdateStrategy;
@@ -417,7 +417,7 @@ impl Range {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
         ))
         .init_asset::<Mesh>()
         .insert_resource(TimeUpdateStrategy::ManualDuration(TICK))

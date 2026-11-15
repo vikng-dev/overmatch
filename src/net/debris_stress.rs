@@ -926,7 +926,7 @@ mod tests {
             bevy::transform::TransformPlugin,
             // Avian's collider cache reads `AssetEvent<Mesh>`.
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
             crate::debris::sim_plugin,
         ))
         .init_asset::<Mesh>()

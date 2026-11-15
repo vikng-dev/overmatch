@@ -284,7 +284,9 @@ fn check() {{
         })
         .expect("headless compute completes");
     receive.recv().unwrap().expect("readback maps");
-    let bytes = readback.get_mapped_range(..);
+    let bytes = readback
+        .get_mapped_range(..)
+        .expect("the readback is mapped over its aligned full range");
     bytes
         .as_chunks::<4>()
         .0

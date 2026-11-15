@@ -174,11 +174,12 @@ fn prepare(
     }
     for (color, constraints) in graph.colors.iter().enumerate() {
         for (ci, constraint) in constraints.contact_constraints.iter().enumerate() {
-            let (sign, collider) = if constraint.body1 == account.body {
-                let (_, pair) = contacts.get_by_id(constraint.contact_id).unwrap();
+            let (_, pair) = contacts
+                .get_by_id(constraint.contact_id)
+                .expect("a prepared constraint retains its pair through the solve");
+            let (sign, collider) = if pair.body1 == Some(account.body) {
                 (-1.0, pair.collider1)
-            } else if constraint.body2 == account.body {
-                let (_, pair) = contacts.get_by_id(constraint.contact_id).unwrap();
+            } else if pair.body2 == Some(account.body) {
                 (1.0, pair.collider2)
             } else {
                 continue; // This constraint transfers no momentum to the observed body.

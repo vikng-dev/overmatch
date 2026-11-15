@@ -3293,7 +3293,7 @@ const CONVEX_STANDOFFS: [f32; 5] = [0.5, 2.0, 5.3, 9.7, 12.3];
 #[test]
 fn a_convex_solid_is_crossed_with_a_chord_at_any_offset_and_incidence() {
     let mut app = world_with_trimesh_plates(&[]);
-    let points = [(0.0, 0.4), (1.8, 0.15)]
+    let points: Vec<_> = [(0.0, 0.4), (1.8, 0.15)]
         .into_iter()
         .flat_map(|(height, radius)| {
             (0..12).map(move |k| {
@@ -3307,7 +3307,7 @@ fn a_convex_solid_is_crossed_with_a_chord_at_any_offset_and_incidence() {
         .spawn((
             Transform::IDENTITY,
             RigidBody::Static,
-            Collider::convex_hull(points).expect("the fixture's two rings define a convex solid"),
+            Collider::convex_hull(&points).expect("the fixture's two rings define a convex solid"),
             CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
             BallisticVolume {
                 material: VolumeMaterial::fixture(1.0),

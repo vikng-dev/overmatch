@@ -262,7 +262,7 @@ pub(crate) fn element_layers() -> CollisionLayers {
 /// Element `k`'s standing solid in the construction frame: its authored hull.
 pub(crate) fn element_collider(kind: &ConstructionKind, k: usize) -> Collider {
     let element = &kind.asset.elements[k];
-    Collider::convex_hull(element.points())
+    Collider::convex_hull(&element.points())
         .unwrap_or_else(|| panic!("construction: element {} has no convex hull", element.name))
 }
 

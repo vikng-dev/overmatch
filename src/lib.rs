@@ -11,6 +11,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 mod aim;
+mod avian_ext;
 /// The embedded armament files, written by `build.rs`: `ROUND_FILES` (`assets/rounds/`) and
 /// `GUN_FILES` (`assets/guns/`), each `(file stem, file text)` in byte order of the stem. The round
 /// and gun registries parse from these alone; no armament file is read at runtime.
@@ -895,6 +896,7 @@ pub(crate) fn offline_physics() -> bevy::app::PluginGroupBuilder {
     PhysicsPlugins::default()
         .with_collision_hooks::<track::stop_contacts::WorldContacts<'static, 'static>>()
         .build()
+        .add(net::physics::extensions)
 }
 
 /// Every moving offline body opts translation/rotation into [`offline_physics`] easing in the

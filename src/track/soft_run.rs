@@ -30,15 +30,15 @@
 //!   belt speed and `stop_contacts::by_owner` reads its friction into the transmission.
 //!
 //! Each run's laws come from a shared read of the contact graph, every run apart ([`read_runs`]);
-//! one short step then writes them into the manifolds ([`write_runs`]), the only writer of a
-//! contact's compliance.
+//! one short step publishes them in the step-local law store ([`write_runs`]).
 
 use std::ops::Range;
 
+use crate::avian_ext::compliance::{ContactCompliance, Laws};
 use avian3d::collision::contact_types::{ContactId, ContactManifold};
 use avian3d::prelude::{
-    Collider, ColliderOf, CollisionLayers, ContactCompliance, ContactGraph, PhysicsSchedule,
-    PhysicsStepSystems, Position, Rotation,
+    Collider, ColliderOf, CollisionLayers, ContactGraph, PhysicsSchedule, PhysicsStepSystems,
+    Position, Rotation,
 };
 use bevy::prelude::*;
 
@@ -522,17 +522,11 @@ fn read_runs(
         });
 }
 
-/// Write each run's laws into its manifolds: the one step that holds the graph exclusively. A
-/// manifold keeps every point: the solver leaves one its law does not bear inert (the vendored
-/// compliant contact), so the law stays a function of the manifold as the narrow phase left it,
-/// and reads the same when read again.
-fn write_runs(mut graph: ResMut<ContactGraph>, runs: Query<&RunContacts>) {
+/// Publish each run's laws in the step-local store; manifold geometry remains the narrow phase's.
+fn write_runs(mut laws: ResMut<Laws>, runs: Query<&RunContacts>) {
     for contacts in &runs {
         for (manifold, &law) in contacts.manifolds.iter().zip(&contacts.laws) {
-            let (_, pair) = graph
-                .get_mut_by_id(manifold.pair)
-                .expect("a pair read this step is still in the graph");
-            pair.manifolds[manifold.index].compliance = Some(law);
+            laws.set(manifold.pair, manifold.index, law);
         }
     }
 }
@@ -606,6 +600,7 @@ mod tests {
     fn world_on(run: SoftRun, manifolds: &[Exposed]) -> (World, Vec<ContactId>) {
         ComputeTaskPool::get_or_init(TaskPool::default);
         let mut world = World::new();
+        world.init_resource::<Laws>();
         world.insert_resource(LAW);
         let body = world
             .spawn((
@@ -982,11 +977,16 @@ mod tests {
         let law = read(&mut world, &pairs);
         world.run_system_once(write_runs).expect("the write runs");
         let after = manifolds(&world);
-        for ((before, after), law) in before.iter().zip(&after).zip(&law) {
+        for (before_index, ((before, after), law)) in
+            before.iter().zip(&after).zip(&law).enumerate()
+        {
             assert_eq!(after.points, before.points, "the hand-over changed a point");
             assert_eq!(
-                after.compliance,
-                Some(*law),
+                world
+                    .resource::<Laws>()
+                    .get(pairs[before_index], 0)
+                    .map(|stored| (stored.stiffness, stored.damping, stored.rest)),
+                Some((law.stiffness, law.damping, law.rest)),
                 "a manifold went without its law"
             );
         }
