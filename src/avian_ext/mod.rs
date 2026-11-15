@@ -9,6 +9,7 @@
 //! [`AvianExtPlugin`] installs every seam; each composition of Avian's `PhysicsPlugins` adds it
 //! after them.
 
+pub mod attachment;
 pub mod child_poses;
 
 use avian3d::prelude::*;
@@ -23,6 +24,7 @@ impl Plugin for AvianExtPlugin {
         if !app.is_plugin_added::<child_poses::ReenabledPlugin>() {
             app.add_plugins(child_poses::ReenabledPlugin);
         }
+        app.add_observer(attachment::refuse_unposed_attachment);
         app.get_schedule_mut(PhysicsSchedule)
             .expect("AvianExtPlugin is added after Avian's PhysicsPlugins")
             .add_systems(child_poses::place_child_colliders.in_set(PhysicsStepSystems::First));

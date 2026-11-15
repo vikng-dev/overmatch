@@ -50,3 +50,21 @@ its bits differ, visits only children whose offset, own pose, attachment or body
 `pub(crate)` `AncestorMarkerPlugin`, which a disabled plugin would leave to the game.
 
 Guard: `src/tests/avian_child_pose_churn.rs`. Record: `upstream/avian-child-collider-pose-churn.md`.
+
+## Attachment refusal: game-side
+
+`ColliderOf::on_insert` returns without listing the collider in its body's `RigidBodyColliders`
+when the collider or the body has no `GlobalTransform`. Every child placement boundary reaches a
+moved body's colliders through that list, so such a child stays at its birth pose. Avian's
+`PhysicsTransformPlugin` requires `Transform` through `Position`; the game's networked composition
+disables that plugin, so there a body spawned without `Transform` takes this path silently.
+
+The game refuses it in an observer on `Insert<ColliderOf>` (`avian_ext::attachment`), which runs
+after the hook on the same insertion and panics naming both entities and the fix. The 0.7 fork
+panicked inside the hook. Cost of the observer, MEASURED in the guard crate's unoptimized test
+profile, 10 000 attachments spawned onto 2 000 static bodies, three runs each: 305 to 310 ms
+without it, 315 to 316 ms with it, about 2%; the hook form is not worth its fork lines.
+
+Guard: `src/tests/avian_child_pose_churn.rs`
+(`a_collider_attached_to_a_body_without_a_global_transform_is_refused`; stock 0.8.0 does not
+panic, MEASURED).

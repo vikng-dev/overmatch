@@ -371,6 +371,36 @@ fn the_physics_step_carries_a_child_re_enabled_frames_before_the_next_step() {
     );
 }
 
+/// Every placement boundary reaches a moved body's colliders only through `RigidBodyColliders`,
+/// which Avian's `ColliderOf` hook fills only when both entities have a `GlobalTransform`. The
+/// networked composition disables `PhysicsTransformPlugin`, which otherwise requires `Transform`
+/// on every body, so there a body spawned without one is refused at the attachment; stock Avian
+/// skips the link and leaves the child at its birth pose whenever the body moves.
+#[test]
+#[should_panic(expected = "without a GlobalTransform")]
+fn a_collider_attached_to_a_body_without_a_global_transform_is_refused() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin::default(),
+        PhysicsPlugins::default()
+            .build()
+            .disable::<PhysicsTransformPlugin>(),
+    ))
+    .add_plugins(crate::avian_ext::AvianExtPlugin);
+    let world = app.world_mut();
+    let body = world
+        .spawn((RigidBody::Static, Position(Vec3::ZERO), Rotation::IDENTITY))
+        .id();
+    world.spawn((
+        Collider::sphere(0.5),
+        Position(Vec3::X),
+        Rotation::IDENTITY,
+        GlobalTransform::from_translation(Vec3::X),
+        ColliderOf { body },
+    ));
+}
+
 /// ColliderOf is the actual physics attachment, including manually attached colliders without a
 /// Transform child relationship. A moved body's collider list must carry that child too.
 #[test]
