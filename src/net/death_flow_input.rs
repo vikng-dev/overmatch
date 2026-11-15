@@ -515,6 +515,87 @@ fn every_tick_of_a_frame_files_the_devices_command() {
     );
 }
 
+/// A cruise notch is the player's standing setting, a held key is not: while the window is
+/// unfocused every tick files, and the server receives, the set throttle notch and nothing else,
+/// whatever keys the device still reports held; with focus back the same notch is filed, not a
+/// fresh one. Mutants: an unfocused feed that files idle drops the pedal; one that files the
+/// device's command keeps the held steer and sustained fire on the wire.
+#[test]
+fn a_set_cruise_notch_outlasts_a_focus_loss_and_held_keys_do_not() {
+    let _udp = lock_real_udp_test();
+    let (mut server, mut client, _) = connected(TICKS_PER_FRAME);
+    // W's hold ends, then one tap sets the first notch; D and Space stay held throughout.
+    let notch = crate::track::drive::drive_feel().notch_step();
+    // The harness mounts no input plugin, so each frame's key edges are cleared by hand.
+    let mut keys = client.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+    keys.clear();
+    keys.release(KeyCode::KeyW);
+    step(&mut server, &mut client);
+    let mut keys = client.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+    keys.clear();
+    keys.press(KeyCode::KeyW);
+    step(&mut server, &mut client);
+    let mut keys = client.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+    keys.clear();
+    keys.release(KeyCode::KeyW);
+    let cruising = |command: &TankCommand| {
+        command.throttle == notch && command.steer == 1.0 && command.fire_secondary
+    };
+    let focused = step(&mut server, &mut client);
+    client
+        .world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .clear();
+    assert!(
+        focused.iter().all(|(_, command)| cruising(command)),
+        "focused, the notch and the held keys are filed: {focused:?}"
+    );
+
+    let set_focus = |client: &mut App, focused: bool| {
+        let world = client.world_mut();
+        world
+            .query_filtered::<&mut Window, With<PrimaryWindow>>()
+            .single_mut(world)
+            .expect("the client has its one primary window")
+            .focused = focused;
+    };
+    set_focus(&mut client, false);
+    let mut unfocused = Vec::new();
+    for _ in 0..PHASE_FRAMES {
+        unfocused.extend(step(&mut server, &mut client));
+    }
+    let pedal_only = |command: &TankCommand| {
+        *command
+            == TankCommand {
+                throttle: notch,
+                for_tick: command.for_tick,
+                ..default()
+            }
+    };
+    for (tick, command) in &unfocused {
+        assert!(
+            pedal_only(command),
+            "tick {tick} filed {command:?} unfocused"
+        );
+    }
+
+    set_focus(&mut client, true);
+    let refocused = step(&mut server, &mut client);
+    assert!(
+        refocused.iter().all(|(_, command)| cruising(command)),
+        "focused again, the same notch is filed: {refocused:?}"
+    );
+    for _ in 0..PHASE_FRAMES {
+        step(&mut server, &mut client);
+    }
+    for (tick, command) in received_on(&server, &ticks(&unfocused)) {
+        assert!(
+            pedal_only(&command),
+            "the server received {command:?} for unfocused tick {tick}"
+        );
+    }
+}
+
 /// On frames of one tick, where every tick is a frame's last: the click the bridge restores, on
 /// the last tick of its frame, is consumed with that tick, so no later frame's device command
 /// carries it, and the server receives it attested once across the run.

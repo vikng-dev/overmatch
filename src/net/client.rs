@@ -2288,37 +2288,50 @@ pub(super) fn install_device_feed(app: &mut App) {
     );
 }
 
-/// File render-rate [`DeviceCommand`] into each tick's controlled `ActionState`; unowned slots
-/// or blocked input file idle so tanks coast and menu clicks do not fire. Device writers include
-/// drive/aim/range/crew UI; death flow neutralizes their device. Levels repeat across the frame,
-/// edges clear after its first tick. The reverse protocol bridge returns buffered input to
-/// `TankCommand`, never read here.
+/// File render-rate [`DeviceCommand`] into each tick's controlled `ActionState`. Unowned slots,
+/// off-match screens and blocking overlays file idle, so tanks coast and menu clicks do not fire. An unfocused window files the drive levers' set notches and nothing
+/// else: cruise holds its pedal, and no key or button held at the focus loss stays on the wire.
+/// Device writers include drive/aim/range/crew UI; death flow neutralizes their device. Levels
+/// repeat across the frame, edges clear after its first tick. The reverse protocol bridge returns
+/// buffered input to `TankCommand`, never read here.
 fn feed_action_state(
     overlays: Res<crate::overlay::Overlays>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    drive_input: Res<crate::command::DriveInput>,
     mut device: ResMut<DeviceCommand>,
     mut slots: Query<
         (&mut ActionState<TankCommand>, Has<GameControlled>),
         With<InputMarker<TankCommand>>,
     >,
 ) {
-    // `overlay::input_blocked` also releases the cursor and gates `PlayerInputSet` through
-    // `state::cursor_locked`: drive/aim/respawn cannot latch while this idles commands, with
-    // no second inference to synchronize (menu/connect screen or unfocused window).
+    // `overlay::input_blocked` reads the same two terms to release the cursor and gate
+    // `PlayerInputSet` through `state::cursor_locked`, so drive/aim/respawn cannot latch while
+    // this files no device, with no second inference to synchronize.
     let focused = match windows.single() {
         Ok(window) => window.focused,
-        // The primary window has closed at exit: no device has focus, so file idle commands.
+        // The primary window has closed at exit: no device has focus.
         Err(QuerySingleError::NoEntities(_)) => false,
         Err(error @ QuerySingleError::MultipleEntities(_)) => {
             panic!("the device feed has exactly one primary window until exit: {error}")
         }
     };
-    let idle = crate::overlay::input_blocked(&overlays, focused);
+    let command = if crate::overlay::input_blocked(&overlays, true) {
+        TankCommand::default()
+    } else if focused {
+        device.0
+    } else {
+        let set = drive_input.set_notches();
+        TankCommand {
+            throttle: set.throttle,
+            steer: set.steer,
+            ..default()
+        }
+    };
     for (mut state, controlled) in &mut slots {
-        state.0 = if idle || !controlled {
-            TankCommand::default()
+        state.0 = if controlled {
+            command
         } else {
-            device.0
+            TankCommand::default()
         };
     }
     device.0.clear_edges();
@@ -2476,6 +2489,7 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         world.init_resource::<crate::overlay::Overlays>();
+        world.init_resource::<crate::command::DriveInput>();
         world.init_resource::<DeviceCommand>();
         for _ in 0..2 {
             world.spawn((PrimaryWindow, Window::default()));
@@ -2489,7 +2503,10 @@ mod tests {
     fn device_feed_files_idle_when_the_window_has_closed() {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
-        world.init_resource::<crate::overlay::Overlays>();
+        let mut overlays = crate::overlay::Overlays::default();
+        overlays.declare_in_match(true);
+        world.insert_resource(overlays);
+        world.init_resource::<crate::command::DriveInput>();
         world.insert_resource(DeviceCommand(TankCommand {
             throttle: 1.0,
             fire_primary: true,
