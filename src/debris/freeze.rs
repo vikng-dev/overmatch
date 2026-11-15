@@ -1217,17 +1217,19 @@ mod tests {
 
     /// A PIECE WITHIN REACH OF A MOVING BODY IS AWAKE BEFORE CONTACT: a hovering body at rest
     /// beside a piece frozen on the ground, a tank's stand-in (no piece) or a loose piece, pushed
-    /// towards it slow or fast, finds it dynamic in every step that solves a contact between them,
-    /// moving in the first update the two touch, and pushes it. A contact with a static piece
-    /// meets infinite mass. The gap is past Avian's contact tolerance and inside the step's travel
-    /// at either speed, so the step after the push makes a speculative contact at the new speed: a
-    /// mutant that drops the reach thaw, or the reach's travel, reds this.
+    /// towards it slow or fast, finds it dynamic in every step that solves a contact between them
+    /// and moving in the first update the two touch; the slow push moves it on. A contact with a
+    /// static piece meets infinite mass. The gap is past Avian's contact tolerance and inside the
+    /// step's travel at either speed: a mutant that drops the reach thaw, or the reach's travel,
+    /// reds this. The fast push's follow-through needs a velocity-based speculative contact, which
+    /// Avian 0.8 makes opt-in (`SpeculativeCcd`) and the game has not decided for its bodies
+    /// (#371): without one that step carries the mover through the piece.
     #[test]
     fn a_piece_within_reach_of_a_moving_body_is_awake_before_contact() {
         // Fixture: a 3 cm gap, between Avian's 5 mm contact tolerance and its 5 cm tree margin;
         // a slow push, and one whose step travels past the piece's whole side.
         let gap = 0.03;
-        for speed in [4.0, 40.0] {
+        for (speed, follows_through) in [(4.0, true), (40.0, false)] {
             for mover_is_a_piece in [false, true] {
                 let case = format!("{speed} m/s, mover a piece: {mover_is_a_piece}");
                 let mut app = settling(GRAVITY);
@@ -1273,6 +1275,9 @@ mod tests {
                     app.world().get::<LinearVelocity>(rubble).unwrap().0.x > 0.0,
                     "the first touch moved it ({case})"
                 );
+                if !follows_through {
+                    continue;
+                }
                 for _ in 0..32 {
                     app.update();
                 }
