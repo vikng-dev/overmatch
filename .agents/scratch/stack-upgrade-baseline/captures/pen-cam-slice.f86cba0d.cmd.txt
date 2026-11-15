@@ -1,0 +1,17 @@
+commit: f86cba0d4a53c79d06ed373d25579db695f27c5a
+cwd: /Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1
+command: scripts/build-lock env -u OVERMATCH_TARGET -u OVERMATCH_START -u SPIKE_AUTO_FIRE -u OVERMATCH_XRAY OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CONFIG_DIR=/tmp/baseline-gaps-slice-empty-config OVERMATCH_CAPTURE=scripts/capture/pen-cam-slice.ron RUST_LOG=info,wgpu=error,naga=warn,overmatch::damage_cam=debug target/debug/overmatch --offline
+started: 2026-11-16T03:09:35+07:00
+start load (MEASURED, uptime): 3:09  up 40 days,  9:43, 10 users, load averages: 2.88 5.96 6.79
+exit: 0
+wall: 6.133 s (MEASURED; includes any queue wait)
+ended: 2026-11-16T03:09:41+07:00
+lock: /tmp/overmatch-cargo.lock held for the entire run; scripts/build-lock takes it before launching the client
+numbers: all output numbers are MEASURED observations unless labelled DERIVED; no emergent result is a pass condition
+note: the game damage-model view only; replay of assets/dev/pen_cam/s8b_mg_stopped.ron through normal shooter projection, storage and corner admission; no dose applied and no simulated HP pool changed
+note: production recording remains unchanged; the target-ahead missing-frame diagnosis is in ../gap-diagnosis.bee99262.md
+note: OVERMATCH_CONFIG_DIR points at an empty directory; inherited target/auto-fire/x-ray/start levers were unset
+note: the slot shows Slice on Corner at t=10.203 s (Time<Real>) (MEASURED); no ERROR lines
+note: frame inspected by eye: top-right inset shows the hatched plate cut and stopped path from pen_cam_slice.wgsl
+note: frame kept out of git at /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/captures/pen-cam-slice.f86cba0d.png; sha256 8540d5a303173df459049a2ccde65b354dfe537de07a7d1c81f386730212cacd, 2050620 bytes (MEASURED)
+note: copied with literal absolute source/destination paths from target/capture/pen-cam-slice.png; checksum listed in ../MANIFEST.sha256

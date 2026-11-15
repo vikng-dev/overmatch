@@ -18,7 +18,8 @@ use bevy::prelude::*;
 use super::PenetrationReport;
 use super::recorder::RecordedShot;
 use super::wire::{
-    Audience, BuiltExplanation, CodecError, ShotExplanation, ShotVocabulary, TankLife,
+    Audience, BuiltExplanation, CodecError, ShooterReplay, ShotExplanation, ShotVocabulary,
+    TankLife,
 };
 use crate::bake::TankBlueprint;
 use crate::ballistics::spall_cone::{BurstFields, ConeShape};
@@ -174,7 +175,9 @@ impl ShotExplanations {
         let drawn = explanation
             .outcome
             .is_some_and(|ordinal| self.drawn.contains(&(shot_key(explanation.shot), ordinal)));
-        self.admit(explanation, vocabulary, now_s, drawn)
+        self.store(explanation, now_s, drawn, |explanation| {
+            explanation.decode(vocabulary)
+        })
     }
 
     /// [`Self::receive`] an explanation whose impact is already drawn: the authority's own, which
@@ -185,21 +188,35 @@ impl ShotExplanations {
         vocabulary: &ShotVocabulary,
         now_s: f64,
     ) -> Receipt {
-        self.admit(explanation, vocabulary, now_s, true)
+        self.store(explanation, now_s, true, |explanation| {
+            explanation.decode(vocabulary)
+        })
     }
 
-    fn admit(
+    /// The game's damage-model capture was projected and decoded at plan admission.
+    pub(crate) fn replay_drawn(
+        &mut self,
+        replay: ShooterReplay,
+        shot: ShotId,
+        struck: TankLife,
+        now_s: f64,
+    ) -> Receipt {
+        let (explanation, report) = replay.bind(shot, struck);
+        self.store(explanation, now_s, true, |_| Ok(report))
+    }
+
+    fn store(
         &mut self,
         explanation: ShotExplanation,
-        vocabulary: &ShotVocabulary,
         now_s: f64,
         drawn: bool,
+        decode: impl FnOnce(&ShotExplanation) -> Result<PenetrationReport, CodecError>,
     ) -> Receipt {
         let key = ExplanationKey::of(&explanation);
         if self.stored.contains_key(&key) || self.evicted.is_some_and(|floor| key <= floor) {
             return Receipt::Ignored;
         }
-        let report = match explanation.decode(vocabulary) {
+        let report = match decode(&explanation) {
             Ok(report) => report,
             Err(error) => {
                 self.refuse(&error);

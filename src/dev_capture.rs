@@ -13,7 +13,8 @@
 //! can raise their events: [`offline_impact_plugin`],
 //! [`offline_shot_plugin`] and [`offline_wall_plugin`] on the offline root alone, and
 //! [`server_wall_plugin`] on the dedicated server, which reads the same plan file so that it fires
-//! the wall shots its capture clients frame.
+//! the wall shots its capture clients frame. [`offline_corner_plugin`] replays a recorded hit
+//! through the offline shooter's corner for shader evidence, without changing simulated game state.
 //!
 //! The plan's `frames.scale_factor` sets the target's UI ratio (ASSUMED default 2, as on a
 //! retina window), so HUD evidence can also request an ordinary scale-1 window. Every capture run seeds the view RNG (cosmetic effect
@@ -37,6 +38,8 @@
 //! which `ImageRenderTarget` defines over both fields; `Screenshot::image` normalizes to scale 1,
 //! names a target no camera renders into, and reads back black.
 
+mod corner;
+pub(crate) use corner::offline_corner_plugin;
 mod fuze;
 pub(crate) use fuze::offline_shot_plugin;
 pub(crate) mod plan;
