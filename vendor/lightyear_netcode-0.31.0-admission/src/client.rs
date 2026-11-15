@@ -11,6 +11,7 @@ use super::{
     token::{ChallengeToken, ConnectToken},
     utils,
 };
+use lightyear_connection::shared::DeniedReason;
 use lightyear_link::{LinkReceiver, LinkSender, RecvPayload, SendPayload};
 use lightyear_serde::writer::Writer;
 use tracing::{debug, error, info, trace};
@@ -182,6 +183,8 @@ pub struct Client<Ctx = ()> {
     replay_protection: ReplayProtection,
     should_disconnect: bool,
     should_disconnect_state: ClientState,
+    // OVERMATCH PATCH: retain the authenticated refusal until a fresh connect attempt.
+    denied_reason: Option<DeniedReason>,
     send_queue: Vec<SendPayload>,
     packet_queue: Vec<RecvPayload>,
     // We use a Writer (wrapper around BytesMut) here because we will keep re-using the
@@ -223,6 +226,7 @@ impl<Ctx> Client<Ctx> {
             replay_protection: ReplayProtection::new(),
             should_disconnect: false,
             should_disconnect_state: ClientState::Disconnected,
+            denied_reason: None,
             send_queue: Vec::new(),
             packet_queue: Vec::new(),
             writer: Writer::with_capacity(MAX_PKT_BUF_SIZE),
@@ -415,6 +419,7 @@ impl<Ctx> Client<Ctx> {
                     "client connection denied by server. Reason: {:?}",
                     pkt.reason
                 );
+                self.denied_reason = Some(pkt.reason);
                 self.should_disconnect = true;
                 self.should_disconnect_state = ClientState::ConnectionDenied;
                 None
@@ -548,10 +553,17 @@ impl<Ctx> Client<Ctx> {
         self.id
     }
 
+    /// OVERMATCH PATCH: the authenticated denial from the last attempt. It survives the terminal
+    /// state reset so applications can show its cause; a fresh connect clears it.
+    pub fn denied_reason(&self) -> Option<&DeniedReason> {
+        self.denied_reason.as_ref()
+    }
+
     /// Prepares the client to connect to the server.
     ///
     /// This function does not perform any IO, it only readies the client to send/receive packets on the next call to [`update`](Client::update).
     pub fn connect(&mut self) {
+        self.denied_reason = None;
         self.reset_connection();
         self.set_state(ClientState::SendingConnectionRequest);
         info!(
