@@ -1,3 +1,5 @@
+import constants::MATERIAL_BIND_GROUP;
+
 // The scatter constructions' surface (`src/construction_surface.rs` — `ConstructionMaterial`): the primary pack
 // through bevy's standard PBR path on every face, the secondary pack swapped in on the timber.
 //
@@ -9,7 +11,7 @@
 // instance's scale. The packs' own repeats are applied after: the primary's by the standard half's
 // `uv_transform`, the secondary's by `surface.secondary.x`.
 //
-// Otherwise bevy's own mesh vertex stage (`bevy_pbr/src/render/mesh.wgsl`) for an unskinned,
+// Otherwise bevy's own mesh vertex stage (`bevy_pbr/src/render/mesh.wesl`) for an unskinned,
 // unmorphed mesh, which a construction always is.
 //
 // DERIVATIVES ARE TAKEN ONCE, UP FRONT. The secondary branch is not uniform across a quad at the eaves,
@@ -17,10 +19,10 @@
 //
 // HOLES ONLY WHERE THE MATERIAL MAY DISCARD. A construction with a hole wears its own copy of the
 // material, alpha-masked (`construction::view`), and only that variant compiles the hole path
-// (`construction_holes.wgsl`): a construction without one draws exactly as it would with no hole code.
+// (`construction_holes.wesl`): a construction without one draws exactly as it would with no hole code.
 
-#import bevy_pbr::{
-    forward_io::{Vertex, VertexOutput, FragmentOutput},
+import bevy_pbr::render::{
+    forward_io::{Vertex, VertexOutput, FragmentOutput, decompress_vertex},
     mesh_functions,
     view_transformations::position_world_to_clip,
     pbr_fragment::pbr_input_from_standard_material,
@@ -28,26 +30,26 @@
     pbr_functions,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     pbr_types,
-}
-#ifdef MAY_DISCARD
-#import "shaders/construction_holes.wgsl"::{hole_at, SEE_THROUGH, INNER_WALL}
-#endif
+};
+@if(MAY_DISCARD)
+import super::construction_holes::{hole_at, SEE_THROUGH, INNER_WALL};
 
 struct SurfaceParams {
     // x: the secondary pack's repeats per metre. yzw: unused.
     secondary: vec4<f32>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> surface: SurfaceParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var secondary_albedo_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var secondary_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103) var secondary_normal_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var secondary_arm_texture: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(100) var<uniform> surface: SurfaceParams;
+@group(MATERIAL_BIND_GROUP) @binding(101) var secondary_albedo_texture: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(102) var secondary_sampler: sampler;
+@group(MATERIAL_BIND_GROUP) @binding(103) var secondary_normal_texture: texture_2d<f32>;
+@group(MATERIAL_BIND_GROUP) @binding(104) var secondary_arm_texture: texture_2d<f32>;
 
 // Every construction mesh supplies UV1: x is the declared palette lane, y its hole tag.
 
 @vertex
-fn vertex(vertex: Vertex) -> VertexOutput {
+fn vertex(vertex_in: Vertex) -> VertexOutput {
+    let vertex = decompress_vertex(vertex_in, vertex_in.instance_index);
     var out: VertexOutput;
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
@@ -60,20 +62,20 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let image_up = vertex.tangent.w * cross(vertex.normal, vertex.tangent.xyz);
     out.uv = vertex.uv * vec2(length(axes * vertex.tangent.xyz), length(axes * image_up));
     out.uv_b = vertex.uv_b;
-#ifdef VERTEX_COLORS
+@if(VERTEX_COLORS) {
     // A dressing's tint (`construction::view`): the standard path multiplies the primary pack by it.
     out.color = vertex.color;
-#endif
+}
     out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
         world_from_local, vertex.tangent, vertex.instance_index);
 
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+@if(VERTEX_OUTPUT_INSTANCE_INDEX) {
     out.instance_index = vertex.instance_index;
-#endif
-#ifdef VISIBILITY_RANGE_DITHER
+}
+@if(VISIBILITY_RANGE_DITHER) {
     out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(
         vertex.instance_index, world_from_local[3]);
-#endif
+}
     return out;
 }
 
@@ -99,9 +101,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         // The material's own factors multiply the secondary pack as they do the primary pack, so the two
         // answer to one material.
         var tint = vec3(1.0);
-#ifdef VERTEX_COLORS
+@if(VERTEX_COLORS) {
         tint = in.color.rgb;
-#endif
+}
         pbr_input.material.base_color = vec4(
             pbr_bindings::material.base_color.rgb * albedo * tint, pbr_input.material.base_color.a);
         pbr_input.N = pbr_functions::apply_normal_mapping(
@@ -111,8 +113,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         pbr_input.material.metallic = pbr_bindings::material.metallic * arm.b;
     }
 
-#ifdef MAY_DISCARD
-#ifdef VERTEX_UVS_B
+@if(MAY_DISCARD) {
+@if(VERTEX_UVS_B) {
     // Through a hole the eye sees past the chunk, or the hole's inner wall: the face's own pack,
     // lit where the wall is and facing into the hole, without the face's normal map.
     let hole = hole_at(in.world_position.xyz, in.uv_b.y, in.instance_index);
@@ -126,10 +128,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         pbr_input.V = pbr_functions::calculate_view(
             pbr_input.world_position, pbr_input.is_orthographic);
     }
-#endif
-#endif
+}
+}
 
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+    pbr_input.material.base_color = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, pbr_input.material.base_color);
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);

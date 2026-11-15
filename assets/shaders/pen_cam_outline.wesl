@@ -1,3 +1,5 @@
+import constants::MATERIAL_BIND_GROUP;
+
 // The pen cam's component outline (`src/damage_cam/pen_cam/material.rs`, `OutlineMaterial`): an
 // inverted hull. Each vertex is pushed out on screen, away from the projected centre, by a fixed
 // width in physical pixels; the pipeline culls front faces, so the hull's back faces show only where
@@ -5,7 +7,7 @@
 // silhouette. Pushing from one centre rather than along each vertex normal keeps a hard-edged
 // (split-normal) mesh's hull closed at its corners.
 
-#import bevy_pbr::{forward_io::Vertex, mesh_functions, mesh_view_bindings::view}
+import bevy_pbr::render::{forward_io::{Vertex, decompress_vertex}, mesh_functions, mesh_view_bindings::view};
 
 struct OutlineParams {
     // rgb: linear colour; a: fade (the band is discarded below one half).
@@ -14,10 +16,11 @@ struct OutlineParams {
     center: vec4<f32>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> outline: OutlineParams;
+@group(MATERIAL_BIND_GROUP) @binding(0) var<uniform> outline: OutlineParams;
 
 @vertex
-fn vertex(vertex: Vertex) -> @builtin(position) vec4<f32> {
+fn vertex(vertex_in: Vertex) -> @builtin(position) vec4<f32> {
+    let vertex = decompress_vertex(vertex_in, vertex_in.instance_index);
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     let world = world_from_local * vec4(vertex.position, 1.0);
     let center = world_from_local * vec4(outline.center.xyz, 1.0);

@@ -21,8 +21,8 @@
 // bottom edges. Clamping the source coordinate to the [0.5, rendered - 0.5] texel-centre band keeps
 // every tap inside what the main pass drew.
 
-#import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput
-#import bevy_render::view::View
+import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
+import bevy_render::view::View;
 
 @group(0) @binding(0) var in_texture: texture_2d<f32>;
 @group(0) @binding(1) var in_sampler: sampler;

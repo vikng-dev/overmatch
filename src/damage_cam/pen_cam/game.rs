@@ -618,7 +618,7 @@ mod tests {
         mount: impl FnOnce(&mut App),
     ) -> (App, Entity) {
         let mut app = App::new();
-        app.set_error_handler(bevy::ecs::error::ignore);
+        app.set_error_handler(bevy::ecs::error::match_severity);
         app.add_plugins((
             TaskPoolPlugin::default(),
             AssetPlugin::default(),
@@ -660,6 +660,16 @@ mod tests {
             .id();
         app.update();
         (app, player)
+    }
+
+    /// The game's damage-model view fixture must resume a routed system panic; otherwise a
+    /// broken invariant in a corner system can leave the fixture's later assertions green.
+    #[test]
+    #[should_panic(expected = "fixture routed panic")]
+    fn the_corner_resumes_routed_panics() {
+        drop(corner_app_with(Settings::default(), |app| {
+            app.add_systems(Update, || panic!("fixture routed panic"));
+        }));
     }
 
     /// A stage view of `report`'s tank file standing in for its glb: the root and the hull node.

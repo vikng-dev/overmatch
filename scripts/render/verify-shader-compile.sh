@@ -2,7 +2,7 @@
 # =============================== RUNBOOK ===============================
 # verify-shader-compile.sh — do this tree's shaders COMPILE on a real device?
 #
-# A WGSL file that parses is not a WGSL file that runs. Everything a shader can get wrong against
+# A WESL file that links still needs pipeline validation. Everything a shader can get wrong against
 # the pipeline it is bound into — a binding the layout does not carry, a texture declared at the
 # wrong dimension, a `textureSample` under non-uniform control flow, a struct whose layout does not
 # match the uniform — is caught by wgpu at `create_render_pipeline`, on a GPU, at run time. Bevy
@@ -17,9 +17,9 @@
 #   needs: cargo build --locked --bin overmatch    (any profile; $BIN selects, default target/debug)
 #
 # THE MUTANT. A gate that cannot fail is not a gate. To prove this one bites, break a shader in a
-# way that PARSES — the sharpest is a dimension lie, because WGSL alone cannot see it:
+# way that PARSES — the sharpest is a dimension lie, because WESL alone cannot see it:
 #
-#   assets/shaders/terrain_blend.wgsl:  texture_2d_array<f32>  ->  texture_2d<f32>
+#   assets/shaders/terrain_blend.wesl:  texture_2d_array<f32>  ->  texture_2d<f32>
 #     (and drop the array index from that texture's textureSampleGrad call)
 #
 # and re-run. It must report FAILED with `Shader global ResourceBinding { group: 3, binding: 101 }
@@ -51,7 +51,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "== booting $CLIENT hidden for ${SECONDS_TO_RUN}s (log: $LOG)"
-OVERMATCH_WINDOW=hidden OVERMATCH_CONFIG_DIR="$CONFIG" \
+OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CONFIG_DIR="$CONFIG" \
   "$CLIENT" --offline >"$LOG" 2>&1 &
 CLIENT_PID=$!
 

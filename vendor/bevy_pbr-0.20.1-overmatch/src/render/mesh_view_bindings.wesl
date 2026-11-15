@@ -120,6 +120,10 @@ const VISIBILITY_RANGE_UNIFORM_BUFFER_SIZE: u32 = 64u;
 @group(1) @binding(0) var diffuse_environment_map: texture_cube<f32>;
 @group(1) @binding(1) var specular_environment_map: texture_cube<f32>;
 }
+// OVERMATCH PATCH: the heightfield shadow is bound in every layout.
+@group(0) @binding(39) var heightfield_shadow_texture: texture_2d<f32>;
+@group(0) @binding(40) var<uniform> heightfield_shadow: types::HeightfieldShadow;
+
 @if(ENVIRONMENT_MAP)
 @group(1) @binding(2) var environment_map_sampler: sampler;
 

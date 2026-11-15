@@ -17,8 +17,8 @@
 // ONE material instance is shared by every live trail — time comes from the view globals, ages from
 // the vertices, so nothing here is per-instance.
 
-#import bevy_pbr::forward_io::VertexOutput
-#import bevy_pbr::mesh_view_bindings::globals
+import bevy_pbr::render::forward_io::VertexOutput;
+import bevy_pbr::render::mesh_view_bindings::globals;
 
 struct TrailParams {
     // x: noise scale along the trail (1/m), y: noise scroll speed (tiles/s), z: erosion sharpness,

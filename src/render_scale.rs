@@ -21,7 +21,7 @@
 //!   same window-logical viewport as before — the override changes neither `Camera::viewport` nor
 //!   the window, so their math is untouched BY CONSTRUCTION, not by a matching fix-up.
 //! * `overlay`, `settings::ui` and every other `bevy_ui` node lay out against the window as before.
-//! * The `vfx` materials do not read `View::viewport`, so nothing in `assets/shaders/vfx_*.wgsl`
+//! * The `vfx` materials do not read `View::viewport`, so nothing in `assets/shaders/vfx_*.wesl`
 //!   needs to learn about this.
 //!
 //! # The near-miss upstream plugin, and why this is not it
@@ -117,8 +117,8 @@ use bevy::render::render_resource::{
     BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedPipelineState,
     CachedRenderPipelineId, ColorTargetState, ColorWrites, FilterMode, FragmentState, LoadOp,
     MultisampleState, Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages,
-    SpecializedRenderPipeline, SpecializedRenderPipelines, StoreOp, TextureFormat,
+    RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
+    ShaderStages, SpecializedRenderPipeline, SpecializedRenderPipelines, StoreOp, TextureFormat,
     TextureSampleType,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
@@ -131,7 +131,7 @@ use bevy::shader::Shader;
 
 /// The upscale fragment shader, loaded through the ordinary asset server like the `vfx_*` materials
 /// (it ships in `assets/shaders/`, which `scripts/package-macos.sh` copies into the bundle).
-const SHADER_PATH: &str = "shaders/render_scale_upscale.wgsl";
+const SHADER_PATH: &str = "shaders/render_scale_upscale.wesl";
 
 /// The floor a scale is clamped to before it reaches the GPU. The settings ladder bottoms out at
 /// 50%; this is a wider guard so a hand-edited `video.ron` cannot ask for a one-pixel main pass
@@ -407,7 +407,7 @@ fn prepare_render_scale(
         // Bevy's own upscaling prepare blocks here for the same reason: a frame that queued a
         // pipeline and then rendered nothing with it is a frame that submitted no GPU work.
         pipeline_cache.block_on_render_pipeline(id);
-        if pipeline_cache.get_render_pipeline(id).is_none() {
+        if ready_pipeline(&pipeline_cache, id).is_none() {
             clear(&mut commands);
             continue;
         }
@@ -459,6 +459,18 @@ fn announce(state: &mut Local<Option<Option<UVec2>>>, scaled: Option<UVec2>, ful
     }
 }
 
+/// Pending asset loads defer the override; a broken shipped pipeline fails at preparation,
+/// before removing its view markers could make the draw's error path unreachable.
+fn ready_pipeline(cache: &PipelineCache, id: CachedRenderPipelineId) -> Option<&RenderPipeline> {
+    match cache.get_render_pipeline_state(id) {
+        CachedPipelineState::Err(bevy::shader::ShaderCacheError::ProcessShaderError(error))
+        | CachedPipelineState::Err(bevy::shader::ShaderCacheError::CreateShaderModule(error)) => {
+            panic!("the shipped render-scale shader must compile: {error}");
+        }
+        _ => cache.get_render_pipeline(id),
+    }
+}
+
 /// The upscale pass itself: stretch the rendered sub-rect across the full main texture.
 ///
 /// `With<MainPassResolutionOverride>` is not decoration — [`ViewQuery`] SKIPS the system when the
@@ -476,16 +488,8 @@ fn render_scale_upscale(
     mut ctx: RenderContext,
 ) {
     let (target, upscale_id, view_offset) = view.into_inner();
-    let Some(pipeline) = pipeline_cache.get_render_pipeline(upscale_id.0) else {
-        match pipeline_cache.get_render_pipeline_state(upscale_id.0) {
-            CachedPipelineState::Err(bevy::shader::ShaderCacheError::ProcessShaderError(err)) => {
-                panic!("the shipped render-scale shader must compile: {err}");
-            }
-            CachedPipelineState::Err(bevy::shader::ShaderCacheError::CreateShaderModule(err)) => {
-                panic!("the shipped render-scale shader must create its GPU module: {err}");
-            }
-            _ => return, // Queued, creating, or awaiting shader imports: no pipeline exists yet.
-        }
+    let Some(pipeline) = ready_pipeline(&pipeline_cache, upscale_id.0) else {
+        return; // The shader or one of its imports has not loaded yet.
     };
     let Some(view_binding) = view_uniforms.uniforms.binding() else {
         return; // The render world's first view-uniform upload has not produced a binding yet.

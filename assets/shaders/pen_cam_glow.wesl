@@ -1,10 +1,12 @@
+import constants::MATERIAL_BIND_GROUP;
+
 // The pen cam's stage material (`src/damage_cam/pen_cam/material.rs`, `GlowMaterial`): one flat
 // colour and an optional view-angle rim. Unlit: everything it draws is a diagram over the record.
 //
 // Output: `rgb` with alpha 0 into the premultiplied pipeline `AlphaMode::Add` selects, so overlap
 // order never changes the sum.
 
-#import bevy_pbr::{forward_io::Vertex, mesh_functions, mesh_view_bindings::view}
+import bevy_pbr::render::{forward_io::{Vertex, decompress_vertex}, mesh_functions, mesh_view_bindings::view};
 
 struct GlowParams {
     // rgb: linear colour; a: overall fade.
@@ -13,7 +15,7 @@ struct GlowParams {
     rim: vec4<f32>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> glow: GlowParams;
+@group(MATERIAL_BIND_GROUP) @binding(0) var<uniform> glow: GlowParams;
 
 struct GlowVertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -22,16 +24,18 @@ struct GlowVertexOutput {
 }
 
 @vertex
-fn vertex(vertex: Vertex) -> GlowVertexOutput {
+fn vertex(vertex_in: Vertex) -> GlowVertexOutput {
+    let vertex = decompress_vertex(vertex_in, vertex_in.instance_index);
     var out: GlowVertexOutput;
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(vertex.position, 1.0));
     out.position = view.clip_from_world * vec4(out.world_position.xyz, 1.0);
-#ifdef VERTEX_NORMALS
+@if(VERTEX_NORMALS) {
     out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
-#else
+}
+@else {
     out.world_normal = vec3(0.0, 1.0, 0.0);
-#endif
+}
     return out;
 }
 
