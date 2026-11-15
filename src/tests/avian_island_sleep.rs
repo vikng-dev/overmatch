@@ -1,11 +1,14 @@
-//! Avian resting-contact and island lifecycle guards for the game’s server physics. Resting bodies require a wake
-//! source; joining a sleeper must not erase an awake body's accumulated rest time.
-//! Geometry and observation counts below are Fixture data, not settlement targets.
-//! Mechanism and upstream draft: `upstream/avian-island-rest-history.md`.
+//! Avian resting-contact and island lifecycle guards for the game's server physics: the avian3d
+//! fork's island, rest and sleeping-increment rows (`vendor/avian3d-0.8.0-overmatch`,
+//! `OVERMATCH_PATCH.md`) and the game's rest law (`crate::avian_ext::rest_test`). Resting bodies
+//! require a wake source; joining a sleeper must not erase an awake body's accumulated rest time.
+//! Geometry and observation counts below are Fixture data, not settlement targets. Mechanism and
+//! upstream draft: `upstream/avian-island-rest-history.md`.
 
+use avian3d::collision::contact_types::ContactId;
 use avian3d::dynamics::solver::{
+    constraint_graph::ConstraintGraph,
     islands::{BodyIslandNode, PhysicsIslands, WakeIslands},
-    joint_graph::JointGraph,
 };
 use avian3d::prelude::*;
 use bevy::ecs::{entity_disabling::Disabled, system::RunSystemOnce};
@@ -84,7 +87,7 @@ fn stationary_contact_does_not_wake_a_resting_island() {
         "the stationary contact must leave the active pair set"
     );
     assert!(
-        edge.constraint_handles.is_empty(),
+        solved(&app, edge.id) == 0,
         "a sleeping contact must leave no solver handles"
     );
 }
@@ -110,11 +113,8 @@ fn waking_a_merged_island_preserves_already_awake_rest_time() {
                 Or<(With<Disabled>, Without<Disabled>)>,
             >,
                   mut islands: ResMut<PhysicsIslands>,
-                  mut contacts: ResMut<ContactGraph>,
-                  mut joints: ResMut<JointGraph>,
                   mut commands: Commands| {
-                let id =
-                    islands.merge_islands(awake, sleeper, &mut nodes, &mut contacts, &mut joints);
+                let id = islands.merge_islands(awake, sleeper, &mut nodes);
                 commands.queue(WakeIslands(vec![id]));
             },
         )
@@ -294,6 +294,14 @@ fn an_impact_wakes_an_island_that_merges_again_before_the_solver() {
     );
 }
 
+/// The solver constraints the contact holds in Avian's constraint graph.
+fn solved(app: &App, contact: ContactId) -> usize {
+    app.world()
+        .resource::<ConstraintGraph>()
+        .contact_handles(contact)
+        .len()
+}
+
 /// The configured contact tolerance (m).
 fn tolerance(app: &App) -> f32 {
     app.world()
@@ -382,7 +390,7 @@ fn a_miss_closed_by_the_last_awake_step_links_the_resting_islands() {
         .get(drifter, anchor)
         .unwrap();
     assert!(
-        edge.is_touching() && !edge.is_sleeping() && !edge.constraint_handles.is_empty(),
+        edge.is_touching() && !edge.is_sleeping() && solved(&app, edge.id) > 0,
         "the impact step solves the resting contact"
     );
     assert!(
@@ -444,7 +452,7 @@ fn an_impulse_on_a_sleeper_meets_its_neighbour_struck_in_the_same_step() {
         .get(pushed, neighbour)
         .expect("the bounds hold the pair");
     assert!(
-        edge.is_touching() && !edge.is_sleeping() && !edge.constraint_handles.is_empty(),
+        edge.is_touching() && !edge.is_sleeping() && solved(&app, edge.id) > 0,
         "the impulse's step solves its contact"
     );
 }
@@ -549,6 +557,7 @@ fn rest_depends_on_energy_per_mass_and_spin_axis() {
 /// Degenerate mass properties use Avian's reciprocal convention without NaNs.
 #[test]
 fn rest_energy_is_frame_invariant_and_handles_degenerate_mass() {
+    use crate::avian_ext::rest_test::kinetic_speed_squared;
     use avian3d::dynamics::solver::solver_body::SolverBody;
     // Fixture: anisotropic inertia, a generic rotation and an off-axis world spin.
     let body = SolverBody {
@@ -567,12 +576,12 @@ fn rest_energy_is_frame_invariant_and_handles_degenerate_mass() {
             + principal.y * local_spin.y.powi(2)
             + principal.z * local_spin.z.powi(2))
             / 12.0;
-    assert!((body.kinetic_speed_squared(mass, inertia, rotation) - expected).abs() < 1e-5);
+    assert!((kinetic_speed_squared(&body, mass, inertia, rotation) - expected).abs() < 1e-5);
     for mass in [ComputedMass::new(0.0), ComputedMass::INFINITY] {
-        assert_eq!(body.kinetic_speed_squared(mass, inertia, rotation), 1.0);
+        assert_eq!(kinetic_speed_squared(&body, mass, inertia, rotation), 1.0);
     }
     assert_eq!(
-        body.kinetic_speed_squared(mass, ComputedAngularInertia::INFINITY, rotation),
+        kinetic_speed_squared(&body, mass, ComputedAngularInertia::INFINITY, rotation),
         1.0
     );
 }
@@ -642,16 +651,20 @@ fn a_long_bar_see_sawing_below_the_angular_limit_still_rests() {
 /// The original angular limit resets the timer at every pulse, before TimeToSleep.
 #[test]
 fn a_supported_bar_rests_through_periodic_one_tick_roll_pulses() {
-    use avian3d::dynamics::solver::solver_body::SolverBody;
+    use avian3d::dynamics::solver::solver_body::{SolverBodies, SolverBodyIndex};
     #[derive(Component)]
     struct PulsedBar;
     fn pulse(
-        mut bars: Query<(&mut SolverBody, &mut AngularVelocity, &Rotation), With<PulsedBar>>,
+        mut solver: ResMut<SolverBodies>,
+        mut bars: Query<(&SolverBodyIndex, &mut AngularVelocity, &Rotation), With<PulsedBar>>,
         mut tick: Local<usize>,
     ) {
         // Fixture: one-tick roll at 0.4 rad/s every ten ticks (MEASURED pile blocker scale).
-        for (mut body, mut spin, rotation) in &mut bars {
+        for (&index, mut spin, rotation) in &mut bars {
             let velocity = if tick.is_multiple_of(10) { 0.4 } else { 0.0 };
+            let body = solver
+                .get_mut(index)
+                .expect("an awake bar's solver index addresses its body");
             body.angular_velocity = rotation.0 * Vec3::X * velocity;
             spin.0 = body.angular_velocity;
         }

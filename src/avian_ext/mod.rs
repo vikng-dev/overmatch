@@ -10,6 +10,7 @@
 
 pub mod attachment;
 pub mod child_poses;
+pub mod rest_test;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;

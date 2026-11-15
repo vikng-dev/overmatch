@@ -12,3 +12,6 @@ mod avian_spawn_batch;
 
 #[path = "../../../src/tests/avian_broad_phase_layers.rs"]
 mod avian_broad_phase_layers;
+
+#[path = "../../../src/tests/avian_island_sleep.rs"]
+mod avian_island_sleep;

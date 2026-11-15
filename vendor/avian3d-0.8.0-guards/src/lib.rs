@@ -15,3 +15,16 @@ mod headless_test {
         app.insert_resource(bevy::time::TimeUpdateStrategy::FixedTimesteps(1));
     }
 }
+
+/// The game's gravity (`physical_laws::gravity_mps2`), read from the same shipped file.
+#[cfg(test)]
+mod physical_laws {
+    pub(crate) fn gravity_mps2() -> f32 {
+        let laws = include_str!("../../../assets/ballistics/physical_laws.ron");
+        let (_, sourced) = laws
+            .split_once("gravity_mps2: (")
+            .expect("the shipped laws name gravity");
+        let (value, _) = sourced.split_once(',').expect("a sourced value");
+        value.trim().parse().expect("gravity is a number")
+    }
+}
