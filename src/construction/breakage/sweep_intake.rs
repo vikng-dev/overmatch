@@ -885,7 +885,9 @@ fn geometry(
     p.constructions
         .par_iter_many_unique_mut(&roots)
         .batching_strategy(bevy::ecs::batching::BatchingStrategy::fixed(1))
-        .for_each(|(root, position, rotation, mut breakage)| {
+        .for_each(|candidate| {
+            let (root, position, rotation, mut breakage) = candidate
+                .expect("a prepared sweep root passed constructions.contains in this intake");
             // Preload storage and cuts change here; a cut owner is marked changed when its
             // departures prepare ([`commit`]).
             let breakage = breakage.bypass_change_detection();
@@ -1232,7 +1234,9 @@ fn commit(
     let chunk_entities = &p.chunk_entities;
     p.constructions
         .par_iter_many_unique_mut(departing.keys())
-        .for_each(|(root, position, rotation, mut breakage)| {
+        .for_each(|candidate| {
+            let (root, position, rotation, mut breakage) =
+                candidate.expect("a cut's owner was resolved from constructions in this round");
             let pose = breakage.physics_frame((position, rotation));
             // A construction without children has no chunk collider to rehome.
             let reusable = reusable_colliders(children.get(root).ok(), chunk_entities);

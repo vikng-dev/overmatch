@@ -1951,7 +1951,10 @@ fn apply_deposits(mut p: DepositParam) {
             p.constructions
                 .par_iter_many_unique_mut(batch.keys())
                 .batching_strategy(bevy::ecs::batching::BatchingStrategy::fixed(1))
-                .for_each(|(root, transform, mut breakage, piece)| {
+                .for_each(|candidate| {
+                    let (root, transform, mut breakage, piece) = candidate.expect(
+                        "a deposit names a construction that is live when its deposits apply",
+                    );
                     let taken = &batch[&root];
                     let construction = breakage.physics_frame(transform);
                     let motion = owner_motion(
