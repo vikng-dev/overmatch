@@ -1,28 +1,27 @@
 //! Constructions and rubble under the running gear, in the game's tank driving physics (game state
 //! only). The terrain field ([`super::oracle::BlockField`]) is the heightmap and the authored
 //! blocks; a construction's elements and standing chunks and every loose piece are Avian colliders
-//! the field never holds. [`RubbleBodies`] snapshots the nearby colliders shared by every driving
-//! source, and the belt's sampled support reads each through a convex shape check over every
-//! link's footprint ([`RubbleBodies::in_slabs`]) at the ground's own per-metre spring.
+//! the field never holds. [`RubbleBodies`] snapshots the nearby solids the belt bears on, loose
+//! pieces excluded, shared by every driving source, and the belt's sampled support reads each
+//! through a convex shape check over every link's footprint ([`RubbleBodies::in_slabs`]) at the
+//! ground's own per-metre spring.
 //!
 //! **The boundary, one rule from construction facts: the layer a collider was built on.**
 //! - **On `Layer::Debris`** (a construction's fallen pieces and the debris stress lever's
-//!   fragments, at any mass, [`RubbleBodies::loose`]): a solver body. It meets the belt's sprung
-//!   segments (`super::belt_segment`), so Avian resolves the equal and opposite reaction and
-//!   whatever holds the piece. The sampled support keeps it in the footprint partition, across
-//!   the whole shoe over the length it covers (a link is stiff across its width), so that length
-//!   takes no ground support as well; the Driver perceives it, but no spring force acts on it.
+//!   fragments, at any mass): a solver body. It meets the belt's soft run (`super::soft_run`), so
+//!   Avian resolves the equal and opposite reaction and whatever holds the piece. The sampled
+//!   support never reads it ([`RubbleQuery::near`]): the ground under it keeps its own support.
 //! - **Every other solid** (standing construction, map blocks, another tank's hull; terrain is the
 //!   field): the sampled support carries the belt and the solid takes the whole opposite reaction,
 //!   fixed construction into its structural load reading
 //!   ([`RubbleBodies::record_static_contacts`]), a dynamic body as an impulse ([`reactions`]). The
 //!   dynamic bodies here are the hulls and a launched turret, on `Layer::Vehicle`. The explicit
-//!   spring is stable for a body while `dt² k / m + 2 dt c / m` stays under 4: DERIVED, about 0.2
-//!   for the shipped belt law on a 50 t body at 64 Hz, so the bound holds down to about 2.5 t.
+//!   spring is stable for a body while `dt² k / m + 2 dt c / m` stays under 4 (the shipped margin:
+//!   `.agents/docs/design/track-model/track-contact.md`, "The boundary, one rule").
 //!
 //! - **What the belt bears on** ([`RubbleQuery::supports`]): solid, layer-compatible colliders,
-//!   except [`super::terrain::FieldSurface`] geometry already represented by the field. Callers
-//!   exclude self-support by identity ([`RubbleBodies::select_source`]).
+//!   except loose pieces and [`super::terrain::FieldSurface`] geometry already represented by the
+//!   field. Callers exclude self-support by identity ([`RubbleBodies::select_source`]).
 //! - **The footprint check**: a link's slab ([`Slab`]) is the volume its field probes sweep, made
 //!   solid across the true shoe width. Six support points reject separated shapes; the convex
 //!   adapter then clips entry faces to that envelope. Narrow pieces and empty corners are
@@ -42,13 +41,8 @@
 //! - **Tick truth**: avian refits dynamic bodies' AABBs at the end of its physics step
 //!   (`update_solver_body_aabbs`) and writes each collider's `Position`/`Rotation`, so a snapshot
 //!   in `FixedUpdate` reads the poses the last step wrote.
-//! - **Rejected alternatives**: probe rays folded onto the colliders (each probe also a ray
-//!   against the rubble, the deepest hit wins) see only the three column lines, so a brick between
-//!   them sits under the belt unseen. A custom reaction law on pieces outside the solver, a
-//!   clamped impulse sized against each piece's effective mass, gave the tank ground support while
-//!   a resting piece took no normal push: nothing pressed the piece into what held it, so the belt
-//!   swept a heap apart, and the law was the larger code path. The belt's solver segments give the
-//!   piece the equal and opposite reaction instead.
+//! - **Rejected**: probe rays against the colliders see only the three column lines, so a brick
+//!   between them sits under the belt unseen; `track-contact.md` tells the others.
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -98,25 +92,19 @@ pub(crate) struct RubbleQuery<'w, 's> {
 }
 
 impl RubbleQuery<'_, '_> {
-    /// Whether `collider` is a surface the belt bears on (module doc). A collider with no rigid
-    /// body is static to the solver, and is read as one here. A disabled body's colliders still
-    /// answer spatial queries but hold nothing up: Avian gives them no contact response.
-    pub(crate) fn supports(&self, collider: Entity) -> bool {
+    /// Whether `collider` is a surface the belt bears on (module doc). A loose piece is none: it
+    /// meets the soft run instead (`super::soft_run`). A collider with no rigid body is static to
+    /// the solver, and is read as one here. A disabled body's colliders still answer spatial
+    /// queries but hold nothing up: Avian gives them no contact response.
+    fn supports(&self, collider: Entity) -> bool {
         let layers = self
             .layers
             .get(collider)
             .expect("avian requires CollisionLayers on every Collider");
         super::world_contact::solid(layers, self.sensors.contains(collider))
+            && !layers.interacts_with(super::soft_run::run_layers())
             && !self.field_surfaces.contains(collider)
             && !self.disabled.contains(self.body_of(collider))
-    }
-
-    /// Whether `collider` is a loose piece the belt segments carry (`super::belt_segment`).
-    fn loose(&self, collider: Entity) -> bool {
-        self.layers
-            .get(collider)
-            .expect("avian requires CollisionLayers on every Collider")
-            .interacts_with(super::belt_segment::segment_layers())
     }
 
     /// The support colliders meeting the AABB of half-extent `radius` about `center`, ascending
@@ -184,8 +172,6 @@ struct Surface {
     structure: Option<Entity>,
     /// The body's motion at the tick's start, dynamic or kinematic; static surfaces have none.
     motion: Option<SurfaceMotion>,
-    /// A loose piece: the belt segments carry it, the spring channel only partitions over it.
-    loose: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -385,7 +371,6 @@ impl RubbleBodies<'_> {
                             friction: rubble.friction(collider),
                             structure: rubble.structures.contains(body).then_some(body),
                             motion,
-                            loose: rubble.loose(collider),
                         }
                 })
                 .collect::<Vec<_>>()
@@ -457,12 +442,6 @@ impl RubbleBodies<'_> {
     /// Only a collider from this snapshot may be read.
     pub(crate) fn friction(&self, collider: Entity) -> Friction {
         self.surface(collider).friction
-    }
-
-    /// Whether `collider` is a loose piece, carried by the belt segments' solver contacts rather
-    /// than the spring channel. Only a collider from this snapshot may be read.
-    pub(crate) fn loose(&self, collider: Entity) -> bool {
-        self.surface(collider).loose
     }
 
     /// Whether `collider`'s body is static: it neither moves nor yields. Only a collider from this
@@ -608,13 +587,7 @@ impl RubbleBodies<'_> {
             self.count(Work::BeltBoundaryBuilds, 1);
             Surface::triangles(&s.shape, s.position, s.rotation)
         });
-        let mut faces = super::world_contact::convex::clip_faces(triangles, slab);
-        if s.loose {
-            faces = faces
-                .into_iter()
-                .flat_map(|face| face.across_shoe(slab))
-                .collect();
-        }
+        let faces = super::world_contact::convex::clip_faces(triangles, slab);
         self.count(Work::BeltOverlaps, usize::from(!faces.is_empty()));
         (!faces.is_empty()).then_some(SlabOverlap { piece, faces })
     }
@@ -978,12 +951,13 @@ mod tests {
         }).unwrap();
     }
 
-    /// THE LAYER DECIDES THE CHANNEL, WHATEVER THE BODY WEIGHS (module doc). A debris-layer body
-    /// is loose at 2.9 t as at 16 kg, so a heavy chunk cannot fall between the channels; a dynamic
-    /// body off that layer takes the whole opposite of the belt's force, grip and rolling
-    /// included. A mutant that gates `loose` on mass, or clamps or drops a part of the reaction,
-    /// fails here. FIXTURE DATA: boxes at brick density, one contact pressing 100 N with 8 N grip
-    /// and 6 N rolling.
+    /// THE LAYER DECIDES THE CHANNEL, WHATEVER THE BODY WEIGHS (module doc). The sampled support
+    /// never reads a debris-layer body, at 2.9 t as at 16 kg, so a heavy chunk cannot fall between
+    /// the channels or be carried by both; a dynamic body off that layer is a support and takes the
+    /// whole opposite of the belt's force, grip and rolling included. A mutant that gates the
+    /// channel on mass, lets [`RubbleQuery::near`] return a piece the soft run meets, or clamps or
+    /// drops a part of the reaction, fails here. FIXTURE DATA: boxes at brick density, one contact
+    /// pressing 100 N with 8 N grip and 6 N rolling.
     #[test]
     fn the_layer_decides_the_channel_and_a_hull_takes_the_whole_reaction() {
         let mut app = physics();
@@ -999,10 +973,10 @@ mod tests {
         app.update();
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                let near = [light, heavy, hull];
+                // Fixture: a box enclosing all three bodies.
+                let near = rubble.near(Vec3::new(4.0, 0.5, 0.0), 6.0);
+                assert_eq!(near, [hull], "the sampled support reads a loose piece");
                 let gathered = RubbleBodies::gather(&rubble, &near, &bodies);
-                assert!(gathered.loose(light) && gathered.loose(heavy));
-                assert!(!gathered.loose(hull));
                 let contact = BeltContact {
                     traction: Vec3::X * 8.0,
                     rolling_force: Vec3::Z * 6.0,
@@ -1666,60 +1640,6 @@ mod tests {
             "wrong footprint share: {narrow}/{full}"
         );
         assert_eq!(beside, 0.0);
-    }
-
-    /// A LINK IS STIFF ACROSS ITS WIDTH, SO A LOOSE PIECE UNDER PART OF IT LIFTS ALL OF IT. The
-    /// ground beside the piece, over the covered length, is not touching the plate; the belt
-    /// segment carries that length whole, so ground left under it would count it twice. Past the
-    /// piece's length the ground keeps the belt. FIXTURE DATA: a 2 m pad 0.2 m wide, 5 mm into
-    /// the ground; the piece stands 15 mm proud of that, under half the width.
-    #[test]
-    fn a_loose_piece_under_part_of_the_width_lifts_the_whole_link_off_the_ground() {
-        let ground_load = |piece: Option<(Vec3, Vec3)>| {
-            let mut app = physics();
-            if let Some((at, size)) = piece {
-                let piece = piece_box(&mut app, at, size);
-                app.world_mut()
-                    .entity_mut(piece)
-                    .insert(crate::construction::breakage::piece_layers());
-            }
-            app.update();
-            app.world_mut()
-                .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                    let near = rubble.near(Vec3::ZERO, 4.0);
-                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
-                    pad_pass(
-                        &ground(),
-                        &pieces,
-                        Affine3A::IDENTITY,
-                        SideState::default(),
-                        Vec3::ZERO,
-                        &mut GripElements::for_stations(30, 3),
-                    )
-                    .contacts
-                    .iter()
-                    .filter(|c| c.collider.is_none())
-                    .map(|c| c.load_elastic * c.normal.y)
-                    .sum::<f32>()
-                })
-                .unwrap()
-        };
-        let box_at = |x: f32, z: f32| Vec3::new(x, 0.015 - 0.2, z);
-        let bare = ground_load(None);
-        let whole_length = ground_load(Some((box_at(0.05, 0.0), Vec3::new(0.1, 0.4, 4.0))));
-        let half_length = ground_load(Some((box_at(0.05, 0.5), Vec3::new(0.1, 0.4, 1.0))));
-        let beside = ground_load(Some((box_at(0.2, 0.0), Vec3::new(0.1, 0.4, 4.0))));
-        println!(
-            "MEASURED ground load: bare {bare:.1} N, piece the whole length {whole_length:.1} N, \
-             half the length {half_length:.1} N, beside the shoe {beside:.1} N"
-        );
-        assert!(bare > 0.0);
-        assert_eq!(whole_length, 0.0, "ground left beside the piece");
-        assert!(
-            (half_length / bare - 0.5).abs() < 0.1,
-            "{half_length}/{bare}"
-        );
-        assert_eq!(beside, bare);
     }
 
     /// STACKED PIECES DO NOT MULTIPLY SUPPORT, AND A SPLIT ELEMENT ADVANCES ITS GRIP ONCE.

@@ -77,9 +77,9 @@ impl Regions {
 
     /// Constraints holding one line with opposite signs, bit for bit, put two regions on opposite
     /// sides of it, so their depth crossing lies on boundaries both already carry. Adjacent
-    /// triangles cross their shared projected vertices in opposite order; adjacent shoe shadows
-    /// meet at one along coordinate. Faces of one collider sharing no edge are still crossed:
-    /// Parry fans merged outlines that need not be planar, and a fold can overlap.
+    /// triangles cross their shared projected vertices in opposite order. Faces of one collider
+    /// sharing no edge are still crossed: Parry fans merged outlines that need not be planar, and
+    /// a fold can overlap.
     fn share_edge(&self, i: usize, j: usize) -> bool {
         let other = self.planes(j);
         self.planes(i).iter().any(|p| other.contains(&-*p))
@@ -254,9 +254,6 @@ pub(super) struct Counts {
 
 #[derive(Default)]
 struct Discovery {
-    /// Test reference: cross faces across shared edges too.
-    #[cfg(test)]
-    cross_shared_edges: bool,
     intervals: Vec<(f64, f64)>,
     next_intervals: Vec<(f64, f64)>,
     edges: Vec<Edge>,
@@ -282,27 +279,6 @@ pub(super) struct Scratch {
     buried: Vec<bool>,
     discovery: Discovery,
     sweep: Sweep,
-}
-
-#[cfg(test)]
-impl Scratch {
-    /// The reference that also crosses faces across shared edges.
-    pub(super) fn crossing_shared_edges() -> Self {
-        let mut scratch = Self::default();
-        scratch.discovery.cross_shared_edges = true;
-        scratch
-    }
-}
-
-impl Discovery {
-    /// Whether regions `i` and `j` share an edge, so their crossing is skipped.
-    fn skips(&self, regions: &Regions, i: usize, j: usize) -> bool {
-        #[cfg(test)]
-        if self.cross_shared_edges {
-            return false;
-        }
-        regions.share_edge(i, j)
-    }
 }
 
 fn visible(
@@ -415,7 +391,7 @@ fn boundaries(
             );
         }
         index.visit(region.bounds, |j| {
-            if j >= i || out.skips(regions, i, j) {
+            if j >= i || regions.share_edge(i, j) {
                 return true;
             }
             let other = &regions.list[j];

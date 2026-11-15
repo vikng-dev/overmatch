@@ -116,14 +116,14 @@ struct Tick {
     /// The part of `solver_up` from bodies that are no loose piece (standing construction).
     structure_up: [f32; 4],
     /// Solver contacts with another body, by the tank collider's role: upward force (N) and
-    /// points, as [belt segment, bump stop, side plate, hull proxy].
+    /// points, as [soft run, bump stop, side plate, hull proxy].
     solver_up: [f32; 4],
     solver_points: [usize; 4],
     /// The hull proxies' summed normal force (N) and the distinct pieces they touch.
     hull_normal: f32,
     hull_pieces: usize,
     /// Upward force near each road-wheel station (N), left side then right, front to rear:
-    /// sampled support, belt segments and bump stops.
+    /// sampled support, soft runs and bump stops.
     stations: Vec<f32>,
     /// The terrain field's clearance under each road-wheel station's rest contact point (m),
     /// the only ground the drawn wheels and belt read (`track::view::drive_track_views`).
@@ -136,7 +136,7 @@ struct Tick {
     sensed: Option<crate::track::driver::Sensed>,
 }
 
-pub(super) const ROLES: [&str; 4] = ["belt segment", "bump stop", "side plate", "hull proxy"];
+pub(super) const ROLES: [&str; 4] = ["soft run", "bump stop", "side plate", "hull proxy"];
 
 fn read(
     bed: &Bed,
@@ -351,14 +351,14 @@ fn carried(ticks: &[&Tick], weight: f32, wheels_per_side: usize) -> Value {
         "share_sampled_support": share(&|t| t.spring_up),
         "share_sampled_on_solids": share(&|t| t.spring_solid_up),
         "share_on_structure_by_role": (0..4).map(|ri| share(&|t| t.structure_up[ri])).collect::<Vec<_>>(),
-        "share_belt_segments": share(&|t| t.solver_up[0]),
+        "share_soft_runs": share(&|t| t.solver_up[0]),
         "share_bump_stops": share(&|t| t.solver_up[1]),
         "share_side_plates": share(&|t| t.solver_up[2]),
         "share_hull_proxies": share(&|t| t.solver_up[3]),
         "hull_proxy_normal_share": share(&|t| t.hull_normal),
         "hull_proxy_points": mean(ticks, |t| t.solver_points[3] as f32),
         "hull_proxy_pieces": mean(ticks, |t| t.hull_pieces as f32),
-        "belt_segment_points": mean(ticks, |t| t.solver_points[0] as f32),
+        "soft_run_points": mean(ticks, |t| t.solver_points[0] as f32),
         "bump_stop_points": mean(ticks, |t| t.solver_points[1] as f32),
         "station_share_left": stations[..wheels_per_side],
         "station_share_right": stations[wheels_per_side..],
@@ -695,8 +695,8 @@ fn write_series(tag: &str, label: &str, ticks: &[Tick], weight: f32) {
     std::fs::create_dir_all(&dir).expect("the target directory exists or can be made");
     let mut csv = String::from(
         "tick,throttle,z,rise,speed,pitch_deg,belt_l,belt_r,gear,reverse,park,shift,clutch,rpm,\
-         spring_l,spring_r,spring_sat,spring_share,seg_share,stop_share,plate_share,hull_share,\
-         seg_pts,stop_pts,plate_pts,hull_pts,hull_pieces,awake,asleep_under,sleep_changes,\
+         spring_l,spring_r,spring_sat,spring_share,run_share,stop_share,plate_share,hull_share,\
+         run_pts,stop_pts,plate_pts,hull_pts,hull_pieces,awake,asleep_under,sleep_changes,\
          tank_asleep,sense_speed,sense_r,sense_dr\n",
     );
     for (i, t) in ticks.iter().enumerate() {
@@ -970,7 +970,7 @@ struct ParkTick {
     clutch: String,
     park: bool,
     belt_reaction: [f32; 2],
-    /// Belt surface speed per side (m/s), which the segments' contact hook gives their faces.
+    /// Belt surface speed per side (m/s), which the contact hook gives the runs' and stops' faces.
     belt_speed: [f32; 2],
     awake: usize,
     /// Awake pieces in the tank's island, and of those (and of the rest) the ones whose own

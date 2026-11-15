@@ -68,6 +68,7 @@ use super::schema::{ConstructionAsset, PLANE_TOLERANCE_M, SurfaceFrame};
 use crate::construction_surface::{ConstructionMaterial, holed};
 use crate::debris::PresentationClock;
 use crate::scatter::MapInstance;
+use crate::track::oracle::HullField;
 
 /// `<id>.dressing.ron` as authored or generated (module doc).
 #[derive(Debug, serde::Deserialize)]
@@ -949,6 +950,99 @@ struct PieceDressed {
     construction: Entity,
     view: Entity,
     origin: Vec3,
+}
+
+/// The fallen pieces as this module draws them, for a view that rests on them: the track view's
+/// wheels and belt ride the drawn hulls, at the pose and on the cursor they are drawn at.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct DrawnPieces<'w, 's> {
+    pieces: Query<
+        'w,
+        's,
+        (
+            &'static Transform,
+            &'static Piece,
+            &'static PieceDressed,
+            &'static Visibility,
+        ),
+    >,
+    constructions: Query<'w, 's, &'static Breakage>,
+}
+
+impl DrawnPieces<'_, '_> {
+    /// Push the chunk hulls of every shown piece reaching within `radius` of `centre` (world, m)
+    /// onto `hulls`.
+    pub(crate) fn near(&self, centre: Vec3, radius: f32, hulls: &mut HullField) {
+        for (pose, piece, dressed, visibility) in &self.pieces {
+            if *visibility == Visibility::Hidden {
+                continue; // Not drawn.
+            }
+            let kind = &self
+                .constructions
+                .get(dressed.construction)
+                .expect("a dressed piece's construction outlives its presentation (dress_pieces)")
+                .kind;
+            for &c in &piece.chunks {
+                let block = &kind.layout.blocks[usize::from(c)];
+                push_drawn(hulls, block, (dressed.origin, pose), (centre, radius));
+            }
+        }
+    }
+}
+
+/// Push `block` onto `hulls`, drawn about `origin` (asset frame) at the rigid `pose`, if it reaches
+/// within `radius` of `centre` (world, m). A carrier's pose (`DebrisPose::transform`) and a body's
+/// writeback carry unit scale.
+fn push_drawn(
+    hulls: &mut HullField,
+    block: &Block,
+    (origin, pose): (Vec3, &Transform),
+    (centre, radius): (Vec3, f32),
+) {
+    // An asset point `x` is drawn at `pose · (x − origin)`.
+    let frame = pose.mul_transform(Transform::from_translation(-origin));
+    // Every point of the block lies in its box, so within half the box's diagonal of its middle.
+    let bound = (
+        (block.min + block.max) / 2.0,
+        (block.max - block.min).length() / 2.0,
+    );
+    if frame.transform_point(bound.0).distance(centre) <= radius + bound.1 {
+        hulls.push(&block.planes, bound, &frame);
+    }
+}
+
+/// A shown, dressed piece of chunk `chunk` of the construction `root` (its `Breakage`), drawn at
+/// `pose` about `origin` (asset frame): what `dress_pieces` and `show_pieces` leave for a view to
+/// rest on, without a mesh.
+#[cfg(test)]
+pub(crate) fn spawn_drawn_piece(
+    world: &mut World,
+    root: Entity,
+    chunk: u16,
+    (origin, pose): (Vec3, Transform),
+) -> Entity {
+    let breakage = world
+        .get::<Breakage>(root)
+        .expect("a piece's construction carries its breakage");
+    let piece = Piece {
+        construction: breakage.construction,
+        chunks: vec![chunk],
+        born: 0,
+        retired: None,
+    };
+    let view = world.spawn(Transform::IDENTITY).id();
+    world
+        .spawn((
+            piece,
+            PieceDressed {
+                construction: root,
+                view,
+                origin,
+            },
+            pose,
+            Visibility::Inherited,
+        ))
+        .id()
 }
 
 /// A shown piece whose mesh wears its chunks' holes.

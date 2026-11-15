@@ -172,6 +172,25 @@ Pair-wide guard: `src/tests/avian_warm_start.rs::nearest_warm_start_is_selected_
 
 Local upstream draft: `upstream/avian-nearest-warm-start-contact.md` (DRAFT, not filed).
 
+## Compliant contact (`src/collision/contact_types/mod.rs`, `src/collision/narrow_phase/system_param.rs`, `src/dynamics/solver/contact/`, `src/dynamics/solver/plugin.rs`)
+
+Subject: the game's tank driving physics (the track belt against loose pieces), game state only.
+
+`ContactManifold::compliance` is an absolute per-point spring-damper law, reset by the narrow phase
+each step and set after it, before the solver. Its signed `rest` is the spring's compression at
+zero overlap: constraint preparation subtracts it from each point's initial separation, so every
+solve reads the spring's coordinate, and `ContactCompliance::bears` (overlap + rest above zero) is
+the one test of a compressed spring. A compliant point at positive separation applies no impulse,
+and one its law does not bear at the narrow phase bears nothing all step: it starts cold, its
+solve returns its accumulated impulse, and it stays in the manifold. A zero `rest` is the law
+without it bit for bit (`-p - 0.0` is `-p`, and `p + 0.0 > 0.0` is `p > 0.0`, for every
+penetration that is a number). The game's soft run (`track::soft_run`) hands each manifold its
+links' stiffness and damping over its bearing points and places their initial force with `rest`,
+so the law is a function of the manifold as the narrow phase left it.
+
+Guard: `src/tests/avian_compliant_contact.rs`. Local upstream draft:
+`upstream/avian-compliant-contact.md` (DRAFT, not filed).
+
 ## Physics work counters (`src/dynamics/solver/`, `src/collision/`, `src/utils.rs`)
 
 Contact passes add serial and parallel constraint visits to `SolverDiagnostics`, summed over

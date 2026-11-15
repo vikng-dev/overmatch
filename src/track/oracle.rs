@@ -14,11 +14,13 @@
 //!   spawn the terrain colliders (the sandbox's step-19..25 field, generalized), which is the
 //!   authored course geometry in fixture worlds.
 //!
-//! Solid geometry outside TerrainMap (grayboxes, construction elements and chunks, loose pieces)
-//! is an Avian collider: [`super::rubble::RubbleBodies`] snapshots it for the belt's footprint checks. Those
-//! shapes enter the support law beside this field, rather than through terrain probe lines.
+//! Standing solids outside TerrainMap (grayboxes, standing construction) are Avian colliders that
+//! [`super::rubble::RubbleBodies`] snapshots for the sampled support, beside this field. Loose
+//! pieces meet the soft run (`super::soft_run`); the view's belt reads their drawn hulls through
+//! [`HullField`].
 
 use bevy::math::{Dir3, Mat3, Quat, Vec2, Vec3};
+use bevy::prelude::Transform;
 
 use crate::ground_field::{ContactGround, GroundField};
 use crate::terrain_grid::HeightGrid;
@@ -612,6 +614,90 @@ impl DepthOracle for BlockField {
 
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
         self.depth_along_lowered_ground(station, out, reach, 0.0)
+    }
+}
+
+/// Convex hulls in world space, each by its planes (a point `x` is inside when `n · x ≤ o` for
+/// every outward unit normal `n` and offset `o`) and a sphere bounding it: the drawn loose pieces
+/// the view's belt rests on. A ray meeting no hull reads full clearance, as a [`BlockField`] miss
+/// does. Two fields are equal when they hold the same hulls in the same order.
+#[derive(Default, PartialEq)]
+pub(crate) struct HullField {
+    planes: Vec<(Vec3, f32)>,
+    hulls: Vec<(Vec3, f32, std::ops::Range<usize>)>,
+}
+
+/// `clone_from` refills both vectors in place, so a retained copy (the track view's last gather)
+/// keeps its buffers once they have grown.
+impl Clone for HullField {
+    fn clone(&self) -> Self {
+        Self {
+            planes: self.planes.clone(),
+            hulls: self.hulls.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.planes.clone_from(&source.planes);
+        self.hulls.clone_from(&source.hulls);
+    }
+}
+
+impl HullField {
+    pub(crate) fn clear(&mut self) {
+        self.planes.clear();
+        self.hulls.clear();
+    }
+
+    /// Add the hull of `planes` bounded by the sphere `(centre, radius)`, both in the frame that
+    /// the rigid `frame` places in the world.
+    pub(crate) fn push(
+        &mut self,
+        planes: &[(Vec3, f32)],
+        (centre, radius): (Vec3, f32),
+        frame: &Transform,
+    ) {
+        let start = self.planes.len();
+        self.planes.extend(planes.iter().map(|&(normal, offset)| {
+            let turned = frame.rotation * normal;
+            (turned, offset + turned.dot(frame.translation))
+        }));
+        self.hulls.push((
+            frame.transform_point(centre),
+            radius,
+            start..self.planes.len(),
+        ));
+    }
+}
+
+impl DepthOracle for HullField {
+    fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+        let origin = station - out * reach;
+        let span = 2.0 * reach;
+        let mut deepest = -reach;
+        for (centre, radius, planes) in &self.hulls {
+            let closest = origin + out * (*centre - origin).dot(out).clamp(0.0, span);
+            if closest.distance_squared(*centre) > radius * radius {
+                continue; // The ray passes outside the hull's bounding sphere.
+            }
+            // The ray lies inside every half-space, so inside the hull, over [enter, exit].
+            let (mut enter, mut exit) = (f32::NEG_INFINITY, f32::INFINITY);
+            for &(normal, offset) in &self.planes[planes.clone()] {
+                let rate = normal.dot(out);
+                let room = offset - normal.dot(origin);
+                if rate > 0.0 {
+                    exit = exit.min(room / rate);
+                } else if rate < 0.0 {
+                    enter = enter.max(room / rate);
+                } else if room < 0.0 {
+                    exit = f32::NEG_INFINITY; // Parallel to this plane, and outside it.
+                }
+            }
+            if enter <= exit && exit >= 0.0 && enter <= span {
+                deepest = deepest.max(reach - enter.max(0.0));
+            }
+        }
+        deepest
     }
 }
 

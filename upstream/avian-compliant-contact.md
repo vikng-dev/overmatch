@@ -13,21 +13,38 @@ therefore cannot be a spring. Under a steady load its overlap decays to zero, wh
 softness, so a vehicle cannot rest on its contacts at a load-proportional deflection.
 
 The patch adds `ContactManifold::compliance: Option<ContactCompliance>`, an absolute normal law
-per point (`stiffness` N/m, `damping` N·s/m), reset by the narrow phase each step and set by a
-contact-modification hook. Constraint preparation turns it into soft-constraint coefficients from
-the point's own effective mass and the substep length, and the normal solve keeps those
-coefficients in the relaxing pass and does not cap them by `max_overlap_solve_speed`.
+per point (`stiffness` N/m, `damping` N·s/m, and a signed `rest` m, the spring's compression at
+zero overlap), reset by the narrow phase each step and set after it, before the solver (the game's
+soft run sets it from a system there). Constraint preparation turns it into soft-constraint
+coefficients from the point's own effective mass and the substep length, and subtracts `rest` from
+the point's initial separation, so the solver's separation is the spring's coordinate; the normal
+solve keeps those coefficients in the relaxing pass and does not cap them by
+`max_overlap_solve_speed`.
 
 DERIVED: with `a = h(c + hk)` the coefficients are bias `k/(c + hk)`, mass scale `a/(m + a)` and
 impulse scale `m/(m + a)`, the exact rewrite of `SoftnessParameters::compute_coefficients` at
 `ω² = k/m`, `2ζω = c/m`. The fixed point of the soft update under a steady load is
-`impulse = k · overlap · h`, the same in both passes, so the static overlap is `F/k`. Absolute
-laws sum over points; a per-contact frequency would make the total stiffness grow with the number
-of points and with the masses involved.
+`impulse = k · (overlap + rest) · h`, the same in both passes, so the static overlap is
+`F/k − rest`. Absolute laws sum over points; a per-contact frequency would make the total stiffness
+grow with the number of points and with the masses involved.
 
-One further rule: a compliant point at positive separation applies no impulse. The stock
-speculative branch would stop the bodies rigidly at the spring's surface, which MEASURED as a
-2.4 MN single-tick impulse against a 0.08 m bar.
+Why `rest`. Without it the spring is free exactly at the surface and `k` and `c` are its only
+handles, so a caller that must carry a force `F0` at an overlap `p` can only write `k = F0/p`: a
+secant, whose tangent stiffness is forced to `F0/p`. With `rest` the law is affine: a caller hands
+its tangent stiffness and places its force at the step's start with the offset. A length reuses the
+solver's one separation variable and its release branch; a force term would need a new bias path,
+and is only required at `k = 0`. Avian's solver has no such term (a slop TODO in
+`ContactNormalPart::solve_impulse`); `CollisionMargin` is a uniform positive offset added to the
+penetration in the narrow phase, for every contact of a collider, not a per-manifold law.
+
+Two further rules, both on the spring's coordinate. A compliant point at positive separation applies
+no impulse: the stock speculative branch would stop the bodies rigidly at the spring's surface,
+which MEASURED as a 2.4 MN single-tick impulse against a 0.08 m bar. And a compliant point whose
+spring is free at the narrow phase (`ContactCompliance::bears`: overlap plus `rest` at or below
+zero) bears nothing all step: no warm start, and coefficients (bias 0, mass scale 0, impulse scale
+1) under which each solve returns its accumulated impulse. The point stays in the manifold, whose
+impulses are stored back by index, so a caller sharing one law over the points that bear need not
+prune the rest, and the law it reads from the manifold reads the same again.
 
 Files: `collision/contact_types/mod.rs` (field, type, coefficients), `collision/mod.rs` (prelude),
 `collision/narrow_phase/system_param.rs` (reset), `dynamics/solver/contact/mod.rs` and

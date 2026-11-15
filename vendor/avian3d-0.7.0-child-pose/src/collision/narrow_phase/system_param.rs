@@ -1042,7 +1042,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     {
                         manifold.tangent_velocity = Vector::ZERO;
                     }
-                    // OVERMATCH PATCH: compliance belongs to this step's hook, never carried over.
+                    // OVERMATCH PATCH: compliance is set for this step only, never carried over.
                     manifold.compliance = None;
 
                     let normal = manifold.normal;

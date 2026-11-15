@@ -523,15 +523,7 @@ mod tests {
                 RigidBody::Dynamic,
                 Collider::cuboid(0.4, 0.4, 0.4),
                 ColliderDensity(1800.0),
-                CollisionLayers::new(
-                    [Layer::Debris],
-                    [
-                        Layer::Terrain,
-                        Layer::Vehicle,
-                        Layer::Debris,
-                        Layer::TrackSide,
-                    ],
-                ),
+                crate::construction::breakage::piece_layers(),
             ))
             .id()
     }

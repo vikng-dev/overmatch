@@ -10,7 +10,9 @@ use core::cmp::Ordering;
 
 use crate::{
     collision::contact_types::ContactId,
-    dynamics::solver::{BodyQueryItem, ContactSoftnessCoefficients},
+    dynamics::solver::{
+        BodyQueryItem, ContactSoftnessCoefficients, softness_parameters::SoftnessCoefficients,
+    },
     prelude::*,
 };
 #[cfg(feature = "serialize")]
@@ -170,6 +172,14 @@ impl ContactConstraint {
             let anchor1 = point.anchor1;
             let anchor2 = point.anchor2;
 
+            // OVERMATCH PATCH: a compliant manifold's point its law does not bear at the narrow
+            // phase bears nothing this step: it starts cold and solves inert. It stays in the
+            // manifold, whose impulses are stored back point by point in order.
+            let inert = manifold
+                .compliance
+                .is_some_and(|law| !law.bears(point.penetration));
+            let warm_start = warm_start_enabled && !inert;
+
             let mut point = ContactConstraintPoint {
                 // TODO: Apply warm starting scale here instead of in `warm_start`?
                 normal_part: ContactNormalPart::generate(
@@ -179,7 +189,7 @@ impl ContactConstraint {
                     anchor1,
                     anchor2,
                     manifold.normal,
-                    warm_start_enabled.then_some(point.warm_start_normal_impulse),
+                    warm_start.then_some(point.warm_start_normal_impulse),
                     softness,
                 ),
                 // There should only be a friction part if the coefficient of friction is non-negative.
@@ -190,17 +200,28 @@ impl ContactConstraint {
                     anchor1,
                     anchor2,
                     tangents,
-                    warm_start_enabled.then_some(point.warm_start_tangent_impulse),
+                    warm_start.then_some(point.warm_start_tangent_impulse),
                 )),
                 anchor1,
                 anchor2,
                 normal_speed: point.normal_speed,
-                initial_separation: -point.penetration - (anchor2 - anchor1).dot(manifold.normal),
+                // OVERMATCH PATCH: a compliant point's separation is its spring's.
+                initial_separation: -point.penetration
+                    - manifold.compliance.map_or(0.0, |law| law.rest)
+                    - (anchor2 - anchor1).dot(manifold.normal),
             };
             // OVERMATCH PATCH: a compliant manifold's absolute law, at this point's own mass.
             if let Some(compliance) = manifold.compliance {
-                point.normal_part.spring =
-                    compliance.coefficients(point.normal_part.effective_mass, substep_secs);
+                point.normal_part.spring = if inert {
+                    // Each solve returns the accumulated impulse, which starts and stays zero.
+                    SoftnessCoefficients {
+                        bias: 0.0,
+                        mass_scale: 0.0,
+                        impulse_scale: 1.0,
+                    }
+                } else {
+                    compliance.coefficients(point.normal_part.effective_mass, substep_secs)
+                };
                 point.normal_part.compliant = true;
             }
 

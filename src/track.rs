@@ -27,7 +27,6 @@ pub(crate) mod envelope;
 // `wheel_view`/`link_view` adapters. They used to be duplicated per consumer — a phase lock whose
 // whole point is that ONE measured constant seats twenty teeth cannot survive two copies of it.
 pub(crate) mod belt_draw;
-pub(crate) mod belt_segment;
 // The rigid compression shape each track bottoms on, one collider per side on every tank's body.
 pub(crate) mod bump_stop;
 pub(crate) mod gear_phase;
@@ -39,6 +38,7 @@ pub mod route;
 pub(crate) mod rubble;
 #[cfg(test)]
 pub(crate) mod schedule_path;
+pub(crate) mod soft_run;
 pub(crate) mod stop_contacts;
 // The belt's SHADOW CASTER: a low-poly ribbon swept along the same drawn polyline the shoes are
 // placed on, so the 1.08 M-triangle shoe pool can stop being re-submitted into every cascade. Pure

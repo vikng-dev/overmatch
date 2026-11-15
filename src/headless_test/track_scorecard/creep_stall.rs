@@ -213,7 +213,7 @@ fn creep_stall_probe() {
     let mut csv = String::from(
         "tick,travel,rise,speed,pitch_deg,belt,gear,clutch,shift,park,rpm,tau_c,delivered,\
          u_fuel,engaged,power_scale,belt_reaction,grip_fwd,soft_belt,soft_push,soft_normal,\
-         hard_belt,hard_push,seg_fwd,stop_fwd,plate_fwd,hull_fwd,solver_up,sense_speed,sense_r\n",
+         hard_belt,hard_push,run_fwd,stop_fwd,plate_fwd,hull_fwd,solver_up,sense_speed,sense_r\n",
     );
     let gear = |bed: &Bed| {
         bed.app

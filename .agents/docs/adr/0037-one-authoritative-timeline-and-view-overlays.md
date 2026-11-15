@@ -95,8 +95,9 @@ presentation consumers (recoil microsim, belt view).
   discontinuity sources are respawn, terrain revision, and lightyear's freeze-then-step clamp),
   servo view interpolation and the `RemoteServos` integrator, lightyear's clock steering, and
   the wire-quantization guards (`HIT_EPS_HP`).
-- Named tuned-constant debt, complete: `PHASE_HEAL_OMEGA` (derived replacement sketched in
-  `recoil_overlay`) and the `SNAP_TRANSLATION`/`SNAP_AXIS` pair.
+- Named tuned-constant debt, complete: the belt phase heal rate, a `Taste` in
+  `assets/driving/belt_phase_view.ron` (derived replacement sketched in `recoil_overlay`), and the
+  `SNAP_TRANSLATION`/`SNAP_AXIS` pair.
 
 **Amended 2026-08-15.** The recoil-overlay/hull-overlay lane above was closed by ruling: the
 fused own-fire echo is permanent, and `recoil_overlay`, `CameraKick`, and the cursor-hit-feel

@@ -1726,17 +1726,21 @@ fn contact_law_forward_step_trace() {
     let mut peak_delta = 0.0_f32;
     let mut previous_force = 0.0_f32;
     // The damper's rate from its owners: per-metre damping over the widest column's share of the
-    // longest patch a station can hold, one chord between stations.
+    // longest patch a station can hold, one station pitch along the force loop.
     let damping_rate = {
-        use crate::track::forces::CONTACT_RESOLUTION;
+        use crate::track::side::Side;
         let geom = app.world().resource::<crate::track::rig_geom::RigGeom>();
-        let share = geom
-            .grip_columns(crate::track::side::Side::Left)
-            .into_iter()
-            .fold(0.0, |widest: f32, (_, share)| widest.max(share));
         let gear = app.world().resource::<crate::track::sim::TrackGear>();
-        gear.segment_law().damping_per_m * share * geom.belt_len()
-            / CONTACT_RESOLUTION.stations as f32
+        let share = Side::ALL
+            .into_iter()
+            .flat_map(|side| geom.grip_columns(side))
+            .fold(0.0, |widest: f32, (_, share)| widest.max(share));
+        let pitch = Side::ALL
+            .into_iter()
+            .map(|side| gear.station_pitch(side))
+            .fold(0.0, f32::max);
+        let law = app.world().resource::<crate::track::forces::SupportLaw>();
+        law.damping_per_m * share * pitch
     };
     let mut max_damping_excess = 0.0_f32;
     let mut last_bin = i32::MIN;
@@ -1785,10 +1789,12 @@ fn contact_law_forward_step_trace() {
         max_y - initial_y
     );
     println!("MEASURED hull lip maximum damping bound excess {max_damping_excess:.8}");
-    // Fixture tolerance: a patch spans one station chord, nominally belt_len/48, and the bound
-    // reads the nominal; MEASURED excess 3.0e-4 of the load.
+    // Resolution: rounding alone. The bound is exact in real arithmetic. In f32 a load and its
+    // elastic part round apart by a few ε of the load, and a station lands about ε times the
+    // loop's few-metre extent off its arc, about 1e-5 of a station pitch (DERIVED, ε 1.2e-7).
+    // 1e-4 of the load clears both by an order; any larger amplification fails.
     assert!(
-        max_damping_excess < 1e-3,
+        max_damping_excess < 1e-4,
         "contact damping amplified the point speed: {max_damping_excess}"
     );
     assert!(
@@ -2133,17 +2139,17 @@ fn a_resting_tank_keeps_its_belt_press_on_fixed_structure() {
 }
 
 /// Belt support lifts a driving hull onto loose pieces and carries it after stopping, through
-/// the belt segments' solver contacts, and the spring channel adds no second support there: the
-/// pieces shadow the ground beneath them. The pieces lie between the rigid side slices, so
-/// neither the slices nor the compression stops may supply their lift. FIXTURE DATA: two long
-/// pieces, height 0.1 m, each one eighth of the hull's mass; dimensions and positions otherwise
-/// come from its running gear. The lift magnitude remains an observation.
+/// the soft runs' solver contacts, and the spring channel never supports it on a piece. The
+/// pieces lie between the rigid side slices, so neither the slices nor the compression stops may
+/// supply their lift. FIXTURE DATA: two long pieces, height 0.1 m, each one eighth of the hull's
+/// mass; dimensions and positions otherwise come from its running gear. The lift magnitude remains
+/// an observation.
 #[test]
 fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
     use crate::contact_transfer::ContactTransfers;
-    use crate::track::belt_segment::BeltSegment;
     use crate::track::side::Side;
     use crate::track::sim::TrackContacts;
+    use crate::track::soft_run::SoftRun;
     use avian3d::prelude::{
         AngularInertia, CenterOfMass, Collider, LinearVelocity, Mass, NoAutoAngularInertia,
         NoAutoCenterOfMass, NoAutoMass, Position, RigidBody, Rotation,
@@ -2202,8 +2208,8 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
             ))
             .id()
     });
-    // The segments' upward support on the hull from the pieces over the last physics step (N).
-    let segment_support = |app: &App| -> f32 {
+    // The runs' upward support on the hull from the pieces over the last physics step (N).
+    let run_support = |app: &App| -> f32 {
         let world = app.world();
         let transfers = world.resource::<ContactTransfers>();
         transfers
@@ -2212,10 +2218,10 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
             .filter_map(|point| {
                 let other = point.other_collider?;
                 let sign = if pieces.contains(&other) {
-                    world.get::<BeltSegment>(point.reference_collider)?;
-                    1.0 // The segment is the reference: the piece took `impulse`.
+                    world.get::<SoftRun>(point.reference_collider)?;
+                    1.0 // The run is the reference: the piece took `impulse`.
                 } else if pieces.contains(&point.reference_collider) {
-                    world.get::<BeltSegment>(other)?;
+                    world.get::<SoftRun>(other)?;
                     -1.0
                 } else {
                     return None;
@@ -2238,7 +2244,7 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
     for _ in 0..(20 * FIXED_TICKS_PER_SECOND) {
         // Full requested power gives this support fixture its declared launch capability.
         drive_tick(&mut app, tank, 1.0, 0.0);
-        carried |= segment_support(&app) > 0.0;
+        carried |= run_support(&app) > 0.0;
         assert!(
             !spring_on_pieces(&app),
             "the spring channel must not support the tank on a loose piece"
@@ -2267,7 +2273,7 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
     println!("MEASURED driven hull rise {rise:.6} m over {height} m pieces");
     assert!(
         carried,
-        "the belt segments never carried the tank on a loose piece"
+        "the soft runs never carried the tank on a loose piece"
     );
     // Resolution: 0.1% of the raised surface's height excludes position roundoff.
     // A settled hull with no demand sleeps with the pieces and transfers nothing, so the rise is
@@ -3726,7 +3732,7 @@ fn every_collider_carries_its_materials_friction_under_the_one_rule() {
                 .get::<crate::track::bump_stop::SidePlate>(collider)
                 .is_some()
             || world
-                .get::<crate::track::belt_segment::BeltSegment>(collider)
+                .get::<crate::track::soft_run::SoftRun>(collider)
                 .is_some()
         {
             registry.contact_friction(&spec.track.substance).unwrap()

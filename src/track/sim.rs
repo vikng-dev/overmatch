@@ -8,8 +8,9 @@
 //! replaces):
 //! - Pose from tick-truth `Position`/`Rotation`, never `GlobalTransform` (render lag differs
 //!   per machine).
-//! - Terrain from the analytic [`TrackField`]; construction and loose-piece support from a
-//!   tick-start shape snapshot ([`RubbleBodies`]), checked across the complete shoe footprint.
+//! - Terrain from the analytic [`TrackField`]; standing-solid support from a tick-start shape
+//!   snapshot ([`RubbleBodies`]), checked across the complete shoe footprint. Loose pieces meet
+//!   the soft run in the solver instead (`super::soft_run`).
 //! - Runs every tick unconditionally (this is sim state); stays inside
 //!   `SimPhase::DrivingForces` so drive samples velocity before the weapon-fire impulse.
 //! - The game's damage model ([`drive_target`]): axes actuate only while someone serves the
@@ -344,14 +345,6 @@ pub struct TrackGear {
 }
 
 impl TrackGear {
-    /// The calibrated envelope law the belt segments carry against loose pieces.
-    pub(crate) fn segment_law(&self) -> super::belt_segment::SegmentLaw {
-        super::belt_segment::SegmentLaw {
-            stiffness_per_m: self.params.support_stiffness_per_m,
-            damping_per_m: self.params.support_damping_per_m,
-        }
-    }
-
     /// The declared joint transmission params. Read-only accessor for the shared drive HUD; the
     /// field stays private so only the drive step and HUD consume it.
     pub fn trans(&self) -> &TransmissionParams {
@@ -527,10 +520,16 @@ impl TrackGear {
     pub(crate) fn params_mut(&mut self) -> &mut ForceParams {
         &mut self.params
     }
+
+    /// The longest patch a force station holds on `side` ([`super::forces::station_pitch`]).
+    #[cfg(test)]
+    pub(crate) fn station_pitch(&self, side: Side) -> f32 {
+        super::forces::station_pitch(&self.loop_pts[side.index()], self.count)
+    }
 }
 
 pub fn sim_plugin(app: &mut App) {
-    app.add_plugins((super::world_contact::plugin, super::belt_segment::plugin));
+    app.add_plugins((super::world_contact::plugin, super::soft_run::plugin));
     app.init_resource::<DriveSupports>()
         .init_resource::<SampledSupports>()
         .add_observer(forget_sampled_supports);
@@ -585,7 +584,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         &sus,
     );
     let gear = TrackGear::from_construction(&blueprint, &geom);
-    commands.insert_resource(gear.segment_law());
+    commands.insert_resource(gear.params.support_law());
     commands.insert_resource(gear);
     // Keep the marker-derived running gear alive as the game's single geometry source: the track
     // VIEW (`track::view`) reads its rest circles / pitch / plate / plane directly, and the bit

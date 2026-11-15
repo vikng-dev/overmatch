@@ -1259,10 +1259,10 @@ mod proxy_tests {
         (authority, replica)
     }
 
-    /// Replica tanks retain every queried collider layer while only authority bodies receive
-    /// sprung belt segments. Clients render the server stream and run no belt support solve.
+    /// Replica tanks retain every queried collider layer while only authority bodies receive soft
+    /// runs. Clients render the server stream and solve no contact with a loose piece.
     #[test]
-    fn replica_tanks_keep_queried_surfaces_without_sprung_belt_segments() {
+    fn replica_tanks_keep_queried_surfaces_without_soft_runs() {
         // Fixture: the selected tank supplies construction data, not a collider-count oracle.
         let mut world = World::new();
         let (authority, replica) = authority_and_replica(&mut world);
@@ -1291,7 +1291,7 @@ mod proxy_tests {
         assert!(authority_counts[2] > 0);
         assert_eq!(
             replica_counts[2], 0,
-            "replicas have no consumer for sprung belt support colliders"
+            "replicas have no consumer for a soft run"
         );
         assert_eq!(replica_counts[..2], authority_counts[..2]);
     }

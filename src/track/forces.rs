@@ -214,12 +214,12 @@ pub(crate) const GRIP_ELEMENT_DAMPING_RATIO: f32 = 0.5;
 /// Resolution: element membership bounds, as fractions of the side's nominal weight: a pad ENTERS the
 /// grip population above the high bound and STAYS down to the low bound (hysteresis).
 /// Membership reads the ELASTIC load only, never the damped load's sign — the damped load
-/// carries the support damper's separation transients, and keying reset to it erased a
-/// parked tank's strain on one noisy tick (netcode review defect 1: unsafe for parking).
+/// carries the support damper's separation transients, and keying reset to it erases a
+/// parked tank's strain on one noisy tick.
 /// The bounds are tiny against a real bearing column (~0.1% / 0.025% of side weight vs the
 /// several percent a grounded column carries) — they exclude numeric dust, not load.
 ///
-/// LOW-LOAD POLICY (netcode review defect 3): strain INTEGRATES only while the element is a
+/// LOW-LOAD POLICY: strain INTEGRATES only while the element is a
 /// member — accumulation shares exactly the membership hysteresis, one regime, one set of
 /// bounds. A barely-touching pad never clears the enter bound, so it accumulates nothing
 /// and later real load finds no stored-up strain to fire as a sudden force; a member that
@@ -241,8 +241,8 @@ pub(crate) const GRIP_ELEMENT_LOSS_DWELL_TICKS: u8 = 8;
 /// The canonical belt-phase decomposition: travel → (integer wrap count, residual station
 /// offset in `[0, pitch)`). ONE function feeds BOTH the resample offset and material
 /// identity — computing them separately (f32 residual here, f64 floor there) let rounding
-/// disagree for one tick at exact pitch multiples, mis-keying element state by a whole link
-/// (netcode review defect 2). The residual comes from the exact f64 remainder; the wrap
+/// disagree for one tick at exact pitch multiples, mis-keying element state by a whole link.
+/// The residual comes from the exact f64 remainder; the wrap
 /// count is derived FROM that residual (never from an independently rounded division), and
 /// the carry branch absorbs the one remaining seam: the f32 cast of a residual just under
 /// `pitch` can round up to exactly `pitch`, which `resample`'s internal `rem_euclid` would
@@ -327,6 +327,26 @@ pub struct ForceParams {
     pub grip: Option<GripParams>,
 }
 
+/// The support law per metre of belt, which the soft run carries against loose pieces
+/// (`super::soft_run`): the sampled support's own, published from the [`ForceParams`] of whichever
+/// driver calibrated it, the game's `TrackGear` or the sandbox's rig.
+#[derive(bevy::prelude::Resource, Clone, Copy, Debug)]
+pub(crate) struct SupportLaw {
+    /// N/m per metre of belt.
+    pub(crate) stiffness_per_m: f32,
+    /// N·s/m per metre of belt.
+    pub(crate) damping_per_m: f32,
+}
+
+impl ForceParams {
+    pub(crate) fn support_law(&self) -> SupportLaw {
+        SupportLaw {
+            stiffness_per_m: self.support_stiffness_per_m,
+            damping_per_m: self.support_damping_per_m,
+        }
+    }
+}
+
 /// Recoverable shear state, one WORLD-space vector (m) per advected force station × lateral column
 /// (flat index `station * lateral_points + column`). Force reads this vector divided by the
 /// element's shear length, capped at that contact's capacity. Sliding returns the state within
@@ -355,9 +375,8 @@ pub(crate) struct ContactResolution {
 /// Resolution: 48 stations × 3 lateral points. A feature shorter than perimeter/48 is unresolved;
 /// MEASURED on the track scorecard, turning at 48 stations is within 0.2 % of 97, and drifts 1 %
 /// at 24 and 2 % at 16. The three points are Simpson's nodes (both shoe edges and the centre):
-/// they integrate lateral pressure exactly through a cubic profile, and their width/2 gap must
-/// stay below the data-owned piece size floor for point-based detection to see a piece. Solid
-/// detection uses the shoe's full bounds.
+/// they integrate lateral pressure exactly through a cubic profile. Solid detection uses the
+/// shoe's full bounds.
 pub(crate) const CONTACT_RESOLUTION: ContactResolution = ContactResolution {
     stations: 48,
     lateral_points: 3,
@@ -594,6 +613,12 @@ pub fn clipped_linear_piece(x0: f32, x1: f32, p0: f32, p1: f32) -> (f32, f32, f3
     }
 }
 
+/// The arc between consecutive force stations on the closed `loop_pts`, `count` stations round:
+/// a chord between them, so a patch's contacting length, is never longer.
+pub(crate) fn station_pitch(loop_pts: &[Vec2], count: usize) -> f32 {
+    polyline_len(loop_pts) / count as f32
+}
+
 /// Advance one side's contact by one fixed tick: support + traction forces at the advected
 /// stations (probing `oracle` at the presented `affine`, reading the hull's velocity field
 /// through `vel_at`), contacts, grip-state update, and the summed longitudinal ground reaction.
@@ -629,7 +654,7 @@ pub fn contact_side<O: TerrainOracle>(
         input.count >= 3,
         "admitted running gear has enough force stations to enclose a belt"
     );
-    let pitch = polyline_len(input.loop_pts) / input.count as f32;
+    let pitch = station_pitch(input.loop_pts, input.count);
     let (wraps, station_offset) = phase_decompose(state.phase, pitch);
     let stations = resample_loop(input.loop_pts, pitch, station_offset, input.count);
 
@@ -1049,9 +1074,6 @@ fn collect_column_contacts<O: TerrainOracle>(
                     (p, normal),
                     (load, load_elastic),
                 );
-                if collider.is_some_and(|piece| pieces.loose(piece)) {
-                    continue; // A loose piece shadows the ground; `belt_segment` carries it.
-                }
                 if load <= 0.0 {
                     if elements_mode && load_elastic > 0.0 {
                         held.push((material(i) * samples.len() + ci, load_elastic));
