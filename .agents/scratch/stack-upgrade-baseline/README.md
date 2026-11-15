@@ -4,12 +4,14 @@ The before half of epic #355's before/after comparison: the shipped stack (Bevy 
 lightyear 0.30) measured so the upgrade can be compared against it. Damage-model content here is
 game state only.
 
-- **Commit.** Every output name carries `264515e5`: the bay's HEAD,
+- **Commit.** The initial outputs carry `264515e5`: the bay's HEAD,
   264515e50b0da455b9ba05e26f477b0fbfd0018a, which is v0.7.0-alpha.17 (b8baa8e4) plus one docs-only
   commit (its parent is b8baa8e4; it adds five files under `.agents/scratch/`). The plan said
-  alpha.16; the coordinator's brief moved the baseline to alpha.17. The bitprobe pair alone ran
+  alpha.16; the coordinator's brief moved the baseline to alpha.17. The bitprobe pair ran
   later, at the fixture fix the coordinator sent: its files carry `9c766de6`, a local merge of
   main whose code is eaac2a66's, since rewritten off this branch (`bitprobe.9c766de6.cmd.txt`).
+  The completed belt probe and slice capture carry `f86cba0d`: the probe lifetime fix and an offline capture-only replay cue, with no
+  production physics or recorder change. Their diagnoses are in `gap-diagnosis.bee99262.md`.
 - **Machine.** Apple M4, 10 cores, 16 GiB, macOS 26.5.2 (MEASURED, Bevy's SystemInfo line). Other
   agents' builds shared the machine and the build lock throughout.
 - **Timing runs.** Every timing run held the machine build lock (`/tmp/overmatch-cargo.lock`) for
@@ -34,15 +36,14 @@ game state only.
 
 ## Gaps
 
-Three rows are not what the plan asked for:
+One row remains substituted: **the collapse ran with one real client, not thirty**. The plan's
+30-client command never got past launch on this machine, so the row is `--tanks 30 --clients 1`
+(29 bots). The after set must run the same flags, or the two are not comparable.
 
-1. **`belt_friction_probe` is incomplete.** Its `house-pivot` case panicked (a probe defect at this
-   commit), so the before set has five of its six cases. The defect is not fixed here.
-2. **`pen_cam_slice.wgsl` has no capture.** Sixteen of the seventeen shaders are shown in a frame;
-   the plate slice never appeared in a hidden run, and the cause was not found (Shader coverage).
-3. **The collapse ran with one real client, not thirty.** The plan's 30-client command never got
-   past launch on this machine, so the row is `--tanks 30 --clients 1` (29 bots). The after set
-   must run the same flags, or the two are not comparable.
+The two missing rows are closed at `f86cba0d`: `belt_friction_probe` completed all six cases, and
+`pen_cam_slice.wgsl` is shown in a hidden capture of a recorded non-penetration. The slice is
+replay evidence; the live target-ahead recorder's missing interior hull frame remains a production
+defect, diagnosed without changing it. See `gap-diagnosis.bee99262.md` and the command records below.
 
 ## Rows (plan A2)
 
@@ -50,14 +51,14 @@ Three rows are not what the plan asked for:
 |---|---|---|
 | Cross-target bitprobe pair | IDENTICAL, at the fixture fix: the macOS leg at 9c766de6 (a local merge of main, whose code is eaac2a66's), the Linux leg at eaac2a66 (CI run 43747219902); startup dump and all 3072 tick payloads identical. At alpha.17 both legs panic (`src/bitprobe.rs:909`, "the differential fixture captures exactly one tank"): the fix (6d868057) keeps the fixture's tank awake through settling. It changes only the fixture, so the verdict stands for alpha.17's simulation code | `bitprobe.9c766de6.cmd.txt`, `bitprobe-diff.9c766de6.txt`; the alpha.17 attempt: `bitprobe.264515e5.cmd.txt` |
 | Track scorecard | OK: 1 passed in 86.80 s | `track-scorecard.264515e5.{md,json}` |
-| Track probes | `belt_friction_probe` FAILED: five of six cases printed; `house-pivot` panicked at `belt_friction.rs:178:27` (`world.entity(piece)` on a despawned body), a probe defect at this commit, not fixed here. `creep_stall_probe` does not exist at this commit: 2665f22b deleted it (and `soft_run_probe`) before alpha.17. `rubble_climb_probe` OK, 51 lines, 501.27 s. `turn_probe` OK: the filter runs `turn_probe` and `pivot_probe`, both passed, 188.29 s | `track-probes/` |
+| Track probes | `belt_friction_probe` OK at f86cba0d: all six cases, full table in `track-probes/belt_friction_probe.f86cba0d.txt` (command/load/lock record beside it). Retired contact bodies are named and their motion series end; no fallback sample. The original incomplete five-case 264515e5 output is retained. `creep_stall_probe` does not exist at this commit: 2665f22b deleted it (and `soft_run_probe`) before alpha.17. `rubble_climb_probe` OK, 51 lines, 501.27 s. `turn_probe` OK: the filter runs `turn_probe` and `pivot_probe`, both passed, 188.29 s | `track-probes/` |
 | Parked on a pile | OK: all six runs valid | `pile-park/` |
 | Scheduled collapse | The plan's command (30 real clients) is INVALID on this machine: run on the debug and on the release binaries, every client missed the harness's 20 s launch watchdog (`src/net/harness.rs:358`). Recorded with `--tanks 30 --clients 1` (29 bots, one real client), the hosted runs' workload: COMPLETE, 59 windows. The after set uses the same flags | `collapse/` |
 | Tick attribution | Per system: `scripts/perf/tick-trace.sh` and `trace_profile.py` landed (the prep file's proposal) and run: 1920 empty-window and 7680 combat-window ticks profiled. Recorded a second time after the profiler learned to refuse malformed records and bad begin/end pairs; the pre-fix profiler wrote identical tables from that trace (the record says how much the second run moved from the first). Per stage: the collapse run's `tick-attribution.json` | `tick-trace/`; cache `collapse/tick-attribution.264515e5.json.gz` |
 | Damage-model cost harness | OK: `idle1`, `fire1`; tables per role | `cost/` |
 | Shader pipelines compile | OK: every pipeline the first 30 s created compiled, 0 ERROR lines | `shader-compile-gate.264515e5.*` |
 | Shader captures | All 15 plans produced their frames. `lod-showcase.ron` requests no frames, so its scene ran under `lod-showcase-frames.264515e5.plan.ron` (frames added; the 14 s frame was byte-identical to the 10 s one and is not kept). The tab-board wrapper exited 1 from its own shell bug after both frames were written | records `captures/`; frames cache `captures/` |
-| Capture gaps | Seven new plans in `scripts/capture/`, each with its frames: `impact-vfx`, `render-scale`, `pen-cam-xray`, `pen-cam-killcam`, `pen-cam-glass`, `optic-mask`, `muzzle-vfx`. One shader is still uncovered: `pen_cam_slice.wgsl` (below) | records `captures/`; frames cache `captures/` |
+| Capture gaps | Eight added plans in `scripts/capture/`, each with its frames: `impact-vfx`, `render-scale`, `pen-cam-xray`, `pen-cam-killcam`, `pen-cam-glass`, `optic-mask`, `muzzle-vfx`, `pen-cam-slice`. The last replays a recorded NonPen through the shooter corner at f86cba0d; all seventeen shaders now have coverage (below) | records `captures/`; frames cache `captures/` |
 
 ## Shader coverage
 
@@ -80,7 +81,7 @@ Which frame shows each of the 17 files in `assets/shaders/` (by eye, unless mark
 | `pen_cam_glow.wgsl` | `pen-cam-killcam`, `pen-cam-glass` (the round's path) |
 | `pen_cam_outline.wgsl` | `pen-cam-killcam`, `pen-cam-glass` (the struck components' silhouettes) |
 | `pen_cam_picture.wgsl` | `pen-cam-glass` (the record's fields drawn as one volume read from its depth pictures). `pen-cam-killcam`'s round stopped in the ammunition and drew no field |
-| `pen_cam_slice.wgsl` | **Not captured.** The plate slice is the shooter's corner for a non-penetration. The corner never opened in three hidden offline runs of `OVERMATCH_TARGET=ahead SPIKE_AUTO_FIRE=1` (frames from 20 to 76 s, machine-gun and main-gun hits on the target, the target knocked out about 60 s), and with `RUST_LOG=…,overmatch::damage_cam=debug` the corner's presence line ("pen cam: the slot shows …") never printed. The cause was not found. The tracked runner that opens the corner, `scripts/perf/run-pencam-cost.sh corner-on`, requires a visible window, which this lane may not open |
+| `pen_cam_slice.wgsl` | `pen-cam-slice.f86cba0d.png` (cache `captures/`): the top-right inset's hatched plate cut and stopped path, inspected by eye. Offline replay of the existing simulated NonPen report; UI enabled. `captures/pen-cam-slice.f86cba0d.cmd.txt` records the hidden run and its `Slice on Corner` mark |
 
 The capture frames are hidden-window renders: never read a frame time out of them. A shot's aim is
 picked through the window's centre, so the plans that fire keep the hidden window's logical size

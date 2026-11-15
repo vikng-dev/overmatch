@@ -1,6 +1,6 @@
 # The stack upgrade baseline's files kept out of git (README.md, Binaries), on the
 # recording machine. One line per file: sha256, size in bytes, absolute path.
-# 275 files, 579650051 bytes (MEASURED). Check:
+# 276 files, 581700671 bytes (MEASURED). Check:
 #   awk '!/^#/ {print $1"  "$3}' MANIFEST.sha256 | shasum -a 256 -c
 17da6773fd3ea9f5c66db29841379d2194251ce899af8be4ec6aa6c81226ff66  801442  /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/bitprobe-macos-aarch64.264515e5.obp.gz
 5818c46130099c54a4d16f8a77d8939d5110ff4704d207951b0d64d20144e6c5  26364365  /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/bitprobe/bitprobe-linux-x86_64.eaac2a66.ci-run-43747219902.obp.gz
@@ -30,6 +30,7 @@ f2a01cbed00355b1fc5a770e3d0c779231125b755dc1e567ac39d12d158644de  1185442  /User
 bc8671aa5b8c9a73d55f30577c4f52ad0351135cbdba98f84f7a042e8ba22126  1857861  /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/captures/pen-cam-killcam-00026.5000s.264515e5.png
 658707fab587453a541d3db8be426c26e8025716b538334d475cfb8d4b665a02  1910147  /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/captures/pen-cam-killcam-00028.0000s.264515e5.png
 9efefdf29a9ed5fd183805308d23fd61387e354af918fda1651cb1b309676a94  1368416  /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/captures/pen-cam-killcam-00029.5000s.264515e5.png
+8540d5a303173df459049a2ccde65b354dfe537de07a7d1c81f386730212cacd  2050620  /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/captures/pen-cam-slice.f86cba0d.png
 166535e47861156f42f73de8c9ee7249ca26d81a72cc16d0e47b1b36e29eb778  1588742  /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/captures/pen-cam-xray.264515e5.png
 2362c3c3bfc5ab835a23efa7ec2b49ab61a886440a8fef1246cb2e352fd7fd6a  1169441  /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/captures/render-scale.264515e5.png
 2bac5536d1fedc9b0f296881aca10cc41dcbb26a527e3987de9d8ca7a0d5ca3c  4739177  /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/captures/repair-panel-00020.0000s.264515e5.png
