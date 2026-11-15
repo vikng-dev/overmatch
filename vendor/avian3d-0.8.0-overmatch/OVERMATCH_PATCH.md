@@ -84,7 +84,8 @@ and short of a custom `AnyCollider` there is none. 21 fork lines (MEASURED).
 The game prepares the cache off the system thread for each construction chunk collider that is no
 sensor. Guard: `src/tests/avian_prepared_mass.rs`, which replaces the shape of a freshly prepared
 collider, so each invalidation stands alone (it fails with the scale invalidation removed and with
-the shape replacement's removed, MEASURED). Local upstream draft: `upstream/avian-prepared-collider-mass.md`.
+the shape replacement's removed, MEASURED). Local upstream draft:
+`upstream/avian-prepared-collider-mass.md`.
 
 ## Complete collider batches and explicit mass ownership (`src/collision/collider/collider_hierarchy/plugin.rs`, `src/dynamics/rigid_body/mass_properties/`, `src/lib.rs`): kept
 
@@ -300,12 +301,13 @@ recycling off (`recycle_distance: 0.0`, set where the game composes physics); tu
 matching for every recycled pair, and the pair guard below goes red (MEASURED).
 
 Guards: `src/tests/avian_warm_start.rs`, 3 tests. The two that rank predecessors are red with
-upstream's matcher (MEASURED: 5.0 taken where 11.0 is closest). The third requires a cold start
-with no admissible predecessor (an UNKNOWN point 1 m from its only one; a known point whose only
-one holds other ids, its anchors coincident in either orientation), red under each of three
-mutants of the law (MEASURED): UNKNOWN ids admitted at any distance, known ids admitted by distance,
-and known ids admitted by distance in the swapped orientation only, upstream's. Local upstream drafts:
-`upstream/avian-unknown-contact-feature-identity.md`, `upstream/avian-nearest-warm-start-contact.md`.
+upstream's matcher (MEASURED: 5.0 taken where 11.0 is closest). The third requires a cold start with
+no admissible predecessor (an UNKNOWN point 1 m from its only one; a known point whose only one
+holds other ids, its anchors coincident in either orientation), red under each of three mutants of
+the law (MEASURED): UNKNOWN ids admitted at any distance, known ids admitted by distance, and known
+ids admitted by distance in the swapped orientation only, upstream's. Local upstream drafts:
+`upstream/avian-unknown-contact-feature-identity.md`,
+`upstream/avian-nearest-warm-start-contact.md`.
 
 ## Stationary non-touching pair cache (`src/collision/narrow_phase/stationary_miss.rs`, `src/collision/narrow_phase/system_param.rs`, `src/collision/contact_types/mod.rs`, `src/collision/diagnostics.rs`): module
 
@@ -381,8 +383,8 @@ phase's query, so a resting miss closed by a sleeper's last awake step is never 
 Subject: the game's rigid-body rest, server physics, game state only.
 
 Avian 0.8.0 wakes every sleeping island a new contact links (`apply_contact_status_change`), a
-resting body's new stationary support included. The game's rule: only an awake body wakes a
-resting island. The game holds it in a pass on stock Avian (`avian_ext::island_wake`,
+resting body's new stationary support included. The game's rule: only an awake body wakes a resting
+island. The game holds it in a pass on stock Avian (`avian_ext::island_wake`,
 `link_resting_contacts` in `NarrowPhaseSystems::Last`, after the reduction pass): each queued
 `StartedGeneratingConstraints` whose sides are each in a sleeping island or hold no island (a
 standalone collider, or a body out of the solver without a node: static, disabled, or asleep since
@@ -390,12 +392,13 @@ its spawn), at least one in an island, leaves the queue; a body in the solver wi
 lost state `IslandPlugin` requires and is refused (guard:
 `an_awake_body_without_its_island_node_is_refused`). The pass links the contact with
 `PhysicsIslands::add_contact`, merging the resting islands it bridges, and moves the pair to the
-sleeping set with `ContactGraph::sleep_entity_with`, so the solver gets no constraint for it. The island's next wake (`WakeIslands`) returns the pair and pushes its manifolds.
-A merge the pass makes stands when a later entry of the same step wakes the merged island, which then
-holds the pair. Sleep is read from the island (`PhysicsIsland::is_sleeping`, public), not the body's
-`Sleeping` marker. Upstream composes without `IslandPlugin` too; the game's does not (no app in the
-tree installs the seams without it), and `avian_ext::plugin` refuses such a composition as it is
-built, naming the plugin (guard: `the_seams_refuse_a_composition_without_islands`).
+sleeping set with `ContactGraph::sleep_entity_with`, so the solver gets no constraint for it. The
+island's next wake (`WakeIslands`) returns the pair and pushes its manifolds. A merge the pass makes
+stands when a later entry of the same step wakes the merged island, which then holds the pair. Sleep
+is read from the island (`PhysicsIsland::is_sleeping`, public), not the body's `Sleeping` marker.
+Upstream composes without `IslandPlugin` too; the game's does not (no app in the tree installs the
+seams without it), and `avian_ext::plugin` refuses such a composition as it is built, naming the
+plugin (guard: `the_seams_refuse_a_composition_without_islands`).
 
 A predicate inside `apply_contact_status_change` was not enough: by then the pair's manifolds are in
 the constraint graph, and the flush holds the contact graph read-only, so the hook would also have

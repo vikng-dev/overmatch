@@ -33,9 +33,9 @@ fn snapshot(app: &mut App) -> crate::cost::AvianStep {
 /// collapse reader's work account. DERIVED visits: warm start, biased solve and relaxation
 /// per substep, plus one restitution pass, including its zero-restitution no-ops. On a compute
 /// pool of more than one thread the fork's solver dispatches a color through parallel chunks from
-/// 64 constraints (`par_for_each(.., 64, ..)` in its `dynamics/solver/plugin.rs`), so a small batch's
-/// visits are all serial and a large one's all parallel; a dispatch counted in the other column
-/// breaks the classification.
+/// 64 constraints (`par_for_each(.., 64, ..)` in its `dynamics/solver/plugin.rs`), so a small
+/// batch's visits are all serial and a large one's all parallel; a dispatch counted in the other
+/// column breaks the classification.
 #[test]
 fn contact_visits_cover_each_pass_and_reset_each_step() {
     // Fixture: a pool of four threads, unless another test of this process built the global pool
