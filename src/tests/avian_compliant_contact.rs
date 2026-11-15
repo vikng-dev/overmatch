@@ -1,11 +1,14 @@
-//! GUARD for the vendored compliant contact patch (`vendor/avian3d-0.7.0-child-pose`,
-//! `OVERMATCH_PATCH.md`; record: `upstream/avian-compliant-contact.md`), in the game's tank driving
-//! physics (game state only). The soft run (`track::soft_run`) hands its law to every point the
-//! narrow phase found and places each spring's free length with `rest`, so a point whose spring is
-//! free must bear nothing in the solver, and a loaded body must rest where its springs carry it.
+//! GUARD for the compliant contact hook (`vendor/avian3d-0.8.0-overmatch`, `OVERMATCH_PATCH.md`,
+//! "Compliant contact"; record: `upstream/avian-compliant-contact.md`) and the game's law behind
+//! it, `crate::avian_ext::compliance`, in the game's tank driving physics (game state only). The
+//! soft run (`track::soft_run`) hands its law to every point the narrow phase found and places each
+//! spring's free length with `rest`, so a point whose spring is free must bear nothing in the
+//! solver, and a loaded body must rest where its springs carry it.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+
+use crate::avian_ext::compliance::{ContactCompliance, Laws};
 
 /// Fixture: a law for a 1 kg box (N/m, N·s/m), its spring free through the first 5 mm of overlap.
 const LAW: ContactCompliance = ContactCompliance {
@@ -26,10 +29,15 @@ struct Cached(bool);
 #[derive(Resource, Default)]
 struct Handed(bool);
 
-fn hand_over(mut graph: ResMut<ContactGraph>, cached: Res<Cached>, mut handed: ResMut<Handed>) {
+fn hand_over(
+    mut graph: ResMut<ContactGraph>,
+    mut laws: ResMut<Laws>,
+    cached: Res<Cached>,
+    mut handed: ResMut<Handed>,
+) {
     for pair in graph.iter_active_mut() {
-        for manifold in &mut pair.manifolds {
-            manifold.compliance = Some(LAW);
+        for (index, manifold) in pair.manifolds.iter_mut().enumerate() {
+            laws.set(pair.contact_id, index, LAW);
             for (point, compression) in manifold.points.iter_mut().skip(1).zip(FREE) {
                 point.penetration = compression - LAW.rest;
                 if cached.0 {
@@ -131,10 +139,10 @@ fn a_compliant_point_whose_spring_is_free_bears_nothing() {
 #[derive(Resource)]
 struct Law(ContactCompliance);
 
-fn hand_law(mut graph: ResMut<ContactGraph>, law: Res<Law>) {
-    for pair in graph.iter_active_mut() {
-        for manifold in &mut pair.manifolds {
-            manifold.compliance = Some(law.0);
+fn hand_law(graph: Res<ContactGraph>, mut laws: ResMut<Laws>, law: Res<Law>) {
+    for pair in graph.iter_active() {
+        for index in 0..pair.manifolds.len() {
+            laws.set(pair.contact_id, index, law.0);
         }
     }
 }

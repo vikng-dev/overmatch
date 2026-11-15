@@ -10,6 +10,7 @@
 
 pub mod attachment;
 pub mod child_poses;
+pub mod compliance;
 pub mod contact_match;
 pub mod contact_reduction;
 pub mod island_wake;
@@ -36,4 +37,5 @@ pub fn plugin(app: &mut App) {
     sleeping_increments::plugin(app);
     contact_reduction::plugin(app);
     island_wake::plugin(app);
+    compliance::plugin(app);
 }

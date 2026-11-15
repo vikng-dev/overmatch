@@ -421,6 +421,36 @@ installed, `rest_depends_on_energy_per_mass_and_spin_axis` and
 `the_original_velocity_test_still_allows_rest` and
 `a_long_bar_see_sawing_below_the_angular_limit_still_rests` fail (MEASURED).
 
+## Compliant contact (`src/dynamics/solver/contact/normal_part.rs`): hook
+
+Subject: the game's tank driving physics (the track belt against loose pieces), game state only.
+
+`ContactNormalPart` gains `compliant: bool` and `spring: SoftnessCoefficients`, and
+`solve_impulse` two arms for a compliant point. At positive separation it removes its accumulated
+impulse, so it pushes only while its spring is compressed and never stops a body short of it. In
+overlap it solves `spring` in the biased and the relaxing pass alike, uncapped by the overlap solve
+speed, so its compression under a steady load is the spring's static deflection. A new part is
+rigid (`compliant` false, `spring` a copy of `softness`).
+
+The law and its writers are the game's (`avian_ext::compliance`): a writer sets a manifold's
+`ContactCompliance` in the `Laws` resource, keyed by contact and manifold index, after the narrow
+phase; the store is cleared at the start of every step. After `SolverSystems::PrepareContactConstraints`
+the game finds each constraint of a manifold with a law by its `contact_id` and `manifold_index`,
+subtracts the law's `rest` from each point's initial separation, and sets `compliant` and `spring`
+at the point's effective mass and the substep. A point the law does not bear at the narrow phase
+starts cold (its warm-start impulses zeroed) and solves inert. The 0.7 fork's
+`ContactManifold::compliance` field, its narrow-phase reset and the substep argument of constraint
+preparation are gone. One change of form: a law of zero stiffness and damping has bias zero where
+the 0.7 fork divided zero by zero; its point's impulse is the same.
+
+Not game-side: no public field makes the relaxing pass soft, so the two arms must sit in the solve.
+25 fork lines (MEASURED).
+
+Guard: `src/tests/avian_compliant_contact.rs`, 2 of 2 green. Mutants, each red (MEASURED): `rest`
+not subtracted (the resting test); a free point's warm start kept, the spring arm removed, the
+speculative arm removed, or the law tested on overlap in place of the spring (the free-point test;
+the spring arm also the resting test). Record: `upstream/avian-compliant-contact.md`.
+
 ## Body-pair contact reduction: game-side
 
 Subject: the game's server physics, contacts between bodies, game state only.

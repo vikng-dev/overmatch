@@ -36,3 +36,6 @@ mod avian_warm_start;
 
 #[path = "../../../src/tests/avian_contact_reduction.rs"]
 mod avian_contact_reduction;
+
+#[path = "../../../src/tests/avian_compliant_contact.rs"]
+mod avian_compliant_contact;

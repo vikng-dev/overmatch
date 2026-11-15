@@ -29,6 +29,15 @@ pub struct ContactNormalPart {
 
     /// The softness parameters used for tuning contact response.
     pub softness: SoftnessCoefficients,
+
+    /// OVERMATCH PATCH: whether the point solves a spring law ([`Self::spring`]) in place of
+    /// [`Self::softness`]: in every pass, uncapped by the overlap solve speed, and with no
+    /// speculative stop at positive separation.
+    pub compliant: bool,
+
+    /// OVERMATCH PATCH: the spring law's soft-constraint coefficients at this point's mass, read
+    /// when [`Self::compliant`] is set. A writer sets both after constraint preparation.
+    pub spring: SoftnessCoefficients,
 }
 
 impl ContactNormalPart {
@@ -106,6 +115,8 @@ impl ContactNormalPart {
             total_impulse: 0.0,
             effective_mass: k.recip_or_zero(),
             softness,
+            compliant: false, // OVERMATCH PATCH
+            spring: softness, // OVERMATCH PATCH
         }
     }
 
@@ -123,9 +134,21 @@ impl ContactNormalPart {
         let normal_speed = relative_velocity.dot(normal);
 
         // Compute the incremental normal impulse.
-        let mut impulse = if separation > 0.0 {
+        let mut impulse = if separation > 0.0 && self.compliant {
+            // OVERMATCH PATCH: a spring pushes only while compressed; a speculative stop here
+            // would be a rigid wall in front of it.
+            -self.impulse
+        } else if separation > 0.0 {
             // Speculative contact: Push back the part of the velocity that would cause penetration.
             -self.effective_mass * (normal_speed + separation / delta_secs)
+        } else if self.compliant {
+            // OVERMATCH PATCH: the spring, alike in the biased and relaxing passes, so its fixed
+            // point under a steady load is its static deflection.
+            let bias = self.spring.bias * separation;
+            let scaled_mass = self.spring.mass_scale * self.effective_mass;
+            let scaled_impulse = self.spring.impulse_scale * self.impulse;
+
+            -scaled_mass * (normal_speed + bias) - scaled_impulse
         } else if USE_BIAS {
             // Contact using bias: Incorporate softness parameters.
             //
