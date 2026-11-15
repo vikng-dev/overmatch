@@ -663,7 +663,8 @@ The heap rows are MEASURED 2026-11-15 and differ by the contact as well as the l
 column ran on the belt segments, this law on the soft run (`track-contact.md`). A start crossed
 when the hull origin passed the heap's far edge; a tick is stalled with the hull under 0.05 m/s
 after the first two seconds. Under this law two of the eight 0.3-pedal starts sat in first gear
-under 0.05 m/s for 2,014 and 2,065 of their 2,560 ticks, 3.7 and 3.2 m from their start.
+under 0.05 m/s for 2,014 and 2,065 of their 2,560 ticks, 3.7 and 3.2 m from their start (open,
+#374).
 
 Pricing a landing gear where its clutch closes moved three of the full-pedal heap starts and no
 other drive (MEASURED, tick for tick, on the contact before the soft run): on each, eighth,
@@ -792,7 +793,7 @@ and a tick stalled when driven under 0.05 m/s:
 
 The two full-pedal climbs short of the edge under this law are the standing house 1.4 m off its
 centre, straight through and stop-go; the first stalled for 1,187 of its 1,600 ticks, 588 of them
-in one run, and ended at rest in fourth with its belts turning at 2.16 m/s.
+in one run, and ended at rest in fourth with its belts turning at 2.16 m/s (open, #374).
 
 The brake lever carries only the stop-force shortfall against intent, without a release latch.
 Opposite input brakes to rest, waits the authored pause, then pays one direction cut;
@@ -845,8 +846,8 @@ This remains a large forecast-versus-delivery envelope: coupled crank accelerati
 speed gained while coupling settles change delivery after the original landing forecast.
 It is not an observer-noise-only bound or certification of a small-margin gear law. DERIVED
 dirt's `M < 8.0 kN` premise is **not met**; its F8 convergence remains unproved. Sand's previously
-MEASURED F7 spare near `−6 kN` still refuses that upshift for every positive M. Lane 3 must assess
-those predictions with its actual gear law, including this inertia/forecast discrepancy.
+MEASURED F7 spare near `−6 kN` still refuses that upshift for every positive M. Both predictions
+are unresolved under the gear law, as is this inertia/forecast discrepancy.
 
 MEASURED launch from rest to 0.5 m/s, before → after: concrete `0.593750 → 0.656250 s`,
 sand `0.640625 → 0.671875 s`. Concrete to 2 m/s is `2.609375 → 2.593750 s`; sand does not
@@ -859,7 +860,7 @@ not a valid invariant fixture once the new launch moves the tank onto different 
 record every sustained sample and the raw first delivery. The historical first-tick record remains
 in `drive-load-measurements-2026-11-02.json` for comparison.
 
-**Same-instant calibration, with the gear lane stopped at its boundary.** The contact pass now
+**Same-instant calibration.** The contact pass now
 records the same clipped convex face for the Driver and the physical contact law. Turn resistance
 uses normal pressure, `mu_t W cos(theta) length/(4 R_g)`, consistently with grip and rolling.
 

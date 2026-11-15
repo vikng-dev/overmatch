@@ -144,8 +144,8 @@ Known differences between the channels, none tuned:
   side into pieces, and a piece under the shoe's edge whose least overlap is sideways, an artefact
   of one normal per convex pair whose truth is the radial law, which no cap law gives. A rigid cap
   would eject by their lateral overlap the pieces the soft run leaves inside the solid; the nearest
-  measurement is the belt segments' side plates below, 28.5 reversals (related, not the same, since
-  a piece there sat in two colliders at once). An inert cap would hand those pieces to the rigid
+  measurement is the belt segments' side plates below, the pivot's reversals in their table
+  (related, not the same, since a piece there sat in two colliders at once). An inert cap would hand those pieces to the rigid
   stop. Parry clips a face to its first four vertices (the TODO in
   `ConvexPolyhedron::local_support_feature`, parry 0.27), so a cap contact, its face an N-gon, is
   mostly the lone GJK witness point (DERIVED).
