@@ -541,12 +541,16 @@ share because the contact law fades rolling to nothing at rest (`ROLLING_FADE_SP
 a Resolution constant): a crawl inside the fade reads part of the rolling a gear meets once it
 moves, and a gear priced against that reading settles in an equilibrium the fade makes (MEASURED
 when the Driver priced `R` alone, 4° at 0.3 pedal: third's slip pull of 53,619 N met a reading of
-53,620 N at 0.150 m/s, and the hull crept there). A gear *holds* the most it pulls on the pedal's
-own fuel (`transmission::viable_pull`), the clutch capping its torque and the grip budget its
-push. A slipping clutch holds the crank at the launch rpm, so a gear below its launch speed holds
-its slip pull. A held clutch keeps the crank on the shaft as the hull slows, lugging down to the
-idle guard, so the gear holds the most its pedal nets at any crank speed from there up to where
-it runs or lands. The idle catch fuels past the pedal and counts for nothing: a gear the catch
+53,620 N at 0.150 m/s, and the hull crept there). A gear *holds* what it pulls on the pedal's own
+fuel, the clutch capping its torque and the grip budget its push. A slipping clutch holds the
+crank at the launch rpm, so a gear below its launch speed holds its slip pull. The engaged gear's
+held clutch keeps the crank on the shaft as the hull slows, lugging down to the idle guard, so it
+holds the most its pedal nets at any crank speed from there up to where it runs
+(`transmission::viable_pull`). Any other gear holds what its pedal nets at the crank speed its
+clutch closes on (`transmission::landing_pull`): it reaches a slower crank only once the hull has
+slowed. No clause admits a gear whose crank is forecast to land past the engine's crank limit.
+The limit is the bound, not the governed speed: a landing on the governor's ramp is partly fueled
+and may pull. The idle catch fuels past the pedal and counts for nothing: a gear the catch
 carries holds less than the load it crawls against.
 
 **A comparison is decided beyond the load's standard error.** Each tick reads its own load,
@@ -574,8 +578,13 @@ not `u`.
 as it is, over a window it pulled whole; a paid cut, another gear or a tick without pull starts
 that run again. Any other gear is judged where the cut lands, `v − R t_cut / M_c` and no lower
 than rest (the park latch holds a hull the cut stops), its clutch closing from out
-(`engagement`): below its launch speed it slips at the launch rpm. Reach is `max_step` either
-way, within the ladder; `max_step` is a fact about one selector event, not a reach to widen.
+(`engagement`): below its launch speed it slips at the launch rpm. The bound is read where the
+clutch closes, not at `v`: the crank turns free through the cut. That landing is a forecast from
+the window's load, so a load that ends inside the cut closes the clutch faster than forecast. One
+that closes it past the crank limit is an engaged over-rev: the clutch's slip guard bounds the
+crank at the limit plus `overrev_margin_rpm` (`assets/driving/engine.ron`), and the ceiling brakes,
+within their capacity, slow the hull to that gear's ceiling speed. Reach is `max_step` either way,
+within the ladder; `max_step` is a fact about one selector event, not a reach to widen.
 
 - *Only a held clutch shows the gear's drive.* A clutch taking up sends its capacity and the
   crank's stored speed, whatever the gear (MEASURED, flat ground at a third of the pedal, fourth
@@ -648,7 +657,19 @@ law against the losing test and the carried clause it replaced:
 | full pedal, 15° | 1.64 m/s in 4th and 3rd, 18 pairs | 2.14 m/s in 4th |
 | full pedal, 20° | fourth at 2.0 m/s stepped to first, 0.66 m/s | 2.0 m/s in 4th |
 | heap, 0.3 pedal, 8 starts | 2 crossed, 86.5 m, 9 relaunches | 2 crossed, 85.8 m, 4 relaunches |
-| heap, full pedal, 6 starts | all crossed, 1830 m, no step down | all crossed, 1801 m, 9 steps down |
+| heap, full pedal, 6 starts | all crossed, 1830 m, no step down | all crossed, 1838 m, 6 steps down |
+
+Pricing a landing gear where its clutch closes moved three of the full-pedal heap starts and no
+other drive (MEASURED, tick for tick, on the contact before the soft run): on each, eighth,
+slipping at 7.8 to 8.0 m/s, had stepped to seventh, whose clutch closed at 2,674 to 2,734 rpm, past
+fuel cut, and dragged the hull at 17 to 35 kN for 60 to 86 ticks before eighth returned; under the
+price eighth held, and the six starts travelled 1838 m against 1801 m. On the soft run's contact
+the price moves none of the 37 drives (MEASURED, tick for tick, against the law without it); the
+six full-pedal heap starts travel 1966 m with no step down either way.
+
+Admission refuses a ladder whose highest launch gear turns its crank past the limit inside the
+parking tolerance (`PARK_ENGAGE_SPEED`): clause 1 launches from out at any speed inside it, and
+needs a launch gear that lands there.
 
 At 0.3 pedal from 10° first creeps under both (0.23 m/s at 10°, 0.03 m/s at 12°): no gear pulls
 more on that pedal. MEASURED by `drive_load`'s unheld-gear witness (0.25 pedal, 46.5 kN, fifth
@@ -699,6 +720,27 @@ Rejected forms:
   its patches' elastic shear while the belts, carrying the crank's inertia, do not (MEASURED, flat
   ground at a third of the pedal, fourth to fifth: the hull's speed swung 2.235 to 2.201 m/s over
   six ticks while the belts rose 2.212 to 2.227 m/s); the drivetrain's gain is the losing test.
+- *Crediting a gear the cut lands with the most its pedal nets at any slower crank*: it prices a
+  gear landing past its torque peak at a pull it gives only once the hull has slowed into it, and
+  one landing past fuel cut or the crank limit at a pull it never gives on landing. MEASURED on the
+  boundary ramp (`headless_test::boundary`, the shipped tank at full pedal entering a 1:8 ramp in
+  top gear at 10.5 m/s): with the hull pitching onto the ramp, eighth read short, holding 46,086 N
+  against 53,257 ± 6,350 N, and seventh, credited 68,600 N, landed at 10.19 m/s, a DERIVED
+  3,609 rpm against the 3,000 rpm limit; the ceiling brakes slowed the hull at 4.06 m/s² against a
+  DERIVED 1.64 m/s² from grade and rolling, sixth followed landing at a DERIVED 3,474 rpm, and the
+  hull reached the lip at 4.89 m/s. Priced where they land, the lower gears are refused all the
+  way up and eighth reaches the lip at 8.12 m/s.
+- *Refusing to close a clutch whose shaft would turn the crank past the limit*, its gear held out
+  and chosen again at the belts' live speed rather than at the cut's forecast, and braked toward
+  top gear's ceiling past it: it creates a state the law otherwise never enters, a moving hull
+  under pull with its clutch out and its gear refused. Rounding can hold it there (DERIVED: top
+  gear's ceiling at 2 − 2⁻¹⁰ m/s, both belts one ulp past it at a mobility of 2⁻¹⁰ against a 1 N
+  reaction; the brake solve cancels the reaction exactly and the belts stay one ulp past the
+  ceiling every tick). Where the selector's reach excludes every gear that lands, no clause has an
+  admissible winner, so the hold needs a choice of its own (DERIVED: eight gears, fourth selected,
+  `max_step` 2, a shaft only seventh and eighth land: reach is second to sixth). It moved none of
+  the 37 drives and held no tick out on the boundary ramp (MEASURED), and a clutch closing past
+  the limit is an over-rev the slip guard and the ceiling brakes already bound.
 - *Pricing a candidate at a crawl as a lug rather than the slip its clutch closes into*: it
   carries the idle catch's whole torque and outbids a part-pedal launch, which then stops in the
   cut (MEASURED in `part_pedal_launches_and_sustains_ordered_speed`, a quarter-pedal launch

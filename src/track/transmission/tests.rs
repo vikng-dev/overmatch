@@ -1652,13 +1652,14 @@ fn full_pedal_reaches_the_curve_and_release_retains_drag() {
     assert!(drag > 0.0);
 }
 
-/// The game's driving model: a gear landing with its clutch held holds the most its pedal nets at
-/// any crank speed down to the idle guard, since the hull slows into it; one landing below its
-/// launch speed holds its slip pull. Viability relies on both. Mutant: pricing only where the gear
-/// lands misses the torque peak below it. Fixture: each class drivetrain's top gear at a third of
-/// the pedal, landing at its governed speed and at half its launch speed.
+/// The game's driving model: an engaged gear with its clutch held holds the most its pedal nets at
+/// any crank speed down to the idle guard, since the hull slows into it; one slipping below its
+/// launch speed holds its slip pull. The engaged gear's verdict relies on both. Mutant: pricing
+/// only where the gear runs misses the torque peak below it. Fixture: each class drivetrain's top
+/// gear at a third of the pedal, running at its governed speed and slipping at half its launch
+/// speed.
 #[test]
-fn a_gear_holds_the_most_its_pedal_nets_at_or_below_where_it_lands() {
+fn an_engaged_gear_holds_the_most_its_pedal_nets_at_or_below_where_it_runs() {
     let command = 0.3; // Fixture: part pedal.
     for (_, tp) in class_drivetrains() {
         let ratio = *tp.gears_fwd.last().expect("a ladder");
@@ -1679,7 +1680,7 @@ fn a_gear_holds_the_most_its_pedal_nets_at_or_below_where_it_lands() {
         );
         assert!(
             held >= pedal(tp.peak_torque_rpm) && pedal(tp.peak_torque_rpm) > pedal(governed),
-            "landing at {governed} rpm the gear holds its peak below: {held} N"
+            "running at {governed} rpm the gear holds its peak below: {held} N"
         );
         let slipping = viable_pull(
             &tp,
@@ -1687,7 +1688,7 @@ fn a_gear_holds_the_most_its_pedal_nets_at_or_below_where_it_lands() {
             at(0.5 * tp.launch_omega(command)),
             ratio,
             command,
-            ClutchState::Out,
+            ClutchState::Slip,
         );
         let slip = price_driver_force(
             &tp,
@@ -1701,6 +1702,56 @@ fn a_gear_holds_the_most_its_pedal_nets_at_or_below_where_it_lands() {
             (slipping - slip).abs() <= 1e-5 * slip.abs(),
             "below its launch speed the gear holds its slip pull: {slipping} N against {slip} N"
         );
+    }
+}
+
+/// The game's driving and damage model: a gear whose clutch closes from out pulls what its pedal
+/// nets at the crank speed it lands on, or slips at the launch rpm below its launch speed, the
+/// clutch's capacity capping the torque either way, and no gear is priced whose crank would land
+/// past the engine's crank limit, so the Driver opens no cut toward one forecast to land there.
+/// Every Driver clause admits a gear by this price. Mutants: dropping the bound prices a gear
+/// landing past the limit; bounding at governed speed or completed fuel cut refuses one landing
+/// inside it; crediting the most the pedal nets at a slower crank prices a landing past the torque
+/// peak at that peak; capping only the pedal's positive torque prices drag a reduced clutch cannot
+/// carry. Fixture: every forward gear of each class drivetrain at full pedal, landing a whole rpm
+/// inside the limit, where each pedal nets only drag, a whole rpm past it and at half its launch
+/// speed, with the transmission whole and with its HP pool emptied.
+#[test]
+fn a_gear_lands_where_its_clutch_closes_and_never_past_the_crank_limit() {
+    let command = 1.0; // Fixture: full pedal.
+    let emptied = DriveSupply {
+        transmission_condition: 0.0,
+        ..DriveSupply::WHOLE
+    };
+    for (_, tp) in class_drivetrains() {
+        let limit = tp.engine.crank_limit_rpm;
+        for supply in [DriveSupply::WHOLE, emptied] {
+            let capacity = supply.transmission_condition * tp.clutch_capacity;
+            for &ratio in &tp.gears_fwd {
+                let lands = |rpm: f32| {
+                    let at = rpm * RPM_TO_RAD * tp.sprocket_radius / ratio;
+                    landing_pull(&tp, supply, at, ratio, command)
+                };
+                let inside = limit - 1.0;
+                let [fuel, _, drag] = engine_torques(&tp, supply, inside * RPM_TO_RAD, command);
+                let nets = (fuel - drag).clamp(-capacity, capacity) * ratio / tp.sprocket_radius;
+                let landed = lands(inside).expect("a gear landing inside the crank limit engages");
+                assert!(
+                    (landed - nets).abs() <= 1e-5 * nets.abs(),
+                    "landing at {inside} rpm the gear pulls what its pedal nets there, capped: \
+                     {landed} N against {nets} N"
+                );
+                assert_eq!(lands(limit + 1.0), None, "landing past {limit} rpm");
+                let launch = tp.launch_omega(command) / RPM_TO_RAD;
+                let slip = price_driver_force(&tp, supply, 0.0, ratio, command, ClutchState::Slip);
+                let slipping = lands(0.5 * launch).expect("a slipping clutch holds the launch rpm");
+                assert!(
+                    (slipping - slip).abs() <= 1e-5 * slip.abs(),
+                    "below its launch speed the gear slips at its launch pull: {slipping} N against \
+                     {slip} N"
+                );
+            }
+        }
     }
 }
 
@@ -3312,6 +3363,38 @@ fn the_crank_limit_requires_completed_fuel_cut() {
     );
     a.crank_limit_rpm += engine_control().governor_cut_rpm.value;
     assert!(TransmissionParams::from_authoring(&a).is_ok());
+}
+
+/// The game's driving model: admission refuses a ladder none of whose launch gears closes its
+/// clutch inside the crank limit at every speed in the parking tolerance, naming the ladder's
+/// field. The Driver's choice at rest (`driver::choose`) launches from out at any such speed and
+/// relies on one gear landing there. Mutant: dropping the check admits these ladders, whose launch
+/// then finds no gear. Fixture: the lab ladder slowed until its highest launch gear, fourth at
+/// 0.09 km/h, reaches its limit at a DERIVED 0.0264 m/s, and its reverse ladder slowed to
+/// 0.036 km/h.
+#[test]
+fn a_ladder_that_cannot_launch_inside_the_crank_limit_is_refused_before_play() {
+    let lab = lab_authoring();
+    let slow_forward = TransmissionAuthoring {
+        forward_speeds_kmh: &[0.036, 0.054, 0.072, 0.09, 0.108],
+        ..lab
+    };
+    let slow_reverse = TransmissionAuthoring {
+        reverse_speeds_kmh: &[0.036],
+        ..lab
+    };
+    for (authoring, field) in [
+        (slow_forward, "gearbox.forward_speeds_kmh"),
+        (slow_reverse, "gearbox.reverse_speeds_kmh"),
+    ] {
+        let error = TransmissionParams::from_authoring(&authoring)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(field) && error.contains("engine.crank_limit_rpm"),
+            "{error}"
+        );
+    }
 }
 
 /// Admission follows the torque law's slope, not how many samples the author used.

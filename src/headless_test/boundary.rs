@@ -7,6 +7,9 @@ use crate::track::{
 };
 use avian3d::prelude::*;
 
+/// Fixture: the ramp's rise per metre run, 1:8.
+const RAMP_GRADE: f32 = 1.0 / 8.0;
+
 struct Bed {
     app: BootedSim,
     tank: Entity,
@@ -17,6 +20,9 @@ struct Bed {
     face: f32,
     tolerance: f32,
     rest: f32,
+    /// The ramp's crest, its last grid sample before the drop (x and height, m); `None` on flat
+    /// ground.
+    crest: Option<Vec2>,
 }
 
 impl Bed {
@@ -25,16 +31,17 @@ impl Bed {
         let manifest = crate::map::tests::fixture_manifest(128.0, 0.0, 50.0);
         let half = manifest.extent.half_extent();
         let size = 129;
+        let column_x = |column: u32| -half + column as f32 * (2.0 * half / (size - 1) as f32);
+        let ramp_height = |x: f32| {
+            (ramp && x > half - 40.0 && x < half - 8.0).then_some((x - (half - 40.0)) * RAMP_GRADE)
+        };
         let heights = (0..size * size)
-            .map(|i| {
-                let x = -half + (i % size) as f32 * (2.0 * half / (size - 1) as f32);
-                if ramp && x > half - 40.0 && x < half - 8.0 {
-                    (x - (half - 40.0)) / 8.0
-                } else {
-                    0.0
-                }
-            })
+            .map(|i| ramp_height(column_x(i % size)).unwrap_or(0.0))
             .collect::<Vec<_>>();
+        let crest = (0..size).rev().find_map(|column| {
+            let x = column_x(column);
+            ramp_height(x).map(|y| Vec2::new(x, y))
+        });
         let grid = crate::terrain_grid::HeightGrid::new(heights.into(), size, manifest.extent);
         let mut app = booted_sim_on_map(Some(grid), Some(manifest));
         start_fixed_clock(&mut app);
@@ -100,6 +107,7 @@ impl Bed {
             face: half - margin,
             tolerance,
             rest,
+            crest,
         }
     }
 
@@ -147,9 +155,10 @@ impl Bed {
             .fold(f32::NEG_INFINITY, f32::max)
     }
 
-    fn enter(&mut self, at: Vec2, yaw_deg: f32, rolling: bool) {
-        let rotation = Quat::from_rotation_y(yaw_deg.to_radians());
-        let position = Vec3::new(at.x, self.rest, at.y);
+    /// Places the hull resting on `ground` (m) turned by `rotation`, settles it, then sets it
+    /// rolling in top gear at that gear's governed speed, or at rest in first.
+    fn enter(&mut self, ground: Vec3, rotation: Quat, rolling: bool) {
+        let position = ground + rotation * Vec3::Y * self.rest;
         drive_load::place(&mut self.app, self.tank, position, rotation, 0.0, 1);
         // Fixture: settle the suspension before drive entry, so launch transients are not wall lift.
         for _ in 0..2 * FIXED_TICKS_PER_SECOND {
@@ -342,7 +351,8 @@ impl Containment {
 fn drive_at_wall(name: &str, yaw: f32, corner: bool, rolling: bool) -> DriveMargins {
     let mut bed = Bed::new(false);
     let z = if corner { bed.half - 16.0 } else { -40.0 };
-    bed.enter(Vec2::new(bed.half - 16.0, z), yaw, rolling);
+    let rotation = Quat::from_rotation_y(yaw.to_radians());
+    bed.enter(Vec3::new(bed.half - 16.0, 0.0, z), rotation, rolling);
     let mut containment = Containment::new(&bed);
     let mut foot = f32::NEG_INFINITY;
     let mut slide_start = None;
@@ -409,12 +419,26 @@ fn oblique_drive_slides_without_rearing_climbing_or_perching() {
     );
 }
 
-/// The server's side bound must hold even when terrain support is absent on arrival. The ramp
-/// supplies the launch through ordinary track contacts; the test never authors an upward impulse.
+/// The server's side bound must hold even when terrain support is absent on arrival. The test sets
+/// the launch: the hull rests pitched up the ramp with its leading roadwheel at the crest, then
+/// leaves it in top gear at that gear's governed speed through ordinary track contacts within one
+/// wheelbase, too short a climb for a gear choice to set the launch speed (DERIVED: grade and
+/// rolling alone take about 0.6 m/s over the booted tank's 3.6 m). It never authors an upward
+/// impulse.
 #[test]
 fn a_hull_launched_off_a_ramp_stays_inside_the_wall() {
     let mut bed = Bed::new(true);
-    bed.enter(Vec2::new(bed.half - 50.0, -40.0), -90.0, true);
+    let crest = bed.crest.expect("a ramp bed has a crest");
+    let rotation =
+        Quat::from_rotation_y((-90.0_f32).to_radians()) * Quat::from_rotation_x(RAMP_GRADE.atan());
+    // The leading roadwheel's reach ahead of the hull's root, along its heading.
+    let lead = bed
+        .droop_feet
+        .iter()
+        .map(|foot| -foot.z)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let ground = Vec3::new(crest.x, crest.y, -40.0) - rotation * Vec3::NEG_Z * lead;
+    bed.enter(ground, rotation, true);
     let mut containment = Containment::new(&bed);
     let mut airborne_at_wall = false;
     let mut peak = f32::NEG_INFINITY;

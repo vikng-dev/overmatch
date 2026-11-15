@@ -251,8 +251,10 @@ impl Measurements {
 
 /// Every paid cut of one drive, held to the rules its construction states (architecture §5a): a
 /// cut opens the clutch for exactly one shift's ticks, a full window of drive separates it from the
-/// last, it changes gear within `max_step`, and a step down lands a gear that holds more than the
-/// engaged gear on the drive's pedal ([`viable_pull`](crate::track::transmission::viable_pull)).
+/// last, it changes gear within `max_step`, and a step down lands a gear inside the crank limit
+/// that holds more than the engaged gear on the drive's pedal
+/// ([`landing_pull`](crate::track::transmission::landing_pull) against
+/// [`viable_pull`](crate::track::transmission::viable_pull)).
 /// Which clause decides a cut is the Driver's unit tests' to show ([`crate::track::driver`]); how
 /// many cuts a drive pays is an observation.
 struct Cuts {
@@ -281,7 +283,7 @@ impl Cuts {
     }
 
     fn tick(&mut self, app: &App, tank: Entity) {
-        use crate::track::transmission::{ClutchState, viable_pull};
+        use crate::track::transmission::{landing_pull, viable_pull};
         let gear = app.world().resource::<crate::track::sim::TrackGear>();
         let tp = gear.trans();
         let window = usize::from(tp.shift_ticks.get());
@@ -326,22 +328,25 @@ impl Cuts {
         } else {
             (&tp.gears_fwd, 1.0)
         };
-        let holds = |candidate: u8, at: f32, clutch: ClutchState| {
-            let ratio = ladder[usize::from(candidate - 1)];
-            viable_pull(tp, DriveSupply::WHOLE, at, ratio, self.pedal, clutch)
-        };
+        let ratio = |gear: u8| ladder[usize::from(gear - 1)];
         let speed = (dir * p.sensed_speed).max(0.0);
         let landing = (speed
             - dir * p.sensed_resistance_n * f32::from(tp.shift_ticks.get())
                 / FIXED_TICKS_PER_SECOND as f32
                 / gear.landing_mass())
         .max(0.0);
-        // The Driver also caps both holds by grip and floors the resistance at a stall, which can
-        // only lower the landing; a gear holds no less landing faster, so its step down passes
-        // this uncapped, unfloored comparison too.
-        let (landed, engaged) = (
-            holds(new, landing, ClutchState::Out),
-            holds(old, speed, self.clutch),
+        // The Driver also caps both holds by grip, which cannot reverse this comparison, and at a
+        // stall floors the resistance, landing slower than this forecast: the check takes a stalled
+        // window to land below the new gear's launch speed either way, where both slip.
+        let landed = landing_pull(tp, DriveSupply::WHOLE, landing, ratio(new), self.pedal)
+            .unwrap_or_else(|| panic!("gear {old} to {new}: a step down lands inside the limit"));
+        let engaged = viable_pull(
+            tp,
+            DriveSupply::WHOLE,
+            speed,
+            ratio(old),
+            self.pedal,
+            self.clutch,
         );
         assert!(
             landed > engaged,
