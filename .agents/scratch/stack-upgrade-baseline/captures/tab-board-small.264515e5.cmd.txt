@@ -1,0 +1,11 @@
+commit: 264515e50b0da455b9ba05e26f477b0fbfd0018a (v0.7.0-alpha.17 = b8baa8e4 plus one docs-only commit)
+cwd: the bay root (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+command: /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/bl356/tab-board.sh scripts/capture/tab-board-small.ron
+started: 2026-11-16T00:28:44+0700
+load averages before start (1, 5, 15 min; MEASURED, uptime): 3.24 8.52 7.68
+exit: 1 wall 858s END 2026-11-16T00:43:02+0700
+wall time includes any wait for the machine lock (/tmp/overmatch-cargo.lock).
+note: the wrapper (a scratch helper, not tracked) ran, from the bay root, as its plan header says: a server, env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_BOT=29 target/debug/overmatch-server, then once it logged 'listening on' the client, env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CONFIG_DIR=<empty dir> OVERMATCH_SERVER=127.0.0.1:5888 OVERMATCH_CAPTURE=scripts/capture/tab-board-small.ron target/debug/overmatch; the server was stopped with SIGINT after the client exited
+note: exit 1 is the wrapper's own bug (zsh refuses an assignment to its read-only 'status' after the client returned), so the client's exit status was not recorded; both frames were written
+note: outputs: tab-board-small-00076.0000s.264515e5.png, tab-board-small-00078.0000s.264515e5.png
+note: the frames named above are kept out of git, at /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/captures/ (sizes and sha256 in ../MANIFEST.sha256)

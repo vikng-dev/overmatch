@@ -1,0 +1,13 @@
+commit: 264515e50b0da455b9ba05e26f477b0fbfd0018a (v0.7.0-alpha.17 = b8baa8e4 plus one docs-only commit)
+cwd: the bay root (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+command: /usr/bin/lockf -k -t 2400 /tmp/overmatch-cargo.lock python3 scripts/perf/pile_park.py --out target/pile-park-264515e5
+started: 2026-11-16T01:32:06+0700
+load averages before start (1, 5, 15 min; MEASURED, uptime): 3.85 5.79 6.44
+exit: 0 wall 353s END 2026-11-16T01:37:59+0700
+wall time includes any wait for the machine lock (/tmp/overmatch-cargo.lock).
+note: the plan names --out target/pile-park; this run wrote target/pile-park-264515e5 so the output carries the commit
+note: the timing gate passed after 45 s: no rustc running and the 1-minute load at 3.85 (MEASURED)
+note: binaries: target/release, built by scripts/serial-cargo build --locked --release --features dev_ui,bitprobe --bin overmatch --bin overmatch-server (11 m 42 s)
+note: all six runs (r01-pile .. r06-pile, the default palindrome) passed their gates (valid); summary.264515e5.{json,txt} are the runner's pooled tables
+note: the run directory (per-run server and client logs, window traces; 218 MB) is kept out of git at /Users/Yan/.cache/overmatch/stack-upgrade-baseline/264515e5/pile-park-run/
+note: machine build lock: held for the whole run; the command wraps it in /usr/bin/lockf on /tmp/overmatch-cargo.lock (pile_park.py's documented command), so no compile could start during it

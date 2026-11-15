@@ -1,0 +1,25 @@
+linux-x86_64	Run deterministic fixture	﻿2026-11-15T17:20:39.4669071Z ##[group]Run ./target/release/bitprobe bitprobe-linux-x86_64.obp.gz
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.4669473Z ./target/release/bitprobe bitprobe-linux-x86_64.obp.gz
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.4712128Z shell: /usr/bin/bash -e {0}
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.4712338Z env:
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.4712508Z   CARGO_TERM_COLOR: always
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.4712706Z   CARGO_HOME: /home/runner/.cargo
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.4712911Z   CARGO_INCREMENTAL: 0
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.4713089Z   CACHE_ON_FAILURE: false
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.4713283Z ##[endgroup]
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.4902178Z 2026-11-15T17:20:39.489252Z  INFO bevy_diagnostic::system_information_diagnostics_plugin::internal: SystemInfo { os: "Linux (Ubuntu 26.04)", kernel: "7.0.0-1019-azure", cpu: "AMD EPYC 9V74 80-Core Processor", core_count: "2", memory: "15.6 GiB" }
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.4904552Z 2026-11-15T17:20:39.490057Z ERROR bevy_render::extract_resource: Render app did not exist when trying to add `extract_resource` for <bevy_camera::clear_color::ClearColor>.
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.6134534Z 2026-11-15T17:20:39.613165Z  WARN bevy_render::texture: CompressedImageFormatSupport resource not found. It should either be initialized in finish() of RenderPlugin, or manually if not using the RenderPlugin or the WGPU backend.
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.6136579Z 2026-11-15T17:20:39.613236Z  WARN bevy_gltf: CompressedImageFormatSupport resource not found. It should either be initialized in finish() of RenderPlugin, or manually if not using the RenderPlugin or the WGPU backend.
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.6147667Z 2026-11-15T17:20:39.614607Z  INFO overmatch::terrain_grid: terrain: ForceFlatWorld set — keeping the flat slab + authored course
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.6152802Z 2026-11-15T17:20:39.615146Z  INFO overmatch::geometry_lod: geometry_lod: certificate loaded — 62 chain(s) over 59 scene mesh(es), sim artifact verified
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.7742874Z 2026-11-15T17:20:39.774008Z  INFO overmatch::track::sim: envelope law: travel 172.6 mm (spring-limited), k 411 kN/m per m, c 38.18 kN·s/m per m (ride 1.20 Hz, ζ 0.35)
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.7744391Z 2026-11-15T17:20:39.774034Z  INFO overmatch::track::sim: declared transmission: 8F/4R
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:39.7745965Z 2026-11-15T17:20:39.774046Z  INFO overmatch::track::sim: grip law: hull coupling 1.695, shortest shear length 6.88 mm per unit grip at the fixed step
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:40.4179762Z 
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:40.4180572Z thread 'main' (9867) panicked at src/bitprobe.rs:909:5:
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:40.4181133Z assertion `left == right` failed: the differential fixture captures exactly one tank
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:40.4182024Z   left: 0
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:40.4182236Z  right: 1
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:40.4182596Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+linux-x86_64	Run deterministic fixture	2026-11-15T17:20:40.4844465Z ##[error]Process completed with exit code 101.

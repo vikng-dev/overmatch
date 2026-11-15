@@ -1,0 +1,13 @@
+commit: 264515e50b0da455b9ba05e26f477b0fbfd0018a (v0.7.0-alpha.17 = b8baa8e4 plus one docs-only commit)
+cwd: the bay root (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+command: env OVERMATCH_MUTE=1 OUT=target/cost-264515e5 scripts/cost/run.sh idle1 fire1
+started: 2026-11-16T01:41:53+0700
+load averages before start (1, 5, 15 min; MEASURED, uptime): 3.56 7.31 6.94
+exit: 0 wall 85s END 2026-11-16T01:43:18+0700
+wall time includes any wait for the machine lock (/tmp/overmatch-cargo.lock).
+note: the timing gate waited 210 s, then passed: no rustc running, 1-minute load 3.56 (MEASURED)
+note: binaries: target/debug (the script's default), built by scripts/serial-cargo build --locked --features dev_ui,bitprobe --bin overmatch --bin overmatch-server
+note: result: idle1 OK, fire1 OK (the script's own lines)
+note: tables: python3 scripts/cost/analyze.py idle1=target/cost-264515e5/idle1.server.jsonl fire1=target/cost-264515e5/fire1.server.jsonl --baseline idle1 > cost-tables.264515e5.server.txt, and the same over the two .client.jsonl streams > cost-tables.264515e5.client.txt. The plan's analyze line names <dir>/idle1.jsonl; the game writes one stream per role, <base>.server.jsonl and <base>.client.jsonl
+note: streams.264515e5/ holds the four streams and the two harness scripts the run wrote, for re-analysis
+note: machine build lock: held for the whole workload; scripts/cost/run.sh re-executes itself under /usr/bin/lockf on /tmp/overmatch-cargo.lock (run.sh:14-16), so no compile could start during it

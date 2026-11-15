@@ -1,0 +1,11 @@
+commit: 264515e50b0da455b9ba05e26f477b0fbfd0018a (v0.7.0-alpha.17 = b8baa8e4 plus one docs-only commit)
+cwd: the bay root (/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1)
+command: env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 scripts/serial-cargo test --lib --features dev_ui,bitprobe belt_friction_probe -- --ignored --nocapture
+started: 2026-11-16T00:39:16+0700
+load averages before start (1, 5, 15 min; MEASURED, uptime): 4.72 7.10 7.16
+exit: 101 wall 435s END 2026-11-16T00:46:31+0700
+wall time includes any wait for the machine lock (/tmp/overmatch-cargo.lock).
+note: result: FAILED (exit 101). Five of six cases printed their BELTFRICTION line (slab-pull, slab-pivot, pieces-pull, pieces-pivot, house-pull); the sixth, house-pivot, panicked at src/headless_test/track_scorecard/belt_friction.rs:178:27, 'Entity despawned: The entity with ID 2202v0 is invalid' (MEASURED). The probe's track_pieces calls world.entity(piece) (line 178) on a body a solver point names without checking it still exists; a probe defect at this commit, not fixed here (a baseline records the shipped tree).
+note: per-tick CSVs of the five finished cases copied from target/belt-friction/ into belt-friction-csv.264515e5/
+note: the .txt beside this file is the run's stdout with INFO/WARN log lines removed
+note: machine build lock: held for the whole run; scripts/serial-cargo holds /tmp/overmatch-cargo.lock across the cargo invocation, the test binary's run included
