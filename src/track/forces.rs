@@ -562,9 +562,10 @@ impl ReactionSlope {
 }
 
 /// One link's rest outer face, hull-local `(z, y)` in metres, and how far the matter its support
-/// samples under each shoe edge stands inside that face, inboard then outboard (m, at least
-/// zero): the band the belt there has risen out of. An edge's matter is its column's: the field
-/// at its edge probes and the solids over its strip, deepest along the link, which is rigid.
+/// samples under each shoe edge stands inside that face, inboard then outboard (m along the link's
+/// outward normal, at least zero): an intrusion, the band the belt there has risen out of, not the
+/// shoe's displacement. An edge's matter is its column's: the field at its edge probes and the
+/// solids over its strip, deepest along the link, which is rigid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LinkRise {
     pub(crate) face: [Vec2; 2],

@@ -414,14 +414,10 @@ mod tests {
         }
     }
 
-    /// A side slice bears only lateral contact through its exposed face, the shoe's own. Its
-    /// rest-height radial planes cannot bypass suspension travel or duplicate the compressed
-    /// outer-face hard limit. Its inner face lies inside the shoe's width: matter the belt rides
-    /// over reaches through the slice, a convex pair's one normal then leaves by whichever lateral
-    /// face is nearer, and by the inner one it would shove the shoe sideways out of matter it
-    /// stands on. The sweep's witnesses rely on the same admission (`construction::sweep::source`).
-    /// Fails if a slice bears a radial normal or a lateral one of either sign, or reads the pair's
-    /// normal without its collider's order in the pair.
+    /// A side slice bears only lateral contact through its exposed face ([`Bearing::Exposed`]): its
+    /// rest-height radial planes would bypass suspension travel and duplicate the stop's limit. The
+    /// sweep's witnesses rely on the same admission (`construction::sweep::source`). Fails if a slice
+    /// bears a radial normal or a lateral one of either sign, or ignores its collider's pair order.
     #[test]
     fn a_side_slice_bears_only_lateral_contact_through_its_exposed_face() {
         for (outward, bears) in [(-Vec3::X, true), (Vec3::X, false), (-Vec3::Y, false)] {

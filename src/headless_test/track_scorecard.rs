@@ -2745,89 +2745,111 @@ fn every_stretch_of_a_run_on_loose_pieces_carries_the_running_gears_law_once() {
     }
 }
 
-/// A tank takes no energy from the solver's contacts with standing matter it rides onto. Over
-/// each tick the kinetic energy of its hull, belts (each its belt inertia at its speed) and crank
-/// rises by no more than the work of gravity, of the sampled support and of the solver's normal
-/// rows, and the most its engine can do (its greatest torque at its crank limit). The support's
-/// work is its forces on the hull over the hull's mean motion less what each belt paid it: the
-/// reaction the drivetrain landed the belt against (sprocket force less the belt's inertia force),
-/// less the solver's bill. Brakes, clutch and solver friction move energy among hull, belts and
-/// crank or spend it. Solver friction's bill reaches its belt a tick late (`sim::feel_tick`), so
-/// each tick charges the belt its own friction's bill at the belt speed the solver moved the
-/// surface at, and returns the bill it paid. The normal rows' work is the overlap correction's
-/// allowance, DERIVED from constraint work: against a static body a rigid row without bias only
-/// stops approach, so whatever positive work the tank's rows do is the correction's push-out.
-///
-/// Fixture: the left shoe comes down between two standing sills taller than the bump travel, each
-/// under one of its edges and running on past that edge's exposed face, so the stop carries the
-/// shoe at full travel on both and each edge's rest face stands the travel deep in its sill. Each
-/// overlaps its side slice sideways by half the lesser of the slice's thickness and the travel:
-/// less than its overlap from above, whatever the tank. Both are on a construction element's
-/// layers, which the slices meet. Fails if a slice bears in the band its belt has vacated: the two
-/// exposed faces' opposed rigid contacts, the pinch of `track-contact.md` (MEASURED: 34 kJ in one
-/// tick, against 6.9 kJ at most with the admission, under the engine's 9.1 kJ). The inner-face
-/// admission (`stop_contacts::Bearing`) is not what holds here: matter at a slice's inner face came
-/// in under the shoe, so it lies in the vacated band. It holds here, not yet everywhere:
-/// `track-contact.md` names what still breaks it.
+/// The left shoe's side slices, inboard then outboard, each with its span along `u`, which runs
+/// outward from the hull along the left side: the inboard slice's exposed face is its least `u`,
+/// the outboard's its greatest. Read from their colliders.
+fn left_slices(bed: &mut Bed) -> [(Entity, (f32, f32)); 2] {
+    use crate::track::stop_contacts::BeltFace;
+    let (tank, sign) = (bed.tank, Side::Left.sign());
+    let world = bed.app.world_mut();
+    let mut slices: Vec<_> = world
+        .query_filtered::<(Entity, &BeltFace, &Collider, &ChildOf), With<SidePlate>>()
+        .iter(world)
+        .filter(|(_, face, _, of)| face.side == Side::Left && of.parent() == tank)
+        .map(|(slice, _, collider, _)| {
+            let u = collider
+                .shape()
+                .as_convex_polyhedron()
+                .expect("a side slice is a convex prism")
+                .points()
+                .iter()
+                .map(|p| sign * p.x);
+            let span = (
+                u.clone().fold(f32::MAX, f32::min),
+                u.fold(f32::MIN, f32::max),
+            );
+            (slice, span)
+        })
+        .collect();
+    slices.sort_by(|a, b| a.1.0.total_cmp(&b.1.0));
+    <[_; 2]>::try_from(slices).expect("a track carries two side slices")
+}
+
+/// A static block on a construction element's layers, which the side slices meet: across `u` from
+/// `span.0` to `span.1` on the left side, `height` tall, `length` long about `z` (m).
+fn standing(bed: &mut Bed, span: (f32, f32), height: f32, (z, length): (f32, f32)) -> Entity {
+    let block = bed.spawn_static(
+        Vec3::new(Side::Left.sign() * (span.0 + span.1) / 2.0, height / 2.0, z),
+        Vec3::new(span.1 - span.0, height, length),
+    );
+    (bed.app.world_mut().entity_mut(block)).insert(crate::construction::element_layers());
+    block
+}
+
+/// The left shoe comes down between two standing sills taller than the bump travel, each under one
+/// of its edges and running on past that edge's exposed face, so the stop carries the shoe at full
+/// travel on both and each edge's rest face stands the travel deep in its sill. Each overlaps its
+/// side slice sideways by half the lesser of the slice's thickness and the travel: less than its
+/// overlap from above, whatever the tank. Fixture: sills 1 m long, half again as tall as the travel
+/// and half a metre wide past their edges, half a metre ahead of the belt.
+struct Straddle {
+    bed: Bed,
+    sills: [Entity; 2],
+    /// The left shoe's side slices, inboard then outboard.
+    slices: [Entity; 2],
+}
+
+impl Straddle {
+    fn new() -> Self {
+        let mut bed = Bed::on_ground(Some(base_ground()), flat());
+        let [(inner, inboard), (outer, outboard)] = left_slices(&mut bed);
+        let bump = shipped_spec().track.suspension.params().bump_stop;
+        let overlap = (outboard.1 - outboard.0).min(bump) / 2.0;
+        let (length, height) = (1.0, 1.5 * bump);
+        let ahead = (front_z(bed.geom()) - 0.5 - length / 2.0, length);
+        let spans = [
+            (inboard.0 - 0.5, inboard.0 + overlap),
+            (outboard.1 - overlap, outboard.1 + 0.5),
+        ];
+        let sills = spans.map(|span| standing(&mut bed, span, height, ahead));
+        bed.place(Vec3::ZERO, Quat::IDENTITY);
+        bed.start();
+        Self {
+            bed,
+            sills,
+            slices: [inner, outer],
+        }
+    }
+
+    /// The stop carries the shoe on both sills this tick.
+    fn carried(&self) -> bool {
+        self.sills.iter().all(|&sill| {
+            (self.bed.touching_colliders(sill).iter()).any(|role| role.starts_with("bump stop"))
+        })
+    }
+}
+
+/// The drivetrain's books close over standing matter it rides onto. Over each tick the kinetic
+/// energy of the hull, belts (each its belt inertia at its speed) and crank rises by no more than
+/// the work of gravity, of the sampled support and of the solver's normal rows, and the most its
+/// engine can do (its greatest torque at its crank limit). The support's work is its forces on the
+/// hull over the hull's mean motion less what each belt paid it: the reaction the drivetrain landed
+/// the belt against (sprocket force less the belt's inertia force), less the solver's bill. Brakes,
+/// clutch and solver friction move energy among hull, belts and crank or spend it. Solver
+/// friction's bill reaches its belt a tick late (`sim::feel_tick`), so each tick charges the belt
+/// its own friction's bill at the belt speed the solver moved the surface at, and returns the bill
+/// it paid. The normal rows' work is booked as the solver did it: whether their push was owed is
+/// [`matter_under_both_edges_of_a_shoe_never_pinches_it`]'s. Fixture: [`Straddle`], 8 s at full
+/// pedal, long enough to cross the sills in first gear. Fails under a pinch, whose friction the
+/// read-back cannot settle within a tick (#353): `track-contact.md`, the side slices against
+/// standing matter.
 #[cfg(feature = "bitprobe")]
 #[test]
-fn a_tank_takes_no_energy_from_standing_matter() {
+fn the_drivetrains_books_close_over_standing_matter() {
     use crate::track::sim::{TankTransmission, TrackDrive, TrackGear, TrackGripEffect};
-    use crate::track::stop_contacts::BeltFace;
-    let mut bed = Bed::on_ground(Some(base_ground()), flat());
-    let (tank, sign) = (bed.tank, Side::Left.sign());
-    // `u` runs outward from the hull along the left side. Each slice's span, read from its
-    // collider, inboard then outboard: the inboard slice's exposed face is its least `u`, the
-    // outboard's its greatest.
-    let mut slices: Vec<(f32, f32)> = {
-        let world = bed.app.world_mut();
-        world
-            .query_filtered::<(&BeltFace, &Collider, &ChildOf), With<SidePlate>>()
-            .iter(world)
-            .filter(|(face, _, of)| face.side == Side::Left && of.parent() == tank)
-            .map(|(_, collider, _)| {
-                let u = collider
-                    .shape()
-                    .as_convex_polyhedron()
-                    .expect("a side slice is a convex prism")
-                    .points()
-                    .iter()
-                    .map(|p| sign * p.x);
-                (
-                    u.clone().fold(f32::MAX, f32::min),
-                    u.fold(f32::MIN, f32::max),
-                )
-            })
-            .collect()
-    };
-    slices.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let [inboard, outboard] = <[_; 2]>::try_from(slices).expect("a track carries two side slices");
-    let front = front_z(bed.geom());
-    let bump = shipped_spec().track.suspension.params().bump_stop;
-    let overlap = (outboard.1 - outboard.0).min(bump) / 2.0;
-    // Fixture: sills 1 m long, half again as tall as the travel and half a metre wide past their
-    // edges, half a metre ahead of the belt.
-    let (length, height) = (1.0, 1.5 * bump);
-    let z = front - 0.5 - length / 2.0;
-    let mut standing = |from: f32, to: f32| {
-        let block = bed.spawn_static(
-            Vec3::new(sign * (from + to) / 2.0, height / 2.0, z),
-            Vec3::new(to - from, height, length),
-        );
-        bed.app
-            .world_mut()
-            .entity_mut(block)
-            .insert(crate::construction::element_layers());
-        block
-    };
-    let sills = [
-        standing(inboard.0 - 0.5, inboard.0 + overlap),
-        standing(outboard.1 - overlap, outboard.1 + 0.5),
-    ];
-    bed.place(Vec3::ZERO, Quat::IDENTITY);
-    bed.start();
-
-    let world = bed.app.world();
+    let mut straddle = Straddle::new();
+    let tank = straddle.bed.tank;
+    let world = straddle.bed.app.world();
     let gear = world.resource::<TrackGear>();
     let trans = gear.trans();
     let torque =
@@ -2849,9 +2871,9 @@ fn a_tank_takes_no_energy_from_standing_matter() {
     // `read`: the solver's bill each belt pays this tick (N); `bill`: its energy at the speeds the
     // solver ran the belt surfaces at (J).
     let (mut carried, mut read, mut bill, mut most) = (false, [0.0_f32; 2], 0.0, f32::MIN);
-    // Fixture: 8 s at full pedal, long enough to cross the sills in first gear.
     for tick in 0..8 * TICKS {
-        let (before, com, held) = (bed.hull(), bed.center_of_mass(), energy(&bed));
+        let bed = &mut straddle.bed;
+        let (before, com, held) = (bed.hull(), bed.center_of_mass(), energy(bed));
         bed.tick(1.0, 0.0);
         let after = bed.hull();
         let mean = |point: Vec3| {
@@ -2879,12 +2901,10 @@ fn a_tank_takes_no_energy_from_standing_matter() {
             .hard_reactions()
             .map(|hard| hard.map_or(0.0, |hard| hard.belt));
         let charge = (read[0] * probe.next_speeds[0] + read[1] * probe.next_speeds[1]) * DT;
-        let excess = energy(&bed) - held - (gravity + support - paid + rows) * DT - charge + bill;
+        let excess = energy(bed) - held - (gravity + support - paid + rows) * DT - charge + bill;
         bill = charge;
         most = most.max(excess);
-        carried |= sills.iter().all(|&sill| {
-            (bed.touching_colliders(sill).iter()).any(|role| role.starts_with("bump stop"))
-        });
+        carried |= straddle.carried();
         assert!(
             excess <= engine,
             "tick {tick}: the tank gained {excess} J beyond the work of gravity, its support and \
@@ -2893,6 +2913,126 @@ fn a_tank_takes_no_energy_from_standing_matter() {
     }
     println!("MEASURED the most gained in a tick: {most} J, against the engine's {engine} J");
     assert!(carried, "the stop never carried the shoe on both sills");
+}
+
+/// Matter under both edges of one shoe never pinches it: in no tick do both of its side slices
+/// carry the solver's normal rows. Each bears only through its exposed face, so two such rows push
+/// the shoe from both sides at once against static bodies, which no motion satisfies; matter under
+/// the shoe is the stop's and the sampled support's. Fixture: [`Straddle`], 8 s at full pedal.
+/// Fails if a slice bears in the band its belt has vacated (`stop_contacts::BeltFace::stands_at`):
+/// `track-contact.md`, the side slices against standing matter.
+#[test]
+fn matter_under_both_edges_of_a_shoe_never_pinches_it() {
+    let mut straddle = Straddle::new();
+    let mut carried = false;
+    for tick in 0..8 * TICKS {
+        straddle.bed.tick(1.0, 0.0);
+        let points = straddle.bed.solver_points();
+        let rows = straddle.slices.map(|slice| {
+            points.iter().any(|(point, force)| {
+                (point.reference_collider == slice || point.other_collider == Some(slice))
+                    && force.dot(point.normal) != 0.0
+            })
+        });
+        assert!(
+            rows != [true; 2],
+            "tick {tick}: both of the left shoe's side slices carry normal rows"
+        );
+        carried |= straddle.carried();
+    }
+    assert!(carried, "the stop never carried the shoe on both sills");
+}
+
+/// The contact hook reads a side slice's vacated band from its tank's last driving pass, so the
+/// band outlives the matter that raised it by the physics step that matter goes in, and no more
+/// (`sim::TrackRise` says why). Fixture: the left shoe parks with its outboard edge on a block as
+/// wide as its slice and half the bump travel tall; beside the shoe, half Avian's contact tolerance
+/// outside it, stands a block as tall, in the band. The first block goes where the construction
+/// sweep removes matter: after the tick's driving passes, before the step. Fails if the hook reads
+/// the gone block's band in a later step: a pass ordered after the step, or a resting tank left
+/// asleep.
+#[test]
+fn a_vacated_band_outlives_its_matter_by_the_step_it_goes_in() {
+    use crate::track::forces::LinkRise;
+    use crate::track::sim::TrackRise;
+    use crate::track::stop_contacts::BeltFace;
+    #[derive(Resource)]
+    struct Collapse {
+        tank: Entity,
+        support: Entity,
+        armed: bool,
+        band: Vec<LinkRise>,
+        /// Each step since the support went: whether the hook reads its band.
+        stale: Vec<bool>,
+    }
+    fn collapse(mut collapse: ResMut<Collapse>, mut commands: Commands) {
+        if std::mem::take(&mut collapse.armed) {
+            commands.entity(collapse.support).despawn();
+        }
+    }
+    fn read(
+        mut collapse: ResMut<Collapse>,
+        rises: Query<&TrackRise>,
+        colliders: Query<(), With<Collider>>,
+    ) {
+        if colliders.contains(collapse.support) {
+            return;
+        }
+        let rise = rises.get(collapse.tank).expect("a driving tank");
+        let stale = rise.0[Side::Left.index()] == collapse.band;
+        collapse.stale.push(stale);
+    }
+
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    let [_, (slice, outboard)] = left_slices(&mut bed);
+    let height = shipped_spec().track.suspension.params().bump_stop / 2.0;
+    let config = bed.app.world().resource::<NarrowPhaseConfig>();
+    let beside = outboard.1 + config.contact_tolerance / 2.0;
+    // Fixture: 1 m blocks under the middle of the ground run, the one beside half a metre wide.
+    let along = (0.0, 1.0);
+    let support = standing(&mut bed, outboard, height, along);
+    standing(&mut bed, (beside, beside + 0.5), height, along);
+    bed.place(Vec3::ZERO, Quat::IDENTITY);
+    bed.start();
+    until_resting(&mut bed);
+
+    let world = bed.app.world();
+    let band =
+        world.get::<TrackRise>(bed.tank).expect("a driving tank").0[Side::Left.index()].clone();
+    let hull = bed.hull();
+    let edge = Vec3::new(Side::Left.sign() * beside, height, along.0);
+    assert!(
+        !(world.get::<BeltFace>(slice).expect("a side slice's face"))
+            .stands_at(&band, hull.rotation.inverse() * (edge - hull.position)),
+        "the block beside the shoe stands in the band its neighbour raised"
+    );
+    let tank = bed.tank;
+    bed.app.insert_resource(Collapse {
+        tank,
+        support,
+        armed: true,
+        band,
+        stale: Vec::new(),
+    });
+    bed.app.add_systems(
+        FixedPostUpdate,
+        (
+            collapse.before(PhysicsSystems::Prepare),
+            read.after(PhysicsSystems::Prepare)
+                .before(PhysicsSystems::StepSimulation),
+        ),
+    );
+    // Fixture: a second after the block goes.
+    for _ in 0..TICKS {
+        bed.tick(0.0, 0.0);
+    }
+    let stale = &bed.app.world().resource::<Collapse>().stale;
+    assert_eq!(stale.len(), TICKS, "the block went before the first step");
+    let late: Vec<_> = (1..TICKS).filter(|&step| stale[step]).collect();
+    assert!(
+        late.is_empty(),
+        "the hook read the gone block's band in steps {late:?} after the one it went in"
+    );
 }
 
 /// One broad heavy slab under the whole tank, the tank settled a second on it. Fixture.
