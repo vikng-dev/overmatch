@@ -469,16 +469,21 @@ subtracts the law's `rest` from each point's initial separation, and sets `compl
 at the point's effective mass and the substep. A point the law does not bear at the narrow phase
 starts cold (its warm-start impulses zeroed) and solves inert. The 0.7 fork's
 `ContactManifold::compliance` field, its narrow-phase reset and the substep argument of constraint
-preparation are gone. One change of form: a law of zero stiffness and damping has bias zero where
-the 0.7 fork divided zero by zero; its point's impulse is the same.
+preparation are gone. A law of zero stiffness and damping solves inert at any effective mass, as a
+point the law does not bear: each solve returns its accumulated impulse. The 0.7 fork reached the
+same impulse through a bias of zero over zero, whose NaN its accumulated-impulse clamp read as zero;
+the formula's coefficients with a finite bias in its place carry a cached impulse through every
+solve of a point of zero effective mass (MEASURED: a locked box's cached 5 N·s kept, 60 N·s stored
+as load over the step's solves).
 
 Not game-side: no public field makes the relaxing pass soft, so the two arms must sit in the solve.
 25 fork lines (MEASURED).
 
-Guard: `src/tests/avian_compliant_contact.rs`, 2 of 2 green. Mutants, each red (MEASURED): `rest`
+Guard: `src/tests/avian_compliant_contact.rs`, 3 of 3 green. Mutants, each red (MEASURED): `rest`
 not subtracted (the resting test); a free point's warm start kept, the spring arm removed, the
 speculative arm removed, or the law tested on overlap in place of the spring (the free-point test;
-the spring arm also the resting test). Record: `upstream/avian-compliant-contact.md`.
+the spring arm also the resting test); the zero law given the formula's coefficients (the zero-law
+test). Record: `upstream/avian-compliant-contact.md`.
 
 ## Body-pair contact reduction: game-side
 

@@ -5,6 +5,7 @@
 //! spring's free length with `rest`, so a point whose spring is free must bear nothing in the
 //! solver, and a loaded body must rest where its springs carry it.
 
+use avian3d::dynamics::solver::constraint_graph::ConstraintGraph;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
@@ -133,6 +134,79 @@ fn a_compliant_point_whose_spring_is_free_bears_nothing() {
         (points, motion),
         "a warm start cached on a free point moved the step"
     );
+}
+
+/// Hands every manifold the law of zero stiffness and damping, its points each a cached warm start.
+fn hand_zero_law_over_a_warm_start(mut graph: ResMut<ContactGraph>, mut laws: ResMut<Laws>) {
+    let zero = ContactCompliance {
+        stiffness: 0.0,
+        damping: 0.0,
+        rest: 0.0,
+    };
+    for pair in graph.iter_active_mut() {
+        for (index, manifold) in pair.manifolds.iter_mut().enumerate() {
+            laws.set(pair.contact_id, index, zero);
+            for point in &mut manifold.points {
+                // Fixture: an impulse large against the step's (N·s).
+                point.warm_start_normal_impulse = 5.0;
+            }
+        }
+    }
+}
+
+/// A law of zero stiffness and damping bears nothing at any effective mass: each solve returns
+/// the point's accumulated impulse, so a cached warm start is cleared, never carried and stored as
+/// load. The soft run hands that law to a manifold out of overlap. Fixture: a box with every axis
+/// locked, so its points' effective mass is zero, 1 cm into a slab. Fails if the zero law takes the
+/// soft formula's zero-mass coefficients (mass scale one, impulse scale zero), under which every
+/// solve leaves the cached impulse in place.
+#[test]
+fn a_zero_law_clears_a_cached_impulse_at_zero_effective_mass() {
+    let mut app = super::avian_child_pose_churn::physics_app();
+    app.insert_resource(Gravity(Vec3::ZERO)).add_systems(
+        PhysicsSchedule,
+        hand_zero_law_over_a_warm_start
+            .after(PhysicsStepSystems::NarrowPhase)
+            .before(PhysicsStepSystems::Solver),
+    );
+    app.world_mut()
+        .spawn((RigidBody::Static, Collider::cuboid(4.0, 1.0, 4.0)));
+    app.world_mut().spawn((
+        RigidBody::Dynamic,
+        LockedAxes::ALL_LOCKED,
+        Collider::cuboid(1.0, 1.0, 1.0),
+        Position(Vec3::Y * 0.99),
+    ));
+    let prepared = |world: &World| -> Vec<f32> {
+        (world.resource::<ConstraintGraph>().colors.iter())
+            .flat_map(|color| &color.contact_constraints)
+            .flat_map(|constraint| &constraint.points)
+            .map(|point| point.normal_part.effective_mass)
+            .collect()
+    };
+    for _ in 0..4 {
+        app.update();
+        if !prepared(app.world()).is_empty() {
+            break;
+        }
+    }
+    let world = app.world();
+    let prepared = prepared(world);
+    assert!(
+        !prepared.is_empty() && prepared.iter().all(|&mass| mass == 0.0),
+        "fixture: the locked box's points are solved at zero effective mass: {prepared:?}"
+    );
+    for point in (world.resource::<ContactGraph>().iter_active())
+        .flat_map(|pair| &pair.manifolds)
+        .flat_map(|manifold| &manifold.points)
+    {
+        assert_eq!(
+            (point.normal_impulse, point.warm_start_normal_impulse),
+            (0.0, 0.0),
+            "a point {} m deep under the zero law kept its cached impulse",
+            point.penetration
+        );
+    }
 }
 
 /// The law a manifold is handed each step.

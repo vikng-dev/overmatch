@@ -45,28 +45,25 @@ impl ContactCompliance {
     /// The soft-constraint coefficients of this law for a point of effective mass `mass` over a
     /// substep `h`: Avian's `SoftnessParameters::compute_coefficients` rewritten with `ω² = k/m`
     /// and `2ζω = c/m`. With `a = h(c + hk)`: bias `k/(c + hk)`, mass scale `a/(m + a)`, impulse
-    /// scale `m/(m + a)`. A point of zero effective mass (a static pair) and a law of zero stiffness
-    /// and damping have no soft response.
+    /// scale `m/(m + a)`. A law of zero stiffness and damping bears nothing: [`INERT`], at any
+    /// effective mass, where the formula at zero mass would carry the point's accumulated impulse
+    /// through every solve.
     fn coefficients(self, mass: f32, h: f32) -> SoftnessCoefficients {
         let response = self.damping + h * self.stiffness;
+        assert!(
+            response >= 0.0,
+            "contact law {self:?} answers a substep of {h} s with a negative or NaN response: \
+             stiffness and damping are never negative"
+        );
+        if response == 0.0 {
+            return INERT;
+        }
         let a = h * response;
         let denominator = mass + a;
         SoftnessCoefficients {
-            bias: if response > 0.0 {
-                self.stiffness / response
-            } else {
-                0.0
-            },
-            mass_scale: if denominator > 0.0 {
-                a / denominator
-            } else {
-                1.0
-            },
-            impulse_scale: if denominator > 0.0 {
-                mass / denominator
-            } else {
-                0.0
-            },
+            bias: self.stiffness / response,
+            mass_scale: a / denominator,
+            impulse_scale: mass / denominator,
         }
     }
 }
