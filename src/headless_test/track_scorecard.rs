@@ -23,16 +23,11 @@
 
 #[cfg(feature = "bitprobe")]
 mod belt_friction;
-// The climb reads the rubble probe's heap and the drivetrain trace.
-#[cfg(all(feature = "dev_ui", feature = "bitprobe"))]
-mod creep_stall;
 // The sandbox's rubble yard builds line 8c's heap; the sandbox builds with `dev_ui`.
 #[cfg(feature = "dev_ui")]
 mod heap;
 #[cfg(feature = "dev_ui")]
 mod rubble_climb;
-#[cfg(feature = "dev_ui")]
-mod soft_run_probe;
 mod turn_probe;
 
 use super::*;

@@ -136,7 +136,7 @@ struct Tick {
     sensed: Option<crate::track::driver::Sensed>,
 }
 
-pub(super) const ROLES: [&str; 4] = ["soft run", "bump stop", "side plate", "hull proxy"];
+const ROLES: [&str; 4] = ["soft run", "bump stop", "side plate", "hull proxy"];
 
 fn read(
     bed: &Bed,

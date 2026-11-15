@@ -144,8 +144,8 @@ Known differences between the channels, none tuned:
   side into pieces, and a piece under the shoe's edge whose least overlap is sideways, an artefact
   of one normal per convex pair whose truth is the radial law, which no cap law gives. A rigid cap
   would eject by their lateral overlap the pieces the soft run leaves inside the solid; the nearest
-  measurement is the belt segments' side plates below, 28.5 reversals (related, not the same, since
-  a piece there sat in two colliders at once). An inert cap would hand those pieces to the rigid
+  measurement is the belt segments' side plates below, the pivot's reversals in their table
+  (related, not the same, since a piece there sat in two colliders at once). An inert cap would hand those pieces to the rigid
   stop. Parry clips a face to its first four vertices (the TODO in
   `ConvexPolyhedron::local_support_feature`, parry 0.27), so a cap contact, its face an N-gon, is
   mostly the lone GJK witness point (DERIVED).
@@ -157,9 +157,10 @@ Known differences between the channels, none tuned:
 - **The secant it replaced** was a damping error, not a feel defect: within a step a secant `k_sec`
   in place of the tangent `K` acts as a damper of `(k_sec − K)·dt/2`, about `0.084·(k_sec/K − 1)` of
   the link's damping for the shipped law (DERIVED: `c'/k' = 2ζ/ω = 0.093 s` unless the travel is
-  chain-clamped, at 64 Hz), +4 % for a piece `d` and `3d` deep across one link. Over the soft-run
-  probe's four cases, 12 starts each, its force-weighted `k_sec/K` read 1.08–1.18: +0.7 to +1.5 %
-  damping (MEASURED).
+  chain-clamped, at 64 Hz), +4 % for a piece `d` and `3d` deep across one link. On the house
+  heap (a pull and a pivot from rest on it, a crossing at full pedal and one at 0.3), 48 starts per
+  case, a start's force-weighted `k_sec/K` read 1.04 to 1.12 at the cases' medians and 1.01 to 1.32
+  over all starts: +0.3 to +1.0 % damping at the medians (MEASURED 2026-11-15).
 - **Restitution** above zero would take a rigid impulse on a compliant point
   (`ContactConstraint::apply_restitution`); pieces and runs set none, and Avian's default is zero.
 
@@ -195,9 +196,30 @@ lateral pressure through a cubic profile.
   none. It was also the larger code: its removal is −1548 +184 lines.
 - **Belt segments, with side plates meeting pieces.** 0.3 m sprung slabs over the wheels' travel,
   their outer faces on the droop envelope, the sampled support shadowing the ground beside a piece
-  across the whole shoe. On the house heap a pivot shook pieces back and forth under the belt, 28.5
-  reversals median against the soft run's 0, and the tank slept after stopping in 41 of 48 starts
-  against 47 of 48 (MEASURED 2026-11-14, 12 to 36 starts per arm).
+  across the whole shoe. On the house heap they shook pieces back and forth under the belt and
+  carried the hull higher and rougher than the soft run does. MEASURED 2026-11-15, 48 starts per
+  case, each start paired with the soft run's (median [quartiles]; the difference is the paired
+  median with its bootstrap 95 % interval; a reversal is a touched piece's velocity along the
+  hull changing sign above its rest speed):
+
+  | case, reading | belt segments | soft run | paired difference |
+  |---|---|---|---|
+  | pivot, reversals | 26 [8, 76] | 0 [0, 1] | −26 [−48, −15] |
+  | pivot, heave rms (m/s²) | 1.97 [1.41, 2.68] | 0.33 [0.23, 0.90] | −1.37 [−1.81, −1.07] |
+  | pull, reversals | 6 [2, 24] | 0 [0, 0] | −6 [−11, −4] |
+  | pull, heave rms (m/s²) | 2.71 [1.90, 3.22] | 1.14 [0.95, 1.48] | −1.38 [−1.68, −0.88] |
+  | full pedal across, heave rms (m/s²) | 2.83 [2.34, 3.49] | 1.93 [1.48, 3.04] | −0.74 [−1.18, −0.44] |
+  | full pedal across, heave peak (m/s²) | 22.6 [15.5, 31.3] | 17.1 [12.0, 25.4] | −6.2 [−12.0, −2.8] |
+  | full pedal across, hull rise max (m) | 1.08 [0.61, 1.59] | 0.17 [0.15, 0.28] | −0.81 [−1.29, −0.59] |
+  | full pedal across, stop's lift share | 0.15 [0.10, 0.21] | 0.33 [0.26, 0.51] | +0.16 [+0.14, +0.32] |
+  | 0.3 pedal across, reversals | 52 [10, 81] | 0 [0, 0] | −52 [−72, −32] |
+  | 0.3 pedal across, heave rms (m/s²) | 1.34 [0.96, 1.68] | 0.45 [0.23, 0.80] | −0.74 [−0.91, −0.62] |
+  | pivot, slept after stopping | 39 of 48 | 47 of 48 | +0.17 [+0.06, +0.29] |
+
+  The two trees also differ by the gear law (`architecture.md` §5a), which decides the 0.3-pedal
+  crossing's gears: the segments' tree crossed in 3 of 48 starts within 40 s, the soft run's in 21.
+  The other three cases read alike on the soft run with that law and without it (MEASURED, the
+  same 48 starts: no paired interval excludes zero).
 - **Exact-triangle terrain clipping.** It added 5.3 ms per tick for 30 tanks (4.2 to 9.4 ms p50,
   local); fixture loads moved 0.04 % on flat ground once replaced by facet samples. Convex overlays
   stay for solids, where the facets are few and the outline matters.

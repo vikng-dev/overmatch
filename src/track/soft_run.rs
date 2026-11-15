@@ -122,7 +122,7 @@ impl Edge {
 
 /// The face of a run a manifold is read on.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Face {
+enum Face {
     /// The rim face over one outline edge, by its index.
     Rim(usize),
     /// Either lateral cap. `StandIn`: a cap contact carries one link's law along its normal, split
@@ -178,7 +178,7 @@ impl SoftRun {
     /// outward normal points lowest in the side plane, then toward least `z`: a key of the
     /// outline's shape, so the law does not depend on where its numbering starts. Parry may take
     /// the other (`track-contact.md`, "One face per piece", bounds where its points then land).
-    pub(crate) fn facing(&self, out: Vec3) -> Face {
+    fn facing(&self, out: Vec3) -> Face {
         let side = Vec2::new(out.z, out.y);
         let (rim, nearest) = (self.edges.iter().map(|edge| edge.out.dot(side)).enumerate())
             .max_by(|a, b| {

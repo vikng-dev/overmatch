@@ -567,7 +567,7 @@ inside the window; eleven ticks later the reading was 92 kN and fifth carried on
 The window's error takes the ticks as independent: a load that trends across the window reads as
 scatter, and a ripple the window spans whole reads as scatter its mean does not carry, so such a
 ripple can hold a gear's verdict open on every window, where no step down leaves it. No drive
-holds one there: MEASURED on the creep stall probe's 35 drives under the window alone
+holds one there: MEASURED on 35 steady-pedal drives of 40 s under the window alone
 (its error then over `n`, not `n − 1`), the 21 graded and flat drives judged 50,688 ticks with
 none open, their error 1.0 to 11.6 N (5th to 95th percentile, median 4.9 N), and the 14 heap
 drives judged 29,507 ticks with 621 open, the longest run 33 ticks. The pedal moves what a gear
@@ -656,8 +656,15 @@ law against the losing test and the carried clause it replaced:
 | 0.5 pedal, 8° / 12° | 0.17 / 0.25 m/s, clutch slipping | 1.44 / 1.00 m/s, locked |
 | full pedal, 15° | 1.64 m/s in 4th and 3rd, 18 pairs | 2.14 m/s in 4th |
 | full pedal, 20° | fourth at 2.0 m/s stepped to first, 0.66 m/s | 2.0 m/s in 4th |
-| heap, 0.3 pedal, 8 starts | 2 crossed, 86.5 m, 9 relaunches | 2 crossed, 85.8 m, 4 relaunches |
-| heap, full pedal, 6 starts | all crossed, 1830 m, no step down | all crossed, 1838 m, 6 steps down |
+| heap, 0.3 pedal, 8 starts | 2 crossed, 86.5 m, 2,660 ticks stalled | 4 crossed, 99.0 m, 4,496 ticks stalled |
+| heap, full pedal, 6 starts | all crossed, 1830 m, no step down | all crossed, 1966 m, no step down |
+
+The heap rows are MEASURED 2026-11-15 and differ by the contact as well as the law: the left
+column ran on the belt segments, this law on the soft run (`track-contact.md`). A start crossed
+when the hull origin passed the heap's far edge; a tick is stalled with the hull under 0.05 m/s
+after the first two seconds. Under this law two of the eight 0.3-pedal starts sat in first gear
+under 0.05 m/s for 2,014 and 2,065 of their 2,560 ticks, 3.7 and 3.2 m from their start (open,
+#374).
 
 Pricing a landing gear where its clutch closes moved three of the full-pedal heap starts and no
 other drive (MEASURED, tick for tick, on the contact before the soft run): on each, eighth,
@@ -766,9 +773,27 @@ Rejected forms:
 
 Open: support carried by solver contacts alone delivers no rolling and has no rolling budget
 (`SideReport::rolling_budget` sums the sampled contacts), so a gear judged on rubble or an
-obstacle meets no rolling there. The rubble battery and the turn probe have not run under this
-law; a viable gear now stays however low in its band it crawls, where the losing test once
-stepped part-pedal stop-go rows down.
+obstacle meets no rolling there. A viable gear stays however low in its band it crawls, where the
+losing test once stepped part-pedal stop-go rows down.
+
+The turn probe and the rubble battery under this law on the soft run, against the losing test and
+the carried clause on the belt segments (MEASURED 2026-11-15, each case once per tree). Of the turn
+probe's 71 rows one differs, the neutral pivot on pieces; no turn on ground differs in its gear, or
+in its speed or radius past the larger of 0.02 m/s and 1 %, of 0.5 m and 2 %. The rubble battery's
+51 climbs are single starts of a drive that a sub-millimetre nudge reorders, so one case's
+difference is no verdict; summed, with a climb crossed when the hull origin ends past the far edge
+and a tick stalled when driven under 0.05 m/s:
+
+| climbs | crossed: losing test → this law | stalled ticks: losing test → this law |
+|---|---|---|
+| 0.3 pedal: house, yard and standing house, 24 | 11 → 19 | 3,765 → 1,651 |
+| full pedal: house and yard, 12 | 12 → 12 | 0 → 0 |
+| full pedal: standing house, 6 | 6 → 4 | 136 → 2,182 |
+| full pedal: rams across the standing house, 9 | 8 → 7 | 1,496 → 3,385 |
+
+The two full-pedal climbs short of the edge under this law are the standing house 1.4 m off its
+centre, straight through and stop-go; the first stalled for 1,187 of its 1,600 ticks, 588 of them
+in one run, and ended at rest in fourth with its belts turning at 2.16 m/s (open, #374).
 
 The brake lever carries only the stop-force shortfall against intent, without a release latch.
 Opposite input brakes to rest, waits the authored pause, then pays one direction cut;
@@ -821,8 +846,8 @@ This remains a large forecast-versus-delivery envelope: coupled crank accelerati
 speed gained while coupling settles change delivery after the original landing forecast.
 It is not an observer-noise-only bound or certification of a small-margin gear law. DERIVED
 dirt's `M < 8.0 kN` premise is **not met**; its F8 convergence remains unproved. Sand's previously
-MEASURED F7 spare near `−6 kN` still refuses that upshift for every positive M. Lane 3 must assess
-those predictions with its actual gear law, including this inertia/forecast discrepancy.
+MEASURED F7 spare near `−6 kN` still refuses that upshift for every positive M. Both predictions
+are unresolved under the gear law, as is this inertia/forecast discrepancy.
 
 MEASURED launch from rest to 0.5 m/s, before → after: concrete `0.593750 → 0.656250 s`,
 sand `0.640625 → 0.671875 s`. Concrete to 2 m/s is `2.609375 → 2.593750 s`; sand does not
@@ -835,7 +860,7 @@ not a valid invariant fixture once the new launch moves the tank onto different 
 record every sustained sample and the raw first delivery. The historical first-tick record remains
 in `drive-load-measurements-2026-11-02.json` for comparison.
 
-**Same-instant calibration, with the gear lane stopped at its boundary.** The contact pass now
+**Same-instant calibration.** The contact pass now
 records the same clipped convex face for the Driver and the physical contact law. Turn resistance
 uses normal pressure, `mu_t W cos(theta) length/(4 R_g)`, consistently with grip and rolling.
 
