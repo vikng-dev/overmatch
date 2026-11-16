@@ -172,11 +172,10 @@ impl Default for Aim {
     }
 }
 
-/// A spawn point and turn, checked and normalized at the script edge. The point is horizontal
-/// (`at: (x, z)`), as every spawn definition is: the server sets the height under the tank's
-/// stance at that turn (`terrain_grid::spawn_pos`), and refuses to start on a point outside the
-/// placeable square. Downstream spawns hold the parsed point and unit rotation; they never
-/// normalize operator input again.
+/// A spawn point and turn, checked and normalized once, at the script edge. The point is
+/// horizontal (`at: (x, z)`), as every spawn definition is: the server sets the height under the
+/// tank's stance at that turn (`terrain_grid::spawn_pos`) and refuses to start on a point outside
+/// the placeable square.
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 #[serde(try_from = "AuthoredSpawnPose")]
 pub(crate) struct SpawnPose {

@@ -426,14 +426,9 @@ pub fn client_plugin(app: &mut App) {
 }
 
 /// The local duel's two spawn POINTS — horizontal only (XZ), like every spawn definition in the
-/// game. Their Y is sampled from the live surface at spawn time (`terrain_grid::spawn_pos`).
-///
-/// These used to be full poses with a hardcoded `y = 2.0`, which was correct for exactly one world:
-/// the flat slab. Once the heightmap world landed, `--offline` spawned both Tigers ~116 m UNDER the
-/// terrain (79 m after the 2560 → 1000 m re-scale) — they were never "falling through" anything,
-/// they simply started inside the hill. The net server had already been fixed for this class; the
-/// offline/single-player path had not, which is precisely why spawn Y is no longer authorable
-/// anywhere.
+/// game; their Y is sampled from the live surface at spawn time (`terrain_grid::spawn_pos`). An
+/// authored Y holds for one world only: a fixed `y = 2.0`, true of the flat slab, starts both tanks
+/// ~116 m inside the heightmap world's hill (79 m at the 1000 m scale).
 pub(crate) const DUEL_SPAWN_XZ: [Vec2; 2] = [Vec2::new(10.0, 5.0), Vec2::new(10.0, -12.0)];
 
 /// Where the duel stands under the FAR probe placement (`OVERMATCH_PROBE_FAR` — see
@@ -528,10 +523,7 @@ fn spawn_tank_when_loaded(
     }
     let content = source.get();
     // Both bodies simulate; only the Controlled marker selects input ownership. Each spawn point is
-    // horizontal — the ground under it is sampled NOW, through the one rule every spawn path shares
-    // (`terrain_grid::spawn_pos`: the tank's stance over the highest ground under its reach), so
-    // the duel lands on whatever world this build actually has: heightmap, flat slab, or a
-    // re-authored map later.
+    // horizontal, its ground sampled now (`terrain_grid::spawn_pos`).
     let grid = height.as_deref();
     if crate::lod_showcase::enabled() {
         // THE SHOWCASE STANDS ITS PAIRS AT THEIR OWN SWITCH DISTANCES, so it cannot be laid out
