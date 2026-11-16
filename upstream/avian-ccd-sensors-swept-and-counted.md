@@ -1,55 +1,39 @@
-# Sensors are swept as solid colliders and counted toward CCD thickness
+# Non-solid colliders in sweeps and CCD thickness
 
-Subject: rigid-body continuous collision in a multiplayer tank video game; game state only.
+Subject: rigid-body collision in a multiplayer tank video game; game state only.
 
-**Target:** published avian3d 0.8.0, `solve_continuous` and `update_body_size_metrics`.
-**Status:** LOCAL DRAFT, not filed; upstream head unchecked. Source verified against the cached
-published crate without network access. The disabled-collider sweep exclusion is already in
-upstream PR #1101; the proposed query extends that exclusion to sensors at the same site.
+**Target:** published avian3d 0.8.0. **Status:** LOCAL DRAFT, not filed; upstream head unchecked.
+Source checked against the cached published crate without web access. The disabled sweep
+exclusion is already in upstream PR #1101; the query extends it to sensors at the same site.
 
-## Mechanism
+## Mechanism and shipping scope
 
-The target-side tree traversal skips sensor proxies, but the moving-side collider query does
-not exclude `Sensor`. A fast body's forward sensor can therefore produce its earliest time of
-impact and clamp the whole body before a solid collider reaches the obstacle. Sensors register
-intersections, so they must not impose solid collision response from either side.
+Target tree traversal rejects sensor proxies, but the moving-side query does not reject Sensor.
+A forward sensor can therefore clamp its body's motion before the solid collider meets a wall.
+Our fork carries only the moving-side query exclusion, with a game-side collision test covering
+both sensors and disabled colliders. MEASURED: that test passes; removing the sensor exclusion
+fails it. The fork does not change body thickness or marker invalidation.
 
-The minimum `BodySizeMetrics::ccd_thickness` also includes sensors and disabled colliders. A
-thin non-solid attachment consequently makes an otherwise thick body enter the fast-body path.
-Filtering the sweep alone leaves this unnecessary work. Filtering the cached thickness alone
-leaves moving sensors on bodies that genuinely require CCD.
+The cached body CCD thickness also includes sensors and disabled colliders, so a thin non-solid
+attachment can cause unnecessary fast-body work. The broader proposal below excludes those
+thicknesses. Additions invalidate via change detection; removals queue the owning body through
+`On<Remove<Sensor>>` and `On<Remove<ColliderDisabled>>` observers, following the observer pattern
+in published `backend.rs` and `collider_tree/update.rs`. Each backend retains its own set until
+the next physics step. `RemovedComponents` messages are unsuitable: they expire after two frame
+updates and a fixed physics step need not run in that window. The queue stores bodies, so a
+later detached collider cannot erase its former owner's pending refresh.
 
-## Fix
+The thickness proposal is **compile-checked only**, not shipped or runtime-tested in this lane.
+The earlier transition test was removed with the fork's thickness change; its previous outcome
+does not verify this observer proposal. No shipped game path inserts or removes Sensor.
 
-Exclude both `Sensor` and `ColliderDisabled` in the existing sweep query. Skip their thicknesses
-when taking the body's minimum. Refresh the metric when either marker is added or removed,
-including when neither shape, transform nor centre of mass changes. Keep sweep-radius computation
-unchanged: that separate metric also serves sleeping and contact recycling.
-
-The published metrics loop is retained here; no game-side batching, hook or diagnostic API is
-required. Despawned, detached or entity-disabled colliders absent from the owner query have no
-enabled attachment to refresh at that point.
-
-## Witnesses
-
-`src/tests/avian_swept_ccd.rs` mounts the game's narrow physics harness, reads the existing
-`SolverBodyFlags::IS_FAST`, and checks two class invariants for sensors and disabled colliders:
-
-- A thin solid attachment first makes its body fast; marking it non-solid stops that, and
-  removing the marker restores it. The centre of mass is held fixed so it cannot supply the
-  invalidation. The server relies on non-solid attachments leaving solid CCD eligibility alone.
-- A genuinely fast body passes the sensor's geometric impact plane while its solid collider
-  still stops at the wall. The server relies on sensor intersections imposing no solid response.
-
-Fixture dimensions and travel set up those relations; no prior physics output is an oracle.
-MEASURED: both guards passed with the fix. Reversing the thickness exclusion failed the first;
-restoring it and reversing the moving-sensor filter failed the second. Both mutants were reverted.
-Detailed commands and evidence are in [the lane report](../.agents/scratch/swept-ccd-sensors-and-price.md).
+Sweep radius is unchanged. Its current readers are the CCD speed test and contact recycling;
+it is not consumed by sleeping. The published metrics loop is otherwise retained, independent
+of the game's batching and instrumentation patches.
 
 ## Apply to published 0.8.0
 
-Apply at the extracted crate root with `patch -p1`. The patch carries no fork markers and depends
-on none of the game's other patches.
+Apply with `patch -p1` at the extracted crate root; no other fork patch is required.
 
 ```diff
 --- a/src/dynamics/ccd/mod.rs
@@ -68,7 +52,15 @@ on none of the game's other patches.
      trees: Res<ColliderTrees>,
 --- a/src/dynamics/rigid_body/body_size_metrics.rs
 +++ b/src/dynamics/rigid_body/body_size_metrics.rs
-@@ -10,7 +10,7 @@
+@@ -6,11 +6,14 @@
+
+ use core::marker::PhantomData;
+
+-use bevy::{ecs::system::StaticSystemParam, prelude::*};
++use bevy::{
++    ecs::{entity::EntityHashSet, system::StaticSystemParam},
++    prelude::*,
++};
 
  use crate::{
      collision::collider::{
@@ -77,7 +69,7 @@ on none of the game's other patches.
          collider_hierarchy::{ColliderOf, RigidBodyColliders},
          collider_transform::ColliderTransform,
      },
-@@ -35,7 +35,7 @@
+@@ -35,7 +38,7 @@
      /// to determine how far the body can move in a single timestep before it might start to
      /// tunnel through geometry.
      ///
@@ -86,7 +78,47 @@ on none of the game's other patches.
      /// and typically corresponds to the minimum distance from the centroid
      /// of any given shape to its surface.
      ///
-@@ -96,8 +96,25 @@
+@@ -72,6 +75,13 @@
+
+ impl<C: AnyCollider> Plugin for BodySizeMetricsPlugin<C> {
+     fn build(&self, app: &mut App) {
++        app.insert_resource(MarkerRemovalRefresh::<C> {
++            bodies: EntityHashSet::default(),
++            marker: PhantomData,
++        });
++        app.add_observer(queue_marker_removal::<C, Sensor>);
++        app.add_observer(queue_marker_removal::<C, ColliderDisabled>);
++
+         // Update body size metrics before they are consumed by the solver and continuous collision
+         // detection. Allowing ambiguities lets multiple collision backends coexist.
+         app.add_systems(
+@@ -80,6 +90,25 @@
+                 .before(PhysicsStepSystems::Solver)
+                 .ambiguous_with_all(),
+         );
++    }
++}
++
++// Removal observers retain invalidations until the next physics step, even when no
++// fixed step runs during the frame in which a marker is removed. Each backend drains its own set.
++#[derive(Resource)]
++struct MarkerRemovalRefresh<C: AnyCollider> {
++    bodies: EntityHashSet,
++    marker: PhantomData<C>,
++}
++
++fn queue_marker_removal<C: AnyCollider, M: Component>(
++    event: On<Remove<M>>,
++    colliders: Query<&ColliderOf>,
++    mut refresh: ResMut<MarkerRemovalRefresh<C>>,
++) {
++    // Standalone and already-detached colliders have no owning body's metric to invalidate.
++    if let Ok(owner) = colliders.get(event.entity) {
++        refresh.bodies.insert(owner.body);
+     }
+ }
+
+@@ -96,8 +125,23 @@
          Query<BodySizeMetricsData, Changed<ComputedCenterOfMass>>,
          Query<BodySizeMetricsData>,
      )>,
@@ -108,13 +140,11 @@ on none of the game's other patches.
 +            Added<ColliderDisabled>,
 +        )>,
 +    >,
-+    collider_owners: Query<&ColliderOf>,
-+    mut removed_sensors: RemovedComponents<Sensor>,
-+    mut removed_disabled: RemovedComponents<ColliderDisabled>,
++    mut marker_refresh: ResMut<MarkerRemovalRefresh<C>>,
      context: StaticSystemParam<C::Context>,
  ) {
      let context = context.into_inner();
-@@ -107,11 +124,15 @@
+@@ -107,11 +151,15 @@
          let mut ccd_thickness: f32 = f32::INFINITY;
          let mut sweep_radius: f32 = 0.0;
 
@@ -134,38 +164,45 @@ on none of the game's other patches.
 
              // Compute the sweep radius
              let ctx = ColliderContext::new(entity, &context);
-@@ -133,11 +154,15 @@
+@@ -133,12 +181,16 @@
 
      // Bodies with a collider that changed. Note that bodies may be visited
      // multiple times, but the end result will be the same.
 -    if changed_colliders.is_empty() {
--        return;
--    }
++    if changed_colliders.is_empty() && marker_refresh.bodies.is_empty() {
+         return;
+     }
      let mut all_bodies = bodies.p1();
 -    for collider_of in &changed_colliders {
-+    // Removed markers restore a solid collider. Despawned/detached colliders have no owner
-+    // here; their removal is handled by the collider hierarchy and mass-property update.
-+    for collider_of in changed_colliders.iter().chain(
-+        removed_sensors
-+            .read()
-+            .chain(removed_disabled.read())
-+            .filter_map(|entity| collider_owners.get(entity).ok()),
-+    ) {
-         if let Ok((mut size_metrics, rb_colliders, com)) = all_bodies.get_mut(collider_of.body) {
+-        if let Ok((mut size_metrics, rb_colliders, com)) = all_bodies.get_mut(collider_of.body) {
++    for body in changed_colliders
++        .iter()
++        .map(|owner| owner.body)
++        .chain(marker_refresh.bodies.drain())
++    {
++        if let Ok((mut size_metrics, rb_colliders, com)) = all_bodies.get_mut(body) {
              *size_metrics = compute(rb_colliders, com);
          }
+     }
 ```
 
-MEASURED: the patch applied cleanly to a fresh extraction of the cached published crate in
-`scratchpad/draft-check-ccd/sensors-e_xlweg3/avian3d-0.8.0` under the lane's requested scratch root.
-The unmodified published manifest is used through a sibling `check-harness` path dependency with
-`default-features = false`, `features = ["3d", "parry-f32"]`; its source is `pub use avian3d;`.
-This avoids resolving unused, uncached published dev-dependencies, as in the pruning draft.
-`cargo check --offline --lib` through `scripts/serial-cargo` passed for Avian and the harness.
-The full command and archive digest are in the lane report.
+MEASURED: this patch applies cleanly to the cached published crate and the complete proposal
+passes the offline compile below. The published manifest is unchanged; a sibling harness uses
+`default-features = false`, `features = ["3d", "parry-f32"]` and `pub use avian3d;`, avoiding
+unused, uncached dev-dependencies.
 
-## What fixing this unlocks for us
+```sh
+scripts/serial-cargo check --offline --lib --manifest-path \
+  /private/tmp/ccd4-drafts/sensors/check-harness/Cargo.toml \
+  --target-dir target/draft-check-ccd --features dev_ui,bitprobe
+```
 
-Retire these CCD exclusions and marker invalidations when a published release provides the same
-non-solid contract. Other fork patches remain independent. This fix neither implements nor
-justifies per-collider motion gating; the hull-first wall probe remains a separate observation.
+Archive SHA-256: `ca7479ccec5f1440675946bada8c805f2b6d514af78e1d2b0937ca53b1e2c543`.
+
+## Retirement
+
+Retire our moving-side exclusion when a published release excludes non-solid moving colliders.
+The thickness proposal has no shipping code to retire. Per-collider eligibility is independent:
+[its draft](avian-ccd-decide-per-collider.md) retains the body early-out and uses each child's own
+thickness for sweep selection. Verification and repeated pricing are in
+[the continuing lane report](../.agents/scratch/swept-ccd-decisions-and-price.md).

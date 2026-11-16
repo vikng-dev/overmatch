@@ -27,7 +27,7 @@ Apply with `patch -p1` at the published crate root; no other fork patch is requi
 @@ -741,6 +741,13 @@
                  continue;
              }
- 
+
 +            // A thin child must not force thicker children to sweep. The body-wide bound
 +            // includes offset rotation and preserves eligibility for a single collider.
 +            let min_extent = shape1.ccd_thickness();
@@ -36,7 +36,7 @@ Apply with `patch -p1` at the published crate root; no other fork patch is requi
 +            }
 +
              let layers1 = layers1.copied().unwrap_or_default();
- 
+
              let motion1 =
 @@ -767,7 +774,7 @@
                      swept_aabb.max.real(),
@@ -45,7 +45,7 @@ Apply with `patch -p1` at the published crate root; no other fork patch is requi
 -                min_extent: shape1.ccd_thickness(),
 +                min_extent,
              };
- 
+
              // Sweep the collider against the relevant trees.
 ```
 

@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 1126 in all (MEASURED), 1048 in upstream files and 78 in the
+of `src/` against the published crate: 1082 in all (MEASURED), 1004 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -220,28 +220,23 @@ offset rotation). Independent published-crate patch: `upstream/avian-ccd-decide-
 The merged-tree source census and repeated release measurements live in the
 [continuing lane report](../../.agents/scratch/swept-ccd-decisions-and-price.md).
 
-## Non-solid colliders in continuous collision (`src/dynamics/ccd/mod.rs`, `src/dynamics/rigid_body/body_size_metrics.rs`): kept
+## Non-solid colliders in continuous collision (`src/dynamics/ccd/mod.rs`): kept
 
-The moving-side sweep query excludes sensors and disabled colliders at the same site as the
-existing upstream #1101 disabled-collider filter. A sensor detects intersections; it must not
-clamp the body's solid motion at its own time of impact. The body-size pass excludes both from
-minimum CCD thickness and refreshes that cache on marker additions/removals, even with no shape,
-transform or centre-of-mass change. Sweep radius retains its separate sleeping/recycling contract.
+The moving-side query excludes sensors and disabled colliders at the same site as upstream
+#1101's disabled-collider filter. Non-solid attachments must not clamp the body's solid motion.
+Only the query exclusion ships: body thickness and its invalidation are unchanged. Sweep radius
+is read by the CCD speed test and contact recycling, not sleeping.
 
-Kept: these decisions are inside the upstream passes. MEASURED against the cached published
-0.8.0 crate: the CCD file has 14 added + 2 removed = 16 fork lines (query and per-collider gate); body size metrics has 98 added + 27 removed = 125, including its once-per-body patch.
-The complete source index is 890 added + 236 removed = 1,126 fork lines: 1,048 in upstream files
-and 78 in the fork-only file. No new counter API ships. The per-collider gate is inventoried above.
+Kept as an upstream bug fix inside the private sweep. Guard: `src/tests/avian_swept_ccd.rs`,
+which checks that a fast body passes its non-solid attachment's impact plane while its solid
+collider stops at the wall. The draft `upstream/avian-ccd-sensors-swept-and-counted.md` separates
+this shipping query from its compile-checked-only thickness proposal. That proposal uses removal
+observers and a persistent refresh queue: frame-expiring `RemovedComponents` messages can be lost
+between fixed steps. No shipped game path inserts or removes Sensor.
 
-Guards: `src/tests/avian_swept_ccd.rs`, reading the existing `IS_FAST` diagnostic and geometric
-wall planes. MEASURED: both passed; the thickness exclusion reversed fails the fast-body guard,
-and the sensor sweep filter reversed fails the wall guard; both mutants reverted. Sensors and
-disabled colliders are covered, including live marker transitions. Draft and independent compile
-proof: `upstream/avian-ccd-sensors-swept-and-counted.md`. Retire the disabled sweep exclusion with
-#1101's release; retire the remaining changes when a release satisfies both non-solid invariants.
-
-The [dedicated release price](../../.agents/scratch/swept-ccd-sensors-and-price.md) records repeated
-rehearsal and open-ground timing/counter samples; it does not change CCD policy.
+The [continuing lane report](../../.agents/scratch/swept-ccd-decisions-and-price.md) owns the
+source census and repeated release measurements. Retire the moving-side exclusions when a
+published release excludes non-solid colliders.
 
 ## Moved-collider bounds prune (`src/collider_tree/update.rs`, `src/collider_tree/diagnostics.rs`): kept
 
@@ -358,8 +353,7 @@ outside Avian's timed stages was 151 to 518 ms in the two ticks after each colla
 the ten worst ticks; with the patch the worst is 0.6 ms and the ten worst sum to 3.9 ms. The run's
 worst tick fell from 599.9 to 82.7 ms (the 0.7 stack: 106.7 ms).
 
-Kept: the loop is inside an upstream system; the non-solid CCD section above owns its combined
-source count.
+Kept: the loop is inside an upstream system. 80 fork lines (MEASURED against published 0.8.0).
 
 Guard: `src/tests/avian_body_size_metrics.rs`, 4 tests. Mutants, each red (MEASURED): every body
 the pass cannot read skipped, as upstream (the refusal does not panic); every such body refused

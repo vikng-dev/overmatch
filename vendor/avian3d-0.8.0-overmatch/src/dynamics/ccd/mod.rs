@@ -735,6 +735,7 @@ fn solve_continuous(
             let Ok((collider1, &collider_pos1, &collider_rot1, layers1)) =
                 colliders.get(collider_entity)
             else {
+                // Non-solid colliders are excluded; a collider missing its pose cannot be swept.
                 continue;
             };
 

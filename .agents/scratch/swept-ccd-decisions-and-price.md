@@ -52,3 +52,24 @@ MEASURED per-collider commit gates: `cargo fmt --all --check`; CI clippy with
 `--locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`; targeted
 `avian_swept_ccd` (5 passed) and `avian_body_size_metrics` (4 passed), all through
 `scripts/serial-cargo`, plus `git diff --check`. Log: `/private/tmp/ccd4-d1-gates.log`.
+
+## Non-solid scope
+
+The fork retains only moving-side query exclusions and their wall-contact test. The thickness
+half and its transition test are removed. MEASURED before merging main: metrics is back to
+60 added + 20 removed = 80 fork lines; the source tree is 853+229=1,082 lines, including
+78 fork-only lines. The CCD skip now names non-solid colliders alongside missing poses.
+
+The sensor draft retains the broader thickness proposal with per-backend persistent queues
+fed by removal observers. It is compile-checked only. Sweep radius has CCD-speed and
+contact-recycling readers; the previous sleeping claim in the draft and patch inventory is fixed.
+The helper-restating module-doc line is deleted. Probe's `or_else` cleanup lands with its rewrite.
+
+MEASURED after narrowing: removing only `Without<Sensor>` failed the retained non-solid
+wall-contact test (exit 101); the sensor clamped the body before its solid collider reached the
+wall. Source restored. Log: `/private/tmp/ccd4-mutant-moving-sensor.log`.
+
+MEASURED narrowed-sensor commit gates: formatting and CI clippy passed; `avian_swept_ccd`
+4 passed, `avian_body_size_metrics` 4 passed. The final diff check caught whitespace-only
+context lines in fenced draft patches; those document lines were trimmed and the diff rechecked.
+Log: `/private/tmp/ccd4-d2-gates.log`.

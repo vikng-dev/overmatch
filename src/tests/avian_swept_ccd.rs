@@ -1,8 +1,6 @@
-//! Under translation, thin sensors and disabled colliders neither make a thick body fast nor
-//! clamp a fast body's motion. The server relies on non-solid attachments leaving solid
-//! collision unchanged.
-//! Marker transitions refresh the cached thickness even with the centre of mass held fixed.
-//! The guard reads Avian's existing IS_FAST diagnostic; it adds no engine instrumentation.
+//! Compound-body CCD follows each solid collider's risk; non-solid attachments never clamp
+//! solid motion. The server relies on thin children leaving unrelated thick contacts discrete
+//! and on fast thin and offset rotating colliders retaining sweep protection.
 //! Dimensions, velocities and step counts are Fixture data.
 
 use avian3d::dynamics::solver::solver_body::{SolverBodies, SolverBodyFlags, SolverBodyIndex};
@@ -22,70 +20,6 @@ fn fast(app: &App, body: Entity) -> bool {
         .expect("the index names a solver body")
         .flags
         .contains(SolverBodyFlags::IS_FAST)
-}
-
-#[test]
-fn a_thin_non_solid_attachment_does_not_make_a_thick_body_fast() {
-    for sensor in [true, false] {
-        let mut app = physics_app();
-        app.insert_resource(Gravity(Vec3::ZERO));
-        let body = app
-            .world_mut()
-            .spawn((
-                RigidBody::Dynamic,
-                NoAutoCenterOfMass,
-                SweptCcd::default().with_threshold(0.5),
-                Collider::cuboid(2.0, 2.0, 2.0),
-                Transform::default(),
-            ))
-            .id();
-        let child = app
-            .world_mut()
-            .spawn((
-                ChildOf(body),
-                Collider::cuboid(0.04, 1.0, 1.0),
-                Transform::default(),
-            ))
-            .id();
-        for _ in 0..3 {
-            app.update();
-        }
-        let step = app
-            .world()
-            .resource::<Time<Fixed>>()
-            .timestep()
-            .as_secs_f32();
-        app.world_mut()
-            .entity_mut(body)
-            .insert(LinearVelocity(Vec3::X * (0.125 / step)));
-        app.update();
-        assert!(
-            fast(&app, body),
-            "the enabled thin collider must exercise the fast-body threshold"
-        );
-        if sensor {
-            app.world_mut().entity_mut(child).insert(Sensor);
-        } else {
-            app.world_mut().entity_mut(child).insert(ColliderDisabled);
-        }
-        app.update();
-        assert!(
-            !fast(&app, body),
-            "a non-solid attachment made the thick body fast (sensor={sensor})"
-        );
-        if sensor {
-            app.world_mut().entity_mut(child).remove::<Sensor>();
-        } else {
-            app.world_mut()
-                .entity_mut(child)
-                .remove::<ColliderDisabled>();
-        }
-        app.update();
-        assert!(
-            fast(&app, body),
-            "restoring a thin solid collider must restore its CCD thickness"
-        );
-    }
 }
 
 #[test]
