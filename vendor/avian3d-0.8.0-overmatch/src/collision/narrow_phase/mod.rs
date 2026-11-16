@@ -92,8 +92,7 @@ where
             .init_resource::<ContactStatusBits>()
             .init_resource::<ContactStatusChangeQueue>()
             .init_resource::<DefaultFriction>()
-            .init_resource::<DefaultRestitution>()
-            .init_resource::<ContactMatcher>(); // OVERMATCH PATCH
+            .init_resource::<DefaultRestitution>();
 
         #[cfg(feature = "parallel")]
         app.init_resource::<NarrowPhaseThreadLocals>();
@@ -230,27 +229,6 @@ impl Default for NarrowPhaseConfig {
             recycle_angle: 0.175,
             match_contacts: true,
         }
-    }
-}
-
-// OVERMATCH PATCH: the warm-start matcher, a hook.
-/// Gives a pair's new contact points the warm-start impulses of its previous ones. The narrow phase
-/// calls it with the pair's new manifolds, its previous manifolds and the matching distance, when
-/// [`NarrowPhaseConfig::match_contacts`] is on and the pair has at most four new manifolds. The
-/// default is upstream's: [`ContactManifold::match_contacts`] for each new manifold against each
-/// previous one in turn.
-#[derive(Resource, Clone, Copy, Debug)]
-pub struct ContactMatcher(pub fn(&mut [ContactManifold], &[ContactManifold], f32));
-
-impl Default for ContactMatcher {
-    fn default() -> Self {
-        Self(|new, old, distance_threshold| {
-            for manifold in new {
-                for previous in old {
-                    manifold.match_contacts(&previous.points, distance_threshold);
-                }
-            }
-        })
     }
 }
 

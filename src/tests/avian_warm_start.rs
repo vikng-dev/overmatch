@@ -1,5 +1,5 @@
-//! GUARD for the warm-start matcher hook (`vendor/avian3d-0.8.0-overmatch`, `OVERMATCH_PATCH.md`,
-//! "Warm-start matching") and the game's law behind it, `crate::avian_ext::contact_match`. Game
+//! Guards for the in-engine warm-start fixes (`vendor/avian3d-0.8.0-overmatch`,
+//! `OVERMATCH_PATCH.md`, "Warm-start matching"). Game
 //! state only: the server's contacts between bodies. The server relies on warm starts following the
 //! closest admissible contact, within a manifold and across the pair. Drafts:
 //! `upstream/avian-unknown-contact-feature-identity.md` and
@@ -8,8 +8,6 @@
 use avian3d::collision::contact_types::PackedFeatureId;
 use avian3d::prelude::*;
 use bevy::prelude::*;
-
-use crate::avian_ext::contact_match::match_pair;
 
 /// UNKNOWN feature ids carry no identity; only nearby anchors may match them, and the closest wins.
 /// Upstream's matcher reads two UNKNOWN ids as one identity and takes the first previous point.
@@ -25,7 +23,7 @@ fn unknown_contact_features_match_by_position() {
             [ContactPoint::new(at, at, at, 0.0)],
             Vec3::Y,
         )];
-        match_pair(&mut next, &[ContactManifold::new(previous, Vec3::Y)], 0.1);
+        next[0].match_contacts(&previous, 0.1);
         assert_eq!(
             next[0].points[0].warm_start_normal_impulse, 11.0,
             "UNKNOWN IDs must select the closest admissible anchors, separation {separation}"
@@ -72,7 +70,7 @@ fn a_point_without_an_admissible_predecessor_starts_cold() {
         previous.warm_start_normal_impulse = 11.0;
         previous.warm_start_tangent_impulse = Vec2::new(7.0, 13.0);
         let mut next = [ContactManifold::new([new], Vec3::Y)];
-        match_pair(&mut next, &[ContactManifold::new([previous], Vec3::Y)], 0.1);
+        next[0].match_contacts(&[previous], 0.1);
         let started = next[0].points[0];
         assert_eq!(
             (
@@ -85,8 +83,8 @@ fn a_point_without_an_admissible_predecessor_starts_cold() {
     }
 }
 
-/// The narrow phase must rank predecessors across the pair, through the matcher `avian_ext::plugin`
-/// installs. Upstream's matcher, run once per old manifold, lets a later offset point overwrite a
+/// The shipped narrow phase must rank predecessors across the pair. Upstream's matcher, run once
+/// per old manifold, lets a later offset point overwrite a
 /// coincident point; either order must keep both impulse fields from the coincident point. Sensors
 /// preserve the cache without solver writes.
 #[test]
