@@ -969,8 +969,9 @@ fn a_supported_bar_rests_through_periodic_one_tick_roll_pulses() {
         *tick += 1;
     }
     let mut app = physics_app();
-    app.insert_resource(Gravity(Vec3::NEG_Y * crate::physical_laws::gravity_mps2()));
-    // Fixture: explicit rest speeds, independent of engine defaults.
+    // Fixture: explicit rest speeds and sleep delay, independent of engine defaults.
+    app.insert_resource(Gravity(Vec3::NEG_Y * crate::physical_laws::gravity_mps2()))
+        .insert_resource(TimeToSleep(0.5));
     let threshold = SleepThreshold {
         linear: 0.15,
         angular: 0.15,
