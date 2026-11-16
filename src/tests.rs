@@ -30,7 +30,6 @@ mod determinism_deps;
 mod doc_citations;
 mod flow_boundary;
 mod gpu_layout;
-mod shape_cast_reachability;
 mod ui_ascii;
 
 /// Open view gates for controlled-rig fixtures; commander framing stays owned by camera data.

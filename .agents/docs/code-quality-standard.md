@@ -341,7 +341,6 @@ Several look redundant or tautological *on purpose*. Deleting one removes an ala
 | `bevy_ktx2_uastc_fallback.rs` | **tripwire** — pins the KTX2/UASTC fallback slice panic |
 | `net_fire_release.rs` | mechanism proof for the MG fire-release leak |
 | `net_sync_margin.rs` | **tripwire** — pins the lightyear sync-margin term placement `net::sync_margin`'s derived laws re-size |
-| `shape_cast_reachability.rs` | **inverted tripwire** — fires when the first shape-cast call site appears in `src/` (parry GJK cast tolerance) |
 
 A tripwire's job is to **fail on a dependency bump**, telling you a local workaround is now
 retirable — or still needed. `determinism_deps.rs` is the clearest case: it asserts something
