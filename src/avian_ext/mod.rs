@@ -10,6 +10,7 @@
 pub mod attachment;
 pub mod child_poses;
 pub mod compliance;
+pub mod contact_match;
 pub mod contact_reduction;
 pub mod island_wake;
 pub mod required_state;
@@ -28,6 +29,9 @@ pub fn plugin(app: &mut App) {
     required_state::plugin(app);
     app.add_observer(attachment::refuse_unposed_attachment);
     app.insert_resource(RestTest(rest_test::at_rest));
+    app.insert_resource(avian3d::collision::narrow_phase::ContactMatcher(
+        contact_match::match_pair,
+    ));
     app.add_plugins(child_poses::PhysicsPlacementPlugin);
     contact_reduction::plugin(app);
     island_wake::plugin(app);

@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 729 in all (MEASURED), 651 in upstream files and 78 in the
+of `src/` against the published crate: 698 in all (MEASURED), 620 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -354,30 +354,25 @@ Witness: `src/tests/avian_moved_lists.rs`, 3 of 3 green on unpatched 0.8.0 (MEAS
 equal the scanning form after every step of a tick of 2,000 rehomes and 1,000 toggles and of
 20,000 generated operations, and a second mark lists the proxy once.
 
-## Warm-start matching (`src/collision/contact_types/mod.rs`, `src/collision/narrow_phase/system_param.rs`): kept bug fix
+## Warm-start matching: correctness fix and game-side ranking hook
 
 Subject: the game's server physics, contacts between bodies, game state only.
 
-`ContactManifold::match_contacts` accepts known feature IDs only by identity, and unknown IDs only
-by both anchors lying within the matching distance, in either orientation. Two UNKNOWN IDs carry
-no shared identity. Among admissible predecessors, the smaller sum of squared anchor distances
-wins; equal distances retain the earlier point. `match_contacts_in` accepts an iterator spanning
-all previous manifolds, so the narrow phase ranks the entire pair once per new manifold instead
-of letting a later old manifold overwrite a closer point.
+The engine's slice matcher accepts known feature IDs only by identity, and UNKNOWN IDs only by
+nearby anchors in either orientation. Known IDs retain upstream's first match, early exit and
+ordering. Correctness fix: `upstream/avian-unknown-contact-feature-identity.md`.
 
-The original slice API delegates to the iterator API. The narrow phase retains upstream's
-matching gate (enabled and at most four new manifolds) and matching distance. No matcher resource
-or game module remains. A recycled pair retains its previous manifolds before this code runs;
-the game keeps recycling off in its shared physics configuration.
+The `ContactMatcher` resource defaults to upstream's per-manifold calls. The game installs
+`avian_ext::contact_match::match_pair` to rank admissible points across the entire pair, including
+known identities. The known-ID witness and the precise failure of upstream ordering are recorded
+once in `upstream/avian-nearest-warm-start-contact.md`; that policy is no upstream proposal.
+The matching gate and distance stay upstream's; the game keeps recycling off. No iterator API
+remains. 62 fork lines (MEASURED: 26 for correctness in contact types, 25 for the hook in narrow
+phase's module, 11 for its field and call site).
 
-Kept: two upstream matcher defects, with local drafts
-`upstream/avian-unknown-contact-feature-identity.md` and
-`upstream/avian-nearest-warm-start-contact.md`. 93 fork lines (MEASURED: 83 in contact types,
-10 at the call site). The nearest-match draft includes the identity fix; their counts overlap.
-
-Guards: `src/tests/avian_warm_start.rs`, with the same assertions for closest position,
-no admissible predecessor, and closest across old manifolds in either order. Direct unit calls
-use the engine's slice method; the pair witness mounts the shipped physics composition.
+Guards: `src/tests/avian_warm_start.rs` checks engine identity rejection and first known-ID match,
+game ranking within a manifold, and the shipped composition's known-ID pair ranking in either
+old-manifold order. The sphere witness asserts the generated `face(0)` IDs are known.
 
 ## Stationary non-touching pair cache (`src/collision/narrow_phase/stationary_miss.rs`, `src/collision/narrow_phase/system_param.rs`, `src/collision/contact_types/mod.rs`, `src/collision/diagnostics.rs`): module
 

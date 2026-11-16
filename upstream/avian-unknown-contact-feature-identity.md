@@ -103,11 +103,10 @@ Against the pristine crate (`a/` and `b/` are the crate root):
 ## Notes
 
 A point with an unknown ID matches by position only, in either orientation; a point with known IDs
-matches by identity only. [The nearest-match draft](avian-nearest-warm-start-contact.md)
-contains this fix; this is the minimal version.
+matches by identity only. The first matching point and upstream's early exit remain unchanged.
+Overmatch's [nearest ranking](avian-nearest-warm-start-contact.md) is a game-side policy.
 
 ## Local verification
 
-The combined identity and nearest-match fix passes the pinned 0.8.0 headless guards for positional
-admissibility, cold starts without a predecessor, and nearest points within and across manifolds
-(MEASURED). The assertions are unchanged; direct unit calls use the engine matcher.
+The game's warm-start guards exercise the engine's identity rejection and first known-ID match,
+and the game seam's closest-point ranking within and across manifolds.

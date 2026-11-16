@@ -431,63 +431,56 @@ impl ContactManifold {
             .unwrap_or(0.0)
     }
 
-    // OVERMATCH PATCH: unknown features match by position, nearest across all manifolds.
+    // OVERMATCH PATCH: UNKNOWN IDs have no identity; distance matching requires unknown IDs.
     /// Copies impulses from previous contacts to matching contacts in `self`.
     ///
-    /// Each contact takes the impulses of the closest admissible previous contact, or none. A
-    /// contact whose [feature IDs](PackedFeatureId) are both known admits a previous contact with
-    /// the same IDs, in either order. A contact with an unknown feature ID admits a previous
-    /// contact whose anchors both lie within `distance_threshold` of its own, in either
-    /// orientation. Closest is the smaller sum of the two anchors' squared distances; a tie goes
-    /// to the earlier previous contact.
+    /// Contacts are first matched based on their [feature IDs](PackedFeatureId), and if they are unknown,
+    /// matching is done based on contact positions using the given `distance_threshold`
+    /// for determining if points are too far away from each other to be considered matching.
     #[inline]
     pub fn match_contacts(&mut self, previous_contacts: &[ContactPoint], distance_threshold: f32) {
-        self.match_contacts_in(previous_contacts.iter(), distance_threshold);
-    }
-
-    /// [`match_contacts`](Self::match_contacts) over previous contacts drawn from any number of
-    /// manifolds, so the closest match across all of them wins.
-    #[inline]
-    pub fn match_contacts_in<'a>(
-        &mut self,
-        previous_contacts: impl Iterator<Item = &'a ContactPoint> + Clone,
-        distance_threshold: f32,
-    ) {
         // The squared maximum distance for two contact points to be considered matching.
         let distance_threshold_squared = distance_threshold.powi(2);
 
         for contact in self.points.iter_mut() {
-            // Two `UNKNOWN` IDs compare equal without naming the same feature.
+            // A point with an unknown feature ID has no identity: two `UNKNOWN` IDs compare equal
+            // without naming the same feature, so such a point is matched by position only.
             let unknown_features = contact.feature_id1 == PackedFeatureId::UNKNOWN
                 || contact.feature_id2 == PackedFeatureId::UNKNOWN;
 
-            let mut closest: Option<(f32, &ContactPoint)> = None;
-            for previous_contact in previous_contacts.clone() {
-                // Both directions, because the pair's order can change between steps.
-                let same_features = !unknown_features
+            for previous_contact in previous_contacts.iter() {
+                // If the feature IDs match, copy the contact impulses over for warm starting.
+                if !unknown_features
                     && ((contact.feature_id1 == previous_contact.feature_id1
-                        && contact.feature_id2 == previous_contact.feature_id2)
-                        || (contact.feature_id2 == previous_contact.feature_id1
-                            && contact.feature_id1 == previous_contact.feature_id2));
-                for (anchor1, anchor2) in [
-                    (previous_contact.anchor1, previous_contact.anchor2),
-                    (previous_contact.anchor2, previous_contact.anchor1),
-                ] {
-                    let near1 = contact.anchor1.distance_squared(anchor1);
-                    let near2 = contact.anchor2.distance_squared(anchor2);
-                    let admissible = same_features
-                        || (unknown_features
-                            && near1 < distance_threshold_squared
-                            && near2 < distance_threshold_squared);
-                    if admissible && closest.is_none_or(|(distance, _)| near1 + near2 < distance) {
-                        closest = Some((near1 + near2, previous_contact));
-                    }
+                    && contact.feature_id2 == previous_contact.feature_id2) ||
+                    // we have to check both directions because the entities are sorted in order
+                    // of aabb.min.x, which could have changed even the two objects in contact are the same
+                    (contact.feature_id2 == previous_contact.feature_id1
+                    && contact.feature_id1 == previous_contact.feature_id2))
+                {
+                    contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
+                    contact.warm_start_tangent_impulse =
+                        previous_contact.warm_start_tangent_impulse;
+                    break;
                 }
-            }
 
-            if let Some((_, previous_contact)) = closest {
-                contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
-                contact.warm_start_tangent_impulse = previous_contact.warm_start_tangent_impulse;
+                // If the feature IDs are unknown and the contact positions match closely enough,
+                // in either orientation, copy the contact impulses over for warm starting.
+                if unknown_features
+                    && ((contact.anchor1.distance_squared(previous_contact.anchor1)
+                        < distance_threshold_squared
+                        && contact.anchor2.distance_squared(previous_contact.anchor2)
+                            < distance_threshold_squared)
+                        || (contact.anchor1.distance_squared(previous_contact.anchor2)
+                            < distance_threshold_squared
+                            && contact.anchor2.distance_squared(previous_contact.anchor1)
+                                < distance_threshold_squared))
+                {
+                    contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
+                    contact.warm_start_tangent_impulse =
+                        previous_contact.warm_start_tangent_impulse;
+                    break;
+                }
             }
         }
     }
