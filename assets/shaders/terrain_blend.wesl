@@ -34,6 +34,7 @@ import bevy_pbr::render::{
     pbr_types,
     mesh_view_bindings as view_bindings,
 };
+import super::terrain_shadow::visibility;
 
 struct TerrainBlendParams {
     // xyz: each layer's UV multiplier over the mesh's own UV. w: the mesh's UV per world metre.
@@ -476,10 +477,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     pbr_input.material.base_color = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, pbr_input.material.base_color);
 
-    // The rut's self-shadow joins the sun's shadow: it takes the direct sunlight, and only that,
-    // where the ground stands over the ray to the sun. It is a sun shadow like any other, so it
-    // lapses with them where the sun casts none (Shadows Off).
-    pbr_input.directional_shadow_factor = sun;
+    // The rut's self-shadow and the terrain's baked shadow join the sun's shadow: each takes the
+    // direct sunlight, and only that, where ground stands over the ray to the sun. They are sun
+    // shadows like any other, so they lapse with them where the sun casts none (Shadows Off).
+    pbr_input.directional_shadow_factor = sun * visibility(pbr_input.world_position.xyz);
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);

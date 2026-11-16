@@ -235,7 +235,7 @@ const PIN_END_NODE: &str = "Pin_End";
 /// The material the blend assigns to the shoe primitive. Named here only so the refusal below can
 /// say what is missing — nothing reads it, because the material arrives as an asset handle on the
 /// glb's own primitive rather than by name.
-const LINK_MATERIAL: &str = "Mat_Track_Link";
+pub(crate) const LINK_MATERIAL: &str = "Mat_Track_Link";
 
 // The certificate owns shoe radius and rung deviations; `crate::geometry_lod` derives switch
 // metres against the live view profile (ADR-0035, the single seam required by ADR-0033 §8).

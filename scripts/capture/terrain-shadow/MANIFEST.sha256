@@ -1,0 +1,18 @@
+# Frames of the terrain-shadow lane (lane/terrain-shadow), kept off-repo under ~/.cache/overmatch/terrain-shadow/.
+# before = main at 2d9b4635 (vendored heightfield patch); after = the game-side seam. Hidden window, 1280x720,
+# scale 1, empty config dir. Plans: scripts/capture/terrain-shadow/*.ron and scripts/capture/surroundings/{p3-hill,
+# p4-hill-sight,hull-closeup}.ron with out redirected; OVERMATCH_START as each plan's header names.
+aecfdb7f37adb506947548d05e17618d126ec7648d9fdba3b5c90a60ade372f1  before/hull-closeup.png
+337a22204a0996fd7f0e3b00ca6c6f4c6de0c62c3c4860e3b37ed3e84d077b66  before/low-sun-hills.png
+166617c62d13cb170841bcc6e5af341a10422b147309f8ec982ba0e0e5c71a00  before/low-sun-house-00007.0000s.png
+5aaa7f19412a2307dfff4b3e38d7c490be6168932a366724a200272b6ede5038  before/low-sun-house-00014.0000s.png
+07217996c7d8f60a2b0e4bf155f0729d819b8281a3bbda14452370c8ba9fe603  before/p3-hill.png
+c08e17380619c2a47d5697a2315fce12d94d127c18039dd33627d0b08a62bc81  before/p4-hill-sight.png
+8b9ebda3f598cf0b6c84c61c208e37f0e0d2dab0e4baac8ba746b958d6b380ce  before/shadow-edge-tank.png
+aecfdb7f37adb506947548d05e17618d126ec7648d9fdba3b5c90a60ade372f1  after/hull-closeup.png
+6108ec628ad2ea3fecebdc4db84204c8ee8aed8b972a952d77507fdee073d29d  after/low-sun-hills.png
+db00ffc3055993ecd2d8e2de9d6478aea7d557ec97321de85085f3c2d8486eba  after/low-sun-house-00007.0000s.png
+8edb421b672fd1c66becf7b22202fc732d18855d7f6b7eca03271aab57848ebf  after/low-sun-house-00014.0000s.png
+07217996c7d8f60a2b0e4bf155f0729d819b8281a3bbda14452370c8ba9fe603  after/p3-hill.png
+98a6ef98530ae32838059493ec5d75da200096f23e16bc5b8d76c134f2c88d63  after/p4-hill-sight.png
+913d526823188df2a069404c149dba7a05c1983bfac3e83d1dd4923677072b95  after/shadow-edge-tank.png

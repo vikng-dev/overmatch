@@ -61,7 +61,7 @@ Where code and prose disagree, the code wins, and the row says so.
 | `src/map.rs` | parses and checks the manifest, the library and the constructions; computes the digest | **B**, except the digest's separate second load (**U**, below) | `MAP_ID` is a const (`:47`): one map ships at early access (PRODUCT.md), and no selection framework exists. The root vs `derived/` split is stated at `:59-62` and `:81-89`. `SpawnPoints::checked` refuses at the load edge, naming file and field (`:126-142`). `#[serde(default)]` on the author's prototype block (`:262`) is a named legitimate absence ("An export may omit the block"), read for keys only. **U**: `load` resolves constructions after `parse` returns (`:441-447`), and `content_digest` repeats parse and resolve on its own (`:485-504`). A cross-file check placed in `parse` could not see footprints, and the digest's load could skip a check `load` runs. W1a gives both one sequence (§3.6). **U**: `dir: path.parent().unwrap_or_else(…)` (`:608`) is a fallback in form and unreachable for a joined path; lens ratchet. |
 | `src/terrain_grid.rs` | the one height decode, the heightfield collider, mesh tiles | **B**, except the pack paths and tile size (`:107-133`) and the spawn footprint constants (`:143-148`), which are backlog rows destruction-05 and destruction-09 (**P**) | `ForceFlatWorld` (`:139`) is a fixture world only. A spawn outside the span is a bug and panics (`:154-167`). Collider with `FIX_INTERNAL_EDGES` (`:693-708`). Edge nodes: `node_world_coord` (`:765`); normals: full-grid central differences, one-sided at the map's edges (`surface_normal_at`, `:770-783`); UVs: world XZ over `TEXTURE_TILE_M` (`:737`). |
 | `src/terrain_lod.rs` | the startup LOD ladder | **B**: ONE-SURFACE, generated at Startup from the grid, so "no baked product can go stale" (`:11-15`). NO SKIRTS: full-density borders at every tile and level pairing (`:20-24`). Mikktspace tangents required at every rung (`:660-672`, `:694`). An OS failure starting tangent workers is a typed `TangentStartupError` (`:641-656`), and the process refuses to start (`:724-727`): the outside-input outcome. | |
-| `src/terrain_shadow.rs` | the baked sun shadow field, startup (`:136`, `:284`) | **B**, except `SUN_ANGULAR_RADIUS_RAD` (`:71-74`, labelled "CLAIMED") and `MIN_PENUMBRA_M` (`:76-79`): backlog row view-13 (**P**) | Outside the field, and beyond the cascades, a receiver reads lit (vendored `render/shadows.wgsl:234-237`, `:280-322`). |
+| `src/terrain_shadow.rs` | the baked sun shadow field, startup; every lit battlefield material binds it and multiplies its receiver law (`assets/shaders/terrain_shadow.wesl`) into bevy's `directional_shadow_factor` | **B**. The sun's radius is shared data (`assets/world/sun.ron`); `MIN_PENUMBRA_M` is a `Resolution` | Outside the field a receiver reads lit; inside it the field applies at every distance while the sun casts shadows, and not at all with shadows off (upstream `pbr_functions.wesl`, the shadow-receiver block). |
 | `src/terrain_blend.rs` | the ground material | **B**, except `BLEND_LAYERS`, `BASE_GROUND` and the appearance consts (`:87-106`, `:190-216`): backlog rows destruction-05 and destruction-08 (**P**) | `prints_world` has no sampler of its own; it is read through the mask's clamping sampler (`:297-302`). §3.3 depends on this. |
 | `src/ground_field.rs` | decodes the masks into ground types for the sim (`:145-213`), reading the file itself (`:196`) | **B** | |
 | `src/scatter.rs` | places instances on every composition; both peers derive them, nothing is replicated (`:1-24`) | **B**. Graybox `Block`s are placeholders (`"placeholder": true`). | Statics are `[Terrain]` (`:318`). |
@@ -259,8 +259,8 @@ on the shipped composition.
   Bevy's lobe multiplies `light.color`, which is premultiplied by illuminance
   (`render/light.rs:1731-1733`), and the exposure (`pbr_functions.wgsl:912-917`).
 - **Unshadowed.** Bevy multiplies the fog's lobe by the receiver's shadow
-  (`pbr_functions.wgsl:919-925`). That costs a filtered cascade sample, possibly a blend into the
-  next cascade, and the heightfield lookup per fogged fragment (`render/shadows.wgsl:238-263`). It
+  (`pbr_functions.wgsl:919-925`). That costs a filtered cascade sample, and possibly a blend into
+  the next cascade, per fogged fragment (`render/shadows.wgsl:238-263`). It
   also makes the fog differ from the unshadowed sky in exactly the fragments the shared law claims
   equal.
   - A receiver's shadow is no statement about the kilometres of air in front of it, so the shadowed
@@ -405,12 +405,9 @@ tracer at range in the optic.
 Both are baked by `sky_radiance` and stay static, since the sun is fixed per map.
 
 **Sun disk (L4a).** `Drawn` bake only.
-- Angular radius: one shared row, `assets/world/sun.ron` (embedded like today's lighting file), per
-  R1's universal-fact rule:
-  `sun_angular_radius_rad: (0.00465, Measured("mean apparent solar semi-diameter, 16′, Astronomical Almanac"))`.
-  - It replaces `terrain_shadow.rs:71-74`. The baked penumbra and the drawn disk then read one owner.
-  - L4a closes backlog row view-13: it classifies `MIN_PENUMBRA_M` (`:76-79`) separately, as a
-    `Resolution` with its f32-rounding reason.
+- Angular radius: the one shared row, `assets/world/sun.ron` (embedded, `sky::sun_angular_radius_rad`),
+  per R1's universal-fact rule, which the baked terrain shadow's penumbra already reads. The drawn
+  disk reads the same owner.
 - Radiance = `sun_illuminance_lux` / disk solid angle (DERIVED) × `sun_disk_gain`, a
   `Taste("sky: sun disk brightness under bloom")` in `view/sky.ron`. The taste scales the physical
   quantity rather than replacing it.

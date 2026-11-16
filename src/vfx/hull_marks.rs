@@ -19,7 +19,9 @@
 //! [`stretch`]. The surface under it ([`MarkSurface`]) is turned about +Y by the mark's roll, so
 //! the roll varies the pattern while the stretch stays on the shot. A scratch is not rolled: its
 //! gouge lies along the shot. [`dress_surface`], the render half, gives the surface its
-//! `ForwardDecal` and its material, shared per (kind, variant, substance response).
+//! `ForwardDecal` and its material, shared per (kind, variant, substance response): a
+//! `StandardMaterial` under the terrain shadow ([`MarkMaterial`]), so a mark on a hull in a hill's
+//! shadow is as dark as the hull.
 //!
 //! # What the forward decal cannot do (DERIVED from bevy_pbr 0.20.1's `decal/forward.rs` and
 //! `decal/forward.wesl`)
@@ -45,13 +47,16 @@ use bevy::prelude::*;
 use crate::hull_marks::{HullMark, HullMarks, MarkKind, in_plane, parts_in_index_order, stretch};
 use crate::substances::SurfaceFeedback;
 use crate::tank::{SimParts, ViewNode};
+use crate::terrain_shadow::{TerrainShadow, TerrainShadowed, TerrainShadowedMaterial};
 use texture::VARIANTS;
+
+/// A mark's material: bevy's forward decal over a `StandardMaterial` under the terrain shadow.
+pub(super) type MarkMaterial = ForwardDecalMaterial<TerrainShadowedMaterial>;
 
 /// The material each (kind, variant) shares.
 #[derive(Resource)]
 pub(super) struct MarkMaterials {
-    by_response:
-        BTreeMap<SurfaceFeedback, [[Handle<ForwardDecalMaterial<StandardMaterial>>; VARIANTS]; 3]>,
+    by_response: BTreeMap<SurfaceFeedback, [[Handle<MarkMaterial>; VARIANTS]; 3]>,
 }
 
 impl MarkMaterials {
@@ -60,7 +65,7 @@ impl MarkMaterials {
         kind: MarkKind,
         variant: usize,
         feedback: SurfaceFeedback,
-    ) -> Handle<ForwardDecalMaterial<StandardMaterial>> {
+    ) -> Handle<MarkMaterial> {
         self.by_response.get(&feedback).expect(
             "every authoritative mark carries a response from the shared hard-substance data",
         )[kind_index(kind)][variant % VARIANTS]
@@ -145,7 +150,12 @@ pub(super) fn variant(seed: u16) -> usize {
 
 pub(super) fn plugin(app: &mut App) {
     crate::hull_marks::max_stretch();
-    app.add_systems(Startup, build_materials)
+    // Each mark's material holds the terrain shadow, so it is built after the world installs it.
+    app.add_plugins(MaterialPlugin::<MarkMaterial>::default())
+        .add_systems(
+            Startup,
+            build_materials.after(crate::world::spawn_environment),
+        )
         .add_systems(Update, draw_marks)
         .add_observer(dress_surface);
 }
@@ -154,7 +164,8 @@ pub(super) fn plugin(app: &mut App) {
 /// threads; the elapsed time is logged.
 pub(super) fn build_materials(
     mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<ForwardDecalMaterial<StandardMaterial>>>,
+    mut materials: ResMut<Assets<MarkMaterial>>,
+    terrain_shadow: Res<TerrainShadow>,
     mut commands: Commands,
 ) {
     let started = std::time::Instant::now();
@@ -171,13 +182,11 @@ pub(super) fn build_materials(
             .collect()
     });
     let elapsed = started.elapsed();
-    let mut by_response: BTreeMap<
-        SurfaceFeedback,
-        [[Handle<ForwardDecalMaterial<StandardMaterial>>; VARIANTS]; 3],
-    > = crate::substances::SubstanceRegistry::shipped_static()
-        .feedbacks()
-        .map(|feedback| (feedback, Default::default()))
-        .collect();
+    let mut by_response: BTreeMap<SurfaceFeedback, [[Handle<MarkMaterial>; VARIANTS]; 3]> =
+        crate::substances::SubstanceRegistry::shipped_static()
+            .feedbacks()
+            .map(|feedback| (feedback, Default::default()))
+            .collect();
     for (kind, variant, maps) in sets {
         let base = StandardMaterial {
             base_color_texture: Some(images.add(maps.color)),
@@ -200,7 +209,10 @@ pub(super) fn build_materials(
         };
         for (feedback, by_kind) in &mut by_response {
             by_kind[kind_index(kind)][variant] = materials.add(ExtendedMaterial {
-                base: surface_material(base.clone(), *feedback),
+                base: TerrainShadowedMaterial {
+                    base: surface_material(base.clone(), *feedback),
+                    extension: TerrainShadowed::from(&*terrain_shadow),
+                },
                 extension: ForwardDecalMaterialExt {
                     depth_fade_factor: super::look::marks().depth_fade_m,
                 },

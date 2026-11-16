@@ -21,6 +21,7 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 
+use crate::terrain_shadow::{TerrainShadow, TerrainShadowUniform};
 use crate::world::{MapEncoding, MapTiling, surface_map};
 
 /// The constructions' material: bevy's `StandardMaterial` carrying the primary palette lane pack and every lighting
@@ -148,6 +149,11 @@ pub(crate) struct Surface {
     /// shared material, whose opaque variant never reads it.
     #[storage(105, read_only)]
     pub holes: Handle<ShaderBuffer>,
+    /// The terrain shadow ([`TerrainShadow`]).
+    #[texture(150, sample_type = "float", filterable = false)]
+    pub terrain_shadow_field: Option<Handle<Image>>,
+    #[uniform(151)]
+    pub terrain_shadow: TerrainShadowUniform,
 }
 
 impl MaterialExtension for Surface {
@@ -202,12 +208,13 @@ struct Maps([AssetId<Image>; 6]);
 
 /// The material every construction shares: both packs' maps through the surface sampler (repeat,
 /// trilinear, anisotropic), the primary scale on the standard half's `uv_transform`, the secondary's on
-/// the extension's.
+/// the extension's, under the world's terrain shadow.
 pub(crate) fn material(
     commands: &mut Commands,
     server: &AssetServer,
     materials: &mut Assets<ConstructionMaterial>,
     buffers: &mut Assets<ShaderBuffer>,
+    terrain_shadow: &TerrainShadow,
 ) -> Handle<ConstructionMaterial> {
     let load = |pack: &SurfacePack, map: &str, encoding: MapEncoding| {
         surface_map(server, &pack.path(map), encoding, MapTiling::Repeat)
@@ -251,6 +258,8 @@ pub(crate) fn material(
             secondary_normal,
             secondary_arm,
             holes: buffers.add(no_holes()),
+            terrain_shadow_field: terrain_shadow.field.clone(),
+            terrain_shadow: terrain_shadow.uniform,
         },
     })
 }

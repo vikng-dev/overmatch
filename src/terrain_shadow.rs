@@ -1,9 +1,10 @@
 //! The terrain's sun shadow as a baked occlusion field (issue #170): generated once, when the
-//! heightfield loads, from the canonical [`HeightGrid`] toward the fixed sun, and handed to the
-//! vendored renderer as `bevy::pbr::HeightfieldShadow`. Every lit fragment samples it — ground,
-//! tanks, trees and constructions — so a ridge shades what stands under it with no terrain caster in
-//! the cascades. Dynamic casters keep drawing into the cascades; the field multiplies their result
-//! (`vendor/bevy_pbr-0.20.1-overmatch/src/render/shadows.wesl`, `fetch_heightfield_shadow`).
+//! heightfield loads, from the canonical [`HeightGrid`] toward the fixed sun, and bound by every lit
+//! battlefield material as [`TerrainShadow`] — ground, tank surfaces and their belts and hull marks,
+//! constructions and trees — so a ridge shades what stands under it with no terrain caster in the
+//! cascades. Each receiver's fragment runs the receiver law (`assets/shaders/terrain_shadow.wesl`)
+//! and multiplies it into bevy's `directional_shadow_factor`, which bevy multiplies into the sun's
+//! cascade shadow; dynamic casters keep drawing into the cascades.
 //!
 //! # The record
 //!
@@ -43,14 +44,18 @@
 //! interpolation of neighbouring rays, one texel wide. The edge's softness is the sun's disc: a
 //! receiver on the occluder's line is half lit, and the penumbra widens with the distance to the
 //! occluder, so a long, shallow shadow from a far crest at a grazing sun is a soft one. The field
-//! ends where the sun's cascades end and at the map's edge; beyond the span no receiver exists.
+//! reaches every receiver on the map at any distance while the sun casts shadows, and none while
+//! it casts none (the Shadows Off setting); beyond the map's edge no receiver exists.
 
 use std::time::Instant;
 
 use bevy::asset::RenderAssetUsages;
-use bevy::pbr::HeightfieldShadow;
+use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::{
+    AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat,
+};
+use bevy::shader::ShaderRef;
 
 use crate::terrain_grid::{HeightGrid, node_world_coord};
 
@@ -68,14 +73,10 @@ pub(crate) fn near_miss_depth(texel_m: f32, tan_elevation: f32) -> f32 {
     RECEIVER_BELOW_SURFACE_M + std::f32::consts::SQRT_2 * texel_m * tan_elevation
 }
 
-/// The sun's angular radius, rad: CLAIMED 16′ (the sun's mean apparent radius). The penumbra is
-/// the sun's own disc seen past the occluder's edge, so it widens with the occluder's distance:
-/// DERIVED ±0.25 m of depth at 50 m under the 17° sun, ±0.04 m at 8 m.
-const SUN_ANGULAR_RADIUS_RAD: f32 = 0.00465;
-
-/// The least penumbra half-width, m, at an occluder's foot where the disc's own vanishes. ASSUMED:
-/// a centimetre, far above the f32 rounding of an interpolated world position on a 1500 m map
-/// (DERIVED ulp at 750 m: 6.1e-5 m).
+/// Resolution: the least penumbra half-width, m, where the sun's disc gives none (at an occluder's
+/// foot), so the receiver law's smoothstep never divides a zero width. A centimetre, far above the
+/// f32 rounding of an interpolated world position on a 1500 m map (DERIVED ulp at 750 m: 6.1e-5 m)
+/// and below any edge a pixel resolves.
 const MIN_PENUMBRA_M: f32 = 0.01;
 
 /// A baked field: `size × size` records, row-major from the grid's `(0, 0)` node.
@@ -221,14 +222,76 @@ fn local_relief(grid: &HeightGrid, i: usize, j: usize) -> f32 {
     relief
 }
 
-/// Bake the field toward `toward_sun` and hand it to the renderer. Called once, from the world's
-/// spawn, on windowed compositions only.
+/// The terrain shadow as every receiving material binds it: the field's records at binding 150 and
+/// its law at 151 (`assets/shaders/terrain_shadow.wesl`). Each material holds its own copy, made
+/// from this resource, so a receiver made before [`install`] would never see the field:
+/// `world::spawn_environment` installs it before it makes the ground's and the constructions'
+/// materials, the hull marks build theirs after that system, and the tank surfaces and belts are
+/// made when their glb lands.
+///
+/// The default is a world with no field (the test course, a sandbox): no records, bevy's fallback
+/// image bound in their place, and a uniform saying the field is absent, so the law returns full
+/// visibility.
+#[derive(Resource, Clone, Debug, Default)]
+pub(crate) struct TerrainShadow {
+    pub(crate) field: Option<Handle<Image>>,
+    pub(crate) uniform: TerrainShadowUniform,
+}
+
+/// The field's uniform, as the shader's `TerrainShadowUniform` reads it.
+#[derive(ShaderType, Reflect, Clone, Copy, Debug, Default)]
+pub(crate) struct TerrainShadowUniform {
+    /// xy: world XZ of texel (0, 0); z: texels per metre; w: metres per texel.
+    map: Vec4,
+    /// xy: the unit horizontal direction toward the sun; z: the sun's rise per horizontal metre;
+    /// w: 1 when the field is bound, 0 when absent.
+    ray: Vec4,
+    /// xyz: the direction toward the sun the field was baked for; w: unused.
+    light: Vec4,
+    /// x: the sun's angular radius (rad); y: [`MIN_PENUMBRA_M`].
+    law: Vec4,
+}
+
+/// A `StandardMaterial` that receives the terrain shadow and is otherwise bevy's own: the hull
+/// marks, under bevy's forward decal. The fragment (`assets/shaders/terrain_shadowed.wesl`) also
+/// draws the track belt, whose extension carries the same two bindings.
+pub(crate) type TerrainShadowedMaterial = ExtendedMaterial<StandardMaterial, TerrainShadowed>;
+
+/// The fragment that draws a `StandardMaterial` look under the terrain shadow.
+pub(crate) const SHADOWED_STANDARD_SHADER: &str = "shaders/terrain_shadowed.wesl";
+
+/// [`TerrainShadowedMaterial`]'s half: [`TerrainShadow`]'s two bindings.
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+pub(crate) struct TerrainShadowed {
+    #[texture(150, sample_type = "float", filterable = false)]
+    pub(crate) terrain_shadow_field: Option<Handle<Image>>,
+    #[uniform(151)]
+    pub(crate) terrain_shadow: TerrainShadowUniform,
+}
+
+impl From<&TerrainShadow> for TerrainShadowed {
+    fn from(shadow: &TerrainShadow) -> Self {
+        Self {
+            terrain_shadow_field: shadow.field.clone(),
+            terrain_shadow: shadow.uniform,
+        }
+    }
+}
+
+impl MaterialExtension for TerrainShadowed {
+    fn fragment_shader() -> ShaderRef {
+        SHADOWED_STANDARD_SHADER.into()
+    }
+}
+
+/// Bake the field toward `toward_sun`, insert it as the [`TerrainShadow`] every receiver binds and
+/// return it. Called once, from the world's spawn, on windowed compositions only.
 pub(crate) fn install(
     commands: &mut Commands,
     images: &mut Assets<Image>,
     grid: &HeightGrid,
     toward_sun: Vec3,
-) {
+) -> TerrainShadow {
     let started = Instant::now();
     let field = bake(grid, toward_sun);
     let n = field.size as usize;
@@ -257,7 +320,14 @@ pub(crate) fn install(
         TEXEL_FORMAT,
         RenderAssetUsages::RENDER_WORLD,
     );
-    commands.insert_resource(handed_over(&field, images.add(image), toward_sun));
+    let shadow = handed_over(
+        &field,
+        images.add(image),
+        toward_sun,
+        crate::sky::sun_angular_radius_rad(),
+    );
+    commands.insert_resource(shadow.clone());
+    shadow
 }
 
 /// The texture format of the field's records (module doc).
@@ -277,19 +347,30 @@ fn texel_bytes(field: &OcclusionField) -> Vec<u8> {
         .collect()
 }
 
-/// What the renderer is handed for `field` baked toward `toward_sun`, its records in `image`.
+/// What the receivers bind for `field` baked toward `toward_sun`, its records in `image`, under a
+/// sun of angular radius `sun_radius_rad`.
 fn handed_over(
     field: &OcclusionField,
     image: Handle<Image>,
     toward_sun: Vec3,
-) -> HeightfieldShadow {
-    HeightfieldShadow {
-        image,
-        origin: field.origin,
-        texel_m: field.texel_m,
-        direction_to_light: toward_sun.normalize(),
-        angular_radius: SUN_ANGULAR_RADIUS_RAD,
-        min_penumbra_m: MIN_PENUMBRA_M,
+    sun_radius_rad: f32,
+) -> TerrainShadow {
+    let dir = toward_sun.normalize();
+    let horizontal = Vec2::new(dir.x, dir.z);
+    let run = horizontal.length();
+    TerrainShadow {
+        field: Some(image),
+        uniform: TerrainShadowUniform {
+            map: Vec4::new(
+                field.origin.x,
+                field.origin.y,
+                field.texel_m.recip(),
+                field.texel_m,
+            ),
+            ray: Vec4::new(horizontal.x / run, horizontal.y / run, dir.y / run, 1.0),
+            light: dir.extend(0.0),
+            law: Vec4::new(sun_radius_rad, MIN_PENUMBRA_M, 0.0, 0.0),
+        },
     }
 }
 
@@ -547,26 +628,20 @@ mod tests {
         }
     }
 
-    /// The vendored receiver law (`shadows.wesl`'s `fetch_heightfield_shadow`) and the field's
-    /// uniform type, lifted out of the shipped shader text with the view bindings swapped for test
-    /// ones: the field's texture at binding 0, its uniform at 1, and the directional lights a
+    /// The shipped receiver law (`assets/shaders/terrain_shadow.wesl`'s `visibility`) and its
+    /// uniform type, lifted out of the shader text with the material bindings swapped for test ones:
+    /// the field's texture at binding 0, its uniform at 1, and the view's directional lights a
     /// private array pointing toward `lights`. The compute entry `check` writes the law's
-    /// visibility at each query of binding 2 (xyz a world position, w a light's index) to
-    /// binding 3.
+    /// visibility at each query of binding 2 (xyz a world position) to binding 3.
     fn receiver_law_module(lights: &[Vec3]) -> String {
-        let shadows = include_str!("../vendor/bevy_pbr-0.20.1-overmatch/src/render/shadows.wesl");
-        let types =
-            include_str!("../vendor/bevy_pbr-0.20.1-overmatch/src/render/mesh_view_types.wesl");
-        let law = &shadows[shadows
-            .find("const HEIGHTFIELD_SHADOW_SAME_LIGHT")
-            .expect("the law's light test")
-            ..shadows
-                .find("fn cascade_debug_visualization")
-                .expect("the function after the law")];
-        let start = types
-            .find("struct HeightfieldShadow {")
+        let shader = include_str!("../assets/shaders/terrain_shadow.wesl");
+        let law = &shader[shader
+            .find("const SAME_LIGHT")
+            .expect("the law's light test")..];
+        let start = shader
+            .find("struct TerrainShadowUniform {")
             .expect("the field's uniform type");
-        let uniform = &types[start..start + types[start..].find("};").expect("its end") + 2];
+        let uniform = &shader[start..start + shader[start..].find("};").expect("its end") + 2];
         let count = lights.len();
         let lights = lights
             .iter()
@@ -576,22 +651,20 @@ mod tests {
         format!(
             "{uniform}
 struct Light {{ direction_to_light: vec3<f32> }}
-struct Lights {{ directional_lights: array<Light, {count}> }}
-var<private> lights: Lights = Lights(array<Light, {count}>({lights}));
-@group(0) @binding(0) var heightfield_shadow_texture: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> heightfield_shadow: HeightfieldShadow;
+struct Lights {{ n_directional_lights: u32, directional_lights: array<Light, {count}> }}
+var<private> lights: Lights = Lights({count}u, array<Light, {count}>({lights}));
+@group(0) @binding(0) var terrain_shadow_field: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> terrain_shadow: TerrainShadowUniform;
 @group(0) @binding(2) var<storage, read> queries: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read_write> visibility: array<f32>;
+@group(0) @binding(3) var<storage, read_write> seen: array<f32>;
 {law}
 @compute @workgroup_size(64)
 fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
     if id.x < arrayLength(&queries) {{
-        let query = queries[id.x];
-        visibility[id.x] = fetch_heightfield_shadow(u32(query.w), query.xyz);
+        seen[id.x] = visibility(queries[id.x].xyz);
     }}
 }}
-",
-            law = law.replace("view_bindings::", ""),
+"
         )
     }
 
@@ -611,7 +684,8 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
     }
 
     /// Run the shipped receiver law on a headless compute device over `field` (baked toward
-    /// `lights[0]`, handed over exactly as [`install`] hands it), one visibility per query.
+    /// `lights[0]`, handed over exactly as [`install`] hands it), in a view lit by `lights`, one
+    /// visibility per query.
     fn run_receiver_law(field: &OcclusionField, lights: &[Vec3], queries: &[Vec4]) -> Vec<f32> {
         use bevy::render::render_resource::encase;
         use bevy::tasks::block_on;
@@ -623,7 +697,7 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
             .expect("a headless compute device");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("heightfield shadow receiver law"),
+            label: Some("terrain shadow receiver law"),
             source: wgpu::ShaderSource::Wgsl(receiver_law_module(lights).into()),
         });
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
@@ -637,7 +711,7 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
             has_dynamic_offset: false,
             min_binding_size: None,
         };
-        // The vendored view layout's own entry: the records are not filterable.
+        // The materials' own entry (`TerrainShadowed`): the records are not filterable.
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[
@@ -696,11 +770,15 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
         );
         let mut uniform = encase::UniformBuffer::new(Vec::new());
         uniform
-            .write(&bevy::pbr::GpuHeightfieldShadow::from_field(&handed_over(
-                field,
-                Handle::default(),
-                lights[0],
-            )))
+            .write(
+                &handed_over(
+                    field,
+                    Handle::default(),
+                    lights[0],
+                    crate::sky::sun_angular_radius_rad(),
+                )
+                .uniform,
+            )
             .expect("the field's uniform layout");
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
@@ -792,8 +870,9 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
     /// the line meets the plain, between texels and wherever the fragment sits in its cell: half
     /// a metre either side of it is fully lit or fully shaded. A law that drops the carry along
     /// the ray, or blends unrecorded texels in as lit, fails; so does a bake that leaves a lit
-    /// texel next to the edge without its near miss, once the crest runs oblique to the sun. Beyond the field's span, and for any light but the one it was baked for, the
-    /// field is silent.
+    /// texel next to the edge without its near miss, once the crest runs oblique to the sun. Beyond
+    /// the field's span, and in a view lit by any directional light but the sun it was baked for
+    /// (the factor would shade that light too), the field is silent.
     #[test]
     #[ignore = "manual headless GPU correctness check; requires a compute adapter, never a window"]
     fn a_receiver_is_lit_above_its_occluders_line_and_shaded_below() {
@@ -814,7 +893,7 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
             assert!(w < RIDGE_FROM - 1.0, "the column stands on the plain");
             let column = at(0.5 * w + 0.31, 0.5 * w - 0.31);
             let line = RIDGE_M - to_ridge_m * tan;
-            let half_width = SUN_ANGULAR_RADIUS_RAD * to_ridge_m * (1.0 + tan * tan);
+            let half_width = crate::sky::sun_angular_radius_rad() * to_ridge_m * (1.0 + tan * tan);
             let heights: Vec<f32> = (0..=84).map(|k| k as f32 * 0.05 - 0.2).collect();
             let mut queries: Vec<Vec4> = heights
                 .iter()
@@ -832,14 +911,12 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
                     queries.push(Vec4::new(p.x, 0.0, p.y, 0.0));
                 }
             }
-            // Silence: open plain far in front of the edge, below the ground beyond the span, and
-            // the shaded column's foot under another light.
+            // Silence: open plain far in front of the edge, and below the ground beyond the span.
             let silent = queries.len();
             let open = at(0.5 * (edge - 8.0), 0.5 * (edge - 8.0));
             queries.push(Vec4::new(open.x, 0.0, open.y, 0.0));
             queries.push(Vec4::new(field.origin.x - 5.0, -10.0, column.y, 0.0));
-            queries.push(Vec4::new(column.x, 0.0, column.y, 1.0));
-            let seen = run_receiver_law(&field, &[toward, other_light], &queries);
+            let seen = run_receiver_law(&field, &[toward], &queries);
             let sun_name = format!("sun ({elevation}°, {azimuth}°)");
             for (&y, &v) in heights.iter().zip(&seen) {
                 if y < line - half_width - SLACK_M {
@@ -883,8 +960,20 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
             }
             assert_eq!(
                 &seen[silent..],
-                &[1.0; 3],
-                "{sun_name}: the open plain, beyond the span, another light"
+                &[1.0; 2],
+                "{sun_name}: the open plain, beyond the span"
+            );
+            // The shaded column's foot, in a view that also holds another directional light.
+            let foot = [Vec4::new(column.x, 0.0, column.y, 0.0)];
+            assert_eq!(
+                run_receiver_law(&field, &[toward], &foot),
+                [0.0],
+                "{sun_name}: the column's foot is shaded under the sun alone"
+            );
+            assert_eq!(
+                run_receiver_law(&field, &[toward, other_light], &foot),
+                [1.0],
+                "{sun_name}: another directional light silences the field"
             );
         }
     }

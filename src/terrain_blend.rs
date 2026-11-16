@@ -310,6 +310,11 @@ pub(crate) struct TerrainBlend {
     /// through the mask's clamping sampler, for the same reason.
     #[texture(110)]
     pub prints_world: Handle<Image>,
+    /// The terrain shadow ([`crate::terrain_shadow::TerrainShadow`]).
+    #[texture(150, sample_type = "float", filterable = false)]
+    pub terrain_shadow_field: Option<Handle<Image>>,
+    #[uniform(151)]
+    pub terrain_shadow: crate::terrain_shadow::TerrainShadowUniform,
 }
 
 /// Shader features removed from the terrain fragment to price them by difference. It is the

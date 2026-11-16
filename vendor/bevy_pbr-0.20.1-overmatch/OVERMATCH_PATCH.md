@@ -15,22 +15,13 @@ are omitted; neither is read for a path dependency.
 Upstream 0.20.1 supplies the field, its initialization and its use inside the shadow-receiver
 block (`src/render/pbr_types.wesl`, `src/render/pbr_functions.wesl`). No backport remains.
 
-## Heightfield shadow: re-ported
+## Heightfield shadow: dropped
 
-`src/heightfield_shadow.rs` owns the main-world field, extraction and GPU uniform. Every mesh view
-binds the non-filterable field texture at group 0 binding 39 and its uniform at binding 40;
-MEASURED pristine 0.20.1 ends its view bindings at 38. No binding index moved.
-
-The WESL edits are `mesh_view_types.wesl` (uniform), `mesh_view_bindings.wesl` (bindings) and
-`shadows.wesl` (receiver law). The receiver arithmetic, matching-light threshold and multiplication
-inside the cascade envelope are unchanged from the 0.19.1 fork. The other two old shader edits
-belonged to the now-upstream directional-shadow multiplier.
-
-No resource, or an image not yet uploaded, is a legitimate absence: the uniform disables the
-field and the texture binding holds the fallback image. Preparation runs after image preparation
-and before mesh view bind groups; its queue writes must precede the reads of that field.
-`GpuHeightfieldShadow::from_field` remains public for the game's headless receiver-law witnesses
-in `src/terrain_shadow.rs`; their source paths now name these WESL modules.
+The game binds the terrain's baked shadow on its own materials and multiplies it into upstream's
+`directional_shadow_factor` (`src/terrain_shadow.rs`, `assets/shaders/terrain_shadow.wesl`); no
+view binding, uniform or receiver law remains here. MEASURED against the pristine crate with
+`diff -ruN` (excluding this file, `Cargo.lock` and `.cargo_vcs_info.json`): 357 changed lines
+(+335, −22) across seven files before the drop, 47 (+27, −20) in `src/render/mesh.rs` alone after.
 
 ## Mesh-instance removals: re-carried
 

@@ -32,7 +32,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
 | view-12 | P3 | `src/sfx/mod.rs::SPATIAL_SCALE` | base-truths: Bare number in code | Falloff, ear separation, mix levels, engine slew and playback bands are embedded presentation tastes. | Move them into required audio data with separate job labels. | ratchet |
-| view-13 | P3 | `src/terrain_shadow.rs::SUN_ANGULAR_RADIUS_RAD` and penumbra floor | base-truths: Bare number in code | Solar radius and minimum penumbra lack distinct required classifications. | Put the solar fact in sourced environment data; classify the floor separately and retain code ownership only for justified resolution. | ratchet |
 
 
 ## dev
