@@ -640,12 +640,14 @@ fn wide_base(app: &mut App) -> Entity {
     root
 }
 
-/// Pairs involving `body`.
+/// Touching pairs involving `body`, awake or asleep: a pair keeps its manifolds when its island
+/// sleeps, so a count does not depend on when the fixture comes to rest.
 fn body_pairs(app: &App, body: Entity) -> Vec<&ContactPair> {
-    app.world()
-        .resource::<ContactGraph>()
+    let graph = app.world().resource::<ContactGraph>();
+    graph
         .active_pairs()
         .iter()
+        .chain(graph.sleeping_pairs())
         .filter(move |pair| pair.is_touching() && [pair.body1, pair.body2].contains(&Some(body)))
         .collect()
 }
@@ -687,11 +689,10 @@ fn over_outline(points: &[Vec3], at: Vec3) -> bool {
         })
 }
 
-/// Steps `app` and checks, on every step `body` is awake, that its centre of mass (`extra` from
-/// its origin) lies over the outline of the contact points the solver keeps for it. Statics owns
-/// the criterion: a body whose centre of mass is over its support outline does not tip, so a
-/// reduction that left it outside would tip a supported body. Sleeping pairs leave the active
-/// set, so asleep steps are skipped.
+/// Steps `app` and checks, on every step `body` touches, that its centre of mass (`extra` from its
+/// origin) lies over the outline of the contact points kept for it. Statics owns the criterion: a
+/// body whose centre of mass is over its support outline does not tip, so a reduction that left it
+/// outside would tip a supported body.
 fn stays_over_its_outline(app: &mut App, body: Entity, extra: Vec3, count: usize) {
     let mut checked = 0;
     for _ in 0..count {
@@ -714,10 +715,7 @@ fn stays_over_its_outline(app: &mut App, body: Entity, extra: Vec3, count: usize
         );
         checked += 1;
     }
-    assert!(
-        checked > 10,
-        "fixture: the body was awake on {checked} steps"
-    );
+    assert!(checked > 10, "fixture: the body touched on {checked} steps");
 }
 
 /// A body on many hull pairs of another body, reduced, stays supported with its centre of mass
