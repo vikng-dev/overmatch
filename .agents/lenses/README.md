@@ -24,6 +24,10 @@ what is not a finding, and the fix each class takes.
   and the lane closes the rows of [`backlog.md`](backlog.md) and fixes the open sweep issues naming
   a file it edits, each verified first; the orchestrator closes those issues. Only P1 findings get
   lanes of their own. Diff-mode review checks both.
+  A change that promises no behaviour change (a port, a rename, a mechanical migration) is the
+  exception: it logs the pre-existing findings it meets on the residue issue and leaves them, so its
+  diff stays the one it promised. It starts only from a drained queue, the backlog rows and sweep
+  issues naming the files it will touch included.
 - **Direction audit**, when one subsystem reaches its third fix round in one chain (each fix
   exposing the next defect): before the next fix lane, one reviewer reads the subsystem's code and
   history against the `base-truths` lens and answers whether the chain converges on one declarative
