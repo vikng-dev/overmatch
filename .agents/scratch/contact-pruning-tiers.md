@@ -12,27 +12,30 @@ projected-anchor deduplication, new geometry heuristic or allocation was added.
 
 The three selection loops retain upstream comments and assertions, with only eligibility filters
 and the normal parameter changing their logic. Rustfmt wraps the moved distance expression.
-The local draft includes the exact pruning-only diff against the cached published archive.
+The mixed branch returns before the homogeneous helper call and unchanged upstream construction.
+The local draft includes the pruning-only diff against the cached published archive, omitting
+fork-only patch comments.
 
 ## Fork inventory
 
 MEASURED using `diff -ru` on `src/` against the cached published avian3d 0.8.0 crate,
 SHA-256 `ca7479ccec5f1440675946bada8c805f2b6d514af78e1d2b0937ca53b1e2c543`, counting
-added plus removed lines and fork-only file lengths: **1,082 total**, **1,004** in upstream files,
-**78** fork-only. The contact-types file has **172**, including **167** pruning lines and
+added plus removed lines and fork-only file lengths: **1,071 total**, **993** in upstream files,
+**78** fork-only. The contact-types file has **161**, including **156** pruning lines and
 **5** pair-state lines. Earlier inventory: **968 / 890 / 78**, contact types **58**, pruning **53**.
-The loops' move and indentation count as removed and added source.
+The loops' move and indentation count as removed and added source. Before restoring the
+construction block to upstream indentation: **1,082 / 1,004 / 78**, contact types **172**,
+pruning **167** (MEASURED).
 
 ## Validation
 
-The initial generator also included collinear mixed manifolds. Those expose a qualification in
-R6's wording: an oracle with only two collinear picks cannot supply three free slots, whereas
-the prescribed implementation must fill the third from remaining input indices. R1–R7 therefore
-use the square/edge-midpoint and pentagon families, whose overflowing separated subsets supply
-enough oracle picks. The required all-bearing collinear/pentagon under-capacity witness stays.
-The implementation shape is unchanged.
+R1–R7 cover collinear, square/edge-midpoint and pentagon families. R6 compares selection-order
+oracle picks followed by remaining separated indices in input order, truncated to the free slots.
+This includes collinear mixed manifolds whose oracle supplies only two picks for three free slots.
+The all-bearing collinear/pentagon under-capacity witness guards upstream compatibility.
 
-All eight pruning guards passed before mutation. Each mutant was applied alone, run through
+The initial implementation passed all eight pruning guards before mutation. Each mutant was
+applied alone, run through
 `scripts/serial-cargo test --offline --lib --features dev_ui,bitprobe tests::avian_contact_pruning`,
 observed failing with test exit 101, then reverted before the next mutation (MEASURED):
 
@@ -57,12 +60,27 @@ proven function. Final commit gates passed after the global mutation was reverte
 
 No push, external repository action, timing measurement or remaining implementation work.
 
-## Draft compile proof
+## Follow-up verification
+
+MEASURED: after restoring collinear generation, all eight pruning guards and 16 scorecard tests
+passed (seven on-demand probes ignored). Mutants (b) and (e) were each applied alone and returned
+101: (b) failed R6; (e) failed R1 and the upstream under-capacity witness. Each was reverted after
+its test process ended. On the restored source, `cargo fmt --all --check`, CI clippy
+(`--locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`), and both
+targeted test modules passed again through the build queue with `CARGO_NET_OFFLINE=true`.
+
+The regenerated draft applies cleanly to pristine published 0.8.0. Its pruning function matches
+the fork after omitting fork-only patch comments; the upstream construction block matches
+pristine verbatim. The cached pristine `src/` was verified byte-for-byte against the published
+archive before counting fork lines.
+
+## Initial standalone draft compile proof
 
 Extracted the cached published `.crate` into the new empty `tier-selection-_b0boc89` directory
 under the requested `scratchpad/draft-check-prune/`. Read the diff directly from the Markdown
 draft's fenced block and applied it with `patch --batch -p1`: clean application; the resulting
-pruning function is byte-for-byte equal to the vendored function. No other fork patch was applied.
+pruning function was byte-for-byte equal to the then-vendored function. No other fork patch was
+applied.
 
 Crate root:
 `/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/draft-check-prune/tier-selection-_b0boc89/avian3d-0.8.0`.

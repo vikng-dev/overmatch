@@ -86,9 +86,10 @@ fn anchors(points: &[ContactPoint]) -> Vec<Vec3> {
 }
 
 fn generated(mut check: impl FnMut(&[ContactPoint])) {
-    // Fixture: a square with edge midpoints and a convex pentagon. Rotations and
+    // Fixture: collinear anchors, a square with edge midpoints and a convex pentagon. Rotations and
     // translations vary first-wins ties and distance from the center of mass; every sign mask
     // covers touching, sub-floor and above-floor depths, with varied weights within each tier.
+    let collinear = [(-2.0, 0.0), (-1.0, 0.0), (0.0, 0.0), (1.0, 0.0), (2.0, 0.0)];
     let square = [
         (-1.0, -1.0),
         (1.0, -1.0),
@@ -106,7 +107,7 @@ fn generated(mut check: impl FnMut(&[ContactPoint])) {
         (1.0, 1.0),
         (-1.0, 1.0),
     ];
-    for shape in [&square[..], &pentagon[..]] {
+    for shape in [&collinear[..], &square[..], &pentagon[..]] {
         for n in 1..=shape.len() {
             for rotation in 0..n {
                 for mask in 0_u32..1 << n {
@@ -220,8 +221,8 @@ fn r5_mixed_excess_bearing_keeps_every_bearing_oracle_pick() {
     });
 }
 
-/// R6: competing speculative stops use upstream's selection order in the free slots;
-/// the solver needs distance/area coverage of future support, independent of input order.
+/// R6: competing speculative stops use upstream's selection order, then remaining input indices;
+/// the solver needs distance/area coverage and full capacity even when area picks leave empty sides.
 #[test]
 fn r6_mixed_speculation_uses_selection_order_in_free_slots() {
     generated(|points| {
@@ -230,8 +231,11 @@ fn r6_mixed_speculation_uses_selection_order_in_free_slots() {
             .filter(|&i| points[i].penetration < 0.0)
             .collect();
         if bearing > 0 && bearing < 4 && separated.len() > 4 - bearing {
-            let expected: Vec<_> = upstream(&zero_depth(points), &separated, true)
-                .into_iter()
+            let picks = upstream(&zero_depth(points), &separated, true);
+            let expected: Vec<_> = picks
+                .iter()
+                .copied()
+                .chain(separated.iter().copied().filter(|i| !picks.contains(i)))
                 .take(4 - bearing)
                 .map(|i| points[i])
                 .collect();

@@ -525,8 +525,7 @@ impl Bed {
     /// points), excluding sensor and disabled-body pairs because they generate no solver work.
     /// Bearing means penetration >= 0. Separated points carried 0.7–0.8% of normal impulse
     /// (MEASURED: experiment commit 1a488c66, `separated_point_normal_impulse_sum`, pre-fix pruning).
-    /// Narrow phase admits them by tolerance or closing speed; the solver uses them as speculative
-    /// stops. Counting both support and all points exposes tolerance's solver work.
+    /// Tolerance or closing speed admits separated points as speculative stops.
     fn contact_census(&self) -> (usize, usize, usize, usize) {
         let graph = self.app.world().resource::<ContactGraph>();
         graph

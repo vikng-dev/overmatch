@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 1082 in all (MEASURED), 1004 in upstream files and 78 in the
+of `src/` against the published crate: 1071 in all (MEASURED), 993 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -39,8 +39,8 @@ manifolds fill four slots. No projected-anchor deduplication or lone-point fallb
 
 Kept as an upstream bug fix: separation must not displace bearing support or be rewarded.
 The selection runs before the contact modification hook, so a game-side pass cannot recover
-points it discarded. This patch has 167 fork lines (MEASURED, added plus removed against the
-cached published crate); the file has 172 including its pair-state field. Guard:
+points it discarded. This patch has 156 fork lines (MEASURED, added plus removed against the
+cached published crate); the file has 161 including its pair-state field. Guard:
 `src/tests/avian_contact_pruning.rs` (R1–R7 and the upstream under-capacity witness).
 Mechanism, exact patch and compile proof: [local upstream draft](../../upstream/avian-prune-points-unsigned-depth.md).
 

@@ -583,50 +583,55 @@ impl ContactManifold {
             })
             .unzip();
 
-        // TODO: The points in the manifold should be in an `ArrayVec`, and the input points should be separate.
-        let points = core::mem::take(&mut self.points);
-        let bearing = |i: usize| points[i].penetration >= 0.0;
-        let bearing_count = (0..points.len()).filter(|&i| bearing(i)).count();
-
-        // OVERMATCH PATCH: homogeneous manifolds keep upstream's selection and construction order.
-        if bearing_count == 0 || bearing_count == points.len() {
-            let [point1_index, point2_index, point3_index, point4_index] =
-                select_four(&projected, &penetrations_squared, self.normal, |_| true);
-            // Construct the manifold, ensuring the order is correct to form a convex polygon.
-            self.points.push(points[point1_index]);
-            if point3_index != usize::MAX {
-                self.points.push(points[point3_index]);
-            }
-            self.points.push(points[point2_index]);
-            if point4_index != usize::MAX {
-                debug_assert_ne!(point3_index, point4_index);
-                self.points.push(points[point4_index]);
+        let bearing_count = self
+            .points
+            .iter()
+            .filter(|point| point.penetration >= 0.0)
+            .count();
+        if bearing_count > 0 && bearing_count < self.points.len() {
+            let points = core::mem::take(&mut self.points);
+            let bearing = |i: usize| points[i].penetration >= 0.0;
+            // OVERMATCH PATCH: mixed manifolds keep bearing points before separated ones. A tier that
+            // fits the free slots is kept whole; a larger tier gives upstream's picks from that tier,
+            // then its other points in input order.
+            for tier in [true, false] {
+                let free = 4 - self.points.len();
+                if free == 0 {
+                    break;
+                }
+                let in_tier = |i: usize| bearing(i) == tier;
+                let picks = if (0..points.len()).filter(|&i| in_tier(i)).count() > free {
+                    select_four(&projected, &penetrations_squared, self.normal, in_tier)
+                } else {
+                    [usize::MAX; 4]
+                };
+                for i in picks
+                    .into_iter()
+                    .filter(|&i| i != usize::MAX)
+                    .chain((0..points.len()).filter(|&i| in_tier(i) && !picks.contains(&i)))
+                    .take(free)
+                {
+                    self.points.push(points[i]);
+                }
             }
             return;
         }
 
-        // OVERMATCH PATCH: mixed manifolds keep bearing points before separated ones. A tier that
-        // fits the free slots is kept whole; a larger tier gives upstream's picks from that tier,
-        // then its other points in input order.
-        for tier in [true, false] {
-            let free = 4 - self.points.len();
-            if free == 0 {
-                break;
-            }
-            let in_tier = |i: usize| bearing(i) == tier;
-            let picks = if (0..points.len()).filter(|&i| in_tier(i)).count() > free {
-                select_four(&projected, &penetrations_squared, self.normal, in_tier)
-            } else {
-                [usize::MAX; 4]
-            };
-            for i in picks
-                .into_iter()
-                .filter(|&i| i != usize::MAX)
-                .chain((0..points.len()).filter(|&i| in_tier(i) && !picks.contains(&i)))
-                .take(free)
-            {
-                self.points.push(points[i]);
-            }
+        // OVERMATCH PATCH: homogeneous manifolds keep upstream's selection and construction order.
+        let [point1_index, point2_index, point3_index, point4_index] =
+            select_four(&projected, &penetrations_squared, self.normal, |_| true);
+
+        // Construct the manifold, ensuring the order is correct to form a convex polygon.
+        // TODO: The points in the manifold should be in an `ArrayVec`, and the input points should be separate.
+        let points = core::mem::take(&mut self.points);
+        self.points.push(points[point1_index]);
+        if point3_index != usize::MAX {
+            self.points.push(points[point3_index]);
+        }
+        self.points.push(points[point2_index]);
+        if point4_index != usize::MAX {
+            debug_assert_ne!(point3_index, point4_index);
+            self.points.push(points[point4_index]);
         }
     }
 

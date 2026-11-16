@@ -47,7 +47,7 @@ Separation monotonicity has its own reason: separation must not be rewarded.
 
 ## Relations and witnesses
 
-The game's `src/tests/avian_contact_pruning.rs` uses generated square/edge-midpoint
+The game's `src/tests/avian_contact_pruning.rs` uses generated collinear, square/edge-midpoint
 and pentagonal manifolds, rotated and translated, with all sign assignments and touching,
 sub-floor and above-floor depths (Fixture). Its independent published-upstream oracle can select
 a subset in selection order. The relations pin contracts, not historical physics outputs:
@@ -59,7 +59,8 @@ a subset in selection order. The relations pin contracts, not historical physics
 - R5: with more than four bearing points in a mixed manifold, no separated point survives and
   every oracle pick on the bearing subset survives, even when the oracle leaves empty sides.
 - R6: with fewer than four bearing points and overflowing speculation, the separated output is
-  the first `free` selection-order oracle picks on the zero-depth separated subset.
+  selection-order oracle picks on the zero-depth separated subset, then remaining separated
+  indices in input order, truncated to `free` slots.
 - R7: making a separated point more separated never promotes it from dropped to kept.
 
 `upstream_can_keep_fewer_than_four_bearing_points` also retains the compatibility witness:
@@ -83,12 +84,10 @@ none of the game's other fork patches is needed.
      #[inline]
      #[cfg(feature = "3d")]
      pub fn prune_points(&mut self) {
-@@ -493,81 +494,135 @@
+@@ -493,68 +494,121 @@
          // Neither of these should become zero, so we clamp the minimum distance.
          const MIN_DISTANCE_SQUARED: f32 = 1e-6;
 
-+        // OVERMATCH PATCH: upstream's selection over the indices `eligible` admits (at least two),
-+        // in selection order [point1, point2, point3, point4]; usize::MAX marks an empty side.
 +        fn select_four(
 +            projected: &[Vector],
 +            penetrations_squared: &[f32],
@@ -181,13 +180,37 @@ none of the game's other fork patches is needed.
 -            if v > value {
 -                value = v;
 -                point1_index = i;
--            }
--        }
++        let bearing_count = self
++            .points
++            .iter()
++            .filter(|point| point.penetration >= 0.0)
++            .count();
++        if bearing_count > 0 && bearing_count < self.points.len() {
++            let points = core::mem::take(&mut self.points);
++            let bearing = |i: usize| points[i].penetration >= 0.0;
++            for tier in [true, false] {
++                let free = 4 - self.points.len();
++                if free == 0 {
++                    break;
++                }
++                let in_tier = |i: usize| bearing(i) == tier;
++                let picks = if (0..points.len()).filter(|&i| in_tier(i)).count() > free {
++                    select_four(&projected, &penetrations_squared, self.normal, in_tier)
++                } else {
++                    [usize::MAX; 4]
++                };
++                for i in picks
++                    .into_iter()
++                    .filter(|&i| i != usize::MAX)
++                    .chain((0..points.len()).filter(|&i| in_tier(i) && !picks.contains(&i)))
++                    .take(free)
++                {
++                    self.points.push(points[i]);
++                }
+             }
++            return;
+         }
 -        let point1 = projected[point1_index];
-+        // TODO: The points in the manifold should be in an `ArrayVec`, and the input points should be separate.
-+        let points = core::mem::take(&mut self.points);
-+        let bearing = |i: usize| points[i].penetration >= 0.0;
-+        let bearing_count = (0..points.len()).filter(|&i| bearing(i)).count();
 
 -        // Find the point farthest from the first point, forming a line segment.
 -        // Also consider the penetration depth heuristic.
@@ -196,30 +219,17 @@ none of the game's other fork patches is needed.
 -        for (i, point) in projected.iter().enumerate() {
 -            if i == point1_index {
 -                continue;
-+        // OVERMATCH PATCH: homogeneous manifolds keep upstream's selection and construction order.
-+        if bearing_count == 0 || bearing_count == points.len() {
-+            let [point1_index, point2_index, point3_index, point4_index] =
-+                select_four(&projected, &penetrations_squared, self.normal, |_| true);
-+            // Construct the manifold, ensuring the order is correct to form a convex polygon.
-+            self.points.push(points[point1_index]);
-+            if point3_index != usize::MAX {
-+                self.points.push(points[point3_index]);
-             }
+-            }
 -            let v =
 -                point.distance_squared(point1).max(MIN_DISTANCE_SQUARED) * penetrations_squared[i];
 -            if v > max_distance {
 -                max_distance = v;
 -                point2_index = i;
-+            self.points.push(points[point2_index]);
-+            if point4_index != usize::MAX {
-+                debug_assert_ne!(point3_index, point4_index);
-+                self.points.push(points[point4_index]);
-             }
-+            return;
-         }
+-            }
+-        }
 -        debug_assert!(point2_index != usize::MAX, "No second point found");
 -        let point2 = projected[point2_index];
-
+-
 -        // Find the farthest points on both sides of the line segment in order to maximize the area.
 -        let mut point3_index = usize::MAX;
 -        let mut point4_index = usize::MAX;
@@ -229,14 +239,7 @@ none of the game's other fork patches is needed.
 -        for (i, point) in projected.iter().enumerate() {
 -            if i == point1_index || i == point2_index {
 -                continue;
-+        // OVERMATCH PATCH: mixed manifolds keep bearing points before separated ones. A tier that
-+        // fits the free slots is kept whole; a larger tier gives upstream's picks from that tier,
-+        // then its other points in input order.
-+        for tier in [true, false] {
-+            let free = 4 - self.points.len();
-+            if free == 0 {
-+                break;
-             }
+-            }
 -            let v = perp.dot(point - point1);
 -            if v < min_value {
 -                min_value = v;
@@ -244,37 +247,13 @@ none of the game's other fork patches is needed.
 -            } else if v > max_value {
 -                max_value = v;
 -                point4_index = i;
-+            let in_tier = |i: usize| bearing(i) == tier;
-+            let picks = if (0..points.len()).filter(|&i| in_tier(i)).count() > free {
-+                select_four(&projected, &penetrations_squared, self.normal, in_tier)
-+            } else {
-+                [usize::MAX; 4]
-+            };
-+            for i in picks
-+                .into_iter()
-+                .filter(|&i| i != usize::MAX)
-+                .chain((0..points.len()).filter(|&i| in_tier(i) && !picks.contains(&i)))
-+                .take(free)
-+            {
-+                self.points.push(points[i]);
-             }
-         }
--
--        // Construct the manifold, ensuring the order is correct to form a convex polygon.
--        // TODO: The points in the manifold should be in an `ArrayVec`, and the input points should be separate.
--        let points = core::mem::take(&mut self.points);
--        self.points.push(points[point1_index]);
--        if point3_index != usize::MAX {
--            self.points.push(points[point3_index]);
+-            }
 -        }
--        self.points.push(points[point2_index]);
--        if point4_index != usize::MAX {
--            debug_assert_ne!(point3_index, point4_index);
--            self.points.push(points[point4_index]);
--        }
-     }
++        let [point1_index, point2_index, point3_index, point4_index] =
++            select_four(&projected, &penetrations_squared, self.normal, |_| true);
 
-     /// Returns the contact point with the largest penetration depth.
+         // Construct the manifold, ensuring the order is correct to form a convex polygon.
+         // TODO: The points in the manifold should be in an `ArrayVec`, and the input points should be separate.
 ```
 
 MEASURED: this pruning-only patch applies cleanly to the cached published crate and passes
