@@ -441,7 +441,7 @@ pub(crate) const DUEL_SPAWN_XZ: [Vec2; 2] = [Vec2::new(10.0, 5.0), Vec2::new(10.
 /// own geometry (and the camera's relationship to it) is the one it always has.
 ///
 /// MEASURED off the shipped heightmap, not chosen by eye: the footprint relief under both duel
-/// points is 0.22 m / 0.29 m (`terrain_grid::SPAWN_FOOTPRINT_HALF_M` square), the flattest pad on
+/// points is 0.22 m / 0.29 m (a 10 m square), the flattest pad on
 /// the map that has a matching flat block 600 m down +Z, and the ground between the two rises
 /// nowhere above the sight line — so the probe block is actually IN FRAME rather than behind a
 /// crest. Flat matters for the same reason it did for the near band: parked tanks on a grade slide,
@@ -529,8 +529,9 @@ fn spawn_tank_when_loaded(
     let content = source.get();
     // Both bodies simulate; only the Controlled marker selects input ownership. Each spawn point is
     // horizontal — the ground under it is sampled NOW, through the one rule every spawn path shares
-    // (`terrain_grid::spawn_pos`: footprint max + clearance), so the duel lands on whatever world
-    // this build actually has: heightmap, flat slab, or a re-authored map later.
+    // (`terrain_grid::spawn_pos`: the tank's stance over the highest ground under its reach), so
+    // the duel lands on whatever world this build actually has: heightmap, flat slab, or a
+    // re-authored map later.
     let grid = height.as_deref();
     if crate::lod_showcase::enabled() {
         // THE SHOWCASE STANDS ITS PAIRS AT THEIR OWN SWITCH DISTANCES, so it cannot be laid out
@@ -593,8 +594,12 @@ fn spawn_tank_when_loaded(
         &mut commands,
         content,
         pending.presentation(),
-        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, a_at))
-            .with_rotation(a_turn),
+        Transform::from_translation(crate::terrain_grid::spawn_pos(
+            grid,
+            a_at,
+            content.stance(a_turn),
+        ))
+        .with_rotation(a_turn),
         "Tiger I (A)",
         0,
         true,
@@ -603,8 +608,12 @@ fn spawn_tank_when_loaded(
         &mut commands,
         content,
         pending.presentation(),
-        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, duel[1]))
-            .with_rotation(b_turn),
+        Transform::from_translation(crate::terrain_grid::spawn_pos(
+            grid,
+            duel[1],
+            content.stance(b_turn),
+        ))
+        .with_rotation(b_turn),
         "Tiger I (B)",
         1,
         false,
@@ -698,7 +707,11 @@ fn spawn_probe_tanks(
             commands,
             content,
             presentation.clone(),
-            Transform::from_translation(crate::terrain_grid::spawn_pos(grid, xz)),
+            Transform::from_translation(crate::terrain_grid::spawn_pos(
+                grid,
+                xz,
+                content.stance(Quat::IDENTITY),
+            )),
             &format!("Probe Tiger {index}"),
             DUEL_SPAWN_XZ.len() + index,
             false,
@@ -761,8 +774,12 @@ fn spawn_lod_showcase(
             content,
             presentation.clone(),
             (
-                Transform::from_translation(crate::terrain_grid::spawn_pos(grid, tank.xz))
-                    .with_rotation(tank.yaw),
+                Transform::from_translation(crate::terrain_grid::spawn_pos(
+                    grid,
+                    tank.xz,
+                    content.stance(tank.yaw),
+                ))
+                .with_rotation(tank.yaw),
                 Name::new(tank.name),
                 crate::eased_dynamic_body(),
                 identity(index),

@@ -27,10 +27,10 @@ use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::TankKnockedOut;
 use crate::hull_marks::HullMarks;
 use crate::state::{GameplaySet, SimPhase};
-// The spawn-height rule and its constants live in `terrain_grid`: ONE rule for every spawn path in
-// every composition (see `terrain_grid::spawn_surface_height`), so the offline duel, the lanes, the
-// bot and the spawn-map overrides cannot drift apart. Spawn points here are HORIZONTAL (XZ) — Y is
-// sampled at the moment of spawn.
+// The spawn-height rule lives in `terrain_grid` (`spawn_pos`): ONE rule for every spawn path in
+// every composition, so the offline duel, the lanes, the bot and the spawn-map overrides cannot
+// drift apart. Spawn points here are HORIZONTAL (XZ) — Y is sampled at the moment of spawn, under
+// the tank's own stance.
 use crate::tank::{
     PendingTankAssets, Rig, TankContent, TankSimSource, load_tank_sim_assets, spawn_complete_tank,
 };
@@ -126,8 +126,10 @@ pub fn run() {
             commands.trigger(Start { entity: server });
             info!("server: starting, listening on {bind}:{PORT}");
         })
-        .after(super::ram::prepare),
+        .after(super::ram::prepare)
+        .after(admit_harness_spawn),
     );
+    app.add_systems(PostStartup, admit_harness_spawn);
     // The SIM load: the spec sheet only. The dedicated server opens no view artifact — no scene,
     // no textures, no rungs (ADR-0035); the walk's geometry arrives through `bake`'s extraction of
     // `<id>.sim.glb`.
@@ -603,10 +605,19 @@ pub(crate) fn lane_spawn_xz(base_xz: Vec2, lane: u32, radius: f32) -> Vec2 {
     base_xz + lane_offset(lane, radius * 2.0)
 }
 
-/// The harness supplies an exact contact pose: lane offsets are horizontal and never resample Y.
-fn lane_spawn_pos(pose: Vec3, lane: u32, radius: f32) -> Vec3 {
-    let xz = lane_spawn_xz(pose.xz(), lane, radius);
-    Vec3::new(xz.x, pose.y, xz.y)
+/// A harness spawn point is operator input, refused before play outside the placeable square:
+/// the spawn rule treats a point outside the world span as a bug.
+fn admit_harness_spawn(manifest: Res<crate::map::MapManifest>) {
+    if let Some((at, _)) = harness::spawn_pose() {
+        let limit = spawn_map::spawn_limit(manifest.extent.half_extent());
+        if at.abs().max_element() > limit {
+            harness::refuse_start::<()>(format!(
+                "OVERMATCH_HARNESS: spawn_pose at ({}, {}) lies outside the placeable square \
+                 (±{limit} m); choose a point inside it",
+                at.x, at.y
+            ));
+        }
+    }
 }
 
 /// The XZ ground a terrain block DENIES a spawn — its world footprint expanded by
@@ -846,24 +857,26 @@ fn spawn_pending_tanks(
         return;
     }
     let content = source.get();
-    // The harness's exact resting-contact instrument keeps its authored pose and lanes. Ordinary
-    // joins use map points; Y is resolved from the authority's ground at the moment of spawn.
-    let harness_pose = if let Some(ram) = ram.as_deref_mut() {
-        Some(ram.pose())
+    // A ram recipe or a harness script names one spawn point and turn, which the lanes offset.
+    // Ordinary joins use map points. Either way Y is resolved from the authority's ground at the
+    // moment of spawn.
+    let fixed = if let Some(ram) = ram.as_deref_mut() {
+        let (planned, rot) = ram.pose();
+        Some((planned.xz(), rot))
     } else {
         harness::spawn_pose()
     };
-    let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
+    let spawn_rot = fixed.map_or(Quat::IDENTITY, |(_, rot)| rot);
     let mut live: Vec<Vec2> = tanks.iter().map(|position| position.0.xz()).collect();
     for (link, client_id) in std::mem::take(&mut pending.0) {
         if !connected.contains(link) {
             // A queued join may disconnect while every authored point is too close.
             continue;
         }
-        let pos = if let Some((pose, _)) = harness_pose {
-            let pos = lane_spawn_pos(pose, lane.0, content.contact_radius());
+        let xz = if let Some((at, _)) = fixed {
+            let xz = lane_spawn_xz(at, lane.0, content.contact_radius());
             lane.0 += 1;
-            pos
+            xz
         } else {
             let Some(xz) = placement.choose(
                 &manifest.spawn_points,
@@ -874,8 +887,9 @@ fn spawn_pending_tanks(
                 pending.0.push((link, client_id));
                 continue;
             };
-            spawn_pos(height.as_deref(), xz)
+            xz
         };
+        let pos = spawn_pos(height.as_deref(), xz, content.stance(spawn_rot));
         // Commands are deferred: later clients in this pass must see the point already handed out.
         live.push(pos.xz());
         let combatant = combatants.player(link);
@@ -1078,7 +1092,7 @@ fn spawn_bots(
             count.0,
             cycle,
         );
-        let pos = spawn_pos(height.as_deref(), bot.home);
+        let pos = spawn_pos(height.as_deref(), bot.home, content.stance(BOT_SPAWN_TURN));
         let combatant = combatants.bot(index);
         let life = combatants.life(combatant);
         let root = spawn_bot_entity(&mut commands, &assets, content, bot, combatant, life, pos);
@@ -1089,9 +1103,12 @@ fn spawn_bots(
     }
 }
 
+/// A bot's turn at spawn: none; its brain turns it from there.
+const BOT_SPAWN_TURN: Quat = Quat::IDENTITY;
+
 /// Construct an ownerless bot, for both initial spawn and respawn. `spawn_pos` is `bot.home`
-/// resolved by `terrain_grid::spawn_pos` at both call sites — footprint-lifted onto the terrain,
-/// never a constant.
+/// resolved by `terrain_grid::spawn_pos` at both call sites, under the tank's stance at
+/// [`BOT_SPAWN_TURN`] — never a constant.
 fn spawn_bot_entity(
     commands: &mut Commands,
     assets: &PendingTankAssets,
@@ -1117,7 +1134,7 @@ fn spawn_bot_entity(
                 Transform::default(),
                 RigidBody::Dynamic,
                 Position(spawn_pos),
-                Rotation(Quat::IDENTITY),
+                Rotation(BOT_SPAWN_TURN),
                 ServoAngles::default(),
                 NetCrew::default(),
             ),
@@ -1175,7 +1192,7 @@ fn respawn_dead_bots(
             bot,
             combatant,
             combatants.life(combatant),
-            spawn_pos(height.as_deref(), bot.home),
+            spawn_pos(height.as_deref(), bot.home, content.stance(BOT_SPAWN_TURN)),
         );
         info!("server: respawned bot as {fresh} (was {root})");
     }
@@ -1254,10 +1271,10 @@ fn respawn_player_tanks(
         return;
     }
     let content = source.get();
-    // The harness instrument retains its exact contact pose, as on initial join.
+    // A harness script's spawn point and turn hold for every life, as on initial join.
     let harness_pose = harness::spawn_pose();
     let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
-    let harness_pos = harness_pose.map(|(pos, _)| pos);
+    let harness_at = harness_pose.map(|(at, _)| at);
     // Only successfully replaced roots leave occupancy: a crowded automatic spawn may wait.
     let mut sweeping: Vec<Entity> = Vec::new();
     let mut live: Vec<Vec2> = tanks
@@ -1296,7 +1313,11 @@ fn respawn_player_tanks(
                                 xz.x, xz.y, spot.x, spot.y
                             );
                         }
-                        Some(spawn_pos(height.as_deref(), spot))
+                        Some(spawn_pos(
+                            height.as_deref(),
+                            spot,
+                            content.stance(spawn_rot),
+                        ))
                     }
                     Err(reason) => {
                         let state = RespawnState {
@@ -1322,10 +1343,10 @@ fn respawn_player_tanks(
         };
         let spawn_pos = if let Some(pos) = override_pos {
             pos
-        } else if let Some(pose) = harness_pos {
-            let pos = lane_spawn_pos(pose, lane.0, content.contact_radius());
+        } else if let Some(at) = harness_at {
+            let xz = lane_spawn_xz(at, lane.0, content.contact_radius());
             lane.0 += 1;
-            pos
+            spawn_pos(height.as_deref(), xz, content.stance(spawn_rot))
         } else {
             let Some(xz) = placement.choose(
                 &manifest.spawn_points,
@@ -1343,7 +1364,7 @@ fn respawn_player_tanks(
                 }
                 continue;
             };
-            spawn_pos(height.as_deref(), xz)
+            spawn_pos(height.as_deref(), xz, content.stance(spawn_rot))
         };
         placed_this_pass.push(spawn_pos.xz());
         live.push(spawn_pos.xz());
@@ -1387,8 +1408,6 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
     // ASSUMED fixture body radius for pure placement-policy tests, unrelated to any vehicle.
     const FIXTURE_BODY_RADIUS_M: f32 = 3.0;
-    // The shared spawn rule these tests assert the server composes correctly.
-    use crate::terrain_grid::spawn_surface_height;
 
     /// The game's server instrument must refuse invalid HE input through the production
     /// entry point. Operators rely on refusal before a benchmark starts; omitting its installer
@@ -1661,27 +1680,6 @@ mod tests {
         }
     }
 
-    /// The shipped tank's certified blueprint and track shapes, a fixture.
-    fn shipped_construction() -> (
-        crate::bake::TankBlueprint,
-        crate::track::bump_stop::TrackColliders,
-    ) {
-        let root = crate::assets::asset_root();
-        let glb = root.join(crate::tank::TANK_SIM_GLB_PATH);
-        let spec_ron = std::fs::read_to_string(root.join(crate::tank::TANK_SPEC_PATH))
-            .expect("the shipped spec sheet");
-        let asset = crate::bake::certify_asset(
-            &glb,
-            &spec_ron,
-            &crate::substances::SubstanceRegistry::shipped(),
-        )
-        .unwrap_or_else(|_| panic!("the shipped sim artifact certifies"));
-        let blueprint =
-            crate::bake::TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), asset);
-        let colliders = crate::track::bump_stop::TrackColliders::of_blueprint(&blueprint, &glb);
-        (blueprint, colliders)
-    }
-
     /// N bots are N complete tanks: one spawn pass builds every one from the blueprint, each its own
     /// combatant at its own home, bot 0 at the one bot's home; a later pass adds none. The server's
     /// load test reads its tank count off this lever, so a mutant that spawns one bot, or stacks
@@ -1690,7 +1688,7 @@ mod tests {
     /// Fixture data: the shipped Tiger, the one tank in the tree.
     #[test]
     fn n_bots_spawn_n_tanks_each_its_own_combatant_at_its_own_home() {
-        let (blueprint, track_colliders) = shipped_construction();
+        let (blueprint, track_colliders) = crate::tank::shipped_construction();
         let mut app = App::new();
         app.insert_resource(blueprint)
             .insert_resource(track_colliders)
@@ -1798,7 +1796,7 @@ mod tests {
     }
 
     fn placement_app_with(mode: Option<BattleMode>) -> App {
-        let (blueprint, colliders) = shipped_construction();
+        let (blueprint, colliders) = crate::tank::shipped_construction();
         let mut app = App::new();
         // Lightyear's replicated-component removal hooks read this registry on despawn.
         app.init_resource::<bevy_replicon::server::visibility::registry::FilterRegistry>()
@@ -2840,11 +2838,18 @@ mod tests {
     /// rule, same assertion helper, asserted from the layer that owns the points.
     #[test]
     fn every_netcode_spawn_point_lands_above_the_shipped_terrain() {
-        use crate::terrain_grid::tests::{assert_spawn_clears_terrain, shipped_grid};
+        use crate::terrain_grid::tests::{
+            FIXTURE_STANCE, assert_spawn_clears_terrain, shipped_grid,
+        };
         let grid = shipped_grid();
         let manifest = crate::map::tests::shipped_manifest();
         for (index, &point) in manifest.spawn_points.as_slice().iter().enumerate() {
-            assert_spawn_clears_terrain(&grid, &format!("authored spawn {index}"), point);
+            assert_spawn_clears_terrain(
+                &grid,
+                &format!("authored spawn {index}"),
+                point,
+                FIXTURE_STANCE,
+            );
         }
         // Lanes fan out from the origin and the bots' homes from theirs; 8 covers far more clients
         // than a match holds.
@@ -2853,11 +2858,13 @@ mod tests {
                 &grid,
                 &format!("server lane {lane}"),
                 lane_spawn_xz(Vec2::ZERO, lane, FIXTURE_BODY_RADIUS_M),
+                FIXTURE_STANCE,
             );
             assert_spawn_clears_terrain(
                 &grid,
                 &format!("bot {lane}"),
                 bot_home_xz(lane, FIXTURE_BODY_RADIUS_M),
+                FIXTURE_STANCE,
             );
         }
         // The extremes a spawn-map click can reach, which the authority clamps to before resolving.
@@ -2868,7 +2875,7 @@ mod tests {
             ("spawn-map corner -,+", Vec2::new(-limit, limit)),
             ("spawn-map corner +,-", Vec2::new(limit, -limit)),
         ] {
-            assert_spawn_clears_terrain(&grid, name, xz);
+            assert_spawn_clears_terrain(&grid, name, xz, FIXTURE_STANCE);
         }
     }
 
@@ -3089,54 +3096,6 @@ mod tests {
         }
     }
 
-    /// The footprint ground query (Finding: sampling only the tank-root point buried the uphill
-    /// axles 1.65 m on a legal slope click): spawn Y reads the MAXIMUM grid height over the
-    /// 10 m × 10 m footprint, so a bump 2.5 m off-center lifts the spawn even though the
-    /// center-point height is 0. A harness spawn-pose override is passed through untouched — it
-    /// names an exact resting contact, so re-sampling it would break the beached-rest repro.
-    #[test]
-    fn spawn_height_samples_the_tank_footprint_not_the_point() {
-        use crate::terrain_grid::{GRID_RESOLUTION, HeightGrid};
-        // The production lattice (~0.977 m spacing), flat except one 10 m node one step off the
-        // origin — inside the footprint square of a spawn at the origin, outside its centre point.
-        let n = GRID_RESOLUTION as usize;
-        let mut samples = vec![0.0f32; n * n];
-        let center = n / 2; // node at world 0
-        samples[center * n + (center + 1)] = 10.0;
-        let grid = HeightGrid::new(
-            samples.into(),
-            GRID_RESOLUTION,
-            crate::terrain_grid::FIXTURE_EXTENT,
-        );
-        assert_eq!(grid.height_at(0.0, 0.0), 0.0, "center-point height is flat");
-        assert_eq!(
-            spawn_surface_height(Some(&grid), Vec2::ZERO),
-            10.0,
-            "the footprint max sees the off-centre bump"
-        );
-        // Far away the footprint reads the flat ground.
-        assert_eq!(
-            spawn_surface_height(Some(&grid), Vec2::new(500.0, 500.0)),
-            0.0
-        );
-        // And the pose composes it with the standard clearance.
-        assert_eq!(
-            spawn_pos(Some(&grid), Vec2::ZERO),
-            Vec3::new(0.0, 12.0, 0.0)
-        );
-        // No grid = the flat-slab world: y = 2 exactly, for players and the bot alike.
-        assert_eq!(spawn_surface_height(None, Vec2::ZERO), 0.0);
-        assert_eq!(
-            spawn_pos(None, bot_home_xz(0, FIXTURE_BODY_RADIUS_M)),
-            Vec3::new(0.0, 2.0, 12.0)
-        );
-        let harness = Vec3::new(3.0, 0.42, -7.0);
-        assert_eq!(
-            lane_spawn_pos(harness, 0, FIXTURE_BODY_RADIUS_M),
-            harness,
-            "a harness spawn pose is never re-sampled",
-        );
-    }
     /// Phase attribution relies on the owning installers' actual set membership. A synthetic
     /// producer cannot catch a removed BotBrain/Servos registration in the shipped composition.
     #[test]

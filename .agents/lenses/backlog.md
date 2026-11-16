@@ -50,7 +50,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
-| destruction-09 | P2 | `src/terrain_grid.rs::SPAWN_FOOTPRINT_HALF_M`, `SPAWN_CLEARANCE_M` | base-truths: Per-asset constant | A valid larger hull can extend beyond the sampled square's fixed half-side or below the fixed spawn-root clearance and intersect terrain at spawn. | Derive footprint and minimum root height from baked construction; put any intended drop clearance in labelled spawn data. | ratchet |
 
 ## ballistics
 

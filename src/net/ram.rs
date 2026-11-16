@@ -23,8 +23,8 @@ use crate::{
     map::{MapManifest, Prototype},
     scatter::MapInstance,
     spec::TankSpec,
-    tank::Tank,
-    terrain_grid::{HeightGrid, spawn_pos},
+    tank::{Tank, TankSimSource},
+    terrain_grid::{HeightGrid, Stance, spawn_pos},
 };
 
 const LEVER: &str = "OVERMATCH_RAM";
@@ -157,9 +157,11 @@ fn runup(spec: &TankSpec, margin: f32) -> (f32, f32) {
 }
 
 impl Recipe {
+    /// The run's plan for a tank of `spec` standing as `stance` gives it at a spawn turn.
     fn plan(
         &self,
         spec: &TankSpec,
+        stance: impl Fn(Quat) -> Stance,
         manifest: &MapManifest,
         height: Option<&HeightGrid>,
     ) -> Result<Plan, LeverError> {
@@ -188,7 +190,7 @@ impl Recipe {
                 "derived run-up is outside spawn bounds; choose another approach or instance",
             ));
         }
-        let spawn = spawn_pos(height, xz);
+        let spawn = spawn_pos(height, xz, stance(rotation));
         Ok(Plan {
             spawn: spawn.to_array(),
             rotation: rotation.to_array(),
@@ -202,13 +204,19 @@ impl Recipe {
 /// All synchronous tank/map publishers have flushed before PostStartup; no client is admitted yet.
 pub(super) fn prepare(
     mut ram: ResMut<Ram>,
-    blueprint: Res<crate::bake::TankBlueprint>,
+    source: TankSimSource,
     manifest: Res<MapManifest>,
     height: Option<Res<HeightGrid>>,
 ) {
+    let content = source.get();
     ram.plan = Some(
         ram.recipe
-            .plan(&blueprint.spec, &manifest, height.as_deref())
+            .plan(
+                content.spec(),
+                |turn| content.stance(turn),
+                &manifest,
+                height.as_deref(),
+            )
             .unwrap_or_else(super::harness::refuse_start),
     );
     println!(
@@ -556,15 +564,28 @@ pub(crate) struct FixturePlan {
 
 /// Headless witnesses use the operator recipe's real parser and planner without enabling pricing.
 #[cfg(test)]
-pub(crate) fn fixture_plan(app: &App) -> FixturePlan {
+pub(crate) fn fixture_plan(app: &mut App) -> FixturePlan {
+    use bevy::ecs::system::RunSystemOnce;
     let recipe = Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap();
-    let plan = recipe
-        .plan(
-            &app.world().resource::<crate::bake::TankBlueprint>().spec,
-            app.world().resource::<MapManifest>(),
-            app.world().get_resource::<HeightGrid>(),
-        )
-        .unwrap();
+    let plan = app
+        .world_mut()
+        .run_system_once({
+            let recipe = recipe.clone();
+            move |source: TankSimSource,
+                  manifest: Res<MapManifest>,
+                  height: Option<Res<HeightGrid>>| {
+                let content = source.get();
+                recipe
+                    .plan(
+                        content.spec(),
+                        |turn| content.stance(turn),
+                        &manifest,
+                        height.as_deref(),
+                    )
+                    .unwrap()
+            }
+        })
+        .expect("the plan's inputs are in the booted world");
     FixturePlan {
         instance: recipe.instance,
         spawn: Vec3::from_array(plan.spawn),
@@ -622,6 +643,8 @@ mod tests {
         );
     }
 
+    use crate::terrain_grid::tests::FIXTURE_STANCE;
+
     fn fixture_spec() -> TankSpec {
         ron::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron")).unwrap()
     }
@@ -636,7 +659,7 @@ mod tests {
             // Fixture: absent and graybox targets.
             recipe.instance = instance.into();
             let error = recipe
-                .plan(&spec, &manifest, None)
+                .plan(&spec, |_| FIXTURE_STANCE, &manifest, None)
                 .err()
                 .expect("unusable target refused")
                 .to_string();
@@ -646,10 +669,14 @@ mod tests {
             );
         }
         recipe.instance = "brick_0001".into(); // Fixture construction from the manifest owner.
-        assert!(recipe.plan(&spec, &manifest, None).is_ok());
+        assert!(
+            recipe
+                .plan(&spec, |_| FIXTURE_STANCE, &manifest, None)
+                .is_ok()
+        );
         recipe.runup_margin = f64::MAX; // Fixture: finite input whose derived run-up cannot fit.
         let error = recipe
-            .plan(&spec, &manifest, None)
+            .plan(&spec, |_| FIXTURE_STANCE, &manifest, None)
             .err()
             .expect("unreachable route refused")
             .to_string();
@@ -663,21 +690,11 @@ mod tests {
         let mut app = App::new();
         let mut recipe = Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap();
         recipe.instance = "brick_0001".into(); // Fixture construction in the manifest below.
+        // Route admission reads the tank's construction for its spawn stance; no rig is spawned.
+        let (blueprint, shapes) = crate::tank::shipped_construction();
         app.insert_resource(crate::map::tests::construction_fixture_manifest())
-            .insert_resource(crate::bake::TankBlueprint::new(
-                "fixture".into(),
-                // Fixture: route admission reads spec/terrain only; no rig is spawned.
-                crate::bake::CertifiedAsset::fixture(
-                    fixture_spec(),
-                    crate::bake::TankGeometry {
-                        nodes: Vec::new(),
-                        by_name: default(),
-                        roadwheels: Vec::new(),
-                        collision_proxies: Vec::new(),
-                        ballistic_volumes: Vec::new(),
-                    },
-                ),
-            ))
+            .insert_resource(blueprint)
+            .insert_resource(shapes)
             .init_resource::<ContactTransfers>()
             .init_resource::<SweepAccount>();
         install_recipe(&mut app, recipe);
@@ -880,7 +897,7 @@ mod tests {
             .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
             .single(app.world())
             .expect("one controlled ram source");
-        let plan = fixture_plan(&app);
+        let plan = fixture_plan(&mut app);
         let (target, ordinal) = app
             .world_mut()
             .query::<(Entity, &crate::scatter::MapInstance, &Breakage)>()
