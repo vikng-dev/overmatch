@@ -498,16 +498,22 @@ fn contains_live_system(schedule: &Schedule, set: impl SystemSet) -> bool {
         .any(|(_, system, _)| system.default_system_sets().contains(&set))
 }
 
-/// Physics updates must refuse an app whose plugin cleanup has not replaced Avian's writer.
-#[test]
-#[should_panic(expected = "physics placement cleanup must replace the engine pose writers")]
-fn physics_without_placement_cleanup_is_refused() {
+/// Unfinished shipped physics setup; each witness owns the lifecycle boundary it exercises.
+fn placement_app() -> App {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
         AssetPlugin::default(),
         crate::net::physics::physics_plugins(),
     ));
+    app
+}
+
+/// Physics updates must refuse an app whose plugin cleanup has not replaced Avian's writer.
+#[test]
+#[should_panic(expected = "physics placement cleanup must replace the engine pose writers")]
+fn physics_without_placement_cleanup_is_refused() {
+    let mut app = placement_app();
     app.finish();
     app.world_mut().run_schedule(PhysicsSchedule);
 }
@@ -516,12 +522,7 @@ fn physics_without_placement_cleanup_is_refused() {
 #[test]
 #[should_panic(expected = "physics placement cleanup must replace the engine pose writers")]
 fn physics_without_frame_placement_cleanup_is_refused() {
-    let mut app = App::new();
-    app.add_plugins((
-        MinimalPlugins,
-        AssetPlugin::default(),
-        crate::net::physics::physics_plugins(),
-    ));
+    let mut app = placement_app();
     crate::net::physics::lightyear_plugin(&mut app);
     crate::net::physics::plugin(&mut app);
     app.finish();
@@ -534,12 +535,7 @@ fn physics_without_frame_placement_cleanup_is_refused() {
 #[test]
 fn lightyear_position_mode_leaves_the_frame_boundary_to_the_game() {
     use lightyear::avian3d::plugin::LightyearAvianPlugin;
-    let mut app = App::new();
-    app.add_plugins((
-        MinimalPlugins,
-        AssetPlugin::default(),
-        crate::net::physics::physics_plugins(),
-    ));
+    let mut app = placement_app();
     crate::net::physics::lightyear_plugin(&mut app);
     app.finish();
     app.cleanup();
@@ -562,12 +558,7 @@ fn lightyear_position_mode_leaves_the_frame_boundary_to_the_game() {
 #[test]
 fn shipped_physics_leaves_child_placement_to_the_game() {
     use avian3d::collision::collider::collider_transform::update_child_collider_position;
-    let mut app = App::new();
-    app.add_plugins((
-        MinimalPlugins,
-        AssetPlugin::default(),
-        crate::net::physics::physics_plugins(),
-    ));
+    let mut app = placement_app();
     app.finish();
     app.cleanup();
     let schedule = app
