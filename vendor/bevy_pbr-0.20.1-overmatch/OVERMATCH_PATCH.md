@@ -10,17 +10,6 @@ Produced from `https://static.crates.io/crates/bevy_pbr/bevy_pbr-0.20.1.crate`, 
 --exclude='*/Cargo.lock' --exclude='*/.cargo_vcs_info.json'`. The published lockfile and VCS record
 are omitted; neither is read for a path dependency.
 
-## MeshUniform alignment: re-carried pending the Metal gate
-
-`src/render/mesh.rs` retains `#[repr(C, align(16))]`. In 0.20.1, `UninitBufferVec::new` uses
-`T::SHADER_SIZE`, fixing the original allocation bug. The new `metadata_index` makes the
-scalar-math field payload DERIVED 168 bytes; shader alignment rounds it to DERIVED 176 bytes.
-The retained representation supplies the eight bytes of tail padding.
-
-`src/tests/gpu_layout.rs` guards the field offsets, including the metadata index, and the audited
-Rust-repr upload sizes. The cutover plan requires both that test and a windowed Metal boot before
-dropping this patch. The boot belongs to integration, so the representation remains until then.
-
 ## directional_shadow_factor: dropped
 
 Upstream 0.20.1 supplies the field, its initialization and its use inside the shadow-receiver

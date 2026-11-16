@@ -524,8 +524,6 @@ pub struct MeshTransforms {
 }
 
 #[derive(ShaderType, Clone)]
-// OVERMATCH PATCH: retain shader-aligned tail padding under scalar-math glam (see OVERMATCH_PATCH.md).
-#[repr(C, align(16))]
 pub struct MeshUniform {
     // Affine 4x3 matrices transposed to 3x4
     pub world_from_local: [Vec4; 3],
