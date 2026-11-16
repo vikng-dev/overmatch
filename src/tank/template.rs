@@ -160,28 +160,13 @@ enum VolumeMatter {
     },
     /// Several, armour only: each primitive's part, in creation order, a volume of its own
     /// substance.
-    Split(Vec<HardSubstance>),
+    Split(Vec<BallisticVolume>),
 }
 
 enum NodeSubstance {
-    Hard(HardSubstance),
+    Hard(BallisticVolume),
     /// A crew box's (ADR-0040): its parts are crew box parts of the set.
-    Witness(String),
-}
-
-/// What the walk reads off a hard volume, and its registry name.
-struct HardSubstance {
-    material: VolumeMaterial,
-    name: String,
-}
-
-impl HardSubstance {
-    fn volume(&self) -> BallisticVolume {
-        BallisticVolume {
-            material: self.material,
-            substance: self.name.clone(),
-        }
-    }
+    Witness(WitnessVolume),
 }
 
 /// One collision proxy node's convex hulls, every primitive's in order, and its friction.
@@ -329,7 +314,13 @@ impl TankTemplate {
             transmission,
             rpm: EngineRpm::of(&transmission),
             sense: DriverSense::for_cut(params.shift_ticks),
-            gate: weapon_gate(spec),
+            gate: WeaponGate {
+                weapons: rig
+                    .weapon_entries
+                    .iter()
+                    .map(|(_, weapon)| WeaponGateState::for_cycle(&weapon.fire_cycle))
+                    .collect(),
+            },
             loads: WeaponLoads {
                 weapons: vec![WeaponLoad::default(); spec.weapons.len()],
             },
@@ -510,10 +501,8 @@ impl TankTemplate {
                         }
                     }
                     match substance {
-                        NodeSubstance::Hard(hard) => entity.insert(hard.volume()),
-                        NodeSubstance::Witness(name) => entity.insert(WitnessVolume {
-                            substance: name.clone(),
-                        }),
+                        NodeSubstance::Hard(volume) => entity.insert(volume.clone()),
+                        NodeSubstance::Witness(volume) => entity.insert(volume.clone()),
                     };
                     for _ in 0..*parts {
                         members.push(commands.spawn((ChildOf(node), Transform::IDENTITY)).id());
@@ -521,11 +510,11 @@ impl TankTemplate {
                 }
                 VolumeMatter::Split(parts) => {
                     entity.insert(ArmorVolume);
-                    for hard in parts {
+                    for shard in parts {
                         let mut part = commands.spawn((ChildOf(node), Transform::IDENTITY));
                         // The primitive IS the volume here ([`classify_volume`]): it carries the
                         // factor the walk reads and the ownership the impulse path resolves.
-                        part.insert((hard.volume(), VolumeOf(root)));
+                        part.insert((shard.clone(), VolumeOf(root)));
                         if volume.external {
                             part.insert(ExternalArmour);
                         }
@@ -784,18 +773,6 @@ fn needed_nodes(geometry: &TankGeometry, nodes: &RigNodes) -> HashSet<usize> {
     needed
 }
 
-/// Complete fire-gate state in the same name-sorted order used to assign every [`WeaponIndex`].
-fn weapon_gate(spec: &TankSpec) -> WeaponGate {
-    let mut weapons: Vec<_> = spec.weapons.iter().collect();
-    weapons.sort_by_key(|(name, _)| name.as_str());
-    WeaponGate {
-        weapons: weapons
-            .into_iter()
-            .map(|(_, weapon)| WeaponGateState::for_cycle(&weapon.fire_cycle))
-            .collect(),
-    }
-}
-
 /// One armour volume or crew box primitive's shape, surfaces and role.
 type PartShape = (Collider, BallisticSurfaces, Role<usize>);
 
@@ -861,7 +838,9 @@ fn classify_volume(
                 factor,
                 debris_ratio,
             } => NodeSubstance::Hard(hard_substance(resolved, factor, debris_ratio)),
-            Matter::Witness => NodeSubstance::Witness((*substance).to_owned()),
+            Matter::Witness => NodeSubstance::Witness(WitnessVolume {
+                substance: (*substance).to_owned(),
+            }),
         }
     });
     assert!(
@@ -944,8 +923,8 @@ fn hard_substance(
     resolved: &crate::bake::PrimitiveSubstance,
     factor: f32,
     debris_ratio: f32,
-) -> HardSubstance {
-    HardSubstance {
+) -> BallisticVolume {
+    BallisticVolume {
         material: VolumeMaterial {
             substance: resolved.id,
             feedback: crate::substances::SubstanceRegistry::shipped_static()
@@ -955,7 +934,7 @@ fn hard_substance(
             factor,
             debris_ratio,
         },
-        name: resolved.name.clone(),
+        substance: resolved.name.clone(),
     }
 }
 
@@ -1215,25 +1194,24 @@ mod tests {
     #[test]
     #[should_panic(expected = "fixture.tank.ron: the tank model is missing required rig nodes")]
     fn a_kind_naming_a_missing_node_is_refused_when_its_template_is_built() {
-        let (spec, glb) = shipped_sheet();
+        let (mut spec, glb) = shipped_sheet();
         let geometry = crate::bake::extract_tank_geometry(
             &glb,
             &spec,
             &crate::substances::SubstanceRegistry::shipped(),
         )
         .unwrap();
-        let (mut renamed, _) = shipped_sheet();
-        let servo = renamed
+        let servo = spec
             .servos
             .keys()
             .next()
             .expect("the fixture tank has a servo")
             .clone();
-        let entry = renamed.servos.remove(&servo).expect("listed above");
-        renamed.servos.insert("FixtureMissingNode".into(), entry);
+        let entry = spec.servos.remove(&servo).expect("listed above");
+        spec.servos.insert("FixtureMissingNode".into(), entry);
         let blueprint = TankBlueprint::new(
             "fixture.tank.ron".into(),
-            crate::bake::CertifiedAsset::fixture(renamed, geometry),
+            crate::bake::CertifiedAsset::fixture(spec, geometry),
         );
         TankTemplate::new(&blueprint, TrackColliders::of_blueprint(&blueprint, &glb));
     }

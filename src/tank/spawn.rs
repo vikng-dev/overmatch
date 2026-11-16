@@ -373,9 +373,8 @@ mod proxy_tests {
         let centre = (min + max) * 0.5;
         // Fixture standoff beyond the set's box, m.
         let reach = (max - min).length() + 10.0;
-        let rays: Vec<Ray3d> = [Dir3::NEG_X, Dir3::Z, Dir3::NEG_Y]
-            .map(|direction| Ray3d::new(centre - direction * reach, direction))
-            .to_vec();
+        let rays = [Dir3::NEG_X, Dir3::Z, Dir3::NEG_Y]
+            .map(|direction| Ray3d::new(centre - direction * reach, direction));
         let aims = aimed(&mut world, &rays, 2.0 * reach, authority);
         assert!(
             aims.iter().all(|&distance| distance < reach),
