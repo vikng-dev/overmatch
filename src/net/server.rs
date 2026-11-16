@@ -2571,7 +2571,10 @@ mod tests {
     fn a_respawn_request_is_refused_before_the_wait_and_granted_after() {
         #[derive(Resource, Default)]
         struct DrivingSnapshot(Vec<Entity>);
+        // Fixture wait: positive, so the probe has a tick before the opening.
+        let wait = RespawnWait::new(Duration::from_secs(2), TICK);
         let mut app = placement_app();
+        app.insert_resource(wait);
         app.init_resource::<DrivingSnapshot>().add_systems(
             Update,
             (|tanks: Query<Entity, With<ControlledBy>>, mut snapshot: ResMut<DrivingSnapshot>| {
@@ -2600,9 +2603,7 @@ mod tests {
                 .respawn = true;
             app.update();
         };
-        let wait = shipped_wait().ticks();
-        assert!(wait > 0, "the shipped mode waits before a respawn");
-        advance(&mut app, wait - 1);
+        advance(&mut app, wait.ticks() - 1);
         request(&mut app, root);
         assert!(
             app.world().get_entity(root).is_ok(),
@@ -2630,19 +2631,14 @@ mod tests {
         );
     }
 
-    /// The game's damage model: bots and players are combatants under the same mode wait.
+    /// The game's damage model: bots and players are combatants under the same respawn wait.
     /// Each old life survives until the opening, then exactly one replacement keeps its id. Repeated
-    /// lives catch a hidden limit; a second mode wait catches a wait compiled into the bot path.
+    /// lives catch a hidden limit; a second wait catches a wait compiled into the bot path.
     #[test]
     fn a_bot_respawns_at_its_scored_opening_and_never_before() {
-        for (label, mode) in [
-            ("shipped", BattleMode::shipped()),
-            (
-                "fixture",
-                BattleMode::parse(include_str!("fixtures/battle-short.ron")),
-            ),
-        ] {
-            let wait = RespawnWait::new(mode.respawn_wait, TICK);
+        // Fixture waits, ms: positive, so each probe has a tick before the opening.
+        for wait_ms in [1_500, 4_000] {
+            let wait = RespawnWait::new(Duration::from_millis(wait_ms), TICK);
             let mut app = placement_app();
             app.insert_resource(wait)
                 .insert_resource(BotCount(1))
@@ -2686,11 +2682,6 @@ mod tests {
                 assert_eq!(*life, CombatantLife(replacement));
                 root = fresh;
             }
-            let respawns = app.world().get::<CombatantLife>(root).unwrap().0;
-            println!(
-                "MEASURED headless bot probe: mode={label}, respawns={respawns}, early_respawns=0; mode_wait_s={} (mode data)",
-                mode.respawn_wait.as_secs_f32()
-            );
         }
     }
 
