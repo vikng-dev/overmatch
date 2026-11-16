@@ -74,8 +74,8 @@ before every policy branch and regardless of `RollbackMode`. That is the whole r
 exists at the layer it does.
 
 The full analysis, its verification ledger, and two candidate upstream fixes are in
-`upstream/lightyear-confirmed-state-at-or-ahead-of-local-tick-never-reconciled.md`. **That document
-is a LOCAL DRAFT. Nothing has been filed, reported, or acknowledged upstream**, and no claim here
+`.agents/scratch/fork-moves-history-2026-11-16/lightyear-confirmed-state-at-or-ahead-of-local-tick-never-reconciled.md`. **That document
+is an ARCHIVED LOCAL DRAFT. Nothing has been filed, reported, or acknowledged upstream**, and no claim here
 rests on upstream agreeing with it.
 
 ### The part worth keeping: our own fixtures hid it
@@ -887,4 +887,4 @@ evidence of.
 [[0014-sim-view-split]] · [[0015-divergence-doctrine]] ·
 [[0016-replicate-causes-derive-consequences]] · [[0021-fire-replication-architecture]] ·
 [[0029-weapon-gate-is-tick-correlated-authority-state]] · [[0030-servo-pose-is-owner-reconciled]] ·
-`upstream/lightyear-confirmed-state-at-or-ahead-of-local-tick-never-reconciled.md`
+`.agents/scratch/fork-moves-history-2026-11-16/lightyear-confirmed-state-at-or-ahead-of-local-tick-never-reconciled.md`

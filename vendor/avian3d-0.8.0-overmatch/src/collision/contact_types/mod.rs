@@ -431,6 +431,7 @@ impl ContactManifold {
             .unwrap_or(0.0)
     }
 
+    // OVERMATCH PATCH: UNKNOWN IDs have no identity; distance matching requires unknown IDs.
     /// Copies impulses from previous contacts to matching contacts in `self`.
     ///
     /// Contacts are first matched based on their [feature IDs](PackedFeatureId), and if they are unknown,
@@ -442,14 +443,20 @@ impl ContactManifold {
         let distance_threshold_squared = distance_threshold.powi(2);
 
         for contact in self.points.iter_mut() {
+            // A point with an unknown feature ID has no identity: two `UNKNOWN` IDs compare equal
+            // without naming the same feature, so such a point is matched by position only.
+            let unknown_features = contact.feature_id1 == PackedFeatureId::UNKNOWN
+                || contact.feature_id2 == PackedFeatureId::UNKNOWN;
+
             for previous_contact in previous_contacts.iter() {
                 // If the feature IDs match, copy the contact impulses over for warm starting.
-                if (contact.feature_id1 == previous_contact.feature_id1
+                if !unknown_features
+                    && ((contact.feature_id1 == previous_contact.feature_id1
                     && contact.feature_id2 == previous_contact.feature_id2) ||
                     // we have to check both directions because the entities are sorted in order
                     // of aabb.min.x, which could have changed even the two objects in contact are the same
                     (contact.feature_id2 == previous_contact.feature_id1
-                    && contact.feature_id1 == previous_contact.feature_id2)
+                    && contact.feature_id1 == previous_contact.feature_id2))
                 {
                     contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
                     contact.warm_start_tangent_impulse =
@@ -457,20 +464,17 @@ impl ContactManifold {
                     break;
                 }
 
-                let unknown_features = contact.feature_id1 == PackedFeatureId::UNKNOWN
-                    || contact.feature_id2 == PackedFeatureId::UNKNOWN;
-
                 // If the feature IDs are unknown and the contact positions match closely enough,
-                // copy the contact impulses over for warm starting.
+                // in either orientation, copy the contact impulses over for warm starting.
                 if unknown_features
-                    && (contact.anchor1.distance_squared(previous_contact.anchor1)
+                    && ((contact.anchor1.distance_squared(previous_contact.anchor1)
                         < distance_threshold_squared
                         && contact.anchor2.distance_squared(previous_contact.anchor2)
                             < distance_threshold_squared)
-                    || (contact.anchor1.distance_squared(previous_contact.anchor2)
-                        < distance_threshold_squared
-                        && contact.anchor2.distance_squared(previous_contact.anchor1)
-                            < distance_threshold_squared)
+                        || (contact.anchor1.distance_squared(previous_contact.anchor2)
+                            < distance_threshold_squared
+                            && contact.anchor2.distance_squared(previous_contact.anchor1)
+                                < distance_threshold_squared))
                 {
                     contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
                     contact.warm_start_tangent_impulse =

@@ -287,6 +287,7 @@ pub(super) struct Census<'w, 's> {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct AvianDiagnostics<'w, 's> {
     solver: Res<'w, avian3d::dynamics::solver::SolverDiagnostics>,
+    visits: Res<'w, crate::avian_ext::solver_cost::ContactVisits>,
     collision: Res<'w, avian3d::collision::CollisionDiagnostics>,
     tree: Res<'w, avian3d::collider_tree::ColliderTreeDiagnostics>,
     graph: Res<'w, avian3d::prelude::ContactGraph>,
@@ -397,8 +398,8 @@ impl AvianDiagnostics<'_, '_> {
                 .filter(|color| !color.contact_constraints.is_empty())
                 .count() as u32,
             overflow_constraints: colors[COLOR_OVERFLOW_INDEX].contact_constraints.len() as u32,
-            serial_contact_visits: s.serial_contact_visits,
-            parallel_contact_visits: s.parallel_contact_visits,
+            serial_contact_visits: self.visits.serial,
+            parallel_contact_visits: self.visits.parallel,
             // No live dynamic endpoint means zero incidence.
             max_dynamic_manifold_degree: self.degrees.values().copied().max().unwrap_or(0),
             stationary_non_touching_pairs: c.stationary_non_touching_pairs,
@@ -712,6 +713,7 @@ mod tests {
     fn record(world: &mut World) -> bool {
         use bevy::ecs::system::RunSystemOnce;
         world.init_resource::<avian3d::dynamics::solver::SolverDiagnostics>();
+        world.init_resource::<crate::avian_ext::solver_cost::ContactVisits>();
         world.init_resource::<avian3d::collision::CollisionDiagnostics>();
         world.init_resource::<avian3d::collider_tree::ColliderTreeDiagnostics>();
         world.init_resource::<avian3d::prelude::ContactGraph>();

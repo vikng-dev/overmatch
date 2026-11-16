@@ -152,7 +152,6 @@ too_many_lines = "warn"
 lightyear_netcode = { path = "vendor/lightyear_netcode-0.31.0-admission" }
 bevy_pbr = { path = "vendor/bevy_pbr-0.20.1-overmatch" }
 avian3d = { path = "vendor/avian3d-0.8.0-overmatch" }
-lightyear_avian3d = { path = "vendor/lightyear_avian3d-0.31.0-child-pose" }
 
 # `cargo test` builds one test artifact, the lib's: every test is a `#[cfg(test)]` module of the
 # lib, so the bins below hold none (`test = false`) and the docs carry no doctest.

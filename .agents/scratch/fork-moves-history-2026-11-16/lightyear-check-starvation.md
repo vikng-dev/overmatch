@@ -1,3 +1,6 @@
+> Historical record, preserved from 21a66be7. Version and status claims below describe
+> the original investigation, not the current dependency pins or draft queue.
+
 # lightyear 0.28: state rollback silently disabled at zero prediction margin
 
 **Target:** github.com/cBournhonesque/lightyear · crates: lightyear_prediction 0.28, lightyear_sync 0.28

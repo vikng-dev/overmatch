@@ -15,11 +15,6 @@ use bevy::prelude::*;
 /// handed one by Avian's `ColliderOf` hook, decomposed from world matrices an ULP off a unit
 /// scale, and the collector refuses armour at any scale but a bit-exact 1 (`ballistics::collect`).
 pub(crate) fn plugin(app: &mut App) {
-    app.add_systems(
-        RunFixedMainLoop,
-        crate::avian_ext::child_poses::place_child_colliders
-            .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
-    );
     app.configure_sets(
         FixedPostUpdate,
         (
@@ -49,6 +44,64 @@ pub fn physics_plugins() -> bevy::app::PluginGroupBuilder {
         .disable::<PhysicsInterpolationPlugin>()
 }
 
+/// Mounts the network physics integration with the game's spawn-transform policy.
+pub(crate) fn lightyear_plugin(app: &mut App) {
+    use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
+    // Avian replication (map §5): mount lightyear_avian3d's ordering fixes, then register the
+    // root's Position/Rotation/velocities ourselves. `AvianReplicationMode::Position` replicates the
+    // sim pose, never `Transform`; `sync_to_transform: false` keeps physics authority one-way
+    // (Position -> Transform in PostUpdate only). Nothing here moves a body by writing its
+    // `Transform`: child colliders (servo nodes) reach physics through avian's own
+    // `ColliderTransform` propagation from their LOCAL transforms. `register_physics_components`
+    // is OFF because the plugin's defaults predict all four components and this client predicts
+    // nothing — protocol::plugin owns the registrations.
+    app.add_plugins((
+        LightyearAvianPlugin {
+            replication_mode: AvianReplicationMode::Position {
+                sync_to_transform: false,
+            },
+            register_physics_components: false,
+            ..default()
+        },
+        FramePlacementPlugin,
+    ));
+    // Position mode installs no per-frame Transform import. This flag lets Avian's spawn hook
+    // initialize Transform-only statics at their authored poses instead of at the origin.
+    app.world_mut()
+        .resource_mut::<avian3d::physics_transform::PhysicsTransformConfig>()
+        .transform_to_position = true;
+}
+
+/// Replaces Lightyear's Position-mode placement after both networking and physics plugin setup.
+pub struct FramePlacementPlugin;
+
+impl Plugin for FramePlacementPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(crate::avian_ext::child_poses::FramePlacementPending);
+    }
+
+    fn cleanup(&self, app: &mut App) {
+        use bevy::ecs::schedule::ScheduleCleanupPolicy;
+        use lightyear::avian3d::plugin::LightyearAvianPlugin;
+        let removed = app.remove_systems_in_set(
+            RunFixedMainLoop,
+            LightyearAvianPlugin::update_child_collider_position,
+            ScheduleCleanupPolicy::RemoveSystemsOnly,
+        ).expect("Lightyear pose-writer removal requires an initializable RunFixedMainLoop containing its system set");
+        assert_eq!(
+            removed, 1,
+            "the game replaces exactly one Lightyear child placement system"
+        );
+        app.add_systems(
+            RunFixedMainLoop,
+            crate::avian_ext::child_poses::place_child_colliders
+                .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
+        );
+        app.world_mut()
+            .remove_resource::<crate::avian_ext::child_poses::FramePlacementPending>();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use avian3d::physics_transform::PhysicsTransformSystems;
@@ -73,12 +126,7 @@ mod tests {
         );
     }
 
-    /// In the networked composition, collider propagation is ordered before `TransformToPosition`,
-    /// which `update_collider_scale` and the mass-property sets follow. Without the edge their
-    /// order is the executor's choice, MEASURED on the dedicated server as the scale taken first:
-    /// a launched turret's armour then held the scale Avian's `ColliderOf` hook decomposed out of
-    /// world matrices, an ULP off 1, for the tick after the launch, and the collector failed closed
-    /// every round that met it (`ballistics::collect`).
+    /// Collider propagation precedes `TransformToPosition`, as required by [`super::plugin`].
     #[test]
     fn collider_propagation_precedes_transform_to_position() {
         let mut app = App::new();

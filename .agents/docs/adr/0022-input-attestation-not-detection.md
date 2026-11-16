@@ -67,7 +67,7 @@ It does not say hold-last is wrong. It is *right* for levels and absolutes, and 
 
 It does not claim the stamp is novel — only the gate.
 
-It does not survive being "cleaned up" alongside the pin. When upstream fixes the `Absent` anchor (fix directions 1–3 in the report), the **pin** and its tripwire may retire — provided `lightyear-check-starvation.md` is also resolved, since `balanced()` triggers that one too. **`for_tick` and `fail_consumables_closed` stay regardless.** What changes is their *status*: they stop being load-bearing and become belt-and-braces, at which point their wire cost becomes a choice (shrink the attested payload, or keep paying 20 B and stop thinking about it). Today neither option is open — thinning attestation reopens unauthored rounds. The removal conditions are written down in the upstream report, not here, because they belong to the defect's lifecycle.
+It does not survive being "cleaned up" alongside the pin. When upstream fixes the `Absent` anchor (fix directions 1–3 in the report), the **pin** and its tripwire may retire — provided `.agents/scratch/fork-moves-history-2026-11-16/lightyear-check-starvation.md` is also resolved, since `balanced()` triggers that one too. **`for_tick` and `fail_consumables_closed` stay regardless.** What changes is their *status*: they stop being load-bearing and become belt-and-braces, at which point their wire cost becomes a choice (shrink the attested payload, or keep paying 20 B and stop thinking about it). Today neither option is open — thinning attestation reopens unauthored rounds. The removal conditions are written down in the upstream report, not here, because they belong to the defect's lifecycle.
 
 ## Canon receipts
 

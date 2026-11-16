@@ -107,7 +107,7 @@ impl<'w, 's, D: IterQueryData, F: QueryFilter> ParallelQueryForEach<'w, 's, D, F
 #[inline(always)]
 #[allow(unused_variables, unused_mut)]
 #[cfg(not(feature = "parallel"))]
-pub fn par_for_each<T, F>(mut slice: &mut [T], min_len: usize, mut f: F) -> bool
+pub fn par_for_each<T, F>(mut slice: &mut [T], min_len: usize, mut f: F)
 where
     T: Send + Sync,
     F: FnMut(usize, &mut T) + Send + Sync,
@@ -115,7 +115,6 @@ where
     slice.iter_mut().enumerate().for_each(|(index, item)| {
         f(index, item);
     });
-    false // OVERMATCH PATCH: whether parallel chunks were dispatched.
 }
 
 /// A helper function for iterating over a slice in parallel or serially
@@ -139,7 +138,7 @@ where
 #[inline(always)]
 #[allow(unused_variables, unused_mut)]
 #[cfg(feature = "parallel")]
-pub fn par_for_each<T, F>(mut slice: &mut [T], min_len: usize, mut f: F) -> bool
+pub fn par_for_each<T, F>(mut slice: &mut [T], min_len: usize, mut f: F)
 where
     T: Send + Sync,
     F: Fn(usize, &mut T) + Send + Sync,
@@ -150,7 +149,6 @@ where
         slice.iter_mut().enumerate().for_each(|(index, item)| {
             f(index, item);
         });
-        false // OVERMATCH PATCH: whether parallel chunks were dispatched.
     } else {
         // TODO: Is there a better approach than `par_chunk_map_mut`?
         let chunk_size_ = (slice.len() / task_pool_.thread_num()).max(1);
@@ -166,6 +164,5 @@ where
                 });
             },
         );
-        true
     }
 }
