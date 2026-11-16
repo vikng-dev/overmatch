@@ -517,11 +517,12 @@ game installs its law (`avian_ext::rest_test::at_rest`): upstream's test, or kin
 under the rest speed's, `v² + ω·I_world·ω/m < (SleepThreshold::linear · PhysicsLengthUnit)²`. The
 law and its account are the 0.7 fork's.
 
-The rest test runs inside upstream's serial loop: each body updates its timer and immediately
-commits its island's awake vote and split-candidate comparison. This loses no parallelism at the
-game's recorded body counts: the removed fork pass called `par_for_each_mut(MIN_PAR_ITER_ENTITIES)`
-(`4778f6ce^`, `sleeping.rs:268-269`), and both that version and pristine 0.8.0 define the floor as
-4,096 (`utils.rs:19` in each); the recorded peak near 160 bodies was serial before and after.
+The rest test stays in upstream's serial loop: each body updates its timer and immediately
+commits its island's awake vote and split-candidate comparison. The retired pass used
+`par_for_each_mut(MIN_PAR_ITER_ENTITIES)` (`4778f6ce^`, `sleeping.rs:268-269`): above 4,096 awake
+bodies it dispatched and upstream's loop does not. The recorded peak near 160 bodies was serial
+in both (MEASURED). Whether dispatch pays above that floor is to be measured on the hosted
+two-core allocation (GitHub issue 367).
 The loop's `SolverBodies` miss
 uses upstream's skip. No parallel output buffer, dispatch policy or extra refusal remains.
 
