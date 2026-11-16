@@ -486,9 +486,73 @@ class TraceInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "trace.jsonl"
             for kind, field in [("send", "rcpt"), ("transport", "public_recipient_count")]:
-                path.write_text(json.dumps({"k": kind}) + "\n")
-                with self.assertRaisesRegex(ValueError, field):
+                for value in (None, -1, True, 1.5, "1"):
+                    item = row(kind, 10, 100, 10, **{field: value})
+                    if value is None:
+                        del item[field]
+                    path.write_text(json.dumps(item) + "\n")
+                    with self.subTest(kind=kind, value=value), self.assertRaisesRegex(
+                            TraceInputError, rf"trace.jsonl:1:.*{kind}\.{field}.*recapture"):
+                        load(path)
+
+    def test_own_damage_requires_a_checked_tick_before_lead_accounting(self):
+        # The game's damage-model report reads dt only for own receipts, duplicates included at admission.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "client.jsonl"
+            for value in (None, -1, True, 1.5, "1"):
+                item = row("dmg_rx", 12, 100, 10, own=True, dt=value)
+                if value is None:
+                    del item["dt"]
+                path.write_text(json.dumps(item) + "\n")
+                with self.subTest(value=value), self.assertRaisesRegex(
+                        TraceInputError, r"client.jsonl:1:.*dmg_rx\.dt.*recapture"):
                     load(path)
+            item["dt"] = 0
+            path.write_text(json.dumps(item) + "\n")
+            self.assertEqual(load(path)[1], [item])
+            del item["dt"]
+            item["own"] = False
+            path.write_text(json.dumps(item) + "\n")
+            self.assertEqual(load(path)[1], [item])
+
+    def test_bounce_requires_a_checked_ordinal_before_ribbon_accounting(self):
+        # The game's damage-model smoke report must join each bounce to its ribbon evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.jsonl"
+            fire = row("fire", 10, 100, 10, smoke=True)
+            for value in (None, -1, True, 1.5, "1"):
+                item = row("path_tx", 12, 100, 10, seq=0, ordinal=value)
+                if value is None:
+                    del item["ordinal"]
+                path.write_text(json.dumps(fire) + "\n" + json.dumps(item) + "\n")
+                with self.subTest(value=value), self.assertRaisesRegex(
+                        TraceInputError, r"server.jsonl:2:.*path_tx\.ordinal.*recapture"):
+                    load(path)
+            item["ordinal"] = 0
+            path.write_text(json.dumps(fire) + "\n" + json.dumps(item) + "\n")
+            self.assertEqual(analyze({}, [], *load(path))["trail"], {"no_row": 1})
+
+    def test_path_impact_cannot_silently_skip_smoke_verification(self):
+        # The game's damage-model report must distinguish a checked non-bounce from missing evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.jsonl"
+            fire = row("fire", 10, 100, 10, smoke=True)
+            for value in (None, "unknown", 1, [], {}):
+                item = row("path_tx", 12, 100, 10, seq=0, impact=value)
+                if value is None:
+                    del item["impact"]
+                path.write_text(json.dumps(fire) + "\n" + json.dumps(item) + "\n")
+                with self.subTest(value=value), self.assertRaisesRegex(
+                        TraceInputError, r"server.jsonl:2:.*path_tx\.impact.*recapture"):
+                    load(path)
+            for impact in ("bounce", "through", "stopped", "ground", "state"):
+                item = row("path_tx", 12, 100, 10, seq=0, impact=impact)
+                if impact != "bounce":
+                    del item["ordinal"]
+                path.write_text(json.dumps(fire) + "\n" + json.dumps(item) + "\n")
+                with self.subTest(impact=impact):
+                    result = analyze({}, [], *load(path))
+                    self.assertEqual(result["trail"], {"no_row": 1} if impact == "bounce" else {})
 
 
 if __name__ == "__main__":

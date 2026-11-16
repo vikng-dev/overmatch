@@ -296,9 +296,7 @@ impl Script {
             });
         }
         if let Some(until) = self.fire_until
-            && (!matches!(self.drive, Drive::Fire { .. })
-                || until == 0
-                || until >= self.total_ticks()
+            && (until >= self.total_ticks()
                 || !match self.drive {
                     Drive::Fire { primary, secondary } => {
                         (primary && self.fire_interval != 0 && self.fire_tick < until)

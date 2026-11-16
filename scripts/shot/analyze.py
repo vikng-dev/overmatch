@@ -15,6 +15,7 @@ import argparse
 import json
 import sys
 from collections import defaultdict
+from enum import StrEnum
 from pathlib import Path
 
 # Resolution: allow half a second at the shipped 64 Hz for independently exiting clients and
@@ -24,6 +25,14 @@ TRACE_END_MAX_SKEW_TICKS = 32
 
 class TraceInputError(ValueError):
     """Outside trace input refused before any lifecycle accounting."""
+
+
+class PathImpact(StrEnum):
+    BOUNCE = "bounce"
+    THROUGH = "through"
+    STOPPED = "stopped"
+    GROUND = "ground"
+    STATE = "state"
 
 
 SHOT_KINDS = frozenset((
@@ -50,10 +59,6 @@ def load(path: Path) -> tuple[dict, list[dict]]:
                 break  # A killed producer may leave only its final row torn.
             if not isinstance(row, dict):
                 raise TraceInputError(f"{path}:{number}: a trace row must be an object")
-            if row.get("k") in ("send", "transport"):
-                field = "rcpt" if row["k"] == "send" else "public_recipient_count"
-                if type(row.get(field)) is not int or row[field] < 0:
-                    raise TraceInputError(f"{path}:{number}: {field} must be a nonnegative integer")
             kind = row.get("k")
             if not isinstance(kind, str):
                 raise TraceInputError(f"{path}:{number}: missing row kind k; recapture with SPIKE_SHOT_TRACE")
@@ -62,6 +67,19 @@ def load(path: Path) -> tuple[dict, list[dict]]:
                 required += ("c",)
             if kind in ("path_tx", "path_rx", "path_done"):
                 required += ("seq",)
+            if kind in ("send", "transport"):
+                required += ("rcpt" if kind == "send" else "public_recipient_count",)
+            if kind == "dmg_rx" and row.get("own"):
+                required += ("dt",)
+            if kind == "path_tx":
+                try:
+                    row["impact"] = PathImpact(row.get("impact"))
+                except ValueError as error:
+                    raise TraceInputError(
+                        f"{path}:{number}: path_tx.impact must be bounce, through, stopped, ground or state; "
+                        "recapture with SPIKE_SHOT_TRACE using the current binary") from error
+                if row["impact"] == PathImpact.BOUNCE:
+                    required += ("ordinal",)
             for field in required:
                 if type(row.get(field)) is not int or row[field] < 0:
                     raise TraceInputError(
@@ -184,13 +202,8 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
     observed_expected = fired - unaddressed
 
     # --- delivery / dedup -----------------------------------------------------------------
-    delivered, lost = 0, []
-    for key in sorted(observed_expected):
-        rx = client[key].get("fire_rx", [])
-        if not rx:
-            lost.append(key)
-            continue
-        delivered += 1
+    lost = [key for key in sorted(observed_expected) if not client[key].get("fire_rx")]
+    delivered = len(observed_expected) - len(lost)
     # Dedup rejections are counted trace-wide: the visual copies of an own-tank echo are just
     # as much real dedup traffic as those of a cross-tank fire.
     dup_rows = sum(1 for r in crows if r["k"] == "fire_rx" and r.get("dup"))
@@ -300,7 +313,7 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
         if not any(fire["smoke"] for fire in kinds.get("fire", [])):
             continue
         for kf in kinds.get("path_tx", []):
-            if kf.get("impact") != "bounce":
+            if kf["impact"] != PathImpact.BOUNCE:
                 continue
             seq = kf["ordinal"]
             rows = [r for r in client.get(key, {}).get("trail", []) if r.get("seq") == seq]
