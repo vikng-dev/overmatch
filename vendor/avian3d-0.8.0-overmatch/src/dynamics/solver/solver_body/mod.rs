@@ -574,6 +574,8 @@ pub struct SolverBodies {
     entities: Vec<Entity>,
     bodies: Vec<SolverBody>,
     inertias: Vec<SolverBodyInertia>,
+    // OVERMATCH PATCH: bumped by every push, removal and clear.
+    membership_changes: u64,
 }
 
 impl SolverBodies {
@@ -584,7 +586,15 @@ impl SolverBodies {
             entities: Vec::new(),
             bodies: Vec::new(),
             inertias: Vec::new(),
+            membership_changes: 0,
         }
+    }
+
+    /// OVERMATCH PATCH: how many times the membership has changed. Two equal readings bound a
+    /// window in which no body entered or left.
+    #[inline]
+    pub(crate) fn membership_changes(&self) -> u64 {
+        self.membership_changes
     }
 
     /// Returns the number of solver bodies.
@@ -689,6 +699,7 @@ impl SolverBodies {
         self.entities.push(entity);
         self.bodies.push(body);
         self.inertias.push(inertia);
+        self.membership_changes += 1; // OVERMATCH PATCH
         index
     }
 
@@ -705,6 +716,7 @@ impl SolverBodies {
         self.entities.swap_remove(index.0 as usize);
         self.bodies.swap_remove(index.0 as usize);
         self.inertias.swap_remove(index.0 as usize);
+        self.membership_changes += 1; // OVERMATCH PATCH
         // TODO: Do this differently
         // If the removed body was not the last one, a body was swapped into its slot.
         self.entities.get(index.0 as usize).copied()
@@ -716,6 +728,7 @@ impl SolverBodies {
         self.entities.clear();
         self.bodies.clear();
         self.inertias.clear();
+        self.membership_changes += 1; // OVERMATCH PATCH
     }
 
     /// Returns a [`SolverBodiesAccess`] that allows obtaining mutable references to solver bodies

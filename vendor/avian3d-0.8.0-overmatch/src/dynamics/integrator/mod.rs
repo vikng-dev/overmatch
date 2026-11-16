@@ -52,6 +52,7 @@ impl Plugin for IntegratorPlugin {
         app.register_required_components::<SolverBodyIndex, VelocityIntegrationData>();
 
         app.init_resource::<Gravity>();
+        app.init_resource::<IncrementsBuiltFor>(); // OVERMATCH PATCH
 
         app.configure_sets(
             PhysicsSchedule,
@@ -257,6 +258,14 @@ impl VelocityIntegrationData {
     }
 }
 
+/// OVERMATCH PATCH: [`SolverBodies::membership_changes`] when this step's velocity increments were
+/// built. The build, the substeps' use and the clear must see one membership: a body entering in
+/// between would take its unscaled pending acceleration as a velocity every substep, and one
+/// leaving would keep a scaled increment that no clear reaches. Public only because
+/// [`pre_process_velocity_increments`] is.
+#[derive(Resource, Default)]
+pub struct IncrementsBuiltFor(u64);
+
 /// Applies gravity and locked axes to the linear and angular velocity increments of bodies.
 pub fn pre_process_velocity_increments(
     // OVERMATCH PATCH: build only increments that the solver will consume and clear.
@@ -273,10 +282,14 @@ pub fn pre_process_velocity_increments(
     >,
     gravity: Res<Gravity>,
     time: Res<Time<Substeps>>,
+    // OVERMATCH PATCH
+    solver_bodies: Res<SolverBodies>,
+    mut built_for: ResMut<IncrementsBuiltFor>,
     mut diagnostics: ResMut<SolverDiagnostics>,
 ) {
     let start = crate::utils::Instant::now();
 
+    built_for.0 = solver_bodies.membership_changes(); // OVERMATCH PATCH
     let delta_secs = time.delta_secs();
 
     // TODO: Do we want to skip kinematic bodies here?
@@ -321,10 +334,21 @@ pub fn pre_process_velocity_increments(
 /// Clears the velocity increments of bodies after the substepping loop.
 fn clear_velocity_increments(
     mut bodies: Query<&mut VelocityIntegrationData, With<SolverBodyIndex>>,
+    // OVERMATCH PATCH
+    solver_bodies: Res<SolverBodies>,
+    built_for: Res<IncrementsBuiltFor>,
     mut diagnostics: ResMut<SolverDiagnostics>,
 ) {
     let start = crate::utils::Instant::now();
 
+    // OVERMATCH PATCH
+    assert_eq!(
+        solver_bodies.membership_changes(),
+        built_for.0,
+        "no body enters or leaves the solver between the velocity increments' build and clear: \
+         Avian wakes and sleeps bodies outside SolverSystems::PreSubstep..=PostSubstep, and \
+         nothing inside may change a body's Sleeping, Disabled, RigidBodyDisabled or RigidBody"
+    );
     bodies.par_for_each_mut(MIN_PAR_ITER_ENTITIES, |mut integration| {
         integration.linear_increment = Vector::ZERO;
         integration.angular_increment = default();

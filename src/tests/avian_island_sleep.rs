@@ -272,9 +272,11 @@ fn a_force_on_a_sleeper_acts_in_its_first_step_awake() {
     );
 }
 
-/// Server force writers need a sleeper's pending increment held unscaled until wake. Sleeping
-/// bodies must stay outside increment construction, including change-tick writes: otherwise the
-/// quiet population still pays every step for building and then undoing those increments.
+/// Server force writers need a sleeper's pending increment held unscaled until wake. Bodies out
+/// of the solver must stay outside increment construction, including change-tick writes:
+/// otherwise the quiet population still pays every step for building and then undoing those
+/// increments. Membership is the solver slot, not wakefulness: a disabled or static body that
+/// once held a slot keeps its increment data, so builders filtered by "not sleeping" fail here.
 #[test]
 fn sleeping_increments_wait_untouched_and_act_on_wake() {
     use avian3d::dynamics::integrator::VelocityIntegrationData;
@@ -282,17 +284,43 @@ fn sleeping_increments_wait_untouched_and_act_on_wake() {
     let mut app = physics_app();
     app.insert_resource(Gravity::ZERO);
     let free = body(&mut app, Vec3::ZERO);
+    // Fixture: awake bodies leaving the solver, side by side with the sleeper so all three move
+    // alike and never touch.
+    let disabled = body(&mut app, Vec3::X * 4.0);
+    let fixed = body(&mut app, Vec3::X * 8.0);
     // Fixture: independent persistent force/acceleration inputs exercise every world-frame builder.
     let constant_force = Vec3::Z * 3.0;
     let acceleration = Vec3::Y * 2.0;
-    app.world_mut().entity_mut(free).insert((
-        ConstantForce(constant_force),
-        ConstantLinearAcceleration(acceleration),
-        ConstantAngularAcceleration(Vec3::Y * 0.5),
-    ));
+    for entity in [free, disabled, fixed] {
+        app.world_mut().entity_mut(entity).insert((
+            ConstantForce(constant_force),
+            ConstantLinearAcceleration(acceleration),
+            ConstantAngularAcceleration(Vec3::Y * 0.5),
+        ));
+    }
     app.update();
     app.update();
     app.world_mut().entity_mut(free).insert(Sleeping);
+    app.world_mut()
+        .entity_mut(disabled)
+        .insert(RigidBodyDisabled);
+    app.world_mut().entity_mut(fixed).insert(RigidBody::Static);
+    app.world_mut().flush();
+    let outside = |app: &App| {
+        [disabled, fixed].map(|entity| {
+            let data = app
+                .world()
+                .entity(entity)
+                .get_ref::<VelocityIntegrationData>()
+                .expect("a body that held a solver slot keeps its increment data");
+            (
+                data.linear_increment,
+                data.angular_increment,
+                data.last_changed(),
+            )
+        })
+    };
+    let left = outside(&app);
     // Fixture: the increment a one-step force leaves pending outside the solver.
     let force = Vec3::X * 10.0;
     let mass = app.world().get::<ComputedMass>(free).unwrap().value();
@@ -322,6 +350,11 @@ fn sleeping_increments_wait_untouched_and_act_on_wake() {
             changed,
             "sleepers do not enter the increment builders"
         );
+        assert_eq!(
+            outside(&app),
+            left,
+            "disabled and static bodies do not enter the increment builders"
+        );
     }
     let before = app.world().get::<LinearVelocity>(free).unwrap().0;
     app.world_mut().entity_mut(free).remove::<Sleeping>();
@@ -335,6 +368,35 @@ fn sleeping_increments_wait_untouched_and_act_on_wake() {
     let gained = app.world().get::<LinearVelocity>(free).unwrap().0 - before;
     // Resolution: f32 summation over substeps, below any missing force contribution.
     assert!((gained - expected).length() <= 1e-4 * expected.length());
+}
+
+/// The increments are built, used and cleared for one solver membership. A body woken between
+/// the build and the clear would take its pending acceleration, unscaled, as a velocity every
+/// substep; the clear refuses the step instead. Fails if the clear stops checking the membership.
+#[test]
+#[should_panic(
+    expected = "no body enters or leaves the solver between the velocity increments' build and clear"
+)]
+fn a_body_woken_between_the_increments_build_and_clear_is_refused() {
+    use avian3d::dynamics::solver::schedule::SolverSystems;
+
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let sleeper = body(&mut app, Vec3::ZERO);
+    app.update();
+    app.update();
+    app.world_mut().entity_mut(sleeper).insert(Sleeping);
+    app.update();
+    assert!(app.world().get::<Sleeping>(sleeper).is_some());
+    app.add_systems(
+        PhysicsSchedule,
+        (move |world: &mut World| {
+            world.entity_mut(sleeper).remove::<Sleeping>();
+        })
+        .after(SolverSystems::PreSubstep)
+        .before(SolverSystems::Substep),
+    );
+    app.update();
 }
 
 /// Physics users need corrupt island membership refused rather than a partly woken island.

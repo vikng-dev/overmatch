@@ -139,7 +139,7 @@ diagnostics).
 Guard: `src/tests/avian_broad_phase_layers.rs` (with the prune removed it fails: 2 candidates
 visited, not 0, MEASURED). Counts and reproduction: `upstream/avian-pairless-broad-phase.md`.
 
-## Sleeping bodies' velocity increments (`src/dynamics/integrator/mod.rs`, `src/dynamics/rigid_body/forces/plugin.rs`): kept
+## Sleeping bodies' velocity increments (`src/dynamics/integrator/mod.rs`, `src/dynamics/rigid_body/forces/plugin.rs`, `src/dynamics/solver/solver_body/mod.rs`): kept
 
 Subject: the game's rigid-body rest, server physics, game state only.
 
@@ -153,11 +153,22 @@ The filter avoids building increments for sleepers at all. No hold/release adapt
 sleeping population or copies its pending increments. MEASURED by the supplied cutover profile:
 the removed adapter cost about 32 µs per tick; no new timing run or speedup claim here.
 
+The filter is exact only while the membership holds from the build to the clear: a body entering
+in between would take its unscaled pending acceleration as a velocity every substep, and one
+leaving would keep a scaled increment no clear reaches. `SolverBodies` counts its membership
+changes (every push, removal and clear); `pre_process_velocity_increments` stores the count in
+`IncrementsBuiltFor`, and `clear_velocity_increments` panics if it moved. Two reads and a compare
+per step.
+
 Guards: `src/tests/avian_island_sleep.rs` (`a_woken_body_takes_only_its_first_steps_gravity`,
 `a_force_on_a_sleeper_acts_in_its_first_step_awake`,
-`sleeping_increments_wait_untouched_and_act_on_wake`). The last checks pending data and change
-ticks across sleeping steps, then the force's contribution on wake. Local upstream draft:
-`upstream/avian-sleeping-velocity-increments.md`.
+`sleeping_increments_wait_untouched_and_act_on_wake`,
+`a_body_woken_between_the_increments_build_and_clear_is_refused`). The third checks pending data
+and change ticks across steps out of the solver (asleep, disabled and static), then the force's
+contribution on wake; the fourth wakes a body inside the window. Mutants, each red (MEASURED): the
+four builders filtered `Without<Sleeping>` (the third: the disabled and static bodies' increments
+and change ticks move), the clear's check removed (the fourth does not panic). Local upstream
+draft: `upstream/avian-sleeping-velocity-increments.md`.
 
 ## Unreadable pair state (`src/collision/narrow_phase/system_param.rs`): kept
 
