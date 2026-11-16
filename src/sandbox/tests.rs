@@ -488,3 +488,33 @@ fn clearing_the_range_keeps_a_launched_turret_tank_a_husk() {
         "a mounted target is refilled and back in action"
     );
 }
+
+/// The game's damage-model sandbox must expose a failed target view at its asset source,
+/// regardless of whether spawn already consumed PendingTarget. Other assets own their reporters.
+#[test]
+fn a_failed_target_view_is_fatal_without_a_pending_spawn() {
+    use bevy::asset::{AssetLoadError, UntypedAssetLoadFailedEvent};
+    for path in ["unrelated.glb", crate::tank::TANK_GLB_PATH] {
+        let mut app = App::new();
+        app.add_message::<UntypedAssetLoadFailedEvent>()
+            .add_systems(Update, report_failed_target);
+        app.world_mut().write_message(UntypedAssetLoadFailedEvent {
+            id: Handle::<Gltf>::default().id().untyped(),
+            path: format!("{path}#Scene0").into(),
+            error: AssetLoadError::AssetReaderError(bevy::asset::io::AssetReaderError::NotFound(
+                path.into(),
+            )),
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.update()));
+        if path == "unrelated.glb" {
+            assert!(result.is_ok());
+        } else {
+            let error = result.unwrap_err();
+            let message = error.downcast_ref::<String>().unwrap();
+            assert!(
+                message.contains(path) && message.contains("restore or rebuild"),
+                "{message}"
+            );
+        }
+    }
+}

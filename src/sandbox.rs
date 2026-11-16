@@ -227,6 +227,7 @@ struct ArmourCopy {
 struct MetTank;
 
 pub fn plugin(app: &mut App) {
+    app.add_systems(Update, report_failed_target);
     // The armor sandbox stays on the flat slab + authored blocks: its target placement and shot
     // scripting assume y=0 ground, and a dev tool should not shift when the game's heightmap does.
     app.insert_resource(crate::terrain_grid::ForceFlatWorld);
@@ -502,6 +503,19 @@ fn pending_target(asset_server: &AssetServer) -> PendingTarget {
         Some(asset_server.load(GltfAssetLabel::Scene(0).from_asset(crate::tank::TANK_GLB_PATH))),
         asset_server.load(crate::tank::TANK_SPEC_PATH),
     ))
+}
+
+/// A required target view cannot become a permanent readiness wait. Its glTF and labelled
+/// scene failures name the same asset path, even after the pending spawn handle was consumed.
+fn report_failed_target(mut failures: MessageReader<bevy::asset::UntypedAssetLoadFailedEvent>) {
+    for failure in failures.read() {
+        if failure.path.path() == std::path::Path::new(crate::tank::TANK_GLB_PATH) {
+            panic!(
+                "required sandbox target `{}` failed to load: {}; restore or rebuild the required target glb",
+                failure.path, failure.error
+            );
+        }
+    }
 }
 
 fn load_target(mut commands: Commands, asset_server: Res<AssetServer>) {

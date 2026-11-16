@@ -541,7 +541,9 @@ pub fn run() -> AppExit {
     if !simulate {
         // Documentation frames to disk (the Join menu, a connect screen); exits once they are.
         // Inert unless a capture plan takes frames.
-        app.add_plugins(crate::dev_capture::plugin);
+        app.add_plugins(crate::dev_capture::CapturePlugin(
+            crate::dev_capture::Anchor::Startup,
+        ));
     }
     // Passive jitter-trace recorder: frame + tick rows with link/interpolation extras. Idle unless
     // `SPIKE_TRACE` is set.
