@@ -77,26 +77,22 @@ pub(crate) fn spawn_crew_bar(mut commands: Commands, fonts: Res<UiFonts>) {
 }
 
 pub(crate) fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
-    // Top-left — the controlled tank's vitals card (the crew bar owns bottom-left). A subtle dark
-    // card behind a compact multi-line stat block, driven by `update_status_panel`.
     commands.spawn((
-        FlowScoped(Flow::InMatch),
         StatusPanelText,
-        crate::hud::HudDock::Fixed,
+        crate::hud::TopHudSlot::Status,
         Text::new(""),
         TextFont {
             // Regular: a dense multi-line stat block.
             font: fonts.body.clone().into(),
-            font_size: FontSize::Px(15.0),
+            font_size: FontSize::Px(crate::hud::look().status_font_px.0),
             ..default()
         },
         TextColor(TEXT),
         Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
-            left: Val::Px(10.0),
-            padding: UiRect::all(Val::Px(8.0)),
-            border_radius: BorderRadius::all(Val::Px(4.0)),
+            justify_self: JustifySelf::Start,
+            max_width: Val::Percent(100.0),
+            padding: UiRect::all(Val::Px(crate::hud::look().status_padding_px.0)),
+            border_radius: BorderRadius::all(Val::Px(crate::hud::look().status_radius_px.0)),
             ..default()
         },
         BackgroundColor(PANEL_BG),

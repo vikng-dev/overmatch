@@ -350,10 +350,10 @@ fn neutral(command: &TankCommand) -> bool {
     } == TankCommand::default()
 }
 
-/// The frame's drive levels, sustained fire and aim. The first notch precedes a full hold.
-fn live(command: &TankCommand, drive_level: f32) -> bool {
-    command.throttle == drive_level
-        && command.steer == drive_level
+/// The frame's throttle, held steering, sustained fire and aim. Throttle starts at its first notch.
+fn live(command: &TankCommand, throttle: f32) -> bool {
+    command.throttle == throttle
+        && command.steer == 1.0
         && command.fire_secondary
         && command.aim.is_some()
 }

@@ -1,0 +1,10 @@
+// Shared HUD appearance, in logical UI pixels.
+(
+    edge_px: (10.0, Taste("HUD look: top and side margins for the shared readouts")),
+    top_gap_px: (8.0, Taste("HUD look: readable gap between timer and status card")),
+    status_font_px: (15.0, Taste("HUD look: compact multi-line status typography")),
+    status_padding_px: (8.0, Taste("HUD look: inset around the status text")),
+    status_radius_px: (4.0, Taste("HUD look: soft status-card corners")),
+    clock_font_px: (28.0, Taste("HUD look: prominent battle timer typography")),
+    modal_gap_px: (8.0, Taste("HUD look: separation between fixed panels and modal cards")),
+)

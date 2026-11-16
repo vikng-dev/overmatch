@@ -174,7 +174,7 @@ fn assert_hit_confirm_root(world: &mut World) {
 const MATCH_ROOTS: &[&str] = &[
     "DebugCard",
     "CrewBarText",
-    "StatusPanelText",
+    "TopHud",
     "StandardDriveHudText",
     "DriveDebugHudText",
     "OpticMask",

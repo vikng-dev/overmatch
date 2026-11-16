@@ -405,7 +405,7 @@ fn snapshot_device_command(
 
 /// Decide [`DeviceOwner`] from the controlled tank's knockout fact and, while the death flow owns
 /// the device, write the controlled tank's command [neutral](TankCommand::neutral). In
-/// [`DeviceClaim`]. Absent or knocked-out bodies discard their persistent levers.
+/// [`DeviceClaim`]. Absent or knocked-out bodies discard their throttle cruise.
 fn claim_device(
     mut owner: ResMut<DeviceOwner>,
     mut drive_input: ResMut<DriveInput>,
@@ -439,18 +439,17 @@ pub struct AxisKeys {
     pub neg: KeyCode,
 }
 
-/// Client-only persistent levers. Ownership changes discard both axes so a respawn or Tab swap
-/// cannot inherit a previous tank's cruise command; a window losing focus discards neither
-/// ([`Self::set_notches`]). Repair brakes mask the request without
-/// moving these levers. The game's damage model: an empty Driver station also masks the
-/// request without discarding it; staffing resumes the latest notch, including taps made while absent.
+/// Client-only throttle cruise. Ownership changes discard it so a respawn or Tab swap
+/// cannot inherit another tank's command; a window losing focus keeps the set throttle
+/// ([`Self::set_throttle`]). Repair brakes mask the request without moving the lever.
+/// The game's damage model: an empty Driver station also masks the request without
+/// discarding it; staffing resumes the latest notch, including taps made while absent.
 /// No field is replicated.
 #[derive(Resource, Default)]
 pub(crate) struct DriveInput {
     owner: Option<Entity>,
     throttle: AxisLever,
-    steer: AxisLever,
-    effective: crate::track::drive::DriveAxes,
+    effective_throttle: f32,
 }
 
 impl DriveInput {
@@ -460,18 +459,14 @@ impl DriveInput {
         }
     }
 
-    pub(crate) fn notches(&self) -> crate::track::drive::DriveAxes {
-        self.effective
+    pub(crate) fn throttle(&self) -> f32 {
+        self.effective_throttle
     }
 
-    /// The levers with every key up, for a window that has lost the keyboard: a set notch
-    /// stands until the player moves it. A lever still mid-press reads neutral, because the
-    /// release that decides between its tap and its hold was never gathered.
-    pub(crate) fn set_notches(&self) -> crate::track::drive::DriveAxes {
-        crate::track::drive::DriveAxes {
-            throttle: self.throttle.set_notch(),
-            steer: self.steer.set_notch(),
-        }
+    /// With the keyboard unfocused a set throttle stands until the player moves it.
+    /// A mid-press lever reads neutral: its tap/hold release was never gathered.
+    pub(crate) fn set_throttle(&self) -> f32 {
+        self.throttle.set_notch()
     }
 }
 
@@ -793,11 +788,9 @@ pub(crate) fn gather_commands(
     drive_input.retain_for(Some(entity));
     let now = time.elapsed_secs_f64();
     command.throttle = drive_input.throttle.sample(&bindings.throttle, &keys, now);
-    command.steer = drive_input.steer.sample(&bindings.steer, &keys, now);
-    drive_input.effective = crate::track::drive::DriveAxes {
-        throttle: command.throttle,
-        steer: command.steer,
-    };
+    command.steer =
+        f32::from(keys.pressed(bindings.steer.pos)) - f32::from(keys.pressed(bindings.steer.neg));
+    drive_input.effective_throttle = command.throttle;
     // `|=`: a click must survive frames the fixed loop skips, until a tick consumes it.
     command.fire_primary |= bindings.fire_primary.just_pressed(&keys, &mouse);
     command.repair |= bindings.repair.just_pressed(&keys, &mouse);
@@ -1101,61 +1094,79 @@ mod tests {
         }
     }
 
-    /// Each axis reaches full in the authored number of taps; fractional steps cannot leave
-    /// either direction short of full, and each released notch persists for the Driver.
+    /// Throttle reaches full in the authored number of taps; fractional steps cannot leave
+    /// either throttle direction short of full, and each released notch persists for the Driver.
     #[test]
-    fn authored_tap_count_reaches_full_on_both_signed_axes() {
+    fn authored_tap_count_reaches_full_in_both_throttle_directions() {
         let feel = crate::track::drive::drive_feel();
-        for (key, throttle, sign) in [
-            (KeyCode::KeyW, true, 1.0),
-            (KeyCode::KeyS, true, -1.0),
-            (KeyCode::KeyD, false, 1.0),
-            (KeyCode::KeyA, false, -1.0),
-        ] {
+        for (key, sign) in [(KeyCode::KeyW, 1.0), (KeyCode::KeyS, -1.0)] {
             let mut script = DriveKeys::new();
-            let axis =
-                |v: crate::track::drive::DriveAxes| if throttle { v.throttle } else { v.steer };
             for index in 1..=feel.notch_count.0 {
                 let expected = sign * f32::from(index) / f32::from(feel.notch_count.0);
-                assert_eq!(axis(script.tap(key)), expected);
-                assert_eq!(axis(script.gather(feel.tap_window_s.0)), expected);
+                assert_eq!(script.tap(key).throttle, expected);
+                assert_eq!(script.gather(feel.tap_window_s.0).throttle, expected);
             }
-            assert_eq!(axis(script.gather(0.0)), sign);
-            assert_eq!(axis(script.tap(key)), sign);
+            assert_eq!(script.gather(0.0).throttle, sign);
+            assert_eq!(script.tap(key).throttle, sign);
         }
     }
 
     /// The Driver sees neutral on an opposing tap from any notch, then the first notch in
-    /// the new direction on the next tap, independently for throttle and steering.
+    /// the new throttle direction on the next tap.
     #[test]
-    fn an_opposing_tap_neutralizes_each_axis_before_the_next_reverses_it() {
+    fn an_opposing_throttle_tap_neutralizes_before_the_next_reverses_it() {
         let feel = crate::track::drive::drive_feel();
-        for (positive, negative, throttle) in [
-            (KeyCode::KeyW, KeyCode::KeyS, true),
-            (KeyCode::KeyD, KeyCode::KeyA, false),
+        for (key, opposing, sign) in [
+            (KeyCode::KeyW, KeyCode::KeyS, 1.0),
+            (KeyCode::KeyS, KeyCode::KeyW, -1.0),
         ] {
-            for (key, opposing, sign) in [(positive, negative, 1.0), (negative, positive, -1.0)] {
-                for index in 1..=feel.notch_count.0 {
-                    let mut script = DriveKeys::new();
-                    let axis = |v: crate::track::drive::DriveAxes| {
-                        if throttle { v.throttle } else { v.steer }
-                    };
-                    for _ in 0..index {
-                        script.tap(key);
-                    }
-                    assert_eq!(
-                        axis(script.gather(0.0)),
-                        sign * f32::from(index) / f32::from(feel.notch_count.0)
-                    );
-                    script.press(opposing);
-                    assert_eq!(axis(script.gather(0.0)), 0.0);
-                    assert_eq!(axis(script.gather(feel.tap_window_s.0 / 2.0)), 0.0);
-                    script.release(opposing);
-                    assert_eq!(axis(script.gather(0.0)), 0.0);
-                    assert_eq!(axis(script.gather(feel.tap_window_s.0)), 0.0);
-                    assert_eq!(axis(script.tap(opposing)), -sign * feel.notch_step());
+            for index in 1..=feel.notch_count.0 {
+                let mut script = DriveKeys::new();
+                for _ in 0..index {
+                    script.tap(key);
                 }
+                assert_eq!(
+                    script.gather(0.0).throttle,
+                    sign * f32::from(index) / f32::from(feel.notch_count.0)
+                );
+                script.press(opposing);
+                assert_eq!(script.gather(0.0).throttle, 0.0);
+                assert_eq!(script.gather(feel.tap_window_s.0 / 2.0).throttle, 0.0);
+                script.release(opposing);
+                assert_eq!(script.gather(0.0).throttle, 0.0);
+                assert_eq!(script.gather(feel.tap_window_s.0).throttle, 0.0);
+                assert_eq!(script.tap(opposing).throttle, -sign * feel.notch_step());
             }
+        }
+    }
+
+    /// Steering is a held request, so the Driver never inherits a turn after key release.
+    /// Opposing keys cancel; subframe taps cannot leave a standing steering command.
+    #[test]
+    fn steering_follows_held_keys_without_cruise() {
+        let mut script = DriveKeys::new();
+        for (key, opposite, sign) in [
+            (KeyCode::KeyD, KeyCode::KeyA, 1.0),
+            (KeyCode::KeyA, KeyCode::KeyD, -1.0),
+        ] {
+            script.press(key);
+            assert_eq!(script.gather(0.0).steer, sign);
+            assert_eq!(
+                script
+                    .gather(crate::track::drive::drive_feel().tap_window_s.0)
+                    .steer,
+                sign
+            );
+            script.press(opposite);
+            assert_eq!(script.gather(0.0).steer, 0.0);
+            script.release(opposite);
+            assert_eq!(script.gather(0.0).steer, sign);
+            script.release(key);
+            assert_eq!(script.gather(0.0).steer, 0.0);
+            assert_eq!(script.tap(key).steer, 0.0);
+            script.press(key);
+            script.release(key);
+            assert_eq!(script.gather(0.0).steer, 0.0);
         }
     }
 
@@ -1205,35 +1216,32 @@ mod tests {
         assert_eq!(script.gather(0.0).throttle, updated);
     }
 
-    /// A hold owns the full axis after the window, then releases to coast/straight. Keeping the
-    /// previous notch here would leave the player's vehicle cruising or turning after release.
+    /// A throttle hold owns the full axis after the window, then releases to coast. Keeping the
+    /// previous notch would leave the player's vehicle cruising after release.
     #[test]
-    fn a_hold_overrides_and_release_clears_each_notch() {
+    fn a_throttle_hold_overrides_and_release_clears_the_notch() {
         let step = crate::track::drive::drive_feel().notch_step();
         let window = crate::track::drive::drive_feel().tap_window_s.0;
-        for key in [KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD] {
+        for key in [KeyCode::KeyW, KeyCode::KeyS] {
             let mut script = DriveKeys::new();
             script.tap(key);
             script.press(key);
             let start = script.gather(0.0);
-            assert!(
-                start.throttle.abs() == (2.0 * step).min(1.0)
-                    || start.steer.abs() == (2.0 * step).min(1.0)
-            );
+            assert_eq!(start.throttle.abs(), (2.0 * step).min(1.0));
             let held = script.gather(window);
             assert_eq!(
-                script.world.resource::<DriveInput>().notches(),
-                held,
+                script.world.resource::<DriveInput>().throttle(),
+                held.throttle,
                 "the HUD must show the effective held output"
             );
-            assert!(held.throttle.abs() == 1.0 || held.steer.abs() == 1.0);
+            assert_eq!(held.throttle.abs(), 1.0);
             script.release(key);
             assert_eq!(
                 script.gather(0.0),
                 crate::track::drive::DriveAxes::default()
             );
             let next = script.tap(key);
-            assert!(next.throttle.abs() == step || next.steer.abs() == step);
+            assert_eq!(next.throttle.abs(), step);
         }
     }
 
@@ -1273,31 +1281,28 @@ mod tests {
         );
     }
 
-    /// An opposing hold overrides the neutral tap after the window on either axis; the
+    /// An opposing throttle hold overrides the neutral tap after the window; the
     /// Driver's shaper still crosses neutral before serving the held direction.
     #[test]
-    fn opposing_holds_override_the_neutral_tap_on_both_axes() {
-        use crate::track::drive::{DriveAxes, drive_feel, shape_drive};
+    fn opposing_throttle_holds_override_the_neutral_tap() {
+        use crate::track::drive::{drive_feel, shape_drive};
         let feel = drive_feel();
-        for (key, opposing, throttle, sign) in [
-            (KeyCode::KeyW, KeyCode::KeyS, true, 1.0),
-            (KeyCode::KeyS, KeyCode::KeyW, true, -1.0),
-            (KeyCode::KeyD, KeyCode::KeyA, false, 1.0),
-            (KeyCode::KeyA, KeyCode::KeyD, false, -1.0),
+        for (key, opposing, sign) in [
+            (KeyCode::KeyW, KeyCode::KeyS, 1.0),
+            (KeyCode::KeyS, KeyCode::KeyW, -1.0),
         ] {
             let mut script = DriveKeys::new();
-            let axis = |v: DriveAxes| if throttle { v.throttle } else { v.steer };
             // Fixture: an opposing press from two same-direction taps.
             script.tap(key);
             let current = script.tap(key);
-            assert_eq!(axis(current), sign * (2.0 * feel.notch_step()).min(1.0));
+            assert_eq!(current.throttle, sign * (2.0 * feel.notch_step()).min(1.0));
             script.press(opposing);
-            assert_eq!(axis(script.gather(0.0)), 0.0);
+            assert_eq!(script.gather(0.0).throttle, 0.0);
             let held = script.gather(feel.tap_window_s.0);
-            assert_eq!(axis(held), -sign);
-            assert_eq!(axis(shape_drive(current, held, 1.0 / 64.0)), 0.0); // Fixture tick.
+            assert_eq!(held.throttle, -sign);
+            assert_eq!(shape_drive(current, held, 1.0 / 64.0).throttle, 0.0); // Fixture tick.
             script.release(opposing);
-            assert_eq!(axis(script.gather(0.0)), 0.0);
+            assert_eq!(script.gather(0.0).throttle, 0.0);
         }
     }
 
@@ -1581,9 +1586,6 @@ mod tests {
             *app.world().resource::<DeviceOwner>(),
             DeviceOwner::DeathFlow
         );
-        assert_eq!(
-            app.world().resource::<DriveInput>().notches(),
-            crate::track::drive::DriveAxes::default()
-        );
+        assert_eq!(app.world().resource::<DriveInput>().throttle(), 0.0);
     }
 }

@@ -696,10 +696,13 @@ fn flat_case(gear: Option<u8>, steer: f32, name: &str) -> Case {
     }
 }
 
-/// Fixture: one notch of lever is the wide detent, the full lever the tight one.
+/// Fixture: mid-wide pedal travel selects the wide detent; full travel selects tight.
 fn detents() -> [(f32, &'static str); 2] {
     let feel = crate::track::drive::drive_feel();
-    [(feel.notch_step(), "wide"), (1.0, "tight")]
+    [
+        ((feel.wide_on.0 + feel.tight_on.0) / 2.0, "wide"),
+        (1.0, "tight"),
+    ]
 }
 
 fn selected(label: &str) -> bool {

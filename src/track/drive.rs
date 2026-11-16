@@ -63,13 +63,6 @@ impl DriveFeel {
             0.0 < self.wide_on.0 && self.wide_on.0 < self.tight_on.0 && self.tight_on.0 < 1.0,
             "assets/input/drive.ron: author ordered wide_on < tight_on within (0, 1)"
         );
-        for index in 1..self.notch_count.0 {
-            let notch = f32::from(index) / f32::from(self.notch_count.0);
-            assert!(
-                notch != self.wide_on.0 && notch != self.tight_on.0,
-                "assets/input/drive.ron: detent threshold rests on a notch; move wide_on or tight_on between lever positions"
-            );
-        }
     }
 
     #[cfg(test)]
@@ -259,23 +252,7 @@ mod tests {
         assert_eq!(cmds, [1.0, -1.0]);
     }
 
-    /// Fixture: wide rests exactly on the first of three equal notches.
-    /// Admission keeps stationary lever values away from detent thresholds.
-    #[test]
-    #[should_panic(expected = "detent threshold rests on a notch")]
-    fn detent_threshold_cannot_rest_on_a_notch() {
-        let mut feel: DriveFeel = crate::provenance::from_shipped_str(
-            "assets/input/drive.ron",
-            include_str!("../../assets/input/drive.ron"),
-        )
-        .unwrap();
-        feel.notch_count.0 = 3;
-        feel.wide_on.0 = feel.notch_step();
-        feel.validate();
-    }
-
-    /// Endpoint thresholds are outside the detent domain; refusal must name that domain
-    /// before checking the reachable notch lattice.
+    /// Endpoint thresholds are outside the steering detent domain and must be refused before play.
     #[test]
     #[should_panic(expected = "author ordered wide_on < tight_on within (0, 1)")]
     fn endpoint_threshold_is_refused_at_the_domain_gate() {
@@ -288,8 +265,8 @@ mod tests {
         feel.validate();
     }
 
-    /// Command gathering must reach either full axis in exactly the authored count of taps,
-    /// with every intermediate value on the same lattice that admission checks.
+    /// Command gathering must reach full throttle in exactly the authored count of taps,
+    /// with every intermediate value on its notch lattice.
     #[test]
     fn authored_notch_count_reaches_full_without_accumulated_roundoff() {
         let mut feel: DriveFeel = crate::provenance::from_shipped_str(

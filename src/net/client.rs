@@ -2290,7 +2290,7 @@ pub(super) fn install_device_feed(app: &mut App) {
 
 /// File render-rate [`DeviceCommand`] into each tick's controlled `ActionState`. Unowned slots, a
 /// closed window, off-match screens and blocking overlays file idle, so tanks coast and menu
-/// clicks do not fire. An unfocused window files the drive levers' set notches and nothing else:
+/// clicks do not fire. An unfocused window files the set throttle notch and nothing else:
 /// cruise holds its pedal, and no key or button held at the focus loss stays on the wire. Device
 /// writers include drive/aim/range/crew UI; death flow neutralizes their device. Levels repeat
 /// across the frame, edges clear after its first tick. The reverse protocol bridge returns
@@ -2321,14 +2321,10 @@ fn feed_action_state(
         // Off-match or under a blocking overlay, whatever the focus.
         Some(_) if crate::overlay::input_blocked(&overlays, true) => TankCommand::default(),
         Some(true) => device.0,
-        Some(false) => {
-            let set = drive_input.set_notches();
-            TankCommand {
-                throttle: set.throttle,
-                steer: set.steer,
-                ..default()
-            }
-        }
+        Some(false) => TankCommand {
+            throttle: drive_input.set_throttle(),
+            ..default()
+        },
     };
     for (mut state, controlled) in &mut slots {
         state.0 = if controlled {
@@ -2543,8 +2539,7 @@ mod tests {
         assert_ne!(
             world
                 .resource::<crate::command::DriveInput>()
-                .set_notches()
-                .throttle,
+                .set_throttle(),
             0.0,
             "the tap sets a notch"
         );
