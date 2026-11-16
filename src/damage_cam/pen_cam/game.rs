@@ -656,6 +656,12 @@ mod tests {
             .insert(&Handle::<Image>::default(), Image::default())
             .unwrap();
         wire(&mut app);
+        app.add_systems(
+            Update,
+            load_stand_ins
+                .after(killcam::KillCamGateSet)
+                .before(view::prepare_stage),
+        );
         // A 4K corner's detail: the headless app has no window for the UI to size the corner in.
         app.insert_resource(super::super::picture::PictureDetail {
             corner: Some(super::super::picture::tests::DETAIL),
@@ -684,7 +690,7 @@ mod tests {
         ));
     }
 
-    /// A stage view of `report`'s tank file standing in for its glb: the root and the hull node.
+    /// [`stage_of`] `report`'s tank file.
     fn stage_ready(app: &mut App, report: &PenetrationReport) {
         stage_of(
             app,
@@ -695,49 +701,56 @@ mod tests {
         );
     }
 
-    /// A stage view of tank file `vehicle` standing in for its glb, beside the corner it draws in:
-    /// the slot rigs the inset and the corner whenever it stages a view (`Rig::ready`), and the
-    /// stage's systems read both.
+    /// Tank files whose stage assets load in the fixture ([`stage_of`]).
+    #[derive(Resource, Default)]
+    struct StandIns(BTreeSet<String>);
+
+    /// Tank file `vehicle`'s stage assets load: once the slot rigs the corner and spawns the stage
+    /// view (`Rig::ready`), [`load_stand_ins`] gives the view what its glb and tank file would.
     pub(super) fn stage_of(app: &mut App, vehicle: &str) {
-        use bevy::ecs::system::RunSystemOnce;
         app.world_mut()
-            .run_system_once(
-                |mut commands: Commands,
-                 mut images: ResMut<Assets<Image>>,
-                 mut stage: ResMut<Stage>,
-                 mut slot: ResMut<Slot>| {
-                    if !slot.rigged {
-                        *stage = Stage::default();
-                        stage::spawn_inset(&mut commands, &mut images, &mut stage);
-                        hud::spawn_corner(&mut commands, &mut images);
-                        slot.rigged = true;
-                    }
-                },
-            )
-            .expect("the corner fixture holds the slot and the stage");
-        let vehicle = vehicle.to_owned();
-        let path = crate::assets::asset_root().join(&vehicle);
+            .get_resource_or_init::<StandIns>()
+            .0
+            .insert(vehicle.to_owned());
+    }
+
+    /// Loads a spawned stage view's assets in place of the headless app's loaders, which have none
+    /// for a glb or a tank file: the tank file's asset at the handle the view holds, and under the
+    /// view's root the hull node and a node per servo of the glb's scene. A view of a tank file
+    /// [`stage_of`] has not named is never placed, as a view whose glb has not loaded.
+    fn load_stand_ins(
+        mut commands: Commands,
+        staged: Option<Res<StageView>>,
+        stand_ins: Option<Res<StandIns>>,
+        asset_server: Res<AssetServer>,
+        mut specs: ResMut<Assets<TankSpec>>,
+        loaded: Query<(), With<Children>>,
+    ) {
+        // No view spawned, or none whose assets load: nothing to load.
+        let (Some(staged), Some(stand_ins)) = (staged, stand_ins) else {
+            return;
+        };
+        if !stand_ins.0.contains(&staged.vehicle) || loaded.contains(staged.root) {
+            return;
+        }
+        let path = crate::assets::asset_root().join(&staged.vehicle);
         let spec: TankSpec = crate::provenance::from_shipped_str(
             crate::tank::TANK_SPEC_PATH,
             &std::fs::read_to_string(path).expect("the tank file"),
         )
         .expect("the tank file parses");
-        let world = app.world_mut();
-        let root = world
-            .spawn((Transform::IDENTITY, Visibility::Hidden, CornerRig))
-            .id();
-        world.spawn((
-            Name::new(view::HULL_NODE),
-            Transform::IDENTITY,
-            ChildOf(root),
-        ));
-        for name in spec.servos.keys() {
-            world.spawn((Name::new(name.clone()), Transform::IDENTITY, ChildOf(root)));
-        }
-        let spec = world.resource_mut::<Assets<TankSpec>>().add(spec);
-        let mut view = StageView::standing_in(spec, root);
-        view.vehicle = vehicle;
-        world.insert_resource(view);
+        commands.entity(staged.root).with_children(|scene| {
+            scene.spawn((Name::new(view::HULL_NODE), Transform::IDENTITY));
+            for name in spec.servos.keys() {
+                scene.spawn((Name::new(name.clone()), Transform::IDENTITY));
+            }
+        });
+        let handle = asset_server
+            .get_handle::<TankSpec>(staged.vehicle.clone())
+            .expect("a spawned stage view holds its tank file's handle");
+        specs
+            .insert(handle.id(), spec)
+            .expect("the view's tank file handle is live");
     }
 
     /// How long `report`'s corner runs in its verdict's frame ([`stage::pace`]); a component's
