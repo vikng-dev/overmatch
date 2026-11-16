@@ -2705,8 +2705,8 @@ fn backward_crank_has_only_opposing_motoring_drag() {
 
 /// The Driver must brake at the curve ceiling without buying a shift; without authority,
 /// only the independent clutch guard remains. Fixture: overrun below top gear
-/// where the ladder permits it, with a live drive request the pedal's fuel cannot answer in any
-/// gear, so no cut buys drive and the gear holds.
+/// where the ladder permits it, with a drive request whose fuel nets nothing at any crank
+/// ([`braking_pedal`]), so no cut buys drive and the gear holds.
 #[test]
 fn ceiling_brake_requires_a_driver_and_holds_the_current_gear() {
     for (fp, tp) in class_drivetrains() {
@@ -2722,19 +2722,7 @@ fn ceiling_brake_requires_a_driver_and_holds_the_current_gear() {
             let k = ratio / tp.sprocket_radius;
             let ceiling = tp.engine.crank_limit_rpm * RPM_TO_RAD / k;
             let speed = dir * ceiling;
-            // Fixture: a request at the dead band's edge, which nets nothing at any crank.
-            let pedal = DEAD;
-            assert!(
-                viable_pull(
-                    &tp,
-                    DriveSupply::WHOLE,
-                    ceiling,
-                    ratio,
-                    pedal,
-                    ClutchState::In
-                ) <= 0.0,
-                "the fixture's request nets nothing from the idle guard to the crank limit"
-            );
+            let pedal = braking_pedal(&tp);
             let mut inp = input(
                 dir * pedal,
                 0.0,

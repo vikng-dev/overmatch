@@ -1625,7 +1625,7 @@ mod tests {
     /// the light pedal. Fixture: each class drivetrain locked in first gear, steady at the first
     /// whole rpm past its governed speed where full pedal nets nothing at the crank, the slope
     /// carrying exactly the drive the engaged gear delivers there, read without error on ample
-    /// grip; a twentieth of the pedal, which nets nothing at any crank.
+    /// grip; the light pedal [`braking_pedal`], which nets nothing at any crank.
     #[test]
     fn an_overrun_gear_shifts_up_only_to_a_gear_the_pedal_drives() {
         for (fp, tp) in class_drivetrains() {
@@ -1645,20 +1645,7 @@ mod tests {
                 .map(|past| tp.engine.governed_rpm + f32::from(past))
                 .find(|&rpm| nets(rpm, 1.0) <= 0.0)
                 .expect("full pedal nets nothing at the crank past the governor's cut");
-            let light = 0.05;
-            let limit = at(tp.engine.crank_limit_rpm);
-            assert!(
-                viable_pull(
-                    &tp,
-                    DriveSupply::WHOLE,
-                    limit,
-                    first,
-                    light,
-                    ClutchState::In
-                ) <= 0.0,
-                "the fixture's light pedal nets nothing at any crank up to the limit"
-            );
-            for (pedal, shifts) in [(1.0, true), (light, false)] {
+            for (pedal, shifts) in [(1.0, true), (braking_pedal(&tp), false)] {
                 let inp = driver_input(at(overrun), nets(overrun, pedal), pedal);
                 let mut st = TransmissionState {
                     gear: 1,

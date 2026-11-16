@@ -969,6 +969,12 @@ pub(crate) fn motoring_drag_base_share() -> f32 {
     engine_control().motoring_drag_base_share.value
 }
 
+/// Authored command share at which the pedal blend recovers the whole net curve, shared with the
+/// law's fixtures.
+pub(super) fn drag_throttle_release() -> f32 {
+    engine_control().drag_throttle_release.value
+}
+
 /// The game's damage model: construction motoring drag at the crank (N m), independent of
 /// pedal and combustion. Its authored mid-band anchor is `drag_fraction × peak torque`;
 /// the affine Coulomb/viscous shape rises with speed. The discrete free-crank stop bounds drag at zero.
@@ -994,7 +1000,7 @@ fn engine_torques(
     if omega < 0.0 {
         return [0.0, 0.0, drag]; // A backward crank cannot fire.
     }
-    let pedal = (command / engine_control().drag_throttle_release.value).clamp(0.0, 1.0);
+    let pedal = (command / drag_throttle_release()).clamp(0.0, 1.0);
     // Cubic smoothstep has zero endpoint slopes: 3p² - 2p³.
     let released = pedal * pedal * (3.0 - 2.0 * pedal);
     let rpm = omega / RPM_TO_RAD;
