@@ -1,4 +1,11 @@
-//! Route macOS Cmd+Q through `AppExit`.
+//! Retire rendering before window teardown, and route macOS Cmd+Q through `AppExit`.
+//!
+//! The final render update must finish while the main world still owns its windows. During
+//! `World::clear_all`, a render-thread `RawHandleWrapper` removal can otherwise drop the last
+//! native window owner. On macOS, winit 0.30.13's `Window::drop` synchronously dispatches its close
+//! onto AppKit's main queue (`platform_impl/macos/window.rs`); Bevy 0.20.1's
+//! `RenderAppChannels::drop` pumps the ECS executor, not that queue. [`retire_renderer_on_exit`]
+//! receives and drops the render app before winit reaches `clear_all`, preserving those owners.
 //!
 //! winit installs the standard macOS app menu, whose Quit item sends `-[NSApplication terminate:]`.
 //! winit does NOT implement `applicationShouldTerminate:` (there are zero hits for it in the
@@ -16,7 +23,10 @@
 //! The alternative (`NSTerminateLater` + `replyToApplicationShouldTerminate:`) needs AppKit to pump
 //! a run loop bevy does not own, which is a worse trade than one re-asked logout.
 
+use bevy::ecs::schedule::MainThreadExecutor;
 use bevy::prelude::*;
+use bevy::render::pipelined_rendering::{RenderAppChannels, RenderExtractApp};
+use bevy::tasks::ComputeTaskPool;
 
 /// Mounted once per WINDOWED root, and every windowed root is one of these four:
 /// [`ClientPlugin`](crate::ClientPlugin) (single-player and the offline feel test),
@@ -28,16 +38,44 @@ use bevy::prelude::*;
 ///
 /// The headless server has no render app and no application menu, so there is nothing here for it
 /// to do; it is the one root that does not mount this.
-#[cfg_attr(
-    not(target_os = "macos"),
-    expect(
-        unused_variables,
-        reason = "only macOS has an application-menu quit route"
-    )
-)]
 pub(crate) fn plugin(app: &mut App) {
+    retire_renderer_on_exit(app);
     #[cfg(target_os = "macos")]
     app.add_plugins(terminate::TerminateRoute);
+}
+
+/// Retire the last render frame while the main world's window owners still live. Winit clears
+/// them in `exiting`; waiting in RenderAppChannels::drop is later than this boundary.
+fn retire_renderer_on_exit(app: &mut App) {
+    // Headless roots and roots without pipelined rendering have no render thread to retire.
+    let Some(extract) = app.get_sub_app_mut(RenderExtractApp) else {
+        return;
+    };
+    let mut inner = extract
+        .take_extract()
+        .expect("PipelinedRenderingPlugin installs its renderer extract with RenderExtractApp");
+    let mut retired = false;
+    extract.set_extract(move |main, render| {
+        if retired {
+            return;
+        }
+        inner(main, render);
+        if main.resource::<Messages<AppExit>>().is_empty() {
+            return;
+        }
+        retired = true;
+        main.resource_scope(|main, executor: Mut<MainThreadExecutor>| {
+            main.resource_scope(|_, mut channels: Mut<RenderAppChannels>| {
+                drop(ComputeTaskPool::get().scope_with_executor(
+                    true,
+                    Some(&executor.0),
+                    |scope| {
+                        scope.spawn(async { channels.recv().await });
+                    },
+                ));
+            });
+        });
+    });
 }
 
 /// The macOS `Cmd+Q` half: teach winit's application delegate to ANSWER the terminate request, and
@@ -286,6 +324,52 @@ mod terminate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Window teardown may invalidate renderer inputs. Every AppExit writer, including capture
+    /// completion and Cmd+Q, needs the pipelined render app dropped before winit clears the world.
+    #[test]
+    fn an_exit_frame_retires_the_render_app_before_window_teardown() {
+        use bevy::app::AppExit;
+        use bevy::render::{RenderApp, pipelined_rendering::PipelinedRenderingPlugin};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        #[derive(Resource)]
+        struct Retired(Arc<AtomicBool>);
+        impl Drop for Retired {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+
+        let retired = Arc::new(AtomicBool::new(false));
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let mut render = SubApp::new();
+        render.insert_resource(Retired(Arc::clone(&retired)));
+        app.insert_sub_app(RenderApp, render);
+        app.add_plugins((PipelinedRenderingPlugin, plugin));
+        app.finish();
+        app.cleanup();
+        app.update();
+        assert!(
+            !retired.load(Ordering::Relaxed),
+            "ordinary frames keep rendering alive"
+        );
+        app.add_systems(Update, |mut exit: MessageWriter<AppExit>| {
+            exit.write(AppExit::Success);
+        });
+        app.update();
+        assert_eq!(app.should_exit(), Some(AppExit::Success));
+        assert!(
+            retired.load(Ordering::Relaxed),
+            "rendering must retire before winit's World::clear_all"
+        );
+        // An extra update must not wait for a renderer that has already retired.
+        app.update();
+    }
 
     /// A windowless root has no application delegate and needs no menu routing.
     #[test]

@@ -141,7 +141,7 @@ mod presentation_authored;
 /// resolution or stand-in job; an unlabelled value does not load.
 mod provenance;
 /// macOS `Cmd+Q` → [`AppExit`](bevy::app::AppExit) and render-`SubApp` recall to avoid teardown
-/// deadlock against its render thread. Exit-only, no per-frame cost. Mounted once per windowed
+/// deadlock against its render thread. Mounted once per windowed
 /// root ([`ClientPlugin`] / [`NetClientPlugin`]); headless servers have neither render app nor menu.
 mod quit;
 /// `SPIKE_RENDER_COST=<path>` JSONL of Bevy per-pass `elapsed_cpu` / `elapsed_gpu` diagnostics.
