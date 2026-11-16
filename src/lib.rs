@@ -938,8 +938,8 @@ impl Plugin for GamePlugin {
 
 /// `overmatch --offline`: [`run_client`](net::run_client)'s windowed runtime (exe-relative
 /// asset root, continuous winit updates) plus [`GamePlugin`]. No Lightyear/connection entities
-/// or path to connect.
-pub fn run_offline() {
+/// or path to connect. Returns the app's exit, which `main` reports as the process's exit code.
+pub fn run_offline() -> AppExit {
     let mut app = App::new();
     // Read the player's settings BEFORE the window is described — see `load_at_boot`, which also
     // inserts the values and the boot report into the app.
@@ -1000,5 +1000,5 @@ pub fn run_offline() {
     // The ground-type tuning panel, shown while paused; egui compiles only into `dev_ui` builds.
     #[cfg(feature = "dev_ui")]
     app.add_plugins(track_prints::tuning::offline_plugin);
-    app.run();
+    app.run()
 }

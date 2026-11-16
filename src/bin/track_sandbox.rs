@@ -12,11 +12,11 @@
 
 use bevy::prelude::*;
 
-fn main() {
+fn main() -> AppExit {
     let mut app = App::new();
     overmatch::windowed_runtime(&mut app, Window::default());
     app.add_plugins(overmatch::track_sandbox::plugin)
         // Documentation frames; inert without `OVERMATCH_CAPTURE`. A capture hides the window.
         .add_plugins(overmatch::dev_capture::plugin)
-        .run();
+        .run()
 }

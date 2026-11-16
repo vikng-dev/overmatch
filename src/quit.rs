@@ -88,14 +88,18 @@ fn retire_renderer_on_exit(extract: &mut SubApp) {
         }
         retired = true;
         main.resource_scope(|main, executor: Mut<MainThreadExecutor>| {
-            main.resource_scope(|_, mut channels: Mut<RenderAppChannels>| {
-                drop(ComputeTaskPool::get().scope_with_executor(
-                    true,
-                    Some(&executor.0),
-                    |scope| {
+            main.resource_scope(|main, mut channels: Mut<RenderAppChannels>| {
+                let returned = ComputeTaskPool::get()
+                    .scope_with_executor(true, Some(&executor.0), |scope| {
                         scope.spawn(async { channels.recv().await });
-                    },
-                ));
+                    })
+                    .pop()
+                    .expect("the scope returns the one receive it spawned");
+                // `None`: the render thread panicked in the exit frame and closed its channel.
+                // Bevy's `renderer_extract` answers a closed channel with the same error exit.
+                if returned.is_none() {
+                    main.write_message(AppExit::error());
+                }
             });
         });
     });
@@ -393,6 +397,35 @@ mod tests {
         );
         // An extra update must not wait for a renderer that has already retired.
         app.update();
+    }
+
+    /// A render thread that panics in the exit frame closes its channel, and the retire receives
+    /// nothing. The app exits with an error, as Bevy's own extract does on a closed channel, so the
+    /// process's exit code reports the render failure. Fails if the retire discards the empty
+    /// receive: the exit stays `Success`.
+    #[test]
+    fn a_render_thread_lost_in_the_exit_frame_exits_with_an_error() {
+        use bevy::app::AppExit;
+        use bevy::ecs::schedule::ScheduleLabel;
+
+        fn fail_the_exit_frame() {
+            panic!("the render app fails its exit frame");
+        }
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let mut render = SubApp::new();
+        render.update_schedule = Some(First.intern());
+        render.add_systems(First, fail_the_exit_frame);
+        app.insert_sub_app(RenderApp, render);
+        app.add_plugins((plugin, PipelinedRenderingPlugin));
+        app.add_systems(Update, |mut exit: MessageWriter<AppExit>| {
+            exit.write(AppExit::Success);
+        });
+        app.finish();
+        app.cleanup();
+        app.update();
+        assert_eq!(app.should_exit(), Some(AppExit::error()));
     }
 
     /// A root without a window or a renderer needs neither exit route: no application delegate,

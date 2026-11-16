@@ -449,7 +449,7 @@ fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, 
     })
 }
 
-pub fn run() {
+pub fn run() -> AppExit {
     client_policy();
     let script = harness::script();
     let simulate = script.is_some();
@@ -675,7 +675,7 @@ pub fn run() {
     // including initial grab. Headless scripts have no overlay authority; scripted clients
     // omit `feed_action_state`, so overlay idling cannot fight `harness::buffer_input`.
 
-    app.run();
+    app.run()
 }
 
 /// The game's netcode and damage-model presentation: the common replica consumer schedule,
