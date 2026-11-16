@@ -336,7 +336,8 @@ pub(crate) struct SimulateInput {
 /// 164 ticks suffice there (DERIVED), and the rest covers a spawn that drops farther. A lead too
 /// short opens the throttle on a rocking hull, whose rocking the Driver reads as load when it
 /// chooses a launch gear; a longer one costs wall time only. `scripts/perf/pile_park.py` counts its
-/// window from it (`LEAD_TICKS`).
+/// window from it and `collapse.py` bounds a ram's throttle by it, both through
+/// `collapse.run_lead_ticks`, which reads this declaration.
 const RUN_LEAD: u32 = 256;
 
 /// The launch phases in order, each a state the script really passes through. Waiting is bounded
