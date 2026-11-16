@@ -72,8 +72,11 @@
 //!
 //! COST, OPEN. The reach casts at most one spatial query per body it evaluates, and exactly one
 //! when the body has a solid collider (`Reach::of`); it evaluates each awake body that is not
-//! static, and each piece the thaw frees. The freeze and the thaw evaluate it serially; whether
-//! splitting that evaluation over the compute pool pays on the hosted allocation is unmeasured.
+//! static, and each piece the thaw frees. The freeze and the thaw evaluate it on the compute pool
+//! (`Reach::of_each`), the thaw's cascade one wave of freed islands at a time; the freeze also
+//! gathers the sleeping pieces and classifies each candidate island's support there, every
+//! candidate's, while its budget bounds only the switches. What those dispatches cost on the hosted
+//! allocation is unmeasured.
 //! With server stats armed, [`census`] gives an upper bound on freezable awake pieces outside the
 //! tick, evaluating reach in parallel. With no server stats recorder, that census fetches nothing
 //! and casts no query.
@@ -292,8 +295,6 @@ pub(crate) fn sim_plugin(app: &mut App) {
         .add_observer(collider_left)
         .add_observer(collider_disabled)
         .add_observer(collider_sensed)
-        // Serial, both (module doc, cost): they visit the awake movers, at most one spatial query
-        // each, and the changes and pushes queued since the step.
         .add_systems(
             PhysicsSchedule,
             thaw.after(super::wake_on_static_moved)
@@ -410,7 +411,7 @@ struct Reach<'w, 's> {
 }
 
 /// One system's reach work: the bodies it evaluated, the spatial queries it cast, and the queries
-/// that reached a body no earlier one in the system had.
+/// that reached a kept body.
 #[derive(Default)]
 struct Tally {
     movers: u64,
@@ -419,6 +420,12 @@ struct Tally {
 }
 
 impl Tally {
+    fn absorb(&mut self, other: Tally) {
+        self.movers += other.movers;
+        self.queries += other.queries;
+        self.finds += other.finds;
+    }
+
     fn report(&self, stages: &Stages) {
         stages.add(Work::ReachMovers, self.movers);
         stages.add(Work::ReachQueries, self.queries);
@@ -427,11 +434,35 @@ impl Tally {
 }
 
 impl Reach<'_, '_> {
-    /// The awake bodies that are not static, in entity order.
+    /// The awake bodies that are not static.
     fn movers(&self) -> Vec<Entity> {
-        let mut movers: Vec<_> = self.movers.iter().collect();
-        movers.sort_unstable();
-        movers
+        self.movers.iter().collect()
+    }
+
+    /// [`Self::of`] for each of `bodies` on the compute pool: each query reads immutable inputs
+    /// into its worker's set, and the union and the summed tally are the same for any split.
+    fn of_each(
+        &self,
+        bodies: &[Entity],
+        keep: impl Fn(Entity) -> bool + Sync,
+    ) -> (BTreeSet<Entity>, Tally) {
+        use bevy::tasks::{ComputeTaskPool, ParallelSlice};
+        let mut out = (BTreeSet::new(), Tally::default());
+        if bodies.is_empty() {
+            return out;
+        }
+        let parts = bodies.par_splat_map(ComputeTaskPool::get(), None, |_, chunk| {
+            let mut part = (BTreeSet::new(), Tally::default());
+            for &body in chunk {
+                self.of(body, &keep, &mut part.0, &mut part.1);
+            }
+            part
+        });
+        for (mut reached, tally) in parts {
+            out.0.append(&mut reached);
+            out.1.absorb(tally);
+        }
+        out
     }
 
     /// Add to `reached` each body passing `keep` with a solid collider that a solid collider of
@@ -472,25 +503,25 @@ impl Reach<'_, '_> {
             return; // A body with no solid collider touches nothing.
         };
         tally.queries += 1;
-        let found = reached.len();
+        let mut found = false;
         self.spatial
             .aabb_intersections_with_aabb_callback(union, |hit| {
                 if self.solids.contains(hit)
                     && let Ok(of) = self.collider_of.get(hit)
                     && keep(of.body)
-                    && !reached.contains(&of.body)
                 {
                     let bounds = self
                         .aabbs
                         .get(hit)
                         .expect("Avian's AABB query reports only colliders with bounds");
                     if boxes.iter().any(|b| bounds.intersects(b)) {
+                        found = true;
                         reached.insert(of.body);
                     }
                 }
                 true
             });
-        tally.finds += u64::from(reached.len() > found);
+        tally.finds += u64::from(found);
     }
 }
 
@@ -589,10 +620,27 @@ struct Freeze<'w, 's> {
     last_step: Res<'w, LastPhysicsTick>,
     tick: SystemChangeTick,
     stages: Option<Res<'w, Stages>>,
+    /// Each worker's sleeping pieces by island and the islands written since the step.
+    gathered: Local<'s, Parallel<(BTreeMap<u32, Vec<Entity>>, BTreeSet<u32>)>>,
+}
+
+/// What [`freeze`] found holding one candidate island.
+enum Support {
+    /// It touches these frozen islands.
+    Meets(BTreeSet<u64>),
+    /// Nothing held it: no evidence of support.
+    Nothing,
+    /// Its pieces' colliders, and the colliders holding them, sorted and deduplicated.
+    Held {
+        own: Vec<Entity>,
+        touched: Vec<Entity>,
+    },
 }
 
 /// Freeze every sleeping island of loose pieces that touches fixed matter, that no mover reaches
-/// and that nothing has woken since the step, within the tick's budget (module doc).
+/// and that nothing has woken since the step, within the tick's budget (module doc). Gathering
+/// the sleeping pieces, the reach and each candidate's support read only the step's state; the
+/// budget and the switches apply after them, in island order.
 fn freeze(p: Freeze, mut commands: Commands) {
     let Freeze {
         sleeping,
@@ -604,25 +652,36 @@ fn freeze(p: Freeze, mut commands: Commands) {
         last_step,
         tick,
         stages,
+        mut gathered,
     } = p;
     let since_step = |at: Tick| at.is_newer_than(last_step.0, tick.this_run());
+    let parts = &*gathered;
+    sleeping
+        .par_iter()
+        .for_each(|(piece, node, _, (at, turn), (linear, angular))| {
+            let id = node.island_id().0;
+            let written = [
+                at.last_changed(),
+                turn.last_changed(),
+                linear.last_changed(),
+                angular.last_changed(),
+            ];
+            parts.scope(|(members, woken)| {
+                members.entry(id).or_default().push(piece);
+                if written.into_iter().any(since_step) {
+                    woken.insert(id);
+                }
+            });
+        });
     let mut members: BTreeMap<u32, Vec<Entity>> = BTreeMap::new();
     let mut woken = BTreeSet::new();
-    let mut visits = 0;
-    for (piece, node, _, (at, turn), (linear, angular)) in &sleeping {
-        visits += 1;
-        let id = node.island_id().0;
-        members.entry(id).or_default().push(piece);
-        let written = [
-            at.last_changed(),
-            turn.last_changed(),
-            linear.last_changed(),
-            angular.last_changed(),
-        ];
-        if written.into_iter().any(since_step) {
-            woken.insert(id);
+    for (part, written) in gathered.iter_mut() {
+        for (id, mut pieces) in std::mem::take(part) {
+            members.entry(id).or_default().append(&mut pieces);
         }
+        woken.append(written);
     }
+    let mut visits = members.values().map(Vec::len).sum::<usize>() as u64;
     // A sleeping island with any other body keeps every piece of it.
     members.retain(|&id, pieces| {
         let island = physics
@@ -637,24 +696,18 @@ fn freeze(p: Freeze, mut commands: Commands) {
             .flat_map(|(&id, pieces)| pieces.iter().map(move |&piece| (piece, id)))
             .collect();
         // An island a mover reaches would thaw at the next step.
-        let mut reached = BTreeSet::new();
-        for mover in reach.movers() {
-            visits += 1;
-            let keep = |body| candidates.contains_key(&body);
-            reach.of(mover, keep, &mut reached, &mut tally);
-        }
+        let movers = reach.movers();
+        visits += movers.len() as u64;
+        let (reached, work) = reach.of_each(&movers, |body| candidates.contains_key(&body));
+        tally = work;
         for piece in reached {
             members.remove(&candidates[&piece]);
         }
     }
-    let (mut froze, mut met) = (0, 0);
-    for mut pieces in members.into_values() {
-        if froze > 0 && froze + pieces.len() > FREEZE_PIECE_BUDGET {
-            break;
-        }
+    let support = |pieces: &mut Vec<Entity>| {
         pieces.sort_unstable();
         let (mut own, mut touched, mut frozen_touched) = (Vec::new(), Vec::new(), BTreeSet::new());
-        for &piece in &pieces {
+        for &piece in pieces.iter() {
             let (_, _, colliders, ..) = sleeping.get(piece).expect("a sleeping island's piece");
             for collider in colliders.iter() {
                 own.push(collider);
@@ -678,6 +731,30 @@ fn freeze(p: Freeze, mut commands: Commands) {
                 }
             }
         }
+        if !frozen_touched.is_empty() {
+            Support::Meets(frozen_touched)
+        } else if touched.is_empty() {
+            Support::Nothing
+        } else {
+            touched.sort_unstable();
+            touched.dedup();
+            Support::Held { own, touched }
+        }
+    };
+    let mut candidates: Vec<Vec<Entity>> = members.into_values().collect();
+    let supports = if candidates.is_empty() {
+        Vec::new()
+    } else {
+        use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
+        candidates.par_splat_map_mut(ComputeTaskPool::get(), None, |_, chunk| {
+            chunk.iter_mut().map(&support).collect::<Vec<_>>()
+        })
+    };
+    let (mut froze, mut met) = (0, 0);
+    for (pieces, support) in candidates.into_iter().zip(supports.into_iter().flatten()) {
+        if froze > 0 && froze + pieces.len() > FREEZE_PIECE_BUDGET {
+            break;
+        }
         // A SLEEPING ISLAND MEETS A FROZEN ONE. As a body switches type, Avian re-derives its
         // colliders' transforms (`collision/collider/collider_hierarchy/plugin.rs:109-110` and
         // `mod.rs:107-111`, through Bevy's `GlobalTransform::reparented_to`) and rescales them to
@@ -687,16 +764,15 @@ fn freeze(p: Freeze, mut commands: Commands) {
         // axis from 1 to 1 + 2^-23), into a sleeping neighbour, with no awake body to wake either
         // (`collision/narrow_phase/system_param.rs:482-500`). This island waits; the one it
         // touches thaws at the next step (module doc, met).
-        if !frozen_touched.is_empty() {
-            met += 1;
-            islands.met.extend(frozen_touched);
-            continue;
-        }
-        if touched.is_empty() {
-            continue; // Nothing held it: no evidence of support.
-        }
-        touched.sort_unstable();
-        touched.dedup();
+        let (own, touched) = match support {
+            Support::Meets(frozen_touched) => {
+                met += 1;
+                islands.met.extend(frozen_touched);
+                continue;
+            }
+            Support::Nothing => continue,
+            Support::Held { own, touched } => (own, touched),
+        };
         froze += pieces.len();
         let id = islands.next;
         islands.next += 1;
@@ -801,52 +877,53 @@ fn thaw(p: Thaw, mut commands: Commands) {
     }
     thawing.extend(met); // Counted where the freeze met them.
     let island_of = |piece: Entity| frozen.get(piece).expect("a reached frozen piece").0.island;
-    let mut reached = BTreeSet::new();
-    for mover in reach.movers() {
-        visits += 1;
-        let keep = |body| frozen.contains(body);
-        reach.of(mover, keep, &mut reached, &mut tally);
-    }
+    let movers = reach.movers();
+    visits += movers.len() as u64;
+    let (reached, work) = reach.of_each(&movers, |body| frozen.contains(body));
+    tally.absorb(work);
     let mut by_reach = 0;
     for piece in reached {
         if thawing.insert(island_of(piece)) {
             by_reach += 1;
         }
     }
-    // Each piece freed is a mover in this step too, with whatever velocity a push gave it.
+    // Each piece freed is a mover in this step too, with whatever velocity a push gave it. A
+    // piece's reach reads only its own pose and velocity, so the islands freed together are one
+    // wave, evaluated together, and the thawed set is the same closure in any order.
     let mut releasing: Vec<u64> = thawing.iter().copied().collect();
     let mut pieces = Vec::new();
-    while let Some(id) = releasing.pop() {
-        let island = islands
-            .islands
-            .remove(&id)
-            .expect("a thawing island is frozen");
-        for collider in island.own.iter().chain(&island.touched) {
-            let ids = islands
-                .by_collider
-                .get_mut(collider)
-                .expect("an island's colliders are indexed");
-            ids.retain(|other| *other != id);
-            if ids.is_empty() {
-                islands.by_collider.remove(collider);
+    while !releasing.is_empty() {
+        let mut freed = Vec::new();
+        for id in releasing.drain(..) {
+            let island = islands
+                .islands
+                .remove(&id)
+                .expect("a thawing island is frozen");
+            for collider in island.own.iter().chain(&island.touched) {
+                let ids = islands
+                    .by_collider
+                    .get_mut(collider)
+                    .expect("an island's colliders are indexed");
+                ids.retain(|other| *other != id);
+                if ids.is_empty() {
+                    islands.by_collider.remove(collider);
+                }
             }
+            // A piece gone since it froze has nothing to thaw.
+            freed.extend(
+                island
+                    .pieces
+                    .into_iter()
+                    .filter(|&piece| frozen.contains(piece)),
+            );
         }
-        // A piece gone since it froze has nothing to thaw.
-        let freed: Vec<_> = island
-            .pieces
-            .into_iter()
-            .filter(|&piece| frozen.contains(piece))
-            .collect();
-        let mut further = BTreeSet::new();
-        for &piece in &freed {
-            visits += 1;
-            let keep = |body| {
-                frozen
-                    .get(body)
-                    .is_ok_and(|(other, ..)| !thawing.contains(&other.island))
-            };
-            reach.of(piece, keep, &mut further, &mut tally);
-        }
+        visits += freed.len() as u64;
+        let (further, work) = reach.of_each(&freed, |body| {
+            frozen
+                .get(body)
+                .is_ok_and(|(other, ..)| !thawing.contains(&other.island))
+        });
+        tally.absorb(work);
         for piece in further {
             let id = island_of(piece);
             if thawing.insert(id) {
@@ -854,7 +931,7 @@ fn thaw(p: Thaw, mut commands: Commands) {
                 releasing.push(id);
             }
         }
-        pieces.extend(freed);
+        pieces.append(&mut freed);
     }
     pieces.sort_unstable();
     for &piece in &pieces {
@@ -879,12 +956,10 @@ mod tests {
 
     use super::*;
     use crate::Layer;
-    use crate::debris::tests::{piece, settling, slab};
+    use crate::debris::tests::{SIDE, piece, settling, slab};
 
     /// Fixture gravity, m/s².
     const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
-    /// The side of [`piece`]'s cube, m (fixture data).
-    const SIDE: f32 = 0.4;
 
     fn is_frozen(app: &App, piece: Entity) -> bool {
         app.world().get::<Frozen>(piece).is_some()

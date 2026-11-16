@@ -9,6 +9,7 @@ both profiles are written: its per-system tables rely on every record being coun
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -16,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from trace_profile import Trace, TraceError, WindowError, profile  # noqa: E402
+from trace_profile import OutputError, Trace, TraceError, WindowError, profile  # noqa: E402
 
 
 def record(ph: str, name: str, ts: float, tid: int = 1) -> str:
@@ -68,6 +69,13 @@ class TraceProfileTest(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, r"t\.json:2: phase 'b'"):
             list(Trace(path))
 
+    def test_a_phase_that_is_no_string_is_refused(self) -> None:
+        """A phase of another JSON type is refused naming its line, not a TypeError from the phase
+        lookup."""
+        path = self.file("t.json", '[\n{"ph":[]}\n]')
+        with self.assertRaisesRegex(TraceError, r"t\.json:2: a record's phase is list"):
+            list(Trace(path))
+
     def test_the_phases_it_ignores_are_skipped(self) -> None:
         """The thread-name (`M`) and instant (`i`) records Bevy's chrome trace writes are skipped,
         the spans around them read: refusing them would refuse every real trace."""
@@ -97,6 +105,24 @@ class TraceProfileTest(unittest.TestCase):
         leave its period short: refused, naming its begin line."""
         with self.assertRaisesRegex(TraceError, r":2: thread 1's system 'a', begun at 5 µs"):
             self.run_profile([record("B", "system: name=a", 5)], 0, 10)
+
+    def test_an_unwritable_output_path_is_refused_naming_it(self) -> None:
+        """A profile path under a missing directory is refused naming the path and the repair,
+        instead of an OSError traceback after the whole trace was read."""
+        records = []
+        for tick in range(12):
+            ts = 10.0 * tick
+            records += [record("B", "schedule: name=FixedMain", ts),
+                        record("B", "system: name=a", ts + 1),
+                        record("E", "system: name=a", ts + 2),
+                        record("E", "schedule: name=FixedMain", ts + 3)]
+        trace = self.file("t.json", "[\n" + ",\n".join(records) + "\n]")
+        window = self.file("w.json", json.dumps({"w0_us": 0, "w1_us": 200}))
+        out = Path(self.dir.name) / "missing" / "out.json"
+        self.assertEqual(profile(trace, window, str(Path(self.dir.name) / "out.json")), 0)
+        refusal = rf"{re.escape(str(out))}: cannot write .* create its directory"
+        with self.assertRaisesRegex(OutputError, refusal):
+            profile(trace, window, str(out))
 
 
 if __name__ == "__main__":

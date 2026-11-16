@@ -181,6 +181,14 @@ pub(crate) struct FirstFall {
     pairs: u32,
 }
 
+impl FirstFall {
+    fn absorb(&mut self, part: Self) {
+        self.awake += part.awake;
+        self.only_first_fall_contacts += part.only_first_fall_contacts;
+        self.pairs += part.pairs;
+    }
+}
+
 /// Airborne pieces this tick.
 #[derive(Clone, Copy, Default, Serialize)]
 pub(crate) struct Airborne {
@@ -192,6 +200,15 @@ pub(crate) struct Airborne {
     /// "Reached" means such a pair that carried normal impulse, the stricter reading: a chunk born
     /// beside a still-standing neighbour touches it without landing on it.
     loaded: FirstFall,
+}
+
+impl Airborne {
+    fn absorb(&mut self, part: Self) {
+        self.awake_pieces += part.awake_pieces;
+        self.no_contact += part.no_contact;
+        self.touch.absorb(part.touch);
+        self.loaded.absorb(part.loaded);
+    }
 }
 
 /// Islands holding an awake piece.
@@ -621,9 +638,13 @@ pub(super) struct ContactCensus<'w, 's> {
     body_pairs: Local<'s, Vec<(Kind, Entity, Entity)>>,
     flags: Local<'s, EntityHashMap<u8>>,
     awake_islands: Local<'s, HashMap<u32, u32>>,
+    /// Each worker's awake-piece counts and awake pieces per island, awaiting the merge.
+    awake_parts: Local<'s, bevy::utils::Parallel<(Airborne, HashMap<u32, u32>)>>,
     tank_islands: Local<'s, HashSet<u32>>,
     /// Each tank's upward momentum from loose pieces through its soft runs (N·s, [`PieceLift`]).
     lifts: Local<'s, EntityHashMap<f32>>,
+    /// Each worker's evaluated piece records, awaiting the commit ([`Self::record_motion`]).
+    observed: Local<'s, bevy::utils::Parallel<Vec<(Entity, PieceRecord, Thresholds)>>>,
 }
 
 impl ContactCensus<'_, '_> {
@@ -703,72 +724,88 @@ impl ContactCensus<'_, '_> {
         }
     }
 
-    /// Every piece's motion this tick, before any of its contacts are read.
+    /// Every piece's motion this tick, before any of its contacts are read. Each piece's record is
+    /// evaluated on the compute pool from its own copy and immutable inputs, then committed by key.
+    /// The line reports one set of thresholds, the highest entity's, whatever the worker split; a
+    /// tick with no piece keeps the last reported.
     fn record_motion(&mut self, tick: u32) {
         let unit = self.length_unit.0;
         let time_to_sleep = self.time_to_sleep.0;
-        let records = &mut *self.records;
-        for (entity, velocity, spin, rest, _, sleeping, piece) in &self.pieces {
-            records.thresholds = Some(Thresholds {
-                linear: rest.linear * unit,
-                angular: rest.angular,
-                time_to_sleep_s: time_to_sleep,
-                visible_motion_m: VISIBLE_MOTION_M,
-            });
-            let record = records
-                .live
-                .entry(entity)
-                .or_insert_with(|| PieceRecord::new(entity, piece, tick));
-            if !sleeping && !record.awake {
-                record.episode_born = tick;
-                record.last_impact = None;
-                record.last_fast = None;
-                record.sleep = None;
-                record.island = None;
-                record.linear_at_sleep = None;
-                record.angular_at_sleep = None;
-            }
-            if !sleeping {
-                let (position, rotation, colliders) = self
-                    .poses
-                    .get(entity)
-                    .expect("a simulated piece has a physics pose and collider membership");
-                let radius = *record.radius_m.get_or_insert_with(|| {
-                    assert!(!colliders.is_empty(), "a simulated piece has colliders");
-                    colliders
-                        .into_iter()
-                        .map(|collider| {
-                            let (shape, pose) = self
-                                .colliders
-                                .get(collider)
-                                .expect("a body's collider membership names live colliders");
-                            let bounds = shape.aabb(pose.translation, pose.rotation, 0.0);
-                            bounds.min.abs().max(bounds.max.abs()).length()
-                        })
-                        .fold(0.0, f32::max)
-                });
-                record.observe_pose(position.0, rotation.0, radius, tick);
-            }
-            let (linear, angular) = (velocity.length(), spin.length());
-            record.motion = (linear, angular);
-            if !sleeping {
-                record.awake_ticks += 1;
-                record.changed = true;
-                let (mass, inertia, rotation, body) = self
-                    .mass_properties
-                    .get(entity)
-                    .expect("every simulated piece retains computed mass and solver state");
-                let body = self
-                    .solver_bodies
-                    .get(*body)
-                    .expect("an awake piece's solver index addresses its state");
-                if !crate::avian_ext::rest_test::at_rest(
-                    body, rest, unit, *mass, *inertia, *rotation,
-                ) {
-                    record.last_fast = Some(tick);
+        let (records, observed) = (&*self.records, &*self.observed);
+        let (poses, colliders) = (&self.poses, &self.colliders);
+        let (mass_properties, solver_bodies) = (&self.mass_properties, &*self.solver_bodies);
+        self.pieces
+            .par_iter()
+            .for_each(|(entity, velocity, spin, rest, _, sleeping, piece)| {
+                let thresholds = Thresholds {
+                    linear: rest.linear * unit,
+                    angular: rest.angular,
+                    time_to_sleep_s: time_to_sleep,
+                    visible_motion_m: VISIBLE_MOTION_M,
+                };
+                let mut record = records
+                    .live
+                    .get(&entity)
+                    .copied()
+                    .unwrap_or_else(|| PieceRecord::new(entity, piece, tick));
+                if !sleeping && !record.awake {
+                    record.episode_born = tick;
+                    record.last_impact = None;
+                    record.last_fast = None;
+                    record.sleep = None;
+                    record.island = None;
+                    record.linear_at_sleep = None;
+                    record.angular_at_sleep = None;
                 }
+                if !sleeping {
+                    let (position, rotation, members) = poses
+                        .get(entity)
+                        .expect("a simulated piece has a physics pose and collider membership");
+                    let radius = *record.radius_m.get_or_insert_with(|| {
+                        assert!(!members.is_empty(), "a simulated piece has colliders");
+                        members
+                            .into_iter()
+                            .map(|collider| {
+                                let (shape, pose) = colliders
+                                    .get(collider)
+                                    .expect("a body's collider membership names live colliders");
+                                let bounds = shape.aabb(pose.translation, pose.rotation, 0.0);
+                                bounds.min.abs().max(bounds.max.abs()).length()
+                            })
+                            .fold(0.0, f32::max)
+                    });
+                    record.observe_pose(position.0, rotation.0, radius, tick);
+                }
+                let (linear, angular) = (velocity.length(), spin.length());
+                record.motion = (linear, angular);
+                if !sleeping {
+                    record.awake_ticks += 1;
+                    record.changed = true;
+                    let (mass, inertia, rotation, body) = mass_properties
+                        .get(entity)
+                        .expect("every simulated piece retains computed mass and solver state");
+                    let body = solver_bodies
+                        .get(*body)
+                        .expect("an awake piece's solver index addresses its state");
+                    if !crate::avian_ext::rest_test::at_rest(
+                        body, rest, unit, *mass, *inertia, *rotation,
+                    ) {
+                        record.last_fast = Some(tick);
+                    }
+                }
+                record.awake = !sleeping;
+                observed.scope(|out| out.push((entity, record, thresholds)));
+            });
+        let records = &mut *self.records;
+        let mut last = None;
+        for (entity, record, thresholds) in self.observed.iter_mut().flat_map(|out| out.drain(..)) {
+            records.live.insert(entity, record);
+            if last.is_none_or(|(highest, _)| entity > highest) {
+                last = Some((entity, thresholds));
             }
-            record.awake = !sleeping;
+        }
+        if let Some((_, thresholds)) = last {
+            records.thresholds = Some(thresholds);
         }
     }
 
@@ -923,26 +960,39 @@ impl ContactCensus<'_, '_> {
         row.airborne.touch.pairs = touch_pairs;
         row.airborne.loaded.pairs = loaded_pairs;
 
+        // Each awake piece is classified on the compute pool from the settled records and flags;
+        // the counts sum and the island tallies merge by key.
+        let (records, flags, parts) = (&*records, &*flags, &*self.awake_parts);
+        self.pieces
+            .par_iter()
+            .for_each(|(entity, _, _, _, island, sleeping, _)| {
+                if sleeping {
+                    return;
+                }
+                let record = &records.live[&entity];
+                parts.scope(|(airborne, islands)| {
+                    airborne.awake_pieces += 1;
+                    *islands.entry(island.island_id().0).or_default() += 1;
+                    airborne.touch.awake += u32::from(record.first_ground.is_none());
+                    airborne.loaded.awake += u32::from(record.first_loaded.is_none());
+                    match flags.get(&entity) {
+                        None => airborne.no_contact += 1,
+                        Some(flag) if flag & NON_PIECE == 0 => {
+                            airborne.touch.only_first_fall_contacts +=
+                                u32::from(flag & BLOCKED_TOUCH == 0);
+                            airborne.loaded.only_first_fall_contacts +=
+                                u32::from(flag & BLOCKED_LOADED == 0);
+                        }
+                        Some(_) => {}
+                    }
+                });
+            });
         let awake_islands = &mut *self.awake_islands;
         awake_islands.clear();
-        for (entity, _, _, _, island, sleeping, _) in &self.pieces {
-            if sleeping {
-                continue;
-            }
-            row.airborne.awake_pieces += 1;
-            *awake_islands.entry(island.island_id().0).or_default() += 1;
-            let record = &records.live[&entity];
-            row.airborne.touch.awake += u32::from(record.first_ground.is_none());
-            row.airborne.loaded.awake += u32::from(record.first_loaded.is_none());
-            match flags.get(&entity) {
-                None => row.airborne.no_contact += 1,
-                Some(flag) if flag & NON_PIECE == 0 => {
-                    row.airborne.touch.only_first_fall_contacts +=
-                        u32::from(flag & BLOCKED_TOUCH == 0);
-                    row.airborne.loaded.only_first_fall_contacts +=
-                        u32::from(flag & BLOCKED_LOADED == 0);
-                }
-                Some(_) => {}
+        for (airborne, islands) in self.awake_parts.iter_mut() {
+            row.airborne.absorb(std::mem::take(airborne));
+            for (id, count) in islands.drain() {
+                *awake_islands.entry(id).or_default() += count;
             }
         }
         row.islands.with_awake_piece = awake_islands.len() as u32;
@@ -1442,10 +1492,14 @@ mod tests {
         step(&mut app, 2);
         app.world_mut().entity_mut(cube).insert(Sleeping);
         let first = app.world().resource::<PieceRecords>().episodes[0];
+        // Fixture: twice the cube's own rest speed, so neither rest test passes on the wake.
+        let wake = 2.0
+            * app.world().get::<SleepThreshold>(cube).unwrap().linear
+            * app.world().resource::<PhysicsLengthUnit>().0;
         app.world_mut()
             .entity_mut(cube)
             .remove::<Sleeping>()
-            .insert(LinearVelocity(Vec3::X));
+            .insert(LinearVelocity(Vec3::X * wake));
         step(&mut app, 1);
         let current = app.world().resource::<PieceRecords>().live[&cube];
         assert!(current.sleep.is_none());
@@ -1458,6 +1512,7 @@ mod tests {
         assert_eq!(records.episodes[1].sleep, Some(3));
         assert_eq!(records.episodes[1].first_ground, first.first_ground);
     }
+
     /// Stillness readers ignore bounded jitter, accumulate slow creep against the held anchor,
     /// and count a rotation at each piece's own extent, including quaternion sign equivalence.
     #[test]

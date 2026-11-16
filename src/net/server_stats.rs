@@ -761,71 +761,72 @@ fn record_tick(
     fixed: Res<Time<Fixed>>,
 ) {
     let (census, load) = &mut traces;
-    if let Some(closed) = clock.closed() {
-        let collect_start = starts
-            .collect_start
-            .take()
-            .expect("the collector bracket opens before the freeze census and record_tick");
-        stats.ticks.push(closed.us);
-        stats.freeze_counts.awake.push(freeze_counts.awake as f64);
-        stats.freeze_counts.rested.push(freeze_counts.rested as f64);
-        stats
-            .freeze_counts
-            .rested_unreached
-            .push(freeze_counts.rested_unreached as f64);
-        let measured = stages.take_us();
-        let cpu = stages.take_cpu_us();
-        let phases_cpu = phases.cpu_times();
-        let tick_cpu_us = cpu.values.iter().chain(&phases_cpu.values).sum();
-        stats.tick_cpu.push(tick_cpu_us);
-        stats
-            .one_thread_estimate
-            .push(one_thread_estimate(closed.us, tick_cpu_us));
-        for (window, us) in stats.stages_cpu.iter_mut().zip(cpu.values) {
-            window.push(us);
-        }
-        for (window, us) in stats.phases_cpu.iter_mut().zip(phases_cpu.values) {
-            window.push(us);
-        }
-        // DERIVED: COUNT phases share COUNT + 1 CPU edges; leaves count their actual edges.
-        stages.add(
-            crate::cost::stages::Work::ProcessCpuReads,
-            (phases::COUNT + 1) as u64,
-        );
-        stages.add(
-            crate::cost::stages::Work::ContactPoints,
-            census.contact_points() as u64,
-        );
-        let work = stages.take_counts();
-        let mut sample = census.sample(
-            closed.us,
-            starts.physics_us,
-            starts.sleep_us,
-            (measured, cpu),
-            &phases,
-            fixed.timestep().as_secs_f64(),
-        );
-        sample.detail = stages.take_details();
-        let recording = census.recording() || load.as_deref().is_some_and(Loadtest::recording);
-        let rows = match recording.then(|| census.contact_tick()) {
-            Some(contacts) => [
-                census.record(sample, work, contacts.clone()),
-                load.as_deref_mut()
-                    .and_then(|load| load.record(sample, work, contacts)),
-            ],
-            None => [None, None],
-        };
-        for (window, us) in stats.stages.iter_mut().zip(measured) {
-            window.push(us);
-        }
-        for (window, us) in stats.phases.iter_mut().zip(phases.times().values) {
-            window.push(us);
-        }
-        let collector_us = collect_start.elapsed().as_secs_f64() * 1.0e6;
-        stats.collector.push(collector_us);
-        for row in rows.into_iter().flatten() {
-            *row = collector_us;
-        }
+    let closed = clock.closed().expect(
+        "open_tick and close_tick bracket run_fixed_main in this FixedMain, before TickClosed",
+    );
+    let collect_start = starts
+        .collect_start
+        .take()
+        .expect("the collector bracket opens before the freeze census and record_tick");
+    stats.ticks.push(closed.us);
+    stats.freeze_counts.awake.push(freeze_counts.awake as f64);
+    stats.freeze_counts.rested.push(freeze_counts.rested as f64);
+    stats
+        .freeze_counts
+        .rested_unreached
+        .push(freeze_counts.rested_unreached as f64);
+    let measured = stages.take_us();
+    let cpu = stages.take_cpu_us();
+    let phases_cpu = phases.cpu_times();
+    let tick_cpu_us = cpu.values.iter().chain(&phases_cpu.values).sum();
+    stats.tick_cpu.push(tick_cpu_us);
+    stats
+        .one_thread_estimate
+        .push(one_thread_estimate(closed.us, tick_cpu_us));
+    for (window, us) in stats.stages_cpu.iter_mut().zip(cpu.values) {
+        window.push(us);
+    }
+    for (window, us) in stats.phases_cpu.iter_mut().zip(phases_cpu.values) {
+        window.push(us);
+    }
+    // DERIVED: COUNT phases share COUNT + 1 CPU edges; leaves count their actual edges.
+    stages.add(
+        crate::cost::stages::Work::ProcessCpuReads,
+        (phases::COUNT + 1) as u64,
+    );
+    stages.add(
+        crate::cost::stages::Work::ContactPoints,
+        census.contact_points() as u64,
+    );
+    let work = stages.take_counts();
+    let mut sample = census.sample(
+        closed.us,
+        starts.physics_us,
+        starts.sleep_us,
+        (measured, cpu),
+        &phases,
+        fixed.timestep().as_secs_f64(),
+    );
+    sample.detail = stages.take_details();
+    let recording = census.recording() || load.as_deref().is_some_and(Loadtest::recording);
+    let rows = match recording.then(|| census.contact_tick()) {
+        Some(contacts) => [
+            census.record(sample, work, contacts.clone()),
+            load.as_deref_mut()
+                .and_then(|load| load.record(sample, work, contacts)),
+        ],
+        None => [None, None],
+    };
+    for (window, us) in stats.stages.iter_mut().zip(measured) {
+        window.push(us);
+    }
+    for (window, us) in stats.phases.iter_mut().zip(phases.times().values) {
+        window.push(us);
+    }
+    let collector_us = collect_start.elapsed().as_secs_f64() * 1.0e6;
+    stats.collector.push(collector_us);
+    for row in rows.into_iter().flatten() {
+        *row = collector_us;
     }
 }
 
@@ -1030,18 +1031,20 @@ fn emit_line(
             | crate::construction::breakage::Event::Hole(..) => {}
         }
     }
-    let departed: usize = census
-        .constructions
-        .iter()
-        .map(|(_, body)| {
-            body.live
-                .state
-                .fate
-                .iter()
-                .filter(|&&f| f == crate::construction::fracture::Fate::Fallen)
-                .count()
-        })
-        .sum();
+    // Each construction's fallen chunks counted on the compute pool; the sum is the same for any
+    // split.
+    let mut fallen = bevy::utils::Parallel::<usize>::default();
+    census.constructions.par_iter().for_each(|(_, body)| {
+        let count = body
+            .live
+            .state
+            .fate
+            .iter()
+            .filter(|&&f| f == crate::construction::fracture::Fate::Fallen)
+            .count();
+        fallen.scope(|sum| *sum += count);
+    });
+    let departed: usize = fallen.iter_mut().map(|sum| *sum).sum();
     let construction = json!({"cracked_joints": cracks.len(), "separated_joints": separated.len(), "departed_chunks": departed});
     let snapshot = Snapshot {
         elapsed,
