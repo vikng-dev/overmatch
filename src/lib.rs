@@ -133,8 +133,6 @@ pub mod dev_capture;
 /// [`NetClientPlugin`]; single-player uses `state::client_plugin`'s real pause.
 mod overlay;
 mod physical_laws;
-/// OS-level process and window helpers that belong to no game layer.
-mod platform;
 #[cfg(test)]
 mod presentation_authored;
 /// Provenance of authored data values: each authored value names its fact, unit, taste,
@@ -284,7 +282,7 @@ pub(crate) fn default_plugins() -> bevy::app::PluginGroupBuilder {
 }
 
 /// Mount [`default_plugins`] with the primary `window`, apply [`run_window`]'s
-/// `OVERMATCH_WINDOW` (default visible) before winit creates it, and honour
+/// `OVERMATCH_WINDOW` (default visible, hidden for frame captures) before WinitPlugin builds, and honour
 /// `OVERMATCH_UNATTENDED` through [`unattended`]. Offline/network clients and both sandboxes
 /// share this path so hidden/silent runs stay hidden/silent on every windowed root.
 ///
@@ -293,11 +291,29 @@ pub(crate) fn default_plugins() -> bevy::app::PluginGroupBuilder {
 /// Malformed or headless `OVERMATCH_WINDOW` refuses startup before constructing the window,
 /// naming the variable and supported modes.
 pub fn windowed_runtime(app: &mut App, window: Window) {
-    let mode = run_window::RunWindow::of_run(run_window::RunWindow::Visible)
+    install_windowed_runtime(
+        app,
+        window,
+        run_window::RunWindow::of_run(run_window::RunWindow::Visible),
+        dev_capture::plan(),
+        default_plugins(),
+    );
+}
+
+/// Install the windowed policy from parsed operator input; tests replace the native device plugins.
+fn install_windowed_runtime(
+    app: &mut App,
+    window: Window,
+    mode: run_window::RunWindow,
+    capture: Option<&dev_capture::plan::CapturePlan>,
+    plugins: bevy::app::PluginGroupBuilder,
+) {
+    let mode = mode
         .windowed()
-        .unwrap_or_else(refuse_start);
-    app.add_plugins(default_plugins().set(WindowPlugin {
-        primary_window: Some(window),
+        .unwrap_or_else(refuse_start)
+        .for_capture(capture.is_some_and(|plan| plan.frames.is_some()));
+    app.add_plugins(plugins.set(WindowPlugin {
+        primary_window: Some(mode.prepare_window(window)),
         ..default()
     }));
     run_window::mount(app, mode);
@@ -385,22 +401,16 @@ pub(crate) fn server_plugin_floor() -> bevy::app::PluginGroupBuilder {
 /// Windowed render settings, stock except macOS GPU-query features. [`default_plugins`]
 /// mounts it; [`gpu_less_default_plugins`] replaces its backend settings for GPU-less roots.
 ///
-/// MEASURED on M4 / macOS 26.5 / Metal / wgpu 29: Bevy's default
-/// `WgpuSettingsPriority::Functionality` copies adapter features then applies `disabled_features`
-/// before device creation (vendored bevy_render-0.19.0/src/renderer/mod.rs:298-315).
-/// `bevy/trace_tracy` auto-mounts `RenderDiagnosticsPlugin` (vendored
-/// bevy_render-0.19.0/src/lib.rs:379-380); device `TIMESTAMP_QUERY` makes `DiagnosticsRecorder`
-/// allocate a 256-entry query set (`FrameData::new`, vendored
-/// bevy_render-0.19.0/src/diagnostic/internal.rs:236-254). Metal refuses
-/// `newCounterSampleBufferWithDescriptor` ("Cannot allocate sample buffer"); wgpu-hal reports
-/// `DeviceLost`, and Bevy quits within ~1 s of the first frame. Removing the feature prevents
-/// allocation while preserving tracy CPU spans (systems, render-graph nodes, shadow pass).
+/// DERIVED from Bevy 0.20.1: `WgpuSettingsPriority::Functionality` copies adapter features before applying
+/// `disabled_features` (`bevy_render/src/renderer/mod.rs`). `TIMESTAMP_QUERY` allocates a
+/// 256-entry query set (`diagnostic/internal.rs::FrameData::new`), even though Bevy no-ops
+/// macOS encoder timestamps there for Tahoe flicker (bevy#22257).
 ///
-/// Bevy already no-ops macOS encoder timestamps for bevy#22257 Tahoe flicker
-/// (`WriteTimestamp for CommandEncoder`, vendored
-/// bevy_render-0.19.0/src/diagnostic/internal.rs:744-760); wgpu#9414 reports Metal4 queries return
-/// zeros. `PIPELINE_STATISTICS_QUERY` also allocates in `FrameData::new`, and wgpu supports it
-/// only on Vulkan/DX12. Windows/Linux retain both features, real `elapsed_gpu` and tracy GPU tracks.
+/// MEASURED on M4 / macOS 26.5 / Metal / wgpu 29: `newCounterSampleBufferWithDescriptor`
+/// failed with "Cannot allocate sample buffer", wgpu-hal reported `DeviceLost`, and Bevy quit
+/// within ~1 s. Disabling the feature prevents allocation while preserving tracy CPU spans.
+/// `PIPELINE_STATISTICS_QUERY` also allocates in `FrameData::new` and wgpu supports it only on
+/// Vulkan/DX12. Windows/Linux retain both features and their GPU diagnostics.
 fn client_render_plugin() -> bevy::render::RenderPlugin {
     #[cfg(target_os = "macos")]
     let disabled_features = Some(

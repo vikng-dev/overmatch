@@ -63,7 +63,7 @@ grep -q "listening" "$OUT/server.log"
 
 # OVERMATCH_SERVER: the local server this script just started, named explicitly (a scripted
 # client with no target falls back to the same address).
-# OVERMATCH_WINDOW=hidden: a headless client cannot load the mipped-KTX2 tank glb — bevy_image 0.19
+# OVERMATCH_WINDOW=hidden: a headless client cannot load the mipped-KTX2 tank glb — bevy_image 0.20.1
 # slices the UASTC source with the RGBA32 destination block geometry on the uncompressed
 # transcode path, the path taken when no RenderApp exists (ktx2.rs:209). Windowed transcodes to
 # a 4x4-block GPU format and loads fine, so captures are windowed-only until the upstream fix.

@@ -185,14 +185,14 @@ sampled for: `(c.x, c.y, −c.z)` of the cube direction `c`, the inverse of Bevy
 | | `Light` (filtered into the environment light) | `Drawn` (`Skybox`) |
 |---|---|---|
 | Face size | 128², as today (`sky::Bake::face_px`) | 512². `Resolution`: 0.18° per texel. The optic's 25° field over about 1080 px is 0.023°/px, about 7.6× texel magnification (DERIVED); the gradient and the haze-faded clouds stay smooth at that. |
-| Format | `Rgba16Float` (L1a). The generator's copy pass converts formats (vendored `light_probe/generate.rs:409`) and builds its own `D2Array` views (`:605-608`, `:781-787`). | `Rgba16Float`, with a `TextureViewDimension::Cube` view descriptor (`bevy_image-0.19.1/src/image.rs:641`) |
+| Format | `Rgba16Float` (L1a). The generator's copy pass converts formats (vendored `light_probe/generate.rs`) and builds its own `D2Array` views (`:605-608`, `:781-787`). | `Rgba16Float`, with a `TextureViewDimension::Cube` view descriptor (`bevy_image-0.20.1/src/image.rs`) |
 | Sun disk | absent: the `DirectionalLight` carries the sun's light. A disk here would add the sun's illuminance twice (DERIVED: disk radiance × disk solid angle = illuminance). | present (§3.4) |
 | Below the horizon | ground bounce, today's law (`sky::sky_radiance`) | the horizon value of the same azimuth: infinitely distant ground under haze, Koschmieder's limit, which the fog converges to (§3.2) |
 | GPU memory (DERIVED) | 0.8 MB | 12.6 MB (512²·6·8 B) |
 
 **Drawn (L1b).**
-- `Skybox { image, brightness: sky_intensity_cd_m2, rotation: Quat::IDENTITY }`
-  (`bevy_light-0.19.1/src/probe.rs:228-256`, exported as `bevy::light::Skybox`).
+- `Skybox { image: Some(image), brightness: sky_intensity_cd_m2, rotation: Quat::IDENTITY }`
+  (`bevy_light-0.20.1/src/probe.rs`, exported as `bevy::light::Skybox`).
 - It goes on every view whose `CameraProfile::draws_battlefield()` holds
   (`render_policy.rs:338-343`): commander, optic, kill cam lesson; and, as the environment light
   does, on a view with no profile (the armour sandbox's) when the view clears its own target. A
@@ -224,7 +224,7 @@ clouds. L4b splits it per face over `ComputeTaskPool` if it measures above one f
 
 **Class.** B.
 
-**Culling.** Battlefield views inherit `far = 1000` m (`bevy_camera-0.19.1/src/projection.rs:422`),
+**Culling.** Battlefield views inherit `far = 1000` m (`bevy_camera-0.20.1/src/projection.rs`),
 but view culling never tests the far plane:
 - `check_visibility` calls `intersects_sphere(…, false)` and `intersects_obb(…, true, false)`
   (`visibility/mod.rs:831-837`);
@@ -245,7 +245,7 @@ on the shipped composition.
 - Haze reaches 90 % at 0.77·V (DERIVED).
 
 **Fog colour.** `haze_linear × sky_intensity_cd_m2 × exposure`.
-- The view's `Exposure`, or `Exposure::default()` (EV100 9.7, `bevy_camera-0.19.1/src/camera.rs:236-283`)
+- The view's `Exposure`, or `Exposure::default()` (EV100 9.7, `bevy_camera-0.20.1/src/camera.rs`)
   when it has none; today no camera carries one.
 - Bevy does not scale the fog's base colour by exposure (`render/fog.rs:70-110`), so the fog system
   multiplies once, reading `Option<&Exposure>` as `vfx/muzzle.rs:426-438` does.
@@ -265,9 +265,10 @@ on the shipped composition.
   equal.
   - A receiver's shadow is no statement about the kilometres of air in front of it, so the shadowed
     form is not the more honest law either.
-  - L2b drops the shadow factor from fog scattering with a vendored patch in
-    `vendor/bevy_pbr-0.19.1-scalar-math/src/render/pbr_functions.wgsl`, recorded in that crate's
-    `OVERMATCH_PATCH.md`. The patch removes compute rather than adding it.
+  - L2b requires a patch to `apply_fog` in
+    `vendor/bevy_pbr-0.20.1-overmatch/src/render/pbr_functions.wesl`: Bevy 0.20.1 still multiplies
+    scattering by the receiver's shadow. This planned patch removes compute; it is not present
+    in the current fork inventory.
 - Without the lobe, the horizon toward the sun is about 11 % brighter than the fog under it
   (DERIVED from today's rows: 0.4·haze + 0.6·glow against haze).
 - Witnesses:
@@ -379,7 +380,7 @@ tracer at range in the optic.
 
 **Colour (L3c).** A second `TerrainMaterial` asset, cloned from the terrain's in `outland.rs`:
 - `masks` is a second image from `world::ground_mask_image` whose sampler mirrors
-  (`ImageAddressMode::MirrorRepeat`, `bevy_image-0.19.1/src/image.rs:726-742`). C0 at the seam is
+  (`ImageAddressMode::MirrorRepeat`, `bevy_image-0.20.1/src/image.rs`). C0 at the seam is
   all colour needs.
 - `prints_world` and `prints_near` are empty images. Through the shared clamping sampler
   (`terrain_blend.rs:297-302`), the map's prints would otherwise mirror outward.
@@ -538,7 +539,7 @@ as `substances::contact_friction(friction)` (`src/substances.rs:70-77`), which c
 project's one pair rule. It replaces borrowing the terrain's solver stand-in
 (`ground_types.rs:360-363`). Zero holds on every path that reads a contact's friction:
 - **Avian's combine.**
-  - `Friction`'s default rule is `Average` (vendored `avian3d-0.7.0-child-pose/src/dynamics/rigid_body/physics_material.rs:146-160`),
+  - `Friction`'s default rule is `Average` (vendored `avian3d-0.8.0-overmatch/src/dynamics/rigid_body/physics_material.rs`),
     and `Friction::ZERO` is `Average` too (`:164-168`). Under `Average`, zero would hand back half
     the partner's grip.
   - A pair takes the higher-priority rule, `Max > Multiply > Min > GeometricMean > Average`

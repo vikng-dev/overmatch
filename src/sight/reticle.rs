@@ -560,7 +560,7 @@ struct OpticGlass {
 ///
 /// Projection errors hide the mask. `world_to_viewport` permits off-rect X/Y but also rejects clip
 /// depth, missing viewport and invalid projection data, not just points behind the camera
-/// (bevy_camera-0.19.1/src/camera.rs:539-559, `world_to_viewport_core`).
+/// (bevy_camera-0.20.1/src/camera.rs, `world_to_viewport_core`).
 ///
 /// [`mask_rim`] uses only the viewport; cursor reach projects the same fraction of the same axis,
 /// so its circle matches the glass at every aspect. The optic FOV supplies the bound's other term.

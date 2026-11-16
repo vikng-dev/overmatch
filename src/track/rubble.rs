@@ -544,7 +544,7 @@ impl RubbleBodies<'_> {
         }
         self.count(Work::BeltDispatches, 1);
         self.count(Work::BeltSlabChecks, slabs.len() * candidates.len());
-        // Bevy 0.19.1 ParallelSlice preserves input order across station chunks.
+        // Bevy 0.20.1 ParallelSlice preserves input order across station chunks.
         prepared
             .par_splat_map(pool, None, |_, stations| {
                 stations

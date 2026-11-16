@@ -29,7 +29,7 @@ removed or cached without changing game state.
 
 ## What the clock actually bounds
 
-DERIVED from the locked sources (`Cargo.lock`: Bevy 0.19.1, Lightyear 0.30.1):
+DERIVED from the locked sources (`Cargo.lock`: Bevy 0.20.1, Lightyear 0.31.0):
 
 - `src/net/server.rs`, `run`, mounts `server_runner::plugin`: Lightyear's
   `ServerPlugins { tick_duration: TICK }` and a custom Bevy runner. The fixed step is
@@ -79,8 +79,8 @@ runner recomputes from the accumulator remainder, including the time spent doing
 frame work. An already-overdue deadline starts immediately. The client runner is
 unchanged.
 
-Verified against locked Bevy 0.19.1's `bevy_app/src/app.rs`, `schedule_runner.rs`,
-`bevy_time/src/lib.rs`, `real.rs`, `virt.rs`, `fixed.rs`, and Lightyear 0.30.1's
+Verified against locked Bevy 0.20.1's `bevy_app/src/app.rs`, `schedule_runner.rs`,
+`bevy_time/src/lib.rs`, `real.rs`, `virt.rs`, `fixed.rs`, and Lightyear 0.31.0's
 `lightyear_core/src/timeline.rs`. Lightyear sets the timestep and advances its local
 timeline in `FixedFirst`; it does not supply another server clock.
 

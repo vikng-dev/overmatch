@@ -17,7 +17,7 @@ from typing import Dict, List
 # with circumferential face angles well above Parry's merge threshold.
 RING_SIDES = 12
 
-# Resolution: Parry 0.27 ConvexPolyhedron::from_convex_mesh deletes an edge when
+# Resolution: Parry 0.31.1 ConvexPolyhedron::from_convex_mesh deletes an edge when
 # normal dot > 1 - sqrt(f32::EPSILON). DEFAULT_EPSILON is Real::EPSILON.
 PARRY_MERGE_RAD = math.acos(1.0 - math.sqrt(2.0 ** -23))
 

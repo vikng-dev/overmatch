@@ -2,11 +2,11 @@
 //! built-in render-pass diagnostics, fresh measurements only, one row per span name per sample
 //! window.
 //!
-//! Bevy's `RenderDiagnosticsPlugin` is auto-mounted only under `bevy/trace_tracy` (vendored
-//! bevy_render-0.19.0/src/lib.rs:379-380); this module mounts it explicitly when the env var is
+//! Bevy's `RenderDiagnosticsPlugin` is auto-mounted only under `bevy/trace_tracy` (
+//! bevy_render-0.20.1/src/lib.rs); this module mounts it explicitly when the env var is
 //! set, so pass timings are available WITHOUT paying for a tracy build. The plugin's recorder
 //! publishes into `DiagnosticsStore` under paths of the shape `render/<span…>/elapsed_cpu` and
-//! `render/<span…>/elapsed_gpu` (vendored bevy_render-0.19.0/src/diagnostic/internal.rs,
+//! `render/<span…>/elapsed_gpu` (bevy_render-0.20.1/src/diagnostic/internal.rs,
 //! `diagnostic_path`).
 //!
 //! Freshness discipline — the schema's whole point: bevy's `Diagnostic` keeps a rolling
@@ -14,8 +14,8 @@
 //! `Diagnostic::average` once per second would (a) overlap successive ~2 s windows and smooth
 //! real single-frame spikes away, and (b) keep re-emitting a dead pass's last value forever,
 //! indistinguishable from a live pass. Instead, once per [`SAMPLE_PERIOD_S`] the sampler walks
-//! each diagnostic's timestamped history (`measurements` on the vendored
-//! bevy_diagnostic-0.19.0/src/diagnostic.rs `Diagnostic`) and consumes ONLY entries newer than
+//! each diagnostic's timestamped history (`measurements` on the
+//! bevy_diagnostic-0.20.1/src/diagnostic.rs `Diagnostic`) and consumes ONLY entries newer than
 //! the newest timestamp it already emitted for that path. Each row is
 //! `{t, name, cpu_ms, gpu_ms}` where `cpu_ms`/`gpu_ms` are ARRAYS of the window's raw per-frame
 //! millisecond values in measurement order (null where that kind produced nothing fresh): raw
@@ -30,8 +30,8 @@
 //!   mesh preprocessing etc, but NOT the shadow pass: bevy's shadow node carries only a tracing
 //!   `info_span!` (vendored bevy_pbr `ShadowPassNode`), so `cargo tracy` stays the shadow-cost
 //!   instrument;
-//! * `elapsed_gpu` is real on Vulkan/DX12 only. On macOS bevy no-ops encoder timestamps (vendored
-//!   bevy_render-0.19.0/src/diagnostic/internal.rs:744-760, citing bevy#22257) and the client
+//! * `elapsed_gpu` is real on Vulkan/DX12 only. On macOS bevy no-ops encoder timestamps (
+//!   bevy_render-0.20.1/src/diagnostic/internal.rs, citing bevy#22257) and the client
 //!   additionally disables `TIMESTAMP_QUERY` there (see `client_render_plugin` for the Metal
 //!   crash it retires), so macOS rows carry `cpu_ms` and a null `gpu_ms`.
 //!

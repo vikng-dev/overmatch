@@ -2,7 +2,7 @@
 //! `CompressedImageFormatSupport` insertion in `src/headless_test.rs` works around. Full decode +
 //! suggested upstream fix: `upstream/bevy-ktx2-uastc-fallback-length-panic.md`.
 //!
-//! The mechanism being pinned, in bevy_image 0.19 (`src/ktx2.rs`, `ktx2_buffer_to_image`,
+//! The mechanism being pinned, in bevy_image 0.20.1 (`src/ktx2.rs`, `ktx2_buffer_to_image`,
 //! `TranscodeFormat::Uastc` arm): the length of the SOURCE slice handed to
 //! `LowLevelUastcTranscoder::transcode_slice` (`ktx2.rs:209`) is computed at `ktx2.rs:176-193`
 //! from the DESTINATION `texture_format`'s block geometry. The source is always UASTC 4x4 /
@@ -39,7 +39,7 @@ use bevy::image::{CompressedImageFormats, Image, ImageSampler, ImageType, Textur
 const UASTC_KTX2: &[u8] = include_bytes!("fixtures/uastc_16x16_mipped.ktx2");
 
 /// Loads the fixture exactly the way `bevy_gltf`'s `load_image` does for a glb-embedded texture
-/// (`bevy_gltf-0.19.0/src/loader/mod.rs:1205`): by mime type, with whatever compressed-format
+/// (`bevy_gltf-0.20.1/src/loader/mod.rs`): by mime type, with whatever compressed-format
 /// support the app resolved, `is_srgb` from the material role.
 fn load_like_gltf(supported: CompressedImageFormats) -> Result<Image, TextureError> {
     Image::from_buffer(

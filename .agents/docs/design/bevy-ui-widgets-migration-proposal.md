@@ -3,7 +3,7 @@
 **Status:** proposal only. This is not an ADR and authorizes no implementation.
 
 **Decision requested:** whether to replace the settings page's hand-written interaction semantics
-with Bevy 0.19's headless `Button` and `Slider` widgets, while retaining Overmatch's layout,
+with Bevy 0.20.1's headless `Button` and `Slider` widgets, while retaining Overmatch's layout,
 styling, `Settings` source of truth, capability gates and save policy.
 
 Adoption is not a refactor. Pointer timing, drag behavior, disabled behavior and focus are observable
@@ -29,9 +29,9 @@ This proposal is limited to `src/settings/ui.rs`. `net::spawn_map` also interpre
 but it is a domain-specific map-to-world coordinate picker, not a button, slider or list. Moving it
 onto a generic widget would not delete its UV and world-space policy, so it stays out.
 
-## What Bevy 0.19 supplies
+## What Bevy 0.20.1 supplies
 
-VERIFIED against the locked `bevy_ui_widgets 0.19.0` source:
+VERIFIED against the locked `bevy_ui_widgets 0.20.1` source:
 
 - `Button` owns pressed state, cancel/drag-end cleanup, disabled gating, keyboard activation and an
   accessibility button role. It emits `Activate`. `ActivateOnPress` preserves the settings arrows'
@@ -44,10 +44,10 @@ VERIFIED against the locked `bevy_ui_widgets 0.19.0` source:
 - `ValueChange<f32>::is_final` distinguishes an in-progress drag from its final drag event. State
   remains externally owned unless the app deliberately installs `slider_self_update`, which fits
   the existing rule that `Settings` is truth and the page is a view/editor of it.
-- `UiWidgetsPlugins` is already included by Bevy 0.19's `DefaultPlugins` when the default
+- `UiWidgetsPlugins` is already included by Bevy 0.20.1's `DefaultPlugins` when the default
   `bevy_ui_widgets` feature is enabled. This project's `bevy` dependency uses default features, so
   adoption adds no dependency and should not add `UiWidgetsPlugins` again.
-- Bevy 0.19 also supplies `Checkbox`, `RadioButton`/`RadioGroup`, `ListBox`, `Menu`,
+- Bevy 0.20.1 also supplies `Checkbox`, `RadioButton`/`RadioGroup`, `ListBox`, `Menu`,
   `ScrollArea`/`Scrollbar`, and input handling for the new `EditableText`. None replaces an
   existing settings control honestly: the enum rows expose previous/next buttons rather than all
   choices at once, and the page's selected row is navigation state rather than a selected value.
@@ -61,10 +61,10 @@ style, so Overmatch can keep its shipped Barlow Condensed typography and visual 
 
 Versioned references:
 
-- [`bevy_ui_widgets 0.19.0`](https://docs.rs/bevy_ui_widgets/0.19.0/bevy_ui_widgets/)
-- [`Slider` 0.19.0](https://docs.rs/bevy_ui_widgets/0.19.0/bevy_ui_widgets/struct.Slider.html)
-- [`Button` 0.19.0](https://docs.rs/bevy_ui_widgets/0.19.0/bevy_ui_widgets/struct.Button.html)
-- [`bevy_feathers 0.19.0`](https://docs.rs/bevy_feathers/0.19.0/bevy_feathers/)
+- [`bevy_ui_widgets 0.20.1`](https://docs.rs/bevy_ui_widgets/0.20.1/bevy_ui_widgets/)
+- [`Slider` 0.20.1](https://docs.rs/bevy_ui_widgets/0.20.1/bevy_ui_widgets/struct.Slider.html)
+- [`Button` 0.20.1](https://docs.rs/bevy_ui_widgets/0.20.1/bevy_ui_widgets/struct.Button.html)
+- [`bevy_feathers 0.20.1`](https://docs.rs/bevy_feathers/0.20.1/bevy_feathers/)
 
 ## Proposed ownership after migration
 

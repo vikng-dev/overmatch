@@ -190,8 +190,8 @@ fn truncate(label: &str) -> String {
 }
 
 /// Whether the monitor list has moved since the ladder was built. `Changed<Monitor>` catches a
-/// display appearing — bevy_winit SPAWNS a new entity rather than editing an existing one (vendored
-/// bevy_winit-0.19.0/src/system.rs:184-215) — and the count catches one going away, which is a
+/// display appearing — bevy_winit SPAWNS a new entity rather than editing an existing one (
+/// bevy_winit-0.20.1/src/system.rs) — and the count catches one going away, which is a
 /// despawn that changes nothing still in the world.
 fn monitors_changed(
     changed: Query<(), Changed<Monitor>>,

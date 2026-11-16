@@ -1,8 +1,7 @@
 # Divergence doctrine: continuous simulation, removable netcode scaffolding
 
 > **Status: partially superseded by [[0037-one-authoritative-timeline-and-view-overlays]]**
-> (2026-08-15). The permanent layer stands (continuous force laws, the solo-divergence model,
-> the shape-cast guard); the removable prediction scaffolding — and with it the
+> (2026-08-15). The permanent layer stands (continuous force laws and the solo-divergence model); the removable prediction scaffolding — and with it the
 > divergence-vs-misprediction distinction — is gone: nothing predicts.
 
 Client/server divergence is now managed under one doctrine with two layers: a **permanent
@@ -27,16 +26,9 @@ none conjectured.
 > moment it lands; `tests/shape_cast_reachability.rs` fails at exactly that moment. The workaround
 > that once made the rule live went out with the raycast-era suspension (9758d97).
 
-> **Re-armed:** the construction sweep (`construction::sweep`) is the rule's consumer. It shape
-> casts only against construction chunk hulls, each cast run in its target's frame about the
-> chunk's bounds' centre, and the construction load gate refuses, before play, a chunk whose
-> half-extent passes `sweep::CAST_HALF_EXTENT_M` (10 m: the figure below, on the cast frame's
-> support coordinates), naming the file, the chunk and the split that fixes it. The two
-> measurements give error ∝ extent^1.37–1.42 (DERIVED), so at most ≈ 0.67 mm at that bound and
-> ≈ 0.30 mm at the largest shipped chunk (fir_1's chunk 35, 5.67 m half-extent, MEASURED).
-> `tests/shape_cast_reachability.rs` admits the sweep while its code names the bound and still
-> fails on a cast anywhere else. fir_1's chunk 35 spans 11.34 m, past the ≤10 m tiling
-> preference below; the construction bake owns that split.
+The construction sweep casts in each target chunk's local frame. Parry 0.31.1 refines a
+stagnated cast from its witnesses (`query/gjk/gjk.rs`, `minkowski_ray_cast`), so asset admission
+needs no extent cap or cast-site allowlist.
 
 ## Context: what divergence actually is here
 
@@ -162,13 +154,6 @@ shrinks what the scaffolding has to absorb.
 - **Thresholds are a ratchet, not a setting**: as divergence collapses (contact-restore fix,
   upstream ordering), the `net/protocol.rs` bars tighten toward the reference values instead of
   ossifying.
-- **Map authoring, defence-in-depth: prefer tiling large static colliders to ≤10 m extents.**
-  parry's GJK shape cast (`minkowski_ray_cast`) takes a stagnation exit: when the upper TOI bound
-  stops moving under float cancellation against a large shape's support coordinates, the last-chance
-  return hands back the *unrefined lower bound*, so hits come back short and the error scales with
-  the target collider's extent (measured: 0.25 mm at 5 m half-extent vs 139–172 mm at 500 m). Any
-  *future* shape-cast consumer inherits it; small tiles cap it at the source. (Not applied
-  retroactively — the 1000 m slab stands until a map-authoring pass.)
 
 ## Related
 

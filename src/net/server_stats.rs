@@ -150,8 +150,8 @@ const LEVER: &str = "OVERMATCH_SERVER_STATS_S";
 /// The line's grep anchor.
 const PREFIX: &str = "server_stats";
 
-/// Fact: lightyear_inputs 0.30.1 src/server.rs:68 sets its private past-input gate to 64;
-/// receive_input_message applies it at :370 beside the lookahead gate, before any buffer write.
+/// Fact: lightyear_inputs 0.31.0 `MAX_INPUT_PAST_TICKS` in src/server.rs sets its past-input gate to 64;
+/// receive_input_message applies it beside the lookahead gate, before any buffer write.
 const MAX_INPUT_PAST_TICKS: i32 = 64;
 
 #[derive(Default, serde::Serialize)]
@@ -220,7 +220,7 @@ struct MessageCensus {
 }
 
 /// Lightyear drains these messages in ReceiveInputs. Retaining every message observes the gate
-/// without consuming, rewriting or refusing anything here (0.30.1 receive.rs:171).
+/// without consuming, rewriting or refusing anything here (0.31.0 receive.rs).
 fn count_input_lookahead(
     timeline: Res<LocalTimeline>,
     mut receivers: Query<
@@ -882,7 +882,7 @@ fn close_send(
 }
 
 /// Encrypted UDP payload bytes queued for transport, including netcode overhead. Rotating the
-/// FIFO once preserves packet order (lightyear_link 0.30.1 exposes no production iterator).
+/// FIFO once preserves packet order (lightyear_link 0.31.0 exposes no production iterator).
 /// This counts attempted sends, not IP/UDP headers or delivery; only an armed stats reader pays it.
 fn count_send_bytes(
     mut stats: ResMut<ServerStats>,

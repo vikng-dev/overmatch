@@ -13,18 +13,11 @@
 //!
 //! # Task-pool sizing
 //!
-//! [`task_pool_options`]: the compute pool gets every core the process may use, async compute and
-//! IO one thread each. One is the least either can have: a pool with no thread never runs a spawned
-//! task, and Avian's step blocks on the tree-optimization tasks it spawns on the async pool. The
-//! main thread drives the schedule without running the compute pool's tasks (bevy_ecs 0.19's
-//! multi-threaded executor scopes with `tick_task_pool_executor: false`), so compute = cores leaves
-//! no core idle in a parallel phase and starts no compute thread a core cannot run.
-//!
-//! The async thread is not a compute thread: Avian's tree tasks run alongside the narrow phase and
-//! the solver (spawned at `BroadPhaseSystems::Last`, blocked on at `SolverSystems::Finalize`,
-//! avian3d 0.7 `collider_tree/optimization.rs`), so the process can have cores + 1 busy threads.
-//! On 2 vCPU that stays inside the quota: the 2/1/1 runs on a 2.00 quota show zero throttling in
-//! all 12 windows at 134-148 % CPU (MEASURED, `perf-2026-10-31/*-t4*/*.server.json`).
+//! [`task_pool_options`]: the compute pool gets every core the process may use; async compute and
+//! IO keep one worker each for background work. Bevy 0.20.1's multi-threaded executor calls
+//! `scope_with_executor(false, ...)`, so the scheduling thread does not steal compute tasks.
+//! Avian's fork shares that compute budget: `collider_tree/optimization.rs::optimize_trees`
+//! queues one task for its tree jobs, and the finalization thread can claim pending jobs too.
 //!
 //! The core count is `std::thread::available_parallelism`. On Linux that is the smaller of the
 //! affinity mask (the cpuset) and the cgroup v1/v2 CPU quota rounded down, at least 1 (Rust 1.98
@@ -32,12 +25,10 @@
 //! cpuset 0-15 reads 2 and a 1.00-cpu quota reads 1 (MEASURED, the startup lines of
 //! `.agents/scratch/perf-2026-10-31/`).
 //!
-//! On a many-core host the async pool is 1 where Bevy's stock split gives up to 3, which
-//! serializes Avian's up to 4 tree tasks (avian3d 0.7 `proxy_key.rs`). MEASURED on the M4, stock split against
-//! this sizing: physics p50 939/1062 -> 1129/1139 us and CPU 86/97 -> 119/121 %, while tick p50
-//! improved. Whether the async pool going 3 -> 1 or the E-cores cause it is DERIVED, not isolated.
-//! Edgegap is unaffected: the stock split already gave it async 1. Measure async 2 before a host
-//! larger than 2 vCPU ships.
+//! MEASURED on Avian 0.7, M4, stock split against this sizing: physics p50
+//! 939/1062 -> 1129/1139 us and CPU 86/97 -> 119/121 %, while tick p50 improved. That comparison
+//! did not isolate the async-pool reduction from E-core scheduling; it does not measure the
+//! current fork's compute-queue optimization.
 //!
 //! Evidence: on 2 vCPU the stock 1/1/1 held the server to ~102 % of one core, and 2/1/1 cut the
 //! tick p50 from 17.5 to 10.9 ms (MEASURED, `.agents/scratch/perf-2026-10-31/README.md`, TLDR 3).
@@ -51,7 +42,7 @@ use bevy::tasks::{AsyncComputeTaskPool, ComputeTaskPool, IoTaskPool};
 /// The task-pool sizing (module doc) for a host of `cores` usable cores.
 ///
 /// Each pool's policy pins `min_threads == max_threads`: Bevy clamps its proportional count into
-/// that range (`TaskPoolThreadAssignmentPolicy::get_number_of_threads`, bevy_app 0.19), so the pin
+/// that range (`TaskPoolThreadAssignmentPolicy::get_number_of_threads`, bevy_app 0.20.1), so the pin
 /// is the count whatever Bevy reads the host as.
 fn task_pool_options(cores: NonZero<usize>) -> TaskPoolOptions {
     let mut options = TaskPoolOptions::default();

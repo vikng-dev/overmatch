@@ -13,8 +13,8 @@
 //!
 //! A test asserts presence where the edge decides it (shown again, material ready, mesh back). A
 //! wgpu error fails the test ([`Lab::new`]'s `RenderErrorHandler`): bevy's default stops rendering,
-//! which would leave the invariants checking a stale render world. Every family passes on stock
-//! 0.19.1 too (MEASURED), so a failure here is a patch's doing.
+//! which would leave the invariants checking a stale render world. MEASURED baseline: every
+//! family also passed on stock 0.19.1.
 //!
 //! The tests need a GPU adapter, which CI (`ubuntu-latest`) lacks: `RenderPlugin` with no backend
 //! builds no render world at all (`bevy_shadow_view_render_layers.rs`). So they are `#[ignore]`d
@@ -163,9 +163,9 @@ impl Lab {
 
     /// Replaces the camera with one that culls on the GPU or does not (`NoIndirectDrawing`), which
     /// is what decides the frame's culling mode: GPU culling while any camera lacks the marker.
-    /// Inserting or removing the marker on a live camera instead fails wgpu validation in stock
-    /// bevy 0.19.1 (a GPU-culling preprocess bind group meets the direct pipeline), a defect of its
-    /// own that is outside the removal path.
+    /// Camera replacement isolates removal from live culling-mode transitions. MEASURED on
+    /// stock bevy 0.19.1: changing the marker on a live camera paired a GPU-culling preprocess
+    /// bind group with the direct pipeline and failed validation.
     fn replace_camera(&mut self, gpu_culling: bool) {
         let camera = self.camera;
         self.app.world_mut().despawn(camera);

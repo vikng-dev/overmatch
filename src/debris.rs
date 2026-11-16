@@ -231,7 +231,7 @@ fn wake_on_body_disabled(
 /// every sleeping body it carries wakes (module doc), and each frozen island depending on any of
 /// them is judged at this step's thaw ([`freeze`]). The changed colliders are judged on the
 /// compute pool; the scan that finds them reads one change tick per collider and stays serial,
-/// since a parallel query spawns its tasks every step whatever it finds (bevy_ecs 0.19
+/// since a parallel query spawns its tasks every step whatever it finds (bevy_ecs 0.20.1
 /// `QueryParIter`): MEASURED on the M4 server with nothing changed, 9 to 13 µs more per tick in the
 /// physics schedule's own systems than this scan (`scripts/perf/pile_park.py`, pile and flat). The
 /// thaw reads the notes as a set, so their order decides nothing.

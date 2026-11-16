@@ -37,7 +37,7 @@ commit. Everything else is in the doc.
 Stock clippy runs at `-D warnings` on correctness/suspicious/style/complexity/perf, so everything
 those categories catch is **already gone**. Hunt what a linter cannot see, or you add nothing.
 
-Verify every engine API against the pinned version — Bevy 0.19, avian3d 0.7, lightyear 0.30 — never
+Verify every engine API against the pinned version — Bevy 0.20.1, the avian3d 0.8.0 fork, lightyear 0.31.0 — never
 from memory. `AGENTS.md` requires it and it has repeatedly caught real renames.
 
 When it is a judgement call, **stop and report** rather than guess. The doc's §C.7 lists what is

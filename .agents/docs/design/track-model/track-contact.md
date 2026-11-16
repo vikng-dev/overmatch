@@ -114,10 +114,10 @@ Known differences between the channels, none tuned:
   `suspension.engage`.
 - **Friction on pieces** is Avian's Coulomb at the pair's μ, not a belt element's strain, and no
   rolling resistance acts on a piece.
-- **One face per piece.** A convex pair gets one contact with one normal (DERIVED from parry 0.27:
+- **One face per piece.** A convex pair gets one contact with one normal (DERIVED from parry 0.31.1:
   `contact_manifold_pfm_pfm` clips the faces `ConvexPolyhedron::local_support_feature` picks, the
   ones whose normals best match the contact's, then adds its GJK witness point). Avian exposes each
-  point midway between the two shapes' witnesses (`contact_manifolds`, avian 0.7), so an exposed
+  point midway between the two shapes' witnesses (`contact_manifolds`, avian 0.8.0), so an exposed
   point need not lie on the run's face: a run witness at (z, y) = (3, 3), outward normal (0.6, 0.8)
   and 0.1 m of overlap expose (2.97, 2.96), inside the outline. The reader selects one face from the
   normal and projects every exposed point onto it, so a piece bearing across a corner of the outline
@@ -147,7 +147,7 @@ Known differences between the channels, none tuned:
   measurement is the belt segments' side plates below, the pivot's reversals in their table
   (related, not the same, since a piece there sat in two colliders at once). An inert cap would hand those pieces to the rigid
   stop. Parry clips a face to its first four vertices (the TODO in
-  `ConvexPolyhedron::local_support_feature`, parry 0.27), so a cap contact, its face an N-gon, is
+  `ConvexPolyhedron::local_support_feature`, parry 0.31.1), so a cap contact, its face an N-gon, is
   mostly the lone GJK witness point (DERIVED).
 - **The stop's side slices against standing matter**, a limit with two owners. A slice is a rigid
   collider one shoe thickness wide that reaches down to the rest belt's outer face. It bears only a

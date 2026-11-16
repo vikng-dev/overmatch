@@ -8,7 +8,7 @@
 #
 # LAT/JIT condition each client's RECEIVE path (server → client), the direction an explanation
 # travels; with both nonzero the jitter is seeded by SEED. Both clients run hidden
-# (OVERMATCH_WINDOW=hidden: no window, macOS activation revoked, unattended).
+# (OVERMATCH_WINDOW=hidden: no window, unfocused at launch, unattended).
 
 set -eu
 # A failed glob is fatal under zsh defaults, so the rm below kills the run when OUT is fresh.

@@ -208,7 +208,7 @@ struct PendingTrailBounce {
 /// A live smoke ribbon following (then outliving) one shell.
 ///
 /// Its entity holds a [`Mesh3d`] only while the ribbon has stations to draw ([`update_trails`]), so
-/// no zero-vertex mesh asset ever exists. bevy_render 0.19.1's mesh allocator skips allocating a
+/// no zero-vertex mesh asset ever exists. bevy_render 0.20.1's mesh allocator skips allocating a
 /// zero-vertex mesh but still copies it, logging `Use-after-free … unallocated key` on every
 /// extraction (bevy 0.20 makes that a warning, bevyengine/bevy#24960). A ribbon has no stations for
 /// its authored near-muzzle arc, and a trail the [`TRAIL_CAP`] ring evicts in
@@ -429,7 +429,7 @@ fn finish_pending_bounces(
     }
 }
 
-/// Bevy 0.19's `On<Remove<T>>` runs BEFORE `T` is removed, so a despawning shell's final fixed-tick
+/// Bevy 0.20.1's `On<Remove<T>>` runs BEFORE `T` is removed, so a despawning shell's final fixed-tick
 /// path is still queryable here. Flush it into the already-detached ribbon synchronously; otherwise a
 /// bounce and terminal between render frames would lose the last segment before `update_trails` saw it.
 fn flush_removed_shell_path(
@@ -1153,7 +1153,7 @@ mod tests {
         app
     }
 
-    /// The renderer is never handed a zero-vertex mesh, which bevy_render 0.19.1's allocator logs
+    /// The renderer is never handed a zero-vertex mesh, which bevy_render 0.20.1's allocator logs
     /// as a `Use-after-free` on every extraction (`TrailRibbon`): a ribbon holds a `Mesh3d` exactly
     /// while it has stations, and no mesh asset it wrote is ever left without vertices. A round
     /// still inside the start arc has no stations; so has a ribbon whose shell is gone and whose

@@ -19,7 +19,7 @@
 //! (albedo, normal, and a packed metalness/roughness) at MEASURED 512² each, with no
 //! `metallicFactor` authored so the glTF default of MEASURED 1.0 leaves the packed map in charge.
 //! The tiling is baked into the UV COORDINATES in the blend, and that part is load-bearing:
-//! `bevy_gltf` 0.19 honours `KHR_texture_transform` only on `base_color_texture` (bevy #15310), so a
+//! `bevy_gltf` 0.20.1 honours `KHR_texture_transform` only on `base_color_texture` (bevy #15310), so a
 //! Blender Mapping node would tile the albedo and leave the other two at DERIVED 1× (the transform
 //! is simply dropped, so those maps keep the authored UVs) — visibly wrong, and awkward to diagnose.
 //! Scaling the UVs themselves keeps every map in step and needs no extension at all. This module
@@ -1095,7 +1095,7 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
 /// One reduced shoe as `[left, right]`, both with tangents, for every certified rung.
 ///
 /// `scripts/lod/generate.py` bakes mikktspace tangents; shipped-byte tests guard that contract.
-/// For an export without them, generate before mirroring: `bevy_gltf` 0.19 only generates when
+/// For an export without them, generate before mirroring: `bevy_gltf` 0.20.1 only generates when
 /// the primitive's own material `needs_tangents` (normal or clearcoat-normal texture), whereas
 /// these bare reductions use glTF's default material. The bound shoe wears [`LINK_MATERIAL`]'s
 /// MEASURED three maps, including a normal map. Bevy PBR requires `VERTEX_TANGENTS` to use it;
@@ -1477,7 +1477,7 @@ mod tests {
     }
 
     /// Exactly one rung owns each distance; boundaries belong to the coarser rung taking over.
-    /// Compare [`rung_at`] to `bevy_camera` 0.19 `visibility/range.rs::is_visible_at_all`:
+    /// Compare [`rung_at`] to `bevy_camera` 0.20.1 `visibility/range.rs::is_visible_at_all`:
     /// `distance >= start_margin.start && distance < end_margin.end`. Probe boundaries themselves
     /// to catch double ownership (both ends inclusive) or missing shoes (both exclusive).
     #[test]

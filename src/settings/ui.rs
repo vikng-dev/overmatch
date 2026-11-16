@@ -1321,7 +1321,7 @@ fn scrub(active: ActiveDrag, cursor_x: f32, settings: &mut ResMut<Settings>) {
 /// Use `physical_cursor_position()`, not hand-converted `cursor_position() * scale_factor()`,
 /// for [`ActiveDrag`]'s physical rect. A node's inverse_scale_factor
 /// also includes UiScale and converts to CSS, not window-logical pixels; see [`track_fraction`].
-/// Source: bevy_ui-0.19.1/src/update.rs:151-159 (`propagate_ui_target_cameras`).
+/// Source: bevy_ui-0.20.1/src/update.rs (`propagate_ui_target_cameras`).
 #[expect(
     clippy::too_many_arguments,
     reason = "a system spanning page visibility, buttons, window, hovered rows and strip, capabilities, ladder, page, drag, settings and save"
@@ -1400,7 +1400,7 @@ fn change_row(
 /// Line is a dimensionless notch count scaled by the authored CSS distance, so it grows with the rows.
 /// Pixel is winit PhysicalPosition copied unchanged by Bevy; convert once to CSS:
 /// winit-0.30.13/src/event.rs:961-975 (`PixelDelta`),
-/// bevy_winit-0.19.1/src/state.rs:342-349 (`MouseWheel`). Layout
+/// bevy_winit-0.20.1/src/state.rs (`MouseWheel`). Layout
 /// multiplies by target scale × UiScale, so omitting conversion scales the flick twice
 /// (0.75x/1.5x at 75/150%, doubled on Retina). Equal physical flicks must move equal physical
 /// content distances. Pure for unit tests without selection-follow interference.
@@ -1420,7 +1420,7 @@ fn wheel_delta_css(unit: bevy::input::mouse::MouseScrollUnit, y: f32, to_css: f3
 ///
 /// ScrollPosition is CSS px; ComputedNode sizes and UiGlobalTransform positions are physical.
 /// Convert rect differences with the viewport's inverse_scale_factor (includes UiScale). Layout
-/// multiplies scroll by its reciprocal (bevy_ui-0.19.1/src/layout/mod.rs:347-367,
+/// multiplies scroll by its reciprocal (bevy_ui-0.20.1/src/layout/mod.rs,
 /// `update_uinode_geometry_recursive`).
 ///
 /// Clamp the component here: Bevy clamps only its rendered clamped_scroll_position, leaving

@@ -94,7 +94,7 @@
 //! that exists under the repo root). A bare basename is not resolved: `server.rs:707`,
 //! `registry.rs:175` and `plugin.rs:355` in this tree all mean lightyear's files, not ours, and
 //! matching them by basename against `src/net/server.rs` would be a guess. Citations into
-//! third-party crates outside the tree (`bevy_render-0.19.0/src/view/mod.rs:1035`) are out of scope:
+//! third-party crates outside the tree (`bevy_render-0.20.1/src/view/mod.rs`) are out of scope:
 //! nothing here can re-pin them and they move only on a deliberate dependency bump.
 
 use std::collections::HashSet;

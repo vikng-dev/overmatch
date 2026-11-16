@@ -341,7 +341,7 @@ fn spawn_impact_read(
         let (eye, exposure) = camera
             .single()
             .expect("exactly one camera declares PlayerView");
-        // Bevy 0.19 camera extraction uses its default exposure when the component is absent.
+        // Bevy 0.20.1 camera extraction uses its default exposure when the component is absent.
         (
             eye.translation() - impact.position,
             exposure.copied().unwrap_or_default(),

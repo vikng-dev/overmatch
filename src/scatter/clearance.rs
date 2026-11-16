@@ -251,10 +251,9 @@ fn pairs<'s>(
 
 /// Whether `b`, moved by `offset`, is apart from `a`, on a certificate: GJK's intersection test
 /// (parry's, never its depth search) answers with a direction, and both solids' support points
-/// along it show the gap. Touching is not apart. GJK also answers "apart" from three failures
-/// (parry3d 0.27.0 `gjk::closest_points`: a bound that stops shrinking, a simplex that rejects
-/// its new point, the 100-iteration cap); their direction shows no gap, and they read as
-/// intersecting.
+/// along it show the gap. Touching is not apart. Parry 0.31.1 `gjk::closest_points` can still
+/// stop at its iteration cap without certifying separation; an answer with no support gap
+/// therefore reads as intersecting.
 fn apart(a: &Solid, b: &Solid, offset: Vec3) -> bool {
     let pos12 = Pose3::from_parts(a.position, a.rotation)
         .inv_mul(&Pose3::from_parts(b.position + offset, b.rotation));

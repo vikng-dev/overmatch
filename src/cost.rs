@@ -328,7 +328,7 @@ pub(crate) fn arm_tick_clock(app: &mut App) {
         return;
     }
     app.init_resource::<TickClock>();
-    // Bevy 0.19.1's runner returns only after each child schedule applies its final buffers.
+    // Bevy 0.20.1's runner returns only after each child schedule applies its final buffers.
     app.add_systems(FixedMain, open_tick.before(FixedMain::run_fixed_main));
     app.add_systems(
         FixedMain,

@@ -8,10 +8,10 @@
 //! `start_tick` led `end_tick` by ≥ 2 the difference went negative, the `as usize` sign-extended to
 //! ~2^64, and the loop became an unbounded allocating spin — the load-gated connect hang (silent
 //! wedge, RSS balloon, eventual SIGKILL). `InputBuffer::set_raw` refuses writes below `start_tick`;
-//! lower writes alone cannot re-anchor it. Lightyear 0.30.1's installed `LocalTimelineShift`
+//! lower writes alone cannot re-anchor it. Lightyear 0.31.0's installed `LocalTimelineShift`
 //! observer shifts both buffer indices (`lightyear_inputs` client.rs, `shift_input_buffer_ticks`).
 //!
-//! Lightyear 0.30 BOUNDS the encoder (`(end - start).saturating_add(1).max(0)` pre-sizing and a
+//! Lightyear 0.31.0 BOUNDS the encoder (`(end - start).saturating_add(1).max(0)` pre-sizing and a
 //! `tick <= end_tick` loop), so the call is now safe to make here — and the bounded reproduction
 //! below shows it is still WRONG: an inverted range encodes one state, the value stored at the
 //! future `start_tick`, labelled as `end_tick`. The boundary asserts before that interval reaches encoding. The
@@ -33,7 +33,7 @@ struct TestAction(u8);
 
 type TestBuffer = InputBuffer<ActionState<TestAction>, TestAction>;
 
-/// Enabler #1: `Tick` subtraction is a signed `i32` difference (0.30 clamps it to the `i32` range,
+/// Enabler #1: `Tick` subtraction is a signed `i32` difference (0.31.0 clamps it to the `i32` range,
 /// which changes nothing at these magnitudes). The wedge needs the negative value; if upstream
 /// saturates at zero the inverted range cannot arise.
 #[test]
@@ -48,7 +48,7 @@ fn tick_subtraction_still_goes_negative() {
 }
 
 /// `set_raw` alone refuses writes below `start_tick`. This does not model a timeline shift:
-/// Lightyear 0.30.1's installed observer moves both buffer indices (see module doc).
+/// Lightyear 0.31.0's installed observer moves both buffer indices (see module doc).
 #[test]
 fn set_raw_still_refuses_lower_ticks() {
     let mut buffer = TestBuffer::default();
@@ -64,7 +64,7 @@ fn set_raw_still_refuses_lower_ticks() {
 }
 
 /// The bounded reproduction: a buffer stranded at tick 313 asked to encode up to tick 20 — the
-/// inverted range the boundary refuses. 0.30 returns promptly with ONE state, the value authored for
+/// inverted range the boundary refuses. 0.31.0 returns promptly with ONE state, the value authored for
 /// tick 313, which the receiver will file under tick 20. Fires when upstream changes the answer
 /// (refuses the range, or encodes nothing) — the signal that the guard may be retirable.
 #[test]

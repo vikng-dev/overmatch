@@ -120,9 +120,9 @@ pub(super) struct PageLook {
     pub(super) tab_gap_px: Sourced<f32>,
     pub(super) tab_marker_height_px: Sourced<f32>,
     /// The hint wrapper reserves authored line heights; Text itself may grow beyond the slot.
-    /// Bevy 0.19 text measurement resolves height as known.or(preferred.or(min)), so putting a
+    /// Bevy 0.20.1 text measurement resolves height as known.or(preferred.or(min)), so putting a
     /// minimum height on Text prevents overlong content from measuring taller.
-    /// Source: bevy_ui-0.19.1 `measurement::resolve_axis`; MEASURED on the headless page.
+    /// Source: bevy_ui-0.20.1 `measurement::resolve_axis`; MEASURED on the headless page.
     pub(super) hint_font_px: Sourced<f32>,
     pub(super) hint_line_height_factor: Sourced<f32>,
     pub(super) hint_lines: Sourced<f32>,
@@ -216,7 +216,7 @@ impl SettingsLook {
                 "author a finite overlap in [0, 1)",
             ));
         }
-        // DERIVED: Bevy 0.19.1 bloom::prepare_bloom_textures uses ilog2(dimension).max(2) - 1
+        // DERIVED: Bevy 0.20.1 bloom::prepare_bloom_textures uses ilog2(dimension).max(2) - 1
         // mips; compute_blend_factor divides by mip_count - 1, requiring at least two.
         if self
             .bloom_mip_dimensions
@@ -493,8 +493,6 @@ mod tests {
     /// Bloom's final blend needs a nonzero maximum mip index, even on LOW.
     #[test]
     fn bloom_admission_requires_a_calculable_blend() {
-        // Fixture: Bevy 0.19.1 uses ilog2(dimension).max(2) - 1 mips;
-        // its final blend divides mip zero by mip_count - 1.
         for dimension in [1, 2, 4] {
             let mut data = decoded();
             data.bloom_mip_dimensions.0 = [dimension, 512];

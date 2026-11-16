@@ -4,9 +4,9 @@ Subject: the game's netcode, client presentation and damage model; game state on
 
 ## Cause verified in dependency source
 
-The pinned lightyear_interpolation 0.30.1 `TimelinePlugin::sync_timeline` synchronizes the
+The pinned lightyear_interpolation 0.31.0 `TimelinePlugin::sync_timeline` synchronizes the
 presentation cursor in `PostUpdate`, on received-packet samples. `TimelineSync::sync` in
-lightyear_sync 0.30.1 snaps on initial synchronization or when the cursor/objective error exceeds
+lightyear_sync 0.31.0 snaps on initial synchronization or when the cursor/objective error exceeds
 `SyncConfig::max_error_margin` (DERIVED installed bound: ten ticks, inherited by
 `sync_margin::derived_interp_sync`). Smaller errors steer clock speed. A resync sets the cursor
 to the remote estimate minus the configured delay and jitter margin; gameplay state transitions
@@ -30,7 +30,7 @@ at the end of that update reaches the next frame's fixed gameplay and physics sc
 Retain an already-presented stream component through unknown history, centrally in `net::resync`.
 Its local `Presented` state distinguishes a sampled value from a held value. A removal observer
 restores the last live sample within the same deferred-command flush that removes it; scheduled
-consumers retain their required-component contracts. This uses Bevy 0.19.1's verified `Remove`
+consumers retain their required-component contracts. This uses Bevy 0.20.1's verified `Remove`
 observer semantics: the old value is still queryable, and observer commands flush before
 Lightyear proceeds to apply interpolation. The dependency versions are those resolved in
 `Cargo.lock`.

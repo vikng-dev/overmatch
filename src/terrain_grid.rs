@@ -681,7 +681,7 @@ pub(crate) fn downsample(grid: &HeightGrid, target: u32) -> HeightGrid {
 
 /// Static heightfield over the grid's full `[-half_extent, +half_extent]` square, using its own
 /// samples and anti-diagonal split. EMPIRICAL: `oracle_matches_collider_at_seeded_points` guards
-/// orientation and millimetre agreement, catching transposes. Avian 0.7's
+/// orientation and millimetre agreement, catching transposes. Avian 0.8.0's
 /// `Collider::heightfield(Vec<Vec<f32>>, scale)` layout is `sample(i, j)` at `data[i·n + j]`;
 /// parry's column-major `Array2` reads `heights_zx`: i along X, j along Z. The origin-centred
 /// field uses total X/Z spans, with scale.y multiplying raw heights; trust raycasts over prose.

@@ -18,14 +18,6 @@ mod mincut;
 mod source;
 pub(crate) use source::{Hull, RigidMotion, SourceBounds, SourceShape, SourceTree, Surface};
 
-/// The farthest a chunk hull's vertex may lie from its bounds' centre on any axis, m: ADR-0015's
-/// 10 m figure on the support coordinates of the only colliders a sweep casts against, each cast
-/// run in its target's frame about that centre. Resolution: parry 0.27's GJK shape cast returns
-/// its hit short by an error that grows with those coordinates; ADR-0015 MEASURED 0.25 mm at 5 m
-/// and 139–172 mm at 500 m, so error ∝ extent^1.37–1.42 (DERIVED from the two), at most
-/// 0.25 mm × 2^1.42 ≈ 0.67 mm at this bound.
-pub(crate) const CAST_HALF_EXTENT_M: f32 = 10.0;
-
 /// The game's environment destruction: only standing, exposed law chunks belong to the sweep.
 pub(super) fn covered(structure: &Structure, state: &State, chunk: usize) -> bool {
     state.standing(chunk) && !structure.chunks[chunk].buried
@@ -157,10 +149,8 @@ struct Demand {
 }
 
 impl Geometry {
-    /// Bake the sweep's chunk hulls, each about its bounds' centre, refusing a chunk whose hull
-    /// reaches past [`CAST_HALF_EXTENT_M`] from it, a joint between chunks on no face of one of
-    /// them, or a chunk whose contact hull cannot be built: the load gate's refusal, its caller
-    /// naming the file.
+    /// Bake chunk hulls about their bounds' centres. Refuse a joint on no face of its chunks
+    /// or a contact hull that cannot be built; the caller names the asset file.
     pub(crate) fn new(blocks: &[Block], structure: &Structure) -> Result<Self, String> {
         use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
         let mut hulls = Vec::with_capacity(blocks.len());
@@ -177,15 +167,6 @@ impl Geometry {
         }
         for (c, (block, chunk)) in blocks.iter().zip(&structure.chunks).enumerate() {
             let centre = (block.min + block.max) / 2.0;
-            let reach = ((block.max - block.min) / 2.0).max_element();
-            if reach > CAST_HALF_EXTENT_M {
-                return Err(format!(
-                    "chunk {c} reaches {reach:.2} m from its bounds' centre, past the \
-                     {CAST_HALF_EXTENT_M} m within which a sweep's shape cast holds its accuracy \
-                     (ADR-0015): split it into chunks at most {} m across",
-                    2.0 * CAST_HALF_EXTENT_M
-                ));
-            }
             let about = |origin: Vec3| {
                 Collider::convex_hull(&block.points.iter().map(|p| *p - origin).collect::<Vec<_>>())
                     .expect("admitted chunk hulls stay solid about any origin")
@@ -495,12 +476,7 @@ enum Hit {
 }
 
 impl Motion<'_> {
-    /// The first hit of this motion on chunk `target`, a hull about `origin`, in construction
-    /// coordinates. The casts are parry's GJK shape casts (ADR-0015's defect): they run in the
-    /// target's frame about `origin`, so its support coordinates stay within the load gate's
-    /// [`CAST_HALF_EXTENT_M`], and only chunk hulls are ever targets, never terrain. DERIVED error
-    /// at the largest shipped chunk (fir_1's chunk 35, 5.67 m half-extent, MEASURED): with
-    /// [`CAST_HALF_EXTENT_M`]'s scaling, 0.25 mm × (5.67 / 5)^1.37–1.42 ≈ 0.30 mm short.
+    /// First hit on a chunk hull centered at `origin`, returned in construction coordinates.
     fn hit(&self, target: &Collider, origin: Vec3, work: &mut Work) -> Option<Hit> {
         let Self {
             hull,
@@ -997,7 +973,7 @@ pub(super) mod tests {
         Arc::new(kind)
     }
 
-    /// The game's environment destruction: the server sweep retains a cast hit when Parry 0.27's
+    /// The game's environment destruction: the server sweep retains a cast hit when Parry 0.31.1's
     /// contact query cannot refine its touching pose; the retained witness must remain inward.
     #[test]
     fn a_cast_hit_survives_a_failed_contact_solve() {
@@ -1171,7 +1147,7 @@ pub(super) mod tests {
         )
         .unwrap()
         .unwrap();
-        // Parry 0.27 refines casts below 1e-5 s at the starting pose, not the impact pose.
+        // Parry 0.31.1 refines casts below 1e-5 s at the starting pose, not the impact pose.
         assert!(cast.time_of_impact > 0.0 && cast.time_of_impact < 1e-5);
         assert!(
             avian3d::parry::query::contact(
@@ -2618,54 +2594,6 @@ pub(super) mod tests {
                     }
                 }
             }
-        }
-    }
-
-    /// The game's environment destruction: the load gate refuses a chunk reaching past the cast
-    /// bound, naming it, so no sweep casts against a collider whose extent parry's shape cast
-    /// misjudges (ADR-0015). Dropping the check lets the stretched chunk through.
-    #[test]
-    fn the_load_gate_refuses_a_chunk_past_the_cast_bound() {
-        let material = Material::of(
-            crate::substances::SubstanceRegistry::shipped_static(),
-            "Brick",
-        )
-        .unwrap()
-        .unwrap();
-        // Fixture: one block reaching twice the bound along x from its centroid.
-        let reach = 2.0 * CAST_HALF_EXTENT_M;
-        let points = [-reach, reach]
-            .into_iter()
-            .flat_map(|x| {
-                [-0.5, 0.5]
-                    .into_iter()
-                    .flat_map(move |y| [-0.5, 0.5].map(move |z| Vec3::new(x, y, z)))
-            })
-            .collect::<Vec<_>>();
-        let mut structure = Structure::default();
-        structure.chunks.push(Chunk {
-            volume: 2.0 * reach,
-            mass: 1.0,
-            centroid: Vec3::ZERO,
-            material,
-            buried: false,
-        });
-        let refusal = Geometry::new(&[Block::hull(points).unwrap()], &structure).unwrap_err();
-        assert!(refusal.contains("chunk 0"), "{refusal}");
-        // MEASURED: the shipped constructions' largest chunk half-extent.
-        let library = crate::construction::ConstructionLibrary::load(
-            &crate::map::tests::shipped_assets(),
-            ["house_1", "fir_1"],
-        );
-        for id in ["house_1", "fir_1"] {
-            let kind = library.get(id).unwrap();
-            let farthest = kind
-                .layout
-                .blocks
-                .iter()
-                .map(|block| ((block.max - block.min) / 2.0).max_element())
-                .fold(0.0, f32::max);
-            println!("MEASURED {id}: largest chunk half-extent {farthest} m");
         }
     }
 

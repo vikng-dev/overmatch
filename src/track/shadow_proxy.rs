@@ -61,9 +61,9 @@
 //!
 //! ## What it relies on
 //!
-//! **Each light carries the right mask.** bevy_pbr 0.19.1 copies the light's `RenderLayers` onto
+//! **Each light carries the right mask.** bevy_pbr 0.20.1 copies the light's `RenderLayers` onto
 //! every kind of shadow view (bevyengine/bevy#24797; record in
-//! `upstream/bevy-shadow-view-ignores-light-render-layers.md`). Without that patch,
+//! `upstream/bevy-shadow-view-ignores-light-render-layers.md`). Without that mask,
 //! `queue_shadows` filters every caster against a shadow view that has no mask, so layer 0, and a
 //! ribbon off layer 0 casts nothing. `bevy_light`'s `check_dir_light_mesh_visibility` gates
 //! casters on the light's mask and marks what it saw visible, so a caster no camera draws
@@ -120,7 +120,7 @@ pub(crate) struct ProxySide {
     /// first frame. Never shared between tanks or sides: two tanks stand on
     /// different ground, and their belts differ every frame.
     ///
-    /// No empty ribbon exists, in `Assets<Mesh>` or on an entity. bevy_render 0.19.1 logs every
+    /// No empty ribbon exists, in `Assets<Mesh>` or on an entity. bevy_render 0.20.1 logs every
     /// extraction of a zero-vertex mesh as `Use-after-free … unallocated key`, and a `Mesh3d` on a
     /// mesh with no positions fails the shadow prepass pipeline's validation (vertex input
     /// `Location[0]` not provided), which quits the client.

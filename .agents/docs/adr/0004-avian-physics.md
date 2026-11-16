@@ -8,4 +8,4 @@ We adopt **Avian** (`avian3d`) as the physics engine rather than `bevy_rapier`. 
 
 ## Consequences
 
-Pinned to **`avian3d` 0.7** against **Bevy 0.19** (see [[bevy-019-scene-rework]] in agent memory for the engine bump). Physics runs in `FixedUpdate`, consistent with the existing sim-in-`FixedUpdate` bet.
+Pinned to **`avian3d` 0.8.0** against **Bevy 0.20.1** (the fork in `vendor/avian3d-0.8.0-overmatch`). Physics runs in `FixedUpdate`, consistent with the existing sim-in-`FixedUpdate` bet.
