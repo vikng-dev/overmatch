@@ -291,11 +291,28 @@ pub(crate) fn default_plugins() -> bevy::app::PluginGroupBuilder {
 /// Malformed or headless `OVERMATCH_WINDOW` refuses startup before constructing the window,
 /// naming the variable and supported modes.
 pub fn windowed_runtime(app: &mut App, window: Window) {
-    let mode = run_window::RunWindow::of_run(run_window::RunWindow::Visible)
+    install_windowed_runtime(
+        app,
+        window,
+        run_window::RunWindow::of_run(run_window::RunWindow::Visible),
+        dev_capture::plan(),
+        default_plugins(),
+    );
+}
+
+/// Install the windowed policy from parsed operator input; tests replace the native device plugins.
+fn install_windowed_runtime(
+    app: &mut App,
+    window: Window,
+    mode: run_window::RunWindow,
+    capture: Option<&dev_capture::plan::CapturePlan>,
+    plugins: bevy::app::PluginGroupBuilder,
+) {
+    let mode = mode
         .windowed()
         .unwrap_or_else(refuse_start)
-        .for_capture(dev_capture::plan().is_some_and(|plan| plan.frames.is_some()));
-    app.add_plugins(default_plugins().set(WindowPlugin {
+        .for_capture(capture.is_some_and(|plan| plan.frames.is_some()));
+    app.add_plugins(plugins.set(WindowPlugin {
         primary_window: Some(mode.prepare_window(window)),
         ..default()
     }));

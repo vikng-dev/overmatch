@@ -236,37 +236,45 @@ mod tests {
 
     /// A HIDDEN RUN TAKES NO SCREEN AND NEVER PAUSES, on any root: hidden harness clients and
     /// captures run on a machine its owner is working at. The window a root described visible and
-    /// fullscreen, or a frame capture with no mode override, is hidden and `Windowed` before
-    /// winit creates it, settings are told to leave it
-    /// so, the run is silent, and a focus loss does not pause it. Mutants: dropping any one of
-    /// [`WindowedRun::prepare_window`], [`pin_window`] or `unattended::mount` fails an assert, and so
-    /// does leaving a hidden or offscreen mode focused before WinitPlugin builds.
+    /// fullscreen, or a frame capture with no mode override, is hidden and unfocused before
+    /// WinitPlugin builds, and `Windowed` before native creation. Settings leave it so, the run
+    /// is silent, and a focus loss does not pause it. Mutants: dropping the installer's
+    /// `for_capture` or `prepare_window`, [`pin_window`] or `unattended::mount` fails an assert.
     #[test]
     fn a_hidden_run_is_hidden_pinned_silent_and_never_paused() {
-        for (mode, takes_frames) in [
-            (RunWindow::Hidden, false),
-            (RunWindow::Offscreen, false),
-            (RunWindow::Visible, true),
+        fn before_winit(app: &mut App) {
+            let window = primary_window(app);
+            assert!(!window.visible, "hidden before WinitPlugin builds");
+            assert!(!window.focused, "unfocused before WinitPlugin builds");
+        }
+
+        let capture =
+            crate::dev_capture::plan::CapturePlan::parse(r#"(frames: (out: "fixture.png"))"#)
+                .unwrap();
+        for (mode, capture) in [
+            (RunWindow::Hidden, None),
+            (RunWindow::Offscreen, None),
+            (RunWindow::Visible, Some(&capture)),
         ] {
-            let admitted = mode.windowed().unwrap().for_capture(takes_frames);
             let mut app = App::new();
-            let window = app
-                .world_mut()
-                .spawn((
-                    admitted.prepare_window(Window {
-                        mode: bevy::window::WindowMode::BorderlessFullscreen(
-                            bevy::window::MonitorSelection::Primary,
-                        ),
-                        ..default()
-                    }),
-                    PrimaryWindow,
-                ))
-                .id();
-            mount(&mut app, admitted);
+            crate::install_windowed_runtime(
+                &mut app,
+                Window {
+                    mode: bevy::window::WindowMode::BorderlessFullscreen(
+                        bevy::window::MonitorSelection::Primary,
+                    ),
+                    ..default()
+                },
+                mode,
+                capture,
+                bevy::app::PluginGroupBuilder::start::<MinimalPlugins>()
+                    .add(WindowPlugin::default())
+                    .add(before_winit),
+            );
             // What a later `AudioPlugin` build writes; unattended policy applies in PreStartup.
             app.insert_resource(GlobalVolume::new(Volume::Linear(1.0)));
             app.world_mut().run_schedule(PreStartup);
-            let window = app.world().get::<Window>(window).expect("the window");
+            let window = primary_window(&mut app);
             assert!(!window.visible, "{mode:?}");
             assert!(!window.focused, "{mode:?}");
             assert_eq!(window.mode, bevy::window::WindowMode::Windowed);
