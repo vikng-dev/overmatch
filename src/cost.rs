@@ -79,7 +79,7 @@ pub(crate) struct AvianStep {
     /// Constraints in the overflow colour, which Avian solves on one thread: a body already in
     /// every colour overflows.
     pub(crate) overflow_constraints: u32,
-    /// Actual contact-pass constraint visits, summed over substeps and restitution.
+    /// Contact-pass visits counted by `avian_ext::solver_cost` at each completed pass.
     /// Overflow is serial; zero-restitution constraint no-ops still count as visits.
     pub(crate) serial_contact_visits: u32,
     pub(crate) parallel_contact_visits: u32,

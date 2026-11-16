@@ -14,6 +14,7 @@ pub mod contact_match;
 pub mod contact_reduction;
 pub mod island_wake;
 pub mod rest_test;
+pub mod solver_cost;
 
 use avian3d::collision::narrow_phase::ContactMatcher;
 use avian3d::dynamics::solver::islands::RestTest;
@@ -32,4 +33,5 @@ pub fn plugin(app: &mut App) {
     contact_reduction::plugin(app);
     island_wake::plugin(app);
     compliance::plugin(app);
+    solver_cost::plugin(app);
 }

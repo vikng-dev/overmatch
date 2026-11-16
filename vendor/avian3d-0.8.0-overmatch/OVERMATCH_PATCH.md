@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 814 in all (MEASURED), 736 in upstream files and 78 in the
+of `src/` against the published crate: 749 in all (MEASURED), 671 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -590,25 +590,15 @@ trips Avian's `push_manifold` assertion, MEASURED); a landing judged at the slow
 (judged at the faster one it fails, MEASURED); and a recycled pair regenerated after reduction (the
 sink above).
 
-## Solver contact visits (`src/dynamics/solver/plugin.rs`, `src/dynamics/solver/diagnostics.rs`, `src/utils.rs`): kept
+## Solver contact visits: game-side
 
-Subject: the game's server physics, contacts between bodies, game state only.
+`avian_ext::solver_cost` reads public `ConstraintGraph::colors` and each color's constraint count
+at each warm-start, biased-solve, relaxation and restitution boundary. Overflow is serial; other
+colors follow Avian 0.8.0's rule exactly: one worker or fewer than 64 constraints is serial. The
+root dependency retains Avian's default parallel feature. The bounded census reads one length per
+color, never every constraint. Reset runs in `PhysicsStepSystems::First`.
 
-`SolverDiagnostics::{serial_contact_visits, parallel_contact_visits}` count the contact constraints
-each contact pass dispatches (warm start, the biased solve and the relaxation in every substep, and
-restitution once a step), serially or through parallel chunks; zero-restitution no-ops count. Each
-step's diagnostics reset clears them. Overflow constraints are serial; a color counts as its
-`par_for_each` dispatched it, which now returns that decision (the single-worker and short-slice
-serial cases included) without changing its thresholds, iteration or chunking. No counter feeds a
-physics decision. The game's work account reads them (`src/net/ram.rs`, `src/cost.rs`).
-
-Kept: counters inside three upstream systems and the dispatch decision of an upstream helper; no
-extension point sees either. 65 fork lines (MEASURED: 26 in the solver, 32 in the diagnostics, 7 in
-`par_for_each`).
-
-Guard: the game's `src/net/ram/avian_tests.rs`, which reads them through the game's work account.
-`contact_visits_cover_each_pass_and_reset_each_step` asserts visits = constraints × (3 × substeps +
-1) and, run alone in a child process on a compute pool of four threads, the classification: 4 floor
-contacts, every visit serial; 128, every visit parallel. Red with every dispatch counted serial
-(MEASURED: 2,432 serial where 2,432 parallel are due). The overflow star checks overflow's serial
-visits.
+`src/net/ram.rs` forwards these game-owned counts to `src/cost.rs`'s unchanged serialized fields.
+The engine's solver, diagnostics and slice-dispatch helper are pristine: 0 fork lines (MEASURED).
+The dispatch-contract tripwire is in the game module. `src/net/ram/avian_tests.rs` retains the
+pass-count, reset, serial/parallel and overflow assertions.
