@@ -2,6 +2,9 @@
 
 Subject: the multiplayer tank game's rigid-body driving physics; game state only.
 
+Continuation: [sensor-only fix and dedicated release price](swept-ccd-sensors-and-price.md).
+This document records the stopped candidate at `f64838c8`.
+
 ## Disposition
 
 Started from `12196bbf`, on `lane/swept-ccd`. The requested per-collider candidate passed its

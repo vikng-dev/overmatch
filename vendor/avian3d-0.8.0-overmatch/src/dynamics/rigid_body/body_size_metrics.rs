@@ -14,7 +14,7 @@ use bevy::{
 
 use crate::{
     collision::collider::{
-        AnyCollider, ColliderContext,
+        AnyCollider, ColliderContext, ColliderDisabled, Sensor,
         collider_hierarchy::{ColliderOf, RigidBodyColliders},
         collider_transform::ColliderTransform,
     },
@@ -39,7 +39,7 @@ pub struct BodySizeMetrics {
     /// to determine how far the body can move in a single timestep before it might start to
     /// tunnel through geometry.
     ///
-    /// This is the minimum [`ccd_thickness`] of the colliders attached to the body,
+    /// This is the minimum [`ccd_thickness`] of the enabled, non-sensor colliders attached to the body,
     /// and typically corresponds to the minimum distance from the centroid
     /// of any given shape to its surface.
     ///
@@ -117,8 +117,27 @@ fn update_body_size_metrics<C: AnyCollider>(
             Changed<ComputedCenterOfMass>,
         ),
     >,
-    colliders: Query<(Entity, &C, &ColliderTransform)>,
-    changed_colliders: Query<&ColliderOf, Or<(Changed<C>, Changed<ColliderTransform>)>>,
+    // OVERMATCH PATCH: non-solid attachments do not determine CCD thickness. Marker changes
+    // refresh the cached metric even when the shape and transform did not change.
+    colliders: Query<(
+        Entity,
+        &C,
+        &ColliderTransform,
+        Has<Sensor>,
+        Has<ColliderDisabled>,
+    )>,
+    changed_colliders: Query<
+        &ColliderOf,
+        Or<(
+            Changed<C>,
+            Changed<ColliderTransform>,
+            Added<Sensor>,
+            Added<ColliderDisabled>,
+        )>,
+    >,
+    collider_owners: Query<&ColliderOf>,
+    mut removed_sensors: RemovedComponents<Sensor>,
+    mut removed_disabled: RemovedComponents<ColliderDisabled>,
     enabled_bodies: Query<(), With<RigidBody>>,
     context: StaticSystemParam<C::Context>,
     mut stale: Local<EntityHashSet>,
@@ -131,11 +150,15 @@ fn update_body_size_metrics<C: AnyCollider>(
         let mut ccd_thickness: f32 = f32::INFINITY;
         let mut sweep_radius: f32 = 0.0;
 
-        for (entity, collider, collider_transform) in colliders.iter_many(rb_colliders).matched() {
+        for (entity, collider, collider_transform, sensor, disabled) in
+            colliders.iter_many(rb_colliders).matched()
+        {
             // Compute the CCD thickness
-            let ctx = ColliderContext::new(entity, &context);
-            let thickness = collider.ccd_thickness_with_context(ctx);
-            ccd_thickness = ccd_thickness.min(thickness);
+            if !sensor && !disabled {
+                let ctx = ColliderContext::new(entity, &context);
+                let thickness = collider.ccd_thickness_with_context(ctx);
+                ccd_thickness = ccd_thickness.min(thickness);
+            }
 
             // Compute the sweep radius
             let ctx = ColliderContext::new(entity, &context);
@@ -156,6 +179,14 @@ fn update_body_size_metrics<C: AnyCollider>(
     stale.clear();
     stale.extend(&moved_centers);
     stale.extend(changed_colliders.iter().map(|collider_of| collider_of.body));
+    // Removed markers restore a solid collider. Despawned/detached colliders have no owner
+    // here; their removal is handled by the collider hierarchy and mass-property update.
+    stale.extend(
+        removed_sensors
+            .read()
+            .chain(removed_disabled.read())
+            .filter_map(|entity| collider_owners.get(entity).ok().map(|owner| owner.body)),
+    );
     if stale.is_empty() {
         updates.0 = 0;
         return;

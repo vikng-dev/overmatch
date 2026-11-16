@@ -22,6 +22,7 @@ mod avian_moved_lists;
 mod avian_narrow_phase;
 mod avian_prepared_mass;
 mod avian_spawn_batch;
+mod avian_swept_ccd;
 mod avian_warm_start;
 mod bevy_ktx2_uastc_fallback;
 mod bevy_mesh_removal_lifecycle;

@@ -593,10 +593,10 @@ struct CcdImpact {
 /// at the first impact, leaving the next frame's collision detection to resolve the contact.
 #[cfg(any(feature = "parry-f32", feature = "parry-f64"))]
 fn solve_continuous(
-    // OVERMATCH PATCH: upstream #1101; a disabled collider takes no part in a sweep.
+    // OVERMATCH PATCH: extend upstream #1101; only enabled solid colliders take part in sweeps.
     colliders: Query<
         (&Collider, &Position, &Rotation, Option<&CollisionLayers>),
-        Without<ColliderDisabled>,
+        (Without<ColliderDisabled>, Without<Sensor>),
     >,
     ccd_query: Query<CcdBodyQuery>,
     mut bodies: ResMut<SolverBodies>,

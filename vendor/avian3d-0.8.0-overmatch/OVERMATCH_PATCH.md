@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 1071 in all (MEASURED), 993 in upstream files and 78 in the
+of `src/` against the published crate: 1116 in all (MEASURED), 1038 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -207,14 +207,29 @@ legitimate absences). Upstream's own defect on the same path, a body leaving and
 body query, still panics the solver on 0.8.0 (MEASURED by the tripwire
 `src/tests/avian_body_query_gap.rs`); record: `upstream/avian-body-query-gap-stale-constraints.md`.
 
-## Disabled colliders in continuous collision (`src/dynamics/ccd/mod.rs`): kept until upstream releases #1101
+## Non-solid colliders in continuous collision (`src/dynamics/ccd/mod.rs`, `src/dynamics/rigid_body/body_size_metrics.rs`): kept
 
-`solve_continuous` fetches each fast body's colliders through a query without
-`Without<ColliderDisabled>`, so a disabled collider still attached to a fast body (its
-`RigidBodyColliders` keeps it) is swept and can stop the body at an impact it does not take part in.
-Upstream fixed it after 0.8.0 (avian #1101) by adding the filter; the fork carries that line. 6 fork
-lines (MEASURED, the query reformatted). No guard of the game's; drop the patch with the release
-that carries #1101.
+The moving-side sweep query excludes sensors and disabled colliders at the same site as the
+existing upstream #1101 disabled-collider filter. A sensor detects intersections; it must not
+clamp the body's solid motion at its own time of impact. The body-size pass excludes both from
+minimum CCD thickness and refreshes that cache on marker additions/removals, even with no shape,
+transform or centre-of-mass change. Sweep radius retains its separate sleeping/recycling contract.
+
+Kept: these decisions are inside the upstream passes. MEASURED against the cached published
+0.8.0 crate: the CCD file has 5 added + 1 removed = 6 fork lines (the #1101 query extended in
+place); body size metrics has 98 added + 27 removed = 125, including its once-per-body patch.
+The complete source index is 881 added + 235 removed = 1,116 fork lines: 1,038 in upstream files
+and 78 in the fork-only file. No per-collider motion gate or new counter API ships.
+
+Guards: `src/tests/avian_swept_ccd.rs`, reading the existing `IS_FAST` diagnostic and geometric
+wall planes. MEASURED: both passed; the thickness exclusion reversed fails the fast-body guard,
+and the sensor sweep filter reversed fails the wall guard; both mutants reverted. Sensors and
+disabled colliders are covered, including live marker transitions. Draft and independent compile
+proof: `upstream/avian-ccd-sensors-swept-and-counted.md`. Retire the disabled sweep exclusion with
+#1101's release; retire the remaining changes when a release satisfies both non-solid invariants.
+
+The [dedicated release price](../../.agents/scratch/swept-ccd-sensors-and-price.md) records repeated
+rehearsal and open-ground timing/counter samples; it does not change CCD policy.
 
 ## Moved-collider bounds prune (`src/collider_tree/update.rs`, `src/collider_tree/diagnostics.rs`): kept
 
@@ -331,7 +346,8 @@ outside Avian's timed stages was 151 to 518 ms in the two ticks after each colla
 the ten worst ticks; with the patch the worst is 0.6 ms and the ten worst sum to 3.9 ms. The run's
 worst tick fell from 599.9 to 82.7 ms (the 0.7 stack: 106.7 ms).
 
-Kept: the loop is inside an upstream system. 80 fork lines (MEASURED).
+Kept: the loop is inside an upstream system; the non-solid CCD section above owns its combined
+source count.
 
 Guard: `src/tests/avian_body_size_metrics.rs`, 4 tests. Mutants, each red (MEASURED): every body
 the pass cannot read skipped, as upstream (the refusal does not panic); every such body refused
