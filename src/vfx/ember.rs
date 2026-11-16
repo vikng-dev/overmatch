@@ -54,7 +54,7 @@ fn glow(emission: &EmberEmission) -> LinearRgba {
 
 /// An explicit absent emitter grows no bead. Re-adding the record retains the existing child.
 fn attach_ember(
-    add: On<Add, FlightEffects>,
+    add: On<Add<FlightEffects>>,
     rounds: Query<(&FlightEffects, Has<Embered>)>,
     assets: Res<EmberAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,

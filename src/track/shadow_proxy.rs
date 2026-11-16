@@ -226,7 +226,7 @@ impl Section {
 /// The ribbon is hidden by its [`crate::render_policy::VisualScope::SHADOW_PROXY`] scope, not by
 /// its material, so the material's only job is to stay out of the way — and opaque is the shape
 /// that does that best. `AlphaMode::Opaque` sets no `MeshPipelineKey::MAY_DISCARD` on the shadow
-/// item (`vendor/bevy_pbr-0.19.1-scalar-math/src/render/light.rs:2474-2481`), so the shadow draw
+/// item (`vendor/bevy_pbr-0.20.1-overmatch/src/render/light.rs:2585-2591`), so the shadow draw
 /// takes the cheapest `is_depth_only` path there is and runs no fragment shader at all.
 ///
 /// # The trick this retires
@@ -235,8 +235,8 @@ impl Section {
 /// render layer. Worth knowing why, because the FIRST spelling of that trick cast nothing at all
 /// and did it silently: `AlphaMode::Blend` at alpha 0 sets `MAY_DISCARD`, which routes the shadow
 /// draw through the material's PREPASS fragment shader, and `prepass_alpha_discard`
-/// (`pbr_prepass_functions.wgsl:76`) discards every fragment under a 0.05 cutoff before it can
-/// write shadow depth. Reading only the MAIN pass's `alpha_discard` (`pbr_functions.wgsl:107`,
+/// (`pbr_prepass_functions.wesl:22`) discards every fragment under a 0.05 cutoff before it can
+/// write shadow depth. Reading only the MAIN pass's `alpha_discard` (`pbr_functions.wesl:98`,
 /// which discards for `Mask`/`AlphaToCoverage` only) is what made it look safe.
 ///
 /// MEASURED 2026-07-28 on the shipped scene: the track-shadow lobe read 82.0 mean luma with the
@@ -563,10 +563,10 @@ mod tests {
     }
 
     /// The alpha modes whose SHADOW item bevy tags with `MeshPipelineKey::MAY_DISCARD` — copied by
-    /// hand from `vendor/bevy_pbr-0.19.1-scalar-math/src/render/light.rs:2474`, the only place that
+    /// hand from `vendor/bevy_pbr-0.20.1-overmatch/src/render/light.rs:2585`, the only place that
     /// decides it. A material in this set has its shadow draw routed through the material's PREPASS
     /// fragment shader, and `prepass_alpha_discard`
-    /// (`vendor/bevy_pbr-0.19.1-scalar-math/src/render/pbr_prepass_functions.wgsl:76`) discards
+    /// (`vendor/bevy_pbr-0.20.1-overmatch/src/render/pbr_prepass_functions.wesl:22`) discards
     /// anything whose alpha is under `PREMULTIPLIED_ALPHA_CUTOFF` = 0.05. So a fully transparent
     /// material in this set casts NOTHING.
     ///

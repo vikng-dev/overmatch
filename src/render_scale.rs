@@ -21,7 +21,7 @@
 //!   same window-logical viewport as before — the override changes neither `Camera::viewport` nor
 //!   the window, so their math is untouched BY CONSTRUCTION, not by a matching fix-up.
 //! * `overlay`, `settings::ui` and every other `bevy_ui` node lay out against the window as before.
-//! * The `vfx` materials do not read `View::viewport`, so nothing in `assets/shaders/vfx_*.wgsl`
+//! * The `vfx` materials do not read `View::viewport`, so nothing in `assets/shaders/vfx_*.wesl`
 //!   needs to learn about this.
 //!
 //! # The near-miss upstream plugin, and why this is not it
@@ -116,10 +116,10 @@ use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_
 use bevy::render::render_resource::{
     BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedPipelineState,
     CachedRenderPipelineId, ColorTargetState, ColorWrites, FilterMode, FragmentState, LoadOp,
-    MultisampleState, Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages,
-    SpecializedRenderPipeline, SpecializedRenderPipelines, StoreOp, TextureFormat,
-    TextureSampleType,
+    MultisampleState, Operations, Pipeline, PipelineCache, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+    SamplerDescriptor, ShaderStages, SpecializedRenderPipeline, SpecializedRenderPipelines,
+    StoreOp, TextureFormat, TextureSampleType,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
 use bevy::render::view::{
@@ -131,7 +131,7 @@ use bevy::shader::Shader;
 
 /// The upscale fragment shader, loaded through the ordinary asset server like the `vfx_*` materials
 /// (it ships in `assets/shaders/`, which `scripts/package-macos.sh` copies into the bundle).
-const SHADER_PATH: &str = "shaders/render_scale_upscale.wgsl";
+const SHADER_PATH: &str = "shaders/render_scale_upscale.wesl";
 
 /// The floor a scale is clamped to before it reaches the GPU. The settings ladder bottoms out at
 /// 50%; this is a wider guard so a hand-edited `video.ron` cannot ask for a one-pixel main pass
@@ -145,6 +145,7 @@ const MIN_SCALE: f32 = 0.25;
 /// replicated, never part of a command, never read by the sim** — it is a view-layer number in the
 /// ADR-0014 sense, and two players at different render scales must see the same battle.
 #[derive(Resource, Clone, Copy, PartialEq, Debug, ExtractResource)]
+#[extract_app(RenderApp)]
 pub(crate) struct RenderScale(pub(crate) f32);
 
 impl Default for RenderScale {
@@ -179,6 +180,7 @@ impl RenderScale {
 /// pen cam's inset and its mask cameras, whose images are sampled against one another pixel for
 /// pixel, so one scaled alone would misregister them.
 #[derive(Component, Clone, Copy, Default, ExtractComponent)]
+#[extract_app(RenderApp)]
 pub(crate) struct NativeResolution;
 
 /// The resource + the render-app half. Mounted BY `settings::plugin`, not beside it: `apply_settings`
@@ -405,7 +407,7 @@ fn prepare_render_scale(
         // Bevy's own upscaling prepare blocks here for the same reason: a frame that queued a
         // pipeline and then rendered nothing with it is a frame that submitted no GPU work.
         pipeline_cache.block_on_render_pipeline(id);
-        if pipeline_cache.get_render_pipeline(id).is_none() {
+        if ready_pipeline(pipeline_cache.get_render_pipeline_state(id), "render-scale").is_none() {
             clear(&mut commands);
             continue;
         }
@@ -457,6 +459,31 @@ fn announce(state: &mut Local<Option<Option<UVec2>>>, scaled: Option<UVec2>, ful
     }
 }
 
+/// Pending shader loads may defer a pass; a broken shipped shader must fail before its
+/// consumer can silently skip the pass forever.
+pub(crate) fn ready_pipeline<'a>(
+    state: &'a CachedPipelineState,
+    name: &str,
+) -> Option<&'a RenderPipeline> {
+    use bevy::shader::ShaderCacheError;
+    match state {
+        CachedPipelineState::Ok(
+            Pipeline::RenderPipeline(pipeline) | Pipeline::MeshPipeline(pipeline),
+        ) => Some(pipeline),
+        CachedPipelineState::Ok(Pipeline::ComputePipeline(_)) => {
+            panic!("{name} requires a render pipeline")
+        }
+        CachedPipelineState::Queued
+        | CachedPipelineState::Creating(_)
+        | CachedPipelineState::Err(
+            ShaderCacheError::ShaderNotLoaded(_) | ShaderCacheError::ShaderImportNotYetAvailable,
+        ) => None,
+        CachedPipelineState::Err(error) => {
+            panic!("the shipped {name} shader must compile: {error}");
+        }
+    }
+}
+
 /// The upscale pass itself: stretch the rendered sub-rect across the full main texture.
 ///
 /// `With<MainPassResolutionOverride>` is not decoration — [`ViewQuery`] SKIPS the system when the
@@ -474,16 +501,11 @@ fn render_scale_upscale(
     mut ctx: RenderContext,
 ) {
     let (target, upscale_id, view_offset) = view.into_inner();
-    let Some(pipeline) = pipeline_cache.get_render_pipeline(upscale_id.0) else {
-        match pipeline_cache.get_render_pipeline_state(upscale_id.0) {
-            CachedPipelineState::Err(bevy::shader::ShaderCacheError::ProcessShaderError(err)) => {
-                panic!("the shipped render-scale shader must compile: {err}");
-            }
-            CachedPipelineState::Err(bevy::shader::ShaderCacheError::CreateShaderModule(err)) => {
-                panic!("the shipped render-scale shader must create its GPU module: {err}");
-            }
-            _ => return, // Queued, creating, or awaiting shader imports: no pipeline exists yet.
-        }
+    let Some(pipeline) = ready_pipeline(
+        pipeline_cache.get_render_pipeline_state(upscale_id.0),
+        "render-scale",
+    ) else {
+        return; // The shader or one of its imports has not loaded yet.
     };
     let Some(view_binding) = view_uniforms.uniforms.binding() else {
         return; // The render world's first view-uniform upload has not produced a binding yet.
@@ -544,6 +566,40 @@ fn render_scale_upscale(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's damage-model picture and the upscale pass must distinguish a
+    /// pending shader from a terminal failure, without needing a GPU to test that policy.
+    #[test]
+    fn shipped_render_pipeline_errors_fail_loudly() {
+        use bevy::shader::ShaderCacheError;
+        for name in ["render-scale", "game's damage-model picture"] {
+            for error in [
+                ShaderCacheError::ProcessShaderError("fixture invalid source".into()),
+                ShaderCacheError::CreateShaderModule("fixture invalid module".into()),
+            ] {
+                let state = CachedPipelineState::Err(error);
+                let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    ready_pipeline(&state, name);
+                }))
+                .expect_err("a terminal shader error must fail the consuming pass");
+                assert!(failure.downcast_ref::<String>().unwrap().contains(name));
+            }
+        }
+    }
+
+    #[test]
+    fn pending_render_shaders_defer_the_pass() {
+        use bevy::shader::{Shader, ShaderCacheError};
+        for state in [
+            CachedPipelineState::Queued,
+            CachedPipelineState::Err(ShaderCacheError::ShaderNotLoaded(
+                Handle::<Shader>::default().id(),
+            )),
+            CachedPipelineState::Err(ShaderCacheError::ShaderImportNotYetAvailable),
+        ] {
+            assert!(ready_pipeline(&state, "fixture pass").is_none());
+        }
+    }
 
     /// The shipped default is native, and native means NO override — the zero-cost path. `Some(full)`
     /// would be a different, worse answer: it still schedules the upscale pass, and

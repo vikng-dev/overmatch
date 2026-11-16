@@ -99,8 +99,7 @@ impl MuzzleVfxAssets {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, sharpness, 0.0, 1.0),
-                // glow.y = 1.0: the additive blend contract (see `vfx_billboard.wgsl`) — premultiply
-                // by coverage so transparent texels add nothing (kills the old orange square).
+                // glow.y = 1.0: the additive blend flag (`vfx_billboard.wesl`'s fragment output).
                 glow: Vec4::new(self.renderer.flash_boost, 1.0, 0.0, 0.0),
             },
             atlas,

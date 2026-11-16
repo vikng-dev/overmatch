@@ -552,7 +552,10 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
             let bound = world.get::<ColliderAabb>(entity).unwrap();
             let at = world.get::<Position>(entity).unwrap().0;
             let rotation = world.get::<Rotation>(entity).unwrap().0;
-            let expected = world.get::<Collider>(entity).unwrap().aabb(at, rotation);
+            let expected = world
+                .get::<Collider>(entity)
+                .unwrap()
+                .aabb(at, rotation, 0.0);
             // Resolution: the engine's collision margin may expand the broad-phase bounds;
             // containment, rather than equality, is the spatial query contract.
             assert!(
@@ -989,22 +992,23 @@ fn settled_freed_matter_rests_within_avians_rest_window() {
                 if at_rest(piece) {
                     return true;
                 }
-                let linear = world.get::<LinearVelocity>(piece).unwrap().length_squared();
-                let angular = world
-                    .get::<AngularVelocity>(piece)
-                    .unwrap()
-                    .length_squared();
-                (linear < (threshold.linear * length_unit).powi(2)
-                    && angular < threshold.angular.powi(2))
-                    || world
-                        .get::<avian3d::dynamics::solver::solver_body::SolverBody>(piece)
-                        .unwrap()
-                        .kinetic_speed_squared(
-                            *world.get::<ComputedMass>(piece).unwrap(),
-                            *world.get::<ComputedAngularInertia>(piece).unwrap(),
-                            *world.get::<Rotation>(piece).unwrap(),
+                crate::avian_ext::rest_test::at_rest(
+                    world
+                        .resource::<avian3d::dynamics::solver::solver_body::SolverBodies>()
+                        .get(
+                            *world
+                                .get::<avian3d::dynamics::solver::solver_body::SolverBodyIndex>(
+                                    piece,
+                                )
+                                .unwrap(),
                         )
-                        < (threshold.linear * length_unit).powi(2)
+                        .unwrap(),
+                    threshold,
+                    length_unit,
+                    *world.get::<ComputedMass>(piece).unwrap(),
+                    *world.get::<ComputedAngularInertia>(piece).unwrap(),
+                    *world.get::<Rotation>(piece).unwrap(),
+                )
             });
         quiet = if resting { quiet + dt } else { 0.0 };
         if quiet >= rest + allowance {
@@ -2350,7 +2354,14 @@ fn collider_valid_hulls_with_collapsed_law_boundaries_are_refused_at_load() {
         })
         .collect::<Vec<_>>();
     assert!(
-        Collider::convex_hull(thin.iter().copied().map(Vec3::from_array).collect()).is_some(),
+        Collider::convex_hull(
+            &thin
+                .iter()
+                .copied()
+                .map(Vec3::from_array)
+                .collect::<Vec<_>>()
+        )
+        .is_some(),
         "the fixture must reach the law-block gate"
     );
     let c = kind.layout.chunks[0] as usize;
@@ -4678,7 +4689,7 @@ fn reconciliation_prepares_the_same_ordered_geometry_across_workers() {
             .map(
                 |(parent, element, chunk, collider, position, rotation, friction)| {
                     let ordinal = world.get::<Breakage>(parent.parent()).unwrap().construction;
-                    let aabb = collider.aabb(position.0, *rotation);
+                    let aabb = collider.aabb(position.0, *rotation, 0.0);
                     (
                         ordinal,
                         element.map(|e| e.0),
@@ -5251,7 +5262,7 @@ fn detected_targets_keep_lookahead_contacts_through_intake() {
             .unwrap()
             .0;
         // Fixture: a solver look-ahead point on the fixed target's face, separated by 1 mm.
-        let face = Vec3::new(target.aabb(Vec3::ZERO, Quat::IDENTITY).max.x, 0.0, 0.0);
+        let face = Vec3::new(target.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0).max.x, 0.0, 0.0);
         let (unjudged, kept) = app
             .world_mut()
             .run_system_once(move |hooks: SweepContacts, mut commands: Commands| {
@@ -5949,7 +5960,7 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
         ));
         install_standing_colliders(&mut app, root);
         app.init_resource::<ShapeInsertions>().add_observer(
-            |_: On<Insert, Collider>, mut insertions: ResMut<ShapeInsertions>| insertions.0 += 1,
+            |_: On<Insert<Collider>>, mut insertions: ResMut<ShapeInsertions>| insertions.0 += 1,
         );
         // Fixture: the upper two members leave together, then split into individual bodies.
         let group = vec![1, 2];
@@ -6217,56 +6228,6 @@ fn absorbed_cut_and_unsupported_matter_keep_their_combined_momentum() {
     assert!((after_p - before_p).length() < tolerance * before_p.length());
     assert!((after_l - before_l).length() < tolerance * before_l.length());
     assert!(after_energy <= before_energy * (1.0 + tolerance));
-}
-
-/// The game's environment physics: prepared contact mass survives insertion and follows shape,
-/// scale and density changes. Tripwire for the vendored `with_mass_properties_cache` patch
-/// (`vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`), which every chunk collider that is no
-/// sensor prepares on workers.
-#[test]
-fn prepared_contact_mass_is_valid_at_insertion_and_invalidates_with_its_inputs() {
-    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
-    // Fixture: an asymmetric convex box exposes centre and inertia as well as mass.
-    let points = [0.0, 1.0]
-        .into_iter()
-        .flat_map(|x| {
-            [0.0, 2.0]
-                .into_iter()
-                .flat_map(move |y| [0.0, 3.0].map(move |z| Vec3::new(x, y, z)))
-        })
-        .collect();
-    let hull = Collider::convex_hull(points).unwrap();
-    let density = ColliderDensity::default().0;
-    let expected = hull.mass_properties(density);
-    let cached = hull.clone().with_mass_properties_cache(density);
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, crate::offline_physics()));
-    app.finish();
-    app.cleanup();
-    let entity = app.world_mut().spawn((Transform::default(), cached)).id();
-    assert_eq!(
-        *app.world().get::<ColliderMassProperties>(entity).unwrap(),
-        ColliderMassProperties::from(expected)
-    );
-    let mut cached = app.world().get::<Collider>(entity).unwrap().clone();
-    assert_eq!(
-        cached.mass_properties(density * 2.0),
-        hull.mass_properties(density * 2.0)
-    );
-    cached.set_scale(Vec3::splat(2.0), 10);
-    let mut scaled = hull;
-    scaled.set_scale(Vec3::splat(2.0), 10);
-    assert_eq!(
-        cached.mass_properties(density),
-        scaled.mass_properties(density)
-    );
-    cached.set_shape(Collider::sphere(1.0).shape().clone());
-    let mut replaced = Collider::sphere(1.0);
-    replaced.set_scale(Vec3::splat(2.0), 10);
-    assert_eq!(
-        cached.mass_properties(density),
-        replaced.mass_properties(density)
-    );
 }
 
 /// The game's scenery recorder distinguishes retained collider reassignment from fresh shapes;

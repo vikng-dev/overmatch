@@ -9,6 +9,7 @@
 /// The counting global allocator a zero-allocation test reads.
 pub(crate) mod alloc_count;
 mod avian_body_query_gap;
+mod avian_body_size_metrics;
 mod avian_broad_phase_layers;
 mod avian_child_pose_churn;
 mod avian_collider_of_removal;
@@ -17,6 +18,8 @@ mod avian_contact_reduction;
 mod avian_island_sleep;
 mod avian_moved_aabb_prune;
 mod avian_moved_lists;
+mod avian_narrow_phase;
+mod avian_prepared_mass;
 mod avian_spawn_batch;
 mod avian_warm_start;
 mod bevy_ktx2_uastc_fallback;

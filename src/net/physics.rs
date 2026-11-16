@@ -15,6 +15,11 @@ use bevy::prelude::*;
 /// handed one by Avian's `ColliderOf` hook, decomposed from world matrices an ULP off a unit
 /// scale, and the collector refuses armour at any scale but a bit-exact 1 (`ballistics::collect`).
 pub(crate) fn plugin(app: &mut App) {
+    app.add_systems(
+        RunFixedMainLoop,
+        crate::avian_ext::child_poses::place_child_colliders
+            .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
+    );
     app.configure_sets(
         FixedPostUpdate,
         (
@@ -24,6 +29,16 @@ pub(crate) fn plugin(app: &mut App) {
             .chain()
             .in_set(PhysicsSystems::Prepare),
     );
+}
+
+/// Shared offline/network policy and the game-owned Avian seams.
+/// Recycling must stay off: reuse returns before the belt's band filter and wake hook.
+pub(crate) fn extensions(app: &mut App) {
+    app.insert_resource(avian3d::prelude::NarrowPhaseConfig {
+        recycle_distance: 0.0,
+        ..default()
+    })
+    .add_plugins(crate::avian_ext::plugin);
 }
 
 /// Plugin set required by `LightyearAvianPlugin`: transform sync and interpolation belong to
@@ -39,6 +54,24 @@ mod tests {
     use avian3d::physics_transform::PhysicsTransformSystems;
     use bevy::ecs::schedule::{NodeId, SystemSet};
     use bevy::prelude::*;
+
+    /// A recycled pair bypasses the belt filter and its wake. Every shared physics root must
+    /// regenerate candidates so the driving pass's current band reaches the solver.
+    #[test]
+    fn shared_physics_keeps_contact_recycling_off() {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            super::physics_plugins(),
+        ));
+        assert_eq!(
+            app.world()
+                .resource::<avian3d::prelude::NarrowPhaseConfig>()
+                .recycle_distance,
+            0.0
+        );
+    }
 
     /// In the networked composition, collider propagation is ordered before `TransformToPosition`,
     /// which `update_collider_scale` and the mass-property sets follow. Without the edge their

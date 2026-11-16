@@ -137,7 +137,7 @@ impl BeltFace {
     }
 }
 
-/// Avian 0.7 permits one hook set. The construction sweep judges speculative points first;
+/// Avian 0.8 permits one hook set. The construction sweep judges speculative points first;
 /// surviving shoe contacts carry the belt's motion and the field's grip at the patch.
 #[derive(SystemParam)]
 pub(crate) struct WorldContacts<'w, 's> {
@@ -177,8 +177,11 @@ impl CollisionHooks for WorldContacts<'_, '_> {
                 .get(of.body)
                 .expect("a moving shoe face hangs on its spawn-built driving body");
             // A resting tank's band may be stale (`TrackRise`). Past the construction sweep's
-            // filter, the hook runs only for a candidate contact, so a moving body's wakes the tank
-            // (removing `Sleeping` wakes its island), whatever either face's filtering keeps.
+            // filter, the hook runs for each fresh candidate (recycling is disabled by the shared
+            // physics policy). NarrowPhaseSystems::Update's ParallelCommands flush at the automatic
+            // ApplyDeferred sync point before PhysicsStepSystems::Solver: removing Sleeping
+            // queues WakeBody through its on-remove hook, waking the island before solver bodies
+            // and constraints prepare, whatever face filtering keeps.
             let moves = |body: Entity| {
                 let (body, rests) = self.bodies.get(body).expect(
                     "a contact's body keeps its `RigidBody`: Avian drops its pairs with it",

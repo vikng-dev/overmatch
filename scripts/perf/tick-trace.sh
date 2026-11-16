@@ -70,11 +70,13 @@ kill -0 "$SPID" || { echo "the server died in the empty window, before any clien
 window empty "$w0" "$w1"
 
 # The client is the same build with its spans filtered off at their callsites; its own trace file
-# is the near-empty proof.
+# is the near-empty proof. bevy_transform is named because Bevy's `trace` feature compiles its
+# propagation spans in (bevy_internal 0.20.1, `bevy_transform/trace`): unfiltered they wrote
+# 2.1 million records in one run (MEASURED, 52e587fb).
 (cd "$REPO" && exec env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 \
    OVERMATCH_SERVER=127.0.0.1:5888 OVERMATCH_HARNESS="$SCRIPT" \
    TRACE_CHROME="$OUT/$LABEL.client.trace-off.json" \
-   RUST_LOG="bevy_ecs=warn,bevy_app=warn" "$CLIENT" >"$CLOG" 2>&1) &
+   RUST_LOG="bevy_ecs=warn,bevy_app=warn,bevy_transform=warn" "$CLIENT" >"$CLOG" 2>&1) &
 CPID=$!
 start=$EPOCHREALTIME
 until grep -q 'harness: input slot' "$CLOG" 2>/dev/null; do

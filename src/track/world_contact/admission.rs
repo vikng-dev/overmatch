@@ -74,7 +74,7 @@ fn refuse_unsupported(candidate: Candidate<'_>, sources: &Sources) {
 }
 
 fn admit_inserted(
-    inserted: On<Insert, (Collider, CollisionLayers, FieldSurface)>,
+    inserted: On<Insert<(Collider, CollisionLayers, FieldSurface)>>,
     colliders: Query<(
         Entity,
         &Collider,
@@ -115,10 +115,17 @@ fn admit_changed(
     changed
         .par_iter()
         .for_each(|candidate| refuse_unsupported(candidate, &sources));
-    // A despawned collider has no world-contact obligation; the many-query skips it.
+    // A removed marker may outlive its collider or entity: neither still has geometry to admit.
+    use bevy::ecs::query::QueryEntityError;
     colliders
         .par_iter_many(sensors.read().chain(fields.read()))
-        .for_each(|candidate| refuse_unsupported(candidate, &sources));
+        .for_each(|candidate| match candidate {
+            Ok(candidate) => refuse_unsupported(candidate, &sources),
+            Err(QueryEntityError::NotSpawned(_) | QueryEntityError::QueryDoesNotMatch(..)) => {}
+            Err(e @ QueryEntityError::AliasedMutability(_)) => {
+                unreachable!("a read-only many-query cannot alias: {e}")
+            }
+        });
 }
 
 #[cfg(test)]

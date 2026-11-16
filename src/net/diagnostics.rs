@@ -64,7 +64,7 @@ pub(crate) fn fixed_nan_probe(
         let bad = position.is_some_and(|p| poisoned(p.0))
             || rotation.is_some_and(|r| bad_rotation(r.0))
             || collider_transform
-                .is_some_and(|t| poisoned(t.translation) || bad_rotation(t.rotation.0));
+                .is_some_and(|t| poisoned(t.translation) || bad_rotation(t.rotation));
         if bad {
             panic!(
                 "net: FIXED-NAN part {entity} ({:?}): pos={:?} rot={:?} collider_transform={:?}",
@@ -124,7 +124,7 @@ pub(crate) fn nan_tripwire(
 }
 
 /// Log the first replicated tank marker.
-pub(crate) fn log_connected(add: On<Add, Connected>) {
+pub(crate) fn log_connected(add: On<Add<Connected>>) {
     info!("client: connected (entity {})", add.entity);
 }
 

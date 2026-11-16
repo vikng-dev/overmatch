@@ -157,7 +157,7 @@ pub(crate) fn set_print_lanes(params: &mut TerrainBlendParams, table: &GroundTyp
 
 /// The print's ground weights from the mask's painted weights `mask` (R recesses, G slopes,
 /// B lowlands), in slot order: the base pack where the mask is silent, each layer by its painted
-/// weight, normalised. `terrain_blend.wgsl`'s `print_weights` is this law, line for line.
+/// weight, normalised. `terrain_blend.wesl`'s `print_weights` is this law, line for line.
 pub(crate) fn print_weights(mask: Vec3) -> Vec4 {
     let base = 1.0 - (mask.x + mask.y + mask.z).clamp(0.0, 1.0);
     let weights = Vec4::new(base, mask.x, mask.y, mask.z).max(Vec4::ZERO);
@@ -166,14 +166,14 @@ pub(crate) fn print_weights(mask: Vec3) -> Vec4 {
 
 /// The depth (m) a shoe's sole, its lowest face, sinks to under a ground pressure of `kpa` (kPa),
 /// on ground of print weights `weights` ([`print_weights`]), from the material's own lanes: each
-/// slot's `softness × pressure`, capped, blended. `terrain_blend.wgsl`'s `sinkage` is this law.
+/// slot's `softness × pressure`, capped, blended. `terrain_blend.wesl`'s `sinkage` is this law.
 pub(crate) fn sinkage_m(params: &TerrainBlendParams, weights: Vec4, kpa: f32) -> f32 {
     weights.dot(params.print_cap.min(params.print_softness * kpa))
 }
 
 /// The print's depth (m) where a point of the shoe `clearance_m` above its sole bore `kpa`: the
 /// sole's sinkage less that clearance, none where the point stays above the ground.
-/// `terrain_blend.wgsl`'s `texel_sunk` is this law on a near-store texel, and its `sunk_at` filters
+/// `terrain_blend.wesl`'s `texel_sunk` is this law on a near-store texel, and its `sunk_at` filters
 /// those depths, never the channels.
 pub(crate) fn print_depth_m(
     params: &TerrainBlendParams,
@@ -229,7 +229,7 @@ const _: () = assert!(0.0 < MACRO_AMPLITUDE && MACRO_AMPLITUDE < 1.0);
 /// coarsest pack ([`TEXTURE_TILE_M`] is the base pack's, [`BLEND_LAYERS`] the rest).
 const _: () = assert!(MACRO_PERIOD_M > 2.0 * TEXTURE_TILE_M);
 
-/// The uniform block `terrain_blend.wgsl` reads — the whole CPU→shader contract, and the single
+/// The uniform block `terrain_blend.wesl` reads — the whole CPU→shader contract, and the single
 /// home of every number the blend law uses.
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
 pub(crate) struct TerrainBlendParams {
@@ -331,7 +331,7 @@ impl From<&TerrainBlend> for TerrainAblate {
 
 impl MaterialExtension for TerrainBlend {
     fn fragment_shader() -> ShaderRef {
-        "shaders/terrain_blend.wgsl".into()
+        "shaders/terrain_blend.wesl".into()
     }
 
     fn specialize(

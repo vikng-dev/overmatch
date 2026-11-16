@@ -73,7 +73,7 @@ fn record_unreachable(mut closed: MessageReader<MatchClosed>, mut probe: ResMut<
     }
 }
 
-fn record_connected(_: On<Add, Connected>, mut probe: ResMut<Probe>) {
+fn record_connected(_: On<Add<Connected>>, mut probe: ResMut<Probe>) {
     probe.connected_at.get_or_insert_with(Instant::now);
 }
 

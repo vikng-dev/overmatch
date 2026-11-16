@@ -1,160 +1,104 @@
-//! Quitting: the two holes between "bevy wants to exit" and "the process is gone".
+//! Retire rendering before window teardown, and route macOS Cmd+Q through `AppExit`.
 //!
-//! Both are macOS-shaped, both were found the same afternoon by sampling a wedged `overmatch`
-//! (2026-07-27, M4 / macOS 26.5 / Metal), and they compound: the second one is what makes Cmd+Q
-//! look like a crash, and the first one is why routing Cmd+Q anywhere else would not have helped.
-//!
-//! # Hole 1 — bevy's exit teardown DEADLOCKS against its own render thread
-//!
-//! MEASURED, from `sample(1)` on a hung debug build:
-//!
-//! ```text
-//! main thread:   -[NSApplication terminate:] / winit internal_exit
-//!                  -> Event::LoopExiting -> bevy_winit exiting() -> World::clear_all()
-//!                  -> drop_in_place<RenderAppChannels> -> recv_blocking -> __psynch_cvwait
-//! render thread: SubApp::update -> Render schedule -> MultiThreadedExecutor
-//!                  -> blocked waiting for a NON-SEND system to be run on the MainThreadExecutor
-//! ```
-//!
-//! `bevy_render::pipelined_rendering` hands the render `SubApp` to a render thread each frame and
-//! takes it back inside `renderer_extract`, which waits with
-//! `scope_with_executor(true, Some(&main_thread_executor), …)` — i.e. it TICKS the main-thread
-//! executor while it waits, which is the only way the render schedule's main-thread-pinned systems
-//! ever run. `RenderAppChannels`' `Drop` waits with a bare `recv_blocking()` instead, and
-//! `bevy_winit`'s `exiting()` calls `World::clear_all()`, which runs that `Drop`. So if the render
-//! thread still owes a non-send system when the app decides to exit, the main thread parks waiting
-//! for the render thread and the render thread parks waiting for the main thread. Forever.
-//!
-//! The render schedule ALWAYS owes one on macOS: `bevy_render::view::window::create_surfaces` takes
-//! a `NonSendMarker` under `#[cfg(any(target_os = "macos", target_os = "ios"))]`. Our own
-//! [`settings::probe`](crate::settings) adds a second on every platform. Upstream: bevy#12912
-//! (open since 2024), repro bevy#24035, fix bevy#24059 — open, milestone 0.20, NOT in 0.19.
-//!
-//! MEASURED here, driving the real `-[NSApplication terminate:]` from inside the process (the
-//! literal Cmd+Q menu action, no debugger attached): **4/4 hung** without this module, **8/8 exited
-//! 0** with it. The same hang reproduces through the window's close button, so it is the EXIT that
-//! is broken, not Cmd+Q. It is a timing race, not a certainty — the same trials on a release build
-//! exited cleanly 4/4 before the fix, and bevy#24059's author measures "20-40% of the time on Apple
-//! Silicon" — which is exactly the shape of an intermittent "sometimes it quits, sometimes it
-//! wedges" report.
-//!
-//! [`recall_render_app`] is that fix at OUR altitude, with no vendored crate: it wraps
-//! `RenderExtractApp`'s extract function (public API — `take_extract`/`set_extract`), which is the
-//! one hook that runs on the main thread AFTER the render app has been handed over and BEFORE the
-//! winit runner notices the exit. When an [`AppExit`] is pending it pulls the render app back the
-//! way `renderer_extract` does — ticking the main-thread executor — and drops it there. That clears
-//! `RenderAppChannels`' "still in the render thread" flag, so the `Drop` inside `clear_all()`
-//! becomes a no-op and cannot park. The render thread then sees its channel close and returns.
-//!
-//! # Hole 2 — Cmd+Q never becomes an `AppExit` at all
+//! The final render update must finish while the main world still owns its windows. During
+//! `World::clear_all`, a render-thread `RawHandleWrapper` removal can otherwise drop the last
+//! native window owner. On macOS, winit 0.30.13's `Window::drop` synchronously dispatches its close
+//! onto AppKit's main queue (`platform_impl/macos/window.rs`); Bevy 0.20.1's
+//! `RenderAppChannels::drop` pumps the ECS executor, not that queue. [`retire_renderer_on_exit`]
+//! receives and drops the render app before winit reaches `clear_all`, preserving those owners.
 //!
 //! winit installs the standard macOS app menu, whose Quit item sends `-[NSApplication terminate:]`.
 //! winit does NOT implement `applicationShouldTerminate:` (there are zero hits for it in the
 //! crate); it only observes `NSApplicationWillTerminateNotification`, which fires when termination
 //! is already irrevocable. From there it closes the windows and emits `LoopExiting` straight into
-//! `clear_all()` — no `AppExit`, no `Last`-schedule shutdown work, and no chance for hole 1's fix
-//! to have run. Upstream: bevy#9499, bevy#20316 (both open).
+//! `clear_all()` — no `AppExit` and no `Last`-schedule shutdown work. Upstream: bevy#9499, bevy#20316 (both open).
 //!
 //! [`terminate`] closes that by adding `applicationShouldTerminate:` to winit's delegate class at
 //! runtime and answering `NSTerminateCancel`, recording the request instead. A system then writes
 //! [`AppExit::Success`], so Cmd+Q takes EXACTLY the path the window's close button takes — which is
-//! the path hole 1's fix sits on.
+//! the ordinary shutdown path.
 //!
 //! Answering `NSTerminateCancel` also means a logout/restart initiated while the game is running is
 //! cancelled rather than honoured; the app quits by itself a frame later, so the retry succeeds.
 //! The alternative (`NSTerminateLater` + `replyToApplicationShouldTerminate:`) needs AppKit to pump
 //! a run loop bevy does not own, which is a worse trade than one re-asked logout.
 
-use bevy::app::AppExit;
-use bevy::ecs::message::Messages;
 use bevy::ecs::schedule::MainThreadExecutor;
 use bevy::prelude::*;
-use bevy::render::pipelined_rendering::{RenderAppChannels, RenderExtractApp};
+use bevy::render::RenderApp;
+use bevy::render::pipelined_rendering::{
+    PipelinedRenderingPlugin, RenderAppChannels, RenderExtractApp,
+};
 use bevy::tasks::ComputeTaskPool;
 
 /// Mounted once per WINDOWED root, and every windowed root is one of these four:
 /// [`ClientPlugin`](crate::ClientPlugin) (single-player and the offline feel test),
 /// [`NetClientPlugin`](crate::NetClientPlugin), and the two dev sandboxes
 /// ([`sandbox::plugin`](crate::sandbox::plugin), [`track_sandbox::plugin`](crate::track_sandbox)) —
-/// which mount `DefaultPlugins` themselves and are therefore on the same deadlocking exit path. The
+/// which mount `DefaultPlugins` themselves and share the same menu route. The
 /// sandboxes reach this through their own crate-internal plugin, so nothing here needs to be `pub`
 /// for the `bin/` shells that run them.
 ///
 /// The headless server has no render app and no application menu, so there is nothing here for it
 /// to do; it is the one root that does not mount this.
 pub(crate) fn plugin(app: &mut App) {
-    recall_render_app_on_exit(app);
+    app.add_plugins(RetireRenderer);
     #[cfg(target_os = "macos")]
     app.add_plugins(terminate::TerminateRoute);
 }
 
-/// Wrap `RenderExtractApp`'s extract so that the frame which decides to exit also pulls the render
-/// app back out of the render thread. See the module doc for why this is the hook.
-///
-/// Ordering is the whole point: `SubApps::update` runs the main schedule (where `AppExit` is
-/// written), then `sub_app.extract(main_world)` — this function — and the winit runner only checks
-/// for the exit after `App::update` returns. So this is the last main-thread code to run before
-/// `bevy_winit`'s `exiting()` calls `World::clear_all()`.
-fn recall_render_app_on_exit(app: &mut App) {
-    // No render app (headless), or pipelined rendering disabled: nothing owes anything.
-    let Some(extract_app) = app.get_sub_app_mut(RenderExtractApp) else {
-        return;
-    };
-    let Some(mut inner) = extract_app.take_extract() else {
-        return;
-    };
-    let mut recalled = false;
-    extract_app.set_extract(move |main_world, extract_world| {
-        // Past the recall the render app is gone — dropped, on this thread, on the exit frame. A
-        // second recall, and bevy's own extract just as much, would wait on a render thread that
-        // has nothing left to send: the exact hang this exists to prevent. There is also nothing
-        // left to extract FOR, so the whole hand-off simply stops. (bevy stops updating after an
-        // `AppExit` anyway; this is the belt to that braces.)
-        if recalled {
+/// The render retire, decided in `finish` so the answer does not depend on whether this root added
+/// `DefaultPlugins` before or after the quit plugin.
+struct RetireRenderer;
+
+impl Plugin for RetireRenderer {
+    fn build(&self, _app: &mut App) {}
+
+    fn finish(&self, app: &mut App) {
+        // No render thread to retire: a windowless root mounts no pipelined rendering, and a
+        // GPU-less one (`backends: None`) mounts it with no `RenderApp` to pipeline. `RenderApp`
+        // is still a sub-app here; `PipelinedRenderingPlugin::cleanup` moves it to its thread.
+        if !app.is_plugin_added::<PipelinedRenderingPlugin>()
+            || app.get_sub_app(RenderApp).is_none()
+        {
             return;
         }
-        inner(main_world, extract_world);
-        if !exit_pending(main_world) {
-            return;
-        }
-        recalled = true;
-        recall_render_app(main_world);
-    });
-}
-
-/// Is this the frame that ends the app? Read off the message buffer rather than a cursor because
-/// there is no state to keep: any `AppExit` at all, from any writer, means `bevy_winit` is about to
-/// stop the loop and tear the world down.
-fn exit_pending(world: &World) -> bool {
-    world
-        .get_resource::<Messages<AppExit>>()
-        .is_some_and(|exits| !exits.is_empty())
-}
-
-/// Pull the render `SubApp` back to the main thread and drop it there, ticking the main-thread
-/// executor while waiting — the same handshake `bevy_render`'s `renderer_extract` performs, and the
-/// one `RenderAppChannels`' `Drop` is missing.
-///
-/// Dropping it HERE rather than leaking it is deliberate: the render world's non-send data (the
-/// wgpu surface, the Metal objects behind it) was created on the main thread and is documented by
-/// bevy as needing to be dropped there. This is that drop, just early enough to still be possible.
-fn recall_render_app(world: &mut World) {
-    if !world.contains_resource::<RenderAppChannels>()
-        || !world.contains_resource::<MainThreadExecutor>()
-    {
-        return;
+        let extract = app.get_sub_app_mut(RenderExtractApp).expect(
+            "PipelinedRenderingPlugin, added after RenderPlugin, builds RenderExtractApp beside \
+             the RenderApp it pipelines",
+        );
+        retire_renderer_on_exit(extract);
     }
-    world.resource_scope(|world, main_thread_executor: Mut<MainThreadExecutor>| {
-        world.resource_scope(|_world, mut channels: Mut<RenderAppChannels>| {
-            let render_app = ComputeTaskPool::get().scope_with_executor(
-                true,
-                Some(&*main_thread_executor.0),
-                |scope| {
-                    scope.spawn(async { channels.recv().await });
-                },
-            );
-            // On the main thread, by construction — see the doc above.
-            drop(render_app);
+}
+
+fn retire_renderer_on_exit(extract: &mut SubApp) {
+    let mut inner = extract
+        .take_extract()
+        .expect("PipelinedRenderingPlugin installs its renderer extract with RenderExtractApp");
+    let mut retired = false;
+    extract.set_extract(move |main, render| {
+        if retired {
+            return;
+        }
+        inner(main, render);
+        if main.resource::<Messages<AppExit>>().is_empty() {
+            return;
+        }
+        retired = true;
+        main.resource_scope(|main, executor: Mut<MainThreadExecutor>| {
+            main.resource_scope(|main, mut channels: Mut<RenderAppChannels>| {
+                let returned = ComputeTaskPool::get()
+                    .scope_with_executor(true, Some(&executor.0), |scope| {
+                        scope.spawn(async { channels.recv().await });
+                    })
+                    .pop()
+                    .expect("the scope returns the one receive it spawned");
+                // `None`: the render thread panicked in the exit frame and closed its channel.
+                // Bevy's `renderer_extract` answers a closed channel with the same error exit.
+                if returned.is_none() {
+                    main.write_message(AppExit::error());
+                }
+            });
         });
     });
 }
@@ -333,7 +277,7 @@ mod terminate {
     /// dev sandboxes run) is Continuous while FOCUSED and reactive at 60 Hz while not, and a Cmd+Q
     /// from the Dock's menu arrives unfocused. Demanding `Continuous` in both slots would cry wolf
     /// on every sandbox boot while catching nothing, and a guard that is normally wrong is a guard
-    /// nobody reads. What genuinely breaks Half B is a mode that can wait a long time — or, at
+    /// nobody reads. What strands a quit is a mode that can wait a long time — or, at
     /// `Duration::MAX`, forever — for an event that cancelling a terminate never produces.
     fn stalls_quit(mode: UpdateMode) -> bool {
         match mode {
@@ -375,7 +319,7 @@ mod terminate {
         }
 
         /// The guard has to be silent on every update mode this repo actually ships and loud on the
-        /// ones that would break Half B. The first two rows are the reason it is not a
+        /// ones that would strand a quit. The first two rows are the reason it is not a
         /// `== Continuous` check.
         #[test]
         fn the_latency_guard_fires_only_on_modes_that_can_swallow_a_quit() {
@@ -404,117 +348,113 @@ mod terminate {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use bevy::app::SubApp;
-
     use super::*;
 
-    /// Headless sandbox roots mount the shared quit helper too. Without winit there is no
-    /// application delegate; requiring one would refuse a valid windowless composition.
+    /// Window teardown may invalidate renderer inputs. Every AppExit writer, including capture
+    /// completion and Cmd+Q, needs the pipelined render app dropped before winit clears the world,
+    /// whichever order the root mounts the renderer and this plugin in: here this plugin comes
+    /// first, before `RenderExtractApp` exists. Fails if the retire is decided at build.
     #[test]
-    fn a_windowless_root_needs_no_application_delegate() {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(plugin);
-        app.update();
-    }
+    fn an_exit_frame_retires_the_render_app_before_window_teardown() {
+        use bevy::app::AppExit;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
 
-    /// The exact version string cargo resolved for a crate, read out of the lockfile. Pulled in at
-    /// COMPILE time, so the tripwire below is re-evaluated the moment `Cargo.lock` moves rather
-    /// than whenever someone remembers to look.
-    fn locked_version<'lock>(lock: &'lock str, crate_name: &str) -> Option<&'lock str> {
-        let mut lines = lock.lines();
-        while let Some(line) = lines.next() {
-            if line.trim_end() != format!("name = \"{crate_name}\"") {
-                continue;
-            }
-            // Cargo writes `version` on the line after `name`, but scan rather than index it: a
-            // lockfile format change should make this return `None` (and fail loudly at the call
-            // site) instead of quietly reading the wrong field.
-            for next in lines.by_ref() {
-                if let Some(rest) = next.trim().strip_prefix("version = \"") {
-                    return rest.strip_suffix('"');
-                }
-                if next.trim().is_empty() {
-                    break;
-                }
+        #[derive(Resource)]
+        struct Retired(Arc<AtomicBool>);
+        impl Drop for Retired {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
             }
         }
-        None
-    }
 
-    /// UPSTREAM TRIPWIRE, and this one is a DELETION notice rather than a defect pin.
-    ///
-    /// [`recall_render_app_on_exit`] exists for exactly one upstream defect — bevy#12912, whose fix
-    /// (PR #24059, `RenderAppChannels::drop` learning to tick the `MainThreadExecutor`) is open
-    /// against milestone **0.20**. On the bevy bump that lands it, Half A becomes redundant: not
-    /// wrong, not harmful, just a wrapper doing by hand what the `Drop` now does for itself — and
-    /// therefore a thing that will sit in this tree forever unless something says otherwise.
-    ///
-    /// **This test is that something.** When it fails, the removal checklist is:
-    ///   1. confirm the bump actually carries #24059 (`RenderAppChannels::drop` in the new
-    ///      `bevy_render` — if it still calls a bare `recv_blocking()`, the fix did NOT land and
-    ///      Half A must stay; only widen the version check below);
-    ///   2. delete [`recall_render_app_on_exit`], [`recall_render_app`], [`exit_pending`] and
-    ///      `the_wrapper_still_runs_bevys_extract`, plus the
-    ///      `RenderExtractApp`/`RenderAppChannels`/`MainThreadExecutor`/
-    ///      `ComputeTaskPool` imports and "Hole 1" from the module doc;
-    ///   3. KEEP the whole `terminate` module — Half B answers a winit gap (no
-    ///      `applicationShouldTerminate:` at all; bevy#9499, bevy#20316), which #24059 does not
-    ///      touch and which nothing upstream has fixed;
-    ///   4. delete this test and `locked_version`.
-    #[test]
-    fn bevy_render_is_still_the_0_19_that_needs_half_a() {
-        let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock"));
-        let version = locked_version(lock, "bevy_render")
-            .expect("bevy_render has a [[package]] entry in Cargo.lock with a version field");
-        assert!(
-            version.starts_with("0.19."),
-            "bevy_render is now {version} — upstream PR #24059's RenderAppChannels fix likely \
-             shipped, so quit.rs's Half A (the render-app recall wrapper) is probably redundant. \
-             Verify, then delete Half A, KEEP Half B (winit still has no terminate hook), and \
-             delete this test. Full checklist on this test's doc comment.",
-        );
-    }
-
-    /// Build a main-world `App` carrying a `RenderExtractApp` whose extract counts its calls —
-    /// the shape `PipelinedRenderingPlugin::build` leaves behind, minus a renderer.
-    ///
-    /// The counter is an `Arc`, deliberately, and NOT a `static`: `cargo test` runs these in
-    /// parallel on one process, so a shared counter reset per call makes each test's assertions
-    /// depend on the other's scheduling.
-    fn app_with_counting_extract() -> (App, Arc<AtomicUsize>) {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&calls);
+        let retired = Arc::new(AtomicBool::new(false));
         let mut app = App::new();
-        app.add_message::<AppExit>();
-        let mut extract_app = SubApp::new();
-        extract_app.set_extract(move |_main, _sub| {
-            counter.fetch_add(1, Ordering::Relaxed);
+        app.add_plugins(MinimalPlugins);
+        let mut render = SubApp::new();
+        render.insert_resource(Retired(Arc::clone(&retired)));
+        app.insert_sub_app(RenderApp, render);
+        app.add_plugins((plugin, PipelinedRenderingPlugin));
+        app.finish();
+        app.cleanup();
+        app.update();
+        assert!(
+            !retired.load(Ordering::Relaxed),
+            "ordinary frames keep rendering alive"
+        );
+        app.add_systems(Update, |mut exit: MessageWriter<AppExit>| {
+            exit.write(AppExit::Success);
         });
-        app.insert_sub_app(RenderExtractApp, extract_app);
-        (app, calls)
+        app.update();
+        assert_eq!(app.should_exit(), Some(AppExit::Success));
+        assert!(
+            retired.load(Ordering::Relaxed),
+            "rendering must retire before winit's World::clear_all"
+        );
+        // An extra update must not wait for a renderer that has already retired.
+        app.update();
     }
 
-    /// The wrapper is a wrapper: bevy's own extract still runs, every frame, exit or no exit.
-    /// Getting this wrong would stop the renderer rather than fix the shutdown.
+    /// A render thread that panics in the exit frame closes its channel, and the retire receives
+    /// nothing. The app exits with an error, as Bevy's own extract does on a closed channel, so the
+    /// process's exit code reports the render failure. Fails if the retire discards the empty
+    /// receive: the exit stays `Success`.
     #[test]
-    fn the_wrapper_still_runs_bevys_extract() {
-        let (mut app, calls) = app_with_counting_extract();
-        recall_render_app_on_exit(&mut app);
-        app.update();
-        app.update();
-        assert_eq!(calls.load(Ordering::Relaxed), 2);
+    fn a_render_thread_lost_in_the_exit_frame_exits_with_an_error() {
+        use bevy::app::AppExit;
+        use bevy::ecs::schedule::ScheduleLabel;
 
-        // …including on the frame that decides to exit.
-        app.world_mut().write_message(AppExit::Success);
-        app.update();
-        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        fn fail_the_exit_frame() {
+            panic!("the render app fails its exit frame");
+        }
 
-        // But NOT after it: the render app has been recalled and dropped, so bevy's extract would
-        // be waiting on a render thread with nothing left to send.
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        let mut render = SubApp::new();
+        render.update_schedule = Some(First.intern());
+        render.add_systems(First, fail_the_exit_frame);
+        app.insert_sub_app(RenderApp, render);
+        app.add_plugins((plugin, PipelinedRenderingPlugin));
+        app.add_systems(Update, |mut exit: MessageWriter<AppExit>| {
+            exit.write(AppExit::Success);
+        });
+        app.finish();
+        app.cleanup();
         app.update();
-        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        assert_eq!(app.should_exit(), Some(AppExit::error()));
+    }
+
+    /// A root without a window or a renderer needs neither exit route: no application delegate,
+    /// and no render thread, whether it mounts no pipelined rendering (windowless) or mounts it
+    /// with no `RenderApp` to pipeline (GPU-less, the headless fixtures' shape). Fails if the
+    /// retire is keyed on the pipelined plugin alone.
+    #[test]
+    fn a_root_without_a_window_or_renderer_needs_no_exit_route() {
+        for pipelined in [false, true] {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins);
+            if pipelined {
+                app.add_plugins(PipelinedRenderingPlugin);
+            }
+            app.add_plugins(plugin);
+            app.finish();
+            app.cleanup();
+            app.update();
+        }
+    }
+
+    /// Pipelined rendering mounted before its `RenderApp` existed builds nothing (Bevy reads
+    /// `PipelinedRenderingPlugin` added before `RenderPlugin` as "do nothing"); the root is
+    /// refused at finish, naming the order, rather than left without its retire.
+    #[test]
+    #[should_panic(expected = "PipelinedRenderingPlugin, added after RenderPlugin")]
+    fn a_renderer_without_its_pipelined_extract_is_refused() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, PipelinedRenderingPlugin));
+        app.insert_sub_app(RenderApp, SubApp::new());
+        app.add_plugins(plugin);
+        app.finish();
     }
 }

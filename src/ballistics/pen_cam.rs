@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use avian3d::prelude::{CollisionLayers, LayerMask, PhysicsPlugins, RigidBody};
+use avian3d::prelude::{CollisionLayers, LayerMask, RigidBody};
 use bevy::time::TimeUpdateStrategy;
 use serde::Deserialize;
 
@@ -625,7 +625,7 @@ pub(super) fn fixture_tanks(
     app.add_plugins((
         MinimalPlugins,
         AssetPlugin::default(),
-        PhysicsPlugins::default(),
+        crate::offline_physics(),
     ))
     .init_asset::<Mesh>()
     .insert_resource(TimeUpdateStrategy::ManualDuration(STEP))

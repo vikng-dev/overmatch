@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 
 use bevy::prelude::*;
+use lightyear::link::prelude::Endpoint;
 use lightyear::prelude::server::{ClientOf, Server};
 use lightyear::prelude::*;
 use lightyear_transport::channel::registry::ChannelKind;
@@ -607,7 +608,7 @@ fn queue_damage(
 }
 
 fn forget_route_on_projectile_removal(
-    remove: On<Remove, Projectile>,
+    remove: On<Remove<Projectile>>,
     shots: Query<&Shot>,
     mut transport: ResMut<ShotTransport>,
 ) {
@@ -687,7 +688,7 @@ fn observe_reliable_outbox(
 }
 
 fn flush_shot_transport(
-    servers: Query<&Server>,
+    servers: Query<&Endpoint, With<Server>>,
     timeline: Res<LocalTimeline>,
     mut transport: ResMut<ShotTransport>,
     mut metrics: ResMut<ShotTransportMetrics>,

@@ -607,18 +607,21 @@ mod tests {
     pub(super) const STEP_S: f32 = 1.0 / 30.0;
 
     /// The corner's systems over a headless app, the player's tank (the shooter's combatant), an
-    /// empty store and bevy's shared default image ([`default_image_kept`]), one frame run.
+    /// empty store, an idle keyboard and mouse, no turret pivot, empty collider
+    /// trees and bevy's shared default image ([`default_image_kept`]), one frame run.
     fn corner_app(settings: Settings) -> (App, Entity) {
-        corner_app_with(settings, |_| {})
+        corner_app_with(settings, |_| {}, |_, _| {})
     }
 
-    /// [`corner_app`] with `mount` run among its plugins, before the app finishes.
+    /// [`corner_app`] with `mount` run among its plugins, before the app finishes, and `world`
+    /// given the app and the player's tank before the first frame.
     pub(super) fn corner_app_with(
         settings: Settings,
         mount: impl FnOnce(&mut App),
+        world: impl FnOnce(&mut App, Entity),
     ) -> (App, Entity) {
         let mut app = App::new();
-        app.set_error_handler(bevy::ecs::error::ignore);
+        app.set_error_handler(bevy::ecs::error::match_severity);
         app.add_plugins((
             TaskPoolPlugin::default(),
             AssetPlugin::default(),
@@ -643,12 +646,22 @@ mod tests {
             .init_resource::<Time>()
             .init_resource::<Time<Real>>()
             .init_resource::<ShotExplanations>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<crate::camera::TurretPivot>()
+            .init_resource::<avian3d::collider_tree::ColliderTrees>()
             .insert_resource(settings);
         app.world_mut()
             .resource_mut::<Assets<Image>>()
             .insert(&Handle::<Image>::default(), Image::default())
             .unwrap();
         wire(&mut app);
+        app.add_systems(
+            Update,
+            load_stand_ins
+                .after(killcam::KillCamGateSet)
+                .before(view::prepare_stage),
+        );
         // A 4K corner's detail: the headless app has no window for the UI to size the corner in.
         app.insert_resource(super::super::picture::PictureDetail {
             corner: Some(super::super::picture::tests::DETAIL),
@@ -658,11 +671,25 @@ mod tests {
             .world_mut()
             .spawn((SHOOTER, CombatantLife(0), Controlled))
             .id();
+        world(&mut app, player);
         app.update();
         (app, player)
     }
 
-    /// A stage view of `report`'s tank file standing in for its glb: the root and the hull node.
+    /// The game's damage-model view fixture must resume a routed system panic; otherwise a
+    /// broken invariant in a corner system can leave the fixture's later assertions green.
+    #[test]
+    #[should_panic(expected = "fixture routed panic")]
+    fn the_corner_resumes_routed_panics() {
+        drop(corner_app_with(
+            Settings::default(),
+            |app| {
+                app.add_systems(Update, || panic!("fixture routed panic"));
+            },
+            |_, _| {},
+        ));
+    }
+
     fn stage_ready(app: &mut App, report: &PenetrationReport) {
         stage_of(
             app,
@@ -673,31 +700,56 @@ mod tests {
         );
     }
 
-    /// A stage view of tank file `vehicle` standing in for its glb.
+    /// Tank files whose stage assets load in the fixture ([`stage_of`]).
+    #[derive(Resource, Default)]
+    struct StandIns(BTreeSet<String>);
+
+    /// Tank file `vehicle`'s stage assets load: once the slot rigs the corner and spawns the stage
+    /// view (`Rig::ready`), [`load_stand_ins`] gives the view what its glb and tank file would.
     pub(super) fn stage_of(app: &mut App, vehicle: &str) {
-        let vehicle = vehicle.to_owned();
-        let path = crate::assets::asset_root().join(&vehicle);
+        app.world_mut()
+            .get_resource_or_init::<StandIns>()
+            .0
+            .insert(vehicle.to_owned());
+    }
+
+    /// Loads a spawned stage view's assets in place of the headless app's loaders, which have none
+    /// for a glb or a tank file: the tank file's asset at the handle the view holds, and under the
+    /// view's root the hull node and a node per servo of the glb's scene. A view of a tank file
+    /// [`stage_of`] has not named is never placed, as a view whose glb has not loaded.
+    fn load_stand_ins(
+        mut commands: Commands,
+        staged: Option<Res<StageView>>,
+        stand_ins: Option<Res<StandIns>>,
+        asset_server: Res<AssetServer>,
+        mut specs: ResMut<Assets<TankSpec>>,
+        loaded: Query<(), With<Children>>,
+    ) {
+        // No view spawned, or none whose assets load: nothing to load.
+        let (Some(staged), Some(stand_ins)) = (staged, stand_ins) else {
+            return;
+        };
+        if !stand_ins.0.contains(&staged.vehicle) || loaded.contains(staged.root) {
+            return;
+        }
+        let path = crate::assets::asset_root().join(&staged.vehicle);
         let spec: TankSpec = crate::provenance::from_shipped_str(
             crate::tank::TANK_SPEC_PATH,
             &std::fs::read_to_string(path).expect("the tank file"),
         )
         .expect("the tank file parses");
-        let world = app.world_mut();
-        let root = world
-            .spawn((Transform::IDENTITY, Visibility::Hidden, CornerRig))
-            .id();
-        world.spawn((
-            Name::new(view::HULL_NODE),
-            Transform::IDENTITY,
-            ChildOf(root),
-        ));
-        for name in spec.servos.keys() {
-            world.spawn((Name::new(name.clone()), Transform::IDENTITY, ChildOf(root)));
-        }
-        let spec = world.resource_mut::<Assets<TankSpec>>().add(spec);
-        let mut view = StageView::standing_in(spec, root);
-        view.vehicle = vehicle;
-        world.insert_resource(view);
+        commands.entity(staged.root).with_children(|scene| {
+            scene.spawn((Name::new(view::HULL_NODE), Transform::IDENTITY));
+            for name in spec.servos.keys() {
+                scene.spawn((Name::new(name.clone()), Transform::IDENTITY));
+            }
+        });
+        let handle = asset_server
+            .get_handle::<TankSpec>(bevy::asset::AssetPath::parse(staged.vehicle.as_str()))
+            .expect("a spawned stage view holds its tank file's handle");
+        specs
+            .insert(handle.id(), spec)
+            .expect("the view's tank file handle is live");
     }
 
     /// How long `report`'s corner runs in its verdict's frame ([`stage::pace`]); a component's
@@ -1294,9 +1346,7 @@ mod tests {
         use bevy::render::render_resource::TextureFormat;
 
         let (mut app, player) = xray_app(Settings::default());
-        app.insert_resource(Bindings::default())
-            .init_resource::<ButtonInput<KeyCode>>()
-            .init_resource::<ButtonInput<MouseButton>>();
+        app.insert_resource(Bindings::default());
         let component = report("s9_breech_and_loader").components[0].name.clone();
         let world = app.world_mut();
         let standard = world
@@ -1840,6 +1890,23 @@ mod tests {
         for mesh in meshes {
             assert!(wears_the_look(&mut app, mesh), "dressed afresh: {mesh:?}");
         }
+    }
+
+    /// The game's damage-model view reads mask depths directly; a tone-mapping pass
+    /// would transform those values before the look shader samples them.
+    #[test]
+    fn mask_depth_cameras_bypass_tonemapping() {
+        use super::super::look::MaskCamera;
+        use bevy::core_pipeline::tonemapping::Tonemapping;
+
+        let (mut app, _, _, _) = world_xray_app();
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        let world = app.world_mut();
+        let mut cameras = world.query_filtered::<&Tonemapping, With<MaskCamera>>();
+        let modes: Vec<_> = cameras.iter(world).copied().collect();
+        assert_eq!(modes.len(), 2, "the viewer owns both depth masks");
+        assert!(modes.iter().all(|mode| *mode == Tonemapping::None));
     }
 
     /// A corner that needs masks opening while the x-ray is on: two mask sets, each on its own

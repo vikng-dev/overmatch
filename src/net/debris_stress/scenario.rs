@@ -129,7 +129,7 @@ impl Scenario {
                 "raise clearance to cover the hull's tilt below its unrotated bottom",
             ));
         }
-        let collider = Collider::convex_hull(vertices)
+        let collider = Collider::convex_hull(&vertices)
             .ok_or_else(|| invalid("fragment_hull_m", "author a nondegenerate convex volume"))?;
         let hull = collider
             .shape()

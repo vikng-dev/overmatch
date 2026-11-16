@@ -413,7 +413,7 @@ mod tests {
             app.add_plugins((
                 bevy::time::TimePlugin,
                 bevy::transform::TransformPlugin,
-                avian3d::prelude::PhysicsPlugins::default(),
+                crate::offline_physics(),
             ))
             .insert_resource(bevy::time::TimeUpdateStrategy::FixedTimesteps(1));
         }

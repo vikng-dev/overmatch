@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use avian3d::prelude::{
     AngularInertia, CollisionLayers, LayerMask, LinearVelocity, Mass, NoAutoAngularInertia,
-    NoAutoMass, PhysicsPlugins, RigidBody,
+    NoAutoMass, RigidBody,
 };
 use bevy::ecs::message::Messages;
 use bevy::time::TimeUpdateStrategy;
@@ -74,7 +74,7 @@ fn recording_world_under(client: bool, pose: ChildPose) -> App {
     app.add_plugins((
         MinimalPlugins,
         AssetPlugin::default(),
-        PhysicsPlugins::default(),
+        crate::offline_physics(),
     ))
     .init_asset::<Mesh>()
     .insert_resource(TimeUpdateStrategy::ManualDuration(TICK))
@@ -89,7 +89,7 @@ fn recording_world_under(client: bool, pose: ChildPose) -> App {
     if let ChildPose::Networked = pose {
         app.add_systems(
             RunFixedMainLoop,
-            lightyear::avian3d::plugin::LightyearAvianPlugin::update_child_collider_position
+            crate::avian_ext::child_poses::place_child_colliders
                 .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
         );
     }
@@ -942,7 +942,7 @@ fn scoring_world() -> (App, Entity, Entity) {
     app.init_resource::<crate::ShotClock>()
         .init_resource::<KnockoutFacts>()
         .add_observer(
-            |add: On<Add, TankKnockedOut>, mut facts: ResMut<KnockoutFacts>| {
+            |add: On<Add<TankKnockedOut>>, mut facts: ResMut<KnockoutFacts>| {
                 facts.transitions.push(add.entity);
             },
         )

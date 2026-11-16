@@ -5,8 +5,8 @@
 //!
 //! A belt's mesh is its rung's shoe repeated once per material link ([`repeated_shoe`]): the
 //! authored geometry untouched, every vertex tagged with the link it belongs to
-//! ([`ATTRIBUTE_BELT_LINK`]). The vertex shader (`shaders/track_belt_mesh.wgsl`, placing through
-//! `shaders/track_belt.wgsl`) reads that link's span from the belt's block of the shared table and
+//! ([`ATTRIBUTE_BELT_LINK`]). The vertex shader (`shaders/track_belt_mesh.wesl`, placing through
+//! `shaders/track_belt.wesl`) reads that link's span from the belt's block of the shared table and
 //! places the vertex rigidly, as [`BeltFrames::pose`] places the shoe on the CPU: the template
 //! correction, the swing about the belt's lateral axis onto the chord, the anchor. A shoe is never
 //! stretched or bent.
@@ -107,14 +107,14 @@ pub(crate) const ATTRIBUTE_BELT_LINK: MeshVertexAttribute =
 pub(crate) const LINK_LOCATION: u32 = 15;
 
 /// The belt's vertex shader, for the main pass and the prepass alike (`PREPASS_PIPELINE` selects).
-const MESH_SHADER: &str = "shaders/track_belt_mesh.wgsl";
+const MESH_SHADER: &str = "shaders/track_belt_mesh.wesl";
 
 /// Bytes in one table record: one `vec4<f32>`.
 const RECORD_BYTES: usize = 16;
 
 /// Records a belt's block starts with, before its spans: the mesh → canonical rotation's three
 /// columns (`xyz`), then the canonical origin in mesh space (`xyz`) and the shoe's lateral centre
-/// in the belt's frame (`w`). `shaders/track_belt.wgsl`'s `belt_at` reads them in this order.
+/// in the belt's frame (`w`). `shaders/track_belt.wesl`'s `belt_at` reads them in this order.
 const HEADER_RECORDS: u32 = 4;
 /// DERIVED from the table's u32 record addresses, reserving the placement header.
 pub(crate) const MAX_BELT_LINKS: usize = (u32::MAX - HEADER_RECORDS) as usize;
@@ -260,7 +260,7 @@ impl BeltTable {
         let capacity = records.max(PAGE_RECORDS);
         let mut page = TablePage {
             buffer: buffers.add(ShaderBuffer::new(
-                &vec![0; capacity as usize * RECORD_BYTES],
+                vec![0u8; capacity as usize * RECORD_BYTES],
                 RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
             )),
             free: vec![Range {
@@ -696,8 +696,7 @@ impl BeltAssets<'_> {
             .get_mut(&self.table.pages[page].buffer)
             .expect("lend owns the page's storage buffer")
             .into_inner()
-            .data
-            .as_mut()
+            .cast_slice_mut::<u8>()
             .expect("belt pages retain MAIN_WORLD data for table writes");
         write_header(bytes, &block, frames);
         write_spans(bytes, &block, frames);
@@ -705,7 +704,7 @@ impl BeltAssets<'_> {
         Some((
             Mesh3d(mesh),
             MeshMaterial3d(material),
-            MeshTag(block.start),
+            MeshTag::new(block.start),
             BeltDraw { page, block, reach },
             NoAutoAabb,
             Aabb::from_min_max(low, high),
@@ -741,8 +740,7 @@ fn upload_belt_frames(
             .get_mut_untracked(&page.buffer)
             .expect("a page retains its storage buffer");
         let bytes = buffer
-            .data
-            .as_mut()
+            .cast_slice_mut::<u8>()
             .expect("belt pages retain MAIN_WORLD data for frame uploads");
         write_spans(bytes, &draw.block, frames);
         written[draw.page] = true;
@@ -969,14 +967,14 @@ mod tests {
             "one count, rung and side, one mesh"
         );
 
-        let tag = |world: &World, belt: Entity| world.get::<MeshTag>(belt).expect("a tag").0;
+        let tag = |world: &World, belt: Entity| world.get::<MeshTag>(belt).expect("a tag").value;
         let page = world.resource::<BeltTable>().pages[0].buffer.clone();
         let bytes = world
             .resource::<Assets<ShaderBuffer>>()
             .get(&page)
             .expect("the page")
-            .data
-            .clone()
+            .cast_slice::<u8>()
+            .map(<[u8]>::to_vec)
             .expect("a main-world page");
         let mut starts: Vec<u32> = belts.iter().map(|&belt| tag(&world, belt)).collect();
         for &belt in &belts {
@@ -1109,12 +1107,12 @@ mod tests {
             vec![page],
             "the page reaches the render world in the frame its table changed, once",
         );
-        let block = app.world().get::<MeshTag>(belt).expect("a tag").0;
+        let block = app.world().get::<MeshTag>(belt).expect("a tag").value;
         let bytes = app
             .world()
             .resource::<Assets<ShaderBuffer>>()
             .get(page)
-            .and_then(|page| page.data.clone())
+            .and_then(|page| page.cast_slice::<u8>().map(<[u8]>::to_vec))
             .expect("a main-world page");
         let [a, b] = app
             .world()

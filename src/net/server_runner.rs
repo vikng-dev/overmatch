@@ -437,7 +437,7 @@ mod tests {
                     ..default()
                 }),
                 LocalAddr(server_addr),
-                ServerUdpIo::default(),
+                ServerUdpIo,
             ))
             .id();
         app.world_mut().commands().trigger(Start { entity: server });

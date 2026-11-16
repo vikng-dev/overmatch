@@ -152,13 +152,13 @@ const ALLOWED_IDENTIFIERS: &[(&str, &str, &str)] = &[
 const ALLOWED_CITATIONS: &[(&str, &str, &str)] = &[
     (
         "src/track/shadow_proxy.rs",
-        "vendor/bevy_pbr-0.19.1-scalar-math/src/render/light.rs",
+        "vendor/bevy_pbr-0.20.1-overmatch/src/render/light.rs",
         "The alpha-mode/`MAY_DISCARD` match arm, cited alongside its symbol. Vendored third-party \
          code moves only when we re-vendor, and each re-vendor re-pins this one by line on purpose.",
     ),
     (
         "src/track/shadow_proxy.rs",
-        "vendor/bevy_pbr-0.19.1-scalar-math/src/render/pbr_prepass_functions.wgsl",
+        "vendor/bevy_pbr-0.20.1-overmatch/src/render/pbr_prepass_functions.wesl",
         "A WGSL fragment-shader body. There is no item path to cite in a shader — the line IS the \
          only handle.",
     ),
@@ -176,7 +176,7 @@ const UNIVERSE_FILES: &[&str] = &["Cargo.toml", "Cargo.lock"];
 /// Text extensions read into the universe. Everything else under [`UNIVERSE_DIRS`] (textures,
 /// meshes, fonts) is skipped.
 const UNIVERSE_EXTS: &[&str] = &[
-    "rs", "wgsl", "ron", "toml", "txt", "sh", "py", "yml", "yaml", "lock", "json",
+    "rs", "wesl", "ron", "toml", "txt", "sh", "py", "yml", "yaml", "lock", "json",
 ];
 
 /// This file, which neither contributes to the universe nor is scanned — see the module doc.

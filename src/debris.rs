@@ -3,27 +3,27 @@
 //! and the debris stress lever's fixture fragments (`net::debris_stress`). The authority
 //! alone simulates a piece; a replica draws it at the pose the network carries. A piece is a body
 //! with [`DebrisPiece`]; its colliders are the body's own ([`RigidBodyColliders`]). Paths below
-//! are under `vendor/avian3d-0.7.0-child-pose/src/`.
+//! are under `vendor/avian3d-0.8.0-overmatch/src/`.
 //!
-//! REST IS AVIAN'S ISLAND SLEEP, THEN A FREEZE. A piece spawns a dynamic body. Avian 0.7 links
+//! REST IS AVIAN'S ISLAND SLEEP, THEN A FREEZE. A piece spawns a dynamic body. Avian 0.8 links
 //! dynamic bodies through touching contacts into islands and puts an island to sleep once every
 //! member has passed its rest test for `TimeToSleep`: either both velocity thresholds pass or
 //! kinetic energy per mass is below the linear rest-speed energy (see the vendor's
 //! `OVERMATCH_PATCH.md`). A sleeping body leaves the solver and keeps its mass, so what touches it
 //! next meets finite mass. Only its touching contact pairs move to the sleeping set the narrow
-//! phase skips (`collision/contact_types/contact_graph.rs:797`); a pair that overlaps in bounds
-//! without touching stays active and is recomputed every tick
-//! (`collision/narrow_phase/system_param.rs:480`). A sleeping island of pieces alone that rests on
-//! fixed matter turns static, and turns dynamic again before anything can touch it or as its
-//! support changes ([`freeze`]). An awake body that starts touching a sleeping one wakes its whole island
-//! (`collision/narrow_phase/system_param.rs:247-261`), as does a body or a body's collider of that
-//! island going (`collision/narrow_phase/mod.rs:484,528`). An island sleeps whole: a piece touching
-//! an awake body that is no piece (a driven tank) shares its island and stays awake while it
-//! touches, with every piece that touches it in turn. A tank's sampled support is applied without
-//! the waking force call (`dynamics/rigid_body/forces/query_data.rs:153,797`); its driving pass
-//! alone judges whether it rests (`track::sim::apply_track_forces`), so a parked tank rests with
-//! its pile whatever carries it, and drive demand or a drivetrain step that no longer holds its
-//! belts ends that rest (`track::sim::wake_driven_tanks`).
+//! phase skips (`dynamics/solver/islands/sleeping.rs`, `sleep_islands`); a pair that overlaps in
+//! bounds without touching stays active and its inputs are checked every tick
+//! (`collision/narrow_phase/system_param.rs`, `update_contacts`). A sleeping island of pieces alone
+//! that rests on fixed matter turns static, and turns dynamic again before anything can touch it
+//! or as its support changes ([`freeze`]). An awake body that starts touching a sleeping one queues
+//! its island's wake at solver start (`dynamics/solver/plugin.rs`, `apply_contact_status_changes`),
+//! as does a body or a body's collider of that island going (`collision/narrow_phase/mod.rs`,
+//! `remove_body_on`, `remove_collider_on`). An island sleeps whole: a piece touching an awake body
+//! that is no piece (a driven tank) shares its island and stays awake while it touches, with every
+//! piece that touches it in turn. A tank's sampled support uses `Forces::non_waking`
+//! (`dynamics/rigid_body/forces/query_data.rs`); its driving pass alone judges whether it rests
+//! (`track::sim::apply_track_forces`), so a parked tank rests with its pile whatever carries it,
+//! and drive demand or a drivetrain step that no longer holds its belts ends that rest (`track::sim::wake_driven_tanks`).
 //!
 //! THE WAKES AVIAN LACKS. Avian wakes no body when a support with no dynamic body of its own goes,
 //! is disabled or moves (the TODO in `collision/narrow_phase/mod.rs`, `remove_collider`), so a
@@ -42,8 +42,7 @@
 //! * changes in place ([`wake_on_static_moved`]: a collider of a static body or of none re-posed,
 //!   by its own [`Position`] or [`Rotation`] or by its body's, reshaped or re-layered), read inside
 //!   the step before the broad phase, while the last step's pairs still stand. It relies on the
-//!   vendored avian and lightyear child-pose writers (`vendor/avian3d-0.7.0-child-pose`,
-//!   `vendor/lightyear_avian3d-0.30.1-child-pose`) writing a child collider's pose only when its
+//!   game-owned child-pose writer (`avian_ext::child_poses`) writing a child collider's pose only when its
 //!   bits change, and on avian rescaling a collider only when its scale changes
 //!   (`collision/collider/backend.rs`, `update_collider_scale`): a writer that rewrote either
 //!   every step would wake every sleeper touching a construction every step.
@@ -142,7 +141,7 @@ impl Carried<'_, '_> {
 
 /// A collider about to go: every sleeping body it carries wakes (module doc).
 fn wake_on_collider_gone(
-    gone: On<Discard, ColliderMarker>,
+    gone: On<Discard<ColliderMarker>>,
     carried: Carried,
     mut commands: Commands,
 ) {
@@ -152,7 +151,7 @@ fn wake_on_collider_gone(
 /// A body about to go or change type: every sleeping body any of its colliders carries wakes
 /// (module doc). A body without attached colliders carries nothing.
 fn wake_on_body_gone(
-    gone: On<Discard, RigidBody>,
+    gone: On<Discard<RigidBody>>,
     bodies: Query<&RigidBodyColliders>,
     carried: Carried,
     mut commands: Commands,
@@ -200,7 +199,7 @@ impl Unheld<'_, '_> {
 
 /// A collider disabled: what it carried wakes (module doc).
 fn wake_on_collider_disabled(
-    disabled: On<Add, ColliderDisabled>,
+    disabled: On<Add<ColliderDisabled>>,
     unheld: Unheld,
     mut commands: Commands,
 ) {
@@ -209,7 +208,7 @@ fn wake_on_collider_disabled(
 
 /// A collider turned sensor: what it carried wakes (module doc). A `Sensor` marks a collider;
 /// on any other entity avian reads nothing of it.
-fn wake_on_collider_sensed(sensed: On<Add, Sensor>, unheld: Unheld, mut commands: Commands) {
+fn wake_on_collider_sensed(sensed: On<Add<Sensor>>, unheld: Unheld, mut commands: Commands) {
     if unheld.aabbs.contains(sensed.entity) {
         unheld.wake(sensed.entity, &mut commands);
     }
@@ -218,7 +217,7 @@ fn wake_on_collider_sensed(sensed: On<Add, Sensor>, unheld: Unheld, mut commands
 /// A body disabled: what each of its colliders carried wakes (module doc). A body without
 /// attached colliders carries nothing.
 fn wake_on_body_disabled(
-    disabled: On<Add, RigidBodyDisabled>,
+    disabled: On<Add<RigidBodyDisabled>>,
     bodies: Query<&RigidBodyColliders>,
     unheld: Unheld,
     mut commands: Commands,
@@ -418,7 +417,7 @@ mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
             sim_plugin,
         ))
         .init_asset::<Mesh>()

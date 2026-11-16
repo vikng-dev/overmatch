@@ -15,7 +15,7 @@
 //! changed slots at most once per frame; ageing a sprite modifies no material.
 //!
 //! Each sprite stays its own draw (`NoAutomaticBatching`): Bevy's instanced batch takes its
-//! instance slots by GPU `atomicAdd` (`mesh_preprocess.wgsl`), so a batch would draw a family's
+//! instance slots by GPU `atomicAdd` (`mesh_preprocess.wesl`), so a batch would draw a family's
 //! sprites in an unspecified order, and overlapping alpha-blended ones would composite out of the
 //! back-to-front sort the transparent pass gives them.
 //!
@@ -68,7 +68,7 @@ pub(super) fn plugin(app: &mut App) {
         );
 }
 
-/// The per-sprite lane block `vfx_billboard.wgsl` reads, one lane-table entry per sprite. Three
+/// The per-sprite lane block `vfx_billboard.wesl` reads, one lane-table entry per sprite. Three
 /// `Vec4`s, CPU-packed (see the shader for the lane map) — kept dumb so the WGSL and this struct
 /// can be compared at a glance.
 #[derive(ShaderType, Debug, Clone, Default)]
@@ -78,11 +78,10 @@ pub(crate) struct VfxParams {
     pub frame: Vec4,
     /// x: erosion threshold, y: erosion sharpness, z: life fraction (LUT row), w: overall alpha.
     pub fade: Vec4,
-    /// x: emissive boost at LUT heat 1.0, y: BLEND CONTRACT flag the shader reads — `1.0` = additive
-    /// glow (`AlphaMode::Add`), `0.0` = alpha-over mass (`AlphaMode::Blend`). Both alpha modes share
-    /// the premultiplied blend state, so the shader must premultiply the additive path itself; this
-    /// lane tells it which (see `vfx_billboard.wgsl`). z: soft-particle fade depth in metres
-    /// ([`soft_particle_depth`]), `0.0` = hard-edged. w: reserved.
+    /// x: emissive boost at LUT heat 1.0, y: blend flag (`vfx_billboard.wesl`'s fragment output),
+    /// `1.0` = additive glow (`AlphaMode::Add`), `0.0` = alpha-over mass (`AlphaMode::Blend`).
+    /// z: soft-particle fade depth in metres ([`soft_particle_depth`]), `0.0` = hard-edged.
+    /// w: reserved.
     pub glow: Vec4,
 }
 
@@ -94,7 +93,7 @@ fn lane_stride() -> usize {
 }
 
 /// How far (m) a soft-particle layer fades over as it closes on the geometry behind it — the lane
-/// `vfx_billboard.wgsl` reads out of `VfxParams::glow.z`, and the whole cure for a dust puff meeting
+/// `vfx_billboard.wesl` reads out of `VfxParams::glow.z`, and the whole cure for a dust puff meeting
 /// terrain along the quad's own intersection line.
 ///
 /// Exactly one class carries it: the diffuse MASS volumes (impact dust, dirt, spall; the muzzle's
@@ -108,7 +107,7 @@ pub(crate) fn soft_particle_depth() -> f32 {
 }
 
 /// One FAMILY's flipbook + erosion + gradient-map billboard material (fragment:
-/// `vfx_billboard.wgsl`; vertex: Bevy's default mesh path — facing is done on the entity's
+/// `vfx_billboard.wesl`; vertex: Bevy's default mesh path — facing is done on the entity's
 /// `Transform`, not in the shader). Blend discipline is per family: `AlphaMode::Add` for hot
 /// cores/flashes, `AlphaMode::Blend` for smoke mass (survey trick 9). No prepass, no shadows —
 /// translucent sprites contribute to neither. The per-sprite lanes are not here: `lanes` is the
@@ -128,7 +127,7 @@ pub(crate) struct VfxBillboardMaterial {
 
 impl Material for VfxBillboardMaterial {
     fn fragment_shader() -> ShaderRef {
-        "shaders/vfx_billboard.wgsl".into()
+        "shaders/vfx_billboard.wesl".into()
     }
 
     fn alpha_mode(&self) -> AlphaMode {
@@ -174,7 +173,7 @@ impl FromWorld for BillboardFamilies {
         // unchanged size lets the render world rewrite the same GPU buffer
         // (`GpuShaderBuffer::prepare_asset`), which every family's bind group keeps pointing at.
         let table = ShaderBuffer::new(
-            &vec![0u8; BILLBOARD_SLOTS * lane_stride()],
+            vec![0u8; BILLBOARD_SLOTS * lane_stride()],
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         );
         Self {
@@ -320,7 +319,7 @@ impl BillboardRing {
 
     /// The slot the next spawn takes.
     fn slot(&self) -> MeshTag {
-        MeshTag((self.first_slot + self.next) as u32)
+        MeshTag::new((self.first_slot + self.next) as u32)
     }
 }
 
@@ -520,12 +519,11 @@ fn upload_billboard_lanes(
         .get_mut(&families.lanes)
         .expect("billboard families keep a strong handle to the startup lane table");
     let bytes = table
-        .data
-        .as_mut()
+        .cast_slice_mut::<u8>()
         .expect("the billboard lane table retains its CPU storage for per-frame uploads");
     let stride = lane_stride();
     for (slot, billboard) in &changed {
-        let start = slot.0 as usize * stride;
+        let start = slot.value as usize * stride;
         encase::StorageBuffer::new(&mut bytes[start..start + stride])
             .write(&billboard.lanes)
             .expect("a lane block fills exactly one slot");
@@ -917,11 +915,11 @@ mod tests {
         let table = world
             .resource::<Assets<ShaderBuffer>>()
             .get(&world.resource::<BillboardFamilies>().lanes)
-            .and_then(|table| table.data.as_deref())
+            .and_then(|table| table.cast_slice::<u8>())
             .expect("the lane table keeps its CPU copy");
         let stride = lane_stride();
         for billboard in billboards {
-            let slot = world.get::<MeshTag>(billboard).expect("a slot").0 as usize;
+            let slot = world.get::<MeshTag>(billboard).expect("a slot").value as usize;
             let lanes = lanes(&app, billboard);
             assert!(lanes.fade.z > 0.0, "the billboard aged");
             let mut expected = encase::StorageBuffer::new(Vec::<u8>::new());
@@ -976,7 +974,7 @@ mod tests {
             .world_mut()
             .query_filtered::<&MeshTag, With<Billboard>>()
             .iter(app.world())
-            .map(|tag| tag.0)
+            .map(|tag| tag.value)
             .collect();
         assert_eq!(
             slots.len(),

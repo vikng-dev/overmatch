@@ -1,17 +1,20 @@
-//! GUARD for the vendored child-collider pose patches (`vendor/avian3d-0.7.0-child-pose` and
-//! `vendor/lightyear_avian3d-0.30.1-child-pose`, `OVERMATCH_PATCH.md` in each; records:
-//! `upstream/avian-child-collider-pose-churn.md`, `upstream/lightyear-avian-child-pass-visits.md`).
+//! GUARD for child collider placement, the game's half of the vendored avian3d fork
+//! (`crate::avian_ext::child_poses`; fork: `vendor/avian3d-0.8.0-overmatch`, `OVERMATCH_PATCH.md`,
+//! "Child collider poses"; record: `upstream/avian-child-collider-pose-churn.md`).
 //!
 //! Two invariants. First: a standing static body's child colliders keep their `Position`,
-//! `Rotation` and `ColliderAabb` change ticks across physics steps and across lightyear_avian's
-//! per-frame child pass, so Avian's `update_moved_collider_aabbs` skips them. Stock Avian 0.7.0 and
-//! lightyear_avian3d 0.30.1 rewrite every child's pose unconditionally and fail the first test.
-//! Second: lightyear_avian's child pass visits only the children whose offset, own pose,
-//! attachment or body changed since it last ran, and still carries every one that did; stock
-//! lightyear_avian3d 0.30.1 visits every child every frame and fails the third test. Who relies on
-//! both: the dedicated server, whose map holds every intact construction element as a static
-//! body's child collider, and whose ballistics reads a moving tank's armour, child colliders too,
-//! at the pose this pass leaves between steps. A dependency bump that drops either patch fails here.
+//! `Rotation` and `ColliderAabb` change ticks across physics steps and across the game's
+//! frame-boundary pass, so Avian's `update_moved_collider_aabbs` skips them. Stock Avian 0.8.0
+//! rewrites every child's pose every step. Second: the placement pass visits only the children
+//! whose offset, own pose, attachment or body changed since it last ran, and still carries every
+//! one that did. Who relies on both: the dedicated server, whose map holds every intact
+//! construction element as a static body's child collider, and whose ballistics reads a moving
+//! tank's armour, child colliders too, at the pose this pass leaves between steps. A dependency
+//! bump that registers Avian's own child pass again fails every physics test here (MEASURED on
+//! stock 0.8.0): both passes write child poses in `PhysicsStepSystems::First`, and Avian's
+//! `PhysicsSchedule` refuses that ambiguity when it initializes. One that registers
+//! lightyear_avian's own pass at the frame boundary again fails
+//! `lightyear_position_mode_leaves_the_frame_boundary_to_the_game` (MEASURED).
 //!
 //! The poses, box dimensions and update counts below are fixture data: any off-origin, turned pose
 //! and any count of settling and observed updates exercise the same invariants.
@@ -24,10 +27,13 @@ use bevy::ecs::entity_disabling::Disabled;
 use bevy::ecs::system::{RunSystemOnce, SystemId};
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use lightyear::avian3d::plugin::LightyearAvianPlugin;
 
-/// Avian's default plugins, one 64 Hz step per `update`: the manual clock advances 15 625 µs per
-/// update, DERIVED as 1 s / 64.
+use crate::avian_ext::child_poses::{ReenabledPlugin, place_child_colliders};
+
+/// Avian's default plugins and the game's half of the fork, one 64 Hz step per `update`: the manual
+/// clock advances 15 625 µs per update, DERIVED as 1 s / 64. Contact recycling is off, as the game
+/// composes physics (`net::physics`): a recycled pair keeps last step's contacts and skips the
+/// narrow phase's matching, cache and hooks.
 pub(super) fn physics_app() -> App {
     physics_app_on(App::new())
 }
@@ -41,6 +47,11 @@ pub(super) fn physics_app_on(mut app: App) -> App {
         AssetPlugin::default(),
         PhysicsPlugins::default(),
     ))
+    .add_plugins(crate::avian_ext::plugin)
+    .insert_resource(NarrowPhaseConfig {
+        recycle_distance: 0.0,
+        ..default()
+    })
     .init_asset::<Mesh>()
     .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
         15_625,
@@ -91,8 +102,8 @@ fn ticks(world: &World, child: Entity) -> [Tick; 3] {
     ]
 }
 
-/// A standing static body's child is never re-marked: not by Avian's step, not by lightyear_avian's
-/// per-frame pass. Fails on stock Avian 0.7.0 or lightyear_avian3d 0.30.1 (see the module doc).
+/// A standing static body's child is never re-marked: not by the physics step, not by the frame
+/// boundary's pass. Fails on stock Avian 0.8.0 (see the module doc).
 #[test]
 fn a_standing_static_bodys_child_collider_is_never_re_marked() {
     let mut app = physics_app();
@@ -104,17 +115,15 @@ fn a_standing_static_bodys_child_collider_is_never_re_marked() {
     assert_eq!(
         ticks(app.world(), child),
         settled,
-        "Avian's step re-marked an unmoved static child's (Position, Rotation, ColliderAabb): \
-         is vendor/avian3d-0.7.0-child-pose still the avian3d in the graph?"
+        "the physics step re-marked an unmoved static child's (Position, Rotation, ColliderAabb)"
     );
     app.world_mut()
-        .run_system_once(LightyearAvianPlugin::update_child_collider_position)
+        .run_system_once(place_child_colliders)
         .expect("the child pass runs");
     assert_eq!(
         ticks(app.world(), child),
         settled,
-        "lightyear_avian's child pass re-marked an unmoved static child's pose: is \
-         vendor/lightyear_avian3d-0.30.1-child-pose still the lightyear_avian3d in the graph?"
+        "the frame boundary's child pass re-marked an unmoved static child's pose"
     );
 }
 
@@ -136,12 +145,12 @@ fn a_moved_static_bodys_child_collider_follows_it() {
     );
     app.world_mut().entity_mut(root).insert((pose, turn));
     app.world_mut()
-        .run_system_once(LightyearAvianPlugin::update_child_collider_position)
+        .run_system_once(place_child_colliders)
         .expect("the child pass runs");
     assert_eq!(
         app.world().get::<Position>(child).expect("pose").0,
         expected(pose, turn),
-        "lightyear_avian's child pass left the child behind its moved body"
+        "the child pass left the child behind its moved body"
     );
 
     let (pose, turn) = (
@@ -155,7 +164,7 @@ fn a_moved_static_bodys_child_collider_follows_it() {
     assert_eq!(
         world.get::<Position>(child).expect("pose").0,
         expected(pose, turn),
-        "Avian's step left the child behind its moved body"
+        "the physics step left the child behind its moved body"
     );
     let moved = *world.get::<ColliderAabb>(child).expect("bounds");
     assert_ne!(
@@ -169,12 +178,10 @@ fn a_moved_static_bodys_child_collider_follows_it() {
     );
 }
 
-/// lightyear_avian's child pass registered once and run once, so its change detection carries from
-/// run to run as it does in `RunFixedMainLoop`. The first run visits every child.
+/// The child pass registered once and run once, so its change detection carries from run to run as
+/// it does at the frame boundary. The first run visits every child.
 fn registered_child_pass(app: &mut App) -> SystemId {
-    let pass = app
-        .world_mut()
-        .register_system(LightyearAvianPlugin::update_child_collider_position);
+    let pass = app.world_mut().register_system(place_child_colliders);
     run(app, pass);
     pass
 }
@@ -210,7 +217,7 @@ fn pose(world: &World, child: Entity) -> (Vec3, Quat) {
     )
 }
 
-/// The pose the child takes from the body it is attached to, by lightyear_avian's expressions.
+/// The pose the child takes from the body it is attached to.
 fn carried_pose(world: &World, child: Entity) -> (Vec3, Quat) {
     let local = world
         .get::<ColliderTransform>(child)
@@ -223,15 +230,15 @@ fn carried_pose(world: &World, child: Entity) -> (Vec3, Quat) {
     let turn = world.get::<Rotation>(body).expect("pose");
     (
         pose.0 + turn * local.translation,
-        (turn.0 * local.rotation.0).normalize(),
+        (turn.0 * local.rotation).normalize(),
     )
 }
 
-/// lightyear_avian's child pass reads no child whose offset, own pose, attachment and body all
-/// stood since its last run: a pose planted there without a change tick survives the pass. Fails on
-/// stock lightyear_avian3d 0.30.1, whose pass recomputes every child every frame.
+/// The child pass reads no child whose offset, own pose, attachment and body all stood since its
+/// last run: a pose planted there without a change tick survives the pass. Fails on a pass that
+/// recomputes every child every run, as Avian's and lightyear_avian's own do.
 #[test]
-fn lightyears_child_pass_visits_no_child_whose_inputs_stood() {
+fn the_child_pass_visits_no_child_whose_inputs_stood() {
     let mut app = physics_app();
     let (_, child) = standing_compound(&mut app);
     let pass = registered_child_pass(&mut app);
@@ -240,15 +247,14 @@ fn lightyears_child_pass_visits_no_child_whose_inputs_stood() {
     assert_eq!(
         pose(app.world(), child),
         stale,
-        "lightyear_avian's child pass visited a child whose inputs all stood: is \
-         vendor/lightyear_avian3d-0.30.1-child-pose still the lightyear_avian3d in the graph?"
+        "the child pass visited a child whose inputs all stood"
     );
 }
 
 /// The other half: a change to any input the pass reads brings the child to its body again, over a
 /// pose planted without a change tick.
 #[test]
-fn lightyears_child_pass_carries_a_child_through_each_input_change() {
+fn the_child_pass_carries_a_child_through_each_input_change() {
     let mut app = physics_app();
     let (body, child) = standing_compound(&mut app);
     let (other_body, _) = standing_compound(&mut app);
@@ -294,7 +300,7 @@ fn lightyears_child_pass_carries_a_child_through_each_input_change() {
         assert_eq!(
             pose(world, child),
             carried_pose(world, child),
-            "lightyear_avian's child pass did not carry the child after {change}"
+            "the child pass did not carry the child after {change}"
         );
     }
 }
@@ -303,7 +309,7 @@ fn lightyears_child_pass_carries_a_child_through_each_input_change() {
 /// none of the change ticks the pass reads, so the pass places each entity a `Reenabled` message
 /// names.
 #[test]
-fn lightyears_child_pass_carries_a_child_re_enabled_after_its_body_moved() {
+fn the_child_pass_carries_a_child_re_enabled_after_its_body_moved() {
     let mut app = physics_app();
     let (body, child) = standing_compound(&mut app);
     let pass = registered_child_pass(&mut app);
@@ -316,16 +322,16 @@ fn lightyears_child_pass_carries_a_child_re_enabled_after_its_body_moved() {
     assert_eq!(
         pose(world, child),
         carried_pose(world, child),
-        "lightyear_avian's child pass left a re-enabled child where its body stood"
+        "the child pass left a re-enabled child where its body stood"
     );
 }
 
-/// Avian's pre-physics pass carries a child re-enabled in `Update` frames before the next fixed
-/// step, after its body moved. Render-driven clients can run several frames between ticks, while
-/// Bevy clears removal messages every frame. The walk relies on the re-enable surviving until the
-/// step so its collider pose follows the body. Fixture cadence: four frames per tick.
+/// The physics step's placement pass carries a child re-enabled in `Update` frames before the next
+/// fixed step, after its body moved. Render-driven clients can run several frames between ticks,
+/// while Bevy clears removal messages every frame. The walk relies on the re-enable surviving until
+/// the step so its collider pose follows the body. Fixture cadence: four frames per tick.
 #[test]
-fn avians_pass_carries_a_child_re_enabled_frames_before_the_next_step() {
+fn the_physics_step_carries_a_child_re_enabled_frames_before_the_next_step() {
     #[derive(Resource, Default)]
     struct Steps(u32);
     #[derive(Resource, Default)]
@@ -369,46 +375,20 @@ fn avians_pass_carries_a_child_re_enabled_frames_before_the_next_step() {
     assert_eq!(
         pose(world, child),
         carried_pose(world, child),
-        "Avian's pass left a child re-enabled between steps where its body stood"
+        "the physics step left a child re-enabled between steps where its body stood"
     );
-}
-
-/// Every placement boundary skips unchanged inputs. The server relies on standing map colliders
-/// costing no pose compositions in physics or replication; a pose planted without a tick is the
-/// witness that a pass did not visit it. The standing compound is fixture construction.
-#[test]
-fn physics_and_replication_share_the_changed_input_placement_law() {
-    let mut app = physics_app();
-    let (body, child) = standing_compound(&mut app);
-    let physics = app.world_mut().register_system(
-        avian3d::collision::collider::collider_transform::update_child_collider_position,
-    );
-    let replication = registered_child_pass(&mut app);
-    run(&mut app, physics);
-    for pass in [physics, replication] {
-        run(&mut app, pass);
-        let stale = plant_stale_pose(app.world_mut(), child);
-        run(&mut app, pass);
-        assert_eq!(
-            pose(app.world(), child),
-            stale,
-            "unchanged inputs must not be recomposed"
-        );
-        app.world_mut().get_mut::<Position>(body).unwrap().0 += Vec3::X;
-        run(&mut app, pass);
-        assert_eq!(pose(app.world(), child), carried_pose(app.world(), child));
-    }
 }
 
 /// Every placement boundary reaches a moved body's colliders only through `RigidBodyColliders`,
-/// which Avian's `ColliderOf` hook fills from both entities' `GlobalTransform`. The networked
-/// composition disables `PhysicsTransformPlugin`, which otherwise requires `Transform` on every
-/// body, so a body spawned without one is refused at the attachment; stock Avian skips the link
-/// and leaves the child at its birth pose whenever the body moves.
+/// which Avian's `ColliderOf` hook fills only when both entities have a `GlobalTransform`. The
+/// networked composition disables `PhysicsTransformPlugin`, which otherwise requires `Transform`
+/// on every body, so there a body spawned without one is refused at the attachment; stock Avian
+/// skips the link and leaves the child at its birth pose whenever the body moves.
 #[test]
 #[should_panic(expected = "without a GlobalTransform")]
 fn a_collider_attached_to_a_body_without_a_global_transform_is_refused() {
-    let mut world = World::new();
+    let mut app = networked_attachment_app();
+    let world = app.world_mut();
     let body = world
         .spawn((RigidBody::Static, Position(Vec3::ZERO), Rotation::IDENTITY))
         .id();
@@ -421,12 +401,65 @@ fn a_collider_attached_to_a_body_without_a_global_transform_is_refused() {
     ));
 }
 
+/// The other half: a posed attachment stands whichever side is disabled, as Avian's hook, whose
+/// raw reads see a disabled entity, attaches it. Fails if the refusal reads either side through a
+/// default-filtered query, which skips a `Disabled` entity and refuses the posed attachment.
+#[test]
+fn a_posed_attachment_stands_with_either_side_disabled() {
+    for (body_disabled, collider_disabled) in [(true, false), (false, true)] {
+        let mut app = networked_attachment_app();
+        let world = app.world_mut();
+        let mut body = world.spawn((
+            RigidBody::Static,
+            Position(Vec3::ZERO),
+            Rotation::IDENTITY,
+            GlobalTransform::IDENTITY,
+        ));
+        if body_disabled {
+            body.insert(Disabled);
+        }
+        let body = body.id();
+        let mut collider = world.spawn((
+            Collider::sphere(0.5),
+            Position(Vec3::X),
+            Rotation::IDENTITY,
+            GlobalTransform::from_translation(Vec3::X),
+        ));
+        if collider_disabled {
+            collider.insert(Disabled);
+        }
+        let collider = collider.insert(ColliderOf { body }).id();
+        assert!(
+            world
+                .get::<RigidBodyColliders>(body)
+                .is_some_and(|colliders| colliders.contains(&collider)),
+            "body disabled {body_disabled}, collider disabled {collider_disabled}: Avian's hook \
+             left the posed collider off its body's list"
+        );
+    }
+}
+
+/// Avian's plugins as the networked composition mounts them (`PhysicsTransformPlugin` disabled),
+/// and the game's seams.
+fn networked_attachment_app() -> App {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin::default(),
+        PhysicsPlugins::default()
+            .build()
+            .disable::<PhysicsTransformPlugin>(),
+    ))
+    .add_plugins(crate::avian_ext::plugin);
+    app
+}
+
 /// ColliderOf is the actual physics attachment, including manually attached colliders without a
 /// Transform child relationship. A moved body's collider list must carry that child too.
 #[test]
 fn a_manually_attached_child_follows_its_body_without_transform_children() {
     let mut app = App::new();
-    app.add_plugins(avian3d::collision::collider::collider_transform::ReenabledPlugin);
+    app.add_plugins(ReenabledPlugin);
     let body = app
         .world_mut()
         .spawn((
@@ -450,11 +483,42 @@ fn a_manually_attached_child_follows_its_body_without_transform_children() {
             },
         ))
         .id();
-    let pass = app.world_mut().register_system(
-        avian3d::collision::collider::collider_transform::update_child_collider_position,
-    );
+    let pass = app.world_mut().register_system(place_child_colliders);
     run(&mut app, pass);
     app.world_mut().get_mut::<Position>(body).unwrap().0 += Vec3::Z;
     run(&mut app, pass);
     assert_eq!(pose(app.world(), child).0, Vec3::X + Vec3::Z);
+}
+
+/// Lightyear's Position mode, composed as the game composes it (`net::protocol`, mounted beside
+/// `net::physics`), registers no child-pose pass of its own in `RunFixedMainLoop`: the frame
+/// boundary's slot holds the game's pass alone. Fails if the registration of
+/// `LightyearAvianPlugin::update_child_collider_position` the vendored crate drops
+/// (`vendor/lightyear_avian3d-0.31.0-child-pose`, `OVERMATCH_PATCH.md`) returns: that pass writes
+/// every child's pose through `Mut` each frame, so no change tick survives it.
+#[test]
+fn lightyear_position_mode_leaves_the_frame_boundary_to_the_game() {
+    use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
+    let mut app = App::new();
+    app.add_plugins(LightyearAvianPlugin {
+        replication_mode: AvianReplicationMode::Position {
+            sync_to_transform: false,
+        },
+        register_physics_components: false,
+        ..default()
+    });
+    crate::net::physics::plugin(&mut app);
+    let sets = &app
+        .get_schedule(RunFixedMainLoop)
+        .expect("the game's pass registers in RunFixedMainLoop")
+        .graph()
+        .system_sets;
+    assert!(
+        sets.contains(place_child_colliders.into_system_set()),
+        "fixture: the game's pass holds the frame boundary"
+    );
+    assert!(
+        !sets.contains(LightyearAvianPlugin::update_child_collider_position.into_system_set()),
+        "lightyear registers its own child-pose pass at the frame boundary"
+    );
 }

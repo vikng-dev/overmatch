@@ -678,7 +678,7 @@ mod tests {
     #[test]
     fn a_raised_strike_emits_its_resolved_read_on_the_probed_ground() {
         use crate::ballistics::Impact;
-        use avian3d::prelude::{Collider, CollisionLayers, LayerMask, PhysicsPlugins, RigidBody};
+        use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody};
         use bevy::time::TimeUpdateStrategy;
 
         #[derive(Resource, Default)]
@@ -700,7 +700,7 @@ mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
         ))
         .init_asset::<Mesh>()
         // DERIVED: 1 s / 64, one physics step per update.

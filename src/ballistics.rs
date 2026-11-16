@@ -2398,7 +2398,7 @@ impl ProjectileMarchWorld<'_, '_> {
             .aabb_intersections_with_aabb_callback(probe.aabb(pad), |entity| {
                 let bounds = self.aabbs.get(entity).expect(
                     "a collider the broad phase names carries the ColliderAabb its Collider \
-                     requires (avian3d 0.7)",
+                     requires (avian3d 0.8)",
                 );
                 visit(entity, collect::Probe::Region(*bounds).aabb(pad));
                 true
@@ -4988,7 +4988,7 @@ pub(crate) mod march_tests {
 
     use avian3d::prelude::{
         AngularInertia, AngularVelocity, Collider, CollisionLayers, GravityScale, LayerMask,
-        LinearVelocity, Mass, NoAutoAngularInertia, NoAutoMass, PhysicsPlugins, RigidBody,
+        LinearVelocity, Mass, NoAutoAngularInertia, NoAutoMass, RigidBody,
     };
     use bevy::time::TimeUpdateStrategy;
 
@@ -5131,7 +5131,7 @@ pub(crate) mod march_tests {
             // Avian's collider cache reads `AssetEvent<Mesh>`, so the asset system must be present
             // even though these cuboid colliders carry no mesh handle.
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
         ))
         .init_asset::<Mesh>()
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
@@ -5174,7 +5174,7 @@ pub(crate) mod march_tests {
                 MinimalPlugins,
                 bevy::transform::TransformPlugin,
                 AssetPlugin::default(),
-                PhysicsPlugins::default(),
+                crate::offline_physics(),
             ))
             .init_asset::<Mesh>()
             .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
@@ -5676,7 +5676,7 @@ pub(crate) mod march_tests {
         struct SpawnedShot(Option<ShotId>);
 
         fn capture(
-            add: On<Add, Projectile>,
+            add: On<Add<Projectile>>,
             shots: Query<&Shot>,
             mut spawned: ResMut<SpawnedShot>,
         ) {
@@ -8007,7 +8007,7 @@ pub(crate) mod march_tests {
             .run_system_once(
                 move |world: ProjectileMarchWorld, armour: armour_set::LiveArmour| {
                     let (pose, collider, _) = world.geometry(volume);
-                    let bounds = collider.aabb(pose.position, pose.rotation);
+                    let bounds = collider.aabb(pose.position, pose.rotation, 0.0);
                     let centre = (bounds.min + bounds.max) * 0.5;
                     // Fixture query margin, m: start outside the convex solid and finish beyond it.
                     let margin = 1.0;

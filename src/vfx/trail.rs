@@ -95,7 +95,7 @@ pub(crate) struct TrailStationMeshEvidence {
     pub(crate) indices: usize,
 }
 
-/// The trail ribbon material (fragment: `vfx_trail.wgsl`): scrolled tileable noise, per-vertex age
+/// The trail ribbon material (fragment: `vfx_trail.wesl`): scrolled tileable noise, per-vertex age
 /// erosion, gradient-map coloring. ONE instance serves every trail (see the module doc).
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub(crate) struct VfxTrailMaterial {
@@ -109,7 +109,7 @@ pub(crate) struct VfxTrailMaterial {
     pub lut: Handle<Image>,
 }
 
-/// The static uniform block `vfx_trail.wgsl` reads (lane map in the shader).
+/// The static uniform block `vfx_trail.wesl` reads (lane map in the shader).
 #[derive(ShaderType, Debug, Clone)]
 pub(crate) struct TrailParams {
     /// x: noise scale along the trail (1/m), y: scroll speed, z: erosion sharpness, w: alpha.
@@ -120,7 +120,7 @@ pub(crate) struct TrailParams {
 
 impl Material for VfxTrailMaterial {
     fn fragment_shader() -> ShaderRef {
-        "shaders/vfx_trail.wgsl".into()
+        "shaders/vfx_trail.wesl".into()
     }
 
     fn alpha_mode(&self) -> AlphaMode {
@@ -242,7 +242,7 @@ struct TrailRing(VecDeque<Entity>);
 /// birth tick in whichever schedule spawned it, so a shell whose whole flight resolves between two
 /// rendered frames still has its path captured.
 fn attach_trail(
-    add: On<Add, FlightEffects>,
+    add: On<Add<FlightEffects>>,
     shells: Query<(&ShellPath, Option<&Shot>, &FlightEffects, Has<TrailedShell>)>,
     assets: Res<TrailAssets>,
     time: Res<Time<Fixed>>,
@@ -429,11 +429,11 @@ fn finish_pending_bounces(
     }
 }
 
-/// Bevy 0.19's `On<Remove, T>` runs BEFORE `T` is removed, so a despawning shell's final fixed-tick
+/// Bevy 0.19's `On<Remove<T>>` runs BEFORE `T` is removed, so a despawning shell's final fixed-tick
 /// path is still queryable here. Flush it into the already-detached ribbon synchronously; otherwise a
 /// bounce and terminal between render frames would lose the last segment before `update_trails` saw it.
 fn flush_removed_shell_path(
-    remove: On<Remove, ShellPath>,
+    remove: On<Remove<ShellPath>>,
     shells: Query<(&ShellPath, &PenetrationMarks, Option<&Shot>), With<FlightEffects>>,
     mut trails: Query<&mut TrailRibbon>,
     mut rng: ResMut<ViewRng>,

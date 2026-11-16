@@ -1583,7 +1583,7 @@ mod tests {
             .spawn((
                 crate::net::server::netcode_server(Some(config), admission),
                 LocalAddr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)),
-                ServerUdpIo::default(),
+                ServerUdpIo,
             ))
             .id();
         app.world_mut().commands().trigger(Start { entity: server });

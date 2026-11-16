@@ -124,7 +124,7 @@ impl Bed {
         self.hulls
             .iter()
             .map(|(shape, local)| {
-                let aabb = shape.aabb(p + r * local.translation, r * local.rotation.0);
+                let aabb = shape.aabb(p + r * local.translation, r * local.rotation, 0.0);
                 aabb.min.xz().abs().max(aabb.max.xz().abs()).max_element() - self.face
             })
             .fold(f32::NEG_INFINITY, f32::max)
@@ -224,7 +224,7 @@ impl Containment {
             .hulls
             .iter()
             .map(|(shape, local)| {
-                let aabb = shape.aabb(local.translation, local.rotation);
+                let aabb = shape.aabb(local.translation, local.rotation, 0.0);
                 (aabb.min - center)
                     .abs()
                     .max((aabb.max - center).abs())
@@ -294,7 +294,7 @@ impl Containment {
         let steady = self.push / stiffness;
         // DERIVED: k*x^2/2 <= E + F*x, discarding damping to bound arrival compression.
         let arrival = steady + (steady * steady + 2.0 * self.energy / stiffness).sqrt();
-        // Avian 0.7 refreshes manifolds once per physics tick, outside its solver substeps.
+        // Avian 0.8 refreshes manifolds once per physics tick, outside its solver substeps.
         // DERIVED by Cauchy-Schwarz in the mass metric: any hull point's speed is bounded by
         // sqrt(2E/m_eff). Discovery can add one tick of motion before contact can resist it.
         let discovery = (2.0 * self.energy / self.effective_mass).sqrt() * self.discovery_step;
@@ -377,7 +377,7 @@ fn drive_at_wall(name: &str, yaw: f32, corner: bool, rolling: bool) -> DriveMarg
         .hulls
         .iter()
         .map(|(shape, local)| {
-            let aabb = shape.aabb(local.translation, local.rotation);
+            let aabb = shape.aabb(local.translation, local.rotation, 0.0);
             aabb.max.x - aabb.min.x
         })
         .fold(0.0_f32, f32::max);

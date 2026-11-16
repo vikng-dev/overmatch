@@ -11,6 +11,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 mod aim;
+mod avian_ext;
 /// The embedded armament files, written by `build.rs`: `ROUND_FILES` (`assets/rounds/`) and
 /// `GUN_FILES` (`assets/guns/`), each `(file stem, file text)` in byte order of the stem. The round
 /// and gun registries parse from these alone; no armament file is read at runtime.
@@ -140,7 +141,7 @@ mod presentation_authored;
 /// resolution or stand-in job; an unlabelled value does not load.
 mod provenance;
 /// macOS `Cmd+Q` → [`AppExit`](bevy::app::AppExit) and render-`SubApp` recall to avoid teardown
-/// deadlock against its render thread. Exit-only, no per-frame cost. Mounted once per windowed
+/// deadlock against its render thread. Mounted once per windowed
 /// root ([`ClientPlugin`] / [`NetClientPlugin`]); headless servers have neither render app nor menu.
 mod quit;
 /// `SPIKE_RENDER_COST=<path>` JSONL of Bevy per-pass `elapsed_cpu` / `elapsed_gpu` diagnostics.
@@ -356,7 +357,11 @@ pub(crate) fn server_plugin_floor() -> bevy::app::PluginGroupBuilder {
         .disable::<ui_widgets::ScrollAreaPlugin>()
         .disable::<ui_widgets::ScrollbarPlugin>()
         .disable::<ui_widgets::SliderPlugin>()
-        .disable::<ui_widgets::EditableTextInputPlugin>()
+        .disable::<ui_widgets::TextInputPlugin>()
+        .disable::<ui_widgets::DialogPlugin>()
+        .disable::<ui_widgets::ModalDialogPlugin>()
+        .disable::<ui_widgets::TabPlugin>()
+        .disable::<input_focus::pointer_focus::PointerFocusPlugin>()
         .disable::<text::TextPlugin>()
         .disable::<sprite::SpritePlugin>()
         .disable::<sprite_render::SpriteRenderPlugin>()
@@ -891,6 +896,7 @@ pub(crate) fn offline_physics() -> bevy::app::PluginGroupBuilder {
     PhysicsPlugins::default()
         .with_collision_hooks::<track::stop_contacts::WorldContacts<'static, 'static>>()
         .build()
+        .add(net::physics::extensions)
 }
 
 /// Every moving offline body opts translation/rotation into [`offline_physics`] easing in the
@@ -932,8 +938,8 @@ impl Plugin for GamePlugin {
 
 /// `overmatch --offline`: [`run_client`](net::run_client)'s windowed runtime (exe-relative
 /// asset root, continuous winit updates) plus [`GamePlugin`]. No Lightyear/connection entities
-/// or path to connect.
-pub fn run_offline() {
+/// or path to connect. Returns the app's exit, which `main` reports as the process's exit code.
+pub fn run_offline() -> AppExit {
     let mut app = App::new();
     // Read the player's settings BEFORE the window is described — see `load_at_boot`, which also
     // inserts the values and the boot report into the app.
@@ -994,5 +1000,5 @@ pub fn run_offline() {
     // The ground-type tuning panel, shown while paused; egui compiles only into `dev_ui` builds.
     #[cfg(feature = "dev_ui")]
     app.add_plugins(track_prints::tuning::offline_plugin);
-    app.run();
+    app.run()
 }

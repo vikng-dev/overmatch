@@ -71,7 +71,7 @@ struct FrontierDiag {
 }
 
 /// A (re)connection resets the interpolation timeline, so its first resync is the handshake.
-fn allow_handshake_resync(_connected: On<Add, Connected>, mut diag: ResMut<FrontierDiag>) {
+fn allow_handshake_resync(_connected: On<Add<Connected>>, mut diag: ResMut<FrontierDiag>) {
     diag.handshake_spent = false;
 }
 

@@ -10,7 +10,7 @@
 //! replacement rule — keeps its own corner-second length. A record's corner length follows from
 //! both ([`Pace`]): each frame's lengths below are its minimum (`ux-spec.md` §3, "Time").
 
-use bevy::math::cubic_splines::CubicSegment;
+use bevy::curve::cubic_splines::CubicSegment;
 use bevy::prelude::*;
 
 use crate::damage_cam::ShotVerdict;

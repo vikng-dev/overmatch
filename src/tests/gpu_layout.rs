@@ -10,7 +10,7 @@ use bevy::pbr::{
     GpuClusteredLight, MeshCullingData, MeshInputUniform, MeshUniform,
     decal::clustered::RenderClusteredDecal,
 };
-use bevy::render::render_resource::ShaderType;
+use bevy::render::{mesh::MeshMetadata, render_resource::ShaderType};
 
 fn assert_rust_upload_matches_shader<T: ShaderType>() {
     assert_eq!(
@@ -23,7 +23,8 @@ fn assert_rust_upload_matches_shader<T: ShaderType>() {
 
 #[test]
 fn rust_repr_gpu_uploads_match_shader_layout_sizes() {
-    // Complete publicly reachable inventory from the Bevy 0.19 Rust-repr upload scope audit.
+    // The audited Rust-repr uploads must agree with their Bevy 0.20.1 shader layouts.
+    assert_rust_upload_matches_shader::<MeshMetadata>();
     assert_rust_upload_matches_shader::<MeshUniform>();
     assert_rust_upload_matches_shader::<MeshInputUniform>();
     assert_rust_upload_matches_shader::<MeshCullingData>();
@@ -33,9 +34,8 @@ fn rust_repr_gpu_uploads_match_shader_layout_sizes() {
 
 #[test]
 fn mesh_uniform_scalar_math_layout_matches_bevy_shader_contract() {
-    // DERIVED from the Bevy 0.19 field order and Encase's WGSL alignment rules. Under SIMD glam
-    // these are the same offsets; scalar-math used to remove only the final DERIVED 12 bytes of
-    // padding.
+    // DERIVED from the Bevy 0.20.1 field order and Encase's WGSL alignment rules.
+    // The final metadata index leaves eight bytes of tail padding at shader alignment.
     assert_eq!(align_of::<MeshUniform>(), 16);
     assert_eq!(size_of::<MeshUniform>(), 176);
     assert_eq!(MeshUniform::min_size().get(), 176);
@@ -52,7 +52,8 @@ fn mesh_uniform_scalar_math_layout_matches_bevy_shader_contract() {
             offset_of!(MeshUniform, material_and_lightmap_bind_group_slot),
             offset_of!(MeshUniform, tag),
             offset_of!(MeshUniform, morph_descriptor_index),
+            offset_of!(MeshUniform, metadata_index),
         ],
-        [0, 48, 96, 128, 132, 136, 144, 148, 152, 156, 160]
+        [0, 48, 96, 128, 132, 136, 144, 148, 152, 156, 160, 164]
     );
 }

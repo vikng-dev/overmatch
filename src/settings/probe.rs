@@ -3,7 +3,7 @@
 //! `[Fifo, Mailbox]` and refuses `Immediate`; Vulkan/X11 and Windows usually offer all three. A
 //! platform table would drift with driver/compositor updates.
 //!
-//! Bevy's render-world `WindowSurfaces` keeps its fields private. Create a short-lived surface
+//! Bevy's render-world `SurfaceData` keeps its fields private. Create a short-lived surface
 //! from the primary window's raw handles under `create_surfaces`' unsafe/main-thread contract.
 //! The query configures nothing; the surface drops before return.
 //!
@@ -12,7 +12,7 @@
 //! Without a render app, caps stays Unprobed: offer everything, promise nothing.
 //!
 //! Creation failure and an empty capability list mean Unavailable, never a conclusive negative.
-//! wgpu 29 returns defaults on a failed query or adapter-incompatible surface; any presentable
+//! wgpu 30 returns defaults on a failed query or adapter-incompatible surface; any presentable
 //! surface reports at least `Fifo`. Only a nonempty list such as `[Fifo]` can prove both uncapped
 //! modes absent. See [`PresentCaps`] for why a false negative would spend a stored player choice.
 
@@ -21,8 +21,9 @@ use std::sync::{Arc, Mutex};
 use bevy::ecs::system::NonSendMarker;
 use bevy::prelude::*;
 use bevy::render::renderer::{RenderAdapter, RenderInstance};
-use bevy::render::view::window::ExtractedWindows;
+use bevy::render::view::window::ExtractedWindow;
 use bevy::render::{Render, RenderApp};
+use bevy::window::{PrimaryWindow, RawHandleWrapper};
 
 use super::PresentCaps;
 
@@ -70,7 +71,7 @@ fn caps_from_present_modes(present_modes: &[wgpu::PresentMode]) -> PresentCaps {
 fn probe_present_modes(
     _non_send_marker: NonSendMarker,
     mut done: Local<bool>,
-    windows: Res<ExtractedWindows>,
+    windows: Query<&RawHandleWrapper, (With<ExtractedWindow>, With<PrimaryWindow>)>,
     instance: Res<RenderInstance>,
     adapter: Res<RenderAdapter>,
     channel: Res<ProbeChannel>,
@@ -78,18 +79,17 @@ fn probe_present_modes(
     if *done {
         return;
     }
-    let Some(window) = windows
-        .primary
-        .and_then(|entity| windows.windows.get(&entity))
-    else {
-        return;
+    let handle = match windows.single() {
+        Ok(handle) => handle,
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => return, // Not extracted yet.
+        Err(error) => panic!("the render world has more than one primary window: {error}"),
     };
     let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-        raw_display_handle: Some(window.handle.get_display_handle()),
-        raw_window_handle: window.handle.get_window_handle(),
+        raw_display_handle: Some(handle.get_display_handle()),
+        raw_window_handle: handle.get_window_handle(),
     };
     // SAFETY: the same contract as bevy's `create_surfaces`, on the same handles — the window
-    // handles in `ExtractedWindows` are valid objects to create surfaces on, and the marker above
+    // handles extracted with `ExtractedWindow` are valid objects to create surfaces on, and the marker above
     // keeps this on the main thread where some platforms require it.
     let surface = match unsafe { instance.create_surface_unsafe(target) } {
         Ok(surface) => surface,

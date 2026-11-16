@@ -1,6 +1,8 @@
 //! Avian broad-phase invariant: empty layer masks do no pair-discovery work but retain their
-//! spatial-query proxies. The server and the game's damage model raycasts rely on this split;
-//! game state only. Fixture dimensions and poses below keep every box overlapping.
+//! spatial-query proxies (the avian3d fork's "Pairless-layer broad-phase prune",
+//! `vendor/avian3d-0.8.0-overmatch/OVERMATCH_PATCH.md`). The server and the game's damage model
+//! raycasts rely on this split; game state only. Fixture dimensions and poses below keep every box
+//! overlapping.
 
 use avian3d::{collision::CollisionDiagnostics, prelude::*};
 use bevy::{ecs::system::RunSystemOnce, prelude::*};

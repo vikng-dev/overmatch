@@ -1,14 +1,18 @@
-//! Guards for the vendored body-pair contact reduction (`OVERMATCH_PATCH.md`,
-//! `collision/contact_types/reduction.rs`). The game's environment destruction relies on it to
-//! keep two pieces' many hull pairs from each costing the solver a manifold; game state only.
-//! The grids, boxes and poses are fixture data: any spread of hull pairs exercises the same laws.
+//! Guards for body-pair contact reduction, the game's pass on Avian
+//! (`crate::avian_ext::contact_reduction`; fork: `OVERMATCH_PATCH.md`, "Body-pair contact
+//! reduction"). The game's environment destruction relies on it to keep two pieces' many hull pairs
+//! from each costing the solver a manifold; game state only. The grids, boxes and poses are fixture
+//! data: any spread of hull pairs exercises the same laws.
 
-use avian3d::collision::contact_types::{
-    BEARING_GAP, HULL_TOLERANCE, MAX_NORMALS, PackedFeatureId, PairManifolds, ReductionStep,
-    reduce_body_pair,
-};
+use avian3d::collision::contact_types::{ContactId, PackedFeatureId};
+use avian3d::dynamics::solver::constraint_graph::ConstraintGraph;
 use avian3d::prelude::*;
 use bevy::prelude::*;
+
+use crate::avian_ext::contact_reduction::{
+    BEARING_GAP, HULL_TOLERANCE, MAX_NORMALS, PARALLEL_GROUPS, PairManifolds, ReducibleContacts,
+    ReductionCounts, ReductionStep, reduce_body_pair,
+};
 
 /// Fixture: Avian's default rest speed, m/s, and the game's 64 Hz step.
 const REST: f32 = 0.15;
@@ -636,12 +640,14 @@ fn wide_base(app: &mut App) -> Entity {
     root
 }
 
-/// Pairs involving `body`.
+/// Touching pairs involving `body`, awake or asleep: a pair keeps its manifolds when its island
+/// sleeps, so a count does not depend on when the fixture comes to rest.
 fn body_pairs(app: &App, body: Entity) -> Vec<&ContactPair> {
-    app.world()
-        .resource::<ContactGraph>()
+    let graph = app.world().resource::<ContactGraph>();
+    graph
         .active_pairs()
         .iter()
+        .chain(graph.sleeping_pairs())
         .filter(move |pair| pair.is_touching() && [pair.body1, pair.body2].contains(&Some(body)))
         .collect()
 }
@@ -683,11 +689,10 @@ fn over_outline(points: &[Vec3], at: Vec3) -> bool {
         })
 }
 
-/// Steps `app` and checks, on every step `body` is awake, that its centre of mass (`extra` from
-/// its origin) lies over the outline of the contact points the solver keeps for it. Statics owns
-/// the criterion: a body whose centre of mass is over its support outline does not tip, so a
-/// reduction that left it outside would tip a supported body. Sleeping pairs leave the active
-/// set, so asleep steps are skipped.
+/// Steps `app` and checks, on every step `body` touches, that its centre of mass (`extra` from its
+/// origin) lies over the outline of the contact points kept for it. Statics owns the criterion: a
+/// body whose centre of mass is over its support outline does not tip, so a reduction that left it
+/// outside would tip a supported body.
 fn stays_over_its_outline(app: &mut App, body: Entity, extra: Vec3, count: usize) {
     let mut checked = 0;
     for _ in 0..count {
@@ -710,10 +715,7 @@ fn stays_over_its_outline(app: &mut App, body: Entity, extra: Vec3, count: usize
         );
         checked += 1;
     }
-    assert!(
-        checked > 10,
-        "fixture: the body was awake on {checked} steps"
-    );
+    assert!(checked > 10, "fixture: the body touched on {checked} steps");
 }
 
 /// A body on many hull pairs of another body, reduced, stays supported with its centre of mass
@@ -916,4 +918,136 @@ fn only_marked_dynamic_body_pairs_reduce() {
         per_pair(body_pairs(&hooked, body)),
         "a hooked pair was reduced"
     );
+}
+
+/// Every touching, constraint-generating active pair of `app` whose constraint count differs from
+/// its manifold count, as `(contact, constraints, manifolds)`.
+fn graph_mismatches(app: &App) -> Vec<(ContactId, usize, usize)> {
+    let constraints = app.world().resource::<ConstraintGraph>();
+    app.world()
+        .resource::<ContactGraph>()
+        .active_pairs()
+        .iter()
+        .filter(|pair| {
+            pair.is_touching()
+                && pair.generates_constraints()
+                && pair.body1.is_some()
+                && pair.body2.is_some()
+        })
+        .map(|pair| {
+            (
+                pair.contact_id,
+                constraints.contact_handles(pair.contact_id).len(),
+                pair.manifolds.len(),
+            )
+        })
+        .filter(|(_, constraints, manifolds)| constraints != manifolds)
+        .collect()
+}
+
+/// The solver needs one constraint per kept manifold: the pass corrects Avian's queued count
+/// change for every pair it reduces, through settling, a lift and a drop. Enough slabs stand on the
+/// base for the groups to reduce in parallel. A mutant queueing its own change beside Avian's, or
+/// none, leaves the graph a constraint per removed or regained manifold off.
+#[test]
+fn the_constraint_graph_holds_one_constraint_per_kept_manifold() {
+    let mut app = app();
+    floor_of(&mut app, 14);
+    wide_base(&mut app);
+    // Fixture: a 3×3 grid of slabs, 4 m apart, on the 8 m base.
+    let slabs: Vec<Entity> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| (x, z)))
+        .map(|(x, z)| {
+            slab_at(
+                &mut app,
+                Vec3::new(3.0 * x as f32 + 0.3, 1.5, 3.0 * z as f32 + 0.3),
+                true,
+                Vec3::ZERO,
+                false,
+            )
+        })
+        .collect();
+    let mut widest = 0;
+    let mut check = |app: &mut App, count: usize| {
+        for _ in 0..count {
+            app.update();
+            widest = widest.max(app.world().resource::<ReductionCounts>().groups);
+            let off = graph_mismatches(app);
+            assert!(off.is_empty(), "(contact, constraints, manifolds): {off:?}");
+        }
+    };
+    check(&mut app, 20);
+    app.world_mut().get_mut::<Position>(slabs[4]).unwrap().0.y += 0.5;
+    check(&mut app, 30);
+    assert!(
+        widest as usize >= PARALLEL_GROUPS,
+        "fixture: {widest} groups in the widest step"
+    );
+}
+
+/// A group stays whole while a point closes faster than the slower of its two bodies' rest speeds
+/// (`SleepThreshold::linear`), so every press of a landing is kept. Fixture: a slab of rest speed
+/// 10 m/s dropped 5 cm onto the base, closing at about 1 m/s (DERIVED: sqrt(2·g·h)), the base's
+/// rest speed above and below that. A mutant judging at the faster body's speed, or at one fixed
+/// speed, misjudges one case.
+#[test]
+fn a_landing_is_judged_at_the_slower_bodys_rest_speed() {
+    let rest = |linear: f32| SleepThreshold {
+        linear,
+        angular: linear,
+    };
+    for (base_rest, lands) in [(10.0, false), (0.15, true)] {
+        let mut app = app();
+        floor_of(&mut app, 14);
+        let base = wide_base(&mut app);
+        app.world_mut().entity_mut(base).insert(rest(base_rest));
+        let slab = slab_at(&mut app, Vec3::new(0.3, 1.55, 0.3), true, Vec3::ZERO, false);
+        app.world_mut().entity_mut(slab).insert(rest(10.0));
+        let (mut groups, mut landings) = (0, 0);
+        for _ in 0..20 {
+            app.update();
+            let counts = app.world().resource::<ReductionCounts>();
+            groups += counts.groups;
+            landings += counts.landing_whole;
+        }
+        assert!(groups > 0, "fixture: the slab's group reduced");
+        assert_eq!(
+            landings > 0,
+            lands,
+            "base rest speed {base_rest} m/s: {landings} landing steps"
+        );
+    }
+}
+
+/// Recycling must not keep a reduced set past the step that reduced it: a taken pair loses its
+/// recycling cache, so Avian regenerates it next step. A pair reduced to no manifold and recycled
+/// keeps none while its body moves less than the recycle distance, and the body sinks through it.
+/// Fixture: the stack with recycling on at Avian's default distance, its body lifted 5 cm and
+/// dropped back onto the base.
+#[test]
+fn a_recycled_pair_is_regenerated_after_reduction() {
+    let mut app = app();
+    app.insert_resource(NarrowPhaseConfig::default());
+    floor_of(&mut app, 14);
+    let (_, body) = stack(&mut app, true, Vec3::ZERO, false);
+    steps(&mut app, 20);
+    let height = |app: &App| app.world().get::<Position>(body).unwrap().0.y;
+    let settled = height(&app);
+    app.world_mut().get_mut::<Position>(body).unwrap().0.y += 0.05;
+    let mut lowest = f32::MAX;
+    for _ in 0..30 {
+        app.update();
+        lowest = lowest.min(height(&app));
+    }
+    let tolerance = app
+        .world()
+        .resource::<NarrowPhaseConfig>()
+        .contact_tolerance;
+    assert!(
+        lowest > settled - tolerance,
+        "the body sank {} m below its rest",
+        settled - lowest
+    );
+    let (_, _, points) = contact_counts(&body_pairs(&app, body));
+    assert_eq!(points, 4, "the reduced footprint after the drop");
 }

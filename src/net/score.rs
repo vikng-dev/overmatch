@@ -225,7 +225,7 @@ fn spawn_scoreboard(mut commands: Commands, battle: BattleState) {
 
 /// A first combat spawn opens its standing; a spawn while waiting for a player waits for combat.
 fn open_standing(
-    add: On<Add, CombatantId>,
+    add: On<Add<CombatantId>>,
     combatants: Query<(&CombatantId, &CombatantLife)>,
     clock: Res<ShotClock>,
     mut boards: Query<(&mut Scoreboard, &BattleState)>,
@@ -251,7 +251,7 @@ fn open_standing(
 /// The game's damage model: the marker's insertion is independent evidence against which an
 /// operator can count scored facts, including a transition outside combat that scores nothing.
 fn log_knockout_transition(
-    add: On<Add, TankKnockedOut>,
+    add: On<Add<TankKnockedOut>>,
     tanks: Query<(&CombatantId, &CombatantLife, &TankKnockedOut)>,
     clock: Res<ShotClock>,
 ) {

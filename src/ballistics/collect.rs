@@ -7,7 +7,7 @@
 //! # Why not `SpatialQuery::ray_hits`
 //!
 //! Avian's "all hits" query cannot express §13.4's all-hits collection, for three independent
-//! reasons (verified against `avian3d-0.7.0/src/spatial_query/system_param.rs:277,354`):
+//! reasons (verified against `avian3d-0.8.0/src/spatial_query/system_param.rs:301,386`):
 //!
 //! - It calls `collider.cast_ray` ONCE per collider, which for a trimesh returns the nearest
 //!   triangle of that collider — the entry face, never the exit. Half of every crossing is missing.
@@ -2993,7 +2993,7 @@ mod tests {
     }
 
     fn twelve_gon_frustum() -> Collider {
-        let points = TWELVE_GON
+        let points: Vec<_> = TWELVE_GON
             .iter()
             .flat_map(|&(c, s)| {
                 [
@@ -3002,7 +3002,7 @@ mod tests {
                 ]
             })
             .collect();
-        Collider::convex_hull(points).expect("two rings of positive radius at distinct heights")
+        Collider::convex_hull(&points).expect("two rings of positive radius at distinct heights")
     }
 
     /// The clip of one collider's shape: the faces it enters and leaves through.
@@ -3431,7 +3431,7 @@ mod tests {
     /// a positive chord through a solid, and its dose, lost.
     #[test]
     fn a_face_whose_f64_rate_cancels_to_zero_is_still_crossed_at_its_exact_parameter() {
-        let tetrahedron = Collider::convex_hull(vec![
+        let tetrahedron = Collider::convex_hull(&[
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(1.0, 1.0, -1.0),
             Vec3::new(-1.0, 0.0, 1.0e-9),

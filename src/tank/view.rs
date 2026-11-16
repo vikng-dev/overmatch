@@ -157,7 +157,7 @@ fn sync_view_barrels(
 /// subtree the moment it escaped: a turret blown off while the player sat in the optic stayed
 /// invisible for the rest of the round.
 fn detach_view_on_turret_launch(
-    add: On<Add, crate::damage::LaunchedTurret>,
+    add: On<Add<crate::damage::LaunchedTurret>>,
     views: Query<&ViewNode>,
     mut commands: Commands,
 ) {

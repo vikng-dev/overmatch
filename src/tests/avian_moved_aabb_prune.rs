@@ -1,4 +1,4 @@
-//! GUARD for the vendored moved-collider bounds prune (`vendor/avian3d-0.7.0-child-pose`,
+//! GUARD for the vendored moved-collider bounds prune (`vendor/avian3d-0.8.0-overmatch`,
 //! `OVERMATCH_PATCH.md`; record: `upstream/avian-moved-aabb-prune.md`).
 //!
 //! The invariant: Avian's `update_moved_collider_aabbs` examines only the colliders whose pose or
@@ -6,8 +6,8 @@
 //! removed still reaches the collider trees. Who relies on it: the dedicated server's physics step,
 //! whose map holds thousands of static colliders that never move (every intact construction
 //! element), and everything that reads the trees, the broad phase and ballistics' ray casts among
-//! them. Stock Avian 0.7.0 examines every collider every step and fails the first test; its
-//! examined count is `ColliderTreeDiagnostics::moved_aabb_candidates`, a field the patch adds.
+//! them. Stock Avian examines every collider every step and fails the first test; its examined
+//! count is `ColliderTreeDiagnostics::moved_aabb_candidates`, a field the patch adds.
 //!
 //! The poses, box dimensions and counts below are fixture data.
 
@@ -46,8 +46,8 @@ fn hit_below(app: &mut App, at: Vec3) -> Option<Entity> {
 }
 
 /// A step in which no collider moved examines none: standing static colliders, on a body or a
-/// body's child, cost the pass their change ticks alone. Fails on stock Avian 0.7.0, which examines
-/// every collider every step.
+/// body's child, cost the pass their change ticks alone. Fails on stock Avian, which examines every
+/// collider every step.
 #[test]
 fn the_moved_aabb_pass_examines_no_standing_static_collider() {
     let mut app = physics_app();
@@ -62,8 +62,7 @@ fn the_moved_aabb_pass_examines_no_standing_static_collider() {
         .moved_aabb_candidates;
     assert_eq!(
         examined, 0,
-        "the moved-AABB pass examined {examined} colliders that stood: is \
-         vendor/avian3d-0.7.0-child-pose still the avian3d in the graph?"
+        "the moved-AABB pass examined {examined} colliders that stood"
     );
 }
 

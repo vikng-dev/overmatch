@@ -8,7 +8,10 @@
 //! Only awake touching pairs count (the active set); a sleeping pair is outside the solver.
 //! Sensors are excluded: only pairs that generate constraints count.
 
-use avian3d::dynamics::solver::{islands::BodyIslandNode, solver_body::SolverBody};
+use avian3d::dynamics::solver::{
+    islands::BodyIslandNode,
+    solver_body::{SolverBodies, SolverBodyIndex},
+};
 use avian3d::prelude::{
     AngularVelocity, Collider, ColliderTransform, ComputedAngularInertia, ComputedMass,
     ContactGraph, ContactPair, LinearVelocity, PhysicsLengthUnit, Position, RigidBody,
@@ -448,7 +451,7 @@ fn install_reading(app: &mut App) {
                 .before(PhysicsStepSystems::Sleeping),
         )
         .add_observer(
-            |event: On<Add, DebrisPiece>,
+            |event: On<Add<DebrisPiece>>,
              capture: Res<Capture>,
              mut records: ResMut<PieceRecords>,
              pieces: Query<Option<&Piece>>,
@@ -468,7 +471,7 @@ fn install_reading(app: &mut App) {
             },
         )
         .add_observer(
-            |event: On<Remove, DebrisPiece>,
+            |event: On<Remove<DebrisPiece>>,
              capture: Res<Capture>,
              mut records: ResMut<PieceRecords>,
              stages: Res<Stages>,
@@ -489,7 +492,7 @@ fn install_reading(app: &mut App) {
             },
         )
         .add_observer(
-            |event: On<Add, Sleeping>,
+            |event: On<Add<Sleeping>>,
              capture: Res<Capture>,
              mut records: ResMut<PieceRecords>,
              pieces: Query<&BodyIslandNode, With<DebrisPiece>>,
@@ -607,9 +610,10 @@ pub(super) struct ContactCensus<'w, 's> {
             &'static ComputedMass,
             &'static ComputedAngularInertia,
             &'static Rotation,
-            &'static SolverBody,
+            &'static SolverBodyIndex,
         ),
     >,
+    solver_bodies: Res<'w, SolverBodies>,
     length_unit: Res<'w, PhysicsLengthUnit>,
     time_to_sleep: Res<'w, TimeToSleep>,
     records: ResMut<'w, PieceRecords>,
@@ -738,7 +742,7 @@ impl ContactCensus<'_, '_> {
                                 .colliders
                                 .get(collider)
                                 .expect("a body's collider membership names live colliders");
-                            let bounds = shape.aabb(pose.translation, pose.rotation);
+                            let bounds = shape.aabb(pose.translation, pose.rotation, 0.0);
                             bounds.min.abs().max(bounds.max.abs()).length()
                         })
                         .fold(0.0, f32::max)
@@ -750,17 +754,17 @@ impl ContactCensus<'_, '_> {
             if !sleeping {
                 record.awake_ticks += 1;
                 record.changed = true;
-                let linear_limit = unit * unit * rest.linear * rest.linear.abs();
                 let (mass, inertia, rotation, body) = self
                     .mass_properties
                     .get(entity)
                     .expect("every simulated piece retains computed mass and solver state");
-                let angular_limit = rest.angular * rest.angular.abs();
-                let original_rest = velocity.length_squared() < linear_limit
-                    && spin.length_squared() < angular_limit;
-                let energy_rest =
-                    body.kinetic_speed_squared(*mass, *inertia, *rotation) < linear_limit;
-                if !(original_rest || energy_rest) {
+                let body = self
+                    .solver_bodies
+                    .get(*body)
+                    .expect("an awake piece's solver index addresses its state");
+                if !crate::avian_ext::rest_test::at_rest(
+                    body, rest, unit, *mass, *inertia, *rotation,
+                ) {
                     record.last_fast = Some(tick);
                 }
             }

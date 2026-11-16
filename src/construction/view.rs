@@ -33,7 +33,7 @@
 //! A hole never changes a mesh: a construction whose standing chunks hold one wears its own copy of the
 //! material ([`crate::construction_surface::holed`]) with its [`hole_table`] bound, and the shader skips
 //! the surface inside a hole and draws its inner wall, in the main pass and the shadow pass alike
-//! (`assets/shaders/construction_holes.wgsl`). A swapped chunk's faces carry its index + 1 in the second
+//! (`assets/shaders/construction_holes.wesl`). A swapped chunk's faces carry its index + 1 in the second
 //! UV's `y`, a whole element's 0, so a fragment finds its chunk's holes. A hole is matter missing
 //! from its chunk, so a chunk that falls keeps it: a fallen piece's faces carry their chunk's place
 //! in the piece + 1, and a piece whose chunks hold a hole wears its own copy with its
@@ -483,7 +483,7 @@ pub(crate) fn piece_hole_table(
     table(asset, layout, chunks, holes, origin)
 }
 
-/// A hole table (the layout is `assets/shaders/construction_holes.wgsl`'s), mesh-local metres: one
+/// A hole table (the layout is `assets/shaders/construction_holes.wesl`'s), mesh-local metres: one
 /// header per slot, a slot being a face tag − 1 that names the law chunk it draws, or none; then
 /// each named chunk's holes, at most [`HOLES_PER_CHUNK`], and its hull's planes, all drawn
 /// `offset` back from the asset frame. `None` when no named chunk holds a hole.
@@ -1825,7 +1825,7 @@ mod tests {
         assert_tagged_hulls(&piece, &fallen, origin);
     }
 
-    /// THE TABLE IS WHAT THE SHADER WALKS (`construction_holes.wgsl`): chunk `c`'s header at record `c`
+    /// THE TABLE IS WHAT THE SHADER WALKS (`construction_holes.wesl`): chunk `c`'s header at record `c`
     /// names where its records start, how many holes and how many planes follow; each hole is its
     /// capsule in mesh-local metres (the chunk's centroid plus the record's millimetres), and its
     /// hull's planes follow. A chunk no longer standing, or holding no hole, has an empty header.
@@ -1893,13 +1893,13 @@ mod tests {
         assert_eq!(table.len(), n + 2 * HOLES_PER_CHUNK + planes.len());
     }
 
-    /// THE SHADER'S BOUND IS THE RECORD'S: `construction_holes.wgsl` sizes its per-fragment spans by
+    /// THE SHADER'S BOUND IS THE RECORD'S: `construction_holes.wesl` sizes its per-fragment spans by
     /// its own `HOLES_PER_CHUNK`, so a record cap above it would leave holes undrawn.
     #[test]
     fn the_shader_s_hole_cap_is_the_record_s() {
         let shader = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/shaders/construction_holes.wgsl"),
+                .join("assets/shaders/construction_holes.wesl"),
         )
         .expect("the hole shader");
         assert!(
@@ -2058,8 +2058,8 @@ mod tests {
             .get(&material.extension.holes)
             .unwrap();
         assert_eq!(
-            bound.data,
-            ShaderBuffer::from(table).data,
+            bound.cast_slice::<Vec4>().unwrap(),
+            table.as_slice(),
             "it binds the construction's table"
         );
 
@@ -2151,7 +2151,7 @@ mod tests {
             .resource::<Assets<ShaderBuffer>>()
             .get(&material.extension.holes)
             .unwrap();
-        assert_eq!(bound.data, ShaderBuffer::from(table.clone()).data);
+        assert_eq!(bound.cast_slice::<Vec4>().unwrap(), table.as_slice());
 
         let centroid = Vec3::from_array(asset.chunks[layout.chunks[holed] as usize].centroid);
         assert_eq!(

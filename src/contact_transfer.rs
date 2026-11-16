@@ -5,9 +5,9 @@
 //!
 //! THE READING. Avian's contact solver runs sequential impulses over substeps. Each substep warm
 //! starts every contact point with its accumulated impulse scaled by
-//! `SolverConfig::warm_start_coefficient` (`w`), then a biased pass and a relaxing pass each add a
-//! clamped increment to that accumulator; after the substeps a restitution pass may add one more,
-//! along the normal. So the momentum one substep moves through a point is its post-relax
+//! `SolverConfig::warm_start_coefficient` (`w`). Normal impulses accumulate in the biased and
+//! relaxing passes; friction accumulates only in the relaxing pass. After the substeps restitution
+//! may add one more normal increment. The momentum one substep moves through a point is its post-relax
 //! accumulated impulse `I_s` less the share of the previous one warm starting did not reapply,
 //! `I_s − (1 − w) I_{s−1}`, normal and friction alike, and restitution moves its increment.
 //! [`ContactTransfers`] sums exactly that, from Avian's public solver state (`ConstraintGraph`):
@@ -49,7 +49,9 @@ use avian3d::dynamics::solver::SolverConfig;
 use avian3d::dynamics::solver::constraint_graph::ConstraintGraph;
 use avian3d::dynamics::solver::contact::{ContactConstraint, ContactConstraintPoint};
 use avian3d::dynamics::solver::schedule::{SolverSystems, SubstepSchedule, SubstepSolverSystems};
+#[cfg(test)]
 use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
+use avian3d::dynamics::solver::solver_body::{SolverBodies, SolverBodyIndex};
 use avian3d::prelude::{
     ComputedCenterOfMass, ContactGraph, PhysicsSchedule, Position, RigidBody, Rotation, Sleeping,
 };
@@ -223,7 +225,7 @@ type ContactBodies<'w, 's> = Query<
     'w,
     's,
     (
-        Option<&'static SolverBodyInertia>,
+        Option<&'static SolverBodyIndex>,
         &'static RigidBody,
         &'static Position,
         &'static Rotation,
@@ -383,10 +385,18 @@ fn prepare_constraint(
     contacts: &ContactGraph,
     structures: &Query<&RigidBody, With<StructureBody>>,
     #[cfg(test)] bodies: &ContactBodies,
+    #[cfg(test)] solver_bodies: &SolverBodies,
 ) -> PreparedContact {
     let (_, pair) = contacts
         .get_by_id(constraint.contact_id)
         .expect("a contact constraint is built from a pair in the contact graph");
+    // Avian 0.8 prepares constraints only for pairs with two rigid-body owners.
+    let body1 = pair
+        .body1
+        .expect("a prepared contact has its first rigid body");
+    let body2 = pair
+        .body2
+        .expect("a prepared contact has its second rigid body");
     let manifold = &pair.manifolds[constraint.manifold_index];
     assert_eq!(
         manifold.points.len(),
@@ -394,14 +404,18 @@ fn prepare_constraint(
         "a contact constraint holds its manifold's points one for one"
     );
     #[cfg(test)]
-    let inertias = [constraint.body1, constraint.body2].map(|body| {
+    let inertias = [body1, body2].map(|body| {
         let (solver, kind, position, rotation, com) = bodies
             .get(body)
             .expect("each contact side is a rigid body with its required pose and centre of mass");
         let inertia = if kind.is_static() {
             &SolverBodyInertia::DUMMY
         } else {
-            solver.expect("Avian supplies solver inertia for an active moving contact body")
+            solver_bodies
+                .get_inertia(
+                    *solver.expect("Avian supplies an index for an active moving contact body"),
+                )
+                .expect("a live solver index addresses its inertia")
         };
         (
             body,
@@ -416,9 +430,9 @@ fn prepare_constraint(
     let mut last = Vec::with_capacity(constraint.points.len());
     for (point, contact) in constraint.points.iter().zip(&manifold.points) {
         points.push(ContactTransfer {
-            reference: constraint.body1,
+            reference: body1,
             reference_collider: pair.collider1,
-            other: constraint.body2,
+            other: body2,
             other_collider: Some(pair.collider2),
             point: contact.point,
             normal: constraint.normal,
@@ -434,7 +448,7 @@ fn prepare_constraint(
             color,
             index,
             first: 0,
-            structures: [constraint.body1, constraint.body2].map(|body| structures.contains(body)),
+            structures: [body1, body2].map(|body| structures.contains(body)),
         },
         #[cfg(test)]
         inertias,
@@ -484,6 +498,7 @@ fn keep(
     graph: Res<ConstraintGraph>,
     rests: Rests,
     bodies: ContactBodies,
+    solver_bodies: Res<SolverBodies>,
     time: Res<Time>,
     mut transfers: ResMut<ContactTransfers>,
 ) {
@@ -571,6 +586,8 @@ fn keep(
                     &rests.structures,
                     #[cfg(test)]
                     &bodies,
+                    #[cfg(test)]
+                    &solver_bodies,
                 )
             })
             .collect::<Vec<_>>()
@@ -612,7 +629,9 @@ fn keep(
             assert!(!kind.is_dynamic(), "the belt's implicit contacts land only on fixed construction; a moving body takes the sampled support's impulse or meets a soft run in the solver");
             let (solver, _, position, rotation, com) = bodies.get(contact.body).expect(
                 "a source that applied an implicit contact remains a dynamic body through this physics step");
-            let solver = solver.expect("an implicit contact source is an active moving body");
+            let index = solver.expect("an implicit contact source is an active moving body");
+            let solver = solver_bodies.get_inertia(*index)
+                .expect("a live solver index addresses its inertia");
             let inertia = BodyInertia {
                 centre: position.0 + rotation.0 * com.0,
                 inverse_mass: solver.effective_inv_mass(),
@@ -763,7 +782,7 @@ mod tests {
 
     use avian3d::prelude::{
         Collider, ColliderDensity, ComputedMass, ConstantForce, Friction, Gravity, LinearVelocity,
-        Physics, PhysicsPlugins, Restitution, RigidBody, SleepingDisabled,
+        Physics, Restitution, RigidBody, SleepingDisabled,
     };
     use bevy::time::TimeUpdateStrategy;
 
@@ -803,7 +822,7 @@ mod tests {
             bevy::transform::TransformPlugin,
             // Avian's collider cache reads `AssetEvent<Mesh>`.
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
             sim_plugin,
         ))
         .init_asset::<Mesh>()
@@ -1277,14 +1296,13 @@ mod tests {
                         assert!(!points.is_empty());
                         assert_eq!(points.len(), constraint.points.len());
                         let (_, pair) = contacts.get_by_id(constraint.contact_id).unwrap();
+                        let body1 = pair.body1.unwrap();
+                        let body2 = pair.body2.unwrap();
                         let manifold = &pair.manifolds[constraint.manifold_index];
                         for ((point, solver), contact) in
                             points.iter().zip(&constraint.points).zip(&manifold.points)
                         {
-                            assert_eq!(
-                                (point.reference, point.other),
-                                (constraint.body1, constraint.body2)
-                            );
+                            assert_eq!((point.reference, point.other), (body1, body2));
                             assert_eq!(
                                 (point.reference_collider, point.other_collider),
                                 (pair.collider1, Some(pair.collider2))
@@ -1294,14 +1312,10 @@ mod tests {
                             assert_eq!(point.effective_mass, solver.normal_part.effective_mass);
                             assert_eq!(point.closing_speed, -solver.normal_speed);
                         }
-                        orders.insert(constraint.body1 == fixed);
+                        orders.insert(body1 == fixed);
                         observed = true;
                         for reference_first in [true, false] {
-                            let reference = if reference_first {
-                                constraint.body1
-                            } else {
-                                constraint.body2
-                            };
+                            let reference = if reference_first { body1 } else { body2 };
                             if (reference == fixed && markers[0])
                                 || (reference == moving && markers[1])
                             {

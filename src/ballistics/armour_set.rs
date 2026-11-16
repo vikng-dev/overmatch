@@ -329,7 +329,7 @@ impl ArmourSet {
             });
             let on = part.node.map_or("the root", |node| nodes[node].name);
             let pose = above * link(part.pose, &format_args!("the part on {on}"));
-            let local = part.shape.aabb(Vec3::ZERO, Quat::IDENTITY);
+            let local = part.shape.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0);
             let posed = Bounds {
                 min: local.min,
                 max: local.max,
@@ -679,7 +679,7 @@ impl ArmourSet {
 /// captured endpoints until the next tick's `motion::seed_births`, so nothing may compose a part it
 /// carries in between: the launch runs in `DamageConsequences`, after the tick's march.
 pub(crate) fn rebase(
-    added: On<Add, RigidBody>,
+    added: On<Add<RigidBody>>,
     frames: Query<&ArmourFrame>,
     mut sets: Query<&mut ArmourSet>,
 ) {
@@ -923,7 +923,7 @@ mod tests {
 
     /// The box of `part`'s shape in its own coordinates.
     fn local_box(part: &Part) -> Bounds {
-        let local = part.shape.aabb(Vec3::ZERO, Quat::IDENTITY);
+        let local = part.shape.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0);
         Bounds {
             min: local.min,
             max: local.max,
@@ -1231,13 +1231,10 @@ mod tests {
         let hull = Collider::cuboid(4.0, 1.0, 6.0);
         let plate = Collider::cuboid(2.0, 1.0, 2.0);
         let crew = Collider::cuboid(1.0, 1.0, 1.0);
-        let cube = Collider::convex_hull(
-            corners(Bounds {
-                min: Vec3::new(0.0, -0.5, -0.5),
-                max: Vec3::new(1.0, 0.5, 0.5),
-            })
-            .to_vec(),
-        )
+        let cube = Collider::convex_hull(&corners(Bounds {
+            min: Vec3::new(0.0, -0.5, -0.5),
+            max: Vec3::new(1.0, 0.5, 0.5),
+        }))
         .expect("a cube's corners span a hull");
         let parts = [
             (None, Transform::IDENTITY, &hull, false),
@@ -1438,7 +1435,7 @@ mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            avian3d::prelude::PhysicsPlugins::default(),
+            crate::offline_physics(),
         ))
         .init_asset::<Mesh>()
         .insert_resource(bevy::time::TimeUpdateStrategy::FixedTimesteps(1))

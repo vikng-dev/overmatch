@@ -844,14 +844,15 @@ mod tests {
                 .iter(world)
             {
                 if matches!(part, Part::Column(_)) && !text.0.trim().is_empty() {
+                    // bevy_text 0.20.1 sizes a layout in physical pixels.
+                    let logical = layout.size.y / layout.scale_factor;
                     assert!(
-                        (layout.size.y - (rows + 1) as f32 * ROW_PX).abs() < 1.0,
-                        "{part:?}: one header and {rows} rendered lines, got {} logical px",
-                        layout.size.y
+                        (logical - (rows + 1) as f32 * ROW_PX).abs() < 1.0,
+                        "{part:?}: one header and {rows} rendered lines, got {logical} logical px"
                     );
                     assert_eq!(
                         layout.glyphs.last().unwrap().line_index,
-                        rows,
+                        rows as u32,
                         "soft wrapping must not add standing lines"
                     );
                 }

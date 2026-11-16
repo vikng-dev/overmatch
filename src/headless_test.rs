@@ -25,7 +25,8 @@ const BOOT_DEADLINE: Duration = Duration::from_secs(60);
 pub(crate) const FIXED_TICKS_PER_SECOND: usize = 64;
 
 pub(crate) fn start_fixed_clock(app: &mut App) {
-    // Verified against Bevy 0.19: one `App::update` runs exactly one fixed loop.
+    // One `App::update` runs exactly one fixed loop (bevy_time 0.20.1,
+    // `TimeUpdateStrategy::FixedTimesteps`).
     app.insert_resource(TimeUpdateStrategy::FixedTimesteps(1));
 }
 
@@ -34,7 +35,7 @@ pub(crate) fn start_fixed_clock(app: &mut App) {
 pub(crate) static BOOT_LEASE: Mutex<()> = Mutex::new(());
 
 fn assert_tank_state_at_add(
-    add: On<Add, Tank>,
+    add: On<Add<Tank>>,
     tanks: Query<(
         Has<TankCommand>,
         Has<crate::track::sim::TrackDrive>,
@@ -74,7 +75,7 @@ fn assert_tank_state_at_add(
 }
 
 fn assert_range_table_at_add(
-    add: On<Add, crate::tank::Weapon>,
+    add: On<Add<crate::tank::Weapon>>,
     weapons: Query<Has<crate::firecontrol::RangeTable>>,
 ) {
     assert!(
@@ -186,6 +187,51 @@ pub(crate) fn finish_plugins(app: &mut App) {
     }
     app.finish();
     app.cleanup();
+}
+
+/// Runs `witness` on a global compute pool of `threads` threads. The pool is built once per
+/// process, by whichever test reaches it first and at the machine's default size (one compute
+/// thread on two cores), so the test re-runs itself alone in a child process of this test binary,
+/// which builds the pool before anything else. `module` is the caller's `module_path!()` and `test`
+/// its function's name.
+pub(crate) fn on_own_compute_pool(
+    module: &str,
+    test: &str,
+    threads: usize,
+    witness: impl FnOnce(),
+) {
+    const CHILD: &str = "OVERMATCH_TEST_OWN_COMPUTE_POOL";
+    let (_, module) = module
+        .split_once("::")
+        .expect("a test module sits below the crate root");
+    let path = format!("{module}::{test}");
+    if std::env::var_os(CHILD).is_some_and(|child| child == path.as_str()) {
+        let pool = bevy::tasks::ComputeTaskPool::get_or_init(|| {
+            bevy::tasks::TaskPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+        });
+        assert_eq!(
+            pool.thread_num(),
+            threads,
+            "the child process built its compute pool before {path}"
+        );
+        witness();
+        return;
+    }
+    let output =
+        std::process::Command::new(std::env::current_exe().expect("the test binary has a path"))
+            .args(["--exact", &path])
+            .env(CHILD, &path)
+            .output()
+            .expect("the test binary runs one of its tests");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // An unknown name runs no test and exits 0: the child must report this one passed.
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{path} on a compute pool of {threads} threads:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// Reports each boot gate separately so a timeout identifies the unavailable prerequisite.
@@ -515,7 +561,7 @@ fn sample_server_round_frame(
 }
 
 fn sample_server_round_birth(
-    born: On<Add, crate::ballistics::Projectile>,
+    born: On<Add<crate::ballistics::Projectile>>,
     views: ServerRoundViews,
     mut samples: ResMut<ServerRoundSamples>,
 ) {
@@ -527,7 +573,7 @@ fn sample_server_round_birth(
 }
 
 fn sample_server_round_removal(
-    gone: On<Remove, crate::ballistics::Projectile>,
+    gone: On<Remove<crate::ballistics::Projectile>>,
     views: ServerRoundViews,
     mut samples: ResMut<ServerRoundSamples>,
 ) {
@@ -1476,14 +1522,16 @@ fn a_tank_repaired_at_rest_catches_its_idle_and_its_powered_traverse() {
 /// neighbour's drive demand wakes runs its full pass from the state the tick began with
 /// (`track::sim::settle_rest`). Witness: an in-flight shift's countdown, which every drivetrain
 /// step lowers by one tick (`transmission::advance_shift_window`). Fixture: the scenario's two
-/// tanks parked side by side on flat ground, their hull bounds overlapping 5 mm so a solver
-/// contact joins their islands; an 8-tick shift countdown, so the two ticks read 6 left from a
-/// single step a tick and 5 from a double step; the 8 s rest watchdog.
+/// tanks parked side by side on flat ground, their hulls half Avian's contact tolerance apart so a
+/// touching solver contact joins their islands; an 8-tick shift countdown, so the two ticks read
+/// 6 left from a single step a tick and 5 from a double step; the 8 s rest watchdog.
 #[test]
 fn a_drivetrain_advances_once_per_tick_whatever_wakes_its_island() {
     use crate::track::sim::TankTransmission;
     use avian3d::dynamics::solver::islands::BodyIslandNode;
-    use avian3d::prelude::{ColliderAabb, RigidBodyColliders, Sleeping};
+    use avian3d::prelude::{
+        Collider, Position, RigidBodyColliders, Rotation, SimpleCollider, Sleeping,
+    };
 
     let mut app = booted_driving_grid(driving_plane(0.0));
     start_fixed_clock(&mut app);
@@ -1511,15 +1559,31 @@ fn a_drivetrain_advances_once_per_tick_whatever_wakes_its_island() {
         1,
     );
     app.update();
+    // The hull's own bounds: a collider's `ColliderAabb` is grown by the contact tolerance.
+    let tolerance = app
+        .world()
+        .resource::<avian3d::prelude::NarrowPhaseConfig>()
+        .contact_tolerance;
     let (lo, hi) = app
         .world()
         .get::<RigidBodyColliders>(a)
         .expect("a tank carries its colliders")
         .iter()
         .map(|collider| {
-            app.world()
-                .get::<ColliderAabb>(collider)
-                .expect("a collider carries its bounds")
+            let world = app.world();
+            world
+                .get::<Collider>(collider)
+                .expect("a body's collider membership names live colliders")
+                .aabb(
+                    world
+                        .get::<Position>(collider)
+                        .expect("a collider is posed")
+                        .0,
+                    *world
+                        .get::<Rotation>(collider)
+                        .expect("a collider is posed"),
+                    0.0,
+                )
         })
         .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), aabb| {
             (lo.min(aabb.min), hi.max(aabb.max))
@@ -1527,7 +1591,7 @@ fn a_drivetrain_advances_once_per_tick_whatever_wakes_its_island() {
     drive_load::place(
         &mut app,
         b,
-        Vec3::new(100.0 + (hi.x - lo.x) - 0.005, rest_y, 0.0),
+        Vec3::new(100.0 + (hi.x - lo.x) + tolerance / 2.0, rest_y, 0.0),
         Quat::IDENTITY,
         0.0,
         1,

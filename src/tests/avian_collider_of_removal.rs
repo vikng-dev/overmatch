@@ -1,14 +1,14 @@
-//! GUARD for the vendored standalone-key write-back (`vendor/avian3d-0.7.0-child-pose`,
-//! `OVERMATCH_PATCH.md`; record: `upstream/avian-collider-of-removal-orphan-proxy.md`).
+//! WITNESS for the standalone-key write-back that avian3d 0.8.0 does itself (upstream #1062), so the
+//! fork dropped its patch (`vendor/avian3d-0.8.0-overmatch`, `OVERMATCH_PATCH.md`; record:
+//! `upstream/avian-collider-of-removal-orphan-proxy.md`).
 //!
 //! The invariant: every proxy in Avian's collider trees names a live collider, so a collider that
 //! leaves its body and is later despawned takes its proxy with it, and a map despawned and rebuilt
 //! in place holds the contact pairs of a fresh map. Who relies on it: the dedicated server, which
 //! despawns and rebuilds the whole map between Battles and despawns tank parts through a combat;
 //! an orphan proxy pairs with every collider its bounds overlap for the rest of the process, and
-//! the narrow phase walks every pair each step. Stock Avian 0.7.0 moves a collider whose
-//! `ColliderOf` is removed to the standalone tree without writing the new key back, and fails the
-//! first test.
+//! the narrow phase walks every pair each step. Avian 0.7.0 moved a collider whose `ColliderOf` is
+//! removed to the standalone tree without writing the new key back, and failed the first test.
 //!
 //! The poses, box dimensions and update counts below are fixture data.
 

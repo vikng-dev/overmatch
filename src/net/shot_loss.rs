@@ -127,7 +127,7 @@ fn scripted_shell(
 
 /// Give each replicated root the fixture weapon slots the scripts fire from, as a production
 /// client's rig does at spawn: the receive path binds every fire's round from these lists.
-fn arm_fixture_weapons(add: On<Add, NetTank>, mut commands: Commands) {
+fn arm_fixture_weapons(add: On<Add<NetTank>>, mut commands: Commands) {
     let rounds: Vec<WeaponRound> = FIXTURE_ROUNDS
         .iter()
         .map(|&(speed, body, wound)| {
@@ -690,12 +690,12 @@ struct PrivateCombatArrivals {
     weapon_gate: u32,
 }
 
-fn count_private_crew_arrival(_: On<Add, NetCrew>, mut arrivals: ResMut<PrivateCombatArrivals>) {
+fn count_private_crew_arrival(_: On<Add<NetCrew>>, mut arrivals: ResMut<PrivateCombatArrivals>) {
     arrivals.crew += 1;
 }
 
 fn count_private_weapon_gate_arrival(
-    _: On<Add, WeaponGate>,
+    _: On<Add<WeaponGate>>,
     mut arrivals: ResMut<PrivateCombatArrivals>,
 ) {
     arrivals.weapon_gate += 1;
@@ -781,7 +781,7 @@ fn build_server(port: u16) -> App {
                 ..default()
             }),
             LocalAddr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)),
-            ServerUdpIo::default(),
+            ServerUdpIo,
         ))
         .id();
     app.world_mut().commands().trigger(Start { entity: server });
@@ -797,7 +797,7 @@ enum HarnessClient {
     FanoutReceiver,
 }
 
-fn claim_harness_input_slot(add: On<Add, Controlled>, mut commands: Commands) {
+fn claim_harness_input_slot(add: On<Add<Controlled>>, mut commands: Commands) {
     // `net::client::claim_input_slot` is private. Reproduce its minimum production bundle here so
     // `receive_fire_events` recognizes this client's own replicated tank and suppresses its echo.
     commands.entity(add.entity).insert((

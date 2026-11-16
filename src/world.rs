@@ -371,7 +371,7 @@ fn spawn_environment(
                     occlusion_texture: Some(arm.clone()),
                     metallic_roughness_texture: Some(arm),
                     // The shader MULTIPLIES these factors into the map (`perceptual_roughness *=
-                    // mr.g`, `metallic *= mr.b` — bevy_pbr's `pbr_fragment.wgsl`), so 1.0 passes
+                    // mr.g`, `metallic *= mr.b` — bevy_pbr's `pbr_fragment.wesl`), so 1.0 passes
                     // the roughness map through unscaled (the old 0.95 would have darkened every
                     // value). Metallic stays 0.0 rather than 1.0: the pack's B channel is all-zero
                     // (checked on import), so the render is identical either way, and hard-zero

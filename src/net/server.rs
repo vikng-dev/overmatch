@@ -117,7 +117,7 @@ pub fn run() {
             Name::new("Server"),
             netcode_server(hosted.as_ref(), admission),
             LocalAddr(SocketAddr::new(bind.into(), PORT)),
-            ServerUdpIo::default(),
+            ServerUdpIo,
         ))
         .id();
     app.add_systems(
@@ -366,7 +366,7 @@ impl CombatantIds {
 }
 
 /// Insert the marker required by Lightyear's per-client visibility hooks before tank spawning.
-pub(super) fn attach_replication_sender(add: On<Add, LinkOf>, mut commands: Commands) {
+pub(super) fn attach_replication_sender(add: On<Add<LinkOf>>, mut commands: Commands) {
     commands.entity(add.entity).insert(ReplicationSender);
 }
 
@@ -1348,7 +1348,7 @@ fn respawn_player_tanks(
         placed_this_pass.push(spawn_pos.xz());
         live.push(spawn_pos.xz());
         sweeping.push(root);
-        // Recursive despawn sweeps the dead root and its attached rig; the `On<Remove, Rig>` observer
+        // Recursive despawn sweeps the dead root and its attached rig; the `On<Remove<Rig>>` observer
         // handles any cooked-off turret that had detached (see the system doc).
         commands.entity(root).despawn();
         let fresh = spawn_player_tank(

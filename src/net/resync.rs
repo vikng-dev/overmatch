@@ -38,7 +38,7 @@ pub(super) fn retain_stream<C: Component + Clone>(app: &mut App) {
 }
 
 fn hold_unknown_history<C: Component + Clone>(
-    remove: On<Remove, C>,
+    remove: On<Remove<C>>,
     replicas: Query<(&C, &ConfirmedHistory<C>, &Presented<C>), (With<Remote>, With<Interpolated>)>,
     timeline: Option<Res<InterpolationTimeline>>,
     mut commands: Commands,

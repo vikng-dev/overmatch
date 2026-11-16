@@ -149,7 +149,7 @@ fn body_size(world: &World, body: Entity) -> f32 {
                 }
             };
             let point =
-                at.rotation.0 * Vec3::new(pick(1, 0), pick(2, 1), pick(4, 2)) + at.translation;
+                at.rotation * Vec3::new(pick(1, 0), pick(2, 1), pick(4, 2)) + at.translation;
             low = low.min(point);
             high = high.max(point);
         }

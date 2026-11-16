@@ -531,7 +531,7 @@ pub(super) fn probe_world_posed(pose: Transform) -> Result<App, String> {
         // Avian's collider cache reads `AssetEvent<Mesh>`; the asset system must exist even though
         // nothing here carries a mesh handle.
         AssetPlugin::default(),
-        avian3d::prelude::PhysicsPlugins::default(),
+        crate::offline_physics(),
     ))
     .init_asset::<Mesh>()
     .add_plugins(crate::bake::plugin)

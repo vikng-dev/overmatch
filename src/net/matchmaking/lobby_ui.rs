@@ -3,7 +3,7 @@
 //!
 //! The picker list is rebuilt only when what it shows changes ([`ListView`] compared against the
 //! last one drawn into the same list node, so a respawned card draws at once); the footer is reconciled every frame with change-guarded writes. Clicks are
-//! one `Pointer<Click>` observer over [`Target`]; hover is picking's own [`Hovered`].
+//! one `PointerClick` observer over [`Target`]; hover is picking's own [`Hovered`].
 //!
 //! Strings from the network (city names, failure reasons) pass through [`printable`] before they
 //! reach `Text`: the bundled font has no fallback glyphs.
@@ -526,7 +526,7 @@ pub(super) fn refresh_footer(
 /// The one click handler for the lobby. Selection changes only while no join is in progress;
 /// expanding a continent is always allowed.
 pub(super) fn clicked(
-    mut click: On<Pointer<Click>>,
+    mut click: On<PointerClick>,
     targets: Query<&Target>,
     link: Res<WorkerLink>,
     time: Res<Time<Real>>,

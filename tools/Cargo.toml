@@ -13,7 +13,7 @@ overmatch = { path = ".." }
 # Already in the tree through the game (same locked versions — these add no compiled crate).
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }
-glam = { version = "0.32.1", features = ["serde", "scalar-math"] }
+glam = { version = "0.33.12", features = ["serde", "scalar-math"] }
 
 [lints]
 workspace = true

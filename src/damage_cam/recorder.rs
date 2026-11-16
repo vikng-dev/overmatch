@@ -335,7 +335,7 @@ pub(crate) fn plugin(app: &mut App) {
 /// Hand a despawning recorded shell's recording and logs to the recorder while it has an encounter
 /// to finish.
 fn keep_spent(
-    remove: On<Remove, ShotRecording>,
+    remove: On<Remove<ShotRecording>>,
     mut shells: Query<(
         &mut ShotRecording,
         &mut PenetrationMarks,

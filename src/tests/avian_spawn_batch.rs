@@ -1,7 +1,8 @@
 //! The game's server physics: batch installation must retain every attachment, and fully
-//! explicit mass properties must stay independent of child colliders. These guard the Avian
-//! 0.7 patches in `OVERMATCH_PATCH.md`; automatic and partially explicit bodies still aggregate.
-//! All dimensions, densities, properties and observation steps below are Fixture data.
+//! explicit mass properties must stay independent of child colliders. These guard the avian3d
+//! fork's "Complete collider batches and explicit mass ownership" (`vendor/avian3d-0.8.0-overmatch`,
+//! `OVERMATCH_PATCH.md`); automatic and partially explicit bodies still aggregate. All dimensions,
+//! densities, properties and observation steps below are Fixture data.
 
 use std::collections::BTreeMap;
 
@@ -21,7 +22,7 @@ struct Attachments(usize);
 fn an_explicit_spawn_attachment_is_installed_once() {
     let mut app = physics_app();
     app.init_resource::<Attachments>()
-        .add_observer(|_: On<Insert, ColliderOf>, mut count: ResMut<Attachments>| count.0 += 1);
+        .add_observer(|_: On<Insert<ColliderOf>>, mut count: ResMut<Attachments>| count.0 += 1);
     let body = app
         .world_mut()
         .spawn((RigidBody::Static, Transform::from_xyz(3.0, 1.0, -2.0)))
@@ -134,7 +135,7 @@ fn collider_mass_changes_request_one_aggregate_only_when_the_owner_uses_it() {
         app.insert_resource(Gravity::ZERO)
             .init_resource::<MassRequests>()
             .add_observer(
-                |insert: On<Insert, RecomputeMassProperties>, mut counts: ResMut<MassRequests>| {
+                |insert: On<Insert<RecomputeMassProperties>>, mut counts: ResMut<MassRequests>| {
                     *counts.0.entry(insert.entity).or_default() += 1;
                 },
             );

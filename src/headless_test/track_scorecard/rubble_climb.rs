@@ -1370,7 +1370,9 @@ fn wedge_read(bed: &mut Bed, tick: usize) -> Vec<Value> {
                     })
                     .sum::<Vec3>()
                     / transfers.dt();
-                for manifold in &pair.manifolds {
+                for (manifold_index, manifold) in pair.manifolds.iter().enumerate() {
+                    let laws = world.resource::<crate::avian_ext::compliance::Laws>();
+                    let law = laws.get(pair.contact_id, manifold_index);
                     let into = if first {
                         -manifold.normal
                     } else {
@@ -1386,8 +1388,8 @@ fn wedge_read(bed: &mut Bed, tick: usize) -> Vec<Value> {
                         "n": local(into),
                         "pen": pen,
                         "points": manifold.points.len(),
-                        "k": manifold.compliance.as_ref().map(|c| c.stiffness),
-                        "c": manifold.compliance.as_ref().map(|c| c.damping),
+                        "k": law.as_ref().map(|c| c.stiffness),
+                        "c": law.as_ref().map(|c| c.damping),
                         "conveyor": local(manifold.tangent_velocity),
                         "force": local(force),
                     }));

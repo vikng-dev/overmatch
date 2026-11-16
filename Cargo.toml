@@ -25,13 +25,16 @@ publish = false
 # now a panic rather than an invisible ground.
 # `jpeg`: not the terrain any more — kept because bevy's default formats stop at PNG/HDR/KTX2 and
 # dropping it would silently break any JPG that shows up in a glTF or a future asset.
-bevy = { version = "0.19", features = ["debug", "jpeg", "basis-universal"] }
-avian3d = { version = "0.7", features = ["serialize"] }
+bevy = { version = "0.20.1", features = ["debug", "jpeg", "basis-universal"] }
+avian3d = { version = "0.8", features = ["serialize"] }
+# Already in the tree through avian3d (same locked version — this adds no compiled crate); named
+# directly only by `avian_ext::contact_reduction`, whose per-pair scratch stays on the stack.
+smallvec = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Required debris scenario admission reports the precise field alongside the RON source span.
 serde_path_to_error = "0.1.20"
-# Lightyear 0.30's message serializer (`lightyear_serde`'s default), named directly only by
+# Lightyear's message serializer (`lightyear_serde`'s default), named directly only by
 # `net::shot_transport`'s batch wire-size bound, which must measure a batch in the exact encoding the
 # wire carries. Already in the tree through lightyear (same locked version).
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
@@ -40,28 +43,31 @@ ron = "0.12"
 # directly only by `ballistics::spall_cone`, whose direction generator must give the same bits on
 # every shipped target, which the platform's own `sin`/`cos` do not (CI measured Linux differing).
 libm = "0.2.16"
-glam ={ version = "0.32.1", features = ["serde", "scalar-math"] }
+# The sim's one glam (ADR-0028): `deny.toml` and `src/tests/determinism_deps.rs` hold the graph to
+# this version. Its scalar `BVec3A`/`BVec4A` implement serde (from 0.33.4), which bevy_reflect's
+# glam registrations need, so bevy_reflect is taken unpatched.
+glam = { version = "0.33.12", features = ["serde", "scalar-math"] }
 winit = "0.30"
 # Already in the tree through bevy (same locked version); named directly only by the present-mode
 # capability probe (`settings::probe`), which needs `SurfaceTargetUnsafe` and the wgpu-side
 # `PresentMode` — neither of which bevy re-exports. No features: bevy enables what the backend needs.
-wgpu = { version = "29.0", default-features = false }
+wgpu = { version = "30.0", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png"] }
 flate2 = { version = "1", optional = true }
-bevy_egui = { version = "0.42", optional = true }
+bevy_egui = { version = "0.43", optional = true }
 # Named by no code: it fixes bevy_winit's feature set across builds. bevy_egui asks for its default
 # features, bevy does not, so without this line a `dev_ui` build hashes bevy_winit differently and
 # compiles a second copy of it and of everything above it (avian3d, lightyear, bevy's plugin
 # crates). Its one default, `x11`, is already on through bevy; only the feature name differs.
-bevy_winit = "0.19"
+bevy_winit = "0.20.1"
 gltf = "1.4"
-# Bevy 0.19 wraps font bytes without parsing; UI admission verifies the bundled faces and coverage.
+# Bevy wraps font bytes without parsing; UI admission verifies the bundled faces and coverage.
 ttf-parser = "0.25.1"
 # Already in the tree through the asset stack (same locked version — this adds no compiled crate);
 # named directly only by `geometry_lod::certificate`, which fingerprints the shipped trio's bytes
 # against the `view_glb_sha` / `sim_glb_sha` the tank build recorded (ADR-0035).
 sha2 = "0.10"
-lightyear = { version = "0.30.1", default-features = false, features = [
+lightyear = { version = "0.31.0", default-features = false, features = [
     "std",
     "client", "server",
     "replication", "interpolation",
@@ -69,12 +75,12 @@ lightyear = { version = "0.30.1", default-features = false, features = [
     "netcode", "udp",
     "avian3d",
 ] }
-lightyear_transport = "0.30.1"
+lightyear_transport = "0.31.0"
 # Already in the tree through lightyear (same locked version — this adds no compiled crate); named
 # directly only by `net::frontier`'s jitter line, which reads the remote clock estimate through
 # `SyncTargetTimeline`, a trait lightyear does not re-export. No defaults, as lightyear asks.
-lightyear_sync = { version = "0.30.1", default-features = false }
-bevy_replicon = "0.44"
+lightyear_sync = { version = "0.31.0", default-features = false }
+bevy_replicon = "0.45"
 # Blocking HTTPS to the matchmaking Worker, never on the frame loop: the hosted server's reports
 # (`net::hosting`, a background thread) and the client's join calls (`net::matchmaking::worker`,
 # short-lived threads). `rustls` = rustls on ring with the bundled webpki roots, so neither the
@@ -128,9 +134,9 @@ objc2-foundation = { version = "0.2.2", features = ["NSThread", "NSValue"] }
 # share their compiled copies: lightyear depends on each with `default-features = false`, and its
 # `std` already turns on the `std` their defaults name.
 [dev-dependencies]
-lightyear_core = { version = "0.30.1", default-features = false }
-lightyear_inputs = { version = "0.30.1", default-features = false }
-lightyear_inputs_native = { version = "0.30.1", default-features = false }
+lightyear_core = { version = "0.31.0", default-features = false }
+lightyear_inputs = { version = "0.31.0", default-features = false }
+lightyear_inputs_native = { version = "0.31.0", default-features = false }
 
 [features]
 bitprobe = ["dep:flate2"]
@@ -153,11 +159,10 @@ needless_collect = "warn"
 too_many_lines = "warn"
 
 [patch.crates-io]
-lightyear_netcode = { path = "vendor/lightyear_netcode-0.30.1-admission" }
-bevy_reflect = { path = "vendor/bevy_reflect-0.19.1-scalar-math" }
-bevy_pbr = { path = "vendor/bevy_pbr-0.19.1-scalar-math" }
-avian3d = { path = "vendor/avian3d-0.7.0-child-pose" }
-lightyear_avian3d = { path = "vendor/lightyear_avian3d-0.30.1-child-pose" }
+lightyear_netcode = { path = "vendor/lightyear_netcode-0.31.0-admission" }
+bevy_pbr = { path = "vendor/bevy_pbr-0.20.1-overmatch" }
+avian3d = { path = "vendor/avian3d-0.8.0-overmatch" }
+lightyear_avian3d = { path = "vendor/lightyear_avian3d-0.31.0-child-pose" }
 
 # `cargo test` builds one test artifact, the lib's: every test is a `#[cfg(test)]` module of the
 # lib, so the bins below hold none (`test = false`) and the docs carry no doctest.

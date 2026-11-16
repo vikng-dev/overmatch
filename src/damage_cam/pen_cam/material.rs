@@ -1,15 +1,15 @@
 //! The pen cam stage's materials: [`GlowMaterial`], the unlit diagram material every record element
-//! wears (`pen_cam_glow.wgsl`); [`OutlineMaterial`], a struck component's silhouette as an inverted
-//! hull (`pen_cam_outline.wgsl`); and [`SliceMaterial`], the
+//! wears (`pen_cam_glow.wesl`); [`OutlineMaterial`], a struck component's silhouette as an inverted
+//! hull (`pen_cam_outline.wesl`); and [`SliceMaterial`], the
 //! tank's own materials with the eye's side of the slice plane dissolved away
-//! (`pen_cam_slice.wgsl`).
+//! (`pen_cam_slice.wesl`).
 
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
-/// The uniform block `pen_cam_glow.wgsl` reads; its lanes are documented there.
+/// The uniform block `pen_cam_glow.wesl` reads; its lanes are documented there.
 #[derive(ShaderType, Debug, Clone, Copy, Default)]
 pub struct GlowParams {
     pub color: Vec4,
@@ -55,11 +55,11 @@ impl GlowMaterial {
 
 impl Material for GlowMaterial {
     fn vertex_shader() -> ShaderRef {
-        "shaders/pen_cam_glow.wgsl".into()
+        "shaders/pen_cam_glow.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "shaders/pen_cam_glow.wgsl".into()
+        "shaders/pen_cam_glow.wesl".into()
     }
 
     fn alpha_mode(&self) -> AlphaMode {
@@ -91,7 +91,7 @@ impl Material for GlowMaterial {
     }
 }
 
-/// The uniform block `pen_cam_outline.wgsl` reads; its lanes are documented there.
+/// The uniform block `pen_cam_outline.wesl` reads; its lanes are documented there.
 #[derive(ShaderType, Debug, Clone, Copy, Default)]
 pub struct OutlineParams {
     pub color: Vec4,
@@ -132,11 +132,11 @@ impl OutlineMaterial {
 
 impl Material for OutlineMaterial {
     fn vertex_shader() -> ShaderRef {
-        "shaders/pen_cam_outline.wgsl".into()
+        "shaders/pen_cam_outline.wesl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "shaders/pen_cam_outline.wgsl".into()
+        "shaders/pen_cam_outline.wesl".into()
     }
 
     fn alpha_mode(&self) -> AlphaMode {
@@ -180,7 +180,7 @@ pub struct SliceCut {
     pub part_mask: Option<Handle<Image>>,
 }
 
-/// The uniform block `pen_cam_slice.wgsl` reads; its lanes are documented there.
+/// The uniform block `pen_cam_slice.wesl` reads; its lanes are documented there.
 #[derive(ShaderType, Reflect, Debug, Clone, Copy, Default)]
 pub struct SliceParams {
     pub plane: Vec4,
@@ -190,6 +190,6 @@ pub struct SliceParams {
 
 impl MaterialExtension for SliceCut {
     fn fragment_shader() -> ShaderRef {
-        "shaders/pen_cam_slice.wgsl".into()
+        "shaders/pen_cam_slice.wesl".into()
     }
 }

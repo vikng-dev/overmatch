@@ -61,7 +61,8 @@ fn heap_strip(bed: &Bed, half_gauge: f32) -> Option<(f32, f32, f32)> {
                 }
                 let origin = Vec3::new(x, aabb.max.y + HEAP_RAY_GRID_M, z);
                 let reach = aabb.max.y - aabb.min.y + 2.0 * HEAP_RAY_GRID_M;
-                if let Some((t, _)) = collider.cast_ray(*at, *rot, origin, Vec3::NEG_Y, reach, true)
+                if let Some((t, _)) =
+                    collider.cast_ray(at.0, rot.0, origin, Vec3::NEG_Y, reach, true)
                 {
                     top = top.max(origin.y - t);
                     near = near.max(z);

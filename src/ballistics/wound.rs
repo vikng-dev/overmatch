@@ -117,7 +117,7 @@ fn presence(
     let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
     for &(node, primitive) in run {
         let (pose, collider, _) = context.world.geometry(primitive);
-        let bounds = collider.aabb(pose.position, pose.rotation);
+        let bounds = collider.aabb(pose.position, pose.rotation, 0.0);
         let (min, max) = (bounds.min - at - margin, bounds.max - at + margin);
         if line_in_box(axis, min, max).is_none_or(|(enter, leave)| leave < 0.0 || enter > length) {
             continue;

@@ -449,7 +449,7 @@ fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, 
     })
 }
 
-pub fn run() {
+pub fn run() -> AppExit {
     client_policy();
     let script = harness::script();
     let simulate = script.is_some();
@@ -593,7 +593,7 @@ pub fn run() {
     // Read-only timeline-resync instrument and the per-second `client_jitter` line.
     super::frontier::install(&mut app);
     super::frontier::install_jitter_line(&mut app);
-    // App-global configs follow `ClientPlugins`: its `On<Insert, InputTimelineConfig>` observer
+    // App-global configs follow `ClientPlugins`: its `On<Insert<InputTimelineConfig>>` observer
     // seeds delay immediately, before stamping/sending, rather than at the first timeline shift.
     app.insert_resource(InputTimelineConfig::new(sync_config, input_delay));
     // Every replica — the own hull included — rides the interpolation buffer behind the server
@@ -675,7 +675,7 @@ pub fn run() {
     // including initial grab. Headless scripts have no overlay authority; scripted clients
     // omit `feed_action_state`, so overlay idling cannot fight `harness::buffer_input`.
 
-    app.run();
+    app.run()
 }
 
 /// The game's netcode and damage-model presentation: the common replica consumer schedule,
@@ -1293,7 +1293,7 @@ fn control_claim_plugin(app: &mut App) {
 }
 
 fn claim_complete_tank(
-    add: On<Add, (NetControlled, Rig)>,
+    add: On<Add<(NetControlled, Rig)>>,
     complete: Query<(), (With<NetControlled>, With<Rig>)>,
     mut commands: Commands,
 ) {
@@ -1304,7 +1304,7 @@ fn claim_complete_tank(
 }
 
 /// File input from Lightyear ownership even while interpolation has not attached the body.
-fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
+fn claim_input_slot(add: On<Add<NetControlled>>, mut commands: Commands) {
     info!("client: controlled entity {} — input slot", add.entity);
     commands.entity(add.entity).insert((
         InputMarker::<TankCommand>::default(),
@@ -1641,7 +1641,7 @@ impl SeenDamage {
 /// `sync_margin::ArrivalDelay` or `fire_presentation::AuthoredIntent`; pending edges must not
 /// replay on the next tank.
 fn reset_link_state(
-    _ended: On<Remove, Connected>,
+    _ended: On<Remove<Connected>>,
     mut arrival: ResMut<super::sync_margin::ArrivalDelay>,
     mut intent: ResMut<super::fire_presentation::AuthoredIntent>,
 ) {
@@ -1652,7 +1652,7 @@ fn reset_link_state(
 /// The game's damage model: this composition has one server link, and its cosmetic paths
 /// cannot receive a terminal after that link ends. Retire those shells with the clock's scope.
 fn retire_link_shells(
-    _ended: On<Remove, Connected>,
+    _ended: On<Remove<Connected>>,
     shells: Query<Entity, With<crate::ballistics::Projectile>>,
     mut commands: Commands,
 ) {
@@ -1669,7 +1669,7 @@ fn retire_link_shells(
 /// prevents a later server connection that reuses match-local ids from colliding with the previous
 /// link. `ShotId` must remain unique for the connection, including across Battles.
 fn reset_shot_receive_state(
-    _connected: On<Add, Connected>,
+    _connected: On<Add<Connected>>,
     mut recoil: ResMut<PendingRecoilKicks>,
     mut shots: ResMut<SeenShots>,
     mut held: ResMut<HeldFireEvents>,

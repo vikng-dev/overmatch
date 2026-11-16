@@ -1,11 +1,15 @@
-//! Avian resting-contact and island lifecycle guards for the game’s server physics. Resting bodies require a wake
-//! source; joining a sleeper must not erase an awake body's accumulated rest time.
-//! Geometry and observation counts below are Fixture data, not settlement targets.
-//! Mechanism and upstream draft: `upstream/avian-island-rest-history.md`.
+//! Avian resting-contact and island lifecycle guards for the game's server physics: the avian3d
+//! fork's island, rest and sleeping-increment rows (`vendor/avian3d-0.8.0-overmatch`,
+//! `OVERMATCH_PATCH.md`), the game's wake rule (`crate::avian_ext::island_wake`) and rest law
+//! (`crate::avian_ext::rest_test`). Resting bodies require a wake source; joining a sleeper must
+//! not erase an awake body's accumulated rest time.
+//! Geometry and observation counts below are Fixture data, not settlement targets. Mechanism and
+//! upstream draft: `upstream/avian-island-rest-history.md`.
 
+use avian3d::collision::contact_types::ContactId;
 use avian3d::dynamics::solver::{
-    islands::{BodyIslandNode, PhysicsIslands, WakeIslands},
-    joint_graph::JointGraph,
+    constraint_graph::ConstraintGraph,
+    islands::{BodyIslandNode, IslandPlugin, PhysicsIslands, WakeIslands},
 };
 use avian3d::prelude::*;
 use bevy::ecs::{entity_disabling::Disabled, system::RunSystemOnce};
@@ -84,9 +88,46 @@ fn stationary_contact_does_not_wake_a_resting_island() {
         "the stationary contact must leave the active pair set"
     );
     assert!(
-        edge.constraint_handles.is_empty(),
+        solved(&app, edge.id) == 0,
         "a sleeping contact must leave no solver handles"
     );
+}
+
+/// A body in the solver holds an island node (Avian's `IslandPlugin` requires one with
+/// `SolverBodyIndex`), so the wake rule refuses one without it instead of reading it as immovable:
+/// so read, an awake body meeting a sleeper has their new contact put to sleep, unsolved. Fails if
+/// a lost node reads as a side that holds no island.
+#[test]
+#[should_panic(expected = "a body in the solver holds an island node")]
+fn an_awake_body_without_its_island_node_is_refused() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let resting = body(&mut app, Vec3::ZERO);
+    until_asleep(&mut app, resting);
+    // Fixture: an awake cube 10 cm off the sleeper's face, closing at 2 m/s.
+    let striker = body(&mut app, Vec3::X * (SIDE + 0.1));
+    app.world_mut()
+        .entity_mut(striker)
+        .insert(LinearVelocity(Vec3::NEG_X * 2.0))
+        .remove::<BodyIslandNode>();
+    for _ in 0..16 {
+        app.update();
+    }
+}
+
+/// The wake rule links resting contacts into Avian's islands, so the game's seams refuse a physics
+/// composition without `IslandPlugin` as they are built, naming the plugin, not inside the pass on
+/// the first step. No composition of the game's physics disables it.
+#[test]
+#[should_panic(expected = "compose physics with Avian's IslandPlugin")]
+fn the_seams_refuse_a_composition_without_islands() {
+    App::new()
+        .add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            PhysicsPlugins::default().build().disable::<IslandPlugin>(),
+        ))
+        .add_plugins(crate::avian_ext::plugin);
 }
 
 /// Island users rely on rest history belonging to each body. A mutant that resets every member
@@ -110,11 +151,8 @@ fn waking_a_merged_island_preserves_already_awake_rest_time() {
                 Or<(With<Disabled>, Without<Disabled>)>,
             >,
                   mut islands: ResMut<PhysicsIslands>,
-                  mut contacts: ResMut<ContactGraph>,
-                  mut joints: ResMut<JointGraph>,
                   mut commands: Commands| {
-                let id =
-                    islands.merge_islands(awake, sleeper, &mut nodes, &mut contacts, &mut joints);
+                let id = islands.merge_islands(awake, sleeper, &mut nodes);
                 commands.queue(WakeIslands(vec![id]));
             },
         )
@@ -185,6 +223,180 @@ fn a_woken_body_takes_only_its_first_steps_gravity() {
         "the first step awake gained {gained}, gravity gives {}",
         gravity * step
     );
+}
+
+/// A force written to a sleeping body acts in its first step awake. The waking `Forces` call wakes
+/// the island only after that step's solve, so the body sits that step out; who relies on it: any
+/// force the server writes to a resting body. A mutant that clears a sleeper's increments at the
+/// step's end loses the force; stock Avian scales it by the substep before the body wakes.
+/// Fixture: a free body held asleep under no gravity, one force for one step.
+#[test]
+fn a_force_on_a_sleeper_acts_in_its_first_step_awake() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let free = body(&mut app, Vec3::ZERO);
+    app.update();
+    app.update();
+    app.world_mut().entity_mut(free).insert(Sleeping);
+    for _ in 0..4 {
+        app.update();
+    }
+    let force = Vec3::X * 10.0;
+    app.world_mut()
+        .run_system_once(move |mut bodies: Query<Forces>| {
+            bodies
+                .get_mut(free)
+                .expect("the fixture body takes forces")
+                .apply_force(force);
+        })
+        .expect("the force applies");
+    app.update();
+    app.update();
+    assert!(app.world().get::<Sleeping>(free).is_none());
+    let step = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let mass = app
+        .world()
+        .get::<ComputedMass>(free)
+        .expect("a dynamic body")
+        .value();
+    let gained = app.world().get::<LinearVelocity>(free).unwrap().0;
+    let expected = force / mass * step;
+    // Resolution: f32 summation over the substeps.
+    assert!(
+        (gained - expected).length() <= 1e-4 * expected.length(),
+        "the woken body gained {gained}, the force gives {expected}"
+    );
+}
+
+/// Server force writers need a sleeper's pending increment held unscaled until wake. Bodies out
+/// of the solver must stay outside increment construction, including change-tick writes:
+/// otherwise the quiet population still pays every step for building and then undoing those
+/// increments. Membership is the solver slot, not wakefulness: a disabled or static body that
+/// once held a slot keeps its increment data, so builders filtered by "not sleeping" fail here.
+#[test]
+fn sleeping_increments_wait_untouched_and_act_on_wake() {
+    use avian3d::dynamics::integrator::VelocityIntegrationData;
+
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let free = body(&mut app, Vec3::ZERO);
+    // Fixture: awake bodies leaving the solver, side by side with the sleeper so all three move
+    // alike and never touch.
+    let disabled = body(&mut app, Vec3::X * 4.0);
+    let fixed = body(&mut app, Vec3::X * 8.0);
+    // Fixture: independent persistent force/acceleration inputs exercise every world-frame builder.
+    let constant_force = Vec3::Z * 3.0;
+    let acceleration = Vec3::Y * 2.0;
+    for entity in [free, disabled, fixed] {
+        app.world_mut().entity_mut(entity).insert((
+            ConstantForce(constant_force),
+            ConstantLinearAcceleration(acceleration),
+            ConstantAngularAcceleration(Vec3::Y * 0.5),
+        ));
+    }
+    app.update();
+    app.update();
+    app.world_mut().entity_mut(free).insert(Sleeping);
+    app.world_mut()
+        .entity_mut(disabled)
+        .insert(RigidBodyDisabled);
+    app.world_mut().entity_mut(fixed).insert(RigidBody::Static);
+    app.world_mut().flush();
+    let outside = |app: &App| {
+        [disabled, fixed].map(|entity| {
+            let data = app
+                .world()
+                .entity(entity)
+                .get_ref::<VelocityIntegrationData>()
+                .expect("a body that held a solver slot keeps its increment data");
+            (
+                data.linear_increment,
+                data.angular_increment,
+                data.last_changed(),
+            )
+        })
+    };
+    let left = outside(&app);
+    // Fixture: the increment a one-step force leaves pending outside the solver.
+    let force = Vec3::X * 10.0;
+    let mass = app.world().get::<ComputedMass>(free).unwrap().value();
+    let pending = force / mass;
+    app.world_mut()
+        .get_mut::<VelocityIntegrationData>(free)
+        .unwrap()
+        .apply_linear_acceleration(pending);
+    let changed = app
+        .world()
+        .entity(free)
+        .get_ref::<VelocityIntegrationData>()
+        .unwrap()
+        .last_changed();
+    for _ in 0..4 {
+        app.update();
+        assert!(app.world().get::<Sleeping>(free).is_some());
+        let entity = app.world().entity(free);
+        let data = entity.get_ref::<VelocityIntegrationData>().unwrap();
+        assert_eq!(
+            data.linear_increment, pending,
+            "pending force stays unscaled"
+        );
+        assert_eq!(data.angular_increment, Vec3::ZERO);
+        assert_eq!(
+            data.last_changed(),
+            changed,
+            "sleepers do not enter the increment builders"
+        );
+        assert_eq!(
+            outside(&app),
+            left,
+            "disabled and static bodies do not enter the increment builders"
+        );
+    }
+    let before = app.world().get::<LinearVelocity>(free).unwrap().0;
+    app.world_mut().entity_mut(free).remove::<Sleeping>();
+    app.update();
+    let step = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let expected = (pending + constant_force / mass + acceleration) * step;
+    let gained = app.world().get::<LinearVelocity>(free).unwrap().0 - before;
+    // Resolution: f32 summation over substeps, below any missing force contribution.
+    assert!((gained - expected).length() <= 1e-4 * expected.length());
+}
+
+/// The increments are built, used and cleared for one solver membership. A body woken between
+/// the build and the clear would take its pending acceleration, unscaled, as a velocity every
+/// substep; the clear refuses the step instead. Fails if the clear stops checking the membership.
+#[test]
+#[should_panic(
+    expected = "no body enters or leaves the solver between the velocity increments' build and clear"
+)]
+fn a_body_woken_between_the_increments_build_and_clear_is_refused() {
+    use avian3d::dynamics::solver::schedule::SolverSystems;
+
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let sleeper = body(&mut app, Vec3::ZERO);
+    app.update();
+    app.update();
+    app.world_mut().entity_mut(sleeper).insert(Sleeping);
+    app.update();
+    assert!(app.world().get::<Sleeping>(sleeper).is_some());
+    app.add_systems(
+        PhysicsSchedule,
+        (move |world: &mut World| {
+            world.entity_mut(sleeper).remove::<Sleeping>();
+        })
+        .after(SolverSystems::PreSubstep)
+        .before(SolverSystems::Substep),
+    );
+    app.update();
 }
 
 /// Physics users need corrupt island membership refused rather than a partly woken island.
@@ -294,6 +506,14 @@ fn an_impact_wakes_an_island_that_merges_again_before_the_solver() {
     );
 }
 
+/// The solver constraints the contact holds in Avian's constraint graph.
+fn solved(app: &App, contact: ContactId) -> usize {
+    app.world()
+        .resource::<ConstraintGraph>()
+        .contact_handles(contact)
+        .len()
+}
+
 /// The configured contact tolerance (m).
 fn tolerance(app: &App) -> f32 {
     app.world()
@@ -306,9 +526,9 @@ fn tolerance(app: &App) -> f32 {
 /// met at the resting poses, which links the two sleeping islands the step after. A mutant whose
 /// misses sleep with the island (avian #1032's transfer) holds the pair with the update from
 /// before that step's motion: the islands stay apart, and a later impact on one side wakes it
-/// alone, its contact with the other unsolved in that step. Fixture: a body drifting under the
-/// rest speed with a mature rest timer, so it sleeps in the step that carries it across the
-/// tolerance.
+/// alone, its contact with the other unsolved in that step. Fixture: a body drifting at half
+/// Avian's default rest speed with a mature rest timer, so it sleeps in the step that carries it
+/// across the tolerance.
 #[test]
 fn a_miss_closed_by_the_last_awake_step_links_the_resting_islands() {
     let mut app = physics_app();
@@ -319,8 +539,9 @@ fn a_miss_closed_by_the_last_awake_step_links_the_resting_islands() {
         .resource::<Time<Fixed>>()
         .timestep()
         .as_secs_f32();
-    // Fixture: a quarter of the tolerance per step.
-    let drift = tolerance / 4.0;
+    let rest_speed =
+        SleepThreshold::default().linear * app.world().resource::<PhysicsLengthUnit>().0;
+    let drift = 0.5 * rest_speed * dt;
     let anchor = body(&mut app, Vec3::ZERO);
     until_asleep(&mut app, anchor);
     // Faces 2.5 drifts outside the tolerance.
@@ -382,7 +603,7 @@ fn a_miss_closed_by_the_last_awake_step_links_the_resting_islands() {
         .get(drifter, anchor)
         .unwrap();
     assert!(
-        edge.is_touching() && !edge.is_sleeping() && !edge.constraint_handles.is_empty(),
+        edge.is_touching() && !edge.is_sleeping() && solved(&app, edge.id) > 0,
         "the impact step solves the resting contact"
     );
     assert!(
@@ -391,12 +612,13 @@ fn a_miss_closed_by_the_last_awake_step_links_the_resting_islands() {
     );
 }
 
-/// Solver users need an impulse on a sleeping body met in its step: the velocity widens the
-/// pair's speculative margin, with no bound or pose changed, and the body wakes only at the step's
-/// end. A mutant whose misses sleep with the island (avian #1032's transfer) holds the pair, so an
-/// impact on the neighbour in the same step wakes the neighbour alone, the impulse's contact
-/// unsolved in that step. Fixture: cubes 1.5 tolerances apart, the impulse closing twice that gap
-/// in one step, a striker within the tolerance of the neighbour's far face.
+/// Solver users need an impulse on a sleeping body met in its step: for a body with speculative
+/// contacts (`SpeculativeCcd`) the velocity widens the pair's speculative margin, with no bound or
+/// pose changed, and the body wakes only at the step's end. A mutant whose misses sleep with the
+/// island (avian #1032's transfer) holds the pair, so an impact on the neighbour in the same step
+/// wakes the neighbour alone, the impulse's contact unsolved in that step. Fixture: cubes 1.5
+/// tolerances apart, the impulse closing twice that gap in one step, a striker within the tolerance
+/// of the neighbour's far face.
 #[test]
 fn an_impulse_on_a_sleeper_meets_its_neighbour_struck_in_the_same_step() {
     let mut app = physics_app();
@@ -409,6 +631,9 @@ fn an_impulse_on_a_sleeper_meets_its_neighbour_struck_in_the_same_step() {
         .timestep()
         .as_secs_f32();
     let pushed = body(&mut app, Vec3::X * -(SIDE + gap));
+    app.world_mut()
+        .entity_mut(pushed)
+        .insert(SpeculativeCcd::MAX);
     let neighbour = body(&mut app, Vec3::ZERO);
     until_asleep(&mut app, pushed);
     until_asleep(&mut app, neighbour);
@@ -444,7 +669,7 @@ fn an_impulse_on_a_sleeper_meets_its_neighbour_struck_in_the_same_step() {
         .get(pushed, neighbour)
         .expect("the bounds hold the pair");
     assert!(
-        edge.is_touching() && !edge.is_sleeping() && !edge.constraint_handles.is_empty(),
+        edge.is_touching() && !edge.is_sleeping() && solved(&app, edge.id) > 0,
         "the impulse's step solves its contact"
     );
 }
@@ -549,6 +774,7 @@ fn rest_depends_on_energy_per_mass_and_spin_axis() {
 /// Degenerate mass properties use Avian's reciprocal convention without NaNs.
 #[test]
 fn rest_energy_is_frame_invariant_and_handles_degenerate_mass() {
+    use crate::avian_ext::rest_test::kinetic_speed_squared;
     use avian3d::dynamics::solver::solver_body::SolverBody;
     // Fixture: anisotropic inertia, a generic rotation and an off-axis world spin.
     let body = SolverBody {
@@ -567,12 +793,12 @@ fn rest_energy_is_frame_invariant_and_handles_degenerate_mass() {
             + principal.y * local_spin.y.powi(2)
             + principal.z * local_spin.z.powi(2))
             / 12.0;
-    assert!((body.kinetic_speed_squared(mass, inertia, rotation) - expected).abs() < 1e-5);
+    assert!((kinetic_speed_squared(&body, mass, inertia, rotation) - expected).abs() < 1e-5);
     for mass in [ComputedMass::new(0.0), ComputedMass::INFINITY] {
-        assert_eq!(body.kinetic_speed_squared(mass, inertia, rotation), 1.0);
+        assert_eq!(kinetic_speed_squared(&body, mass, inertia, rotation), 1.0);
     }
     assert_eq!(
-        body.kinetic_speed_squared(mass, ComputedAngularInertia::INFINITY, rotation),
+        kinetic_speed_squared(&body, mass, ComputedAngularInertia::INFINITY, rotation),
         1.0
     );
 }
@@ -606,6 +832,64 @@ fn the_original_velocity_test_still_allows_rest() {
         app.update();
     }
     assert!(app.world().get::<Sleeping>(resting).is_some());
+}
+
+/// From Avian's floor for its per-body loops (`utils::MIN_PAR_ITER_ENTITIES`, 4,096 awake bodies,
+/// crate-private) the rest test runs per body on the compute pool, and every body's island still
+/// commits: the still bodies' islands sleep and a drifting body's stays awake. Fixture: 4,096 still
+/// cubes apart in zero gravity and one drifting at 1 m/s, over the witness's own compute pool of
+/// four threads. Fails if the parallel pass drops a body's commit (the drifting body's island
+/// sleeps) or its timer (no island sleeps).
+#[test]
+fn rest_on_the_compute_pool_commits_every_body() {
+    crate::headless_test::on_own_compute_pool(
+        module_path!(),
+        "rest_on_the_compute_pool_commits_every_body",
+        4,
+        rest_commits_every_body,
+    );
+}
+
+fn rest_commits_every_body() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    // Fixture: a 64 × 64 grid of cubes 2 m apart, none touching.
+    let still: Vec<Entity> = (0..4096)
+        .map(|i| {
+            let (row, column) = ((i / 64) as f32, (i % 64) as f32);
+            body(&mut app, Vec3::new(2.0 * column, 0.0, 2.0 * row))
+        })
+        .collect();
+    let drifting = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Position(Vec3::Y * 4.0),
+            LinearVelocity(Vec3::X),
+            Collider::cuboid(SIDE, SIDE, SIDE),
+        ))
+        .id();
+    app.update();
+    let dt = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let ticks = (app.world().resource::<TimeToSleep>().0 / dt).ceil() as usize;
+    // Allow one step to expose the first fixed tick and one to commit sleeping.
+    for _ in 0..ticks + 2 {
+        app.update();
+    }
+    let world = app.world();
+    let awake = still
+        .iter()
+        .filter(|&&body| world.get::<Sleeping>(body).is_none())
+        .count();
+    assert_eq!(awake, 0, "still bodies' islands stayed awake");
+    assert!(
+        world.get::<Sleeping>(drifting).is_none(),
+        "the drifting body's island slept"
+    );
 }
 
 /// The engine's angular limit must retain the resting see-saw case for large scenery pieces;
@@ -642,16 +926,20 @@ fn a_long_bar_see_sawing_below_the_angular_limit_still_rests() {
 /// The original angular limit resets the timer at every pulse, before TimeToSleep.
 #[test]
 fn a_supported_bar_rests_through_periodic_one_tick_roll_pulses() {
-    use avian3d::dynamics::solver::solver_body::SolverBody;
+    use avian3d::dynamics::solver::solver_body::{SolverBodies, SolverBodyIndex};
     #[derive(Component)]
     struct PulsedBar;
     fn pulse(
-        mut bars: Query<(&mut SolverBody, &mut AngularVelocity, &Rotation), With<PulsedBar>>,
+        mut solver: ResMut<SolverBodies>,
+        mut bars: Query<(&SolverBodyIndex, &mut AngularVelocity, &Rotation), With<PulsedBar>>,
         mut tick: Local<usize>,
     ) {
         // Fixture: one-tick roll at 0.4 rad/s every ten ticks (MEASURED pile blocker scale).
-        for (mut body, mut spin, rotation) in &mut bars {
+        for (&index, mut spin, rotation) in &mut bars {
             let velocity = if tick.is_multiple_of(10) { 0.4 } else { 0.0 };
+            let body = solver
+                .get_mut(index)
+                .expect("an awake bar's solver index addresses its body");
             body.angular_velocity = rotation.0 * Vec3::X * velocity;
             spin.0 = body.angular_velocity;
         }

@@ -668,7 +668,7 @@ pub(crate) struct ChunkCollider(pub(crate) u16);
 /// ascending. On the authority it rides the group's dynamic body; the network carries it to
 /// replicas on the body's pose carrier, with its birth and optional retirement ticks.
 #[derive(Component, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[require(avian3d::prelude::ReducibleContacts)]
+#[require(crate::avian_ext::contact_reduction::ReducibleContacts)]
 pub(crate) struct Piece {
     pub(crate) construction: u16,
     pub(crate) chunks: Vec<u16>,
@@ -1412,7 +1412,7 @@ fn owner_motion(
     ReleasedMotion {
         velocity: body.linear_velocity(),
         spin: body.angular_velocity(),
-        centre: body.position().0 + body.rotation().0 * centre.0,
+        centre: body.position() + body.rotation() * centre.0,
     }
 }
 
@@ -1951,7 +1951,10 @@ fn apply_deposits(mut p: DepositParam) {
             p.constructions
                 .par_iter_many_unique_mut(batch.keys())
                 .batching_strategy(bevy::ecs::batching::BatchingStrategy::fixed(1))
-                .for_each(|(root, transform, mut breakage, piece)| {
+                .for_each(|candidate| {
+                    let (root, transform, mut breakage, piece) = candidate.expect(
+                        "sweep_intake queues changed roots for LawSet in the same tick, before retirement",
+                    );
                     let taken = &batch[&root];
                     let construction = breakage.physics_frame(transform);
                     let motion = owner_motion(
@@ -2544,9 +2547,9 @@ fn solid_collider(points: Vec<Vec3>, density: f32) -> bool {
     use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::{
         AngularInertiaTensor, ComputeMassProperties3d,
     };
-    Collider::convex_hull(points).is_some_and(|collider| {
+    Collider::convex_hull(&points).is_some_and(|collider| {
         let properties = collider.mass_properties(density);
-        // bevy_heavy 0.5 (avian3d 0.7) returns zero for an underflowed inertia determinant.
+        // bevy_heavy 0.6 (avian3d 0.8) returns zero for an underflowed inertia determinant.
         let inverse = properties.angular_inertia_tensor().inverse();
         properties.mass.is_finite()
             && properties.mass > 0.0
@@ -2569,11 +2572,11 @@ fn solid_collider(points: Vec<Vec3>, density: f32) -> bool {
 #[cfg(any(test, feature = "dev_ui"))]
 pub(crate) fn chunk_collider(kind: &ConstructionKind, c: usize, origin: Vec3) -> Collider {
     Collider::convex_hull(
-        kind.layout.blocks[c]
+        &kind.layout.blocks[c]
             .points
             .iter()
             .map(|p| *p - origin)
-            .collect(),
+            .collect::<Vec<_>>(),
     )
     .expect("a load-certified authored hull stays a solid convex hull")
 }
@@ -2673,7 +2676,7 @@ pub(crate) fn contact_collider(block: &Block, faces: &[bool], origin: Vec3) -> O
         .map(|p| (p - origin.as_dvec3()).as_vec3())
         .collect();
     Block::hull(points.clone())?;
-    Collider::convex_hull(points)
+    Collider::convex_hull(&points)
 }
 
 /// The ballistic volume of law chunk `c`: its element's substance.

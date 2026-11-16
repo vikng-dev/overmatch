@@ -101,7 +101,7 @@ fn show(
 }
 
 fn clicked(
-    mut click: On<Pointer<Click>>,
+    mut click: On<PointerClick>,
     buttons: Query<(), With<LeaveMatchButton>>,
     overlays: Res<Overlays>,
     mut leave: MessageWriter<LeaveMatch>,
@@ -157,23 +157,23 @@ mod tests {
             .single(world)
             .unwrap();
         // Fixture pointer: no window or renderer is needed to deliver an observer event.
-        world.trigger(Pointer::new(
-            PointerId::Mouse,
-            Location {
-                target: NormalizedRenderTarget::None {
-                    width: 1,
-                    height: 1,
+        world.trigger(PointerClick {
+            entity: button,
+            pointer: Pointer::new(
+                PointerId::Mouse,
+                Location {
+                    target: NormalizedRenderTarget::None {
+                        width: 1,
+                        height: 1,
+                    },
+                    position: Vec2::ZERO,
                 },
-                position: Vec2::ZERO,
-            },
-            Click {
-                button: PointerButton::Primary,
-                hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
-                duration: std::time::Duration::ZERO,
-                count: 1,
-            },
-            button,
-        ));
+            ),
+            button: PointerButton::Primary,
+            hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            duration: std::time::Duration::ZERO,
+            count: 1,
+        });
         assert_eq!(world.resource::<Messages<LeaveMatch>>().len(), 1);
     }
 }

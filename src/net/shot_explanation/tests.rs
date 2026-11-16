@@ -66,7 +66,7 @@ fn build_server(port: u16, vocabulary: ShotVocabulary) -> App {
                 ..default()
             }),
             LocalAddr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)),
-            ServerUdpIo::default(),
+            ServerUdpIo,
         ))
         .id();
     app.world_mut().commands().trigger(Start { entity: server });

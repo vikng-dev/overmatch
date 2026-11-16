@@ -287,7 +287,10 @@ impl MeshGeometry {
         if parts.is_empty() {
             return None;
         }
-        parts.into_values().map(Collider::convex_hull).collect()
+        parts
+            .into_values()
+            .map(|points| Collider::convex_hull(&points))
+            .collect()
     }
 }
 
@@ -3669,7 +3672,7 @@ mod tests {
         let hull = |p: &MeshGeometry| p.convex_hull_colliders().expect("a box").remove(0);
         assert!(shared(&hull(&unit), &hull(&unit)));
         assert!(shared(&unit.trimesh_collider(), &unit.trimesh_collider()));
-        let top = |c: &Collider| c.aabb(Vec3::ZERO, Quat::IDENTITY).max;
+        let top = |c: &Collider| c.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0).max;
         assert_eq!(top(&hull(&unit)), Vec3::ONE);
         assert_eq!(top(&hull(&double)), Vec3::splat(2.0));
         assert_eq!(top(&double.trimesh_collider()), Vec3::splat(2.0));

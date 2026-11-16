@@ -3,10 +3,10 @@
 use super::*;
 
 fn helpers() -> String {
-    let source = include_str!("../../assets/shaders/terrain_blend.wgsl");
+    let source = include_str!("../../assets/shaders/terrain_blend.wesl");
     let start = source.find("struct TerrainBlendParams").unwrap();
     let end = source.find("@fragment").unwrap();
-    source[start..end].replace("#{MATERIAL_BIND_GROUP}", "0")
+    source[start..end].replace("@group(MATERIAL_BIND_GROUP)", "@group(0)")
 }
 
 /// The terrain's divergent marches must remain valid WGSL without implicit derivatives. Parsing
@@ -284,7 +284,9 @@ fn check() {{
         })
         .expect("headless compute completes");
     receive.recv().unwrap().expect("readback maps");
-    let bytes = readback.get_mapped_range(..);
+    let bytes = readback
+        .get_mapped_range(..)
+        .expect("the readback is mapped over its aligned full range");
     bytes
         .as_chunks::<4>()
         .0

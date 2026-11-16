@@ -205,7 +205,7 @@ struct Prepared {
 }
 
 impl SweepSource {
-    /// DERIVED: Avian 0.7 `ContactNormalPart::generate`
+    /// DERIVED: Avian 0.8 `ContactNormalPart::generate`
     /// (`dynamics/solver/contact/normal_part.rs`), with a fixed target:
     /// `m_eff = 1 / (n dot M^-1 n + (r cross n) dot I_world^-1 (r cross n))`.
     /// The lever and world inertia are evaluated at the witness's pose. Avian supplies the
@@ -640,7 +640,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                 return;
             }
             let axes = axes.copied().unwrap_or_default(); // Absence is Avian's unrestricted state.
-            let rotation = forces.rotation().0;
+            let rotation = forces.rotation();
             // No solver contact moved this body last step: nothing pushes it.
             let push = free_translation(axes) * pushes.get(&body_entity).map_or(Vec3::ZERO, |&f| f);
             // What Avian integrates before its contact solve: accumulated and constant forces and
@@ -675,14 +675,14 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                 (false, None) => {
                     let Some(bounds) = super::super::sweep::SourceBounds::new(
                         admitted()
-                            .map(|(hull, local, _)| (hull, local.translation, local.rotation.0)),
+                            .map(|(hull, local, _)| (hull, local.translation, local.rotation)),
                     ) else {
                         return; // No construction-contact geometry on this body.
                     };
                     bounds
                 }
             };
-            let position = forces.position().0;
+            let position = forces.position();
             let centre = position + rotation * com.0;
             let motion = super::super::sweep::RigidMotion {
                 position,
@@ -714,7 +714,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                                 }),
                                 hull: hull.clone(),
                                 position: local.translation,
-                                rotation: local.rotation.0,
+                                rotation: local.rotation,
                             })
                             .collect(),
                     )),
@@ -738,7 +738,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
     sources
 }
 
-/// DERIVED: Avian 0.7 adds `a dt / N` to the velocity before each of its `N` substep position
+/// DERIVED: Avian 0.8 adds `a dt / N` to the velocity before each of its `N` substep position
 /// steps (`pre_process_velocity_increments`, then `integrate_velocities`), so a body no contact
 /// touches travels `v dt + a dt² (N + 1) / (2N)`: the cast's one velocity, `v + a` times this,
 /// reaches that pose, and is the body's velocity this far into the tick
@@ -747,7 +747,7 @@ fn travel(substeps: &avian3d::prelude::SubstepCount, dt: f32) -> f32 {
     (substeps.0 + 1) as f32 / (2 * substeps.0) as f32 * dt
 }
 
-/// One spatial query before fine geometry exists. Avian 0.7's AABB query tests each returned
+/// One spatial query before fine geometry exists. Avian 0.8's AABB query tests each returned
 /// collider's ColliderAabb; filtering those same boxes by the fine bound preserves its owner set.
 fn prepare_source(
     (spatial, colliders, constructions, aabbs): (
@@ -885,7 +885,9 @@ fn geometry(
     p.constructions
         .par_iter_many_unique_mut(&roots)
         .batching_strategy(bevy::ecs::batching::BatchingStrategy::fixed(1))
-        .for_each(|(root, position, rotation, mut breakage)| {
+        .for_each(|candidate| {
+            let (root, position, rotation, mut breakage) = candidate
+                .expect("a prepared sweep root passed constructions.contains in this intake");
             // Preload storage and cuts change here; a cut owner is marked changed when its
             // departures prepare ([`commit`]).
             let breakage = breakage.bypass_change_detection();
@@ -1118,7 +1120,7 @@ fn exchange_all(
 fn source_body(bodies: &Bodies, body: Entity) -> super::super::sweep::Body {
     let (forces, _, mass, inertia, com, axes, _) =
         bodies.get(body).expect("sweep source survives intake");
-    let rotation = forces.rotation().0;
+    let rotation = forces.rotation();
     let axes = axes.copied().unwrap_or_default(); // Absence is Avian's unrestricted body state.
     let angular = Mat3::from_diagonal(Vec3::new(
         f32::from(!axes.is_rotation_x_locked()),
@@ -1126,7 +1128,7 @@ fn source_body(bodies: &Bodies, body: Entity) -> super::super::sweep::Body {
         f32::from(!axes.is_rotation_z_locked()),
     ));
     super::super::sweep::Body {
-        centre: (forces.position().0 + rotation * com.0).as_dvec3(),
+        centre: (forces.position() + rotation * com.0).as_dvec3(),
         inverse_mass: (free_translation(axes) * mass.inverse()).as_dvec3(),
         inverse_inertia: (angular * inertia.rotated(rotation).inverse().to_mat3() * angular)
             .as_dmat3(),
@@ -1232,7 +1234,9 @@ fn commit(
     let chunk_entities = &p.chunk_entities;
     p.constructions
         .par_iter_many_unique_mut(departing.keys())
-        .for_each(|(root, position, rotation, mut breakage)| {
+        .for_each(|candidate| {
+            let (root, position, rotation, mut breakage) =
+                candidate.expect("a cut's owner was resolved from constructions in this round");
             let pose = breakage.physics_frame((position, rotation));
             // A construction without children has no chunk collider to rehome.
             let reusable = reusable_colliders(children.get(root).ok(), chunk_entities);

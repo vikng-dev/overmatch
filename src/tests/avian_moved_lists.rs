@@ -1,15 +1,16 @@
-//! GUARD for the vendored moved-list index (`vendor/avian3d-0.7.0-child-pose`,
-//! `OVERMATCH_PATCH.md`).
+//! WITNESS for the moved-list index that avian3d 0.8.0 does itself (`MovedProxyList` and the
+//! indexed `MovedProxies`), so the fork dropped its patch (`vendor/avian3d-0.8.0-overmatch`,
+//! `OVERMATCH_PATCH.md`, "Moved-list removal by index").
 //!
 //! The invariant: a collider tree's moved list and `MovedProxies` hold the proxies, in the order,
-//! that stock Avian 0.7.0's scanning removal leaves: a removed proxy's place is taken by the last
-//! one listed, and nothing else moves. Who relies on it: the broad phase, which makes its pairs in
+//! that Avian 0.7.0's scanning removal left: a removed proxy's place is taken by the last one
+//! listed, and nothing else moves. Who relies on it: the broad phase, which makes its pairs in
 //! `MovedProxies` order, and through the pair order the solver; and tree optimization, which
 //! reinserts the tree's moved proxies in list order. A removal that took the wrong entry, or left
 //! a removed proxy listed, changes both.
 //!
-//! The model below is the stock form: one list per structure, a removal by a scan from the front
-//! and `swap_remove`. Counts, bounds and the generator's constants are fixture data.
+//! The model below is that scanning form: one list per structure, a removal by a scan from the
+//! front and `swap_remove`. Counts, bounds and the generator's constants are fixture data.
 
 use avian3d::collider_tree::{
     ColliderTree, ColliderTreeProxy, ColliderTreeProxyKey, ColliderTreeType, MovedProxies, ProxyId,
@@ -86,7 +87,10 @@ impl Lists {
             "insert accepts a key exactly when the stock list lacks it"
         );
         if absent {
-            self.tree.mark_moved(id);
+            assert!(
+                self.tree.moved_proxies.push(id),
+                "a key `MovedProxies` lacked is not listed in its tree"
+            );
             self.stock_tree.push(id);
             self.stock_moved.push(key(id));
         }
@@ -94,14 +98,14 @@ impl Lists {
 
     /// As Avian's `clear_moved_proxies`, at the end of a physics step.
     fn clear(&mut self) {
-        self.tree.clear_moved();
+        self.tree.moved_proxies.clear();
         self.moved.clear();
         self.stock_tree.clear();
         self.stock_moved.clear();
     }
 
     fn assert_stock(&self, when: &str) {
-        assert_eq!(self.tree.moved_proxies(), self.stock_tree, "{when}");
+        assert_eq!(*self.tree.moved_proxies, self.stock_tree, "{when}");
         assert_eq!(self.moved.proxies(), self.stock_moved, "{when}");
     }
 }
@@ -129,7 +133,7 @@ fn a_tick_of_rehomes_and_toggles_leaves_the_stock_moved_lists() {
         lists.add(i as f32);
         lists.assert_stock("after a toggle");
     }
-    assert_eq!(lists.tree.moved_proxies().len(), PROXIES);
+    assert_eq!(lists.tree.moved_proxies.len(), PROXIES);
 }
 
 /// Adds, removals of listed and unlisted proxies, marks and clears in a generated order, with
@@ -158,12 +162,16 @@ fn generated_moves_leave_the_stock_moved_lists() {
 }
 
 /// A tree lists a moved proxy once: a second entry would stay listed after the proxy's removal,
-/// naming a freed or reused id to tree optimization.
+/// naming a freed or reused id to tree optimization. A second mark returns `false` and leaves one
+/// entry, and the proxy's removal unlists it.
 #[test]
-#[should_panic(expected = "marked moved twice")]
-fn marking_a_listed_proxy_again_is_refused() {
+fn marking_a_listed_proxy_again_lists_it_once() {
     let mut lists = Lists::default();
     lists.add(0.0);
     let id = lists.live[0];
-    lists.tree.mark_moved(id);
+    assert!(!lists.tree.moved_proxies.push(id));
+    lists.assert_stock("after a second mark");
+    lists.remove(0);
+    assert!(!lists.tree.moved_proxies.contains(&id));
+    lists.assert_stock("after the removal");
 }

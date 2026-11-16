@@ -1424,9 +1424,7 @@ pub(crate) mod tests {
     /// Box, pitch, speed and DERIVED 1.465 m shipped-map spacing are FIXTURE data.
     #[test]
     fn a_frictionless_edge_slides_across_flat_terrain_at_speed() {
-        use avian3d::prelude::{
-            LinearVelocity, LockedAxes, PhysicsPlugins, Position, RigidBody, Rotation,
-        };
+        use avian3d::prelude::{LinearVelocity, LockedAxes, Position, RigidBody, Rotation};
         use bevy::time::TimeUpdateStrategy;
         use std::time::Duration;
 
@@ -1445,7 +1443,7 @@ pub(crate) mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
         ))
         .init_asset::<Mesh>()
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
@@ -1456,6 +1454,13 @@ pub(crate) mod tests {
         }
         app.finish();
         app.cleanup();
+        assert_eq!(
+            app.world()
+                .resource::<avian3d::prelude::NarrowPhaseConfig>()
+                .recycle_distance,
+            0.0,
+            "the terrain edge witness uses the shipped no-recycling contact policy",
+        );
         app.world_mut()
             .spawn((RigidBody::Static, heightfield_collider(&grid)));
         // Pitched about +X, the box's +Z bottom edge is its lowest point: that edge leads.

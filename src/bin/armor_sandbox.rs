@@ -5,11 +5,11 @@
 
 use bevy::prelude::*;
 
-fn main() {
+fn main() -> AppExit {
     let mut app = App::new();
     overmatch::windowed_runtime(&mut app, Window::default());
     app.add_plugins(overmatch::sandbox::plugin)
         // Documentation frames; inert without `OVERMATCH_CAPTURE`.
         .add_plugins(overmatch::dev_capture::plugin)
-        .run();
+        .run()
 }

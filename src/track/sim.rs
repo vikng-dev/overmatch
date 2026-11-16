@@ -280,7 +280,7 @@ impl SampledSupports {
     }
 }
 
-fn forget_sampled_supports(gone: On<Remove, TrackContacts>, mut index: ResMut<SampledSupports>) {
+fn forget_sampled_supports(gone: On<Remove<TrackContacts>>, mut index: ResMut<SampledSupports>) {
     index.forget(gone.entity);
 }
 
@@ -1389,9 +1389,9 @@ fn apply_track_forces(
             .expect("a dynamic driving hull carries Avian force state");
         let target = drive_target(tank.command, tank.volumes, tank.capabilities, &volumes);
         let affine = Affine3A::from_rotation_translation(tank.rotation.0, tank.position.0);
-        // avian3d 0.7 ForcesItem's global COM expression in query_data.rs.
+        // avian3d 0.8 ForcesItem's global COM expression in query_data.rs.
         let center_of_mass = tank.position.0 + tank.rotation.0 * tank.center_of_mass.0;
-        // avian3d 0.7 dynamics/integrator/mod.rs: the increments are inverse mass times force
+        // avian3d 0.8 dynamics/integrator/mod.rs: the increments are inverse mass times force
         // plus gravity, and the rotated inverse inertia times torque. A tank locks no axis and
         // carries no damping; the solver's gyroscopic term is left out.
         let hull = HullBody {
@@ -1583,7 +1583,7 @@ mod tests {
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            crate::offline_physics(),
             crate::bake::plugin,
         ))
         .init_asset::<Mesh>()
