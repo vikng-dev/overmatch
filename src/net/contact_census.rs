@@ -181,6 +181,14 @@ pub(crate) struct FirstFall {
     pairs: u32,
 }
 
+impl FirstFall {
+    fn absorb(&mut self, part: Self) {
+        self.awake += part.awake;
+        self.only_first_fall_contacts += part.only_first_fall_contacts;
+        self.pairs += part.pairs;
+    }
+}
+
 /// Airborne pieces this tick.
 #[derive(Clone, Copy, Default, Serialize)]
 pub(crate) struct Airborne {
@@ -192,6 +200,15 @@ pub(crate) struct Airborne {
     /// "Reached" means such a pair that carried normal impulse, the stricter reading: a chunk born
     /// beside a still-standing neighbour touches it without landing on it.
     loaded: FirstFall,
+}
+
+impl Airborne {
+    fn absorb(&mut self, part: Self) {
+        self.awake_pieces += part.awake_pieces;
+        self.no_contact += part.no_contact;
+        self.touch.absorb(part.touch);
+        self.loaded.absorb(part.loaded);
+    }
 }
 
 /// Islands holding an awake piece.
@@ -621,6 +638,8 @@ pub(super) struct ContactCensus<'w, 's> {
     body_pairs: Local<'s, Vec<(Kind, Entity, Entity)>>,
     flags: Local<'s, EntityHashMap<u8>>,
     awake_islands: Local<'s, HashMap<u32, u32>>,
+    /// Each worker's awake-piece counts and awake pieces per island, awaiting the merge.
+    awake_parts: Local<'s, bevy::utils::Parallel<(Airborne, HashMap<u32, u32>)>>,
     tank_islands: Local<'s, HashSet<u32>>,
     /// Each tank's upward momentum from loose pieces through its soft runs (N·s, [`PieceLift`]).
     lifts: Local<'s, EntityHashMap<f32>>,
@@ -941,26 +960,39 @@ impl ContactCensus<'_, '_> {
         row.airborne.touch.pairs = touch_pairs;
         row.airborne.loaded.pairs = loaded_pairs;
 
+        // Each awake piece is classified on the compute pool from the settled records and flags;
+        // the counts sum and the island tallies merge by key.
+        let (records, flags, parts) = (&*records, &*flags, &*self.awake_parts);
+        self.pieces
+            .par_iter()
+            .for_each(|(entity, _, _, _, island, sleeping, _)| {
+                if sleeping {
+                    return;
+                }
+                let record = &records.live[&entity];
+                parts.scope(|(airborne, islands)| {
+                    airborne.awake_pieces += 1;
+                    *islands.entry(island.island_id().0).or_default() += 1;
+                    airborne.touch.awake += u32::from(record.first_ground.is_none());
+                    airborne.loaded.awake += u32::from(record.first_loaded.is_none());
+                    match flags.get(&entity) {
+                        None => airborne.no_contact += 1,
+                        Some(flag) if flag & NON_PIECE == 0 => {
+                            airborne.touch.only_first_fall_contacts +=
+                                u32::from(flag & BLOCKED_TOUCH == 0);
+                            airborne.loaded.only_first_fall_contacts +=
+                                u32::from(flag & BLOCKED_LOADED == 0);
+                        }
+                        Some(_) => {}
+                    }
+                });
+            });
         let awake_islands = &mut *self.awake_islands;
         awake_islands.clear();
-        for (entity, _, _, _, island, sleeping, _) in &self.pieces {
-            if sleeping {
-                continue;
-            }
-            row.airborne.awake_pieces += 1;
-            *awake_islands.entry(island.island_id().0).or_default() += 1;
-            let record = &records.live[&entity];
-            row.airborne.touch.awake += u32::from(record.first_ground.is_none());
-            row.airborne.loaded.awake += u32::from(record.first_loaded.is_none());
-            match flags.get(&entity) {
-                None => row.airborne.no_contact += 1,
-                Some(flag) if flag & NON_PIECE == 0 => {
-                    row.airborne.touch.only_first_fall_contacts +=
-                        u32::from(flag & BLOCKED_TOUCH == 0);
-                    row.airborne.loaded.only_first_fall_contacts +=
-                        u32::from(flag & BLOCKED_LOADED == 0);
-                }
-                Some(_) => {}
+        for (airborne, islands) in self.awake_parts.iter_mut() {
+            row.airborne.absorb(std::mem::take(airborne));
+            for (id, count) in islands.drain() {
+                *awake_islands.entry(id).or_default() += count;
             }
         }
         row.islands.with_awake_piece = awake_islands.len() as u32;
@@ -1460,10 +1492,14 @@ mod tests {
         step(&mut app, 2);
         app.world_mut().entity_mut(cube).insert(Sleeping);
         let first = app.world().resource::<PieceRecords>().episodes[0];
+        // Fixture: twice the cube's own rest speed, so neither rest test passes on the wake.
+        let wake = 2.0
+            * app.world().get::<SleepThreshold>(cube).unwrap().linear
+            * app.world().resource::<PhysicsLengthUnit>().0;
         app.world_mut()
             .entity_mut(cube)
             .remove::<Sleeping>()
-            .insert(LinearVelocity(Vec3::X));
+            .insert(LinearVelocity(Vec3::X * wake));
         step(&mut app, 1);
         let current = app.world().resource::<PieceRecords>().live[&cube];
         assert!(current.sleep.is_none());
@@ -1476,6 +1512,7 @@ mod tests {
         assert_eq!(records.episodes[1].sleep, Some(3));
         assert_eq!(records.episodes[1].first_ground, first.first_ground);
     }
+
     /// Stillness readers ignore bounded jitter, accumulate slow creep against the held anchor,
     /// and count a rotation at each piece's own extent, including quaternion sign equivalence.
     #[test]
