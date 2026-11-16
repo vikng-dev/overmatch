@@ -34,7 +34,7 @@ use crate::state::{GameplaySet, SimPhase};
 use crate::tank::{
     PendingTankAssets, Rig, TankContent, TankSimSource, load_tank_sim_assets, spawn_complete_tank,
 };
-use crate::terrain_grid::spawn_pos;
+use crate::terrain_grid::{HeightGrid, Stance, spawn_pos};
 // The spawn selector reads the world's standing geometry through the SAME encoding the analytic
 // track field is built from (`world::TerrainMap` blocks → `TerrainBlock`), so the two cannot drift.
 use crate::track::oracle::TerrainBlock;
@@ -127,9 +127,9 @@ pub fn run() {
             info!("server: starting, listening on {bind}:{PORT}");
         })
         .after(super::ram::prepare)
-        .after(admit_harness_spawn),
+        .after(admit_spawn_levers),
     );
-    app.add_systems(PostStartup, admit_harness_spawn);
+    app.add_systems(PostStartup, admit_spawn_levers);
     // The SIM load: the spec sheet only. The dedicated server opens no view artifact — no scene,
     // no textures, no rungs (ADR-0035); the walk's geometry arrives through `bake`'s extraction of
     // `<id>.sim.glb`.
@@ -251,7 +251,7 @@ fn cycle_battles(
         Boundary::NextBattle => {
             score.0.clear();
             overrides.0.clear();
-            lane.0 = 0;
+            *lane = SpawnLane::default();
             let number = next.number;
             commands.queue(move |world: &mut World| super::world_reset::start_next(world, number));
             pending.0 = clients
@@ -372,9 +372,27 @@ pub(super) fn attach_replication_sender(add: On<Add<LinkOf>>, mut commands: Comm
     commands.entity(add.entity).insert(ReplicationSender);
 }
 
-/// Monotonic spawn-lane allocator; concurrent tanks must not overlap at spawn.
+/// Each link's lane about a fixed spawn point (a ram recipe's or a harness script's), so
+/// concurrent tanks do not overlap at spawn. A link keeps its lane for every life of the Battle and
+/// a new link takes the next, so the lanes in use are bounded by the Battle's links, never by its
+/// respawns.
 #[derive(Resource, Default)]
-struct SpawnLane(u32);
+struct SpawnLane {
+    next: u32,
+    of: bevy::platform::collections::HashMap<Entity, u32>,
+}
+
+impl SpawnLane {
+    /// `link`'s lane, assigned on its first spawn of the Battle.
+    fn of(&mut self, link: Entity) -> u32 {
+        let Self { next, of } = self;
+        *of.entry(link).or_insert_with(|| {
+            let lane = *next;
+            *next += 1;
+            lane
+        })
+    }
+}
 
 /// Deterministic outward search pattern for an occupied spawn point: per-radius direction
 /// tables of fixed unit vectors (exact constants — no trig at runtime, so every peer/replay
@@ -605,18 +623,60 @@ pub(crate) fn lane_spawn_xz(base_xz: Vec2, lane: u32, radius: f32) -> Vec2 {
     base_xz + lane_offset(lane, radius * 2.0)
 }
 
-/// A harness spawn point is operator input, refused before play outside the placeable square:
-/// the spawn rule treats a point outside the world span as a bug.
-fn admit_harness_spawn(manifest: Res<crate::map::MapManifest>) {
-    if let Some((at, _)) = harness::spawn_pose() {
-        let limit = spawn_map::spawn_limit(manifest.extent.half_extent());
-        if at.abs().max_element() > limit {
-            harness::refuse_start::<()>(format!(
-                "OVERMATCH_HARNESS: spawn_pose at ({}, {}) lies outside the placeable square \
-                 (±{limit} m); choose a point inside it",
-                at.x, at.y
-            ));
-        }
+/// A fixed spawn's lane whose point lies outside the placeable square: the lane is unavailable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LaneUnavailable {
+    lane: u32,
+    xz: Vec2,
+    limit: f32,
+}
+
+impl std::fmt::Display for LaneUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "lane {} at ({:.1}, {:.1}) lies outside the placeable square (±{:.1} m)",
+            self.lane, self.xz.x, self.xz.y, self.limit
+        )
+    }
+}
+
+/// Lane `lane`'s point about the fixed spawn point `at`, for bodies of `radius`, or why it has
+/// none. Fixed points come from operator levers, so every derived point is checked here, before
+/// the spawn rule, which treats a point outside the world span as a bug.
+fn fixed_lane_xz(at: Vec2, lane: u32, radius: f32, limit: f32) -> Result<Vec2, LaneUnavailable> {
+    let xz = lane_spawn_xz(at, lane, radius);
+    if xz.abs().max_element() > limit {
+        return Err(LaneUnavailable { lane, xz, limit });
+    }
+    Ok(xz)
+}
+
+/// The fixed spawns' operator levers, refused before play where a point they name lies outside the
+/// placeable square: the harness script's spawn point (its other lanes are checked as joins take
+/// them) and every bot's home.
+fn admit_spawn_levers(
+    manifest: Res<crate::map::MapManifest>,
+    source: TankSimSource,
+    bots: Res<BotCount>,
+) {
+    let limit = spawn_map::spawn_limit(manifest.extent.half_extent());
+    let radius = source.get().contact_radius();
+    if let Some((at, _)) = harness::spawn_pose()
+        && let Err(unavailable) = fixed_lane_xz(at, 0, radius, limit)
+    {
+        harness::refuse_start::<()>(format!(
+            "OVERMATCH_HARNESS: spawn_pose: {unavailable}; choose a point inside it"
+        ));
+    }
+    let home = Vec2::from(bot_policy().home_xz.0);
+    if let Some(unavailable) =
+        (0..bots.0).find_map(|bot| fixed_lane_xz(home, bot, radius, limit).err())
+    {
+        harness::refuse_start::<()>(format!(
+            "OVERMATCH_BOT={}: a bot's home {unavailable}; ask for fewer bots",
+            bots.0
+        ));
     }
 }
 
@@ -857,6 +917,8 @@ fn spawn_pending_tanks(
         return;
     }
     let content = source.get();
+    let radius = content.contact_radius();
+    let limit = spawn_map::spawn_limit(manifest.extent.half_extent());
     // A ram recipe or a harness script names one spawn point and turn, which the lanes offset.
     // Ordinary joins use map points. Either way Y is resolved from the authority's ground at the
     // moment of spawn.
@@ -867,29 +929,33 @@ fn spawn_pending_tanks(
         harness::spawn_pose()
     };
     let spawn_rot = fixed.map_or(Quat::IDENTITY, |(_, rot)| rot);
+    // Every tank of the pass spawns at `spawn_rot`.
+    let stance = content.stance(spawn_rot);
     let mut live: Vec<Vec2> = tanks.iter().map(|position| position.0.xz()).collect();
+    // Serial: each map-point choice reads the points handed out earlier in the pass (`live`), and
+    // a pass holds the joins of one tick.
     for (link, client_id) in std::mem::take(&mut pending.0) {
         if !connected.contains(link) {
             // A queued join may disconnect while every authored point is too close.
             continue;
         }
         let xz = if let Some((at, _)) = fixed {
-            let xz = lane_spawn_xz(at, lane.0, content.contact_radius());
-            lane.0 += 1;
-            xz
+            match fixed_lane_xz(at, lane.of(link), radius, limit) {
+                Ok(xz) => xz,
+                Err(unavailable) => {
+                    warn!("server: join of client {client_id} refused: its spawn {unavailable}");
+                    continue;
+                }
+            }
         } else {
-            let Some(xz) = placement.choose(
-                &manifest.spawn_points,
-                &live,
-                2.0 * content.contact_radius(),
-            ) else {
+            let Some(xz) = placement.choose(&manifest.spawn_points, &live, 2.0 * radius) else {
                 // All points are inside the minimum: keep this join queued until one is free.
                 pending.0.push((link, client_id));
                 continue;
             };
             xz
         };
-        let pos = spawn_pos(height.as_deref(), xz, content.stance(spawn_rot));
+        let pos = spawn_pos(height.as_deref(), xz, stance);
         // Commands are deferred: later clients in this pass must see the point already handed out.
         live.push(pos.xz());
         let combatant = combatants.player(link);
@@ -1085,14 +1151,13 @@ fn spawn_bots(
         .find(|weapon| weapon.trigger == crate::spec::Trigger::Primary)
         .expect("the tank load gate requires exactly one primary weapon")
         .fire_cycle;
-    for index in 0..count.0 {
-        let bot = Bot::new(
-            bot_home_xz(index, content.contact_radius()),
-            index,
-            count.0,
-            cycle,
-        );
-        let pos = spawn_pos(height.as_deref(), bot.home, content.stance(BOT_SPAWN_TURN));
+    let radius = content.contact_radius();
+    let bots: Vec<Bot> = (0..count.0)
+        .map(|index| Bot::new(bot_home_xz(index, radius), index, count.0, cycle))
+        .collect();
+    let placed = bot_placements(height.as_deref(), &bots, content.stance(BOT_SPAWN_TURN));
+    // Committed in bot order: identities and structural changes.
+    for (index, (bot, pos)) in (0..).zip(bots.into_iter().zip(placed)) {
         let combatant = combatants.bot(index);
         let life = combatants.life(combatant);
         let root = spawn_bot_entity(&mut commands, &assets, content, bot, combatant, life, pos);
@@ -1105,6 +1170,22 @@ fn spawn_bots(
 
 /// A bot's turn at spawn: none; its brain turns it from there.
 const BOT_SPAWN_TURN: Quat = Quat::IDENTITY;
+
+/// Where each of `bots` spawns at its home, under the one `stance` every bot spawns with
+/// ([`BOT_SPAWN_TURN`]), in `bots` order. The placements read only the ground and are
+/// independent, so they are evaluated on the compute pool; the bot count is an operator lever.
+fn bot_placements(grid: Option<&HeightGrid>, bots: &[Bot], stance: Stance) -> Vec<Vec3> {
+    use bevy::tasks::{ComputeTaskPool, ParallelSlice};
+    bots.par_splat_map(ComputeTaskPool::get(), None, |_, chunk| {
+        chunk
+            .iter()
+            .map(|bot| spawn_pos(grid, bot.home, stance))
+            .collect::<Vec<_>>()
+    })
+    .into_iter()
+    .flatten()
+    .collect()
+}
 
 /// Construct an ownerless bot, for both initial spawn and respawn. `spawn_pos` is `bot.home`
 /// resolved by `terrain_grid::spawn_pos` at both call sites, under the tank's stance at
@@ -1178,7 +1259,10 @@ fn respawn_dead_bots(
         return;
     }
     let content = source.get();
-    for (root, turret, combatant, bot) in due {
+    let bots: Vec<Bot> = due.iter().map(|&(_, _, _, bot)| bot).collect();
+    let placed = bot_placements(height.as_deref(), &bots, content.stance(BOT_SPAWN_TURN));
+    // Committed in query order: the bots' replacements commute, each its own combatant.
+    for ((root, turret, combatant, bot), pos) in due.into_iter().zip(placed) {
         // Recursive despawn sweeps the root and its attached rig (children + relationship targets).
         commands.entity(root).despawn();
         // The launched turret, if it detached on cookoff. `try_despawn` is a silent no-op when the
@@ -1192,7 +1276,7 @@ fn respawn_dead_bots(
             bot,
             combatant,
             combatants.life(combatant),
-            spawn_pos(height.as_deref(), bot.home, content.stance(BOT_SPAWN_TURN)),
+            pos,
         );
         info!("server: respawned bot as {fresh} (was {root})");
     }
@@ -1270,11 +1354,19 @@ fn respawn_player_tanks(
     if requests.is_empty() {
         return;
     }
+    // Requests commit occupancy in a declared priority, never query order: one already waiting on
+    // occupancy first, then the lower combatant id.
+    let mut requests = requests;
+    requests.sort_by_key(|&(_, _, _, combatant, state)| (!state.waiting, combatant.0));
     let content = source.get();
+    let radius = content.contact_radius();
+    let limit = spawn_map::spawn_limit(manifest.extent.half_extent());
     // A harness script's spawn point and turn hold for every life, as on initial join.
     let harness_pose = harness::spawn_pose();
     let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
     let harness_at = harness_pose.map(|(at, _)| at);
+    // Every tank of the pass spawns at `spawn_rot`.
+    let stance = content.stance(spawn_rot);
     // Only successfully replaced roots leave occupancy: a crowded automatic spawn may wait.
     let mut sweeping: Vec<Entity> = Vec::new();
     let mut live: Vec<Vec2> = tanks
@@ -1304,7 +1396,7 @@ fn respawn_player_tanks(
                     &occupied,
                     &standing,
                     height.as_deref(),
-                    content.contact_radius(),
+                    radius,
                 ) {
                     Ok((spot, nudged)) => {
                         if nudged {
@@ -1313,11 +1405,7 @@ fn respawn_player_tanks(
                                 xz.x, xz.y, spot.x, spot.y
                             );
                         }
-                        Some(spawn_pos(
-                            height.as_deref(),
-                            spot,
-                            content.stance(spawn_rot),
-                        ))
+                        Some(spawn_pos(height.as_deref(), spot, stance))
                     }
                     Err(reason) => {
                         let state = RespawnState {
@@ -1344,15 +1432,15 @@ fn respawn_player_tanks(
         let spawn_pos = if let Some(pos) = override_pos {
             pos
         } else if let Some(at) = harness_at {
-            let xz = lane_spawn_xz(at, lane.0, content.contact_radius());
-            lane.0 += 1;
-            spawn_pos(height.as_deref(), xz, content.stance(spawn_rot))
+            match fixed_lane_xz(at, lane.of(link), radius, limit) {
+                Ok(xz) => spawn_pos(height.as_deref(), xz, stance),
+                Err(unavailable) => {
+                    warn!("server: respawn of client {client_id} refused: its spawn {unavailable}");
+                    continue;
+                }
+            }
         } else {
-            let Some(xz) = placement.choose(
-                &manifest.spawn_points,
-                &live,
-                2.0 * content.contact_radius(),
-            ) else {
+            let Some(xz) = placement.choose(&manifest.spawn_points, &live, 2.0 * radius) else {
                 if !previous.waiting {
                     info!(
                         "server: player {client_id} respawn waiting — every map spawn point is inside the minimum distance"
@@ -1364,7 +1452,7 @@ fn respawn_player_tanks(
                 }
                 continue;
             };
-            spawn_pos(height.as_deref(), xz, content.stance(spawn_rot))
+            spawn_pos(height.as_deref(), xz, stance)
         };
         placed_this_pass.push(spawn_pos.xz());
         live.push(spawn_pos.xz());
@@ -3094,6 +3182,40 @@ mod tests {
                 "the found spot must clear every occupant"
             );
         }
+    }
+
+    /// A FIXED SPAWN'S LANES ARE STABLE AND CHECKED. A link keeps its lane for every life of the
+    /// Battle, so harness respawns never walk a tank sideways off the map, and each new link takes
+    /// the next lane. A lane whose point leaves the placeable square is refused by name before the
+    /// spawn rule, which treats a point outside the world span as a bug. Fixture data: the point,
+    /// the radius and the square.
+    #[test]
+    fn a_fixed_spawns_lanes_are_kept_per_link_and_refused_outside_the_square() {
+        let mut world = World::new();
+        let [a, b] = [(); 2].map(|()| world.spawn_empty().id());
+        let mut lanes = SpawnLane::default();
+        assert_eq!(
+            [
+                lanes.of(a),
+                lanes.of(b),
+                lanes.of(a),
+                lanes.of(a),
+                lanes.of(b)
+            ],
+            [0, 1, 0, 0, 1]
+        );
+        const LIMIT_M: f32 = 20.0;
+        assert_eq!(
+            fixed_lane_xz(Vec2::ZERO, 1, FIXTURE_BODY_RADIUS_M, LIMIT_M),
+            Ok(lane_spawn_xz(Vec2::ZERO, 1, FIXTURE_BODY_RADIUS_M))
+        );
+        // Lane 7 sits four lane spacings (24 m) out.
+        let refused = fixed_lane_xz(Vec2::ZERO, 7, FIXTURE_BODY_RADIUS_M, LIMIT_M).unwrap_err();
+        assert_eq!(refused.lane, 7);
+        assert!(
+            refused.to_string().starts_with("lane 7 at (24.0, 0.0)"),
+            "{refused}"
+        );
     }
 
     /// Phase attribution relies on the owning installers' actual set membership. A synthetic
