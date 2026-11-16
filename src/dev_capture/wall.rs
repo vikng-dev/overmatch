@@ -188,7 +188,7 @@ pub(crate) fn offline_wall_plugin(app: &mut App) {
     app.insert_resource(cue)
         .insert_resource(crate::camera::CameraCaptive(true))
         .add_systems(PostStartup, (place_preview, check_wall_target).chain())
-        .add_systems(Update, fire_on_cue);
+        .add_systems(Update, fire_on_cue.in_set(super::clock::Cues));
     let placed = super::plan()
         .and_then(|plan| plan.frames.as_ref())
         .is_some_and(|frames| frames.camera != super::plan::Camera::Player);
@@ -203,9 +203,10 @@ pub(crate) fn offline_wall_plugin(app: &mut App) {
 /// The dedicated server's cue (module doc): it fires, and its clients frame the wall.
 pub(crate) fn server_wall_plugin(app: &mut App) {
     if let Some(cue) = cue_from_plan() {
+        super::clock::install(app, super::Anchor::Startup);
         app.insert_resource(cue)
             .add_systems(PostStartup, check_wall_target)
-            .add_systems(Update, fire_on_cue);
+            .add_systems(Update, fire_on_cue.in_set(super::clock::Cues));
     }
 }
 

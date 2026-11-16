@@ -17,6 +17,8 @@ fn main() -> AppExit {
     overmatch::windowed_runtime(&mut app, Window::default());
     app.add_plugins(overmatch::track_sandbox::plugin)
         // Documentation frames; inert without `OVERMATCH_CAPTURE`. A capture hides the window.
-        .add_plugins(overmatch::dev_capture::plugin)
+        .add_plugins(overmatch::dev_capture::CapturePlugin(
+            overmatch::dev_capture::Anchor::TrackRig,
+        ))
         .run()
 }

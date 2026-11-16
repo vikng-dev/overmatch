@@ -77,7 +77,9 @@ fn install(app: &mut App, cue: &super::plan::CornerReplay) {
     })
     .add_systems(
         Update,
-        replay.before(crate::damage_cam::pen_cam::game::PenCamSet),
+        replay
+            .in_set(super::clock::Cues)
+            .before(crate::damage_cam::pen_cam::game::PenCamSet),
     );
 }
 

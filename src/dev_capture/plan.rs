@@ -51,7 +51,7 @@ pub(crate) struct CapturePlan {
     pub(crate) scene: Scene,
 }
 
-/// The game's damage-model shader evidence: a recorded report, replayed at app second `at`.
+/// The game's damage-model shader evidence: a recorded report, replayed at anchored second `at`.
 /// This cue presents game state only; it applies no dose and changes no simulated HP pool.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
@@ -168,8 +168,8 @@ pub(crate) struct Frames {
     /// of the names is time order, so a glob assembles a sequence as is. Its directory is created
     /// at mount.
     pub(crate) out: PathBuf,
-    /// App seconds (`Time` as `Update` sees it) of each frame, finite and non-negative; sorted,
-    /// and times that share a file name kept once. Default `[6.0]`.
+    /// Frame seconds since placement ([`super::Anchor`]), finite and non-negative; sorted,
+    /// with times sharing a file name kept once. Default `[6.0]`.
     #[serde(default = "default_at")]
     pub(crate) at: Vec<f32>,
     /// The frame in physical pixels, `(width, height)`. Default `(2560, 1440)`.
@@ -189,8 +189,8 @@ pub(crate) struct Frames {
     /// Shift toggle writes; ignored where that resource is absent.
     #[serde(default)]
     pub(crate) sight: bool,
-    /// A positive, fixed virtual frame step, s, for reproducible comparisons. Asset loading still
-    /// runs asynchronously, so capture after the scene is ready.
+    /// A positive, fixed frame step, s, for reproducible comparisons. Loading before the
+    /// composition's anchor consumes no time or simulation ticks.
     #[serde(default)]
     pub(crate) step_s: Option<FrameStep>,
     /// Who places the player's camera ([`Camera`]). Default the player's own writers.
@@ -233,7 +233,7 @@ fn orbit_direction<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<
     Ok(unit)
 }
 
-/// One key read as pressed from app second `from` until app second `to` (`Time` as `Update`
+/// One key read as pressed from anchored second `from` until anchored second `to` (`Time` as `Update`
 /// sees it), `0 <= from < to`: pressed on the first frame inside the window and released on the
 /// first frame past it, so a reader sees one press edge and one release edge.
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -245,7 +245,7 @@ pub(crate) struct KeyHold {
     pub(crate) to: f32,
 }
 
-/// On the first frame at or after app second `at`, the shipped round `round` dresses the terrain
+/// On the first frame at or after anchored second `at`, the shipped round `round` dresses the terrain
 /// point under world `x, z` as a strike on `surface`: the game's damage-model view raises its
 /// impact read there with no round flown and no shot recorded, so a plan presents what that round's
 /// and that surface's data state.
@@ -320,7 +320,7 @@ impl TryFrom<f64> for FrameStep {
     }
 }
 
-/// On the first frame at or after app second `at`, the shipped round `round` in fuze mode `mode`
+/// On the first frame at or after anchored second `at`, the shipped round `round` in fuze mode `mode`
 /// is fired at a real construction or at the ground beside it, and the frames are timed from its burst.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(try_from = "ShotInput")]
@@ -471,7 +471,7 @@ impl Wall {
     }
 }
 
-/// One shot at the wall, at app second `at`: a shipped round square at it, or a bare charge of
+/// One shot at the wall, at anchored second `at`: a shipped round square at it, or a bare charge of
 /// `kg` of the shipped burst core `core` (a `materials.ron` key) set off at its foot
 /// (`dev_capture::wall`'s module doc).
 #[derive(Deserialize, Debug, Clone, PartialEq)]

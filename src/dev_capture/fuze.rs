@@ -14,8 +14,7 @@ use crate::ballistics::{
 use crate::tank::{Controlled, Muzzle, TankRoot, Weapon, WeaponIndex, WeaponLoads};
 use bevy::prelude::*;
 
-/// App seconds past the cue after which a shot with no burst fails the run (ASSUMED: a 0.1 s delay
-/// and the scene's load leave orders of magnitude of slack).
+/// Resolution: bound the wait for a missing burst after its cue, in anchored seconds.
 const GIVE_UP_S: f32 = 30.0;
 
 /// The app second the shot burst at, once it has: the capture's frames count from it.
@@ -68,7 +67,7 @@ fn install_shot(app: &mut App, shot: super::plan::Shot, refuse: fn(super::plan::
                 });
             },
         )
-        .add_systems(Update, fire_on_cue)
+        .add_systems(Update, fire_on_cue.in_set(super::clock::Cues))
         .add_systems(
             PostUpdate,
             show_shot.in_set(crate::camera::CaptiveCameraPlaced),

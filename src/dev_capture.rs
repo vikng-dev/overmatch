@@ -6,7 +6,7 @@
 //! (`OVERMATCH_TARGET`, `OVERMATCH_PROBE_FAR`, `OVERMATCH_PROBE_TANKS`,
 //! `OVERMATCH_BATTLE`, `OVERMATCH_XRAY`) also select the scene; a capture inherits their values.
 //!
-//! [`plugin`] takes the plan's `frames` and `keys`. It is mounted after `crate::windowed_runtime`
+//! [`CapturePlugin`] takes the plan's `frames` and `keys`. It is mounted after `crate::windowed_runtime`
 //! by every windowed root: the offline route, both sandboxes, and the windowed network client. A
 //! plan without `frames` runs its cues on a normal window and takes no frame (the scene of a frame
 //! cost measurement). The cue plugins take the plan's other fields where an authority
@@ -38,6 +38,8 @@
 //! which `ImageRenderTarget` defines over both fields; `Screenshot::image` normalizes to scale 1,
 //! names a target no camera renders into, and reads back black.
 
+mod clock;
+pub use clock::Anchor;
 mod corner;
 pub(crate) use corner::offline_corner_plugin;
 mod fuze;
@@ -61,17 +63,16 @@ use bevy::ui::IsDefaultUiCamera;
 
 use crate::sight::SightMode;
 
-/// Seconds between the retarget and the first frame. The image's GPU texture, the camera's target
-/// info and the UI's relayout each follow the retarget by a frame; one second covers them all.
+/// Resolution: seconds allowed for the GPU target, camera info and UI layout to follow retargeting.
 const WARM_UP: f32 = 1.0;
-/// Seconds before the first frame at which the sight switches.
+/// Resolution: sight-camera settling time before the first frame, seconds.
 const SIGHT_LEAD: f32 = 2.0;
-/// Seconds after the last frame's time by which it must be on disk, or the run exits failed.
+/// Resolution: bound asynchronous frame-write waiting after the final frame, seconds.
 const GRACE: f32 = 3.0;
-/// The view RNG's seed in a capture run: any fixed value.
+/// Resolution: a fixed seed makes cosmetic sampling reproducible.
 const VIEW_SEED: u64 = 0x5EED;
-/// Height a capture impact's ground probe starts from, world metres. ASSUMED above any terrain.
-const IMPACT_PROBE_TOP_M: f32 = 1000.0;
+/// Resolution: keep ray origins clear of rounded surface bounds for reliable hit normals, metres.
+const IMPACT_PROBE_CLEARANCE_M: f32 = 1.0;
 
 #[derive(Resource)]
 struct Capture {
@@ -92,7 +93,19 @@ struct Capture {
 
 /// The capture of the plan's `frames` (module doc) and its `keys`; each is inert where the plan
 /// lacks it.
-pub fn plugin(app: &mut App) {
+pub struct CapturePlugin(pub Anchor);
+
+impl Plugin for CapturePlugin {
+    fn build(&self, app: &mut App) {
+        // Frames choose their update strategy before the clock suspends it.
+        mount_plan(app);
+        if plan().is_some() {
+            clock::install(app, self.0);
+        }
+    }
+}
+
+fn mount_plan(app: &mut App) {
     if let Some(frames) = plan().and_then(|plan| plan.frames.as_ref()) {
         mount(app, frames);
     }
@@ -105,7 +118,12 @@ pub fn plugin(app: &mut App) {
             holds,
             held: Vec::new(),
         })
-        .add_systems(PreUpdate, hold_keys.after(bevy::input::InputSystems));
+        .add_systems(
+            PreUpdate,
+            hold_keys
+                .after(bevy::input::InputSystems)
+                .in_set(clock::Cues),
+        );
     }
 }
 
@@ -284,7 +302,7 @@ fn mount(app: &mut App, frames: &plan::Frames) {
         requested: 0,
         saved: 0,
     });
-    app.add_systems(Update, capture);
+    app.add_systems(Update, capture.in_set(clock::Cues));
     if !frames.ui {
         app.add_systems(
             PostUpdate,
@@ -376,7 +394,7 @@ pub(crate) fn offline_impact_plugin(app: &mut App) {
         })
         .collect();
     app.insert_resource(ImpactCues(cues))
-        .add_systems(Update, raise_impacts);
+        .add_systems(Update, raise_impacts.in_set(clock::Cues));
 }
 
 /// Raise each due strike on the ground under its point, with the ground's normal there.
@@ -384,16 +402,36 @@ fn raise_impacts(
     time: Res<Time>,
     mut cues: ResMut<ImpactCues>,
     spatial: avian3d::prelude::SpatialQuery,
+    terrain: Query<(
+        &avian3d::prelude::ColliderAabb,
+        &avian3d::prelude::CollisionLayers,
+    )>,
     mut commands: Commands,
 ) {
     let now = time.elapsed_secs();
+    if !cues.0.iter().any(|cue| cue.at <= now) {
+        return;
+    }
+    let (bottom, top) = terrain
+        .iter()
+        .filter(|(_, layers)| layers.memberships.has_all(crate::Layer::Terrain))
+        .fold(
+            (f32::INFINITY, f32::NEG_INFINITY),
+            |(bottom, top), (bounds, _)| (bottom.min(bounds.min.y), top.max(bounds.max.y)),
+        );
+    assert!(
+        bottom.is_finite() && top.is_finite() && bottom <= top,
+        "capture impacts require prepared terrain collider bounds before their cue"
+    );
+    let origin_y = top + IMPACT_PROBE_CLEARANCE_M;
+    let distance = origin_y - bottom + IMPACT_PROBE_CLEARANCE_M;
     let filter = avian3d::prelude::SpatialQueryFilter::from_mask(crate::Layer::Terrain);
     cues.0.retain(|cue| {
         if cue.at > now {
             return true;
         }
-        let origin = Vec3::new(cue.x, IMPACT_PROBE_TOP_M, cue.z);
-        match spatial.cast_ray(origin, Dir3::NEG_Y, 2.0 * IMPACT_PROBE_TOP_M, true, &filter) {
+        let origin = Vec3::new(cue.x, origin_y, cue.z);
+        match spatial.cast_ray(origin, Dir3::NEG_Y, distance, true, &filter) {
             Some(hit) => {
                 let position = origin - Vec3::Y * hit.distance;
                 info!("capture: impact at {position} ({now:.4} s)");
@@ -717,11 +755,13 @@ mod tests {
         }
         app.finish();
         app.cleanup();
-        // FIXTURE: a slab whose top is the plane y = 2 m.
+        // Fixture: elevated terrain; the probe must derive its range from the collider.
+        let terrain_y = 2000.0;
+        let thickness = 2.0;
         app.world_mut().spawn((
             RigidBody::Static,
-            Transform::from_xyz(0.0, 1.0, 0.0),
-            Collider::cuboid(100.0, 2.0, 100.0),
+            Transform::from_xyz(0.0, terrain_y, 0.0),
+            Collider::cuboid(100.0, thickness, 100.0),
             CollisionLayers::new(crate::Layer::Terrain, LayerMask::ALL),
         ));
         app.update();
@@ -738,7 +778,12 @@ mod tests {
         let raised = &app.world().resource::<Raised>().0;
         assert_eq!(
             raised.as_slice(),
-            [(Vec3::new(3.0, 2.0, -4.0), Vec3::Y, style, surface)]
+            [(
+                Vec3::new(cue.x, terrain_y + thickness / 2.0, cue.z),
+                Vec3::Y,
+                style,
+                surface
+            )]
         );
         assert!(app.world().resource::<ImpactCues>().0.is_empty());
     }
