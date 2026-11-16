@@ -110,22 +110,12 @@ serde_path_to_error = "0.1"
 # macOS on arm64 only, but correctness here does not get to depend on that.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc-sys = "0.3"
-# AppKit bindings for the hidden-capture activation revocation in `net::client` (winit hardcodes
-# activate-at-launch; see `revoke_macos_activation`) and for the display row's real monitor names
-# (winit's own `MonitorHandle::name` is a model number on macOS; see `settings::displays`).
-# Version-matched to winit 0.30's OWN objc2-app-kit dependency (Cargo.lock pins both at 0.2.2), so
-# this adds no second copy of the crate to the graph — arboard's 0.3.x line is a separate,
-# pre-existing major. Features are the minimum for those two call sites: `NSResponder` gates the
-# `NSApplication` class itself, `NSApplication` its methods, `NSRunningApplication` the
-# activation-policy API; `NSScreen` gates the screen list and `localizedName`, and `NSGraphics` the
-# `deviceDescription` the display ID is read from. In this 0.2.x generation `MainThreadMarker` lives
-# in objc2-foundation, with `NSThread` gating its CHECKED constructor (without it only the unsafe
-# `new_unchecked` exists) and `NSValue` the `NSNumber` that device description holds.
+# AppKit bindings for display names and IDs (`settings::displays`). Version-matched to
+# winit 0.30's dependency, so this adds no second copy. `NSGraphics` supplies the display ID's
+# deviceDescription; `NSScreen` supplies the screen list and localizedName. Foundation's
+# `NSThread` supplies the checked MainThreadMarker constructor and `NSValue` supplies NSNumber.
 objc2-app-kit = { version = "0.2.2", features = [
-    "NSApplication",
     "NSGraphics",
-    "NSResponder",
-    "NSRunningApplication",
     "NSScreen",
 ] }
 objc2-foundation = { version = "0.2.2", features = ["NSThread", "NSValue"] }

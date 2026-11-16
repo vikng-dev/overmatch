@@ -1,4 +1,4 @@
-//! How a run shows its primary window: one input, `OVERMATCH_WINDOW=<mode>`, one [`RunWindow`].
+//! How a run shows its primary window: `OVERMATCH_WINDOW=<mode>` selects a [`RunWindow`].
 //! A value outside the four modes fails the boot naming the variable (ADR-0011).
 //!
 //! - `visible`: the window on screen, as a player has it. The default on every windowed root, and
@@ -65,6 +65,24 @@ pub(crate) enum WindowedRun {
 }
 
 impl WindowedRun {
+    /// Frame captures need an invisible window even when no window-mode override was supplied.
+    pub(crate) fn for_capture(self, takes_frames: bool) -> Self {
+        match (self, takes_frames) {
+            (Self::Visible, true) => Self::Hidden,
+            _ => self,
+        }
+    }
+
+    /// Winit reads focus during plugin construction, before it creates the native window.
+    /// Bevy 0.20.1 suppresses macOS launch activation only when every initial window is unfocused.
+    pub(crate) fn prepare_window(self, mut window: Window) -> Window {
+        if matches!(self, Self::Hidden | Self::Offscreen) {
+            window.visible = false;
+            window.focused = false;
+        }
+        window
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Hidden => RunWindow::Hidden,
@@ -128,7 +146,7 @@ pub(crate) fn primary_or_headless<T>(
     }
 }
 
-/// Apply an admitted windowed mode after the primary window spawns, before winit creates it.
+/// Mount the run policy after its prepared primary window spawns, before winit creates it.
 /// Hidden modes require exactly one primary window (`hide`); violating that is a construction bug.
 pub(crate) fn mount(app: &mut App, mode: WindowedRun) {
     info!("window: {}", mode.name());
@@ -138,34 +156,16 @@ pub(crate) fn mount(app: &mut App, mode: WindowedRun) {
     }
 }
 
-/// What a run nobody can see implies, on any root: the window hidden and kept a plain window, and
-/// the run unattended.
+/// Mount policy for a prepared hidden window: keep it windowed and the run unattended.
 ///
 /// # Panics
 ///
 /// When the app holds no single primary window: it is called after the root's runtime
 /// (`crate::windowed_runtime`) has spawned the root's one window and before winit creates it, and
 /// a window spawned later would be created visible.
-pub(crate) fn hide(app: &mut App) {
-    hide_window(app);
+fn hide(app: &mut App) {
     pin_window(app);
     crate::unattended::mount(app);
-}
-
-/// Create the primary window hidden. `WindowPlugin` has spawned the entity by now and `bevy_winit`
-/// reads `visible` when it creates the OS window, which is after every plugin's build. On macOS,
-/// `visible` is the only lever that keeps the window from taking focus: bevy creates every winit
-/// window invisible and then calls `set_visible(window.visible)`, which is `makeKeyAndOrderFront`
-/// whatever `focused` says. winit still makes even an invisible unbundled process the active app
-/// at launch, so the process also renounces activation (`platform::revoke_macos_activation`).
-fn hide_window(app: &mut App) {
-    let mut window = primary_window(app);
-    if !window.visible {
-        return;
-    }
-    window.visible = false;
-    #[cfg(target_os = "macos")]
-    app.add_systems(Startup, crate::platform::revoke_macos_activation);
 }
 
 /// Keep the primary window a plain window for the whole run: `Windowed` at creation, so a persisted
@@ -236,33 +236,39 @@ mod tests {
 
     /// A HIDDEN RUN TAKES NO SCREEN AND NEVER PAUSES, on any root: hidden harness clients and
     /// captures run on a machine its owner is working at. The window a root described visible and
-    /// fullscreen is hidden and `Windowed` before winit creates it, settings are told to leave it
+    /// fullscreen, or a frame capture with no mode override, is hidden and `Windowed` before
+    /// winit creates it, settings are told to leave it
     /// so, the run is silent, and a focus loss does not pause it. Mutants: dropping any one of
-    /// [`hide_window`], [`pin_window`] or `unattended::mount` from [`hide`] fails an assert, and so
-    /// does `mount` leaving a hidden or offscreen mode visible.
+    /// [`WindowedRun::prepare_window`], [`pin_window`] or `unattended::mount` fails an assert, and so
+    /// does leaving a hidden or offscreen mode focused before WinitPlugin builds.
     #[test]
     fn a_hidden_run_is_hidden_pinned_silent_and_never_paused() {
-        for mode in [RunWindow::Hidden, RunWindow::Offscreen] {
+        for (mode, takes_frames) in [
+            (RunWindow::Hidden, false),
+            (RunWindow::Offscreen, false),
+            (RunWindow::Visible, true),
+        ] {
+            let admitted = mode.windowed().unwrap().for_capture(takes_frames);
             let mut app = App::new();
             let window = app
                 .world_mut()
                 .spawn((
-                    Window {
+                    admitted.prepare_window(Window {
                         mode: bevy::window::WindowMode::BorderlessFullscreen(
                             bevy::window::MonitorSelection::Primary,
                         ),
                         ..default()
-                    },
+                    }),
                     PrimaryWindow,
                 ))
                 .id();
-            mount(&mut app, mode.windowed().unwrap());
-            // What a later `AudioPlugin` build writes. Only `PreStartup` runs: `Startup` holds the
-            // macOS activation revocation, which needs the process's main thread.
+            mount(&mut app, admitted);
+            // What a later `AudioPlugin` build writes; unattended policy applies in PreStartup.
             app.insert_resource(GlobalVolume::new(Volume::Linear(1.0)));
             app.world_mut().run_schedule(PreStartup);
             let window = app.world().get::<Window>(window).expect("the window");
             assert!(!window.visible, "{mode:?}");
+            assert!(!window.focused, "{mode:?}");
             assert_eq!(window.mode, bevy::window::WindowMode::Windowed);
             assert!(
                 app.world()
@@ -295,15 +301,17 @@ mod tests {
         let mut app = App::new();
         let window = app
             .world_mut()
-            .spawn((Window::default(), PrimaryWindow))
+            .spawn((
+                WindowedRun::Visible
+                    .for_capture(false)
+                    .prepare_window(Window::default()),
+                PrimaryWindow,
+            ))
             .id();
         mount(&mut app, WindowedRun::Visible);
-        assert!(
-            app.world()
-                .get::<Window>(window)
-                .expect("the window")
-                .visible
-        );
+        let window = app.world().get::<Window>(window).expect("the window");
+        assert!(window.visible);
+        assert!(window.focused);
         assert!(
             !app.world()
                 .contains_resource::<crate::settings::CaptureWindowPinned>()

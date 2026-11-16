@@ -25,8 +25,8 @@
 //! # Invariant: a capture run shows no window
 //!
 //! On every root, whenever the plan takes frames and with no other variable, the run is a hidden
-//! one (`run_window::hide`): the primary window is created hidden and `Windowed`, settings never
-//! re-apply a persisted fullscreen to it, on macOS the process renounces activation, and the run is
+//! one (`windowed_runtime`): the primary window is created hidden, unfocused and `Windowed`,
+//! settings never re-apply a persisted fullscreen to it, and the run is
 //! unattended (silent, never paused by a focus loss). A hidden window has no swapchain texture,
 //! and a window screenshot reads back nothing without one
 //! (`bevy_render::view::window::screenshot::submit_screenshot_commands` skips the copy), so the
@@ -196,7 +196,6 @@ fn mount(app: &mut App, frames: &plan::Frames) {
         prepare_output(&frame_path(&frames.out, *at, frames.at.len()))
             .unwrap_or_else(|error| plan::refuse(error));
     }
-    crate::run_window::hide(app);
     // The effects plugin only `init_resource`s the RNG, so this seed holds in either mount order.
     app.insert_resource(crate::vfx::ViewRng::seeded(VIEW_SEED));
     if let Some(step) = frames.step_s {

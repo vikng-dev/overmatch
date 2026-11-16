@@ -133,8 +133,6 @@ pub mod dev_capture;
 /// [`NetClientPlugin`]; single-player uses `state::client_plugin`'s real pause.
 mod overlay;
 mod physical_laws;
-/// OS-level process and window helpers that belong to no game layer.
-mod platform;
 #[cfg(test)]
 mod presentation_authored;
 /// Provenance of authored data values: each authored value names its fact, unit, taste,
@@ -284,7 +282,7 @@ pub(crate) fn default_plugins() -> bevy::app::PluginGroupBuilder {
 }
 
 /// Mount [`default_plugins`] with the primary `window`, apply [`run_window`]'s
-/// `OVERMATCH_WINDOW` (default visible) before winit creates it, and honour
+/// `OVERMATCH_WINDOW` (default visible, hidden for frame captures) before WinitPlugin builds, and honour
 /// `OVERMATCH_UNATTENDED` through [`unattended`]. Offline/network clients and both sandboxes
 /// share this path so hidden/silent runs stay hidden/silent on every windowed root.
 ///
@@ -295,9 +293,10 @@ pub(crate) fn default_plugins() -> bevy::app::PluginGroupBuilder {
 pub fn windowed_runtime(app: &mut App, window: Window) {
     let mode = run_window::RunWindow::of_run(run_window::RunWindow::Visible)
         .windowed()
-        .unwrap_or_else(refuse_start);
+        .unwrap_or_else(refuse_start)
+        .for_capture(dev_capture::plan().is_some_and(|plan| plan.frames.is_some()));
     app.add_plugins(default_plugins().set(WindowPlugin {
-        primary_window: Some(window),
+        primary_window: Some(mode.prepare_window(window)),
         ..default()
     }));
     run_window::mount(app, mode);
