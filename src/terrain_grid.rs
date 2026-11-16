@@ -1277,14 +1277,13 @@ pub(crate) mod tests {
             bytes
         };
         let base = &crate::terrain_surface::surface().base;
-        let path = |map| base.map_path(map);
         use crate::terrain_surface::PackMap;
         for (map, what) in [
             (PackMap::Albedo, "albedo"),
             (PackMap::Normal, "normal"),
             (PackMap::Arm, "arm"),
         ] {
-            let bytes = read(&path(map), what);
+            let bytes = read(&base.map_path(map), what);
             let width = header_u32(&bytes, PIXEL_WIDTH_AT);
             let height = header_u32(&bytes, PIXEL_HEIGHT_AT);
             let levels = header_u32(&bytes, LEVEL_COUNT_AT);
@@ -1301,7 +1300,7 @@ pub(crate) mod tests {
                  {width}×{height}"
             );
         }
-        let albedo = path(PackMap::Albedo);
+        let albedo = base.map_path(PackMap::Albedo);
         let image =
             ktx2_buffer_to_image(&read(&albedo, "albedo"), CompressedImageFormats::BC, true)
                 .unwrap_or_else(|err| panic!("{albedo} failed to transcode: {err:?}"));

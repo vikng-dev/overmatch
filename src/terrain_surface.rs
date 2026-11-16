@@ -66,10 +66,7 @@ pub(crate) struct BlendLook {
     /// the only reason a 1024² mask can read as a sharp boundary: the crossing moves with the AO
     /// bias, so the edge follows the material's detail instead of the mask's texel grid.
     pub(crate) window: f32,
-    /// World metres per period of the macro tint, a low-frequency gain on the BLENDED albedo after
-    /// the mix (the only point the base pack can be reached), which breaks up a pack's visible
-    /// repeat. Above twice the coarsest pack, so the tint varies across a repeat rather than
-    /// beating against it.
+    /// World metres per period of the macro tint (`terrain_blend.wesl` places it), above 0.
     pub(crate) macro_period_m: f32,
     /// How far the macro tint moves the blended albedo, as a fraction of it: the gain is
     /// `1 ± this`, so below 1 keeps it positive.
@@ -177,17 +174,6 @@ impl TerrainSurface {
                 "0..1, where the gain 1 ± amplitude stays positive",
             )?,
         };
-        let coarsest = layers
-            .iter()
-            .map(|layer| layer.authored_m)
-            .fold(base.authored_m, f32::max);
-        if blend.macro_period_m <= 2.0 * coarsest {
-            return Err(format!(
-                "{file}: blend.macro_period_m: {} m does not clear twice the coarsest pack's {coarsest} m, \
-                 so the tint would beat against a repeat; lengthen the period",
-                blend.macro_period_m
-            ));
-        }
         Ok(Self {
             base,
             layers,
@@ -324,7 +310,7 @@ mod tests {
                 "layers",
             ),
             (
-                surface(&pack("base", "15.0"), &three, "30.0", "0.1"),
+                surface(&pack("base", "15.0"), &three, "0.0", "0.1"),
                 "blend.macro_period_m",
             ),
             (
