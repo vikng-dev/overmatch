@@ -1,119 +1,178 @@
-# Warm-start matching chooses the first admissible point, then lets later manifolds overwrite it
+# Contact matching takes the first admissible previous point, and later manifolds overwrite it
 
-Subject: the video game's server contact solver and environment rubble; game state only.
+Found in a game using avian3d. Local draft; not filed.
 
-**Target:** avian3d 0.7.0 and current upstream `main` (source inspection).
-**Status:** **DRAFT, not filed**. Checked read-only on 2026-11-08; unfixed on `main` at
-"Add missing `Without<ColliderDisabled>` in `solve_continuous` (#1101)".
+**Crate:** avian3d 0.8.0 (crates.io). **Status:** not sent. Source audit: Unchanged on `main` at 2c2d6934 (2026-11-04): MEASURED, `main`'s `src/` differs from 0.8.0 only in `dynamics/ccd/mod.rs` (#1101), and this diff applies to `main` with `patch --dry-run`.
 
-## Mechanism
+## Defect
 
-`ContactManifold::match_contacts` copies the first admissible predecessor's normal and tangent
-warm-start impulses and breaks. After correcting the separate
-[unknown-ID admissibility defect](avian-unknown-contact-feature-identity.md), several predecessors
-can still lie inside the distance threshold. Array order then selects the cache, even if a later
-point has exactly coincident anchors.
+`ContactManifold::match_contacts` copies the warm start of the first admissible previous point and
+breaks, though a later point may be much closer. The narrow phase
+(`src/collision/narrow_phase/system_param.rs:897-901`) then calls it once per previous manifold of
+the pair, so a match from a later previous manifold overwrites one from an earlier manifold without
+any distance comparison: the result depends on manifold order.
 
-`NarrowPhase::update` calls the matcher separately for each old manifold. Each call can overwrite
-the preceding call's choice without comparing distances. Choosing the nearest point inside each
-manifold therefore still leaves the pair-wide result dependent on manifold order.
+This draft also contains the unknown-feature identity fix
+([its own draft](avian-unknown-contact-feature-identity.md)), since it rewrites the same loop.
 
-Sources: published `avian3d-0.7.0/src/collision/contact_types/mod.rs`,
-`ContactManifold::match_contacts`, and `src/collision/narrow_phase/system_param.rs`,
-`NarrowPhase::update`, read from the Cargo registry;
-[upstream matcher](https://github.com/avianphysics/avian/blob/main/src/collision/contact_types/mod.rs#L435)
-and [upstream caller](https://github.com/avianphysics/avian/blob/main/src/collision/narrow_phase/system_param.rs#L894).
-The shipped selection is at
-`vendor/avian3d-0.7.0-child-pose/src/collision/contact_types/mod.rs:437`, with its pair-wide iterator
-at `vendor/avian3d-0.7.0-child-pose/src/collision/narrow_phase/system_param.rs:859`.
+## Minimal repro
 
-## Evidence
+```rust
+#[test]
+fn nearest_admissible_previous_point_wins() {
+    let near = Vector::X * 0.08;
+    let mut previous_near = ContactPoint::new(near, near, RVector::ZERO, 0.0);
+    previous_near.warm_start_normal_impulse = 5.0;
+    let mut previous_here = ContactPoint::new(Vector::ZERO, Vector::ZERO, RVector::ZERO, 0.0);
+    previous_here.warm_start_normal_impulse = 11.0;
 
-Our commit **"physics: match unknown contact features through their anchors (#235)"** fixes
-admissibility but retains first-match selection and the per-old-manifold calls. Its successor,
-**"physics: match warm starts to the nearest admissible contact (#235)"**, extends
-`src/tests/avian_warm_start.rs`, `unknown_contact_features_match_by_position`:
+    let point = ContactPoint::new(Vector::ZERO, Vector::ZERO, RVector::ZERO, 0.0);
+    let mut manifold = ContactManifold::new([point], Vector::Y);
+    manifold.match_contacts(&[previous_near, previous_here], 0.1);
 
-- Fixture inputs: predecessors at the origin and 0.05 m along x, a 0.1 m radius, cached normal
-  impulses of 5 and 11 N s, and a new point coincident with the latter; all feature IDs unknown.
-- **MEASURED in the successor commit:** first-match copies 5 N s rather than the coincident
-  point's 11 N s even after the admissibility correction. Nearest selection makes it pass.
-- `nearest_warm_start_is_selected_across_old_manifolds` seeds a real sensor pair's prior cache
-  with a coincident predecessor in the earlier manifold and an offset predecessor in the later
-  one, then runs the shipped narrow phase. It checks both normal and tangent caches and reverses
-  manifold order. Sensors exclude solver writes so the assertion reads only matching.
-  **MEASURED with the published per-old-manifold caller restored:** the normal cache is 5 N s
-  instead of 11 N s and the guard fails. The shipped pair-wide caller passes both orders. The
-  caller witness keeps generated known IDs; the direct guard covers unknown identity.
+    // First-admissible copies 5.0, from the point 0.08 away.
+    assert_eq!(manifold.points[0].warm_start_normal_impulse, 11.0);
+}
+```
 
-**MEASURED in the successor commit:** its final 60 s wave ends at 62 awake / 514 asleep, against
-the first corrected-sweep wave's 81 awake / 460 asleep. These are observations of different
-emergent populations, not an isolated A/B of nearest selection, a sleep requirement or evidence
-of a CPU speedup. No sleep rule changed; complete settling remains unproven.
+DERIVED for 0.8.0, not compiled here; the same fixture copied 5 instead of 11 on 0.7.0 after the
+identity fix (MEASURED, found in a game using avian3d). Across manifolds: give a pair two previous
+manifolds, the closer point in the first; the second call overwrites it.
 
-## Composite feature identity (Parry 0.27 source check)
+## Fix
 
-**VERIFIED from Parry 0.27.0 source:** known feature IDs are local to the subshape, not the
-composite. `contact_manifolds_composite_shape_shape` stores the leaf in `ContactManifold::subshape1`
-or `subshape2` and dispatches convex matching on that leaf. `contact_manifolds_trimesh_shape`
-likewise keeps each triangle's index on its manifold. `PolygonalFeature::from(Triangle)` assigns
-the same local vertex/edge IDs and face ID to every triangle. These are separate identity fields;
-the point IDs do not encode the leaf or triangle.
+Against the pristine crate (`a/` and `b/` are the crate root):
 
-Avian 0.7.0's `collision/collider/parry/contact_query.rs::contact_manifolds` transforms the anchors
-and copies `fid1`/`fid2` into `ContactPoint`, but does not retain the manifold's subshape IDs.
-**DERIVED:** the pair-wide matcher can admit an unrelated triangle's equal known IDs regardless
-of anchor distance. This predates nearest selection: the published per-old-manifold loop uses
-the same ID admission and can overwrite the cache from another subshape too. The local patch
-does not resolve it. An upstream fix must qualify known identity by the subshape pair, or use
-anchor admission where that identity is unavailable; preserving unqualified known-ID matching
-is insufficient for composite shapes.
+```diff
+--- a/src/collision/contact_types/mod.rs
++++ b/src/collision/contact_types/mod.rs
+@@ -428,51 +428,61 @@
+ 
+     /// Copies impulses from previous contacts to matching contacts in `self`.
+     ///
+-    /// Contacts are first matched based on their [feature IDs](PackedFeatureId), and if they are unknown,
+-    /// matching is done based on contact positions using the given `distance_threshold`
+-    /// for determining if points are too far away from each other to be considered matching.
++    /// Each contact takes the impulses of the closest admissible previous contact, or none. A
++    /// contact whose [feature IDs](PackedFeatureId) are both known admits a previous contact with
++    /// the same IDs, in either order. A contact with an unknown feature ID admits a previous
++    /// contact whose anchors both lie within `distance_threshold` of its own, in either
++    /// orientation. Closest is the smaller sum of the two anchors' squared distances; a tie goes
++    /// to the earlier previous contact.
+     #[inline]
+     pub fn match_contacts(&mut self, previous_contacts: &[ContactPoint], distance_threshold: f32) {
++        self.match_contacts_in(previous_contacts.iter(), distance_threshold);
++    }
++
++    /// [`match_contacts`](Self::match_contacts) over previous contacts drawn from any number of
++    /// manifolds, so the closest match across all of them wins.
++    #[inline]
++    pub fn match_contacts_in<'a>(
++        &mut self,
++        previous_contacts: impl Iterator<Item = &'a ContactPoint> + Clone,
++        distance_threshold: f32,
++    ) {
+         // The squared maximum distance for two contact points to be considered matching.
+         let distance_threshold_squared = distance_threshold.powi(2);
+ 
+         for contact in self.points.iter_mut() {
+-            for previous_contact in previous_contacts.iter() {
+-                // If the feature IDs match, copy the contact impulses over for warm starting.
+-                if (contact.feature_id1 == previous_contact.feature_id1
+-                    && contact.feature_id2 == previous_contact.feature_id2) ||
+-                    // we have to check both directions because the entities are sorted in order
+-                    // of aabb.min.x, which could have changed even the two objects in contact are the same
+-                    (contact.feature_id2 == previous_contact.feature_id1
+-                    && contact.feature_id1 == previous_contact.feature_id2)
+-                {
+-                    contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
+-                    contact.warm_start_tangent_impulse =
+-                        previous_contact.warm_start_tangent_impulse;
+-                    break;
+-                }
++            // Two `UNKNOWN` IDs compare equal without naming the same feature.
++            let unknown_features = contact.feature_id1 == PackedFeatureId::UNKNOWN
++                || contact.feature_id2 == PackedFeatureId::UNKNOWN;
+ 
+-                let unknown_features = contact.feature_id1 == PackedFeatureId::UNKNOWN
+-                    || contact.feature_id2 == PackedFeatureId::UNKNOWN;
+-
+-                // If the feature IDs are unknown and the contact positions match closely enough,
+-                // copy the contact impulses over for warm starting.
+-                if unknown_features
+-                    && (contact.anchor1.distance_squared(previous_contact.anchor1)
+-                        < distance_threshold_squared
+-                        && contact.anchor2.distance_squared(previous_contact.anchor2)
+-                            < distance_threshold_squared)
+-                    || (contact.anchor1.distance_squared(previous_contact.anchor2)
+-                        < distance_threshold_squared
+-                        && contact.anchor2.distance_squared(previous_contact.anchor1)
+-                            < distance_threshold_squared)
+-                {
+-                    contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
+-                    contact.warm_start_tangent_impulse =
+-                        previous_contact.warm_start_tangent_impulse;
+-                    break;
++            let mut closest: Option<(f32, &ContactPoint)> = None;
++            for previous_contact in previous_contacts.clone() {
++                // Both directions, because the pair's order can change between steps.
++                let same_features = !unknown_features
++                    && ((contact.feature_id1 == previous_contact.feature_id1
++                        && contact.feature_id2 == previous_contact.feature_id2)
++                        || (contact.feature_id2 == previous_contact.feature_id1
++                            && contact.feature_id1 == previous_contact.feature_id2));
++                for (anchor1, anchor2) in [
++                    (previous_contact.anchor1, previous_contact.anchor2),
++                    (previous_contact.anchor2, previous_contact.anchor1),
++                ] {
++                    let near1 = contact.anchor1.distance_squared(anchor1);
++                    let near2 = contact.anchor2.distance_squared(anchor2);
++                    let admissible = same_features
++                        || (unknown_features
++                            && near1 < distance_threshold_squared
++                            && near2 < distance_threshold_squared);
++                    if admissible && closest.is_none_or(|(distance, _)| near1 + near2 < distance) {
++                        closest = Some((near1 + near2, previous_contact));
++                    }
+                 }
+             }
++
++            if let Some((_, previous_contact)) = closest {
++                contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
++                contact.warm_start_tangent_impulse = previous_contact.warm_start_tangent_impulse;
++            }
+         }
+     }
+ 
+--- a/src/collision/narrow_phase/system_param.rs
++++ b/src/collision/narrow_phase/system_param.rs
+@@ -895,10 +895,13 @@
+                     // TODO: Cache this?
+                     let distance_threshold = 0.1 * self.length_unit.0;
+ 
++                    // Match against all of the pair's previous points at once, so a later
++                    // previous manifold cannot overwrite a closer match from an earlier one.
+                     for manifold in contacts.manifolds.iter_mut() {
+-                        for previous_manifold in old_manifolds.iter() {
+-                            manifold.match_contacts(&previous_manifold.points, distance_threshold);
+-                        }
++                        manifold.match_contacts_in(
++                            old_manifolds.iter().flat_map(|previous| previous.points.iter()),
++                            distance_threshold,
++                        );
+                     }
+                 }
+```
 
-Parry's manifold functions are under `parry3d-0.27.0/src/query/contact_manifolds/`; the triangle
-conversion is `parry3d-0.27.0/src/shape/polygonal_feature3d.rs`. This check changes the draft's recommendation,
-not the shipped matcher contract.
+## Notes
 
-## Upstream status and filing boundary
+Closest is the smaller sum of both anchors' squared distances over the admissible orientation; a tie
+keeps the earlier previous point. `match_contacts` keeps its signature and delegates to
+`match_contacts_in`, which takes the previous points of every old manifold as one iterator, so the
+caller allocates nothing.
 
-The inspected `main` still breaks on the first match and calls once per old manifold. Read-only
-GitHub issue/PR searches for `warm`, `UNKNOWN`, `match_contacts`, `contact matching`, `nearest`
-and `anchor` found no matching report. [Issue #1098](https://github.com/avianphysics/avian/issues/1098)
-reports generated sphere/trimesh geometry, and
-[issue #734](https://github.com/avianphysics/avian/issues/734) proposes cache-free solving;
-neither reports this selection error. [PR #480](https://github.com/avianphysics/avian/pull/480)
-discusses contact orientation and [PR #385](https://github.com/avianphysics/avian/pull/385)
-introduces the solver/matching machinery. Their discussion does not identify nearest selection
-or cross-manifold overwrite. No matching report found is a scoped search result, not proof of absence.
+## Local verification
 
-File this separately from unknown identity: admissibility and ranking have different invariants
-and independently failing fixtures. The nearest-point witness is evaluated after fixing
-admissibility; this report does not attribute that prerequisite's failure to ranking.
-
-## Suggested upstream fix
-
-Choose a predecessor once across every old manifold of the contact pair. Among admissible
-candidates, minimize the sum of squared anchor distances over the accepted direct/reversed
-orientations, then copy both cached impulse fields once. Known-feature identity must include the
-subshape pair as described above; retain the anchor-distance gate for unknown identity. With no
-predecessor, keep the new contact's empty cache.
-
-The shipped implementation accepts a cloneable iterator and flattens old point iterators without
-allocating a point buffer. **DERIVED work:** O(current points × prior points), unchanged in
-worst-case order, with a full candidate scan instead of first-match early exit. Runtime cost is
-unmeasured here. The guards in `src/tests/avian_warm_start.rs` cover nearby and distant unknown
-anchors, plus both cached fields through the pair-wide caller in both manifold orders. Upstream
-acceptance also needs composite-subshape identity coverage.
-
-## Our shipped workaround and its removal condition
-
-The successor commit's vendored matcher and narrow-phase caller implement pair-wide nearest
-selection without subshape qualification. Remove those changes when an upstream replacement passes the nearby-point
-witness and a positive cross-manifold order witness, while retaining the unknown-ID correction.
-Both guards live in `src/tests/avian_warm_start.rs`; the direct witness alone cannot authorize
-retiring the caller patch. Other patches still require the vendored crate.
-
-## What fixing this unlocks for us
-
-Retire the local iterator API change, nearest-selection implementation and narrow-phase caller
-change. Rubble contacts can use upstream warm starts without our correspondence patch. This
-does not justify changing sleep thresholds or promise that every pile settles.
+The combined identity and nearest-match fix passes the pinned 0.8.0 headless guards for positional
+admissibility, cold starts without a predecessor, and nearest points within and across manifolds
+(MEASURED). The assertions are unchanged; direct unit calls use the engine matcher.
