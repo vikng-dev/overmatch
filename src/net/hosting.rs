@@ -1111,7 +1111,6 @@ mod tests {
             .env(API, &worker.base)
             .env("OVERMATCH_UNATTENDED", "1")
             .env("OVERMATCH_WINDOW", "headless")
-            .env("OVERMATCH_MUTE", "1")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
@@ -1360,7 +1359,6 @@ mod tests {
             .env("BEVY_ASSET_ROOT", &empty)
             .env("OVERMATCH_UNATTENDED", "1")
             .env("OVERMATCH_WINDOW", "headless")
-            .env("OVERMATCH_MUTE", "1")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .spawn()

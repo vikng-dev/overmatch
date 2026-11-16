@@ -1,5 +1,5 @@
 // From the bay, after scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch:
-// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_START=735,0,90 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/surroundings/w1d-wall.ron target/debug/overmatch --offline
+// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_START=735,0,90 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_CAPTURE=scripts/capture/surroundings/w1d-wall.ron target/debug/overmatch --offline
 // East edge: full forward input holds the hull at the invisible wall. The third-person orbit's
 // live collision query pulls its camera in from the east; only its bearing is scripted.
 // ASSUMED capture configuration: pose, key window, frame time, size and fixed frame step.

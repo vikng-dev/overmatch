@@ -1,7 +1,7 @@
 // Subject: the game's shot harness and damage model, game state only.
 // The flat patch used by flat-patch.ron, with a fixture 45-degree hull turn. It brings the
-// target's forward module within the idle-powered turret's traverse during the capture's
-// warmup and firing window. DERIVED quaternion: sin/cos of half the 45-degree turn.
+// target's hull and forward module within the idle-powered turret's traverse during the
+// capture's firing window. DERIVED quaternion: sin/cos of half the 45-degree turn.
 (
     spawn_pose: (at: (680.0, -520.0), rot: (0.0, 0.38268343, 0.0, 0.9238795)),
 )

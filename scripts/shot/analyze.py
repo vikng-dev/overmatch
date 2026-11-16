@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["numpy"]
+# dependencies = []
 # ///
 """The game's damage model: join fire, public-path playback, damage receipts and trail evidence.
 
@@ -17,14 +17,19 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-import numpy as np
-
-# DERIVED from `ballistics::TRACER_MAX_CALIBER`: at/above this, the shell owns the smoke ribbon
-# whose post-bounce consumption rows are under analysis.
-MAIN_GUN_MIN_CALIBER = 0.02
-# Resolution: reject captures whose endpoints differ by more than the existing 32-tick
-# diagnostic overlap allowance. Missing facts remain strict failures even inside this allowance.
+# Resolution: allow half a second at the shipped 64 Hz for independently exiting clients and
+# the runner's server shutdown. Delivery and playback checks never exclude shots in this overlap.
 TRACE_END_MAX_SKEW_TICKS = 32
+
+
+class TraceInputError(ValueError):
+    """Outside trace input refused before any lifecycle accounting."""
+
+
+SHOT_KINDS = frozenset((
+    "fire", "dmg", "send", "path_tx", "kf", "term", "fire_rx", "path_rx", "path_done",
+    "spawn", "end", "dmg_rx", "marker", "trail", "tank_strike", "cf",
+))
 
 
 def load(path: Path) -> tuple[dict, list[dict]]:
@@ -32,6 +37,7 @@ def load(path: Path) -> tuple[dict, list[dict]]:
     a hard-killed process can lose its unflushed remainder (src/trace.rs `JsonlSink`)."""
     meta: dict = {}
     rows: list[dict] = []
+    controlled = None
     with path.open() as f:
         for number, line in enumerate(f, 1):
             if not line.strip():
@@ -40,14 +46,39 @@ def load(path: Path) -> tuple[dict, list[dict]]:
                 row = json.loads(line)
             except json.JSONDecodeError as error:
                 if any(rest.strip() for rest in f):
-                    raise ValueError(f"{path}:{number}: malformed row before the tail") from error
+                    raise TraceInputError(f"{path}:{number}: malformed row before the tail") from error
                 break  # A killed producer may leave only its final row torn.
             if not isinstance(row, dict):
-                raise ValueError(f"{path}:{number}: a trace row must be an object")
+                raise TraceInputError(f"{path}:{number}: a trace row must be an object")
             if row.get("k") in ("send", "transport"):
                 field = "rcpt" if row["k"] == "send" else "public_recipient_count"
                 if type(row.get(field)) is not int or row[field] < 0:
-                    raise ValueError(f"{path}:{number}: {field} must be a nonnegative integer")
+                    raise TraceInputError(f"{path}:{number}: {field} must be a nonnegative integer")
+            kind = row.get("k")
+            if not isinstance(kind, str):
+                raise TraceInputError(f"{path}:{number}: missing row kind k; recapture with SPIKE_SHOT_TRACE")
+            required = ("t", "c", "w", "ft") if kind in SHOT_KINDS else (() if kind == "meta" else ("t",))
+            if kind == "controlled":
+                required += ("c",)
+            if kind in ("path_tx", "path_rx", "path_done"):
+                required += ("seq",)
+            for field in required:
+                if type(row.get(field)) is not int or row[field] < 0:
+                    raise TraceInputError(
+                        f"{path}:{number}: {kind}.{field} must be a nonnegative integer; "
+                        "recapture with SPIKE_SHOT_TRACE using the current binary")
+            bool_fields = {"fire": ("smoke",), "tank_strike": ("armour",),
+                           "capture_end": ("shooter",)}.get(kind, ())
+            for field in bool_fields:
+                if type(row.get(field)) is not bool:
+                    raise TraceInputError(
+                        f"{path}:{number}: {kind}.{field} must be a boolean; recapture with the current binary")
+            if kind == "controlled":
+                if controlled is not None and controlled != row["c"]:
+                    raise TraceInputError(
+                        f"{path}:{number}: conflicting controlled identities {controlled} and {row['c']}; "
+                        "recapture one controlled combatant per client trace")
+                controlled = row["c"]
             if row.get("k") == "meta":
                 meta = row
             else:
@@ -64,24 +95,6 @@ def tick_diff(now: int, then: int) -> int:
     """Lightyear-style signed wrapping tick difference (`Tick - Tick -> i32`)."""
     delta = (int(now) - int(then)) & 0xFFFF_FFFF
     return delta if delta <= 0x7FFF_FFFF else delta - 0x1_0000_0000
-
-
-def pct(values, q: float) -> float:
-    a = np.asarray(values, dtype=float)
-    return float(np.percentile(a, q)) if len(a) else float("nan")
-
-
-def fmt_ticks(values, hz: float) -> str:
-    if not len(values):
-        return "      (none)"
-    a = np.asarray(values, dtype=float)
-    ms = 1000.0 / hz
-    return (
-        f"  n={len(a):<6d} p50={pct(a, 50):5.1f}t  p95={pct(a, 95):5.1f}t  "
-        f"p99={pct(a, 99):5.1f}t  max={a.max():5.0f}t"
-        f"   ({pct(a, 50) * ms:5.1f} / {pct(a, 95) * ms:5.1f} / "
-        f"{pct(a, 99) * ms:5.1f} / {a.max() * ms:5.1f} ms)"
-    )
 
 
 def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> dict:
@@ -150,7 +163,6 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
     # Own fire uses the same server identity and presentation path as remote fire (ADR-0037).
     # Control is recorded at the input edge, independently of whether any receipt arrives.
     own_ids = {r["c"] for r in crows if r["k"] == "controlled"}
-    assert len(own_ids) <= 1, f"multiple controlled ids in one capture: {sorted(own_ids)}"
     c_own = next(iter(own_ids), None)
     fired = {k for k, kinds in server.items() if kinds.get("fire")}
     own_identity = {k for k in fired if k[0] == c_own}
@@ -248,8 +260,8 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
                 paths["missing_delivery"] += 1
             if any(r.get("seq") == seq for r in client.get(key, {}).get("path_done", [])):
                 paths["completed"] += 1
-            elif received and sent.get("impact") != "state":
-                # A still-future effect at the trace boundary is observable as pending.
+            elif received:
+                # A still-future path at the trace boundary is observable as pending.
                 paths["pending"] += 1
 
     # --- how each observed shell's picture ENDED ------------------------------------------
@@ -282,11 +294,10 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
         "stray_markers": stray_markers,
     }
 
-    # --- renderer boundary: sanctioned main-gun bounce -> captured post-bounce ribbon station -----
+    # Authored flight smoke, independent of calibre, requires captured ribbon consumption.
     trail = defaultdict(int)
     for key, kinds in server.items():
-        is_main_gun = any(float(fire.get("cal", 0.0)) >= MAIN_GUN_MIN_CALIBER for fire in kinds.get("fire", []))
-        if not is_main_gun:
+        if not any(fire["smoke"] for fire in kinds.get("fire", [])):
             continue
         for kf in kinds.get("path_tx", []):
             if kf.get("impact") != "bounce":
@@ -310,8 +321,12 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
         "hz": hz,
         "server_fires": len(fired),
         "own_shots": len(own_identity),
+        "shooter_armour_contacts": sum(
+            bool(r["armour"]) for key in own_identity for r in server[key].get("tank_strike", [])),
         "controlled_combatant": c_own,
         "capture_completed": any(r["k"] == "capture_end" for r in crows),
+        "declared_shooter": c_own is not None or any(
+            r["k"] == "capture_end" and r.get("shooter") for r in crows),
         "client_trace_end_gap_ticks": client_trace_end_gap,
         "expected": len(observed_expected),
         "unaddressed": len(unaddressed),
@@ -339,11 +354,11 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
     }
 
 
-def verification_failures(summary: dict, require_shooter_damage: bool = False) -> list[str]:
+def verification_failures(summary: dict) -> list[str]:
     """Check every authoritative fire, path and own private receipt, without tail exclusions.
 
-    Generic captures may have empty categories. The MG runner additionally requires a completed
-    shooter capture and nonempty private-damage evidence, so a missed target cannot pass it.
+    A declared shooter requires completion and nonempty private-damage evidence, so a missed
+    target cannot pass the MG runner. Other captures may have empty categories.
     """
     failures: list[str] = []
 
@@ -361,8 +376,11 @@ def verification_failures(summary: dict, require_shooter_damage: bool = False) -
     paths = summary["paths"]
     add("public_path_failures", paths.get("missing_delivery", 0) + paths.get("refused", 0))
 
+    if summary["capture_completed"]:
+        add("pending_public_paths", paths.get("pending", 0))
+
     damage = summary["damage"]
-    if require_shooter_damage:
+    if summary["declared_shooter"]:
         add("missing_controlled_identity", int(summary["controlled_combatant"] is None))
         add("incomplete_capture", int(not summary["capture_completed"]))
         add("no_shooter_damage", int(damage["authored_expected"] == 0))
@@ -373,7 +391,7 @@ def verification_failures(summary: dict, require_shooter_damage: bool = False) -
 
     trail = summary["trail"]
     add(
-        "main_gun_trail_failures",
+        "smoke_trail_failures",
         sum(trail.get(outcome, 0) for outcome in ("unrendered", "ribbon_missing", "no_row")),
     )
     return failures
@@ -440,23 +458,21 @@ def main() -> int:
         action="store_true",
         help="exit nonzero when the trace violates a verifiable shot-lifecycle contract",
     )
-    ap.add_argument("--require-shooter-damage", action="store_true",
-                    help="require a completed shooter capture and at least one damaging shot")
     args = ap.parse_args()
 
-    cmeta, crows = load(Path(args.client))
-    smeta, srows = load(Path(args.server))
+    try:
+        cmeta, crows = load(Path(args.client))
+        smeta, srows = load(Path(args.server))
+    except (TraceInputError, OSError) as error:
+        print(f"trace refused: {error}", file=sys.stderr)
+        return 2
     if not crows and not srows:
         print("no rows in either trace — was SPIKE_SHOT_TRACE armed?", file=sys.stderr)
         return 1
 
     a = analyze(cmeta, crows, smeta, srows)
-    failures = verification_failures(a, args.require_shooter_damage)
-    if args.json:
-        payload = {k: v for k, v in a.items() if k not in ("server", "client", "expected_keys")}
-        print(json.dumps(payload, indent=2, default=float))
-    else:
-        report(a, args.samples)
+    failures = verification_failures(a)
+    report(a, 0 if args.json else args.samples)
     if args.strict and failures:
         print("strict verification failed: " + ", ".join(failures), file=sys.stderr)
         return 1

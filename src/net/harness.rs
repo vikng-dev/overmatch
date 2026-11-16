@@ -251,6 +251,9 @@ impl std::error::Error for ScriptLoadError {}
 
 impl Script {
     fn total_ticks(&self) -> u32 {
+        // Resolution: default capture budgets at 64 Hz: 20 s for the straight course's
+        // 4 s lead + 15 s throttle + 1 s coast; otherwise 9.375 s covers the arc's
+        // 4 s lead + 4 s throttle + 1.375 s coast (DERIVED). Runners can author ticks.
         self.ticks.unwrap_or(if self.drive == Drive::Straight {
             1280
         } else {
@@ -295,11 +298,18 @@ impl Script {
         if let Some(until) = self.fire_until
             && (!matches!(self.drive, Drive::Fire { .. })
                 || until == 0
-                || until >= self.total_ticks())
+                || until >= self.total_ticks()
+                || !match self.drive {
+                    Drive::Fire { primary, secondary } => {
+                        (primary && self.fire_interval != 0 && self.fire_tick < until)
+                            || (secondary && until > FIRE_WARMUP + 1)
+                    }
+                    _ => false,
+                })
         {
             return Err(ScriptError::Invalid {
                 field: "fire_until",
-                problem: "a Fire workload needs a positive end before ticks",
+                problem: "a Fire workload needs an end before ticks with at least one trigger demand",
             });
         }
         match self.aim {
@@ -394,6 +404,8 @@ enum ScriptClock {
         at: Duration,
         first_fire_logged: bool,
     },
+    /// Completion was emitted; subsequent Update calls cannot repeat the capture boundary.
+    Finished,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -405,7 +417,9 @@ enum ScriptTimeout {
 // ASSUMED startup and scheduling slack, shared by both wall-clock bounds.
 const WATCHDOG_SLACK: Duration = Duration::from_secs(20);
 
-// Resolution: allow 192 combat ticks / 64 Hz = 3 s for settling and aim before held fire.
+// Resolution: delay held fire by 192 combat ticks / 64 Hz = 3 s so fixture hulls can
+// settle (MEASURED: flat patch rests by tick 174 after admission). Aim keeps slewing
+// during firing; this is no guarantee of aim convergence.
 const FIRE_WARMUP: u32 = 192;
 
 impl SimulateInput {
@@ -458,7 +472,7 @@ impl SimulateInput {
                 };
                 true
             }
-            ScriptClock::Released { .. } => false,
+            ScriptClock::Released { .. } | ScriptClock::Finished => false,
         }
     }
 
@@ -478,8 +492,7 @@ impl SimulateInput {
         }
     }
 
-    /// The scripted secondary trigger's held window: from the warmup boundary to the end of the
-    /// run.
+    /// The scripted secondary's warmup predicate; `write` also applies the firing cutoff.
     fn holding_secondary(t: u32) -> bool {
         t > FIRE_WARMUP
     }
@@ -605,14 +618,11 @@ impl SimulateInput {
         command.steer = if driving { self.steer } else { 0.0 };
         command.aim = Some(self.aim_at(t));
         command.range = self.range;
+        let firing = self.fire_until.is_none_or(|until| t < until);
         (command.fire_primary, command.fire_secondary) = match self.drive {
             Drive::Fire { primary, secondary } => (
-                primary
-                    && self.fire_until.is_none_or(|until| t < until)
-                    && self.clicking_primary(t),
-                secondary
-                    && self.fire_until.is_none_or(|until| t < until)
-                    && Self::holding_secondary(t),
+                primary && firing && self.clicking_primary(t),
+                secondary && firing && Self::holding_secondary(t),
             ),
             Drive::Arc | Drive::Straight => (t == self.fire_tick, false),
             // A recoil impulse would disturb the resting contact under study.
@@ -642,7 +652,7 @@ impl SimulateInput {
 
 /// Exit once the released script has played out; separately bound startup and execution.
 pub(crate) fn simulate_watchdog(
-    simulate: ResMut<SimulateInput>,
+    mut simulate: ResMut<SimulateInput>,
     time: Res<Time<Real>>,
     fixed: Res<Time<Fixed>>,
     mut exit: MessageWriter<AppExit>,
@@ -651,17 +661,18 @@ pub(crate) fn simulate_watchdog(
 ) {
     let now = time.startup().elapsed();
     if simulate.ticks >= simulate.total && matches!(simulate.clock, ScriptClock::Released { .. }) {
+        simulate.clock = ScriptClock::Finished;
         info!(
             "client: simulation script complete, exiting ticks={} app_s={:.3}",
             simulate.ticks,
             now.as_secs_f64()
         );
-        crate::shot_trace::record_global(
-            &mut trace,
-            "capture_end",
-            timeline.tick().0,
-            || serde_json::json!({ "ticks": simulate.ticks }),
-        );
+        crate::shot_trace::record_global(&mut trace, "capture_end", timeline.tick().0, || {
+            serde_json::json!({
+                "ticks": simulate.ticks,
+                "shooter": matches!(simulate.drive, Drive::Fire { .. }),
+            })
+        });
         exit.write(AppExit::Success);
     } else if let Some(timeout) = simulate.timeout(now, fixed.timestep()) {
         match timeout {
@@ -1059,7 +1070,7 @@ mod tests {
     fn a_full_script_parses_every_field() {
         let script = Script::parse(
             "(ticks: Some(2048), drive: Fire(primary: true, secondary: true), \
-             aim: Point((8, 1.2, -2)), range_m: 12, fire_tick: 320, fire_interval: 128, \
+             aim: Point((8, 1.2, -2)), range_m: 12, fire_tick: 320, fire_interval: 128, fire_until: 1800, \
              spawn_pose: (at: (149.3, 293.9), rot: (0, 0, 0, 1)))",
         )
         .expect("a valid script");
@@ -1075,6 +1086,7 @@ mod tests {
                 range_m: 12.0,
                 fire_tick: 320,
                 fire_interval: 128,
+                fire_until: Some(1800),
                 spawn_pose: Some(SpawnPose {
                     at: Vec2::new(149.3, 293.9),
                     rot: bevy::math::Quat::IDENTITY,
@@ -1265,9 +1277,55 @@ mod tests {
             "(fire_until: 250)",
             "(drive: Fire(secondary: true), fire_until: 0)",
             "(drive: Fire(secondary: true), ticks: 250, fire_until: 250)",
+            "(drive: Fire(secondary: true), fire_until: 193)",
+            "(drive: Fire(primary: true), fire_tick: 250, fire_until: 250)",
+            "(drive: Fire(primary: true), fire_tick: 0, fire_interval: 0, fire_until: 250)",
         ] {
-            assert!(Script::parse(text).is_err(), "invalid fire window: {text}");
+            let error = Script::parse(text).expect_err("an empty firing window is refused");
+            assert!(error.to_string().contains("fire_until"), "{text}: {error}");
         }
+    }
+
+    /// The game's damage-model capture boundary is a transition: both fixed-tick and Update
+    /// watchdog calls can see completion before AppExit is consumed, but readers get one end row.
+    #[test]
+    fn repeated_watchdog_calls_record_one_capture_end() {
+        use bevy::prelude::*;
+
+        let path = std::env::temp_dir().join(format!(
+            "overmatch-capture-end-{}.jsonl",
+            std::process::id()
+        ));
+        let mut sim = SimulateInput::new(&Script::parse("(ticks: 2)").unwrap());
+        sim.hold_slot(Duration::ZERO);
+        sim.release(Duration::ZERO);
+        sim.ticks = sim.total;
+        let mut app = App::new();
+        app.insert_resource(sim)
+            .insert_resource(Time::<Real>::default())
+            .insert_resource(Time::<Fixed>::from_hz(64.0))
+            .init_resource::<lightyear::prelude::LocalTimeline>()
+            .insert_resource(crate::shot_trace::ShotTrace::for_test(&path))
+            .add_systems(Update, super::simulate_watchdog);
+        app.update();
+        app.update();
+        assert!(matches!(
+            app.world().resource::<SimulateInput>().clock,
+            super::ScriptClock::Finished
+        ));
+        drop(app); // Drop flushes the trace before reading its rows.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "completion is emitted once, even before the app exits"
+        );
+        assert_eq!(rows[0]["k"], "capture_end");
+        std::fs::remove_file(path).unwrap();
     }
 
     /// Frame runners must open on the frame rows' clock even when window initialization delays

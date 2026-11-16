@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["numpy"]
+# dependencies = []
 # ///
 """Scientific-integrity tests for the shot trace join."""
 
@@ -15,10 +15,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from analyze import analyze, load, verification_failures  # noqa: E402
+from analyze import TraceInputError, analyze, load, verification_failures  # noqa: E402
 
 
 def row(kind: str, tick: int, combatant: int, fire_tick: int, **extra) -> dict:
+    if kind == "fire":
+        extra.setdefault("smoke", False)
     if kind == "send":
         extra.setdefault("rcpt", 1)  # FIXTURE DATA: one recipient unless a case states another.
     if kind == "path_tx":
@@ -31,6 +33,7 @@ def row(kind: str, tick: int, combatant: int, fire_tick: int, **extra) -> dict:
 
 def received_own(tick: int, combatant: int, fire_tick: int) -> list[dict]:
     return [{"k": "controlled", "t": tick, "c": combatant},
+            {"k": "capture_end", "t": tick + 10},
             row("fire_rx", tick, combatant, fire_tick),
             row("spawn", tick, combatant, fire_tick, src="obs")]
 
@@ -68,7 +71,7 @@ class JoinIntegrityTests(unittest.TestCase):
 class StrictVerificationTests(unittest.TestCase):
     def test_own_damage_confirm_duplicate_receive_rows_reaches_one_marker(self) -> None:
         server = [
-            row("fire", 10, 100, 10, cal=0.088),
+            row("fire", 10, 100, 10, cal=0.088, smoke=True),
             row("dmg", 12, 100, 10, hp=5.0),
         ]
         client = [
@@ -97,7 +100,7 @@ class StrictVerificationTests(unittest.TestCase):
 
     def test_strict_rejects_missing_duplicate_and_stray_shooter_markers(self) -> None:
         server = [
-            row("fire", 10, 100, 10, cal=0.088),
+            row("fire", 10, 100, 10, cal=0.088, smoke=True),
             row("dmg", 12, 100, 10, hp=5.0),
         ]
         client = [
@@ -120,7 +123,7 @@ class StrictVerificationTests(unittest.TestCase):
 
     def test_strict_rejects_missing_shooter_marker(self) -> None:
         server = [
-            row("fire", 10, 100, 10, cal=0.088),
+            row("fire", 10, 100, 10, cal=0.088, smoke=True),
             row("dmg", 12, 100, 10, hp=5.0),
         ]
         client = [
@@ -135,11 +138,11 @@ class StrictVerificationTests(unittest.TestCase):
 
     def test_main_gun_sanctioned_bounce_reaches_post_bounce_trail_station(self) -> None:
         server = [
-            row("fire", 10, 100, 10, cal=0.088),
+            row("fire", 10, 100, 10, cal=0.088, smoke=True),
             row("path_tx", 12, 100, 10, seq=0),
         ]
         client = [
-            *received_own(10, 100, 10),
+            row("fire_rx", 13, 100, 10), row("spawn", 13, 100, 10),
             row("path_rx", 13, 100, 10, seq=0, dup=False, bt=12),
             row("path_done", 13, 100, 10, seq=0, res="bounce", held=1),
             row("trail", 13, 100, 10, seq=0, res="post_bounce_consumed"),
@@ -152,16 +155,16 @@ class StrictVerificationTests(unittest.TestCase):
 
     def test_strict_rejects_main_gun_trail_with_no_row_or_unrendered_result(self) -> None:
         server = [
-            row("fire", 10, 100, 10, cal=0.088),
+            row("fire", 10, 100, 10, cal=0.088, smoke=True),
             row("path_tx", 12, 100, 10, seq=0),
-            row("fire", 20, 100, 20, cal=0.088),
+            row("fire", 20, 100, 20, cal=0.088, smoke=True),
             row("path_tx", 22, 100, 20, seq=0),
         ]
         client = [
-            *received_own(10, 100, 10),
+            row("fire_rx", 13, 100, 10), row("spawn", 13, 100, 10),
             row("path_rx", 13, 100, 10, seq=0, dup=False, bt=12),
             row("path_done", 13, 100, 10, seq=0, res="bounce", held=1),
-            *received_own(20, 100, 20),
+            row("fire_rx", 23, 100, 20), row("spawn", 23, 100, 20),
             row("path_rx", 23, 100, 20, seq=0, dup=False, bt=22),
             row("path_done", 23, 100, 20, seq=0, res="bounce", held=1),
             row("trail", 23, 100, 20, seq=0, res="post_bounce_unrendered"),
@@ -172,8 +175,29 @@ class StrictVerificationTests(unittest.TestCase):
         self.assertEqual(result["trail"], {"no_row": 1, "unrendered": 1})
         self.assertEqual(
             verification_failures(result),
-            ["main_gun_trail_failures=2"],
+            ["smoke_trail_failures=2"],
         )
+
+    def test_completed_capture_requires_playback_of_received_paths(self):
+        for impact in ("bounce", "state"):
+            server = [row("fire", 10, 100, 10), row("path_tx", 12, 100, 10, seq=0, impact=impact)]
+            client = [row("fire_rx", 13, 100, 10), row("spawn", 13, 100, 10),
+                      row("path_rx", 13, 100, 10, seq=0), {"k": "capture_end", "t": 20}]
+            with self.subTest(impact=impact):
+                self.assertIn("pending_public_paths=1", verification_failures(analyze({}, client, {}, server)))
+                client.append(row("path_done", 15, 100, 10, seq=0))
+                self.assertEqual(verification_failures(analyze({}, client, {}, server)), [])
+
+    def test_smoke_choice_controls_ribbon_evidence_independently_of_calibre(self):
+        for smoke, caliber, failures in [(True, 0.008, ["smoke_trail_failures=1"]),
+                                         (False, 0.088, [])]:
+            server = [row("fire", 10, 100, 10, cal=caliber, smoke=smoke),
+                      row("path_tx", 12, 100, 10, seq=0)]
+            client = [row("fire_rx", 13, 100, 10), row("spawn", 13, 100, 10),
+                      row("path_rx", 13, 100, 10, seq=0),
+                      row("path_done", 15, 100, 10, seq=0)]
+            with self.subTest(smoke=smoke):
+                self.assertEqual(verification_failures(analyze({}, client, {}, server)), failures)
 
     def test_strict_reports_every_lifecycle_failure_class(self) -> None:
         server = [
@@ -222,20 +246,26 @@ class OwnFireIdentityTests(unittest.TestCase):
         self.assertEqual(result["own_shots"], 1)
         self.assertEqual(result["damage"]["authored_expected"], 1)
         self.assertEqual(verification_failures(result), [
-            "missing_shooter_damage_confirms=1", "missing_shooter_markers=1"])
+            "incomplete_capture=1", "missing_shooter_damage_confirms=1", "missing_shooter_markers=1"])
 
     def test_mg_capture_refuses_empty_damage_and_missing_completion_evidence(self):
         # An armor runner must not certify a run that only exercised ground contacts.
         result = analyze({}, [{"k": "controlled", "t": 1, "c": 100}], {}, [])
-        self.assertEqual(verification_failures(result, require_shooter_damage=True),
+        self.assertEqual(verification_failures(result),
                          ["incomplete_capture=1", "no_shooter_damage=1"])
+
+    def test_declared_shooter_cannot_pass_without_controlled_identity(self):
+        result = analyze({}, [{"k": "capture_end", "t": 10, "shooter": True}], {}, [])
+        self.assertEqual(verification_failures(result),
+                         ["missing_controlled_identity=1", "no_shooter_damage=1"])
 
     def test_own_and_remote_fires_require_delivery_and_exactly_one_spawn_even_at_end(self):
         # No prediction-era echo exemption may hide a missing spawn or a final lost shot.
         server = [row("fire", 10, 100, 10), row("fire", 10, 200, 10)]
         client = [{"k": "controlled", "t": 1, "c": 100}, row("fire_rx", 12, 100, 10)]
         result = analyze({}, client, {}, server)
-        self.assertEqual(verification_failures(result), ["lost_shots=1", "no_spawn_shots=1"])
+        self.assertEqual(verification_failures(result), ["lost_shots=1", "no_spawn_shots=1",
+                                                               "incomplete_capture=1", "no_shooter_damage=1"])
 
     def test_strict_refuses_a_client_trace_that_ends_early(self):
         result = analyze({}, [{"k": "capture_end", "t": 100}], {},
@@ -243,7 +273,6 @@ class OwnFireIdentityTests(unittest.TestCase):
         self.assertIn("client_trace_ended_early_by_ticks=100", verification_failures(result))
 
     def test_quiet_observation_tail_is_capture_coverage_not_a_lost_client(self):
-        # The server still records idle transport after the final shot; the client records its end.
         server = [row("fire", 10, 100, 10), {"k": "reliable_outbox", "t": 90}]
         client = [row("fire_rx", 12, 100, 10), row("spawn", 13, 100, 10, src="obs"),
                   {"k": "capture_end", "t": 100}]
@@ -423,6 +452,25 @@ class TransportCopyTests(unittest.TestCase):
 
 
 class TraceInputTests(unittest.TestCase):
+    def test_conflicting_controlled_ids_refuse_with_file_and_identities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "client.jsonl"
+            path.write_text('{"k":"controlled","t":1,"c":7}\n'
+                            '{"k":"controlled","t":2,"c":8}\n')
+            with self.assertRaisesRegex(TraceInputError, r"client.jsonl:2:.*controlled.*7.*8.*recapture"):
+                load(path)
+
+    def test_missing_shot_identity_refuses_instead_of_shrinking_denominator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.jsonl"
+            for field in ("t", "c", "w", "ft", "smoke"):
+                fire = row("fire", 10, 100, 10, smoke=False)
+                del fire[field]
+                path.write_text(json.dumps(fire) + "\n")
+                with self.subTest(field=field), self.assertRaisesRegex(
+                        TraceInputError, rf"server.jsonl:1:.*fire.*{field}.*recapture"):
+                    load(path)
+
     def test_only_the_final_row_may_be_torn(self):
         # The game's damage-model report must not certify a stream with missing middle evidence.
         with tempfile.TemporaryDirectory() as directory:

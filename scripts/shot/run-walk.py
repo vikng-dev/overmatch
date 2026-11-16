@@ -21,7 +21,7 @@ def run_one(root, out, seconds, index):
     # Fixture cues exercise real wall crossings and structural changes, without taking frames.
     plan.write_text('(wall: (shots: [Round(round: "88mm_AP", at: 10.0), '
                     'Charge(kg: 1.0, core: "88mm_burst_core", at: 20.0)]))\n')
-    env = dict(os.environ, OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="hidden", OVERMATCH_MUTE="1",
+    env = dict(os.environ, OVERMATCH_UNATTENDED="1",
                OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_BOT="30",
                SPIKE_SHOT_TRACE=str(prefix), OVERMATCH_CAPTURE=str(plan),
                RUST_BACKTRACE="1")
@@ -86,7 +86,7 @@ def main():
     root = Path(__file__).resolve().parents[2]
     if not args.holding_lock:
         env = dict(os.environ, OVERMATCH_CARGO_LOCK_WAIT_S="10800",
-                   OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="hidden")
+                   OVERMATCH_UNATTENDED="1")
         subprocess.run([str(root / "scripts/serial-cargo"), "build", "--locked",
                         "--bin", "overmatch-server", "--features", "dev_ui,bitprobe"],
                        cwd=root, env=env, check=True)

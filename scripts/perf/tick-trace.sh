@@ -58,7 +58,7 @@ window() { # phase w0 w1
 }
 
 launch=$EPOCHREALTIME
-(cd "$REPO" && exec env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 \
+(cd "$REPO" && exec env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless \
    OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_SERVER_STATS_S=1 OVERMATCH_BOT="$BOTS" \
    TRACE_CHROME="$TRACE" "$SERVER" >"$SLOG" 2>&1) &
 SPID=$!
@@ -73,7 +73,7 @@ window empty "$w0" "$w1"
 # is the near-empty proof. bevy_transform is named because Bevy's `trace` feature compiles its
 # propagation spans in (bevy_internal 0.20.1, `bevy_transform/trace`): unfiltered they wrote
 # 2.1 million records in one run (MEASURED, 52e587fb).
-(cd "$REPO" && exec env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 \
+(cd "$REPO" && exec env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless \
    OVERMATCH_SERVER=127.0.0.1:5888 OVERMATCH_HARNESS="$SCRIPT" \
    TRACE_CHROME="$OUT/$LABEL.client.trace-off.json" \
    RUST_LOG="bevy_ecs=warn,bevy_app=warn,bevy_transform=warn" "$CLIENT" >"$CLOG" 2>&1) &

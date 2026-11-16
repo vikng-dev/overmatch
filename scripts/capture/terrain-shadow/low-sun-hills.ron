@@ -1,5 +1,5 @@
 // From the bay, after scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch:
-// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/terrain-shadow/low-sun-hills.ron target/debug/overmatch --offline
+// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_CAPTURE=scripts/capture/terrain-shadow/low-sun-hills.ron target/debug/overmatch --offline
 // The hills' baked shadows under a 3° sun across the map, near and past the sun's cascade range,
 // from high over the north-east.
 (

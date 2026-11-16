@@ -11,7 +11,7 @@
 // machine's build lock:
 //
 //   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_TARGET=kills \
-//     OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 \
+//     OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden \
 //     OVERMATCH_CAPTURE=scripts/capture/pen-cam-killcam.ron target/debug/overmatch --offline
 //
 // writes target/capture/pen-cam-killcam-<second>.png at each frame second, then exits. Times and

@@ -11,7 +11,7 @@
 // under the machine's build lock:
 //
 //   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_TARGET=fires \
-//     OVERMATCH_XRAY=26-40 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 \
+//     OVERMATCH_XRAY=26-40 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden \
 //     OVERMATCH_CAPTURE=scripts/capture/pen-cam-glass.ron target/debug/overmatch --offline
 //
 // writes target/capture/pen-cam-glass-<second>.png at each frame second, then exits. Times and
