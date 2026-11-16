@@ -30,7 +30,6 @@ struct HudLook {
     gauge_width_px: crate::provenance::Sourced<f32>,
     gauge_height_px: crate::provenance::Sourced<f32>,
     gauge_label_px: crate::provenance::Sourced<f32>,
-    gauge_gap_px: crate::provenance::Sourced<f32>,
     rail_px: crate::provenance::Sourced<f32>,
     mark_px: crate::provenance::Sourced<f32>,
 }
@@ -55,7 +54,6 @@ fn hud_look() -> &'static HudLook {
             ("gauge_width_px", look.gauge_width_px.0),
             ("gauge_height_px", look.gauge_height_px.0),
             ("gauge_label_px", look.gauge_label_px.0),
-            ("gauge_gap_px", look.gauge_gap_px.0),
             ("rail_px", look.rail_px.0),
             ("mark_px", look.mark_px.0),
         ] {
@@ -86,11 +84,8 @@ fn hud_look() -> &'static HudLook {
 #[derive(Component)]
 struct DriveNotchGauge;
 
-#[derive(Component, Clone, Copy)]
-enum NotchMark {
-    Throttle,
-    Steer,
-}
+#[derive(Component)]
+struct NotchMark;
 
 /// The signed bounded axis maps onto the usable rail, keeping the full mark inside both ends.
 fn notch_left(value: f32) -> f32 {
@@ -196,74 +191,70 @@ fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                         }
                         + look.gauge_above_row_gap_px.0,
                 ),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(look.gauge_gap_px.0),
                 ..default()
             },
             Visibility::Hidden,
         ))
         .with_children(|gauge| {
-            for (label, axis) in [("THR", NotchMark::Throttle), ("STEER", NotchMark::Steer)] {
-                gauge
-                    .spawn(Node {
-                        align_items: AlignItems::Center,
+            gauge
+                .spawn(Node {
+                    align_items: AlignItems::Center,
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn((
+                        Text::new("THR"),
+                        TextFont {
+                            font: fonts.body.clone().into(),
+                            font_size: FontSize::Px(look.debug_font_px.0),
+                            ..default()
+                        },
+                        TextColor(standard_color),
+                        Node {
+                            width: Val::Px(look.gauge_label_px.0),
+                            ..default()
+                        },
+                    ));
+                    row.spawn(Node {
+                        width: Val::Px(look.gauge_width_px.0),
+                        height: Val::Px(look.gauge_height_px.0),
                         ..default()
                     })
-                    .with_children(|row| {
-                        row.spawn((
-                            Text::new(label),
-                            TextFont {
-                                font: fonts.body.clone().into(),
-                                font_size: FontSize::Px(look.debug_font_px.0),
-                                ..default()
-                            },
-                            TextColor(standard_color),
+                    .with_children(|rail| {
+                        rail.spawn((
                             Node {
-                                width: Val::Px(look.gauge_label_px.0),
+                                position_type: PositionType::Absolute,
+                                top: Val::Px((look.gauge_height_px.0 - look.rail_px.0) / 2.0),
+                                width: Val::Px(look.gauge_width_px.0),
+                                height: Val::Px(look.rail_px.0),
                                 ..default()
                             },
+                            BackgroundColor(debug_color),
                         ));
-                        row.spawn(Node {
-                            width: Val::Px(look.gauge_width_px.0),
-                            height: Val::Px(look.gauge_height_px.0),
-                            ..default()
-                        })
-                        .with_children(|rail| {
-                            rail.spawn((
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    top: Val::Px((look.gauge_height_px.0 - look.rail_px.0) / 2.0),
-                                    width: Val::Px(look.gauge_width_px.0),
-                                    height: Val::Px(look.rail_px.0),
-                                    ..default()
-                                },
-                                BackgroundColor(debug_color),
-                            ));
-                            // The neutral reference and the live notch are shapes, not font glyphs.
-                            rail.spawn((
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: Val::Px((look.gauge_width_px.0 - look.rail_px.0) / 2.0),
-                                    width: Val::Px(look.rail_px.0),
-                                    height: Val::Px(look.gauge_height_px.0),
-                                    ..default()
-                                },
-                                BackgroundColor(debug_color),
-                            ));
-                            rail.spawn((
-                                axis,
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: Val::Px(notch_left(0.0)),
-                                    width: Val::Px(look.mark_px.0),
-                                    height: Val::Px(look.gauge_height_px.0),
-                                    ..default()
-                                },
-                                BackgroundColor(standard_color),
-                            ));
-                        });
+                        // The neutral reference and the live notch are shapes, not font glyphs.
+                        rail.spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: Val::Px((look.gauge_width_px.0 - look.rail_px.0) / 2.0),
+                                width: Val::Px(look.rail_px.0),
+                                height: Val::Px(look.gauge_height_px.0),
+                                ..default()
+                            },
+                            BackgroundColor(debug_color),
+                        ));
+                        rail.spawn((
+                            NotchMark,
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: Val::Px(notch_left(0.0)),
+                                width: Val::Px(look.mark_px.0),
+                                height: Val::Px(look.gauge_height_px.0),
+                                ..default()
+                            },
+                            BackgroundColor(standard_color),
+                        ));
                     });
-            }
+                });
         });
 }
 
@@ -421,7 +412,7 @@ fn update_notch_gauge(
     input: Res<crate::command::DriveInput>,
     controlled: Query<Has<crate::damage::TankKnockedOut>, With<Controlled>>,
     mut gauges: Query<&mut Visibility, With<DriveNotchGauge>>,
-    mut marks: Query<(&NotchMark, &mut Node)>,
+    mut marks: Query<&mut Node, With<NotchMark>>,
 ) {
     let visible = crate::tank::controlled_one(controlled.single()).is_some_and(|dead| !dead);
     for mut visibility in &mut gauges {
@@ -431,12 +422,8 @@ fn update_notch_gauge(
             Visibility::Hidden
         });
     }
-    let notches = input.notches();
-    for (axis, mut node) in &mut marks {
-        let value = match axis {
-            NotchMark::Throttle => notches.throttle,
-            NotchMark::Steer => notches.steer,
-        };
+    for mut node in &mut marks {
+        let value = input.throttle();
         let left = Val::Px(notch_left(value));
         if node.left != left {
             node.left = left;
@@ -513,10 +500,10 @@ mod tests {
         }
     }
 
-    /// Players need both signed lever positions, including neutral and both bounds. The marks
-    /// stay inside the rails and follow independent axes through the real gather and HUD systems.
+    /// Players need the signed throttle position, including neutral and both bounds. The mark
+    /// stays inside its rail and follows the real gather and HUD systems.
     #[test]
-    fn gauge_marks_follow_the_two_local_notches_and_hide_without_a_body() {
+    fn gauge_mark_follows_throttle_and_hides_without_a_body() {
         let mut world = World::new();
         world.insert_resource(UiFonts {
             hud: Handle::default(),
@@ -540,13 +527,10 @@ mod tests {
             .run_system_once(crate::command::gather_commands)
             .unwrap();
         world.run_system_once(update_notch_gauge).unwrap();
-        let mut marks = world.query::<(&NotchMark, &Node)>();
-        assert_eq!(marks.iter(&world).count(), 2);
-        for (axis, node) in marks.iter(&world) {
-            let expected = match axis {
-                NotchMark::Throttle => crate::track::drive::drive_feel().notch_step(),
-                NotchMark::Steer => -crate::track::drive::drive_feel().notch_step(),
-            }; // Fixture tap.
+        let mut marks = world.query_filtered::<&Node, With<NotchMark>>();
+        assert_eq!(marks.iter(&world).count(), 1);
+        for node in marks.iter(&world) {
+            let expected = crate::track::drive::drive_feel().notch_step();
             assert_eq!(node.left, Val::Px(notch_left(expected)));
         }
         assert_eq!(notch_left(-1.0), 0.0);
