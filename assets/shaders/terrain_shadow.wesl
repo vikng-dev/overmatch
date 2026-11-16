@@ -3,11 +3,12 @@ import constants::MATERIAL_BIND_GROUP;
 // The terrain's baked sun shadow (`src/terrain_shadow.rs` owns the bake, the record and the
 // uniform): the receiver law, and the two material bindings it reads. A material that receives the
 // shadow binds the field at 150 and its uniform at 151, and multiplies `visibility` at its lit
-// position into `pbr_input.directional_shadow_factor` before `apply_pbr_lighting`. Bevy multiplies
-// that factor into every directional light's shadow inside its shadow-receiver block
-// (`pbr_functions.wesl`): at every distance, and nowhere while the light casts no shadows.
+// position into `pbr_input.directional_shadow_factor` before `apply_pbr_lighting`.
 
-import bevy_pbr::render::mesh_view_bindings::lights;
+import bevy_pbr::render::{
+    mesh_view_bindings::lights,
+    mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+};
 
 struct TerrainShadowUniform {
     // xy: world XZ of texel (0, 0); z: texels per metre; w: metres per texel.
@@ -40,15 +41,20 @@ const SAME_LIGHT: f32 = 0.9999;
 // fragment's ray to the sun's centre, `reach` metres away horizontally, stands
 // `depth · cos²(elevation) / reach` radians above it.
 //
-// The factor this returns multiplies EVERY directional light of the view, so the field speaks only
-// in a view whose every directional light is the sun it was baked for; in any other (the pen cam's
-// stage under its own key light) it is silent. It is silent outside the field too.
+// Bevy multiplies the factor into a directional light's shadow inside its shadow-receiver block, at
+// every distance and only while the light casts shadows: one scalar for all such lights, not one per
+// light (`pbr_types.wesl`, `pbr_functions.wesl`). So the field is silent in a view holding a
+// shadow-casting directional light other than the sun it was baked for, which it would shade too; a
+// light casting none (the pen cam stage's keys) never meets the factor. A per-light factor upstream
+// would lift this: `upstream/bevy-directional-shadow-factor-per-light.md`. It is silent outside the
+// field too.
 fn visibility(position: vec3<f32>) -> f32 {
     if terrain_shadow.ray.w == 0.0 {
         return 1.0;
     }
     for (var i = 0u; i < lights.n_directional_lights; i++) {
-        if dot(lights.directional_lights[i].direction_to_light, terrain_shadow.light.xyz) < SAME_LIGHT {
+        let casts = (lights.directional_lights[i].flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u;
+        if casts && dot(lights.directional_lights[i].direction_to_light, terrain_shadow.light.xyz) < SAME_LIGHT {
             return 1.0;
         }
     }

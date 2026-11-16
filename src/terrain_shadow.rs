@@ -628,12 +628,20 @@ mod tests {
         }
     }
 
+    /// One of the view's directional lights, as the law reads it: the direction toward it, and
+    /// whether it casts shadows.
+    #[derive(Clone, Copy)]
+    struct ViewLight {
+        toward: Vec3,
+        casts: bool,
+    }
+
     /// The shipped receiver law (`assets/shaders/terrain_shadow.wesl`'s `visibility`) and its
     /// uniform type, lifted out of the shader text with the material bindings swapped for test ones:
     /// the field's texture at binding 0, its uniform at 1, and the view's directional lights a
-    /// private array pointing toward `lights`. The compute entry `check` writes the law's
-    /// visibility at each query of binding 2 (xyz a world position) to binding 3.
-    fn receiver_law_module(lights: &[Vec3]) -> String {
+    /// private array of `lights`, flagged as bevy flags them. The compute entry `check` writes the
+    /// law's visibility at each query of binding 2 (xyz a world position) to binding 3.
+    fn receiver_law_module(lights: &[ViewLight]) -> String {
         let shader = include_str!("../assets/shaders/terrain_shadow.wesl");
         let law = &shader[shader
             .find("const SAME_LIGHT")
@@ -642,15 +650,29 @@ mod tests {
             .find("struct TerrainShadowUniform {")
             .expect("the field's uniform type");
         let uniform = &shader[start..start + shader[start..].find("};").expect("its end") + 2];
+        // Bevy's own flag, from the view types the law imports it from.
+        let shadows_enabled =
+            include_str!("../vendor/bevy_pbr-0.20.1-overmatch/src/render/mesh_view_types.wesl")
+                .lines()
+                .find(|line| line.starts_with("const DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT:"))
+                .expect("bevy's view types declare the shadows-enabled flag");
         let count = lights.len();
         let lights = lights
             .iter()
-            .map(|l| format!("Light(vec3<f32>({:?}, {:?}, {:?}))", l.x, l.y, l.z))
+            .map(|&ViewLight { toward: l, casts }| {
+                let flags = if casts {
+                    "DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT"
+                } else {
+                    "0u"
+                };
+                format!("Light(vec3<f32>({:?}, {:?}, {:?}), {flags})", l.x, l.y, l.z)
+            })
             .collect::<Vec<_>>()
             .join(", ");
         format!(
             "{uniform}
-struct Light {{ direction_to_light: vec3<f32> }}
+{shadows_enabled}
+struct Light {{ direction_to_light: vec3<f32>, flags: u32 }}
 struct Lights {{ n_directional_lights: u32, directional_lights: array<Light, {count}> }}
 var<private> lights: Lights = Lights({count}u, array<Light, {count}>({lights}));
 @group(0) @binding(0) var terrain_shadow_field: texture_2d<f32>;
@@ -672,7 +694,10 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
     /// edit fails here, in CI, rather than when a player's first lit mesh builds its pipeline.
     #[test]
     fn the_receiver_law_validates() {
-        let source = receiver_law_module(&[Vec3::Y, Vec3::X]);
+        let source = receiver_law_module(&[Vec3::Y, Vec3::X].map(|toward| ViewLight {
+            toward,
+            casts: true,
+        }));
         let module = wgpu::naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|err| panic!("{}", err.emit_to_string(&source)));
         wgpu::naga::valid::Validator::new(
@@ -683,10 +708,15 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
         .expect("the receiver law validates");
     }
 
-    /// Run the shipped receiver law on a headless compute device over `field` (baked toward
-    /// `lights[0]`, handed over exactly as [`install`] hands it), in a view lit by `lights`, one
-    /// visibility per query.
-    fn run_receiver_law(field: &OcclusionField, lights: &[Vec3], queries: &[Vec4]) -> Vec<f32> {
+    /// Run the shipped receiver law on a headless compute device over `field` (baked toward `sun`,
+    /// handed over exactly as [`install`] hands it), in a view lit by `lights`, one visibility per
+    /// query.
+    fn run_receiver_law(
+        field: &OcclusionField,
+        sun: Vec3,
+        lights: &[ViewLight],
+        queries: &[Vec4],
+    ) -> Vec<f32> {
         use bevy::render::render_resource::encase;
         use bevy::tasks::block_on;
         use wgpu::util::DeviceExt;
@@ -774,7 +804,7 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
                 &handed_over(
                     field,
                     Handle::default(),
-                    lights[0],
+                    sun,
                     crate::sky::sun_angular_radius_rad(),
                 )
                 .uniform,
@@ -871,8 +901,10 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
     /// a metre either side of it is fully lit or fully shaded. A law that drops the carry along
     /// the ray, or blends unrecorded texels in as lit, fails; so does a bake that leaves a lit
     /// texel next to the edge without its near miss, once the crest runs oblique to the sun. Beyond
-    /// the field's span, and in a view lit by any directional light but the sun it was baked for
-    /// (the factor would shade that light too), the field is silent.
+    /// the field's span it is silent. Beside a directional light casting no shadow (the pen cam
+    /// stage's keys), which bevy never multiplies the factor into, the sun keeps the field's shadow;
+    /// a shadow-casting light other than the sun is never shaded by it, so a view holding one leaves
+    /// the one factor at 1. A law silenced by any second light, or deaf to the lights, fails.
     #[test]
     #[ignore = "manual headless GPU correctness check; requires a compute adapter, never a window"]
     fn a_receiver_is_lit_above_its_occluders_line_and_shaded_below() {
@@ -916,7 +948,11 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
             let open = at(0.5 * (edge - 8.0), 0.5 * (edge - 8.0));
             queries.push(Vec4::new(open.x, 0.0, open.y, 0.0));
             queries.push(Vec4::new(field.origin.x - 5.0, -10.0, column.y, 0.0));
-            let seen = run_receiver_law(&field, &[toward], &queries);
+            let alone = [ViewLight {
+                toward,
+                casts: true,
+            }];
+            let seen = run_receiver_law(&field, toward, &alone, &queries);
             let sun_name = format!("sun ({elevation}°, {azimuth}°)");
             for (&y, &v) in heights.iter().zip(&seen) {
                 if y < line - half_width - SLACK_M {
@@ -963,18 +999,42 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
                 &[1.0; 2],
                 "{sun_name}: the open plain, beyond the span"
             );
-            // The shaded column's foot, in a view that also holds another directional light.
+            // The shaded column's foot, beside the view's other directional lights.
             let foot = [Vec4::new(column.x, 0.0, column.y, 0.0)];
-            assert_eq!(
-                run_receiver_law(&field, &[toward], &foot),
-                [0.0],
-                "{sun_name}: the column's foot is shaded under the sun alone"
-            );
-            assert_eq!(
-                run_receiver_law(&field, &[toward, other_light], &foot),
-                [1.0],
-                "{sun_name}: another directional light silences the field"
-            );
+            let [sun_light] = alone;
+            let key = ViewLight {
+                toward: other_light,
+                casts: false,
+            };
+            let caster = ViewLight {
+                toward: other_light,
+                casts: true,
+            };
+            for (lights, expected, what) in [
+                (&alone[..], 0.0, "the sun shades the foot"),
+                (
+                    &[key, sun_light],
+                    0.0,
+                    "beside a light casting no shadow, the sun shades the foot",
+                ),
+                (
+                    &[caster],
+                    1.0,
+                    "a shadow-casting light that is not the sun is not shaded by the terrain",
+                ),
+                (
+                    &[sun_light, caster],
+                    1.0,
+                    "a shadow-casting light that is not the sun is not shaded by the terrain, \
+                     beside the sun",
+                ),
+            ] {
+                assert_eq!(
+                    run_receiver_law(&field, toward, lights, &foot),
+                    [expected],
+                    "{sun_name}: {what}"
+                );
+            }
         }
     }
 }
