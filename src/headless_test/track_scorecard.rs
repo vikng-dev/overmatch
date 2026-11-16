@@ -521,17 +521,34 @@ impl Bed {
         out
     }
 
-    /// Avian solver contacts with the tank as a party: (pairs, manifolds, points).
+    /// Avian bearing contacts with the tank as a party: (pairs, manifolds, points).
+    /// A pair or manifold counts only with a bearing point (penetration >= 0). Separated points
+    /// carry almost no force at rest (MEASURED parked-layer experiment: 0.7–0.8% of normal impulse),
+    /// so this census excludes speculative points admitted by the contact tolerance.
     fn solver_contacts(&self) -> (usize, usize, usize) {
         let graph = self.app.world().resource::<ContactGraph>();
         graph
             .iter_active_touching()
             .filter(|pair| pair.body1 == Some(self.tank) || pair.body2 == Some(self.tank))
             .fold((0, 0, 0), |(pairs, manifolds, points), pair| {
+                let (bearing_manifolds, bearing_points) = pair
+                    .manifolds
+                    .iter()
+                    .map(|manifold| {
+                        manifold
+                            .points
+                            .iter()
+                            .filter(|point| point.penetration >= 0.0)
+                            .count()
+                    })
+                    .filter(|&count| count > 0)
+                    .fold((0, 0), |(manifolds, points), count| {
+                        (manifolds + 1, points + count)
+                    });
                 (
-                    pairs + 1,
-                    manifolds + pair.manifolds.len(),
-                    points + pair.manifolds.iter().map(|m| m.points.len()).sum::<usize>(),
+                    pairs + usize::from(bearing_manifolds > 0),
+                    manifolds + bearing_manifolds,
+                    points + bearing_points,
                 )
             })
     }
@@ -3318,8 +3335,10 @@ fn track_scorecard() {
         pass: None,
         rows: work_rows,
         note: "MEASURED counts per tick for the one tank in the world: the production `Work` \
-               counters, the belt's contact counts and Avian's solver contacts with the \
-               tank as a party. No timing."
+               counters, the belt's contact counts and Avian's bearing contacts with the \
+               tank as a party: points with penetration >= 0, and pairs/manifolds containing \
+               such points. Speculative contacts still cost solver work but are excluded from \
+               these bearing counts. No timing."
             .into(),
     });
     println!("{}", card.markdown());
