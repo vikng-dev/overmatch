@@ -814,8 +814,7 @@ impl<Ctx> Server<Ctx> {
         Ok(())
     }
 
-    /// Whether the token lists this server's address, when `server_addr` asks for the check.
-    /// OVERMATCH PATCH: lifted out of `process_connection_request` for `refuse_foreign_protocol`.
+    /// OVERMATCH PATCH: whether the token lists this server's address, if `server_addr` is given.
     fn token_names_this_server(
         &self,
         token: &ConnectTokenPrivate,
