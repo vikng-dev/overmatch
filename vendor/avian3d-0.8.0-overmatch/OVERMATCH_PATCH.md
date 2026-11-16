@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 820 in all (MEASURED), 742 in upstream files and 78 in the
+of `src/` against the published crate: 914 in all (MEASURED), 836 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -160,6 +160,10 @@ changes (every push, removal and clear); `pre_process_velocity_increments` store
 `IncrementsBuiltFor`, and `clear_velocity_increments` panics if it moved. Two reads and a compare
 per step.
 
+Kept: the filters sit inside upstream systems, and the count is bumped inside `SolverBodies`, whose
+membership only its own methods change. 75 fork lines (MEASURED: 44 in the integrator, 18 in the
+force builders, 13 in `SolverBodies`).
+
 Guards: `src/tests/avian_island_sleep.rs` (`a_woken_body_takes_only_its_first_steps_gravity`,
 `a_force_on_a_sleeper_acts_in_its_first_step_awake`,
 `sleeping_increments_wait_untouched_and_act_on_wake`,
@@ -273,7 +277,8 @@ side of the crossover, and the rise is not attributed to the lost floor; any spe
 restoring it is unmeasured. No timing run was made.
 
 Each color writes only its own constraints, preserving its manifold-handle order on either path.
-Guard: `src/tests/avian_contact_reduction.rs::the_constraint_graph_holds_one_constraint_per_kept_manifold`.
+16 fork lines (MEASURED). Guard:
+`src/tests/avian_contact_reduction.rs::the_constraint_graph_holds_one_constraint_per_kept_manifold`.
 
 ## Collider transform propagation on the compute pool (`src/collision/collider/collider_transform/plugin.rs`): kept
 
@@ -322,7 +327,7 @@ outside Avian's timed stages was 151 to 518 ms in the two ticks after each colla
 the ten worst ticks; with the patch the worst is 0.6 ms and the ten worst sum to 3.9 ms. The run's
 worst tick fell from 599.9 to 82.7 ms (the 0.7 stack: 106.7 ms).
 
-Kept: the loop is inside an upstream system. 60 fork lines (MEASURED).
+Kept: the loop is inside an upstream system. 63 fork lines (MEASURED).
 
 Guard: `src/tests/avian_body_size_metrics.rs`, 2 tests.
 
