@@ -551,7 +551,6 @@ pub(super) fn choose(
     let lands = |gear: u8, at: f32| {
         landing_pull(tp, inp.supply, at, ratio(gear), command).map(|pull| pull.min(sensed.grip))
     };
-    // `gear` holding `holds` is viable; `None` holds nothing.
     let viable = |gear: u8, holds: Option<f32>| {
         holds.is_some_and(|holds| verdict(holds, carried(&window, gear)) == Verdict::Viable)
     };
@@ -588,11 +587,7 @@ pub(super) fn choose(
         st.gear.saturating_sub(tp.max_step).max(1)..=st.gear.saturating_add(tp.max_step).min(top);
     let held =
         viable_pull(tp, inp.supply, speed, ratio(st.gear), command, st.clutch).min(sensed.grip);
-    // A cut buys a gear only where it pulls on landing. One the pedal's own fuel cannot drive at the
-    // crank it lands on only brakes the hull less than the engaged gear, as every higher gear does
-    // on overrun: a cut to it would shed engine braking and buy no drive. The engaged crank decides
-    // nothing here: on overrun the hull turns it past the governor's cut, where no pedal fuels it,
-    // while a higher gear lands where the pedal drives.
+    // The design's "A cut buys drive, never less braking" (section 5a) says why.
     let buys = |gear: u8| lands(gear, landing).filter(|&pull| pull > 0.0);
     let offer = |gear: u8| {
         if gear == st.gear {
