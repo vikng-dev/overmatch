@@ -799,7 +799,7 @@ fn update_toast(
     if toast.remaining > 0.0 {
         toast.remaining -= time.delta_secs();
         set_text(text.reborrow(), &toast.message);
-        visibility.set_if_neq(Visibility::Visible);
+        visibility.set_if_neq(Visibility::Inherited);
     } else if *visibility != Visibility::Hidden {
         *visibility = Visibility::Hidden;
     }
@@ -807,6 +807,32 @@ fn update_toast(
 
 #[cfg(test)]
 mod tests {
+    /// Capture hides UI roots, including a toast's parent; a shown child must inherit it.
+    #[test]
+    fn a_shown_toast_inherits_the_hidden_hud_root() {
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::prelude::*;
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        let mut toast = super::Toast::default();
+        toast.show("fixture");
+        world.insert_resource(toast);
+        let root = world.spawn(Visibility::Hidden).id();
+        let text = world
+            .spawn((
+                super::ToastText,
+                Text::new(""),
+                Visibility::Hidden,
+                ChildOf(root),
+            ))
+            .id();
+        world.run_system_once(super::update_toast).unwrap();
+        assert_eq!(
+            *world.get::<Visibility>(text).unwrap(),
+            Visibility::Inherited
+        );
+    }
+
     /// Sight appearance must reach the shipped widget spawners; retunes cannot leave a code copy.
     #[test]
     fn sight_widget_appearance_comes_from_data() {

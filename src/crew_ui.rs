@@ -241,7 +241,7 @@ fn update_status_panel(
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
-    visibility.set_if_neq(Visibility::Visible);
+    visibility.set_if_neq(Visibility::Inherited);
 
     // Crew active/total: this tank's seats, a seat down when flagged `Dead` (the notion the crew bar
     // draws too).
@@ -500,8 +500,15 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(crate::WeaponClock(crate::sim_tick::SimTick::new(0)));
         world.insert_resource(Time::<Fixed>::default());
+        // Fixture: capture hides the HUD root; showing its card must inherit that decision.
+        let root = world.spawn(Visibility::Hidden).id();
         let panel = world
-            .spawn((StatusPanelText, Text::new(""), Visibility::Visible))
+            .spawn((
+                StatusPanelText,
+                Text::new(""),
+                Visibility::Visible,
+                ChildOf(root),
+            ))
             .id();
         let tank = world
             .spawn((
@@ -572,7 +579,7 @@ mod tests {
                 assert!(text.contains(expected), "{text}");
                 assert_eq!(
                     *world.get::<Visibility>(panel).unwrap(),
-                    Visibility::Visible
+                    Visibility::Inherited
                 );
             }
         }

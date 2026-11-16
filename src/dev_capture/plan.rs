@@ -130,7 +130,7 @@ pub(crate) enum Demo {
     LodShowcase,
     /// The hull marks, struck on the parked target (`hull_marks::demo`).
     HullMarks,
-    /// The track prints, set down at app second `at` at world `(x, z)` on travel heading
+    /// The track prints, set down at anchored second `at` at world `(x, z)` on travel heading
     /// `heading_deg` (from `+Z` toward `+X`) and driven, pivoting at `steer` (default 1, right)
     /// (`track_prints::demo`). `at` is the plan's schedule, like every cue's: the player's tank
     /// must have spawned by then, or the demo waits for it; the phases run from the set-down.
@@ -171,8 +171,10 @@ pub(crate) struct Frames {
     /// of the names is time order, so a glob assembles a sequence as is. Its directory is created
     /// at mount.
     pub(crate) out: PathBuf,
-    /// Frame seconds since placement ([`super::Anchor`]), finite and non-negative; sorted,
-    /// with times sharing a file name kept once. Default `[6.0]`.
+    /// Seconds since the composition anchor ([`super::Anchor`]), finite and non-negative;
+    /// sorted with times sharing a file name kept once. Offline/sandbox loading consumes no
+    /// time; online clients and dedicated servers count from startup, including loading.
+    /// Network arrivals are not repeatable. Default `[6.0]`.
     #[serde(default = "default_at")]
     pub(crate) at: Vec<f32>,
     /// The frame in physical pixels, `(width, height)`. Default `(2560, 1440)`.
@@ -192,8 +194,9 @@ pub(crate) struct Frames {
     /// Shift toggle writes; ignored where that resource is absent.
     #[serde(default)]
     pub(crate) sight: bool,
-    /// A positive, fixed frame step, s, for reproducible comparisons. Loading before the
-    /// composition's anchor consumes no time or simulation ticks.
+    /// A positive, fixed frame step, s, for reproducible offline/sandbox comparisons. Their
+    /// loading consumes no time or simulation ticks. Online clients and dedicated servers
+    /// count loading from startup; fixed stepping does not make network arrivals repeatable.
     #[serde(default)]
     pub(crate) step_s: Option<FrameStep>,
     /// Who places the player's camera ([`Camera`]). Default the player's own writers.
@@ -253,45 +256,82 @@ pub(crate) struct KeyHold {
 /// impact read there with no round flown and no shot recorded, so a plan presents what that round's
 /// and that surface's data state.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ImpactInput")]
 pub(crate) struct Impact {
     pub(crate) x: f32,
     pub(crate) z: f32,
-    pub(crate) round: String,
-    pub(crate) surface: StruckSurface,
     pub(crate) at: f32,
+    pub(crate) style: crate::rounds::ImpactStyle,
+    pub(crate) surface: crate::ballistics::ImpactSurface,
 }
 
-/// What a raised strike finds: the painted ground under its point, or a shipped hard substance.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
-pub(crate) enum StruckSurface {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImpactInput {
+    x: f32,
+    z: f32,
+    round: String,
+    surface: StruckSurface,
+    at: f32,
+}
+
+/// What a raised strike finds: the painted ground or a shipped hard substance.
+#[derive(Deserialize)]
+enum StruckSurface {
     Terrain,
     Substance(String),
 }
 
-impl Impact {
-    /// The contact read of the round as the first gun chambering it fires it, and the surface's
-    /// response, from the shipped tables, or why a key names neither.
-    pub(crate) fn resolved(
-        &self,
-    ) -> Result<(crate::rounds::ImpactStyle, crate::ballistics::ImpactSurface), String> {
-        let style = crate::guns::GunRegistry::shipped()
-            .fired_rounds()
-            .find(|(_, key, _)| *key == self.round)
-            .map(|(_, _, round)| round.impact_style())
-            .ok_or_else(|| format!("impacts: round {:?}: no gun chambers it", self.round))?;
-        let surface = match &self.surface {
+/// The game's damage-model cue refuses unresolved vocabulary before any cue can be installed.
+#[derive(Debug)]
+enum ImpactError {
+    Round(crate::guns::GunError),
+    Substance(crate::substances::SubstanceError),
+    NotHard(String),
+}
+
+impl std::fmt::Display for ImpactError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Round(error) => write!(
+                f,
+                "impacts.round: {error}; name a round chambered by a shipped gun"
+            ),
+            Self::Substance(error) => write!(
+                f,
+                "impacts.surface: {error}; name a hard substance from materials.ron"
+            ),
+            Self::NotHard(key) => write!(
+                f,
+                "impacts.surface: {key:?} is not hard; choose Terrain or a hard substance from materials.ron"
+            ),
+        }
+    }
+}
+
+impl TryFrom<ImpactInput> for Impact {
+    type Error = ImpactError;
+
+    fn try_from(input: ImpactInput) -> Result<Self, Self::Error> {
+        let round = crate::tank::WeaponRound::resolve(&input.round).map_err(ImpactError::Round)?;
+        let surface = match input.surface {
             StruckSurface::Terrain => crate::ballistics::ImpactSurface::Terrain,
             StruckSurface::Substance(key) => crate::ballistics::ImpactSurface::Material(
                 crate::substances::SubstanceRegistry::shipped_static()
-                    .get(key)
-                    .map_err(|error| format!("impacts: substance {key:?}: {error}"))?
+                    .get(&key)
+                    .map_err(ImpactError::Substance)?
                     .hard()
-                    .ok_or_else(|| format!("impacts: substance {key:?} is not a hard substance"))?
+                    .ok_or(ImpactError::NotHard(key))?
                     .feedback,
             ),
         };
-        Ok((style, surface))
+        Ok(Self {
+            x: input.x,
+            z: input.z,
+            at: input.at,
+            style: round.round.impact_style(),
+            surface,
+        })
     }
 }
 
@@ -532,6 +572,12 @@ pub(crate) enum PlanError {
     Parse(ron::error::SpannedError),
     Field(String),
     OrbitCamera(bevy::ecs::query::QuerySingleError),
+    FollowWithoutTank(super::Anchor),
+    ImpactOffTerrain {
+        x: f32,
+        z: f32,
+        half_extent: f32,
+    },
     /// `scene.demo`'s track-print spot lies outside the loaded terrain's span.
     DemoOffTerrain {
         x: f32,
@@ -555,6 +601,14 @@ impl std::fmt::Display for PlanError {
             Self::OrbitCamera(error) => write!(
                 f,
                 "frames.camera: {error}; choose Pose on a root without exactly one player orbit camera"
+            ),
+            Self::FollowWithoutTank(anchor) => write!(
+                f,
+                "frames.camera: Follow requires an offline controlled-tank composition, but {anchor:?} supplies none at admission; choose Pose or use an offline scenario"
+            ),
+            Self::ImpactOffTerrain { x, z, half_extent } => write!(
+                f,
+                "impacts.x/z: ({x}, {z}) lies outside the terrain's ±{half_extent} m span; place x and z inside that span"
             ),
             Self::DemoOffTerrain { x, z, half_extent } => write!(
                 f,
@@ -685,6 +739,7 @@ impl CapturePlan {
             }
         }
         for impact in &self.impacts {
+            finite_at("impacts.at", impact.at)?;
             let numbers = [impact.x, impact.z, impact.at];
             if !numbers.iter().all(|n| n.is_finite()) {
                 return Err(format!(
@@ -1066,8 +1121,18 @@ mod tests {
             vec![Impact {
                 x: 1.0,
                 z: -2.0,
-                round: "88mm_HE".into(),
-                surface: StruckSurface::Substance("Wood".into()),
+                style: crate::tank::WeaponRound::resolve("88mm_HE")
+                    .unwrap()
+                    .round
+                    .impact_style(),
+                surface: crate::ballistics::ImpactSurface::Material(
+                    crate::substances::SubstanceRegistry::shipped_static()
+                        .get("Wood")
+                        .unwrap()
+                        .hard()
+                        .unwrap()
+                        .feedback
+                ),
                 at: 5.0,
             }]
         );
@@ -1368,17 +1433,45 @@ mod tests {
         }
     }
 
+    /// The game's damage-model cue vocabulary is operator input: unknown rounds or substances
+    /// must be refused during parsing, naming the field and repair before plugin installation.
+    #[test]
+    fn impact_vocabulary_is_refused_at_plan_admission() {
+        for (round, surface, field) in [
+            ("no-such-round", "Terrain", "impacts.round"),
+            (
+                "88mm_AP",
+                "Substance(\"no-such-substance\")",
+                "impacts.surface",
+            ),
+        ] {
+            let text = format!(
+                r#"(impacts: [(x: 0.0, z: 0.0, round: "{round}", surface: {surface}, at: 0.0)])"#
+            );
+            let error = CapturePlan::parse(&text).unwrap_err();
+            assert!(matches!(error, PlanError::Parse(_)));
+            let message = error.to_string();
+            assert!(
+                message.contains(field) && message.contains("name a"),
+                "{message}"
+            );
+        }
+    }
+
     /// A raised strike reads its style and its surface from the shipped tables, so a capture
     /// presents what the data states; a key naming neither is refused, never read as a default.
     /// Mutant: a cue that ignores its round or its substance fails here.
     #[test]
     fn a_raised_strike_resolves_its_round_and_surface_from_the_shipped_tables() {
-        let cue = |round: &str, surface| Impact {
-            x: 0.0,
-            z: 0.0,
-            round: round.into(),
-            surface,
-            at: 0.0,
+        let cue = |round: &str, surface| {
+            Impact::try_from(ImpactInput {
+                x: 0.0,
+                z: 0.0,
+                round: round.into(),
+                surface,
+                at: 0.0,
+            })
+            .map(|cue| (cue.style, cue.surface))
         };
         let key = "88mm_AP";
         let style = crate::guns::GunRegistry::shipped()
@@ -1395,22 +1488,14 @@ mod tests {
             .expect("a hard substance")
             .feedback;
         assert_eq!(
-            cue(key, StruckSurface::Substance(substance.into())).resolved(),
-            Ok((style, crate::ballistics::ImpactSurface::Material(feedback)))
+            cue(key, StruckSurface::Substance(substance.into())).unwrap(),
+            (style, crate::ballistics::ImpactSurface::Material(feedback))
         );
         assert_eq!(
-            cue(key, StruckSurface::Terrain).resolved(),
-            Ok((style, crate::ballistics::ImpactSurface::Terrain))
+            cue(key, StruckSurface::Terrain).unwrap(),
+            (style, crate::ballistics::ImpactSurface::Terrain)
         );
-        assert!(
-            cue("no such round", StruckSurface::Terrain)
-                .resolved()
-                .is_err()
-        );
-        assert!(
-            cue(key, StruckSurface::Substance("no such substance".into()))
-                .resolved()
-                .is_err()
-        );
+        assert!(cue("no such round", StruckSurface::Terrain).is_err());
+        assert!(cue(key, StruckSurface::Substance("no such substance".into())).is_err());
     }
 }

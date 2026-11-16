@@ -65,7 +65,7 @@ pub(crate) fn offline_corner_plugin(app: &mut App) {
     install(app, cue);
 }
 
-fn install(app: &mut App, cue: &super::plan::CornerReplay) {
+pub(super) fn install(app: &mut App, cue: &super::plan::CornerReplay) {
     info!(
         "capture: game's damage-model corner replay {} at {} s",
         cue.report.path.display(),

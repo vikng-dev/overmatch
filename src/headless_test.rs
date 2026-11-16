@@ -2586,6 +2586,14 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
         .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
     let tank = controlled.single(app.world()).expect("one controlled tank");
 
+    // Fixture: the airborne witness needs free fall of its own; the spawn rule's drop clearance
+    // is a taste and may leave the tracks within suspension reach of the ground.
+    app.world_mut()
+        .get_mut::<avian3d::prelude::Position>(tank)
+        .expect("the controlled tank is a physics body")
+        .0
+        .y += 1.0;
+
     for tick in 0..SCRIPT_TICKS {
         {
             let mut command = app

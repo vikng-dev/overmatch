@@ -1,4 +1,5 @@
-//! In-engine frames to disk, for documentation. The plan file that
+//! In-engine frames to disk, for documentation of the game's presentation and damage model
+//! (game state only). The plan file that
 //! `OVERMATCH_CAPTURE=<plan>.ron` names holds one [`plan::CapturePlan`], whose struct docs are the
 //! grammar's one home. `scripts/capture/example.ron` is a worked plan, checked by a test. Without
 //! the variable every plugin here is inert. The operator's hand-driving lever `OVERMATCH_START`
@@ -40,6 +41,7 @@
 
 mod clock;
 pub use clock::Anchor;
+pub(crate) use clock::Cues as CaptureCues;
 mod corner;
 pub(crate) use corner::offline_corner_plugin;
 mod fuze;
@@ -69,6 +71,8 @@ const WARM_UP: f32 = 1.0;
 const SIGHT_LEAD: f32 = 2.0;
 /// Resolution: bound asynchronous frame-write waiting after the final frame, seconds.
 const GRACE: f32 = 3.0;
+/// Resolution: seconds for spawned burst views and GPU pipelines to prepare before retargeting.
+const BURST_VIEW_WARM_UP: f32 = 1.0;
 /// Resolution: a fixed seed makes cosmetic sampling reproducible.
 const VIEW_SEED: u64 = 0x5EED;
 /// Resolution: keep ray origins clear of rounded surface bounds for reliable hit normals, metres.
@@ -97,22 +101,38 @@ pub struct CapturePlugin(pub Anchor);
 
 impl Plugin for CapturePlugin {
     fn build(&self, app: &mut App) {
-        // Frames choose their update strategy before the clock suspends it.
-        mount_plan(app);
-        if plan().is_some() {
-            clock::install(app, self.0);
+        if let Some(plan) = plan() {
+            build_plan(app, self.0, plan).unwrap_or_else(|error| plan::refuse(error));
         }
     }
 }
 
-fn mount_plan(app: &mut App) {
-    if let Some(frames) = plan().and_then(|plan| plan.frames.as_ref()) {
+/// The shipped plugin's plan-dependent build, also mounted with fixture plans by its tests.
+pub(crate) fn build_plan(
+    app: &mut App,
+    anchor: Anchor,
+    plan: &plan::CapturePlan,
+) -> Result<(), plan::PlanError> {
+    if plan
+        .frames
+        .as_ref()
+        .is_some_and(|frames| matches!(frames.camera, plan::Camera::Follow { .. }))
+        && !matches!(anchor, Anchor::Scenario)
+    {
+        return Err(plan::PlanError::FollowWithoutTank(anchor));
+    }
+    // Frames choose their update strategy before the clock suspends it.
+    mount_plan(app, plan);
+    clock::install(app, anchor);
+    Ok(())
+}
+
+fn mount_plan(app: &mut App, plan: &plan::CapturePlan) {
+    if let Some(frames) = &plan.frames {
         mount(app, frames);
     }
-    if let Some(holds) = plan()
-        .map(|plan| plan.keys.clone())
-        .filter(|holds| !holds.is_empty())
-    {
+    if !plan.keys.is_empty() {
+        let holds = plan.keys.clone();
         info!("capture: keys {holds:?}");
         app.insert_resource(KeyHolds {
             holds,
@@ -371,30 +391,49 @@ struct ImpactCues(Vec<ImpactCue>);
 /// The capture's terrain-impact cue, mounted by the offline root only, where the impact seam has
 /// no replica reading it. Inert unless the plan lists `impacts`.
 pub(crate) fn offline_impact_plugin(app: &mut App) {
-    let Some(cues) = plan()
-        .map(|plan| plan.impacts.clone())
-        .filter(|cues| !cues.is_empty())
-    else {
+    if let Some(plan) = plan() {
+        install_impacts(app, &plan.impacts);
+    }
+}
+
+fn admit_impact(
+    cue: &plan::Impact,
+    grid: Option<&crate::terrain_grid::HeightGrid>,
+) -> Result<ImpactCue, plan::PlanError> {
+    let half_extent = crate::terrain_grid::world_extent(grid).half_extent();
+    if cue.x.abs() > half_extent || cue.z.abs() > half_extent {
+        return Err(plan::PlanError::ImpactOffTerrain {
+            x: cue.x,
+            z: cue.z,
+            half_extent,
+        });
+    }
+    Ok(ImpactCue {
+        x: cue.x,
+        z: cue.z,
+        at: cue.at,
+        style: cue.style,
+        surface: cue.surface,
+    })
+}
+
+fn install_impacts(app: &mut App, cues: &[plan::Impact]) {
+    if cues.is_empty() {
         return;
-    };
-    info!("capture: impacts {cues:?}");
-    let cues = cues
-        .iter()
-        .map(|cue| {
-            let (style, surface) = cue
-                .resolved()
-                .unwrap_or_else(|why| panic!("{}: {why}", plan::VARIABLE));
-            ImpactCue {
-                x: cue.x,
-                z: cue.z,
-                at: cue.at,
-                style,
-                surface,
-            }
-        })
-        .collect();
-    app.insert_resource(ImpactCues(cues))
-        .add_systems(Update, raise_impacts.in_set(clock::Cues));
+    }
+    let cues = cues.to_vec();
+    app.add_systems(
+        PostStartup,
+        move |grid: Option<Res<crate::terrain_grid::HeightGrid>>, mut commands: Commands| {
+            let cues = cues
+                .iter()
+                .map(|cue| admit_impact(cue, grid.as_deref()))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_else(|error| plan::refuse(error));
+            commands.insert_resource(ImpactCues(cues));
+        },
+    )
+    .add_systems(Update, raise_impacts.in_set(clock::Cues));
 }
 
 /// Raise each due strike on the ground under its point, with the ground's normal there.
@@ -443,7 +482,7 @@ fn raise_impacts(
                     outcome: crate::ballistics::ImpactOutcome::Struck,
                 });
             }
-            None => panic!("capture: impacts: no terrain under {cue:?}; place the cue inside the terrain collider"),
+            None => panic!("capture: terrain collider must cover the impacts.x/z admitted inside its span: {cue:?}"),
         }
         false
     });
@@ -523,13 +562,13 @@ fn capture(
     mode: Option<ResMut<SightMode>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    // Under a shot cue the frames are timed from the burst, which no app second predicts: the first
-    // is taken `WARM_UP` + 1 s after it, the target retargeted `WARM_UP` before that.
+    // The game's damage-model shot frames count from the observed burst, after target warm-up
+    // and burst-view preparation; the plan's relative frame spacing remains intact.
     let t = if let Some(ready) = shot_ready {
         let Some(at) = ready.0 else {
             return;
         };
-        time.elapsed_secs() - at + cap.at[0] - WARM_UP - 1.0
+        time.elapsed_secs() - at + cap.at[0] - WARM_UP - BURST_VIEW_WARM_UP
     } else {
         time.elapsed_secs()
     };
@@ -662,6 +701,183 @@ pub(crate) fn retarget_to(
 mod tests {
     use super::*;
 
+    use bevy::ecs::schedule::{NodeId, ScheduleLabel, SystemSet};
+
+    fn assert_cues(app: &App, label: impl ScheduleLabel, systems: &[&str]) {
+        let schedules = app.world().resource::<bevy::ecs::schedule::Schedules>();
+        let graph = schedules.get(label).unwrap().graph();
+        let set = graph
+            .system_sets
+            .get_key(clock::Cues.intern())
+            .expect("cue set exists");
+        for name in systems {
+            let (key, _, _) = graph
+                .systems
+                .iter()
+                .find(|(_, system, _)| system.name().to_string().ends_with(name))
+                .expect(name);
+            assert!(
+                graph
+                    .hierarchy()
+                    .graph()
+                    .contains_edge(NodeId::Set(set), NodeId::System(key)),
+                "{name} must wait for the capture anchor"
+            );
+        }
+    }
+
+    /// The shipped builder must freeze the plan-selected frame strategy and every zero-time
+    /// consumer until readiness; captures and scripted key input rely on the same release update.
+    #[test]
+    fn shipped_plan_builder_holds_frames_and_keys_until_placement() {
+        use bevy::time::TimeUpdateStrategy;
+        let fixture = plan::CapturePlan::parse(r#"(frames: (out: "/tmp/overmatch-clock-fixture.png", at: [10.0], step_s: 0.01), keys: [(key: KeyW, from: 0.0, to: 1.0)])"#).unwrap();
+        let step = fixture.frames.as_ref().unwrap().step_s.unwrap().0;
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::state::app::StatesPlugin,
+            bevy::input::InputPlugin,
+        ))
+        .init_state::<crate::state::AppState>()
+        .init_resource::<Assets<Image>>()
+        .add_plugins(move |app: &mut App| {
+            build_plan(app, Anchor::Scenario, &fixture).unwrap();
+        });
+        assert_cues(&app, PreUpdate, &["hold_keys"]);
+        assert_cues(&app, Update, &["capture"]);
+        for _ in 0..3 {
+            // Fixture loading frames.
+            app.update();
+            assert_eq!(
+                app.world().resource::<Time>().elapsed(),
+                std::time::Duration::ZERO
+            );
+            assert!(
+                !app.world()
+                    .resource::<ButtonInput<KeyCode>>()
+                    .pressed(KeyCode::KeyW)
+            );
+            assert!(app.world().resource::<Capture>().target.is_none());
+        }
+        app.world_mut()
+            .spawn((crate::tank::Tank, crate::tank::TankViewReady));
+        app.insert_resource(State::new(crate::state::AppState::Playing));
+        app.update();
+        assert!(
+            app.world()
+                .resource::<ButtonInput<KeyCode>>()
+                .pressed(KeyCode::KeyW)
+        );
+        assert!(
+            matches!(*app.world().resource::<TimeUpdateStrategy>(), TimeUpdateStrategy::ManualDuration(actual) if actual == step)
+        );
+        app.update();
+        assert_eq!(app.world().resource::<Time>().elapsed(), step);
+    }
+
+    /// The game's damage-model cues (game state only) must share the clock gate even at zero.
+    /// This reads production registrations, so removing membership from any consumer fails.
+    #[test]
+    fn all_offline_cue_consumers_belong_to_the_clock_gate() {
+        let fixture = plan::CapturePlan::parse(r#"(impacts: [(x: 0.0, z: 0.0, round: "88mm_AP", surface: Terrain, at: 0.0)], shot: (round: "88mm_HE", mode: 0, target: Ground, at: 0.0), wall: (shots: [Round(round: "88mm_AP", at: 0.0)]))"#).unwrap();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        build_plan(&mut app, Anchor::Scenario, &fixture).unwrap();
+        install_impacts(&mut app, &fixture.impacts);
+        fuze::install_shot(&mut app, fixture.shot.unwrap(), plan::refuse);
+        wall::install(
+            &mut app,
+            wall::cue_for(fixture.wall.as_ref().unwrap()),
+            true,
+        );
+        repair::install(&mut app);
+        corner::install(
+            &mut app,
+            &plan::CornerReplay {
+                at: 0.0,
+                report: corner::ReplayReport::try_from(PathBuf::from(
+                    "assets/dev/pen_cam/s8b_mg_stopped.ron",
+                ))
+                .unwrap(),
+            },
+        );
+        assert_cues(
+            &app,
+            Update,
+            &[
+                "raise_impacts",
+                "fuze::fire_on_cue",
+                "wall::fire_on_cue",
+                "start_panel_repair",
+                "replay",
+            ],
+        );
+        let mut server = App::new();
+        server.add_plugins(MinimalPlugins);
+        wall::install_server(&mut server, wall::cue_for(fixture.wall.as_ref().unwrap()));
+        assert_cues(&server, Update, &["wall::fire_on_cue"]);
+    }
+
+    /// A Follow camera cannot bind tankless roots; operators get the field and the repair before
+    /// a frame or cue runs, rather than an assertion when the target arms.
+    #[test]
+    fn follow_is_refused_at_composition_admission() {
+        // Fixture camera on a root with no admitted controlled tank.
+        let fixture = plan::CapturePlan::parse(r#"(frames: (out: "/tmp/overmatch-follow-fixture.png", camera: Follow(offset: (1.0, 2.0, 3.0))))"#).unwrap();
+        for anchor in [Anchor::TankView, Anchor::TrackRig, Anchor::Startup] {
+            let mut app = App::new();
+            let error = build_plan(&mut app, anchor, &fixture).unwrap_err();
+            assert!(matches!(error, plan::PlanError::FollowWithoutTank(_)));
+            let message = error.to_string();
+            assert!(
+                message.contains("frames.camera") && message.contains("Pose"),
+                "{message}"
+            );
+            assert!(
+                !app.world().contains_resource::<Capture>(),
+                "refusal precedes installation"
+            );
+        }
+    }
+
+    /// The game's damage-model terrain cues must refuse coordinates outside either the loaded
+    /// grid or the flat world's slab before any cue time is consumed.
+    #[test]
+    fn impacts_admit_their_terrain_domain_before_play() {
+        let cue = plan::CapturePlan::parse(
+            r#"(impacts: [(x: 0.0, z: 0.0, round: "88mm_AP", surface: Terrain, at: 0.0)])"#,
+        )
+        .unwrap()
+        .impacts
+        .remove(0);
+        let grid = crate::terrain_grid::HeightGrid::new(
+            vec![0.0; 4].into(),
+            2,
+            crate::terrain_grid::FIXTURE_EXTENT,
+        );
+        for grid in [None, Some(&grid)] {
+            assert!(admit_impact(&cue, grid).is_ok());
+            let half = crate::terrain_grid::world_extent(grid).half_extent();
+            for (x, z) in [(half * 2.0, 0.0), (0.0, -half * 2.0)] {
+                let error = admit_impact(
+                    &plan::Impact {
+                        x,
+                        z,
+                        ..cue.clone()
+                    },
+                    grid,
+                )
+                .unwrap_err();
+                assert!(matches!(error, plan::PlanError::ImpactOffTerrain { .. }));
+                assert!(
+                    error.to_string().contains("impacts.x/z")
+                        && error.to_string().contains("inside")
+                );
+            }
+        }
+    }
+
     /// Capture operators get a field-level refusal on a free-fly root before frame systems run.
     #[test]
     fn orbit_binding_refuses_a_root_without_an_orbit_camera() {
@@ -722,14 +938,9 @@ mod tests {
         struct Raised(Vec<(Vec3, Vec3, crate::rounds::ImpactStyle, ImpactSurface)>);
         use crate::ballistics::ImpactSurface;
 
-        let cue = plan::Impact {
-            x: 3.0,
-            z: -4.0,
-            round: "88mm_AP".into(),
-            surface: plan::StruckSurface::Substance("Wood".into()),
-            at: 0.0,
-        };
-        let (style, surface) = cue.resolved().expect("a shipped round and substance");
+        // Fixture: a cue resolved through the same admission as an operator's plan.
+        let cue = plan::CapturePlan::parse(r#"(impacts: [(x: 3.0, z: -4.0, round: "88mm_AP", surface: Substance("Wood"), at: 0.0)])"#).unwrap().impacts.remove(0);
+        let (style, surface) = (cue.style, cue.surface);
         assert!(matches!(surface, ImpactSurface::Material(_)));
 
         let mut app = App::new();

@@ -41,7 +41,11 @@ pub(crate) fn offline_shot_plugin(app: &mut App) {
 
 /// The game's damage-model capture admits its scene in startup before any firing cue can run.
 /// The boundary supplies refusal handling; tests can observe it without exiting their process.
-fn install_shot(app: &mut App, shot: super::plan::Shot, refuse: fn(super::plan::PlanError) -> !) {
+pub(super) fn install_shot(
+    app: &mut App,
+    shot: super::plan::Shot,
+    refuse: fn(super::plan::PlanError) -> !,
+) {
     info!("capture: game's damage model shot {shot:?}");
     app.insert_resource(ShotReady(None))
         .insert_resource(RetainSpentShells(true))
