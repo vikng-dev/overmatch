@@ -939,16 +939,27 @@ fn a_long_bar_see_sawing_below_the_angular_limit_still_rests() {
 #[test]
 fn a_supported_bar_rests_through_periodic_one_tick_roll_pulses() {
     use avian3d::dynamics::solver::solver_body::{SolverBodies, SolverBodyIndex};
+    /// Fixture: ticks between one-tick pulses.
+    const PERIOD: usize = 10;
+    /// The roll speed of each pulse, rad/s.
     #[derive(Component)]
-    struct PulsedBar;
+    struct PulsedBar(f32);
     fn pulse(
         mut solver: ResMut<SolverBodies>,
-        mut bars: Query<(&SolverBodyIndex, &mut AngularVelocity, &Rotation), With<PulsedBar>>,
+        mut bars: Query<(
+            &SolverBodyIndex,
+            &mut AngularVelocity,
+            &Rotation,
+            &PulsedBar,
+        )>,
         mut tick: Local<usize>,
     ) {
-        // Fixture: one-tick roll at 0.4 rad/s every ten ticks (MEASURED pile blocker scale).
-        for (&index, mut spin, rotation) in &mut bars {
-            let velocity = if tick.is_multiple_of(10) { 0.4 } else { 0.0 };
+        for (&index, mut spin, rotation, &PulsedBar(speed)) in &mut bars {
+            let velocity = if tick.is_multiple_of(PERIOD) {
+                speed
+            } else {
+                0.0
+            };
             let body = solver
                 .get_mut(index)
                 .expect("an awake bar's solver index addresses its body");
@@ -959,6 +970,21 @@ fn a_supported_bar_rests_through_periodic_one_tick_roll_pulses() {
     }
     let mut app = physics_app();
     app.insert_resource(Gravity(Vec3::NEG_Y * crate::physical_laws::gravity_mps2()));
+    // Fixture: explicit rest speeds, independent of engine defaults.
+    let threshold = SleepThreshold {
+        linear: 0.15,
+        angular: 0.15,
+    };
+    let size = Vec3::new(6.6, 0.2, 0.05);
+    let rest = threshold.linear * app.world().resource::<PhysicsLengthUnit>().0;
+    // DERIVED: I_x/m = (y² + z²)/12, so roll energy reaches the rest energy at rest / that root;
+    // the geometric mean with the angular limit puts the pulse between them.
+    let energy_limit = rest / ((size.y * size.y + size.z * size.z) / 12.0).sqrt();
+    let speed = (energy_limit * threshold.angular).sqrt();
+    assert!(
+        speed > threshold.angular,
+        "fixture excludes the velocity-only rest branch at each pulse"
+    );
     // Fixture: level support, initially supported bar, no collapse or launch trajectory.
     app.world_mut().spawn((
         RigidBody::Static,
@@ -969,9 +995,10 @@ fn a_supported_bar_rests_through_periodic_one_tick_roll_pulses() {
         .world_mut()
         .spawn((
             RigidBody::Dynamic,
-            PulsedBar,
-            Position(Vec3::Y * 0.1),
-            Collider::cuboid(6.6, 0.2, 0.05),
+            PulsedBar(speed),
+            threshold,
+            Position(Vec3::Y * size.y / 2.0),
+            Collider::cuboid(size.x, size.y, size.z),
         ))
         .id();
     app.add_systems(
@@ -987,6 +1014,10 @@ fn a_supported_bar_rests_through_periodic_one_tick_roll_pulses() {
         .timestep()
         .as_secs_f32();
     let ticks = (app.world().resource::<TimeToSleep>().0 / dt).ceil() as usize;
+    assert!(
+        PERIOD < ticks,
+        "a pulse must recur before the velocity-only rest timer could mature"
+    );
     // DERIVED allowance: one initial fixed tick and one deferred sleeping commit.
     for _ in 0..ticks + 2 {
         if app.world().get::<Sleeping>(bar).is_some() {
