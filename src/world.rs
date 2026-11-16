@@ -101,6 +101,8 @@ pub fn plugin(app: &mut App) {
         Last,
         crate::terrain_shadow::the_sun_is_the_only_shadow_caster,
     );
+    // Refused before play, in every composition that spawns a tank on this world.
+    crate::terrain_grid::admit_spawn_rule();
     // Decode the heightmap FIRST (synchronous, ADR-0014), then spawn whichever world it selects:
     // the heightfield when the grid decoded, the flat slab + authored course otherwise.
     app.add_systems(

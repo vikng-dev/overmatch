@@ -134,6 +134,12 @@ const SPAWN_FILE: &str = "assets/world/spawn.ron";
 static SPAWN_RULE: LazyLock<SpawnRule> =
     LazyLock::new(|| shipped_spawn_rule().unwrap_or_else(|error| panic!("{error}")));
 
+/// Refuse a malformed shipped spawn rule while the app builds, in every composition that mounts
+/// `world::plugin`, before any tank can spawn.
+pub(crate) fn admit_spawn_rule() {
+    LazyLock::force(&SPAWN_RULE);
+}
+
 /// The shipped spawn rule, admitted under the shipped-file policy.
 fn shipped_spawn_rule() -> Result<SpawnRule, String> {
     crate::provenance::with_shipped_policy(|| {
@@ -158,8 +164,9 @@ impl SpawnRule {
     /// The rule `text` holds, or why `file` is refused: a malformed file, a field missing or
     /// unknown, or a clearance that is not a finite taste of 0 m or more.
     fn parse(file: &str, text: &str) -> Result<Self, String> {
-        let raw: RawSpawnRule =
-            ron::de::from_str(text).map_err(|error| format!("{file}: {error}"))?;
+        let raw: RawSpawnRule = ron::de::from_str(text).map_err(|error| {
+            format!("{file}: {error}; author `(drop_clearance_m: (<metres>, Taste(\"<effect>\")))`")
+        })?;
         let clearance = raw.drop_clearance_m;
         if !clearance.value.is_finite() || clearance.value < 0.0 {
             return Err(format!(
@@ -1560,6 +1567,12 @@ pub(crate) mod tests {
             let error = SpawnRule::parse("f.ron", text).unwrap_err();
             assert!(error.starts_with("f.ron: drop_clearance_m"), "{error}");
         }
+        // A file that does not parse names the field's shape to author.
+        let error = SpawnRule::parse("f.ron", "(drop_clearance_m: 0.1)").unwrap_err();
+        assert!(
+            error.starts_with("f.ron: ") && error.contains("author `(drop_clearance_m:"),
+            "{error}"
+        );
     }
 
     /// A frictionless box, pitched and rotation-locked with its leading bottom edge lowest, must
