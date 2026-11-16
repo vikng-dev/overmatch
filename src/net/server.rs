@@ -145,8 +145,10 @@ pub fn run() {
             (
                 spawn_bots.run_if(places_tanks),
                 respawn_dead_bots.run_if(in_combat),
-                // Both commits allocate from one counter: a frame's new players take theirs first.
-                commit_bot_spawns.after(commit_player_spawns),
+                // Both commits allocate from one counter, which each updates in place: a frame's
+                // new players take theirs first. Neither reads the other's commands, so the edge
+                // ignores deferred and adds no sync point between them.
+                commit_bot_spawns.after_ignore_deferred(commit_player_spawns),
             )
                 .chain(),
             open_gameplay_gate,
@@ -1041,7 +1043,9 @@ enum PlayerLife {
 }
 
 /// Commit the evaluated [`PlayerSpawns`] in push order: each life's identity, then its structural
-/// changes. The one player step that takes [`CombatantIds`]; evaluation never holds it.
+/// changes. The one player step that takes [`CombatantIds`]; evaluation never holds it. Each tank's
+/// rig is prepared serially here, inside the ordered commit, until a tank construction template
+/// built at load leaves only entity allocation to it.
 fn commit_player_spawns(
     mut spawns: ResMut<PlayerSpawns>,
     assets: Res<PendingTankAssets>,
@@ -1082,9 +1086,8 @@ fn commit_player_spawns(
                 combatant,
                 previous,
             } => {
-                // Recursive despawn sweeps the dead root and its attached rig; the
-                // `On<Remove<Rig>>` observer handles any cooked-off turret that had detached
-                // ([`respawn_player_tanks`]).
+                // Recursive despawn sweeps the dead root and its attached rig;
+                // `tank::sweep_launched_turret_on_root_despawn` sweeps any turret that detached.
                 commands.entity(root).despawn();
                 let life = combatants.life(combatant);
                 let fresh = spawn_player_tank(
@@ -1437,7 +1440,8 @@ fn respawn_dead_bots(
 }
 
 /// Commit the evaluated [`BotSpawns`] in push order: each life's identity, then its structural
-/// changes. The one bot step that takes [`CombatantIds`]; evaluation never holds it.
+/// changes. The one bot step that takes [`CombatantIds`]; evaluation never holds it. Rigs are
+/// prepared serially, as in [`commit_player_spawns`].
 fn commit_bot_spawns(
     mut spawns: ResMut<BotSpawns>,
     assets: Res<PendingTankAssets>,
@@ -1486,8 +1490,7 @@ fn commit_bot_spawns(
 /// knockout) is refused: it is dropped, and the client, which shows the time left, sends another.
 /// Runs after the command bridge; its [`commit_player_spawns`] runs before the driving snapshot.
 /// Both initial placement and automatic respawn use `SpawnPlacement`; the player's persistent
-/// spawn-map pick still wins. At commit, recursive root despawn and
-/// `tank::sweep_launched_turret_on_root_despawn` sweep the old rig, including any detached turret.
+/// spawn-map pick still wins.
 #[expect(
     clippy::too_many_arguments,
     reason = "a respawn sweep spanning dead tanks, remotes, occupancy, sim source, spawn lane, overrides, terrain and obstacles"
