@@ -162,9 +162,8 @@ fn generated_moves_leave_the_stock_moved_lists() {
 }
 
 /// A tree lists a moved proxy once: a second entry would stay listed after the proxy's removal,
-/// naming a freed or reused id to tree optimization. The 0.7 fork panicked on a second mark;
-/// Avian 0.8.0's list declines it and reports `false`, a fifth outcome its callers ignore, and the
-/// hazard is gone: the proxy is listed once and unlisted by its removal.
+/// naming a freed or reused id to tree optimization. A second mark returns `false` and leaves one
+/// entry, and the proxy's removal unlists it.
 #[test]
 fn marking_a_listed_proxy_again_lists_it_once() {
     let mut lists = Lists::default();

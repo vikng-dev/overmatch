@@ -10,11 +10,9 @@
 //! anchors' squared distances over the admissible orientations; a tie goes to the earlier previous
 //! point.
 //!
-//! Upstream's matcher reads two UNKNOWN ids as one identity (a new point takes the first previous
-//! point's impulses at any distance), lets the swapped orientation match known ids by distance, and
-//! runs once per previous manifold, so a later manifold overwrites a closer predecessor from an
-//! earlier one. Who relies on the law: the server's resting stacks and construction contacts, whose
-//! warm starts must stay with the contact point they were solved for.
+//! Upstream's matcher and its defects: `OVERMATCH_PATCH.md`, "Warm-start matching". Who relies on
+//! the law: the server's resting stacks and construction contacts, whose warm starts must stay with
+//! the contact point they were solved for.
 
 use avian3d::collision::contact_types::PackedFeatureId;
 use avian3d::prelude::*;

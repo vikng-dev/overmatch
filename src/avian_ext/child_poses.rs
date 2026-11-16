@@ -156,7 +156,6 @@ fn write(
 /// despawning: a reader admits it only where its default-filtered queries now match it.
 #[derive(Message, Clone, Copy, Debug)]
 pub struct Reenabled {
-    /// The entity a disabling component left.
     pub entity: Entity,
 }
 
