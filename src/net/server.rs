@@ -256,7 +256,7 @@ fn cycle_battles(
             commands.queue(move |world: &mut World| super::world_reset::start_next(world, number));
             pending.0 = clients
                 .iter()
-                .map(|(link, remote)| (link, remote.0))
+                .map(|(link, remote)| PendingJoin::new(link, remote.0))
                 .collect();
         }
         Boundary::None => {}
@@ -317,7 +317,26 @@ pub(super) fn netcode_server(
 /// Connected clients waiting for the server's next spawn pass. The simulation blueprint is eager,
 /// so this queue batches link setup and spawn work rather than waiting on view assets.
 #[derive(Resource, Default)]
-struct PendingClients(Vec<(Entity, PeerId)>);
+struct PendingClients(Vec<PendingJoin>);
+
+/// One queued join; `waiting` marks one an earlier pass kept queued because every map point was
+/// inside the minimum.
+#[derive(Clone, Copy)]
+struct PendingJoin {
+    link: Entity,
+    client_id: PeerId,
+    waiting: bool,
+}
+
+impl PendingJoin {
+    fn new(link: Entity, client_id: PeerId) -> Self {
+        Self {
+            link,
+            client_id,
+            waiting: false,
+        }
+    }
+}
 
 /// Match-local combatant identities. `next` is never reused; player links retain their id across
 /// respawn, and each bot, keyed by its index, retains its id across its timed respawns. `lives`
@@ -886,9 +905,9 @@ fn handle_new_clients(
 ) {
     for (link, remote) in &new {
         info!("server: client connected: {remote} (link {link})");
-        if !pending.0.iter().any(|(queued, _)| *queued == link) {
+        if !pending.0.iter().any(|join| join.link == link) {
             // The next-Battle boundary may already have queued this newly connected link.
-            pending.0.push((link, remote.0));
+            pending.0.push(PendingJoin::new(link, remote.0));
         }
     }
 }
@@ -934,9 +953,17 @@ fn spawn_pending_tanks(
     let mut live: Vec<Vec2> = tanks.iter().map(|position| position.0.xz()).collect();
     // Serial: each XZ choice reads the XZ handed out earlier in the pass (`live`). The ground
     // under a chosen XZ reads only the height grid, so the admitted joins are grounded as one batch.
+    let mut queue = std::mem::take(&mut pending.0);
+    // Joins take ground, lanes and identities in a declared priority, never arrival or query
+    // order: one already waiting on occupancy first, then the lower client id. A join has no
+    // combatant id until it spawns, so its key is the `PeerId` it connected with.
+    queue.sort_by_key(|join| (!join.waiting, join.client_id));
     let mut joins: Vec<(Entity, PeerId)> = Vec::new();
     let mut points: Vec<Vec2> = Vec::new();
-    for (link, client_id) in std::mem::take(&mut pending.0) {
+    for join in queue {
+        let PendingJoin {
+            link, client_id, ..
+        } = join;
         if !connected.contains(link) {
             // A queued join may disconnect while every authored point is too close.
             continue;
@@ -952,7 +979,10 @@ fn spawn_pending_tanks(
         } else {
             let Some(xz) = placement.choose(&manifest.spawn_points, &live, 2.0 * radius) else {
                 // All points are inside the minimum: keep this join queued until one is free.
-                pending.0.push((link, client_id));
+                pending.0.push(PendingJoin {
+                    waiting: true,
+                    ..join
+                });
                 continue;
             };
             xz
@@ -2164,7 +2194,7 @@ mod tests {
             app.world_mut()
                 .resource_mut::<PendingClients>()
                 .0
-                .push((link, PeerId::Netcode(1)));
+                .push(PendingJoin::new(link, PeerId::Netcode(1)));
             app.update();
             let root = app
                 .world_mut()
@@ -2487,7 +2517,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<PendingClients>()
             .0
-            .push((link, peer));
+            .push(PendingJoin::new(link, peer));
         app.update();
         let root = app
             .world_mut()
@@ -2614,7 +2644,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<PendingClients>()
             .0
-            .push((link, client_id));
+            .push(PendingJoin::new(link, client_id));
         app.update();
         assert_eq!(
             app.world().resource::<PendingClients>().0.len(),
@@ -2717,7 +2747,7 @@ mod tests {
             app.world_mut()
                 .resource_mut::<PendingClients>()
                 .0
-                .push((link, client_id));
+                .push(PendingJoin::new(link, client_id));
             app.update();
             let root = app
                 .world_mut()
@@ -2834,7 +2864,7 @@ mod tests {
             app.world_mut()
                 .resource_mut::<PendingClients>()
                 .0
-                .push((link, peer));
+                .push(PendingJoin::new(link, peer));
         }
         app.update();
         assert_eq!(app.world().resource::<PendingClients>().0.len(), 1);
@@ -2846,10 +2876,64 @@ mod tests {
             1,
             "a second player cannot reuse the sole point"
         );
-        let link = app.world().resource::<PendingClients>().0[0].0;
+        let link = app.world().resource::<PendingClients>().0[0].link;
         app.world_mut().entity_mut(link).remove::<Connected>();
         app.update();
         assert!(app.world().resource::<PendingClients>().0.is_empty());
+    }
+
+    /// When clear ground is short, the join priority, not arrival or query order, decides who
+    /// spawns: a join already waiting goes first, then the lower client id. Mutants: dropping the
+    /// sort hands the fixture's sole point to the first queued join; dropping the waiting key hands
+    /// the freed point to a newer join with a lower id.
+    #[test]
+    fn joins_take_scarce_ground_waiting_first_then_by_client_id() {
+        let mut app = placement_app();
+        let join = |app: &mut App, id: u64| {
+            let peer = PeerId::Netcode(id);
+            let link = app.world_mut().spawn((RemoteId(peer), Connected)).id();
+            app.world_mut()
+                .resource_mut::<PendingClients>()
+                .0
+                .push(PendingJoin::new(link, peer));
+            link
+        };
+        let owner = |app: &mut App| {
+            app.world_mut()
+                .query::<(Entity, &ControlledBy, Has<TankKnockedOut>)>()
+                .iter(app.world())
+                .filter(|(_, _, knocked_out)| !knocked_out)
+                .map(|(root, controlled, _)| (root, controlled.owner))
+                .collect::<Vec<_>>()
+        };
+        // Fixture ids: queued high before low.
+        let high = join(&mut app, 2);
+        let low = join(&mut app, 1);
+        app.update();
+        let [(first, spawned)] = owner(&mut app)[..] else {
+            panic!("one join takes the sole point");
+        };
+        assert_eq!(spawned, low, "the lower client id spawns first");
+        let lower = join(&mut app, 0);
+        app.world_mut().entity_mut(first).insert(TankKnockedOut {
+            reason: crate::damage::KnockoutReason::CrewLoss,
+        });
+        app.update();
+        let [(_, spawned)] = owner(&mut app)[..] else {
+            panic!("one join takes the freed point");
+        };
+        assert_eq!(
+            spawned, high,
+            "the join already waiting spawns before a newer, lower id"
+        );
+        let queued: Vec<Entity> = app
+            .world()
+            .resource::<PendingClients>()
+            .0
+            .iter()
+            .map(|join| join.link)
+            .collect();
+        assert_eq!(queued, vec![lower]);
     }
 
     /// Every map's authored automatic spawn points must clear its construction footprints expanded
