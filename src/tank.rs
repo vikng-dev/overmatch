@@ -45,6 +45,8 @@ pub(crate) use spawn::TANK_SPEC_PATH;
 pub(crate) use spawn::TankPresentation;
 #[cfg(any(feature = "dev_ui", test))]
 pub(crate) use spawn::proxy_friction;
+#[cfg(test)]
+pub(crate) use spawn::shipped_construction;
 pub(crate) use spawn::spawn_headless_tank;
 pub(crate) use spawn::{
     PendingTankAssets, TANK_GLB_PATH, TANK_SIM_GLB_PATH, TankContent, TankSimSource,

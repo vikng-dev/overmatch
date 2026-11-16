@@ -128,6 +128,7 @@ pub(crate) struct ViewAssets<'a> {
     pub(crate) server: &'a AssetServer,
     pub(crate) construction_materials: &'a mut Assets<ConstructionMaterial>,
     pub(crate) buffers: &'a mut Assets<bevy::render::storage::ShaderBuffer>,
+    pub(crate) terrain_shadow: &'a crate::terrain_shadow::TerrainShadow,
 }
 
 /// The view-side handles, built ONCE per world: one mesh per prototype, cloned per instance, and
@@ -199,6 +200,7 @@ impl ScatterView {
                 assets.server,
                 assets.construction_materials,
                 assets.buffers,
+                assets.terrain_shadow,
             ),
         }
     }
@@ -420,6 +422,7 @@ mod tests {
         let grid = sloped_grid();
         let mut obstacles: Vec<Transform> = Vec::new();
         let server = draw.then(|| app.world().resource::<AssetServer>().clone());
+        let terrain_shadow = crate::terrain_shadow::TerrainShadow::default();
         let world = app.world_mut();
         world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
             world.resource_scope(
@@ -437,6 +440,7 @@ mod tests {
                                     server,
                                     construction_materials: &mut constructions,
                                     buffers: &mut buffers,
+                                    terrain_shadow: &terrain_shadow,
                                 }),
                             );
                             queue.apply(world);

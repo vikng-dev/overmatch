@@ -202,6 +202,27 @@ impl<'a> TankContent<'a> {
         );
         radius
     }
+
+    /// DERIVED: how the tank stands over the ground it spawns on, posed by `rotation`: the stance
+    /// enclosing its collision construction, the declared proxies at their authored pose and the
+    /// prepared track shapes' bounds, the rest belt's ground face among them. Collision geometry
+    /// alone, as for [`Self::contact_radius`]: it is what meets the ground.
+    pub(crate) fn stance(self, rotation: Quat) -> crate::terrain_grid::Stance {
+        let proxies = self.geometry.collision_proxies.iter().flat_map(|&index| {
+            let node = &self.geometry.nodes[index];
+            node.primitives
+                .iter()
+                .flat_map(|primitive| &primitive.positions)
+                .map(|&point| {
+                    node.root_position + node.root_rotation * (node.root_scale * Vec3::from(point))
+                })
+        });
+        crate::terrain_grid::Stance::enclosing(
+            proxies
+                .chain(self.track_colliders.bound_corners())
+                .map(|point| rotation * point),
+        )
+    }
 }
 
 /// DERIVED triangle-inequality bound for a sphere through one authored local transform.
@@ -1195,40 +1216,41 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
 }
 
 #[cfg(test)]
+/// The shipped tank's construction data, a fixture: its blueprint and track shapes.
+pub(crate) fn shipped_construction() -> (TankBlueprint, TrackColliders) {
+    let spec: TankSpec = crate::provenance::from_shipped_str(
+        TANK_SPEC_PATH,
+        include_str!(concat!(
+            "../../assets/",
+            crate::assets::tank_file!(".tank.ron")
+        )),
+    )
+    .unwrap();
+    let glb = crate::assets::asset_root().join(crate::assets::tank_file!(".sim.glb"));
+    let geometry = crate::bake::extract_tank_geometry(
+        &glb,
+        &spec,
+        &crate::substances::SubstanceRegistry::shipped(),
+    )
+    .unwrap();
+    let blueprint = TankBlueprint::new(
+        TANK_SPEC_PATH.into(),
+        crate::bake::CertifiedAsset::fixture(spec, geometry),
+    );
+    let shapes = TrackColliders::of_blueprint(&blueprint, &glb);
+    (blueprint, shapes)
+}
+
+#[cfg(test)]
 mod proxy_tests {
     use super::*;
     use crate::bake::MeshGeometry;
     use avian3d::prelude::Collider;
 
-    /// The shipped tank's construction data, a fixture: its blueprint and track shapes.
-    fn shipped() -> (TankBlueprint, TrackColliders) {
-        let spec: TankSpec = crate::provenance::from_shipped_str(
-            TANK_SPEC_PATH,
-            include_str!(concat!(
-                "../../assets/",
-                crate::assets::tank_file!(".tank.ron")
-            )),
-        )
-        .unwrap();
-        let glb = crate::assets::asset_root().join(crate::assets::tank_file!(".sim.glb"));
-        let geometry = crate::bake::extract_tank_geometry(
-            &glb,
-            &spec,
-            &crate::substances::SubstanceRegistry::shipped(),
-        )
-        .unwrap();
-        let blueprint = TankBlueprint::new(
-            TANK_SPEC_PATH.into(),
-            crate::bake::CertifiedAsset::fixture(spec, geometry),
-        );
-        let shapes = TrackColliders::of_blueprint(&blueprint, &glb);
-        (blueprint, shapes)
-    }
-
     /// An authority tank and a replica of the shipped fixture, spawned into one world.
     fn authority_and_replica(world: &mut World) -> (Entity, Entity) {
         use avian3d::prelude::{Position, RigidBody, Rotation};
-        let (blueprint, shapes) = shipped();
+        let (blueprint, shapes) = shipped_construction();
         let content = TankContent {
             geometry: &blueprint.geometry,
             spec: &blueprint.spec,
@@ -1384,7 +1406,7 @@ mod proxy_tests {
         use std::collections::BTreeSet;
         let mut world = World::new();
         let (tank, _) = authority_and_replica(&mut world);
-        let (blueprint, _) = shipped();
+        let (blueprint, _) = shipped_construction();
         let (geometry, spec) = (&blueprint.geometry, &blueprint.spec);
         let node = named(&world, tank);
         let set = world
@@ -1569,7 +1591,7 @@ mod proxy_tests {
         use avian3d::prelude::SimpleCollider;
         let mut world = World::new();
         let (authority, replica) = authority_and_replica(&mut world);
-        let (blueprint, _) = shipped();
+        let (blueprint, _) = shipped_construction();
         let rig = world
             .get::<Rig>(replica)
             .expect("the replica carries its rig");
@@ -1759,5 +1781,63 @@ mod proxy_tests {
             .map(|(_, child_of)| child_of.parent())
             .collect();
         assert_eq!(parents, vec![node, node]);
+    }
+
+    /// THE SPAWN STANCE COVERS THE GROUND CONTACT. Under any spawn turn, the stance a tank spawns
+    /// under reaches past every road-contact cylinder of its running gear and down to its rest
+    /// belt's ground face, so the spawn rule's footprint samples all the ground the tank stands on
+    /// and its lowest point starts clear of it. A stance of the hull's proxies alone, of track
+    /// shapes cut short of the rest belt, or of another pose than the spawn's, fails here.
+    #[test]
+    fn the_spawn_stance_covers_the_running_gears_ground_contact() {
+        let (blueprint, shapes) = shipped_construction();
+        let content = TankContent {
+            geometry: &blueprint.geometry,
+            spec: &blueprint.spec,
+            transmission: &blueprint.transmission,
+            track_colliders: &shapes,
+        };
+        let track = &blueprint.spec.track;
+        let params = track.suspension.params();
+        let geom = crate::track::rig_geom::RigGeom::build(
+            &blueprint,
+            &crate::assets::asset_root().join(TANK_SIM_GLB_PATH),
+            track.sprocket.teeth,
+            track.link_count,
+            &params,
+        );
+        // Resolution: f32 rounding of root-frame coordinates a few metres out.
+        const ROUNDING_M: f32 = 1e-4;
+        // FIXTURE DATA: spawn turns about the vertical.
+        for yaw in [0.0_f32, 0.6, 2.5] {
+            let stance = content.stance(Quat::from_rotation_y(yaw));
+            assert!(
+                stance.depth_m >= geom.hull_rest_y - ROUNDING_M,
+                "turn {yaw}: the stance hangs {} m, short of the rest belt's {} m",
+                stance.depth_m,
+                geom.hull_rest_y
+            );
+            for side in crate::track::side::Side::ALL {
+                for (centre, tread) in geom
+                    .road_wheels
+                    .get(side)
+                    .iter()
+                    .zip(geom.wheel_treads.get(side))
+                {
+                    for &(start, end) in &tread.spans {
+                        // The cylinder's farthest rim from the vertical axis: its farther face, at
+                        // the axle's height, fore or aft of the centre.
+                        let lateral = (centre.x + start).abs().max((centre.x + end).abs());
+                        let reach = lateral.hypot(centre.z.abs() + tread.radius);
+                        assert!(
+                            stance.reach_m >= reach - ROUNDING_M,
+                            "turn {yaw}: a road wheel at {centre} reaches {reach} m, past the \
+                             stance's {} m",
+                            stance.reach_m
+                        );
+                    }
+                }
+            }
+        }
     }
 }

@@ -1,0 +1,4 @@
+// The sun's universal facts, which belong to no map: embedded once in the client (`src/sky.rs`).
+(
+    sun_angular_radius_rad: (0.00465, Measured("mean apparent solar semi-diameter, 16′, Astronomical Almanac")),
+)

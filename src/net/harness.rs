@@ -88,7 +88,8 @@ pub(crate) struct Script {
     /// Ticks between a [`Drive::Fire`] primary's clicks; zero clicks none. Default 256 (DERIVED:
     /// four seconds at the fixed 64 Hz).
     pub(crate) fire_interval: u32,
-    /// The server's spawned tank starts here instead of its lane spawn ([`SpawnPose`]).
+    /// The server's spawned tank starts at this point and turn instead of a map point
+    /// ([`SpawnPose`]).
     pub(crate) spawn_pose: Option<SpawnPose>,
     /// [`Drive::Arc`]'s ticks at full throttle after the lead. This field, [`Self::arc_steer`] and
     /// [`Self::straight_ticks`] belong to their courses, not to the grammar: no script sets them.
@@ -139,8 +140,8 @@ pub(crate) enum Drive {
     /// tank released under first gear's idle speed (`track::transmission`); a faster one keeps
     /// rolling in gear. Never fires.
     Park { throttle_ticks: u32 },
-    /// Never drive, never fire: the tank sits on whatever contact it spawned onto (with
-    /// `spawn_pose`, a known resting contact), with no drive input perturbing it.
+    /// Never drive, never fire: the tank sits on whatever contact it settled onto (with
+    /// `spawn_pose`, a chosen patch of ground), with no drive input perturbing it.
     Idle,
     /// Stationary fire, so the only difference from [`Drive::Idle`] is the fire itself: hold the
     /// secondary trigger from a ~3 s warmup to the end, and click the primary every
@@ -171,19 +172,21 @@ impl Default for Aim {
     }
 }
 
-/// A spawn pose checked and normalized at the script edge. Downstream spawns hold the parsed
-/// position and unit rotation; they never normalize operator input again.
+/// A spawn point and turn, checked and normalized once, at the script edge. The point is
+/// horizontal (`at: (x, z)`), as every spawn definition is: the server sets the height under the
+/// tank's stance at that turn (`terrain_grid::spawn_pos`) and refuses to start on a point outside
+/// the placeable square.
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 #[serde(try_from = "AuthoredSpawnPose")]
 pub(crate) struct SpawnPose {
-    pos: Vec3,
+    at: Vec2,
     rot: Quat,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AuthoredSpawnPose {
-    pos: (f32, f32, f32),
+    at: (f32, f32),
     rot: (f32, f32, f32, f32),
 }
 
@@ -191,19 +194,19 @@ impl TryFrom<AuthoredSpawnPose> for SpawnPose {
     type Error = ScriptError;
 
     fn try_from(raw: AuthoredSpawnPose) -> Result<Self, Self::Error> {
-        let pos = Vec3::from(raw.pos);
+        let at = Vec2::from(raw.at);
         let rot = Vec4::from(raw.rot);
-        if !pos.is_finite() || !rot.is_finite() || rot.abs().max_element() == 0.0 {
+        if !at.is_finite() || !rot.is_finite() || rot.abs().max_element() == 0.0 {
             return Err(ScriptError::Invalid {
                 field: "spawn_pose",
-                problem: "use a finite position and a finite nonzero rotation",
+                problem: "use a finite point and a finite nonzero rotation",
             });
         }
         // Scaling before normalization avoids squared-length overflow and underflow, including
         // finite hand-entered quaternions with very large or very small magnitudes.
         let unit = (rot / rot.abs().max_element()).normalize();
         Ok(Self {
-            pos,
+            at,
             rot: Quat::from_xyzw(unit.x, unit.y, unit.z, unit.w),
         })
     }
@@ -926,12 +929,12 @@ fn seeded_delay_ms(seed: u64, packet_index: u64, latency_ms: u64, jitter_ms: u64
     delay_ms.clamp(0, i128::from(u64::MAX)) as u64
 }
 
-/// The server's spawn-pose override ([`Script::spawn_pose`]), applied in `spawn_pending_tanks`;
+/// The server's spawn-point override ([`Script::spawn_pose`]), applied in `spawn_pending_tanks`;
 /// `None` without a script or a pose.
-pub(crate) fn spawn_pose() -> Option<(Vec3, Quat)> {
-    let SpawnPose { pos, rot } = script()?.spawn_pose?;
-    info!("server: harness spawn pose pos={pos:?} rot={rot:?}");
-    Some((pos, rot))
+pub(crate) fn spawn_pose() -> Option<(Vec2, Quat)> {
+    let SpawnPose { at, rot } = script()?.spawn_pose?;
+    info!("server: harness spawn point at={at:?} rot={rot:?}");
+    Some((at, rot))
 }
 
 #[cfg(test)]
@@ -995,7 +998,7 @@ mod tests {
 
     use lightyear::core::time::Instant;
 
-    use bevy::math::Vec3;
+    use bevy::math::{Vec2, Vec3};
 
     use super::{
         Aim, BurstSpec, Drive, Script, ScriptTimeout, SeededRecvConditioner, SimulateInput,
@@ -1011,7 +1014,7 @@ mod tests {
         let script = Script::parse(
             "(ticks: Some(2048), drive: Fire(primary: true, secondary: true), \
              aim: Point((8, 1.2, -2)), range_m: 12, fire_tick: 320, fire_interval: 128, \
-             spawn_pose: (pos: (149.3, 8.75, 293.9), rot: (0, 0, 0, 1)))",
+             spawn_pose: (at: (149.3, 293.9), rot: (0, 0, 0, 1)))",
         )
         .expect("a valid script");
         assert_eq!(
@@ -1027,7 +1030,7 @@ mod tests {
                 fire_tick: 320,
                 fire_interval: 128,
                 spawn_pose: Some(SpawnPose {
-                    pos: Vec3::new(149.3, 8.75, 293.9),
+                    at: Vec2::new(149.3, 293.9),
                     rot: bevy::math::Quat::IDENTITY,
                 }),
                 ..Script::default()
@@ -1073,7 +1076,7 @@ mod tests {
             ("(aim: Point((1.0, 1e30, 0.0)))", "aim"),
             ("(range_m: 0.0)", "range_m"),
             (
-                "(spawn_pose: (pos: (0.0, 0.0, 0.0), rot: (0.0, 0.0, 0.0, 0.0)))",
+                "(spawn_pose: (at: (0.0, 0.0), rot: (0.0, 0.0, 0.0, 0.0)))",
                 "spawn_pose",
             ),
             ("(drive: Forward)", "Forward"),
@@ -1092,8 +1095,7 @@ mod tests {
     #[test]
     fn spawn_rotations_are_normalized_once_without_magnitude_overflow() {
         for magnitude in ["1e30", "1e-30"] {
-            let text =
-                format!("(spawn_pose: (pos: (0, 0, 0), rot: (0, {magnitude}, 0, {magnitude})))");
+            let text = format!("(spawn_pose: (at: (0, 0), rot: (0, {magnitude}, 0, {magnitude})))");
             let pose = Script::parse(&text).unwrap().spawn_pose.unwrap();
             assert!(pose.rot.is_normalized());
             assert!((pose.rot * Vec3::NEG_Z).distance(Vec3::NEG_X) < 1e-5);

@@ -1,0 +1,15 @@
+// From the bay, after scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch:
+// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/terrain-shadow/hull-mark-shadowed.ron target/debug/overmatch --offline
+// Hull marks (the visual layer of the game's damage model) inside a hill's shadow: under a 2° sun
+// the hull-marks demo's target, on the far pad, stands about 8 m deep in the shadow of a hill some
+// 340 m up-sun (DERIVED from the height grid), so its plates and the marks on them must read dark
+// together. The frames hold on the hole, the dent and the scratch in turn. Paired with
+// hull-mark-lit.ron, the same scene in sun.
+(
+    frames: (
+        out: "target/capture/terrain-shadow/hull-mark-shadowed.png",
+        at: [18.0, 21.0, 24.0],
+        size: (1280, 720), scale_factor: 1.0, ui: false, gizmos: false, step_s: 0.015625,
+    ),
+    scene: (sun_elevation_deg: 2.0, demo: HullMarks),
+)

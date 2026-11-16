@@ -1,0 +1,13 @@
+// From the bay, after scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch:
+// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_START=98,405,135 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/terrain-shadow/shadow-edge-tank.ron target/debug/overmatch --offline
+// A tank across a hill shadow's edge under a 5° sun: the edge runs across hull, decor and belt at
+// the height the field's law puts it, the same on every material.
+(
+    frames: (
+        out: "target/capture/terrain-shadow/shadow-edge-tank.png",
+        at: [12.0],
+        size: (1280, 720), scale_factor: 1.0, ui: false, gizmos: false, step_s: 0.015625,
+        camera: Follow(offset: (7.0, 2.5, 7.0)),
+    ),
+    scene: (sun_elevation_deg: 5.0),
+)

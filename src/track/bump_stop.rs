@@ -86,15 +86,26 @@ impl TrackColliders {
     /// DERIVED root-centred sphere enclosing every prepared running-gear shape, in metres.
     /// A sphere also bounds horizontal occupancy at any body orientation.
     pub(crate) fn contact_radius(&self) -> f32 {
+        self.bound_corners().map(Vec3::length).fold(0.0, f32::max)
+    }
+
+    /// The body-local corners of every prepared shape's bounds: their hull encloses the stops, the
+    /// side plates (which reach the rest belt's ground face) and the soft runs, at any pose.
+    pub(crate) fn bound_corners(&self) -> impl Iterator<Item = Vec3> + '_ {
         self.colliders
             .values()
             .chain(self.side_plates.values().flat_map(|pair| pair.iter()))
             .chain(self.runs.values().map(RunShape::collider))
-            .map(|collider| {
+            .flat_map(|collider| {
                 let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY, 0.0);
-                bounds.min.abs().max(bounds.max.abs()).length()
+                (0..8).map(move |k| {
+                    Vec3::select(
+                        BVec3::new(k & 1 != 0, k & 2 != 0, k & 4 != 0),
+                        bounds.max,
+                        bounds.min,
+                    )
+                })
             })
-            .fold(0.0, f32::max)
     }
 
     /// A tank kind's shapes at its authored travel, prepared during startup extraction of the sim
