@@ -260,15 +260,17 @@ continuous collision's per-body floor remains unmeasured.
 
 `prepare_contact_constraints` counts active manifold handles before splitting over colors. Its
 `Resolution` floor is serial through 561 manifolds, parallel above that when enough colors exist.
-MEASURED in the 0.7 fork's "Serial small loops" crossover record: on two compute threads, parallel
-minus serial was +1.1 µs at 561 manifolds and -3.9 µs at 723 (medians of five runs; each used 192
-settling steps and 256 measured steps). Serial won every run at 561; parallel won every run at
-723. Between those measured populations the old policy used the parallel path.
+MEASURED on the 0.7 fork (Bevy 0.19) in its "Serial small loops" crossover record: on two compute
+threads, parallel minus serial was +1.1 µs at 561 manifolds and -3.9 µs at 723 (medians of five
+runs; each used 192 settling steps and 256 measured steps). Serial won every run at 561; parallel
+won every run at 723. Between those measured populations the old policy used the parallel path.
+The crossover is unmeasured on 0.8.
 
 The cutover retained color dispatch but lost this floor. MEASURED in the supplied before/after
-tick trace, the combat window with 30 tanks: preparation rose from 6.0 to 13.0 µs per tick. The
-small-population dispatch cost therefore still warrants the floor; the new crossover and any
-speedup from restoring it are unmeasured here. No timing run was made.
+tick trace, the combat window with 30 tanks: preparation rose from 6.0 to 13.0 µs per tick (means).
+The trace records no manifold count for that window, so it does not place the window on either
+side of the crossover, and the rise is not attributed to the lost floor; any speedup from
+restoring it is unmeasured. No timing run was made.
 
 Each color writes only its own constraints, preserving its manifold-handle order on either path.
 Guard: `src/tests/avian_contact_reduction.rs::the_constraint_graph_holds_one_constraint_per_kept_manifold`.

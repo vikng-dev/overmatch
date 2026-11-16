@@ -687,7 +687,8 @@ fn prepare_contact_constraints(
         .collect::<Vec<&mut GraphColor>>();
 
     // OVERMATCH PATCH. Resolution: avoid compute-pool dispatch through the last manifold count
-    // MEASURED cheaper serially on two compute threads (OVERMATCH_PATCH.md, "Serial small loops").
+    // MEASURED cheaper serially on the 0.7 fork (Bevy 0.19, two compute threads); unmeasured on
+    // 0.8 (OVERMATCH_PATCH.md, "Serial small loops").
     const SERIAL_THROUGH_MANIFOLDS: usize = 561;
     let manifolds: usize = active_colors
         .iter()
