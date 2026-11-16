@@ -26,28 +26,32 @@ that keep touching sleepers may never sleep.
 Against the pristine crate (`a/` and `b/` are the crate root):
 
 ```diff
+--- a/src/dynamics/solver/islands/mod.rs
++++ b/src/dynamics/solver/islands/mod.rs
+@@ -1378,6 +1378,8 @@
+     on_remove = BodyIslandNode::on_remove,
+     clone_behavior = Custom(clone_placeholder_body_island_node),
+ )]
++// Enable observers can create a node before its first solver index.
++#[require(crate::dynamics::rigid_body::sleeping::SleepTimer)]
+ pub struct BodyIslandNode(IslandNode<Entity>);
+
+ // Avoid incorrect prev/next links when cloning a rigid body
 --- a/src/dynamics/solver/islands/sleeping.rs
 +++ b/src/dynamics/solver/islands/sleeping.rs
-@@ -121,6 +121,11 @@
+@@ -121,6 +121,12 @@
          return;
      }
 
-+    // This body has lost Sleeping before the queued wake. An awake newly enabled node can
-+    // precede its first solver index and timer; a sleeping island's links retain their timers.
-+    if let Some(mut sleep_timer) = world.get_mut::<SleepTimer>(ctx.entity) {
-+        sleep_timer.0 = 0.0;
-+    }
++    // This body has lost Sleeping before the queued wake, which resets only sleeping members.
++    // BodyIslandNode requires its timer even before a solver index.
++    world
++        .get_mut::<SleepTimer>(ctx.entity)
++        .expect("every BodyIslandNode retains its required SleepTimer for waking")
++        .0 = 0.0;
      world.commands().queue_silenced(WakeBody(ctx.entity));
  }
 
-@@ -361,6 +366,7 @@
-             &'static BodyIslandNode,
-             &'static mut SleepTimer,
-             Option<&'static RigidBodyColliders>,
-+            Has<Sleeping>,
-         )>,
-         SResMut<PhysicsIslands>,
-         SResMut<ContactGraph>,
 @@ -457,6 +463,7 @@
              &'static BodyIslandNode,
              &'static mut SleepTimer,
@@ -91,9 +95,16 @@ The walk resets only bodies that were sleeping (`Has<Sleeping>`). A body whose `
 removed directly has lost the marker by the time its queued `WakeBody` runs, so the removal hook
 resets that body's timer itself. The solver still resets a timer when the body exceeds a threshold.
 
-An awake node created by the enable observer may precede its first solver index and timer.
-Sleeping islands have accumulated rest history, and every linked body must remain fetchable with
-its timer. A broken link must panic: ending the walk after marking the island awake leaves its
-tail sleeping indefinitely. The local application requires `SleepTimer` with `BodyIslandNode`, so a node created by an enable
-observer is complete even before its first solver index; admission refuses a lost timer. The
-command tripwire covers direct wakes too.
+`BodyIslandNode` requires `SleepTimer` in the engine, including nodes created by enable
+observers before their first solver index. The requirement and the wake tripwire are one fix.
+Removing a required timer afterwards violates the node invariant and panics at the wake boundary.
+One lifecycle behavior differs from pristine: a body enabled while asleep since spawn now wakes;
+the enable observer can fetch its newly required timer and queue the wake. The local lifecycle
+test explicitly asserts this behavior.
+
+## Local verification
+
+MEASURED: the final patch applies to a fresh cached published 0.8.0 crate and its library compiles
+offline with all default features through `scripts/serial-cargo check`, using the path-dependency
+harness described in [the draft index](README.md#avian-draft-compile-checks). The sleep command's
+query remains its original three-element tuple; only the wake command adds `Has<Sleeping>`.

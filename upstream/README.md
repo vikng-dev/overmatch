@@ -23,7 +23,7 @@ a public seam and has no crate patch to retire.
 | [avian-moved-aabb-prune.md](avian-moved-aabb-prune.md) | avian3d 0.8.0 | bug fix | 59 | not sent |
 | [avian-body-size-metrics-once-per-body.md](avian-body-size-metrics-once-per-body.md) | avian3d 0.8.0 | bug fix | 45 | not sent |
 | [avian-unknown-contact-feature-identity.md](avian-unknown-contact-feature-identity.md) | avian3d 0.8.0 | bug fix | 26 | not sent |
-| [avian-island-rest-history.md](avian-island-rest-history.md) | avian3d 0.8.0 | bug fix | 22 | not sent |
+| [avian-island-rest-history.md](avian-island-rest-history.md) | avian3d 0.8.0 | bug fix | 23 | not sent |
 | [bevy-invisible-mesh-removal-churn.md](bevy-invisible-mesh-removal-churn.md) | bevy_pbr 0.20.1 | bug fix | 10 | not sent |
 | [bevy-mesh-removal-channel.md](bevy-mesh-removal-channel.md) | bevy_pbr 0.20.1 | bug fix | 37 | not sent |
 | [lightyear-netcode-denied-reason.md](lightyear-netcode-denied-reason.md) | lightyear_netcode 0.31.0 | bug fix | 12 | not sent |
@@ -35,6 +35,30 @@ investigations live under `.agents/scratch/fork-moves-history-2026-11-16/`; they
 proposal queue. Obsolete proposals without a current source or patch-record consumer were removed.
 
 Current complete fork deltas, MEASURED again against the cached published archives with
-`diff -ruN src/` (added + removed lines, fork-only source included): avian3d **698**,
-bevy_pbr **357**, lightyear_netcode **159**, lightyear_avian3d **0**; total **1214**.
+`diff -ruN src/` (added + removed lines, fork-only source included): avian3d **699**,
+bevy_pbr **357**, lightyear_netcode **159**, lightyear_avian3d **0**; total **1215**.
 The per-proposal rows above exclude game divergences and the diagnostic-only lines listed here.
+
+## Avian draft compile checks
+
+MEASURED: each patch below was applied independently to a fresh extraction of the cached
+published avian3d 0.8.0 crate, then its library compiled offline through `scripts/serial-cargo
+check`, with all default features (including 3d). A tiny path-dependency harness leaves the
+published manifest unchanged and excludes example-only dev dependencies: direct crate-root
+checks cannot resolve the uncached `bevy_mod_debugdump 0.17` offline. These are library compile
+checks, not example builds or upstream test runs.
+
+| Draft | Library compile result |
+|---|---|
+| avian-body-size-metrics-once-per-body.md | compiled |
+| avian-child-collider-pose-churn.md | compiled |
+| avian-collider-of-reinsert.md | compiled |
+| avian-collider-propagation-floor-counts-roots.md | compiled |
+| avian-island-rest-history.md | compiled |
+| avian-mass-recompute-redundant-work.md | compiled |
+| avian-moved-aabb-prune.md | compiled |
+| avian-pairless-broad-phase.md | compiled |
+| avian-sleeping-velocity-increments.md | compiled |
+| avian-unknown-contact-feature-identity.md | compiled |
+
+`avian-nearest-warm-start-contact.md` records game policy and contains no upstream patch.

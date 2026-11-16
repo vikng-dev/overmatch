@@ -122,13 +122,12 @@ fn wake_on_remove_sleeping(mut world: DeferredWorld, ctx: HookContext) {
         return;
     }
 
-    // OVERMATCH PATCH: this body has lost `Sleeping` by the time the queued wake runs, which
-    // restarts only sleeping bodies' rest intervals.
-    // Upstream's enable observers can create a node before its first solver index and timer;
-    // it has no rest history. Applications can require a timer with the node itself.
-    if let Some(mut sleep_timer) = world.get_mut::<SleepTimer>(ctx.entity) {
-        sleep_timer.0 = 0.0;
-    }
+    // OVERMATCH PATCH: this body has lost `Sleeping` before the queued wake, which resets
+    // only sleeping members. BodyIslandNode requires its timer even before a solver index.
+    world
+        .get_mut::<SleepTimer>(ctx.entity)
+        .expect("every BodyIslandNode retains its required SleepTimer for waking")
+        .0 = 0.0;
     world.commands().queue_silenced(WakeBody(ctx.entity));
 }
 

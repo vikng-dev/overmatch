@@ -431,8 +431,8 @@ fn a_sleeping_body_without_its_timer_is_refused_at_admission() {
     app.update();
 }
 
-/// The game's island nodes require timers at creation, even when Avian's enable observer creates
-/// a node for a body asleep since spawn. Wake commands can then traverse it before any solver index.
+/// Island nodes require timers before their first solver index. Unlike pristine Avian, a body
+/// enabled while asleep since spawn now wakes; its queued wake can traverse the complete node.
 #[test]
 fn a_newly_enabled_island_has_its_timer_before_its_first_solver_index() {
     use avian3d::dynamics::solver::solver_body::SolverBodyIndex;
@@ -468,6 +468,10 @@ fn a_newly_enabled_island_has_its_timer_before_its_first_solver_index() {
         "the node supplies a timer before the enable observer's queued wake enters the solver"
     );
     assert!(app.world().get::<SleepTimer>(enabled).is_some());
+    assert!(
+        app.world().get::<Sleeping>(enabled).is_none(),
+        "a body enabled while asleep since spawn now wakes, unlike pristine Avian"
+    );
 }
 
 /// Solver users need the wake source to survive every merge in one narrow phase. A mutant

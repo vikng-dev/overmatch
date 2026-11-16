@@ -22,9 +22,6 @@ pub(super) struct PendingOwners(pub Vec<(Entity, Entity)>);
 
 /// Refuses incomplete state in the first physics phase, before child placement.
 pub fn plugin(app: &mut App) {
-    // Avian's enable observers can create a node before its first solver index. Every game
-    // island node owns its timer from creation, including a body asleep since spawn.
-    app.register_required_components::<BodyIslandNode, SleepTimer>();
     app.init_resource::<PendingOwners>().add_systems(
         PhysicsSchedule,
         (refuse_unfinished_placement, refuse_incomplete_state)

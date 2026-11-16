@@ -1382,6 +1382,8 @@ impl<Id: Copy> Copy for IslandNode<Id> {}
     on_remove = BodyIslandNode::on_remove,
     clone_behavior = Custom(clone_placeholder_body_island_node),
 )]
+// OVERMATCH PATCH: enable observers can create a node before its first solver index.
+#[require(crate::dynamics::rigid_body::sleeping::SleepTimer)]
 pub struct BodyIslandNode(IslandNode<Entity>);
 
 // Avoid incorrect prev/next links when cloning a rigid body

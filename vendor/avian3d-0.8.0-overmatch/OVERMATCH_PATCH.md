@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 698 in all (MEASURED), 620 in upstream files and 78 in the
+of `src/` against the published crate: 699 in all (MEASURED), 621 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -479,7 +479,7 @@ Mutants, each red (MEASURED): an awake side counted as resting (the impact test)
 the sleeping set (the stationary, closed-miss and impulse tests), no island link (the closed-miss
 test).
 
-## Island rest history (`src/dynamics/solver/islands/sleeping.rs`): kept
+## Island rest history (`src/dynamics/solver/islands/sleeping.rs`, `src/dynamics/solver/islands/mod.rs`): kept
 
 Subject: the game's rigid-body rest, server physics, game state only.
 
@@ -487,17 +487,16 @@ Rest history belongs to each body. `WakeIslands` restarts the rest interval (`Sl
 bodies that were sleeping only: an island merged from an awake and a sleeping one is marked sleeping
 (`merge_islands`), and upstream's wake zeroed the awake members' timers with the rest. The removal
 hook of `Sleeping` restarts its own body's interval, which has lost the marker by the time its
-queued wake runs. A node enabled before its first solver index can have no timer yet and no
-rest history to clear, so the hook resets only a present timer. Avian's enable observers create
-that awake node before the solver-body observers supply `SolverBodyIndex` and its required timer.
-The game requires `SleepTimer` with `BodyIslandNode`, closing that construction gap synchronously;
-its First-stage gate refuses any posed enabled node that subsequently loses its timer.
+queued wake runs. The fork requires `SleepTimer` with `BodyIslandNode`, so enable observers
+construct complete nodes before their first solver index. One lifecycle behavior differs from
+pristine: a body enabled while asleep since spawn now wakes. The game's First-stage gate refuses
+any posed enabled node that subsequently loses its timer.
 `WakeIslands` expects every link to resolve to a live node with a timer:
 terminating a broken list after marking the island awake would strand its remaining sleepers.
 The tripwire also covers direct wake commands outside scheduled admission.
 
-Kept: the timer reset and the walk sit inside an upstream command and hook. 22 fork lines
-(MEASURED, including the extra `was_sleeping` tuple input and the linked-list tripwire).
+Kept: the timer reset, node requirement and linked-list tripwire are one engine fix. 23 fork lines
+(MEASURED: 21 in sleeping, 2 on BodyIslandNode), including the `was_sleeping` tuple input.
 
 Guards: in `src/tests/avian_island_sleep.rs`,
 `waking_a_merged_island_preserves_already_awake_rest_time`,
