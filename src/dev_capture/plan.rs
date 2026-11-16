@@ -1209,8 +1209,7 @@ mod tests {
     /// A PLAN THAT CANNOT MEAN WHAT IT SAYS FAILS THE BOOT, NAMING ITS FIELD (ADR-0011): a typo, a
     /// missing path, an empty or negative time, a zero side, a non-positive step, a degenerate
     /// pose, an empty or negative key window, an unknown key, a non-positive calibre or charge, a
-    /// sun at or past the zenith, an unknown demo. Each was a silent default or a skipped cue under the variables
-    /// the plan replaced.
+    /// sun at or past the zenith, an unknown demo.
     #[test]
     fn a_plan_outside_its_domain_is_refused_naming_the_field() {
         let pose = "Pose(eye: (1.0, 1.0, 1.0), look: (1.0, 1.0, 1.0))";

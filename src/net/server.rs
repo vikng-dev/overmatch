@@ -955,8 +955,6 @@ fn spawn_pending_tanks(
     // Every tank of the pass spawns at `spawn_rot`.
     let stance = content.stance(spawn_rot);
     let mut live: Vec<Vec2> = tanks.iter().map(|position| position.0.xz()).collect();
-    // Serial: each XZ choice reads the XZ handed out earlier in the pass (`live`). The ground
-    // under a chosen XZ reads only the height grid, so the admitted joins are grounded as one batch.
     let mut queue = std::mem::take(&mut pending.0);
     // Joins take ground, lanes and identities in a declared priority, never arrival or query
     // order: one already waiting on occupancy first, then the lower client id. A join has no
@@ -964,6 +962,7 @@ fn spawn_pending_tanks(
     queue.sort_by_key(|join| (!join.waiting, join.client_id));
     let mut joins: Vec<(Entity, PeerId)> = Vec::new();
     let mut points: Vec<Vec2> = Vec::new();
+    // Serial: each XZ choice reads earlier reservations in `live`.
     for join in queue {
         let PendingJoin {
             link, client_id, ..
@@ -1370,13 +1369,9 @@ fn commit_bot_spawns(
                 turret,
                 combatant,
             } => {
-                // Recursive despawn sweeps the root and its attached rig (children + relationship
-                // targets).
+                // A detached turret survives the root sweep; `try_despawn` also tolerates one
+                // already swept or otherwise gone.
                 commands.entity(root).despawn();
-                // The launched turret, if it detached on cookoff. `try_despawn` is a silent no-op
-                // when the turret is still an attached child (already swept above) or otherwise
-                // gone — no panic, no double-free, so the one branch covers both the cookoff and
-                // crew-loss deaths.
                 commands.entity(turret).try_despawn();
                 let life = combatants.life(combatant);
                 let fresh =
@@ -1482,14 +1477,12 @@ fn respawn_player_tanks(
     let standing: Vec<Transform> = map.blocks.iter().chain(&obstacles.0).copied().collect();
     // Occupancy also includes the spots ALREADY HANDED OUT this pass: two clients respawning onto
     // the same click in the same tick would otherwise both read the pre-pass world and overlap.
-    // Serial for that XZ reservation only: the accepted spots are grounded as one batch after it.
     let mut placed_this_pass: Vec<Vec2> = Vec::new();
     let mut accepted: Vec<(Entity, Entity, PeerId, CombatantId, RespawnState)> = Vec::new();
     for request in requests {
         let (root, link, client_id, _, previous) = request;
         // Keep the player's spawn-map override and its occupancy nudge ahead of automatic choice.
-        let picked = overrides.0.get(&link);
-        let override_xz = match picked {
+        let override_xz = match overrides.0.get(&link) {
             Some(&xz) => {
                 let occupied: Vec<Vec2> = tanks
                     .iter()

@@ -155,7 +155,6 @@ struct Demo {
     set_down_at: Option<f32>,
     /// Travel heading, rad from `+Z` toward `+X`.
     heading: f32,
-    /// The pivot's steer.
     pivot_steer: f32,
     /// The view held for good in place of the level cycle, at the player's own relief setting.
     hold: Option<Phase>,
