@@ -482,30 +482,39 @@ impl ContactManifold {
     }
 
     /// Prunes the contact points in the manifold to a maximum of 4 points.
-    /// This is done to improve performance and stability.
+    /// Bearing points take precedence over separated points, preserving current support.
     #[inline]
     #[cfg(feature = "3d")]
     pub fn prune_points(&mut self) {
         // Based on `PruneContactPoints` in Jolt by Jorrit Rouwe.
         // https://github.com/jrouwe/JoltPhysics/blob/f3dbdd2dadac4a5510391f103f264c0427d55c50/Jolt/Physics/Collision/ManifoldBetweenTwoFaces.cpp#L16
 
-        debug_assert!(
+        assert!(
             self.points.len() > 4,
             "`ContactManifold::prune_points` called on a manifold with 4 or fewer points"
         );
 
+        // OVERMATCH PATCH: separation cannot displace a bearing point, even below the depth floor.
+        if self.points.iter().any(|point| point.penetration >= 0.0) {
+            self.points.retain(|point| point.penetration >= 0.0);
+            if self.points.len() <= 4 {
+                return;
+            }
+        }
+
         // We use a heuristic of `distance_to_com * penetration` to find the points we should keep.
-        // Neither of these should become zero, so we clamp the minimum distance.
+        // Resolution: a 1 mm floor keeps coincident or zero-depth candidates selectable.
         const MIN_DISTANCE_SQUARED: f32 = 1e-6;
 
-        // Project the contact points onto the contact normal and compute the squared penetration depths.
+        // Project onto the contact plane; separation must not increase a point's weight.
         let (projected, penetrations_squared): (Vec<Vector>, Vec<f32>) = self
             .points
             .iter()
             .map(|point| {
+                let depth = point.penetration.max(0.0);
                 (
                     point.anchor1.reject_from_normalized(self.normal),
-                    (point.penetration * point.penetration).max(MIN_DISTANCE_SQUARED),
+                    (depth * depth).max(MIN_DISTANCE_SQUARED),
                 )
             })
             .unzip();
@@ -538,7 +547,7 @@ impl ContactManifold {
                 point2_index = i;
             }
         }
-        debug_assert!(point2_index != usize::MAX, "No second point found");
+        assert!(point2_index != usize::MAX, "No second point found");
         let point2 = projected[point2_index];
 
         // Find the farthest points on both sides of the line segment in order to maximize the area.
@@ -570,7 +579,7 @@ impl ContactManifold {
         }
         self.points.push(points[point2_index]);
         if point4_index != usize::MAX {
-            debug_assert_ne!(point3_index, point4_index);
+            assert_ne!(point3_index, point4_index);
             self.points.push(points[point4_index]);
         }
     }
@@ -603,6 +612,52 @@ impl ContactManifold {
         #[cfg(feature = "3d")]
         {
             self.points.retain_mut(f);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "3d"))]
+mod tests {
+    use super::*;
+
+    /// The contact solver relies on pruning never trading current support for speculative support.
+    /// A depth clamp alone still drops bearing points through ties or the polygon's area selection.
+    #[test]
+    fn pruning_never_drops_a_bearing_point_for_a_separated_point() {
+        // Fixture: six anchors on a 2 m square; all assignments of bearing and separated points.
+        let anchors = [
+            (-1.0, -1.0),
+            (1.0, -1.0),
+            (1.0, 1.0),
+            (-1.0, 1.0),
+            (0.0, 1.0),
+            (0.0, -1.0),
+        ];
+        // Fixture: touching, sub-floor and above-floor bearing depths; 12 mm separation.
+        for bearing_depth in [0.0, 0.0005, 0.003] {
+            for mask in 0_u32..1 << anchors.len() {
+                let mut manifold = ContactManifold::new(
+                    anchors.iter().enumerate().map(|(i, &(x, z))| {
+                        let at = Vector::new(x, 0.0, z);
+                        let depth = if mask & (1 << i) != 0 {
+                            bearing_depth
+                        } else {
+                            -0.012
+                        };
+                        ContactPoint::new(at, at, at.real(), depth)
+                    }),
+                    Vector::Y,
+                );
+                manifold.prune_points();
+                assert!(!manifold.points.is_empty() && manifold.points.len() <= 4);
+                let bearing = mask.count_ones() as usize;
+                if bearing > 0 {
+                    assert!(manifold.points.iter().all(|point| point.penetration >= 0.0));
+                    if bearing <= 4 {
+                        assert_eq!(manifold.points.len(), bearing);
+                    }
+                }
+            }
         }
     }
 }

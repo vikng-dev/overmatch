@@ -24,10 +24,31 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 915 in all (MEASURED), 837 in upstream files and 78 in the
+of `src/` against the published crate: 984 in all (MEASURED), 906 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
+
+## Bearing-first manifold pruning (`src/collision/contact_types/mod.rs`): kept
+
+`ContactManifold::prune_points` makes bearing points (penetration >= 0) the eligible set whenever
+any exist; if at most four remain, it keeps them all. Larger bearing sets and wholly separated
+sets use upstream's distance/area selection and polygon order. Depth is clamped to zero before
+squaring, so separation cannot increase priority. The 1 mm floor remains a Resolution choice
+keeping zero-depth and coincident candidates selectable. Pruning's invariants assert in every build.
+
+Kept as an upstream bug fix: unsigned depth rewards separation, while the floor and depth-free
+area selection mean a signed clamp alone cannot prevent a separated point displacing bearing
+support. The private selection has no public seam. This patch adds 69 fork lines (MEASURED,
+including its engine-level test); the file has 74 total, including its existing pair-state field.
+The fork before this change has 915 lines, 837 in upstream files and 78 in the fork-only module
+(MEASURED against the SHA-256-verified cached published crate; changed lines count both sides).
+
+Guard beside the function:
+`collision::contact_types::tests::pruning_never_drops_a_bearing_point_for_a_separated_point`.
+It covers every bearing/separated assignment on a Fixture square, including touching and shallow
+bearing points. Unlike the other guards, it runs as an Avian library test. Local upstream draft:
+`upstream/avian-prune-points-unsigned-depth.md`.
 
 ## Child collider poses (`src/collision/collider/collider_transform/plugin.rs`): hook
 
