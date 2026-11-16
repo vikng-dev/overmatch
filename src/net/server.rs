@@ -135,15 +135,19 @@ pub fn run() {
     // `<id>.sim.glb`.
     app.add_systems(Startup, load_tank_sim_assets);
     install_battle(&mut app, BattleMode::shipped(), TICK);
-    app.insert_resource(bot_count);
+    app.insert_resource(bot_count).init_resource::<BotSpawns>();
     install_spawn_picks(&mut app);
     install_client_spawns(&mut app);
 
     app.add_systems(
         Update,
         (
-            spawn_bots.run_if(places_tanks),
-            respawn_dead_bots.run_if(in_combat),
+            (
+                spawn_bots.run_if(places_tanks),
+                respawn_dead_bots.run_if(in_combat),
+                commit_bot_spawns,
+            )
+                .chain(),
             open_gameplay_gate,
         ),
     );
@@ -1167,15 +1171,37 @@ impl BotCount {
     }
 }
 
-/// Spawn the [`BotCount`] ownerless bots once, each at its own [`bot_home_xz`].
+/// Bot lives evaluated this tick, in the order their systems pushed them, awaiting
+/// [`commit_bot_spawns`].
+#[derive(Resource, Default)]
+struct BotSpawns(Vec<BotSpawn>);
+
+/// One bot grounded at its home, and the life it begins.
+struct BotSpawn {
+    bot: Bot,
+    pos: Vec3,
+    life: BotLife,
+}
+
+enum BotLife {
+    /// The first life of spawn-cohort bot `.0`, whose identity is allocated at commit.
+    First(u32),
+    /// A knocked-out bot's next life: its `root`, that root's `Rig.turret`, and the combatant it
+    /// keeps.
+    Replaces {
+        root: Entity,
+        turret: Entity,
+        combatant: CombatantId,
+    },
+}
+
+/// Evaluate the [`BotCount`] ownerless bots once, each at its own [`bot_home_xz`].
 fn spawn_bots(
     bots: Query<(), With<Bot>>,
     count: Res<BotCount>,
-    assets: Res<PendingTankAssets>,
     source: TankSimSource,
-    mut combatants: ResMut<CombatantIds>,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
-    mut commands: Commands,
+    mut spawns: ResMut<BotSpawns>,
 ) {
     if !bots.is_empty() || count.0 == 0 {
         return;
@@ -1194,16 +1220,16 @@ fn spawn_bots(
         .collect();
     let homes: Vec<Vec2> = bots.iter().map(|bot| bot.home).collect();
     let placed = ground_spawns(height.as_deref(), &homes, content.stance(BOT_SPAWN_TURN));
-    // Committed in bot order: identities and structural changes.
-    for (index, (bot, pos)) in (0..).zip(bots.into_iter().zip(placed)) {
-        let combatant = combatants.bot(index);
-        let life = combatants.life(combatant);
-        let root = spawn_bot_entity(&mut commands, &assets, content, bot, combatant, life, pos);
-        info!(
-            "server: spawned circling bot {index} tank {root} (OVERMATCH_BOT) at ({:.1}, {:.1}, {:.1})",
-            pos.x, pos.y, pos.z
-        );
-    }
+    // Pushed in bot order, the order identities are allocated in.
+    spawns.0.extend(
+        (0..)
+            .zip(bots.into_iter().zip(placed))
+            .map(|(index, (bot, pos))| BotSpawn {
+                bot,
+                pos,
+                life: BotLife::First(index),
+            }),
+    );
 }
 
 /// A bot's turn at spawn: none; its brain turns it from there.
@@ -1226,7 +1252,7 @@ fn ground_spawns(grid: Option<&HeightGrid>, points: &[Vec2], stance: Stance) -> 
 }
 
 /// Construct an ownerless bot, for both initial spawn and respawn. `spawn_pos` is `bot.home`
-/// resolved by `terrain_grid::spawn_pos` at both call sites, under the tank's stance at
+/// grounded by [`ground_spawns`] in both evaluating systems, under the tank's stance at
 /// [`BOT_SPAWN_TURN`] — never a constant.
 fn spawn_bot_entity(
     commands: &mut Commands,
@@ -1273,21 +1299,20 @@ fn spawn_bot_entity(
     )
 }
 
-/// The game's damage model: replace a knocked-out bot once the same scored opening used by
-/// players is due. Its combatant and life select the mode's wait on the authority clock.
+/// The game's damage model: evaluate the replacement of a knocked-out bot once the same scored
+/// opening used by players is due. Its combatant and life select the mode's wait on the authority
+/// clock.
 fn respawn_dead_bots(
     dead: Query<(Entity, &CombatantLife, &Rig, &CombatantId, &Bot), With<TankKnockedOut>>,
-    assets: Res<PendingTankAssets>,
     source: TankSimSource,
     gate: RespawnGate,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
-    mut combatants: ResMut<CombatantIds>,
-    mut commands: Commands,
+    mut spawns: ResMut<BotSpawns>,
 ) {
     // (root, its Rig.turret) for every bot now due. Capture the turret handle BEFORE despawning the
     // root: if the bot cooked off, `damage::launch_turrets_on_cookoff` stripped the turret's
     // `ChildOf` and made it a free body, so it is NOT a descendant of the root and the recursive
-    // root despawn below would miss it — leaking one launched turret per respawn.
+    // root despawn at commit would miss it — leaking one launched turret per respawn.
     let due: Vec<(Entity, Entity, CombatantId, Bot)> = dead
         .iter()
         .filter(|(_, life, _, combatant, _)| gate.opening(**combatant, **life) == Opening::Open)
@@ -1299,24 +1324,66 @@ fn respawn_dead_bots(
     let content = source.get();
     let homes: Vec<Vec2> = due.iter().map(|&(_, _, _, bot)| bot.home).collect();
     let placed = ground_spawns(height.as_deref(), &homes, content.stance(BOT_SPAWN_TURN));
-    // Committed in query order: the bots' replacements commute, each its own combatant.
-    for ((root, turret, combatant, bot), pos) in due.into_iter().zip(placed) {
-        // Recursive despawn sweeps the root and its attached rig (children + relationship targets).
-        commands.entity(root).despawn();
-        // The launched turret, if it detached on cookoff. `try_despawn` is a silent no-op when the
-        // turret is still an attached child (already swept above) or otherwise gone — no panic, no
-        // double-free, so the one branch covers both the cookoff and crew-loss deaths.
-        commands.entity(turret).try_despawn();
-        let fresh = spawn_bot_entity(
-            &mut commands,
-            &assets,
-            content,
-            bot,
-            combatant,
-            combatants.life(combatant),
-            pos,
-        );
-        info!("server: respawned bot as {fresh} (was {root})");
+    // Pushed in query order: the bots' replacements commute, each its own combatant.
+    spawns.0.extend(
+        due.into_iter()
+            .zip(placed)
+            .map(|((root, turret, combatant, bot), pos)| BotSpawn {
+                bot,
+                pos,
+                life: BotLife::Replaces {
+                    root,
+                    turret,
+                    combatant,
+                },
+            }),
+    );
+}
+
+/// Commit the evaluated [`BotSpawns`] in push order: each life's identity, then its structural
+/// changes. The one bot step that takes [`CombatantIds`]; evaluation never holds it.
+fn commit_bot_spawns(
+    mut spawns: ResMut<BotSpawns>,
+    assets: Res<PendingTankAssets>,
+    source: TankSimSource,
+    mut combatants: ResMut<CombatantIds>,
+    mut commands: Commands,
+) {
+    if spawns.0.is_empty() {
+        return;
+    }
+    let content = source.get();
+    for BotSpawn { bot, pos, life } in spawns.0.drain(..) {
+        match life {
+            BotLife::First(index) => {
+                let combatant = combatants.bot(index);
+                let life = combatants.life(combatant);
+                let root =
+                    spawn_bot_entity(&mut commands, &assets, content, bot, combatant, life, pos);
+                info!(
+                    "server: spawned circling bot {index} tank {root} (OVERMATCH_BOT) at ({:.1}, {:.1}, {:.1})",
+                    pos.x, pos.y, pos.z
+                );
+            }
+            BotLife::Replaces {
+                root,
+                turret,
+                combatant,
+            } => {
+                // Recursive despawn sweeps the root and its attached rig (children + relationship
+                // targets).
+                commands.entity(root).despawn();
+                // The launched turret, if it detached on cookoff. `try_despawn` is a silent no-op
+                // when the turret is still an attached child (already swept above) or otherwise
+                // gone — no panic, no double-free, so the one branch covers both the cookoff and
+                // crew-loss deaths.
+                commands.entity(turret).try_despawn();
+                let life = combatants.life(combatant);
+                let fresh =
+                    spawn_bot_entity(&mut commands, &assets, content, bot, combatant, life, pos);
+                info!("server: respawned bot as {fresh} (was {root})");
+            }
+        }
     }
 }
 
@@ -1834,7 +1901,8 @@ mod tests {
             })
             .insert_resource(BotCount(4))
             .init_resource::<CombatantIds>()
-            .add_systems(Update, spawn_bots);
+            .init_resource::<BotSpawns>()
+            .add_systems(Update, (spawn_bots, commit_bot_spawns).chain());
         app.update();
         app.update();
 
@@ -2578,7 +2646,11 @@ mod tests {
             let mut app = placement_app();
             app.insert_resource(wait)
                 .insert_resource(BotCount(1))
-                .add_systems(Update, (spawn_bots, respawn_dead_bots).chain());
+                .init_resource::<BotSpawns>()
+                .add_systems(
+                    Update,
+                    (spawn_bots, respawn_dead_bots, commit_bot_spawns).chain(),
+                );
             app.update();
             let mut root = app
                 .world_mut()
