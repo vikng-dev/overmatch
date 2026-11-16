@@ -788,7 +788,7 @@ pub(crate) struct ViewTree<'w, 's> {
 pub(crate) struct Dress<'w, 's> {
     tree: ViewTree<'w, 's>,
     data: Res<'w, SurfaceData>,
-    blueprint: Option<Res<'w, crate::bake::TankBlueprint>>,
+    blueprint: Res<'w, crate::bake::TankBlueprint>,
     vehicles: ResMut<'w, SurfaceVehicles>,
     standard: Res<'w, Assets<StandardMaterial>>,
     surfaces: ResMut<'w, Assets<TankSurfaceMaterial>>,
@@ -806,10 +806,7 @@ impl Dress<'_, '_> {
         };
         let scene = scene.0.id();
         let registry = SubstanceRegistry::shipped_static();
-        let spec = self.blueprint.as_deref().map(|blueprint| &*blueprint.spec);
-        let articulated: HashSet<&str> = spec
-            .map(|spec| spec.articulated_nodes().collect())
-            .unwrap_or_default();
+        let articulated: HashSet<&str> = self.blueprint.spec.articulated_nodes().collect();
         let articulated = |name: &str| articulated.contains(name);
 
         let template: HashSet<Entity> = crate::track::link_view::find_template(
@@ -1390,6 +1387,8 @@ mod tests {
             .init_asset::<ShaderBuffer>()
             .init_asset::<WorldAsset>()
             .insert_resource(shipped())
+            // The shipped tank's construction: the dress reads which nodes articulate.
+            .insert_resource(crate::tank::shipped_construction().0)
             .init_resource::<SurfaceVehicles>()
             .init_resource::<TerrainShadow>();
         app

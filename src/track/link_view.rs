@@ -824,20 +824,15 @@ fn bind_link_template(
         );
     }
 
-    // Search direct primitive children, then the node itself. A descendant search could bind
-    // `Link_Box`'s primitive, one level deeper. See the name ambiguity above.
+    // Bevy's glTF loader spawns each primitive as a child of its node (bevy_gltf 0.20.1
+    // `loader/mod.rs:1631`, `:1680`), so the shoe is a direct primitive child. A descendant search
+    // could bind `Link_Box`'s primitive, one level deeper. See the name ambiguity above.
     let (shoe_entity, source) = children
         .get(link_entity)
         .ok()
         .into_iter()
         .flatten()
         .find_map(|&child| meshes_of.get(child).ok().map(|mesh| (child, mesh)))
-        .or_else(|| {
-            meshes_of
-                .get(link_entity)
-                .ok()
-                .map(|mesh| (link_entity, mesh))
-        })
         .unwrap_or_else(|| {
             panic!(
                 "track links: the `{LINK_NODE}` template node carries no mesh primitive; \
