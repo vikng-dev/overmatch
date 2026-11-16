@@ -13,7 +13,13 @@ Each positional argument is `LABEL=path.jsonl` (or just `path.jsonl`, labelled b
 stem). With two or more files, a DELTA table prints each scenario minus the
 `--baseline` label (median-to-median), i.e. what firing adds over idle — the
 answer to "what does the MG cost per tick". Pass `--rounds-per-s R` to convert the
-march delta into a per-round cost.
+march delta into a per-round cost, at the tick rate each trace's meta row declares.
+
+A trace this table cannot be read from is refused with its file and line, and the CLI exits 2: a
+malformed or unknown row, a tick row lacking a field, no meta row or a second one, a meta tick
+rate that is not finite and positive, no tick rows, or a delta across traces of different rates.
+A final line with no newline after it is the recorder stopped mid-write: it is omitted, and
+stderr says so.
 
 Usage:
     uv run scripts/cost/analyze.py idle=idle.server.jsonl fire=fire.server.jsonl \
@@ -24,8 +30,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
+
+# The numbers every tick row carries (src/cost.rs, `write_tick`).
+TICK_FIELDS = ("us", "mus", "np", "ne", "nt", "mc")
+
+
+class Refused(Exception):
+    """A trace the tables cannot be computed from, naming the file, the line and the fault."""
+
+
+def finite(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def pct(xs, q):
@@ -66,51 +84,54 @@ def linfit(xs, ys):
 
 
 def parse(path):
-    meta = {}
+    """The trace's meta row, its tick rate and its tick rows (module doc: what is refused)."""
+    meta = None
     ticks = []
-    bad = 0
     with open(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
+        lines = fh.read().split("\n")
+    for number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as error:
+            if number == len(lines):
+                print(f"  {path}:{number}: torn final line omitted", file=sys.stderr)
                 continue
-            try:
-                row = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                bad += 1
-                continue
-            if row.get("k") == "meta":
-                meta = row
-            elif row.get("k") == "tick":
-                ticks.append(row)
-    return meta, ticks, bad
+            raise Refused(f"{path}:{number}: malformed row ({error})") from error
+        kind = row.get("k") if isinstance(row, dict) else None
+        if kind == "meta":
+            if meta is not None:
+                raise Refused(f"{path}:{number}: a second meta row")
+            meta = row
+        elif kind == "tick":
+            missing = [field for field in TICK_FIELDS if not finite(row.get(field))]
+            if missing:
+                raise Refused(f"{path}:{number}: tick row lacks a finite {', '.join(missing)}")
+            ticks.append(row)
+        else:
+            raise Refused(f"{path}:{number}: a row that is neither meta nor tick")
+    if meta is None:
+        raise Refused(f"{path}: no meta row (src/cost.rs writes it at startup)")
+    hz = meta.get("tick_hz")
+    if not finite(hz) or hz <= 0:
+        raise Refused(f"{path}: meta tick_hz {hz!r} is not a finite positive rate")
+    if not isinstance(meta.get("role"), str):
+        raise Refused(f"{path}: meta row names no role")
+    if not ticks:
+        raise Refused(f"{path}: no tick rows")
+    return meta, hz, ticks
 
 
 def summarize(label, path):
-    meta, ticks, bad = parse(path)
-    if not ticks:
-        print(f"  {label}: no tick rows in {path} (bad lines: {bad})", file=sys.stderr)
-        return None
-    us = [t["us"] for t in ticks]
-    mus = [t["mus"] for t in ticks]
-    np_ = [t["np"] for t in ticks]
-    ne = [t["ne"] for t in ticks]
-    nt = [t["nt"] for t in ticks]
-    mc = [t["mc"] for t in ticks]
-    hz = meta.get("tick_hz", 64.0)
-    dur = len(ticks) / hz
+    meta, hz, ticks = parse(path)
     return {
         "label": label,
-        "role": meta.get("role", "?"),
+        "role": meta["role"],
+        "hz": hz,
         "n": len(ticks),
-        "dur": dur,
-        "us": us,
-        "mus": mus,
-        "np": np_,
-        "ne": ne,
-        "nt": nt,
-        "mc": mc,
-        "bad": bad,
+        "dur": len(ticks) / hz,
+        **{field: [t[field] for t in ticks] for field in TICK_FIELDS},
     }
 
 
@@ -144,8 +165,11 @@ def print_block(s):
 def print_deltas(blocks, base_label, rounds_per_s):
     base = next((b for b in blocks if b["label"] == base_label), None)
     if base is None:
-        print(f"\n(no baseline '{base_label}' — skipping delta table)", file=sys.stderr)
-        return
+        raise Refused(f"--baseline {base_label!r} names no trace given")
+    rates = {b["hz"] for b in blocks}
+    if len(rates) > 1:
+        raise Refused("the delta table subtracts per-tick means; the traces run at "
+                      f"{sorted(rates)} Hz")
     print(f"\n=== DELTA vs baseline '{base_label}' (each scenario minus idle) ===")
     print(f"  {'scenario':<20}{'Δtick us p50':>14}{'Δtick us mean':>15}"
           f"{'Δmarch mean':>14}{'per-round march':>18}")
@@ -169,22 +193,21 @@ def main():
                     help="rounds/s in the firing scenarios, to derive per-round march cost")
     args = ap.parse_args()
 
-    blocks = []
-    for spec in args.files:
-        if "=" in spec:
-            label, path = spec.split("=", 1)
-        else:
-            label, path = Path(spec).stem, spec
-        s = summarize(label, path)
-        if s is None:
-            continue
-        s["hz"] = 64.0
-        s["role_scale"] = 1.0
-        blocks.append(s)
-        print_block(s)
-
-    if args.baseline:
-        print_deltas(blocks, args.baseline, args.rounds_per_s)
+    try:
+        blocks = []
+        for spec in args.files:
+            if "=" in spec:
+                label, path = spec.split("=", 1)
+            else:
+                label, path = Path(spec).stem, spec
+            blocks.append(summarize(label, path))
+        for s in blocks:
+            print_block(s)
+        if args.baseline:
+            print_deltas(blocks, args.baseline, args.rounds_per_s)
+    except (Refused, OSError) as error:
+        print(f"analyze: refused: {error}", file=sys.stderr)
+        return 2
     return 0
 
 
