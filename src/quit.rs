@@ -25,7 +25,10 @@
 
 use bevy::ecs::schedule::MainThreadExecutor;
 use bevy::prelude::*;
-use bevy::render::pipelined_rendering::{RenderAppChannels, RenderExtractApp};
+use bevy::render::RenderApp;
+use bevy::render::pipelined_rendering::{
+    PipelinedRenderingPlugin, RenderAppChannels, RenderExtractApp,
+};
 use bevy::tasks::ComputeTaskPool;
 
 /// Mounted once per WINDOWED root, and every windowed root is one of these four:
@@ -39,18 +42,38 @@ use bevy::tasks::ComputeTaskPool;
 /// The headless server has no render app and no application menu, so there is nothing here for it
 /// to do; it is the one root that does not mount this.
 pub(crate) fn plugin(app: &mut App) {
-    retire_renderer_on_exit(app);
+    app.add_plugins(RetireRenderer);
     #[cfg(target_os = "macos")]
     app.add_plugins(terminate::TerminateRoute);
 }
 
-/// Retire the last render frame while the main world's window owners still live. Winit clears
-/// them in `exiting`; waiting in RenderAppChannels::drop is later than this boundary.
-fn retire_renderer_on_exit(app: &mut App) {
-    // Headless roots and roots without pipelined rendering have no render thread to retire.
-    let Some(extract) = app.get_sub_app_mut(RenderExtractApp) else {
-        return;
-    };
+/// Retires the last render frame while the main world's window owners still live. Winit clears
+/// them in `exiting`; waiting in RenderAppChannels::drop is later than this boundary. Decided in
+/// `finish`, so the answer does not depend on whether this root added `DefaultPlugins` before or
+/// after the quit plugin.
+struct RetireRenderer;
+
+impl Plugin for RetireRenderer {
+    fn build(&self, _app: &mut App) {}
+
+    fn finish(&self, app: &mut App) {
+        // No render thread to retire: a windowless root mounts no pipelined rendering, and a
+        // GPU-less one (`backends: None`) mounts it with no `RenderApp` to pipeline. `RenderApp`
+        // is still a sub-app here; `PipelinedRenderingPlugin::cleanup` moves it to its thread.
+        if !app.is_plugin_added::<PipelinedRenderingPlugin>()
+            || app.get_sub_app(RenderApp).is_none()
+        {
+            return;
+        }
+        let extract = app.get_sub_app_mut(RenderExtractApp).expect(
+            "PipelinedRenderingPlugin, added after RenderPlugin, builds RenderExtractApp beside \
+             the RenderApp it pipelines",
+        );
+        retire_renderer_on_exit(extract);
+    }
+}
+
+fn retire_renderer_on_exit(extract: &mut SubApp) {
     let mut inner = extract
         .take_extract()
         .expect("PipelinedRenderingPlugin installs its renderer extract with RenderExtractApp");
@@ -326,11 +349,12 @@ mod tests {
     use super::*;
 
     /// Window teardown may invalidate renderer inputs. Every AppExit writer, including capture
-    /// completion and Cmd+Q, needs the pipelined render app dropped before winit clears the world.
+    /// completion and Cmd+Q, needs the pipelined render app dropped before winit clears the world,
+    /// whichever order the root mounts the renderer and this plugin in: here this plugin comes
+    /// first, before `RenderExtractApp` exists. Fails if the retire is decided at build.
     #[test]
     fn an_exit_frame_retires_the_render_app_before_window_teardown() {
         use bevy::app::AppExit;
-        use bevy::render::{RenderApp, pipelined_rendering::PipelinedRenderingPlugin};
         use std::sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
@@ -350,7 +374,7 @@ mod tests {
         let mut render = SubApp::new();
         render.insert_resource(Retired(Arc::clone(&retired)));
         app.insert_sub_app(RenderApp, render);
-        app.add_plugins((PipelinedRenderingPlugin, plugin));
+        app.add_plugins((plugin, PipelinedRenderingPlugin));
         app.finish();
         app.cleanup();
         app.update();
@@ -371,11 +395,35 @@ mod tests {
         app.update();
     }
 
-    /// A windowless root has no application delegate and needs no menu routing.
+    /// A root without a window or a renderer needs neither exit route: no application delegate,
+    /// and no render thread, whether it mounts no pipelined rendering (windowless) or mounts it
+    /// with no `RenderApp` to pipeline (GPU-less, the headless fixtures' shape). Fails if the
+    /// retire is keyed on the pipelined plugin alone.
     #[test]
-    fn a_windowless_root_needs_no_application_delegate() {
+    fn a_root_without_a_window_or_renderer_needs_no_exit_route() {
+        for pipelined in [false, true] {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins);
+            if pipelined {
+                app.add_plugins(PipelinedRenderingPlugin);
+            }
+            app.add_plugins(plugin);
+            app.finish();
+            app.cleanup();
+            app.update();
+        }
+    }
+
+    /// Pipelined rendering mounted before its `RenderApp` existed builds nothing (Bevy reads
+    /// `PipelinedRenderingPlugin` added before `RenderPlugin` as "do nothing"); the root is
+    /// refused at finish, naming the order, rather than left without its retire.
+    #[test]
+    #[should_panic(expected = "PipelinedRenderingPlugin, added after RenderPlugin")]
+    fn a_renderer_without_its_pipelined_extract_is_refused() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(plugin);
-        app.update();
+        app.add_plugins((MinimalPlugins, PipelinedRenderingPlugin));
+        app.insert_sub_app(RenderApp, SubApp::new());
+        app.add_plugins(plugin);
+        app.finish();
     }
 }
