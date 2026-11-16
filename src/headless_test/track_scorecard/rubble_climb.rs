@@ -992,7 +992,6 @@ fn park_read(bed: &mut Bed) -> ParkTick {
     use avian3d::dynamics::solver::islands::BodyIslandNode;
     bed.pieces = live_pieces(bed);
     let work = bed.take_work();
-    let tank_pairs = bed.solver_contacts().0;
     let world = bed.app.world();
     let to_sleep = world.resource::<TimeToSleep>().0;
     let island = |e: Entity| {
@@ -1101,7 +1100,11 @@ fn park_read(bed: &mut Bed) -> ParkTick {
             .resource::<ContactGraph>()
             .iter_active_touching()
             .count(),
-        tank_pairs,
+        tank_pairs: world
+            .resource::<ContactGraph>()
+            .iter_active_touching()
+            .filter(|pair| pair.body1 == Some(bed.tank) || pair.body2 == Some(bed.tank))
+            .count(),
         constraints: world
             .resource::<ConstraintGraph>()
             .colors
