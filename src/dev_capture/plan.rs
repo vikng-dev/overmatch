@@ -603,7 +603,7 @@ impl std::fmt::Display for PlanError {
             ),
             Self::FollowWithoutTank(anchor) => write!(
                 f,
-                "frames.camera: Follow requires a controlled tank, but {anchor:?} supplies none; choose Pose or use an offline scenario or online client"
+                "frames.camera: Follow follows the scenario's controlled tank; only a Scenario root guarantees it at the anchor ({anchor:?} does not); choose a fixed camera (Pose) or a Scenario root"
             ),
             Self::ImpactOffTerrain { x, z, half_extent } => write!(
                 f,
@@ -739,8 +739,7 @@ impl CapturePlan {
         }
         for impact in &self.impacts {
             finite_at("impacts.at", impact.at)?;
-            let numbers = [impact.x, impact.z];
-            if !numbers.iter().all(|n| n.is_finite()) {
+            if ![impact.x, impact.z].iter().all(|n| n.is_finite()) {
                 return Err(format!("impacts: {impact:?} needs finite coordinates"));
             }
         }

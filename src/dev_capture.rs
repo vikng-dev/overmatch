@@ -117,7 +117,7 @@ pub(crate) fn build_plan(
         .frames
         .as_ref()
         .is_some_and(|frames| matches!(frames.camera, plan::Camera::Follow { .. }))
-        && !matches!(anchor, Anchor::Scenario | Anchor::Startup)
+        && !matches!(anchor, Anchor::Scenario)
     {
         return Err(plan::PlanError::FollowWithoutTank(anchor));
     }
@@ -811,19 +811,22 @@ mod tests {
         assert_cues(&server, Update, &["wall::fire_on_cue"]);
     }
 
-    /// A Follow camera cannot bind tankless roots; operators get the field and the repair before
-    /// a frame or cue runs, rather than an assertion when the target arms.
+    /// Only Scenario guarantees Follow's controlled tank at the anchor; operators on other roots
+    /// get the field and the repair before a frame or cue runs.
     #[test]
     fn follow_is_refused_at_composition_admission() {
         // Fixture camera on a root with no admitted controlled tank.
         let fixture = plan::CapturePlan::parse(r#"(frames: (out: "/tmp/overmatch-follow-fixture.png", camera: Follow(offset: (1.0, 2.0, 3.0))))"#).unwrap();
-        for anchor in [Anchor::TankView, Anchor::TrackRig] {
+        for anchor in [Anchor::TankView, Anchor::TrackRig, Anchor::Startup] {
             let mut app = App::new();
             let error = build_plan(&mut app, anchor, &fixture).unwrap_err();
             assert!(matches!(error, plan::PlanError::FollowWithoutTank(_)));
             let message = error.to_string();
             assert!(
-                message.contains("frames.camera") && message.contains("Pose"),
+                message.contains("frames.camera")
+                    && message.contains("Pose")
+                    && message.contains("Scenario root")
+                    && message.contains("at the anchor"),
                 "{message}"
             );
             assert!(
@@ -831,79 +834,6 @@ mod tests {
                 "refusal precedes installation"
             );
         }
-    }
-
-    /// Offline and online capture operators can follow their controlled tank. The shipped
-    /// builder must admit both roots and keep following after the frame target arms.
-    #[test]
-    fn follow_tracks_the_controlled_tank_on_scenario_and_startup_roots() {
-        for anchor in [Anchor::Scenario, Anchor::Startup] {
-            let path = std::env::temp_dir().join(format!(
-                "overmatch-follow-{anchor:?}-{}.png",
-                std::process::id()
-            ));
-            let fixture = plan::CapturePlan::parse(&format!(
-                r#"(frames: (out: {path:?}, at: [0.0], camera: Follow(offset: (1.0, 2.0, 3.0))))"#
-            ))
-            .unwrap();
-            let mut app = App::new();
-            app.add_plugins(MinimalPlugins)
-                .init_resource::<Assets<Image>>()
-                .insert_resource(State::new(crate::state::AppState::Playing));
-            build_plan(&mut app, anchor, &fixture).unwrap();
-            let tank = app
-                .world_mut()
-                .spawn((
-                    crate::tank::Tank,
-                    crate::tank::Controlled,
-                    crate::tank::TankViewReady,
-                    Transform::IDENTITY,
-                ))
-                .id();
-            let camera = app
-                .world_mut()
-                .spawn((crate::view::PlayerView, Transform::IDENTITY))
-                .id();
-            for position in [Vec3::ZERO, Vec3::new(4.0, 5.0, 6.0)] {
-                // Fixture movement: the camera must follow the owner, not its initial pose.
-                app.world_mut()
-                    .get_mut::<Transform>(tank)
-                    .unwrap()
-                    .translation = position;
-                app.update();
-                assert!(app.world().resource::<Capture>().target.is_some());
-                let transform = app.world().get::<Transform>(camera).unwrap();
-                assert_eq!(transform.translation, position + Vec3::new(1.0, 2.0, 3.0));
-                assert!(
-                    transform
-                        .forward()
-                        .dot((position - transform.translation).normalize())
-                        > 0.999
-                );
-            }
-        }
-    }
-
-    /// Startup also serves tankless servers; Follow must still fail when retargeting finds no
-    /// controlled tank, rather than silently capturing an unrelated view.
-    #[test]
-    #[should_panic(
-        expected = "frames.camera Follow needs a controlled tank before the first frame"
-    )]
-    fn startup_follow_requires_a_controlled_tank_when_the_target_arms() {
-        let path = std::env::temp_dir().join(format!(
-            "overmatch-follow-tankless-{}.png",
-            std::process::id()
-        ));
-        let fixture = plan::CapturePlan::parse(&format!(
-            r#"(frames: (out: {path:?}, at: [0.0], camera: Follow(offset: (1.0, 2.0, 3.0))))"#
-        ))
-        .unwrap();
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .init_resource::<Assets<Image>>();
-        build_plan(&mut app, Anchor::Startup, &fixture).unwrap();
-        app.update();
     }
 
     /// The game's damage-model terrain cues must refuse coordinates outside either the loaded
