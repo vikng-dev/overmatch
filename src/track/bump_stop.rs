@@ -32,7 +32,7 @@ pub(crate) struct SidePlate;
 
 /// One tank kind's body-local stops, side plates and soft runs, with the friction of the track's
 /// substance ([`crate::spec::TrackSpec::friction`]).
-#[derive(Resource, Clone)]
+#[derive(Clone)]
 pub(crate) struct TrackColliders {
     colliders: PerSide<Collider>,
     /// Inboard then outboard, as in [`RigGeom::grip_columns`].

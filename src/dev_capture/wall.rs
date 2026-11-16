@@ -156,7 +156,7 @@ fn staging() -> &'static Staging {
 /// The cue's shots in order, each with its second, its aim and whether it went off; the
 /// preview; the framing once found.
 #[derive(Resource)]
-struct Cue {
+pub(super) struct Cue {
     shots: Vec<(What, f32, Option<BoundAim>, bool)>,
     preview: Option<Preview>,
     camera: Option<Transform>,
@@ -185,13 +185,17 @@ pub(crate) fn offline_wall_plugin(app: &mut App) {
     let Some(cue) = cue_from_plan() else {
         return;
     };
-    app.insert_resource(cue)
-        .insert_resource(crate::camera::CameraCaptive(true))
-        .add_systems(PostStartup, (place_preview, check_wall_target).chain())
-        .add_systems(Update, fire_on_cue);
     let placed = super::plan()
         .and_then(|plan| plan.frames.as_ref())
         .is_some_and(|frames| frames.camera != super::plan::Camera::Player);
+    install(app, cue, placed);
+}
+
+pub(super) fn install(app: &mut App, cue: Cue, placed: bool) {
+    app.insert_resource(cue)
+        .insert_resource(crate::camera::CameraCaptive(true))
+        .add_systems(PostStartup, (place_preview, check_wall_target).chain())
+        .add_systems(Update, fire_on_cue.in_set(super::clock::Cues));
     if !placed {
         app.add_systems(
             PostUpdate,
@@ -203,22 +207,30 @@ pub(crate) fn offline_wall_plugin(app: &mut App) {
 /// The dedicated server's cue (module doc): it fires, and its clients frame the wall.
 pub(crate) fn server_wall_plugin(app: &mut App) {
     if let Some(cue) = cue_from_plan() {
-        app.insert_resource(cue)
-            .add_systems(PostStartup, check_wall_target)
-            .add_systems(Update, fire_on_cue);
+        install_server(app, cue);
     }
 }
 
-/// The plan's `wall` cue, `None` when the plan has none.
+pub(super) fn install_server(app: &mut App, cue: Cue) {
+    super::clock::install(app, super::Anchor::Startup);
+    app.insert_resource(cue)
+        .add_systems(PostStartup, check_wall_target)
+        .add_systems(Update, fire_on_cue.in_set(super::clock::Cues));
+}
+
 fn cue_from_plan() -> Option<Cue> {
     let wall = super::plan()?.wall.as_ref()?;
+    Some(cue_for(wall))
+}
+
+pub(super) fn cue_for(wall: &super::plan::Wall) -> Cue {
     staging();
     info!("capture: game's environment destruction wall cue {wall:?}");
-    Some(Cue {
+    Cue {
         shots: Vec::new(), // check_wall_target binds the shots before Update can fire them.
         preview: wall.preview.clone(),
         camera: None,
-    })
+    }
 }
 
 /// The camera looks at the middle of the aim point and foot; [`staging`] owns its offsets (m).

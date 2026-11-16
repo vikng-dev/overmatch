@@ -9,8 +9,12 @@ use crate::tank::Controlled;
 
 pub(crate) fn offline_repair_plugin(app: &mut App) {
     if super::plan().is_some_and(|plan| plan.repair.is_some()) {
-        app.add_systems(Update, start_panel_repair);
+        install(app);
     }
+}
+
+pub(super) fn install(app: &mut App) {
+    app.add_systems(Update, start_panel_repair.in_set(super::clock::Cues));
 }
 
 fn start_panel_repair(

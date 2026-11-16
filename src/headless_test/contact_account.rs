@@ -327,12 +327,12 @@ fn contact_account_snag() {
     let at = app
         .world_mut()
         .run_system_once(
-            move |source: crate::tank::TankSimSource,
+            move |template: Res<crate::tank::TankTemplate>,
                   grid: Res<crate::terrain_grid::HeightGrid>| {
                 crate::terrain_grid::spawn_pos(
                     Some(&grid),
                     Vec2::new(-641.434, 153.384),
-                    source.get().stance(rotation),
+                    template.stance(rotation),
                 )
             },
         )

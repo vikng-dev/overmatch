@@ -541,7 +541,9 @@ pub fn run() -> AppExit {
     if !simulate {
         // Documentation frames to disk (the Join menu, a connect screen); exits once they are.
         // Inert unless a capture plan takes frames.
-        app.add_plugins(crate::dev_capture::plugin);
+        app.add_plugins(crate::dev_capture::CapturePlugin(
+            crate::dev_capture::Anchor::Startup,
+        ));
     }
     // Passive jitter-trace recorder: frame + tick rows with link/interpolation extras. Idle unless
     // `SPIKE_TRACE` is set.
@@ -1286,7 +1288,7 @@ where
 }
 
 /// Input can precede the body; player-facing ownership cannot. `Rig` and `TankViews` enter
-/// together in `tank::spawn::insert_root_components`, after the body's children are assembled.
+/// together in `tank::template::TankTemplate::assemble`, after the body's children are assembled.
 fn control_claim_plugin(app: &mut App) {
     app.add_observer(claim_input_slot)
         .add_observer(claim_complete_tank);

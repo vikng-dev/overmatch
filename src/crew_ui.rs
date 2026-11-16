@@ -241,7 +241,7 @@ fn update_status_panel(
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
-    visibility.set_if_neq(Visibility::Visible);
+    visibility.set_if_neq(Visibility::Inherited);
 
     // Crew active/total: this tank's seats, a seat down when flagged `Dead` (the notion the crew bar
     // draws too).
@@ -264,8 +264,7 @@ fn update_status_panel(
 
     // Weapons: name + per-fire-mode state, flagged `no-fire` when the fire gate is unmet (knocked-out
     // gunner/loader/breech). A `Single` reads as the classic READY / reload countdown; an
-    // `Automatic` shows its belt count, or the swap countdown while the belt is dry. Sorted by
-    // name so the order is stable frame to frame.
+    // `Automatic` shows its belt count, or the swap countdown while the belt is dry.
     let mut weapon_entries = weapons
         .iter()
         .filter(|(_, _, root)| root.0 == tank)
@@ -320,7 +319,6 @@ fn update_status_panel(
             .join("   ")
     };
 
-    // Terminal state: ALIVE, or the knock-out and its cause.
     let state = knocked_out
         .map(|ko| format!("KNOCKED OUT ({})", ko.reason.label()))
         .unwrap_or_else(|| "ALIVE".to_string());
@@ -500,8 +498,15 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(crate::WeaponClock(crate::sim_tick::SimTick::new(0)));
         world.insert_resource(Time::<Fixed>::default());
+        // Fixture: capture hides the HUD root; showing its card must inherit that decision.
+        let root = world.spawn(Visibility::Hidden).id();
         let panel = world
-            .spawn((StatusPanelText, Text::new(""), Visibility::Visible))
+            .spawn((
+                StatusPanelText,
+                Text::new(""),
+                Visibility::Visible,
+                ChildOf(root),
+            ))
             .id();
         let tank = world
             .spawn((
@@ -572,7 +577,7 @@ mod tests {
                 assert!(text.contains(expected), "{text}");
                 assert_eq!(
                     *world.get::<Visibility>(panel).unwrap(),
-                    Visibility::Visible
+                    Visibility::Inherited
                 );
             }
         }

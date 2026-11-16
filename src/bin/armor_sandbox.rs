@@ -10,6 +10,8 @@ fn main() -> AppExit {
     overmatch::windowed_runtime(&mut app, Window::default());
     app.add_plugins(overmatch::sandbox::plugin)
         // Documentation frames; inert without `OVERMATCH_CAPTURE`.
-        .add_plugins(overmatch::dev_capture::plugin)
+        .add_plugins(overmatch::dev_capture::CapturePlugin(
+            overmatch::dev_capture::Anchor::TankView,
+        ))
         .run()
 }

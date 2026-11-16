@@ -1,12 +1,12 @@
 //! A capture plan's `scene.demo: TrackPrints(…)` (`dev_capture::plan::Demo`), a dev capture of the
-//! track prints (cosmetic terrain marks) on the offline route. From the plan's app second `at`, once
-//! it has spawned, the player's tank is set down at world XZ `(x, z)`, its travel heading
+//! track prints (cosmetic terrain marks) on the offline route. From the plan's anchored second
+//! `at`, the player's tank is set down at world XZ `(x, z)`, its travel heading
 //! `heading_deg` from `+Z` toward `+X`; every later phase runs from that set-down. Once settled it
 //! drives straight, stops, pivots on the spot at `steer`, stops, and drives out of the pivot. The
 //! camera is then held low, about 10 m off, first on the straight drive's track and then
 //! on the pivot, each at the three relief levels in turn ([`crate::settings::TrackPrintRelief`],
 //! forced through [`super::ReliefOverride`]) for `OVERMATCH_CAPTURE` stills. Every phase boundary is
-//! logged with its app time.
+//! logged with its anchored time.
 //!
 //! `hold: Drive` or `Pivot` replaces the views' level cycle: the camera holds that one view for
 //! good and nothing overrides the player's relief setting, the scene of the frame cost measurement
@@ -149,9 +149,9 @@ impl Phase {
 #[derive(Resource)]
 struct Demo {
     at: Vec2,
-    /// The plan's `at`: the app second from which the tank is set down, once it has spawned.
+    /// The plan's `at`: seconds since the offline composition was placed.
     set_down_from: f32,
-    /// The app second it was set down, which every later phase runs from; `None` until then.
+    /// The anchored second it was set down, which every later phase runs from; `None` until then.
     set_down_at: Option<f32>,
     /// Travel heading, rad from `+Z` toward `+X`.
     heading: f32,
@@ -167,6 +167,12 @@ struct Demo {
 }
 
 pub(crate) fn offline_plugin(app: &mut App) {
+    if let Some(plan) = crate::dev_capture::plan() {
+        install(app, plan.scene.demo);
+    }
+}
+
+fn install(app: &mut App, demo: Option<plan::Demo>) {
     let Some(plan::Demo::TrackPrints {
         x,
         z,
@@ -174,7 +180,7 @@ pub(crate) fn offline_plugin(app: &mut App) {
         at: set_down_from,
         steer: pivot_steer,
         hold,
-    }) = crate::dev_capture::plan().and_then(|plan| plan.scene.demo)
+    }) = demo
     else {
         return;
     };
@@ -200,14 +206,25 @@ pub(crate) fn offline_plugin(app: &mut App) {
         exit_to: None,
     })
     .add_systems(PostStartup, admit_spot)
-    .add_systems(Update, (place, follow, report_hold).chain())
+    .add_systems(
+        Update,
+        (place, follow, report_hold)
+            .chain()
+            .in_set(crate::dev_capture::CaptureCues),
+    )
     .add_systems(
         RunFixedMainLoop,
         drive
             .after(crate::command::gather_commands)
-            .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
+            .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+            .in_set(crate::dev_capture::CaptureCues),
     )
-    .add_systems(PostUpdate, hold_camera.in_set(CaptiveCameraPlaced));
+    .add_systems(
+        PostUpdate,
+        hold_camera
+            .in_set(CaptiveCameraPlaced)
+            .in_set(crate::dev_capture::CaptureCues),
+    );
 }
 
 /// Refuse a spot off the loaded terrain before play: [`crate::terrain_grid::spawn_pos`] requires
@@ -238,7 +255,7 @@ fn place(
     time: Res<Time>,
     mut demo: ResMut<Demo>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
-    source: crate::tank::TankSimSource,
+    template: Res<crate::tank::TankTemplate>,
     mut tank: Query<
         (
             &mut Position,
@@ -269,7 +286,7 @@ fn place(
     // The hull faces its own −Z: a turn of `heading + π` about Y points it along the heading.
     rotation.0 = Quat::from_rotation_y(demo.heading + std::f32::consts::PI);
     position.0 =
-        crate::terrain_grid::spawn_pos(grid.as_deref(), demo.at, source.get().stance(rotation.0));
+        crate::terrain_grid::spawn_pos(grid.as_deref(), demo.at, template.stance(rotation.0));
     linear.0 = Vec3::ZERO;
     angular.0 = Vec3::ZERO;
     demo.set_down_at = Some(time.elapsed_secs());
@@ -421,6 +438,53 @@ fn hold_camera(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A zero-time demo changes simulation poses; it must wait for the same bound-view anchor
+    /// as screenshots, independently of the number of loading updates.
+    #[test]
+    fn zero_time_set_down_waits_for_the_compositions_view() {
+        let fixture = plan::CapturePlan::parse(
+            "(scene: (demo: TrackPrints(x: 0.0, z: 0.0, heading_deg: 0.0, at: 0.0)))",
+        )
+        .unwrap();
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            crate::bake::plugin,
+            crate::track::sim::sim_plugin,
+        ));
+        app.insert_resource(State::new(crate::state::AppState::Playing))
+            .insert_resource(CameraCaptive(false));
+        crate::dev_capture::build_plan(&mut app, crate::dev_capture::Anchor::Scenario, &fixture)
+            .unwrap();
+        install(&mut app, fixture.scene.demo);
+        let original = Vec3::new(4.0, 5.0, 6.0); // Fixture pose distinct from the authored spot.
+        let tank = app
+            .world_mut()
+            .spawn((
+                Tank,
+                Controlled,
+                Position(original),
+                Rotation::IDENTITY,
+                LinearVelocity::ZERO,
+                AngularVelocity::ZERO,
+                GlobalTransform::default(),
+                TankCommand::default(),
+            ))
+            .id();
+        for _ in 0..3 {
+            // Fixture asynchronous loading frames.
+            app.update();
+            assert!(app.world().resource::<Demo>().set_down_at.is_none());
+            assert_eq!(app.world().get::<Position>(tank).unwrap().0, original);
+        }
+        app.world_mut()
+            .entity_mut(tank)
+            .insert(crate::tank::TankViewReady);
+        app.update();
+        assert_eq!(app.world().resource::<Demo>().set_down_at, Some(0.0));
+        assert_ne!(app.world().get::<Position>(tank).unwrap().0, original);
+    }
 
     /// Fixture data: a flat two-sample grid over the fixture extent.
     fn fixture_grid() -> crate::terrain_grid::HeightGrid {
