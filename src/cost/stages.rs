@@ -156,7 +156,7 @@ labelled!(
         FreezeMet = "freeze_met",
         // Entities the freeze and the thaw visit; the bodies whose reach they evaluate, the
         // spatial queries it casts (at most one per body, and exactly one when the body has a
-        // solid collider), and those that reach a body no earlier one in that system had.
+        // solid collider), and those that reach a body the system keeps.
         FreezeVisits = "freeze_visits",
         ReachMovers = "reach_movers",
         ReachQueries = "reach_queries",

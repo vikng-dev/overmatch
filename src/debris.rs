@@ -506,7 +506,10 @@ mod tests {
         app.update();
     }
 
-    /// A 0.4 m cube piece at `at`, dynamic (fixture data).
+    /// The side of [`piece`]'s cube, m (fixture data).
+    pub(super) const SIDE: f32 = 0.4;
+
+    /// A [`SIDE`] cube piece at `at`, dynamic (fixture data).
     pub(super) fn piece(app: &mut App, at: Vec3) -> Entity {
         app.world_mut()
             .spawn((
@@ -514,7 +517,7 @@ mod tests {
                 Position(at),
                 Rotation::default(),
                 RigidBody::Dynamic,
-                Collider::cuboid(0.4, 0.4, 0.4),
+                Collider::cuboid(SIDE, SIDE, SIDE),
                 ColliderDensity(1800.0),
                 crate::construction::breakage::piece_layers(),
             ))
