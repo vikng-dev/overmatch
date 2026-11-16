@@ -624,6 +624,8 @@ pub(super) struct ContactCensus<'w, 's> {
     tank_islands: Local<'s, HashSet<u32>>,
     /// Each tank's upward momentum from loose pieces through its soft runs (N·s, [`PieceLift`]).
     lifts: Local<'s, EntityHashMap<f32>>,
+    /// Each worker's evaluated piece records, awaiting the commit ([`Self::record_motion`]).
+    observed: Local<'s, bevy::utils::Parallel<Vec<(Entity, PieceRecord, Thresholds)>>>,
 }
 
 impl ContactCensus<'_, '_> {
@@ -703,72 +705,88 @@ impl ContactCensus<'_, '_> {
         }
     }
 
-    /// Every piece's motion this tick, before any of its contacts are read.
+    /// Every piece's motion this tick, before any of its contacts are read. Each piece's record is
+    /// evaluated on the compute pool from its own copy and immutable inputs, then committed by key.
+    /// The line reports one set of thresholds, the highest entity's, whatever the worker split; a
+    /// tick with no piece keeps the last reported.
     fn record_motion(&mut self, tick: u32) {
         let unit = self.length_unit.0;
         let time_to_sleep = self.time_to_sleep.0;
-        let records = &mut *self.records;
-        for (entity, velocity, spin, rest, _, sleeping, piece) in &self.pieces {
-            records.thresholds = Some(Thresholds {
-                linear: rest.linear * unit,
-                angular: rest.angular,
-                time_to_sleep_s: time_to_sleep,
-                visible_motion_m: VISIBLE_MOTION_M,
-            });
-            let record = records
-                .live
-                .entry(entity)
-                .or_insert_with(|| PieceRecord::new(entity, piece, tick));
-            if !sleeping && !record.awake {
-                record.episode_born = tick;
-                record.last_impact = None;
-                record.last_fast = None;
-                record.sleep = None;
-                record.island = None;
-                record.linear_at_sleep = None;
-                record.angular_at_sleep = None;
-            }
-            if !sleeping {
-                let (position, rotation, colliders) = self
-                    .poses
-                    .get(entity)
-                    .expect("a simulated piece has a physics pose and collider membership");
-                let radius = *record.radius_m.get_or_insert_with(|| {
-                    assert!(!colliders.is_empty(), "a simulated piece has colliders");
-                    colliders
-                        .into_iter()
-                        .map(|collider| {
-                            let (shape, pose) = self
-                                .colliders
-                                .get(collider)
-                                .expect("a body's collider membership names live colliders");
-                            let bounds = shape.aabb(pose.translation, pose.rotation, 0.0);
-                            bounds.min.abs().max(bounds.max.abs()).length()
-                        })
-                        .fold(0.0, f32::max)
-                });
-                record.observe_pose(position.0, rotation.0, radius, tick);
-            }
-            let (linear, angular) = (velocity.length(), spin.length());
-            record.motion = (linear, angular);
-            if !sleeping {
-                record.awake_ticks += 1;
-                record.changed = true;
-                let (mass, inertia, rotation, body) = self
-                    .mass_properties
-                    .get(entity)
-                    .expect("every simulated piece retains computed mass and solver state");
-                let body = self
-                    .solver_bodies
-                    .get(*body)
-                    .expect("an awake piece's solver index addresses its state");
-                if !crate::avian_ext::rest_test::at_rest(
-                    body, rest, unit, *mass, *inertia, *rotation,
-                ) {
-                    record.last_fast = Some(tick);
+        let (records, observed) = (&*self.records, &*self.observed);
+        let (poses, colliders) = (&self.poses, &self.colliders);
+        let (mass_properties, solver_bodies) = (&self.mass_properties, &*self.solver_bodies);
+        self.pieces
+            .par_iter()
+            .for_each(|(entity, velocity, spin, rest, _, sleeping, piece)| {
+                let thresholds = Thresholds {
+                    linear: rest.linear * unit,
+                    angular: rest.angular,
+                    time_to_sleep_s: time_to_sleep,
+                    visible_motion_m: VISIBLE_MOTION_M,
+                };
+                let mut record = records
+                    .live
+                    .get(&entity)
+                    .copied()
+                    .unwrap_or_else(|| PieceRecord::new(entity, piece, tick));
+                if !sleeping && !record.awake {
+                    record.episode_born = tick;
+                    record.last_impact = None;
+                    record.last_fast = None;
+                    record.sleep = None;
+                    record.island = None;
+                    record.linear_at_sleep = None;
+                    record.angular_at_sleep = None;
                 }
+                if !sleeping {
+                    let (position, rotation, members) = poses
+                        .get(entity)
+                        .expect("a simulated piece has a physics pose and collider membership");
+                    let radius = *record.radius_m.get_or_insert_with(|| {
+                        assert!(!members.is_empty(), "a simulated piece has colliders");
+                        members
+                            .into_iter()
+                            .map(|collider| {
+                                let (shape, pose) = colliders
+                                    .get(collider)
+                                    .expect("a body's collider membership names live colliders");
+                                let bounds = shape.aabb(pose.translation, pose.rotation, 0.0);
+                                bounds.min.abs().max(bounds.max.abs()).length()
+                            })
+                            .fold(0.0, f32::max)
+                    });
+                    record.observe_pose(position.0, rotation.0, radius, tick);
+                }
+                let (linear, angular) = (velocity.length(), spin.length());
+                record.motion = (linear, angular);
+                if !sleeping {
+                    record.awake_ticks += 1;
+                    record.changed = true;
+                    let (mass, inertia, rotation, body) = mass_properties
+                        .get(entity)
+                        .expect("every simulated piece retains computed mass and solver state");
+                    let body = solver_bodies
+                        .get(*body)
+                        .expect("an awake piece's solver index addresses its state");
+                    if !crate::avian_ext::rest_test::at_rest(
+                        body, rest, unit, *mass, *inertia, *rotation,
+                    ) {
+                        record.last_fast = Some(tick);
+                    }
+                }
+                record.awake = !sleeping;
+                observed.scope(|out| out.push((entity, record, thresholds)));
+            });
+        let records = &mut *self.records;
+        let mut last = None;
+        for (entity, record, thresholds) in self.observed.iter_mut().flat_map(|out| out.drain(..)) {
+            records.live.insert(entity, record);
+            if last.is_none_or(|(highest, _)| entity > highest) {
+                last = Some((entity, thresholds));
             }
-            record.awake = !sleeping;
+        }
+        if let Some((_, thresholds)) = last {
+            records.thresholds = Some(thresholds);
         }
     }
 
