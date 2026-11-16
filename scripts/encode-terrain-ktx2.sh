@@ -96,7 +96,11 @@ fetch() {
 # (a wgpu format behind an optional feature) and basisu gains nothing from the extra depth, so
 # truncate to 8-bit — bit depth only, no colour-space change.
 to_8bit() {
-    case "$(magick identify -format '%z' "$1" 2>/dev/null)" in
+    depth="$(magick identify -format '%z' "$1")" || {
+        echo "magick cannot read $1; delete it so the next run fetches it again" >&2
+        exit 1
+    }
+    case "$depth" in
         16) echo "8-bit ▸ $(basename "$1")"
             magick "$1" -depth 8 -define png:color-type=2 -strip "$1.8" && mv "$1.8" "$1" ;;
     esac

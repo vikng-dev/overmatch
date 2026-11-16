@@ -221,9 +221,16 @@ fn place(
     if demo.phase != Phase::Wait || time.elapsed_secs() < PLACE_AT_S {
         return;
     }
-    let Ok((mut position, mut rotation, mut linear, mut angular)) = tank.single_mut() else {
-        warn_once!("track prints demo: no player tank at {PLACE_AT_S} s");
-        return;
+    let (mut position, mut rotation, mut linear, mut angular) = match tank.single_mut() {
+        Ok(tank) => tank,
+        // The player's tank has not spawned yet: the demo waits for it.
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => {
+            warn_once!("track prints demo: no player tank at {PLACE_AT_S} s");
+            return;
+        }
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("track prints demo: a composition controls one player tank")
+        }
     };
     // The hull faces its own −Z: a turn of `heading + π` about Y points it along the heading.
     rotation.0 = Quat::from_rotation_y(demo.heading + std::f32::consts::PI);
