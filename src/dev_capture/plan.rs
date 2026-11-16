@@ -132,8 +132,8 @@ pub(crate) enum Demo {
     HullMarks,
     /// The track prints, set down at anchored second `at` at world `(x, z)` on travel heading
     /// `heading_deg` (from `+Z` toward `+X`) and driven, pivoting at `steer` (default 1, right)
-    /// (`track_prints::demo`). `at` is the plan's schedule, like every cue's: the player's tank
-    /// must have spawned by then, or the demo waits for it; the phases run from the set-down.
+    /// (`track_prints::demo`). The anchor guarantees the player's tank is placed before `at`;
+    /// the phases run from the set-down.
     TrackPrints {
         x: f32,
         z: f32,
@@ -194,9 +194,8 @@ pub(crate) struct Frames {
     /// Shift toggle writes; ignored where that resource is absent.
     #[serde(default)]
     pub(crate) sight: bool,
-    /// A positive, fixed frame step, s, for reproducible offline/sandbox comparisons. Their
-    /// loading consumes no time or simulation ticks. Online clients and dedicated servers
-    /// count loading from startup; fixed stepping does not make network arrivals repeatable.
+    /// A positive, fixed frame step in seconds. See [`Frames::at`] for the timeline origin
+    /// and repeatability contract.
     #[serde(default)]
     pub(crate) step_s: Option<FrameStep>,
     /// Who places the player's camera ([`Camera`]). Default the player's own writers.
@@ -604,7 +603,7 @@ impl std::fmt::Display for PlanError {
             ),
             Self::FollowWithoutTank(anchor) => write!(
                 f,
-                "frames.camera: Follow requires an offline controlled-tank composition, but {anchor:?} supplies none at admission; choose Pose or use an offline scenario"
+                "frames.camera: Follow requires a controlled tank, but {anchor:?} supplies none; choose Pose or use an offline scenario or online client"
             ),
             Self::ImpactOffTerrain { x, z, half_extent } => write!(
                 f,
@@ -740,11 +739,9 @@ impl CapturePlan {
         }
         for impact in &self.impacts {
             finite_at("impacts.at", impact.at)?;
-            let numbers = [impact.x, impact.z, impact.at];
+            let numbers = [impact.x, impact.z];
             if !numbers.iter().all(|n| n.is_finite()) {
-                return Err(format!(
-                    "impacts: {impact:?} needs finite coordinates and time"
-                ));
+                return Err(format!("impacts: {impact:?} needs finite coordinates"));
             }
         }
         if let Some(shot) = &self.shot {

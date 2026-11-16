@@ -264,8 +264,7 @@ fn update_status_panel(
 
     // Weapons: name + per-fire-mode state, flagged `no-fire` when the fire gate is unmet (knocked-out
     // gunner/loader/breech). A `Single` reads as the classic READY / reload countdown; an
-    // `Automatic` shows its belt count, or the swap countdown while the belt is dry. Sorted by
-    // name so the order is stable frame to frame.
+    // `Automatic` shows its belt count, or the swap countdown while the belt is dry.
     let mut weapon_entries = weapons
         .iter()
         .filter(|(_, _, root)| root.0 == tank)
@@ -320,7 +319,6 @@ fn update_status_panel(
             .join("   ")
     };
 
-    // Terminal state: ALIVE, or the knock-out and its cause.
     let state = knocked_out
         .map(|ko| format!("KNOCKED OUT ({})", ko.reason.label()))
         .unwrap_or_else(|| "ALIVE".to_string());

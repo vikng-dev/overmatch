@@ -3,26 +3,9 @@
 //! Online clients and dedicated servers count from startup: loading consumes time there and
 //! network arrivals are live input, never repeatable.
 //!
-//! Holding time still admits one-time view construction (`tank::view::bind_tank_view`,
-//! `track::view::bind_track_rigs`, `camera::capture_turret_pivot`). Servo interpolation uses the
-//! unchanged fixed overstep; track-view motion returns on zero delta. Print pose memory still
-//! updates (`src/track_prints.rs:506`), but unchanged contacts make no stamp
-//! (`src/track_prints/stamper.rs:254`).
-//! `camera::orbit_camera` writes a pose from current inputs (`src/camera.rs:414`), and the range
-//! wall script holds its initial view (`src/sandbox/wall.rs:1920`). Battle motion evidence adds
-//! zero distance while positions stand still (`src/tank/battle.rs:845`). None advances a phase
-//! by counting loading frames. The track-print demo's zero-time set-down belongs to `Cues`.
-//! Operator-enabled recorders still sample wall time (`src/frame_cost.rs:535`,
-//! `src/render_cost.rs:592`); those observations cannot be repeated byte for byte.
-//!
-//! Bevy 0.20.1 `TimePlugin::build` retains messages until `FixedPostUpdate` signals cleanup.
-//! Game fixed readers consume `Reenabled`: disabling-component removal writes it
-//! (`src/avian_ext/child_poses.rs:216`), never a recurring loading-frame writer. Child placement
-//! guards equal writes; `ballistics::motion::admitted` deduplicates IDs (`src/ballistics/motion.rs:99`).
-//! `Shed` and `RecordedShot` originate in fixed gameplay, which cannot run while waiting.
-//! Avian's mesh-cache and joint-graph readers consume asset/construction changes; clearing their
-//! buffers would lose required initialization. The scroll accumulation at `src/camera.rs:405`
-//! is live outside input; unattended captures suppress focus pause, but do not replay devices.
+//! [`install`] suspends the selected pacing; [`start_clock`] restores it before Bevy's time
+//! update when the composition is ready. [`Cues`] gates every timeline consumer during loading.
+//! The loading-writer and message-reader audit lives in `.agents/scratch/capture-clock/README.md`.
 
 use bevy::prelude::*;
 use bevy::time::{TimeSystems, TimeUpdateStrategy};
@@ -30,6 +13,7 @@ use std::time::{Duration, Instant};
 
 /// Resolution: allow asynchronous asset decode and binding, but bound a broken readiness gate
 /// independently of the suspended game clock, in wall seconds.
+/// MEASURED: placement took 1.6–2.2 s on a local M4 debug build across ten runs.
 const LOAD_DEADLINE: Duration = Duration::from_secs(120);
 
 /// The composition event that opens a plan's timeline.
@@ -110,9 +94,16 @@ fn start_clock(
         return;
     };
     let views_ready = || !tanks.is_empty() && tanks.iter().all(|ready| ready);
-    let playing = state
-        .as_ref()
-        .is_some_and(|s| *s.get() == crate::state::AppState::Playing);
+    let playing = match gate {
+        Gate::Scenario => {
+            *state
+                .as_ref()
+                .expect("capture: Scenario anchor requires State<AppState>; missing AppState is a wiring bug")
+                .get()
+                == crate::state::AppState::Playing
+        }
+        Gate::TankView | Gate::TrackRig => false,
+    };
     let ready = match gate {
         Gate::Scenario => playing && views_ready(),
         Gate::TankView => views_ready(),
@@ -337,17 +328,16 @@ mod tests {
         }
     }
 
-    /// A missing state resource is a readiness failure, not an unrelated parameter panic.
+    /// Scenario wiring must supply AppState on the first frame; automation must not wait for
+    /// the asset-loading deadline to discover a missing resource.
     #[test]
-    #[should_panic(expected = "state None; requires Playing; 0 of 0 tank views bound")]
-    fn missing_scenario_state_is_named_by_the_wall_deadline() {
+    #[should_panic(
+        expected = "Scenario anchor requires State<AppState>; missing AppState is a wiring bug"
+    )]
+    fn missing_scenario_state_panics_on_the_first_frame() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         install(&mut app, Anchor::Scenario);
-        let Clock::Waiting { deadline, .. } = &mut *app.world_mut().resource_mut::<Clock>() else {
-            unreachable!()
-        };
-        *deadline = Instant::now();
         app.update();
     }
 

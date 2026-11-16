@@ -218,7 +218,6 @@ pub(super) fn install_server(app: &mut App, cue: Cue) {
         .add_systems(Update, fire_on_cue.in_set(super::clock::Cues));
 }
 
-/// The plan's `wall` cue, `None` when the plan has none.
 fn cue_from_plan() -> Option<Cue> {
     let wall = super::plan()?.wall.as_ref()?;
     Some(cue_for(wall))

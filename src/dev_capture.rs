@@ -117,7 +117,7 @@ pub(crate) fn build_plan(
         .frames
         .as_ref()
         .is_some_and(|frames| matches!(frames.camera, plan::Camera::Follow { .. }))
-        && !matches!(anchor, Anchor::Scenario)
+        && !matches!(anchor, Anchor::Scenario | Anchor::Startup)
     {
         return Err(plan::PlanError::FollowWithoutTank(anchor));
     }
@@ -374,15 +374,9 @@ fn resolve_round(
     })
 }
 
-/// A plan's strike with its round's style and its surface resolved.
-#[derive(Clone, Copy, Debug)]
-struct ImpactCue {
-    x: f32,
-    z: f32,
-    at: f32,
-    style: crate::rounds::ImpactStyle,
-    surface: crate::ballistics::ImpactSurface,
-}
+/// The game's damage-model terrain cue, admitted inside the terrain span.
+#[derive(Debug)]
+struct ImpactCue(plan::Impact);
 
 /// The plan's `impacts` ([`plan::Impact`]) not yet raised.
 #[derive(Resource, Debug)]
@@ -408,13 +402,7 @@ fn admit_impact(
             half_extent,
         });
     }
-    Ok(ImpactCue {
-        x: cue.x,
-        z: cue.z,
-        at: cue.at,
-        style: cue.style,
-        surface: cue.surface,
-    })
+    Ok(ImpactCue(cue.clone()))
 }
 
 fn install_impacts(app: &mut App, cues: &[plan::Impact]) {
@@ -448,7 +436,7 @@ fn raise_impacts(
     mut commands: Commands,
 ) {
     let now = time.elapsed_secs();
-    if !cues.0.iter().any(|cue| cue.at <= now) {
+    if !cues.0.iter().any(|ImpactCue(cue)| cue.at <= now) {
         return;
     }
     let (bottom, top) = terrain
@@ -465,7 +453,7 @@ fn raise_impacts(
     let origin_y = top + IMPACT_PROBE_CLEARANCE_M;
     let distance = origin_y - bottom + IMPACT_PROBE_CLEARANCE_M;
     let filter = avian3d::prelude::SpatialQueryFilter::from_mask(crate::Layer::Terrain);
-    cues.0.retain(|cue| {
+    cues.0.retain(|ImpactCue(cue)| {
         if cue.at > now {
             return true;
         }
@@ -710,6 +698,7 @@ mod tests {
             .system_sets
             .get_key(clock::Cues.intern())
             .expect("cue set exists");
+        let hierarchy = graph.hierarchy().clone().analyze().unwrap();
         for name in systems {
             let (key, _, _) = graph
                 .systems
@@ -717,9 +706,8 @@ mod tests {
                 .find(|(_, system, _)| system.name().to_string().ends_with(name))
                 .expect(name);
             assert!(
-                graph
-                    .hierarchy()
-                    .graph()
+                hierarchy
+                    .transitive_closure()
                     .contains_edge(NodeId::Set(set), NodeId::System(key)),
                 "{name} must wait for the capture anchor"
             );
@@ -731,7 +719,11 @@ mod tests {
     #[test]
     fn shipped_plan_builder_holds_frames_and_keys_until_placement() {
         use bevy::time::TimeUpdateStrategy;
-        let fixture = plan::CapturePlan::parse(r#"(frames: (out: "/tmp/overmatch-clock-fixture.png", at: [10.0], step_s: 0.01), keys: [(key: KeyW, from: 0.0, to: 1.0)])"#).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "overmatch-clock-fixture-{}.png",
+            std::process::id()
+        ));
+        let fixture = plan::CapturePlan::parse(&format!(r#"(frames: (out: {path:?}, at: [10.0], step_s: 0.01), keys: [(key: KeyW, from: 0.0, to: 1.0)])"#)).unwrap();
         let step = fixture.frames.as_ref().unwrap().step_s.unwrap().0;
         let mut app = App::new();
         app.add_plugins((
@@ -825,7 +817,7 @@ mod tests {
     fn follow_is_refused_at_composition_admission() {
         // Fixture camera on a root with no admitted controlled tank.
         let fixture = plan::CapturePlan::parse(r#"(frames: (out: "/tmp/overmatch-follow-fixture.png", camera: Follow(offset: (1.0, 2.0, 3.0))))"#).unwrap();
-        for anchor in [Anchor::TankView, Anchor::TrackRig, Anchor::Startup] {
+        for anchor in [Anchor::TankView, Anchor::TrackRig] {
             let mut app = App::new();
             let error = build_plan(&mut app, anchor, &fixture).unwrap_err();
             assert!(matches!(error, plan::PlanError::FollowWithoutTank(_)));
@@ -839,6 +831,79 @@ mod tests {
                 "refusal precedes installation"
             );
         }
+    }
+
+    /// Offline and online capture operators can follow their controlled tank. The shipped
+    /// builder must admit both roots and keep following after the frame target arms.
+    #[test]
+    fn follow_tracks_the_controlled_tank_on_scenario_and_startup_roots() {
+        for anchor in [Anchor::Scenario, Anchor::Startup] {
+            let path = std::env::temp_dir().join(format!(
+                "overmatch-follow-{anchor:?}-{}.png",
+                std::process::id()
+            ));
+            let fixture = plan::CapturePlan::parse(&format!(
+                r#"(frames: (out: {path:?}, at: [0.0], camera: Follow(offset: (1.0, 2.0, 3.0))))"#
+            ))
+            .unwrap();
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .init_resource::<Assets<Image>>()
+                .insert_resource(State::new(crate::state::AppState::Playing));
+            build_plan(&mut app, anchor, &fixture).unwrap();
+            let tank = app
+                .world_mut()
+                .spawn((
+                    crate::tank::Tank,
+                    crate::tank::Controlled,
+                    crate::tank::TankViewReady,
+                    Transform::IDENTITY,
+                ))
+                .id();
+            let camera = app
+                .world_mut()
+                .spawn((crate::view::PlayerView, Transform::IDENTITY))
+                .id();
+            for position in [Vec3::ZERO, Vec3::new(4.0, 5.0, 6.0)] {
+                // Fixture movement: the camera must follow the owner, not its initial pose.
+                app.world_mut()
+                    .get_mut::<Transform>(tank)
+                    .unwrap()
+                    .translation = position;
+                app.update();
+                assert!(app.world().resource::<Capture>().target.is_some());
+                let transform = app.world().get::<Transform>(camera).unwrap();
+                assert_eq!(transform.translation, position + Vec3::new(1.0, 2.0, 3.0));
+                assert!(
+                    transform
+                        .forward()
+                        .dot((position - transform.translation).normalize())
+                        > 0.999
+                );
+            }
+        }
+    }
+
+    /// Startup also serves tankless servers; Follow must still fail when retargeting finds no
+    /// controlled tank, rather than silently capturing an unrelated view.
+    #[test]
+    #[should_panic(
+        expected = "frames.camera Follow needs a controlled tank before the first frame"
+    )]
+    fn startup_follow_requires_a_controlled_tank_when_the_target_arms() {
+        let path = std::env::temp_dir().join(format!(
+            "overmatch-follow-tankless-{}.png",
+            std::process::id()
+        ));
+        let fixture = plan::CapturePlan::parse(&format!(
+            r#"(frames: (out: {path:?}, at: [0.0], camera: Follow(offset: (1.0, 2.0, 3.0))))"#
+        ))
+        .unwrap();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Assets<Image>>();
+        build_plan(&mut app, Anchor::Startup, &fixture).unwrap();
+        app.update();
     }
 
     /// The game's damage-model terrain cues must refuse coordinates outside either the loaded
@@ -977,14 +1042,8 @@ mod tests {
         ));
         app.update();
         app.update();
-        app.insert_resource(ImpactCues(vec![ImpactCue {
-            x: cue.x,
-            z: cue.z,
-            at: cue.at,
-            style,
-            surface,
-        }]))
-        .add_systems(Update, raise_impacts);
+        app.insert_resource(ImpactCues(vec![admit_impact(&cue, None).unwrap()]))
+            .add_systems(Update, raise_impacts);
         app.update();
         let raised = &app.world().resource::<Raised>().0;
         assert_eq!(

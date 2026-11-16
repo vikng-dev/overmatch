@@ -1,5 +1,6 @@
 //! A capture plan's `scene.demo: TrackPrints(…)` (`dev_capture::plan::Demo`), a dev capture of the
-//! track prints (cosmetic terrain marks) on the offline route. From the plan's anchored second `at`, the player's tank is set down at world XZ `(x, z)`, its travel heading
+//! track prints (cosmetic terrain marks) on the offline route. From the plan's anchored second
+//! `at`, the player's tank is set down at world XZ `(x, z)`, its travel heading
 //! `heading_deg` from `+Z` toward `+X`; every later phase runs from that set-down. Once settled it
 //! drives straight, stops, pivots on the spot at `steer`, stops, and drives out of the pivot. The
 //! camera is then held low, about 10 m off, first on the straight drive's track and then
@@ -438,7 +439,6 @@ fn hold_camera(
 mod tests {
     use super::*;
 
-    /// Fixture data: a flat two-sample grid over the fixture extent.
     /// A zero-time demo changes simulation poses; it must wait for the same bound-view anchor
     /// as screenshots, independently of the number of loading updates.
     #[test]
@@ -486,6 +486,7 @@ mod tests {
         assert_ne!(app.world().get::<Position>(tank).unwrap().0, original);
     }
 
+    /// Fixture data: a flat two-sample grid over the fixture extent.
     fn fixture_grid() -> crate::terrain_grid::HeightGrid {
         crate::terrain_grid::HeightGrid::new(
             vec![0.0; 4].into(),
