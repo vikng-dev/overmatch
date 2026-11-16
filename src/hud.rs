@@ -1,5 +1,6 @@
 //! Shared HUD layers and placement for game and armor sandbox, plus pooled world nameplates.
 //!
+//! [`TopHudSlot`] readouts occupy separate intrinsic grid rows; text growth never overlaps them.
 //! [`HudLayer`] owns semantic draw order. [`HudDock`] panels reserve their laid-out boxes from
 //! a [`ModalExtent`] modal's placement before UI layout: a fixed readout always, a passing
 //! presentation unless covering it shows more of the modal. The design/evidence record is
@@ -58,8 +59,102 @@ fn stamp_hud_layer(mut world: DeferredWorld, HookContext { entity, .. }: HookCon
         .insert(GlobalZIndex(layer.zindex()));
 }
 
-/// A panel whose actual laid-out box modal placement keeps clear. These are root nodes on the
-/// player's UI target, with axis-aligned UI transforms. Hidden panels reserve nothing.
+/// Appearance shared by the top readouts and modal spacing, in logical UI pixels.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HudLook {
+    pub(crate) edge_px: crate::provenance::Sourced<f32>,
+    pub(crate) top_gap_px: crate::provenance::Sourced<f32>,
+    pub(crate) status_font_px: crate::provenance::Sourced<f32>,
+    pub(crate) status_padding_px: crate::provenance::Sourced<f32>,
+    pub(crate) status_radius_px: crate::provenance::Sourced<f32>,
+    pub(crate) clock_font_px: crate::provenance::Sourced<f32>,
+    modal_gap_px: crate::provenance::Sourced<f32>,
+}
+
+pub(crate) fn look() -> &'static HudLook {
+    static LOOK: std::sync::LazyLock<HudLook> = std::sync::LazyLock::new(|| {
+        let look: HudLook = crate::provenance::from_shipped_str(
+            "assets/ui/hud.ron",
+            include_str!("../assets/ui/hud.ron"),
+        )
+        .expect("assets/ui/hud.ron: author all HUD dimensions with provenance");
+        for (field, value) in [
+            ("edge_px", look.edge_px.0),
+            ("top_gap_px", look.top_gap_px.0),
+            ("status_font_px", look.status_font_px.0),
+            ("status_padding_px", look.status_padding_px.0),
+            ("status_radius_px", look.status_radius_px.0),
+            ("clock_font_px", look.clock_font_px.0),
+            ("modal_gap_px", look.modal_gap_px.0),
+        ] {
+            assert!(
+                value.is_finite() && value > 0.0,
+                "assets/ui/hud.ron: {field} must be finite and positive; author a HUD dimension"
+            );
+        }
+        look
+    });
+    &LOOK
+}
+
+#[derive(Component)]
+struct TopHud;
+
+/// One shared top grid, independent of plugin/spawn order. Intrinsic row heights keep the
+/// clock above the status card at every width, including wrapped results and vitals text.
+#[derive(Component, Clone, Copy)]
+#[require(Node, HudDock = HudDock::Fixed)]
+#[component(on_add = attach_top_hud)]
+pub(crate) enum TopHudSlot {
+    Clock,
+    Status,
+}
+
+fn attach_top_hud(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
+    world.commands().queue(move |world: &mut World| {
+        use bevy::ecs::query::QuerySingleError;
+        let root = match world.query_filtered::<Entity, With<TopHud>>().single(world) {
+            Ok(root) => root,
+            // The first top readout creates the match-owned layout root.
+            Err(QuerySingleError::NoEntities(_)) => world
+                .spawn((
+                    TopHud,
+                    FlowScoped(Flow::InMatch),
+                    HudLayer::Fixed,
+                    Node {
+                        display: Display::Grid,
+                        position_type: PositionType::Absolute,
+                        top: Val::Px(look().edge_px.0),
+                        width: Val::Percent(100.0),
+                        padding: UiRect::horizontal(Val::Px(look().edge_px.0)),
+                        grid_template_columns: vec![GridTrack::flex(1.0)],
+                        row_gap: Val::Px(look().top_gap_px.0),
+                        ..default()
+                    },
+                ))
+                .id(),
+            Err(error @ QuerySingleError::MultipleEntities(_)) => {
+                panic!("top readouts share exactly one match-owned layout root: {error}")
+            }
+        };
+        let row = match world
+            .get::<TopHudSlot>(entity)
+            .expect("TopHudSlot is present in its own on_add command")
+        {
+            TopHudSlot::Clock => 1,
+            TopHudSlot::Status => 2,
+        };
+        world
+            .get_mut::<Node>(entity)
+            .expect("TopHudSlot requires Node")
+            .grid_row = GridPlacement::start(row);
+        world.entity_mut(entity).insert(ChildOf(root));
+    });
+}
+
+/// A panel whose actual laid-out box modal placement keeps clear, on the player's UI target
+/// with an axis-aligned UI transform. Hidden panels reserve nothing.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 #[require(HudLayer = HudLayer::Fixed)]
 pub(crate) enum HudDock {
@@ -101,9 +196,6 @@ fn dock_corner_ui(
     }
 }
 
-/// ASSUMED spacing between fixed panels and modal cards, in logical UI pixels.
-const MODAL_GAP_PX: f32 = 8.0;
-
 /// The previous completed layout supplies panel extents for this layout. Neither text length,
 /// font size nor a viewport percentage stands in for measured panel geometry. Target propagation
 /// has run; the modal's new Node is consumed by this frame's layout. Resizing/text changes settle
@@ -137,7 +229,7 @@ fn place_modal_hud(
             continue;
         }
         let scale = target.scale_factor();
-        let gap = MODAL_GAP_PX.min(size.min_element() * 0.5);
+        let gap = look().modal_gap_px.0.min(size.min_element() * 0.5);
         let screen = Rect::from_corners(Vec2::splat(gap), (size - gap).max(Vec2::splat(gap)));
         let occupied: Vec<(HudDock, Rect)> = panels
             .iter()

@@ -292,13 +292,10 @@ fn mount_bare(app: &mut App) {
 fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
         .spawn((
-            FlowScoped(Flow::InMatch),
             MatchUi::Clock,
-            crate::hud::HudDock::Fixed,
+            crate::hud::TopHudSlot::Clock,
             Visibility::Hidden,
             Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(10.0),
                 width: Val::Percent(100.0),
                 justify_content: JustifyContent::Center,
                 ..default()
@@ -311,7 +308,7 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                 TextFont {
                     // SemiBold: a terse all-caps status line.
                     font: fonts.hud.clone().into(),
-                    font_size: FontSize::Px(28.0),
+                    font_size: FontSize::Px(crate::hud::look().clock_font_px.0),
                     ..default()
                 },
                 TextColor(TEXT),
@@ -727,6 +724,58 @@ mod tests {
         a.min.x < b.max.x && a.max.x > b.min.x && a.min.y < b.max.y && a.max.y > b.min.y
     }
 
+    /// Players must read the timer and vitals together. Their actual laid-out boxes stay
+    /// separate across viewport/UI scales and when the results label or status text grows.
+    #[test]
+    fn timer_and_status_never_overlap() {
+        // Fixture: narrow, high-scale and regular windows, including both capture targets.
+        for (width, height, scale) in [
+            (640, 1080, 2.0),
+            (1280, 720, 2.0),
+            (1280, 720, 1.0),
+            (1920, 1080, 1.0),
+            (1920, 1080, 1.5),
+        ] {
+            let mut app = hud_layout_app(width, height, scale);
+            for results in [false, true] {
+                if results {
+                    let world = app.world_mut();
+                    world
+                        .query::<&mut BattleState>()
+                        .single_mut(world)
+                        .unwrap()
+                        .phase = BattlePhase::Results {
+                        ends_at: crate::sim_tick::SimTick::new(100_000),
+                        outcome: BattleOutcome::Draw,
+                    };
+                    world
+                        .query_filtered::<&mut Text, With<crate::crew_ui::StatusPanelText>>()
+                        .single_mut(world)
+                        .unwrap()
+                        .0
+                        .push_str("\nFixture extra status line");
+                    settle_hud(&mut app);
+                }
+                let world = app.world_mut();
+                let clock = world
+                    .query::<(Entity, &Part)>()
+                    .iter(world)
+                    .find_map(|(entity, part)| (*part == Part::ClockLine).then_some(entity))
+                    .unwrap();
+                let status = world
+                    .query_filtered::<Entity, With<crate::crew_ui::StatusPanelText>>()
+                    .single(world)
+                    .unwrap();
+                let clock = hud_rect(world, clock);
+                let status = hud_rect(world, status);
+                assert!(
+                    !overlaps(clock, status),
+                    "{width}x{height} scale {scale}, results={results}: timer {clock:?} overlaps status {status:?}"
+                );
+            }
+        }
+    }
+
     /// The Tab board leaves every visible dock readable at different UI scales and after text
     /// growth. Hiding a dock releases its space. Players rely on layout, not a fixed-panel size
     /// guessed from one rig's readout; the table must retain a nonempty scrollable viewport.
@@ -777,7 +826,7 @@ mod tests {
     /// clipped columns. FIXTURE DATA: a window narrower than every column, diagnostics shown.
     #[test]
     fn a_narrow_board_keeps_every_column_in_its_scroll_content() {
-        let mut app = hud_layout_app(640, 1080, 2.0);
+        let mut app = hud_layout_app(320, 1600, 2.0);
         // FIXTURE DATA: full-width ids and a results winner keep every rendered column wide,
         // independently of compact typography. An empty combat winner column has no ink.
         {
@@ -801,7 +850,9 @@ mod tests {
         let bounds = hud_rect(world, entity);
         assert!(
             viewport.content_size.x > viewport.size.x,
-            "fixture must need horizontal scrolling"
+            "fixture must need horizontal scrolling: viewport {:?}, content {:?}",
+            viewport.size,
+            viewport.content_size
         );
         let right = bounds.min.x + viewport.content_size.x;
         for (entity, part, layout) in world.query::<(Entity, &Part, &TextLayout)>().iter(world) {
