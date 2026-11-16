@@ -166,9 +166,16 @@ fn sun_elevation_deg() -> f32 {
 /// rather than in each map's `sky.ron` (`.agents/docs/design/map-surroundings.md`, R1).
 const SUN_FILE: &str = "assets/world/sun.ron";
 static SUN: LazyLock<Sun> = LazyLock::new(|| {
-    Sun::parse(SUN_FILE, include_str!("../assets/world/sun.ron"))
+    shipped_sun()
         .unwrap_or_else(|error| panic!("{error}; sun: author the fact with its provenance"))
 });
+
+/// The shipped sun, admitted under the shipped-file policy.
+fn shipped_sun() -> Result<Sun, String> {
+    crate::provenance::with_shipped_policy(|| {
+        Sun::parse(SUN_FILE, include_str!("../assets/world/sun.ron"))
+    })
+}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Sun {
@@ -180,7 +187,7 @@ struct Sun {
 }
 impl Sun {
     fn parse(file: &str, text: &str) -> Result<Self, String> {
-        let data: Self = from_shipped_str(file, text)?;
+        let data: Self = ron::de::from_str(text).map_err(|error| format!("{file}: {error}"))?;
         let radius = data.sun_angular_radius_rad.0;
         if !radius.is_finite() || radius <= 0.0 {
             return Err(format!(
@@ -668,13 +675,17 @@ mod tests {
 
     /// The sun's one fact is required, sourced and a positive angle before play: the shipped file
     /// loads, and a zero radius (a penumbra-free shadow edge) is refused naming the file and field.
+    /// FIXTURE DATA: the zero radius.
     #[test]
     fn the_suns_fact_is_checked_before_play() {
-        let shipped = include_str!("../assets/world/sun.ron");
-        Sun::parse(SUN_FILE, shipped).unwrap();
-        let error = Sun::parse(SUN_FILE, &shipped.replace("0.00465", "0.0")).unwrap_err();
+        shipped_sun().unwrap();
+        let error = Sun::parse(
+            "f.ron",
+            r#"(sun_angular_radius_rad: (0.0, Fixture("a penumbra-free edge")))"#,
+        )
+        .unwrap_err();
         assert!(
-            error.contains(SUN_FILE) && error.contains("sun_angular_radius_rad"),
+            error.contains("f.ron") && error.contains("sun_angular_radius_rad"),
             "{error}"
         );
     }
