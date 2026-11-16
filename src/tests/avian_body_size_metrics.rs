@@ -2,7 +2,8 @@
 //! `OVERMATCH_PATCH.md`, "Body size metrics once per body").
 //!
 //! The invariant: a physics step recomputes a body's `BodySizeMetrics` once when any of its
-//! colliders or its centre of mass changed, and not at all otherwise. Who relies on it: the
+//! colliders or its centre of mass changed, and not at all otherwise; an enabled body missing a
+//! component the pass reads is refused, never left with stale metrics. Who relies on it: the
 //! dedicated server's step in the tick a construction's piece takes its chunks (hundreds of
 //! colliders changed on one body), and Avian's continuous collision, which reads the metrics.
 //! Stock Avian recomputes the body once per changed collider, each time over all its colliders;
@@ -12,6 +13,7 @@
 
 use avian3d::dynamics::rigid_body::body_size_metrics::{BodySizeMetricUpdates, BodySizeMetrics};
 use avian3d::prelude::*;
+use bevy::ecs::entity_disabling::Disabled;
 use bevy::prelude::*;
 
 use super::avian_child_pose_churn::physics_app;
@@ -115,5 +117,86 @@ fn a_moved_centre_of_mass_refreshes_the_bodys_reach() {
     assert!(
         (reach - 2.5).abs() < 1e-4,
         "the reach was not measured from the moved centre of mass: {reach}"
+    );
+}
+
+/// An enabled body that lost its centre of mass is refused when its collider changes, not left
+/// with the metrics continuous collision reads gone stale. Fails if the pass passes by every body
+/// it cannot read.
+#[test]
+#[should_panic(expected = "an enabled rigid body with colliders keeps")]
+fn a_body_that_lost_its_centre_of_mass_is_refused() {
+    let mut app = physics_app();
+    let body = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            Collider::sphere(0.5),
+            Transform::default(),
+        ))
+        .id();
+    for _ in 0..3 {
+        app.update();
+    }
+    app.world_mut()
+        .entity_mut(body)
+        .remove::<ComputedCenterOfMass>()
+        .insert(Collider::sphere(1.0));
+    app.update();
+}
+
+/// A disabled body whose collider changed and a body with no collider whose centre of mass moved
+/// have no metrics to refresh, and the pass passes both by. Fails if the pass refuses every body
+/// it cannot read, or reads a moved centre on a body with no collider.
+#[test]
+fn a_disabled_or_colliderless_body_is_passed_by() {
+    let mut app = physics_app();
+    let disabled = app
+        .world_mut()
+        .spawn((RigidBody::Static, Transform::default()))
+        .id();
+    let collider = app
+        .world_mut()
+        .spawn((
+            ChildOf(disabled),
+            Collider::sphere(0.5),
+            Transform::default(),
+        ))
+        .id();
+    let bare = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            GravityScale(0.0),
+            Mass(1.0),
+            AngularInertia::new(Vec3::ONE),
+            Transform::default(),
+        ))
+        .id();
+    for _ in 0..3 {
+        app.update();
+    }
+    app.world_mut().entity_mut(disabled).insert(Disabled);
+    app.world_mut()
+        .entity_mut(collider)
+        .insert(Collider::sphere(1.0));
+    app.world_mut()
+        .entity_mut(bare)
+        .insert((CenterOfMass(Vec3::X), NoAutoCenterOfMass));
+    for _ in 0..2 {
+        app.update();
+        assert_eq!(
+            updates(&app),
+            0,
+            "a body with no metrics to refresh was recomputed"
+        );
+    }
+    assert_eq!(
+        app.world()
+            .get::<ComputedCenterOfMass>(bare)
+            .expect("a rigid body carries its centre of mass")
+            .0,
+        Vec3::X,
+        "the bare body's centre of mass must move for the pass to see it"
     );
 }

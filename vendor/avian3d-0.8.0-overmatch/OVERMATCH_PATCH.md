@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 914 in all (MEASURED), 836 in upstream files and 78 in the
+of `src/` against the published crate: 932 in all (MEASURED), 854 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -315,7 +315,10 @@ The patch collects the stale bodies (a changed centre of mass, or any changed co
 and recomputes each once. A body owns its metrics and reads only its own colliders, so the stale
 bodies run on the compute pool (`par_iter_many_unique_mut`, which takes only a set: a body visited
 twice is unrepresentable); a step with no stale body dispatches nothing. A changed collider whose
-body is despawned, disabled or holds no metrics is skipped, as upstream.
+body is despawned, disabled or no longer a rigid body is skipped, and a body with no collider is
+never stale (Avian removes its `RigidBodyColliders` with the last one), as upstream. An enabled body
+missing a component the pass reads panics naming the invariant; pristine 0.8.0's `if let Ok` skips
+it unseen with the rest, and the patch adds only the refusal and the stale set's filters.
 `BodySizeMetricUpdates` holds the count of bodies the last pass recomputed: test instrumentation,
 read only by the guard, at one relaxed atomic add per recomputed body and one resource write per
 step. It cannot be `cfg(test)` (the game's tests build this crate as a dependency), and a feature
@@ -327,9 +330,12 @@ outside Avian's timed stages was 151 to 518 ms in the two ticks after each colla
 the ten worst ticks; with the patch the worst is 0.6 ms and the ten worst sum to 3.9 ms. The run's
 worst tick fell from 599.9 to 82.7 ms (the 0.7 stack: 106.7 ms).
 
-Kept: the loop is inside an upstream system. 63 fork lines (MEASURED).
+Kept: the loop is inside an upstream system. 81 fork lines (MEASURED).
 
-Guard: `src/tests/avian_body_size_metrics.rs`, 2 tests.
+Guard: `src/tests/avian_body_size_metrics.rs`, 4 tests. Mutants, each red (MEASURED): every body
+the pass cannot read skipped, as upstream (the refusal does not panic); every such body refused
+(the disabled body panics); the moved-centre filter without `RigidBodyColliders` (the body with no
+collider panics).
 
 ## Standalone key write-back: dropped
 

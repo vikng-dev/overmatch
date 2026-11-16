@@ -18,7 +18,7 @@ use crate::{
         collider_hierarchy::{ColliderOf, RigidBodyColliders},
         collider_transform::ColliderTransform,
     },
-    dynamics::rigid_body::mass_properties::components::ComputedCenterOfMass,
+    dynamics::rigid_body::{RigidBody, mass_properties::components::ComputedCenterOfMass},
     math::ToRealPrecision,
     schedule::{PhysicsSchedule, PhysicsStepSystems},
 };
@@ -107,9 +107,19 @@ fn update_body_size_metrics<C: AnyCollider>(
     mut bodies: Query<BodySizeMetricsData>,
     // Body size metrics only need updating when the center of mass
     // or one of the colliders changes.
-    moved_centers: Query<Entity, (With<BodySizeMetrics>, Changed<ComputedCenterOfMass>)>,
+    // OVERMATCH PATCH: a body with no collider has no `RigidBodyColliders` (Avian removes it with
+    // the last one) and no size to measure.
+    moved_centers: Query<
+        Entity,
+        (
+            With<RigidBody>,
+            With<RigidBodyColliders>,
+            Changed<ComputedCenterOfMass>,
+        ),
+    >,
     colliders: Query<(Entity, &C, &ColliderTransform)>,
     changed_colliders: Query<&ColliderOf, Or<(Changed<C>, Changed<ColliderTransform>)>>,
+    enabled_bodies: Query<(), With<RigidBody>>,
     context: StaticSystemParam<C::Context>,
     mut stale: Local<EntityHashSet>,
     mut updates: ResMut<BodySizeMetricUpdates>,
@@ -159,9 +169,15 @@ fn update_body_size_metrics<C: AnyCollider>(
                 *size_metrics = compute(rb_colliders, com);
                 recomputed.fetch_add(1, Ordering::Relaxed);
             }
-            // A changed collider's body that is despawned, disabled or holds no metrics has none
-            // to refresh.
-            Err(QueryEntityError::NotSpawned(_) | QueryEntityError::QueryDoesNotMatch(..)) => {}
+            // A changed collider's body that is despawned, disabled or no longer a rigid body has
+            // no metrics to refresh.
+            Err(QueryEntityError::NotSpawned(_)) => {}
+            Err(QueryEntityError::QueryDoesNotMatch(body, _)) => assert!(
+                !enabled_bodies.contains(body),
+                "an enabled rigid body with colliders keeps the BodySizeMetrics and \
+                 ComputedCenterOfMass that RigidBody requires and the RigidBodyColliders its \
+                 colliders' ColliderOf fill: {body}"
+            ),
             Err(e @ QueryEntityError::AliasedMutability(_)) => {
                 unreachable!("a set of distinct bodies cannot alias: {e}")
             }
