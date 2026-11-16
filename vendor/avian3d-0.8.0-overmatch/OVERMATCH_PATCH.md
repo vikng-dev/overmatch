@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 821 in all (MEASURED), 743 in upstream files and 78 in the
+of `src/` against the published crate: 814 in all (MEASURED), 736 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -261,26 +261,11 @@ continuous collision's per-body floor remains unmeasured.
 through 561 manifolds, a crossover MEASURED on that stack (Bevy 0.19, two compute threads); nothing
 measured on this one supports carrying it.
 
-## Collider transform propagation on the compute pool (`src/collision/collider/collider_transform/plugin.rs`): kept
+## Collider-transform propagation dispatch: upstream
 
-Subject: the game's server physics step, game state only.
-
-`propagate_collider_transforms` walks each root's hierarchy. Avian 0.7 dispatched every root to the
-compute pool; 0.8.0 runs them serially below 4,096 roots, the floor of loops whose item is one
-body's update. Here an item is a whole hierarchy (a construction's every element, a piece's
-chunks), and the game's roots stay under the floor, so the pass was serial. The patch restores
-0.7's dispatch (`par_iter_mut`). Roots own disjoint hierarchies (upstream's own safety argument),
-so the dispatch changes no result.
-
-MEASURED on the scheduled collapse (`scripts/perf/collapse.sh --target local --schedule
-scripts/perf/match-collapse.json --rehearsal --tanks 30 --clients 1`, debug server, compute pool
-10, one run each): the phase that holds the pass (`physics_prepare`) took 436.8 µs wall and
-443.7 µs CPU per tick serial, 176.6 µs wall and 621.5 µs CPU dispatched; the 0.7 stack, 184.8 and
-637.9. On a compute pool of two the 0.7 fork measured the pass level or faster than serial at the
-pile (its patch record); not re-measured on two threads here.
-
-Kept: the dispatch is one call inside an upstream system. 7 fork lines (MEASURED). No guard: no
-result depends on it.
+`propagate_collider_transforms` uses upstream's `ParallelQueryForEach` and
+`MIN_PAR_ITER_ENTITIES` floor. No game-specific dispatch change remains: 0 fork lines (MEASURED).
+The child-placement visibility change is counted separately.
 
 ## Body size metrics once per body (`src/dynamics/rigid_body/body_size_metrics.rs`): kept
 
