@@ -771,13 +771,29 @@ fn stationary_contacts_keep_the_configured_minimum_speculative_margin() {
 #[test]
 fn rest_depends_on_energy_per_mass_and_spin_axis() {
     let mut app = physics_app();
-    app.insert_resource(Gravity::ZERO);
+    // Fixture: explicit rest speeds and world length scale, independent of engine defaults.
+    let threshold = SleepThreshold {
+        linear: 0.15,
+        angular: 0.01,
+    };
+    let length_unit = 2.0;
+    app.insert_resource(Gravity::ZERO)
+        .insert_resource(PhysicsLengthUnit(length_unit));
     // Fixture: a slender bar and a small cube; rotation is about each body's principal axes.
     let bar = Vec3::new(6.6, 0.2, 0.05);
     let chunk = Vec3::splat(0.2);
-    let rest = SleepThreshold::default().linear;
+    let rest = threshold.linear * length_unit;
+    // DERIVED: I_axis/m = (the other two box sides squared and summed)/12.
+    let radius = |x: f32, y: f32| ((x * x + y * y) / 12.0).sqrt();
+    // DERIVED: geometric mean of the roll/transverse energy-limit speeds puts one shared
+    // angular speed between them: roll rests and transverse spin does not.
+    let spin = rest / (radius(bar.y, bar.z) * radius(bar.x, bar.y)).sqrt();
+    assert!(
+        spin > threshold.angular,
+        "fixture excludes the velocity-only rest branch"
+    );
     let mut bodies = Vec::new();
-    for (size, spin, sleeps) in [(bar, Vec3::X * 0.45, true), (bar, Vec3::Z * 0.45, false)] {
+    for (size, spin, sleeps) in [(bar, Vec3::X * spin, true), (bar, Vec3::Z * spin, false)] {
         bodies.push((
             app.world_mut()
                 .spawn((
@@ -785,6 +801,7 @@ fn rest_depends_on_energy_per_mass_and_spin_axis() {
                     Position(Vec3::X * bodies.len() as f32 * 20.0),
                     Collider::cuboid(size.x, size.y, size.z),
                     AngularVelocity(spin),
+                    threshold,
                 ))
                 .id(),
             sleeps,
@@ -793,8 +810,12 @@ fn rest_depends_on_energy_per_mass_and_spin_axis() {
     for fraction in [0.5, 2.0] {
         // Fixture: either side of the resource-owned rest energy.
         for size in [chunk, bar] {
-            // DERIVED: I_z/m = (x²+y²)/12 for a uniform box; the factor 1/2 cancels from E/m.
-            let spin = rest * fraction / ((size.x * size.x + size.y * size.y) / 12.0).sqrt();
+            // DERIVED: sqrt(I_z/m) converts the energy-limit speed to angular speed.
+            let spin = rest * fraction / radius(size.x, size.y);
+            assert!(
+                spin > threshold.angular,
+                "fixture excludes the velocity-only rest branch"
+            );
             bodies.push((
                 app.world_mut()
                     .spawn((
@@ -802,6 +823,7 @@ fn rest_depends_on_energy_per_mass_and_spin_axis() {
                         Position(Vec3::X * bodies.len() as f32 * 20.0),
                         Collider::cuboid(size.x, size.y, size.z),
                         AngularVelocity(Vec3::Z * spin),
+                        threshold,
                     ))
                     .id(),
                 fraction < 1.0,
