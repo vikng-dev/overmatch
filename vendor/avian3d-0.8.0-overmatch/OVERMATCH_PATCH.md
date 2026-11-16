@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 932 in all (MEASURED), 854 in upstream files and 78 in the
+of `src/` against the published crate: 916 in all (MEASURED), 838 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -252,7 +252,7 @@ is at least as large as the contact tolerance"). Witness:
 `stationary_contacts_keep_the_configured_minimum_speculative_margin` in
 `src/tests/avian_island_sleep.rs`, green on this fork, which carries no line for it (MEASURED).
 
-## Serial small loops: upstream body floors, contact-preparation floor kept
+## Serial small loops: dropped
 
 Subject: the game's server physics step, game state only.
 
@@ -262,23 +262,9 @@ serial under either at the game's recorded populations (MEASURED: awake bodies p
 the scheduled collapse). Collider transform propagation uses the dispatch described below;
 continuous collision's per-body floor remains unmeasured.
 
-`prepare_contact_constraints` counts active manifold handles before splitting over colors. Its
-`Resolution` floor is serial through 561 manifolds, parallel above that when enough colors exist.
-MEASURED on the 0.7 fork (Bevy 0.19) in its "Serial small loops" crossover record: on two compute
-threads, parallel minus serial was +1.1 µs at 561 manifolds and -3.9 µs at 723 (medians of five
-runs; each used 192 settling steps and 256 measured steps). Serial won every run at 561; parallel
-won every run at 723. Between those measured populations the old policy used the parallel path.
-The crossover is unmeasured on 0.8.
-
-The cutover retained color dispatch but lost this floor. MEASURED in the supplied before/after
-tick trace, the combat window with 30 tanks: preparation rose from 6.0 to 13.0 µs per tick (means).
-The trace records no manifold count for that window, so it does not place the window on either
-side of the crossover, and the rise is not attributed to the lost floor; any speedup from
-restoring it is unmeasured. No timing run was made.
-
-Each color writes only its own constraints, preserving its manifold-handle order on either path.
-16 fork lines (MEASURED). Guard:
-`src/tests/avian_contact_reduction.rs::the_constraint_graph_holds_one_constraint_per_kept_manifold`.
+`prepare_contact_constraints` dispatches over colors as upstream. The 0.7 fork kept it serial
+through 561 manifolds, a crossover MEASURED on that stack (Bevy 0.19, two compute threads); nothing
+measured on this one supports carrying it.
 
 ## Collider transform propagation on the compute pool (`src/collision/collider/collider_transform/plugin.rs`): kept
 

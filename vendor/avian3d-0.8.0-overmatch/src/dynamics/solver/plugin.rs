@@ -686,22 +686,8 @@ fn prepare_contact_constraints(
         .filter(|color| !color.manifold_handles.is_empty())
         .collect::<Vec<&mut GraphColor>>();
 
-    // OVERMATCH PATCH. Resolution: avoid compute-pool dispatch through the last manifold count
-    // MEASURED cheaper serially on the 0.7 fork (Bevy 0.19, two compute threads); unmeasured on
-    // 0.8 (OVERMATCH_PATCH.md, "Serial small loops").
-    const SERIAL_THROUGH_MANIFOLDS: usize = 561;
-    let manifolds: usize = active_colors
-        .iter()
-        .map(|color| color.manifold_handles.len())
-        .sum();
-    let min_colors = if manifolds <= SERIAL_THROUGH_MANIFOLDS {
-        usize::MAX
-    } else {
-        2
-    };
-
     // Generate contact constraints for each contact pair, parallelizing over graph colors.
-    crate::utils::par_for_each(&mut active_colors, min_colors, |_i, color| {
+    crate::utils::par_for_each(&mut active_colors, 2, |_i, color| {
         for handle in color.manifold_handles.iter() {
             // Get the contact pair and its manifold.
             let contact_pair = contact_graph
