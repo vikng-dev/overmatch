@@ -73,3 +73,23 @@ MEASURED narrowed-sensor commit gates: formatting and CI clippy passed; `avian_s
 4 passed, `avian_body_size_metrics` 4 passed. The final diff check caught whitespace-only
 context lines in fenced draft patches; those document lines were trimmed and the diff rechecked.
 Log: `/private/tmp/ccd4-d2-gates.log`.
+
+## Signed hull/wall probe
+
+The probe uses Avian's signed convex shape contact distance at the current body/local-collider
+pose, including hull tilt, rather than a bounding-box minimum across its width. Shape queries
+place the wall at 0.1 m signed separation. It asserts no tunnelling and peak intrusion no greater
+than one tick's travel at the test speed (plus floating-point query roundoff); settled distance
+is only reported. The first-touch update now uses `or_else`.
+
+MEASURED before lazy construction, one probe run, metres (negative settled intrusion means
+separation). All three approach speeds passed:
+
+```text
+CCD_PROBE speed=6 peak_intrusion_m=0 settled_intrusion_m=-0.006247805 tick_travel_m=0.09375 velocity=Vec3(-0.005075951, 0.00056405476, 0.009142528) first_touch=Some("hull proxy Hull_Collider")
+CCD_PROBE speed=8 peak_intrusion_m=0.024152366 settled_intrusion_m=-0.0015402351 tick_travel_m=0.125 velocity=Vec3(-0.0109014185, 0.010689352, 0.0019009099) first_touch=Some("hull proxy Hull_Collider")
+CCD_PROBE speed=10 peak_intrusion_m=0.05540262 settled_intrusion_m=-0.0027852983 tick_travel_m=0.15625 velocity=Vec3(-0.013570169, 0.014060323, 0.0056100953) first_touch=Some("hull proxy Hull_Collider")
+```
+
+MEASURED probe commit gates passed: formatting, CI clippy, CCD 4/4, metrics 4/4, ordinary
+track-scorecard tests, and the ignored signed-distance probe. Log: `/private/tmp/ccd4-d3-gates.log`.
