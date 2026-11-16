@@ -28,6 +28,7 @@ mod belt_friction;
 mod heap;
 #[cfg(feature = "dev_ui")]
 mod rubble_climb;
+mod swept_ccd_probe;
 mod turn_probe;
 
 use super::*;
