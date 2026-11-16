@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 1116 in all (MEASURED), 1038 in upstream files and 78 in the
+of `src/` against the published crate: 1126 in all (MEASURED), 1048 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -207,6 +207,19 @@ legitimate absences). Upstream's own defect on the same path, a body leaving and
 body query, still panics the solver on 0.8.0 (MEASURED by the tripwire
 `src/tests/avian_body_query_gap.rs`); record: `upstream/avian-body-query-gap-stale-constraints.md`.
 
+## Per-collider swept CCD eligibility (`src/dynamics/ccd/mod.rs`): kept
+
+The body gate stays an early-out. Each supported moving collider then compares the body's
+conservative motion bound with its own threshold-scaled CCD thickness, before mass properties,
+swept bounds or tree traversal. Thin children no longer select thicker children for a sweep.
+The body-wide bound includes off-centre rotation; a single collider keeps upstream eligibility.
+
+Kept as an upstream bug fix inside the private per-collider loop. Guards:
+`src/tests/avian_swept_ccd.rs` (thick-child discrete contact, thin-child/single-collider protection,
+offset rotation). Independent published-crate patch: `upstream/avian-ccd-decide-per-collider.md`.
+The merged-tree source census and repeated release measurements live in the
+[continuing lane report](../../.agents/scratch/swept-ccd-decisions-and-price.md).
+
 ## Non-solid colliders in continuous collision (`src/dynamics/ccd/mod.rs`, `src/dynamics/rigid_body/body_size_metrics.rs`): kept
 
 The moving-side sweep query excludes sensors and disabled colliders at the same site as the
@@ -216,10 +229,9 @@ minimum CCD thickness and refreshes that cache on marker additions/removals, eve
 transform or centre-of-mass change. Sweep radius retains its separate sleeping/recycling contract.
 
 Kept: these decisions are inside the upstream passes. MEASURED against the cached published
-0.8.0 crate: the CCD file has 5 added + 1 removed = 6 fork lines (the #1101 query extended in
-place); body size metrics has 98 added + 27 removed = 125, including its once-per-body patch.
-The complete source index is 881 added + 235 removed = 1,116 fork lines: 1,038 in upstream files
-and 78 in the fork-only file. No per-collider motion gate or new counter API ships.
+0.8.0 crate: the CCD file has 14 added + 2 removed = 16 fork lines (query and per-collider gate); body size metrics has 98 added + 27 removed = 125, including its once-per-body patch.
+The complete source index is 890 added + 236 removed = 1,126 fork lines: 1,048 in upstream files
+and 78 in the fork-only file. No new counter API ships. The per-collider gate is inventoried above.
 
 Guards: `src/tests/avian_swept_ccd.rs`, reading the existing `IS_FAST` diagnostic and geometric
 wall planes. MEASURED: both passed; the thickness exclusion reversed fails the fast-body guard,

@@ -745,6 +745,14 @@ fn solve_continuous(
                 continue;
             }
 
+            // OVERMATCH PATCH: a thin child must not force thicker children to sweep.
+            // The body-wide bound includes offset rotation about the body's center of mass
+            // and preserves upstream eligibility for a single-collider body.
+            let min_extent = shape1.ccd_thickness();
+            if max_motion <= ccd.threshold * min_extent.f32() {
+                continue;
+            }
+
             let layers1 = layers1.copied().unwrap_or_default();
 
             let motion1 =
@@ -771,7 +779,7 @@ fn solve_continuous(
                     swept_aabb.max.real(),
                 ),
                 local_centroid: shape1.mass_properties(1.0).local_com,
-                min_extent: shape1.ccd_thickness(),
+                min_extent,
             };
 
             // Sweep the collider against the relevant trees.

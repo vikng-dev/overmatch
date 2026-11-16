@@ -47,7 +47,9 @@ Records 1–11 come from the 2026-07-06/07 MP jitter campaign + architecture-rev
 | 31 | [avian-prune-points-unsigned-depth.md](avian-prune-points-unsigned-depth.md) | avian3d 0.8.0 — **LOCAL DRAFT, not filed** | MEDIUM — unsigned depth and shallow-depth ties let separated points displace bearing support during manifold pruning | Vendored clamped depth and bearing-first tiers using the same selection; homogeneous upstream order, mixed capacity; 156 pruning fork lines (MEASURED); generated collinear/polygon relations R1–R7 | Retire the pruning patch when upstream satisfies the pruning relations |
 | 32 | [avian-ccd-sensors-swept-and-counted.md](avian-ccd-sensors-swept-and-counted.md) | avian3d 0.8.0 — **LOCAL DRAFT, not filed**; upstream head unchecked | MEDIUM — a moving sensor can clamp its body; thin sensors and disabled colliders trigger unnecessary CCD | Extend the #1101 sweep query and exclude non-solid CCD thickness, with marker invalidation; `src/tests/avian_swept_ccd.rs` | Retire the exclusions when a published release satisfies both non-solid invariants |
 
-MEASURED index census: 29 open-candidate rows, 12 targeting Avian (counted from this table).
+| 33 | [avian-ccd-decide-per-collider.md](avian-ccd-decide-per-collider.md) | avian3d 0.8.0 — **LOCAL DRAFT, not filed**; upstream head unchecked | MEDIUM — a compound body's thinnest child makes every supported child sweep, changing unrelated thick-child first contact | Per-collider thickness gate after the body gate; three game-side collision witnesses in `src/tests/avian_swept_ccd.rs` | Retire the gate when upstream decides eligibility per collider |
+
+MEASURED index census: 30 open-candidate rows, 13 targeting Avian (counted from this table).
 
 **Evidence note on `InputDelayConfig::balanced()`:** it is implicated in **three** CRITICAL failure paths
 (#1, #10 and #11). Its prediction-margin and fabricated-input failures are measured in #1/#10. Its role

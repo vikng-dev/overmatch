@@ -157,3 +157,128 @@ fn a_fast_bodys_non_solid_attachment_does_not_stop_it_before_its_solid_wall_cont
         );
     }
 }
+
+// Compound-body users rely on eligibility following each collider's own thickness.
+// Fixture: neither child initially touches the wall, so only CCD can clamp this step.
+fn wall_step(compound: bool, thin_wall: bool) -> f32 {
+    let mut app = physics_app();
+    app.insert_resource(Gravity(Vec3::ZERO));
+    let body = app
+        .world_mut()
+        .spawn((RigidBody::Dynamic, Transform::default()))
+        .id();
+    app.world_mut().spawn((
+        ChildOf(body),
+        Collider::cuboid(0.04, 0.4, 0.4),
+        Transform::from_xyz(0.0, 4.0, 0.0),
+    ));
+    if compound {
+        app.world_mut().spawn((
+            ChildOf(body),
+            Collider::cuboid(2.0, 2.0, 2.0),
+            Transform::default(),
+        ));
+    }
+    let (wall_x, wall_y) = if thin_wall { (0.08, 4.0) } else { (1.06, 0.0) };
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(0.01, 0.5, 0.5),
+        Transform::from_xyz(wall_x, wall_y, 0.0),
+    ));
+    for _ in 0..3 {
+        app.update();
+    }
+    let step = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let before = app
+        .world()
+        .get::<Position>(body)
+        .expect("the body has a pose")
+        .x;
+    app.world_mut()
+        .entity_mut(body)
+        .insert(LinearVelocity(Vec3::X * (0.125 / step)));
+    app.update();
+    app.world()
+        .get::<Position>(body)
+        .expect("the body has a pose")
+        .x
+        - before
+}
+
+#[test]
+fn a_thin_child_does_not_force_a_slow_thick_child_to_sweep() {
+    // DERIVED: 0.125 m exceeds half the thin child's 0.02 m thickness, but not half
+    // the thick child's 1 m thickness; the low-risk pair belongs to the discrete solver.
+    let moved = wall_step(true, false);
+    assert!(
+        moved > 1.055 - 1.0,
+        "a slow thick child was swept: moved {moved}"
+    );
+}
+
+#[test]
+fn a_fast_thin_child_and_a_single_slab_still_stop_at_a_thin_wall() {
+    // Single-collider users retain upstream protection; a compound's thin child needs it too.
+    for compound in [false, true] {
+        let moved = wall_step(compound, true);
+        assert!(
+            moved > 0.0 && moved <= 0.075 - 0.02,
+            "tunneled or froze: compound={compound}, moved={moved}"
+        );
+    }
+}
+
+#[test]
+fn an_offset_rotating_child_still_sweeps() {
+    // Compound-body users need rotation about the body's COM even when it is stationary.
+    let mut app = physics_app();
+    app.insert_resource(Gravity(Vec3::ZERO));
+    let body = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            CenterOfMass(Vec3::ZERO),
+            NoAutoCenterOfMass,
+            Transform::default(),
+        ))
+        .id();
+    app.world_mut().spawn((
+        ChildOf(body),
+        Collider::cuboid(0.2, 0.2, 0.2),
+        Transform::from_xyz(5.0, 0.0, 0.0),
+    ));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(1.0, 0.01, 1.0),
+        Transform::from_xyz(5.0, 0.3, 0.0),
+    ));
+    for _ in 0..3 {
+        app.update();
+    }
+    let step = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    app.world_mut()
+        .entity_mut(body)
+        .insert(AngularVelocity(Vec3::Z * (0.125 / step)));
+    app.update();
+    let angle = app
+        .world()
+        .get::<Rotation>(body)
+        .expect("body rotation")
+        .0
+        .to_axis_angle()
+        .1;
+    // Fixture wall's near face is at y=0.295; a child's centre at radius 5 reaches
+    // that plane before 0.1 radians even without its half-height.
+    assert!(
+        angle > 0.0 && angle < 0.1,
+        "the offset child rotated through its wall: {angle}"
+    );
+}
