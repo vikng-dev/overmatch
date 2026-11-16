@@ -932,8 +932,10 @@ fn spawn_pending_tanks(
     // Every tank of the pass spawns at `spawn_rot`.
     let stance = content.stance(spawn_rot);
     let mut live: Vec<Vec2> = tanks.iter().map(|position| position.0.xz()).collect();
-    // Serial: each map-point choice reads the points handed out earlier in the pass (`live`), and
-    // a pass holds the joins of one tick.
+    // Serial: each XZ choice reads the XZ handed out earlier in the pass (`live`). The ground
+    // under a chosen XZ reads only the height grid, so the admitted joins are grounded as one batch.
+    let mut joins: Vec<(Entity, PeerId)> = Vec::new();
+    let mut points: Vec<Vec2> = Vec::new();
     for (link, client_id) in std::mem::take(&mut pending.0) {
         if !connected.contains(link) {
             // A queued join may disconnect while every authored point is too close.
@@ -955,9 +957,14 @@ fn spawn_pending_tanks(
             };
             xz
         };
-        let pos = spawn_pos(height.as_deref(), xz, stance);
         // Commands are deferred: later clients in this pass must see the point already handed out.
-        live.push(pos.xz());
+        live.push(xz);
+        joins.push((link, client_id));
+        points.push(xz);
+    }
+    let grounded = ground_spawns(height.as_deref(), &points, stance);
+    // Committed in pass order: identities and structural changes.
+    for ((link, client_id), pos) in joins.into_iter().zip(grounded) {
         let combatant = combatants.player(link);
         spawn_player_tank(
             &mut commands,
@@ -1155,7 +1162,8 @@ fn spawn_bots(
     let bots: Vec<Bot> = (0..count.0)
         .map(|index| Bot::new(bot_home_xz(index, radius), index, count.0, cycle))
         .collect();
-    let placed = bot_placements(height.as_deref(), &bots, content.stance(BOT_SPAWN_TURN));
+    let homes: Vec<Vec2> = bots.iter().map(|bot| bot.home).collect();
+    let placed = ground_spawns(height.as_deref(), &homes, content.stance(BOT_SPAWN_TURN));
     // Committed in bot order: identities and structural changes.
     for (index, (bot, pos)) in (0..).zip(bots.into_iter().zip(placed)) {
         let combatant = combatants.bot(index);
@@ -1171,20 +1179,20 @@ fn spawn_bots(
 /// A bot's turn at spawn: none; its brain turns it from there.
 const BOT_SPAWN_TURN: Quat = Quat::IDENTITY;
 
-/// Where each of `bots` spawns at its home, under the one `stance` every bot spawns with
-/// ([`BOT_SPAWN_TURN`]), in `bots` order. The placements read only the ground and are
-/// independent, so they are evaluated on the compute pool; the bot count is an operator lever.
-fn bot_placements(grid: Option<&HeightGrid>, bots: &[Bot], stance: Stance) -> Vec<Vec3> {
+/// Each of `points` set on the ground under `stance`, in order. Each reads only the immutable
+/// height grid, so the batch is evaluated on the compute pool; the bot count is an operator lever.
+fn ground_spawns(grid: Option<&HeightGrid>, points: &[Vec2], stance: Stance) -> Vec<Vec3> {
     use bevy::tasks::{ComputeTaskPool, ParallelSlice};
-    bots.par_splat_map(ComputeTaskPool::get(), None, |_, chunk| {
-        chunk
-            .iter()
-            .map(|bot| spawn_pos(grid, bot.home, stance))
-            .collect::<Vec<_>>()
-    })
-    .into_iter()
-    .flatten()
-    .collect()
+    points
+        .par_splat_map(ComputeTaskPool::get(), None, |_, chunk| {
+            chunk
+                .iter()
+                .map(|&xz| spawn_pos(grid, xz, stance))
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Construct an ownerless bot, for both initial spawn and respawn. `spawn_pos` is `bot.home`
@@ -1259,8 +1267,8 @@ fn respawn_dead_bots(
         return;
     }
     let content = source.get();
-    let bots: Vec<Bot> = due.iter().map(|&(_, _, _, bot)| bot).collect();
-    let placed = bot_placements(height.as_deref(), &bots, content.stance(BOT_SPAWN_TURN));
+    let homes: Vec<Vec2> = due.iter().map(|&(_, _, _, bot)| bot.home).collect();
+    let placed = ground_spawns(height.as_deref(), &homes, content.stance(BOT_SPAWN_TURN));
     // Committed in query order: the bots' replacements commute, each its own combatant.
     for ((root, turret, combatant, bot), pos) in due.into_iter().zip(placed) {
         // Recursive despawn sweeps the root and its attached rig (children + relationship targets).
@@ -1332,7 +1340,7 @@ fn respawn_player_tanks(
     // respawn this tick. Resolve the owner's `RemoteId` up front (the `PeerId` the fresh tank must be
     // owned by); an owner link mid-disconnect with no `RemoteId` is skipped rather than
     // respawned to a client that is leaving.
-    let requests: Vec<(Entity, Entity, PeerId, CombatantId, RespawnState)> = dead
+    let mut requests: Vec<(Entity, Entity, PeerId, CombatantId, RespawnState)> = dead
         .iter()
         .filter(|(_, command, _, _, _, state)| state.waiting || command.respawn)
         .filter(
@@ -1356,7 +1364,6 @@ fn respawn_player_tanks(
     }
     // Requests commit occupancy in a declared priority, never query order: one already waiting on
     // occupancy first, then the lower combatant id.
-    let mut requests = requests;
     requests.sort_by_key(|&(_, _, _, combatant, state)| (!state.waiting, combatant.0));
     let content = source.get();
     let radius = content.contact_radius();
@@ -1378,11 +1385,14 @@ fn respawn_player_tanks(
     let standing: Vec<Transform> = map.blocks.iter().chain(&obstacles.0).copied().collect();
     // Occupancy also includes the spots ALREADY HANDED OUT this pass: two clients respawning onto
     // the same click in the same tick would otherwise both read the pre-pass world and overlap.
+    // Serial for that XZ reservation only: the accepted spots are grounded as one batch after it.
     let mut placed_this_pass: Vec<Vec2> = Vec::new();
-    for (root, link, client_id, combatant, previous) in requests {
+    let mut accepted: Vec<(Entity, Entity, PeerId, CombatantId, RespawnState)> = Vec::new();
+    for request in requests {
+        let (root, link, client_id, _, previous) = request;
         // Keep the player's spawn-map override and its occupancy nudge ahead of automatic choice.
         let picked = overrides.0.get(&link);
-        let override_pos = match picked {
+        let override_xz = match picked {
             Some(&xz) => {
                 let occupied: Vec<Vec2> = tanks
                     .iter()
@@ -1405,7 +1415,7 @@ fn respawn_player_tanks(
                                 xz.x, xz.y, spot.x, spot.y
                             );
                         }
-                        Some(spawn_pos(height.as_deref(), spot, stance))
+                        Some(spot)
                     }
                     Err(reason) => {
                         let state = RespawnState {
@@ -1429,11 +1439,11 @@ fn respawn_player_tanks(
             }
             None => None,
         };
-        let spawn_pos = if let Some(pos) = override_pos {
-            pos
+        let xz = if let Some(spot) = override_xz {
+            spot
         } else if let Some(at) = harness_at {
             match fixed_lane_xz(at, lane.of(link), radius, limit) {
-                Ok(xz) => spawn_pos(height.as_deref(), xz, stance),
+                Ok(xz) => xz,
                 Err(unavailable) => {
                     warn!("server: respawn of client {client_id} refused: its spawn {unavailable}");
                     continue;
@@ -1452,11 +1462,18 @@ fn respawn_player_tanks(
                 }
                 continue;
             };
-            spawn_pos(height.as_deref(), xz, stance)
+            xz
         };
-        placed_this_pass.push(spawn_pos.xz());
-        live.push(spawn_pos.xz());
+        placed_this_pass.push(xz);
+        live.push(xz);
         sweeping.push(root);
+        accepted.push(request);
+    }
+    let grounded = ground_spawns(height.as_deref(), &placed_this_pass, stance);
+    // Committed in priority order: identities and structural changes.
+    for ((root, link, client_id, combatant, previous), spawn_pos) in
+        accepted.into_iter().zip(grounded)
+    {
         // Recursive despawn sweeps the dead root and its attached rig; the `On<Remove<Rig>>` observer
         // handles any cooked-off turret that had detached (see the system doc).
         commands.entity(root).despawn();
