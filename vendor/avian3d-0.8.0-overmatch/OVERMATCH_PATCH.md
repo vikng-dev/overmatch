@@ -24,31 +24,34 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 984 in all (MEASURED), 906 in upstream files and 78 in the
+of `src/` against the published crate: 938 in all (MEASURED), 860 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
 
 ## Bearing-first manifold pruning (`src/collision/contact_types/mod.rs`): kept
 
-`ContactManifold::prune_points` makes bearing points (penetration >= 0) the eligible set whenever
-any exist; if at most four remain, it keeps them all. Larger bearing sets and wholly separated
-sets use upstream's distance/area selection and polygon order. Depth is clamped to zero before
-squaring, so separation cannot increase priority. The 1 mm floor remains a Resolution choice
-keeping zero-depth and coincident candidates selectable. Pruning's invariants assert in every build.
+`ContactManifold::prune_points` retains bearing points before separated points, using upstream's
+distance/area preference then input order to fill four slots whenever separated candidates exist,
+clamping depth before squaring so extra separation cannot improve selection, and leaving
+all-bearing selection unchanged. The unchanged 1 mm floor prevents a zero factor from erasing
+the other factor's ranking.
 
 Kept as an upstream bug fix: unsigned depth rewards separation, while the floor and depth-free
 area selection mean a signed clamp alone cannot prevent a separated point displacing bearing
-support. The private selection has no public seam. This patch adds 69 fork lines (MEASURED,
-including its engine-level test); the file has 74 total, including its existing pair-state field.
-The fork before this change has 915 lines, 837 in upstream files and 78 in the fork-only module
-(MEASURED against the SHA-256-verified cached published crate; changed lines count both sides).
+support. Separated candidates must still fill free slots: narrow phase admits them by tolerance
+or closing speed, the normal solver uses them as speculative stops, and the game's contact reducer
+reads their `normal_speed` after pruning. No new geometry heuristic or heap allocation is introduced.
+This patch adds 23 fork lines (MEASURED); the file has 28 total, including its existing pair-state
+field. Counts compare `src/` against the SHA-256-verified cached published crate, counting both
+sides of changed lines.
 
-Guard beside the function:
-`collision::contact_types::tests::pruning_never_drops_a_bearing_point_for_a_separated_point`.
-It covers every bearing/separated assignment on a Fixture square, including touching and shallow
-bearing points. Unlike the other guards, it runs as an Avian library test. Local upstream draft:
-`upstream/avian-prune-points-unsigned-depth.md`.
+Guard: `src/tests/avian_contact_pruning.rs`, registered in the game's library tests (the workspace
+excludes vendor crates). Generated mixes check bearing priority, full capacity when separated
+candidates exist, exact all-bearing upstream selection, and separation monotonicity. Upstream's
+all-bearing selection can itself return fewer than four points; collinear and convex-pentagon
+counterexamples record why unconditional capacity and exact upstream compatibility conflict.
+Local upstream draft: `upstream/avian-prune-points-unsigned-depth.md`.
 
 ## Child collider poses (`src/collision/collider/collider_transform/plugin.rs`): hook
 

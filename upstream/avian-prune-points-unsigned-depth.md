@@ -11,7 +11,7 @@ Source verified against the cached published crate, without network access.
 The first two selections multiply squared projected distance by squared penetration, floored at
 1 mm squared. Squaring a negative penetration rewards separation: a point at -12 mm has
 144 times the depth weight of a bearing point at +0.5 mm (DERIVED from the heuristic). Such
-separated points are legitimate candidates inside the contact-tolerance band, but retaining them
+separated points are legitimate candidates admitted by tolerance or closing speed, but retaining them
 at the expense of bearing points removes current support from the solver manifold.
 
 Clamping depth to zero before squaring removes that reward but does not guarantee bearing priority.
@@ -44,21 +44,34 @@ assert_eq!(bearing_kept, 3, "pruning must preserve the three bearing points");
 
 The unsigned heuristic selects two bearing points here. Exchanging the bearing and separated
 halves makes even the depth-clamped heuristic select only one (DERIVED by executing the selection
-arithmetic on these anchors). The guard beside the vendored function covers every assignment on
-this square, with zero-depth, sub-floor and above-floor bearing points.
+arithmetic on these anchors). The game-side guard covers generated bearing/separated assignments,
+with zero-depth, sub-floor and above-floor bearing points, varied separation and input orders.
 
 ## Proposed fix and local patch
 
-When a manifold has bearing points, make those the eligible set. If at most four remain, keep
-them all. Otherwise retain the existing farthest-from-centre, farthest-from-first and two-sided
-area selection, including its polygon order. If every point is separated, retain speculative
-support through that same selection, weighting signed depth clamped to zero before squaring.
-The distance/depth floor is unchanged. This enforces the invariant independently of placement,
-point order and shallow-depth ties; it introduces no vehicle or material rule.
+Retain bearing points before separated points, using upstream's distance/area preference then
+input order to fill four slots whenever separated candidates exist, clamping depth before squaring
+so extra separation cannot improve selection, and leaving all-bearing selection unchanged.
 
-Local guard: `collision::contact_types::tests::pruning_never_drops_a_bearing_point_for_a_separated_point`
-in `vendor/avian3d-0.8.0-overmatch/src/collision/contact_types/mod.rs`.
-The patch inventory is that crate's `OVERMATCH_PATCH.md`.
+The projection, first two distance/depth selections and two-sided area selection stay upstream's.
+Construction visits those selected indices before remaining input indices, bearing candidates
+first, stopping at four. This preserves current support and free-slot speculative stops without
+adding a geometry heuristic or heap allocation. The unchanged floor prevents a zero distance or depth
+factor from erasing the other factor's ranking. The normal solver turns separated points into
+speculative stops, and our contact reducer reads their `normal_speed` after pruning.
+
+An unconditional `min(n, 4)` result conflicts with exact all-bearing upstream selection: for five
+collinear all-bearing points upstream returns two endpoints (DERIVED by its zero signed areas;
+MEASURED by the direct guard). A convex pentagon with linearly varying positive depths can select
+an edge first and return three points (also covered by the guard). This local patch
+chooses exact all-bearing compatibility and guarantees full capacity when any separated candidate
+exists; a requirement to fill every all-bearing manifold would also change upstream behavior.
+
+Local guard: `src/tests/avian_contact_pruning.rs`, registered in the game's `src/tests.rs`.
+The workspace excludes `vendor/`, so an in-crate dependency test would not run in the game's CI.
+The guard checks generated mixes against bearing priority, capacity where compatible with
+upstream, exact all-bearing upstream selection and separation monotonicity. It asserts contracts,
+not historical physics outputs. The patch inventory is that crate's `OVERMATCH_PATCH.md`.
 
 ## What fixing this unlocks for us
 
@@ -66,8 +79,8 @@ The server's friction law can use the body's bearing support without manifold se
 it in favour of separated candidates. The experiment lane MEASURED a full-width wall push at
 0.83–0.99 of mu*(weight + downward wall friction) over five placements with unsigned depth;
 the signed-depth experiment reached 0.99998–1.00005 at the upstream 0.02 m tolerance. Those are
-observations, not acceptance values, and that experiment is not the stronger eligibility rule
-proposed here. No tolerance adjustment, experiment switch or logger is shipped.
+observations, not acceptance values, and that experiment did not include the bearing-priority
+retention proposed here. No tolerance adjustment, experiment switch or logger is shipped.
 
 Retire this local pruning patch when an upstream release preserves the bearing-priority invariant
 under the direct guard. Other fork patches remain independent.
