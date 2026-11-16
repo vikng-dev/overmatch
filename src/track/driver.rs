@@ -39,7 +39,7 @@ use super::stop_contacts::HardReaction;
 use super::transmission::{
     ClutchState, DriveConstruction, PARK_ENGAGE_SPEED, TransmissionInput, TransmissionParams,
     TransmissionReport, TransmissionState, candidate_pull, coupled_mass, force_margin,
-    fuel_beats_drag, landing_pull, steer_ratio, viable_pull,
+    landing_pull, steer_ratio, viable_pull,
 };
 
 /// Resolution: the fewest driven ticks a reading spans, since one gives a mean but no sample
@@ -508,9 +508,10 @@ impl DriverSense {
 ///    where they land ([`candidate_pull`], capped by grip), the one that pulls hardest, the higher
 ///    on a tie.
 ///
-/// Clauses 2 and 3 pay the cut. A cut to the gear that holds most is paid only where it holds more
-/// than the engaged gear; among launch gears a tie goes to the higher. A cut in flight, no pull
-/// asked or fuel that cannot beat drag choose nothing.
+/// Clauses 2 and 3 pay the cut, and only for a gear that pulls where it lands: one the pedal's own
+/// fuel cannot drive at the crank it lands on only brakes less than the engaged gear. A cut to the
+/// gear that holds most is paid only where it holds more than the engaged gear; among launch gears
+/// a tie goes to the higher. A cut in flight or no pull asked choose nothing.
 pub(super) fn choose(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -519,10 +520,7 @@ pub(super) fn choose(
     command: f32,
     sensed: Sensed,
 ) {
-    if st.shift_ticks != 0
-        || command <= 0.0
-        || !fuel_beats_drag(tp, inp.supply, st.omega_e, command)
-    {
+    if st.shift_ticks != 0 || command <= 0.0 {
         return;
     }
     let (ladder, dir) = if st.reverse {
@@ -553,9 +551,8 @@ pub(super) fn choose(
     let lands = |gear: u8, at: f32| {
         landing_pull(tp, inp.supply, at, ratio(gear), command).map(|pull| pull.min(sensed.grip))
     };
-    let admits = |gear: u8, at: f32| {
-        lands(gear, at)
-            .is_some_and(|holds| verdict(holds, carried(&window, gear)) == Verdict::Viable)
+    let viable = |gear: u8, holds: Option<f32>| {
+        holds.is_some_and(|holds| verdict(holds, carried(&window, gear)) == Verdict::Viable)
     };
     // The gear of `gears` that holds most, the higher on a tie, and what it holds; `None` where
     // none lands.
@@ -578,7 +575,7 @@ pub(super) fn choose(
             launches
                 .clone()
                 .rev()
-                .find(|&gear| admits(gear, speed))
+                .find(|&gear| viable(gear, lands(gear, speed)))
                 .unwrap_or_else(strongest_launch)
         };
         return;
@@ -590,11 +587,13 @@ pub(super) fn choose(
         st.gear.saturating_sub(tp.max_step).max(1)..=st.gear.saturating_add(tp.max_step).min(top);
     let held =
         viable_pull(tp, inp.supply, speed, ratio(st.gear), command, st.clutch).min(sensed.grip);
+    // The design's "A cut buys drive, never less braking" (section 5a) says why.
+    let buys = |gear: u8| lands(gear, landing).filter(|&pull| pull > 0.0);
     let offer = |gear: u8| {
         if gear == st.gear {
             Some(held)
         } else {
-            lands(gear, landing)
+            buys(gear)
         }
     };
     // The gear in reach that holds most, where it holds more than the engaged gear: on equal
@@ -615,7 +614,7 @@ pub(super) fn choose(
             .clone()
             .rev()
             .filter(|&gear| gear != st.gear)
-            .find(|&gear| admits(gear, landing))
+            .find(|&gear| viable(gear, buys(gear)))
             .or_else(stronger)
     } else if sensed.observed
         && st.steer_step == 0
@@ -626,7 +625,7 @@ pub(super) fn choose(
         let margin = force_margin(tp);
         // A detent turn's radius belongs to its gear: no upshift changes it.
         (st.gear + 1..=*reach.end())
-            .filter(|&gear| admits(gear, landing))
+            .filter(|&gear| viable(gear, buys(gear)))
             .map(|gear| {
                 let pull = candidate_pull(
                     tp,
@@ -1593,8 +1592,11 @@ mod tests {
                     st.gear
                 );
                 if prior == ClutchState::Out && st.clutch != ClutchState::Out {
+                    // What the pedal nets through the gear with its shaft turning the crank at `rpm`.
+                    let shaft = st.omega_e * tp.sprocket_radius / ratio(st.gear);
+                    let (whole, held) = (DriveSupply::WHOLE, ClutchState::In);
                     assert!(
-                        fuel_beats_drag(&tp, DriveSupply::WHOLE, st.omega_e, 1.0),
+                        price_driver_force(&tp, whole, shaft, ratio(st.gear), 1.0, held) > 0.0,
                         "tick {tick}: gear {} closes on {rpm} rpm, past fuel",
                         st.gear
                     );
@@ -1605,6 +1607,55 @@ mod tests {
                 gears.len() > 1 && speed >= PARK_ENGAGE_SPEED,
                 "the climb leaves top gear and moves on: {gears:?} at {speed} m/s"
             );
+        }
+    }
+
+    /// The game's driving model: on overrun, the hull turning the engaged crank past where the
+    /// pedal's fuel meets drag, the Driver judges each gear at its own crank. Under a pedal that
+    /// drives a higher gear where it lands, it shifts up; under one that drives no gear, it pays no
+    /// cut and the engaged gear keeps braking. A full-pedal descent relies on the first to leave a
+    /// low gear the slope has pushed past the governor's cut; a lift-off on the second not to walk
+    /// up the ladder shedding engine braking. Mutants: reading fuel against drag at the engaged
+    /// crank holds the low gear at full pedal; cutting to a gear that only brakes less shifts up at
+    /// the light pedal. Fixture: each class drivetrain locked in first gear, steady at the first
+    /// whole rpm past its governed speed where full pedal nets nothing at the crank, the slope
+    /// carrying exactly the drive the engaged gear delivers there, read without error on ample
+    /// grip; the light pedal [`braking_pedal`], which nets nothing at any crank.
+    #[test]
+    fn an_overrun_gear_shifts_up_only_to_a_gear_the_pedal_drives() {
+        for (fp, tp) in class_drivetrains() {
+            let first = tp.gears_fwd[0];
+            let at = |rpm: f32| rpm * RPM_TO_RAD * tp.sprocket_radius / first;
+            let nets = |rpm: f32, pedal: f32| {
+                price_driver_force(
+                    &tp,
+                    DriveSupply::WHOLE,
+                    at(rpm),
+                    first,
+                    pedal,
+                    ClutchState::In,
+                )
+            };
+            let overrun = (1_u16..)
+                .map(|past| tp.engine.governed_rpm + f32::from(past))
+                .find(|&rpm| nets(rpm, 1.0) <= 0.0)
+                .expect("full pedal nets nothing at the crank past the governor's cut");
+            for (pedal, shifts) in [(1.0, true), (braking_pedal(&tp), false)] {
+                let inp = driver_input(at(overrun), nets(overrun, pedal), pedal);
+                let mut st = TransmissionState {
+                    gear: 1,
+                    clutch: ClutchState::In,
+                    omega_e: overrun * RPM_TO_RAD,
+                    ..fresh(&tp)
+                };
+                choose(&mut st, &tp, &construction(&fp), &inp, pedal, felt(&inp));
+                assert_eq!(
+                    (st.gear > 1, st.shift_ticks > 0),
+                    (shifts, shifts),
+                    "first gear overrun at {overrun} rpm under {pedal} pedal chose gear {}",
+                    st.gear
+                );
+            }
         }
     }
 

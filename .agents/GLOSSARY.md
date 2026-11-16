@@ -261,7 +261,7 @@ Mean belt motion expressed relative to the engaged forward or reverse ladder. No
 The engine-side angular speed, positive in its firing direction and negative when back-driven. Its rotation determines engine rpm; belt speed does not stand in for it while the clutch slips.
 
 **Driver gear law**:
-The Driver's choice of a permitted gear from its spare force after a shift, against the perceived ground, slope and steering load at requested pedal. It preserves engine braking on overrun, permits a lower gear on a deficit or engaged lug, and preselects the highest capable launch gear at rest.
+The Driver's choice of a permitted gear from its spare force after a shift, against the perceived ground, slope and steering load at requested pedal. It never cuts to a gear that only brakes less (on overrun it holds its gear unless a higher one pulls where it lands), permits a lower gear on a deficit or engaged lug, and preselects the highest capable launch gear at rest.
 
 **Steering detent**:
 A fixed-radii steering state selected by one lever threshold per detent: straight, wide radius, or tight radius. While a turn detent is engaged, the transmission constrains belt-speed difference to the declared curvature and defers predictor-blind upshifts.
