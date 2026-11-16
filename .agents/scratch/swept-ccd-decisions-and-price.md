@@ -93,3 +93,17 @@ CCD_PROBE speed=10 peak_intrusion_m=0.05540262 settled_intrusion_m=-0.0027852983
 
 MEASURED probe commit gates passed: formatting, CI clippy, CCD 4/4, metrics 4/4, ordinary
 track-scorecard tests, and the ignored signed-distance probe. Log: `/private/tmp/ccd4-d3-gates.log`.
+
+## Lazy sweep shape
+
+A local `LazyCell` constructs `CcdFastShape` only when a candidate passes all filters and reaches
+TOI dispatch, once per moving collider. Eligibility still needs thickness before the gate and
+reuses that value in the shape. This is a three-line lazy-initialization change, so its patch
+and fresh published-crate compile proof are folded into the per-collider draft. No switch or
+extra counter API ships.
+
+MEASURED: the three signed-probe output lines, including peak, settled and velocity values,
+are identical before/after this construction-only change. This is one report comparison, not a
+persistent output-pinning test. The published-crate check, formatting, CI clippy, CCD 4/4, metrics
+4/4 and signed probe passed. Log: `/private/tmp/ccd4-d4-gates.log`. Before merging main the
+source tree is MEASURED 856 added + 231 removed = 1,087 lines; CCD 18+4=22, metrics 60+20=80.

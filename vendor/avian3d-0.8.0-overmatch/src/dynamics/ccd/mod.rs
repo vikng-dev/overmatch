@@ -773,7 +773,8 @@ fn solve_continuous(
             );
             let query_aabb = obvhs::aabb::Aabb::from(swept_aabb);
 
-            let fast_shape = CcdFastShape {
+            // OVERMATCH PATCH: mass properties are needed only by a filtered TOI candidate.
+            let fast_shape = core::cell::LazyCell::new(|| CcdFastShape {
                 shape: shape1,
                 swept_aabb: parry::bounding_volume::Aabb::new(
                     swept_aabb.min.real(),
@@ -781,7 +782,7 @@ fn solve_continuous(
                 ),
                 local_centroid: shape1.mass_properties(1.0).local_com,
                 min_extent,
-            };
+            });
 
             // Sweep the collider against the relevant trees.
             for tree in trees_to_query.into_iter().flatten() {

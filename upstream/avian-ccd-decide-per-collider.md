@@ -15,6 +15,12 @@ the body's centre of mass. A child's own radius about its origin would underesti
 child's rotation. For a single-collider body the existing body gate and this gate use the same
 thickness, so eligibility is unchanged. No thresholds, defaults or contact laws change.
 
+The sweep-shape initializer uses a local `LazyCell`: centroid/mass properties are computed only
+when a candidate passes the self, non-solid, layer, touching-contact and target-query filters
+and reaches TOI dispatch, once per moving collider. The thickness already required by eligibility
+is reused. This three-line lazy-construction patch changes no collision result and is folded into
+this draft; it does not need a separate upstream proposal.
+
 The game's three small collision witnesses cover a thick child's discrete first step beside a
 thin child, thin-child and single-collider wall protection, and a stationary-COM offset rotation.
 They assert geometric relationships, not earlier measured positions.
@@ -38,15 +44,25 @@ Apply with `patch -p1` at the published crate root; no other fork patch is requi
              let layers1 = layers1.copied().unwrap_or_default();
 
              let motion1 =
-@@ -767,7 +774,7 @@
+@@ -760,15 +767,15 @@
+             );
+             let query_aabb = obvhs::aabb::Aabb::from(swept_aabb);
+
+-            let fast_shape = CcdFastShape {
++            let fast_shape = core::cell::LazyCell::new(|| CcdFastShape {
+                 shape: shape1,
+                 swept_aabb: parry::bounding_volume::Aabb::new(
+                     swept_aabb.min.real(),
                      swept_aabb.max.real(),
                  ),
                  local_centroid: shape1.mass_properties(1.0).local_com,
 -                min_extent: shape1.ccd_thickness(),
+-            };
 +                min_extent,
-             };
++            });
 
              // Sweep the collider against the relevant trees.
+             for tree in trees_to_query.into_iter().flatten() {
 ```
 
 MEASURED: the patch applied cleanly to the cached published 0.8.0 source. A sibling harness

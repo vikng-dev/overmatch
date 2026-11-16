@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 1082 in all (MEASURED), 1004 in upstream files and 78 in the
+of `src/` against the published crate: 1087 in all (MEASURED), 1009 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -216,7 +216,9 @@ The body-wide bound includes off-centre rotation; a single collider keeps upstre
 
 Kept as an upstream bug fix inside the private per-collider loop. Guards:
 `src/tests/avian_swept_ccd.rs` (thick-child discrete contact, thin-child/single-collider protection,
-offset rotation). Independent published-crate patch: `upstream/avian-ccd-decide-per-collider.md`.
+offset rotation). A local `LazyCell` defers sweep-shape mass properties until the first filtered
+TOI candidate, once per collider; the gate's thickness is reused. This small bug-fix-kind change
+is folded into the same independent published-crate patch: `upstream/avian-ccd-decide-per-collider.md`.
 The merged-tree source census and repeated release measurements live in the
 [continuing lane report](../../.agents/scratch/swept-ccd-decisions-and-price.md).
 
