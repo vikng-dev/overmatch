@@ -4,8 +4,8 @@
 //!
 //! A child collider takes `body pose ∘ ColliderTransform`. Avian's own system assigned that pose to
 //! every child of every body every step, so every standing static collider was marked changed and
-//! its bounds recomputed each step; the fork deletes it (`OVERMATCH_PATCH.md`, "Child
-//! collider poses"). [`ChildColliderPoses`] visits only children whose inputs changed (own offset,
+//! its bounds recomputed each step; [`PhysicsPlacementPlugin`] replaces it after plugin setup.
+//! [`ChildColliderPoses`] visits only children whose inputs changed (own offset,
 //! own pose, attachment, or the body's pose, kind or collider list) and writes a component only
 //! where its bits change, so an unchanged pose keeps its change tick.
 //!
@@ -21,6 +21,7 @@
 use avian3d::prelude::*;
 use bevy::ecs::component::ComponentId;
 use bevy::ecs::entity_disabling::DefaultQueryFilters;
+use bevy::ecs::schedule::ScheduleCleanupPolicy;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
@@ -215,4 +216,31 @@ fn announce_reenabled(removed: On<Remove<()>>, mut reenabled: MessageWriter<Reen
     reenabled.write(Reenabled {
         entity: removed.entity,
     });
+}
+
+/// Replaces Avian's child placement after all plugins have built and finished. Removal initializes
+/// the schedule, so the replacement is added afterwards to avoid an ambiguous pair of writers.
+pub struct PhysicsPlacementPlugin;
+
+impl Plugin for PhysicsPlacementPlugin {
+    fn build(&self, _app: &mut App) {}
+
+    fn cleanup(&self, app: &mut App) {
+        use avian3d::collision::collider::collider_transform::update_child_collider_position;
+        let removed = app
+            .remove_systems_in_set(
+                PhysicsSchedule,
+                update_child_collider_position,
+                ScheduleCleanupPolicy::RemoveSetAndSystems,
+            )
+            .expect("Avian child placement must be registered before the game replaces it");
+        assert_eq!(
+            removed, 1,
+            "the game replaces exactly one Avian child placement system"
+        );
+        app.add_systems(
+            PhysicsSchedule,
+            place_child_colliders.in_set(PhysicsStepSystems::First),
+        );
+    }
 }

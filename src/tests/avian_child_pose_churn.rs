@@ -24,6 +24,7 @@ use std::time::Duration;
 use avian3d::prelude::*;
 use bevy::ecs::change_detection::Tick;
 use bevy::ecs::entity_disabling::Disabled;
+use bevy::ecs::schedule::SystemSet;
 use bevy::ecs::system::{RunSystemOnce, SystemId};
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
@@ -490,16 +491,17 @@ fn a_manually_attached_child_follows_its_body_without_transform_children() {
     assert_eq!(pose(app.world(), child).0, Vec3::X + Vec3::Z);
 }
 
-/// Lightyear's Position mode, composed as the game composes it (`net::protocol`, mounted beside
-/// `net::physics`), registers no child-pose pass of its own in `RunFixedMainLoop`: the frame
-/// boundary's slot holds the game's pass alone. Fails if the registration of
-/// `LightyearAvianPlugin::update_child_collider_position` the vendored crate drops
-/// (`vendor/lightyear_avian3d-0.31.0-child-pose`, `OVERMATCH_PATCH.md`) returns: that pass writes
-/// every child's pose through `Mut` each frame, so no change tick survives it.
+/// The shipped physics and networking composition leaves child placement to the game. An engine
+/// writer registered beside it would mark standing colliders changed at every boundary.
 #[test]
 fn lightyear_position_mode_leaves_the_frame_boundary_to_the_game() {
     use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
     let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin::default(),
+        crate::net::physics::physics_plugins(),
+    ));
     app.add_plugins(LightyearAvianPlugin {
         replication_mode: AvianReplicationMode::Position {
             sync_to_transform: false,
@@ -508,6 +510,8 @@ fn lightyear_position_mode_leaves_the_frame_boundary_to_the_game() {
         ..default()
     });
     crate::net::physics::plugin(&mut app);
+    app.finish();
+    app.cleanup();
     let sets = &app
         .get_schedule(RunFixedMainLoop)
         .expect("the game's pass registers in RunFixedMainLoop")
@@ -518,7 +522,52 @@ fn lightyear_position_mode_leaves_the_frame_boundary_to_the_game() {
         "fixture: the game's pass holds the frame boundary"
     );
     assert!(
-        !sets.contains(LightyearAvianPlugin::update_child_collider_position.into_system_set()),
+        !app.get_schedule(RunFixedMainLoop)
+            .unwrap()
+            .graph()
+            .systems
+            .iter()
+            .any(|(_, system, _)| {
+                system.default_system_sets().contains(
+                    &LightyearAvianPlugin::update_child_collider_position
+                        .into_system_set()
+                        .intern(),
+                )
+            }),
         "lightyear registers its own child-pose pass at the frame boundary"
+    );
+}
+
+/// The shipped physics plugin group must remove Avian's unconditional pose writer, even if the
+/// game placement no longer conflicts with its queries and ambiguity detection cannot catch it.
+#[test]
+fn shipped_physics_leaves_child_placement_to_the_game() {
+    use avian3d::collision::collider::collider_transform::update_child_collider_position;
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin::default(),
+        crate::net::physics::physics_plugins(),
+    ));
+    app.finish();
+    app.cleanup();
+    let sets = &app
+        .get_schedule(PhysicsSchedule)
+        .expect("shipped physics schedule")
+        .graph()
+        .system_sets;
+    assert!(sets.contains(place_child_colliders.into_system_set()));
+    assert!(
+        !app.get_schedule(PhysicsSchedule)
+            .unwrap()
+            .graph()
+            .systems
+            .iter()
+            .any(|(_, system, _)| {
+                system
+                    .default_system_sets()
+                    .contains(&update_child_collider_position.into_system_set().intern())
+            }),
+        "Avian's pose writer must be removed"
     );
 }

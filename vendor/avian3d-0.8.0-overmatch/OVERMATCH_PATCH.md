@@ -24,30 +24,25 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 915 in all (MEASURED), 837 in upstream files and 78 in the
+of `src/` against the published crate: 880 in all (MEASURED), 802 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
 
 ## Child collider poses (`src/collision/collider/collider_transform/plugin.rs`): hook
 
-`ColliderTransformPlugin` no longer has `update_child_collider_position`, which assigned every child
-collider's `Position` and `Rotation` through `Mut` every step, changed or not: every child collider
-of every body, static bodies included, was marked changed every step, and
-`update_moved_collider_aabbs`, which skips a collider whose pose and shape ticks did not move,
-recomputed all their bounds. On the product map that is every building element and tree segment,
-none of which moves. The system, its registration and the plugin doc's claim to place colliders are
-deleted (42 fork lines, MEASURED).
+The upstream system and registration remain intact. The fork makes
+`update_child_collider_position` public and re-exports it (7 fork lines, MEASURED against pristine
+0.8.0 with `diff -ruN src/`). The game removes exactly one instance in
+`PhysicsPlacementPlugin::cleanup`, after every plugin has built and finished, then installs its
+change-aware placement in the same slot. Missing registration fails during setup.
 
-The placement law is the game's (`avian_ext::child_poses`): `place_child_colliders`, which the game
-runs in `PhysicsStepSystems::First` (the slot upstream used) and at the frame boundary where
-lightyear_avian ran its own child pass. It composes the same pose and writes a component only where
-its bits differ, visits only children whose offset, own pose, attachment or body changed, and reads
-`Reenabled` messages for re-enabled entities, whose re-enable moves no tick.
-`ColliderTransformPlugin` stays enabled: it also propagates `ColliderTransform` and adds the
-`pub(crate)` `AncestorMarkerPlugin`, which a disabled plugin would leave to the game.
+The game also replaces the published Lightyear integration's frame-boundary writer from
+`FramePlacementPlugin::cleanup`; no lightyear_avian3d fork remains. `ColliderTransformPlugin`
+stays enabled for transform propagation and ancestry marking.
 
-Guard: `src/tests/avian_child_pose_churn.rs`. Record: `upstream/avian-child-collider-pose-churn.md`.
+Guard: `src/tests/avian_child_pose_churn.rs`, including the shipped composition's schedule.
+Record: `upstream/avian-child-collider-pose-churn.md`.
 
 ## Attachment refusal: game-side
 

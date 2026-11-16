@@ -1164,6 +1164,13 @@ mod tests {
         use avian3d::prelude::Collider;
 
         let mut app = crate::net::test_harness::net_physics_app();
+        app.add_plugins(LightyearAvianPlugin {
+            replication_mode: AvianReplicationMode::Position {
+                sync_to_transform: false,
+            },
+            register_physics_components: false,
+            ..default()
+        });
         super::super::physics::plugin(&mut app);
         app.add_systems(FixedUpdate, apply_launched_turret_pose);
         crate::net::test_harness::finish(&mut app);

@@ -15,11 +15,7 @@ use bevy::prelude::*;
 /// handed one by Avian's `ColliderOf` hook, decomposed from world matrices an ULP off a unit
 /// scale, and the collector refuses armour at any scale but a bit-exact 1 (`ballistics::collect`).
 pub(crate) fn plugin(app: &mut App) {
-    app.add_systems(
-        RunFixedMainLoop,
-        crate::avian_ext::child_poses::place_child_colliders
-            .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
-    );
+    app.add_plugins(FramePlacementPlugin);
     app.configure_sets(
         FixedPostUpdate,
         (
@@ -47,6 +43,32 @@ pub fn physics_plugins() -> bevy::app::PluginGroupBuilder {
     crate::offline_physics()
         .disable::<PhysicsTransformPlugin>()
         .disable::<PhysicsInterpolationPlugin>()
+}
+
+/// Replaces Lightyear's Position-mode placement after both networking and physics plugin setup.
+pub struct FramePlacementPlugin;
+
+impl Plugin for FramePlacementPlugin {
+    fn build(&self, _app: &mut App) {}
+
+    fn cleanup(&self, app: &mut App) {
+        use bevy::ecs::schedule::ScheduleCleanupPolicy;
+        use lightyear::avian3d::plugin::LightyearAvianPlugin;
+        let removed = app.remove_systems_in_set(
+            RunFixedMainLoop,
+            LightyearAvianPlugin::update_child_collider_position,
+            ScheduleCleanupPolicy::RemoveSetAndSystems,
+        ).expect("Lightyear Position-mode child placement must be registered before the game replaces it");
+        assert_eq!(
+            removed, 1,
+            "the game replaces exactly one Lightyear child placement system"
+        );
+        app.add_systems(
+            RunFixedMainLoop,
+            crate::avian_ext::child_poses::place_child_colliders
+                .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
+        );
+    }
 }
 
 #[cfg(test)]

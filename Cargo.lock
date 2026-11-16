@@ -4962,6 +4962,8 @@ dependencies = [
 [[package]]
 name = "lightyear_avian3d"
 version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0ea43838ce698bd3b21b0298b74a6838b3f1942052f4ccea2489413d766c739"
 dependencies = [
  "avian3d",
  "bevy_app",

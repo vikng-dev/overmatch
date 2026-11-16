@@ -17,7 +17,6 @@ pub mod rest_test;
 
 use avian3d::collision::narrow_phase::ContactMatcher;
 use avian3d::dynamics::solver::islands::RestTest;
-use avian3d::prelude::*;
 use bevy::prelude::*;
 
 /// Every seam of the game's half of the fork, installed into Avian's `PhysicsSchedule`. Added after
@@ -29,9 +28,7 @@ pub fn plugin(app: &mut App) {
     app.add_observer(attachment::refuse_unposed_attachment);
     app.insert_resource(ContactMatcher(contact_match::match_pair));
     app.insert_resource(RestTest(rest_test::at_rest));
-    app.get_schedule_mut(PhysicsSchedule)
-        .expect("avian_ext::plugin is added after Avian's PhysicsPlugins")
-        .add_systems(child_poses::place_child_colliders.in_set(PhysicsStepSystems::First));
+    app.add_plugins(child_poses::PhysicsPlacementPlugin);
     contact_reduction::plugin(app);
     island_wake::plugin(app);
     compliance::plugin(app);
