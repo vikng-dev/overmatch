@@ -31,16 +31,16 @@ Against the pristine crate (`a/` and `b/` are the crate root):
 @@ -121,6 +121,11 @@
          return;
      }
- 
-+    // The queued wake restarts the rest interval of the bodies that were sleeping, and this body
-+    // has lost `Sleeping` by the time it runs, so restart its interval here.
+
++    // This body has lost Sleeping before the queued wake. An awake newly enabled node can
++    // precede its first solver index and timer; a sleeping island's links retain their timers.
 +    if let Some(mut sleep_timer) = world.get_mut::<SleepTimer>(ctx.entity) {
 +        sleep_timer.0 = 0.0;
 +    }
      world.commands().queue_silenced(WakeBody(ctx.entity));
  }
- 
-@@ -457,6 +462,7 @@
+
+@@ -361,6 +366,7 @@
              &'static BodyIslandNode,
              &'static mut SleepTimer,
              Option<&'static RigidBodyColliders>,
@@ -48,24 +48,35 @@ Against the pristine crate (`a/` and `b/` are the crate root):
          )>,
          SResMut<PhysicsIslands>,
          SResMut<ContactGraph>,
-@@ -514,7 +520,8 @@
+@@ -457,6 +463,7 @@
+             &'static BodyIslandNode,
+             &'static mut SleepTimer,
+             Option<&'static RigidBodyColliders>,
++            Has<Sleeping>,
+         )>,
+         SResMut<PhysicsIslands>,
+         SResMut<ContactGraph>,
+@@ -514,11 +521,9 @@
                      let mut body = island.head_body;
- 
+
                      while let Some(entity) = body {
 -                        let Ok((body_island, mut sleep_timer, colliders)) = bodies.get_mut(entity)
-+                        let Ok((body_island, mut sleep_timer, colliders, was_sleeping)) =
-+                            bodies.get_mut(entity)
-                         else {
-                             body = None;
-                             continue;
-@@ -539,7 +546,12 @@
- 
+-                        else {
+-                            body = None;
+-                            continue;
+-                        };
++                        let (body_island, mut sleep_timer, colliders, was_sleeping) = bodies
++                            .get_mut(entity)
++                            .expect("every sleeping island link resolves to a live BodyIslandNode with SleepTimer; otherwise waking would leave later bodies asleep");
+
+                         // Transfer the contact pairs to the awake set, and add touching contacts to the constraint graph.
+                         if let Some(colliders) = colliders {
+@@ -539,7 +544,10 @@
+
                          bodies_to_wake.push(entity);
                          body = body_island.next;
 -                        sleep_timer.0 = 0.0;
-+                        // Only bodies that were sleeping restart their rest interval. A sleeping
-+                        // island that merged with an awake one is marked sleeping, and its awake
-+                        // members keep the rest time they have accumulated.
++                        // Awake members of a merged island retain their rest history.
 +                        if was_sleeping {
 +                            sleep_timer.0 = 0.0;
 +                        }
@@ -79,3 +90,10 @@ Against the pristine crate (`a/` and `b/` are the crate root):
 The walk resets only bodies that were sleeping (`Has<Sleeping>`). A body whose `Sleeping` is
 removed directly has lost the marker by the time its queued `WakeBody` runs, so the removal hook
 resets that body's timer itself. The solver still resets a timer when the body exceeds a threshold.
+
+An awake node created by the enable observer may precede its first solver index and timer.
+Sleeping islands have accumulated rest history, and every linked body must remain fetchable with
+its timer. A broken link must panic: ending the walk after marking the island awake leaves its
+tail sleeping indefinitely. The local application requires `SleepTimer` with `BodyIslandNode`, so a node created by an enable
+observer is complete even before its first solver index; admission refuses a lost timer. The
+command tripwire covers direct wakes too.

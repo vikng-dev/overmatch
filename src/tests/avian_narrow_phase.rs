@@ -47,8 +47,8 @@ fn stationary_pair() -> (App, Entity, Entity, f32) {
     (app, fixed, moving, radius)
 }
 
-/// Contact users need a pair whose collider lost state the narrow phase reads refused, not left
-/// with its last update. A mutant that skips every pair it cannot read keeps it silently.
+/// Contact users rely on admission refusing a posed enabled collider without its required layers
+/// before the narrow phase can skip the pair and leave its previous update in place.
 #[test]
 #[should_panic(expected = "a posed enabled collider retains CollisionLayers and EnlargedAabb")]
 fn a_pair_whose_collider_lost_its_layers_is_refused() {
@@ -78,8 +78,8 @@ fn a_pair_whose_collider_lost_its_pose_is_skipped() {
     );
 }
 
-/// Contact users need a pair whose body lost state the narrow phase reads refused, not read as
-/// bodiless. A mutant that reads every body it cannot fetch as absent keeps it silently.
+/// Contact users rely on admission refusing a posed enabled body without its required velocity
+/// before the narrow phase can read it as absent.
 #[test]
 #[should_panic(expected = "a posed enabled body retains LinearVelocity")]
 fn a_pair_whose_body_lost_its_velocity_is_refused() {

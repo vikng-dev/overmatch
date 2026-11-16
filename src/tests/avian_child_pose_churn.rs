@@ -10,11 +10,9 @@
 //! one that did. Who relies on both: the dedicated server, whose map holds every intact
 //! construction element as a static body's child collider, and whose ballistics reads a moving
 //! tank's armour, child colliders too, at the pose this pass leaves between steps. A dependency
-//! bump that registers Avian's own child pass again fails every physics test here (MEASURED on
-//! stock 0.8.0): both passes write child poses in `PhysicsStepSystems::First`, and Avian's
-//! `PhysicsSchedule` refuses that ambiguity when it initializes. One that registers
-//! lightyear_avian's own pass at the frame boundary again fails
-//! `lightyear_position_mode_leaves_the_frame_boundary_to_the_game` (MEASURED).
+//! bump must leave exactly the game's live writer at each boundary. The schedule guards inspect
+//! live systems after cleanup, because Bevy retains removed systems' set identifiers. The
+//! admission guard refuses physics updates before cleanup has replaced the engine writers.
 //!
 //! The poses, box dimensions and update counts below are fixture data: any off-origin, turned pose
 //! and any count of settling and observed updates exercise the same invariants.
@@ -491,50 +489,72 @@ fn a_manually_attached_child_follows_its_body_without_transform_children() {
     assert_eq!(pose(app.world(), child).0, Vec3::X + Vec3::Z);
 }
 
-/// The shipped physics and networking composition leaves child placement to the game. An engine
-/// writer registered beside it would mark standing colliders changed at every boundary.
+fn contains_live_system(schedule: &Schedule, set: impl SystemSet) -> bool {
+    let set = set.intern();
+    schedule
+        .graph()
+        .systems
+        .iter()
+        .any(|(_, system, _)| system.default_system_sets().contains(&set))
+}
+
+/// Physics updates must refuse an app whose plugin cleanup has not replaced Avian's writer.
 #[test]
-fn lightyear_position_mode_leaves_the_frame_boundary_to_the_game() {
-    use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
+#[should_panic(expected = "physics placement cleanup must replace the engine pose writers")]
+fn physics_without_placement_cleanup_is_refused() {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
         AssetPlugin::default(),
         crate::net::physics::physics_plugins(),
     ));
-    app.add_plugins(LightyearAvianPlugin {
-        replication_mode: AvianReplicationMode::Position {
-            sync_to_transform: false,
-        },
-        register_physics_components: false,
-        ..default()
-    });
+    app.finish();
+    app.world_mut().run_schedule(PhysicsSchedule);
+}
+
+/// Frame placement cleanup is part of admission even when physics placement cleanup has run.
+#[test]
+#[should_panic(expected = "physics placement cleanup must replace the engine pose writers")]
+fn physics_without_frame_placement_cleanup_is_refused() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin::default(),
+        crate::net::physics::physics_plugins(),
+    ));
+    crate::net::physics::lightyear_plugin(&mut app);
+    crate::net::physics::plugin(&mut app);
+    app.finish();
+    crate::avian_ext::child_poses::PhysicsPlacementPlugin.cleanup(&mut app);
+    app.world_mut().run_schedule(PhysicsSchedule);
+}
+
+/// The shipped physics and networking composition leaves child placement to the game. An engine
+/// writer registered beside it would mark standing colliders changed at every boundary.
+#[test]
+fn lightyear_position_mode_leaves_the_frame_boundary_to_the_game() {
+    use lightyear::avian3d::plugin::LightyearAvianPlugin;
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin::default(),
+        crate::net::physics::physics_plugins(),
+    ));
+    crate::net::physics::lightyear_plugin(&mut app);
     crate::net::physics::plugin(&mut app);
     app.finish();
     app.cleanup();
-    let sets = &app
-        .get_schedule(RunFixedMainLoop)
-        .expect("the game's pass registers in RunFixedMainLoop")
-        .graph()
-        .system_sets;
+    let schedule = app.get_schedule(RunFixedMainLoop).expect("frame boundary");
+    assert!(contains_live_system(
+        schedule,
+        place_child_colliders.into_system_set()
+    ));
     assert!(
-        sets.contains(place_child_colliders.into_system_set()),
-        "fixture: the game's pass holds the frame boundary"
-    );
-    assert!(
-        !app.get_schedule(RunFixedMainLoop)
-            .unwrap()
-            .graph()
-            .systems
-            .iter()
-            .any(|(_, system, _)| {
-                system.default_system_sets().contains(
-                    &LightyearAvianPlugin::update_child_collider_position
-                        .into_system_set()
-                        .intern(),
-                )
-            }),
-        "lightyear registers its own child-pose pass at the frame boundary"
+        !contains_live_system(
+            schedule,
+            LightyearAvianPlugin::update_child_collider_position.into_system_set()
+        ),
+        "Lightyear's pose writer must be removed"
     );
 }
 
@@ -551,23 +571,15 @@ fn shipped_physics_leaves_child_placement_to_the_game() {
     ));
     app.finish();
     app.cleanup();
-    let sets = &app
+    let schedule = app
         .get_schedule(PhysicsSchedule)
-        .expect("shipped physics schedule")
-        .graph()
-        .system_sets;
-    assert!(sets.contains(place_child_colliders.into_system_set()));
+        .expect("shipped physics schedule");
+    assert!(contains_live_system(
+        schedule,
+        place_child_colliders.into_system_set()
+    ));
     assert!(
-        !app.get_schedule(PhysicsSchedule)
-            .unwrap()
-            .graph()
-            .systems
-            .iter()
-            .any(|(_, system, _)| {
-                system
-                    .default_system_sets()
-                    .contains(&update_child_collider_position.into_system_set().intern())
-            }),
+        !contains_live_system(schedule, update_child_collider_position.into_system_set()),
         "Avian's pose writer must be removed"
     );
 }

@@ -218,6 +218,14 @@ fn announce_reenabled(removed: On<Remove<()>>, mut reenabled: MessageWriter<Reen
     });
 }
 
+/// Proof that cleanup replaced Avian's scheduled pose writer.
+#[derive(Resource)]
+pub(super) struct PhysicsPlacementReady;
+
+/// Present between Lightyear placement setup and its cleanup replacement.
+#[derive(Resource)]
+pub(crate) struct FramePlacementPending;
+
 /// Replaces Avian's child placement after all plugins have built and finished. Removal initializes
 /// the schedule, so the replacement is added afterwards to avoid an ambiguous pair of writers.
 pub struct PhysicsPlacementPlugin;
@@ -231,9 +239,9 @@ impl Plugin for PhysicsPlacementPlugin {
             .remove_systems_in_set(
                 PhysicsSchedule,
                 update_child_collider_position,
-                ScheduleCleanupPolicy::RemoveSetAndSystems,
+                ScheduleCleanupPolicy::RemoveSystemsOnly,
             )
-            .expect("Avian child placement must be registered before the game replaces it");
+            .expect("Avian pose-writer removal requires an initializable PhysicsSchedule containing its system set");
         assert_eq!(
             removed, 1,
             "the game replaces exactly one Avian child placement system"
@@ -242,5 +250,6 @@ impl Plugin for PhysicsPlacementPlugin {
             PhysicsSchedule,
             place_child_colliders.in_set(PhysicsStepSystems::First),
         );
+        app.insert_resource(PhysicsPlacementReady);
     }
 }

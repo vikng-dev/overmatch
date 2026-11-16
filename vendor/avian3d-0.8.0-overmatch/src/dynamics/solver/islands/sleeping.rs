@@ -124,7 +124,8 @@ fn wake_on_remove_sleeping(mut world: DeferredWorld, ctx: HookContext) {
 
     // OVERMATCH PATCH: this body has lost `Sleeping` by the time the queued wake runs, which
     // restarts only sleeping bodies' rest intervals.
-    // A newly enabled node can precede its first solver index and timer; it has no rest history.
+    // Upstream's enable observers can create a node before its first solver index and timer;
+    // it has no rest history. Applications can require a timer with the node itself.
     if let Some(mut sleep_timer) = world.get_mut::<SleepTimer>(ctx.entity) {
         sleep_timer.0 = 0.0;
     }
@@ -569,12 +570,10 @@ impl Command for WakeIslands {
                     let mut body = island.head_body;
 
                     while let Some(entity) = body {
-                        let Ok((body_island, mut sleep_timer, colliders, was_sleeping)) =
-                            bodies.get_mut(entity)
-                        else {
-                            body = None;
-                            continue;
-                        };
+                        // OVERMATCH PATCH: the sleeping island owns a complete linked list.
+                        let (body_island, mut sleep_timer, colliders, was_sleeping) = bodies
+                            .get_mut(entity)
+                            .expect("every sleeping island link resolves to a live BodyIslandNode with SleepTimer; otherwise waking would leave later bodies asleep");
 
                         // Transfer the contact pairs to the awake set, and add touching contacts to the constraint graph.
                         if let Some(colliders) = colliders {

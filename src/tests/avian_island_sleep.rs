@@ -399,17 +399,75 @@ fn a_body_woken_between_the_increments_build_and_clear_is_refused() {
     app.update();
 }
 
-/// Physics users need corrupt island membership refused rather than a partly woken island.
-/// Missing required body state must not terminate the linked-list walk silently.
+/// Physics users rely on every sleeping-island link resolving during WakeIslands, even for a wake
+/// issued outside scheduled admission. A missing timer must panic before the walk drops its tail.
+#[test]
+#[should_panic(
+    expected = "every sleeping island link resolves to a live BodyIslandNode with SleepTimer"
+)]
+fn a_linked_body_without_sleep_timer_is_refused() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let resting = body(&mut app, Vec3::ZERO);
+    until_asleep(&mut app, resting);
+    let island_id = app
+        .world()
+        .get::<BodyIslandNode>(resting)
+        .unwrap()
+        .island_id();
+    app.world_mut().entity_mut(resting).remove::<SleepTimer>();
+    WakeIslands(vec![island_id]).apply(app.world_mut());
+}
+
+/// Admission must catch a lost timer before scheduled consumers can skip the sleeping body.
 #[test]
 #[should_panic(expected = "a posed enabled island body retains SleepTimer")]
-fn a_linked_body_without_sleep_timer_is_refused() {
+fn a_sleeping_body_without_its_timer_is_refused_at_admission() {
     let mut app = physics_app();
     app.insert_resource(Gravity::ZERO);
     let resting = body(&mut app, Vec3::ZERO);
     until_asleep(&mut app, resting);
     app.world_mut().entity_mut(resting).remove::<SleepTimer>();
     app.update();
+}
+
+/// The game's island nodes require timers at creation, even when Avian's enable observer creates
+/// a node for a body asleep since spawn. Wake commands can then traverse it before any solver index.
+#[test]
+fn a_newly_enabled_island_has_its_timer_before_its_first_solver_index() {
+    use avian3d::dynamics::solver::solver_body::SolverBodyIndex;
+    #[derive(Resource, Default)]
+    struct NodeCreation(Option<(bool, bool)>);
+    let mut app = physics_app();
+    app.init_resource::<NodeCreation>().add_observer(
+        |added: On<Insert<BodyIslandNode>>,
+         nodes: Query<(Has<SleepTimer>, Has<SolverBodyIndex>)>,
+         mut observed: ResMut<NodeCreation>| {
+            observed.0 = Some(nodes.get(added.entity).unwrap());
+        },
+    );
+    // Fixture: a posed dynamic body disabled and asleep from birth has never entered the solver.
+    let enabled = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            RigidBodyDisabled,
+            Sleeping,
+            Position(Vec3::ZERO),
+            Collider::cuboid(SIDE, SIDE, SIDE),
+        ))
+        .id();
+    assert!(app.world().get::<SleepTimer>(enabled).is_none());
+    app.world_mut()
+        .entity_mut(enabled)
+        .remove::<RigidBodyDisabled>();
+    app.world_mut().flush();
+    assert_eq!(
+        app.world().resource::<NodeCreation>().0,
+        Some((true, false)),
+        "the node supplies a timer before the enable observer's queued wake enters the solver"
+    );
+    assert!(app.world().get::<SleepTimer>(enabled).is_some());
 }
 
 /// Solver users need the wake source to survive every merge in one narrow phase. A mutant

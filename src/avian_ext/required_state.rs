@@ -22,11 +22,28 @@ pub(super) struct PendingOwners(pub Vec<(Entity, Entity)>);
 
 /// Refuses incomplete state in the first physics phase, before child placement.
 pub fn plugin(app: &mut App) {
+    // Avian's enable observers can create a node before its first solver index. Every game
+    // island node owns its timer from creation, including a body asleep since spawn.
+    app.register_required_components::<BodyIslandNode, SleepTimer>();
     app.init_resource::<PendingOwners>().add_systems(
         PhysicsSchedule,
-        refuse_incomplete_state
+        (refuse_unfinished_placement, refuse_incomplete_state)
+            .chain()
             .in_set(PhysicsStepSystems::First)
+            .before(
+                avian3d::collision::collider::collider_transform::update_child_collider_position,
+            )
             .before(super::child_poses::place_child_colliders),
+    );
+}
+
+fn refuse_unfinished_placement(
+    physics_placement: Option<Res<super::child_poses::PhysicsPlacementReady>>,
+    frame_pending: Option<Res<super::child_poses::FramePlacementPending>>,
+) {
+    assert!(
+        physics_placement.is_some() && frame_pending.is_none(),
+        "physics placement cleanup must replace the engine pose writers before updates; call App::finish and App::cleanup before running physics"
     );
 }
 

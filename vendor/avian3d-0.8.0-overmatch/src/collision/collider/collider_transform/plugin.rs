@@ -2,7 +2,6 @@ use crate::{
     ancestor_marker::{AncestorMarker, AncestorMarkerPlugin},
     physics_transform::PhysicsTransformSystems,
     prelude::*,
-    utils::{MIN_PAR_ITER_ENTITIES, ParallelQueryForEach},
 };
 use bevy::{
     ecs::{intern::Interned, schedule::ScheduleLabel},
@@ -64,8 +63,7 @@ impl Plugin for ColliderTransformPlugin {
     }
 }
 
-/// Updates child collider poses from their bodies.
-// OVERMATCH PATCH: public so applications can replace this scheduled system.
+/// OVERMATCH PATCH: public so applications can replace the unconditional pose writer.
 #[allow(clippy::type_complexity)]
 pub fn update_child_collider_position(
     mut collider_query: Query<
@@ -121,8 +119,9 @@ pub(crate) fn propagate_collider_transforms(
     >,
     parent_query: Query<(Entity, Ref<Transform>, Has<RigidBody>, Ref<ChildOf>), ShouldPropagate>,
 ) {
-    root_query.par_for_each_mut(
-        MIN_PAR_ITER_ENTITIES,
+    // OVERMATCH PATCH: a root owns a whole hierarchy, so the per-entity dispatch floor
+    // counts roots instead of the descendants walked and serializes substantial work.
+    root_query.par_iter_mut().for_each(
         |(entity, transform, children)| {
             for (child, child_transform, is_child_rb, child_of) in parent_query.iter_many(children).matched() {
                 assert_eq!(

@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 717 in all (MEASURED), 639 in upstream files and 78 in the
+of `src/` against the published crate: 729 in all (MEASURED), 651 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -32,10 +32,13 @@ Guards run as the game's own tests, each named in its patch's section.
 ## Child collider poses (`src/collision/collider/collider_transform/plugin.rs`): hook
 
 The upstream system and registration remain intact. The fork makes
-`update_child_collider_position` public and re-exports it (7 fork lines, MEASURED against pristine
+`update_child_collider_position` public and re-exports it (6 fork lines, MEASURED against pristine
 0.8.0 with `diff -ruN src/`). The game removes exactly one instance in
 `PhysicsPlacementPlugin::cleanup`, after every plugin has built and finished, then installs its
-change-aware placement in the same slot. Missing registration fails during setup.
+change-aware placement in the same slot. All game removals use `RemoveSystemsOnly`, retaining
+ordering sets. Cleanup records its completion; admission refuses updates until both the physics
+and any installed frame-boundary replacement have completed. Removal errors name the missing
+system set or uninitializable schedule; an unexpected removal count also fails during setup.
 
 The game also replaces the published Lightyear integration's frame-boundary writer from
 `FramePlacementPlugin::cleanup`; no lightyear_avian3d fork remains. `ColliderTransformPlugin`
@@ -79,8 +82,8 @@ and short of a custom `AnyCollider` there is none. 21 fork lines (MEASURED).
 The game prepares the cache off the system thread for each construction chunk collider that is no
 sensor. Guard: `src/tests/avian_prepared_mass.rs`, which replaces the shape of a freshly prepared
 collider, so each invalidation stands alone (it fails with the scale invalidation removed and with
-the shape replacement's removed, MEASURED). Local upstream draft:
-`upstream/avian-prepared-collider-mass.md`.
+the shape replacement's removed, MEASURED). Historical mechanism pointer:
+`upstream/avian-prepared-collider-mass.md`; this is not a current upstream proposal.
 
 ## Complete collider batches and explicit mass ownership (`src/collision/collider/collider_hierarchy/plugin.rs`, `src/dynamics/rigid_body/mass_properties/`, `src/lib.rs`): kept
 
@@ -181,8 +184,10 @@ links at admission, allowing a late body completed before play without walking e
 Bevy's relationship-target hooks maintain the reciprocal collider list.
 
 The narrow phase's optional fetches are upstream's again: 0 fork lines (MEASURED). The size-metric
-and linked-island refusals also moved to this game gate; their retained patches count only the
-recomputation and rest-history changes below. The solver-membership tripwire stays with increments.
+refusal also lives in this game gate. Avian's enable observers can create a node before its first
+solver index supplies a timer; the game requires `SleepTimer` with `BodyIslandNode`, so every node
+is complete at creation, even for a body asleep since spawn. Admission refuses a lost timer.
+The wake walk retains its fail-fast link check, including wakes outside scheduled physics. The solver-membership tripwire stays with increments.
 
 Guards: `src/tests/avian_narrow_phase.rs`, `src/tests/avian_body_size_metrics.rs`,
 `src/tests/avian_island_sleep.rs` and the attachment witness in
@@ -264,11 +269,30 @@ continuous collision's per-body floor remains unmeasured.
 through 561 manifolds, a crossover MEASURED on that stack (Bevy 0.19, two compute threads); nothing
 measured on this one supports carrying it.
 
-## Collider-transform propagation dispatch: upstream
+## Collider-transform propagation dispatch (`src/collision/collider/collider_transform/plugin.rs`): kept bug fix
 
-`propagate_collider_transforms` uses upstream's `ParallelQueryForEach` and
-`MIN_PAR_ITER_ENTITIES` floor. No game-specific dispatch change remains: 0 fork lines (MEASURED).
-The child-placement visibility change is counted separately.
+Subject: the game's server physics step, game state only.
+
+`propagate_collider_transforms` walks each root's hierarchy. Avian 0.8.0's 4,096-item floor counts
+roots, not the descendants walked; an item can be a whole construction or a piece's chunks.
+`par_iter_mut` dispatches those disjoint hierarchies without that per-body floor. Upstream's
+forest invariant already supplies its safety argument.
+
+MEASURED on the scheduled collapse (`scripts/perf/collapse.sh --target local --schedule
+scripts/perf/match-collapse.json --rehearsal --tanks 30 --clients 1`, Bevy 0.20.1 / Avian 0.8.0,
+debug server, compute pool 10, one run each): `physics_prepare`, the phase containing propagation,
+took 436.8 µs wall and 443.7 µs CPU per tick serial, against 176.6 µs wall and 621.5 µs CPU
+dispatched. The 0.7 stack measured 184.8 µs wall and 637.9 µs CPU in that comparison. Historical
+MEASURED evidence on Bevy 0.19 / Avian 0.7: the house-collapse pile's first and final phase
+segments, which contain propagation, were level or faster with compute pool 2 than 1 (phase A,
+median of 10 runs). That evidence lives in the 0.7 patch record at `ff62d411^:vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`,
+"Serial small loops". The hosted two-core allocation uses compute pool 2
+(`src/net/server_host.rs::task_pool_options`); the 0.8.0 comparison above used 10, not 2.
+No new timing measurement is claimed.
+
+Kept as a bug fix: a per-entity floor does not measure hierarchy work. 6 fork lines (MEASURED),
+separate from the child-placement export. No result depends on dispatch, and no invariant test
+was removed by `00bb0a04`. Local draft: `upstream/avian-collider-propagation-floor-counts-roots.md`.
 
 ## Body size metrics once per body (`src/dynamics/rigid_body/body_size_metrics.rs`): kept
 
@@ -469,17 +493,23 @@ bodies that were sleeping only: an island merged from an awake and a sleeping on
 (`merge_islands`), and upstream's wake zeroed the awake members' timers with the rest. The removal
 hook of `Sleeping` restarts its own body's interval, which has lost the marker by the time its
 queued wake runs. A node enabled before its first solver index can have no timer yet and no
-rest history to clear, so the hook resets only a present timer, as the upstream draft proposes. The linked-body fetch follows
-upstream's optional form; the game's First-stage check refuses missing timers before scheduled
-physics consumes an incomplete island body.
+rest history to clear, so the hook resets only a present timer. Avian's enable observers create
+that awake node before the solver-body observers supply `SolverBodyIndex` and its required timer.
+The game requires `SleepTimer` with `BodyIslandNode`, closing that construction gap synchronously;
+its First-stage gate refuses any posed enabled node that subsequently loses its timer.
+`WakeIslands` expects every link to resolve to a live node with a timer:
+terminating a broken list after marking the island awake would strand its remaining sleepers.
+The tripwire also covers direct wake commands outside scheduled admission.
 
-Kept: the timer reset and the walk sit inside an upstream command and hook. 15 fork lines
-(MEASURED, including the extra `was_sleeping` tuple input).
+Kept: the timer reset and the walk sit inside an upstream command and hook. 22 fork lines
+(MEASURED, including the extra `was_sleeping` tuple input and the linked-list tripwire).
 
 Guards: in `src/tests/avian_island_sleep.rs`,
 `waking_a_merged_island_preserves_already_awake_rest_time`,
-`removing_sleeping_restarts_the_woken_bodys_rest_interval`, and the missing-timer witness moved to
-an ordinary physics update through the game's gate.
+`removing_sleeping_restarts_the_woken_bodys_rest_interval`,
+`a_linked_body_without_sleep_timer_is_refused` (direct wake),
+`a_sleeping_body_without_its_timer_is_refused_at_admission` (scheduled gate), and
+`a_newly_enabled_island_has_its_timer_before_its_first_solver_index` (complete node construction).
 
 ## Rest energy (`src/dynamics/solver/islands/sleeping.rs`, `src/dynamics/solver/islands/mod.rs`): hook
 
@@ -494,7 +524,11 @@ under the rest speed's, `v² + ω·I_world·ω/m < (SleepThreshold::linear · Ph
 law and its account are the 0.7 fork's.
 
 The rest test runs inside upstream's serial loop: each body updates its timer and immediately
-commits its island's awake vote and split-candidate comparison. The loop's `SolverBodies` miss
+commits its island's awake vote and split-candidate comparison. This loses no parallelism at the
+game's recorded body counts: the removed fork pass called `par_for_each_mut(MIN_PAR_ITER_ENTITIES)`
+(`4778f6ce^`, `sleeping.rs:268-269`), and both that version and pristine 0.8.0 define the floor as
+4,096 (`utils.rs:19` in each); the recorded peak near 160 bodies was serial before and after.
+The loop's `SolverBodies` miss
 uses upstream's skip. No parallel output buffer, dispatch policy or extra refusal remains.
 
 Kept as a hook: the test sits inside an upstream system. 84 fork lines (MEASURED).

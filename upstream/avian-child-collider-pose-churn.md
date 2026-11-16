@@ -39,7 +39,7 @@ Against pristine 0.8.0:
 @@ -65,7 +65,8 @@
  }
  
-+/// Updates child collider poses from their bodies.
++/// Public so applications can replace the unconditional pose writer.
  #[allow(clippy::type_complexity)]
 -pub(crate) fn update_child_collider_position(
 +pub fn update_child_collider_position(

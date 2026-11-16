@@ -45,11 +45,30 @@ pub fn physics_plugins() -> bevy::app::PluginGroupBuilder {
         .disable::<PhysicsInterpolationPlugin>()
 }
 
+/// Mounts the network physics integration with the game's spawn-transform policy.
+pub(crate) fn lightyear_plugin(app: &mut App) {
+    use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
+    app.add_plugins(LightyearAvianPlugin {
+        replication_mode: AvianReplicationMode::Position {
+            sync_to_transform: false,
+        },
+        register_physics_components: false,
+        ..default()
+    });
+    // Position mode installs no per-frame Transform import. This flag lets Avian's spawn hook
+    // initialize Transform-only statics at their authored poses instead of at the origin.
+    app.world_mut()
+        .resource_mut::<avian3d::physics_transform::PhysicsTransformConfig>()
+        .transform_to_position = true;
+}
+
 /// Replaces Lightyear's Position-mode placement after both networking and physics plugin setup.
 pub struct FramePlacementPlugin;
 
 impl Plugin for FramePlacementPlugin {
-    fn build(&self, _app: &mut App) {}
+    fn build(&self, app: &mut App) {
+        app.insert_resource(crate::avian_ext::child_poses::FramePlacementPending);
+    }
 
     fn cleanup(&self, app: &mut App) {
         use bevy::ecs::schedule::ScheduleCleanupPolicy;
@@ -57,8 +76,8 @@ impl Plugin for FramePlacementPlugin {
         let removed = app.remove_systems_in_set(
             RunFixedMainLoop,
             LightyearAvianPlugin::update_child_collider_position,
-            ScheduleCleanupPolicy::RemoveSetAndSystems,
-        ).expect("Lightyear Position-mode child placement must be registered before the game replaces it");
+            ScheduleCleanupPolicy::RemoveSystemsOnly,
+        ).expect("Lightyear pose-writer removal requires an initializable RunFixedMainLoop containing its system set");
         assert_eq!(
             removed, 1,
             "the game replaces exactly one Lightyear child placement system"
@@ -68,6 +87,8 @@ impl Plugin for FramePlacementPlugin {
             crate::avian_ext::child_poses::place_child_colliders
                 .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
         );
+        app.world_mut()
+            .remove_resource::<crate::avian_ext::child_poses::FramePlacementPending>();
     }
 }
 

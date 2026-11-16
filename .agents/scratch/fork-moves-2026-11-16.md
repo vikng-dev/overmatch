@@ -67,7 +67,7 @@ line estimate as a target.
 
 ## Dispositions
 
-All seven moves are done; none was skipped.
+The seven moves and their review corrections are reflected in these final dispositions.
 
 1. Avian's original child writer and registration are restored, with public access. The game
    removes it and the published Lightyear writer in plugin cleanup, after builds and finishes,
@@ -76,8 +76,13 @@ All seven moves are done; none was skipped.
    the CI cargo-deny command accepted that resolution.
 2. The rest pass is upstream's serial timer/vote loop with the RestTest call. Its parallel output
    buffer, refusal and dispatch-only witness are gone. The island vote and split-candidate update
-   remain in that loop; this lane makes no performance claim.
-3. Collider-transform propagation uses upstream's per-query dispatch floor.
+   remain in that loop. The removed pass used the same 4,096-entity floor as pristine 0.8.0
+   (`4778f6ce^` sleeping.rs:268-269 and utils.rs:19; pristine utils.rs:19), so the recorded
+   body counts ran serially before and after.
+3. Collider-transform propagation dispatches disjoint root hierarchies directly. The per-query
+   floor counts roots rather than descendants walked. The restored patch record preserves the
+   MEASURED 436.8 µs serial / 176.6 µs dispatched containing-phase comparison and its workload,
+   plus the historical two-worker evidence; the new local draft proposes this as a bug fix.
 4. Contact visits come from public graph lengths at each actual pass boundary, with overflow
    serial and the pinned worker-count/floor rule. The engine counter fields, recording calls and
    altered dispatch return value are gone. Before and after, the unchanged census assertions
@@ -87,8 +92,11 @@ All seven moves are done; none was skipped.
    placement. Negative archetypal queries avoid a scan of healthy entities. Only attachments
    initially missing their owner enter a pending queue: admission requires a rigid body and its
    reciprocal collider list, while valid late construction, disabled entities and unposed replicas
-   remain named states. The narrow-phase, metric and island fetches use upstream's optional forms;
-   the moved-proxy engine-internal refusal is gone. The solver-membership tripwire stays with the
+   remain named states. Avian can create a newly enabled node before its first solver index;
+   the game requires SleepTimer with BodyIslandNode so it is complete at node creation. The narrow-phase and metric fetches
+   use upstream's optional forms. The wake walk expects every sleeping-island link to resolve,
+   including direct commands outside admission; the moved-proxy engine-internal refusal is gone.
+   The solver-membership tripwire stays with the
    sleeping-increments fix. Two added attachment witnesses cover the incomplete owner and a late
    owner outside the hierarchy whose reciprocal list was never built.
 6. The engine carries the combined unknown-feature identity and nearest-contact fix. The
@@ -97,7 +105,7 @@ All seven moves are done; none was skipped.
    search. Warm-start assertions are unchanged; the two direct unit calls now use the engine's
    slice API. As drafted, NaN distance comparison uses `<` rather than the deleted adapter's
    `total_cmp`; finite contact data retains the same ranking. No non-finite input policy is added.
-7. The upstream index has the 15 rebased proposals, all marked **not sent**, with no project name
+7. The upstream index has 16 proposals, all marked **not sent**, with no project name
    in any draft. The child proposals expose Avian's system and fix Lightyear's unconditional
    writes respectively. The sleeping-increments draft includes its membership tripwire; the size
    metrics draft mirrors the parallel once-per-body computation without test instrumentation.
@@ -109,9 +117,9 @@ All seven moves are done; none was skipped.
 ## Assertion changes
 
 - No warm-start, contact-visit or physical-law assertion changed.
-- The four missing-state panic expectations name the game gate instead of the former fork sites.
-  The missing-SleepTimer witness advances an ordinary physics update, where admission now lives,
-  instead of directly invoking an engine wake command.
+- Narrow-phase and metric missing-state expectations name the game gate. Missing-SleepTimer
+  witnesses cover both scheduled admission and direct WakeIslands; a fresh enabled node gains
+  its required timer at creation before its first solver index.
 - The existing Lightyear schedule-absence assertion reads live systems rather than Bevy's retained
   system-set IDs, as explained above. Its asserted invariant is unchanged.
 - The parallel rest implementation's dispatch-only witness was deleted with that implementation.
@@ -124,11 +132,11 @@ existing move's committed source delta was rechecked against pristine as part of
 
 | Crate | Before | After |
 |---|---:|---:|
-| avian3d 0.8.0 | 915 | 717 |
+| avian3d 0.8.0 | 915 | 729 |
 | bevy_pbr 0.20.1 | 357 | 357 |
 | lightyear_netcode 0.31.0 | 159 | 159 |
 | lightyear_avian3d 0.31.0 | 9 | 0 |
-| Total | 1440 | 1233 |
+| Total | 1440 | 1245 |
 
 The combined engine matcher increases Avian's delta by 57 lines (MEASURED), replacing a hook
 with a bug fix and deleting the game module. Fork size is recorded, not used as a target.
@@ -163,3 +171,30 @@ this lane. The failing UI composition (`src/damage_cam/pen_cam/game.rs:625-631`)
 assets, transforms and world serialization, with empty collider trees; it does not install the
 physics plugins changed here. This pre-existing fixture mismatch remains for its owner; no
 assertion was weakened to hide it.
+
+## Review corrections
+
+The child-writer removals all use `RemoveSystemsOnly`. Cleanup supplies an Avian completion
+marker and clears a Lightyear pending marker; admission refuses updates without completion.
+Both schedule guards inspect live systems for the game writer's presence and the engine writer's
+absence through one local helper. Production and fixtures mount the same Lightyear installer,
+including its spawn-transform override. Stale mutant descriptions now name admission invariants;
+single-manifold matcher fixtures hold manifolds directly. No wire registration or net-22 behavior
+changed, and the backlog row remains open.
+
+Deleted investigations cited by ADR-0028 and ADR-0032 are preserved in the history directory;
+those ADRs and ADR-0022 now cite the archived paths. Prepared-mass prose identifies its pointer
+as historical. The nearest-match draft distinguishes identity correctness, nearest ranking, the
+iterator API proposal and the change from total NaN ordering to strict comparison.
+
+MEASURED source deltas against SHA-256-verified cached published archives: Avian 729 (651 in
+upstream files + 78 fork-only), Bevy PBR 357, netcode 159, Lightyear Avian 0; total 1245.
+Section counts and the draft index were rechecked. No timing measurement or external action.
+
+Review-correction gates: `cargo fmt --all --check` and locked workspace/all-target CI clippy with
+`dev_ui,bitprobe` passed. Targeted `scripts/serial-cargo test --lib --features dev_ui,bitprobe`
+results (MEASURED): narrow phase 11, body-size metrics 4, child poses 15, island sleep 21,
+warm start 3, net::protocol 26, net::physics 2 — **82 passed, 0 failed**. All 16 draft patches
+apply to the cached pristine releases with `patch --dry-run`; checked Markdown links resolve.
+The earlier full-library UI fixture mismatch remains outside this correction; no full suite or
+timing run was repeated.

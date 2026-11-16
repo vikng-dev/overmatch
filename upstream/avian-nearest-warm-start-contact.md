@@ -12,8 +12,18 @@ breaks, though a later point may be much closer. The narrow phase
 the pair, so a match from a later previous manifold overwrites one from an earlier manifold without
 any distance comparison: the result depends on manifold order.
 
-This draft also contains the unknown-feature identity fix
-([its own draft](avian-unknown-contact-feature-identity.md)), since it rewrites the same loop.
+There are two independent changes in the combined patch:
+
+- **Identity/admissibility fix:** UNKNOWN IDs do not identify a feature; known IDs do not match
+  merely because swapped anchors are nearby. The [identity-only draft](avian-unknown-contact-feature-identity.md)
+  fixes those defects without changing first-admissible selection or adding an API.
+- **Nearest ranking:** among admissible predecessors, choose the smallest sum of squared anchor
+  distances across the whole pair. This replaces first-admissible selection within a manifold and
+  last-matching-manifold overwrite across manifolds. It is a separate predecessor-ranking policy,
+  including for contacts with known feature identity.
+
+The combined patch below includes both because they rewrite the same loop. Identity correctness
+does not depend on nearest ranking or `match_contacts_in`.
 
 ## Minimal repro
 
@@ -169,7 +179,17 @@ Against the pristine crate (`a/` and `b/` are the crate root):
 Closest is the smaller sum of both anchors' squared distances over the admissible orientation; a tie
 keeps the earlier previous point. `match_contacts` keeps its signature and delegates to
 `match_contacts_in`, which takes the previous points of every old manifold as one iterator, so the
-caller allocates nothing.
+caller allocates nothing. The only production caller of the iterator method in this tree is the
+engine's narrow phase; the game has no custom matcher caller. Pair-wide ranking motivates that
+call-site change, while public visibility is an API proposal, not required for the identity fix
+or correctness: a crate-private iterator helper would also serve the narrow phase.
+
+The move from the former game adapter also changes NaN ordering: that adapter used
+`f32::total_cmp`; this loop uses strict `<`. For finite admissible distances the ranking is the
+same. For known-ID contacts, a first admissible candidate with a NaN score is kept and later
+finite scores cannot displace it (`finite < NaN` is false); a later NaN cannot displace an existing
+finite score. UNKNOWN anchors with NaN distances fail the positional cutoff. This is not a total
+ordering of non-finite scores, and no new non-finite-input policy is claimed.
 
 ## Local verification
 
