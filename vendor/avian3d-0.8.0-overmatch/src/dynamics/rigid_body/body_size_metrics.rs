@@ -138,7 +138,9 @@ fn update_body_size_metrics<C: AnyCollider>(
 
             // Compute the sweep radius
             let ctx = ColliderContext::new(entity, &context);
-            let point = com.0 - collider_transform.translation;
+            // OVERMATCH PATCH: the distance query takes a collider-local point.
+            let point =
+                collider_transform.rotation.inverse() * (com.0 - collider_transform.translation);
             let distance_to_com = collider.max_distance_to_point_with_context(point.real(), ctx);
             sweep_radius = sweep_radius.max(distance_to_com);
         }

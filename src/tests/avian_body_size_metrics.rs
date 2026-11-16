@@ -198,3 +198,54 @@ fn a_disabled_or_colliderless_body_is_passed_by() {
         "the bare body's centre of mass must move for the pass to see it"
     );
 }
+
+/// CCD and contact recycling need a bound about the body's COM even when an off-origin
+/// shape is rotated relative to that body; a body-frame point underestimates this fixture.
+#[test]
+fn a_rotated_off_origin_collider_bounds_its_distance_from_the_body_com() {
+    // Fixture: a translated cube, with its own bounding centre away from its local origin.
+    let center = Vec3::X * 2.0;
+    let half = Vec3::splat(0.25);
+    let translation = -center;
+    let points: Vec<_> = [-1.0, 1.0]
+        .into_iter()
+        .flat_map(|x| {
+            [-1.0, 1.0].into_iter().flat_map(move |y| {
+                [-1.0, 1.0]
+                    .into_iter()
+                    .map(move |z| center + half * Vec3::new(x, y, z))
+            })
+        })
+        .collect();
+    for rotation in [Quat::IDENTITY, Quat::from_rotation_z(std::f32::consts::PI)] {
+        let mut app = physics_app();
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Static,
+                CenterOfMass(Vec3::ZERO),
+                NoAutoCenterOfMass,
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut().spawn((
+            ChildOf(body),
+            Collider::convex_hull(&points).expect("a cube has a nondegenerate convex hull"),
+            Transform::from_translation(translation).with_rotation(rotation),
+        ));
+        for _ in 0..3 {
+            app.update();
+        }
+        // DERIVED from the fixture: every transformed corner must fit inside the bound.
+        let farthest_corner = points
+            .iter()
+            .map(|point| (translation + rotation * *point).length())
+            .fold(0.0, f32::max);
+        let actual = metrics(&app, body).sweep_radius;
+        // Resolution: float tolerance for hull bounds and rotation.
+        assert!(
+            actual.is_finite() && actual + 1e-4 >= farthest_corner,
+            "rotation={rotation:?}, radius={actual}, farthest_corner={farthest_corner}"
+        );
+    }
+}

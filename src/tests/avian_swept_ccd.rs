@@ -92,31 +92,46 @@ fn a_fast_bodys_non_solid_attachment_does_not_stop_it_before_its_solid_wall_cont
     }
 }
 
-// Compound-body users rely on eligibility following each collider's own thickness.
-// Fixture: neither child initially touches the wall, so only CCD can clamp this step.
+// Fixture: separated children and walls isolate CCD; these also define the asserted planes.
+const THIN_HALF: f32 = 0.02;
+const THICK_HALF: f32 = 1.0;
+const WALL_WIDTH: f32 = 0.01;
+const THIN_WALL_X: f32 = 0.08;
+const THICK_WALL_X: f32 = 1.06;
+const CCD_THRESHOLD: f32 = 0.5;
+const TRAVEL: f32 = 0.125;
+
 fn wall_step(compound: bool, thin_wall: bool) -> f32 {
     let mut app = physics_app();
     app.insert_resource(Gravity(Vec3::ZERO));
     let body = app
         .world_mut()
-        .spawn((RigidBody::Dynamic, Transform::default()))
+        .spawn((
+            RigidBody::Dynamic,
+            SweptCcd::default().with_threshold(CCD_THRESHOLD),
+            Transform::default(),
+        ))
         .id();
     app.world_mut().spawn((
         ChildOf(body),
-        Collider::cuboid(0.04, 0.4, 0.4),
+        Collider::cuboid(2.0 * THIN_HALF, 0.4, 0.4),
         Transform::from_xyz(0.0, 4.0, 0.0),
     ));
     if compound {
         app.world_mut().spawn((
             ChildOf(body),
-            Collider::cuboid(2.0, 2.0, 2.0),
+            Collider::cuboid(2.0 * THICK_HALF, 2.0, 2.0),
             Transform::default(),
         ));
     }
-    let (wall_x, wall_y) = if thin_wall { (0.08, 4.0) } else { (1.06, 0.0) };
+    let (wall_x, wall_y) = if thin_wall {
+        (THIN_WALL_X, 4.0)
+    } else {
+        (THICK_WALL_X, 0.0)
+    };
     app.world_mut().spawn((
         RigidBody::Static,
-        Collider::cuboid(0.01, 0.5, 0.5),
+        Collider::cuboid(WALL_WIDTH, 0.5, 0.5),
         Transform::from_xyz(wall_x, wall_y, 0.0),
     ));
     for _ in 0..3 {
@@ -134,7 +149,7 @@ fn wall_step(compound: bool, thin_wall: bool) -> f32 {
         .x;
     app.world_mut()
         .entity_mut(body)
-        .insert(LinearVelocity(Vec3::X * (0.125 / step)));
+        .insert(LinearVelocity(Vec3::X * (TRAVEL / step)));
     app.update();
     app.world()
         .get::<Position>(body)
@@ -145,11 +160,10 @@ fn wall_step(compound: bool, thin_wall: bool) -> f32 {
 
 #[test]
 fn a_thin_child_does_not_force_a_slow_thick_child_to_sweep() {
-    // DERIVED: 0.125 m exceeds half the thin child's 0.02 m thickness, but not half
-    // the thick child's 1 m thickness; the low-risk pair belongs to the discrete solver.
+    // DERIVED from the fixture: travel exceeds the thin threshold but not the thick one.
     let moved = wall_step(true, false);
     assert!(
-        moved > 1.055 - 1.0,
+        moved + THICK_HALF > THICK_WALL_X - WALL_WIDTH / 2.0,
         "a slow thick child was swept: moved {moved}"
     );
 }
@@ -160,7 +174,7 @@ fn a_fast_thin_child_and_a_single_slab_still_stop_at_a_thin_wall() {
     for compound in [false, true] {
         let moved = wall_step(compound, true);
         assert!(
-            moved > 0.0 && moved <= 0.075 - 0.02,
+            moved > 0.0 && moved + THIN_HALF <= THIN_WALL_X - WALL_WIDTH / 2.0 + 1e-4,
             "tunneled or froze: compound={compound}, moved={moved}"
         );
     }
@@ -171,10 +185,16 @@ fn an_offset_rotating_child_still_sweeps() {
     // Compound-body users need rotation about the body's COM even when it is stationary.
     let mut app = physics_app();
     app.insert_resource(Gravity(Vec3::ZERO));
+    // Fixture: a cube rotates about an offset pivot toward a horizontal wall.
+    let half = 0.1;
+    let radius = 5.0;
+    let wall_y = 0.3;
+    let wall_width = 0.01;
     let body = app
         .world_mut()
         .spawn((
             RigidBody::Dynamic,
+            SweptCcd::default().with_threshold(CCD_THRESHOLD),
             CenterOfMass(Vec3::ZERO),
             NoAutoCenterOfMass,
             Transform::default(),
@@ -182,13 +202,13 @@ fn an_offset_rotating_child_still_sweeps() {
         .id();
     app.world_mut().spawn((
         ChildOf(body),
-        Collider::cuboid(0.2, 0.2, 0.2),
-        Transform::from_xyz(5.0, 0.0, 0.0),
+        Collider::cuboid(2.0 * half, 2.0 * half, 2.0 * half),
+        Transform::from_xyz(radius, 0.0, 0.0),
     ));
     app.world_mut().spawn((
         RigidBody::Static,
-        Collider::cuboid(1.0, 0.01, 1.0),
-        Transform::from_xyz(5.0, 0.3, 0.0),
+        Collider::cuboid(1.0, wall_width, 1.0),
+        Transform::from_xyz(radius, wall_y, 0.0),
     ));
     for _ in 0..3 {
         app.update();
@@ -209,10 +229,12 @@ fn an_offset_rotating_child_still_sweeps() {
         .0
         .to_axis_angle()
         .1;
-    // Fixture wall's near face is at y=0.295; a child's centre at radius 5 reaches
-    // that plane before 0.1 radians even without its half-height.
+    let position = app.world().get::<Position>(body).expect("body position");
+    // DERIVED: the +X/+Y corner leads under positive Z rotation.
+    let leading_y = position.y + (radius + half) * angle.sin() + half * angle.cos();
+    // Resolution: allow float roundoff at the fixture's analytically defined wall plane.
     assert!(
-        angle > 0.0 && angle < 0.1,
-        "the offset child rotated through its wall: {angle}"
+        angle > 0.0 && leading_y <= wall_y - wall_width / 2.0 + 1e-4,
+        "the offset child's leading corner crossed its wall: angle={angle}, y={leading_y}"
     );
 }

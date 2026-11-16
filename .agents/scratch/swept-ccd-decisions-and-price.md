@@ -264,6 +264,8 @@ thickness remains compile-only and unshipped.
 
 All six lenses were applied locally to the changed items; no unresolved lane finding or backlog
 row names one. Independent landing review belongs to the orchestrator. No agent was spawned, no
-web access, external filing, push, reset, stash or target deletion was used. No lane work remains.
+web access, external filing, push, reset, stash or target deletion was used. The subsequent
+collapse-tail investigation and review fixes are recorded in
+[swept-ccd-collapse-diagnosis.md](swept-ccd-collapse-diagnosis.md); its causal landing blocker remains open.
 The release prices precede the main merge; the final scorecard and source census use the merged
 tree. Local capacity was not established by the 30-tank runs.

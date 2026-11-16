@@ -18,8 +18,9 @@ The cached body CCD thickness also includes sensors and disabled colliders, so a
 attachment can cause unnecessary fast-body work. The broader proposal below excludes those
 thicknesses. Additions invalidate via change detection; removals queue the owning body through
 `On<Remove<Sensor>>` and `On<Remove<ColliderDisabled>>` observers, following the observer pattern
-in published `backend.rs` and `collider_tree/update.rs`. Each backend retains its own set until
-the next physics step. `RemovedComponents` messages are unsuitable: they expire after two frame
+in published `backend.rs` and `collider_tree/update.rs`. Ownership queries include entity-disabled colliders. Each backend keeps its pending owners until
+they can be recomputed, including across a temporary body disable; genuine body despawn retires
+the invalidation. `RemovedComponents` messages are unsuitable: they expire after two frame
 updates and a fixed physics step need not run in that window. The queue stores bodies, so a
 later detached collider cannot erase its former owner's pending refresh.
 
@@ -28,7 +29,7 @@ The earlier transition test was removed with the fork's thickness change; its pr
 does not verify this observer proposal. No shipped game path inserts or removes Sensor.
 
 Sweep radius is unchanged. Its current readers are the CCD speed test and contact recycling;
-it is not consumed by sleeping. The published metrics loop is otherwise retained, independent
+it is not consumed by sleeping. The published metric computation is otherwise retained, independent
 of the game's batching and instrumentation patches.
 
 ## Apply to published 0.8.0
@@ -58,7 +59,7 @@ Apply with `patch -p1` at the extracted crate root; no other fork patch is requi
 
 -use bevy::{ecs::system::StaticSystemParam, prelude::*};
 +use bevy::{
-+    ecs::{entity::EntityHashSet, system::StaticSystemParam},
++    ecs::{entity::EntityHashSet, entity_disabling::Disabled, system::StaticSystemParam},
 +    prelude::*,
 +};
 
@@ -92,15 +93,12 @@ Apply with `patch -p1` at the extracted crate root; no other fork patch is requi
          // Update body size metrics before they are consumed by the solver and continuous collision
          // detection. Allowing ambiguities lets multiple collision backends coexist.
          app.add_systems(
-@@ -80,6 +90,25 @@
-                 .before(PhysicsStepSystems::Solver)
-                 .ambiguous_with_all(),
-         );
-+    }
-+}
-+
-+// Removal observers retain invalidations until the next physics step, even when no
-+// fixed step runs during the frame in which a marker is removed. Each backend drains its own set.
+@@ -83,6 +93,25 @@
+     }
+ }
+
++// Each backend retains invalidations until its owner can be recomputed, even across
++// frames without a physics step or a temporary body disable.
 +#[derive(Resource)]
 +struct MarkerRemovalRefresh<C: AnyCollider> {
 +    bodies: EntityHashSet,
@@ -109,16 +107,19 @@ Apply with `patch -p1` at the extracted crate root; no other fork patch is requi
 +
 +fn queue_marker_removal<C: AnyCollider, M: Component>(
 +    event: On<Remove<M>>,
-+    colliders: Query<&ColliderOf>,
++    colliders: Query<&ColliderOf, Allow<Disabled>>,
 +    mut refresh: ResMut<MarkerRemovalRefresh<C>>,
 +) {
-+    // Standalone and already-detached colliders have no owning body's metric to invalidate.
++    // Standalone, detached and genuinely despawned colliders have no owner to refresh.
 +    if let Ok(owner) = colliders.get(event.entity) {
 +        refresh.bodies.insert(owner.body);
-     }
- }
-
-@@ -96,8 +125,23 @@
++    }
++}
++
+ type BodySizeMetricsData = (
+     &'static mut BodySizeMetrics,
+     &'static RigidBodyColliders,
+@@ -96,8 +125,24 @@
          Query<BodySizeMetricsData, Changed<ComputedCenterOfMass>>,
          Query<BodySizeMetricsData>,
      )>,
@@ -141,10 +142,11 @@ Apply with `patch -p1` at the extracted crate root; no other fork patch is requi
 +        )>,
 +    >,
 +    mut marker_refresh: ResMut<MarkerRemovalRefresh<C>>,
++    live_entities: Query<(), Allow<Disabled>>,
      context: StaticSystemParam<C::Context>,
  ) {
      let context = context.into_inner();
-@@ -107,11 +151,15 @@
+@@ -107,11 +152,15 @@
          let mut ccd_thickness: f32 = f32::INFINITY;
          let mut sweep_radius: f32 = 0.0;
 
@@ -164,7 +166,7 @@ Apply with `patch -p1` at the extracted crate root; no other fork patch is requi
 
              // Compute the sweep radius
              let ctx = ColliderContext::new(entity, &context);
-@@ -133,12 +181,16 @@
+@@ -133,13 +182,21 @@
 
      // Bodies with a collider that changed. Note that bodies may be visited
      // multiple times, but the end result will be the same.
@@ -175,15 +177,23 @@ Apply with `patch -p1` at the extracted crate root; no other fork patch is requi
      let mut all_bodies = bodies.p1();
 -    for collider_of in &changed_colliders {
 -        if let Ok((mut size_metrics, rb_colliders, com)) = all_bodies.get_mut(collider_of.body) {
-+    for body in changed_colliders
-+        .iter()
-+        .map(|owner| owner.body)
-+        .chain(marker_refresh.bodies.drain())
-+    {
++    marker_refresh
++        .bodies
++        .extend(changed_colliders.iter().map(|owner| owner.body));
++    marker_refresh.bodies.retain(|&body| {
 +        if let Ok((mut size_metrics, rb_colliders, com)) = all_bodies.get_mut(body) {
              *size_metrics = compute(rb_colliders, com);
-         }
-     }
+-        }
+-    }
+-}
++            false
++        } else {
++            // A temporarily disabled body must refresh when it returns. Genuine despawn
++            // is the legitimate absence: that body can never consume its cached metric again.
++            live_entities.contains(body)
++        }
++    });
++}
 ```
 
 MEASURED: this patch applies cleanly to the cached published crate and the complete proposal
@@ -193,7 +203,7 @@ unused, uncached dev-dependencies.
 
 ```sh
 scripts/serial-cargo check --offline --lib --manifest-path \
-  /private/tmp/ccd4-drafts/sensors/check-harness/Cargo.toml \
+  /tmp/swept-ccd-drafts/sensors/check-harness/Cargo.toml \
   --target-dir target/draft-check-ccd --features dev_ui,bitprobe
 ```
 
@@ -201,7 +211,8 @@ Archive SHA-256: `ca7479ccec5f1440675946bada8c805f2b6d514af78e1d2b0937ca53b1e2c5
 
 ## Retirement
 
-Retire our moving-side exclusion when a published release excludes non-solid moving colliders.
+Retire the disabled-collider sweep exclusion with a published release carrying upstream's own
+disabled-collider filter; retire the sensor exclusion when this draft is adopted in a release.
 The thickness proposal has no shipping code to retire. Per-collider eligibility is independent:
 [its draft](avian-ccd-decide-per-collider.md) retains the body early-out and uses each child's own
 thickness for sweep selection. Verification and repeated pricing are in

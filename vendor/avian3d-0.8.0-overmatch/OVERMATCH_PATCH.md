@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff --minimal -ruN`
-of `src/` against the published crate: 871 in all (MEASURED), 793 in upstream files and 78 in the
+of `src/` against the published crate: 875 in all (MEASURED), 797 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -241,8 +241,9 @@ observers and a persistent refresh queue: frame-expiring `RemovedComponents` mes
 between fixed steps. No shipped game path inserts or removes Sensor.
 
 The [continuing lane report](../../.agents/scratch/swept-ccd-decisions-and-price.md) owns the
-source census and repeated release measurements. Retire the moving-side exclusions when a
-published release excludes non-solid colliders.
+source census and repeated release measurements. Retire the disabled-collider half with a
+published release carrying upstream's own disabled-collider filter. Retire the sensor half when
+its draft is adopted in a published release.
 
 ## Moved-collider bounds prune (`src/collider_tree/update.rs`, `src/collider_tree/diagnostics.rs`): kept
 
@@ -367,6 +368,19 @@ Kept: the loop is inside an upstream system. 61 fork lines (MEASURED).
 
 Guards: `src/tests/avian_body_size_metrics.rs`: once-per-body recomputation and the named no-collider
 and disabled absences. Its missing-center witness now exercises the game's First-stage gate.
+
+## Collider-frame sweep radius (`src/dynamics/rigid_body/body_size_metrics.rs`): kept
+
+The COM and collider translation are body-local; the shape's distance query takes a collider-local
+point. Inverse rotation supplies that frame before the query, keeping the CCD and recycling bound
+conservative for rotated shapes with an off-origin bounding centre.
+
+Kept as an upstream bug fix inside the metric computation: 3 added + 1 removed = 4 fork lines
+(MEASURED). Together with batching and diagnostics the metrics file is 46 + 19 = 65 lines.
+Guard: `src/tests/avian_body_size_metrics.rs`,
+`a_rotated_off_origin_collider_bounds_its_distance_from_the_body_com`, which requires every
+transformed fixture corner to fit inside the bound. Independent published-crate draft:
+`upstream/avian-body-size-metrics-collider-frame.md`.
 
 ## Standalone key write-back: dropped
 

@@ -24,6 +24,7 @@ this draft; it does not need a separate upstream proposal.
 The game's three small collision witnesses cover a thick child's discrete first step beside a
 thin child, thin-child and single-collider wall protection, and a stationary-COM offset rotation.
 They assert geometric relationships, not earlier measured positions.
+This draft is compile-checked only; its behaviour was witnessed on the fork with the game's physics harness.
 
 Apply with `patch -p1` at the published crate root; no other fork patch is required:
 
