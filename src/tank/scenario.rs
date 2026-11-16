@@ -5,10 +5,8 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 
 use super::model::{Controlled, Tank};
-use super::spawn::{
-    PendingTankAssets, TankContent, TankPresentation, TankSimSource, load_tank_assets,
-    spawn_complete_tank,
-};
+use super::spawn::{PendingTankAssets, TankPresentation, load_tank_assets, spawn_complete_tank};
+use super::template::TankTemplate;
 use crate::sight::SightMode;
 use crate::state::{AppState, GameplaySet};
 use crate::{CombatantId, CombatantLife};
@@ -525,13 +523,13 @@ pub(crate) fn probe_spawn_xz(far: bool, index: usize) -> Vec2 {
 /// is an admission policy; assets do not initialize simulation state. Failed loads remain fatal.
 #[expect(
     clippy::too_many_arguments,
-    reason = "admission spans the loader, assets, sim source, terrain, map, certificate, view profile and app state"
+    reason = "admission spans the loader, assets, template, terrain, map, certificate, view profile and app state"
 )]
 fn spawn_tank_when_loaded(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     pending: Res<PendingTankAssets>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     certificate: Res<crate::geometry_lod::TankCertificate>,
     view: Option<Res<crate::view::ViewProfile>>,
@@ -542,7 +540,6 @@ fn spawn_tank_when_loaded(
     if !pending.loaded(&asset_server) {
         return;
     }
-    let content = source.get();
     // Both bodies simulate; only the Controlled marker selects input ownership. Each spawn point is
     // horizontal, its ground sampled now (`terrain_grid::spawn_pos`).
     let grid = height.as_deref();
@@ -556,7 +553,7 @@ fn spawn_tank_when_loaded(
         };
         spawn_lod_showcase(
             &mut commands,
-            content,
+            &template,
             pending.presentation(),
             grid,
             &certificate,
@@ -569,7 +566,7 @@ fn spawn_tank_when_loaded(
     if super::battle::enabled() {
         super::battle::spawn(
             &mut commands,
-            content,
+            &template,
             pending.presentation(),
             grid,
             manifest.as_deref(),
@@ -580,8 +577,8 @@ fn spawn_tank_when_loaded(
     }
     let target = target_scenario();
     match target {
-        Some(TargetScenario::Fires) => require_aim_role(content.spec(), AimRole::Engine),
-        Some(TargetScenario::Kills) => require_aim_role(content.spec(), AimRole::Ammunition),
+        Some(TargetScenario::Fires) => require_aim_role(template.spec(), AimRole::Engine),
+        Some(TargetScenario::Kills) => require_aim_role(template.spec(), AimRole::Ammunition),
         Some(TargetScenario::Ahead) | None => Ok(()),
     }
     .unwrap_or_else(crate::refuse_start);
@@ -605,12 +602,12 @@ fn spawn_tank_when_loaded(
     };
     spawn_tank(
         &mut commands,
-        content,
+        &template,
         pending.presentation(),
         Transform::from_translation(crate::terrain_grid::spawn_pos(
             grid,
             a_at,
-            content.stance(a_turn),
+            template.stance(a_turn),
         ))
         .with_rotation(a_turn),
         "Tiger I (A)",
@@ -619,19 +616,19 @@ fn spawn_tank_when_loaded(
     );
     spawn_tank(
         &mut commands,
-        content,
+        &template,
         pending.presentation(),
         Transform::from_translation(crate::terrain_grid::spawn_pos(
             grid,
             duel[1],
-            content.stance(b_turn),
+            template.stance(b_turn),
         ))
         .with_rotation(b_turn),
         "Tiger I (B)",
         1,
         false,
     );
-    spawn_probe_tanks(&mut commands, content, pending.presentation(), grid, far);
+    spawn_probe_tanks(&mut commands, &template, pending.presentation(), grid, far);
     commands.remove_resource::<PendingTankAssets>();
     next.set(AppState::Playing);
 }
@@ -694,7 +691,7 @@ const PROBE_GRID_COLUMNS: usize = 6;
 /// lever — the shadow ladder is what the near placement is for.
 fn spawn_probe_tanks(
     commands: &mut Commands,
-    content: TankContent,
+    template: &TankTemplate,
     presentation: TankPresentation,
     grid: Option<&crate::terrain_grid::HeightGrid>,
     far: bool,
@@ -718,12 +715,12 @@ fn spawn_probe_tanks(
         furthest = furthest.max(distance);
         spawn_tank(
             commands,
-            content,
+            template,
             presentation.clone(),
             Transform::from_translation(crate::terrain_grid::spawn_pos(
                 grid,
                 xz,
-                content.stance(Quat::IDENTITY),
+                template.stance(Quat::IDENTITY),
             )),
             &format!("Probe Tiger {index}"),
             DUEL_SPAWN_XZ.len() + index,
@@ -764,7 +761,7 @@ fn spawn_probe_tanks(
 /// function's whole job is turning poses into tanks and putting the legend next to them in the log.
 fn spawn_lod_showcase(
     commands: &mut Commands,
-    content: TankContent,
+    template: &TankTemplate,
     presentation: TankPresentation,
     grid: Option<&crate::terrain_grid::HeightGrid>,
     certificate: &crate::geometry_lod::TankCertificate,
@@ -784,13 +781,13 @@ fn spawn_lod_showcase(
     {
         let root = spawn_complete_tank(
             commands,
-            content,
+            template,
             presentation.clone(),
             (
                 Transform::from_translation(crate::terrain_grid::spawn_pos(
                     grid,
                     tank.xz,
-                    content.stance(tank.yaw),
+                    template.stance(tank.yaw),
                 ))
                 .with_rotation(tank.yaw),
                 Name::new(tank.name),
@@ -818,7 +815,7 @@ fn identity(index: usize) -> (CombatantId, CombatantLife) {
 /// Spawn one complete dynamic tank for the local scenario, its tank `index`, and return its root.
 pub(super) fn spawn_tank(
     commands: &mut Commands,
-    content: TankContent,
+    template: &TankTemplate,
     presentation: TankPresentation,
     transform: Transform,
     name: &str,
@@ -827,7 +824,7 @@ pub(super) fn spawn_tank(
 ) -> Entity {
     let root = spawn_complete_tank(
         commands,
-        content,
+        template,
         presentation,
         (
             transform,
@@ -1010,61 +1007,5 @@ mod target_scenario_tests {
         for refused in ["", "1", "Ahead", "fire", "ahead,fires"] {
             assert_eq!(TargetScenario::named(refused), None, "{refused}");
         }
-    }
-}
-
-#[cfg(test)]
-mod spawn_contract_tests {
-    use std::collections::HashMap;
-
-    use bevy::prelude::{App, ResMut, Resource, Update};
-
-    use super::super::spawn::TankSimSource;
-    use crate::bake::{TankBlueprint, TankGeometry};
-    use crate::spec::TankSpec;
-
-    #[derive(Resource, Default)]
-    struct SourceProbe(bool);
-
-    fn probe_unresolved_handle(source: TankSimSource, mut probe: ResMut<SourceProbe>) {
-        // Running at all is the proof: the param validated on the blueprint and colliders alone.
-        let _content = source.get();
-        probe.0 = true;
-    }
-
-    #[test]
-    fn sim_source_does_not_require_a_resolved_asset_handle() {
-        let spec: TankSpec = crate::provenance::from_shipped_str(
-            crate::tank::TANK_SPEC_PATH,
-            include_str!("../../assets/tiger_1/tiger_1.tank.ron"),
-        )
-        .expect("the shipped Tiger spec must parse");
-        let geometry = TankGeometry {
-            nodes: Vec::new(),
-            by_name: HashMap::new(),
-            roadwheels: Vec::new(),
-            collision_proxies: Vec::new(),
-            ballistic_volumes: Vec::new(),
-        };
-
-        let track_colliders = crate::track::bump_stop::TrackColliders::new(
-            &crate::track::rig_geom::tiger_rig(),
-            &spec.track.suspension.params(),
-            spec.track.friction(),
-        );
-        let mut app = App::new();
-        app.insert_resource(TankBlueprint::new(
-            crate::tank::TANK_SPEC_PATH.to_owned(),
-            crate::bake::CertifiedAsset::fixture(spec, geometry),
-        ))
-        .insert_resource(track_colliders)
-        .init_resource::<SourceProbe>()
-        .add_systems(Update, probe_unresolved_handle);
-        app.update();
-
-        assert!(
-            app.world().resource::<SourceProbe>().0,
-            "TankSimSource must read the eager blueprint without an asset-handle argument",
-        );
     }
 }

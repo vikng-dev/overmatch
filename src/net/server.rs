@@ -32,7 +32,7 @@ use crate::state::{GameplaySet, SimPhase};
 // drift apart. Spawn points here are HORIZONTAL (XZ) — Y is sampled at the moment of spawn, under
 // the tank's own stance.
 use crate::tank::{
-    PendingTankAssets, Rig, TankContent, TankSimSource, load_tank_sim_assets, spawn_complete_tank,
+    PendingTankAssets, Rig, TankTemplate, load_tank_sim_assets, spawn_complete_tank,
 };
 use crate::terrain_grid::{HeightGrid, Stance, spawn_pos};
 // The spawn selector reads the world's standing geometry through the SAME encoding the analytic
@@ -687,11 +687,11 @@ fn fixed_lane_xz(at: Vec2, lane: u32, radius: f32, limit: f32) -> Result<Vec2, L
 /// them) and every bot's home.
 fn admit_spawn_levers(
     manifest: Res<crate::map::MapManifest>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     bots: Res<BotCount>,
 ) {
     let limit = spawn_map::spawn_limit(manifest.extent.half_extent());
-    let radius = source.get().contact_radius();
+    let radius = template.contact_radius();
     if let Some((at, _)) = harness::spawn_pose()
         && let Err(unavailable) = fixed_lane_xz(at, 0, radius, limit)
     {
@@ -832,7 +832,7 @@ struct SpawnPickGround<'w> {
     height: Option<Res<'w, crate::terrain_grid::HeightGrid>>,
     map: Res<'w, TerrainMap>,
     obstacles: Res<'w, SpawnObstacles>,
-    source: TankSimSource<'w>,
+    template: Res<'w, TankTemplate>,
 }
 
 /// Evaluate each sending link's newest pick per frame. Superseded clicks do not run placement
@@ -859,7 +859,7 @@ fn receive_spawn_points(
                         .chain(&ground.obstacles.0)
                         .copied()
                         .collect::<Vec<_>>(),
-                    ground.source.get().contact_radius(),
+                    ground.template.contact_radius(),
                 )
             });
             let checked = check_spawn_pick(
@@ -931,7 +931,7 @@ fn handle_new_clients(
 )]
 fn spawn_pending_tanks(
     mut pending: ResMut<PendingClients>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     mut lane: ResMut<SpawnLane>,
     mut placement: ResMut<SpawnPlacement>,
     mut ram: Option<ResMut<super::ram::Ram>>,
@@ -944,8 +944,7 @@ fn spawn_pending_tanks(
     if pending.0.is_empty() {
         return;
     }
-    let content = source.get();
-    let radius = content.contact_radius();
+    let radius = template.contact_radius();
     let limit = spawn_map::spawn_limit(manifest.extent.half_extent());
     // A ram recipe or a harness script names one spawn point and turn, which the lanes offset.
     // Ordinary joins use map points. Either way Y is resolved from the authority's ground at the
@@ -958,7 +957,7 @@ fn spawn_pending_tanks(
     };
     let spawn_rot = fixed.map_or(Quat::IDENTITY, |(_, rot)| rot);
     // Every tank of the pass spawns at `spawn_rot`.
-    let stance = content.stance(spawn_rot);
+    let stance = template.stance(spawn_rot);
     let mut live: Vec<Vec2> = tanks.iter().map(|position| position.0.xz()).collect();
     let mut queue = std::mem::take(&mut pending.0);
     // Joins take ground, lanes and identities in a declared priority, never arrival or query
@@ -1043,20 +1042,19 @@ enum PlayerLife {
 }
 
 /// Commit the evaluated [`PlayerSpawns`] in push order: each life's identity, then its structural
-/// changes. The one player step that takes [`CombatantIds`]; evaluation never holds it. Each tank's
-/// rig is prepared serially here, inside the ordered commit, until a tank construction template
-/// built at load leaves only entity allocation to it.
+/// changes. The one player step that takes [`CombatantIds`]; evaluation never holds it. Everything
+/// a tank kind's instances share was prepared at load ([`TankTemplate`]), so each spawn here only
+/// allocates its entities and inserts the template's values with its links.
 fn commit_player_spawns(
     mut spawns: ResMut<PlayerSpawns>,
     assets: Res<PendingTankAssets>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     mut combatants: ResMut<CombatantIds>,
     mut commands: Commands,
 ) {
     if spawns.0.is_empty() {
         return;
     }
-    let content = source.get();
     for PlayerSpawn {
         link,
         client_id,
@@ -1071,7 +1069,7 @@ fn commit_player_spawns(
                 let life = combatants.life(combatant);
                 spawn_player_tank(
                     &mut commands,
-                    content,
+                    &template,
                     &assets,
                     link,
                     client_id,
@@ -1092,7 +1090,7 @@ fn commit_player_spawns(
                 let life = combatants.life(combatant);
                 let fresh = spawn_player_tank(
                     &mut commands,
-                    content,
+                    &template,
                     &assets,
                     link,
                     client_id,
@@ -1117,11 +1115,11 @@ fn commit_player_spawns(
 /// bundle so reacquisition cannot drift from first spawn.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the authoritative tank's construction inputs: content, assets, link, peer, pose and combatant identity"
+    reason = "the authoritative tank's construction inputs: template, assets, link, peer, pose and combatant identity"
 )]
 fn spawn_player_tank(
     commands: &mut Commands,
-    content: TankContent<'_>,
+    template: &TankTemplate,
     assets: &PendingTankAssets,
     link: Entity,
     client_id: PeerId,
@@ -1132,7 +1130,7 @@ fn spawn_player_tank(
 ) -> Entity {
     let root = spawn_complete_tank(
         commands,
-        content,
+        template,
         assets.presentation(),
         (
             (
@@ -1298,27 +1296,26 @@ enum BotLife {
 fn spawn_bots(
     bots: Query<(), With<Bot>>,
     count: Res<BotCount>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut spawns: ResMut<BotSpawns>,
 ) {
     if !bots.is_empty() || count.0 == 0 {
         return;
     }
-    let content = source.get();
-    let cycle = content
+    let cycle = template
         .spec()
         .weapons
         .values()
         .find(|weapon| weapon.trigger == crate::spec::Trigger::Primary)
         .expect("the tank load gate requires exactly one primary weapon")
         .fire_cycle;
-    let radius = content.contact_radius();
+    let radius = template.contact_radius();
     let bots: Vec<Bot> = (0..count.0)
         .map(|index| Bot::new(bot_home_xz(index, radius), index, count.0, cycle))
         .collect();
     let homes: Vec<Vec2> = bots.iter().map(|bot| bot.home).collect();
-    let placed = ground_spawns(height.as_deref(), &homes, content.stance(BOT_SPAWN_TURN));
+    let placed = ground_spawns(height.as_deref(), &homes, template.stance(BOT_SPAWN_TURN));
     // Pushed in bot order, the order identities are allocated in.
     spawns.0.extend(
         (0..)
@@ -1356,7 +1353,7 @@ fn ground_spawns(grid: Option<&HeightGrid>, points: &[Vec2], stance: Stance) -> 
 fn spawn_bot_entity(
     commands: &mut Commands,
     assets: &PendingTankAssets,
-    content: TankContent<'_>,
+    template: &TankTemplate,
     bot: Bot,
     combatant: CombatantId,
     life: CombatantLife,
@@ -1364,7 +1361,7 @@ fn spawn_bot_entity(
 ) -> Entity {
     spawn_complete_tank(
         commands,
-        content,
+        template,
         assets.presentation(),
         (
             (
@@ -1403,7 +1400,7 @@ fn spawn_bot_entity(
 /// clock.
 fn respawn_dead_bots(
     dead: Query<(Entity, &CombatantLife, &Rig, &CombatantId, &Bot), With<TankKnockedOut>>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     gate: RespawnGate,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut spawns: ResMut<BotSpawns>,
@@ -1420,9 +1417,8 @@ fn respawn_dead_bots(
     if due.is_empty() {
         return;
     }
-    let content = source.get();
     let homes: Vec<Vec2> = due.iter().map(|&(_, _, _, bot)| bot.home).collect();
-    let placed = ground_spawns(height.as_deref(), &homes, content.stance(BOT_SPAWN_TURN));
+    let placed = ground_spawns(height.as_deref(), &homes, template.stance(BOT_SPAWN_TURN));
     // Pushed in query order: the bots' replacements commute, each its own combatant.
     spawns.0.extend(
         due.into_iter()
@@ -1440,26 +1436,25 @@ fn respawn_dead_bots(
 }
 
 /// Commit the evaluated [`BotSpawns`] in push order: each life's identity, then its structural
-/// changes. The one bot step that takes [`CombatantIds`]; evaluation never holds it. Rigs are
-/// prepared serially, as in [`commit_player_spawns`].
+/// changes. The one bot step that takes [`CombatantIds`]; evaluation never holds it. Each spawn
+/// instantiates the load-time template, as in [`commit_player_spawns`].
 fn commit_bot_spawns(
     mut spawns: ResMut<BotSpawns>,
     assets: Res<PendingTankAssets>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     mut combatants: ResMut<CombatantIds>,
     mut commands: Commands,
 ) {
     if spawns.0.is_empty() {
         return;
     }
-    let content = source.get();
     for BotSpawn { bot, pos, life } in spawns.0.drain(..) {
         match life {
             BotLife::First(index) => {
                 let combatant = combatants.bot(index);
                 let life = combatants.life(combatant);
                 let root =
-                    spawn_bot_entity(&mut commands, &assets, content, bot, combatant, life, pos);
+                    spawn_bot_entity(&mut commands, &assets, &template, bot, combatant, life, pos);
                 info!(
                     "server: spawned circling bot {index} tank {root} (OVERMATCH_BOT) at ({:.1}, {:.1}, {:.1})",
                     pos.x, pos.y, pos.z
@@ -1476,7 +1471,7 @@ fn commit_bot_spawns(
                 commands.entity(turret).try_despawn();
                 let life = combatants.life(combatant);
                 let fresh =
-                    spawn_bot_entity(&mut commands, &assets, content, bot, combatant, life, pos);
+                    spawn_bot_entity(&mut commands, &assets, &template, bot, combatant, life, pos);
                 info!("server: respawned bot as {fresh} (was {root})");
             }
         }
@@ -1493,7 +1488,7 @@ fn commit_bot_spawns(
 /// spawn-map pick still wins.
 #[expect(
     clippy::too_many_arguments,
-    reason = "a respawn sweep spanning dead tanks, remotes, occupancy, sim source, spawn lane, overrides, terrain and obstacles"
+    reason = "a respawn sweep spanning dead tanks, remotes, occupancy, template, spawn lane, overrides, terrain and obstacles"
 )]
 fn respawn_player_tanks(
     mut dead: Query<
@@ -1512,7 +1507,7 @@ fn respawn_player_tanks(
     // Every tank root's live position — the occupancy set an override spawn checks against
     // (includes dead husks still on the field and the bot; excludes roots swept this pass).
     tanks: Query<(Entity, &Position, Has<TankKnockedOut>), With<NetTank>>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     mut lane: ResMut<SpawnLane>,
     mut placement: ResMut<SpawnPlacement>,
     manifest: Res<crate::map::MapManifest>,
@@ -1555,15 +1550,14 @@ fn respawn_player_tanks(
     // Requests commit occupancy in a declared priority, never query order: one already waiting on
     // occupancy first, then the lower combatant id.
     requests.sort_by_key(|&(_, _, _, combatant, state)| (!state.waiting, combatant.0));
-    let content = source.get();
-    let radius = content.contact_radius();
+    let radius = template.contact_radius();
     let limit = spawn_map::spawn_limit(manifest.extent.half_extent());
     // A harness script's spawn point and turn hold for every life, as on initial join.
     let harness_pose = harness::spawn_pose();
     let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
     let harness_at = harness_pose.map(|(at, _)| at);
     // Every tank of the pass spawns at `spawn_rot`.
-    let stance = content.stance(spawn_rot);
+    let stance = template.stance(spawn_rot);
     // Only successfully replaced roots leave occupancy: a crowded automatic spawn may wait.
     let mut sweeping: Vec<Entity> = Vec::new();
     let mut live: Vec<Vec2> = tanks
@@ -1980,10 +1974,10 @@ mod tests {
     /// Fixture data: the shipped Tiger, the one tank in the tree.
     #[test]
     fn n_bots_spawn_n_tanks_each_its_own_combatant_at_its_own_home() {
-        let (blueprint, track_colliders) = crate::tank::shipped_construction();
+        let (blueprint, template) = crate::tank::shipped_construction();
         let mut app = App::new();
         app.insert_resource(blueprint)
-            .insert_resource(track_colliders)
+            .insert_resource(template)
             .insert_resource(PendingTankAssets {
                 spec: Handle::default(),
                 scene: None,
@@ -1998,7 +1992,7 @@ mod tests {
 
         let radius = app
             .world_mut()
-            .run_system_once(|source: TankSimSource| source.get().contact_radius())
+            .run_system_once(|template: Res<TankTemplate>| template.contact_radius())
             .unwrap();
         let world = app.world_mut();
         let cadence: Vec<_> = world
@@ -2089,12 +2083,12 @@ mod tests {
     }
 
     fn placement_app_with(mode: Option<BattleMode>) -> App {
-        let (blueprint, colliders) = crate::tank::shipped_construction();
+        let (blueprint, template) = crate::tank::shipped_construction();
         let mut app = App::new();
         // Lightyear's replicated-component removal hooks read this registry on despawn.
         app.init_resource::<bevy_replicon::server::visibility::registry::FilterRegistry>()
             .insert_resource(blueprint)
-            .insert_resource(colliders)
+            .insert_resource(template)
             .insert_resource(PendingTankAssets {
                 spec: Handle::default(),
                 scene: None,
@@ -3097,7 +3091,7 @@ mod tests {
         let mut fixture = placement_app();
         let radius = fixture
             .world_mut()
-            .run_system_once(|source: TankSimSource| source.get().contact_radius())
+            .run_system_once(|template: Res<TankTemplate>| template.contact_radius())
             .unwrap();
         let manifest = crate::map::tests::shipped_manifest();
         for instance in &manifest.instances {

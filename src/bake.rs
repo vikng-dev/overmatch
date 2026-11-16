@@ -457,7 +457,7 @@ pub(crate) fn construction_digest(root: &Path) -> u64 {
 /// Roadwheels are the one node class that is BOTH a rig station and a volume: the wheels ship as one
 /// watertight mesh per station, so the same node is the suspension station AND its own armour. The
 /// station role is a marker component (`Roadwheel`) and the volume role a bundle + trimesh children,
-/// and they compose on one entity (`tank::spawn::assemble_tank_body`). Their capture needs no rule
+/// and they compose on one entity (`tank::template::TankTemplate::assemble`). Their capture needs no rule
 /// of its own — the wheel nodes are keyed in `volumes` and wear `MildSteel`/`Rubber`.
 ///
 /// A declared node that mixes substance and non-substance primitives is REFUSED (see
@@ -908,10 +908,11 @@ fn extract_at_startup(mut commands: Commands) {
         )
     });
     let blueprint = TankBlueprint::new(crate::tank::TANK_SPEC_PATH.to_owned(), asset);
-    // The rigid track colliders ride the blueprint's flush: every body built from it gets them at
-    // spawn. They are cut from the running gear measured off this same sim artifact.
-    commands.insert_resource(crate::track::bump_stop::TrackColliders::of_blueprint(
-        &blueprint, &path,
+    // The kind's template rides the blueprint's flush, its rigid track colliders cut from the
+    // running gear measured off this same sim artifact: every spawn instantiates it.
+    commands.insert_resource(crate::tank::TankTemplate::new(
+        &blueprint,
+        crate::track::bump_stop::TrackColliders::of_blueprint(&blueprint, &path),
     ));
     commands.insert_resource(blueprint);
 }

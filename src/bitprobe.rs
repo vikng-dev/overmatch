@@ -24,7 +24,7 @@ use crate::SimPlugin;
 use crate::bake::TankBlueprint;
 use crate::command::TankCommand;
 use crate::state::AppState;
-use crate::tank::{Controlled, TankSimSource, spawn_headless_tank};
+use crate::tank::{Controlled, TankTemplate, spawn_headless_tank};
 use crate::track::sim::{
     DriveSignal, TankTransmission, TrackDrive, TrackGear, TrackGrip, TrackGripEffect,
 };
@@ -406,17 +406,16 @@ struct FixtureEntity(Entity);
 
 fn spawn_fixture(
     mut commands: Commands,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     fixture: Option<Res<FixtureEntity>>,
     mut next_state: ResMut<NextState<AppState>>,
 ) {
     if fixture.is_some() {
         return;
     }
-    let content = source.get();
     let tank = spawn_headless_tank(
         &mut commands,
-        content,
+        &template,
         (
             Transform::from_translation(SPAWN_TRANSLATION).with_rotation(SPAWN_ROTATION),
             Name::new("bitprobe Tiger I"),

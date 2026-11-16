@@ -100,7 +100,7 @@ pub(crate) const MESH_TILE_CELLS: usize = 128;
 pub struct ForceFlatWorld;
 
 /// How a tank stands over the ground it spawns on, posed as it spawns
-/// ([`crate::tank::TankContent::stance`], from its construction).
+/// ([`crate::tank::TankTemplate::stance`], from its construction).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Stance {
     /// How far any point of the construction lies from the root's vertical axis, m.

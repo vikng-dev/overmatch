@@ -39,7 +39,7 @@ pub(crate) fn recoil_impulse(bore: Dir3, mass: f32, speed: f32) -> Vec3 {
 /// recoil STATE (offset/velocity) is sim truth — the muzzle rides the barrel — and lives
 /// root-resident in `TankSim::weapons` (see `TankSim`), keyed by the barrel's `WeaponIndex`. The
 /// translational cousin of `Servo`.
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub(crate) struct RecoilParams {
     pub(crate) rest: Vec3,
     pub(crate) stiffness: f32,

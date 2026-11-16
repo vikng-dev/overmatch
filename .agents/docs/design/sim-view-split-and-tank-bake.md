@@ -68,14 +68,14 @@ coordinates).
 
 **Trivial to bake — one Transform/Vec3/Quat per named node:**
 - servo rest quaternions (spawn data since ADR-0014 — no longer a lazy first-tick capture, which
-  is the field the ConfirmedHistory bug corrupted; `tank::spawn::insert_servos`) and each servo's
+  is the field the ConfirmedHistory bug corrupted; `tank::template::TankTemplate::new`) and each servo's
   local transform + static intermediate chain transforms up to root (`tank::model::rig_world_pose`)
 - muzzle local pose (shell origin/bore) and barrel rest translation (recoil spring origin) —
-  both built in `tank::spawn::insert_weapons`, consumed by `shooting`
+  both built in `tank::template::TankTemplate::new`, consumed by `shooting`
 - roadwheel station local poses — the contact-envelope station geometry per wheel
   (`track::forces` / `track::envelope`), plus wheel count/side (derived from the
   `Wheel_L_/R_<n>` name pattern in `bake::roadwheel_side`)
-- `Center_Of_Mass` empty position (resolved in `tank::spawn::resolve_rig_nodes`, applied to the
+- `Center_Of_Mass` empty position (resolved in `tank::template::resolve_rig_nodes`, applied to the
   root as pure data — it is deliberately NOT spawned as an entity)
 - turret pivot offset (camera reads it once, `camera::capture_turret_pivot`)
 
@@ -84,7 +84,7 @@ coordinates).
 
 **Mesh-derived — the dominant scope:**
 - **armor volume trimeshes** (~45 concave volumes, `TrimeshFromMesh` on the Armor layer, built in
-  `tank::spawn::insert_ballistic_volumes`): the penetration march raycasts them for entry point,
+  `tank::template::classify_volume`): the penetration march raycasts them for entry point,
   normal, perpendicular thickness, slope span (`ballistics::march_shell_step` →
   `ballistics::resolve_armor_crossing`). Plate thickness is deliberately geometric — the mesh IS
   the armor model.

@@ -749,21 +749,21 @@ fn drive_track_views(
     pieces: (
         DrawnPieces,
         Local<HullField>,
-        Res<super::bump_stop::TrackColliders>,
+        Res<crate::tank::TankTemplate>,
     ),
 ) {
     let Some(ground) = track.field.as_ref() else {
         return;
     };
     let (depths, geom) = sink;
-    let (drawn, mut hulls, shapes) = pieces;
+    let (drawn, mut hulls, template) = pieces;
     // A probe station lies on the running gear's shapes moved by at most its travel, and its ray
     // runs PROBE_REACH past the station.
     let travel = Side::ALL
         .into_iter()
         .map(|side| gear.max_droop(side))
         .fold(blueprint.spec.track.suspension.bump_stop, f32::max);
-    let gather_m = shapes.contact_radius() + travel + PROBE_REACH;
+    let gather_m = template.track_colliders().contact_radius() + travel + PROBE_REACH;
     let pressure_kpa = geom
         .as_deref()
         .map(crate::track_prints::tank_ground_pressure_kpa);

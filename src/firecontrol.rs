@@ -43,7 +43,7 @@ impl Default for Ranging {
 /// A weapon's precomputed range table: ascending `(range_m, superelevation_rad)` rows. Built once per
 /// speed/drag bit pattern and shared on weapon muzzles at spawn; the aim commit looks up the
 /// dialed range to lob the aim point.
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct RangeTable {
     /// `(range, superelevation)`, ascending by range. Monotonic by construction: only the rising
     /// (direct-fire) branch is kept, so a binary-free linear scan interpolates cleanly.

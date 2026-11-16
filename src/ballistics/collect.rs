@@ -22,7 +22,7 @@
 //!
 //! # Two narrow phases, deliberately
 //!
-//! - **Trimesh** — certified vehicle armour (`tank::spawn::insert_ballistic_volumes`). Traverses parry's BVH collecting every triangle the
+//! - **Trimesh** — certified vehicle armour (`tank::template::classify_volume`). Traverses parry's BVH collecting every triangle the
 //!   ray crosses, and takes the normal from the triangle's WINDING, which is the mesh's real
 //!   orientation rather than a query artefact.
 //! - **Convex** — construction elements and chunks (`Collider::convex_hull`), and sandbox slabs
