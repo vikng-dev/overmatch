@@ -5,9 +5,8 @@
 //! colliders or its centre of mass changed, and not at all otherwise; an enabled body missing a
 //! component the pass reads is refused, never left with stale metrics. Who relies on it: the
 //! dedicated server's step in the tick a construction's piece takes its chunks (hundreds of
-//! colliders changed on one body), and Avian's continuous collision, which reads the metrics.
-//! Stock Avian recomputes the body once per changed collider, each time over all its colliders;
-//! its count is `BodySizeMetricUpdates`, a resource the patch adds.
+//! colliders changed on one body), and Avian's continuous collision, which reads the metrics. The
+//! pass's count is `BodySizeMetricUpdates`, a resource the patch adds.
 //!
 //! The poses, sizes and counts below are fixture data.
 

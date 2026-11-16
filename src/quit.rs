@@ -47,10 +47,8 @@ pub(crate) fn plugin(app: &mut App) {
     app.add_plugins(terminate::TerminateRoute);
 }
 
-/// Retires the last render frame while the main world's window owners still live. Winit clears
-/// them in `exiting`; waiting in RenderAppChannels::drop is later than this boundary. Decided in
-/// `finish`, so the answer does not depend on whether this root added `DefaultPlugins` before or
-/// after the quit plugin.
+/// The render retire, decided in `finish` so the answer does not depend on whether this root added
+/// `DefaultPlugins` before or after the quit plugin.
 struct RetireRenderer;
 
 impl Plugin for RetireRenderer {

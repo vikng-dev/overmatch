@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 916 in all (MEASURED), 838 in upstream files and 78 in the
+of `src/` against the published crate: 915 in all (MEASURED), 837 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -316,7 +316,7 @@ outside Avian's timed stages was 151 to 518 ms in the two ticks after each colla
 the ten worst ticks; with the patch the worst is 0.6 ms and the ten worst sum to 3.9 ms. The run's
 worst tick fell from 599.9 to 82.7 ms (the 0.7 stack: 106.7 ms).
 
-Kept: the loop is inside an upstream system. 81 fork lines (MEASURED).
+Kept: the loop is inside an upstream system. 80 fork lines (MEASURED).
 
 Guard: `src/tests/avian_body_size_metrics.rs`, 4 tests. Mutants, each red (MEASURED): every body
 the pass cannot read skipped, as upstream (the refusal does not panic); every such body refused

@@ -151,9 +151,8 @@ fn update_body_size_metrics<C: AnyCollider>(
     };
 
     // OVERMATCH PATCH: a stale body is recomputed once, however many of its colliders changed.
-    // Upstream recomputed it once per changed collider, each time over all its colliders. Each
-    // stale body owns its metrics and reads only its own colliders, so they run on the compute
-    // pool; a step with no stale body dispatches nothing.
+    // Each stale body owns its metrics and reads only its own colliders, so they run on the
+    // compute pool; a step with no stale body dispatches nothing.
     stale.clear();
     stale.extend(&moved_centers);
     stale.extend(changed_colliders.iter().map(|collider_of| collider_of.body));
