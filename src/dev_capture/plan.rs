@@ -130,12 +130,15 @@ pub(crate) enum Demo {
     LodShowcase,
     /// The hull marks, struck on the parked target (`hull_marks::demo`).
     HullMarks,
-    /// The track prints, driven at world `(x, z)` on travel heading `heading_deg` (from `+Z`
-    /// toward `+X`), pivoting at `steer` (default 1, right) (`track_prints::demo`).
+    /// The track prints, set down at app second `at` at world `(x, z)` on travel heading
+    /// `heading_deg` (from `+Z` toward `+X`) and driven, pivoting at `steer` (default 1, right)
+    /// (`track_prints::demo`). `at` is the plan's schedule, like every cue's: the player's tank
+    /// must have spawned by then, or the demo waits for it.
     TrackPrints {
         x: f32,
         z: f32,
         heading_deg: f32,
+        at: f32,
         #[serde(default = "right")]
         steer: f32,
         /// Hold one view for good in place of the relief level cycle.
@@ -529,6 +532,12 @@ pub(crate) enum PlanError {
     Parse(ron::error::SpannedError),
     Field(String),
     OrbitCamera(bevy::ecs::query::QuerySingleError),
+    /// `scene.demo`'s track-print spot lies outside the loaded terrain's span.
+    DemoOffTerrain {
+        x: f32,
+        z: f32,
+        half_extent: f32,
+    },
     Output {
         path: PathBuf,
         source: std::io::Error,
@@ -547,6 +556,10 @@ impl std::fmt::Display for PlanError {
                 f,
                 "frames.camera: {error}; choose Pose on a root without exactly one player orbit camera"
             ),
+            Self::DemoOffTerrain { x, z, half_extent } => write!(
+                f,
+                "scene.demo: ({x}, {z}) lies outside the terrain's ±{half_extent} m span; choose x and z inside it"
+            ),
             Self::Output { path, source } => write!(
                 f,
                 "frames.out: cannot prepare {}: {source}; choose a writable directory and fix its path or permissions",
@@ -557,7 +570,7 @@ impl std::fmt::Display for PlanError {
 }
 
 /// Refuse operator input at either file admission or binding to the startup world.
-pub(super) fn refuse(error: PlanError) -> ! {
+pub(crate) fn refuse(error: PlanError) -> ! {
     let path = PathBuf::from(
         std::env::var_os(VARIABLE).expect("a capture cue requires a loaded plan path"),
     );
@@ -710,12 +723,15 @@ impl CapturePlan {
             x,
             z,
             heading_deg,
+            at,
             steer,
             ..
         }) = scene.demo
-            && ![x, z, heading_deg, steer].iter().all(|n| n.is_finite())
         {
-            return Err("scene.demo: a track-print drive needs finite numbers".into());
+            finite_at("scene.demo.at", at)?;
+            if ![x, z, heading_deg, steer].iter().all(|n| n.is_finite()) {
+                return Err("scene.demo: a track-print drive needs finite numbers".into());
+            }
         }
         if let Some(wall) = &self.wall {
             wall.validate_targets()?;
@@ -1016,7 +1032,7 @@ mod tests {
                     sun_elevation_deg: 12.5,
                     xray: false,
                     range_wall: (case: Blast(kg: 1.0, standoff_m: 3.0), bare: true, witness: true),
-                    demo: TrackPrints(x: 70.0, z: -20.0, heading_deg: 90.0, hold: Pivot),
+                    demo: TrackPrints(x: 70.0, z: -20.0, heading_deg: 90.0, at: 10.0, hold: Pivot),
                 ),
             )"#,
         )
@@ -1100,6 +1116,7 @@ mod tests {
                     x: 70.0,
                     z: -20.0,
                     heading_deg: 90.0,
+                    at: 10.0,
                     steer: 1.0,
                     hold: Some(DemoHold::Pivot),
                 }),
@@ -1298,6 +1315,15 @@ mod tests {
                 "scene.range_wall.case",
             ),
             ("(scene: (demo: Spin))".to_owned(), "Spin"),
+            (
+                "(scene: (demo: TrackPrints(x: 0.0, z: 0.0, heading_deg: 0.0)))".to_owned(),
+                "`at`",
+            ),
+            (
+                "(scene: (demo: TrackPrints(x: 0.0, z: 0.0, heading_deg: 0.0, at: -1.0)))"
+                    .to_owned(),
+                "scene.demo.at",
+            ),
         ] {
             let error = CapturePlan::parse(&text)
                 .expect_err("the plan is refused")
