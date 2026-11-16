@@ -175,6 +175,13 @@ struct Unheld<'w, 's> {
 impl Unheld<'_, '_> {
     /// Wake every sleeping body with a collider whose bounds come within avian's contact tolerance
     /// of `collider`'s, and every resting tank its sampled support carries.
+    ///
+    /// Serial, in the observer: the wake must be visible to every reader of sleep state after the
+    /// flush that removed the support ([`freeze`] after the splits, the driving pass, the next
+    /// step), and those readers follow different flushes; a body still asleep past that flush can
+    /// be frozen over support it no longer has. The work is one AABB query per removed support,
+    /// over the colliders within its bounds; a sensor spawned with its collider holds avian's empty
+    /// bound until the step computes one, and finds nothing.
     fn wake(&self, collider: Entity, commands: &mut Commands) {
         let aabb = self
             .aabbs
@@ -229,12 +236,12 @@ fn wake_on_body_disabled(
 
 /// Every collider of a static body or of none re-posed, reshaped or re-layered since the last step:
 /// every sleeping body it carries wakes (module doc), and each frozen island depending on any of
-/// them is judged at this step's thaw ([`freeze`]). The changed colliders are judged on the
-/// compute pool; the scan that finds them reads one change tick per collider and stays serial,
-/// since a parallel query spawns its tasks every step whatever it finds (bevy_ecs 0.20.1
-/// `QueryParIter`): MEASURED on the M4 server with nothing changed, 9 to 13 µs more per tick in the
-/// physics schedule's own systems than this scan (`scripts/perf/pile_park.py`, pile and flat). The
-/// thaw reads the notes as a set, so their order decides nothing.
+/// them is judged at this step's thaw ([`freeze`]). One pass on the compute pool reads each
+/// collider's change ticks, selects the changed ones and wakes what they carry; the notes commit
+/// after it, and the thaw reads them as a set, so their order decides nothing. The pass dispatches
+/// every step whatever it finds (bevy_ecs 0.20.1 `QueryParIter`): MEASURED on the M4 server with
+/// nothing changed, 9 to 13 µs more per tick in the physics schedule's own systems than a serial
+/// scan (`scripts/perf/pile_park.py`, pile and flat); unmeasured on the hosted allocation.
 fn wake_on_static_moved(
     changed: Query<
         (Entity, Option<&ColliderOf>),
@@ -252,31 +259,18 @@ fn wake_on_static_moved(
     carried: Carried,
     mut islands: ResMut<freeze::FrozenIslands>,
     commands: ParallelCommands,
-    mut moved: Local<Vec<Entity>>,
+    mut moved: Local<bevy::utils::Parallel<Vec<Entity>>>,
 ) {
-    use bevy::tasks::{ComputeTaskPool, ParallelSlice};
-    moved.clear();
-    moved.extend(
-        changed
-            .iter()
-            // A collider with no body is static to the solver, and the belt's sampling reads it as
-            // one (`track::rubble::RubbleQuery`); a moving body's colliders move with it.
-            .filter(|(_, of)| {
-                of.is_none_or(|of| bodies.get(of.body).is_ok_and(RigidBody::is_static))
-            })
-            .map(|(collider, _)| collider),
-    );
-    if moved.is_empty() {
-        return;
-    }
-    moved.par_splat_map(ComputeTaskPool::get(), None, |_, colliders| {
-        commands.command_scope(|mut commands| {
-            for &collider in colliders {
-                carried.wake(collider, &mut commands);
-            }
-        });
+    let notes = &*moved;
+    changed.par_iter().for_each(|(collider, of)| {
+        // A collider with no body is static to the solver, and the belt's sampling reads it as
+        // one (`track::rubble::RubbleQuery`); a moving body's colliders move with it.
+        if of.is_none_or(|of| bodies.get(of.body).is_ok_and(RigidBody::is_static)) {
+            commands.command_scope(|mut commands| carried.wake(collider, &mut commands));
+            notes.scope(|notes| notes.push(collider));
+        }
     });
-    for &collider in moved.iter() {
+    for collider in moved.iter_mut().flat_map(|notes| notes.drain(..)) {
         islands.changed_in_place(collider);
     }
 }
