@@ -1341,7 +1341,7 @@ impl ShellPath {
 /// Solid taxing the penetrator over geometric line-of-sight distance, for plates and modules
 /// alike (§2), on `Armor`. At extraction, `bake` resolves primitive material names against
 /// `assets/materials/materials.ron` (§12): no per-query string lookup or per-node authored number.
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct BallisticVolume {
     /// The substance's identity and its §13.2 field value (reference-mm of armour per metre of
     /// chord).
@@ -1359,7 +1359,7 @@ pub struct BallisticVolume {
 /// Crew HP pool at a station (ADR-0040), dosed by what the hard world sends through it ([`wound`]).
 /// It supplies no armour layer, resistance, shadowing or spall. Its primitives are crew box parts of
 /// its tank's armour set ([`armour_set::Role::CrewBox`]); the node carries [`ComponentHealth`].
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct WitnessVolume {
     /// The substance's registry name — identity, for diagnostics and inspection.
     #[allow(

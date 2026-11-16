@@ -403,7 +403,7 @@ fn release_breaches(
     mut stress: ResMut<DebrisStress>,
     tanks: Query<(&Position, &Rotation), With<Tank>>,
     grid: Option<Res<HeightGrid>>,
-    source: crate::tank::TankSimSource,
+    template: Res<crate::tank::TankTemplate>,
     generation: Res<AuthorityWorld>,
     mut commands: Commands,
 ) {
@@ -441,7 +441,7 @@ fn release_breaches(
         &stress.scenario,
         (anchor.0, heading.0),
         side,
-        source.get().contact_radius(),
+        template.contact_radius(),
         stress.lever.pieces,
         stress.released,
         ground,
@@ -1034,28 +1034,12 @@ mod tests {
     #[test]
     fn a_released_piece_collides_as_a_fallen_piece_does() {
         use bevy::ecs::system::RunSystemOnce;
-        // Fixture data: the shipped tank's sheet and rig, beside no geometry.
-        let spec = crate::track::rig_geom::tiger_spec();
-        let track_colliders = crate::track::bump_stop::TrackColliders::new(
-            &crate::track::rig_geom::tiger_rig(),
-            &spec.track.suspension.params(),
-            spec.track.friction(),
-        );
-        let geometry = crate::bake::TankGeometry {
-            nodes: Vec::new(),
-            by_name: Default::default(),
-            roadwheels: Vec::new(),
-            collision_proxies: Vec::new(),
-            ballistic_volumes: Vec::new(),
-        };
+        // Fixture data: the shipped tank's construction.
+        let (_, template) = crate::tank::shipped_construction();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_resource(fixture_world())
-            .insert_resource(crate::bake::TankBlueprint::new(
-                crate::tank::TANK_SPEC_PATH.to_owned(),
-                crate::bake::CertifiedAsset::fixture(spec, geometry),
-            ))
-            .insert_resource(track_colliders)
+            .insert_resource(template)
             .insert_resource(DebrisStress::new(
                 Lever {
                     pieces: 3,

@@ -88,7 +88,7 @@ mod tests;
 /// One ballistic mesh primitive — the grain presence is REPORTED at.
 ///
 /// The primitive is an `Entity` rather than an index because the bind already gives every glb mesh
-/// primitive its own collider entity (`tank::spawn::insert_ballistic_volumes`), so the identity the
+/// primitive its own collider entity (`tank::template::classify_volume`), so the identity the
 /// walk needs already exists and is stable for the frame — an index would be a second, weaker name
 /// for the same thing.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

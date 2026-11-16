@@ -53,7 +53,7 @@ use crate::damage::{self, CookedOff, Dead, LaunchedTurret, TankKnockedOut, Volum
 use crate::damage_cam::pen_cam::game::{PenCamSet, XRay, XRayRelease, XRaySubject};
 use crate::settings::{PenCamCorner, Settings};
 use crate::tank::{
-    Tank, TankPresentation, TankRoot, TankSimSource, ViewOf, Weapon, WeaponIndex,
+    Tank, TankPresentation, TankRoot, TankTemplate, ViewOf, Weapon, WeaponIndex,
     spawn_complete_tank,
 };
 use crate::view::PlayerView;
@@ -550,15 +550,14 @@ fn spawn_target_from_blueprint(
     mut commands: Commands,
     pending: Option<Res<PendingTarget>>,
     life: Res<TargetLife>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
 ) {
     let Some(pending) = pending else {
         return; // No initial target or rebuild is pending.
     };
-    let content = source.get();
     spawn_complete_tank(
         &mut commands,
-        content,
+        &template,
         pending.0.clone(),
         (
             Transform::from_xyz(0.0, 2.0, -12.0),

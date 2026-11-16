@@ -13,7 +13,7 @@ use lightyear::prelude::client::Remote;
 use lightyear::prelude::*;
 
 use super::protocol::NetTank;
-use crate::tank::{PendingTankAssets, TankSimSource, attach_replicated_tank_body};
+use crate::tank::{PendingTankAssets, TankTemplate, attach_replicated_tank_body};
 use crate::track::sim::EngineRpm;
 
 /// Attach simulation only after interpolation has established this frame's visible component
@@ -44,18 +44,17 @@ fn attach_visible_rigs(
         ),
     >,
     assets: Res<PendingTankAssets>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     mut commands: Commands,
 ) {
     if tanks.is_empty() {
         return;
     }
-    let content = source.get();
     for entity in &tanks {
         attach_replicated_tank_body(
             &mut commands,
             entity,
-            content,
+            &template,
             assets.presentation(),
             (
                 NetTank,

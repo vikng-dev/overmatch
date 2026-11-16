@@ -255,7 +255,7 @@ fn place(
     time: Res<Time>,
     mut demo: ResMut<Demo>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
-    source: crate::tank::TankSimSource,
+    template: Res<crate::tank::TankTemplate>,
     mut tank: Query<
         (
             &mut Position,
@@ -286,7 +286,7 @@ fn place(
     // The hull faces its own −Z: a turn of `heading + π` about Y points it along the heading.
     rotation.0 = Quat::from_rotation_y(demo.heading + std::f32::consts::PI);
     position.0 =
-        crate::terrain_grid::spawn_pos(grid.as_deref(), demo.at, source.get().stance(rotation.0));
+        crate::terrain_grid::spawn_pos(grid.as_deref(), demo.at, template.stance(rotation.0));
     linear.0 = Vec3::ZERO;
     angular.0 = Vec3::ZERO;
     demo.set_down_at = Some(time.elapsed_secs());

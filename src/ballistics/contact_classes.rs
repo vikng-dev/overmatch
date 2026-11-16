@@ -36,7 +36,7 @@ use super::fuzz::PROBE_TANK_AT;
 use super::mechanism::SolidShot;
 use super::walk::{Begin, DiscFrame, Shot};
 use super::*;
-use crate::tank::{TankSimSource, spawn_headless_tank};
+use crate::tank::{TankTemplate, spawn_headless_tank};
 
 /// The record the sweep's tables land in, from the manifest directory.
 const RECORD: &str = ".agents/scratch/research/contact-classes-2026-11-03.md";
@@ -369,20 +369,19 @@ struct Mounted(Entity);
 
 fn mount_tank(
     mut commands: Commands,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     mount: Res<Mount>,
     mounted: Option<Res<Mounted>>,
 ) {
     if mounted.is_some() {
         return;
     }
-    let content = source.get();
     let tank = spawn_headless_tank(
         &mut commands,
-        content,
+        &template,
         (
             Transform::from_translation(PROBE_TANK_AT),
-            Name::new(content.spec().display_name.clone()),
+            Name::new(template.spec().display_name.clone()),
             mount.0,
         ),
     );

@@ -74,7 +74,8 @@ use avian3d::prelude::{LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 
 use super::model::{Tank, TankRoot, Weapon, WeaponIndex};
-use super::spawn::{TankContent, TankPresentation};
+use super::spawn::TankPresentation;
+use super::template::TankTemplate;
 use crate::ballistics::{FireShell, Impact, ImpactSurface, ShellStrike};
 use crate::command::{AimIntent, TankCommand};
 use crate::damage::TankKnockedOut;
@@ -410,7 +411,7 @@ struct BattleSlot(usize);
 /// plan. Called by the scenario's spawn when [`enabled`].
 pub(super) fn spawn(
     commands: &mut Commands,
-    content: TankContent,
+    template: &TankTemplate,
     presentation: TankPresentation,
     grid: Option<&HeightGrid>,
     manifest: Option<&MapManifest>,
@@ -418,10 +419,10 @@ pub(super) fn spawn(
     let plan = Plan::new(SEED);
     for (index, tank) in plan.tanks.iter().enumerate() {
         let turn = tank.lane.spawn_turn();
-        let at = crate::terrain_grid::spawn_pos(grid, tank.lane.back, content.stance(turn));
+        let at = crate::terrain_grid::spawn_pos(grid, tank.lane.back, template.stance(turn));
         let root = super::scenario::spawn_tank(
             commands,
-            content,
+            template,
             presentation.clone(),
             Transform::from_translation(at).with_rotation(turn),
             &format!("Battle tank {index}"),
