@@ -690,7 +690,6 @@ mod tests {
         ));
     }
 
-    /// [`stage_of`] `report`'s tank file.
     fn stage_ready(app: &mut App, report: &PenetrationReport) {
         stage_of(
             app,
@@ -746,7 +745,7 @@ mod tests {
             }
         });
         let handle = asset_server
-            .get_handle::<TankSpec>(staged.vehicle.clone())
+            .get_handle::<TankSpec>(bevy::asset::AssetPath::parse(staged.vehicle.as_str()))
             .expect("a spawned stage view holds its tank file's handle");
         specs
             .insert(handle.id(), spec)
