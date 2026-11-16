@@ -133,7 +133,7 @@ pub(crate) enum Demo {
     /// The track prints, set down at app second `at` at world `(x, z)` on travel heading
     /// `heading_deg` (from `+Z` toward `+X`) and driven, pivoting at `steer` (default 1, right)
     /// (`track_prints::demo`). `at` is the plan's schedule, like every cue's: the player's tank
-    /// must have spawned by then, or the demo waits for it.
+    /// must have spawned by then, or the demo waits for it; the phases run from the set-down.
     TrackPrints {
         x: f32,
         z: f32,

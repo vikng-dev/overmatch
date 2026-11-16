@@ -1,8 +1,9 @@
 //! A capture plan's `scene.demo: TrackPrints(…)` (`dev_capture::plan::Demo`), a dev capture of the
-//! track prints (cosmetic terrain marks) on the offline route. At the plan's app second `at` the
-//! player's tank is set down at world XZ `(x, z)`, its travel heading `heading_deg` from `+Z` toward `+X`; once
-//! settled it drives straight, stops, pivots on the spot at `steer`, stops, and drives out of the
-//! pivot. The camera is then held low, about 10 m off, first on the straight drive's track and then
+//! track prints (cosmetic terrain marks) on the offline route. From the plan's app second `at`, once
+//! it has spawned, the player's tank is set down at world XZ `(x, z)`, its travel heading
+//! `heading_deg` from `+Z` toward `+X`; every later phase runs from that set-down. Once settled it
+//! drives straight, stops, pivots on the spot at `steer`, stops, and drives out of the pivot. The
+//! camera is then held low, about 10 m off, first on the straight drive's track and then
 //! on the pivot, each at the three relief levels in turn ([`crate::settings::TrackPrintRelief`],
 //! forced through [`super::ReliefOverride`]) for `OVERMATCH_CAPTURE` stills. Every phase boundary is
 //! logged with its app time.
@@ -83,7 +84,7 @@ enum Phase {
 }
 
 impl Phase {
-    /// The scripted phase `t` seconds after the set-down time.
+    /// The scripted phase `t` seconds after the set-down.
     fn at(t: f32) -> Self {
         let mut end = 0.0;
         for (phase, length) in [
@@ -129,7 +130,7 @@ impl Phase {
         }
     }
 
-    /// The phase shown `t` seconds after the set-down time: the scripted one, with `hold` standing
+    /// The phase shown `t` seconds after the set-down: the scripted one, with `hold` standing
     /// in for every view.
     fn shown(t: f32, hold: Option<Phase>) -> Self {
         match (Phase::at(t), hold) {
@@ -148,8 +149,10 @@ impl Phase {
 #[derive(Resource)]
 struct Demo {
     at: Vec2,
-    /// The app second the tank is set down, the plan's `at`.
-    place_at: f32,
+    /// The plan's `at`: the app second from which the tank is set down, once it has spawned.
+    set_down_from: f32,
+    /// The app second it was set down, which every later phase runs from; `None` until then.
+    set_down_at: Option<f32>,
     /// Travel heading, rad from `+Z` toward `+X`.
     heading: f32,
     /// The pivot's steer.
@@ -169,7 +172,7 @@ pub(crate) fn offline_plugin(app: &mut App) {
         x,
         z,
         heading_deg: heading,
-        at: place_at,
+        at: set_down_from,
         steer: pivot_steer,
         hold,
     }) = crate::dev_capture::plan().and_then(|plan| plan.scene.demo)
@@ -181,12 +184,13 @@ pub(crate) fn offline_plugin(app: &mut App) {
         DemoHold::Pivot => Phase::PivotView(0),
     });
     info!(
-        "track prints demo: armed at ({x}, {z}) heading {heading}°, set down at {place_at} s, \
+        "track prints demo: armed at ({x}, {z}) heading {heading}°, set down from {set_down_from} s, \
          hold {hold:?}"
     );
     app.insert_resource(Demo {
         at: Vec2::new(x, z),
-        place_at,
+        set_down_from,
+        set_down_at: None,
         heading: heading.to_radians(),
         pivot_steer,
         hold,
@@ -246,14 +250,17 @@ fn place(
         (With<Tank>, With<Controlled>),
     >,
 ) {
-    if demo.phase != Phase::Wait || time.elapsed_secs() < demo.place_at {
+    if demo.set_down_at.is_some() || time.elapsed_secs() < demo.set_down_from {
         return;
     }
     let (mut position, mut rotation, mut linear, mut angular) = match tank.single_mut() {
         Ok(tank) => tank,
         // The player's tank has not spawned yet: the demo waits for it.
         Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => {
-            warn_once!("track prints demo: no player tank at {} s", demo.place_at);
+            warn_once!(
+                "track prints demo: no player tank at {} s",
+                demo.set_down_from
+            );
             return;
         }
         Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
@@ -266,6 +273,7 @@ fn place(
         crate::terrain_grid::spawn_pos(grid.as_deref(), demo.at, source.get().stance(rotation.0));
     linear.0 = Vec3::ZERO;
     angular.0 = Vec3::ZERO;
+    demo.set_down_at = Some(time.elapsed_secs());
     demo.phase = Phase::Settle;
     info!(
         "track prints demo: set down at {:.1} at t={:.2}s",
@@ -284,10 +292,10 @@ fn follow(
     prints: Option<Res<super::TrackPrints>>,
     mut commands: Commands,
 ) {
-    if demo.phase == Phase::Wait {
+    let Some(set_down) = demo.set_down_at else {
         return;
-    }
-    let now = Phase::shown(time.elapsed_secs() - demo.place_at, demo.hold);
+    };
+    let now = Phase::shown(time.elapsed_secs() - set_down, demo.hold);
     if now == demo.phase {
         return;
     }
