@@ -222,7 +222,8 @@ fn announce_reenabled(removed: On<Remove<()>>, mut reenabled: MessageWriter<Reen
 #[derive(Resource)]
 pub(super) struct PhysicsPlacementReady;
 
-/// Present between Lightyear placement setup and its cleanup replacement.
+/// Inserted by FramePlacementPlugin::build in the shared Lightyear installer; removed only after
+/// its cleanup replaces the frame-boundary writer.
 #[derive(Resource)]
 pub(crate) struct FramePlacementPending;
 

@@ -964,14 +964,6 @@ pub(crate) fn plugin(app: &mut App) {
 
     app.add_plugins(input::native::InputPlugin::<TankCommand>::default());
 
-    // Avian replication (map §5): mount lightyear_avian3d's ordering fixes, then register the
-    // root's Position/Rotation/velocities ourselves. `AvianReplicationMode::Position` replicates the
-    // sim pose, never `Transform`; `sync_to_transform: false` keeps physics authority one-way
-    // (Position -> Transform in PostUpdate only). Nothing here moves a body by writing its
-    // `Transform`: child colliders (servo nodes) reach physics through avian's own
-    // `ColliderTransform` propagation from their LOCAL transforms. `register_physics_components`
-    // is OFF because the plugin's defaults predict all four components and this client predicts
-    // nothing — the registrations below are the protocol.
     super::physics::lightyear_plugin(app);
     // The hull pose interpolates on the cursor; everything else applies the confirmed value on
     // arrival (per-tick keyframes, so the discrete components step at most one tick apart from

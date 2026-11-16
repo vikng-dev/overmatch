@@ -15,7 +15,6 @@ use bevy::prelude::*;
 /// handed one by Avian's `ColliderOf` hook, decomposed from world matrices an ULP off a unit
 /// scale, and the collector refuses armour at any scale but a bit-exact 1 (`ballistics::collect`).
 pub(crate) fn plugin(app: &mut App) {
-    app.add_plugins(FramePlacementPlugin);
     app.configure_sets(
         FixedPostUpdate,
         (
@@ -48,13 +47,24 @@ pub fn physics_plugins() -> bevy::app::PluginGroupBuilder {
 /// Mounts the network physics integration with the game's spawn-transform policy.
 pub(crate) fn lightyear_plugin(app: &mut App) {
     use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
-    app.add_plugins(LightyearAvianPlugin {
-        replication_mode: AvianReplicationMode::Position {
-            sync_to_transform: false,
+    // Avian replication (map §5): mount lightyear_avian3d's ordering fixes, then register the
+    // root's Position/Rotation/velocities ourselves. `AvianReplicationMode::Position` replicates the
+    // sim pose, never `Transform`; `sync_to_transform: false` keeps physics authority one-way
+    // (Position -> Transform in PostUpdate only). Nothing here moves a body by writing its
+    // `Transform`: child colliders (servo nodes) reach physics through avian's own
+    // `ColliderTransform` propagation from their LOCAL transforms. `register_physics_components`
+    // is OFF because the plugin's defaults predict all four components and this client predicts
+    // nothing — protocol::plugin owns the registrations.
+    app.add_plugins((
+        LightyearAvianPlugin {
+            replication_mode: AvianReplicationMode::Position {
+                sync_to_transform: false,
+            },
+            register_physics_components: false,
+            ..default()
         },
-        register_physics_components: false,
-        ..default()
-    });
+        FramePlacementPlugin,
+    ));
     // Position mode installs no per-frame Transform import. This flag lets Avian's spawn hook
     // initialize Transform-only statics at their authored poses instead of at the origin.
     app.world_mut()

@@ -529,8 +529,8 @@ fn physics_without_frame_placement_cleanup_is_refused() {
     app.world_mut().run_schedule(PhysicsSchedule);
 }
 
-/// The shipped physics and networking composition leaves child placement to the game. An engine
-/// writer registered beside it would mark standing colliders changed at every boundary.
+/// Installing Lightyear alone must install its replacement too, as protocol-only net test apps
+/// do. An engine writer beside it would mark standing colliders changed at every boundary.
 #[test]
 fn lightyear_position_mode_leaves_the_frame_boundary_to_the_game() {
     use lightyear::avian3d::plugin::LightyearAvianPlugin;
@@ -541,7 +541,6 @@ fn lightyear_position_mode_leaves_the_frame_boundary_to_the_game() {
         crate::net::physics::physics_plugins(),
     ));
     crate::net::physics::lightyear_plugin(&mut app);
-    crate::net::physics::plugin(&mut app);
     app.finish();
     app.cleanup();
     let schedule = app.get_schedule(RunFixedMainLoop).expect("frame boundary");
