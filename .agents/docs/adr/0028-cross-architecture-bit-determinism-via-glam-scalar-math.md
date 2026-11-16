@@ -65,8 +65,8 @@ Rejected alternatives:
 - `scripts/bitprobe` is the verification instrument for cross-target raw-bit behavior. Dependency,
   compiler, or profile changes touching math or physics must rerun the macOS-aarch64/Linux-x86_64
   pair before merge.
-- `upstream/avian-enhanced-determinism-simd-reductions.md` records the feature-contract gap and its
-  evidence. The upstream report is drafted but remains unfiled pending explicit direction.
+- `.agents/scratch/fork-moves-history-2026-11-16/avian-enhanced-determinism-simd-reductions.md` records the feature-contract gap and its
+  evidence. This is an archived local investigation, not a current proposal.
 
 ## 2026-07-21 re-land addendum
 
@@ -84,10 +84,10 @@ and SIMD builds. At that re-land, a no-GPU project test asserted Rust size equal
 complete publicly reachable Rust-repr GPU-upload inventory and pins the `MeshUniform` offsets; local
 VFX uniform canaries pin `VfxParams` and `TrailParams` too. The generic upstream defect and the
 principled array-stride fix are recorded in
-`upstream/bevy-uninitbuffervec-rust-size-vs-shader-stride.md` as DRAFTED, NOT FILED. The re-land left the owner's windowed Metal boot as its post-land runtime validation.
+`.agents/scratch/fork-moves-history-2026-11-16/bevy-uninitbuffervec-rust-size-vs-shader-stride.md` as an archived local draft, not a current proposal. The re-land left the owner's windowed Metal boot as its post-land runtime validation.
 
 ## Related
 
 [[0015-divergence-doctrine]] · [[0027-element-grip-netcode]] ·
 `design/sim-divergence-and-determinism.md` §11 ·
-`upstream/bevy-uninitbuffervec-rust-size-vs-shader-stride.md`
+`.agents/scratch/fork-moves-history-2026-11-16/bevy-uninitbuffervec-rust-size-vs-shader-stride.md`

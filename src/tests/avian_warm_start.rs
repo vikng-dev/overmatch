@@ -1,5 +1,5 @@
-//! GUARD for the warm-start matcher hook (`vendor/avian3d-0.8.0-overmatch`, `OVERMATCH_PATCH.md`,
-//! "Warm-start matching") and the game's law behind it, `crate::avian_ext::contact_match`. Game
+//! Guards for the warm-start correctness fixes and game-owned predecessor ranking
+//! (`vendor/avian3d-0.8.0-overmatch/OVERMATCH_PATCH.md`, "Warm-start matching"). Game
 //! state only: the server's contacts between bodies. The server relies on warm starts following the
 //! closest admissible contact, within a manifold and across the pair. Drafts:
 //! `upstream/avian-unknown-contact-feature-identity.md` and
@@ -8,8 +8,6 @@
 use avian3d::collision::contact_types::PackedFeatureId;
 use avian3d::prelude::*;
 use bevy::prelude::*;
-
-use crate::avian_ext::contact_match::match_pair;
 
 /// UNKNOWN feature ids carry no identity; only nearby anchors may match them, and the closest wins.
 /// Upstream's matcher reads two UNKNOWN ids as one identity and takes the first previous point.
@@ -21,13 +19,14 @@ fn unknown_contact_features_match_by_position() {
         let mut previous = [Vec3::ZERO, at].map(|at| ContactPoint::new(at, at, at, 0.0));
         previous[0].warm_start_normal_impulse = 5.0;
         previous[1].warm_start_normal_impulse = 11.0;
-        let mut next = [ContactManifold::new(
-            [ContactPoint::new(at, at, at, 0.0)],
-            Vec3::Y,
-        )];
-        match_pair(&mut next, &[ContactManifold::new(previous, Vec3::Y)], 0.1);
+        let mut next = ContactManifold::new([ContactPoint::new(at, at, at, 0.0)], Vec3::Y);
+        crate::avian_ext::contact_match::match_pair(
+            std::slice::from_mut(&mut next),
+            &[ContactManifold::new(previous, Vec3::Y)],
+            0.1,
+        );
         assert_eq!(
-            next[0].points[0].warm_start_normal_impulse, 11.0,
+            next.points[0].warm_start_normal_impulse, 11.0,
             "UNKNOWN IDs must select the closest admissible anchors, separation {separation}"
         );
     }
@@ -71,9 +70,9 @@ fn a_point_without_an_admissible_predecessor_starts_cold() {
         // Fixture: a cached impulse, N s.
         previous.warm_start_normal_impulse = 11.0;
         previous.warm_start_tangent_impulse = Vec2::new(7.0, 13.0);
-        let mut next = [ContactManifold::new([new], Vec3::Y)];
-        match_pair(&mut next, &[ContactManifold::new([previous], Vec3::Y)], 0.1);
-        let started = next[0].points[0];
+        let mut next = ContactManifold::new([new], Vec3::Y);
+        next.match_contacts(&[previous], 0.1);
+        let started = next.points[0];
         assert_eq!(
             (
                 started.warm_start_normal_impulse,
@@ -85,8 +84,8 @@ fn a_point_without_an_admissible_predecessor_starts_cold() {
     }
 }
 
-/// The narrow phase must rank predecessors across the pair, through the matcher `avian_ext::plugin`
-/// installs. Upstream's matcher, run once per old manifold, lets a later offset point overwrite a
+/// The shipped narrow phase must rank predecessors across the pair. Upstream's matcher, run once
+/// per old manifold, lets a later offset point overwrite a
 /// coincident point; either order must keep both impulse fields from the coincident point. Sensors
 /// preserve the cache without solver writes.
 #[test]
@@ -122,6 +121,8 @@ fn nearest_warm_start_is_selected_across_old_manifolds() {
             let manifold = &pair.manifolds[0];
             assert_eq!(manifold.points.len(), 1);
             let mut coincident = manifold.points[0];
+            assert_ne!(coincident.feature_id1, PackedFeatureId::UNKNOWN);
+            assert_ne!(coincident.feature_id2, PackedFeatureId::UNKNOWN);
             // Fixture: distinct cached normal and tangent impulses, N s.
             coincident.warm_start_normal_impulse = 11.0;
             coincident.warm_start_tangent_impulse = Vec2::new(7.0, 13.0);
@@ -156,4 +157,20 @@ fn nearest_warm_start_is_selected_across_old_manifolds() {
             "manifold order reversed: {reversed}"
         );
     }
+}
+
+/// The engine's known-ID matcher retains upstream's first identity match and early exit;
+/// distance ranking belongs to the game's ContactMatcher seam.
+#[test]
+fn known_feature_identity_keeps_upstreams_first_match() {
+    // Fixture: the same known faces at two positions, with distinct cached impulses.
+    let mut previous = [Vec3::X, Vec3::ZERO].map(|at| {
+        ContactPoint::new(at, at, at, 0.0)
+            .with_feature_ids(PackedFeatureId::face(1), PackedFeatureId::face(2))
+    });
+    previous[0].warm_start_normal_impulse = 5.0;
+    previous[1].warm_start_normal_impulse = 11.0;
+    let mut next = ContactManifold::new([previous[1]], Vec3::Y);
+    next.match_contacts(&previous, 0.1);
+    assert_eq!(next.points[0].warm_start_normal_impulse, 5.0);
 }

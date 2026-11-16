@@ -1,3 +1,7 @@
+> Historical investigation preserved for ADR citations. Versions, source audits and status
+> statements below describe the original investigation, not the current pinned stack.
+> This is outside the current proposal queue; nothing is sent by preserving it here.
+
 # `UninitBufferVec` allocates Rust size instead of shader array stride
 
 ## Summary

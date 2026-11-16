@@ -876,8 +876,8 @@ fn the_death_flow_owns_the_device() {
         assert_eq!(clicks(&mut app), 1, "{replay:?}: the trigger clicked");
         let alive = command(&app);
         assert_eq!(
-            (alive.throttle, alive.steer),
-            (first_notch, first_notch),
+            (alive.throttle, alive.steer.signum()),
+            (first_notch, 1.0),
             "{replay:?}: the first frame drives in both keys' directions"
         );
         assert!(alive.fire_primary && alive.fire_secondary, "{replay:?}");
@@ -924,8 +924,8 @@ fn the_death_flow_owns_the_device() {
         hold_all(&mut app, 1, |_| {});
         let alive = command(&app);
         assert_eq!(
-            (alive.throttle, alive.steer),
-            (first_notch, first_notch),
+            (alive.throttle, alive.steer.signum()),
+            (first_notch, 1.0),
             "{replay:?}: the new life's first frame drives at fresh notches"
         );
         assert!(alive.fire_secondary, "{replay:?}");

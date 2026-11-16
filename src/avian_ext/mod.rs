@@ -4,8 +4,6 @@
 //! `OVERMATCH_PATCH.md` names each seam's form and its guard.
 //!
 //! These modules depend on Avian and Bevy only, never on the rest of the game.
-//!
-//! [`plugin`] installs every seam; each composition of Avian's `PhysicsPlugins` adds it after them.
 
 pub mod attachment;
 pub mod child_poses;
@@ -13,11 +11,11 @@ pub mod compliance;
 pub mod contact_match;
 pub mod contact_reduction;
 pub mod island_wake;
+pub mod required_state;
 pub mod rest_test;
+pub mod solver_cost;
 
-use avian3d::collision::narrow_phase::ContactMatcher;
 use avian3d::dynamics::solver::islands::RestTest;
-use avian3d::prelude::*;
 use bevy::prelude::*;
 
 /// Every seam of the game's half of the fork, installed into Avian's `PhysicsSchedule`. Added after
@@ -26,13 +24,15 @@ pub fn plugin(app: &mut App) {
     if !app.is_plugin_added::<child_poses::ReenabledPlugin>() {
         app.add_plugins(child_poses::ReenabledPlugin);
     }
+    required_state::plugin(app);
     app.add_observer(attachment::refuse_unposed_attachment);
-    app.insert_resource(ContactMatcher(contact_match::match_pair));
     app.insert_resource(RestTest(rest_test::at_rest));
-    app.get_schedule_mut(PhysicsSchedule)
-        .expect("avian_ext::plugin is added after Avian's PhysicsPlugins")
-        .add_systems(child_poses::place_child_colliders.in_set(PhysicsStepSystems::First));
+    app.insert_resource(avian3d::collision::narrow_phase::ContactMatcher(
+        contact_match::match_pair,
+    ));
+    app.add_plugins(child_poses::PhysicsPlacementPlugin);
     contact_reduction::plugin(app);
     island_wake::plugin(app);
     compliance::plugin(app);
+    solver_cost::plugin(app);
 }

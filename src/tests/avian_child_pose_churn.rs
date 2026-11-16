@@ -10,11 +10,9 @@
 //! one that did. Who relies on both: the dedicated server, whose map holds every intact
 //! construction element as a static body's child collider, and whose ballistics reads a moving
 //! tank's armour, child colliders too, at the pose this pass leaves between steps. A dependency
-//! bump that registers Avian's own child pass again fails every physics test here (MEASURED on
-//! stock 0.8.0): both passes write child poses in `PhysicsStepSystems::First`, and Avian's
-//! `PhysicsSchedule` refuses that ambiguity when it initializes. One that registers
-//! lightyear_avian's own pass at the frame boundary again fails
-//! `lightyear_position_mode_leaves_the_frame_boundary_to_the_game` (MEASURED).
+//! bump must leave exactly the game's live writer at each boundary. The schedule guards inspect
+//! live systems after cleanup, because Bevy retains removed systems' set identifiers. The
+//! admission guard refuses physics updates before cleanup has replaced the engine writers.
 //!
 //! The poses, box dimensions and update counts below are fixture data: any off-origin, turned pose
 //! and any count of settling and observed updates exercise the same invariants.
@@ -24,6 +22,7 @@ use std::time::Duration;
 use avian3d::prelude::*;
 use bevy::ecs::change_detection::Tick;
 use bevy::ecs::entity_disabling::Disabled;
+use bevy::ecs::schedule::SystemSet;
 use bevy::ecs::system::{RunSystemOnce, SystemId};
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
@@ -490,35 +489,142 @@ fn a_manually_attached_child_follows_its_body_without_transform_children() {
     assert_eq!(pose(app.world(), child).0, Vec3::X + Vec3::Z);
 }
 
-/// Lightyear's Position mode, composed as the game composes it (`net::protocol`, mounted beside
-/// `net::physics`), registers no child-pose pass of its own in `RunFixedMainLoop`: the frame
-/// boundary's slot holds the game's pass alone. Fails if the registration of
-/// `LightyearAvianPlugin::update_child_collider_position` the vendored crate drops
-/// (`vendor/lightyear_avian3d-0.31.0-child-pose`, `OVERMATCH_PATCH.md`) returns: that pass writes
-/// every child's pose through `Mut` each frame, so no change tick survives it.
+fn contains_live_system(schedule: &Schedule, set: impl SystemSet) -> bool {
+    let set = set.intern();
+    schedule
+        .graph()
+        .systems
+        .iter()
+        .any(|(_, system, _)| system.default_system_sets().contains(&set))
+}
+
+/// Unfinished shipped physics setup; each witness owns the lifecycle boundary it exercises.
+fn placement_app() -> App {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        AssetPlugin::default(),
+        crate::net::physics::physics_plugins(),
+    ));
+    app
+}
+
+/// Physics updates must refuse an app whose plugin cleanup has not replaced Avian's writer.
+#[test]
+#[should_panic(expected = "physics placement cleanup must replace the engine pose writers")]
+fn physics_without_placement_cleanup_is_refused() {
+    let mut app = placement_app();
+    app.finish();
+    app.world_mut().run_schedule(PhysicsSchedule);
+}
+
+/// Frame placement cleanup is part of admission even when physics placement cleanup has run.
+#[test]
+#[should_panic(expected = "physics placement cleanup must replace the engine pose writers")]
+fn physics_without_frame_placement_cleanup_is_refused() {
+    let mut app = placement_app();
+    crate::net::physics::lightyear_plugin(&mut app);
+    crate::net::physics::plugin(&mut app);
+    app.finish();
+    crate::avian_ext::child_poses::PhysicsPlacementPlugin.cleanup(&mut app);
+    app.world_mut().run_schedule(PhysicsSchedule);
+}
+
+/// Installing Lightyear alone must install its replacement too, as protocol-only net test apps
+/// do. An engine writer beside it would mark standing colliders changed at every boundary.
 #[test]
 fn lightyear_position_mode_leaves_the_frame_boundary_to_the_game() {
-    use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
-    let mut app = App::new();
-    app.add_plugins(LightyearAvianPlugin {
-        replication_mode: AvianReplicationMode::Position {
-            sync_to_transform: false,
-        },
-        register_physics_components: false,
-        ..default()
-    });
-    crate::net::physics::plugin(&mut app);
-    let sets = &app
-        .get_schedule(RunFixedMainLoop)
-        .expect("the game's pass registers in RunFixedMainLoop")
-        .graph()
-        .system_sets;
+    use lightyear::avian3d::plugin::LightyearAvianPlugin;
+    let mut app = placement_app();
+    crate::net::physics::lightyear_plugin(&mut app);
+    app.finish();
+    app.cleanup();
+    let schedule = app.get_schedule(RunFixedMainLoop).expect("frame boundary");
+    assert!(contains_live_system(
+        schedule,
+        place_child_colliders.into_system_set()
+    ));
     assert!(
-        sets.contains(place_child_colliders.into_system_set()),
-        "fixture: the game's pass holds the frame boundary"
+        !contains_live_system(
+            schedule,
+            LightyearAvianPlugin::update_child_collider_position.into_system_set()
+        ),
+        "Lightyear's pose writer must be removed"
     );
+}
+
+/// The shipped physics plugin group must remove Avian's unconditional pose writer, even if the
+/// game placement no longer conflicts with its queries and ambiguity detection cannot catch it.
+#[test]
+fn shipped_physics_leaves_child_placement_to_the_game() {
+    use avian3d::collision::collider::collider_transform::update_child_collider_position;
+    let mut app = placement_app();
+    app.finish();
+    app.cleanup();
+    let schedule = app
+        .get_schedule(PhysicsSchedule)
+        .expect("shipped physics schedule");
+    assert!(contains_live_system(
+        schedule,
+        place_child_colliders.into_system_set()
+    ));
     assert!(
-        !sets.contains(LightyearAvianPlugin::update_child_collider_position.into_system_set()),
-        "lightyear registers its own child-pose pass at the frame boundary"
+        !contains_live_system(schedule, update_child_collider_position.into_system_set()),
+        "Avian's pose writer must be removed"
     );
+}
+
+/// The narrow phase must never receive a posed attachment whose target is merely a view entity.
+/// Validate only the queued incomplete relationship at admission, allowing construction batches.
+#[test]
+#[should_panic(expected = "ColliderOf targets a rigid body")]
+fn an_attachment_to_a_posed_entity_without_a_rigid_body_is_refused() {
+    let mut app = physics_app();
+    let body = app
+        .world_mut()
+        .spawn((
+            Position(Vec3::ZERO),
+            Rotation::default(),
+            Transform::default(),
+        ))
+        .id();
+    // Fixture: any collider shape and size exercise the target invariant.
+    let collider = app
+        .world_mut()
+        .spawn((Transform::default(), Collider::sphere(0.5)))
+        .id();
+    app.world_mut()
+        .entity_mut(collider)
+        .insert(ColliderOf { body });
+    // Fixture: advance past the clock's initial update to one physics admission.
+    app.update();
+    app.update();
+}
+
+/// Size metrics need the reciprocal list, even for a manually attached collider outside the
+/// owner's hierarchy. A late body cannot retire its admission check merely by gaining RigidBody.
+#[test]
+#[should_panic(
+    expected = "a posed enabled body with attached colliders retains RigidBodyColliders"
+)]
+fn a_late_body_without_a_reciprocal_collider_list_is_refused() {
+    let mut app = physics_app();
+    let body = app
+        .world_mut()
+        .spawn((
+            Position(Vec3::ZERO),
+            Rotation::default(),
+            Transform::default(),
+        ))
+        .id();
+    // Fixture: any collider shape and size exercise the reciprocal-list invariant.
+    app.world_mut().spawn((
+        Transform::default(),
+        Collider::sphere(0.5),
+        ColliderOf { body },
+    ));
+    app.world_mut().entity_mut(body).insert(RigidBody::Static);
+    // Fixture: advance past the clock's initial update to one physics admission.
+    app.update();
+    app.update();
 }

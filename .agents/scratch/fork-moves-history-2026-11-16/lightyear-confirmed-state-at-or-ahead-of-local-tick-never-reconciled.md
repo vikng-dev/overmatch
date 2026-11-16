@@ -1,3 +1,7 @@
+> Historical investigation preserved for ADR citations. Versions, source audits and status
+> statements below describe the original investigation, not the current pinned stack.
+> This is outside the current proposal queue; nothing is sent by preserving it here.
+
 # Upstream: authoritative state arriving at or ahead of the client's local tick is never reconciled
 
 Status: **DRAFT — NOT FILED.** Written to be sent as a new upstream issue by the repo owner, if and

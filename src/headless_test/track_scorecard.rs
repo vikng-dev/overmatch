@@ -521,17 +521,37 @@ impl Bed {
         out
     }
 
-    /// Avian solver contacts with the tank as a party: (pairs, manifolds, points).
-    fn solver_contacts(&self) -> (usize, usize, usize) {
+    /// Avian contacts with the tank: (bearing pairs, bearing manifolds, bearing points, all solver
+    /// points), excluding sensor and disabled-body pairs because they generate no solver work.
+    /// Bearing means penetration >= 0. Separated points carried 0.7–0.8% of normal impulse
+    /// (MEASURED: experiment commit 1a488c66, `separated_point_normal_impulse_sum`, pre-fix pruning).
+    /// Tolerance or closing speed admits separated points as speculative stops.
+    fn contact_census(&self) -> (usize, usize, usize, usize) {
         let graph = self.app.world().resource::<ContactGraph>();
         graph
             .iter_active_touching()
             .filter(|pair| pair.body1 == Some(self.tank) || pair.body2 == Some(self.tank))
-            .fold((0, 0, 0), |(pairs, manifolds, points), pair| {
+            .filter(|pair| pair.generates_constraints())
+            .fold((0, 0, 0, 0), |(pairs, manifolds, points, total), pair| {
+                let (bearing_manifolds, bearing_points) = pair
+                    .manifolds
+                    .iter()
+                    .map(|manifold| {
+                        manifold
+                            .points
+                            .iter()
+                            .filter(|point| point.penetration >= 0.0)
+                            .count()
+                    })
+                    .filter(|&count| count > 0)
+                    .fold((0, 0), |(manifolds, points), count| {
+                        (manifolds + 1, points + count)
+                    });
                 (
-                    pairs + 1,
-                    manifolds + pair.manifolds.len(),
-                    points + pair.manifolds.iter().map(|m| m.points.len()).sum::<usize>(),
+                    pairs + usize::from(bearing_manifolds > 0),
+                    manifolds + bearing_manifolds,
+                    points + bearing_points,
+                    total + pair.manifolds.iter().map(|m| m.points.len()).sum::<usize>(),
                 )
             })
     }
@@ -1762,11 +1782,12 @@ fn accumulate_work(bed: &Bed, work: &mut std::collections::BTreeMap<String, f64>
     ] {
         *work.entry(name.to_owned()).or_default() += count;
     }
-    let (pairs, manifolds, points) = bed.solver_contacts();
+    let (pairs, manifolds, points, total) = bed.contact_census();
     for (name, count) in [
-        ("solver_pairs", pairs),
-        ("solver_manifolds", manifolds),
-        ("solver_points", points),
+        ("bearing_pairs", pairs),
+        ("bearing_manifolds", manifolds),
+        ("bearing_points", points),
+        ("solver_points", total),
     ] {
         *work.entry(name.to_owned()).or_default() += count as f64;
     }
@@ -1782,7 +1803,7 @@ fn work_row(case: &str, work: &std::collections::BTreeMap<String, f64>, ticks: u
 }
 
 /// The work columns: the production counts the belt adds, its contacts, and the solver's.
-const WORK_COLUMNS: [&str; 16] = [
+const WORK_COLUMNS: [&str; 17] = [
     "belt_near_colliders",
     "belt_candidates",
     "belt_slab_checks",
@@ -1795,8 +1816,9 @@ const WORK_COLUMNS: [&str; 16] = [
     "belt_partition_cells",
     "belt_contacts",
     "belt_force_applications",
-    "solver_pairs",
-    "solver_manifolds",
+    "bearing_pairs",
+    "bearing_manifolds",
+    "bearing_points",
     "solver_points",
     "contact_points",
 ];
@@ -3318,8 +3340,11 @@ fn track_scorecard() {
         pass: None,
         rows: work_rows,
         note: "MEASURED counts per tick for the one tank in the world: the production `Work` \
-               counters, the belt's contact counts and Avian's solver contacts with the \
-               tank as a party. No timing."
+               counters, the belt's contact counts and Avian's bearing contacts with the \
+               tank as a party: points with penetration >= 0, and pairs/manifolds containing \
+               such points. Sensor and disabled-body pairs are excluded: they generate no solver \
+               work. `solver_points` includes separated speculative stops as well, so \
+               tolerance changes expose solver work alongside bearing support. No timing."
             .into(),
     });
     println!("{}", card.markdown());
