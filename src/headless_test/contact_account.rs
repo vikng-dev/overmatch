@@ -315,9 +315,8 @@ fn contact_account_closes_momentum() {
 #[cfg(feature = "bitprobe")]
 #[ignore = "operator contact account; prints one record per tick, no trajectory gate"]
 fn contact_account_snag() {
-    let grid = crate::terrain_grid::tests::shipped_grid();
-    let at = crate::terrain_grid::spawn_pos(Some(&grid), Vec2::new(-641.434, 153.384));
-    let mut app = booted_sim_on(Some(grid));
+    use bevy::ecs::system::RunSystemOnce;
+    let mut app = booted_sim_on(Some(crate::terrain_grid::tests::shipped_grid()));
     let tank = app
         .world_mut()
         .query_filtered::<Entity, With<Controlled>>()
@@ -325,6 +324,19 @@ fn contact_account_snag() {
         .unwrap();
     // Fixture heading uses the operator lever's convention: heading from +Z, hull front -Z.
     let rotation = Quat::from_rotation_y(176.08_f32.to_radians() + std::f32::consts::PI);
+    let at = app
+        .world_mut()
+        .run_system_once(
+            move |source: crate::tank::TankSimSource,
+                  grid: Res<crate::terrain_grid::HeightGrid>| {
+                crate::terrain_grid::spawn_pos(
+                    Some(&grid),
+                    Vec2::new(-641.434, 153.384),
+                    source.get().stance(rotation),
+                )
+            },
+        )
+        .expect("the booted world holds the tank's construction and the ground");
     super::drive_load::place(&mut app, tank, at, rotation, 0.0, 1);
     mount(&mut app, tank);
     start_fixed_clock(&mut app);

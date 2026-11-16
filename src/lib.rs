@@ -219,6 +219,9 @@ mod terrain_lod;
 /// The terrain's sun shadow, baked once from the canonical grid toward the fixed sun and sampled by
 /// every lit fragment in place of terrain casters in the cascades. View-only. See the module doc.
 mod terrain_shadow;
+/// The ground's surface packs, their authored sizes and grounds, and the blend's look, as admitted
+/// data (`assets/terrain/surface.ron`). Read by the blend, the mesh UVs and the ground field.
+mod terrain_surface;
 /// The repository-wide gates and the upstream tripwires on the engine.
 #[cfg(test)]
 mod tests;

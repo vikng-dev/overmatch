@@ -15,7 +15,10 @@
 //! - The dress ([`Dress::vehicle`]): on a tank's `WorldInstanceReady`, every primitive whose glTF
 //!   material names a visual swaps its `StandardMaterial` for a surface material and takes a
 //!   [`MeshTag`] naming its rest frame. A primitive whose material names none (decor, proxies, a
-//!   crew witness) keeps its own.
+//!   crew witness), or that glTF leaves unnamed, wears its own look through a surface material too
+//!   ([`own_material`]), so it receives the terrain shadow (`terrain_shadow`) like the rest of the
+//!   tank. The shoe template's subtree is the track's (`link_view::template_node`) and keeps its
+//!   `StandardMaterial`, which the belt reads off it and draws.
 //!
 //! # Invariants
 //!
@@ -72,6 +75,7 @@ use serde::de::{self, Deserializer};
 use crate::keyed_map::KeyedMap;
 use crate::provenance::Sourced;
 use crate::substances::SubstanceRegistry;
+use crate::terrain_shadow::{TerrainShadow, TerrainShadowUniform};
 use crate::world::{MapEncoding, MapTiling, surface_map, surface_sampler};
 
 /// A tank's drawn surface: bevy's `StandardMaterial` carrying the lighting parameters and, for a
@@ -91,6 +95,8 @@ const FLAG_MAPS: u32 = 1;
 const FLAG_PAINT: u32 = 2;
 /// The livery carries camouflage.
 const FLAG_CAMO: u32 = 4;
+/// The glb material's own look: bevy's normal, its normal map included, stands.
+const FLAG_OWN: u32 = 8;
 /// The most camouflage colours a pattern carries: its R, G and B coverage.
 const CAMO_COLOURS: usize = 3;
 /// How far a rest row's axis lengths may differ, relative to the first, before its node is refused
@@ -420,6 +426,11 @@ pub(crate) struct TankSurface {
     /// primitive's [`MeshTag`].
     #[storage(106, read_only)]
     pub rest_frames: Handle<ShaderBuffer>,
+    /// The terrain shadow ([`TerrainShadow`]).
+    #[texture(150, sample_type = "float", filterable = false)]
+    pub terrain_shadow_field: Option<Handle<Image>>,
+    #[uniform(151)]
+    pub terrain_shadow: TerrainShadowUniform,
 }
 
 impl TankSurface {
@@ -516,14 +527,15 @@ struct CamouflageCoat {
     pattern: Handle<Image>,
 }
 
-/// The surface material for the glb material `original`, of `look`, under `coat`. `stand_in` is
-/// [`SurfaceVehicles`]'s: binding 101 holds it where no albedo is drawn.
+/// The surface material for the glb material `original`, of `look`, under `coat` and the terrain
+/// shadow. `stand_in` is [`SurfaceVehicles`]'s: binding 101 holds it where no albedo is drawn.
 fn surface_material(
     original: &StandardMaterial,
     look: &Look,
     coat: &Coat,
     stand_in: &Handle<Image>,
     rest_frames: Handle<ShaderBuffer>,
+    terrain_shadow: &TerrainShadow,
 ) -> TankSurfaceMaterial {
     // The glb material keeps its pipeline-shaping state (culling, sidedness, alpha mode); its maps
     // and factors give way to the visual's. Factors of 1 pass the maps and the paint through.
@@ -584,6 +596,34 @@ fn surface_material(
             visual_arm: relief.map(|relief| relief.arm.clone()),
             camo_pattern,
             rest_frames,
+            terrain_shadow_field: terrain_shadow.field.clone(),
+            terrain_shadow: terrain_shadow.uniform,
+        },
+    }
+}
+
+/// The surface material for a glb material `original` that names no visual: its own look, whole,
+/// under the terrain shadow. It binds no image of the surface's own and reads no rest frame, so it
+/// is final the frame it is made.
+fn own_material(
+    original: &StandardMaterial,
+    rest_frames: Handle<ShaderBuffer>,
+    terrain_shadow: &TerrainShadow,
+) -> TankSurfaceMaterial {
+    TankSurfaceMaterial {
+        base: original.clone(),
+        extension: TankSurface {
+            params: TankSurfaceParams {
+                flags: FLAG_OWN,
+                ..default()
+            },
+            visual_albedo: None,
+            visual_normal: None,
+            visual_arm: None,
+            camo_pattern: None,
+            rest_frames,
+            terrain_shadow_field: terrain_shadow.field.clone(),
+            terrain_shadow: terrain_shadow.uniform,
         },
     }
 }
@@ -613,6 +653,8 @@ fn waiting_material(
             visual_arm: None,
             camo_pattern: None,
             rest_frames: made.extension.rest_frames.clone(),
+            terrain_shadow_field: made.extension.terrain_shadow_field.clone(),
+            terrain_shadow: made.extension.terrain_shadow,
         },
     }
 }
@@ -626,7 +668,7 @@ struct Vehicle {
     rest_frames: Handle<ShaderBuffer>,
     /// Node path → row of the rest table.
     rows: HashMap<String, u32>,
-    /// glb material → its surface material.
+    /// glb material → its surface material, of a visual or its own look.
     materials: HashMap<AssetId<StandardMaterial>, Handle<TankSurfaceMaterial>>,
 }
 
@@ -736,7 +778,7 @@ pub(crate) struct ViewTree<'w, 's> {
         's,
         (
             &'static MeshMaterial3d<StandardMaterial>,
-            &'static GltfMaterialName,
+            Option<&'static GltfMaterialName>,
         ),
     >,
 }
@@ -746,12 +788,13 @@ pub(crate) struct ViewTree<'w, 's> {
 pub(crate) struct Dress<'w, 's> {
     tree: ViewTree<'w, 's>,
     data: Res<'w, SurfaceData>,
-    blueprint: Option<Res<'w, crate::bake::TankBlueprint>>,
+    blueprint: Res<'w, crate::bake::TankBlueprint>,
     vehicles: ResMut<'w, SurfaceVehicles>,
     standard: Res<'w, Assets<StandardMaterial>>,
     surfaces: ResMut<'w, Assets<TankSurfaceMaterial>>,
     buffers: ResMut<'w, Assets<ShaderBuffer>>,
     server: Res<'w, AssetServer>,
+    terrain_shadow: Res<'w, TerrainShadow>,
     commands: Commands<'w, 's>,
 }
 
@@ -763,31 +806,42 @@ impl Dress<'_, '_> {
         };
         let scene = scene.0.id();
         let registry = SubstanceRegistry::shipped_static();
-        let spec = self.blueprint.as_deref().map(|blueprint| &*blueprint.spec);
-        let articulated: HashSet<&str> = spec
-            .map(|spec| spec.articulated_nodes().collect())
-            .unwrap_or_default();
+        let articulated: HashSet<&str> = self.blueprint.spec.articulated_nodes().collect();
         let articulated = |name: &str| articulated.contains(name);
 
-        // Every primitive whose material names a visual, with the visual's key.
-        let worn: Vec<(Entity, Handle<StandardMaterial>, &str)> = self
-            .tree
-            .children
-            .iter_descendants(root)
-            .filter_map(|entity| {
-                let (material, name) = self.tree.primitives.get(entity).ok()?;
-                let name = name.0.as_str();
-                let visual = registry.visual(name)?;
-                if self.data.library.get(visual).is_none() {
-                    panic!(
-                        "tank surface: material {name:?} names visual {visual:?}, which \
-                         {VISUALS_PATH} does not carry"
-                    );
+        let template: HashSet<Entity> = crate::track::link_view::find_template(
+            self.tree.children.iter_descendants(root),
+            &self.tree.parents,
+            &self.tree.names,
+        )
+        .into_iter()
+        .flat_map(|template| self.tree.children.iter_descendants(template))
+        .collect();
+        let mut worn: Vec<(Entity, Handle<StandardMaterial>, &str)> = Vec::new();
+        let mut own: Vec<(Entity, Handle<StandardMaterial>)> = Vec::new();
+        for entity in self.tree.children.iter_descendants(root) {
+            if template.contains(&entity) {
+                continue;
+            }
+            let Ok((material, name)) = self.tree.primitives.get(entity) else {
+                // No standard material: a node of the tree.
+                continue;
+            };
+            let name = name.map(|name| name.0.as_str());
+            match name.and_then(|name| Some((name, registry.visual(name)?))) {
+                Some((name, visual)) => {
+                    if self.data.library.get(visual).is_none() {
+                        panic!(
+                            "tank surface: material {name:?} names visual {visual:?}, which \
+                             {VISUALS_PATH} does not carry"
+                        );
+                    }
+                    worn.push((entity, material.0.clone(), visual));
                 }
-                Some((entity, material.0.clone(), visual))
-            })
-            .collect();
-        if worn.is_empty() {
+                None => own.push((entity, material.0.clone())),
+            }
+        }
+        if worn.is_empty() && own.is_empty() {
             return;
         }
 
@@ -841,6 +895,40 @@ impl Dress<'_, '_> {
                 .remove::<MeshMaterial3d<StandardMaterial>>()
                 .insert((MeshMaterial3d(handle), MeshTag::new(row)));
         }
+        for (entity, original) in own {
+            let handle = self.own(scene, &original);
+            self.commands
+                .entity(entity)
+                .remove::<MeshMaterial3d<StandardMaterial>>()
+                .insert(MeshMaterial3d(handle));
+        }
+    }
+
+    /// The vehicle's own-look surface material for glb material `original`, made on first sight.
+    fn own(
+        &mut self,
+        scene: AssetId<WorldAsset>,
+        original: &Handle<StandardMaterial>,
+    ) -> Handle<TankSurfaceMaterial> {
+        let vehicle = self
+            .vehicles
+            .vehicles
+            .get_mut(&scene)
+            .expect("the dress builds the vehicle before it wears a material");
+        if let Some(handle) = vehicle.materials.get(&original.id()) {
+            return handle.clone();
+        }
+        let base = self.standard.get(original).expect(
+            "a glb's materials are labelled assets of its load, in place before its scene \
+             instantiates, and the primitive's handle holds its own",
+        );
+        let handle = self.surfaces.add(own_material(
+            base,
+            vehicle.rest_frames.clone(),
+            &self.terrain_shadow,
+        ));
+        vehicle.materials.insert(original.id(), handle.clone());
+        handle
     }
 
     /// The vehicle's surface material for glb material `original`, of library visual `visual`,
@@ -861,7 +949,14 @@ impl Dress<'_, '_> {
              instantiates, and the worn primitive's handle holds its own",
         );
         let rest_frames = self.vehicles.vehicles[&scene].rest_frames.clone();
-        let made = surface_material(&base, &look, &coat, &self.vehicles.stand_in, rest_frames);
+        let made = surface_material(
+            &base,
+            &look,
+            &coat,
+            &self.vehicles.stand_in,
+            rest_frames,
+            &self.terrain_shadow,
+        );
         let handle = self.surfaces.add(waiting_material(&base, &made));
         self.vehicles.waiting.push(Waiting {
             handle: handle.clone(),
@@ -1292,7 +1387,10 @@ mod tests {
             .init_asset::<ShaderBuffer>()
             .init_asset::<WorldAsset>()
             .insert_resource(shipped())
-            .init_resource::<SurfaceVehicles>();
+            // The shipped tank's construction: the dress reads which nodes articulate.
+            .insert_resource(crate::tank::shipped_construction().0)
+            .init_resource::<SurfaceVehicles>()
+            .init_resource::<TerrainShadow>();
         app
     }
 
@@ -1329,6 +1427,7 @@ mod tests {
             &coat,
             &stand_in,
             Handle::default(),
+            &TerrainShadow::default(),
         );
         assert_ne!(
             made.extension.params.flags & FLAG_CAMO,
@@ -1402,14 +1501,11 @@ mod tests {
             normal_map_texture: Some(Handle::default()),
             ..default()
         };
-        let (worn_material, decor_material) = {
+        let materials = {
             let mut standard = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
-            (
-                standard.add(glb.clone()),
-                standard.add(StandardMaterial::default()),
-            )
+            [glb.clone(), default(), default(), default()].map(|material| standard.add(material))
         };
-        let (root, worn, _) = spawn_view(&mut app, &scene, &worn_material, &decor_material);
+        let View { root, worn, .. } = spawn_view(&mut app, &scene, &materials);
         app.world_mut()
             .run_system_once(move |mut dress: Dress| dress.vehicle(root))
             .expect("the dress runs");
@@ -1516,15 +1612,29 @@ mod tests {
         );
     }
 
-    /// One vehicle's view as a scene lands it: a root with two nodes, the outer moved, the inner
-    /// holding two primitives wearing `worn` (a material naming a visual) and `decor` (one naming
-    /// none). The root, the worn primitive and the decor primitive.
+    /// One vehicle's view as a scene lands it.
+    struct View {
+        root: Entity,
+        /// Its material names a visual.
+        worn: Entity,
+        /// Its material names none.
+        decor: Entity,
+        /// glTF gave its material no name.
+        unnamed: Entity,
+        /// The shoe template's primitive, under the template node beside its start pin; its
+        /// material names a visual, as the shoe's might.
+        shoe: Entity,
+    }
+
+    /// A root with two nodes, the outer moved, the inner holding the worn, decor and unnamed
+    /// primitives; and the shoe template beside them. `materials` are the worn, decor, unnamed and
+    /// shoe primitives' glb materials, in that order.
     fn spawn_view(
         app: &mut App,
         scene: &Handle<WorldAsset>,
-        worn: &Handle<StandardMaterial>,
-        decor: &Handle<StandardMaterial>,
-    ) -> (Entity, Entity, Entity) {
+        materials: &[Handle<StandardMaterial>; 4],
+    ) -> View {
+        let [worn, decor, unnamed, shoe] = materials;
         let registry = SubstanceRegistry::shipped_static();
         let worn_name = registry
             .keys()
@@ -1549,27 +1659,51 @@ mod tests {
                 ChildOf(outer),
             ))
             .id();
-        let primitive = |world: &mut World, material: &Handle<StandardMaterial>, name: &str| {
-            world
-                .spawn((
-                    Mesh3d(Handle::default()),
-                    MeshMaterial3d(material.clone()),
-                    GltfMaterialName(name.to_owned()),
-                    Transform::IDENTITY,
-                    ChildOf(inner),
-                ))
-                .id()
+        let primitive = |world: &mut World,
+                         parent: Entity,
+                         material: &Handle<StandardMaterial>,
+                         name: Option<&str>| {
+            let mut primitive = world.spawn((
+                Mesh3d(Handle::default()),
+                MeshMaterial3d(material.clone()),
+                Transform::IDENTITY,
+                ChildOf(parent),
+            ));
+            if let Some(name) = name {
+                primitive.insert(GltfMaterialName(name.to_owned()));
+            }
+            primitive.id()
         };
-        let worn = primitive(world, worn, worn_name);
-        let decor = primitive(world, decor, "not a material");
-        (root, worn, decor)
+        let template = world
+            .spawn((
+                Name::new(crate::track::link_view::LINK_NODE),
+                Transform::IDENTITY,
+                ChildOf(root),
+            ))
+            .id();
+        world.spawn((
+            Name::new(crate::track::link_view::PIN_START_NODE),
+            Transform::IDENTITY,
+            ChildOf(template),
+        ));
+        View {
+            root,
+            worn: primitive(world, inner, worn, Some(worn_name)),
+            decor: primitive(world, inner, decor, Some("not a material")),
+            unnamed: primitive(world, inner, unnamed, None),
+            shoe: primitive(world, template, shoe, Some(worn_name)),
+        }
     }
 
-    /// THE DRESS SWAPS WHAT A MATERIAL NAMES AND NOTHING ELSE, ONCE PER VEHICLE. A primitive whose
-    /// material names a visual leaves its standard material for a surface material and is tagged
-    /// with its rest row, the node chain's translation; one whose material names none keeps its
-    /// own. A second instance of the vehicle shares the first's material and rest table and finds
-    /// the same row by node path. A mutant that dressed decor, tagged row 0, rebuilt the table per
+    /// THE DRESS SWAPS EVERY DRAWN PRIMITIVE, ONCE PER VEHICLE, UNDER THE TERRAIN SHADOW. A
+    /// primitive whose material names a visual leaves its standard material for a surface material
+    /// and is tagged with its rest row, the node chain's translation; one whose material names none,
+    /// or has no name, wears its own look through a surface material, untagged; the shoe template's
+    /// primitive keeps its standard material, which the belt reads, whatever its material is named.
+    /// Every surface binds the world's terrain shadow, so no part of the tank draws lit inside a
+    /// hill's shadow. A second instance of the vehicle shares the first's materials and rest table
+    /// and finds the same row by node path. A mutant that left decor or an unnamed primitive in its
+    /// standard material, dressed the template, bound no shadow, tagged row 0, rebuilt the table per
     /// instance or minted a material per instance fails here.
     #[test]
     fn the_dress_swaps_worn_primitives_and_shares_one_material_per_vehicle() {
@@ -1578,16 +1712,21 @@ mod tests {
             .world_mut()
             .resource_mut::<Assets<WorldAsset>>()
             .add(WorldAsset::new(World::new()));
-        let (worn_material, decor_material) = {
+        let materials: [Handle<StandardMaterial>; 4] = {
             let mut standard = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
-            (
-                standard.add(StandardMaterial::default()),
-                standard.add(StandardMaterial::default()),
-            )
+            std::array::from_fn(|_| standard.add(StandardMaterial::default()))
         };
-        let first = spawn_view(&mut app, &scene, &worn_material, &decor_material);
-        let second = spawn_view(&mut app, &scene, &worn_material, &decor_material);
-        for (root, ..) in [first, second] {
+        let shadow = TerrainShadow {
+            field: Some(
+                app.world_mut()
+                    .resource_mut::<Assets<Image>>()
+                    .add(Image::default()),
+            ),
+            ..default()
+        };
+        app.insert_resource(shadow.clone());
+        let views = [(); 2].map(|()| spawn_view(&mut app, &scene, &materials));
+        for root in views.each_ref().map(|view| view.root) {
             app.world_mut()
                 .run_system_once(move |mut dress: Dress| dress.vehicle(root))
                 .expect("the dress runs");
@@ -1595,30 +1734,61 @@ mod tests {
 
         let world = app.world();
         let surface = |entity: Entity| world.get::<MeshMaterial3d<TankSurfaceMaterial>>(entity);
-        for (_, worn, decor) in [first, second] {
+        for view in &views {
             assert!(
-                surface(worn).is_some(),
+                surface(view.worn).is_some(),
                 "the worn primitive wears the surface"
             );
             assert!(
                 world
-                    .get::<MeshMaterial3d<StandardMaterial>>(worn)
+                    .get::<MeshMaterial3d<StandardMaterial>>(view.worn)
                     .is_none()
             );
             assert_eq!(
-                world.get::<MeshTag>(worn),
+                world.get::<MeshTag>(view.worn),
                 Some(&MeshTag::new(1)),
                 "its rest row"
             );
-            assert!(surface(decor).is_none(), "decor keeps its own material");
-            assert!(world.get::<MeshTag>(decor).is_none());
+            for (own, what) in [
+                (view.decor, "decor"),
+                (view.unnamed, "an unnamed primitive"),
+            ] {
+                let material = surface(own)
+                    .unwrap_or_else(|| panic!("{what} wears its own look as a surface"));
+                let material = world
+                    .resource::<Assets<TankSurfaceMaterial>>()
+                    .get(material.id())
+                    .expect("the dress added the own-look material");
+                assert_eq!(
+                    material.extension.params.flags, FLAG_OWN,
+                    "{what}: its own look"
+                );
+                assert!(world.get::<MeshTag>(own).is_none(), "{what}: untagged");
+            }
+            assert!(
+                world
+                    .get::<MeshMaterial3d<StandardMaterial>>(view.shoe)
+                    .is_some()
+                    && surface(view.shoe).is_none(),
+                "the shoe template keeps its standard material"
+            );
+        }
+        for (_, material) in world.resource::<Assets<TankSurfaceMaterial>>().iter() {
+            assert_eq!(
+                material.extension.terrain_shadow_field, shadow.field,
+                "every surface binds the world's terrain shadow"
+            );
         }
         assert_eq!(
-            surface(first.1).map(|m| m.id()),
-            surface(second.1).map(|m| m.id()),
+            surface(views[0].worn).map(|m| m.id()),
+            surface(views[1].worn).map(|m| m.id()),
             "one material per vehicle and material"
         );
-        assert_eq!(world.resource::<Assets<TankSurfaceMaterial>>().len(), 1);
+        assert_eq!(
+            world.resource::<Assets<TankSurfaceMaterial>>().len(),
+            3,
+            "one worn and two own-look materials for the vehicle"
+        );
         assert_eq!(
             world.resource::<Assets<ShaderBuffer>>().len(),
             1,

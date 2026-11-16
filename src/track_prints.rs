@@ -717,6 +717,8 @@ mod tests {
                     masks: default(),
                     prints_near: default(),
                     prints_world: default(),
+                    terrain_shadow_field: None,
+                    terrain_shadow: default(),
                 },
             });
         let mut prints = TrackPrints::new(

@@ -1929,6 +1929,8 @@ mod tests {
                         secondary_normal: default(),
                         secondary_arm: default(),
                         holes: shared_buffer,
+                        terrain_shadow_field: None,
+                        terrain_shadow: default(),
                     },
                 });
         world.insert_resource(Look {

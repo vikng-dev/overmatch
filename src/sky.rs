@@ -162,6 +162,47 @@ fn sun_elevation_deg() -> f32 {
         .unwrap_or(LIGHTING.sun_elevation_deg.0)
 }
 
+/// The sun's universal facts (`assets/world/sun.ron`), which belong to no map, so they live once
+/// rather than in each map's `sky.ron` (`.agents/docs/design/map-surroundings.md`, R1).
+const SUN_FILE: &str = "assets/world/sun.ron";
+static SUN: LazyLock<Sun> = LazyLock::new(|| {
+    shipped_sun()
+        .unwrap_or_else(|error| panic!("{error}; sun: author the fact with its provenance"))
+});
+
+/// The shipped sun, admitted under the shipped-file policy.
+fn shipped_sun() -> Result<Sun, String> {
+    crate::provenance::with_shipped_policy(|| {
+        Sun::parse(SUN_FILE, include_str!("../assets/world/sun.ron"))
+    })
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Sun {
+    /// The sun's angular radius, rad: the disc that softens the baked terrain shadow's edge
+    /// (`terrain_shadow`). The penumbra is that disc seen past the occluder's edge, so it widens
+    /// with the occluder's distance: DERIVED ±0.25 m of depth at 50 m under the 17° sun, ±0.04 m at
+    /// 8 m.
+    sun_angular_radius_rad: Sourced<f32>,
+}
+impl Sun {
+    fn parse(file: &str, text: &str) -> Result<Self, String> {
+        let data: Self = ron::de::from_str(text).map_err(|error| format!("{file}: {error}"))?;
+        let radius = data.sun_angular_radius_rad.0;
+        if !radius.is_finite() || radius <= 0.0 {
+            return Err(format!(
+                "{file}: sun_angular_radius_rad: author a finite positive angle in radians"
+            ));
+        }
+        Ok(data)
+    }
+}
+
+/// The sun's angular radius, rad (`Sun::sun_angular_radius_rad`).
+pub(crate) fn sun_angular_radius_rad() -> f32 {
+    SUN.sun_angular_radius_rad.0
+}
+
 /// Unit vector pointing FROM the scene TOWARD the sun, from [`sun_elevation_deg`] and
 /// `Lighting::sun_azimuth_deg`: the one direction the key light and the sky it is baked into share.
 pub(crate) fn toward_sun() -> Vec3 {
@@ -628,6 +669,23 @@ mod tests {
         let error = Lighting::parse(FILE, &DATA.replace("Taste(", "Fixture(")).unwrap_err();
         assert!(
             error.contains(FILE) && error.contains("Fixture provenance is test-only"),
+            "{error}"
+        );
+    }
+
+    /// The sun's one fact is required, sourced and a positive angle before play: the shipped file
+    /// loads, and a zero radius (a penumbra-free shadow edge) is refused naming the file and field.
+    /// FIXTURE DATA: the zero radius.
+    #[test]
+    fn the_suns_fact_is_checked_before_play() {
+        shipped_sun().unwrap();
+        let error = Sun::parse(
+            "f.ron",
+            r#"(sun_angular_radius_rad: (0.0, Fixture("a penumbra-free edge")))"#,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("f.ron") && error.contains("sun_angular_radius_rad"),
             "{error}"
         );
     }

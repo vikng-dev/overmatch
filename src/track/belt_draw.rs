@@ -15,7 +15,8 @@
 //! every phase that material rides: opaque, depth prepass and shadow. The extension supplies a
 //! prepass vertex shader, which is also what makes bevy bind the material in its depth-only
 //! prepass and shadow paths (`prepass_reads_material`); without it those paths would draw the
-//! undeformed stack.
+//! undeformed stack. Its fragment is bevy's own under the terrain shadow
+//! (`terrain_shadow::SHADOWED_STANDARD_SHADER`).
 //!
 //! # One material per look, one block per belt
 //!
@@ -97,6 +98,7 @@ use bevy::shader::ShaderRef;
 
 use super::link_view::{BeltFrames, LinkTemplate};
 use super::side::{PerSide, Side};
+use crate::terrain_shadow::{TerrainShadow, TerrainShadowUniform};
 
 /// The material link a belt-mesh vertex belongs to: its record in the belt's table.
 pub(crate) const ATTRIBUTE_BELT_LINK: MeshVertexAttribute =
@@ -129,11 +131,20 @@ pub(crate) struct BeltShoes {
     /// placement constants, then one span `(a.z, a.y, b.z, b.y)` per material link.
     #[storage(100, read_only)]
     pub(crate) table: Handle<ShaderBuffer>,
+    /// The terrain shadow ([`TerrainShadow`]).
+    #[texture(150, sample_type = "float", filterable = false)]
+    pub(crate) terrain_shadow_field: Option<Handle<Image>>,
+    #[uniform(151)]
+    pub(crate) terrain_shadow: TerrainShadowUniform,
 }
 
 impl MaterialExtension for BeltShoes {
     fn vertex_shader() -> ShaderRef {
         MESH_SHADER.into()
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        crate::terrain_shadow::SHADOWED_STANDARD_SHADER.into()
     }
 
     fn prepass_vertex_shader() -> ShaderRef {
@@ -290,6 +301,7 @@ impl BeltTable {
         look: &Handle<StandardMaterial>,
         base: &StandardMaterial,
         materials: &mut Assets<BeltMaterial>,
+        terrain_shadow: &TerrainShadow,
     ) -> Handle<BeltMaterial> {
         let TablePage { buffer, looks, .. } = &mut self.pages[page];
         looks
@@ -299,6 +311,8 @@ impl BeltTable {
                     base: base.clone(),
                     extension: BeltShoes {
                         table: buffer.clone(),
+                        terrain_shadow_field: terrain_shadow.field.clone(),
+                        terrain_shadow: terrain_shadow.uniform,
                     },
                 })
             })
@@ -643,6 +657,7 @@ pub(crate) struct BeltAssets<'w> {
     buffers: ResMut<'w, Assets<ShaderBuffer>>,
     cache: ResMut<'w, BeltMeshes>,
     table: ResMut<'w, BeltTable>,
+    terrain_shadow: Res<'w, TerrainShadow>,
 }
 
 impl BeltAssets<'_> {
@@ -688,9 +703,13 @@ impl BeltAssets<'_> {
             .get(template.material())
             .expect("ready checked the retained shoe material");
         let (page, block) = self.table.lend(records, &mut self.buffers);
-        let material = self
-            .table
-            .material(page, template.material(), base, &mut self.materials);
+        let material = self.table.material(
+            page,
+            template.material(),
+            base,
+            &mut self.materials,
+            &self.terrain_shadow,
+        );
         let bytes = self
             .buffers
             .get_mut(&self.table.pages[page].buffer)
@@ -775,7 +794,9 @@ pub(crate) fn plugin(app: &mut App) {
 
 /// Everything [`plugin`] mounts but the material's render plugin.
 fn schedule(app: &mut App) {
-    app.init_resource::<BeltMeshes>()
+    // A composition with no world (the track sandbox) draws its belts with no field.
+    app.init_resource::<TerrainShadow>()
+        .init_resource::<BeltMeshes>()
         .init_resource::<BeltTable>()
         .configure_sets(
             PostUpdate,
@@ -892,6 +913,7 @@ mod tests {
         world.insert_resource(Assets::<ShaderBuffer>::default());
         world.init_resource::<BeltMeshes>();
         world.init_resource::<BeltTable>();
+        world.init_resource::<TerrainShadow>();
         world
     }
 

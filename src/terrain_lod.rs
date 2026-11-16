@@ -81,8 +81,8 @@ use bevy::prelude::*;
 
 use crate::render_policy::VisualScope;
 use crate::terrain_grid::{
-    HeightGrid, MESH_TILE_CELLS, TERRAIN_MESH_USAGE, TEXTURE_TILE_M, mesh_tile_node_ranges,
-    node_world_coord, surface_normal_at,
+    HeightGrid, MESH_TILE_CELLS, TERRAIN_MESH_USAGE, mesh_tile_node_ranges, node_world_coord,
+    surface_normal_at,
 };
 use crate::view::{ViewFacts, ViewProfile};
 
@@ -315,6 +315,7 @@ fn tile_mesh(grid: &HeightGrid, ia: usize, ja: usize, size: usize, tris: &[[u32;
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut indices: Vec<u32> = Vec::with_capacity(tris.len() * 3);
+    let tile_m = crate::terrain_surface::surface().base.authored_m;
     for tri in tris {
         for &node in tri {
             let slot = &mut remap[node as usize];
@@ -325,7 +326,7 @@ fn tile_mesh(grid: &HeightGrid, ia: usize, ja: usize, size: usize, tris: &[[u32;
                 *slot = positions.len() as u32;
                 positions.push([x, grid.sample(i, j), z]);
                 normals.push(surface_normal_at(grid, i, j));
-                uvs.push([x / TEXTURE_TILE_M, z / TEXTURE_TILE_M]);
+                uvs.push([x / tile_m, z / tile_m]);
             }
             indices.push(*slot);
         }

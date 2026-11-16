@@ -27,6 +27,7 @@ a public seam and has no crate patch to retire.
 | [avian-island-rest-history.md](avian-island-rest-history.md) | avian3d 0.8.0 | bug fix | 23 | not sent |
 | [bevy-invisible-mesh-removal-churn.md](bevy-invisible-mesh-removal-churn.md) | bevy_pbr 0.20.1 | bug fix | 10 | not sent |
 | [bevy-mesh-removal-channel.md](bevy-mesh-removal-channel.md) | bevy_pbr 0.20.1 | bug fix | 37 | not sent |
+| [bevy-directional-shadow-factor-per-light.md](bevy-directional-shadow-factor-per-light.md) | bevy_pbr 0.20.1 | API gap | 0 | not sent |
 | [lightyear-netcode-denied-reason.md](lightyear-netcode-denied-reason.md) | lightyear_netcode 0.31.0 | bug fix | 12 | not sent |
 | [lightyear-netcode-admission-recheck.md](lightyear-netcode-admission-recheck.md) | lightyear_netcode 0.31.0 | bug fix | 11 | not sent |
 | [lightyear-avian-child-collider-pose-churn.md](lightyear-avian-child-collider-pose-churn.md) | lightyear_avian3d 0.31.0 | bug fix | 0 | not sent |
@@ -37,7 +38,7 @@ proposal queue. Obsolete proposals without a current source or patch-record cons
 
 Current complete fork deltas, MEASURED again against the cached published archives with
 `diff --minimal -ruN src/` (added + removed lines, fork-only source included): avian3d **855**,
-bevy_pbr **357**, lightyear_netcode **159**, lightyear_avian3d **0**; total **1371**.
+bevy_pbr **47**, lightyear_netcode **159**, lightyear_avian3d **0**; total **1061**.
 The per-proposal rows above exclude game divergences and the diagnostic-only lines listed here.
 
 ## Avian draft compile checks

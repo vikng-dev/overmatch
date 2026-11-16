@@ -26,6 +26,7 @@ import bevy_pbr::render::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
 };
+import super::terrain_shadow::visibility;
 
 struct TankSurfaceParams {
     // rgb: the livery's paint, linear. a: its perceptual roughness (1 − sheen).
@@ -70,6 +71,9 @@ const FLAG_MAPS: u32 = 1u;
 const FLAG_PAINT: u32 = 2u;
 // The livery carries a camouflage pattern.
 const FLAG_CAMO: u32 = 4u;
+// The glb material's own look (a primitive whose material names no visual): bevy's normal, its
+// normal map included, stands.
+const FLAG_OWN: u32 = 8u;
 
 // How sharply the projections hand over around an edge: the weight of an axis is the eighth power
 // of the normal's component along it. ASSUMED: a fillet of a few degrees blends, a flat plate reads
@@ -209,9 +213,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     pbr_input.material.perceptual_roughness = roughness;
     pbr_input.material.metallic = metallic;
     pbr_input.diffuse_occlusion *= occlusion;
-    pbr_input.N = normalize(transpose(local_m3) * (transpose(rest_from_local) * normal));
+    if (flags & FLAG_OWN) == 0u {
+        pbr_input.N = normalize(transpose(local_m3) * (transpose(rest_from_local) * normal));
+    }
 
     pbr_input.material.base_color = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, pbr_input.material.base_color);
+    pbr_input.directional_shadow_factor *= visibility(pbr_input.world_position.xyz);
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);

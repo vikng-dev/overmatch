@@ -1,0 +1,7 @@
+// How every spawn sets a tank above the ground (`src/terrain_grid.rs`, embedded in every build). The
+// tank's construction says how far it reaches and hangs below its root, as it is posed
+// (`TankContent::stance`); this says how far above the highest ground under it its lowest point
+// starts.
+(
+    drop_clearance_m: (0.1, Taste("spawn settle: the drop a fresh tank falls onto the ground, short enough to read as setting down, never as a fall; zero would start its lowest point touching the highest ground under it")),
+)

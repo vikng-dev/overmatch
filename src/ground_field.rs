@@ -2,8 +2,8 @@
 //! blend weights (`terrain.masks` in its `level.json`, R recesses, G slopes, B lowlands) are
 //! decoded once at the data edge, synchronously at startup beside the height grid
 //! ([`crate::terrain_grid::decode_height_grid`], ADR-0014: never the view's loaded texture), and
-//! held with the ground-type table's row for each of the four packs ([`crate::terrain_blend`]'s
-//! slot order: the base pack, then [`crate::terrain_blend::BLEND_LAYERS`]).
+//! held with the ground-type table's row for each of the four packs (the slot order of
+//! [`crate::terrain_surface::TerrainSurface::grounds`]: the base pack, then the layers).
 //!
 //! A point's ground ([`GroundField::ground_at`]) is the four packs' rows blended by the print's
 //! painted weights there ([`crate::terrain_blend::print_weights`] of the mask read bilinearly and
@@ -14,7 +14,7 @@
 //! The field's resolution is the mask's own, 1024² over the shipped 1 500 m square: 1.46 m a
 //! texel (DERIVED, 1500 / 1024). `Resolution`: the mask is the finest statement of the ground the
 //! map has, and the patch a player can see is the blend's edge at that texel scale (the material
-//! sharpens the transition inside one texel, `terrain_blend::BLEND_WINDOW`); a coarser field would
+//! sharpens the transition inside one texel, `terrain_surface::BlendLook::window`); a coarser field would
 //! let a player see ground the tracks do not feel, and a finer one would interpolate data the map
 //! does not state. Cost: three bytes a texel, 3 MiB on the shipped map (DERIVED, 1024² × 3), and
 //! one decode at startup, logged MEASURED.
@@ -26,7 +26,6 @@ use bevy::math::{UVec2, Vec2, Vec3, Vec4};
 use bevy::prelude::Resource;
 
 use crate::ground_types::GroundTypes;
-use crate::terrain_blend::{BASE_GROUND, BLEND_LAYERS};
 use crate::terrain_grid::RowOrder;
 
 /// Effective ground coefficients at a contact; rolling is quoted at the global reference pressure.
@@ -102,12 +101,9 @@ impl std::error::Error for GroundMaskError {}
 impl GroundField {
     /// The four packs' grounds from `table` ([`GroundTypes::parse`] requires every pack's).
     fn slots(table: &GroundTypes) -> [ContactGround; 4] {
-        [
-            table.get(BASE_GROUND).contact(),
-            table.get(BLEND_LAYERS[0].ground).contact(),
-            table.get(BLEND_LAYERS[1].ground).contact(),
-            table.get(BLEND_LAYERS[2].ground).contact(),
-        ]
+        crate::terrain_surface::surface()
+            .grounds()
+            .map(|ground| table.get(ground).contact())
     }
 
     /// A world no map paints: the base pack's ground everywhere.
@@ -323,11 +319,12 @@ mod tests {
         });
         let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
         let row = |name: &str| table.get(name).contact();
+        let [base, recesses, slopes, lowlands] = crate::terrain_surface::surface().grounds();
         for (xz, ground) in [
-            (Vec2::new(-15.0, -15.0), row(BASE_GROUND)),
-            (Vec2::new(15.0, -15.0), row(BLEND_LAYERS[0].ground)),
-            (Vec2::new(-15.0, 15.0), row(BLEND_LAYERS[1].ground)),
-            (Vec2::new(15.0, 15.0), row(BLEND_LAYERS[2].ground)),
+            (Vec2::new(-15.0, -15.0), row(base)),
+            (Vec2::new(15.0, -15.0), row(recesses)),
+            (Vec2::new(-15.0, 15.0), row(slopes)),
+            (Vec2::new(15.0, 15.0), row(lowlands)),
         ] {
             let read = field.ground_at(xz);
             assert_eq!(
@@ -336,7 +333,7 @@ mod tests {
             );
         }
         let flat = GroundField::unpainted(&table);
-        assert_eq!(flat.ground_at(Vec2::new(15.0, 15.0)), row(BASE_GROUND));
+        assert_eq!(flat.ground_at(Vec2::new(15.0, 15.0)), row(base));
     }
 
     /// Arithmetic mixtures preserve grip capacity and pressure-dependent drag, and mix the shear

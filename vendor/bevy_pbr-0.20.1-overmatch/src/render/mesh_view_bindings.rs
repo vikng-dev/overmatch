@@ -61,8 +61,6 @@ use crate::{
     ViewClusterBindings, ViewShadowBindings, ViewTransmissionTexture,
     CLUSTERED_FORWARD_STORAGE_BUFFER_COUNT,
 };
-// OVERMATCH PATCH: the heightfield shadow (`heightfield_shadow.rs`).
-use crate::{ExtractedHeightfieldShadow, GpuHeightfieldShadow, HeightfieldShadowUniform};
 
 #[cfg(all(feature = "webgl", target_arch = "wasm32", not(feature = "webgpu")))]
 use bevy_render::render_resource::binding_types::texture_cube;
@@ -72,9 +70,6 @@ use {crate::MESH_PIPELINE_VIEW_LAYOUT_SAFE_MAX_TEXTURES, bevy_utils::once, traci
 
 pub const TONEMAPPING_LUT_TEXTURE_BINDING_INDEX: u32 = 18;
 pub const TONEMAPPING_LUT_SAMPLER_BINDING_INDEX: u32 = 19;
-// OVERMATCH PATCH: the heightfield shadow (`heightfield_shadow.rs`).
-pub const HEIGHTFIELD_SHADOW_TEXTURE_BINDING_INDEX: u32 = 39;
-pub const HEIGHTFIELD_SHADOW_UNIFORM_BINDING_INDEX: u32 = 40;
 
 #[derive(Clone)]
 pub struct MeshPipelineViewLayout {
@@ -498,18 +493,6 @@ fn layout_entries(
         ));
     }
 
-    // OVERMATCH PATCH: the heightfield shadow (`heightfield_shadow.rs`), in every layout.
-    entries = entries.extend_with_indices((
-        (
-            HEIGHTFIELD_SHADOW_TEXTURE_BINDING_INDEX,
-            texture_2d(TextureSampleType::Float { filterable: false }),
-        ),
-        (
-            HEIGHTFIELD_SHADOW_UNIFORM_BINDING_INDEX,
-            uniform_buffer::<GpuHeightfieldShadow>(false),
-        ),
-    ));
-
     let mut binding_array_entries = DynamicBindGroupLayoutEntries::new(ShaderStages::FRAGMENT);
     if layout_key.contains(MeshPipelineViewLayoutKey::ENVIRONMENT_MAP) {
         binding_array_entries = binding_array_entries.extend_with_indices((
@@ -703,25 +686,13 @@ pub fn prepare_mesh_view_bind_groups(
         Res<ContactShadowsBuffer>,
         Res<OitBuffers>,
     ),
-    // OVERMATCH PATCH: the shared field and its uniform are bound in every mesh view.
-    (
-        decals_buffer,
-        render_decals,
-        atmosphere_sampler,
-        blue_noise,
-        area_light_luts,
-        dfg_lut,
-        heightfield_shadow,
-        heightfield_shadow_uniform,
-    ): (
+    (decals_buffer, render_decals, atmosphere_sampler, blue_noise, area_light_luts, dfg_lut): (
         Res<DecalsBuffer>,
         Res<RenderClusteredDecals>,
         Option<Res<AtmosphereSampler>>,
         Res<Bluenoise>,
         Res<AreaLightLuts>,
         Res<DfgLut>,
-        Option<Res<ExtractedHeightfieldShadow>>,
-        Res<HeightfieldShadowUniform>,
     ),
     // TODO: Figure out how to reuse the memory. `BindGroupEntry` is non-send on wasm with atomics.
     #[cfg(not(all(target_arch = "wasm32", target_feature = "atomics")))]
@@ -736,7 +707,6 @@ pub fn prepare_mesh_view_bind_groups(
         Some(globals),
         Some(light_probes_binding),
         Some(visibility_ranges_buffer),
-        Some(heightfield_shadow_binding),
     ) = (
         view_uniforms.uniforms.binding(),
         light_meta.view_gpu_lights.binding(),
@@ -746,14 +716,7 @@ pub fn prepare_mesh_view_bind_groups(
         globals_buffer.buffer.binding(),
         light_probes_buffer.binding(),
         visibility_ranges.buffer().buffer(),
-        heightfield_shadow_uniform.buffer.binding(),
     ) {
-        // OVERMATCH PATCH: the field's image once it is on the GPU, the fallback until then (the
-        // uniform reads the same readiness and says absent).
-        let heightfield_shadow_view = heightfield_shadow
-            .as_ref()
-            .and_then(|field| images.get(&field.0.image))
-            .map_or(&fallback_image.d2.texture_view, |image| &image.texture_view);
         for (
             entity,
             camera,
@@ -828,14 +791,6 @@ pub fn prepare_mesh_view_bind_groups(
                 (11, globals.clone()),
                 (12, light_probes_binding.clone()),
                 (14, visibility_ranges_buffer.as_entire_binding()),
-                (
-                    HEIGHTFIELD_SHADOW_TEXTURE_BINDING_INDEX,
-                    heightfield_shadow_view,
-                ),
-                (
-                    HEIGHTFIELD_SHADOW_UNIFORM_BINDING_INDEX,
-                    heightfield_shadow_binding.clone(),
-                ),
             ));
 
             if let Some(view_fog_offset) = view_fog_offset {

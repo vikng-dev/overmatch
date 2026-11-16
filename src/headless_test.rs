@@ -886,7 +886,7 @@ fn full_pedal_climbs_the_declared_ladder_gear_by_gear() {
 fn full_throttle_reaches_and_holds_the_governed_top_speed() {
     let (mut app, tank) = booted_offline_sim();
     let base = crate::ground_types::GroundTypes::load_shipped()
-        .get(crate::terrain_blend::BASE_GROUND)
+        .get(crate::terrain_surface::surface().base.ground.as_str())
         .contact();
     let road = crate::ground_field::ContactGround {
         // Fixture: invert the pressure law to make this governor witness lossless.

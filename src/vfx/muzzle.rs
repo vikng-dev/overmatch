@@ -1408,7 +1408,7 @@ mod tests {
             app.world_mut()
                 .resource_mut::<crate::ground_types::GroundTypes>()
                 .types
-                .get_mut(crate::terrain_blend::BASE_GROUND)
+                .get_mut(crate::terrain_surface::surface().base.ground.as_str())
                 .expect("the base pack's ground")
                 .dust
                 .colour_srgb = colour;
@@ -1491,7 +1491,10 @@ mod tests {
                     app.world_mut()
                         .resource_mut::<crate::ground_types::GroundTypes>()
                         .types
-                        .insert(crate::terrain_blend::BASE_GROUND.to_owned(), ground.clone());
+                        .insert(
+                            crate::terrain_surface::surface().base.ground.clone(),
+                            ground.clone(),
+                        );
                     fire_with(&mut app, muzzle, SLOW, CANNON_CALIBER, 0, true);
                     let puffs = dust_puffs(&mut app);
                     let count = puffs.len();

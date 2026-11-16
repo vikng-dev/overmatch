@@ -27,7 +27,7 @@
 //! constant here. Only an explicit [`ForceFlatWorld`] leaves the resource out, and `world` then
 //! builds the flat slab + authored test course.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use avian3d::prelude::Collider;
 use bevy::asset::RenderAssetUsages;
@@ -93,65 +93,108 @@ pub(crate) const GRID_RESOLUTION: u32 = 1025;
 /// becomes 8×8 tiles of 128² cells instead of drawing ~2.1M triangles every frame.
 pub(crate) const MESH_TILE_CELLS: usize = 128;
 
-/// Real-world coverage the ACTIVE pack was authored at, metres per texture repeat. Poly Haven
-/// scans declare their physical size (`api.polyhaven.com/info/coast_sand_rocks_02` →
-/// `dimensions: [15000, 15000]`, millimetres — the unit is pinned by `rocks_ground_02`, which
-/// carries both `dimensions: [2000, 2000]` and the human-readable `scale: "2x2M"`). Recorded in
-/// the pack's `cc.txt` as part of its contract.
-///
-/// Only the BASE pack needs a constant here — the blended layers carry theirs in
-/// [`crate::terrain_blend::BLEND_LAYERS`], and apply it as a UV scale in the shader. The two
-/// folders left under `assets/terrain/` that neither binds (`brown_mud_leaves_01`,
-/// `rocks_ground_02`) are STAGED: nothing loads them, so they carry their `cc.txt` and no maps,
-/// which is all `scripts/encode-terrain-ktx2.sh` needs to cut one.
-const COAST_SAND_ROCKS_02_AUTHORED_M: f32 = 15.0;
-
-/// Authored world metres per repeat (`world_xz / this`, repeat sampler), not a taste. View-only:
-/// texturing never changes grid/oracle/collider, and world rescaling keeps physical texel density.
-/// DERIVED counterexample: fitting this 15 m scan into an 8 m guess gives 0.53× features — a 1 m
-/// boulder reads as 53 cm, making the terrain look like a scale model.
-pub(crate) const TEXTURE_TILE_M: f32 = COAST_SAND_ROCKS_02_AUTHORED_M;
-
-/// The BASE terrain surface pack — Poly Haven `coast_sand_rocks_02`, CC0 (see the pack folder's
-/// `cc.txt`), relative to the asset root. One folder per pack under `assets/terrain/`, each holding
-/// the three maps `world::spawn_environment` binds: albedo (`diff`/`col`, sRGB), OpenGL-convention
-/// tangent-space normals (`nor_gl`), and the glTF-ORM `arm` pack (R = AO, G = roughness,
-/// B = metallic). This is what the ground is wherever the map's masks are silent; the three packs
-/// blended on top of it ship as 2D ARRAYS under `assets/terrain/blend/`
-/// ([`crate::terrain_blend`]), and the two folders neither binds hold only their `cc.txt`.
-///
-/// Its three maps are **KTX2 (UASTC 4x4, zstd-supercompressed, full mip chain)**, built by
-/// `scripts/encode-terrain-ktx2.sh` from masters kept outside the repo. The format is not a
-/// packaging detail — it is the frame budget. A PNG/JPG load gives bevy a texture with ONE mip
-/// level, and a 4k map tiled every [`TEXTURE_TILE_M`] across the whole horizon then misses the
-/// texture cache on nearly every fetch (measured: 30 fps). Mips fix the sampling; the block
-/// compression cuts the resident bytes 4× on top. Do not "simplify" these back to PNG.
-pub(crate) const TEXTURE_PATH: &str = "terrain/coast_sand_rocks_02/coast_sand_rocks_02_diff.ktx2";
-/// Tangent-space normal map of [`TEXTURE_PATH`]'s pack — see it for the pack layout.
-pub(crate) const NORMAL_PATH: &str = "terrain/coast_sand_rocks_02/coast_sand_rocks_02_nor_gl.ktx2";
-/// AO / roughness / metallic pack of [`TEXTURE_PATH`]'s pack — see it for the channel layout.
-pub(crate) const ARM_PATH: &str = "terrain/coast_sand_rocks_02/coast_sand_rocks_02_arm.ktx2";
-
 /// Opt-out marker: insert BEFORE the first update to keep the flat slab + authored test course
 /// even when the heightmap PNG is present. Test fixtures (`headless_test`, whose transmission
 /// gates drive the authored ramps) and the armor sandbox insert this; product compositions do not.
 #[derive(Resource, Default)]
 pub struct ForceFlatWorld;
 
-/// Clearance every spawn keeps above the sampled surface, metres — the flat-pad spawn's `y = 2.0`
-/// over a surface at 0, reproduced over terrain as the footprint's max ground height plus this.
-pub(crate) const SPAWN_CLEARANCE_M: f32 = 2.0;
+/// How a tank stands over the ground it spawns on, posed as it spawns
+/// ([`crate::tank::TankContent::stance`], from its construction).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Stance {
+    /// How far any point of the construction lies from the root's vertical axis, m.
+    pub(crate) reach_m: f32,
+    /// How far its lowest point lies below the root, m; negative when it lies above.
+    pub(crate) depth_m: f32,
+}
 
-/// Spawn footprint half-side (m): a fixed axis-aligned square, independent of hull construction or yaw.
-/// DERIVED coverage: 10 m × 10 m; larger hulls need a construction-derived footprint.
-/// Sample its maximum, not its centre: MEASURED centre-only placement buried uphill axles 1.65 m.
-pub(crate) const SPAWN_FOOTPRINT_HALF_M: f32 = 5.0;
+impl Stance {
+    /// The stance of a construction whose points, posed about its root, are `points`.
+    pub(crate) fn enclosing(points: impl IntoIterator<Item = Vec3>) -> Self {
+        let (reach_m, lowest) = points
+            .into_iter()
+            .fold((0.0_f32, f32::INFINITY), |(reach, lowest), point| {
+                (reach.max(point.xz().length()), lowest.min(point.y))
+            });
+        assert!(
+            lowest.is_finite() && reach_m.is_finite(),
+            "a certified construction has finite points"
+        );
+        Self {
+            reach_m,
+            depth_m: -lowest,
+        }
+    }
+}
 
-/// Shared ground-height rule for all spawns: resolve the horizontal definition at spawn time.
-/// Authored Y goes stale when a map is re-authored or rescaled. MEASURED counterexample: fixed
-/// `y = 2.0` duel spawns sat ~116 m below terrain. No better constant replaces a surface query.
-/// No grid means the flat slab at y = 0; adding clearance reproduces the flat-pad y = 2.0 pose.
-pub(crate) fn spawn_surface_height(grid: Option<&HeightGrid>, xz: Vec2) -> f32 {
+/// The spawn rule's data, as its refusals name it.
+const SPAWN_FILE: &str = "assets/world/spawn.ron";
+
+static SPAWN_RULE: LazyLock<SpawnRule> =
+    LazyLock::new(|| shipped_spawn_rule().unwrap_or_else(|error| panic!("{error}")));
+
+/// Refuse a malformed shipped spawn rule while the app builds, in every composition that mounts
+/// `world::plugin`, before any tank can spawn.
+pub(crate) fn admit_spawn_rule() {
+    LazyLock::force(&SPAWN_RULE);
+}
+
+/// The shipped spawn rule, admitted under the shipped-file policy.
+fn shipped_spawn_rule() -> Result<SpawnRule, String> {
+    crate::provenance::with_shipped_policy(|| {
+        SpawnRule::parse(SPAWN_FILE, include_str!("../assets/world/spawn.ron"))
+    })
+}
+
+/// How every spawn sets a tank above the ground under it.
+#[derive(Debug)]
+struct SpawnRule {
+    /// How far above the highest ground under it a fresh tank's lowest point starts, m.
+    drop_clearance_m: f32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSpawnRule {
+    drop_clearance_m: crate::provenance::Labelled<f32>,
+}
+
+impl SpawnRule {
+    /// The rule `text` holds, or why `file` is refused: a malformed file, a field missing or
+    /// unknown, or a clearance that is not a finite taste of 0 m or more.
+    fn parse(file: &str, text: &str) -> Result<Self, String> {
+        let raw: RawSpawnRule = ron::de::from_str(text).map_err(|error| {
+            format!("{file}: {error}; author `(drop_clearance_m: (<metres>, Taste(\"<effect>\")))`")
+        })?;
+        let clearance = raw.drop_clearance_m;
+        if !clearance.value.is_finite() || clearance.value < 0.0 {
+            return Err(format!(
+                "{file}: drop_clearance_m: {} is not a clearance; author 0 m or more",
+                clearance.value
+            ));
+        }
+        if !matches!(
+            clearance.label,
+            crate::provenance::Provenance::Taste(_) | crate::provenance::Provenance::Fixture(_)
+        ) {
+            return Err(format!(
+                "{file}: drop_clearance_m: label it Taste, naming its effect family"
+            ));
+        }
+        Ok(Self {
+            drop_clearance_m: clearance.value,
+        })
+    }
+}
+
+/// The highest ground under a spawn at `xz` whose construction reaches `reach_m` from its root:
+/// the maximum over the square of that half-side, which covers the reach at any yaw. Never the
+/// centre: MEASURED centre-only placement buried uphill axles 1.65 m. Resolved at spawn time, from
+/// a horizontal definition: authored Y goes stale when a map is re-authored or rescaled (MEASURED
+/// counterexample: fixed `y = 2.0` duel spawns sat ~116 m below terrain). No grid means the flat
+/// slab at y = 0.
+fn spawn_surface_height(grid: Option<&HeightGrid>, xz: Vec2, reach_m: f32) -> f32 {
     grid.map_or(0.0, |grid| {
         // Outside the collider there is no surface; an edge-clamped height would spawn a tank
         // over void. Callers clamp via `net::spawn_map::spawn_limit` or use constant positions,
@@ -164,16 +207,18 @@ pub(crate) fn spawn_surface_height(grid: Option<&HeightGrid>, xz: Vec2) -> f32 {
             xz.y,
             grid.half_extent(),
         );
-        grid.max_height_in_square(xz.x, xz.y, SPAWN_FOOTPRINT_HALF_M)
+        grid.max_height_in_square(xz.x, xz.y, reach_m)
     })
 }
 
-/// Horizontal XZ → footprint ground height + [`SPAWN_CLEARANCE_M`].
-/// [`spawn_surface_height`] owns why spawn definitions carry no Y.
-pub(crate) fn spawn_pos(grid: Option<&HeightGrid>, xz: Vec2) -> Vec3 {
+/// Where a tank standing as `stance` spawns at horizontal `xz`: its root set so its lowest point
+/// starts [`SpawnRule::drop_clearance_m`] above the highest ground under it
+/// ([`spawn_surface_height`], which owns why spawn definitions carry no Y).
+pub(crate) fn spawn_pos(grid: Option<&HeightGrid>, xz: Vec2, stance: Stance) -> Vec3 {
+    let ground = spawn_surface_height(grid, xz, stance.reach_m);
     Vec3::new(
         xz.x,
-        spawn_surface_height(grid, xz) + SPAWN_CLEARANCE_M,
+        ground + SPAWN_RULE.drop_clearance_m + stance.depth_m,
         xz.y,
     )
 }
@@ -286,7 +331,7 @@ impl HeightGrid {
     }
 
     /// Conservative maximum height (m) over the axis-aligned square of half-side `half` at world `(x, z)`.
-    /// Spawn placement must clear uphill gear, not only the centre (see [`SPAWN_FOOTPRINT_HALF_M`]).
+    /// Spawn placement must clear uphill gear, not only the centre ([`spawn_surface_height`]).
     /// Take every node of every touched cell: piecewise-linear extrema occur at nodes, so their
     /// enclosing rectangle bounds the square's surface maximum. Pure and deterministic.
     pub fn max_height_in_square(&self, x: f32, z: f32, half: f32) -> f32 {
@@ -717,11 +762,12 @@ pub(crate) const TERRAIN_MESH_USAGE: RenderAssetUsages = RenderAssetUsages::REND
 
 /// Client meshes from exact grid samples and anti-diagonals, chunked into [`MESH_TILE_CELLS`]²
 /// tiles for entity culling. World-space positions require `Transform::IDENTITY`; adjacent tiles
-/// share border vertices. Normals use full-grid central differences, UVs `world_xz / TEXTURE_TILE_M`
-/// with repeat sampling. `world::spawn_environment` builds these only with a window, never on
+/// share border vertices. Normals use full-grid central differences, UVs `world_xz /` the base pack's
+/// authored metres ([`crate::terrain_surface::Pack::authored_m`]) with repeat sampling. `world::spawn_environment` builds these only with a window, never on
 /// the dedicated server.
 pub(crate) fn terrain_mesh_tiles(grid: &HeightGrid) -> Vec<Mesh> {
     let ranges = mesh_tile_node_ranges(grid);
+    let tile_m = crate::terrain_surface::surface().base.authored_m;
     let mut meshes = Vec::with_capacity(ranges.len());
     for [ia, ib, ja, jb] in ranges {
         let (w, h) = (ib - ia + 1, jb - ja + 1);
@@ -734,7 +780,7 @@ pub(crate) fn terrain_mesh_tiles(grid: &HeightGrid) -> Vec<Mesh> {
                 let x = node_world_coord(grid, i);
                 positions.push([x, grid.sample(i, j), z]);
                 normals.push(surface_normal_at(grid, i, j));
-                uvs.push([x / TEXTURE_TILE_M, z / TEXTURE_TILE_M]);
+                uvs.push([x / tile_m, z / tile_m]);
             }
         }
         let mut indices: Vec<u32> = Vec::with_capacity((w - 1) * (h - 1) * 6);
@@ -822,9 +868,21 @@ pub(crate) mod tests {
         .expect("shipped heightmap must decode")
     }
 
-    /// Require a spawn inside the span and above its centre and whole footprint, so uphill gear
-    /// clears slopes. [`SPAWN_FOOTPRINT_HALF_M`] owns the centre-only burial counterexample.
-    pub(crate) fn assert_spawn_clears_terrain(grid: &HeightGrid, name: &str, xz: Vec2) {
+    /// FIXTURE DATA: a stance of hull size, for tests whose subject is the spawn points.
+    pub(crate) const FIXTURE_STANCE: Stance = Stance {
+        reach_m: 4.0,
+        depth_m: 0.6,
+    };
+
+    /// Require a spawn inside the span whose lowest point starts the spawn rule's drop clearance
+    /// above the ground everywhere under its reach, sampled independently of the rule's own node
+    /// maximum, so uphill gear clears slopes.
+    pub(crate) fn assert_spawn_clears_terrain(
+        grid: &HeightGrid,
+        name: &str,
+        xz: Vec2,
+        stance: Stance,
+    ) {
         assert!(
             grid.contains_xz(xz.x, xz.y),
             "{name} spawns at ({}, {}), outside the ±{} m world span",
@@ -832,20 +890,30 @@ pub(crate) mod tests {
             xz.y,
             grid.half_extent(),
         );
-        let spawned = spawn_pos(Some(grid), xz);
-        let surface = grid.height_at(xz.x, xz.y);
-        assert!(
-            spawned.y >= surface + SPAWN_CLEARANCE_M,
-            "{name} spawns at y {:.2} m with the surface at {surface:.2} m — {:.2} m of it is \
-             underground",
-            spawned.y,
-            surface - spawned.y,
-        );
-        let footprint = grid.max_height_in_square(xz.x, xz.y, SPAWN_FOOTPRINT_HALF_M);
-        assert!(
-            spawned.y >= footprint + SPAWN_CLEARANCE_M,
-            "{name} clears its centre point but not its footprint ({footprint:.2} m)",
-        );
+        let lowest = spawn_pos(Some(grid), xz, stance).y - stance.depth_m;
+        let clear = lowest - shipped_spawn_rule().unwrap().drop_clearance_m;
+        // Resolution: a lattice finer than any cell; f32 rounding of the root's height at map
+        // heights.
+        const STEP_M: f32 = 0.25;
+        const ROUNDING_M: f32 = 1e-4;
+        let steps = (stance.reach_m / STEP_M).ceil() as i32;
+        for i in -steps..=steps {
+            for j in -steps..=steps {
+                let offset = Vec2::new(i as f32, j as f32) * STEP_M;
+                let at = xz + offset;
+                // Beyond the reach nothing of the tank stands; beyond the span there is no ground.
+                if offset.length() > stance.reach_m || !grid.contains_xz(at.x, at.y) {
+                    continue;
+                }
+                let ground = grid.height_at(at.x, at.y);
+                assert!(
+                    clear >= ground - ROUNDING_M,
+                    "{name}: its lowest point starts {:.2} m over the ground at {at}, short of \
+                     the drop clearance",
+                    lowest - ground,
+                );
+            }
+        }
     }
 
     use avian3d::parry::math::{Pose, Vector};
@@ -1314,12 +1382,14 @@ pub(crate) mod tests {
             );
             bytes
         };
-        for (path, what) in [
-            (TEXTURE_PATH, "albedo"),
-            (NORMAL_PATH, "normal"),
-            (ARM_PATH, "arm"),
+        let base = &crate::terrain_surface::surface().base;
+        use crate::terrain_surface::PackMap;
+        for (map, what) in [
+            (PackMap::Albedo, "albedo"),
+            (PackMap::Normal, "normal"),
+            (PackMap::Arm, "arm"),
         ] {
-            let bytes = read(path, what);
+            let bytes = read(&base.map_path(map), what);
             let width = header_u32(&bytes, PIXEL_WIDTH_AT);
             let height = header_u32(&bytes, PIXEL_HEIGHT_AT);
             let levels = header_u32(&bytes, LEVEL_COUNT_AT);
@@ -1336,12 +1406,10 @@ pub(crate) mod tests {
                  {width}×{height}"
             );
         }
-        let image = ktx2_buffer_to_image(
-            &read(TEXTURE_PATH, "albedo"),
-            CompressedImageFormats::BC,
-            true,
-        )
-        .unwrap_or_else(|err| panic!("{TEXTURE_PATH} failed to transcode: {err:?}"));
+        let albedo = base.map_path(PackMap::Albedo);
+        let image =
+            ktx2_buffer_to_image(&read(&albedo, "albedo"), CompressedImageFormats::BC, true)
+                .unwrap_or_else(|err| panic!("{albedo} failed to transcode: {err:?}"));
         let format = format!("{:?}", image.texture_descriptor.format);
         assert_eq!(
             format, "Bc7RgbaUnormSrgb",
@@ -1395,13 +1463,19 @@ pub(crate) mod tests {
         for far in [false, true] {
             let placement = if far { "far" } else { "near" };
             for (i, xz) in duel_spawn_xz(far).iter().enumerate() {
-                assert_spawn_clears_terrain(&grid, &format!("{placement} offline duel {i}"), *xz);
+                assert_spawn_clears_terrain(
+                    &grid,
+                    &format!("{placement} offline duel {i}"),
+                    *xz,
+                    FIXTURE_STANCE,
+                );
             }
             for i in 0..PROBES {
                 assert_spawn_clears_terrain(
                     &grid,
                     &format!("{placement} probe tank {i}"),
                     probe_spawn_xz(far, i),
+                    FIXTURE_STANCE,
                 );
             }
         }
@@ -1414,7 +1488,91 @@ pub(crate) mod tests {
     #[should_panic(expected = "outside the")]
     fn a_spawn_outside_the_world_span_fails_loud() {
         let grid = grid_from(9, |_, _| 40);
-        spawn_pos(Some(&grid), Vec2::new(FIXTURE_HALF + 1.0, 0.0));
+        spawn_pos(
+            Some(&grid),
+            Vec2::new(FIXTURE_HALF + 1.0, 0.0),
+            FIXTURE_STANCE,
+        );
+    }
+
+    /// A SPAWN STARTS CLEAR OF THE GROUND UNDER ITS WHOLE REACH. Beside one raised node, off its
+    /// centre and farther out than a fixed hull-sized square would sample, a tank whose
+    /// construction reaches past the node starts with its lowest point the drop clearance above
+    /// the ground there, whatever its depth below the root, the depth of a construction standing
+    /// above its root included. A mutant sampling the centre or a fixed square, or dropping the
+    /// depth, fails. FIXTURE DATA: the grid, the node and the stances.
+    #[test]
+    fn a_spawn_starts_clear_of_the_ground_under_its_reach() {
+        let n = GRID_RESOLUTION as usize;
+        let mut samples = vec![0.0f32; n * n];
+        let centre = n / 2;
+        // The node 7 cells east of the origin's: about 6.8 m out on the fixture extent.
+        samples[centre * n + centre + 7] = 10.0;
+        let grid = HeightGrid::new(samples.into(), GRID_RESOLUTION, FIXTURE_EXTENT);
+        let node_m = 7.0 * FIXTURE_EXTENT.world_size_m / (n - 1) as f32;
+        assert_eq!(grid.height_at(0.0, 0.0), 0.0, "the centre is flat");
+        for depth_m in [0.6, 3.0, -0.4] {
+            let stance = Stance {
+                reach_m: node_m + 0.5,
+                depth_m,
+            };
+            assert_spawn_clears_terrain(&grid, &format!("depth {depth_m} m"), Vec2::ZERO, stance);
+        }
+    }
+
+    /// A construction's stance encloses every point of it as it is posed: none lies farther from
+    /// the root's vertical axis than its reach, or lower than its depth, and an extreme point sets
+    /// each. A rolled box hangs a corner lower than it does upright, which is why the stance is
+    /// taken of the pose a tank spawns in. FIXTURE DATA: the box and the roll.
+    #[test]
+    fn a_stance_encloses_its_construction_as_posed() {
+        let mut corners = Vec::new();
+        for x in [-1.8, 1.8] {
+            for y in [-1.5, 0.5] {
+                for z in [-3.2, 3.2] {
+                    corners.push(Vec3::new(x, y, z));
+                }
+            }
+        }
+        let stance_of = |pose: Quat| {
+            let posed: Vec<Vec3> = corners.iter().map(|&corner| pose * corner).collect();
+            let stance = Stance::enclosing(posed.iter().copied());
+            assert!(
+                posed
+                    .iter()
+                    .all(|p| p.xz().length() <= stance.reach_m && p.y >= -stance.depth_m),
+                "{pose:?}: the stance encloses the box"
+            );
+            assert!(
+                posed.iter().any(|p| p.xz().length() == stance.reach_m)
+                    && posed.iter().any(|p| p.y == -stance.depth_m),
+                "{pose:?}: a corner sets the reach and one the depth"
+            );
+            stance
+        };
+        let upright = stance_of(Quat::IDENTITY);
+        let rolled = stance_of(Quat::from_rotation_z(0.7));
+        assert!(rolled.depth_m > upright.depth_m, "a rolled box hangs lower");
+    }
+
+    /// The shipped spawn rule is admitted, and a clearance outside its domain or job is refused
+    /// naming the file and field. FIXTURE DATA: the refused values.
+    #[test]
+    fn the_spawn_rule_is_checked_before_play() {
+        shipped_spawn_rule().unwrap();
+        for text in [
+            r#"(drop_clearance_m: (-0.1, Fixture("below the ground")))"#,
+            r#"(drop_clearance_m: (0.1, Measured("not a fact")))"#,
+        ] {
+            let error = SpawnRule::parse("f.ron", text).unwrap_err();
+            assert!(error.starts_with("f.ron: drop_clearance_m"), "{error}");
+        }
+        // A file that does not parse names the field's shape to author.
+        let error = SpawnRule::parse("f.ron", "(drop_clearance_m: 0.1)").unwrap_err();
+        assert!(
+            error.starts_with("f.ron: ") && error.contains("author `(drop_clearance_m:"),
+            "{error}"
+        );
     }
 
     /// A frictionless box, pitched and rotation-locked with its leading bottom edge lowest, must
