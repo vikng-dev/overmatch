@@ -277,10 +277,16 @@ def profile(trace_path: str, window_path: str, out_path: str) -> int:
     leaf_total = [0.0] * n
     physics_total = [0.0] * n
     rows = []
+    other_rows = []
     for (kind, name), vals in per.items():
-        if kind == "system" and container.get(name):
-            continue
-        if kind == "other":
+        if kind == "other" or (kind == "system" and container.get(name)):
+            other_rows.append({
+                "kind": "container" if kind == "system" else kind,
+                "name": name,
+                "runs_per_tick": runs[(kind, name)] / n,
+                "mean_us": sum(vals) / n,
+                "p95_us": pct(vals, 0.95),
+            })
             continue
         top_sched = max(sched_of[(kind, name)].items(), key=lambda kv: kv[1])[0]
         for i, v in enumerate(vals):
@@ -296,17 +302,6 @@ def profile(trace_path: str, window_path: str, out_path: str) -> int:
             "p50_us": pct(vals, 0.5),
             "p95_us": pct(vals, 0.95),
             "max_us": max(vals),
-        })
-    other_rows = []
-    for (kind, name), vals in per.items():
-        if kind != "other" and not (kind == "system" and container.get(name)):
-            continue
-        other_rows.append({
-            "kind": "container" if kind == "system" else kind,
-            "name": name,
-            "runs_per_tick": runs[(kind, name)] / n,
-            "mean_us": sum(vals) / n,
-            "p95_us": pct(vals, 0.95),
         })
     mean_leaf = sum(leaf_total) / n
     for r in rows:
