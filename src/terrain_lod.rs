@@ -25,7 +25,7 @@
 //!
 //! 3. **Shared discrete thresholds.** Quantize each level's MEASURED deviation upward to the
 //!    smallest containing rung; switch distance depends only on (rung, view profile).
-//!    `bevy_render-0.19.0/src/view/visibility/range.rs` retains range slots for app lifetime and
+//!    `bevy_render-0.20.1/src/view/visibility/range.rs` retains range slots for app lifetime and
 //!    indexes them with `u16`: per-tile floats eventually leak into slot-zero aliasing. Shared
 //!    rungs bound this to a couple of dozen distinct values regardless of tile count.
 //!
@@ -57,7 +57,7 @@
 //!
 //! # The landmine this module is built around
 //!
-//! `check_visibility_ranges` (`bevy_camera-0.19.0/src/visibility/range.rs:263`) measures to
+//! `check_visibility_ranges` (`bevy_camera-0.20.1/src/visibility/range.rs`) measures to
 //! `entity_transform.translation()` — world origin for world-space tiles at identity — unless
 //! `use_aabb` selects `affine.transform_point3a(aabb.center)`. This is the centre, not the nearest
 //! point: pin the same exact-level [`Aabb`] on every level, and add tile bounding radius to
@@ -68,7 +68,7 @@
 //! and its exact-grid-sample assertions share one layout.
 //!
 //! `NoAutoAabb` is not optional either: bevy's `calculate_bounds` re-derives the AABB on
-//! `Changed<Mesh3d>` (`bevy_camera-0.19.0/src/visibility/mod.rs:568`), which fires on spawn and
+//! `Changed<Mesh3d>` (`bevy_camera-0.20.1/src/visibility/mod.rs`), which fires on spawn and
 //! would replace our pinned bounds with each LEVEL's own — drifting the anchor per level and
 //! opening sub-metre gaps and overlaps in the range chain.
 

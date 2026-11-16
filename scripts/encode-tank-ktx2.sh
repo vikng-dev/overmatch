@@ -19,8 +19,8 @@
 # terrain before `scripts/encode-terrain-ktx2.sh` moved it to KTX2. Same medicine, applied to the
 # glb instead of loose files.
 #
-# HOW BEVY LOADS THIS: bevy_gltf 0.19 does NOT implement the `KHR_texture_basisu` *syntax*
-# (bevy_gltf-0.19.0/src/lib.rs:117) — it never reads the extension block. It DOES load KTX2 when it
+# HOW BEVY LOADS THIS: bevy_gltf 0.20.1 does NOT implement the `KHR_texture_basisu` *syntax*
+# (bevy_gltf-0.20.1/src/lib.rs) — it never reads the extension block. It DOES load KTX2 when it
 # arrives through the ordinary path: `textures[i].source` -> `images[i]` with
 # `mimeType: "image/ktx2"` (loader/mod.rs:1201 -> `ImageType::MimeType` -> bevy_image image.rs:439
 # -> `ImageFormat::Ktx2`). So this bake keeps `source` pointing at the KTX2 image AND writes the

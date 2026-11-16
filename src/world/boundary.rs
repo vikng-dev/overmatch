@@ -13,11 +13,11 @@ use crate::{Layer, map::MapManifest};
 
 use super::BoundaryWall;
 
-/// Resolution: Parry 0.27's f32 GJK misreads a contact within a fraction of a metre of a face
-/// this large: at touch its normal runs along the face with depths toward the far end, a little
-/// further off it drops the contact. MEASURED at 0.5 m on faces to 1,250 m half-diagonal (the
-/// shipped edge's is 930 m): of 4,000 resting hulls per face, none dropped and no normal off the
-/// face; map-surroundings §3.6.
+/// Resolution: stand-off for near-touch queries on large faces. Parry 0.31.1 still drops a
+/// resting hull's manifold without it in the boundary contact witness below.
+/// MEASURED on Parry 0.27 at 0.5 m, faces to 1,250 m half-diagonal (the shipped edge's is
+/// 930 m): of 4,000 resting hulls per face, none dropped and no normal off the face;
+/// map-surroundings §3.6.
 const CONTACT_MARGIN_M: f32 = 0.5;
 
 pub(super) fn spawn(commands: &mut Commands, manifest: &MapManifest) {

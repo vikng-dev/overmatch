@@ -1,6 +1,6 @@
 //! Branding: applies the game's window icon at startup.
 //!
-//! Bevy 0.19 has no native window-icon field on `Window`, so we reach through to
+//! Bevy 0.20.1 has no native window-icon field on `Window`, so we reach through to
 //! winit — the documented approach. The PNG is embedded with `include_bytes!`
 //! rather than loaded via `AssetServer`, so the binary is self-contained and works
 //! regardless of working directory (the release bundle runs as `./overmatch` from
@@ -20,7 +20,7 @@ pub(crate) fn plugin(app: &mut App) {
     app.add_systems(Startup, set_window_icon);
 }
 
-/// Decode the embedded PNG and apply it to every window. In Bevy 0.19 the winit
+/// Decode the embedded PNG and apply it to every window. In Bevy 0.20.1 the winit
 /// windows live in a thread-local (`WINIT_WINDOWS`), not an ECS `NonSend` resource
 /// (a stopgap pending bevyengine/bevy#17667). The `NonSendMarker` param is
 /// load-bearing: it forces this system onto the main thread, where that thread-local

@@ -12,7 +12,7 @@
 //! windowed mode was the logical canvas — so the UI grew by `1/fraction` while the drawable, and
 //! therefore the GPU cost, stayed put or moved for the wrong reason.
 //!
-//! Route A instead uses bevy 0.19's `MainPassResolutionOverride`, the primitive that exists as DLSS
+//! Route A instead uses bevy 0.20.1's `MainPassResolutionOverride`, the primitive that exists as DLSS
 //! scaffolding and is honoured by the prepass, the opaque/transparent main passes, the deferred pass
 //! and OIT. The camera still targets the WINDOW at its real size, which is the property that makes
 //! the blast radius the render app alone:
@@ -26,25 +26,25 @@
 //!
 //! # The near-miss upstream plugin, and why this is not it
 //!
-//! bevy 0.19 ships `bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin<T>` — a
+//! bevy 0.20.1 ships `bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin<T>` — a
 //! generic "run a fragment shader over a fullscreen triangle in `Core3d`" plugin, with a
 //! `FullscreenMaterial` trait for the shader path and the schedule position. It is close enough that
 //! the next reader will ask why it is not used, so the answer is recorded here rather than
-//! re-derived. **Both blockers were read out of the vendored 0.19.0 source, not inferred:**
+//! re-derived. **Both blockers follow from the Bevy 0.20.1 source:**
 //!
 //! * **Its sampler is NEAREST, which is the one thing this module exists to avoid.**
 //!   `init_pipeline` builds it with `render_device.create_sampler(&SamplerDescriptor::default())`
-//!   (`bevy_core_pipeline-0.19.0/src/fullscreen_material.rs:151`), and wgpu-types 29's `FilterMode`
-//!   derives `Default` with `#[default] Nearest` (`wgpu-types-29.0.4/src/texture.rs:727`). The
+//!   (`bevy_core_pipeline-0.20.1/src/fullscreen_material.rs`), and wgpu-types 30's `FilterMode`
+//!   derives `Default` with `#[default] Nearest` (`wgpu-types-30.0.2/src/texture.rs`, `FilterMode`). The
 //!   sampler is a private field of `FullscreenMaterialPipeline<T>` with no hook to replace it, so a
 //!   render-scale upscale through it would be chunky point magnification. (Its bind-group LAYOUT is
 //!   already `filterable: true` / `SamplerBindingType::Filtering`, so only the sampler instance is
 //!   wrong — which is exactly the kind of near-miss that costs an afternoon to discover.)
 //! * **Its third binding is the MATERIAL's uniform, not the view's.** The layout is
-//!   `(texture_2d, sampler, uniform_buffer::<T>(true))` (same file, line 147) and the bind group
-//!   fills that slot from `ComponentUniforms<T>` (line 257). The shader therefore cannot read
+//!   `(texture_2d, sampler, uniform_buffer::<T>(true))` (`init_pipeline`) and the bind group
+//!   fills that slot from `ComponentUniforms<T>` (`prepare_bind_groups`). The shader therefore cannot read
 //!   `View::main_pass_viewport` — the field bevy itself writes the resolution override into
-//!   (`bevy_render-0.19.0/src/view/mod.rs:1035-1038`) and the field `MainPassResolutionOverride`'s
+//!   (`bevy_render-0.20.1/src/view/mod.rs`) and the field `MainPassResolutionOverride`'s
 //!   own doc tells shaders to use. Passing the sub-rect as material data instead would reintroduce
 //!   precisely the disagreement this module's scissor-consistency argument rules out: the stretch
 //!   would be whatever the material said last, not what the main pass was actually scissored to.
@@ -55,7 +55,7 @@
 //!
 //! # The pipeline position, and what it buys
 //!
-//! bevy 0.19's 3D pipeline runs `Prepass -> MainPass -> EarlyPostProcess -> PostProcess`, with the
+//! bevy 0.20.1's 3D pipeline runs `Prepass -> MainPass -> EarlyPostProcess -> PostProcess`, with the
 //! UI pass after `PostProcess` and bloom + tonemapping inside it. Putting the upscale in
 //! [`Core3dSystems::EarlyPostProcess`] therefore means the reduced-resolution region ends exactly at
 //! the end of the 3D main pass: bloom, tonemapping and the whole UI run at native resolution on a

@@ -1217,8 +1217,8 @@ fn wake_driven_tanks(
 /// with, so a drivetrain advances once per tick: the chain's sync point applies each removed
 /// `Sleeping`, whose hook wakes the whole island within that sync point (avian
 /// `wake_on_remove_sleeping` queues `WakeBody`, whose `WakeIslands` removes every member's
-/// `Sleeping`; bevy_ecs 0.19 applies the world commands a command queues before the next one,
-/// `RawCommandQueue::push`). An awake tank whose pass did not find it at rest restarts its rest
+/// `Sleeping`; bevy_ecs 0.20.1 applies the world commands a command queues before the next one,
+/// `CommandQueue::push`). An awake tank whose pass did not find it at rest restarts its rest
 /// timer, which Avian's island sleep reads after this update (`update_sleeping_states`,
 /// `dynamics/solver/islands/sleeping.rs`): the tank and its island rest only once a whole rest
 /// time of passes found it at rest. Avian's `Forces` item holds the timer through the pass and
@@ -1321,7 +1321,7 @@ fn gather_drive_supports(
 }
 
 /// Each tank reads the common tick-start snapshot and changes only its own driving and force state.
-/// Bevy 0.19.1's QueryParIter batches on ComputeTaskPool; worker assignment has no effect order.
+/// Bevy 0.20.1's QueryParIter batches on ComputeTaskPool; worker assignment has no effect order.
 #[expect(
     clippy::too_many_arguments,
     reason = "one owner reads terrain, construction and solver impulses before its joint solve"

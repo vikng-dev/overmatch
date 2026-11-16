@@ -1694,8 +1694,8 @@ Deliberately **no** `driving`, `aim`, `camera`, `sight`, `shooting`.
 **v1 simplifications:** modules/crew are just *named ballistic volumes with HP* — no function, no
 backfill, no fire, no cookoff, no HE. Those are §§7–8 and arrive after the march itself feels right.
 
-**API discipline (AGENTS.md):** verify every Bevy 0.19 / avian3d 0.7 API against versioned docs
-(`docs.rs/bevy/0.19.0`, `docs.rs/avian3d/0.7.0`, or the `v0.19.0` / `v0.7.0` tags) *before* writing
+**API discipline (AGENTS.md):** verify every Bevy 0.20.1 / avian3d 0.8.0 API against versioned docs
+(`docs.rs/bevy/0.20.1`, `docs.rs/avian3d/0.8.0`, or the `v0.20.1` / `v0.8.0` tags) *before* writing
 it. Do not write engine code from memory.
 
 ## 12. Model↔code binding contract (LOCKED, 2026-06-27)
@@ -1782,7 +1782,7 @@ body (disc sampling) rather than an infinitely thin line.
 The march resolves one plate at a time: first armor hit, then thickness/exit probes **restricted to
 the struck entity** (`|e| e == hit.entity` — `ballistics.rs:2243`, `:2330`), charge that plate's
 chord, teleport to its exit, nudge `EPS = 1mm`, resume. Two parry facts govern the seams
-(verified in `parry3d-0.27.0/src/query/ray/ray_triangle.rs`): trimeshes have **no interior** (the
+(verified in `parry3d-0.31.1/src/query/ray/ray_triangle.rs`): trimeshes have **no interior** (the
 `solid` flag is ignored for triangles — a ray born inside a plate just flies until it crosses a
 face), and triangles are **double-sided with the returned normal flipped to oppose the ray** (a
 backface hit from inside reads as a head-on entry). Consequences:

@@ -161,7 +161,7 @@ Signals, strongest first:
   "simplified" away. A `Local` holding a *copy of something the World already knows* is the defect.
 - **Dirty flags** where change detection exists — but see the caveat below.
 
-**Caveat on dirty flags (VERIFIED, Bevy 0.19).** Mutably dereferencing a `Mut`/`ResMut` flags the
+**Caveat on dirty flags (VERIFIED, Bevy 0.20.1).** Mutably dereferencing a `Mut`/`ResMut` flags the
 value as changed **regardless of whether the value actually changed**; `set_if_neq` exists
 precisely to avoid that. So a hand-rolled dirty flag may have been written by someone who hit this
 exact behaviour. Before calling one redundant, check whether `set_if_neq` would serve — and check
@@ -335,7 +335,7 @@ Several look redundant or tautological *on purpose*. Deleting one removes an ala
 | `flow_boundary.rs` | no fixed-clock registration may name the `Flow` screen state |
 | `gpu_layout.rs` | Rust ↔ shader struct layout contract |
 | `determinism_deps.rs` | **tripwire** — fails if a dep bump splits `glam` and silently drops the `scalar-math` pin |
-| `net_input_buffer_wrap.rs` | **tripwire** — pins the inverted-range input encoding (bounded but mislabeled in lightyear 0.30) and its two enablers behind the connect-hang guard |
+| `net_input_buffer_wrap.rs` | **tripwire** — pins the inverted-range input encoding (bounded but mislabeled in lightyear 0.31.0) and its two enablers behind the connect-hang guard |
 | `net_interp_delay.rs` | **tripwire** — pins the `send_interval = 0` interpolation-delay collapse |
 | `bevy_shadow_view_render_layers.rs` | guard — every shadow view carries the light's `RenderLayers` in the linked `bevy_pbr` (upstream #24797, shipped 0.19.1) |
 | `bevy_ktx2_uastc_fallback.rs` | **tripwire** — pins the KTX2/UASTC fallback slice panic |
@@ -352,7 +352,7 @@ in `src/`. If a tripwire looks wrong, report it (§C.7); never edit it.
 
 ### B5. `vendor/` is off limits
 
-Two patched crates — `bevy_reflect` and `bevy_pbr`, both 0.19.1 — wired through
+The patched crates inventoried by `Cargo.toml` are wired through
 `[patch.crates-io]`. Every deviation from pristine upstream is marked `// OVERMATCH PATCH:` so the
 diff is self-describing, and each crate carries an `OVERMATCH_PATCH.md` naming its deviation and
 its retirement condition. **Do not format, lint, tidy, de-duplicate or comment-prune anything under
@@ -477,9 +477,9 @@ does not.
 
 ### C6. Verify every engine API against the pinned version before writing it
 
-`AGENTS.md`: treat Bevy/Avian API knowledge as deprecated. Pins are **Bevy 0.19**, **avian3d 0.7**,
-**lightyear 0.30**, **bevy_replicon 0.44**, **glam 0.32**, **wgpu 29**, **bevy_egui 0.42**. Check
-`docs.rs/bevy/0.19.1/…`, `docs.rs/avian3d/0.7.0/…`, or the `v0.19.1` / `v0.7.0` git tags. This has repeatedly caught real
+`AGENTS.md`: treat Bevy/Avian API knowledge as deprecated. Pins are **Bevy 0.20.1**, **avian3d 0.8.0 (fork)**,
+**lightyear 0.31.0**, **bevy_replicon 0.45.5**, **glam 0.33.12**, **wgpu 30**, **bevy_egui 0.43**. Check
+`docs.rs/bevy/0.20.1/…`, `docs.rs/avian3d/0.8.0/…`, or the `v0.20.1` / `v0.8.0` git tags. This has repeatedly caught real
 renames (`Trigger`→`On`, buffered events→observers, `Camera` moving to `bevy::camera`,
 `SceneRoot`→`WorldAssetRoot`). A simplification proposed from memory of a different Bevy version
 either does not compile — the good case — or compiles and means something else.
@@ -580,8 +580,8 @@ against this branch**.
 - Clippy lint categories and default levels — <https://rust-lang.github.io/rust-clippy/master/index.html>.
   Confirms correctness (deny) / suspicious / style / complexity / perf (warn) ship enabled, and
   pedantic / nursery / restriction / cargo are allow-by-default. This is what §1 rests on.
-- Bevy 0.19 change detection — <https://docs.rs/bevy/0.19.0/bevy/ecs/change_detection/index.html>
-  and <https://docs.rs/bevy/0.19.0/bevy/ecs/change_detection/trait.DetectChangesMut.html>.
+- Bevy 0.20.1 change detection — <https://docs.rs/bevy/0.20.1/bevy/ecs/change_detection/index.html>
+  and <https://docs.rs/bevy/0.20.1/bevy/ecs/change_detection/trait.DetectChangesMut.html>.
   Confirms **for the pinned version** that mutable deref flags a change regardless of whether the
   value changed, and that `set_if_neq` exists to avoid it. Underpins the §A2 caveat.
 - Rust API Guidelines checklist — <https://rust-lang.github.io/api-guidelines/checklist.html>.

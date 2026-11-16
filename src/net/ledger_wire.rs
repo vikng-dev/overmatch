@@ -6,7 +6,7 @@
 //! an entry for another position. A client that is caught up must be sent only what it lacks, or
 //! every change resends the whole list.
 //!
-//! What places every entry (bevy_replicon 0.44.3):
+//! What places every entry (bevy_replicon 0.45.5):
 //! - The authority numbers each diff as it records it, one index after the last
 //!   (`shared/replication/diff.rs:220`, `DiffHistory::record`), and sends a client the contiguous
 //!   run of diffs past its acknowledged cursor, or the whole value when that run is no longer

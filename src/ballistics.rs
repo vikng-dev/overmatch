@@ -2018,7 +2018,7 @@ fn on_fire_shell(
         Transform::from_translation(position).looking_to(travel, Vec3::Y),
     );
 
-    // One spawn transaction lets `view`'s dressing observer read a complete shell: Bevy 0.19
+    // One spawn transaction lets `view`'s dressing observer read a complete shell: Bevy 0.20.1
     // writes the bundle before `Add` observers; a late insert would be incomplete. `Option<T>`
     // is not a Bundle, so branch explicitly; `spawn_shell` folds in tracer and recording.
     let born = Born {

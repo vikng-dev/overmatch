@@ -25,7 +25,7 @@ use crate::spec::FireMechanism;
 pub(super) const VISUAL_COPIES: u8 = 3;
 /// DERIVED: sixteen 64 Hz ticks are 250 ms, matching the current client armor-outcome hold span.
 const VISUAL_TTL_TICKS: i32 = 16;
-/// DERIVED from Lightyear 0.30's 1,162-byte unfragmented-message ceiling (the transport's fragment
+/// DERIVED from Lightyear 0.31.0's 1,162-byte unfragmented-message ceiling (the transport's fragment
 /// size at the 1,200-byte default MTU: 13 header bytes + 23 fragment-metadata bytes — a 4-byte
 /// channel id, 2-byte message id, two 8-byte fragment fields, 1 compression byte — then the
 /// payload's own 2-byte QUIC-varint length prefix), leaving 62 bytes of headroom after worst-case
@@ -37,7 +37,7 @@ const VISUAL_TICK_WIRE_LIMIT: usize = VISUAL_BATCH_WIRE_LIMIT * 4;
 /// DERIVED: Lightyear's registered `MessageNetId` is a `u16` in lightyear's QUIC-style varint
 /// (1/2/4/8-byte tiers), whose largest tier for a `u16` is four bytes — the exact maximum.
 const MESSAGE_NET_ID_BYTES: usize = 4;
-/// DERIVED from Lightyear 0.30's `SendEntityMap`: recipient-mapped entities set bit 63 before Bevy's
+/// DERIVED from Lightyear 0.31.0's `SendEntityMap`: recipient-mapped entities set bit 63 before Bevy's
 /// `u64` serde representation is encoded, forcing postcard's ten-byte LEB128 `u64` tier.
 const WORST_CASE_MAPPED_ENTITY: Entity = Entity::from_bits(0x8000_0000_0000_0001);
 

@@ -35,7 +35,7 @@
 //! new draw replacing it) and handed to the next belt that fits; pages and their materials live
 //! for the session.
 //!
-//! The rejected adapter is custom instancing (bevy 0.19's `custom_shader_instancing` example):
+//! The rejected adapter is custom instancing (bevy 0.20.1's `custom_shader_instancing` example):
 //! it queues its own phase item with its own pipeline, so it would have to rebuild, for the shoe,
 //! what the material pipeline already gives every mesh — the bindless `StandardMaterial` bind
 //! group, the opaque, prepass and shadow phases, visibility, and the x-ray's look and mask
@@ -51,7 +51,7 @@
 //! count.
 //!
 //! Vertex pulling (the link read as `vertex_index / V` off one copy of the shoe) does not remove
-//! the cost on bevy 0.19's material path: `DrawMesh` draws exactly the mesh's own index range
+//! the cost on bevy 0.20.1's material path: `DrawMesh` draws exactly the mesh's own index range
 //! (`bevy_pbr` `render/mesh.rs`, direct and indirect alike), and the instance range belongs to
 //! batching, so a belt still needs a mesh with one index per drawn corner — DERIVED ~7 MB per count
 //! at 4 bytes a corner — and every shoe attribute moved to a storage buffer, with the vertex

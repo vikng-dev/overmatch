@@ -3105,7 +3105,7 @@ fn spawn_prepared_as(commands: &mut Commands, piece: Entity, prepared: PreparedD
         Visibility::default(),
         crate::debris::DebrisPiece,
         crate::eased_dynamic_body(),
-        // Avian 0.7's ColliderOf hook appends directly when this collection exists. Without
+        // Avian 0.8.0's ColliderOf hook appends directly when this collection exists. Without
         // it, a batch queues competing one-child lists. The ancestor marker also belongs to
         // the whole group: deferring it per child would repeatedly traverse the same subtree.
         avian3d::prelude::RigidBodyColliders::default(),

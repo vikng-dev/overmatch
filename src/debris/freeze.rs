@@ -508,7 +508,7 @@ pub(crate) struct Census<'w, 's> {
 /// Stats-only census after `TickClosed`, before the recorder. The freeze changes sleeping
 /// islands only; after it, publication copies poses to carriers and `FixedLast` only records
 /// state or advances the weapon clock. Awake membership, timers, collider shapes, placed poses,
-/// bounds and velocities therefore remain those the freeze read. Bevy 0.19.1 keeps the generic
+/// bounds and velocities therefore remain those the freeze read. Bevy 0.20.1 keeps the generic
 /// clock fixed throughout `FixedMain`, so reach also uses the same dt.
 ///
 /// Temporary instrument for the #379 decision: measuring the freezable fraction on the hosted

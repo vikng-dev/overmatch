@@ -2,7 +2,7 @@
 //! re-size (companion to `src/net/tests/net_interp_delay.rs`, which pins the `min_delay` degenerate
 //! the other half of the downlink law compensates for).
 //!
-//! The mechanisms being pinned, in lightyear 0.30:
+//! The mechanisms being pinned, in lightyear 0.31.0:
 //!
 //! - the INPUT timeline objective (`lightyear_sync` input.rs): `remote + rtt/2 + (jitter ·
 //!   jitter_multiple + tick · jitter_margin) + 1 tick + tick · error_margin − input_delay`. The
@@ -156,7 +156,7 @@ fn interp_objective_honors_the_sync_floor() {
 /// field from the controller.
 #[test]
 fn error_margin_is_the_speed_controller_deadband() {
-    // The controller's hysteresis is private in 0.30; `TimelineSync::speed_adjustment` is the
+    // The controller's hysteresis is private in 0.31.0; `TimelineSync::speed_adjustment` is the
     // public entry to it, reached through the local clock's controller with a zero input delay.
     let config = InputTimelineConfig::new(
         SyncConfig {

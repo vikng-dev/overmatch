@@ -361,7 +361,7 @@ pub(crate) fn restore_servo_truth(
 
 /// Each tank integrates its own slots from its own crew, modules and crank and this update's
 /// commands, and writes only its own integrator, so tanks evaluate on the compute pool (Bevy
-/// 0.19.1's `QueryParIter`); a tank's slots step in slot order.
+/// 0.20.1's `QueryParIter`); a tank's slots step in slot order.
 pub(crate) fn drive_servos(
     time: Res<Time>,
     mut nodes: Query<(

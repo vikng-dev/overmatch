@@ -374,7 +374,7 @@ pub(super) fn prepare_round(
 
 /// The material the shell model wears: bevy_pbr's glTF handler adds each glTF material's
 /// `StandardMaterial` under `<label>/std` and gives a mesh of that material that handle
-/// (`bevy_pbr-0.19.1/src/gltf.rs`, `on_material`); the model has one material, unscaled (MEASURED).
+/// (`bevy_pbr-0.20.1/src/gltf.rs`, `on_material`); the model has one material, unscaled (MEASURED).
 pub(super) fn shell_material(
     asset_server: &AssetServer,
     model: &BodyModel,

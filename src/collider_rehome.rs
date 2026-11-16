@@ -1,7 +1,7 @@
 //! A collider moved onto another rigid body drops its contact pairs, so the physics makes them again
 //! under the body it belongs to now. Game state only.
 //!
-//! THE INVARIANT: every contact pair names the bodies its two colliders belong to now. Avian 0.7
+//! THE INVARIANT: every contact pair names the bodies its two colliders belong to now. Avian 0.8.0
 //! records a pair's bodies once, when its broad phase makes the pair, and never rewrites them when a
 //! collider's [`ColliderOf`] changes; a stale pair corrupts Avian's island lists. The game rehomes
 //! colliders when a turret launches.
@@ -221,7 +221,7 @@ mod tests {
         );
     }
 
-    /// UPSTREAM TRIPWIRE, inverted: it passes while Avian 0.7 keeps a pair's bodies from the
+    /// UPSTREAM TRIPWIRE, inverted: it passes while Avian 0.8.0 keeps a pair's bodies from the
     /// pair's birth. When it fails, Avian rewrites them on a `ColliderOf` change, and the rule
     /// ([`super::drop_stale_pairs`]) can go with its record,
     /// `upstream/avian-collider-rehome-stale-pair-bodies.md`.

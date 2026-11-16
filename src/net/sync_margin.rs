@@ -102,8 +102,8 @@ const RING_CAP: usize = Duration::from_secs(60)
     .as_nanos()
     .div_ceil(super::server::TICK.as_nanos()) as usize;
 
-/// Fact: lightyear_inputs 0.30.1 src/server.rs:59 sets its private future-input gate to 64;
-/// receive_input_message applies it at :370 before any buffer write. Shared by the input law
+/// Fact: lightyear_inputs 0.31.0 `MAX_INPUT_LOOKAHEAD_TICKS` in src/server.rs sets its future-input gate to 64;
+/// receive_input_message applies it before any buffer write. Shared by the input law
 /// and the server census; the census test drives the actual receive path on both sides.
 pub(super) const MAX_INPUT_LOOKAHEAD_TICKS: i32 = 64;
 
@@ -391,7 +391,7 @@ fn derived_input_sync(
     tick: Duration,
     rtt: Duration,
 ) -> SyncConfig {
-    // Lightyear 0.30.1 timeline/input.rs:599-630 adds RTT/2, a pipeline tick and both margins,
+    // Lightyear 0.31.0 timeline/input.rs adds RTT/2, a pipeline tick and both margins,
     // subtracting input delay; the sender re-adds that delay to the message's end tick.
     // Conservatively reserve the fixed delay too. Cover beyond the gate buys nothing:
     // receive_input_message drops those inputs by construction, before any buffer write.

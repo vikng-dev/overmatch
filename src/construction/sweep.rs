@@ -973,7 +973,7 @@ pub(super) mod tests {
         Arc::new(kind)
     }
 
-    /// The game's environment destruction: the server sweep retains a cast hit when Parry 0.27's
+    /// The game's environment destruction: the server sweep retains a cast hit when Parry 0.31.1's
     /// contact query cannot refine its touching pose; the retained witness must remain inward.
     #[test]
     fn a_cast_hit_survives_a_failed_contact_solve() {
@@ -1147,7 +1147,7 @@ pub(super) mod tests {
         )
         .unwrap()
         .unwrap();
-        // Parry 0.27 refines casts below 1e-5 s at the starting pose, not the impact pose.
+        // Parry 0.31.1 refines casts below 1e-5 s at the starting pose, not the impact pose.
         assert!(cast.time_of_impact > 0.0 && cast.time_of_impact < 1e-5);
         assert!(
             avian3d::parry::query::contact(

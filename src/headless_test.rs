@@ -161,7 +161,7 @@ pub(crate) fn headless_shell() -> App {
     let mut app = App::new();
     app.add_plugins(crate::gpu_less_default_plugins(None))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
-    // UPSTREAM WORKAROUND — bevy_image 0.19 panics (not errors) transcoding UASTC KTX2 when NO
+    // UPSTREAM WORKAROUND — bevy_image 0.20.1 panics (not errors) transcoding UASTC KTX2 when NO
     // block-compressed format is supported: it sizes the SOURCE slice from the DESTINATION
     // format's block geometry, so the Rgba8 fallback reads 4x too far. `backends: None` means no
     // wgpu device, so nothing inserts `CompressedImageFormatSupport` and bevy_gltf resolves
@@ -2373,7 +2373,7 @@ struct ScriptedPose {
 
 /// The observer is deliberately at the production `FireShell` seam: `rounds_fired > 0` proves
 /// only root bookkeeping, while this proves the forward script actually crossed the shell-spawn
-/// boundary. Bevy 0.19 applies `Commands::trigger` at its deferred barrier, where observers run.
+/// boundary. Bevy 0.20.1 applies `Commands::trigger` at its deferred barrier, where observers run.
 fn count_scripted_fire_shells(
     _: On<crate::ballistics::FireShell>,
     mut run: ResMut<ScriptedDeterminismRun>,

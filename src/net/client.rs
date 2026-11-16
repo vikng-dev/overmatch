@@ -257,13 +257,13 @@ fn recv_conditioner_mode(
     }
 }
 
-/// Resolution: input-buffer scheduling depth. The three-tick choice matches Lightyear 0.30.1's
+/// Resolution: input-buffer scheduling depth. The three-tick choice matches Lightyear 0.31.0's
 /// `balanced()` cap for jitter headroom; no minimum is derived for the authoritative timeline.
 /// Delay stays fixed so input-buffer end ticks advance once per local tick.
 /// See `src/net/tests/net_fire_release.rs`.
 pub(crate) const SHIPPING_INPUT_DELAY_TICKS: u16 = 3;
 
-/// Lightyear 0.30.1 saturates effective RTT ticks at `u16::MAX`. Cover that domain without
+/// Lightyear 0.31.0 saturates effective RTT ticks at `u16::MAX`. Cover that domain without
 /// overflowing its prediction-allowance sum; the client runs no gameplay prediction (ADR-0037).
 pub(crate) fn shipping_input_delay() -> InputDelayConfig {
     InputDelayConfig {
@@ -473,7 +473,7 @@ pub fn run() -> AppExit {
         app.insert_resource(harness::SimulateInput::new(
             script.expect("a headless client runs a script"),
         ));
-        // bevy_image 0.19 panics transcoding mipped UASTC KTX2 under `CompressedImageFormats::NONE`,
+        // bevy_image 0.20.1 panics transcoding mipped UASTC KTX2 under `CompressedImageFormats::NONE`,
         // then required-view loading aborts (MEASURED with a packaged client). `headless_test`
         // owns the mechanism and retirement tripwire for this shared GPU-less workaround.
         app.insert_resource(bevy::image::CompressedImageFormatSupport(
@@ -1369,7 +1369,7 @@ fn input_send_due(cadence: Res<InputSendCadence>) -> bool {
     cadence.due
 }
 
-/// Refuse inverted native-input encoder intervals. Lightyear 0.30.1's installed timeline-shift
+/// Refuse inverted native-input encoder intervals. Lightyear 0.31.0's installed timeline-shift
 /// observer moves buffer start/remote ticks together; clearing a future buffer would conceal a
 /// broken timeline invariant and discard authored input. The upstream encoder still mislabels
 /// inverted ranges (`src/net/tests/net_input_buffer_wrap.rs`).
@@ -3104,7 +3104,7 @@ mod tests {
     /// Catch-up is 0 for a fire tick at or ahead of now (clock skew or a malicious tick never
     /// rewinds the shell), the elapsed ticks up to `MAX_COSMETIC_CATCH_UP_TICKS` inclusive, and
     /// `None` beyond (a stale or corrupt fire is rejected, never a 10^6-step loop). Tick arithmetic
-    /// SATURATES rather than wrapping (lightyear 0.30's `Tick` is monotonic), so the extreme pairs
+    /// SATURATES rather than wrapping (lightyear 0.31.0's `Tick` is monotonic), so the extreme pairs
     /// land in the bounded arms — never a ~4-billion-tick catch-up loop. Fires if lightyear
     /// re-introduces wrapping ticks.
     #[test]

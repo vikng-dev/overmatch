@@ -3,7 +3,7 @@
 //! `build_from_input_buffer`, `update_buffer`, `predict`, `pop_keeping_last`) end to end and
 //! counts the ticks on which fire is committed off a value the player never authored for that tick.
 //!
-//! Pinned against lightyear 0.30, whose `InputBuffer` stores MATERIALIZED `Option` values (wire
+//! Pinned against lightyear 0.31.0, whose `InputBuffer` stores MATERIALIZED `Option` values (wire
 //! compression — `Compressed::SameAsPrecedent` — is re-derived at message-build time, never
 //! stored). So an `Absent` entry is a single-tick hole: it neither dead-ends the reads behind it
 //! nor travels through `pop` (upstream issue #1559 describes the stored-chain buffer where it
@@ -313,7 +313,7 @@ fn a_fabricated_gap_fill_is_indistinguishable_from_a_held_trigger() {
     );
 }
 
-/// What an `Absent` entry does in 0.30: it is a ONE-TICK hole, not an anchor. A stored `None` reads
+/// What an `Absent` entry does in 0.31.0: it is a ONE-TICK hole, not an anchor. A stored `None` reads
 /// as no input at exactly its own tick — `get` and `predict` both return `None` there, so
 /// lightyear's server `update_action_state` skips the apply and the `ActionState` holds the previous
 /// command for that one tick — while every stored tick behind it resolves on its own.

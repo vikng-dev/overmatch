@@ -2,7 +2,7 @@
 //! derived `min_delay` compensates for (the 2026-07-11 remote-tank "teleports along the driving
 //! path" fix; the derived law replaced the 100 ms pin on 2026-08-14).
 //!
-//! The mechanism being pinned, in lightyear 0.30 (`lightyear_interpolation` timeline.rs):
+//! The mechanism being pinned, in lightyear 0.31.0 (`lightyear_interpolation` timeline.rs):
 //! interpolated remotes render at `I = server_estimate − (delay + jitter_margin)` with
 //! `delay = max(remote_send_interval · send_interval_ratio, min_delay)`. Our server replicates
 //! every tick and therefore advertises `send_interval = 0` (`ReplicationMetadata` default), which

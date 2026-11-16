@@ -154,7 +154,7 @@ fn tracer_dressing(
 /// model when the round draws one, and the streak when its belt marks it a tracer and the round
 /// authors one. A round authoring neither flies, raycasts and lands unseen.
 ///
-/// Bevy 0.19 writes the entire spawn bundle before it fires `Add`, so the round read here is the
+/// Bevy 0.20.1 writes the entire spawn bundle before it fires `Add`, so the round read here is the
 /// complete one `on_fire_shell` authored — effects and path included.
 fn dress_projectile(
     add: On<Add<Projectile>>,

@@ -362,7 +362,7 @@ keep their existing jobs; no enclosing convex hull invents matter between the le
 At each target leaf, visit source siblings by lower entry time. Rotation-only envelopes
 translate with the COM, so a slab query gives a conservative entry time. Only an inward exact
 convex hit may prune later source leaves. Every occupied target joins the body's patch once;
-the earliest inward witness supplies its contact response. Parry 0.27's
+the earliest inward witness supplies its contact response. Parry 0.31.1's
 `CompositeShapeRef::cast_shape_nonlinear` returns the first geometric hit, which can be tangent
 and hide another leaf's later inward hit; its first-hit composite query therefore cannot own this
 patch. Each touched construction resolves its sources in one task, in body entity order, because
@@ -457,7 +457,7 @@ The demand is the peak force of the hull's impact on the patch plus its drive:
 landings use too (`contact_law::peak_force`): the witness chunk's material and volume-sphere
 radius on one side, the hull rigid and flat on the other (StandIn: no body data carries a hull's
 stiffness). DERIVED: the first inward surface witness supplies the contact mass
-`m_eff = 1 / (1/m + (r cross n) dot I_world^-1 (r cross n))`, as in Avian 0.7's
+`m_eff = 1 / (1/m + (r cross n) dot I_world^-1 (r cross n))`, as in Avian 0.8.0's
 `ContactNormalPart::generate` against a fixed target. The lever `r` starts at the moving centre
 of mass; inertia is in world coordinates at contact time, with Avian's locked-axis response.
 No physics step enters the demand. The inward drive adds to it: all Avian integrates before
@@ -552,9 +552,9 @@ contact tolerance band included; a body the sweep did not cast keeps every point
 coincidence with gravity reach, and its dependence on tick rate and substeps, is stated at
 `LOOSE_GAP_M`; retaining the pair through Avian's minimum speculative margin does not remove it.
 
-Avian's warm-start matcher treats unknown feature IDs as absent identities: those contacts
-match only by nearby anchors. The engine patch and its class witness are recorded in
-`vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`, "Unknown contact features".
+The game's warm-start matcher treats unknown feature IDs as absent identities: those contacts
+match only by nearby anchors. The fork hook and its class witnesses are recorded in
+`vendor/avian3d-0.8.0-overmatch/OVERMATCH_PATCH.md`, "Warm-start matching".
 
 A cut reads the touching body's own motion and drive, and a pusher reaches it through an
 estimated press from the last step's solver contacts with every body but standing construction.

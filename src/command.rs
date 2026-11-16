@@ -1367,7 +1367,7 @@ mod tests {
 
     /// Every system name registered in `RunFixedMainLoop`, read off the schedule GRAPH so no
     /// initialization or `update()` is needed (`Schedule::systems` requires a run first; the graph
-    /// holds the nodes from `add_systems` onward — vendored bevy_ecs-0.19.0 `ScheduleGraph`).
+    /// holds the nodes from `add_systems` onward — bevy_ecs-0.20.1 `ScheduleGraph`).
     fn run_fixed_main_loop_systems(app: &App) -> Vec<String> {
         let schedules = app.world().resource::<bevy::ecs::schedule::Schedules>();
         schedules

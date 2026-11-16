@@ -80,18 +80,18 @@ const SETTINGS_VERSION: u32 = 1;
 /// crispness and reach. The shipped envelope spends only 0.30 ms of that distance axis
 /// ([`ShadowDistance`]); `look::SettingsLook::shadow_first_cascade_far_bound_m` keeps the picture crisp at 3 cascades.
 ///
-/// Runtime count changes require registry bevy_light >= 0.19.1: PR #24807 resizes every pooled
-/// thread slot before each view's parallel walk. Stock 0.19.0 can panic on growth; shrinking is
-/// benign. Mechanism and validation: `upstream/bevy-cascade-count-stale-local-parallel.md`.
+/// Bevy 0.20.1 `check_dir_light_mesh_visibility` resizes every pooled thread slot before
+/// each view's parallel walk, so runtime cascade-count changes cannot leave stale lengths.
+/// Mechanism: `upstream/bevy-cascade-count-stale-local-parallel.md`.
 ///
 /// # Runtime-length audit
 ///
 /// Bevy's per-frame `Local`s outlive frames: config-sized buffers must resize even on idle threads.
-/// Audit of the settings [`apply_settings`] writes against Bevy 0.19's pooled `Local<Parallel<…>>`:
+/// Audit of the settings [`apply_settings`] writes against Bevy 0.20.1's pooled `Local<Parallel<…>>`:
 ///
 /// | Site | Element | Positionally indexed by a config length? |
 /// |---|---|---|
-/// | `bevy_light` `check_dir_light_mesh_visibility` | `Vec<Vec<Entity>>` | yes — cascade count; every slot resized since 0.19.1 |
+/// | `bevy_light` `check_dir_light_mesh_visibility` | `Vec<Vec<Entity>>` | yes — cascade count; every slot resized before use |
 /// | same system, `defer_visible_entities_queue` | `Vec<Entity>` | no (flat append) |
 /// | `bevy_light` point/spot visibility | `[Vec<Entity>; 6]`, `Vec<Entity>` | no (cubemap faces are a fixed 6) |
 /// | `bevy_camera` visibility + ranges | `TypeIdMap<Vec<Entity>>`, `Vec<(Entity, u32)>` | no (keyed / flat) |
@@ -108,7 +108,7 @@ const SETTINGS_VERSION: u32 = 1;
 /// * **Bloom** — `Bloom` is an `ExtractComponent`, re-extracted every frame. `prepare_bloom_textures`
 ///   takes the mip chain from `TextureCache` by a descriptor built from that frame's
 ///   `max_mip_dimension`, and `prepare_bloom_bind_groups` sizes its bind groups from that frame's
-///   `BloomTexture::mip_count`; nothing on the path is a `Local` (bevy_post_process 0.19.1
+///   `BloomTexture::mip_count`; nothing on the path is a `Local` (bevy_post_process 0.20.1
 ///   `bloom/mod.rs`).
 /// * **Render scale** — `MainPassResolutionOverride` is reconciled onto the render-world view every
 ///   frame from an extracted resource, and it feeds only per-frame values: the pass scissor rect and
@@ -119,7 +119,7 @@ pub(crate) const SHADOW_CASCADES: usize = 3;
 
 /// Directional shadow cascade count at fixed [`ShadowResolution`] and [`ShadowDistance`]. Each
 /// cascade costs a render pass; fewer alias more near the camera. MEASURED M4 cost is owned by
-/// [`SHADOW_CASCADES`], whose doc also explains the bevy_light >= 0.19.1 runtime-growth requirement.
+/// [`SHADOW_CASCADES`], whose doc also explains pooled-buffer resizing.
 ///
 /// No `Off` (owned by [`ShadowDistance::Off`]) or `1`: a single full-distance cascade falls below
 /// the offered quality floor; 2 is the budget rung.
@@ -373,7 +373,7 @@ impl MsaaLevel {
 /// **No `Off`.** Tracers and muzzle flashes must stay visible under every graphics option (#159's
 /// never-list), and they are drawn through this glow; LOW keeps every halo and draws it coarser.
 ///
-/// The cost, DERIVED from bevy_post_process 0.19.1 `prepare_bloom_textures`: the chain's top
+/// The cost, DERIVED from bevy_post_process 0.20.1 `prepare_bloom_textures`: the chain's top
 /// texture is `max_mip_dimension` texels tall (and the view's aspect wide), and the chain has
 /// `ilog2(max_mip_dimension) - 1` mips, so LOW's 256 holds a quarter of NORMAL's top-level texels
 /// and one mip fewer, and both chains end at the same 4-texel-tall mip, so the widest halo is the
@@ -530,7 +530,7 @@ impl VsyncMode {
 /// Surface capabilities from `probe`. Only [`PresentCaps::Reported`] is evidence a rung is absent:
 /// normalizing on a failed probe would permanently replace a valid stored FAST/OFF with ON.
 ///
-/// Surface creation can fail; wgpu 29 also returns an empty present-mode list on a failed query or
+/// Surface creation can fail; wgpu 30 also returns an empty present-mode list on a failed query or
 /// an adapter-incompatible surface. A presentable surface reports at least `Fifo`, so `probe` maps
 /// both failures to [`PresentCaps::Unavailable`].
 ///
@@ -614,7 +614,7 @@ impl PresentCaps {
 ///
 /// **The monitor rides THIS field, not `Window::position`** — see [`DisplaySelection`]'s fullscreen
 /// section. A fullscreen window ignores `set_outer_position`, and bevy picks a borderless window's
-/// monitor out of `Window::mode` alone (vendored bevy_winit-0.19.0/src/system.rs:326-334), so the
+/// monitor out of `Window::mode` alone (bevy_winit-0.20.1/src/system.rs), so the
 /// display row has to reach fullscreen through here or not at all.
 ///
 /// **The row REFLECTS the OS, it does not own it** — see `observe_window_placement`: the player can
@@ -889,7 +889,7 @@ impl TrackPrintRange {
 ///   [`WindowModeSetting::to_window_mode`].
 ///
 /// Fullscreen ignores `set_outer_position`: Bevy resolves its monitor from `Window::mode` alone,
-/// never the adjacent position (bevy_winit-0.19.1/src/system.rs:326-334). A fullscreen display
+/// never the adjacent position (bevy_winit-0.20.1/src/system.rs). A fullscreen display
 /// choice written only into position therefore leaves the window on `Current`'s fallback monitor.
 ///
 /// The two are applied differently on purpose, and [`apply_settings`] states which is which:
@@ -900,16 +900,16 @@ impl TrackPrintRange {
 /// # The boot window must NOT name an indexed display, and that is not an optimisation
 ///
 /// `Index` cannot be resolved when the window is CREATED. Bevy creates the primary window from
-/// `resumed` (vendored bevy_winit-0.19.0/src/state.rs:173-181) but only populates `WinitMonitors`
+/// `resumed` (bevy_winit-0.20.1/src/state.rs) but only populates `WinitMonitors`
 /// from `about_to_wait` (state.rs:458-464), so `select_monitor`'s `Index(n) => monitors.nth(n)`
-/// (bevy_winit-0.19.0/src/winit_windows.rs:522) sees an EMPTY list and answers `None`. Creation
+/// (bevy_winit-0.20.1/src/winit_windows.rs) sees an EMPTY list and answers `None`. Creation
 /// then goes fullscreen on `Fullscreen::Borderless(None)` (winit_windows.rs:73-86) — the wrong
 /// display — and `winit_window_position` likewise warns and declines to place a windowed window
 /// (winit_windows.rs:493-497).
 ///
 /// **The trap is what happens NEXT, and it is why the boot mode is deliberately weaker than the
 /// stored setting.** Bevy caches the window it was ASKED for, verbatim and unresolved:
-/// `CachedWindow(window.clone())` (bevy_winit-0.19.0/src/system.rs:88). Reissuing fullscreen is
+/// `CachedWindow(window.clone())` (bevy_winit-0.20.1/src/system.rs). Reissuing fullscreen is
 /// then gated on the component DIFFERING from that cache — `Changed<Window>` plus
 /// `if window.mode != cache.mode` (system.rs:305-326). So a boot window described with
 /// `BorderlessFullscreen(Index(1))` produces a cache saying `Index(1)`, and when [`apply_settings`]
@@ -1010,7 +1010,7 @@ impl DisplaySelection {
     ///
     /// Prefer `MonitorSelection::Entity` for a marked primary: [`AttachedDisplays::primary`] can be
     /// stale, but `find_entity` resolves any attached monitor deterministically
-    /// (bevy_winit-0.19.0/src/winit_windows.rs:523, `winit_monitors.rs:29-35`), bypassing Wayland
+    /// (bevy_winit-0.20.1/src/winit_windows.rs, `winit_monitors.rs`), bypassing Wayland
     /// `primary_monitor()`'s `None`. Emit bare `Primary` only while nothing is known.
     pub(crate) fn monitor_on(self, displays: AttachedDisplays) -> Option<MonitorSelection> {
         match self.resolve(displays) {
@@ -1028,8 +1028,8 @@ impl DisplaySelection {
 
     /// The `Window::position` this rung asks for on `displays`. `Automatic` for
     /// [`DisplaySelection::Auto`], which bevy answers with "the window manager handles it" and no
-    /// move at all (`winit_window_position`, vendored
-    /// bevy_winit-0.19.0/src/winit_windows.rs:458-461).
+    /// move at all (`winit_window_position`,
+    /// bevy_winit-0.20.1/src/winit_windows.rs).
     pub(crate) fn window_position_on(self, displays: AttachedDisplays) -> WindowPosition {
         self.monitor_on(displays)
             .map_or(WindowPosition::Automatic, WindowPosition::Centered)
@@ -1045,7 +1045,7 @@ impl DisplaySelection {
     ///   monitor as a primary one", and then, verbatim: "**Wayland / Web:** Always returns `None`"
     ///   (vendored winit-0.30.13/src/event_loop.rs:405-411). Bevy hands `MonitorSelection::Primary`
     ///   straight to that optional handle (`Primary => primary_monitor`,
-    ///   bevy_winit-0.19.0/src/winit_windows.rs:521), so on Wayland both the explicit PRIMARY rung
+    ///   bevy_winit-0.20.1/src/winit_windows.rs), so on Wayland both the explicit PRIMARY rung
     ///   AND the unplugged-display fallback above would have resolved to `None` — a warning and a
     ///   window that never moves. `Index(0)` is the documented substitute: it always exists when
     ///   anything is attached, and it is what "the first display" means on a stack that refuses to
@@ -1053,7 +1053,7 @@ impl DisplaySelection {
     ///
     /// [`AttachedDisplays::primary`] is what makes that decidable rather than a `cfg`: bevy inserts
     /// `PrimaryMonitor` only on the entity whose handle matched `primary_monitor()`
-    /// (bevy_winit-0.19.0/src/system.rs:217-219), so "monitors exist and none is marked" IS winit's
+    /// (bevy_winit-0.20.1/src/system.rs), so "monitors exist and none is marked" IS winit's
     /// `None`, observed rather than guessed at per platform. It is a LAGGING observation, not a live
     /// one — see that field for the hot-plug limitation and what [`DisplaySelection::monitor_on`]
     /// does about it.
@@ -1123,7 +1123,7 @@ pub(crate) struct AttachedDisplays {
     /// `create_monitors` skips known monitors before inserting the marker and never reassigns or
     /// removes it. Only spawning a newly seen primary or despawning a removed monitor changes it.
     /// Hot-plug can therefore leave the new primary unmarked or an obsolete primary marked.
-    /// Source: bevy_winit-0.19.1/src/system.rs:184-190,217-236 (`create_monitors`).
+    /// Source: bevy_winit-0.20.1/src/system.rs (`create_monitors`).
     ///
     /// [`DisplaySelection::monitor_on`] emits `MonitorSelection::Entity` so even a stale marker names
     /// a real attached display, avoiding Wayland's unresolvable `Primary` request. After the marked
@@ -1461,7 +1461,7 @@ pub(crate) struct Settings {
     pub(crate) shadow_distance: ShadowDistance,
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) shadow_resolution: ShadowResolution,
-    /// The cascade count — runtime changes require bevy_light >= 0.19.1; see
+    /// The cascade count; for runtime buffer resizing see
     /// [`ShadowCascades`] and [`SHADOW_CASCADES`].
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) shadow_cascades: ShadowCascades,

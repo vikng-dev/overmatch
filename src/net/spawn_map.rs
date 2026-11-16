@@ -157,7 +157,7 @@ struct SpawnMap {
 /// The full-screen backdrop + its centred square image panel. The panel's px rect is the ONE thing
 /// the click math needs, so it is written by [`size_spawn_map`] rather than inferred from layout.
 ///
-/// **The panel node carries NO border and NO padding, deliberately.** Bevy 0.19's `ImageNode` draws
+/// **The panel node carries NO border and NO padding, deliberately.** Bevy 0.20.1's `ImageNode` draws
 /// into the node's CONTENT box (`VisualBox::ContentBox`) and absolutely-positioned children are laid
 /// out against the PADDING box, while `Node::width` under the default `BoxSizing::BorderBox` names the
 /// OUTER box. Put a 2 px border on this node and those three boxes stop coinciding: the recorded rect

@@ -69,7 +69,7 @@ pub(crate) fn plugin(app: &mut App) {
         .add_systems(PreStartup, require_fonts);
 }
 
-/// Bevy 0.19's FontLoader wraps bytes without decoding them. Admit format and glyph coverage
+/// Bevy 0.20.1's FontLoader wraps bytes without decoding them. Admit format and glyph coverage
 /// synchronously, then let the shared presentation gate wait for both asynchronous handles.
 fn require_fonts(fonts: Res<UiFonts>, mut required: ResMut<crate::assets::PresentationLoads>) {
     let root = crate::assets::asset_root();
@@ -162,7 +162,7 @@ mod tests {
         assert_ne!(fonts.hud.id(), fonts.body.id());
     }
 
-    /// A loader's Loaded state alone cannot prove drawable text in Bevy 0.19. Corrupt or
+    /// A loader's Loaded state alone cannot prove drawable text in Bevy 0.20.1. Corrupt or
     /// truncated bytes must refuse at the font gate, naming the asset and its repair.
     #[test]
     fn font_admission_refuses_corrupt_bytes_and_checks_the_bundled_coverage() {

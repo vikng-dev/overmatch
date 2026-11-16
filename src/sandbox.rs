@@ -423,8 +423,8 @@ fn spawn_camera(mut commands: Commands) {
     // armour overlay — otherwise the overlay's opaque plates (order 1) would paint over UI carried
     // by the order-0 main camera. It renders no
     // 3D itself (its layer holds no geometry; gizmos default to layer 0) and doesn't clear the frame,
-    // so it only composites the UI. (bevy_camera 0.19: higher `order` renders later/on top; bevy_ui
-    // 0.19: UI without an explicit target goes to the `IsDefaultUiCamera`.)
+    // so it only composites the UI. (bevy_camera 0.20.1: higher `order` renders later/on top; bevy_ui
+    // 0.20.1: UI without an explicit target goes to the `IsDefaultUiCamera`.)
     commands.spawn((
         Camera3d::default(),
         Camera {

@@ -116,7 +116,7 @@ fn reset_tick_gaps(_connected: On<Add<Connected>>, mut gaps: ResMut<ServerTickGa
     *gaps = default();
 }
 
-/// lightyear_transport 0.30.1's `TransportPlugin::buffer_receive` emits the packet header's tick
+/// lightyear_transport 0.31.0's `TransportPlugin::buffer_receive` emits the packet header's tick
 /// through `PacketReceived` in PreUpdate. Sample receipt, never a locally extrapolated timeline.
 fn record_tick_arrival(
     packet: On<PacketReceived>,

@@ -58,7 +58,7 @@ motion/impulse and angular-error contract; it cannot reuse the traction-only pre
 ## Continuous delay acquisition
 
 The desired headroom is `H = spread + tick`; applied headroom `A` follows it in elapsed time.
-Let `M = 1 + 2*(speedup_factor - 1)`, the Lightyear 0.30.1 controller's maximum speed, and
+Let `M = 1 + 2*(speedup_factor - 1)`, the Lightyear 0.31.0 controller's maximum speed, and
 `B = min(M - 1, 1/M)`. Each frame applies a signed change `dA`, at most `B*dt` towards `H`,
 and advances the cursor at `controller_rate - dA/dt`. Before synchronization the writer sets
 `min_delay = rtt/2 + A`. Thus `dA` cancels in the controller's clock error, however long acquisition

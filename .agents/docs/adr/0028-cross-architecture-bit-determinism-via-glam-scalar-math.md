@@ -1,9 +1,9 @@
 # Cross-architecture bit determinism via glam scalar-math
 
-> **Status: accepted; cross-target bitprobe validated 2026-07-21; re-land GPU boot pending.**
+> **Status: accepted. The cross-target measurement below is from 2026-07-21, on the earlier dependency graph.**
 
 The simulation enables `glam/scalar-math` workspace-wide and keeps the Bevy/Avian math graph on
-one pinned glam 0.32.1 instance. This removes an architecture-specific SIMD reduction order from
+one pinned glam 0.33.12 instance. This removes an architecture-specific SIMD reduction order from
 simulation math while preserving server authority, state replication, and the divergence doctrine
 in [[0015-divergence-doctrine]].
 
@@ -34,11 +34,11 @@ amplified the seed chaotically into the later force, grip, and transmission dive
 ## Decision
 
 Enable `glam/scalar-math` through the workspace's direct glam dependency and unify it with
-Bevy/Avian on glam 0.32.1. Cargo feature unification then selects glam's scalar implementation for
-the complete simulation math graph on every target. Keep the narrow vendored bevy_reflect 0.19.0
-compatibility patch required because scalar glam does not provide serde implementations for
-`BVec3A` and `BVec4A`; the patch omits only those unsupported serde registrations. Also keep the
-vendored bevy_pbr 0.19.0 `MeshUniform` alignment patch described in the dated addendum below.
+Bevy/Avian on glam 0.33.12. Cargo feature unification selects glam's scalar implementation for
+the complete simulation math graph. This version supplies scalar `BVec3A`/`BVec4A` serde, so
+`bevy_reflect` needs no compatibility fork. Bevy 0.20.1 allocates GPU-built mesh uniforms by
+shader stride (`UninitBufferVec::new`) and serializes CPU-built uniforms through Encase
+(`BufferVec::push`); `MeshUniform` needs no Rust-alignment patch.
 
 Rejected alternatives:
 
@@ -59,9 +59,9 @@ Rejected alternatives:
   payloads `IDENTICAL` for all 3,072 ticks across all seven seams, macOS aarch64 vs Linux x86_64.
 - The cost is negligible in the validating measurement. The full probe including dump took
   MEASURED 18.2 s with scalar math vs 20.3 s with SIMD; the difference is within measurement noise.
-- The vendored bevy_reflect and bevy_pbr patches are explicit upgrade surfaces. Any Bevy or glam
-  upgrade must re-evaluate both the missing scalar `BVec3A`/`BVec4A` serde registrations and the
-  `MeshUniform` Rust-size-versus-shader-stride workaround.
+- `deny.toml` and `tests::determinism_deps` refuse a second glam instance, which would escape
+  the scalar feature pin. GPU data copied as Rust bytes must still match its shader layout;
+  `tests::gpu_layout` guards those uploads.
 - `scripts/bitprobe` is the verification instrument for cross-target raw-bit behavior. Dependency,
   compiler, or profile changes touching math or physics must rerun the macOS-aarch64/Linux-x86_64
   pair before merge.
@@ -80,12 +80,11 @@ incompatibility.
 
 The decision is re-landed with a vendored bevy_pbr 0.19.0 workaround that adds
 `#[repr(C, align(16))]` to `MeshUniform`, restoring DERIVED size 176 with the same offsets in scalar
-and SIMD builds. A no-GPU project test now asserts Rust size equals Encase minimum size for the
+and SIMD builds. At that re-land, a no-GPU project test asserted Rust size equals Encase minimum size for the
 complete publicly reachable Rust-repr GPU-upload inventory and pins the `MeshUniform` offsets; local
 VFX uniform canaries pin `VfxParams` and `TrailParams` too. The generic upstream defect and the
 principled array-stride fix are recorded in
-`upstream/bevy-uninitbuffervec-rust-size-vs-shader-stride.md` as DRAFTED, NOT FILED. The owner's
-windowed Metal boot remains the post-land runtime validation.
+`upstream/bevy-uninitbuffervec-rust-size-vs-shader-stride.md` as DRAFTED, NOT FILED. The re-land left the owner's windowed Metal boot as its post-land runtime validation.
 
 ## Related
 

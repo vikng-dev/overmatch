@@ -266,7 +266,7 @@ impl Chain {
     /// per level with rung 0 (the source primitive) first.
     ///
     /// Each range ends exactly where the next begins, and `VisibilityRange::is_visible_at_all` is
-    /// half-open `[start, end)` (bevy_camera 0.19 `visibility/range.rs`), so every distance in
+    /// half-open `[start, end)` (bevy_camera 0.20.1 `visibility/range.rs`), so every distance in
     /// `[0, ∞)` is owned by exactly one level — no gap, no double-draw.
     ///
     /// `abrupt`, so `use_aabb` stays false and the distance is measured to the entity ORIGIN, which

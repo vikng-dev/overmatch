@@ -122,7 +122,7 @@ fn await_panic_exit() {
 }
 
 /// The largest `OVERMATCH_CAPACITY` accepted: lightyear netcode's own default client ceiling, 256 in
-/// 0.30.1.
+/// 0.31.0.
 const MAX_CAPACITY: u32 = 256;
 
 const SERVER_ID: &str = "OVERMATCH_SERVER_ID";

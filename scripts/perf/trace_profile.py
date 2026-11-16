@@ -43,7 +43,7 @@ from collections.abc import Iterator
 from typing import NamedTuple
 
 NAME_FIELD = re.compile(r'^(system|system_commands|schedule): name=(.*)$')
-# The phases tracing-chrome 0.7's Threaded style (bevy_log 0.19's chrome layer) writes besides B
+# The phases tracing-chrome 0.7's Threaded style (bevy_log 0.20.1's chrome layer) writes besides B
 # and E, which carry no span time; any other phase is refused.
 IGNORED_PHASES = {"i": "an instant event (a log line)", "M": "a thread's name"}
 WINDOW_REPAIR = ('tick-trace.sh writes it; rerun the wrapper, or write {"w0_us": <start>, '

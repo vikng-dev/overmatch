@@ -12,7 +12,7 @@
 //!   virtual time clamps a frame that long — so the give-up lands within [`gone_frame_limit`] frames
 //!   only on the real clock.
 //!
-//!   Either way the match's replicas leave with its link: lightyear 0.30.1 despawns every
+//!   Either way the match's replicas leave with its link: lightyear 0.31.0 despawns every
 //!   replicated entity on the client when the link's `Connected` is removed, unless the receiver
 //!   is `Persistent` (`lightyear_replication` client.rs, `on_replication_disconnect`), so a client
 //!   returning to the lobby has no replica to clean up. Both exits replicate one tank root first

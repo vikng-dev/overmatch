@@ -4,9 +4,9 @@
 //! Raw deltas preserve tail stutter (p95/p99/worst frame); `scripts/perf/analyze.py` computes percentiles.
 //!
 //! `frame_ms` uses [`sample`]'s monotonic `Instant`, not the `Time<Real>` delta read by bevy's
-//! diagnostic (vendored bevy_diagnostic-0.19.1, `frame_time_diagnostics_plugin.rs`, `diagnostic_system`).
+//! diagnostic (bevy_diagnostic-0.20.1, `frame_time_diagnostics_plugin.rs`, `diagnostic_system`).
 //! Manual `TimeUpdateStrategy` fixes that delta to the flight step regardless of cost, as in the
-//! armour sandbox (vendored bevy_time-0.19.1/src/lib.rs, `time_system`). DERIVED from source, not
+//! armour sandbox (bevy_time-0.20.1/src/lib.rs, `time_system`). DERIVED from source, not
 //! measured side by side: under the default strategy both read the loop period at different points
 //! (`Time<Real>` at the render world's `send_time`, this recorder in `Update`).
 //!
@@ -27,7 +27,7 @@
 //! therefore gate on these additional signals:
 //!
 //! * **Occlusion transitions:** `WindowOccluded` carries winit's `occluded: bool` when minimized,
-//!   hidden or fully covered (vendored bevy_window-0.19.0/src/event.rs). `{t, occluded}` rows share
+//!   hidden or fully covered (bevy_window-0.20.1/src/event.rs). `{t, occluded}` rows share
 //!   the frames' stream and clock; logs use the stable token `frame_cost: presentation occluded=`.
 //!   Any occluded interval overlapping the post-warmup measurement window fails analysis.
 //!
@@ -52,8 +52,8 @@
 //! panel versus 12.057 ms on the built-in 120 Hz ProMotion panel. The recorder therefore:
 //!
 //! * **parks** the primary window at [`PARK_AT`] once, at startup. The coordinate space is global
-//!   physical pixels whose origin is the top-left of the MAIN display (vendored
-//!   bevy_winit-0.19.0/src/winit_windows.rs, `winit_window_position`: `WindowPosition::At` is
+//!   physical pixels whose origin is the top-left of the MAIN display (
+//!   bevy_winit-0.20.1/src/winit_windows.rs, `winit_window_position`: `WindowPosition::At` is
 //!   handed to winit as a `PhysicalPosition` unchanged), so a small positive point lands on the
 //!   primary panel by construction whatever else is plugged in;
 //! * **records** `{t, monitor, refresh_mhz, primary}` on first resolution and changes, sharing the
@@ -73,7 +73,7 @@
 //! # The surface size
 //!
 //! Refresh alone cannot prove pixel count. Bevy's default is 1280x720 logical
-//! (vendored bevy_window-0.19.0/src/window.rs, `WindowResolution::default`: 1280x720 physical at
+//! (bevy_window-0.20.1/src/window.rs, `WindowResolution::default`: 1280x720 physical at
 //! scale 1.0). ARZOPA's scale 1.0 gives that surface; built-in scale 2.0 gives the reference
 //! datasets' 2560x1440, four times the pixels (DERIVED). MEASURED: m350-2 read 4.19 ms on the
 //! external panel versus 11.83 ms for identical code on the built-in: about three times too fast
@@ -287,8 +287,8 @@ fn park_and_pin(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
 }
 
 /// Re-pin on scale changes: `WindowResolution` stores physical size separately from scale.
-/// `ScaleFactorChanged` writes only scale (`react_to_scale_factor_change`, vendored
-/// bevy_winit-0.19.0/src/state.rs); size follows only on `Resized`. A scale-1.0 → 2.0 park can leave
+/// `ScaleFactorChanged` writes only scale (`react_to_scale_factor_change`,
+/// bevy_winit-0.20.1/src/state.rs); size follows only on `Resized`. A scale-1.0 → 2.0 park can leave
 /// 1280x720 physical at scale 2: half the pinned logical size and a quarter of reference pixels
 /// (DERIVED). Trigger on scale, not size mismatch, to bound requests by monitor moves rather than
 /// retrying every second against an OS refusing resize.
@@ -351,7 +351,7 @@ fn raise_when_occluded(
     let mut window = windows.single_mut().expect(
         "the frame-cost recorder is mounted on a windowed root with exactly one primary window",
     );
-    // Only false -> true calls `focus_window()` (vendored bevy_winit-0.19.0/src/system.rs,
+    // Only false -> true calls `focus_window()` (bevy_winit-0.20.1/src/system.rs,
     // `changed_windows`); another app holding focus leaves false, allowing a new request per poll.
     if !window.focused {
         warn!("frame_cost: window occluded at t={t:.3}s — asking for focus back");
@@ -466,7 +466,7 @@ struct MonitorFacts {
 
 /// Poll winit's `current_monitor()` for the module's presenting-monitor evidence, rather than
 /// `OnMonitor`: it uses the same call but only through `changed_windows`, filtered by
-/// `Changed<Window>` in `Last` (vendored bevy_winit-0.19.0/src/lib.rs and src/system.rs).
+/// `Changed<Window>` in `Last` (bevy_winit-0.20.1/src/lib.rs and src/system.rs).
 /// A hands-off capture can write `Window` only at startup park, before mapping, get None, then
 /// never trigger another query. MEASURED: zero monitor rows for a whole condition, rejected by
 /// analysis. Polling avoids depending on query timing.
