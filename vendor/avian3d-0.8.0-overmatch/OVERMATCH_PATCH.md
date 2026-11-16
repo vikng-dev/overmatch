@@ -237,17 +237,30 @@ is at least as large as the contact tolerance"). Witness:
 `stationary_contacts_keep_the_configured_minimum_speculative_margin` in
 `src/tests/avian_island_sleep.rs`, green on this fork, which carries no line for it (MEASURED).
 
-## Serial small loops: dropped
+## Serial small loops: upstream body floors, contact-preparation floor kept
 
-The 0.7 fork ran a few parallel loops serially below measured body and manifold counts. Avian
-0.8.0 has its own floor (upstream #1035: `MIN_PAR_ITER_ENTITIES`, 4,096 matched entities); the 0.7
-thresholds are not carried and not re-measured. Every per-body loop is serial under either at the
-game's populations (MEASURED: awake bodies peak near 160 in the scheduled collapse). Two sites
-differ from 0.7 there. Collider transform propagation, which #1035 floors, is restored (next
-section). Contact preparation always splits over colours, where the 0.7 fork ran serially through
-561 manifolds: `prepare_contact_constraints` 6.0 → 13.0 µs per tick (MEASURED, the tick trace's
-combat window, 30 tanks, before and after the upgrade); not restored. Continuous collision's
-per-body loop is under the same floor and unmeasured.
+Subject: the game's server physics step, game state only.
+
+Avian 0.8.0 supplies the per-body floor (upstream #1035: `MIN_PAR_ITER_ENTITIES`, 4,096 matched
+entities). The 0.7 per-body thresholds are not carried or re-measured. Every per-body loop is
+serial under either at the game's recorded populations (MEASURED: awake bodies peak near 160 in
+the scheduled collapse). Collider transform propagation uses the dispatch described below;
+continuous collision's per-body floor remains unmeasured.
+
+`prepare_contact_constraints` counts active manifold handles before splitting over colors. Its
+`Resolution` floor is serial through 561 manifolds, parallel above that when enough colors exist.
+MEASURED in the 0.7 fork's "Serial small loops" crossover record: on two compute threads, parallel
+minus serial was +1.1 µs at 561 manifolds and -3.9 µs at 723 (medians of five runs; each used 192
+settling steps and 256 measured steps). Serial won every run at 561; parallel won every run at
+723. Between those measured populations the old policy used the parallel path.
+
+The cutover retained color dispatch but lost this floor. MEASURED in the supplied before/after
+tick trace, the combat window with 30 tanks: preparation rose from 6.0 to 13.0 µs per tick. The
+small-population dispatch cost therefore still warrants the floor; the new crossover and any
+speedup from restoring it are unmeasured here. No timing run was made.
+
+Each color writes only its own constraints, preserving its manifold-handle order on either path.
+Guard: `src/tests/avian_contact_reduction.rs::the_constraint_graph_holds_one_constraint_per_kept_manifold`.
 
 ## Collider transform propagation on the compute pool (`src/collision/collider/collider_transform/plugin.rs`): kept
 
