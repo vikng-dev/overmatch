@@ -252,20 +252,11 @@ impl RawPack {
 mod tests {
     use super::*;
 
-    /// THE SHIPPED SURFACE IS ADMITTED, and the blend arrays are cut in its layer order. The shader
-    /// reads array slice `i` as mask channel `i`, whose scale and ground are layer `i` here, so a
-    /// script cutting another order draws every layer at another's size over another's ground.
+    /// THE SHIPPED SURFACE IS ADMITTED, and every pack it names has the folder whose `cc.txt`
+    /// carries the pack's attribution and authored size.
     #[test]
-    fn the_shipped_surface_is_admitted_and_cut_in_its_layer_order() {
+    fn the_shipped_surface_is_admitted_with_its_packs_attributed() {
         let surface = surface();
-        let script = include_str!("../scripts/encode-terrain-ktx2.sh");
-        let cut = script
-            .lines()
-            .find_map(|line| line.strip_prefix("LAYER_PACKS=\""))
-            .and_then(|rest| rest.strip_suffix('"'))
-            .expect("the encode script declares LAYER_PACKS=\"…\"");
-        let layers: Vec<&str> = surface.layers.iter().map(|l| l.pack.as_str()).collect();
-        assert_eq!(cut.split_whitespace().collect::<Vec<_>>(), layers);
         for pack in std::iter::once(&surface.base).chain(&surface.layers) {
             let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("assets/terrain")

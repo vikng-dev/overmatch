@@ -355,10 +355,9 @@ pub(crate) mod relief_tests;
 mod tests {
     use super::*;
 
-    /// THE BINDING THIS SLICE STANDS ON. The three layer maps ship as KTX2 2D ARRAYS, one slice
-    /// per pack, because nine separate bindings do not fit beside bevy's PBR bind group. This runs
-    /// the shipped bytes through bevy's OWN loader and pins what the material declares: three
-    /// slices, 2048² each, a full mip chain, and a `D2Array` texture view — which is what makes
+    /// THE BINDING THIS SLICE STANDS ON. This runs the shipped layer arrays through bevy's OWN
+    /// loader and pins what the material declares: one slice per layer, 2048² each, a full mip
+    /// chain, and a `D2Array` texture view — which is what makes
     /// `#[texture(_, dimension = "2d_array")]` legal. A pack re-cut without `-tex_type 2darray`
     /// loads as a plain 2D texture and the bind group would fail at pipeline creation, on a
     /// machine with a window, at run time.

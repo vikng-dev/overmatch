@@ -14,23 +14,22 @@
 # whatever is already there. Everything is CC0 — see each pack's `cc.txt` in the asset folder.
 #
 #   usage: scripts/encode-terrain-ktx2.sh [pack | blend ...]   (default: everything below)
-#   needs: basisu (brew install basis_universal), magick (only for 16-bit source normalization)
+#   needs: basisu (brew install basis_universal), magick (only for 16-bit source normalization),
+#          python3 (reads the ground's packs from `assets/terrain/surface.ron`)
 #
 # TWO CUTS, ONE CODEC POLICY. A pack named alone is cut as three standalone maps into its own
-# folder. `blend` cuts the SAME three map types as 2D ARRAYS whose layers are $LAYER_PACKS in
-# order — one array per map type, because the blend material's texture slots are the constraint:
+# folder. `blend` cuts the SAME three map types as 2D ARRAYS whose layers are the surface's layers
+# in order — one array per map type, because the blend material's texture slots are the constraint:
 # nine separate bindings do not fit beside bevy's PBR bind group, three array bindings do. Naming
 # any layer pack selects `blend`, since a layer cannot be cut on its own.
 #
-#   pack                  albedo file  res   source
-#   coast_sand_rocks_02   diff         4096  4k  base — `assets/terrain/surface.ron`
-#   dirt_aerial_03        diff         2048  4k  blend layer 0 (recesses)
-#   coast_sand_05         diff         2048  4k  blend layer 1 (slopes)
-#   aerial_mud_1          diff         2048  4k  blend layer 2 (lowlands)
-#   brown_mud_leaves_01   diff         2048  4k  staged — nothing loads it
-#   rocks_ground_02       col          2048  4k  staged — nothing loads it
-#   brick_wall_006        diff         1024  2k  the primary construction lane (visuals.ron "brick")
-#   dark_planks           diff         1024  2k  the secondary construction lane (visuals.ron "dark_planks")
+#   pack                                res   source
+#   the surface's base                  4096  4k
+#   each of the surface's layers        2048  4k  one slice of the blend arrays
+#   brick_wall_006                      1024  2k  the primary construction lane (visuals.ron "brick")
+#   dark_planks                         1024  2k  the secondary construction lane (visuals.ron "dark_planks")
+#
+# Every pack's albedo ships as Poly Haven's `diff`.
 #
 # A construction pack is cut at 1024², from 2k masters: a house face spans metres, not a horizon, and
 # the LOW preset's GPU is a GTX 1650-class part. Two master texels per shipped texel is all the
@@ -41,17 +40,27 @@ cd "$(git rev-parse --show-toplevel)"
 SRC="${TERRAIN_SRC:-$HOME/Downloads/overmatch-terrain-src}"
 CDN="https://dl.polyhaven.org/file/ph-assets/Textures"
 
-# The blend arrays' layer order — the mask's channel order (`assets/terrain/surface.ron`'s layers,
-# which `terrain_surface`'s shipped-file test holds this list to), and the
-# order the `-file` arguments are passed in below. Changing it re-numbers every layer index.
-LAYER_PACKS="dirt_aerial_03 coast_sand_05 aerial_mud_1"
+# The ground's packs, from their owner `assets/terrain/surface.ron`: its base, or its layers in the
+# mask's channel order, which is the order the blend's `-file` arguments are passed in below.
+surface_packs() {
+    python3 -I - "$1" <<'PY'
+import sys
+sys.path.insert(0, "scripts/prop")
+import ron
+surface = ron.load("assets/terrain/surface.ron")
+packs = [surface["base"]] if sys.argv[1] == "base" else surface["layers"]
+print(" ".join(pack["pack"] for pack in packs))
+PY
+}
+BASE_PACK="$(surface_packs base)"
+LAYER_PACKS="$(surface_packs layers)"
 BLEND_DIR="assets/terrain/blend"
 BLEND_RES=2048
 
 # The scatter constructions' packs: standalone maps into `assets/constructions/<pack>/`.
 BUILDING_PACKS="brick_wall_006 dark_planks"
 
-TARGETS="${*:-coast_sand_rocks_02 brown_mud_leaves_01 rocks_ground_02 blend $BUILDING_PACKS}"
+TARGETS="${*:-$BASE_PACK blend $BUILDING_PACKS}"
 
 command -v basisu >/dev/null || { echo "need basisu: brew install basis_universal" >&2; exit 1; }
 mkdir -p "$SRC"
@@ -93,17 +102,9 @@ to_8bit() {
     esac
 }
 
-# The albedo file name Poly Haven ships a pack's colour map under.
-albedo_of() {
-    case "$1" in
-        rocks_ground_02) echo col ;;
-        *)               echo diff ;;
-    esac
-}
-
 # Pull a pack's three masters down and normalize their bit depth.
 stage_sources() {
-    fetch "$1" "$(albedo_of "$1")" jpg
+    fetch "$1" diff jpg
     fetch "$1" nor_gl png
     fetch "$1" arm png
     to_8bit "$(source_of "$1" nor_gl png)"
@@ -148,18 +149,14 @@ encode() {
 encode_pack() {
     pack="$1"
     out="assets/terrain/$pack"
-    case "$pack" in
-        coast_sand_rocks_02) res=4096 ;;
-        *)                   res=2048 ;;
-    esac
+    res=4096
     if is_construction "$pack"; then
         out="assets/constructions/$pack"
         res=1024
     fi
-    albedo="$(albedo_of "$pack")"
     mkdir -p "$out"
     stage_sources "$pack"
-    encode albedo "$res" "$out/${pack}_${albedo}.ktx2" "$(source_of "$pack" "$albedo" jpg)"
+    encode albedo "$res" "$out/${pack}_diff.ktx2" "$(source_of "$pack" diff jpg)"
     encode nor_gl "$res" "$out/${pack}_nor_gl.ktx2" "$(source_of "$pack" nor_gl png)"
     encode arm "$res" "$out/${pack}_arm.ktx2" "$(source_of "$pack" arm png)"
     echo "ktx2  ▸ $pack at ${res}² — $(du -ch "$out"/*.ktx2 | tail -1 | cut -f1)"
@@ -173,7 +170,7 @@ encode_blend() {
     arm_sources=""
     for pack in $LAYER_PACKS; do
         stage_sources "$pack"
-        albedo_sources="$albedo_sources $(source_of "$pack" "$(albedo_of "$pack")" jpg)"
+        albedo_sources="$albedo_sources $(source_of "$pack" diff jpg)"
         nor_sources="$nor_sources $(source_of "$pack" nor_gl png)"
         arm_sources="$arm_sources $(source_of "$pack" arm png)"
     done
@@ -193,13 +190,11 @@ for target in $TARGETS; do
     case " $LAYER_PACKS blend " in
         *" $target "*) blend=yes; continue ;;
     esac
-    case "$target" in
-        coast_sand_rocks_02|brown_mud_leaves_01|rocks_ground_02) packs="$packs $target" ;;
-        *)
-            is_construction "$target" || { echo "unknown target: $target" >&2; exit 1; }
-            packs="$packs $target"
-            ;;
-    esac
+    if [ "$target" != "$BASE_PACK" ] && ! is_construction "$target"; then
+        echo "unknown target: $target" >&2
+        exit 1
+    fi
+    packs="$packs $target"
 done
 for pack in $packs; do
     encode_pack "$pack"

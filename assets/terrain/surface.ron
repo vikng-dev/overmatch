@@ -11,7 +11,7 @@
         ground: "sandy loam",
     ),
     // In the mask's channel order: layer i is mask channel i and slice i of the blend arrays, which
-    // `scripts/encode-terrain-ktx2.sh`'s `LAYER_PACKS` cuts in this order.
+    // `scripts/encode-terrain-ktx2.sh blend` reads from here and cuts in this order.
     layers: [
         // R, recesses: where dirt and debris settle.
         (
