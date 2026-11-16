@@ -822,7 +822,8 @@ def run_ram(args, out, recipe):
     # DERIVED: accepted contact is at most approach_s after capture starts, so observation
     # ends by approach_s + deadline_s, while that much throttle starts later, at driving.
     throttle_ticks = math.ceil(drive_window_s/dt)
-    if ticks > 2**32-1 or throttle_ticks > 2**32-129:
+    # The harness refuses a run its 256-tick lead (RUN_LEAD, src/net/harness.rs) overflows.
+    if ticks > 2**32-1 or throttle_ticks > 2**32-1-256:
         raise ValueError("ram duration exceeds harness tick representation")
     script = out / "ram.harness.ron"
     script.write_text(f"(ticks: {ticks}, drive: Ram(throttle_ticks: {throttle_ticks}))\n")

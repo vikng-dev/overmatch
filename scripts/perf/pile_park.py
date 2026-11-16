@@ -29,7 +29,7 @@ fixed tick from combat admission, with its stage and phase wall times, Avian's s
 the production work counts. Outside a rubble run its one event names a construction far from both
 spawns, at a time the run never reaches, so it fells nothing. The window is the trace's ticks
 whose `elapsed_s` lies in [lead + --settle-s, lead + --settle-s + --park-s], where lead is the
-throttle's end (the harness's 128-tick lead-in plus --throttle-ticks, DERIVED at 64 Hz) and
+throttle's end (the harness's 256-tick lead-in plus --throttle-ticks, DERIVED at 64 Hz) and
 --settle-s covers the braking; every condition uses the same window. `tick_us` includes the
 contact census leaves the trace adds (`contact_census_us`, `sweep_census_us`); `net_us` subtracts
 them. The collector runs outside `tick_us`.
@@ -75,7 +75,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ENDPOINT = ("127.0.0.1", 5888)
 # Harness facts (src/net/harness.rs): the fixed rate, and `Drive::Park`'s lead-in before throttle.
 TICK_HZ = 64
-LEAD_TICKS = 128
+LEAD_TICKS = 256
 # spawn_pos (src/terrain_grid.rs): the ground's highest point within this half-side, plus clearance.
 SPAWN_HALF_M = 5.0
 SPAWN_CLEARANCE_M = 2.0
