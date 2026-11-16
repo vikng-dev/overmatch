@@ -23,7 +23,7 @@ if [[ "${1:-}" != --holding-lock ]]; then
   exec /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock "$0" --holding-lock "$@"
 fi
 shift
-export OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden
+export OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1
 LAT="${LAT:-0}"
 JIT="${JIT:-0}"
 SEED="${SEED:-1}"

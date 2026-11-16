@@ -16,7 +16,7 @@ if [[ "${1:-}" != --holding-lock ]]; then
   exec /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock "$0" --holding-lock "$@"
 fi
 shift
-export OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden
+export OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1
 OUT="${OUT:-/tmp/overmatch-shot-mg}"
 BIN="${BIN:-target/debug}"
 TICKS="${TICKS:-700}"
@@ -46,11 +46,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# The flat patch (scripts/harness/flat-patch.ron): the lane-spawn default sits at world origin,
-# which on the heightmap world is a slope — the tanks slide apart and the hull-local -8,0,0 aim
-# never touches armor (verified: zero damage rows in a full run). Lane 1 puts the shooter at +8 x,
-# so aim -8,0,0 points back at the target.
-env OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" \
+# The flat patch keeps the fixture hulls at rest. The target holds its main barrel forward and down;
+# the shooter's fixture aim crosses that exposed module ahead of the armored hull. Its HP pool
+# can be reduced by MG fire. The nonempty damage gate verifies the fixture still exercises it.
+env OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_HARNESS="$REPO/scripts/harness/mg-armor.ron" \
   SPIKE_SHOT_TRACE="$OUT/server" \
   "$SERVER" >"$OUT/server.log" 2>&1 &
 SERVER_PID=$!
@@ -67,16 +66,16 @@ grep -q "listening" "$OUT/server.log"
 # slices the UASTC source with the RGBA32 destination block geometry on the uncompressed
 # transcode path, the path taken when no RenderApp exists (ktx2.rs:209). Windowed transcodes to
 # a 4x4-block GPU format and loads fine, so captures are windowed-only until the upstream fix.
-# DERIVED: both scripts play from the shared tool barrier; the target runs
-# 128 ticks longer so it is still present when the shooter's last rounds arrive.
-printf '(drive: Idle, ticks: %s)\n' "$((TICKS + 128))" >"$OUT/target.harness.ron"
+# Fixture capture: the final 128 ticks contain no trigger demand. Both clients stay for the
+# same script length; the quiet tail lets the final echoes and paths reach the presentation cursor.
+printf '(drive: Idle, aim: Point((0, -160, -800)), range_m: 12, ticks: %s)\n' "$TICKS" >"$OUT/target.harness.ron"
 env SPIKE_WORKLOAD_READY="$READY" OVERMATCH_HARNESS="$OUT/target.harness.ron" OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
   SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 SPIKE_SHOT_TRACE="$OUT/target" \
   "$CLIENT" >"$OUT/target.log" 2>&1 &
 TARGET_PID=$!
 
-# Lane assignment is connect-order: the first client to CONNECT gets lane 0, and the shooter's
-# hull-local -8,0,0 aim assumes the target holds lane 0. A fixed sleep raced that under load
+# Lane assignment is connect-order: the first client to CONNECT gets lane 0; the fixture aim
+# assumes the target holds lane 0. A fixed sleep raced that under load
 # (shooter connected first, took lane 0, aimed away — zero hits, gate-failed run).
 #
 # COLD-START MODE: the first capture after a rebuild can stall >10 s on Metal pipeline
@@ -90,7 +89,7 @@ for _ in {1..150}; do
 done
 grep -q "client connected" "$OUT/server.log"
 
-printf '(drive: Fire(secondary: true), aim: Point((-8, 0, 0)), range_m: 12, ticks: %s)\n' "$TICKS" \
+printf '(drive: Fire(secondary: true), fire_until: %s, aim: Point((-6.9, 1.6, -10.6)), range_m: 12, ticks: %s)\n' "$((TICKS - 128))" "$TICKS" \
   >"$OUT/shooter.harness.ron"
 env SPIKE_WORKLOAD_READY="$READY" OVERMATCH_HARNESS="$OUT/shooter.harness.ron" OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
   SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 \
@@ -110,6 +109,6 @@ SERVER_PID=""
 uv run scripts/shot/analyze.py \
   --client "$OUT/shooter.client.jsonl" \
   --server "$OUT/server.server.jsonl" \
-  --samples 0 --json --strict >"$OUT/summary.json"
+  --samples 0 --json --strict --require-shooter-damage >"$OUT/summary.json"
 
 echo "MG shot verification passed -> $OUT/summary.json"

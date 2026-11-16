@@ -31,7 +31,7 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     env = dict(os.environ, OVERMATCH_CARGO_LOCK_WAIT_S="10800",
-               OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless")
+               OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="hidden", OVERMATCH_MUTE="1")
     if not args.holding_lock:
         subprocess.run([str(root / "scripts/serial-cargo"), "build", "--locked",
                         "--features", "dev_ui,bitprobe", "--bin", "overmatch",

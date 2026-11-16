@@ -29,7 +29,9 @@ import os
 from pathlib import Path
 import time
 assert os.environ['OVERMATCH_UNATTENDED'] == '1'
+assert os.environ['OVERMATCH_MUTE'] == '1'
 assert os.environ['OVERMATCH_SERVER_BIND'] == '127.0.0.1'
+assert os.environ['OVERMATCH_WINDOW'] == 'hidden'
 out = Path(os.environ['OUT'])
 (out / 'server.pid').write_text(str(os.getpid()))
 print('listening', flush=True)
@@ -38,14 +40,20 @@ print('client connected', flush=True)
 while True: time.sleep(1)
 ''')
             client = binary / "overmatch"
-            client.write_text(f'''#!{sys.executable}
+            client.write_text(fr'''#!{sys.executable}
 import os
 from pathlib import Path
 import time
 assert os.environ['OVERMATCH_UNATTENDED'] == '1'
+assert os.environ['OVERMATCH_MUTE'] == '1'
 assert os.environ['OVERMATCH_WINDOW'] == 'hidden'
 out = Path(os.environ['OUT'])
-first = Path(os.environ['OVERMATCH_HARNESS']).name in ('target.harness.ron', 'a.harness.ron')
+harness = Path(os.environ['OVERMATCH_HARNESS'])
+first = harness.name in ('target.harness.ron', 'a.harness.ron')
+if harness.name == 'shooter.harness.ron':
+    import re
+    fields = dict(re.findall(r'(\w+): (\d+)', harness.read_text()))
+    assert 0 < int(fields['fire_until']) < int(fields['ticks']), 'the capture observes after release'
 role = 'first' if first else 'second'
 (out / (role + '.pid')).write_text(str(os.getpid()))
 ready = Path(os.environ['SPIKE_WORKLOAD_READY'])
