@@ -364,6 +364,7 @@ struct TankNameplate;
 
 pub fn plugin(app: &mut App) {
     crate::flow::require(app, "hud");
+    look();
     app.add_observer(dock_corner_ui)
         .add_systems(OnEnter(Flow::InMatch), spawn_labels)
         .add_systems(

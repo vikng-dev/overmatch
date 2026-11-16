@@ -180,6 +180,7 @@ fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
             crate::hud::HudDock::Fixed,
             Node {
                 position_type: PositionType::Absolute,
+                align_items: AlignItems::Center,
                 left: Val::Px(look.left_px.0),
                 bottom: Val::Px(
                     look.standard_bottom_px.0
@@ -196,64 +197,58 @@ fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
             Visibility::Hidden,
         ))
         .with_children(|gauge| {
+            gauge.spawn((
+                Text::new("THR"),
+                TextFont {
+                    font: fonts.body.clone().into(),
+                    font_size: FontSize::Px(look.debug_font_px.0),
+                    ..default()
+                },
+                TextColor(standard_color),
+                Node {
+                    width: Val::Px(look.gauge_label_px.0),
+                    ..default()
+                },
+            ));
             gauge
                 .spawn(Node {
-                    align_items: AlignItems::Center,
+                    width: Val::Px(look.gauge_width_px.0),
+                    height: Val::Px(look.gauge_height_px.0),
                     ..default()
                 })
-                .with_children(|row| {
-                    row.spawn((
-                        Text::new("THR"),
-                        TextFont {
-                            font: fonts.body.clone().into(),
-                            font_size: FontSize::Px(look.debug_font_px.0),
-                            ..default()
-                        },
-                        TextColor(standard_color),
+                .with_children(|rail| {
+                    rail.spawn((
                         Node {
-                            width: Val::Px(look.gauge_label_px.0),
+                            position_type: PositionType::Absolute,
+                            top: Val::Px((look.gauge_height_px.0 - look.rail_px.0) / 2.0),
+                            width: Val::Px(look.gauge_width_px.0),
+                            height: Val::Px(look.rail_px.0),
                             ..default()
                         },
+                        BackgroundColor(debug_color),
                     ));
-                    row.spawn(Node {
-                        width: Val::Px(look.gauge_width_px.0),
-                        height: Val::Px(look.gauge_height_px.0),
-                        ..default()
-                    })
-                    .with_children(|rail| {
-                        rail.spawn((
-                            Node {
-                                position_type: PositionType::Absolute,
-                                top: Val::Px((look.gauge_height_px.0 - look.rail_px.0) / 2.0),
-                                width: Val::Px(look.gauge_width_px.0),
-                                height: Val::Px(look.rail_px.0),
-                                ..default()
-                            },
-                            BackgroundColor(debug_color),
-                        ));
-                        // The neutral reference and the live notch are shapes, not font glyphs.
-                        rail.spawn((
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: Val::Px((look.gauge_width_px.0 - look.rail_px.0) / 2.0),
-                                width: Val::Px(look.rail_px.0),
-                                height: Val::Px(look.gauge_height_px.0),
-                                ..default()
-                            },
-                            BackgroundColor(debug_color),
-                        ));
-                        rail.spawn((
-                            NotchMark,
-                            Node {
-                                position_type: PositionType::Absolute,
-                                left: Val::Px(notch_left(0.0)),
-                                width: Val::Px(look.mark_px.0),
-                                height: Val::Px(look.gauge_height_px.0),
-                                ..default()
-                            },
-                            BackgroundColor(standard_color),
-                        ));
-                    });
+                    // The neutral reference and the live notch are shapes, not font glyphs.
+                    rail.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px((look.gauge_width_px.0 - look.rail_px.0) / 2.0),
+                            width: Val::Px(look.rail_px.0),
+                            height: Val::Px(look.gauge_height_px.0),
+                            ..default()
+                        },
+                        BackgroundColor(debug_color),
+                    ));
+                    rail.spawn((
+                        NotchMark,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(notch_left(0.0)),
+                            width: Val::Px(look.mark_px.0),
+                            height: Val::Px(look.gauge_height_px.0),
+                            ..default()
+                        },
+                        BackgroundColor(standard_color),
+                    ));
                 });
         });
 }
@@ -423,8 +418,7 @@ fn update_notch_gauge(
         });
     }
     for mut node in &mut marks {
-        let value = input.throttle();
-        let left = Val::Px(notch_left(value));
+        let left = Val::Px(notch_left(input.throttle()));
         if node.left != left {
             node.left = left;
         }
