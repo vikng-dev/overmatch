@@ -633,7 +633,18 @@ Clauses 2 and 3 pay the cut, and a cut to the gear that holds most is paid only 
 than the engaged gear: on equal capacity, every gear capped by the same grip, a cut buys nothing,
 and a stall that stepped to a tied gear would reopen the launch, which chooses again. Among launch
 gears a tie goes to the higher. No pull asked (released, braking, a request against the engaged
-ladder) or fuel under drag chooses nothing. The Driver uses requested pedal, not its actuator ramp.
+ladder) chooses nothing. The Driver uses requested pedal, not its actuator ramp.
+
+*A cut buys drive, never less braking.* Clauses 2 and 3 cut only to a gear that pulls where it
+lands. A gear the pedal's own fuel cannot drive at the crank it lands on only brakes the hull less
+than the engaged gear, and on overrun every higher gear does: a cut paid for that walks up the
+ladder shedding the engine braking that holds a descent, on every lift-off to a pedal too light to
+drive any gear. Whether fuel beats drag is a fact about a crank speed, which a held clutch takes
+from the gear and the hull, so each gear answers it at its own crank. The engaged crank answers it
+for no other gear: on a descent at full pedal the hull turns a low gear's crank past the governor's
+cut, where no pedal fuels it, while a higher gear lands where the pedal drives. On overrun the
+engaged gear is not short (it holds the most it nets lugging down, its torque peak included), so
+the upshift clause decides, against a drive `D` that is engine braking.
 A slipping clutch holds its launch floor, capped at the speed the crank reaches freely, so a launch
 takes none of the flywheel's stored energy below that floor; a crank above the floor when the clutch
 closes can spend the excess. M is the crank arithmetic term alone (`assets/driving/driver.ron`,
@@ -770,6 +781,12 @@ Rejected forms:
   fourth fell to first at a 4.7 m radius and 0.64 m/s against 15.8 m and 2.16 m/s).
 - *Keeping the park latch off under drive*: the one-way lever already carries rollback there, and
   the latch is what holds a hull at rest the tick a cut opens its clutch.
+- *Choosing nothing while fuel cannot beat drag at the engaged crank*: it cannot tell a crank that
+  cannot fire from one the hull turns past the governor's cut, so a full-pedal descent that reaches
+  that point in a low gear never shifts up (MEASURED on the pile-park run-up, #383: third held at
+  about 1.48 m/s for the 45 s the slope lasted, in three runs, its crank past the 2,572 rpm where
+  full pedal's fuel meets drag, DERIVED from the shipped curve, governor cut and motoring drag).
+  Its protection, no cut to shed braking, is each gear's at its landing crank.
 
 Open: support carried by solver contacts alone delivers no rolling and has no rolling budget
 (`SideReport::rolling_budget` sums the sampled contacts), so a gear judged on rubble or an
@@ -800,7 +817,8 @@ Opposite input brakes to rest, waits the authored pause, then pays one direction
 release during the pause keeps park held. Zero intent below first gear's idle speed parks.
 The [brake-law record](../../../scratch/research/law-drive-4-brake-2026-11-02.md) owns its proof and decisions.
 The protective upshift is absent: the existing clutch over-rev slip guard bounds crank speed
-and retains motoring drag while the Driver holds overrun gear. Service braking at the ceiling
+and retains motoring drag while the Driver holds an overrun gear no cut buys drive from. Service
+braking at the ceiling
 belongs to the next ceiling law. The bitprobe records the reading, the engaged gear's force
 price (`price_driver_force`) and the delivered force: `headless_test::drive_load` splits each
 landing's forecast gap into the landing speed's share and the price model's share at the engaged

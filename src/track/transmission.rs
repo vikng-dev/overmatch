@@ -1013,18 +1013,6 @@ fn engine_torques(
     [induced, (catch - induced).max(0.0), drag]
 }
 
-/// The fuel `command` and the idle catch give the crank at `omega` (rad/s) beats its drag: the
-/// Driver chooses no gear for a crank that cannot drive.
-pub(super) fn fuel_beats_drag(
-    tp: &TransmissionParams,
-    supply: DriveSupply,
-    omega: f32,
-    command: f32,
-) -> bool {
-    let [fuel, catch, drag] = engine_torques(tp, supply, omega, command);
-    fuel + catch > drag.abs()
-}
-
 /// The game's driving and damage model: the Driver's idle catch is work by the Drive task,
 /// consuming the served task throughput, like commanded fueling.
 fn idle_catch_capacity(tp: &TransmissionParams, supply: DriveSupply) -> f32 {
