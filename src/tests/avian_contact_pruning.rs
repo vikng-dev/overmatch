@@ -1,6 +1,6 @@
-//! The game's solver relies on bearing support surviving pruning, while its speculative stops
-//! and contact reducer need separated candidates in the remaining slots. No world is needed:
-//! these guards exercise Avian's public manifold API against generated contact mixes.
+//! The game's solver relies on bearing support surviving pruning; its speculative stops and
+//! contact reducer need separated candidates in free slots. Generated manifolds exercise Avian's
+//! public API without a world or historical physics targets.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -13,12 +13,13 @@ fn prune(points: &[ContactPoint]) -> Vec<ContactPoint> {
     manifold.points
 }
 
-/// Published Avian 0.8.0, `collision/contact_types/mod.rs::prune_points`: an independent
-/// distance/area oracle, including first-wins ties and polygon order, for all-bearing compatibility.
-fn upstream(points: &[ContactPoint]) -> Vec<ContactPoint> {
-    if points.len() <= 4 {
-        return points.to_vec();
+/// Published Avian 0.8.0's independent distance/area oracle, with first-wins ties.
+/// Selection order exposes its picks over a subset; otherwise it returns polygon order.
+fn upstream(points: &[ContactPoint], indices: &[usize], selection_order: bool) -> Vec<usize> {
+    if !selection_order && indices.len() <= 4 {
+        return indices.to_vec();
     }
+    assert!(indices.len() >= 2, "a selection needs a segment");
     let projected: Vec<_> = points
         .iter()
         .map(|p| p.anchor1.reject_from_normalized(Vec3::Y))
@@ -27,7 +28,9 @@ fn upstream(points: &[ContactPoint]) -> Vec<ContactPoint> {
     let floor = 1e-6;
     let weight = |i: usize| (points[i].penetration * points[i].penetration).max(floor);
     let first_max = |score: &dyn Fn(usize) -> f32, excluded: Option<usize>| {
-        (0..points.len())
+        indices
+            .iter()
+            .copied()
             .filter(|i| Some(*i) != excluded)
             .fold((usize::MAX, f32::MIN), |best, i| {
                 let value = score(i);
@@ -46,32 +49,47 @@ fn upstream(points: &[ContactPoint]) -> Vec<ContactPoint> {
     let perp = (projected[b] - projected[a]).cross(Vec3::Y);
     let (mut low, mut high) = (None, None);
     let (mut min, mut max) = (0.0, 0.0);
-    for (i, p) in projected.iter().enumerate() {
+    for &i in indices {
         if i == a || i == b {
             continue;
         }
-        let area = perp.dot(*p - projected[a]);
+        let area = perp.dot(projected[i] - projected[a]);
         if area < min {
             (low, min) = (Some(i), area);
         } else if area > max {
             (high, max) = (Some(i), area);
         }
     }
-    [Some(a), low, Some(b), high]
-        .into_iter()
-        .flatten()
-        .map(|i| points[i])
+    if selection_order {
+        [Some(a), Some(b), low, high]
+    } else {
+        [Some(a), low, Some(b), high]
+    }
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn zero_depth(points: &[ContactPoint]) -> Vec<ContactPoint> {
+    points
+        .iter()
+        .copied()
+        .map(|mut p| {
+            p.penetration = 0.0;
+            p
+        })
         .collect()
 }
 
-/// The solver must never trade bearing support for speculation, and must retain speculative
-/// stops in free slots because the contact reducer reads their normal_speed after pruning.
-/// All-bearing callers retain upstream's exact selection; separation must never be rewarded.
-#[test]
-fn bearing_priority_capacity_upstream_compatibility_and_separation_monotonicity() {
-    // Fixture: a square with edge midpoints, plus rotated input orders; every bearing assignment
-    // for 1..=8 points, at touching, sub-floor and above-floor depths, uniform and varied.
-    let anchors = [
+fn anchors(points: &[ContactPoint]) -> Vec<Vec3> {
+    points.iter().map(|p| p.anchor1).collect()
+}
+
+fn generated(mut check: impl FnMut(&[ContactPoint])) {
+    // Fixture: a square with edge midpoints and a convex pentagon. Rotations and
+    // translations vary first-wins ties and distance from the center of mass; every sign mask
+    // covers touching, sub-floor and above-floor depths, with varied weights within each tier.
+    let square = [
         (-1.0, -1.0),
         (1.0, -1.0),
         (1.0, 1.0),
@@ -81,79 +99,173 @@ fn bearing_priority_capacity_upstream_compatibility_and_separation_monotonicity(
         (-1.0, 0.0),
         (1.0, 0.0),
     ];
-    for n in 1..=anchors.len() {
-        for rotation in 0..n {
-            for mask in 0_u32..1 << n {
-                for depth in [0.0, 0.0005, 0.003] {
-                    let points: Vec<_> = (0..n)
-                        .map(|i| {
-                            let (x, z) = anchors[(i + rotation) % anchors.len()];
-                            let at = Vec3::new(x, 0.0, z);
-                            // Fixture: varying signed depths exercise both weighted selections.
-                            let penetration = if mask & (1 << i) != 0 {
-                                depth * (i + 1) as f32
-                            } else {
-                                -0.001 * (i + 1) as f32
-                            };
-                            ContactPoint::new(at, at, at, penetration)
-                        })
-                        .collect();
-                    let kept = prune(&points);
-                    let bearing = mask.count_ones() as usize;
-                    if bearing == n {
-                        assert_eq!(
-                            kept,
-                            upstream(&points),
-                            "all-bearing upstream compatibility"
-                        );
-                    } else {
-                        assert_eq!(
-                            kept.iter().filter(|p| p.penetration >= 0.0).count(),
-                            bearing.min(4),
-                            "solver bearing support lost: n={n}, mask={mask}, rotation={rotation}"
-                        );
-                        assert_eq!(
-                            kept.len(),
-                            n.min(4),
-                            "speculative stops lost from free slots"
-                        );
-                    }
-                    let bearing_subset: Vec<_> = points
-                        .iter()
-                        .copied()
-                        .filter(|p| p.penetration >= 0.0)
-                        .collect();
-                    let support = prune(&bearing_subset);
-                    // A spanning four-point selection must not become clustered by separated
-                    // candidates stealing preferred slots, then admitting support by input order.
-                    if bearing > 4 && bearing < n && support.len() == 4 {
-                        assert!(
-                            support.iter().all(|point| kept.contains(point)),
-                            "mixed support must match pruning the bearing subset alone: \
-                             n={n}, mask={mask}, rotation={rotation}"
-                        );
-                    }
-                    for (i, point) in points.iter().enumerate() {
-                        if point.penetration >= 0.0 {
-                            continue;
-                        }
-                        let was_kept = kept.iter().any(|p| p.anchor1 == point.anchor1);
-                        // Fixture: increase only this point's separation, across and above the floor.
-                        for separation in [0.012, 0.04, 0.1] {
-                            let mut farther = points.clone();
-                            farther[i].penetration -= separation;
-                            let now_kept =
-                                prune(&farther).iter().any(|p| p.anchor1 == point.anchor1);
-                            assert!(
-                                was_kept || !now_kept,
-                                "extra separation improved admission: n={n}, mask={mask}, point={i}"
-                            );
-                        }
+    let pentagon = [
+        (-1.0, -1.0),
+        (1.0, -1.0),
+        (2.0, 0.0),
+        (1.0, 1.0),
+        (-1.0, 1.0),
+    ];
+    for shape in [&square[..], &pentagon[..]] {
+        for n in 1..=shape.len() {
+            for rotation in 0..n {
+                for mask in 0_u32..1 << n {
+                    for depth in [0.0, 0.0005, 0.003] {
+                        let points: Vec<_> = (0..n)
+                            .map(|i| {
+                                let (x, z) = shape[(i + rotation) % shape.len()];
+                                let at = Vec3::new(x + rotation as f32 * 0.25, 0.0, z);
+                                let penetration = if mask & (1 << i) != 0 {
+                                    depth * (i + 1) as f32
+                                } else {
+                                    -0.001 * (i + 1) as f32
+                                };
+                                ContactPoint::new(at, at, at, penetration)
+                            })
+                            .collect();
+                        check(&points);
                     }
                 }
             }
         }
     }
+}
+
+/// R1: the solver retains upstream's complete all-bearing selection, including polygon order.
+#[test]
+fn r1_all_bearing_equals_upstream_in_order() {
+    generated(|points| {
+        if points.iter().all(|p| p.penetration >= 0.0) {
+            let expected: Vec<_> = upstream(points, &(0..points.len()).collect::<Vec<_>>(), false)
+                .into_iter()
+                .map(|i| points[i])
+                .collect();
+            assert_eq!(
+                prune(points),
+                expected,
+                "R1: all-bearing upstream compatibility"
+            );
+        }
+    });
+}
+
+/// R2: speculative stops use the touching manifold's anchors and order; the solver must not
+/// prefer a point because it is separated farther.
+#[test]
+fn r2_all_separated_equals_zero_depth_anchors_in_order() {
+    generated(|points| {
+        if points.iter().all(|p| p.penetration < 0.0) {
+            assert_eq!(
+                anchors(&prune(points)),
+                anchors(&prune(&zero_depth(points))),
+                "R2: separation must have zero depth weight"
+            );
+        }
+    });
+}
+
+/// R3: the solver must never trade available bearing support for speculative candidates.
+#[test]
+fn r3_mixed_keeps_bearing_count_up_to_capacity() {
+    generated(|points| {
+        let bearing = points.iter().filter(|p| p.penetration >= 0.0).count();
+        if bearing > 0 && bearing < points.len() {
+            assert_eq!(
+                prune(points)
+                    .iter()
+                    .filter(|p| p.penetration >= 0.0)
+                    .count(),
+                bearing.min(4),
+                "R3: bearing support takes priority"
+            );
+        }
+    });
+}
+
+/// R4: mixed manifolds fill four slots, so the solver and contact reducer retain speculative
+/// stops (and their normal_speed) wherever bearing support leaves room.
+#[test]
+fn r4_mixed_over_capacity_fills_four_slots() {
+    generated(|points| {
+        if points.len() > 4
+            && points.iter().any(|p| p.penetration >= 0.0)
+            && points.iter().any(|p| p.penetration < 0.0)
+        {
+            assert_eq!(prune(points).len(), 4, "R4: mixed capacity");
+        }
+    });
+}
+
+/// R5: excess bearing support excludes speculation and retains every upstream subset pick;
+/// the solver relies on the same distance/area support even when the oracle leaves empty sides.
+#[test]
+fn r5_mixed_excess_bearing_keeps_every_bearing_oracle_pick() {
+    generated(|points| {
+        let bearing: Vec<_> = (0..points.len())
+            .filter(|&i| points[i].penetration >= 0.0)
+            .collect();
+        if bearing.len() > 4 && bearing.len() < points.len() {
+            let kept = prune(points);
+            assert!(
+                kept.iter().all(|p| p.penetration >= 0.0),
+                "R5: no speculative displacement"
+            );
+            assert!(
+                upstream(points, &bearing, true)
+                    .into_iter()
+                    .all(|i| kept.contains(&points[i])),
+                "R5: every bearing oracle pick survives"
+            );
+        }
+    });
+}
+
+/// R6: competing speculative stops use upstream's selection order in the free slots;
+/// the solver needs distance/area coverage of future support, independent of input order.
+#[test]
+fn r6_mixed_speculation_uses_selection_order_in_free_slots() {
+    generated(|points| {
+        let bearing = points.iter().filter(|p| p.penetration >= 0.0).count();
+        let separated: Vec<_> = (0..points.len())
+            .filter(|&i| points[i].penetration < 0.0)
+            .collect();
+        if bearing > 0 && bearing < 4 && separated.len() > 4 - bearing {
+            let expected: Vec<_> = upstream(&zero_depth(points), &separated, true)
+                .into_iter()
+                .take(4 - bearing)
+                .map(|i| points[i])
+                .collect();
+            let kept: Vec<_> = prune(points)
+                .into_iter()
+                .filter(|p| p.penetration < 0.0)
+                .collect();
+            assert_eq!(kept, expected, "R6: speculative selection order");
+        }
+    });
+}
+
+/// R7: the solver must not reward separation: moving a separated point farther away cannot
+/// promote it from dropped to kept. This is independent of the reducer's use of normal_speed.
+#[test]
+fn r7_more_separation_never_promotes_a_dropped_point() {
+    generated(|points| {
+        let kept = anchors(&prune(points));
+        for (i, p) in points
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.penetration < 0.0)
+        {
+            // Fixture: changes above the depth floor, each applied to this point alone.
+            for extra in [0.012, 0.04, 0.1] {
+                let mut farther = points.to_vec();
+                farther[i].penetration -= extra;
+                assert!(
+                    kept.contains(&p.anchor1) || !anchors(&prune(&farther)).contains(&p.anchor1),
+                    "R7: separation rewarded point {i} in {points:?}"
+                );
+            }
+        }
+    });
 }
 
 /// Upstream's all-bearing selection need not fill four slots: collinear points have zero signed
@@ -182,7 +294,10 @@ fn upstream_can_keep_fewer_than_four_bearing_points() {
     })
     .collect();
     for points in [collinear, pentagon] {
-        let reference = upstream(&points);
+        let reference: Vec<_> = upstream(&points, &(0..points.len()).collect::<Vec<_>>(), false)
+            .into_iter()
+            .map(|i| points[i])
+            .collect();
         assert!(
             reference.len() < 4,
             "upstream has fewer than two nonzero area extremes"
@@ -193,42 +308,4 @@ fn upstream_can_keep_fewer_than_four_bearing_points() {
             "all-bearing upstream compatibility"
         );
     }
-}
-
-/// The solver needs distinct speculative stops, while every bearing point still has priority
-/// when support fits. A separated copy along the normal must not displace a distinct stop.
-#[test]
-fn redundant_projected_speculation_preserves_distinct_stops_without_losing_support() {
-    // Fixture: one bearing corner and four separated corners/edge points.
-    let points: Vec<_> = [
-        (-1.0, -1.0),
-        (1.0, -1.0),
-        (1.0, 1.0),
-        (-1.0, 1.0),
-        (0.0, 1.0),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(i, (x, z))| {
-        let at = Vec3::new(x, 0.0, z);
-        ContactPoint::new(at, at, at, if i == 0 { 0.001 } else { -0.01 })
-    })
-    .collect();
-    let at = points[0].anchor1 + Vec3::Y;
-    let mut redundant = vec![ContactPoint::new(at, at, at, -0.01)];
-    redundant.extend_from_slice(&points);
-    assert_eq!(
-        prune(&redundant),
-        prune(&points),
-        "a duplicate projected speculative stop must not displace a distinct stop"
-    );
-    redundant[0].penetration = 0.0;
-    let kept = prune(&redundant);
-    assert!(
-        redundant
-            .iter()
-            .filter(|p| p.penetration >= 0.0)
-            .all(|p| kept.contains(p)),
-        "projected deduplication must not discard bearing support that fits"
-    );
 }
