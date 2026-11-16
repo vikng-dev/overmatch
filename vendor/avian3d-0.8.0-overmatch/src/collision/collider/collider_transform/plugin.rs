@@ -2,7 +2,6 @@ use crate::{
     ancestor_marker::{AncestorMarker, AncestorMarkerPlugin},
     physics_transform::PhysicsTransformSystems,
     prelude::*,
-    utils::{MIN_PAR_ITER_ENTITIES, ParallelQueryForEach},
 };
 use bevy::{
     ecs::{intern::Interned, schedule::ScheduleLabel},
@@ -83,8 +82,10 @@ pub(crate) fn propagate_collider_transforms(
     >,
     parent_query: Query<(Entity, Ref<Transform>, Has<RigidBody>, Ref<ChildOf>), ShouldPropagate>,
 ) {
-    root_query.par_for_each_mut(
-        MIN_PAR_ITER_ENTITIES,
+    // OVERMATCH PATCH: every root dispatches to the compute pool, as on Avian 0.7. A root's item is
+    // the walk of its whole hierarchy (a construction's every element), not one entity's update,
+    // so the 4,096-entity floor of Avian's per-body loops keeps the game's roots serial.
+    root_query.par_iter_mut().for_each(
         |(entity, transform, children)| {
             for (child, child_transform, is_child_rb, child_of) in parent_query.iter_many(children).matched() {
                 assert_eq!(

@@ -5,8 +5,12 @@
 //! [`RigidBody`]: crate::dynamics::rigid_body::RigidBody
 
 use core::marker::PhantomData;
+use core::sync::atomic::{AtomicU32, Ordering};
 
-use bevy::{ecs::system::StaticSystemParam, prelude::*};
+use bevy::{
+    ecs::{entity::EntityHashSet, query::QueryEntityError, system::StaticSystemParam},
+    prelude::*,
+};
 
 use crate::{
     collision::collider::{
@@ -72,6 +76,8 @@ pub struct BodySizeMetricsPlugin<C: AnyCollider> {
 
 impl<C: AnyCollider> Plugin for BodySizeMetricsPlugin<C> {
     fn build(&self, app: &mut App) {
+        app.init_resource::<BodySizeMetricUpdates>(); // OVERMATCH PATCH
+
         // Update body size metrics before they are consumed by the solver and continuous collision
         // detection. Allowing ambiguities lets multiple collision backends coexist.
         app.add_systems(
@@ -83,6 +89,11 @@ impl<C: AnyCollider> Plugin for BodySizeMetricsPlugin<C> {
     }
 }
 
+/// OVERMATCH PATCH: the bodies whose metrics the last pass of [`update_body_size_metrics`]
+/// recomputed.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BodySizeMetricUpdates(pub u32);
+
 type BodySizeMetricsData = (
     &'static mut BodySizeMetrics,
     &'static RigidBodyColliders,
@@ -90,15 +101,15 @@ type BodySizeMetricsData = (
 );
 
 fn update_body_size_metrics<C: AnyCollider>(
+    mut bodies: Query<BodySizeMetricsData>,
     // Body size metrics only need updating when the center of mass
     // or one of the colliders changes.
-    mut bodies: ParamSet<(
-        Query<BodySizeMetricsData, Changed<ComputedCenterOfMass>>,
-        Query<BodySizeMetricsData>,
-    )>,
+    moved_centers: Query<Entity, (With<BodySizeMetrics>, Changed<ComputedCenterOfMass>)>,
     colliders: Query<(Entity, &C, &ColliderTransform)>,
     changed_colliders: Query<&ColliderOf, Or<(Changed<C>, Changed<ColliderTransform>)>>,
     context: StaticSystemParam<C::Context>,
+    mut stale: Local<EntityHashSet>,
+    mut updates: ResMut<BodySizeMetricUpdates>,
 ) {
     let context = context.into_inner();
 
@@ -126,20 +137,31 @@ fn update_body_size_metrics<C: AnyCollider>(
         }
     };
 
-    // Bodies whose center of mass changed.
-    for (mut size_metrics, rb_colliders, com) in &mut bodies.p0() {
-        *size_metrics = compute(rb_colliders, com);
-    }
-
-    // Bodies with a collider that changed. Note that bodies may be visited
-    // multiple times, but the end result will be the same.
-    if changed_colliders.is_empty() {
+    // OVERMATCH PATCH: a stale body is recomputed once, however many of its colliders changed.
+    // Upstream recomputed it once per changed collider, each time over all its colliders. Each
+    // stale body owns its metrics and reads only its own colliders, so they run on the compute
+    // pool; a step with no stale body dispatches nothing.
+    stale.clear();
+    stale.extend(&moved_centers);
+    stale.extend(changed_colliders.iter().map(|collider_of| collider_of.body));
+    if stale.is_empty() {
+        updates.0 = 0;
         return;
     }
-    let mut all_bodies = bodies.p1();
-    for collider_of in &changed_colliders {
-        if let Ok((mut size_metrics, rb_colliders, com)) = all_bodies.get_mut(collider_of.body) {
-            *size_metrics = compute(rb_colliders, com);
-        }
-    }
+    let recomputed = AtomicU32::new(0);
+    bodies
+        .par_iter_many_unique_mut(&*stale)
+        .for_each(|body| match body {
+            Ok((mut size_metrics, rb_colliders, com)) => {
+                *size_metrics = compute(rb_colliders, com);
+                recomputed.fetch_add(1, Ordering::Relaxed);
+            }
+            // A changed collider's body that is despawned, disabled or holds no metrics has none
+            // to refresh.
+            Err(QueryEntityError::NotSpawned(_) | QueryEntityError::QueryDoesNotMatch(..)) => {}
+            Err(e @ QueryEntityError::AliasedMutability(_)) => {
+                unreachable!("a set of distinct bodies cannot alias: {e}")
+            }
+        });
+    updates.0 = recomputed.into_inner();
 }

@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 753 in all (MEASURED), 675 in upstream files and 78 in the
+of `src/` against the published crate: 820 in all (MEASURED), 742 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -244,8 +244,61 @@ is at least as large as the contact tolerance"). Witness:
 ## Serial small loops: dropped
 
 The 0.7 fork ran a few parallel loops serially below measured body and manifold counts. Avian
-0.8.0 has its own floors (upstream #1035); the 0.7 thresholds are not carried and not re-measured
-here. No witness: a measurement, for the stack's cost pass.
+0.8.0 has its own floor (upstream #1035: `MIN_PAR_ITER_ENTITIES`, 4,096 matched entities); the 0.7
+thresholds are not carried and not re-measured. Every per-body loop is serial under either at the
+game's populations (MEASURED: awake bodies peak near 160 in the scheduled collapse). Two sites
+differ from 0.7 there. Collider transform propagation, which #1035 floors, is restored (next
+section). Contact preparation always splits over colours, where the 0.7 fork ran serially through
+561 manifolds: `prepare_contact_constraints` 6.0 → 13.0 µs per tick (MEASURED, the tick trace's
+combat window, 30 tanks, before and after the upgrade); not restored. Continuous collision's
+per-body loop is under the same floor and unmeasured.
+
+## Collider transform propagation on the compute pool (`src/collision/collider/collider_transform/plugin.rs`): kept
+
+Subject: the game's server physics step, game state only.
+
+`propagate_collider_transforms` walks each root's hierarchy. Avian 0.7 dispatched every root to the
+compute pool; 0.8.0 runs them serially below 4,096 roots, the floor of loops whose item is one
+body's update. Here an item is a whole hierarchy (a construction's every element, a piece's
+chunks), and the game's roots stay under the floor, so the pass was serial. The patch restores
+0.7's dispatch (`par_iter_mut`). Roots own disjoint hierarchies (upstream's own safety argument),
+so the dispatch changes no result.
+
+MEASURED on the scheduled collapse (`scripts/perf/collapse.sh --target local --schedule
+scripts/perf/match-collapse.json --rehearsal --tanks 30 --clients 1`, debug server, compute pool
+10, one run each): the phase that holds the pass (`physics_prepare`) took 436.8 µs wall and
+443.7 µs CPU per tick serial, 176.6 µs wall and 621.5 µs CPU dispatched; the 0.7 stack, 184.8 and
+637.9. On a compute pool of two the 0.7 fork measured the pass level or faster than serial at the
+pile (its patch record); not re-measured on two threads here.
+
+Kept: the dispatch is one call inside an upstream system. 7 fork lines (MEASURED). No guard: no
+result depends on it.
+
+## Body size metrics once per body (`src/dynamics/rigid_body/body_size_metrics.rs`): kept
+
+Subject: the game's server physics step, game state only.
+
+`update_body_size_metrics` recomputes a body's `BodySizeMetrics` (the thickness and reach that
+continuous collision reads) over all the body's colliders. Upstream does so once per changed
+collider ("bodies may be visited multiple times"), so a body whose N colliders changed in one step
+costs N² collider visits, each a scan of the collider's hull points. The tick a construction's
+piece takes its chunks changes hundreds of colliders on one body (962 at a house's collapse).
+
+The patch collects the stale bodies (a changed centre of mass, or any changed collider) in a set
+and recomputes each once. A body owns its metrics and reads only its own colliders, so the stale
+bodies run on the compute pool (`par_iter_many_unique_mut`, which takes only a set: a body visited
+twice is unrepresentable); a step with no stale body dispatches nothing. A changed collider whose
+body is despawned, disabled or holds no metrics is skipped, as upstream.
+`BodySizeMetricUpdates` holds the count of bodies the last pass recomputed.
+
+MEASURED on the scheduled collapse (the command above, one run each): the physics step's time
+outside Avian's timed stages was 151 to 518 ms in the two ticks after each collapse and 2.35 s over
+the ten worst ticks; with the patch the worst is 0.6 ms and the ten worst sum to 3.9 ms. The run's
+worst tick fell from 599.9 to 82.7 ms (the 0.7 stack: 106.7 ms).
+
+Kept: the loop is inside an upstream system. 60 fork lines (MEASURED).
+
+Guard: `src/tests/avian_body_size_metrics.rs`, 2 tests.
 
 ## Standalone key write-back: dropped
 
