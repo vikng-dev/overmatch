@@ -93,45 +93,6 @@ pub(crate) const GRID_RESOLUTION: u32 = 1025;
 /// becomes 8×8 tiles of 128² cells instead of drawing ~2.1M triangles every frame.
 pub(crate) const MESH_TILE_CELLS: usize = 128;
 
-/// Real-world coverage the ACTIVE pack was authored at, metres per texture repeat. Poly Haven
-/// scans declare their physical size (`api.polyhaven.com/info/coast_sand_rocks_02` →
-/// `dimensions: [15000, 15000]`, millimetres — the unit is pinned by `rocks_ground_02`, which
-/// carries both `dimensions: [2000, 2000]` and the human-readable `scale: "2x2M"`). Recorded in
-/// the pack's `cc.txt` as part of its contract.
-///
-/// Only the BASE pack needs a constant here — the blended layers carry theirs in
-/// [`crate::terrain_blend::BLEND_LAYERS`], and apply it as a UV scale in the shader. The two
-/// folders left under `assets/terrain/` that neither binds (`brown_mud_leaves_01`,
-/// `rocks_ground_02`) are STAGED: nothing loads them, so they carry their `cc.txt` and no maps,
-/// which is all `scripts/encode-terrain-ktx2.sh` needs to cut one.
-const COAST_SAND_ROCKS_02_AUTHORED_M: f32 = 15.0;
-
-/// Authored world metres per repeat (`world_xz / this`, repeat sampler), not a taste. View-only:
-/// texturing never changes grid/oracle/collider, and world rescaling keeps physical texel density.
-/// DERIVED counterexample: fitting this 15 m scan into an 8 m guess gives 0.53× features — a 1 m
-/// boulder reads as 53 cm, making the terrain look like a scale model.
-pub(crate) const TEXTURE_TILE_M: f32 = COAST_SAND_ROCKS_02_AUTHORED_M;
-
-/// The BASE terrain surface pack — Poly Haven `coast_sand_rocks_02`, CC0 (see the pack folder's
-/// `cc.txt`), relative to the asset root. One folder per pack under `assets/terrain/`, each holding
-/// the three maps `world::spawn_environment` binds: albedo (`diff`/`col`, sRGB), OpenGL-convention
-/// tangent-space normals (`nor_gl`), and the glTF-ORM `arm` pack (R = AO, G = roughness,
-/// B = metallic). This is what the ground is wherever the map's masks are silent; the three packs
-/// blended on top of it ship as 2D ARRAYS under `assets/terrain/blend/`
-/// ([`crate::terrain_blend`]), and the two folders neither binds hold only their `cc.txt`.
-///
-/// Its three maps are **KTX2 (UASTC 4x4, zstd-supercompressed, full mip chain)**, built by
-/// `scripts/encode-terrain-ktx2.sh` from masters kept outside the repo. The format is not a
-/// packaging detail — it is the frame budget. A PNG/JPG load gives bevy a texture with ONE mip
-/// level, and a 4k map tiled every [`TEXTURE_TILE_M`] across the whole horizon then misses the
-/// texture cache on nearly every fetch (measured: 30 fps). Mips fix the sampling; the block
-/// compression cuts the resident bytes 4× on top. Do not "simplify" these back to PNG.
-pub(crate) const TEXTURE_PATH: &str = "terrain/coast_sand_rocks_02/coast_sand_rocks_02_diff.ktx2";
-/// Tangent-space normal map of [`TEXTURE_PATH`]'s pack — see it for the pack layout.
-pub(crate) const NORMAL_PATH: &str = "terrain/coast_sand_rocks_02/coast_sand_rocks_02_nor_gl.ktx2";
-/// AO / roughness / metallic pack of [`TEXTURE_PATH`]'s pack — see it for the channel layout.
-pub(crate) const ARM_PATH: &str = "terrain/coast_sand_rocks_02/coast_sand_rocks_02_arm.ktx2";
-
 /// Opt-out marker: insert BEFORE the first update to keep the flat slab + authored test course
 /// even when the heightmap PNG is present. Test fixtures (`headless_test`, whose transmission
 /// gates drive the authored ramps) and the armor sandbox insert this; product compositions do not.
@@ -717,11 +678,12 @@ pub(crate) const TERRAIN_MESH_USAGE: RenderAssetUsages = RenderAssetUsages::REND
 
 /// Client meshes from exact grid samples and anti-diagonals, chunked into [`MESH_TILE_CELLS`]²
 /// tiles for entity culling. World-space positions require `Transform::IDENTITY`; adjacent tiles
-/// share border vertices. Normals use full-grid central differences, UVs `world_xz / TEXTURE_TILE_M`
-/// with repeat sampling. `world::spawn_environment` builds these only with a window, never on
+/// share border vertices. Normals use full-grid central differences, UVs `world_xz /` the base pack's
+/// authored metres ([`crate::terrain_surface::Pack::authored_m`]) with repeat sampling. `world::spawn_environment` builds these only with a window, never on
 /// the dedicated server.
 pub(crate) fn terrain_mesh_tiles(grid: &HeightGrid) -> Vec<Mesh> {
     let ranges = mesh_tile_node_ranges(grid);
+    let tile_m = crate::terrain_surface::surface().base.authored_m;
     let mut meshes = Vec::with_capacity(ranges.len());
     for [ia, ib, ja, jb] in ranges {
         let (w, h) = (ib - ia + 1, jb - ja + 1);
@@ -734,7 +696,7 @@ pub(crate) fn terrain_mesh_tiles(grid: &HeightGrid) -> Vec<Mesh> {
                 let x = node_world_coord(grid, i);
                 positions.push([x, grid.sample(i, j), z]);
                 normals.push(surface_normal_at(grid, i, j));
-                uvs.push([x / TEXTURE_TILE_M, z / TEXTURE_TILE_M]);
+                uvs.push([x / tile_m, z / tile_m]);
             }
         }
         let mut indices: Vec<u32> = Vec::with_capacity((w - 1) * (h - 1) * 6);
@@ -1314,12 +1276,15 @@ pub(crate) mod tests {
             );
             bytes
         };
-        for (path, what) in [
-            (TEXTURE_PATH, "albedo"),
-            (NORMAL_PATH, "normal"),
-            (ARM_PATH, "arm"),
+        let base = &crate::terrain_surface::surface().base;
+        let path = |map| base.map_path(map);
+        use crate::terrain_surface::PackMap;
+        for (map, what) in [
+            (PackMap::Albedo, "albedo"),
+            (PackMap::Normal, "normal"),
+            (PackMap::Arm, "arm"),
         ] {
-            let bytes = read(path, what);
+            let bytes = read(&path(map), what);
             let width = header_u32(&bytes, PIXEL_WIDTH_AT);
             let height = header_u32(&bytes, PIXEL_HEIGHT_AT);
             let levels = header_u32(&bytes, LEVEL_COUNT_AT);
@@ -1336,12 +1301,10 @@ pub(crate) mod tests {
                  {width}×{height}"
             );
         }
-        let image = ktx2_buffer_to_image(
-            &read(TEXTURE_PATH, "albedo"),
-            CompressedImageFormats::BC,
-            true,
-        )
-        .unwrap_or_else(|err| panic!("{TEXTURE_PATH} failed to transcode: {err:?}"));
+        let albedo = path(PackMap::Albedo);
+        let image =
+            ktx2_buffer_to_image(&read(&albedo, "albedo"), CompressedImageFormats::BC, true)
+                .unwrap_or_else(|err| panic!("{albedo} failed to transcode: {err:?}"));
         let format = format!("{:?}", image.texture_descriptor.format);
         assert_eq!(
             format, "Bc7RgbaUnormSrgb",

@@ -50,8 +50,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
-| destruction-05 | P2 | `src/terrain_blend.rs::BLEND_LAYERS`, `BASE_GROUND`; `src/terrain_grid.rs` base-pack selection | base-truths: Named asset in logic | Replacing a texture pack's scale or ground material requires Rust edits; otherwise rendering and contact properties retain the previous pack's facts. | Declare pack identity, dimensions and ground membership in shared validated surface data. | ratchet |
-| destruction-08 | P3 | `src/terrain_blend.rs::AO_BIAS` and blend appearance constants | base-truths: Bare number in code | AO bias, blend width and macro-tint settings are visual choices compiled into Rust. | Move them into required terrain `Taste` data with admission checks. | ratchet |
 | destruction-09 | P2 | `src/terrain_grid.rs::SPAWN_FOOTPRINT_HALF_M`, `SPAWN_CLEARANCE_M` | base-truths: Per-asset constant | A valid larger hull can extend beyond the sampled square's fixed half-side or below the fixed spawn-root clearance and intersect terrain at spawn. | Derive footprint and minimum root height from baked construction; put any intended drop clearance in labelled spawn data. | ratchet |
 
 ## ballistics

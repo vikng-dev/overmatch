@@ -1,6 +1,6 @@
 //! The GROUND-TYPE TABLE: each kind of ground the map is made of, from squishy mud to hard concrete,
 //! as data (`assets/terrain/ground_types.ron`). Each terrain pack names the type it is
-//! (`terrain_blend::BlendLayer::ground`, `terrain_blend::BASE_GROUND`).
+//! (`terrain_surface::Pack::ground`, in `assets/terrain/surface.ron`).
 //!
 //! Required, labelled `grip`, `shear_length_m` and reference-pressure `rolling_resistance` become a
 //! [`crate::ground_field::ContactGround`]. `GroundTypes::parse` refuses malformed or incomplete
@@ -149,14 +149,6 @@ impl GroundType {
     }
 }
 
-/// Every terrain pack's ground in the shader's slot order: the base, then the blend layers.
-const PACK_GROUNDS: [&str; 4] = [
-    crate::terrain_blend::BASE_GROUND,
-    crate::terrain_blend::BLEND_LAYERS[0].ground,
-    crate::terrain_blend::BLEND_LAYERS[1].ground,
-    crate::terrain_blend::BLEND_LAYERS[2].ground,
-];
-
 /// The table, keyed by the name a pack's contract uses.
 #[derive(Resource, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -212,8 +204,7 @@ impl GroundTypes {
     /// table does not know, a value outside its domain (grip and shear length must be finite and
     /// nonnegative; a darkening outside 0..=1 is an albedo
     /// gain no material holds; a negative depth or softness prints upward), or a table lacking a
-    /// ground a terrain pack names ([`crate::terrain_blend::BASE_GROUND`],
-    /// [`crate::terrain_blend::BLEND_LAYERS`]).
+    /// ground a terrain pack names ([`crate::terrain_surface::TerrainSurface::grounds`]).
     pub(crate) fn parse(text: &str) -> Result<Self, GroundTableError> {
         let table: Self = ron::de::from_str(text).map_err(GroundTableError::Ron)?;
         if !table.terrain_solver_friction.value.is_finite()
@@ -348,7 +339,7 @@ impl GroundTypes {
                 }
             }
         }
-        for ground in PACK_GROUNDS {
+        for ground in crate::terrain_surface::surface().grounds() {
             if !table.types.contains_key(ground) {
                 return Err(GroundTableError::Refused(format!(
                     "a terrain pack is ground type {ground:?}, which the table lacks (it has \
@@ -396,8 +387,9 @@ impl GroundTypes {
     /// ground's read (the slot's painted weight times its [`StrikeResponse::lifted`]) and its soil.
     /// The shares sum to the blended lift, in 0..=1.
     pub(crate) fn strike_sources(&self, weights: Vec4) -> [(f32, StrikeSource); 4] {
+        let grounds = crate::terrain_surface::surface().grounds();
         std::array::from_fn(|slot| {
-            let ground = self.get(PACK_GROUNDS[slot]);
+            let ground = self.get(grounds[slot]);
             (
                 weights[slot] * ground.strike.lifted.value,
                 StrikeSource {
@@ -458,10 +450,13 @@ mod tests {
                      strike: (lifted: (0.5, Fixture(\"fixture\")), sparks: (false, \
                      Fixture(\"fixture\")))"
         );
+        let [base_ground, layers @ ..] = crate::terrain_surface::surface().grounds();
+        let layers: String = layers
+            .iter()
+            .map(|ground| format!(", {ground:?}: ({block})"))
+            .collect();
         format!(
-            "(terrain_solver_friction: (0.5, Fixture(\"fixture\")), types: {{{:?}: ({base}), \"dirt\": ({block}), \"sand\": ({block}), \
-             \"mud\": ({block})}})",
-            crate::terrain_blend::BASE_GROUND
+            "(terrain_solver_friction: (0.5, Fixture(\"fixture\")), types: {{{base_ground:?}: ({base}){layers}}})"
         )
     }
 
@@ -663,7 +658,7 @@ mod tests {
     /// refused rather than read as a ground that states none.
     #[test]
     fn a_value_out_of_domain_is_refused_at_load_naming_the_ground() {
-        let base = crate::terrain_blend::BASE_GROUND;
+        let base = crate::terrain_surface::surface().base.ground.as_str();
         let row = |[
             softness,
             cap,
@@ -768,7 +763,11 @@ mod tests {
     #[test]
     fn strike_sources_weigh_each_pack_by_its_own_lift() {
         let mut table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
-        for (slot, name) in PACK_GROUNDS.iter().enumerate() {
+        for (slot, name) in crate::terrain_surface::surface()
+            .grounds()
+            .iter()
+            .enumerate()
+        {
             let ground = table.types.get_mut(*name).expect("a pack's ground");
             ground.strike.lifted.value = 0.1 * (slot + 1) as f32;
             ground.strike.sparks.value = slot == 2;

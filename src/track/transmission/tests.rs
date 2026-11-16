@@ -3098,7 +3098,7 @@ fn coast_expectation_includes_the_rolling_fade_for_every_drivetrain() {
             let weight = fp.grip.side_weight * 2.0;
             let angle = 10.0_f32.to_radians(); // Fixture slope.
             let rolling = crate::ground_types::GroundTypes::load_shipped()
-                .get(crate::terrain_blend::BASE_GROUND)
+                .get(crate::terrain_surface::surface().base.ground.as_str())
                 .contact()
                 .rolling_at(fp.grip.nominal_pressure_kpa);
             for gear in 1..=tp.gears_fwd.len() as u8 {

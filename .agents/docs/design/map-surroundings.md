@@ -40,8 +40,8 @@ Where code and prose disagree, the code wins, and the row says so.
 | File | Producer | Read by | Class | Evidence |
 |---|---|---|---|---|
 | `level.json` | Houdini export, format `overmatch_bevy_level` v1, hand-edited since. The Houdini scene is not in the repo. | `map::parse` (`src/map.rs:558-623`); the content digest (`map.rs:485-504`); `scripts/lod/config.py:80-124` (the LOD certificate's right wall, the map diagonal); the server pack (`.github/actions/build-server/action.yml:114-115`) | **P**: the source is off-repo and edits land on the exported product. Replaced by #221's pipeline with tracked source. The provisional marks are already in the data: `"placeholder": true` on `house_proxy` and `church_proxy`, `spawn_points_note: "ASSUMED…"`. | 709 instances. MEASURED: `fir_a_0201` stands at x = 749.9 m, 0.09 m from the edge; 26 instances stand within 10 m. Houses are ≥ 117.9 m from the edge, spawn points ≥ 30 m. `church_proxy` has 0 instances. |
-| `terrain_height.png` | the same off-repo export | `decode_height_grid` reads the bytes itself (`src/terrain_grid.rs:569`) and decodes them (`grid_from_png`, `:593`); the digest reads them again (`map.rs:493`) | Product **B** (LFS, `.gitattributes:20`); source **P**, as above. | Decoded once and downsampled once to 1025² (`terrain_grid.rs:90`). |
-| `terrain_masks.png` | `scripts/map/extract_masks.py`, from a TIFF kept off-repo (`extract_masks.py:6-8`, `:39`) | `ground_field` for sim ground types (`src/ground_field.rs:145-213`); the view's mask image, built from that decode (`world::ground_mask_image`) | Product **B**. Script **P**: its source is off-repo, replaced by #221. **U**: the server reads the masks but the digest does not fold them (`map.rs:485-504`); W1a folds them (R1). | The script refuses misalignment at full resolution before writing (`extract_masks.py:17-20`). |
+| `terrain_height.png` | the same off-repo export | `terrain_grid::decode_height_grid` reads the bytes itself and decodes them (`grid_from_png`); the digest reads them again (`map.rs:493`) | Product **B** (LFS, `.gitattributes:20`); source **P**, as above. | Decoded once and downsampled once to 1025² (`terrain_grid.rs:90`). |
+| `terrain_masks.png` | `scripts/map/extract_masks.py`, from a TIFF kept off-repo (`extract_masks.py:6-8`, `:39`) | `ground_field` for sim ground types (`GroundField::load_painted`); the view's mask image, built from that decode (`world::ground_mask_image`) | Product **B**. Script **P**: its source is off-repo, replaced by #221. **U**: the server reads the masks but the digest does not fold them (`map.rs:485-504`); W1a folds them (R1). | The script refuses misalignment at full resolution before writing (`extract_masks.py:17-20`). |
 | `prototypes.ron` | hand-authored, game-owned | `map::parse` (`map.rs:562-584`), `check_prototype` (`:524`), the digest | **B** | Every id the placement uses or the author declares must resolve, or `map::parse` panics (`map.rs:571-584`). |
 | `derived/map_ui.png` | a python/PIL recipe written only in a doc comment (`src/net/spawn_map.rs:46-61`) | `net::spawn_map`, a client plugin; excluded from the server pack (`action.yml:114-115`); pushed-asset list (`scripts/hooks/test_pushed_assets.sh:382`) | **P**: untracked generator. Replaced by a startup derivation from `HeightGrid` (R3a), a pure 1024² downshift, which deletes the recipe and the LFS product. No lane here does it. | `derived/` is "what WE generate from the authored data" (`map.rs:59-62`, `:86-89`). |
 
@@ -59,11 +59,11 @@ Where code and prose disagree, the code wins, and the row says so.
 | Module | Role | Class | Evidence and notes |
 |---|---|---|---|
 | `src/map.rs` | parses and checks the manifest, the library and the constructions; computes the digest | **B**, except the digest's separate second load (**U**, below) | `MAP_ID` is a const (`:47`): one map ships at early access (PRODUCT.md), and no selection framework exists. The root vs `derived/` split is stated at `:59-62` and `:81-89`. `SpawnPoints::checked` refuses at the load edge, naming file and field (`:126-142`). `#[serde(default)]` on the author's prototype block (`:262`) is a named legitimate absence ("An export may omit the block"), read for keys only. **U**: `load` resolves constructions after `parse` returns (`:441-447`), and `content_digest` repeats parse and resolve on its own (`:485-504`). A cross-file check placed in `parse` could not see footprints, and the digest's load could skip a check `load` runs. W1a gives both one sequence (§3.6). **U**: `dir: path.parent().unwrap_or_else(…)` (`:608`) is a fallback in form and unreachable for a joined path; lens ratchet. |
-| `src/terrain_grid.rs` | the one height decode, the heightfield collider, mesh tiles | **B**, except the pack paths and tile size (`:107-133`) and the spawn footprint constants (`:143-148`), which are backlog rows destruction-05 and destruction-09 (**P**) | `ForceFlatWorld` (`:139`) is a fixture world only. A spawn outside the span is a bug and panics (`:154-167`). Collider with `FIX_INTERNAL_EDGES` (`:693-708`). Edge nodes: `node_world_coord` (`:765`); normals: full-grid central differences, one-sided at the map's edges (`surface_normal_at`, `:770-783`); UVs: world XZ over `TEXTURE_TILE_M` (`:737`). |
+| `src/terrain_grid.rs` | the one height decode, the heightfield collider, mesh tiles | **B**, except the spawn footprint constants (`SPAWN_FOOTPRINT_HALF_M`, `SPAWN_CLEARANCE_M`), backlog row destruction-09 (**P**) | `ForceFlatWorld` is a fixture world only. A spawn outside the span is a bug and panics (`spawn_surface_height`). Collider with `FIX_INTERNAL_EDGES` (`heightfield_collider`). Edge nodes: `node_world_coord`; normals: full-grid central differences, one-sided at the map's edges (`surface_normal_at`); UVs: world XZ over the base pack's authored metres (`terrain_mesh_tiles`), read from `assets/terrain/surface.ron`. |
 | `src/terrain_lod.rs` | the startup LOD ladder | **B**: ONE-SURFACE, generated at Startup from the grid, so "no baked product can go stale" (`:11-15`). NO SKIRTS: full-density borders at every tile and level pairing (`:20-24`). Mikktspace tangents required at every rung (`:660-672`, `:694`). An OS failure starting tangent workers is a typed `TangentStartupError` (`:641-656`), and the process refuses to start (`:724-727`): the outside-input outcome. | |
 | `src/terrain_shadow.rs` | the baked sun shadow field, startup; every lit battlefield material binds it and multiplies its receiver law (`assets/shaders/terrain_shadow.wesl`) into bevy's `directional_shadow_factor` | **B**. The sun's radius is shared data (`assets/world/sun.ron`); `MIN_PENUMBRA_M` is a `Resolution` | Outside the field a receiver reads lit; inside it the field applies at every distance while the sun casts shadows, and not at all with shadows off (upstream `pbr_functions.wesl`, the shadow-receiver block). |
-| `src/terrain_blend.rs` | the ground material | **B**, except `BLEND_LAYERS`, `BASE_GROUND` and the appearance consts (`:87-106`, `:190-216`): backlog rows destruction-05 and destruction-08 (**P**) | `prints_world` has no sampler of its own; it is read through the mask's clamping sampler (`:297-302`). §3.3 depends on this. |
-| `src/ground_field.rs` | decodes the masks into ground types for the sim (`:145-213`), reading the file itself (`:196`) | **B** | |
+| `src/terrain_blend.rs` | the ground material | **B**. Its packs, their authored metres and grounds, and the blend's tastes are admitted data (`assets/terrain/surface.ron`, read through `src/terrain_surface.rs` by the blend, the mesh UVs, the ground field and the ground-type table); only `SKIP_WEIGHT`, a `Resolution`, stays in code | `prints_world` has no sampler of its own; it is read through the mask's clamping sampler (`TerrainBlend::prints_world`). §3.3 depends on this. |
+| `src/ground_field.rs` | decodes the masks into ground types for the sim, reading the file itself (`GroundField::load_painted`) | **B** | |
 | `src/scatter.rs` | places instances on every composition; both peers derive them, nothing is replicated (`:1-24`) | **B**. Graybox `Block`s are placeholders (`"placeholder": true`). | Statics are `[Terrain]` (`:318`). |
 | `src/world.rs`, `src/world/look.rs` | sun, analytic sky, environment light, environment spawn | sky law **B**; sky data home **P** (moved by V0) | Sky data is `include_str!` of `assets/world/lighting.ron` : global, not per map. `sky_radiance` (V1 moved it to `sky::sky_radiance`) is baked to 128² `Rgba8Unorm` and filtered once (`sky::light_battlefield_views`). **A bug**: the bake evaluates radiance at cubemap coordinates, but Bevy samples every cubemap at (x, y, −z) of the world direction (`bevy_core_pipeline-0.19.1/src/skybox/skybox.wgsl:78-79`; vendored `light_probe/environment_map.wgsl`, `compute_cubemap_sample_dir`). Today's fill glow therefore sits mirrored across the XY plane: the sun is at azimuth +45° and the glow at −45° (DERIVED). L1a fixes it (`sky::world_direction`). **U**: the sun's `DirectionalLight` spawns on every composition, the server included, and `world::plugin` parses the lighting file on the server. That is view data on the server; V0 moves it. |
 | `assets/world/lighting.ron` | 12 `Taste` rows | **P**: moves per map (V0) | Its parse admits `sky_intensity_cd_m2 = 0` (refused since L1a) and zero colour channels, which the new derivations divide by (§3.2, §3.4). |
@@ -139,10 +139,10 @@ numbers, each with its reason.
 - `content_digest(root)` is `load(root).digest`, so the digest's caller (`src/net/protocol.rs:75`)
   gets the same checks.
 - Mutation witnesses: editing `boundary.ron` or `terrain_masks.png` changes the digest.
-- The height and mask decoders still read their files a second time (`terrain_grid.rs:569`,
-  `ground_field.rs:196`). That double read is pre-existing and stays: moving those bytes into the
-  snapshot edits `terrain_grid.rs` and pulls backlog rows destruction-05 and destruction-09 into a
-  lane with no hour left for them. Recorded as the R6 remainder.
+- The height and mask decoders still read their files a second time
+  (`terrain_grid::decode_height_grid`, `GroundField::load_painted`). That double read is
+  pre-existing and stays: moving those bytes into the snapshot edits `terrain_grid.rs` and pulls
+  backlog row destruction-09 into a lane with no hour left for it. Recorded as the R6 remainder.
 
 **R7. Sim and view.**
 - Sim state is built at spawn from root data (ADR-0014).
@@ -346,14 +346,14 @@ tracer at range in the optic.
   `view/outland.ron`, `fade_m: (…, StandIn("outland height: odd-reflection fade; replaced by the authored outland (#221)"))`.
   - Odd reflection keeps the outward slope continuous, and the smoothstep's zero slope at the seam
     keeps it so.
-  - So the grid's one-sided edge normal (`terrain_grid.rs:770-783`) equals the outland's own
+  - So the grid's one-sided edge normal (`terrain_grid::surface_normal_at`) equals the outland's own
     central difference at the seam by construction: `(2h₀ − 2h₋₁)/(2s) = (h₀ − h₋₁)/s`.
   - An even mirror would fold the slope into a crease one cell out.
 - **Seam attributes.** Loop 0 copies the grid's normals (`surface_normal_at`), bit for bit, so f32
-  rounding cannot open a shading line. UVs follow the grid's law, world XZ over `TEXTURE_TILE_M`
-  (`terrain_grid.rs:737`), so they are continuous by construction.
+  rounding cannot open a shading line. UVs follow the grid's law, world XZ over the base pack's authored
+  metres (`terrain_grid::terrain_mesh_tiles`), so they are continuous by construction.
 - **Tangents.** The outland requires mikktspace tangents, as every terrain rung does
-  (`terrain_lod.rs:660-672`), generated by the same `Mesh::generate_tangents` (`:694`). A generation
+  (`terrain_lod::generate_tangents`), generated by the same `Mesh::generate_tangents`. A generation
   failure is the same typed startup refusal.
   - At the seam the two meshes' tangents differ by their adjacent triangles. L3a reports the
     MEASURED largest angle, and L3c's edge capture judges it.
@@ -383,7 +383,7 @@ tracer at range in the optic.
   (`ImageAddressMode::MirrorRepeat`, `bevy_image-0.20.1/src/image.rs`). C0 at the seam is
   all colour needs.
 - `prints_world` and `prints_near` are empty images. Through the shared clamping sampler
-  (`terrain_blend.rs:297-302`), the map's prints would otherwise mirror outward.
+  (`TerrainBlend::prints_world`), the map's prints would otherwise mirror outward.
 - Per-pixel cost is bounded by the terrain's.
 - No edit to `terrain_blend.rs`, so backlog rows destruction-05 and destruction-08 stay out of this
   lane.
@@ -534,7 +534,7 @@ below. `MapManifest` carries it.
 **No grip (owner decision, a `Taste`).** The wall's `friction` row is 0 and goes on its colliders
 as `substances::contact_friction(friction)` (`src/substances.rs:70-77`), which carries the
 project's one pair rule. It replaces borrowing the terrain's solver stand-in
-(`ground_types.rs:360-363`). Zero holds on every path that reads a contact's friction:
+(`GroundTypes::terrain_friction`). Zero holds on every path that reads a contact's friction:
 - **Avian's combine.**
   - `Friction`'s default rule is `Average` (vendored `avian3d-0.8.0-overmatch/src/dynamics/rigid_body/physics_material.rs`),
     and `Friction::ZERO` is `Average` too (`:164-168`). Under `Average`, zero would hand back half
@@ -729,7 +729,7 @@ does not refuse it.
 | Placement Y | finite authored Y is admitted | scatter replaces Y with terrain height because the export is stale | #221: restore the off-repo Houdini source, export truthful world XYZ against the shipped height decode (including moved XZ), then retain authored Y; hand-resampling the product alone would be overwritten on export |
 | Boundary driving | production-composition hull witnesses; a force/energy-derived containment check, a reported revisitation and held-position trend, and geometry-derived support reach | none new | #299: the owner judges the wall capture |
 | Boundary floor consumers (W2, W3 delivered) | shared admitted floor; ordered authority retirement and shared-cursor records | none new | none |
-| Map load (W1a delivered) | one admitted sequence and digest, including boundary and masks (R6); height-decode range must remain finite | the decoders' second read (R6 remainder) | the snapshot carrying the bytes, with destruction-05 and destruction-09 |
+| Map load (W1a delivered) | one admitted sequence and digest, including boundary and masks (R6); height-decode range must remain finite | the decoders' second read (R6 remainder) | the snapshot carrying the bytes, with destruction-09 |
 | Map sources | tracked, reproducible, admitted generators | off-repo Houdini scene and TIFF; `map_ui.png` recipe | #221's pipeline; a startup derivation |
 
 ---
@@ -760,8 +760,10 @@ south-east, square to the sun's bearing, so the faces in view take their fill fr
 
 **Ratchet.** The backlog rows naming files these lanes edit:
 - view-13 (`terrain_shadow.rs`) goes to L4a.
-- No lane edits `terrain_grid.rs` or `terrain_blend.rs` (destruction-05, destruction-08,
-  destruction-09) or `spawn_map.rs` (net-05, net-09, net-10).
+- No lane edits `spawn_map.rs` (net-05, net-09, net-10). L4a edits `terrain_grid.rs` and
+  `terrain_blend.rs` and closes destruction-05 and destruction-08 (the surface's data,
+  `assets/terrain/surface.ron`); destruction-09 needs spawn data from the baked construction and
+  stays.
 - A builder who finds it must edit one stops and reports: the rows come with the edit and need a
   lane of their own.
 - Any other file a lane edits carries no backlog row today (`.agents/lenses/backlog.md`, read

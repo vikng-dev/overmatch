@@ -1,0 +1,41 @@
+// The ground's surface (`src/terrain_surface.rs`, embedded in every build): which Poly Haven pack
+// the base and each blended layer is (a folder under `assets/terrain/`, whose `cc.txt` carries the
+// attribution and the authored size), the metres it was authored at, the ground type it is (a key
+// into `ground_types.ron`), and the blend's look.
+(
+    // Wherever the map's masks are silent. Its maps are `terrain/<pack>/<pack>_{diff,nor_gl,arm}.ktx2`.
+    base: (
+        pack: "coast_sand_rocks_02",
+        authored_m: (15.0, Measured("Poly Haven coast_sand_rocks_02 `dimensions: [15000, 15000]` mm, api.polyhaven.com/info/coast_sand_rocks_02")),
+        // Sand strewn with stones: a sandy loam, its stones left to the look.
+        ground: "sandy loam",
+    ),
+    // In the mask's channel order: layer i is mask channel i and slice i of the blend arrays, which
+    // `scripts/encode-terrain-ktx2.sh`'s `LAYER_PACKS` cuts in this order.
+    layers: [
+        // R, recesses: where dirt and debris settle.
+        (
+            pack: "dirt_aerial_03",
+            authored_m: (25.0, Measured("Poly Haven dirt_aerial_03 `dimensions: [25000, 25000]` mm, confirmed by its `scale: \"25M x 25M\"`")),
+            ground: "dirt",
+        ),
+        // G, slopes: where land slides, exposing sand and soil.
+        (
+            pack: "coast_sand_05",
+            authored_m: (25.0, Measured("Poly Haven coast_sand_05 `dimensions: [24999.998, 25000.002]` mm, a scan fit read as 25 m")),
+            ground: "sand",
+        ),
+        // B, lowlands: swampy, marshy, moist.
+        (
+            pack: "aerial_mud_1",
+            authored_m: (8.0, Measured("Poly Haven aerial_mud_1 `dimensions: [8000, 8000]` mm; its `scale: \"40x40\"` disagrees and is not read")),
+            ground: "mud",
+        ),
+    ],
+    blend: (
+        ao_bias: (0.5, Taste("terrain blend edge: how far a layer's own ambient occlusion raises its weight, as a fraction of it, so a pack boundary follows the material's detail rather than the mask's texels")),
+        window: (0.4, Taste("terrain blend edge: the biased-weight gap behind the leading layer at which a layer stops contributing; the transition width")),
+        macro_period_m: (60.0, Taste("terrain repeat breakup: metres per period of the low-frequency albedo gain, so it varies across a pack's repeat")),
+        macro_amplitude: (0.12, Taste("terrain repeat breakup: how far the gain moves the blended albedo, as a fraction of it")),
+    ),
+)

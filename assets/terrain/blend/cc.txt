@@ -5,7 +5,7 @@ Haven packs. Cut by `scripts/encode-terrain-ktx2.sh blend`, bound by `terrain_bl
 ONE ARRAY PER MAP TYPE, not one per pack: nine separate bindings do not fit beside bevy's PBR bind
 group, three array bindings do.
 
-SLICE ORDER IS THE MASK'S CHANNEL ORDER (`terrain_blend::BLEND_LAYERS`, and each pack's own cc.txt
+SLICE ORDER IS THE MASK'S CHANNEL ORDER (the layers of `assets/terrain/surface.ron`, and each pack's own cc.txt
 for its authored scale and attribution):
 
   slice 0  dirt_aerial_03   mask R, recesses  25 m

@@ -23,7 +23,7 @@
 # any layer pack selects `blend`, since a layer cannot be cut on its own.
 #
 #   pack                  albedo file  res   source
-#   coast_sand_rocks_02   diff         4096  4k  ACTIVE base — bound by `terrain_grid::TEXTURE_PATH`
+#   coast_sand_rocks_02   diff         4096  4k  base — `assets/terrain/surface.ron`
 #   dirt_aerial_03        diff         2048  4k  blend layer 0 (recesses)
 #   coast_sand_05         diff         2048  4k  blend layer 1 (slopes)
 #   aerial_mud_1          diff         2048  4k  blend layer 2 (lowlands)
@@ -41,7 +41,8 @@ cd "$(git rev-parse --show-toplevel)"
 SRC="${TERRAIN_SRC:-$HOME/Downloads/overmatch-terrain-src}"
 CDN="https://dl.polyhaven.org/file/ph-assets/Textures"
 
-# The blend arrays' layer order — the mask's channel order (`terrain_grid::BLEND_LAYERS`), and the
+# The blend arrays' layer order — the mask's channel order (`assets/terrain/surface.ron`'s layers,
+# which `terrain_surface`'s shipped-file test holds this list to), and the
 # order the `-file` arguments are passed in below. Changing it re-numbers every layer index.
 LAYER_PACKS="dirt_aerial_03 coast_sand_05 aerial_mud_1"
 BLEND_DIR="assets/terrain/blend"

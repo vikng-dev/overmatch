@@ -739,7 +739,7 @@ fn grounds() -> Vec<(String, crate::ground_types::GroundType)> {
 
 fn base_ground() -> crate::ground_field::ContactGround {
     crate::ground_types::GroundTypes::load_shipped()
-        .get(crate::terrain_blend::BASE_GROUND)
+        .get(crate::terrain_surface::surface().base.ground.as_str())
         .contact()
 }
 
@@ -987,7 +987,7 @@ fn turning(card: &mut Card) {
              longitudinal and lateral parts; in a steady turn they cancel, and the lateral part \
              is the resisting moment Steeds' μWL/4 estimates (DERIVED: μ the ground's grip, W the \
              hull weight, L the mean road-wheel span).",
-            crate::terrain_blend::BASE_GROUND
+            crate::terrain_surface::surface().base.ground.as_str()
         ),
     });
 }

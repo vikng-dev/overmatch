@@ -998,7 +998,6 @@ mod tests {
 
     use bevy::mesh::MeshTag;
 
-    use crate::terrain_blend::{BASE_GROUND, BLEND_LAYERS};
     use crate::vfx::billboard::{
         BILLBOARD_SLOTS, Billboard, BillboardFamilies, VfxBillboardMaterial, flipbook_frame,
     };
@@ -1240,10 +1239,8 @@ mod tests {
         };
         let mut app = harness();
         let mut table = crate::ground_types::GroundTypes::load_shipped();
-        for (name, lifted, sparks) in [
-            (BASE_GROUND, 0.5, false),
-            (BLEND_LAYERS[0].ground, 0.0, true),
-        ] {
+        let [base, recesses, ..] = crate::terrain_surface::surface().grounds();
+        for (name, lifted, sparks) in [(base, 0.5, false), (recesses, 0.0, true)] {
             let ground = table.types.get_mut(name).expect("a pack's ground");
             ground.strike.lifted.value = lifted;
             ground.strike.sparks.value = sparks;
@@ -1350,10 +1347,8 @@ mod tests {
         let mut table = crate::ground_types::GroundTypes::load_shipped();
         let soils = [[0.2, 0.2, 0.2], [0.8, 0.8, 0.8]];
         let lifts = [0.4, 0.8];
-        for (name, lifted, colour) in [
-            (BASE_GROUND, lifts[0], soils[0]),
-            (BLEND_LAYERS[0].ground, lifts[1], soils[1]),
-        ] {
+        let [base, recesses, ..] = crate::terrain_surface::surface().grounds();
+        for (name, lifted, colour) in [(base, lifts[0], soils[0]), (recesses, lifts[1], soils[1])] {
             let ground = table.types.get_mut(name).expect("a pack's ground");
             ground.strike.lifted.value = lifted;
             ground.strike.sparks.value = false;
@@ -1409,7 +1404,8 @@ mod tests {
             .resource::<crate::ground_types::GroundTypes>()
             .clone();
         let mut table = table;
-        for (name, colour) in [(BASE_GROUND, soils[0]), (BLEND_LAYERS[0].ground, soils[1])] {
+        let [base, recesses, ..] = crate::terrain_surface::surface().grounds();
+        for (name, colour) in [(base, soils[0]), (recesses, soils[1])] {
             let ground = table.types.get_mut(name).expect("a pack's ground");
             ground.strike.sparks.value = false;
             ground.dust.colour_srgb = colour;
