@@ -493,8 +493,6 @@ mod tests {
     /// Bloom's final blend needs a nonzero maximum mip index, even on LOW.
     #[test]
     fn bloom_admission_requires_a_calculable_blend() {
-        // Fixture: Bevy 0.20.1 uses ilog2(dimension).max(2) - 1 mips;
-        // its final blend divides mip zero by mip_count - 1.
         for dimension in [1, 2, 4] {
             let mut data = decoded();
             data.bloom_mip_dimensions.0 = [dimension, 512];
