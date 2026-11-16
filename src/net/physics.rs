@@ -126,12 +126,7 @@ mod tests {
         );
     }
 
-    /// In the networked composition, collider propagation is ordered before `TransformToPosition`,
-    /// which `update_collider_scale` and the mass-property sets follow. Without the edge their
-    /// order is the executor's choice, MEASURED on the dedicated server as the scale taken first:
-    /// a launched turret's armour then held the scale Avian's `ColliderOf` hook decomposed out of
-    /// world matrices, an ULP off 1, for the tick after the launch, and the collector failed closed
-    /// every round that met it (`ballistics::collect`).
+    /// Collider propagation precedes `TransformToPosition`, as required by [`super::plugin`].
     #[test]
     fn collider_propagation_precedes_transform_to_position() {
         let mut app = App::new();

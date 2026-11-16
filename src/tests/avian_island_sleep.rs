@@ -793,19 +793,21 @@ fn rest_depends_on_energy_per_mass_and_spin_axis() {
         "fixture excludes the velocity-only rest branch"
     );
     let mut bodies = Vec::new();
-    for (size, spin, sleeps) in [(bar, Vec3::X * spin, true), (bar, Vec3::Z * spin, false)] {
-        bodies.push((
-            app.world_mut()
-                .spawn((
-                    RigidBody::Dynamic,
-                    Position(Vec3::X * bodies.len() as f32 * 20.0),
-                    Collider::cuboid(size.x, size.y, size.z),
-                    AngularVelocity(spin),
-                    threshold,
-                ))
-                .id(),
-            sleeps,
-        ));
+    let mut add_body = |size: Vec3, spin: Vec3, sleeps| {
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Position(Vec3::X * bodies.len() as f32 * 20.0),
+                Collider::cuboid(size.x, size.y, size.z),
+                AngularVelocity(spin),
+                threshold,
+            ))
+            .id();
+        bodies.push((body, sleeps));
+    };
+    for (spin, sleeps) in [(Vec3::X * spin, true), (Vec3::Z * spin, false)] {
+        add_body(bar, spin, sleeps);
     }
     for fraction in [0.5, 2.0] {
         // Fixture: either side of the resource-owned rest energy.
@@ -816,18 +818,7 @@ fn rest_depends_on_energy_per_mass_and_spin_axis() {
                 spin > threshold.angular,
                 "fixture excludes the velocity-only rest branch"
             );
-            bodies.push((
-                app.world_mut()
-                    .spawn((
-                        RigidBody::Dynamic,
-                        Position(Vec3::X * bodies.len() as f32 * 20.0),
-                        Collider::cuboid(size.x, size.y, size.z),
-                        AngularVelocity(Vec3::Z * spin),
-                        threshold,
-                    ))
-                    .id(),
-                fraction < 1.0,
-            ));
+            add_body(size, Vec3::Z * spin, fraction < 1.0);
         }
     }
     app.update();

@@ -17,8 +17,7 @@
 use avian3d::collision::contact_types::PackedFeatureId;
 use avian3d::prelude::*;
 
-/// Gives each point of `new` the warm-start impulses of its closest admissible point in `old` (see
-/// the module doc); `distance_threshold` is in metres.
+/// `distance_threshold` is in metres; see the module's matching law.
 pub fn match_pair(new: &mut [ContactManifold], old: &[ContactManifold], distance_threshold: f32) {
     let admissible_squared = distance_threshold * distance_threshold;
     for point in new

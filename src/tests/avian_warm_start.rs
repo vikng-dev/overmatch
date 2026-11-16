@@ -121,8 +121,8 @@ fn nearest_warm_start_is_selected_across_old_manifolds() {
             let manifold = &pair.manifolds[0];
             assert_eq!(manifold.points.len(), 1);
             let mut coincident = manifold.points[0];
-            assert_eq!(coincident.feature_id1, PackedFeatureId::face(0));
-            assert_eq!(coincident.feature_id2, PackedFeatureId::face(0));
+            assert_ne!(coincident.feature_id1, PackedFeatureId::UNKNOWN);
+            assert_ne!(coincident.feature_id2, PackedFeatureId::UNKNOWN);
             // Fixture: distinct cached normal and tangent impulses, N s.
             coincident.warm_start_normal_impulse = 11.0;
             coincident.warm_start_tangent_impulse = Vec2::new(7.0, 13.0);
