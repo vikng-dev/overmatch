@@ -98,6 +98,19 @@ class Refusals(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn("tick_hz", err)
 
+    def test_an_integer_beyond_float_range_is_refused_naming_its_field(self):
+        # JSON admits integers no float holds; the tables compute in floats.
+        huge = 10**400
+        path = self.traces.write("t.jsonl", [meta(huge), tick(0, 100.0, 1.0)])
+        status, _, err = run(path)
+        self.assertEqual(status, 2)
+        self.assertIn(f"{path}:1", err)
+        self.assertIn("tick_hz", err)
+        path = self.traces.write("u.jsonl", [meta(64.0), tick(0, huge, 1.0)])
+        status, _, err = run(path)
+        self.assertEqual(status, 2)
+        self.assertIn(f"{path}:2: tick row lacks a finite us", err)
+
     def test_the_per_round_cost_uses_the_declared_tick_rate(self):
         # Δmarch µs/tick × ticks/s ÷ rounds/s, at the traces' own rate (DERIVED, fixture numbers).
         hz, rounds_per_s = 128.0, 32.0

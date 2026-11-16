@@ -16,8 +16,10 @@ answer to "what does the MG cost per tick". Pass `--rounds-per-s R` to convert t
 march delta into a per-round cost, at the tick rate each trace's meta row declares.
 
 A trace this table cannot be read from is refused with its file and line, and the CLI exits 2: a
-malformed or unknown row, a tick row lacking a field, no meta row or a second one, a meta tick
-rate that is not finite and positive, no tick rows, or a delta across traces of different rates.
+malformed or unknown row, a tick row lacking a finite number in a field, no meta row or a second
+one, a meta tick rate that is not a finite positive number, no tick rows, or a delta across traces
+of different rates. A number is finite only if a float holds it: an integer beyond float range is
+refused.
 A final line with no newline after it is the recorder stopped mid-write: it is omitted, and
 stderr says so.
 
@@ -42,8 +44,16 @@ class Refused(Exception):
     """A trace the tables cannot be computed from, naming the file, the line and the fault."""
 
 
-def finite(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+def finite_float(value):
+    """`value` as a finite float, or None for a bool, a non-number, an integer beyond float range or
+    a non-finite float: the tables hold only finite floats."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        parsed = float(value)
+    except OverflowError:
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def pct(xs, q):
@@ -85,7 +95,7 @@ def linfit(xs, ys):
 
 def parse(path):
     """The trace's meta row, its tick rate and its tick rows (module doc: what is refused)."""
-    meta = None
+    meta, meta_line = None, None
     ticks = []
     with open(path) as fh:
         lines = fh.read().split("\n")
@@ -103,21 +113,22 @@ def parse(path):
         if kind == "meta":
             if meta is not None:
                 raise Refused(f"{path}:{number}: a second meta row")
-            meta = row
+            meta, meta_line = row, number
         elif kind == "tick":
-            missing = [field for field in TICK_FIELDS if not finite(row.get(field))]
+            parsed = {field: finite_float(row.get(field)) for field in TICK_FIELDS}
+            missing = [field for field, value in parsed.items() if value is None]
             if missing:
                 raise Refused(f"{path}:{number}: tick row lacks a finite {', '.join(missing)}")
-            ticks.append(row)
+            ticks.append(parsed)
         else:
             raise Refused(f"{path}:{number}: a row that is neither meta nor tick")
     if meta is None:
         raise Refused(f"{path}: no meta row (src/cost.rs writes it at startup)")
-    hz = meta.get("tick_hz")
-    if not finite(hz) or hz <= 0:
-        raise Refused(f"{path}: meta tick_hz {hz!r} is not a finite positive rate")
+    hz = finite_float(meta.get("tick_hz"))
+    if hz is None or hz <= 0:
+        raise Refused(f"{path}:{meta_line}: meta tick_hz is not a finite positive rate")
     if not isinstance(meta.get("role"), str):
-        raise Refused(f"{path}: meta row names no role")
+        raise Refused(f"{path}:{meta_line}: meta row names no role")
     if not ticks:
         raise Refused(f"{path}: no tick rows")
     return meta, hz, ticks
@@ -137,11 +148,11 @@ def summarize(label, path):
 
 def print_block(s):
     print(f"\n=== {s['label']}  (role={s['role']}) ===")
-    print(f"  ticks {s['n']}  ({s['dur']:.1f} s)   tanks {min(s['nt'])}-{max(s['nt'])}"
-          f"   entities {min(s['ne'])}-{max(s['ne'])}   march re-runs(mc>1): "
+    print(f"  ticks {s['n']}  ({s['dur']:.1f} s)   tanks {min(s['nt']):.0f}-{max(s['nt']):.0f}"
+          f"   entities {min(s['ne']):.0f}-{max(s['ne']):.0f}   march re-runs(mc>1): "
           f"{sum(1 for m in s['mc'] if m > 1)}")
     print(f"  projectiles alive/tick: mean {mean(s['np']):.2f}  p50 {pct(s['np'],50):.0f}"
-          f"  p99 {pct(s['np'],99):.0f}  max {max(s['np'])}")
+          f"  p99 {pct(s['np'],99):.0f}  max {max(s['np']):.0f}")
     print(f"  {'metric':<22}{'p50':>10}{'p90':>10}{'p99':>10}{'max':>10}{'mean':>10}")
     print(f"  {'FixedUpdate tick us':<22}{pct(s['us'],50):>10.2f}{pct(s['us'],90):>10.2f}"
           f"{pct(s['us'],99):>10.2f}{max(s['us']):>10.2f}{mean(s['us']):>10.2f}")
@@ -156,7 +167,7 @@ def print_block(s):
     if fit and max(s["np"]) - min(s["np"]) >= 4:
         slope, intercept, _ = fit
         print(f"  march vs live-projectile fit: {slope:.4f} µs/projectile  "
-              f"(+ {intercept:.3f} µs empty)   [np {min(s['np'])}..{max(s['np'])}]")
+              f"(+ {intercept:.3f} µs empty)   [np {min(s['np']):.0f}..{max(s['np']):.0f}]")
         for p in (10, 30, 60, 150):
             if p <= max(s["np"]) * 1.05:
                 print(f"      → np={p:>3}: march ≈ {slope * p + intercept:7.2f} µs/tick")
