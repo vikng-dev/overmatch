@@ -311,7 +311,11 @@ and recomputes each once. A body owns its metrics and reads only its own collide
 bodies run on the compute pool (`par_iter_many_unique_mut`, which takes only a set: a body visited
 twice is unrepresentable); a step with no stale body dispatches nothing. A changed collider whose
 body is despawned, disabled or holds no metrics is skipped, as upstream.
-`BodySizeMetricUpdates` holds the count of bodies the last pass recomputed.
+`BodySizeMetricUpdates` holds the count of bodies the last pass recomputed: test instrumentation,
+read only by the guard, at one relaxed atomic add per recomputed body and one resource write per
+step. It cannot be `cfg(test)` (the game's tests build this crate as a dependency), and a feature
+switched on from the game's dev-dependencies would compile the fork and every crate above it in
+two feature sets.
 
 MEASURED on the scheduled collapse (the command above, one run each): the physics step's time
 outside Avian's timed stages was 151 to 518 ms in the two ticks after each collapse and 2.35 s over

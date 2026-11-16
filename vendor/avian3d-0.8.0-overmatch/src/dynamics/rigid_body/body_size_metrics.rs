@@ -89,8 +89,11 @@ impl<C: AnyCollider> Plugin for BodySizeMetricsPlugin<C> {
     }
 }
 
-/// OVERMATCH PATCH: the bodies whose metrics the last pass of [`update_body_size_metrics`]
-/// recomputed.
+/// OVERMATCH PATCH: test instrumentation, the bodies whose metrics the last pass of
+/// [`update_body_size_metrics`] recomputed. Only the game's guard reads it
+/// (`src/tests/avian_body_size_metrics.rs`). Cost: one relaxed atomic add per recomputed body and
+/// one resource write per step. Why it is not test-only: `OVERMATCH_PATCH.md`, "Body size
+/// metrics once per body".
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BodySizeMetricUpdates(pub u32);
 
