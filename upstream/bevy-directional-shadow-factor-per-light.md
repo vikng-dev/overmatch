@@ -48,17 +48,14 @@ it was baked for: the GPU light record carries no identity a material could matc
 
 ## Our side
 
-`assets/shaders/terrain_shadow.wesl` (`visibility`) returns 1, silencing the field, in a view
-holding a shadow-casting directional light other than the sun it was baked for; a light that casts
-none does not silence it. No shipped view holds such a light today (DERIVED from the light spawns
-and their render-layer masks): the pen cam stage's two key lights cast no shadow
-(`src/damage_cam/pen_cam/stage.rs`), so the kill cam lesson view, which sees the sun and those keys
-(`src/render_policy.rs`), keeps the terrain's shadow. The cost lands the first time a second
-shadow-casting directional light shares a view with the terrain. Guarded by
-`terrain_shadow::tests::a_receiver_is_lit_above_its_occluders_line_and_shaded_below`.
+A world that binds the terrain's field holds at most one shadow-casting directional light, the sun
+the field was baked for; `src/terrain_shadow.rs` (`the_sun_is_the_only_shadow_caster`) asserts it
+every frame and panics naming any other. Lights casting none are untouched: the pen cam stage's two
+key lights cast no shadow (`src/damage_cam/pen_cam/stage.rs`), so the kill cam lesson view, which
+sees the sun and those keys (`src/render_policy.rs`), keeps the terrain's shadow. The cost lands
+the first time the game wants a second shadow-casting directional light beside the terrain.
 
 ## What fixing this unlocks for us
 
-The terrain shades the sun in any view, beside any other light: the light loop's early return goes,
-and the field selects the sun's index instead. `SAME_LIGHT` and the uniform's baked direction stay,
-since the match by direction is how a material finds that index.
+A second shadow-casting directional light beside the terrain: the one-sun assertion goes, and the
+receiver law selects the sun's index by matching `direction_to_light` against the baked direction.

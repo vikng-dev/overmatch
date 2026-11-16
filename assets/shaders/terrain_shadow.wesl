@@ -5,19 +5,12 @@ import constants::MATERIAL_BIND_GROUP;
 // shadow binds the field at 150 and its uniform at 151, and multiplies `visibility` at its lit
 // position into `pbr_input.directional_shadow_factor` before `apply_pbr_lighting`.
 
-import bevy_pbr::render::{
-    mesh_view_bindings::lights,
-    mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
-};
-
 struct TerrainShadowUniform {
     // xy: world XZ of texel (0, 0); z: texels per metre; w: metres per texel.
     map: vec4<f32>,
     // xy: the unit horizontal direction toward the sun; z: the sun's rise per horizontal metre;
     // w: 1 when the field is bound, 0 when absent.
     ray: vec4<f32>,
-    // xyz: the direction toward the sun the field was baked for; w: unused.
-    light: vec4<f32>,
     // x: the sun's angular radius (rad); y: the least penumbra half-width (m).
     law: vec4<f32>,
 };
@@ -28,11 +21,6 @@ struct TerrainShadowUniform {
 
 // THE RECEIVER LAW.
 //
-// The cosine above which a light's direction is the one the field was baked for. ASSUMED: about
-// 0.8°, far wider than the f32 difference between two derivations of one direction, far narrower
-// than any second light a scene would aim differently.
-const SAME_LIGHT: f32 = 0.9999;
-
 // The field's visibility (0..1) at `position`. Each of the four texels around the fragment holds the
 // occluder its own ray toward the sun meets; that occluder's line toward the sun is carried to the
 // fragment, which is lit above it. A texel whose occluder lies at or behind the fragment (or that
@@ -42,21 +30,13 @@ const SAME_LIGHT: f32 = 0.9999;
 // `depth · cos²(elevation) / reach` radians above it.
 //
 // Bevy multiplies the factor into a directional light's shadow inside its shadow-receiver block, at
-// every distance and only while the light casts shadows: one scalar for all such lights, not one per
-// light (`pbr_types.wesl`, `pbr_functions.wesl`). So the field is silent in a view holding a
-// shadow-casting directional light other than the sun it was baked for, which it would shade too; a
-// light casting none (the pen cam stage's keys) never meets the factor. A per-light factor upstream
-// would lift this: `upstream/bevy-directional-shadow-factor-per-light.md`. It is silent outside the
-// field too.
+// every distance and only while the light casts shadows: one scalar for all such lights
+// (`pbr_types.wesl`, `pbr_functions.wesl`). The game keeps the baked sun the only one wherever a
+// field is bound (`terrain_shadow::the_sun_is_the_only_shadow_caster`). It is silent outside the
+// field.
 fn visibility(position: vec3<f32>) -> f32 {
     if terrain_shadow.ray.w == 0.0 {
         return 1.0;
-    }
-    for (var i = 0u; i < lights.n_directional_lights; i++) {
-        let casts = (lights.directional_lights[i].flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u;
-        if casts && dot(lights.directional_lights[i].direction_to_light, terrain_shadow.light.xyz) < SAME_LIGHT {
-            return 1.0;
-        }
     }
     let size = vec2<i32>(textureDimensions(terrain_shadow_field));
     let grid = (position.xz - terrain_shadow.map.xy) * terrain_shadow.map.z;

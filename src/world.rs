@@ -96,6 +96,11 @@ const GROUND_THICKNESS: f32 = 1.0;
 pub fn plugin(app: &mut App) {
     // A world with no baked field until `spawn_environment` bakes one (`terrain_shadow`).
     app.init_resource::<crate::terrain_shadow::TerrainShadow>();
+    // After the frame's light and transform writes, before the render world extracts them.
+    app.add_systems(
+        Last,
+        crate::terrain_shadow::the_sun_is_the_only_shadow_caster,
+    );
     // Decode the heightmap FIRST (synchronous, ADR-0014), then spawn whichever world it selects:
     // the heightfield when the grid decoded, the flat slab + authored course otherwise.
     app.add_systems(
