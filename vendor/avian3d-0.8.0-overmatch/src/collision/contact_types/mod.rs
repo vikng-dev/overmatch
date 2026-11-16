@@ -500,6 +500,9 @@ impl ContactManifold {
         // Neither of these should become zero, so we clamp the minimum distance.
         const MIN_DISTANCE_SQUARED: f32 = 1e-6;
 
+        // OVERMATCH PATCH: separated geometry must not displace bearing support.
+        let has_bearing = self.points.iter().any(|point| point.penetration >= 0.0);
+
         // Project the contact points onto the contact normal and compute the squared penetration depths.
         let (projected, penetrations_squared): (Vec<Vector>, Vec<f32>) = self
             .points
@@ -518,6 +521,9 @@ impl ContactManifold {
         let mut point1_index = 0;
         let mut value = f32::MIN;
         for (i, point) in projected.iter().enumerate() {
+            if has_bearing && self.points[i].penetration < 0.0 {
+                continue;
+            }
             let v = point.length_squared().max(MIN_DISTANCE_SQUARED) * penetrations_squared[i];
             if v > value {
                 value = v;
@@ -531,7 +537,7 @@ impl ContactManifold {
         let mut point2_index = usize::MAX;
         let mut max_distance = f32::MIN;
         for (i, point) in projected.iter().enumerate() {
-            if i == point1_index {
+            if i == point1_index || (has_bearing && self.points[i].penetration < 0.0) {
                 continue;
             }
             let v =
@@ -541,8 +547,12 @@ impl ContactManifold {
                 point2_index = i;
             }
         }
-        debug_assert!(point2_index != usize::MAX, "No second point found");
-        let point2 = projected[point2_index];
+        // A lone bearing point has no segment; its zero area leaves the fill pass the spare slots.
+        let point2 = if point2_index == usize::MAX {
+            point1
+        } else {
+            projected[point2_index]
+        };
 
         // Find the farthest points on both sides of the line segment in order to maximize the area.
         let mut point3_index = usize::MAX;
@@ -551,7 +561,10 @@ impl ContactManifold {
         let mut max_value = 0.0;
         let perp = (point2 - point1).cross(self.normal);
         for (i, point) in projected.iter().enumerate() {
-            if i == point1_index || i == point2_index {
+            if i == point1_index
+                || i == point2_index
+                || (has_bearing && self.points[i].penetration < 0.0)
+            {
                 continue;
             }
             let v = perp.dot(point - point1);
@@ -564,11 +577,11 @@ impl ContactManifold {
             }
         }
 
-        // Construct the manifold, ensuring the order is correct to form a convex polygon.
         // TODO: The points in the manifold should be in an `ArrayVec`, and the input points should be separate.
         let points = core::mem::take(&mut self.points);
 
-        // OVERMATCH PATCH: bearing priority without discarding speculative stops in free slots.
+        // OVERMATCH PATCH: bearing priority, then distinct speculative stops in free slots.
+        // No downstream consumer depends on polygon order.
         if points.iter().any(|point| point.penetration < 0.0) {
             let preferred = [point1_index, point3_index, point2_index, point4_index];
             for bearing in [true, false] {
@@ -577,7 +590,13 @@ impl ContactManifold {
                     .filter(|&i| i != usize::MAX)
                     .chain((0..points.len()).filter(|i| !preferred.contains(i)))
                 {
-                    if self.points.len() < 4 && (points[i].penetration >= 0.0) == bearing {
+                    if self.points.len() < 4
+                        && (points[i].penetration >= 0.0) == bearing
+                        && (bearing
+                            || !self.points.iter().any(|kept| {
+                                kept.anchor1.reject_from_normalized(self.normal) == projected[i]
+                            }))
+                    {
                         self.points.push(points[i]);
                     }
                 }
@@ -585,6 +604,7 @@ impl ContactManifold {
             return;
         }
 
+        // Construct the manifold, ensuring the order is correct to form a convex polygon.
         self.points.push(points[point1_index]);
         if point3_index != usize::MAX {
             self.points.push(points[point3_index]);

@@ -49,29 +49,40 @@ with zero-depth, sub-floor and above-floor bearing points, varied separation and
 
 ## Proposed fix and local patch
 
-Retain bearing points before separated points, using upstream's distance/area preference then
-input order to fill four slots whenever separated candidates exist, clamping depth before squaring
-so extra separation cannot improve selection, and leaving all-bearing selection unchanged.
+When any point bears, restrict all three distance/area selection loops to bearing points.
+Clamp depth before squaring so extra separation cannot improve selection. Construct mixed
+manifolds from preferred indices, then remaining input indices, bearing candidates first, up to
+four points. Skip a separated candidate when its projected anchor exactly equals one already
+kept; bearing priority takes precedence over projected deduplication. No downstream consumer
+requires polygon order. All-bearing output remains exactly upstream's, including first-wins ties.
 
-The projection, first two distance/depth selections and two-sided area selection stay upstream's.
-Construction visits those selected indices before remaining input indices, bearing candidates
-first, stopping at four. This preserves current support and free-slot speculative stops without
-adding a geometry heuristic or heap allocation. The unchanged floor prevents a zero distance or depth
-factor from erasing the other factor's ranking. The normal solver turns separated points into
-speculative stops, and our contact reducer reads their `normal_speed` after pruning.
+The bearing-only selections preserve spanning support when more than four bearing candidates
+compete. Selecting preferred indices across all candidates and merely sorting bearing points
+first afterward is insufficient: separated extremes can consume preferred slots, leaving adjacent
+bearing points to enter by clipped-boundary input order. A lone bearing point has no second
+bearing endpoint or area extremes; the fill pass supplies its distinct speculative stops.
+No new geometry heuristic or heap allocation is introduced. The unchanged floor prevents a zero
+distance or depth factor from erasing the other factor's ranking. The normal solver turns
+separated points into speculative stops, and our contact reducer reads their `normal_speed`
+after pruning; these are reasons to retain distinct speculative candidates in spare slots,
+not reasons for separation monotonicity, which forbids rewarding separation itself.
 
 An unconditional `min(n, 4)` result conflicts with exact all-bearing upstream selection: for five
 collinear all-bearing points upstream returns two endpoints (DERIVED by its zero signed areas;
 MEASURED by the direct guard). A convex pentagon with linearly varying positive depths can select
-an edge first and return three points (also covered by the guard). This local patch
-chooses exact all-bearing compatibility and guarantees full capacity when any separated candidate
-exists; a requirement to fill every all-bearing manifold would also change upstream behavior.
+an edge first and return three points (also covered by the guard). This local patch chooses exact
+all-bearing compatibility; mixed manifolds fill spare slots while prioritizing bearing candidates
+and skipping redundant projected speculation. Thus mixed/subset equality holds when the
+bearing-only selection spans four points; degenerate mixed support can gain bearing points
+through the fill pass. Fewer than four distinct candidates need not fill four slots.
 
 Local guard: `src/tests/avian_contact_pruning.rs`, registered in the game's `src/tests.rs`.
 The workspace excludes `vendor/`, so an in-crate dependency test would not run in the game's CI.
-The guard checks generated mixes against bearing priority, capacity where compatible with
-upstream, exact all-bearing upstream selection and separation monotonicity. It asserts contracts,
-not historical physics outputs. The patch inventory is that crate's `OVERMATCH_PATCH.md`.
+Generated mixes check bearing priority, capacity for distinct candidates, exact all-bearing
+upstream selection, separation monotonicity and mixed support against pruning the bearing subset
+alone when that selects four. A redundant projected speculative candidate must not displace a
+distinct stop, while coincident bearing candidates retain priority. These are relations, not
+historical physics outputs. The patch inventory is that crate's `OVERMATCH_PATCH.md`.
 
 ## What fixing this unlocks for us
 

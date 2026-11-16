@@ -65,8 +65,8 @@ fn upstream(points: &[ContactPoint]) -> Vec<ContactPoint> {
 }
 
 /// The solver must never trade bearing support for speculation, and must retain speculative
-/// stops in free slots. All-bearing callers retain upstream's exact selection. The contact
-/// reducer reads normal_speed after pruning, so extra separation must never improve admission.
+/// stops in free slots because the contact reducer reads their normal_speed after pruning.
+/// All-bearing callers retain upstream's exact selection; separation must never be rewarded.
 #[test]
 fn bearing_priority_capacity_upstream_compatibility_and_separation_monotonicity() {
     // Fixture: a square with edge midpoints, plus rotated input orders; every bearing assignment
@@ -116,6 +116,21 @@ fn bearing_priority_capacity_upstream_compatibility_and_separation_monotonicity(
                             kept.len(),
                             n.min(4),
                             "speculative stops lost from free slots"
+                        );
+                    }
+                    let bearing_subset: Vec<_> = points
+                        .iter()
+                        .copied()
+                        .filter(|p| p.penetration >= 0.0)
+                        .collect();
+                    let support = prune(&bearing_subset);
+                    // A spanning four-point selection must not become clustered by separated
+                    // candidates stealing preferred slots, then admitting support by input order.
+                    if bearing > 4 && bearing < n && support.len() == 4 {
+                        assert!(
+                            support.iter().all(|point| kept.contains(point)),
+                            "mixed support must match pruning the bearing subset alone: \
+                             n={n}, mask={mask}, rotation={rotation}"
                         );
                     }
                     for (i, point) in points.iter().enumerate() {
@@ -178,4 +193,42 @@ fn upstream_can_keep_fewer_than_four_bearing_points() {
             "all-bearing upstream compatibility"
         );
     }
+}
+
+/// The solver needs distinct speculative stops, while every bearing point still has priority
+/// when support fits. A separated copy along the normal must not displace a distinct stop.
+#[test]
+fn redundant_projected_speculation_preserves_distinct_stops_without_losing_support() {
+    // Fixture: one bearing corner and four separated corners/edge points.
+    let points: Vec<_> = [
+        (-1.0, -1.0),
+        (1.0, -1.0),
+        (1.0, 1.0),
+        (-1.0, 1.0),
+        (0.0, 1.0),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (x, z))| {
+        let at = Vec3::new(x, 0.0, z);
+        ContactPoint::new(at, at, at, if i == 0 { 0.001 } else { -0.01 })
+    })
+    .collect();
+    let at = points[0].anchor1 + Vec3::Y;
+    let mut redundant = vec![ContactPoint::new(at, at, at, -0.01)];
+    redundant.extend_from_slice(&points);
+    assert_eq!(
+        prune(&redundant),
+        prune(&points),
+        "a duplicate projected speculative stop must not displace a distinct stop"
+    );
+    redundant[0].penetration = 0.0;
+    let kept = prune(&redundant);
+    assert!(
+        redundant
+            .iter()
+            .filter(|p| p.penetration >= 0.0)
+            .all(|p| kept.contains(p)),
+        "projected deduplication must not discard bearing support that fits"
+    );
 }

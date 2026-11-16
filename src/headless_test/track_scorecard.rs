@@ -522,10 +522,11 @@ impl Bed {
     }
 
     /// Avian contacts with the tank: (bearing pairs, bearing manifolds, bearing points, all solver
-    /// points). Bearing means penetration >= 0. Separated points carried 0.7–0.8% of normal impulse
-    /// (MEASURED: the parked-layer experiment's `separated_point_normal_impulse_sum`, pre-fix
-    /// pruning). Narrow phase admits them by tolerance or closing speed; the solver uses them as
-    /// speculative stops. Counting both support and all points exposes tolerance's solver work.
+    /// points), excluding sensor and disabled-body pairs because they generate no solver work.
+    /// Bearing means penetration >= 0. Separated points carried 0.7–0.8% of normal impulse
+    /// (MEASURED: experiment commit 1a488c66, `separated_point_normal_impulse_sum`, pre-fix pruning).
+    /// Narrow phase admits them by tolerance or closing speed; the solver uses them as speculative
+    /// stops. Counting both support and all points exposes tolerance's solver work.
     fn contact_census(&self) -> (usize, usize, usize, usize) {
         let graph = self.app.world().resource::<ContactGraph>();
         graph
@@ -3342,7 +3343,8 @@ fn track_scorecard() {
         note: "MEASURED counts per tick for the one tank in the world: the production `Work` \
                counters, the belt's contact counts and Avian's bearing contacts with the \
                tank as a party: points with penetration >= 0, and pairs/manifolds containing \
-               such points. `solver_points` includes separated speculative stops as well, so \
+               such points. Sensor and disabled-body pairs are excluded: they generate no solver \
+               work. `solver_points` includes separated speculative stops as well, so \
                tolerance changes expose solver work alongside bearing support. No timing."
             .into(),
     });
