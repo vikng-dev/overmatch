@@ -27,6 +27,11 @@ pub fn sp_spawn_plugin(app: &mut App) {
 #[derive(Debug)]
 enum ScenarioFault {
     Start(String),
+    /// `OVERMATCH_START`'s spot lies outside the loaded terrain's span.
+    StartOffTerrain {
+        at: Vec2,
+        half_extent: f32,
+    },
     Target(String),
     ConflictingDemo,
     MissingVolume(&'static str),
@@ -36,6 +41,7 @@ impl std::fmt::Display for ScenarioFault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Start(value) => write!(f, "OVERMATCH_START={value:?}: want finite <x>,<z>[,<heading degrees>] or one of {:?}", START_SPOTS.map(|(name, ..)| name)),
+            Self::StartOffTerrain { at, half_extent } => write!(f, "OVERMATCH_START: ({}, {}) lies outside the terrain; want x and z within ±{half_extent} m", at.x, at.y),
             Self::Target(value) => write!(f, "OVERMATCH_TARGET={value:?}: want ahead, fires or kills"),
             Self::ConflictingDemo => f.write_str("OVERMATCH_TARGET conflicts with the capture plan's HullMarks demo; select ahead or unset the lever"),
             Self::MissingVolume(role) => write!(f, "OVERMATCH_TARGET requires a declared {role} volume; select a compatible tank or another scenario"),
@@ -149,15 +155,30 @@ const START_SPOTS: [(&str, f32, f32, f32); 3] = [
 /// every normal run; a dev lever on the offline path only, like [`target_scenario`].
 ///
 /// The owner sets this operator lever for hand-driving terrain-print checks at named spots.
-/// Refuses startup when the variable is set to anything [`parse_start`] refuses: a capture or a measurement that
-/// asked for a spot must never frame the duel as if it were that spot.
-pub(crate) fn start_spot() -> Option<(Vec2, f32)> {
+/// Refuses startup when the variable is set to anything [`admit_start`] refuses: a capture or a
+/// measurement that asked for a spot must never frame the duel as if it were that spot.
+pub(crate) fn start_spot(grid: Option<&crate::terrain_grid::HeightGrid>) -> Option<(Vec2, f32)> {
     let spec = crate::env_value("OVERMATCH_START").unwrap_or_else(crate::refuse_start)?;
-    let (at, heading) = parse_start(&spec)
-        .ok_or_else(|| ScenarioFault::Start(spec.clone()))
-        .unwrap_or_else(crate::refuse_start);
+    let (at, heading) = admit_start(&spec, grid).unwrap_or_else(crate::refuse_start);
     info!("OVERMATCH_START: the player's tank spawns at {at} heading {heading}°");
     Some((at, heading.to_radians()))
+}
+
+/// The spot `spec` names if [`parse_start`] reads it and it lies on the terrain:
+/// `terrain_grid::spawn_pos` requires its point inside the grid's span.
+fn admit_start(
+    spec: &str,
+    grid: Option<&crate::terrain_grid::HeightGrid>,
+) -> Result<(Vec2, f32), ScenarioFault> {
+    let (at, heading) = parse_start(spec).ok_or_else(|| ScenarioFault::Start(spec.to_owned()))?;
+    match grid {
+        Some(grid) if !grid.contains_xz(at.x, at.y) => Err(ScenarioFault::StartOffTerrain {
+            at,
+            half_extent: grid.half_extent(),
+        }),
+        // A flat world has no grid: `spawn_pos` stands the tank on its slab plane at any point.
+        _ => Ok((at, heading)),
+    }
 }
 
 /// The spot `spec` names, world XZ and heading in degrees: a [`START_SPOTS`] name (any case), or
@@ -577,7 +598,7 @@ fn spawn_tank_when_loaded(
         None => (Quat::from_rotation_z(0.7), Quat::IDENTITY),
     };
     // The player's own spawn, moved by the dev start lever when it is set.
-    let (a_at, a_turn) = match start_spot() {
+    let (a_at, a_turn) = match start_spot(grid) {
         // The hull faces its own −Z: a turn of `heading + π` about Y points it along the heading.
         Some((at, heading)) => (at, Quat::from_rotation_y(heading + std::f32::consts::PI)),
         None => (duel[0], a_turn),
@@ -860,7 +881,7 @@ fn swap_controlled_tank(
 mod target_scenario_tests {
     use bevy::math::Vec2;
 
-    use super::{START_SPOTS, TargetScenario, parse_start};
+    use super::{START_SPOTS, TargetScenario, admit_start, parse_start};
 
     /// In the game's damage model, a scenario aim follows the selected functional volume's
     /// pose, independently of the hull origin. A hull-offset mutant would leave the second aim
@@ -955,6 +976,28 @@ mod target_scenario_tests {
         ] {
             assert_eq!(parse_start(refused), None, "{refused}");
         }
+    }
+
+    /// A start spot off the loaded terrain is refused before the spawn, naming the lever and the
+    /// allowed bounds, rather than reaching `spawn_pos`'s span assertion. Mutant: dropping the
+    /// check passes the off-span spot.
+    #[test]
+    fn a_start_off_the_terrain_is_refused_naming_the_lever_and_its_bounds() {
+        // Fixture data: a flat two-sample grid over the fixture extent.
+        let grid = crate::terrain_grid::HeightGrid::new(
+            vec![0.0; 4].into(),
+            2,
+            crate::terrain_grid::FIXTURE_EXTENT,
+        );
+        let edge = grid.half_extent();
+        assert!(admit_start(&format!("{edge},{}", -edge), Some(&grid)).is_ok());
+        let error = admit_start(&format!("{},0", edge + 1.0), Some(&grid))
+            .expect_err("a spot past the span is refused")
+            .to_string();
+        assert!(
+            error.starts_with("OVERMATCH_START:") && error.contains(&format!("±{edge} m")),
+            "{error}"
+        );
     }
 
     /// `scripts/perf/run-pencam-cost.sh` names its three conditions' scenarios by these words; a
