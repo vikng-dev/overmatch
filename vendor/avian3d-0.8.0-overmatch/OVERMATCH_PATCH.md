@@ -24,10 +24,25 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 915 in all (MEASURED), 837 in upstream files and 78 in the
+of `src/` against the published crate: 1071 in all (MEASURED), 993 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
+
+## Bearing-first manifold pruning (`src/collision/contact_types/mod.rs`): kept
+
+`ContactManifold::prune_points` keeps penetrating (bearing) points first; speculative
+(separated) points fill free slots by the same selection. Both tiers use upstream's distance/area
+picks in selection order, then remaining tier indices if needed. Depth is clamped before squaring.
+Homogeneous manifolds retain upstream's construction order and may keep fewer than four; mixed
+manifolds fill four slots. No projected-anchor deduplication or lone-point fallback is used.
+
+Kept as an upstream bug fix: separation must not displace bearing support or be rewarded.
+The selection runs before the contact modification hook, so a game-side pass cannot recover
+points it discarded. This patch has 156 fork lines (MEASURED, added plus removed against the
+cached published crate); the file has 161 including its pair-state field. Guard:
+`src/tests/avian_contact_pruning.rs` (R1–R7 and the upstream under-capacity witness).
+Mechanism, exact patch and compile proof: [local upstream draft](../../upstream/avian-prune-points-unsigned-depth.md).
 
 ## Child collider poses (`src/collision/collider/collider_transform/plugin.rs`): hook
 
