@@ -3,10 +3,7 @@
 //! Body sweeps exchange momentum before physics in `construction::sweep`.
 
 use crate::construction::fracture::Load;
-use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::{
-    ComputeMassProperties3d, MassProperties3d,
-};
-use avian3d::prelude::*;
+use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::MassProperties3d;
 use bevy::prelude::*;
 
 /// A freed group's occupied-mass frame and departure in construction terms.
@@ -21,29 +18,16 @@ pub(crate) struct Launch {
     pub(crate) mass_properties: MassProperties3d,
 }
 
-/// What a collider contributes to its body's mass, inertia and centre: the occupied `hull`'s at
-/// `density`, whatever shape the collider itself meets contacts with.
-pub(crate) fn occupied_mass(hull: &Collider, density: f32) -> (Mass, AngularInertia, CenterOfMass) {
-    let props = hull.mass_properties(density);
-    (
-        Mass(props.mass),
-        AngularInertia::new_with_local_frame(
-            props.principal_angular_inertia,
-            props.local_inertial_frame,
-        ),
-        CenterOfMass(props.center_of_mass),
-    )
-}
-
 /// Occupied geometry and field impulses in a frame about `centroid`. Contacts carry force only;
 /// their momentum is already integrated by physics or the construction sweep.
 #[cfg(any(test, feature = "dev_ui"))]
 pub(crate) fn launch_colliders(
     centroid: Vec3,
-    colliders: Vec<(usize, Collider)>,
+    colliders: Vec<(usize, avian3d::prelude::Collider)>,
     density: impl Fn(usize) -> f32,
     loads: &[Load],
 ) -> Launch {
+    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
     let total = colliders
         .iter()
         .map(|(c, shape)| shape.mass_properties(density(*c)))
