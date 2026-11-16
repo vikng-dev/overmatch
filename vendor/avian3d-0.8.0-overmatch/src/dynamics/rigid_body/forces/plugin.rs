@@ -94,7 +94,11 @@ pub enum ForceSystems {
 
 /// Applies [`ConstantForce`] to the accumulated forces.
 fn apply_constant_forces(
-    mut bodies: Query<(&mut VelocityIntegrationData, &ComputedMass, &ConstantForce)>,
+    // OVERMATCH PATCH: sleepers retain pending increments until the solver takes them.
+    mut bodies: Query<
+        (&mut VelocityIntegrationData, &ComputedMass, &ConstantForce),
+        With<SolverBodyIndex>,
+    >,
 ) {
     bodies
         .iter_mut()
@@ -125,7 +129,11 @@ fn apply_constant_torques(
 
 /// Applies [`ConstantLinearAcceleration`] to the linear velocity increments.
 fn apply_constant_linear_acceleration(
-    mut bodies: Query<(&mut VelocityIntegrationData, &ConstantLinearAcceleration)>,
+    // OVERMATCH PATCH: same solver membership as increment preprocessing and clearing.
+    mut bodies: Query<
+        (&mut VelocityIntegrationData, &ConstantLinearAcceleration),
+        With<SolverBodyIndex>,
+    >,
 ) {
     bodies
         .iter_mut()
@@ -136,7 +144,11 @@ fn apply_constant_linear_acceleration(
 
 /// Applies [`ConstantAngularAcceleration`] to the angular velocity increments.
 fn apply_constant_angular_acceleration(
-    mut bodies: Query<(&mut VelocityIntegrationData, &ConstantAngularAcceleration)>,
+    // OVERMATCH PATCH: same solver membership as increment preprocessing and clearing.
+    mut bodies: Query<
+        (&mut VelocityIntegrationData, &ConstantAngularAcceleration),
+        With<SolverBodyIndex>,
+    >,
 ) {
     bodies
         .iter_mut()

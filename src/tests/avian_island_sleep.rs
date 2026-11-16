@@ -272,6 +272,71 @@ fn a_force_on_a_sleeper_acts_in_its_first_step_awake() {
     );
 }
 
+/// Server force writers need a sleeper's pending increment held unscaled until wake. Sleeping
+/// bodies must stay outside increment construction, including change-tick writes: otherwise the
+/// quiet population still pays every step for building and then undoing those increments.
+#[test]
+fn sleeping_increments_wait_untouched_and_act_on_wake() {
+    use avian3d::dynamics::integrator::VelocityIntegrationData;
+
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let free = body(&mut app, Vec3::ZERO);
+    // Fixture: independent persistent force/acceleration inputs exercise every world-frame builder.
+    let constant_force = Vec3::Z * 3.0;
+    let acceleration = Vec3::Y * 2.0;
+    app.world_mut().entity_mut(free).insert((
+        ConstantForce(constant_force),
+        ConstantLinearAcceleration(acceleration),
+        ConstantAngularAcceleration(Vec3::Y * 0.5),
+    ));
+    app.update();
+    app.update();
+    app.world_mut().entity_mut(free).insert(Sleeping);
+    // Fixture: the increment a one-step force leaves pending outside the solver.
+    let force = Vec3::X * 10.0;
+    let mass = app.world().get::<ComputedMass>(free).unwrap().value();
+    let pending = force / mass;
+    app.world_mut()
+        .get_mut::<VelocityIntegrationData>(free)
+        .unwrap()
+        .apply_linear_acceleration(pending);
+    let changed = app
+        .world()
+        .entity(free)
+        .get_ref::<VelocityIntegrationData>()
+        .unwrap()
+        .last_changed();
+    for _ in 0..4 {
+        app.update();
+        assert!(app.world().get::<Sleeping>(free).is_some());
+        let entity = app.world().entity(free);
+        let data = entity.get_ref::<VelocityIntegrationData>().unwrap();
+        assert_eq!(
+            data.linear_increment, pending,
+            "pending force stays unscaled"
+        );
+        assert_eq!(data.angular_increment, Vec3::ZERO);
+        assert_eq!(
+            data.last_changed(),
+            changed,
+            "sleepers do not enter the increment builders"
+        );
+    }
+    let before = app.world().get::<LinearVelocity>(free).unwrap().0;
+    app.world_mut().entity_mut(free).remove::<Sleeping>();
+    app.update();
+    let step = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let expected = (pending + constant_force / mass + acceleration) * step;
+    let gained = app.world().get::<LinearVelocity>(free).unwrap().0 - before;
+    // Resolution: f32 summation over substeps, below any missing force contribution.
+    assert!((gained - expected).length() <= 1e-4 * expected.length());
+}
+
 /// Physics users need corrupt island membership refused rather than a partly woken island.
 /// Missing required body state must not terminate the linked-list walk silently.
 #[test]

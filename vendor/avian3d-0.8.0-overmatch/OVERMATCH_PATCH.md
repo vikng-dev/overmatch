@@ -139,28 +139,24 @@ diagnostics).
 Guard: `src/tests/avian_broad_phase_layers.rs` (with the prune removed it fails: 2 candidates
 visited, not 0, MEASURED). Counts and reproduction: `upstream/avian-pairless-broad-phase.md`.
 
-## Sleeping bodies' velocity increments: game-side
+## Sleeping bodies' velocity increments (`src/dynamics/integrator/mod.rs`, `src/dynamics/rigid_body/forces/plugin.rs`): kept
 
 Subject: the game's rigid-body rest, server physics, game state only.
 
-Avian 0.8.0 still builds every body's world-frame velocity increment each step (constant forces
-and accelerations, gravity, the scaling by the substep in `pre_process_velocity_increments`) and
-clears only bodies with a `SolverBodyIndex`. A sleeping body has none and keeps its
-`VelocityIntegrationData`, so its increment compounds while it sleeps and its first step awake
-gains about `N·g·h²/(1 − h)` extra (DERIVED; `h` the substep length in s, `N` the substeps).
-MEASURED in the guard: −0.15368 m/s gained where gravity gives −0.15328.
+World-frame increment construction (constant forces and accelerations, gravity, and substep
+scaling) uses `With<SolverBodyIndex>`, the same membership as consumption and clearing. A body
+outside the solver keeps exactly its pending increment until wake, unscaled. `ConstantTorque`
+already requires the index; local acceleration applies only through solver indices and retains
+upstream's separate accumulation and clear.
 
-The 0.7 fork filtered the increment builders to solver bodies. 0.8 needs no fork line:
-`avian_ext::sleeping_increments` holds the non-zero increments of bodies out of the solver before
-`ForceSystems::ApplyConstantForces` and, in `IntegrationSystems::ClearVelocityIncrements`, clears
-those bodies and gives back what it held. A body out of the solver therefore ends each step with
-the increment it began it with, as under the 0.7 patch: a force written to a sleeper (the waking
-`Forces` call wakes the island only in `PhysicsStepSystems::Sleeping`, after the solve) acts,
-unscaled, in its first step awake. A clear alone loses that force: MEASURED, the woken body gained
-0 where the force gives 2.44 m/s; stock Avian gives it 0.0064.
+The filter avoids building increments for sleepers at all. No hold/release adapter scans the
+sleeping population or copies its pending increments. MEASURED by the supplied cutover profile:
+the removed adapter cost about 32 µs per tick; no new timing run or speedup claim here.
 
 Guards: `src/tests/avian_island_sleep.rs` (`a_woken_body_takes_only_its_first_steps_gravity`,
-`a_force_on_a_sleeper_acts_in_its_first_step_awake`). Local upstream draft:
+`a_force_on_a_sleeper_acts_in_its_first_step_awake`,
+`sleeping_increments_wait_untouched_and_act_on_wake`). The last checks pending data and change
+ticks across sleeping steps, then the force's contribution on wake. Local upstream draft:
 `upstream/avian-sleeping-velocity-increments.md`.
 
 ## Unreadable pair state (`src/collision/narrow_phase/system_param.rs`): kept
