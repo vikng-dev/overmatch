@@ -980,7 +980,7 @@ pub fn run_offline() -> AppExit {
     // Documentation cues are inert without `OVERMATCH_CAPTURE`. Offline cues need both
     // authority state and presentation; this root supplies both.
     app.add_plugins((
-        dev_capture::plugin,
+        dev_capture::CapturePlugin(dev_capture::Anchor::Scenario),
         dev_capture::offline_impact_plugin,
         dev_capture::offline_shot_plugin,
         dev_capture::offline_wall_plugin,

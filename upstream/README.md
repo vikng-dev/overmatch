@@ -45,6 +45,8 @@ Current complete fork deltas, MEASURED again against the cached published archiv
 `diff --minimal -ruN src/` (added + removed lines, fork-only source included): avian3d **875**,
 bevy_pbr **47**, lightyear_netcode **159**, lightyear_avian3d **0**; total **1081**.
 The per-proposal rows above exclude game divergences and the diagnostic-only lines listed here.
+The [latest merged-tree census](../.agents/scratch/swept-ccd-controlled-fork-lines.json) reproduces
+these totals after the controlled collapse experiment and its instrumentation cleanup.
 
 ## Avian draft compile checks
 

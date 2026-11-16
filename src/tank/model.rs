@@ -11,8 +11,9 @@ use crate::track::sim::{TrackContacts, TrackDrive, TrackGrip};
 #[derive(Component)]
 pub struct Turret;
 
-/// The turret's rigid-body data, built at spawn from the sheet's `turret` block and the tank's
-/// geometry, so the launch reads it from the entity rather than from the asset.
+/// The turret's rigid-body data, built with its tank kind's template from the sheet's `turret`
+/// block and the tank's geometry, so the launch reads it from the entity rather than from the
+/// asset.
 #[derive(Component, Clone, Copy)]
 pub struct TurretBody {
     /// Mass (kg).
@@ -21,7 +22,7 @@ pub struct TurretBody {
     pub angular_inertia: avian3d::prelude::AngularInertia,
     /// The assembly's mass centre in its node's frame (m), a StandIn for its substances' densities:
     /// the centroid of its hard volumes at rest, every volume one density and an overlap counted
-    /// twice ([`crate::ballistics::armour_set::ArmourSet::mass_centre`]). The sheet states no
+    /// twice ([`crate::ballistics::armour_set::ArmourTemplate::mass_centre`]). The sheet states no
     /// centre and `materials.ron` no density for most of its substances; per-substance densities,
     /// or an authored centre node as the hull has, replace it.
     pub centre_of_mass: Vec3,
@@ -70,6 +71,7 @@ pub struct Rig {
 }
 
 /// Runtime camera configuration and availability gate for one authored view.
+#[derive(Clone)]
 pub struct ViewConfig {
     /// Vertical field of view (RADIANS), taken from the authored [`crate::spec::Optics`] at spawn —
     /// the authored degrees have already become radians by the time they reach a camera.
@@ -78,7 +80,7 @@ pub struct ViewConfig {
 }
 
 /// Both player views, complete at spawn. A missing authored kind is refused by the spec gate.
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct TankViews {
     pub gunner: ViewConfig,
     pub commander: ViewConfig,
@@ -101,7 +103,7 @@ pub struct Muzzle;
 pub struct GunBarrel;
 
 /// Runtime weapon configuration attached to its muzzle.
-#[derive(Component)]
+#[derive(Component, Clone)]
 pub struct Weapon {
     /// Logical authored name, distinct from the muzzle node name.
     pub name: String,

@@ -18,8 +18,7 @@ pub mod solver_cost;
 use avian3d::dynamics::solver::islands::RestTest;
 use bevy::prelude::*;
 
-/// Every seam of the game's half of the fork, installed into Avian's `PhysicsSchedule`. Added after
-/// `PhysicsPlugins`, whose schedule it extends.
+/// Installs every seam above. Added after `PhysicsPlugins`, whose schedule it extends.
 pub fn plugin(app: &mut App) {
     if !app.is_plugin_added::<child_poses::ReenabledPlugin>() {
         app.add_plugins(child_poses::ReenabledPlugin);

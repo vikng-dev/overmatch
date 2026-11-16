@@ -52,7 +52,7 @@ use super::walk::{self, DiscFrame, DiscWalk, FaceHit, RayCorridor, Span, VolumeT
 use super::{Ahead, ProjectileMarchWorld, RoundBody, capability, next_surface, speed_for, wound};
 use crate::damage::{Ammo, CrewStation};
 use crate::substances::SubstanceId;
-use crate::tank::{TankSimSource, spawn_headless_tank};
+use crate::tank::{TankTemplate, spawn_headless_tank};
 
 // ---------------------------------------------------------------------------------------------
 // The gun list
@@ -486,20 +486,19 @@ struct Spares {
 
 fn spawn_probe_tank(
     mut commands: Commands,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     pose: Res<ProbePose>,
     existing: Option<Res<ProbeTank>>,
 ) {
     if existing.is_some() {
         return;
     }
-    let content = source.get();
     let tank = spawn_headless_tank(
         &mut commands,
-        content,
+        &template,
         (
             pose.0,
-            Name::new(content.spec().display_name.clone()),
+            Name::new(template.spec().display_name.clone()),
             RigidBody::Static,
         ),
     );

@@ -1,6 +1,8 @@
 //! The game's damage model: a tank's armour set. Its armour volumes and crew boxes (HP pools at
-//! stations) are grouped by the rigid frame that carries them, built at spawn from the tank's data
-//! (ADR-0014), so the damage model bounds and poses them per frame instead of per primitive.
+//! stations) are grouped by the rigid frame that carries them, so the damage model bounds and poses
+//! them per frame instead of per primitive. A tank kind's set is built once from its data when the
+//! kind is admitted ([`ArmourTemplate`]); each spawn instantiates it with its own entities
+//! (ADR-0014).
 //!
 //! A frame is the tank root, or a node that moves against its parent: a servo, a recoiling barrel,
 //! or the assembly a launch detaches. A part belongs to its nearest frame at or above its node, at
@@ -64,13 +66,14 @@ impl Bounds {
     }
 }
 
-/// The game's damage model: one armour volume or crew box primitive of a tank, built at spawn from
-/// the tank's data. Ballistics reads its shape, surfaces and role here, never from the entity.
+/// The game's damage model: one armour volume or crew box primitive of a tank. Ballistics reads its
+/// shape, surfaces and role here, never from the entity. `E` names entities: a spawned tank's, or
+/// its kind's member ids in an [`ArmourTemplate`].
 #[derive(Debug)]
-pub(super) struct Part {
+pub(super) struct Part<E = Entity> {
     /// The primitive's entity: its identity for keys (the walk's `ShellKey`, the march's contact
     /// order and resting list), which every reader takes from here.
-    pub entity: Entity,
+    pub entity: E,
     /// Its pose in its frame, fixed.
     pub pose: Pose,
     /// The box of its shape in its frame's coordinates.
@@ -79,33 +82,41 @@ pub(super) struct Part {
     pub shape: Collider,
     /// The bake's manifold certificate for a trimesh part; `None` for a fixture's convex part.
     pub surfaces: Option<super::BallisticSurfaces>,
-    pub role: Role,
+    pub role: Role<E>,
 }
 
 /// The game's damage model: what a part is to a round, and the volume it belongs to: the entity
 /// that carries the volume's material and, where it has one, its HP pool (`ComponentHealth`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Role {
+pub(crate) enum Role<E = Entity> {
     /// A primitive of an armour volume (`BallisticVolume`): the walk reads its material.
-    Armour(Entity),
+    Armour(E),
     /// A crew box (`WitnessVolume`, ADR-0040): an HP pool at a station, dosed by what the hard
     /// world sends through it; never a layer of the walk.
-    CrewBox(Entity),
+    CrewBox(E),
 }
 
-impl Role {
-    pub(crate) fn volume(self) -> Entity {
+impl<E: Copy> Role<E> {
+    pub(crate) fn volume(self) -> E {
         match self {
             Self::Armour(volume) | Self::CrewBox(volume) => volume,
         }
     }
+
+    fn map<F>(self, entity: impl Fn(E) -> F) -> Role<F> {
+        match self {
+            Self::Armour(volume) => Role::Armour(entity(volume)),
+            Self::CrewBox(volume) => Role::CrewBox(entity(volume)),
+        }
+    }
 }
 
-/// The game's damage model: one rigid frame of a tank and the parts it carries.
+/// The game's damage model: one rigid frame of a tank and the parts it carries, its entities named
+/// as [`Part`]'s are.
 #[derive(Debug)]
-pub(super) struct Frame {
+pub(super) struct Frame<E = Entity> {
     /// The node whose pose the frame follows; the root for the root frame.
-    pub node: Entity,
+    pub node: E,
     /// The frame carrying this one; `None` for a frame that is its own base's body.
     pub carrier: Option<usize>,
     /// The rest pose of `node`'s parent in the carrier's frame.
@@ -114,10 +125,17 @@ pub(super) struct Frame {
     /// identity for a frame that is its own base's body.
     pub poses: Poses,
     /// The nearest rigid-body ancestor of `node`, itself included.
-    pub base: Entity,
-    pub parts: Vec<Part>,
+    pub base: E,
+    pub parts: Vec<Part<E>>,
     /// The box of every part in this frame's coordinates; `None` for a frame carrying none.
     pub bounds: Option<Bounds>,
+}
+
+impl<E: Copy + std::fmt::Display> Frame<E> {
+    /// Its pose in its carrier, its node's local pose read by `local`.
+    fn live_in_carrier(&self, local: &dyn Fn(E) -> Transform) -> Pose {
+        self.offset * link(local(self.node), &self.node)
+    }
 }
 
 /// The game's damage model: a tank's armour volumes and crew boxes by rigid frame, frame 0 the
@@ -215,7 +233,8 @@ impl Composed<'_> {
 pub(crate) struct Node<'a> {
     /// Its name in the tank's model, for a refusal to name.
     pub name: &'a str,
-    pub entity: Entity,
+    /// Its member id ([`ArmourTemplate`]).
+    pub id: usize,
     /// Index of its parent in the same list; `None` for a child of the root.
     pub parent: Option<usize>,
     /// Its rest pose in its parent.
@@ -224,15 +243,15 @@ pub(crate) struct Node<'a> {
     pub frame: bool,
 }
 
-/// One armour volume or crew box primitive: its entity, the node it hangs under (`None`: the root)
-/// and its pose there, its shape and surfaces, and its role.
+/// One armour volume or crew box primitive: its member id, the node it hangs under (`None`: the
+/// root) and its pose there, its shape and surfaces, and its role.
 pub(crate) struct PartSource<'a> {
-    pub entity: Entity,
+    pub id: usize,
     pub node: Option<usize>,
     pub pose: Transform,
     pub shape: &'a Collider,
     pub surfaces: Option<&'a super::BallisticSurfaces>,
-    pub role: Role,
+    pub role: Role<usize>,
 }
 
 /// A link a frame or part composes through, as a pose. The set composes rigidly, so each such link
@@ -253,11 +272,19 @@ fn link(transform: Transform, node: &dyn std::fmt::Display) -> Pose {
     }
 }
 
-impl ArmourSet {
-    /// The set of `root`'s armour: `nodes` its hierarchy below the root, parent first, and `parts`
-    /// its armour volume and crew box primitives.
+/// The game's damage model: a tank kind's armour set before any tank carries it, built once from
+/// the kind's data. Each entity is named by its member id: the index, in the entities a spawn
+/// creates, of the one standing for it ([`Self::instantiate`]).
+#[derive(Debug)]
+pub(crate) struct ArmourTemplate {
+    frames: Vec<Frame<usize>>,
+}
+
+impl ArmourTemplate {
+    /// The set of the kind whose root is member `root`: `nodes` its hierarchy below the root,
+    /// parent first, and `parts` its armour volume and crew box primitives.
     pub(crate) fn build<'a>(
-        root: Entity,
+        root: usize,
         nodes: &[Node<'_>],
         parts: impl IntoIterator<Item = PartSource<'a>>,
     ) -> Self {
@@ -307,7 +334,7 @@ impl ArmourSet {
             if node.frame {
                 let rest = above * link(node.transform, &node.name);
                 frames.push(Frame {
-                    node: node.entity,
+                    node: node.id,
                     carrier: Some(carrier),
                     offset: above,
                     poses: Poses {
@@ -338,7 +365,7 @@ impl ArmourSet {
             let frame = &mut frames[frame];
             frame.bounds = Some(frame.bounds.map_or(posed, |held| held.union(posed)));
             frame.parts.push(Part {
-                entity: part.entity,
+                entity: part.id,
                 pose,
                 bounds: posed,
                 shape: part.shape.clone(),
@@ -346,12 +373,86 @@ impl ArmourSet {
                 role: part.role,
             });
         }
-        Self {
-            frames,
+        Self { frames }
+    }
+
+    /// One tank's set, member `n` standing for `entities[n]`.
+    pub(crate) fn instantiate(&self, entities: &[Entity]) -> ArmourSet {
+        let entity = |member: usize| entities[member];
+        ArmourSet {
+            frames: self
+                .frames
+                .iter()
+                .map(|frame| Frame {
+                    node: entity(frame.node),
+                    carrier: frame.carrier,
+                    offset: frame.offset,
+                    poses: frame.poses,
+                    base: entity(frame.base),
+                    parts: frame
+                        .parts
+                        .iter()
+                        .map(|part| Part {
+                            entity: entity(part.entity),
+                            pose: part.pose,
+                            bounds: part.bounds,
+                            shape: part.shape.clone(),
+                            surfaces: part.surfaces.clone(),
+                            role: part.role.map(entity),
+                        })
+                        .collect(),
+                    bounds: frame.bounds,
+                })
+                .collect(),
             reach: None,
         }
     }
 
+    /// The game's damage model: the mass centre, in frame node `node`'s coordinates, of the armour
+    /// volume parts (no crew box) on that frame and on every frame it carries taken as one uniform
+    /// solid, each part's volume counted whole where parts overlap, each frame posed in its carrier
+    /// from the node poses `local` gives. `None` for a member that is no frame of the set.
+    pub(crate) fn mass_centre(
+        &self,
+        node: usize,
+        local: &dyn Fn(usize) -> Transform,
+    ) -> Option<Vec3> {
+        use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
+        let top = self.frames.iter().position(|frame| frame.node == node)?;
+        // Each frame's pose in `top`'s, for `top` and the frames it carries; a carrier precedes
+        // the frames it carries.
+        let mut in_top: Vec<Option<Pose>> = vec![None; self.frames.len()];
+        in_top[top] = Some(Pose::IDENTITY);
+        // Volume, m³, and its first moment: unit density.
+        let (mut volume, mut moment) = (0.0, Vec3::ZERO);
+        for index in top..self.frames.len() {
+            if index != top {
+                in_top[index] = self.frames[index]
+                    .carrier
+                    .and_then(|carrier| in_top[carrier])
+                    .map(|carrier| carrier * self.frames[index].live_in_carrier(local));
+            }
+            let Some(pose) = in_top[index] else {
+                continue; // A frame `top` does not carry.
+            };
+            for part in &self.frames[index].parts {
+                if let Role::Armour(_) = part.role {
+                    let solid = part.shape.mass_properties(1.0);
+                    let at = pose * part.pose;
+                    volume += solid.mass;
+                    moment += solid.mass * (at.position + at.rotation * solid.center_of_mass);
+                }
+            }
+        }
+        assert!(
+            volume > 0.0,
+            "game's damage model: armour frame {node} and the frames it carries hold armour"
+        );
+        Some(moment / volume)
+    }
+}
+
+impl ArmourSet {
     /// Insert the set on `root` and mark its frame nodes and part entities, in one command batch.
     pub(crate) fn insert(self, commands: &mut Commands, root: Entity) {
         for (index, frame) in self.frames.iter().enumerate() {
@@ -499,52 +600,7 @@ impl ArmourSet {
         frame: usize,
         local: &dyn Fn(Entity) -> Transform,
     ) -> Pose {
-        let frame = &self.frames[frame];
-        frame.offset * link(local(frame.node), &frame.node)
-    }
-
-    /// The game's damage model: the mass centre, in frame node `node`'s coordinates, of the armour
-    /// volume parts (no crew box) on that frame and on every frame it carries taken as one uniform
-    /// solid, each part's volume counted whole where parts overlap, each frame posed in its carrier
-    /// from the node poses `local` gives ([`Self::live_in_carrier`]). `None` for a node that is no
-    /// frame of the set.
-    pub(crate) fn mass_centre(
-        &self,
-        node: Entity,
-        local: &dyn Fn(Entity) -> Transform,
-    ) -> Option<Vec3> {
-        use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
-        let top = self.frames.iter().position(|frame| frame.node == node)?;
-        // Each frame's pose in `top`'s, for `top` and the frames it carries; a carrier precedes
-        // the frames it carries.
-        let mut in_top: Vec<Option<Pose>> = vec![None; self.frames.len()];
-        in_top[top] = Some(Pose::IDENTITY);
-        // Volume, m³, and its first moment: unit density.
-        let (mut volume, mut moment) = (0.0, Vec3::ZERO);
-        for index in top..self.frames.len() {
-            if index != top {
-                in_top[index] = self.frames[index]
-                    .carrier
-                    .and_then(|carrier| in_top[carrier])
-                    .map(|carrier| carrier * self.live_in_carrier(index, local));
-            }
-            let Some(pose) = in_top[index] else {
-                continue; // A frame `top` does not carry.
-            };
-            for part in &self.frames[index].parts {
-                if let Role::Armour(_) = part.role {
-                    let solid = part.shape.mass_properties(1.0);
-                    let at = pose * part.pose;
-                    volume += solid.mass;
-                    moment += solid.mass * (at.position + at.rotation * solid.center_of_mass);
-                }
-            }
-        }
-        assert!(
-            volume > 0.0,
-            "game's damage model: armour frame {node} and the frames it carries hold armour"
-        );
-        Some(moment / volume)
+        self.frames[frame].live_in_carrier(local)
     }
 
     /// The nearest armour volume part (no crew box) the ray from `origin` along `direction` meets
@@ -824,6 +880,8 @@ pub(super) fn snapshot(
 /// tank's part is none.
 #[cfg(test)]
 pub(crate) fn fixture(world: &mut World, root: Entity) {
+    // Member 0 is the root, then each descendant as the walk meets it.
+    let mut entities = vec![root];
     let mut nodes = Vec::new();
     let mut parts = Vec::new();
     let mut walk = vec![(root, None)];
@@ -835,17 +893,19 @@ pub(crate) fn fixture(world: &mut World, root: Entity) {
             let transform = *world
                 .get::<Transform>(child)
                 .expect("a fixture child is placed");
+            entities.push(child);
+            let id = entities.len() - 1;
             if let Some(role) = layered_role(world, child) {
                 let shape = world
                     .get::<Collider>(child)
                     .expect("a layered fixture child is a collider")
                     .clone();
                 let surfaces = world.get::<super::BallisticSurfaces>(child).cloned();
-                parts.push((child, node, transform, shape, surfaces, role));
+                parts.push((id, node, transform, shape, surfaces, role));
             }
             nodes.push(Node {
                 name: "a fixture node",
-                entity: child,
+                id,
                 parent: node,
                 transform,
                 frame: false,
@@ -853,23 +913,30 @@ pub(crate) fn fixture(world: &mut World, root: Entity) {
             walk.push((child, Some(nodes.len() - 1)));
         }
     }
-    let set = ArmourSet::build(
-        root,
+    let member = |volume: Entity| {
+        entities
+            .iter()
+            .position(|&entity| entity == volume)
+            .expect("a fixture part's volume is in its body's hierarchy")
+    };
+    let set = ArmourTemplate::build(
+        0,
         &nodes,
         parts
             .iter()
-            .map(|(entity, node, pose, shape, surfaces, role)| PartSource {
-                entity: *entity,
+            .map(|(id, node, pose, shape, surfaces, role)| PartSource {
+                id: *id,
                 node: *node,
                 pose: *pose,
                 shape,
                 surfaces: surfaces.as_ref(),
-                role: *role,
+                role: role.map(member),
             }),
-    );
-    for &(entity, ..) in &parts {
+    )
+    .instantiate(&entities);
+    for &(id, ..) in &parts {
         world
-            .entity_mut(entity)
+            .entity_mut(entities[id])
             .remove_with_requires::<(Collider, super::BallisticSurfaces)>();
     }
     set.insert(&mut world.commands(), root);
@@ -1004,15 +1071,15 @@ mod tests {
 
     /// Spawn the synthetic hierarchy under `root`: its node entities and its set, not inserted.
     fn spawn(world: &mut World, root: Entity) -> (Vec<Entity>, ArmourSet) {
-        let mut entities: Vec<Entity> = Vec::new();
+        // Member 0 is the root, then each node, then each part.
+        let mut members = vec![root];
         let mut nodes = Vec::new();
         for (name, parent, transform, frame) in rest() {
-            let above = parent.map_or(root, |index| entities[index]);
-            let entity = world.spawn((transform, ChildOf(above))).id();
-            entities.push(entity);
+            let above = parent.map_or(root, |index| members[index + 1]);
+            members.push(world.spawn((transform, ChildOf(above))).id());
             nodes.push(Node {
                 name,
-                entity,
+                id: members.len() - 1,
                 parent,
                 transform,
                 frame,
@@ -1021,32 +1088,35 @@ mod tests {
         let shape = Collider::cuboid(0.6, 0.3, 0.9);
         let mut parts = Vec::new();
         for (node, pose) in part_rest() {
-            let above = node.map_or(root, |index| entities[index]);
-            let entity = world
-                .spawn((
-                    pose,
-                    ChildOf(above),
-                    super::super::BallisticVolume {
-                        material: super::super::walk::VolumeMaterial::fixture(1000.0),
-                        substance: "fixture".to_owned(),
-                    },
-                ))
-                .id();
-            parts.push((entity, node, pose));
+            let above = node.map_or(root, |index| members[index + 1]);
+            members.push(
+                world
+                    .spawn((
+                        pose,
+                        ChildOf(above),
+                        super::super::BallisticVolume {
+                            material: super::super::walk::VolumeMaterial::fixture(1000.0),
+                            substance: "fixture".to_owned(),
+                        },
+                    ))
+                    .id(),
+            );
+            parts.push((members.len() - 1, node, pose));
         }
-        let set = ArmourSet::build(
-            root,
+        let set = ArmourTemplate::build(
+            0,
             &nodes,
-            parts.iter().map(|&(entity, node, pose)| PartSource {
-                entity,
+            parts.iter().map(|&(id, node, pose)| PartSource {
+                id,
                 node,
                 pose,
                 shape: &shape,
                 surfaces: None,
-                role: Role::Armour(entity),
+                role: Role::Armour(id),
             }),
-        );
-        (entities, set)
+        )
+        .instantiate(&members);
+        (members[1..=nodes.len()].to_vec(), set)
     }
 
     fn synthetic() -> Synthetic {
@@ -1212,17 +1282,19 @@ mod tests {
         let barrel = world
             .spawn((Transform::from_xyz(0.0, 0.0, 0.8), ChildOf(turret)))
             .id();
+        // Member 0 is the root, then the turret, the barrel and the four parts.
+        let members = [root, turret, barrel];
         let nodes = [
             Node {
                 name: "turret",
-                entity: turret,
+                id: 1,
                 parent: None,
                 transform: turret_rest,
                 frame: true,
             },
             Node {
                 name: "barrel",
-                entity: barrel,
+                id: 2,
                 parent: Some(0),
                 transform: barrel_rest,
                 frame: true,
@@ -1237,10 +1309,17 @@ mod tests {
         }))
         .expect("a cube's corners span a hull");
         let parts = [
-            (None, Transform::IDENTITY, &hull, false),
-            (Some(0), Transform::from_xyz(0.0, 0.5, -1.0), &plate, false),
-            (Some(0), Transform::from_xyz(3.0, 0.0, 0.0), &crew, true),
+            (3, None, Transform::IDENTITY, &hull, false),
             (
+                4,
+                Some(0),
+                Transform::from_xyz(0.0, 0.5, -1.0),
+                &plate,
+                false,
+            ),
+            (5, Some(0), Transform::from_xyz(3.0, 0.0, 0.0), &crew, true),
+            (
+                6,
                 Some(1),
                 Transform::from_xyz(0.0, 0.0, 1.0)
                     .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
@@ -1248,24 +1327,20 @@ mod tests {
                 false,
             ),
         ]
-        .map(|(node, pose, shape, crew)| {
-            let entity = world.spawn_empty().id();
-            PartSource {
-                entity,
-                node,
-                pose,
-                shape,
-                surfaces: None,
-                role: if crew {
-                    Role::CrewBox(entity)
-                } else {
-                    Role::Armour(entity)
-                },
-            }
+        .map(|(id, node, pose, shape, crew)| PartSource {
+            id,
+            node,
+            pose,
+            shape,
+            surfaces: None,
+            role: if crew {
+                Role::CrewBox(id)
+            } else {
+                Role::Armour(id)
+            },
         });
-        let set = ArmourSet::build(root, &nodes, parts);
-        let centre = set
-            .mass_centre(turret, &|node| *world.get::<Transform>(node).unwrap())
+        let centre = ArmourTemplate::build(0, &nodes, parts)
+            .mass_centre(1, &|node| *world.get::<Transform>(members[node]).unwrap())
             .expect("the turret node is a frame");
         // In the turret's coordinates: the plate, 4 m³ centred at (0, 0.5, -1); the cube, 1 m³,
         // its shape's centre (0.5, 0, 0) turned to (0, 0, -0.5), its pose's (0, 0, 1) and the

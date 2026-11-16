@@ -23,7 +23,7 @@ use crate::{
     map::{MapManifest, Prototype},
     scatter::MapInstance,
     spec::TankSpec,
-    tank::{Tank, TankSimSource},
+    tank::{Tank, TankTemplate},
     terrain_grid::{HeightGrid, Stance, spawn_pos},
 };
 
@@ -204,16 +204,15 @@ impl Recipe {
 /// All synchronous tank/map publishers have flushed before PostStartup; no client is admitted yet.
 pub(super) fn prepare(
     mut ram: ResMut<Ram>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     manifest: Res<MapManifest>,
     height: Option<Res<HeightGrid>>,
 ) {
-    let content = source.get();
     ram.plan = Some(
         ram.recipe
             .plan(
-                content.spec(),
-                |turn| content.stance(turn),
+                template.spec(),
+                |turn| template.stance(turn),
                 &manifest,
                 height.as_deref(),
             )
@@ -572,14 +571,13 @@ pub(crate) fn fixture_plan(app: &mut App) -> FixturePlan {
         .world_mut()
         .run_system_once({
             let recipe = recipe.clone();
-            move |source: TankSimSource,
+            move |template: Res<TankTemplate>,
                   manifest: Res<MapManifest>,
                   height: Option<Res<HeightGrid>>| {
-                let content = source.get();
                 recipe
                     .plan(
-                        content.spec(),
-                        |turn| content.stance(turn),
+                        template.spec(),
+                        |turn| template.stance(turn),
                         &manifest,
                         height.as_deref(),
                     )
@@ -692,10 +690,10 @@ mod tests {
         let mut recipe = Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap();
         recipe.instance = "brick_0001".into(); // Fixture construction in the manifest below.
         // Route admission reads the tank's construction for its spawn stance; no rig is spawned.
-        let (blueprint, shapes) = crate::tank::shipped_construction();
+        let (blueprint, template) = crate::tank::shipped_construction();
         app.insert_resource(crate::map::tests::construction_fixture_manifest())
             .insert_resource(blueprint)
-            .insert_resource(shapes)
+            .insert_resource(template)
             .init_resource::<ContactTransfers>()
             .init_resource::<SweepAccount>();
         install_recipe(&mut app, recipe);

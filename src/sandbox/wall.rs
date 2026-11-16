@@ -40,8 +40,10 @@ mod model;
 #[cfg(test)]
 mod tests;
 
+use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
 use avian3d::prelude::{
-    AngularVelocity, Collider, CollisionLayers, LayerMask, LinearVelocity, RigidBody,
+    AngularInertia, AngularVelocity, CenterOfMass, Collider, CollisionLayers, LayerMask,
+    LinearVelocity, Mass, RigidBody,
 };
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::SystemParam;
@@ -868,6 +870,20 @@ fn chunk_collider(block: &Block) -> Collider {
         .expect("a bake chunk has volume")
 }
 
+/// What a collider contributes to its body's mass, inertia and centre: the occupied `hull`'s at
+/// `density`, whatever shape the collider itself meets contacts with.
+fn occupied_mass(hull: &Collider, density: f32) -> (Mass, AngularInertia, CenterOfMass) {
+    let props = hull.mass_properties(density);
+    (
+        Mass(props.mass),
+        AngularInertia::new_with_local_frame(
+            props.principal_angular_inertia,
+            props.local_inertial_frame,
+        ),
+        CenterOfMass(props.center_of_mass),
+    )
+}
+
 /// Spawn a new wall: one static chunk per block, full pools, nothing cracked.
 fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallAssets) -> Wall {
     let cut = layout().cut.clone();
@@ -1475,10 +1491,7 @@ fn apply_deposits(mut p: ApplyParam) {
                                 block.center(),
                             )
                             .expect("a sandbox wall chunk is thicker than its contact setback"),
-                            crate::debris::launch::occupied_mass(
-                                &chunk_collider(block),
-                                wall.material.density,
-                            ),
+                            occupied_mass(&chunk_collider(block), wall.material.density),
                             crate::substances::contact_friction(wall.material.friction),
                             CollisionLayers::new(
                                 [Layer::Default],

@@ -266,6 +266,7 @@ All six lenses were applied locally to the changed items; no unresolved lane fin
 row names one. Independent landing review belongs to the orchestrator. No agent was spawned, no
 web access, external filing, push, reset, stash or target deletion was used. The subsequent
 collapse-tail investigation and review fixes are recorded in
-[swept-ccd-collapse-diagnosis.md](swept-ccd-collapse-diagnosis.md); its causal landing blocker remains open.
+[swept-ccd-collapse-diagnosis.md](swept-ccd-collapse-diagnosis.md) and the
+[controlled experiment](swept-ccd-controlled-collapse.md); the live-run causal landing blocker remains open.
 The release prices precede the main merge; the final scorecard and source census use the merged
 tree. Local capacity was not established by the 30-tank runs.

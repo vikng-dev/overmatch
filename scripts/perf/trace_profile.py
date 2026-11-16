@@ -58,6 +58,10 @@ class WindowError(Exception):
     """The window file cannot be read; the message names the file, the cause and the repair."""
 
 
+class OutputError(Exception):
+    """The profile cannot be written; the message names the path, the cause and the repair."""
+
+
 class Span(NamedTuple):
     """One span begin (`B`) or end (`E`) record."""
     ph: str
@@ -107,6 +111,9 @@ class Trace:
     def admit(self, record: object) -> Span | None:
         """The record as a Span, or None for a phase in IGNORED_PHASES."""
         ph = record.get("ph") if isinstance(record, dict) else None
+        if not isinstance(ph, str):
+            raise TraceError(f"{self.path}:{self.lines}: a record's phase is "
+                             f"{type(ph).__name__}, not a string")
         if ph in IGNORED_PHASES:
             return None
         if ph not in ("B", "E"):
@@ -277,10 +284,16 @@ def profile(trace_path: str, window_path: str, out_path: str) -> int:
     leaf_total = [0.0] * n
     physics_total = [0.0] * n
     rows = []
+    other_rows = []
     for (kind, name), vals in per.items():
-        if kind == "system" and container.get(name):
-            continue
-        if kind == "other":
+        if kind == "other" or (kind == "system" and container.get(name)):
+            other_rows.append({
+                "kind": "container" if kind == "system" else kind,
+                "name": name,
+                "runs_per_tick": runs[(kind, name)] / n,
+                "mean_us": sum(vals) / n,
+                "p95_us": pct(vals, 0.95),
+            })
             continue
         top_sched = max(sched_of[(kind, name)].items(), key=lambda kv: kv[1])[0]
         for i, v in enumerate(vals):
@@ -296,17 +309,6 @@ def profile(trace_path: str, window_path: str, out_path: str) -> int:
             "p50_us": pct(vals, 0.5),
             "p95_us": pct(vals, 0.95),
             "max_us": max(vals),
-        })
-    other_rows = []
-    for (kind, name), vals in per.items():
-        if kind != "other" and not (kind == "system" and container.get(name)):
-            continue
-        other_rows.append({
-            "kind": "container" if kind == "system" else kind,
-            "name": name,
-            "runs_per_tick": runs[(kind, name)] / n,
-            "mean_us": sum(vals) / n,
-            "p95_us": pct(vals, 0.95),
         })
     mean_leaf = sum(leaf_total) / n
     for r in rows:
@@ -340,8 +342,12 @@ def profile(trace_path: str, window_path: str, out_path: str) -> int:
         "containers_and_other": other_rows,
         "schedules": schedules,
     }
-    with open(out_path, "w") as f:
-        json.dump(out, f, indent=1)
+    try:
+        with open(out_path, "w") as f:
+            json.dump(out, f, indent=1)
+    except OSError as e:
+        raise OutputError(f"{out_path}: cannot write the profile ({e.strerror}); create its "
+                          f"directory or pass a writable path") from e
     print(f"{trace_path}: {trace.lines} lines, {n} tick periods (mean {out['period_us_mean']:.0f} µs), "
           f"leaf busy mean {mean_leaf:.0f} µs/tick, physics leaf {out['physics_leaf_us']['mean']:.0f}, "
           f"{len(rows)} leaf keys, {open_at_end} spans open at the end, "
@@ -359,7 +365,7 @@ def main() -> int:
         return 2
     try:
         return profile(*sys.argv[1:])
-    except (TraceError, WindowError) as e:
+    except (TraceError, WindowError, OutputError) as e:
         print(f"trace_profile: {e}", file=sys.stderr)
         return 1
 

@@ -32,7 +32,7 @@ use crate::state::{GameplaySet, SimPhase};
 // drift apart. Spawn points here are HORIZONTAL (XZ) — Y is sampled at the moment of spawn, under
 // the tank's own stance.
 use crate::tank::{
-    PendingTankAssets, Rig, TankContent, TankSimSource, load_tank_sim_assets, spawn_complete_tank,
+    PendingTankAssets, Rig, TankTemplate, load_tank_sim_assets, spawn_complete_tank,
 };
 use crate::terrain_grid::{HeightGrid, Stance, spawn_pos};
 // The spawn selector reads the world's standing geometry through the SAME encoding the analytic
@@ -145,7 +145,10 @@ pub fn run() {
             (
                 spawn_bots.run_if(places_tanks),
                 respawn_dead_bots.run_if(in_combat),
-                commit_bot_spawns,
+                // Both commits allocate from one counter, which each updates in place: a frame's
+                // new players take theirs first. Neither reads the other's commands, so the edge
+                // ignores deferred and adds no sync point between them.
+                commit_bot_spawns.after_ignore_deferred(commit_player_spawns),
             )
                 .chain(),
             open_gameplay_gate,
@@ -173,21 +176,25 @@ pub fn run() {
 
 /// The production join-to-spawn boundary: queue each new link once before placing pending tanks.
 fn install_client_spawns(app: &mut App) {
-    app.add_systems(
+    app.init_resource::<PlayerSpawns>().add_systems(
         Update,
-        (handle_new_clients, spawn_pending_tanks.run_if(places_tanks)).chain(),
+        (
+            handle_new_clients,
+            spawn_pending_tanks.run_if(places_tanks),
+            commit_player_spawns,
+        )
+            .chain(),
     );
 }
 
 /// Root replacement publishes before the drive snapshot; no source can disappear between
 /// snapshot publication and the same tick's ordered contact commit.
 fn player_respawn_system() -> ScheduleConfigs<ScheduleSystem> {
-    respawn_player_tanks
-        .run_if(in_combat)
+    (respawn_player_tanks.run_if(in_combat), commit_player_spawns)
+        .chain()
         .in_set(GameplaySet)
         .before(SimPhase::DrivingForces)
         .before(ConsumeCommandEdges)
-        .into_configs()
 }
 
 /// Install the production Battle clock and score. The short-mode headless probe mounts this same
@@ -680,11 +687,11 @@ fn fixed_lane_xz(at: Vec2, lane: u32, radius: f32, limit: f32) -> Result<Vec2, L
 /// them) and every bot's home.
 fn admit_spawn_levers(
     manifest: Res<crate::map::MapManifest>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     bots: Res<BotCount>,
 ) {
     let limit = spawn_map::spawn_limit(manifest.extent.half_extent());
-    let radius = source.get().contact_radius();
+    let radius = template.contact_radius();
     if let Some((at, _)) = harness::spawn_pose()
         && let Err(unavailable) = fixed_lane_xz(at, 0, radius, limit)
     {
@@ -825,7 +832,7 @@ struct SpawnPickGround<'w> {
     height: Option<Res<'w, crate::terrain_grid::HeightGrid>>,
     map: Res<'w, TerrainMap>,
     obstacles: Res<'w, SpawnObstacles>,
-    source: TankSimSource<'w>,
+    template: Res<'w, TankTemplate>,
 }
 
 /// Evaluate each sending link's newest pick per frame. Superseded clicks do not run placement
@@ -852,7 +859,7 @@ fn receive_spawn_points(
                         .chain(&ground.obstacles.0)
                         .copied()
                         .collect::<Vec<_>>(),
-                    ground.source.get().contact_radius(),
+                    ground.template.contact_radius(),
                 )
             });
             let checked = check_spawn_pick(
@@ -916,31 +923,28 @@ fn handle_new_clients(
     }
 }
 
-/// Spawns a complete authoritative tank for every queued client. View handles may still be
-/// loading; the simulation body comes from the eager blueprint.
+/// Evaluate a grounded spawn for every queued client, for [`commit_player_spawns`]. View handles
+/// may still be loading; the simulation body comes from the eager blueprint.
 #[expect(
     clippy::too_many_arguments,
-    reason = "first spawn reads the checked map, mode, live tanks, assets and client identities"
+    reason = "first spawn reads the checked map, mode, live tanks, links and terrain"
 )]
 fn spawn_pending_tanks(
     mut pending: ResMut<PendingClients>,
-    assets: Res<PendingTankAssets>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     mut lane: ResMut<SpawnLane>,
     mut placement: ResMut<SpawnPlacement>,
     mut ram: Option<ResMut<super::ram::Ram>>,
     manifest: Res<crate::map::MapManifest>,
     tanks: Query<&Position, (With<NetTank>, Without<TankKnockedOut>)>,
     connected: Query<(), With<Connected>>,
-    mut combatants: ResMut<CombatantIds>,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
-    mut commands: Commands,
+    mut spawns: ResMut<PlayerSpawns>,
 ) {
     if pending.0.is_empty() {
         return;
     }
-    let content = source.get();
-    let radius = content.contact_radius();
+    let radius = template.contact_radius();
     let limit = spawn_map::spawn_limit(manifest.extent.half_extent());
     // A ram recipe or a harness script names one spawn point and turn, which the lanes offset.
     // Ordinary joins use map points. Either way Y is resolved from the authority's ground at the
@@ -953,7 +957,7 @@ fn spawn_pending_tanks(
     };
     let spawn_rot = fixed.map_or(Quat::IDENTITY, |(_, rot)| rot);
     // Every tank of the pass spawns at `spawn_rot`.
-    let stance = content.stance(spawn_rot);
+    let stance = template.stance(spawn_rot);
     let mut live: Vec<Vec2> = tanks.iter().map(|position| position.0.xz()).collect();
     let mut queue = std::mem::take(&mut pending.0);
     // Joins take ground, lanes and identities in a declared priority, never arrival or query
@@ -996,20 +1000,114 @@ fn spawn_pending_tanks(
         points.push(xz);
     }
     let grounded = ground_spawns(height.as_deref(), &points, stance);
-    // Committed in pass order: identities and structural changes.
-    for ((link, client_id), pos) in joins.into_iter().zip(grounded) {
-        let combatant = combatants.player(link);
-        spawn_player_tank(
-            &mut commands,
-            content,
-            &assets,
-            link,
-            client_id,
-            pos,
-            spawn_rot,
-            combatant,
-            combatants.life(combatant),
-        );
+    // Pushed in pass order, the order identities are allocated in.
+    spawns.0.extend(
+        joins
+            .into_iter()
+            .zip(grounded)
+            .map(|((link, client_id), pos)| PlayerSpawn {
+                link,
+                client_id,
+                pos,
+                rot: spawn_rot,
+                life: PlayerLife::Join,
+            }),
+    );
+}
+
+/// Player lives evaluated this update, in their declared priority, awaiting
+/// [`commit_player_spawns`].
+#[derive(Resource, Default)]
+struct PlayerSpawns(Vec<PlayerSpawn>);
+
+/// One player's tank grounded at its spawn, and the life it begins.
+struct PlayerSpawn {
+    link: Entity,
+    client_id: PeerId,
+    pos: Vec3,
+    rot: Quat,
+    life: PlayerLife,
+}
+
+enum PlayerLife {
+    /// A queued join's life, under the link's identity, allocated at commit on its first.
+    Join,
+    /// A knocked-out tank's next life: its `root`, the combatant it keeps, and the respawn state
+    /// the fresh root carries on.
+    Replaces {
+        root: Entity,
+        combatant: CombatantId,
+        previous: RespawnState,
+    },
+}
+
+/// Commit the evaluated [`PlayerSpawns`] in push order: each life's identity, then its structural
+/// changes. The one player step that takes [`CombatantIds`]; evaluation never holds it. Everything
+/// a tank kind's instances share was prepared at load ([`TankTemplate`]), so each spawn here only
+/// allocates its entities and inserts the template's values with its links.
+fn commit_player_spawns(
+    mut spawns: ResMut<PlayerSpawns>,
+    assets: Res<PendingTankAssets>,
+    template: Res<TankTemplate>,
+    mut combatants: ResMut<CombatantIds>,
+    mut commands: Commands,
+) {
+    if spawns.0.is_empty() {
+        return;
+    }
+    for PlayerSpawn {
+        link,
+        client_id,
+        pos,
+        rot,
+        life,
+    } in spawns.0.drain(..)
+    {
+        match life {
+            PlayerLife::Join => {
+                let combatant = combatants.player(link);
+                let life = combatants.life(combatant);
+                spawn_player_tank(
+                    &mut commands,
+                    &template,
+                    &assets,
+                    link,
+                    client_id,
+                    pos,
+                    rot,
+                    combatant,
+                    life,
+                );
+            }
+            PlayerLife::Replaces {
+                root,
+                combatant,
+                previous,
+            } => {
+                // Recursive despawn sweeps the dead root and its attached rig;
+                // `tank::sweep_launched_turret_on_root_despawn` sweeps any turret that detached.
+                commands.entity(root).despawn();
+                let life = combatants.life(combatant);
+                let fresh = spawn_player_tank(
+                    &mut commands,
+                    &template,
+                    &assets,
+                    link,
+                    client_id,
+                    pos,
+                    rot,
+                    combatant,
+                    life,
+                );
+                commands.entity(fresh).insert(RespawnState {
+                    waiting: false,
+                    ..previous
+                });
+                info!(
+                    "server: player {client_id} respawn requested — swept {root}, spawned {fresh}"
+                );
+            }
+        }
     }
 }
 
@@ -1017,11 +1115,11 @@ fn spawn_pending_tanks(
 /// bundle so reacquisition cannot drift from first spawn.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the authoritative tank's construction inputs: content, assets, link, peer, pose and combatant identity"
+    reason = "the authoritative tank's construction inputs: template, assets, link, peer, pose and combatant identity"
 )]
 fn spawn_player_tank(
     commands: &mut Commands,
-    content: TankContent<'_>,
+    template: &TankTemplate,
     assets: &PendingTankAssets,
     link: Entity,
     client_id: PeerId,
@@ -1032,7 +1130,7 @@ fn spawn_player_tank(
 ) -> Entity {
     let root = spawn_complete_tank(
         commands,
-        content,
+        template,
         assets.presentation(),
         (
             (
@@ -1078,7 +1176,7 @@ fn spawn_player_tank(
 
 /// Server command producers, ordered before parsing and the Battle's hold.
 pub(crate) fn install_fixed_input(app: &mut App) {
-    app.add_systems(
+    app.init_resource::<PlayerSpawns>().add_systems(
         FixedUpdate,
         (
             // A bot authors its command as a device does, before the parse and the Battle's hold.
@@ -1198,27 +1296,26 @@ enum BotLife {
 fn spawn_bots(
     bots: Query<(), With<Bot>>,
     count: Res<BotCount>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut spawns: ResMut<BotSpawns>,
 ) {
     if !bots.is_empty() || count.0 == 0 {
         return;
     }
-    let content = source.get();
-    let cycle = content
+    let cycle = template
         .spec()
         .weapons
         .values()
         .find(|weapon| weapon.trigger == crate::spec::Trigger::Primary)
         .expect("the tank load gate requires exactly one primary weapon")
         .fire_cycle;
-    let radius = content.contact_radius();
+    let radius = template.contact_radius();
     let bots: Vec<Bot> = (0..count.0)
         .map(|index| Bot::new(bot_home_xz(index, radius), index, count.0, cycle))
         .collect();
     let homes: Vec<Vec2> = bots.iter().map(|bot| bot.home).collect();
-    let placed = ground_spawns(height.as_deref(), &homes, content.stance(BOT_SPAWN_TURN));
+    let placed = ground_spawns(height.as_deref(), &homes, template.stance(BOT_SPAWN_TURN));
     // Pushed in bot order, the order identities are allocated in.
     spawns.0.extend(
         (0..)
@@ -1256,7 +1353,7 @@ fn ground_spawns(grid: Option<&HeightGrid>, points: &[Vec2], stance: Stance) -> 
 fn spawn_bot_entity(
     commands: &mut Commands,
     assets: &PendingTankAssets,
-    content: TankContent<'_>,
+    template: &TankTemplate,
     bot: Bot,
     combatant: CombatantId,
     life: CombatantLife,
@@ -1264,7 +1361,7 @@ fn spawn_bot_entity(
 ) -> Entity {
     spawn_complete_tank(
         commands,
-        content,
+        template,
         assets.presentation(),
         (
             (
@@ -1303,7 +1400,7 @@ fn spawn_bot_entity(
 /// clock.
 fn respawn_dead_bots(
     dead: Query<(Entity, &CombatantLife, &Rig, &CombatantId, &Bot), With<TankKnockedOut>>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     gate: RespawnGate,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut spawns: ResMut<BotSpawns>,
@@ -1320,9 +1417,8 @@ fn respawn_dead_bots(
     if due.is_empty() {
         return;
     }
-    let content = source.get();
     let homes: Vec<Vec2> = due.iter().map(|&(_, _, _, bot)| bot.home).collect();
-    let placed = ground_spawns(height.as_deref(), &homes, content.stance(BOT_SPAWN_TURN));
+    let placed = ground_spawns(height.as_deref(), &homes, template.stance(BOT_SPAWN_TURN));
     // Pushed in query order: the bots' replacements commute, each its own combatant.
     spawns.0.extend(
         due.into_iter()
@@ -1340,25 +1436,25 @@ fn respawn_dead_bots(
 }
 
 /// Commit the evaluated [`BotSpawns`] in push order: each life's identity, then its structural
-/// changes. The one bot step that takes [`CombatantIds`]; evaluation never holds it.
+/// changes. The one bot step that takes [`CombatantIds`]; evaluation never holds it. Each spawn
+/// instantiates the load-time template, as in [`commit_player_spawns`].
 fn commit_bot_spawns(
     mut spawns: ResMut<BotSpawns>,
     assets: Res<PendingTankAssets>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     mut combatants: ResMut<CombatantIds>,
     mut commands: Commands,
 ) {
     if spawns.0.is_empty() {
         return;
     }
-    let content = source.get();
     for BotSpawn { bot, pos, life } in spawns.0.drain(..) {
         match life {
             BotLife::First(index) => {
                 let combatant = combatants.bot(index);
                 let life = combatants.life(combatant);
                 let root =
-                    spawn_bot_entity(&mut commands, &assets, content, bot, combatant, life, pos);
+                    spawn_bot_entity(&mut commands, &assets, &template, bot, combatant, life, pos);
                 info!(
                     "server: spawned circling bot {index} tank {root} (OVERMATCH_BOT) at ({:.1}, {:.1}, {:.1})",
                     pos.x, pos.y, pos.z
@@ -1375,7 +1471,7 @@ fn commit_bot_spawns(
                 commands.entity(turret).try_despawn();
                 let life = combatants.life(combatant);
                 let fresh =
-                    spawn_bot_entity(&mut commands, &assets, content, bot, combatant, life, pos);
+                    spawn_bot_entity(&mut commands, &assets, &template, bot, combatant, life, pos);
                 info!("server: respawned bot as {fresh} (was {root})");
             }
         }
@@ -1387,23 +1483,22 @@ fn commit_bot_spawns(
 /// The authority's `TankKnockedOut` marker validates eligibility; `ControlledBy` excludes bots. A
 /// request before the life's respawn opens (`score::RespawnGate`, the mode's wait after the
 /// knockout) is refused: it is dropped, and the client, which shows the time left, sends another.
-/// Runs after the command bridge and before the driving snapshot. Both initial
-/// placement and automatic respawn use `SpawnPlacement`; the player's persistent spawn-map pick
-/// still wins. Recursive root despawn and `tank::sweep_launched_turret_on_root_despawn` sweep the
-/// old rig, including any detached turret.
+/// Runs after the command bridge; its [`commit_player_spawns`] runs before the driving snapshot.
+/// Both initial placement and automatic respawn use `SpawnPlacement`; the player's persistent
+/// spawn-map pick still wins.
 #[expect(
     clippy::too_many_arguments,
-    reason = "a respawn sweep spanning dead tanks, remotes, occupancy, assets, sim source, spawn lane, overrides, terrain, obstacles and ids"
+    reason = "a respawn sweep spanning dead tanks, remotes, occupancy, template, spawn lane, overrides, terrain and obstacles"
 )]
 fn respawn_player_tanks(
-    dead: Query<
+    mut dead: Query<
         (
             Entity,
             &TankCommand,
             &ControlledBy,
             &CombatantId,
             &CombatantLife,
-            &RespawnState,
+            &mut RespawnState,
         ),
         With<TankKnockedOut>,
     >,
@@ -1412,8 +1507,7 @@ fn respawn_player_tanks(
     // Every tank root's live position — the occupancy set an override spawn checks against
     // (includes dead husks still on the field and the bot; excludes roots swept this pass).
     tanks: Query<(Entity, &Position, Has<TankKnockedOut>), With<NetTank>>,
-    assets: Res<PendingTankAssets>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
     mut lane: ResMut<SpawnLane>,
     mut placement: ResMut<SpawnPlacement>,
     manifest: Res<crate::map::MapManifest>,
@@ -1425,8 +1519,7 @@ fn respawn_player_tanks(
     // against exactly like a live tank. `world` inserts both at startup in every world.
     map: Res<TerrainMap>,
     obstacles: Res<SpawnObstacles>,
-    mut combatants: ResMut<CombatantIds>,
-    mut commands: Commands,
+    mut spawns: ResMut<PlayerSpawns>,
 ) {
     // (dead root, owner link, owner client id) for every owned tank that both IS dead and asked to
     // respawn this tick. Resolve the owner's `RemoteId` up front (the `PeerId` the fresh tank must be
@@ -1457,15 +1550,14 @@ fn respawn_player_tanks(
     // Requests commit occupancy in a declared priority, never query order: one already waiting on
     // occupancy first, then the lower combatant id.
     requests.sort_by_key(|&(_, _, _, combatant, state)| (!state.waiting, combatant.0));
-    let content = source.get();
-    let radius = content.contact_radius();
+    let radius = template.contact_radius();
     let limit = spawn_map::spawn_limit(manifest.extent.half_extent());
     // A harness script's spawn point and turn hold for every life, as on initial join.
     let harness_pose = harness::spawn_pose();
     let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
     let harness_at = harness_pose.map(|(at, _)| at);
     // Every tank of the pass spawns at `spawn_rot`.
-    let stance = content.stance(spawn_rot);
+    let stance = template.stance(spawn_rot);
     // Only successfully replaced roots leave occupancy: a crowded automatic spawn may wait.
     let mut sweeping: Vec<Entity> = Vec::new();
     let mut live: Vec<Vec2> = tanks
@@ -1479,6 +1571,12 @@ fn respawn_player_tanks(
     // the same click in the same tick would otherwise both read the pre-pass world and overlap.
     let mut placed_this_pass: Vec<Vec2> = Vec::new();
     let mut accepted: Vec<(Entity, Entity, PeerId, CombatantId, RespawnState)> = Vec::new();
+    let mut hold = |root: Entity, state: RespawnState| {
+        *dead
+            .get_mut(root)
+            .expect("a request names a knocked-out root of this pass")
+            .5 = state;
+    };
     for request in requests {
         let (root, link, client_id, _, previous) = request;
         // Keep the player's spawn-map override and its occupancy nudge ahead of automatic choice.
@@ -1521,7 +1619,7 @@ fn respawn_player_tanks(
                                 "server: spawn pick ({:.1}, {:.1}): {reason:?}; player may re-pick on the map",
                                 xz.x, xz.y
                             );
-                            commands.entity(root).insert(state);
+                            hold(root, state);
                         }
                         continue;
                     }
@@ -1545,10 +1643,13 @@ fn respawn_player_tanks(
                     info!(
                         "server: player {client_id} respawn waiting — every map spawn point is inside the minimum distance"
                     );
-                    commands.entity(root).insert(RespawnState {
-                        waiting: true,
-                        ..previous
-                    });
+                    hold(
+                        root,
+                        RespawnState {
+                            waiting: true,
+                            ..previous
+                        },
+                    );
                 }
                 continue;
             };
@@ -1560,30 +1661,20 @@ fn respawn_player_tanks(
         accepted.push(request);
     }
     let grounded = ground_spawns(height.as_deref(), &placed_this_pass, stance);
-    // Committed in priority order: identities and structural changes.
-    for ((root, link, client_id, combatant, previous), spawn_pos) in
-        accepted.into_iter().zip(grounded)
-    {
-        // Recursive despawn sweeps the dead root and its attached rig; the `On<Remove<Rig>>` observer
-        // handles any cooked-off turret that had detached (see the system doc).
-        commands.entity(root).despawn();
-        let fresh = spawn_player_tank(
-            &mut commands,
-            content,
-            &assets,
+    // Pushed in priority order, the order the commit replaces roots in.
+    spawns.0.extend(accepted.into_iter().zip(grounded).map(
+        |((root, link, client_id, combatant, previous), pos)| PlayerSpawn {
             link,
             client_id,
-            spawn_pos,
-            spawn_rot,
-            combatant,
-            combatants.life(combatant),
-        );
-        commands.entity(fresh).insert(RespawnState {
-            waiting: false,
-            ..previous
-        });
-        info!("server: player {client_id} respawn requested — swept {root}, spawned {fresh}");
-    }
+            pos,
+            rot: spawn_rot,
+            life: PlayerLife::Replaces {
+                root,
+                combatant,
+                previous,
+            },
+        },
+    ));
 }
 
 /// Bots author device commands before parsing and the Battle's hold. Primary clicks occupy the
@@ -1883,10 +1974,10 @@ mod tests {
     /// Fixture data: the shipped Tiger, the one tank in the tree.
     #[test]
     fn n_bots_spawn_n_tanks_each_its_own_combatant_at_its_own_home() {
-        let (blueprint, track_colliders) = crate::tank::shipped_construction();
+        let (blueprint, template) = crate::tank::shipped_construction();
         let mut app = App::new();
         app.insert_resource(blueprint)
-            .insert_resource(track_colliders)
+            .insert_resource(template)
             .insert_resource(PendingTankAssets {
                 spec: Handle::default(),
                 scene: None,
@@ -1901,7 +1992,7 @@ mod tests {
 
         let radius = app
             .world_mut()
-            .run_system_once(|source: TankSimSource| source.get().contact_radius())
+            .run_system_once(|template: Res<TankTemplate>| template.contact_radius())
             .unwrap();
         let world = app.world_mut();
         let cadence: Vec<_> = world
@@ -1992,12 +2083,12 @@ mod tests {
     }
 
     fn placement_app_with(mode: Option<BattleMode>) -> App {
-        let (blueprint, colliders) = crate::tank::shipped_construction();
+        let (blueprint, template) = crate::tank::shipped_construction();
         let mut app = App::new();
         // Lightyear's replicated-component removal hooks read this registry on despawn.
         app.init_resource::<bevy_replicon::server::visibility::registry::FilterRegistry>()
             .insert_resource(blueprint)
-            .insert_resource(colliders)
+            .insert_resource(template)
             .insert_resource(PendingTankAssets {
                 spec: Handle::default(),
                 scene: None,
@@ -3000,7 +3091,7 @@ mod tests {
         let mut fixture = placement_app();
         let radius = fixture
             .world_mut()
-            .run_system_once(|source: TankSimSource| source.get().contact_radius())
+            .run_system_once(|template: Res<TankTemplate>| template.contact_radius())
             .unwrap();
         let manifest = crate::map::tests::shipped_manifest();
         for instance in &manifest.instances {

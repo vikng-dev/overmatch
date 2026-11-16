@@ -2,6 +2,10 @@
 
 Subject: Overmatch's environment destruction model, game state only.
 
+Follow-up: the [controlled six-house experiment](swept-ccd-controlled-collapse.md) repeats each
+runtime arm exactly but finds identical physical outcomes across arms. It does not reproduce the
+extra truncation hypothesis or close this live-run causal question.
+
 ## Decision and limit
 
 The expensive tail is an awake debris contact graph: narrow phase, constraint preparation and

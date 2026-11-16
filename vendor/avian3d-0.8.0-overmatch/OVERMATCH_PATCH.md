@@ -225,6 +225,8 @@ TOI candidate, once per collider; the gate's thickness is reused. This small bug
 is folded into the same independent published-crate patch: `upstream/avian-ccd-decide-per-collider.md`.
 The merged-tree source census and repeated release measurements live in the
 [continuing lane report](../../.agents/scratch/swept-ccd-decisions-and-price.md).
+The [controlled collapse record](../../.agents/scratch/swept-ccd-controlled-collapse.md) tests
+the proposed extra truncation mechanism; its two runtime arms have identical physical traces.
 
 ## Non-solid colliders in continuous collision (`src/dynamics/ccd/mod.rs`): kept
 

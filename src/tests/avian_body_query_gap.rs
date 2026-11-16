@@ -55,11 +55,7 @@ fn physics_app() -> App {
     .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
         15_625,
     )));
-    while app.plugins_state() == bevy::app::PluginsState::Adding {
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    app.finish();
-    app.cleanup();
+    crate::headless_test::finish_plugins(&mut app);
     app
 }
 

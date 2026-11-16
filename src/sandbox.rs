@@ -53,7 +53,7 @@ use crate::damage::{self, CookedOff, Dead, LaunchedTurret, TankKnockedOut, Volum
 use crate::damage_cam::pen_cam::game::{PenCamSet, XRay, XRayRelease, XRaySubject};
 use crate::settings::{PenCamCorner, Settings};
 use crate::tank::{
-    Tank, TankPresentation, TankRoot, TankSimSource, ViewOf, Weapon, WeaponIndex,
+    Tank, TankPresentation, TankRoot, TankTemplate, ViewOf, Weapon, WeaponIndex,
     spawn_complete_tank,
 };
 use crate::view::PlayerView;
@@ -227,6 +227,7 @@ struct ArmourCopy {
 struct MetTank;
 
 pub fn plugin(app: &mut App) {
+    app.add_systems(Update, report_failed_target);
     // The armor sandbox stays on the flat slab + authored blocks: its target placement and shot
     // scripting assume y=0 ground, and a dev tool should not shift when the game's heightmap does.
     app.insert_resource(crate::terrain_grid::ForceFlatWorld);
@@ -504,6 +505,19 @@ fn pending_target(asset_server: &AssetServer) -> PendingTarget {
     ))
 }
 
+/// A required target view cannot become a permanent readiness wait. Its glTF and labelled
+/// scene failures name the same asset path, even after the pending spawn handle was consumed.
+fn report_failed_target(mut failures: MessageReader<bevy::asset::UntypedAssetLoadFailedEvent>) {
+    for failure in failures.read() {
+        if failure.path.path() == std::path::Path::new(crate::tank::TANK_GLB_PATH) {
+            panic!(
+                "required sandbox target `{}` failed to load: {}; restore or rebuild the required target glb",
+                failure.path, failure.error
+            );
+        }
+    }
+}
+
 fn load_target(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(pending_target(&asset_server));
 }
@@ -536,15 +550,14 @@ fn spawn_target_from_blueprint(
     mut commands: Commands,
     pending: Option<Res<PendingTarget>>,
     life: Res<TargetLife>,
-    source: TankSimSource,
+    template: Res<TankTemplate>,
 ) {
     let Some(pending) = pending else {
         return; // No initial target or rebuild is pending.
     };
-    let content = source.get();
     spawn_complete_tank(
         &mut commands,
-        content,
+        &template,
         pending.0.clone(),
         (
             Transform::from_xyz(0.0, 2.0, -12.0),
