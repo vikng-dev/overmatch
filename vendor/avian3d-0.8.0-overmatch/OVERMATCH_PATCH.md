@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 749 in all (MEASURED), 671 in upstream files and 78 in the
+of `src/` against the published crate: 660 in all (MEASURED), 582 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -120,15 +120,15 @@ repair; a self-attached explicit body's edits). The construction's
 memberships or filters are empty: either empty term makes `CollisionLayers::interacts_with` false
 for every partner. The proxy stays in its one collider tree, so spatial queries still find it.
 Eligibility reads the proxy's current layers each step, sensor and standalone proxies included.
-The system reads `ColliderTrees` as `Res` (upstream asks `ResMut` and writes nothing), and a live
-moved proxy without bounds panics where upstream skipped it unseen. Upstream's own `unwrap`s stay.
+The system reads `ColliderTrees` as `Res` (upstream asks `ResMut` and writes nothing). A moved
+proxy without bounds follows upstream's skip; no engine-internal refusal remains.
 
 `CollisionDiagnostics::broad_phase_candidates` counts non-self BVH leaf visits before duplicate,
 layer and body filtering, summed from per-chunk counts; a candidate can be visited from both
 endpoints. The game's tick trace reads it for the ram and scheduled-collapse instruments.
 
 Kept: the prune sits inside the broad phase's private per-proxy loop, so the alternative is
-replacing the whole broad-phase plugin. 33 fork lines (MEASURED: 28 in the broad phase, 5 in the
+replacing the whole broad-phase plugin. 28 fork lines (MEASURED: 23 in the broad phase, 5 in the
 diagnostics).
 
 Guard: `src/tests/avian_broad_phase_layers.rs` (with the prune removed it fails: 2 candidates
@@ -169,23 +169,26 @@ four builders filtered `Without<Sleeping>` (the third: the disabled and static b
 and change ticks move), the clear's check removed (the fourth does not panic). Local upstream
 draft: `upstream/avian-sleeping-velocity-increments.md`.
 
-## Unreadable pair state (`src/collision/narrow_phase/system_param.rs`): kept
+## Unreadable pair state: game-side
 
-`update_contacts` reads a pair's two colliders and their bodies. It skips a pair whose colliders it
-cannot fetch only when one is of another collider type (that type's narrow phase updates the pair)
-or unposed (a client's replication lifted its pose for a frame); disabled and removed colliders
-lose their pairs first (`remove_collider_on`). It reads a body outside its body query as no body
-only when the body is disabled (`RigidBodyDisabled` or `Disabled`, whose pairs generate no
-constraints) or unposed. Anything else has lost a component every collider or body carries, and
-panics naming the pair or the body; upstream skips the pair or reads the body as absent, unseen.
+`avian_ext::required_state` checks posed, enabled colliders and bodies in `PhysicsStepSystems::First`,
+before child placement. Missing narrow-phase, metric and island-wake
+inputs panic naming the invariant. Its negative With/Without/Or queries are archetypal in Bevy
+0.20.1: healthy archetypes never match, so the healthy tick walks no entity population. Replicas
+without either pose component, disabled entities and bodies with no attached colliders are named
+legitimate absences. The attachment observer queues only owners that do not yet have RigidBody; First validates those
+links at admission, allowing a late body completed before play without walking every live link.
+Bevy's relationship-target hooks maintain the reciprocal collider list.
 
-Kept: both reads are inside the private per-pair closure. 57 fork lines (MEASURED; two filter
-queries on `NarrowPhase` and the two checks).
+The narrow phase's optional fetches are upstream's again: 0 fork lines (MEASURED). The size-metric
+and linked-island refusals also moved to this game gate; their retained patches count only the
+recomputation and rest-history changes below. The solver-membership tripwire stays with increments.
 
-Guards: `src/tests/avian_narrow_phase.rs` (two refusals, red on stock 0.8.0, MEASURED; two
-legitimate absences). Upstream's own defect on the same path, a body leaving and re-entering the
-body query, still panics the solver on 0.8.0 (MEASURED by the tripwire
-`src/tests/avian_body_query_gap.rs`); record: `upstream/avian-body-query-gap-stale-constraints.md`.
+Guards: `src/tests/avian_narrow_phase.rs`, `src/tests/avian_body_size_metrics.rs`,
+`src/tests/avian_island_sleep.rs` and the attachment witness in
+`src/tests/avian_child_pose_churn.rs`. The unposed and disabled cases remain admitted. The upstream
+body-query-gap defect still has its separate, deliberately unextended composition in
+`src/tests/avian_body_query_gap.rs`; record: `upstream/avian-body-query-gap-stale-constraints.md`.
 
 ## Disabled colliders in continuous collision (`src/dynamics/ccd/mod.rs`): kept until upstream releases #1101
 
@@ -282,26 +285,24 @@ and recomputes each once. A body owns its metrics and reads only its own collide
 bodies run on the compute pool (`par_iter_many_unique_mut`, which takes only a set: a body visited
 twice is unrepresentable); a step with no stale body dispatches nothing. A changed collider whose
 body is despawned, disabled or no longer a rigid body is skipped, and a body with no collider is
-never stale (Avian removes its `RigidBodyColliders` with the last one), as upstream. An enabled body
-missing a component the pass reads panics naming the invariant; pristine 0.8.0's `if let Ok` skips
-it unseen with the rest, and the patch adds only the refusal and the stale set's filters.
+never stale (Avian removes its `RigidBodyColliders` with the last one), as upstream. The fetch uses
+upstream's optional form; incomplete posed, enabled bodies are refused by the game's First-stage
+gate before the pass can read stale state.
 `BodySizeMetricUpdates` holds the count of bodies the last pass recomputed: test instrumentation,
 read only by the guard, at one relaxed atomic add per recomputed body and one resource write per
 step. It cannot be `cfg(test)` (the game's tests build this crate as a dependency), and a feature
 switched on from the game's dev-dependencies would compile the fork and every crate above it in
 two feature sets.
 
-MEASURED on the scheduled collapse (the command above, one run each): the physics step's time
+MEASURED on the scheduled collapse (the previously recorded scheduled collapse, one run each): the physics step's time
 outside Avian's timed stages was 151 to 518 ms in the two ticks after each collapse and 2.35 s over
 the ten worst ticks; with the patch the worst is 0.6 ms and the ten worst sum to 3.9 ms. The run's
 worst tick fell from 599.9 to 82.7 ms (the 0.7 stack: 106.7 ms).
 
-Kept: the loop is inside an upstream system. 80 fork lines (MEASURED).
+Kept: the loop is inside an upstream system. 61 fork lines (MEASURED).
 
-Guard: `src/tests/avian_body_size_metrics.rs`, 4 tests. Mutants, each red (MEASURED): every body
-the pass cannot read skipped, as upstream (the refusal does not panic); every such body refused
-(the disabled body panics); the moved-centre filter without `RigidBodyColliders` (the body with no
-collider panics).
+Guards: `src/tests/avian_body_size_metrics.rs`: once-per-body recomputation and the named no-collider
+and disabled absences. Its missing-center witness now exercises the game's First-stage gate.
 
 ## Standalone key write-back: dropped
 
@@ -478,18 +479,18 @@ Rest history belongs to each body. `WakeIslands` restarts the rest interval (`Sl
 bodies that were sleeping only: an island merged from an awake and a sleeping one is marked sleeping
 (`merge_islands`), and upstream's wake zeroed the awake members' timers with the rest. The removal
 hook of `Sleeping` restarts its own body's interval, which has lost the marker by the time its
-queued wake runs. A linked body without `BodyIslandNode` or `SleepTimer` panics in the wake
-("every linked island body retains BodyIslandNode and SleepTimer"), where upstream ended the walk
-and left the island partly awake.
+queued wake runs. A node enabled before its first solver index can have no timer yet and no
+rest history to clear, so the hook resets only a present timer, as the upstream draft proposes. The linked-body fetch follows
+upstream's optional form; the game's First-stage check refuses missing timers before scheduled
+physics consumes an incomplete island body.
 
-Kept: the timer reset and the walk sit inside an upstream command and hook. 23 fork lines
-(MEASURED).
+Kept: the timer reset and the walk sit inside an upstream command and hook. 15 fork lines
+(MEASURED, including the extra `was_sleeping` tuple input).
 
 Guards: in `src/tests/avian_island_sleep.rs`,
-`waking_a_merged_island_preserves_already_awake_rest_time` and
-`a_linked_body_without_sleep_timer_is_refused`, both red on upstream 0.8.0 (MEASURED), and
-`removing_sleeping_restarts_the_woken_bodys_rest_interval`, red without the hook's reset (MEASURED).
-Record: `upstream/avian-island-rest-history.md`.
+`waking_a_merged_island_preserves_already_awake_rest_time`,
+`removing_sleeping_restarts_the_woken_bodys_rest_interval`, and the missing-timer witness moved to
+an ordinary physics update through the game's gate.
 
 ## Rest energy (`src/dynamics/solver/islands/sleeping.rs`, `src/dynamics/solver/islands/mod.rs`): hook
 

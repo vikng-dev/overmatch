@@ -571,3 +571,58 @@ fn shipped_physics_leaves_child_placement_to_the_game() {
         "Avian's pose writer must be removed"
     );
 }
+
+/// The narrow phase must never receive a posed attachment whose target is merely a view entity.
+/// Validate only the queued incomplete relationship at admission, allowing construction batches.
+#[test]
+#[should_panic(expected = "ColliderOf targets a rigid body")]
+fn an_attachment_to_a_posed_entity_without_a_rigid_body_is_refused() {
+    let mut app = physics_app();
+    let body = app
+        .world_mut()
+        .spawn((
+            Position(Vec3::ZERO),
+            Rotation::default(),
+            Transform::default(),
+        ))
+        .id();
+    // Fixture: any collider shape and size exercise the target invariant.
+    let collider = app
+        .world_mut()
+        .spawn((Transform::default(), Collider::sphere(0.5)))
+        .id();
+    app.world_mut()
+        .entity_mut(collider)
+        .insert(ColliderOf { body });
+    // Fixture: advance past the clock's initial update to one physics admission.
+    app.update();
+    app.update();
+}
+
+/// Size metrics need the reciprocal list, even for a manually attached collider outside the
+/// owner's hierarchy. A late body cannot retire its admission check merely by gaining RigidBody.
+#[test]
+#[should_panic(
+    expected = "a posed enabled body with attached colliders retains RigidBodyColliders"
+)]
+fn a_late_body_without_a_reciprocal_collider_list_is_refused() {
+    let mut app = physics_app();
+    let body = app
+        .world_mut()
+        .spawn((
+            Position(Vec3::ZERO),
+            Rotation::default(),
+            Transform::default(),
+        ))
+        .id();
+    // Fixture: any collider shape and size exercise the reciprocal-list invariant.
+    app.world_mut().spawn((
+        Transform::default(),
+        Collider::sphere(0.5),
+        ColliderOf { body },
+    ));
+    app.world_mut().entity_mut(body).insert(RigidBody::Static);
+    // Fixture: advance past the clock's initial update to one physics admission.
+    app.update();
+    app.update();
+}

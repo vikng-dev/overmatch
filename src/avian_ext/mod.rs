@@ -13,6 +13,7 @@ pub mod compliance;
 pub mod contact_match;
 pub mod contact_reduction;
 pub mod island_wake;
+pub mod required_state;
 pub mod rest_test;
 pub mod solver_cost;
 
@@ -26,6 +27,7 @@ pub fn plugin(app: &mut App) {
     if !app.is_plugin_added::<child_poses::ReenabledPlugin>() {
         app.add_plugins(child_poses::ReenabledPlugin);
     }
+    required_state::plugin(app);
     app.add_observer(attachment::refuse_unposed_attachment);
     app.insert_resource(ContactMatcher(contact_match::match_pair));
     app.insert_resource(RestTest(rest_test::at_rest));

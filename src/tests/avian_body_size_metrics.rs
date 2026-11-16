@@ -123,7 +123,7 @@ fn a_moved_centre_of_mass_refreshes_the_bodys_reach() {
 /// with the metrics continuous collision reads gone stale. Fails if the pass passes by every body
 /// it cannot read.
 #[test]
-#[should_panic(expected = "an enabled rigid body with colliders keeps")]
+#[should_panic(expected = "a posed enabled body retains LinearVelocity")]
 fn a_body_that_lost_its_centre_of_mass_is_refused() {
     let mut app = physics_app();
     let body = app

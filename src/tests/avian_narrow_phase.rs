@@ -1,7 +1,7 @@
-//! GUARD for the avian3d fork's narrow-phase rows (`vendor/avian3d-0.8.0-overmatch`,
-//! `OVERMATCH_PATCH.md`): which pairs `update_contacts` may skip or read as bodiless ("Unreadable
-//! pair state"), and which still, non-touching pairs may skip their geometry query ("Stationary
-//! non-touching pair cache"). Game state only: the server's contacts between bodies, not damage.
+//! Guards for the game's required-state gate (`avian_ext::required_state`) and Avian's stationary
+//! miss cache (`vendor/avian3d-0.8.0-overmatch`, `OVERMATCH_PATCH.md`). Game state only: the server's
+//! contacts between bodies. The gate refuses incomplete posed participants while preserving
+//! unposed and disabled states; the cache skips only geometry queries whose inputs remain equal.
 
 use avian3d::collision::CollisionDiagnostics;
 use avian3d::prelude::*;
@@ -50,7 +50,7 @@ fn stationary_pair() -> (App, Entity, Entity, f32) {
 /// Contact users need a pair whose collider lost state the narrow phase reads refused, not left
 /// with its last update. A mutant that skips every pair it cannot read keeps it silently.
 #[test]
-#[should_panic(expected = "a pair's posed colliders keep the state the narrow phase reads")]
+#[should_panic(expected = "a posed enabled collider retains CollisionLayers and EnlargedAabb")]
 fn a_pair_whose_collider_lost_its_layers_is_refused() {
     let (mut app, fixed, _, _) = stationary_pair();
     app.world_mut()
@@ -81,7 +81,7 @@ fn a_pair_whose_collider_lost_its_pose_is_skipped() {
 /// Contact users need a pair whose body lost state the narrow phase reads refused, not read as
 /// bodiless. A mutant that reads every body it cannot fetch as absent keeps it silently.
 #[test]
-#[should_panic(expected = "a collider's body keeps the state the narrow phase reads")]
+#[should_panic(expected = "a posed enabled body retains LinearVelocity")]
 fn a_pair_whose_body_lost_its_velocity_is_refused() {
     let (mut app, _, moving, _) = stationary_pair();
     app.world_mut()
