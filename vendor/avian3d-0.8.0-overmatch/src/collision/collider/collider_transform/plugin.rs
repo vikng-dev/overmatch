@@ -12,7 +12,6 @@ use bevy::{
 /// A plugin for propagating and updating transforms for colliders.
 ///
 /// - Propagates [`Transform`] to [`GlobalTransform`] and [`ColliderTransform`].
-/// - Updates [`Position`] and [`Rotation`] for colliders.
 ///
 /// This plugin requires that colliders have the [`ColliderMarker`] component,
 /// which is added automatically for colliders if the [`ColliderBackendPlugin`] is enabled.
@@ -53,39 +52,9 @@ impl Plugin for ColliderTransformPlugin {
             propagate_collider_transforms.in_set(PhysicsTransformSystems::Propagate),
         );
 
-        // OVERMATCH PATCH: `update_child_collider_position` is not registered. The host places
-        // child collider poses with its own system in `PhysicsStepSystems::First` (Overmatch's
-        // `avian_ext::child_poses`); this one assigned every child pose every step.
-    }
-}
-
-#[allow(clippy::type_complexity, dead_code)] // OVERMATCH PATCH: unregistered (above).
-pub(crate) fn update_child_collider_position(
-    mut collider_query: Query<
-        (
-            &ColliderTransform,
-            &mut Position,
-            &mut Rotation,
-            &ColliderOf,
-        ),
-        Without<RigidBody>,
-    >,
-    rb_query: Query<(&Position, &Rotation), (With<RigidBody>, With<Children>)>,
-) {
-    for (collider_transform, mut position, mut rotation, collider_of) in &mut collider_query {
-        let Ok((rb_pos, rb_rot)) = rb_query.get(collider_of.body) else {
-            continue;
-        };
-
-        position.0 = rb_pos.0 + (rb_rot * collider_transform.translation).real();
-        #[cfg(feature = "2d")]
-        {
-            *rotation = (Rot2::from(*rb_rot) * collider_transform.rotation).into();
-        }
-        #[cfg(feature = "3d")]
-        {
-            *rotation = (rb_rot.0 * collider_transform.rotation).normalize().into();
-        }
+        // OVERMATCH PATCH: no child collider placement. The host places child collider poses with
+        // its own system in `PhysicsStepSystems::First` (Overmatch's `avian_ext::child_poses`);
+        // upstream's assigned every child pose every step.
     }
 }
 

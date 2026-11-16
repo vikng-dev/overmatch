@@ -4,7 +4,7 @@
 //!
 //! A child collider takes `body pose ∘ ColliderTransform`. Avian's own system assigned that pose to
 //! every child of every body every step, so every standing static collider was marked changed and
-//! its bounds recomputed each step; the fork leaves it unregistered (`OVERMATCH_PATCH.md`, "Child
+//! its bounds recomputed each step; the fork deletes it (`OVERMATCH_PATCH.md`, "Child
 //! collider poses"). [`ChildColliderPoses`] visits only children whose inputs changed (own offset,
 //! own pose, attachment, or the body's pose, kind or collider list) and writes a component only
 //! where its bits change, so an unchanged pose keeps its change tick.

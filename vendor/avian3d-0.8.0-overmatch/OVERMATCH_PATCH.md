@@ -24,20 +24,20 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 724 in all (MEASURED), 646 in upstream files and 78 in the
+of `src/` against the published crate: 753 in all (MEASURED), 675 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
 
 ## Child collider poses (`src/collision/collider/collider_transform/plugin.rs`): hook
 
-`ColliderTransformPlugin` no longer registers `update_child_collider_position`, which assigned every
-child collider's `Position` and `Rotation` through `Mut` every step, changed or not: every child
-collider of every body, static bodies included, was marked changed every step, and
+`ColliderTransformPlugin` no longer has `update_child_collider_position`, which assigned every child
+collider's `Position` and `Rotation` through `Mut` every step, changed or not: every child collider
+of every body, static bodies included, was marked changed every step, and
 `update_moved_collider_aabbs`, which skips a collider whose pose and shape ticks did not move,
 recomputed all their bounds. On the product map that is every building element and tree segment,
-none of which moves. The function stays, unregistered, so the edit is the registration alone
-(13 fork lines, MEASURED).
+none of which moves. The system, its registration and the plugin doc's claim to place colliders are
+deleted (42 fork lines, MEASURED).
 
 The placement law is the game's (`avian_ext::child_poses`): `place_child_colliders`, which the game
 runs in `PhysicsStepSystems::First` (the slot upstream used) and at the frame boundary where
