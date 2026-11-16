@@ -487,6 +487,7 @@ impl ContactManifold {
 
     /// Prunes the contact points in the manifold to a maximum of 4 points.
     /// This is done to improve performance and stability.
+    /// Penetrating (bearing) points first; speculative (separated) points fill free slots by the same selection.
     #[inline]
     #[cfg(feature = "3d")]
     pub fn prune_points(&mut self) {
@@ -502,68 +503,127 @@ impl ContactManifold {
         // Neither of these should become zero, so we clamp the minimum distance.
         const MIN_DISTANCE_SQUARED: f32 = 1e-6;
 
+        // OVERMATCH PATCH: upstream's selection over the indices `eligible` admits (at least two),
+        // in selection order [point1, point2, point3, point4]; usize::MAX marks an empty side.
+        fn select_four(
+            projected: &[Vector],
+            penetrations_squared: &[f32],
+            normal: Vector,
+            eligible: impl Fn(usize) -> bool,
+        ) -> [usize; 4] {
+            // Find the point that is farthest from the center of mass, as its torque has the largest influence,
+            // while also taking into account the penetration depth heuristic.
+            let mut point1_index = 0;
+            let mut value = f32::MIN;
+            for (i, point) in projected.iter().enumerate() {
+                if !eligible(i) {
+                    continue;
+                }
+                let v = point.length_squared().max(MIN_DISTANCE_SQUARED) * penetrations_squared[i];
+                if v > value {
+                    value = v;
+                    point1_index = i;
+                }
+            }
+            let point1 = projected[point1_index];
+
+            // Find the point farthest from the first point, forming a line segment.
+            // Also consider the penetration depth heuristic.
+            let mut point2_index = usize::MAX;
+            let mut max_distance = f32::MIN;
+            for (i, point) in projected.iter().enumerate() {
+                if !eligible(i) {
+                    continue;
+                }
+                if i == point1_index {
+                    continue;
+                }
+                let v = point.distance_squared(point1).max(MIN_DISTANCE_SQUARED)
+                    * penetrations_squared[i];
+                if v > max_distance {
+                    max_distance = v;
+                    point2_index = i;
+                }
+            }
+            debug_assert!(point2_index != usize::MAX, "No second point found");
+            let point2 = projected[point2_index];
+
+            // Find the farthest points on both sides of the line segment in order to maximize the area.
+            let mut point3_index = usize::MAX;
+            let mut point4_index = usize::MAX;
+            let mut min_value = 0.0;
+            let mut max_value = 0.0;
+            let perp = (point2 - point1).cross(normal);
+            for (i, point) in projected.iter().enumerate() {
+                if !eligible(i) {
+                    continue;
+                }
+                if i == point1_index || i == point2_index {
+                    continue;
+                }
+                let v = perp.dot(point - point1);
+                if v < min_value {
+                    min_value = v;
+                    point3_index = i;
+                } else if v > max_value {
+                    max_value = v;
+                    point4_index = i;
+                }
+            }
+
+            [point1_index, point2_index, point3_index, point4_index]
+        }
+
         // Project the contact points onto the contact normal and compute the squared penetration depths.
         let (projected, penetrations_squared): (Vec<Vector>, Vec<f32>) = self
             .points
             .iter()
             .map(|point| {
+                let depth = point.penetration.max(0.0);
                 (
                     point.anchor1.reject_from_normalized(self.normal),
-                    (point.penetration * point.penetration).max(MIN_DISTANCE_SQUARED),
+                    (depth * depth).max(MIN_DISTANCE_SQUARED),
                 )
             })
             .unzip();
 
-        // Find the point that is farthest from the center of mass, as its torque has the largest influence,
-        // while also taking into account the penetration depth heuristic.
-        let mut point1_index = 0;
-        let mut value = f32::MIN;
-        for (i, point) in projected.iter().enumerate() {
-            let v = point.length_squared().max(MIN_DISTANCE_SQUARED) * penetrations_squared[i];
-            if v > value {
-                value = v;
-                point1_index = i;
+        let bearing_count = self
+            .points
+            .iter()
+            .filter(|point| point.penetration >= 0.0)
+            .count();
+        if bearing_count > 0 && bearing_count < self.points.len() {
+            let points = core::mem::take(&mut self.points);
+            let bearing = |i: usize| points[i].penetration >= 0.0;
+            // OVERMATCH PATCH: mixed manifolds keep bearing points before separated ones. A tier that
+            // fits the free slots is kept whole; a larger tier gives upstream's picks from that tier,
+            // then its other points in input order.
+            for tier in [true, false] {
+                let free = 4 - self.points.len();
+                if free == 0 {
+                    break;
+                }
+                let in_tier = |i: usize| bearing(i) == tier;
+                let picks = if (0..points.len()).filter(|&i| in_tier(i)).count() > free {
+                    select_four(&projected, &penetrations_squared, self.normal, in_tier)
+                } else {
+                    [usize::MAX; 4]
+                };
+                for i in picks
+                    .into_iter()
+                    .filter(|&i| i != usize::MAX)
+                    .chain((0..points.len()).filter(|&i| in_tier(i) && !picks.contains(&i)))
+                    .take(free)
+                {
+                    self.points.push(points[i]);
+                }
             }
+            return;
         }
-        let point1 = projected[point1_index];
 
-        // Find the point farthest from the first point, forming a line segment.
-        // Also consider the penetration depth heuristic.
-        let mut point2_index = usize::MAX;
-        let mut max_distance = f32::MIN;
-        for (i, point) in projected.iter().enumerate() {
-            if i == point1_index {
-                continue;
-            }
-            let v =
-                point.distance_squared(point1).max(MIN_DISTANCE_SQUARED) * penetrations_squared[i];
-            if v > max_distance {
-                max_distance = v;
-                point2_index = i;
-            }
-        }
-        debug_assert!(point2_index != usize::MAX, "No second point found");
-        let point2 = projected[point2_index];
-
-        // Find the farthest points on both sides of the line segment in order to maximize the area.
-        let mut point3_index = usize::MAX;
-        let mut point4_index = usize::MAX;
-        let mut min_value = 0.0;
-        let mut max_value = 0.0;
-        let perp = (point2 - point1).cross(self.normal);
-        for (i, point) in projected.iter().enumerate() {
-            if i == point1_index || i == point2_index {
-                continue;
-            }
-            let v = perp.dot(point - point1);
-            if v < min_value {
-                min_value = v;
-                point3_index = i;
-            } else if v > max_value {
-                max_value = v;
-                point4_index = i;
-            }
-        }
+        // OVERMATCH PATCH: homogeneous manifolds keep upstream's selection and construction order.
+        let [point1_index, point2_index, point3_index, point4_index] =
+            select_four(&projected, &penetrations_squared, self.normal, |_| true);
 
         // Construct the manifold, ensuring the order is correct to form a convex polygon.
         // TODO: The points in the manifold should be in an `ArrayVec`, and the input points should be separate.

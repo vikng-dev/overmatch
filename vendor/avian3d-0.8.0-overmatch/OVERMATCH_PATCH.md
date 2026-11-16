@@ -23,11 +23,26 @@ Each patch takes one form, named in its section:
 - **kept**: an edit inside an upstream file, with the reason no narrower form exists.
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
-Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 699 in all (MEASURED), 621 in upstream files and 78 in the
+Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff --minimal -ruN`
+of `src/` against the published crate: 855 in all (MEASURED), 777 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
+
+## Bearing-first manifold pruning (`src/collision/contact_types/mod.rs`): kept
+
+`ContactManifold::prune_points` keeps penetrating (bearing) points first; speculative
+(separated) points fill free slots by the same selection. Both tiers use upstream's distance/area
+picks in selection order, then remaining tier indices if needed. Depth is clamped before squaring.
+Homogeneous manifolds retain upstream's construction order and may keep fewer than four; mixed
+manifolds fill four slots. No projected-anchor deduplication or lone-point fallback is used.
+
+Kept as an upstream bug fix: separation must not displace bearing support or be rewarded.
+The selection runs before the contact modification hook, so a game-side pass cannot recover
+points it discarded. This patch has 156 fork lines (MEASURED, added plus removed against the
+cached published crate); the file has 187 including its pair-state field and warm-start correctness fix. Guard:
+`src/tests/avian_contact_pruning.rs` (R1–R7 and the upstream under-capacity witness).
+Mechanism, exact patch and compile proof: [local upstream draft](../../upstream/avian-prune-points-unsigned-depth.md).
 
 ## Child collider poses (`src/collision/collider/collider_transform/plugin.rs`): hook
 
@@ -372,7 +387,7 @@ phase's module, 11 for its field and call site).
 
 Guards: `src/tests/avian_warm_start.rs` checks engine identity rejection and first known-ID match,
 game ranking within a manifold, and the shipped composition's known-ID pair ranking in either
-old-manifold order. The sphere witness asserts the generated `face(0)` IDs are known.
+old-manifold order. The sphere witness asserts both generated IDs are known.
 
 ## Stationary non-touching pair cache (`src/collision/narrow_phase/stationary_miss.rs`, `src/collision/narrow_phase/system_param.rs`, `src/collision/contact_types/mod.rs`, `src/collision/diagnostics.rs`): module
 

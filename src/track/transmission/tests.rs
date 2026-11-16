@@ -2705,7 +2705,8 @@ fn backward_crank_has_only_opposing_motoring_drag() {
 
 /// The Driver must brake at the curve ceiling without buying a shift; without authority,
 /// only the independent clutch guard remains. Fixture: overrun below top gear
-/// where the ladder permits it, with a live drive request so gear holding exercises C2.
+/// where the ladder permits it, with a drive request whose fuel nets nothing at any crank
+/// ([`braking_pedal`]), so no cut buys drive and the gear holds.
 #[test]
 fn ceiling_brake_requires_a_driver_and_holds_the_current_gear() {
     for (fp, tp) in class_drivetrains() {
@@ -2721,13 +2722,14 @@ fn ceiling_brake_requires_a_driver_and_holds_the_current_gear() {
             let k = ratio / tp.sprocket_radius;
             let ceiling = tp.engine.crank_limit_rpm * RPM_TO_RAD / k;
             let speed = dir * ceiling;
+            let pedal = braking_pedal(&tp);
             let mut inp = input(
-                dir * 0.25, // Fixture: requested drive remains below drag, so C2 must hold.
+                dir * pedal,
                 0.0,
                 [speed; 2],
                 [-dir * (engine_drag(&tp, ceiling * k) * k * 0.5 + tp.brake_capacity_n * 0.25); 2],
             );
-            inp.sensed = driver_input(speed, inp.reactions.iter().sum(), 0.25 * dir).sensed;
+            inp.sensed = driver_input(speed, inp.reactions.iter().sum(), pedal * dir).sensed;
             let mut state = TransmissionState {
                 gear,
                 reverse,

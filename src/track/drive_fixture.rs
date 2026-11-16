@@ -7,7 +7,7 @@ use super::forces;
 use super::transmission::{
     ClutchState, DriveConstruction, DriveSupply, NeutralMean, TransmissionAuthoring,
     TransmissionInput, TransmissionParams, TransmissionReport, TransmissionState,
-    price_driver_force,
+    drag_throttle_release, motoring_drag_base_share, price_driver_force,
 };
 
 /// Fixture: a lighter three-speed construction using the seed's declared running-gear geometry.
@@ -276,6 +276,17 @@ pub(crate) fn driver_input(speed: f32, load: f32, command: f32) -> TransmissionI
     let mut inp = input(command, 0.0, [speed; 2], [0.0; 2]);
     inp.sensed = Some(Sensed::steady(speed, load, f32::INFINITY));
     inp
+}
+
+/// Fixture: a pedal whose own fuel nets nothing at any crank speed on [`DriveSupply::WHOLE`],
+/// derived from the engine's parameters, so an engine retune moves it and keeps it braking. At
+/// command `p` the crank nets `p·T + s·c·D − D` (`transmission::engine_torques`): the curve `T` at
+/// most its peak `P`, the governor's cut `c` at most one, the release `s` the smoothstep of `p`
+/// over `drag_throttle_release` `r`, and the motoring drag `D` at least its Coulomb base `b·f·P`
+/// (`motoring_drag_base_share` `b`, `drag_fraction` `f`). Half the lesser of `b·f` and `r` keeps
+/// `s` at most `s(½) = ½`, so the net is at most `P·(p − b·f/2) ≤ 0` (DERIVED).
+pub(crate) fn braking_pedal(tp: &TransmissionParams) -> f32 {
+    0.5 * (motoring_drag_base_share() * tp.drag_fraction).min(drag_throttle_release())
 }
 
 /// The fixture reading a Driver-policy input carries.
