@@ -4,9 +4,9 @@
 # PRINTS level — LIGHTING, PARALLAX, SUN SHADOW — costs while prints fill the screen, on the mud
 # pack and on the base pack. The relief is drawn only on print pixels within TRACK PRINT RANGE, so
 # the scene is prints held on screen: the track-print demo (src/track_prints/demo.rs) sets the
-# player's tank down on the spot at 10 s, drives it straight, stops, pivots, drives out, and from
-# ~37 s holds the camera ~10 m off the pivot for good (the demo's `hold`), at the relief level and
-# range the condition injects into video.ron. Each condition's scene is a capture plan with no
+# player's tank down on the spot at the plan's `at` (10 s), drives it straight, stops, pivots,
+# drives out, and from ~37 s holds the camera ~10 m off the pivot for good (the demo's `hold`), at
+# the relief level and range the condition injects into video.ron. Each condition's scene is a capture plan with no
 # frames (`$OUT/<condition>.plan.ron`, `dev_capture::plan`), so the window stays a normal one.
 # Nothing but those two settings differs between two conditions on one ground. Offline
 # single-player path, no server.
@@ -118,7 +118,7 @@ for cond in "${CONDITIONS[@]}"; do
     base-*) spot="x: 70.0, z: -20.0, heading_deg: 90.0" ;;
   esac
   plan="$OUT/$cond.plan.ron"
-  print -r -- "(scene: (demo: Some(TrackPrints($spot, hold: Some($hold)))))" >"$plan"
+  print -r -- "(scene: (demo: Some(TrackPrints($spot, at: 10.0, hold: Some($hold)))))" >"$plan"
   case "$cond" in
     *-lighting) relief=Lighting ;;
     *-parallax) relief=Parallax ;;

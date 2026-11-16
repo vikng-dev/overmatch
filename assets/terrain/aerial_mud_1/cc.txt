@@ -2,8 +2,9 @@
 
 AUTHORED SCALE: 8 x 8 m (Poly Haven `dimensions: [8000, 8000]` mm). Whatever binds it must tile at
 8 m to keep its mud cracks and ruts life-sized. At 2048², 8 m is 256 px/m.
-This pack's `scale: "40x40"` field disagrees with its `dimensions`; `dimensions` is the millimetre
-field rocks_ground_02's own `scale` pins, and is what the contract above is read from.
+This pack's `scale: "40x40"` field disagrees with its `dimensions`; `dimensions` is in millimetres
+(Poly Haven's rocks_ground_02 pairs `dimensions: [2000, 2000]` with `scale: "2x2M"`), and is what
+the contract above is read from.
 
 SHIPPED as slice 2 of the surface-blend arrays — the mask's lowlands channel. This pack's
 three maps are not files of their own: `scripts/encode-terrain-ktx2.sh blend` cuts them, with

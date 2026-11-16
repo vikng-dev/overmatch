@@ -3,6 +3,10 @@
 This directory is the published `lightyear_netcode` 0.31.0 crate with the admission changes below,
 marked `OVERMATCH PATCH` at their sites.
 
+MEASURED with `diff -ru` over `src/` against pristine 0.31.0: **159** added + removed lines, all
+in the admission/refusal section below: **12** retain the denial reason, **11** recheck admission,
+and **136** implement the foreign-protocol hook.
+
 Produced from `https://static.crates.io/crates/lightyear_netcode/lightyear_netcode-0.31.0.crate`,
 whose sha256 `2cf16a8bb3ed7746dc8808a2a6c4d026b7bb174692bb70beaf3c42bbd85cae28` matches the
 crates.io index's `cksum`, by `tar -xzf lightyear_netcode-0.31.0.crate -C
@@ -35,8 +39,9 @@ That path runs the upstream request checks that do not compare protocol ids: the
 packet size cap, the version, the expiry, the private key and, when enabled, the
 server-address check (`token_names_this_server`, shared with the upstream path).
 It skips the reused-token check, which guards the connection state a request
-creates; this path creates none. A replayed request is therefore answered again,
-and that is bounded: each answer is one denial of at most 282 bytes (DERIVED:
+creates; this path creates none. With a foreign-protocol handler installed, a same-protocol
+request is parsed again by the ordinary receive path; this changes no packet or connection state.
+A replayed request is therefore answered again, and that is bounded: each answer is one denial of at most 282 bytes (DERIVED:
 prefix 1, sequence at most 8, reason code and length 2, reason at most 255, MAC
 16) to a request of 1078 (DERIVED: prefix 1, version 13, protocol id 8, expiry 8,
 nonce 24, private token 1024), sent to the request's source, so a replay cannot

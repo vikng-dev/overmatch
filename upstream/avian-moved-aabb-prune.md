@@ -1,49 +1,140 @@
-# Draft: the moved-collider AABB pass fetches every collider every step
+# The moved-collider AABB pass fetches every collider every step
 
-**LOCAL DRAFT — not filed.** Performance finding against `avian3d 0.7.0` with Bevy 0.19.1, read in
-the published source. Upstream already names it: the TODO at `src/collider_tree/update.rs:888`
-("par-iter over all colliders, check if they have actually changed since the `LastPhysicsTick`").
+Found in a game using avian3d. Local draft; not filed.
 
-## Source and consequence
+**Crate:** avian3d 0.8.0 (crates.io). **Status:** not sent. Source audit: Unchanged on `main` at 2c2d6934 (2026-11-04): MEASURED, `main`'s `src/` differs from 0.8.0 only in `dynamics/ccd/mod.rs` (#1101), and this diff applies to `main` with `patch --dry-run`. Reported as issue #1102 (open), and named in the pass's own TODO.
 
-`update_moved_collider_aabbs` (`src/collider_tree/update.rs`, `ColliderTreeSystems::UpdateAabbs`,
-every physics step) runs a parallel iteration over every enabled collider, fetching its entity,
-pose, shape, `ColliderAabb`, `EnlargedAabb`, margin and proxy key, and only then skips the collider
-if none of its `Position`, `Rotation` and shape ticks is newer than `LastPhysicsTick`. A world of
-standing static colliders pays the fetch for every one of them every step.
+## Defect
 
-## Evidence
+`update_moved_collider_aabbs` (`src/collider_tree/update.rs`) runs a parallel iteration over every
+enabled collider, fetching its pose, shape, AABBs, margin and proxy key, and only then skips it when
+none of its `Position`, `Rotation` and shape ticks is newer than `LastPhysicsTick`. A world of
+standing colliders pays the fetch for all of them every step.
 
-Overmatch's dedicated server, 30 tanks on its product map (~13.8k map entities, MEASURED): the
-pass and its parallel batches cost 2391 µs per tick traced (DERIVED, 1753 + 638 MEASURED
-2026-10-31, M4, `bevy/trace_chrome`) before the child-pose fix of
-[avian-child-collider-pose-churn.md](avian-child-collider-pose-churn.md), when every static child
-collider was also recomputed. With that fix they cost 236 µs per tick traced (DERIVED, 99 + 137
-MEASURED the same day, 30 bots and no client): the fetch of colliders that did not move. The change
-below is priced separately.
+## Minimal repro
 
-## Proposed upstream change
+Spawn 10,000 static colliders and step with nothing moving: the pass visits 10,000 colliders per
+step and updates none (DERIVED).
 
-Add the change filter to the query: `Or<(Changed<Position>, Changed<Rotation>, Changed<C>)>`, so a
-collider whose ticks did not move since the system's previous run costs three tick reads and is
-never fetched; keep the `LastPhysicsTick` check in the body. This is exact while
-`LastPhysicsTick` is newer than the system's previous run, since every tick newer than it is then
-newer than that run too. `update_last_physics_tick` runs after the system in every step, so inside
-the physics schedule that always holds. For an instance the application schedules elsewhere, fall
-back to the unfiltered query when it does not (`SystemChangeTick::last_run` against
-`LastPhysicsTick`).
+## Fix
 
-The prune changes nothing the pass writes, so only a count can test it: a counter of examined
-colliders in `ColliderTreeDiagnostics` (`moved_aabb_candidates` in our patch), with a test that a
-step in which nothing moved examines no collider, and one that a static collider moved, rescaled,
-added or removed is found where a spatial query looks for it after one step.
+Against the pristine crate (`a/` and `b/` are the crate root):
 
-## Workaround
+```diff
+--- a/src/collider_tree/update.rs
++++ b/src/collider_tree/update.rs
+@@ -18,7 +18,7 @@
+     ecs::{
+         change_detection::Tick,
+         entity_disabling::Disabled,
+-        query::QueryFilter,
++        query::{QueryFilter, QueryItem},
+         system::{StaticSystemParam, SystemChangeTick},
+     },
+     platform::collections::HashMap,
+@@ -857,25 +857,33 @@
+ 
+     diagnostics.update += start.elapsed();
+ }
++
++/// The data [`update_moved_collider_aabbs`] reads per collider.
++type MovedCollider<C> = (
++    Entity,
++    Ref<'static, Position>,
++    Ref<'static, Rotation>,
++    &'static mut ColliderAabb,
++    &'static mut EnlargedAabb,
++    &'static mut ColliderAabbMargin,
++    Ref<'static, C>,
++    Option<&'static CollisionMargin>,
++    &'static ColliderTreeProxyKey,
++);
+ 
+ /// Updates the AABBs of colliders that have been manually moved after the previous physics step.
+ pub fn update_moved_collider_aabbs<C: AnyCollider>(
+     mut colliders: ParamSet<(
++        Query<MovedCollider<C>, Without<ColliderDisabled>>,
++        Query<&EnlargedAabb, Without<ColliderDisabled>>,
++        // The same colliders, pruned by their change ticks.
+         Query<
++            MovedCollider<C>,
+             (
+-                Entity,
+-                Ref<Position>,
+-                Ref<Rotation>,
+-                &mut ColliderAabb,
+-                &mut EnlargedAabb,
+-                &mut ColliderAabbMargin,
+-                Ref<C>,
+-                Option<&CollisionMargin>,
+-                &ColliderTreeProxyKey,
++                Without<ColliderDisabled>,
++                Or<(Changed<Position>, Changed<Rotation>, Changed<C>)>,
+             ),
+-            Without<ColliderDisabled>,
+         >,
+-        Query<&EnlargedAabb, Without<ColliderDisabled>>,
+     )>,
+     narrow_phase_config: Res<NarrowPhaseConfig>,
+     length_unit: Res<PhysicsLengthUnit>,
+@@ -910,11 +918,8 @@
+ 
+     // TODO: This doesn't do velocity-based enlargement like the dynamic/kinematic AABB update.
+     //       We should overall rework CCD to not rely on velocity-based AABB enlargement for all bodies.
+-    // TODO: par-iter over all colliders, check if they have actually changed since the `LastPhysicsTick`
+-    let mut collider_query = colliders.p0();
+-    collider_query.par_for_each_mut(
+-        MIN_PAR_ITER_ENTITIES,
+-        |(
++    let update_moved = |item: QueryItem<'_, '_, MovedCollider<C>>| {
++        let (
+             entity,
+             pos,
+             rot,
+@@ -924,7 +929,8 @@
+             collider,
+             collision_margin,
+             proxy_key,
+-        )| {
++        ) = item;
++        {
+             // Skip if the collider's AABB can't have changed since the last physics tick.
+             let collider_changed = collider.last_changed().is_newer_than(last_tick.0, this_run);
+             if !pos.last_changed().is_newer_than(last_tick.0, this_run)
+@@ -980,8 +986,19 @@
+ 
+                 thread_local_bit_vec.set(proxy_key.id().index());
+             }
+-        },
+-    );
++        }
++    };
++    // When `LastPhysicsTick` is newer than this system's previous run, every collider the tick
++    // check above accepts also passes the change filter, so the filtered query visits only
++    // colliders that moved or changed shape. `par_iter_mut` directly: counting a change-filtered
++    // query first would visit every collider again. Otherwise, visit every collider.
++    if last_tick.0.is_newer_than(system_tick.last_run(), this_run) {
++        colliders.p2().par_iter_mut().for_each(update_moved);
++    } else {
++        colliders
++            .p0()
++            .par_for_each_mut(MIN_PAR_ITER_ENTITIES, update_moved);
++    }
+ 
+     // Reinsert moved proxies in each tree.
+     let aabb_query = colliders.p1();
+```
 
-Overmatch vendors the crate with this patch beside the child-pose one:
-`vendor/avian3d-0.7.0-child-pose` (`OVERMATCH_PATCH.md`), guarded by
-`src/tests/avian_moved_aabb_prune.rs`. Removal condition: upstream filters the pass on change ticks.
+## Notes
 
-## What fixing this unlocks for us
+The filtered query (`Or<(Changed<Position>, Changed<Rotation>, Changed<C>)>`) is exact while
+`LastPhysicsTick` is newer than the system's previous run: every tick newer than `LastPhysicsTick`
+is then also newer than that run, so every collider the body's check accepts passes the filter.
+Inside `PhysicsSchedule` that always holds, since `update_last_physics_tick` runs after the pass
+each step; otherwise the pass falls back to the unfiltered query. It iterates with `par_iter_mut`
+directly, since counting a change-filtered query first would visit every collider again.
 
-Drop the vendored crate, together with the child-pose record's fix. Nothing else.
+An unconditional child-pose writer makes even standing children pass this filter every step.
+The [Avian access proposal](avian-child-collider-pose-churn.md) lets an application replace that
+writer; the [Lightyear proposal](lightyear-avian-child-collider-pose-churn.md) avoids marking
+unchanged poses through `set_if_neq`.

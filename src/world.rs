@@ -94,6 +94,15 @@ const GROUND_SIZE: f32 = crate::terrain_grid::FIXTURE_EXTENT.world_size_m;
 const GROUND_THICKNESS: f32 = 1.0;
 
 pub fn plugin(app: &mut App) {
+    // A world with no baked field until `spawn_environment` bakes one (`terrain_shadow`).
+    app.init_resource::<crate::terrain_shadow::TerrainShadow>();
+    // After the frame's light and transform writes, before the render world extracts them.
+    app.add_systems(
+        Last,
+        crate::terrain_shadow::the_sun_is_the_only_shadow_caster,
+    );
+    // Refused before play, in every composition that spawns a tank on this world.
+    crate::terrain_grid::admit_spawn_rule();
     // Decode the heightmap FIRST (synchronous, ADR-0014), then spawn whichever world it selects:
     // the heightfield when the grid decoded, the flat slab + authored course otherwise.
     app.add_systems(
@@ -135,7 +144,7 @@ pub(crate) enum MapEncoding {
 const SURFACE_ANISOTROPY: u16 = 8;
 
 /// How a surface image is addressed outside `0..1`. A surface pack TILES — bevy's default clamps,
-/// which would smear the first [`crate::terrain_grid::TEXTURE_TILE_M`] tile across the whole map.
+/// which would smear the first repeat of the pack across the whole map.
 /// A weight mask is STRETCHED over the world square exactly once, so it must clamp instead: with
 /// repeat addressing its opposite edges would bleed into each other at the map's border.
 #[derive(Clone, Copy)]
@@ -243,7 +252,7 @@ fn report_failed_terrain_map(
     reason = "spawns the environment: six asset stores, terrain, map, window, view profile, loader \
               and the ablation lever"
 )]
-fn spawn_environment(
+pub(crate) fn spawn_environment(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -300,27 +309,24 @@ fn spawn_environment(
         ));
         // The render mesh is view-only: windowed compositions have a primary window; the
         // dedicated server (and the headless harness) has none and must not pay for it.
+        // `view_shadow` is the baked terrain shadow, made exactly where the window is.
+        let mut view_shadow = None;
         if !windows.is_empty() {
-            // The BASE ground surface pack (Poly Haven, CC0 — see the pack folder's `cc.txt`),
-            // world-space tiled by the mesh's UVs every `terrain_grid::TEXTURE_TILE_M`.
-            let diffuse = surface_map(
-                &asset_server,
-                crate::terrain_grid::TEXTURE_PATH,
-                MapEncoding::Srgb,
-                MapTiling::Repeat,
-            );
-            let normal = surface_map(
-                &asset_server,
-                crate::terrain_grid::NORMAL_PATH,
-                MapEncoding::Linear,
-                MapTiling::Repeat,
-            );
-            let arm = surface_map(
-                &asset_server,
-                crate::terrain_grid::ARM_PATH,
-                MapEncoding::Linear,
-                MapTiling::Repeat,
-            );
+            // The BASE ground surface pack (`terrain_surface`; Poly Haven, CC0, see the pack
+            // folder's `cc.txt`), world-space tiled by the mesh's UVs at its authored metres.
+            let base = &crate::terrain_surface::surface().base;
+            let base_map = |map, encoding| {
+                surface_map(
+                    &asset_server,
+                    &base.map_path(map),
+                    encoding,
+                    MapTiling::Repeat,
+                )
+            };
+            use crate::terrain_surface::PackMap;
+            let diffuse = base_map(PackMap::Albedo, MapEncoding::Srgb);
+            let normal = base_map(PackMap::Normal, MapEncoding::Linear);
+            let arm = base_map(PackMap::Arm, MapEncoding::Linear);
             // The three BLENDED packs, one 2D array per map type, plus the map's own weight mask
             // (`terrain_blend` — layer order is the mask's channel order).
             let layer_albedo = surface_map(
@@ -340,6 +346,15 @@ fn spawn_environment(
                 crate::terrain_blend::LAYER_ARM_PATH,
                 MapEncoding::Linear,
                 MapTiling::Repeat,
+            );
+            // The same heightfield supplies the baked sun shadow every receiver binds, so it is
+            // installed before any of their materials is made. Terrain geometry does not also cast
+            // into the cascades.
+            let shadow = crate::terrain_shadow::install(
+                &mut commands,
+                &mut images,
+                &grid,
+                crate::sky::toward_sun(),
             );
             let field = ground_field
                 .as_ref()
@@ -392,6 +407,8 @@ fn spawn_environment(
                     masks,
                     prints_near: prints.near.clone(),
                     prints_world: prints.world.clone(),
+                    terrain_shadow_field: shadow.field.clone(),
+                    terrain_shadow: shadow.uniform,
                 },
             });
             // The world layer spans the square the material's `print_world` lane maps it over.
@@ -404,8 +421,9 @@ fn spawn_environment(
                 ground,
             );
             info!(
-                "terrain surface: base pack every {} m, masks {} at {:?}, blend layers {}",
-                crate::terrain_grid::TEXTURE_TILE_M,
+                "terrain surface: base pack {} every {} m, masks {} at {:?}, blend layers {}",
+                base.pack,
+                base.authored_m,
                 map.masks_asset(),
                 map.masks_resolution,
                 crate::terrain_blend::layer_census(),
@@ -420,15 +438,6 @@ fn spawn_environment(
             // distance bevy switches them in. Generated HERE, from the in-memory grid, so there is
             // no build product that can go stale against the surface the sim reads. Tangent
             // generation (ADR-0011, required with no fallback) happens per level inside `spawn`.
-            //
-            // The same heightfield supplies the baked sun shadow to every receiver. Terrain
-            // geometry does not also cast into the cascades.
-            crate::terrain_shadow::install(
-                &mut commands,
-                &mut images,
-                &grid,
-                crate::sky::toward_sun(),
-            );
             crate::terrain_lod::spawn(
                 &mut commands,
                 &mut meshes,
@@ -437,6 +446,7 @@ fn spawn_environment(
                 view.as_deref().copied(),
                 crate::render_policy::VisualScope::BAKED_CASTER,
             );
+            view_shadow = Some(shadow);
         }
         // The map's object scatter (`scatter`): proxies and bodies posed from the shipped level file
         // onto THIS grid, colliders on every composition and meshes only where there is a window.
@@ -449,14 +459,14 @@ fn spawn_environment(
                 &mut meshes,
                 &manifest,
                 &grid,
-                buffers
-                    .as_deref_mut()
-                    .filter(|_| !windows.is_empty())
-                    .map(|buffers| crate::scatter::ViewAssets {
+                buffers.as_deref_mut().zip(view_shadow.as_ref()).map(
+                    |(buffers, terrain_shadow)| crate::scatter::ViewAssets {
                         server: &asset_server,
                         construction_materials: &mut construction_materials,
                         buffers,
-                    }),
+                        terrain_shadow,
+                    },
+                ),
             );
         }
         commands.insert_resource(TerrainMap {

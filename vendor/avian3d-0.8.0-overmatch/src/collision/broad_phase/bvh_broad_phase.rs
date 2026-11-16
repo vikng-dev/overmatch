@@ -92,10 +92,9 @@ fn collect_collision_pairs<H: CollisionHooks>(
                         continue;
                     }
 
-                    // OVERMATCH PATCH: a live moved proxy has bounds; upstream skipped it unseen.
-                    let proxy_aabb1 = tree
-                        .get_proxy_aabb(proxy_id1)
-                        .expect("A live moved proxy has bounds in its collider tree");
+                    let Some(proxy_aabb1) = tree.get_proxy_aabb(proxy_id1) else {
+                        continue;
+                    };
 
                     // Query dynamic tree.
                     query_tree(

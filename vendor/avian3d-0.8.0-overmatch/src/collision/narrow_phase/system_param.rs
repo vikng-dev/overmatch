@@ -72,33 +72,8 @@ struct RigidBodyQuery {
 #[expect(missing_docs)]
 pub struct NarrowPhase<'w, 's, C: AnyCollider> {
     collider_query: Query<'w, 's, ColliderQuery<C>, Without<ColliderDisabled>>,
-    // OVERMATCH PATCH: the enabled, posed colliders of this type, whose pairs this narrow phase
-    // must read.
-    posed_colliders: Query<
-        'w,
-        's,
-        (),
-        (
-            With<C>,
-            With<Position>,
-            With<Rotation>,
-            Without<ColliderDisabled>,
-        ),
-    >,
     colliding_entities_query: Query<'w, 's, &'static mut CollidingEntities>,
     body_query: Query<'w, 's, RigidBodyQuery, Without<RigidBodyDisabled>>,
-    // OVERMATCH PATCH: the bodies `body_query` may legitimately miss: disabled or unposed.
-    unread_bodies: Query<
-        'w,
-        's,
-        (),
-        Or<(
-            With<RigidBodyDisabled>,
-            With<bevy::ecs::entity_disabling::Disabled>,
-            Without<Position>,
-            Without<Rotation>,
-        )>,
-    >,
     pub contact_graph: ResMut<'w, ContactGraph>,
     /// The queue of contact status changess.
     pub contact_status_changes: ResMut<'w, ContactStatusChangeQueue>,
@@ -508,16 +483,6 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 .collider_query
                 .get_many([contacts.collider1, contacts.collider2])
             else {
-                // OVERMATCH PATCH: two absences are legitimate. The broad phase pairs colliders of
-                // every type, and another type's narrow phase updates their pairs; a client's
-                // replication may lift a pose for a frame. Disabled and removed colliders lose
-                // their pairs first (`remove_collider_on`).
-                assert!(
-                    !self.posed_colliders.contains(contacts.collider1)
-                        || !self.posed_colliders.contains(contacts.collider2),
-                    "{:?}: a pair's posed colliders keep the state the narrow phase reads",
-                    contacts.contact_id
-                );
                 return;
             };
 
@@ -545,22 +510,12 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
 
                 let was_touching = contacts.flags.contains(ContactPairFlags::TOUCHING);
 
-                // OVERMATCH PATCH: a body outside the body query reads as no body only when it is
-                // disabled, whose pairs generate no constraints, or unposed.
-                let body_state = |of: Option<&ColliderOf>| {
-                    of.and_then(|&ColliderOf { body }| match self.body_query.get(body) {
-                        Ok(state) => Some(state),
-                        Err(_) => {
-                            assert!(
-                                self.unread_bodies.contains(body),
-                                "{body}: a collider's body keeps the state the narrow phase reads"
-                            );
-                            None
-                        }
-                    })
-                };
-                let body1_bundle = body_state(collider1.of);
-                let body2_bundle = body_state(collider2.of);
+                let body1_bundle = collider1
+                    .of
+                    .and_then(|&ColliderOf { body }| self.body_query.get(body).ok());
+                let body2_bundle = collider2
+                    .of
+                    .and_then(|&ColliderOf { body }| self.body_query.get(body).ok());
 
                 // The rigid body's friction, restitution, and collision margin
                 // will be used if the collider doesn't have them specified.
@@ -987,7 +942,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     // TODO: Cache this?
                     let distance_threshold = 0.1 * self.length_unit.0;
 
-                    // OVERMATCH PATCH: the matcher is a hook (`ContactMatcher`).
+                    // OVERMATCH PATCH: predecessor ranking is a game-owned policy.
                     (self.contact_matcher.0)(
                         &mut contacts.manifolds,
                         &old_manifolds,

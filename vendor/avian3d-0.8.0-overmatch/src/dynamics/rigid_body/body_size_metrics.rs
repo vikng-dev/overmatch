@@ -8,7 +8,7 @@ use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use bevy::{
-    ecs::{entity::EntityHashSet, query::QueryEntityError, system::StaticSystemParam},
+    ecs::{entity::EntityHashSet, system::StaticSystemParam},
     prelude::*,
 };
 
@@ -119,7 +119,6 @@ fn update_body_size_metrics<C: AnyCollider>(
     >,
     colliders: Query<(Entity, &C, &ColliderTransform)>,
     changed_colliders: Query<&ColliderOf, Or<(Changed<C>, Changed<ColliderTransform>)>>,
-    enabled_bodies: Query<(), With<RigidBody>>,
     context: StaticSystemParam<C::Context>,
     mut stale: Local<EntityHashSet>,
     mut updates: ResMut<BodySizeMetricUpdates>,
@@ -161,25 +160,11 @@ fn update_body_size_metrics<C: AnyCollider>(
         return;
     }
     let recomputed = AtomicU32::new(0);
-    bodies
-        .par_iter_many_unique_mut(&*stale)
-        .for_each(|body| match body {
-            Ok((mut size_metrics, rb_colliders, com)) => {
-                *size_metrics = compute(rb_colliders, com);
-                recomputed.fetch_add(1, Ordering::Relaxed);
-            }
-            // A changed collider's body that is despawned, disabled or no longer a rigid body has
-            // no metrics to refresh.
-            Err(QueryEntityError::NotSpawned(_)) => {}
-            Err(QueryEntityError::QueryDoesNotMatch(body, _)) => assert!(
-                !enabled_bodies.contains(body),
-                "an enabled rigid body with colliders keeps the BodySizeMetrics and \
-                 ComputedCenterOfMass that RigidBody requires and the RigidBodyColliders its \
-                 colliders' ColliderOf fill: {body}"
-            ),
-            Err(e @ QueryEntityError::AliasedMutability(_)) => {
-                unreachable!("a set of distinct bodies cannot alias: {e}")
-            }
-        });
+    bodies.par_iter_many_unique_mut(&*stale).for_each(|body| {
+        if let Ok((mut size_metrics, rb_colliders, com)) = body {
+            *size_metrics = compute(rb_colliders, com);
+            recomputed.fetch_add(1, Ordering::Relaxed);
+        }
+    });
     updates.0 = recomputed.into_inner();
 }

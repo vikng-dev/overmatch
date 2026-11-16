@@ -142,8 +142,11 @@ instead of material alone.
 
 - **Where it goes.** When a tank's view glb lands, every primitive wearing a material whose
   `materials.ron` row names a visual swaps its glb material for a surface material: one per
-  (vehicle, material), shared by every instance of the vehicle. Decor, the collision and shadow
-  proxies, the crew boxes and the track belt keep theirs. LOD rungs wear their source primitive's
+  (vehicle, material), shared by every instance of the vehicle. A primitive whose material names no
+  visual (decor, the collision and shadow proxies, the crew boxes) wears its glb material's own
+  look, whole, through a surface material too (`own_material`), so the baked terrain shadow
+  (`terrain_shadow`) falls on all of the tank; only the track's shoe template keeps its
+  `StandardMaterial`, which the belt reads off it and draws. LOD rungs wear their source primitive's
   material (`geometry_lod`), and the pen cam's x-ray dresses and restores the surface material like
   the standard one.
 - **Loading.** The swap happens the frame the view lands, before the visual's maps and the pattern

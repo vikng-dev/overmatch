@@ -417,12 +417,13 @@ pub(super) fn spawn(
 ) {
     let plan = Plan::new(SEED);
     for (index, tank) in plan.tanks.iter().enumerate() {
+        let turn = tank.lane.spawn_turn();
+        let at = crate::terrain_grid::spawn_pos(grid, tank.lane.back, content.stance(turn));
         let root = super::scenario::spawn_tank(
             commands,
             content,
             presentation.clone(),
-            Transform::from_translation(crate::terrain_grid::spawn_pos(grid, tank.lane.back))
-                .with_rotation(tank.lane.spawn_turn()),
+            Transform::from_translation(at).with_rotation(turn),
             &format!("Battle tank {index}"),
             index,
             index == 0,
@@ -1099,6 +1100,7 @@ mod tests {
                 &grid,
                 &format!("battle tank {index}"),
                 tank.lane.back,
+                crate::terrain_grid::tests::FIXTURE_STANCE,
             );
             for (other, them) in plan.tanks.iter().enumerate().skip(index + 1) {
                 let apart = tank.lane.back.distance(them.lane.back);

@@ -886,7 +886,7 @@ fn full_pedal_climbs_the_declared_ladder_gear_by_gear() {
 fn full_throttle_reaches_and_holds_the_governed_top_speed() {
     let (mut app, tank) = booted_offline_sim();
     let base = crate::ground_types::GroundTypes::load_shipped()
-        .get(crate::terrain_blend::BASE_GROUND)
+        .get(crate::terrain_surface::surface().base.ground.as_str())
         .contact();
     let road = crate::ground_field::ContactGround {
         // Fixture: invert the pressure law to make this governor witness lossless.
@@ -2585,6 +2585,14 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
         .world_mut()
         .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
     let tank = controlled.single(app.world()).expect("one controlled tank");
+
+    // Fixture: the airborne witness needs free fall of its own; the spawn rule's drop clearance
+    // is a taste and may leave the tracks within suspension reach of the ground.
+    app.world_mut()
+        .get_mut::<avian3d::prelude::Position>(tank)
+        .expect("the controlled tank is a physics body")
+        .0
+        .y += 1.0;
 
     for tick in 0..SCRIPT_TICKS {
         {

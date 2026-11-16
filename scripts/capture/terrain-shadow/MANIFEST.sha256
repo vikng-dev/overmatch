@@ -1,0 +1,34 @@
+# Frames of the terrain-shadow lane (lane/terrain-shadow), kept off-repo under ~/.cache/overmatch/terrain-shadow/.
+# before = main at 2d9b4635 (vendored heightfield patch); after = the game-side seam. Hidden window, 1280x720,
+# scale 1, empty config dir. Plans: scripts/capture/terrain-shadow/*.ron and scripts/capture/surroundings/{p3-hill,
+# p4-hill-sight,hull-closeup}.ron with out redirected; OVERMATCH_START as each plan's header names.
+# A plan's second counts from the process start, and the offline duel spawns on the first frame its assets have
+# loaded, a wall-clock race: two runs can frame a tank one frame (1/64 s) apart in age. MEASURED: after/p4-hill-sight
+# taken at 12 s - 1/64 equals before/p4-hill-sight byte for byte, and a rerun of hull-closeup at the surface-data
+# commit equals after/hull-closeup at the same offset.
+aecfdb7f37adb506947548d05e17618d126ec7648d9fdba3b5c90a60ade372f1  before/hull-closeup.png
+337a22204a0996fd7f0e3b00ca6c6f4c6de0c62c3c4860e3b37ed3e84d077b66  before/low-sun-hills.png
+166617c62d13cb170841bcc6e5af341a10422b147309f8ec982ba0e0e5c71a00  before/low-sun-house-00007.0000s.png
+5aaa7f19412a2307dfff4b3e38d7c490be6168932a366724a200272b6ede5038  before/low-sun-house-00014.0000s.png
+07217996c7d8f60a2b0e4bf155f0729d819b8281a3bbda14452370c8ba9fe603  before/p3-hill.png
+c08e17380619c2a47d5697a2315fce12d94d127c18039dd33627d0b08a62bc81  before/p4-hill-sight.png
+8b9ebda3f598cf0b6c84c61c208e37f0e0d2dab0e4baac8ba746b958d6b380ce  before/shadow-edge-tank.png
+aecfdb7f37adb506947548d05e17618d126ec7648d9fdba3b5c90a60ade372f1  after/hull-closeup.png
+6108ec628ad2ea3fecebdc4db84204c8ee8aed8b972a952d77507fdee073d29d  after/low-sun-hills.png
+db00ffc3055993ecd2d8e2de9d6478aea7d557ec97321de85085f3c2d8486eba  after/low-sun-house-00007.0000s.png
+8edb421b672fd1c66becf7b22202fc732d18855d7f6b7eca03271aab57848ebf  after/low-sun-house-00014.0000s.png
+07217996c7d8f60a2b0e4bf155f0729d819b8281a3bbda14452370c8ba9fe603  after/p3-hill.png
+98a6ef98530ae32838059493ec5d75da200096f23e16bc5b8d76c134f2c88d63  after/p4-hill-sight.png
+913d526823188df2a069404c149dba7a05c1983bfac3e83d1dd4923677072b95  after/shadow-edge-tank.png
+310e3ebc62a7ef8e8408a340bcd3890ed40417d7d44af3d878b3f44bfe090ee5  before/hull-mark-lit-00018.0000s.png
+16aa8fef59eaa2b1ab23029269ec094c811ef89e50a48f38ab0e615202946625  before/hull-mark-lit-00021.0000s.png
+d950ad3d95b31cf291ecad7547dc5467dda9f5919c2b6cb87bf000e5da48d2dd  before/hull-mark-lit-00024.0000s.png
+d8d38c5c380fa0dfd5ca1e6c0528c390f6f58dfc38fb446603f000a2732e7922  before/hull-mark-shadowed-00018.0000s.png
+0536ff9cd9a66a5e7aef5a9762d9e10945b941f137a9afdd6c52f1fe6252132c  before/hull-mark-shadowed-00021.0000s.png
+aa430ba3453c9dc668e0b2bccb16c7d650b11e22bb5406956b447e063d892b8b  before/hull-mark-shadowed-00024.0000s.png
+886af8eaddaa91d5db701afe143408232d06ec35932b02e251214f97dff65187  after/hull-mark-lit-00018.0000s.png
+79de2aa16c2664e03b5fa65aef22730569932da81148af51793a73abfb744a38  after/hull-mark-lit-00021.0000s.png
+398160a9db90fbe2c55e3af96c2e49d3b12a668183ecc353214fadee5c3e88dc  after/hull-mark-lit-00024.0000s.png
+d1866dc9f0c5e6eaa58244dc625532a9c9f2d471d0b2e42f218ed710764afc0a  after/hull-mark-shadowed-00018.0000s.png
+29f918af37e57e085389e92e068ba948d605f993e283fdacd2c8f32e4e8f0a56  after/hull-mark-shadowed-00021.0000s.png
+aa430ba3453c9dc668e0b2bccb16c7d650b11e22bb5406956b447e063d892b8b  after/hull-mark-shadowed-00024.0000s.png

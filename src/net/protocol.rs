@@ -7,7 +7,6 @@ use avian3d::prelude::{LinearVelocity, Position, RigidBody, Rotation};
 use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::ecs::query::QueryData;
 use bevy::prelude::*;
-use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
 // authority-vs-replica discriminator — `Predicted`/`Interpolated` are role markers, not provenance.
 use lightyear::prelude::client::Remote;
@@ -965,30 +964,7 @@ pub(crate) fn plugin(app: &mut App) {
 
     app.add_plugins(input::native::InputPlugin::<TankCommand>::default());
 
-    // Avian replication (map §5): mount lightyear_avian3d's ordering fixes, then register the
-    // root's Position/Rotation/velocities ourselves. `AvianReplicationMode::Position` replicates the
-    // sim pose, never `Transform`; `sync_to_transform: false` keeps physics authority one-way
-    // (Position -> Transform in PostUpdate only). Nothing here moves a body by writing its
-    // `Transform`: child colliders (servo nodes) reach physics through avian's own
-    // `ColliderTransform` propagation from their LOCAL transforms. `register_physics_components`
-    // is OFF because the plugin's defaults predict all four components and this client predicts
-    // nothing — the registrations below are the protocol.
-    app.add_plugins(LightyearAvianPlugin {
-        replication_mode: AvianReplicationMode::Position {
-            sync_to_transform: false,
-        },
-        register_physics_components: false,
-        ..default()
-    });
-    // The plugin mirrors `sync_to_transform` into `PhysicsTransformConfig::transform_to_position`,
-    // and in this mode that flag's only reader is avian's spawn hook (`init_physics_transform`):
-    // OFF, a body spawned with a `Transform` and no `Position` — every scatter construction and trunk,
-    // the test course's statics — gets its placeholder `Position` ZEROED, and with avian's
-    // transform plugin disabled nothing ever moves it. ON, the hook derives `Position`/`Rotation`
-    // from the spawn transform once. No per-frame import is installed either way in this mode.
-    app.world_mut()
-        .resource_mut::<avian3d::physics_transform::PhysicsTransformConfig>()
-        .transform_to_position = true;
+    super::physics::lightyear_plugin(app);
     // The hull pose interpolates on the cursor; everything else applies the confirmed value on
     // arrival (per-tick keyframes, so the discrete components step at most one tick apart from
     // the pose they ride beside). Pose and velocity ride `wire_quant`'s codecs, whose module doc states each
@@ -1164,6 +1140,7 @@ mod tests {
         use avian3d::prelude::Collider;
 
         let mut app = crate::net::test_harness::net_physics_app();
+        super::super::physics::lightyear_plugin(&mut app);
         super::super::physics::plugin(&mut app);
         app.add_systems(FixedUpdate, apply_launched_turret_pose);
         crate::net::test_harness::finish(&mut app);

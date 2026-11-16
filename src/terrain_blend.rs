@@ -7,31 +7,31 @@
 //!
 //! # The four packs
 //!
-//! The BASE pack is [`crate::terrain_grid::TEXTURE_PATH`]'s — the surface everywhere the masks are
-//! silent. The three LAYERS are [`BLEND_LAYERS`], and their order is the mask's channel order:
-//! R = recesses, G = slopes, B = lowlands (the map manifest's `terrain.masks` block declares the
-//! same one). Each layer is a slice of the three 2D-ARRAY textures the encode script cuts
-//! ([`LAYER_TEXTURE_PATH`] and its siblings), because texture slots are the binding constraint:
-//! nine separate layer maps do not fit beside bevy's PBR bind group, three arrays do.
+//! Which packs, their authored metres, their grounds and the blend's tastes are the surface's data
+//! ([`crate::terrain_surface`]). The BASE pack is the surface everywhere the masks are silent. The
+//! three LAYERS are in the mask's channel order: R = recesses, G = slopes, B = lowlands (the map
+//! manifest's `terrain.masks` block declares the same one). Each layer is a slice of the three
+//! 2D-ARRAY textures the encode script cuts ([`LAYER_TEXTURE_PATH`] and its siblings), because
+//! texture slots are the binding constraint: nine separate layer maps do not fit beside bevy's PBR
+//! bind group, three arrays do.
 //!
 //! # Per-pack UV scale lives HERE, not on the mesh
 //!
-//! The mesh bakes ONE UV set, `world_xz / TEXTURE_TILE_M`, cut for the base pack's authored size.
-//! Every layer multiplies that by [`BlendLayer::uv_scale`] — its own authored metres are a pack
-//! CONTRACT (each pack's `cc.txt`), and mapping a scan onto anything else silently resizes every
-//! feature in it. So a pack swap is a constant here, never a mesh regeneration.
+//! The mesh bakes ONE UV set, `world_xz /` the base pack's authored metres. Every layer multiplies
+//! that by [`crate::terrain_surface::TerrainSurface::uv_scale`], so a pack swap is a data edit,
+//! never a mesh regeneration.
 //!
 //! # The macro tint
 //!
 //! Every pack repeats at its authored size, and at 8–25 m that grid is visible across a map. The
 //! shader multiplies the BLENDED albedo by a low-frequency gain over world XZ
-//! ([`MACRO_PERIOD_M`], [`MACRO_AMPLITUDE`]) — one gain for all four packs, after the mix, which
-//! is the only point the base pack can be reached at all. It moves brightness, which is what a
-//! repeat is read by; the packs, the normals and the ARM are untouched.
+//! ([`crate::terrain_surface::BlendLook::macro_period_m`]) — one gain for all four packs, after
+//! the mix. It moves brightness, which is what a repeat is read by; the packs, the normals and the
+//! ARM are untouched.
 //!
 //! # Track prints
 //!
-//! Each pack names its ground type ([`BlendLayer::ground`], [`BASE_GROUND`]), and the ground-type
+//! Each pack names its ground type ([`crate::terrain_surface::Pack::ground`]), and the ground-type
 //! table ([`crate::ground_types`]) says how that ground takes a track print
 //! ([`crate::track_prints`], cosmetic terrain marks): its softness and depth cap, and how its albedo
 //! and roughness change where a sole lay. The shader blends the four responses by the map's PAINTED
@@ -51,71 +51,18 @@ use bevy::shader::ShaderRef;
 
 use crate::ground_types::{GroundTypes, PrintResponse};
 use crate::map::MapManifest;
-use crate::terrain_grid::{RowOrder, TEXTURE_TILE_M, TerrainExtent};
+use crate::terrain_grid::{RowOrder, TerrainExtent};
+use crate::terrain_surface::surface;
 
 /// The ground material: bevy's `StandardMaterial` (which carries the BASE pack's three maps and
 /// every lighting parameter) extended with [`TerrainBlend`] (the three layer arrays, the mask, and
 /// the blend law's constants).
 pub(crate) type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainBlend>;
 
-/// The ground type the BASE pack (`coast_sand_rocks_02`, sand strewn with stones) is: a sandy
-/// loam, its stones left to the look, a key into [`crate::ground_types::GroundTypes`].
-pub(crate) const BASE_GROUND: &str = "sandy loam";
-
-/// One blended layer's contract: which pack it is, the real-world metres that pack was authored
-/// at, and which ground type it is.
-pub(crate) struct BlendLayer {
-    /// The Poly Haven pack — the folder under `assets/terrain/` whose `cc.txt` carries the
-    /// attribution and the authored size below. Names the layer; nothing parses it.
-    pub(crate) pack: &'static str,
-    /// Metres per texture repeat, as the scan declares (`dimensions`, millimetres). The layer's UV
-    /// scale is derived from it and from nothing else.
-    pub(crate) authored_m: f32,
-    /// The ground type the pack is: a key into [`crate::ground_types::GroundTypes`], which says how
-    /// it takes a track print.
-    pub(crate) ground: &'static str,
-}
-
-impl BlendLayer {
-    /// The multiplier this layer applies to the mesh's UV, which is cut at [`TEXTURE_TILE_M`].
-    /// Ratio of authored sizes, so both packs render at life size off one UV set.
-    pub(crate) fn uv_scale(&self) -> f32 {
-        TEXTURE_TILE_M / self.authored_m
-    }
-}
-
-/// The blended layers, in the mask's channel order — layer `i` is array slice `i` and mask channel
-/// `i`. Changing this order re-cuts the arrays (`scripts/encode-terrain-ktx2.sh`'s `LAYER_PACKS`)
-/// and re-paints the masks; the two are one contract.
-pub(crate) const BLEND_LAYERS: [BlendLayer; 3] = [
-    // R — recesses: where dirt and debris settle.
-    BlendLayer {
-        pack: "dirt_aerial_03",
-        authored_m: 25.0,
-        ground: "dirt",
-    },
-    // G — slopes: where land slides, exposing sand and soil.
-    BlendLayer {
-        pack: "coast_sand_05",
-        authored_m: 25.0,
-        ground: "sand",
-    },
-    // B — lowlands: swampy, marshy, moist.
-    BlendLayer {
-        pack: "aerial_mud_1",
-        authored_m: 8.0,
-        ground: "mud",
-    },
-];
-
-/// Every pack's ground type in the shader's slot order: the base, then [`BLEND_LAYERS`].
+/// Every pack's ground type in the shader's slot order
+/// ([`crate::terrain_surface::TerrainSurface::grounds`]).
 fn slot_grounds(table: &GroundTypes) -> [&crate::ground_types::GroundType; 4] {
-    [
-        table.get(BASE_GROUND),
-        table.get(BLEND_LAYERS[0].ground),
-        table.get(BLEND_LAYERS[1].ground),
-        table.get(BLEND_LAYERS[2].ground),
-    ]
+    surface().grounds().map(|ground| table.get(ground))
 }
 
 /// What ground of print weights `weights` ([`print_weights`]) gives a muzzle blast, per slot: its
@@ -185,7 +132,7 @@ pub(crate) fn print_depth_m(
 }
 
 /// Albedo of every layer, as one KTX2 2D array (UASTC 4x4 + zstd, full mip chain, 2048² per
-/// slice) — slice order is [`BLEND_LAYERS`]. Cut by `scripts/encode-terrain-ktx2.sh blend`; the
+/// slice) — slice order is the surface's layers ([`crate::terrain_surface`]). Cut by `scripts/encode-terrain-ktx2.sh blend`; the
 /// attribution for each slice is its pack's `cc.txt`.
 pub(crate) const LAYER_TEXTURE_PATH: &str = "terrain/blend/blend_diff.ktx2";
 /// OpenGL-convention tangent-space normals of every layer — see [`LAYER_TEXTURE_PATH`].
@@ -194,55 +141,29 @@ pub(crate) const LAYER_NORMAL_PATH: &str = "terrain/blend/blend_nor_gl.ktx2";
 /// [`LAYER_TEXTURE_PATH`].
 pub(crate) const LAYER_ARM_PATH: &str = "terrain/blend/blend_arm.ktx2";
 
-/// How far a layer's own ambient occlusion may push its weight, as a fraction of that weight. The
-/// bias is MULTIPLICATIVE (`w · (1 + this · ao)`), so a zero weight stays zero however bright the
-/// layer's AO is — which is what makes [`SKIP_WEIGHT`] exact.
-const AO_BIAS: f32 = 0.5;
-
-/// The window, in biased-weight units, below the winning weight that still contributes: a layer
-/// `BLEND_WINDOW` behind the leader reaches zero, one level with it keeps its full weight. This is
-/// the transition width, and the only reason a 1024² mask can read as a sharp boundary — the
-/// crossing point moves with the AO bias above, so the edge follows the material's own detail
-/// instead of the mask's texel grid.
-const BLEND_WINDOW: f32 = 0.4;
-
-/// Mask weight at or below which a layer is not sampled at all. HALF A MASK QUANTISATION STEP
+/// Resolution: mask weight at or below which a layer is not sampled at all. HALF A MASK QUANTISATION STEP
 /// (the mask is 8-bit, so a stored weight is a multiple of 1/255): the skip therefore fires
 /// exactly on the weights the mask stores as zero and on no other, and the ~6 texture reads it
 /// leaves are not an approximation of the 13 it avoids — they are the same result.
 const SKIP_WEIGHT: f32 = 0.5 / 255.0;
 
-/// World metres per period of the macro tint. Well above every pack's authored size
-/// ([`BLEND_LAYERS`], 8–25 m), so the tint varies across a repeat instead of with it.
-const MACRO_PERIOD_M: f32 = 60.0;
-
-/// How far the macro tint may push the blended albedo, as a fraction of it: the ground ranges
-/// between `1 - this` and `1 + this` of its packs' own colour. Strictly below 1, which is what
-/// makes the gain positive at every field value.
-const MACRO_AMPLITUDE: f32 = 0.12;
-
-/// The gain the shader applies is `1 ± MACRO_AMPLITUDE`, so an amplitude at or above 1 would zero
-/// or invert the ground's albedo. Checked where it cannot be edited past — at compile time.
-const _: () = assert!(0.0 < MACRO_AMPLITUDE && MACRO_AMPLITUDE < 1.0);
-
-/// The tint must vary ACROSS a repeat rather than beat against it, so its period clears twice the
-/// coarsest pack ([`TEXTURE_TILE_M`] is the base pack's, [`BLEND_LAYERS`] the rest).
-const _: () = assert!(MACRO_PERIOD_M > 2.0 * TEXTURE_TILE_M);
-
 /// The uniform block `terrain_blend.wesl` reads — the whole CPU→shader contract, and the single
 /// home of every number the blend law uses.
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
 pub(crate) struct TerrainBlendParams {
-    /// `xyz`: each layer's [`BlendLayer::uv_scale`] over the mesh's own UV. `w`: the mesh's UV per
-    /// world metre (`1 / `[`TEXTURE_TILE_M`]), which moves the UV with a parallax offset.
+    /// `xyz`: each layer's [`crate::terrain_surface::TerrainSurface::uv_scale`] over the mesh's own
+    /// UV. `w`: the mesh's UV per world metre (1 / the base pack's authored metres), which moves the
+    /// UV with a parallax offset.
     pub layer_uv_scale: Vec4,
     /// World XZ to mask UV: `uv = world.xz * xy + zw`. Carries the map's extent AND the row order
     /// its mask image was exported in (a `-Z` image has a negative `y`), so the mask lands on the
     /// terrain the author painted it for.
     pub mask_map: Vec4,
-    /// `x`: [`AO_BIAS`], `y`: [`BLEND_WINDOW`], `z`: [`SKIP_WEIGHT`], `w`: unused.
+    /// `x`: [`crate::terrain_surface::BlendLook::ao_bias`], `y`: its `window`, `z`:
+    /// [`SKIP_WEIGHT`], `w`: unused.
     pub blend_law: Vec4,
-    /// `x`: periods per metre (`1 / `[`MACRO_PERIOD_M`]), `y`: [`MACRO_AMPLITUDE`], `zw`: unused.
+    /// `x`: periods per metre (1 / [`crate::terrain_surface::BlendLook::macro_period_m`]), `y`: its
+    /// `macro_amplitude`, `zw`: unused.
     /// World-space, so it rides no UV set and no pack's authored size.
     pub macro_tint: Vec4,
     /// Per slot (`x` the base pack, `yzw` the layers), from the ground type the pack names: the
@@ -310,6 +231,11 @@ pub(crate) struct TerrainBlend {
     /// through the mask's clamping sampler, for the same reason.
     #[texture(110)]
     pub prints_world: Handle<Image>,
+    /// The terrain shadow ([`crate::terrain_shadow::TerrainShadow`]).
+    #[texture(150, sample_type = "float", filterable = false)]
+    pub terrain_shadow_field: Option<Handle<Image>>,
+    #[uniform(151)]
+    pub terrain_shadow: crate::terrain_shadow::TerrainShadowUniform,
 }
 
 /// Shader features removed from the terrain fragment to price them by difference. It is the
@@ -368,20 +294,25 @@ pub(crate) fn mask_map(extent: TerrainExtent, rows: RowOrder) -> Vec4 {
     Vec4::new(per_metre, toward_z, 0.5, 0.5)
 }
 
-/// The material's parameters for the map being drawn: per-layer UV scales from the pack contracts,
-/// the mask mapping from the manifest, the blend law's constants, and each pack's ground type's
-/// print response from `ground`, with the prints' stores as they start.
+/// The material's parameters for the map being drawn: per-layer UV scales and the blend's look from
+/// the surface's data, the mask mapping from the manifest, and each pack's ground type's print
+/// response from `ground`, with the prints' stores as they start.
 pub(crate) fn params(manifest: &MapManifest, ground: &GroundTypes) -> TerrainBlendParams {
+    let surface = surface();
+    let look = &surface.blend;
     let mut params = TerrainBlendParams {
-        layer_uv_scale: Vec4::new(
-            BLEND_LAYERS[0].uv_scale(),
-            BLEND_LAYERS[1].uv_scale(),
-            BLEND_LAYERS[2].uv_scale(),
-            1.0 / TEXTURE_TILE_M,
-        ),
+        layer_uv_scale: Vec4::from((
+            Vec3::from_array(
+                surface
+                    .layers
+                    .each_ref()
+                    .map(|layer| surface.uv_scale(layer)),
+            ),
+            1.0 / surface.base.authored_m,
+        )),
         mask_map: mask_map(manifest.extent, manifest.rows),
-        blend_law: Vec4::new(AO_BIAS, BLEND_WINDOW, SKIP_WEIGHT, 0.0),
-        macro_tint: Vec4::new(1.0 / MACRO_PERIOD_M, MACRO_AMPLITUDE, 0.0, 0.0),
+        blend_law: Vec4::new(look.ao_bias, look.window, SKIP_WEIGHT, 0.0),
+        macro_tint: Vec4::new(1.0 / look.macro_period_m, look.macro_amplitude, 0.0, 0.0),
         print_near: crate::track_prints::near_params(Vec2::ZERO),
         print_world: crate::track_prints::world_params(manifest.extent.world_size_m),
         print_law: crate::track_prints::law_params(),
@@ -396,7 +327,9 @@ pub(crate) fn params(manifest: &MapManifest, ground: &GroundTypes) -> TerrainBle
 /// The layer roster for the boot log: which pack each array slice is, the metres its contract
 /// pins, and the UV scale that follows. The one runtime statement of what the ground is made of.
 pub(crate) fn layer_census() -> String {
-    BLEND_LAYERS
+    let surface = surface();
+    surface
+        .layers
         .iter()
         .enumerate()
         .map(|(slice, layer)| {
@@ -404,7 +337,7 @@ pub(crate) fn layer_census() -> String {
                 "{slice}={} every {} m (uv x{:.3})",
                 layer.pack,
                 layer.authored_m,
-                layer.uv_scale(),
+                surface.uv_scale(layer),
             )
         })
         .collect::<Vec<_>>()
@@ -422,10 +355,9 @@ pub(crate) mod relief_tests;
 mod tests {
     use super::*;
 
-    /// THE BINDING THIS SLICE STANDS ON. The three layer maps ship as KTX2 2D ARRAYS, one slice
-    /// per pack, because nine separate bindings do not fit beside bevy's PBR bind group. This runs
-    /// the shipped bytes through bevy's OWN loader and pins what the material declares: three
-    /// slices, 2048² each, a full mip chain, and a `D2Array` texture view — which is what makes
+    /// THE BINDING THIS SLICE STANDS ON. This runs the shipped layer arrays through bevy's OWN
+    /// loader and pins what the material declares: one slice per layer, 2048² each, a full mip
+    /// chain, and a `D2Array` texture view — which is what makes
     /// `#[texture(_, dimension = "2d_array")]` legal. A pack re-cut without `-tex_type 2darray`
     /// loads as a plain 2D texture and the bind group would fail at pipeline creation, on a
     /// machine with a window, at run time.
@@ -464,7 +396,7 @@ mod tests {
             );
             assert_eq!(
                 size.depth_or_array_layers,
-                BLEND_LAYERS.len() as u32,
+                surface().layers.len() as u32,
                 "the {what} array carries one slice per blended layer",
             );
             assert_eq!(
@@ -492,13 +424,7 @@ mod tests {
     fn every_pack_takes_its_named_ground_types_print() {
         let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
         let [softness, cap, albedo, roughness] = print_lanes(&table);
-        let names = [
-            BASE_GROUND,
-            BLEND_LAYERS[0].ground,
-            BLEND_LAYERS[1].ground,
-            BLEND_LAYERS[2].ground,
-        ];
-        for (slot, name) in names.into_iter().enumerate() {
+        for (slot, name) in surface().grounds().into_iter().enumerate() {
             let print = &table.get(name).print;
             assert_eq!(softness[slot], print.softness_mm_per_kpa / 1000.0, "{name}");
             assert_eq!(cap[slot], print.depth_cap_mm.value / 1000.0, "{name}");

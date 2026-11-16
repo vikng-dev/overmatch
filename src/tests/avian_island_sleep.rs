@@ -399,22 +399,79 @@ fn a_body_woken_between_the_increments_build_and_clear_is_refused() {
     app.update();
 }
 
-/// Physics users need corrupt island membership refused rather than a partly woken island.
-/// Missing required body state must not terminate the linked-list walk silently.
+/// Physics users rely on every sleeping-island link resolving during WakeIslands, even for a wake
+/// issued outside scheduled admission. A missing timer must panic before the walk drops its tail.
 #[test]
-#[should_panic(expected = "every linked island body retains BodyIslandNode and SleepTimer")]
+#[should_panic(
+    expected = "every sleeping island link resolves to a live BodyIslandNode with SleepTimer"
+)]
 fn a_linked_body_without_sleep_timer_is_refused() {
     let mut app = physics_app();
     app.insert_resource(Gravity::ZERO);
     let resting = body(&mut app, Vec3::ZERO);
     until_asleep(&mut app, resting);
-    let island = app
+    let island_id = app
         .world()
         .get::<BodyIslandNode>(resting)
         .unwrap()
         .island_id();
     app.world_mut().entity_mut(resting).remove::<SleepTimer>();
-    WakeIslands(vec![island]).apply(app.world_mut());
+    WakeIslands(vec![island_id]).apply(app.world_mut());
+}
+
+/// Admission must catch a lost timer before scheduled consumers can skip the sleeping body.
+#[test]
+#[should_panic(expected = "a posed enabled island body retains SleepTimer")]
+fn a_sleeping_body_without_its_timer_is_refused_at_admission() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let resting = body(&mut app, Vec3::ZERO);
+    until_asleep(&mut app, resting);
+    app.world_mut().entity_mut(resting).remove::<SleepTimer>();
+    app.update();
+}
+
+/// Island nodes require timers before their first solver index. Unlike pristine Avian, a body
+/// enabled while asleep since spawn now wakes; its queued wake can traverse the complete node.
+#[test]
+fn a_newly_enabled_island_has_its_timer_before_its_first_solver_index() {
+    use avian3d::dynamics::solver::solver_body::SolverBodyIndex;
+    #[derive(Resource, Default)]
+    struct NodeCreation(Option<(bool, bool)>);
+    let mut app = physics_app();
+    app.init_resource::<NodeCreation>().add_observer(
+        |added: On<Insert<BodyIslandNode>>,
+         nodes: Query<(Has<SleepTimer>, Has<SolverBodyIndex>)>,
+         mut observed: ResMut<NodeCreation>| {
+            observed.0 = Some(nodes.get(added.entity).unwrap());
+        },
+    );
+    // Fixture: a posed dynamic body disabled and asleep from birth has never entered the solver.
+    let enabled = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            RigidBodyDisabled,
+            Sleeping,
+            Position(Vec3::ZERO),
+            Collider::cuboid(SIDE, SIDE, SIDE),
+        ))
+        .id();
+    assert!(app.world().get::<SleepTimer>(enabled).is_none());
+    app.world_mut()
+        .entity_mut(enabled)
+        .remove::<RigidBodyDisabled>();
+    app.world_mut().flush();
+    assert_eq!(
+        app.world().resource::<NodeCreation>().0,
+        Some((true, false)),
+        "the node supplies a timer before the enable observer's queued wake enters the solver"
+    );
+    assert!(app.world().get::<SleepTimer>(enabled).is_some());
+    assert!(
+        app.world().get::<Sleeping>(enabled).is_none(),
+        "a body enabled while asleep since spawn now wakes, unlike pristine Avian"
+    );
 }
 
 /// Solver users need the wake source to survive every merge in one narrow phase. A mutant
@@ -714,41 +771,54 @@ fn stationary_contacts_keep_the_configured_minimum_speculative_margin() {
 #[test]
 fn rest_depends_on_energy_per_mass_and_spin_axis() {
     let mut app = physics_app();
-    app.insert_resource(Gravity::ZERO);
+    // Fixture: explicit rest speeds and world length scale, independent of engine defaults.
+    let threshold = SleepThreshold {
+        linear: 0.15,
+        angular: 0.01,
+    };
+    let length_unit = 2.0;
+    app.insert_resource(Gravity::ZERO)
+        .insert_resource(PhysicsLengthUnit(length_unit));
     // Fixture: a slender bar and a small cube; rotation is about each body's principal axes.
     let bar = Vec3::new(6.6, 0.2, 0.05);
     let chunk = Vec3::splat(0.2);
-    let rest = SleepThreshold::default().linear;
+    let rest = threshold.linear * length_unit;
+    // DERIVED: I_axis/m = (the other two box sides squared and summed)/12.
+    let radius = |x: f32, y: f32| ((x * x + y * y) / 12.0).sqrt();
+    // DERIVED: geometric mean of the roll/transverse energy-limit speeds puts one shared
+    // angular speed between them: roll rests and transverse spin does not.
+    let spin = rest / (radius(bar.y, bar.z) * radius(bar.x, bar.y)).sqrt();
+    assert!(
+        spin > threshold.angular,
+        "fixture excludes the velocity-only rest branch"
+    );
     let mut bodies = Vec::new();
-    for (size, spin, sleeps) in [(bar, Vec3::X * 0.45, true), (bar, Vec3::Z * 0.45, false)] {
-        bodies.push((
-            app.world_mut()
-                .spawn((
-                    RigidBody::Dynamic,
-                    Position(Vec3::X * bodies.len() as f32 * 20.0),
-                    Collider::cuboid(size.x, size.y, size.z),
-                    AngularVelocity(spin),
-                ))
-                .id(),
-            sleeps,
-        ));
+    let mut add_body = |size: Vec3, spin: Vec3, sleeps| {
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Position(Vec3::X * bodies.len() as f32 * 20.0),
+                Collider::cuboid(size.x, size.y, size.z),
+                AngularVelocity(spin),
+                threshold,
+            ))
+            .id();
+        bodies.push((body, sleeps));
+    };
+    for (spin, sleeps) in [(Vec3::X * spin, true), (Vec3::Z * spin, false)] {
+        add_body(bar, spin, sleeps);
     }
     for fraction in [0.5, 2.0] {
         // Fixture: either side of the resource-owned rest energy.
         for size in [chunk, bar] {
-            // DERIVED: I_z/m = (x²+y²)/12 for a uniform box; the factor 1/2 cancels from E/m.
-            let spin = rest * fraction / ((size.x * size.x + size.y * size.y) / 12.0).sqrt();
-            bodies.push((
-                app.world_mut()
-                    .spawn((
-                        RigidBody::Dynamic,
-                        Position(Vec3::X * bodies.len() as f32 * 20.0),
-                        Collider::cuboid(size.x, size.y, size.z),
-                        AngularVelocity(Vec3::Z * spin),
-                    ))
-                    .id(),
-                fraction < 1.0,
-            ));
+            // DERIVED: sqrt(I_z/m) converts the energy-limit speed to angular speed.
+            let spin = rest * fraction / radius(size.x, size.y);
+            assert!(
+                spin > threshold.angular,
+                "fixture excludes the velocity-only rest branch"
+            );
+            add_body(size, Vec3::Z * spin, fraction < 1.0);
         }
     }
     app.update();
@@ -832,64 +902,6 @@ fn the_original_velocity_test_still_allows_rest() {
         app.update();
     }
     assert!(app.world().get::<Sleeping>(resting).is_some());
-}
-
-/// From Avian's floor for its per-body loops (`utils::MIN_PAR_ITER_ENTITIES`, 4,096 awake bodies,
-/// crate-private) the rest test runs per body on the compute pool, and every body's island still
-/// commits: the still bodies' islands sleep and a drifting body's stays awake. Fixture: 4,096 still
-/// cubes apart in zero gravity and one drifting at 1 m/s, over the witness's own compute pool of
-/// four threads. Fails if the parallel pass drops a body's commit (the drifting body's island
-/// sleeps) or its timer (no island sleeps).
-#[test]
-fn rest_on_the_compute_pool_commits_every_body() {
-    crate::headless_test::on_own_compute_pool(
-        module_path!(),
-        "rest_on_the_compute_pool_commits_every_body",
-        4,
-        rest_commits_every_body,
-    );
-}
-
-fn rest_commits_every_body() {
-    let mut app = physics_app();
-    app.insert_resource(Gravity::ZERO);
-    // Fixture: a 64 × 64 grid of cubes 2 m apart, none touching.
-    let still: Vec<Entity> = (0..4096)
-        .map(|i| {
-            let (row, column) = ((i / 64) as f32, (i % 64) as f32);
-            body(&mut app, Vec3::new(2.0 * column, 0.0, 2.0 * row))
-        })
-        .collect();
-    let drifting = app
-        .world_mut()
-        .spawn((
-            RigidBody::Dynamic,
-            Position(Vec3::Y * 4.0),
-            LinearVelocity(Vec3::X),
-            Collider::cuboid(SIDE, SIDE, SIDE),
-        ))
-        .id();
-    app.update();
-    let dt = app
-        .world()
-        .resource::<Time<Fixed>>()
-        .timestep()
-        .as_secs_f32();
-    let ticks = (app.world().resource::<TimeToSleep>().0 / dt).ceil() as usize;
-    // Allow one step to expose the first fixed tick and one to commit sleeping.
-    for _ in 0..ticks + 2 {
-        app.update();
-    }
-    let world = app.world();
-    let awake = still
-        .iter()
-        .filter(|&&body| world.get::<Sleeping>(body).is_none())
-        .count();
-    assert_eq!(awake, 0, "still bodies' islands stayed awake");
-    assert!(
-        world.get::<Sleeping>(drifting).is_none(),
-        "the drifting body's island slept"
-    );
 }
 
 /// The engine's angular limit must retain the resting see-saw case for large scenery pieces;

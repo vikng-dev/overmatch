@@ -119,11 +119,10 @@ fn a_moved_centre_of_mass_refreshes_the_bodys_reach() {
     );
 }
 
-/// An enabled body that lost its centre of mass is refused when its collider changes, not left
-/// with the metrics continuous collision reads gone stale. Fails if the pass passes by every body
-/// it cannot read.
+/// Continuous collision relies on admission refusing a posed enabled body without its centre of
+/// mass before the metric pass can skip it and leave stale metrics.
 #[test]
-#[should_panic(expected = "an enabled rigid body with colliders keeps")]
+#[should_panic(expected = "a posed enabled body retains LinearVelocity")]
 fn a_body_that_lost_its_centre_of_mass_is_refused() {
     let mut app = physics_app();
     let body = app

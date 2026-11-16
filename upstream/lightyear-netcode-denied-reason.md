@@ -1,91 +1,88 @@
-# Draft: lightyear_netcode drops the denial reason, and admits a challenge after its handler closes
+# The netcode client logs the server's denial reason and discards it
 
-**LOCAL DRAFT — not filed.** Two API gaps in `lightyear_netcode 0.30.1`, read in the published
-source. Upstream `main` was not re-read for this draft: check it before filing. Subject: the
-connection handshake only.
+Found in a game using lightyear_netcode. Local draft; not filed.
 
-## Suggested title
+**Crate:** lightyear_netcode 0.31.0 (crates.io). **Status:** not sent. Source audit: Unchanged on lightyear `main` at 736e1695 (2026-11-05), where the crate now lives under `crates/connection/netcode`; this diff applies there with `patch --dry-run` (MEASURED).
 
-Netcode client cannot read why it was denied; `ConnectionRequestHandler` is consulted only at the
-connection request, not when the challenge response completes it
+## Defect
 
-## 1. The client logs the denial reason and then discards it
+On an authenticated `Denied` packet, `Client` (`src/client.rs`) logs `pkt.reason` and moves to
+`ClientState::ConnectionDenied`, discarding the reason. The client plugin (`src/client_plugin.rs:187`) then reports
+`DisconnectedReason::TransportError(format!("{state:?}"))`, so an application cannot tell a full
+server from a ban, an invalid token or a `DeniedReason::Custom` its own `ConnectionRequestHandler`
+returned.
 
-`Client::process_packet` (`src/client.rs`), on a `Packet::Denied` while
-`SendingConnectionRequest` or `SendingChallengeResponse`, logs `pkt.reason` at `error!`, sets
-`should_disconnect` and `should_disconnect_state = ClientState::ConnectionDenied`, and keeps
-nothing else. The client plugin (`src/client_plugin.rs`) then inserts
-`Disconnected { reason: DisconnectedReason::TransportError(format!("{state:?}")) }`, so the
-application sees the string `"ConnectionDenied"` and no `DeniedReason`. A server that refuses with
-`DeniedReason::Custom(..)` (the reason `ConnectionRequestHandler` exists to send) cannot tell its
-client why. The reason is authenticated (it arrives in a packet sealed with the token's
-server-to-client key), so it is safe to act on; an application wants to tell "server full" from
-"this match no longer takes joins", show the cause, and stop retrying a server that will refuse
-again.
+## Minimal repro
 
-**Proposed change.** Keep the last authenticated reason on `Client` and expose it:
+1. Server with a `ConnectionRequestHandler` returning `Some(DeniedReason::Custom("closed".into()))`.
+2. Client connects.
+3. Expected: the application can read `Custom("closed")`. Actual: only a log line and
+   `TransportError("ConnectionDenied")` (DERIVED from `src/client.rs` and the client plugin).
 
-```rust
-denied_reason: Option<DeniedReason>,          // field, `None` in `new`
-self.denied_reason = Some(pkt.reason);        // in the `Packet::Denied` arm
-pub fn denied_reason(&self) -> Option<&DeniedReason> { self.denied_reason.as_ref() }
-self.denied_reason = None;                    // first line of `connect`
+## Fix
+
+Against the pristine crate (`a/` and `b/` are the crate root):
+
+```diff
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -11,6 +11,7 @@
+     token::{ChallengeToken, ConnectToken},
+     utils,
+ };
++use lightyear_connection::shared::DeniedReason;
+ use lightyear_link::{LinkReceiver, LinkSender, RecvPayload, SendPayload};
+ use lightyear_serde::writer::Writer;
+ use tracing::{debug, error, info, trace};
+@@ -182,6 +183,7 @@
+     replay_protection: ReplayProtection,
+     should_disconnect: bool,
+     should_disconnect_state: ClientState,
++    denied_reason: Option<DeniedReason>,
+     send_queue: Vec<SendPayload>,
+     packet_queue: Vec<RecvPayload>,
+     // We use a Writer (wrapper around BytesMut) here because we will keep re-using the
+@@ -223,6 +225,7 @@
+             replay_protection: ReplayProtection::new(),
+             should_disconnect: false,
+             should_disconnect_state: ClientState::Disconnected,
++            denied_reason: None,
+             send_queue: Vec::new(),
+             packet_queue: Vec::new(),
+             writer: Writer::with_capacity(MAX_PKT_BUF_SIZE),
+@@ -415,6 +418,7 @@
+                     "client connection denied by server. Reason: {:?}",
+                     pkt.reason
+                 );
++                self.denied_reason = Some(pkt.reason);
+                 self.should_disconnect = true;
+                 self.should_disconnect_state = ClientState::ConnectionDenied;
+                 None
+@@ -546,12 +550,20 @@
+     /// Returns the netcode client id of the client once it is connected, or returns 0 if not connected.
+     pub fn id(&self) -> ClientId {
+         self.id
++    }
++
++    /// The authenticated reason the server gave for denying the last connection attempt, if it
++    /// denied it. It survives the client's reset to a terminal state; a new [`connect`](Client::connect)
++    /// clears it.
++    pub fn denied_reason(&self) -> Option<&DeniedReason> {
++        self.denied_reason.as_ref()
+     }
+ 
+     /// Prepares the client to connect to the server.
+     ///
+     /// This function does not perform any IO, it only readies the client to send/receive packets on the next call to [`update`](Client::update).
+     pub fn connect(&mut self) {
++        self.denied_reason = None;
+         self.reset_connection();
+         self.set_state(ClientState::SendingConnectionRequest);
+         info!(
 ```
 
-It must survive `reset_connection` and `reset`, which run on the terminal transition, and clear in
-`connect`, which a fresh attempt and `connect_to_next_server` both call, so a token listing another
-address moves on with no stale reason. The packet format is unchanged. A richer alternative is a
-`DisconnectedReason::Denied(DeniedReason)` variant filled by the client plugin; it changes a public
-enum, so the getter is the smaller first step.
+## Notes
 
-## 2. A closed handler still admits a challenge issued while it was open
-
-`Server::process_connection_request` (`src/server.rs`) asks
-`cfg.connection_request_handler.handle_request(..)` before it issues a challenge. Its sibling
-`Server::process_connection_response`, which turns that challenge into a connection
-(`client.connect()`, `on_connect`), rechecks `max_clients` but not the handler. A handler whose
-answer changes over time (a match that stops taking joins, a maintenance drain) therefore admits
-every client whose request it accepted before it closed, for as long as challenges take to return
-(one round trip, and the client resends responses until it is answered).
-
-**Proposed change.** In `process_connection_response`, after the `ServerFull` recheck and before
-`client.connect()`, ask the handler again and refuse the same way the request path does:
-
-```rust
-if let Some(reason) = self.cfg.connection_request_handler.handle_request(id::PeerId::Netcode(id)) {
-    self.send_netcode_packet(DeniedPacket::create(reason), client.send_key, entity)?;
-    return Err(Error::Denied(id::PeerId::Netcode(id)));
-}
-```
-
-The client is in `SendingChallengeResponse`, which already accepts `Packet::Denied`, so it gets an
-authenticated refusal rather than a timeout. A handler that is a pure predicate (the default
-accepts everyone) behaves the same at both stages; a stateful handler that counts its calls would
-see two per admitted client, which the trait's documentation should then say.
-
-One upstream property carries over unchanged: a client refused at the response stage, like one
-refused there for `ServerFull` today, keeps its pending `conn_cache` entry, since
-`check_for_timeouts` visits only connected clients. Each refused client id holds one small entry
-for the server's lifetime.
-
-## Evidence
-
-Overmatch closes late joins partway through a match: its handler is one shared `AtomicBool` the
-match clock writes each tick (`src/net/admission.rs`, `JoinAdmission`). Two headless real-UDP tests
-in `src/net/hosting.rs` pin both changes:
-`a_challenge_issued_while_open_cannot_connect_after_admission_closes` closes the gate between a
-client's request and its response, and asserts the client receives the custom reason and never
-connects; `a_short_mode_cycles_replicates_and_refuses_a_late_join_with_its_reason` asserts a late
-join reads the typed reason and renders it. Before the response-stage recheck, the first test's
-client connected after closure (CLAIMED by the lane that wrote the patch; not re-run without it).
-
-## Workaround
-
-`vendor/lightyear_netcode-0.30.1-admission` carries both changes, each marked `OVERMATCH PATCH`
-(`OVERMATCH_PATCH.md`), behind `[patch.crates-io]`. Removal condition: upstream exposes the
-client's denial reason and rechecks the handler at challenge completion.
-
-## What fixing this unlocks for us
-
-Drop the vendored crate and its `[patch.crates-io]` line. Nothing else changes: the game's own
-refusal type and its tests stay.
+`Client::denied_reason()` keeps the last authenticated reason until the next `connect`. A typed
+`DisconnectedReason::Denied(DeniedReason)` in `lightyear_connection` would carry it further, but
+changes a public enum; this is the minimal change.

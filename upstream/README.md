@@ -1,137 +1,73 @@
-# Upstream issue records — index
+# Current upstream drafts
 
-One file per independently-filable defect found in an upstream dependency. Each file is
-self-contained: mechanism, evidence (vendored file:line + our commits + measurements), suggested
-upstream fix, our shipped workaround and its removal condition, and **what fixing it would let us
-clean up, optimize or explore** (the `What fixing this unlocks for us` section — added 2026-07-12;
-several records honestly unlock *nothing* for us and say so). File them upstream in any order; each
-carries enough to stand alone. Severity is OUR impact, not upstream's triage.
+Local proposals against the pinned published crates. Nothing here has been sent.
+Every embedded patch is checked against the pristine release; evidence from an older release is
+labelled as historical measurement, never the current pin.
 
-Files here are the source of truth. External filings happen only on explicit direction, and the
-issue or PR URL goes into that file's own Status line.
+Lines to retire are MEASURED added + removed source lines from `diff --minimal -ruN` against pristine,
+including fork-only source files. Counts cover the retained functional patch, including its
+comments. Diagnostic-only deltas remain separate: broad phase 18, moved bounds 13, size metrics
+16; the batch ancestry re-export's 2 lines are also outside these proposals.
+The known-ID nearest-contact ranking is game policy, served by the fork's `ContactMatcher` hook;
+only the identity correctness fix is proposed upstream. Zero means the application already uses
+a public seam and has no crate patch to retire.
 
-## Open candidates
+| Draft | Crate | Kind | Fork lines it would retire (MEASURED) | Status |
+|---|---|---|---:|---|
+| [avian-child-collider-pose-churn.md](avian-child-collider-pose-churn.md) | avian3d 0.8.0 | public scheduling seam | 6 | not sent |
+| [avian-collider-propagation-floor-counts-roots.md](avian-collider-propagation-floor-counts-roots.md) | avian3d 0.8.0 | bug fix | 6 | not sent |
+| [avian-collider-of-reinsert.md](avian-collider-of-reinsert.md) | avian3d 0.8.0 | bug fix | 23 | not sent |
+| [avian-mass-recompute-redundant-work.md](avian-mass-recompute-redundant-work.md) | avian3d 0.8.0 | bug fix | 41 | not sent |
+| [avian-pairless-broad-phase.md](avian-pairless-broad-phase.md) | avian3d 0.8.0 | bug fix | 10 | not sent |
+| [avian-sleeping-velocity-increments.md](avian-sleeping-velocity-increments.md) | avian3d 0.8.0 | bug fix | 75 | not sent |
+| [avian-moved-aabb-prune.md](avian-moved-aabb-prune.md) | avian3d 0.8.0 | bug fix | 59 | not sent |
+| [avian-body-size-metrics-once-per-body.md](avian-body-size-metrics-once-per-body.md) | avian3d 0.8.0 | bug fix | 45 | not sent |
+| [avian-prune-points-unsigned-depth.md](avian-prune-points-unsigned-depth.md) | avian3d 0.8.0 | bug fix | 156 | not sent |
+| [avian-unknown-contact-feature-identity.md](avian-unknown-contact-feature-identity.md) | avian3d 0.8.0 | bug fix | 26 | not sent |
+| [avian-island-rest-history.md](avian-island-rest-history.md) | avian3d 0.8.0 | bug fix | 23 | not sent |
+| [bevy-invisible-mesh-removal-churn.md](bevy-invisible-mesh-removal-churn.md) | bevy_pbr 0.20.1 | bug fix | 10 | not sent |
+| [bevy-mesh-removal-channel.md](bevy-mesh-removal-channel.md) | bevy_pbr 0.20.1 | bug fix | 37 | not sent |
+| [bevy-directional-shadow-factor-per-light.md](bevy-directional-shadow-factor-per-light.md) | bevy_pbr 0.20.1 | API gap | 0 | not sent |
+| [lightyear-netcode-denied-reason.md](lightyear-netcode-denied-reason.md) | lightyear_netcode 0.31.0 | bug fix | 12 | not sent |
+| [lightyear-netcode-admission-recheck.md](lightyear-netcode-admission-recheck.md) | lightyear_netcode 0.31.0 | bug fix | 11 | not sent |
+| [lightyear-avian-child-collider-pose-churn.md](lightyear-avian-child-collider-pose-churn.md) | lightyear_avian3d 0.31.0 | bug fix | 0 | not sent |
+| [avian-ccd-sensors-swept-and-counted.md](avian-ccd-sensors-swept-and-counted.md) | avian3d 0.8.0 | bug fix | 7 | not sent; query ships, observer/thickness proposal compile-only |
+| [avian-ccd-decide-per-collider.md](avian-ccd-decide-per-collider.md) | avian3d 0.8.0 | bug fix | 15 | not sent; includes the small lazy-shape patch |
 
-Records 1–11 come from the 2026-07-06/07 MP jitter campaign + architecture-review session; 12–15 and
-18 each came out of its own later hunt.
+MEASURED index census: 19 current draft rows, 13 targeting Avian.
 
-| # | File | Target | Severity (us) | Our workaround | Unlocks for us |
-|---|------|--------|---------------|----------------|----------------|
-| 1 | [lightyear-check-starvation.md](lightyear-check-starvation.md) | lightyear 0.28 | CRITICAL — silent 35–50 m desync at LAN latency | `net/watchdog.rs` (8ae795c) | Delete `net/watchdog.rs` (346 lines) + the `pub(crate)` threshold coupling. **Input delay stops being a correctness knob** → the 0-tick / adaptive-delay experiments |
-| 2 | [lightyear-avian-blanket-apply-pos-to-transform.md](lightyear-avian-blanket-apply-pos-to-transform.md) | lightyear_avian3d 0.28 | CRITICAL — collider attachments ratchet off the rig | `AuthoredLocalTransform` observers (33cc4e4) | Delete the shield (marker + 2 observers + `authored_attachment`) and the standing "every child collider must carry the marker" rule; one of the two conditions for tightening the rollback bars |
-| 3 | [parry-gjk-cast-relative-tolerance.md](parry-gjk-cast-relative-tolerance.md) | parry3d 0.27 | DORMANT — zero shape-cast call sites in `src/`; 200 mm cast noise vs large colliders if one lands | none — the witness reconstruction went out at 9758d97 with the raycast-era suspension | Retires ADR-0015's "tile static colliders to ≤10 m" map rule; **future** shape-cast consumers (track model, armor probes) stop inheriting the defect |
-| 4 | [lightyear-dual-marker-tiebreak.md](lightyear-dual-marker-tiebreak.md) | lightyear 0.28 | HIGH — Position rollback checks silently dead | ~~`demote_predicted_interpolated`~~ **deleted at f2c9510** (root cause was our missing `ReplicationSender`) | Nothing to delete — **diagnostic only**: a `warn!` on the marker combination turns a multi-second silent-desync hunt into a log line |
-| 5 | [lightyear-avian-restore-assumes-enlarged-aabb.md](lightyear-avian-restore-assumes-enlarged-aabb.md) | lightyear_avian3d 0.28 | MEDIUM — restore comment/logic false for child colliders | none needed post-#2 fix; document | **Nothing for us** — filed for the ecosystem (goes live only if a child collider's pose can genuinely diverge during prediction) |
-| 6 | [lightyear-confirmedhistory-seeding.md](lightyear-confirmedhistory-seeding.md) | lightyear 0.28 | MEDIUM — local_rollback components restored to add-time defaults | `strip_confirmed_history` (net/protocol.rs) | Delete `strip_confirmed_history` + the standing rule that every new `local_rollback` component must be registered there. **Not** the reason `NetBelts` pins (checked — see the file) |
-| 7 | [lightyear-sealed-correction-policy.md](lightyear-sealed-correction-policy.md) | lightyear 0.28 | LOW — API gap, no builder for CorrectionPolicy | render-error layer bypasses (597ec21) | **Nothing for us** — `net/render_error.rs` is permanent architecture (ADR-0014/0015), not scaffolding. Filed as an API suggestion |
-| 8 | [avian-solver-constraint-order.md](avian-solver-constraint-order.md) | avian3d 0.7 | LOW impact / **HIGHEST strategic** — the last same-machine non-determinism; linchpin for deterministic MP | none (bounded/self-healing, absorbed by server auth) | Nothing to delete. **The enabler for predict-everyone** (ADR-0017 names this file as its revisit condition) → tank-tank collision felt locally; tightens the rollback bars; makes deep replays cheap |
-| 9 | [lightyear-avian-childof-not-replicated-transform-mode.md](lightyear-avian-childof-not-replicated-transform-mode.md) | lightyear_avian 0.28 | NONE for us (we use Position mode) — upstream's own test fails at the 0.28.0 tag | none needed | **Nothing for us** — filed for the ecosystem (a failing test already in their tree; the cheapest issue here to act on) |
-| 10 | [lightyear-absent-anchor-input-freeze.md](lightyear-absent-anchor-input-freeze.md) | lightyear 0.28 | CRITICAL — server fires unauthored rounds after release (ammo + damage, nothing to roll back) | `fixed_input_delay(3)` + `TankCommand.for_tick` (REV 5) | Retire the delay pin + the anti-adaptive tripwire. `for_tick` **stays** (the invariant is ours) but its wire cost (+20 B/msg aiming, +140 B/msg idle, measured) becomes optional rather than load-bearing |
-| 11 | [lightyear-native-input-encoder-inverted-range-oom.md](lightyear-native-input-encoder-inverted-range-oom.md) | lightyear_inputs_native 0.28 | CRITICAL before containment — inverted client tick range allocates until OOM | pre-`PrepareInputMessage` buffer guard + fixed shipping delay | Delete the guard, metrics, malformed-composition fallback and focused tests. The Docker fan-out lane stays; adaptive delay remains blocked on #1 and #10 |
-| 12 | [bevy-ktx2-uastc-fallback-length-panic.md](bevy-ktx2-uastc-fallback-length-panic.md) | bevy_image 0.19 — **READY TO FILE**, unreported and unfixed on `main` | HIGH — every headless composition panics on boot once a texture is UASTC KTX2 (no device → `CompressedImageFormats::NONE`) | `CompressedImageFormatSupport(ASTC_LDR)` inserted in `src/headless_test.rs` before `finish()` | Delete the insertion, its fixture and both tests. **Retirement is automatic**: `src/tests/bevy_ktx2_uastc_fallback.rs::fallback_transcode_still_panics` is inverted, so it FAILS the first bevy release that fixes the arithmetic |
-| 13 | [lightyear-confirmed-state-at-or-ahead-of-local-tick-never-reconciled.md](lightyear-confirmed-state-at-or-ahead-of-local-tick-never-reconciled.md) | lightyear 0.28 + `main` — **DRAFT, not filed** | HIGH — at lead ≤ 0, `RollbackMode::Check` never checks an actively driven predicted entity; unbounded divergence for the whole session, not a transient | none shipped — routed around in `src/net/lead_zero_rollback.rs` (RED `#[ignore]`d fixtures as the acceptance test + a live lead-arithmetic guard). Cheapest escape if ever needed: keep lead ≥ 1, i.e. `input_delay <= 2` at loopback | Un-`#[ignore]` the `lead_zero_rollback` fixtures; the lead-arithmetic guard stays permanently. **A green upstream suite is not evidence** — today's upstream tests pin the broken half, so retirement needs a positive assertion upstream |
-| 14 | [bevy-uninitbuffervec-rust-size-vs-shader-stride.md](bevy-uninitbuffervec-rust-size-vs-shader-stride.md) | bevy 0.19 under glam `scalar-math` — **DRAFTED, not filed** | BLOCKER for #15's fix — `UninitBufferVec` allocates 164 B against `MeshUniform::min_size()` 176 B, so wgpu rejects the buffer and nothing renders | `vendor/bevy_pbr-0.19.0-scalar-math` alignment patch + a static Rust-size-vs-shader-size gate | Drop the vendored bevy_pbr crate — but only together with #17, which rides the same vendor entry |
-| 15 | [avian-enhanced-determinism-simd-reductions.md](avian-enhanced-determinism-simd-reductions.md) | avian3d 0.7 / glam 0.32.1 — feature-contract gap, **DRAFTED, not filed** | Was the last CROSS-ARCHITECTURE divergence: `enhanced-determinism` does not imply `glam/scalar-math`, so SIMD reduction order splits macOS aarch64 from Linux x86_64 at MEASURED 1 ULP in `fast_renormalize`. **Fix validated locally** — bit-identical for all 3,072 ticks at `020f9fd` | workspace-wide `glam/scalar-math`, plus vendored bevy_reflect (scalar glam has no `BVec3A`/`BVec4A` serde) and vendored bevy_pbr (#14) | Retire both compatibility vendors and the feature pin. Distinct from #8: this one was cross-arch, #8 is the remaining *same-machine* non-determinism |
-| 18 | [winit-macos-borderless-to-borderless-fullscreen-noop.md](winit-macos-borderless-to-borderless-fullscreen-noop.md) | winit 0.30.13 — **DRAFT, not filed** | HIGH — macOS `set_fullscreen` has no `Borderless -> Borderless` arm, so changing display while fullscreen moves nothing. The prologue commits the new monitor to winit's own state first, so the component, bevy's cache and `fullscreen()` all read as correct while the window sits on the other panel | app-side exit-then-re-enter round trip, sequenced on the OBSERVED fullscreen edge (`RoundTrip` in `src/settings.rs`) | Delete `RoundTrip`/`PlacementStep` and the mode yield in `apply_settings` — and with them a transitional window state every future window rule would otherwise have to account for. Changing display while fullscreen stops costing two ~1-2 s Space animations |
-| 20 | [bevy-invisible-mesh-removal-churn.md](bevy-invisible-mesh-removal-churn.md) | bevy_pbr 0.19.1 and `main` — **PR-READY DRAFT, not filed** | MEDIUM — every hidden moving mesh re-queues a no-op instance removal each frame, one channel send each: MEASURED 8,040 per frame at 30 tanks, 0.02 of them with an instance | two patches in `vendor/bevy_pbr-0.19.1-scalar-math` (removal batching, removal skip; `OVERMATCH_PATCH.md`), guarded by `src/tests/bevy_mesh_removal_lifecycle.rs` | Drop both patches at the next Bevy bump |
-| 21 | [avian-body-query-gap-stale-constraints.md](avian-body-query-gap-stale-constraints.md) | avian3d 0.7.0, and `main` by source reading — **DRAFT, not filed** | HIGH — a touching body that leaves the narrow phase's body query for a step keeps its pairs' constraint handles and gets a second set on return; `prepare_contact_constraints` panics. Lightyear's interpolation strips `Position` from every replica hull at a timeline resync, which crashed the client (#183) | the net client holds only static bodies: its launched turret is `RigidBody::Static` (`apply_launched_turret_pose`), so no pair generates constraints; inverted tripwire `src/tests/avian_body_query_gap.rs` | Little: a client could hold a non-static body (presentation debris) without proving no interpolated body it touches loses `Position` |
-| 22 | [avian-child-collider-pose-churn.md](avian-child-collider-pose-churn.md) | avian3d 0.7.0 + lightyear_avian3d 0.30.1 — **DRAFT, not filed** | MEDIUM — both crates' `update_child_collider_position` rewrite every child collider's pose unconditionally, so every static compound body's colliders get their AABBs recomputed every physics step: MEASURED −32 % physics step p50 at 30 tanks once both stop | `vendor/avian3d-0.7.0-child-pose` and `vendor/lightyear_avian3d-0.30.1-child-pose` (bit-compare before writing), guarded by `src/tests/avian_child_pose_churn.rs` | Drop both vendored crates |
-| 23 | [avian-collider-rehome-stale-pair-bodies.md](avian-collider-rehome-stale-pair-bodies.md) | avian3d 0.7.0 — **DRAFT, not filed** | HIGH — a collider moved onto another rigid body keeps its pairs naming the old body; the island manager links them where body despawns and island splits never look, and a later unlink panics. A cooked-off turret's colliders panicked the dedicated server MEASURED 53-58 s into a 29-bot debris match (#193) | `src/collider_rehome.rs`: an `On<Insert, ColliderOf>` observer toggles `ColliderDisabled` on a collider whose pairs name another body, so Avian drops them and the broad phase remakes them; inverted tripwire `avian_still_names_a_rehomed_colliders_former_body` | Delete the observer and its tests |
-| 24 | [lightyear-avian-child-pass-visits.md](lightyear-avian-child-pass-visits.md) | lightyear_avian3d 0.30.1 — **DRAFT, not filed** | LOW — after #22 its per-frame child pass still reads every child collider of every body, static ones included, several times per tick to find nothing moved: MEASURED 372 µs per tick traced at 30 tanks before the fix | `vendor/lightyear_avian3d-0.30.1-child-pose`: the pass visits only children whose offset, own pose, attachment or body changed, and every child after a re-enable; guarded by `src/tests/avian_child_pose_churn.rs` | Drop the vendored crate, with #22 |
-| 25 | [avian-moved-aabb-prune.md](avian-moved-aabb-prune.md) | avian3d 0.7.0 — **DRAFT, not filed** | LOW — after #22 the moved-collider AABB pass still fetches every collider every step before skipping the unmoved ones: 236 µs per tick traced at 30 tanks before the fix (DERIVED from MEASURED spans) | `vendor/avian3d-0.7.0-child-pose`: the pass's query takes a `Changed` filter, with an unfiltered fallback when `LastPhysicsTick` is not newer than its last run; `ColliderTreeDiagnostics::moved_aabb_candidates` counts what it examined; guarded by `src/tests/avian_moved_aabb_prune.rs` | Drop the vendored crate, with #22 |
-| 26 | [lightyear-netcode-denied-reason.md](lightyear-netcode-denied-reason.md) | lightyear_netcode 0.30.1 — **DRAFT, not filed** | MEDIUM — the client logs and discards an authenticated `DeniedReason`, so a refused player cannot be told why; the handshake consults `ConnectionRequestHandler` only at the request, so a challenge issued while open completes after the handler closes | `vendor/lightyear_netcode-0.30.1-admission`: `Client::denied_reason` and a response-stage handler recheck (`OVERMATCH_PATCH.md`), guarded by two real-UDP tests in `src/net/hosting.rs` | Drop the vendored crate |
-| 27 | [avian-collider-of-removal-orphan-proxy.md](avian-collider-of-removal-orphan-proxy.md) | avian3d 0.7.0 — **DRAFT, not filed** | MEDIUM — removing `ColliderOf` moves the collider to the standalone tree without writing the new key back, so a despawn off a body leaves an orphan proxy that pairs with everything it overlaps: the server's map rebuild left 46 087 contact pairs on a static-only map (MEASURED) and physics p50 rose 71 % | `vendor/avian3d-0.7.0-child-pose`: Case 3 writes the standalone key back; guarded by `src/tests/avian_collider_of_removal.rs` | Drop the vendored crate, with #22 |
-| 28 | [avian-unknown-contact-feature-identity.md](avian-unknown-contact-feature-identity.md) | avian3d 0.7.0 and `main` — **DRAFT, not filed** | MEDIUM — equal `UNKNOWN` IDs bypass anchor distance; MEASURED fixture copies 5 N s instead of the matching point's 11 N s | Vendored `ContactManifold::match_contacts` requires known identities and gates both positional orientations; `src/tests/avian_warm_start.rs::unknown_contact_features_match_by_position` | Retire the admissibility patch; other vendor patches remain |
-| 29 | [avian-nearest-warm-start-contact.md](avian-nearest-warm-start-contact.md) | avian3d 0.7.0 and `main` — **DRAFT, not filed** | MEDIUM — first admissible point wins and later manifolds can overwrite a closer match; MEASURED nearby-point fixture copies 5 N s instead of 11 N s after #28's fix | Vendored nearest-anchor selection across all prior manifolds; `src/tests/avian_warm_start.rs` direct and pair-wide guards | Retire the matcher API and caller changes; other vendor patches remain |
-| 30 | [avian-minimum-speculative-margin.md](avian-minimum-speculative-margin.md) | avian3d 0.7.0 — **LOCAL DRAFT, not filed**; upstream head unchecked | MEDIUM — stationary contacts inside `contact_tolerance` are pruned against a zero velocity-only margin | Vendored `NarrowPhase::update` shares the tolerance floor between query and pruning; `src/tests/avian_island_sleep.rs::stationary_contacts_keep_the_configured_minimum_speculative_margin` | Retire the margin floor when upstream retains in-band points and rejects out-of-band points; other vendor patches remain |
-| 31 | [avian-prune-points-unsigned-depth.md](avian-prune-points-unsigned-depth.md) | avian3d 0.8.0 — **LOCAL DRAFT, not filed** | MEDIUM — unsigned depth and shallow-depth ties let separated points displace bearing support during manifold pruning | Vendored clamped depth and bearing-first tiers using the same selection; homogeneous upstream order, mixed capacity; 156 pruning fork lines (MEASURED); generated collinear/polygon relations R1–R7 | Retire the pruning patch when upstream satisfies the pruning relations |
-| 32 | [avian-ccd-sensors-swept-and-counted.md](avian-ccd-sensors-swept-and-counted.md) | avian3d 0.8.0 — **LOCAL DRAFT, not filed**; upstream head unchecked | MEDIUM — a moving sensor can clamp its body; thin sensors and disabled colliders trigger unnecessary CCD | Query exclusion only in the fork, guarded by `src/tests/avian_swept_ccd.rs`; observer-based thickness refresh is draft-only and compile-checked | Retire the moving-side exclusions when a published release excludes non-solid colliders |
+Historical mechanism pointers beside these drafts keep current source citations usable. Their
+investigations live under `.agents/scratch/fork-moves-history-2026-11-16/`; they are outside this
+proposal queue. Obsolete proposals without a current source or patch-record consumer were removed.
 
-| 33 | [avian-ccd-decide-per-collider.md](avian-ccd-decide-per-collider.md) | avian3d 0.8.0 — **LOCAL DRAFT, not filed**; upstream head unchecked | MEDIUM — a compound body's thinnest child makes every supported child sweep, changing unrelated thick-child first contact | Per-collider thickness gate after the body gate; three game-side collision witnesses in `src/tests/avian_swept_ccd.rs` | Retire the gate when upstream decides eligibility per collider |
+Current complete fork deltas, MEASURED again against the cached published archives with
+`diff --minimal -ruN src/` (added + removed lines, fork-only source included): avian3d **871**,
+bevy_pbr **47**, lightyear_netcode **159**, lightyear_avian3d **0**; total **1077**.
+The per-proposal rows above exclude game divergences and the diagnostic-only lines listed here.
 
-MEASURED index census: 30 open-candidate rows, 13 targeting Avian (counted from this table).
+## Avian draft compile checks
 
-**Evidence note on `InputDelayConfig::balanced()`:** it is implicated in **three** CRITICAL failure paths
-(#1, #10 and #11). Its prediction-margin and fabricated-input failures are measured in #1/#10. Its role
-in exposing #11 is an inference from the source path and the zero-clear fixed-delay A/B recorded in #11.
-We have pinned it. Reconsider adaptive delay only when all three are resolved upstream.
+MEASURED: each patch below was applied independently to a fresh extraction of the cached
+published avian3d 0.8.0 crate, then its library compiled offline through `scripts/serial-cargo
+check`, with all default features (including 3d), except the CCD drafts, which use
+`3d,parry-f32` with default features disabled. A tiny path-dependency harness leaves the
+published manifest unchanged and excludes example-only dev dependencies: direct crate-root
+checks cannot resolve the uncached `bevy_mod_debugdump 0.17` offline. These are library compile
+checks, not example builds or upstream test runs.
 
-## Re-checked against lightyear 0.30.1 (the tree's current pin)
+| Draft | Library compile result |
+|---|---|
+| avian-body-size-metrics-once-per-body.md | compiled |
+| avian-child-collider-pose-churn.md | compiled |
+| avian-collider-of-reinsert.md | compiled |
+| avian-collider-propagation-floor-counts-roots.md | compiled |
+| avian-island-rest-history.md | compiled |
+| avian-mass-recompute-redundant-work.md | compiled |
+| avian-moved-aabb-prune.md | compiled |
+| avian-pairless-broad-phase.md | compiled |
+| avian-sleeping-velocity-increments.md | compiled |
+| avian-unknown-contact-feature-identity.md | compiled |
+| avian-ccd-sensors-swept-and-counted.md | compiled (`3d,parry-f32`); thickness proposal compile-only |
+| avian-ccd-decide-per-collider.md | compiled (`3d,parry-f32`), including lazy shape |
 
-The table above states each record as found, against lightyear 0.28. The tree now pins 0.30.1; each
-lightyear record was re-read against the 0.30.1 source. VERIFIED = read in the 0.30.1 source for
-this re-check; the rest are from a source reading not repeated here and are labelled as such.
-Client prediction left the tree at ADR-0037, so several records no longer touch this project
-whatever their upstream state.
-
-| # | Record | At 0.30.1 | Our side |
-|---|--------|-----------|----------|
-| 1 | check-starvation | Mechanism replaced — rollback checks run per completed checkpoint, covering lead ≤ 0 (source reading) | Moot: no prediction. `net/watchdog.rs` already gone |
-| 2 | avian-blanket-apply-pos-to-transform | **FIXED — VERIFIED**: the blanket `Position`/`Rotation` → `ApplyPosToTransform` requirement is gone; real child colliders have it removed (`lightyear_avian3d` plugin.rs) | The `AuthoredLocalTransform` shield is now redundant; delete it only after a playtest parity run |
-| 4 | dual-marker-tiebreak | Not fixed; the tie now resolves the other way (`Interpolated` outranks `Predicted`) (source reading) | Nothing to delete |
-| 5 | avian-restore-assumes-enlarged-aabb | Mechanism replaced — restore snapshots the collider trees (source reading) | None needed |
-| 6 | confirmedhistory-seeding | Fixed — add-time seeding removed (source reading) | Moot: `strip_confirmed_history` already gone |
-| 7 | sealed-correction-policy | Partly widened (`CorrectionPolicy::new`, `with_ease`); still no custom curve (source reading) | Moot: no correction layer |
-| 9 | avian-childof-not-replicated-transform-mode | Upstream rewrote the test; not re-run here | None (Position mode) |
-| 10 | absent-anchor-input-freeze | **Partly fixed — VERIFIED**: the buffer stores materialized values, so the propagating `Absent` anchor is gone and an `Absent` is a one-tick hole; stalled `end_tick` corrections are still dropped by the `tick > last_remote_tick` gate and gap-fill still fabricates a hold-last copy (`lightyear_inputs` input_buffer.rs / input_message.rs) | `fixed_input_delay(3)` and `for_tick` stay load-bearing; `src/net/tests/net_fire_release.rs` re-pinned to the 0.30 buffer |
-| 11 | native-input-encoder-inverted-range-oom | **OOM fixed — VERIFIED**: the encoder is bounded; an inverted range now yields one mislabeled state (`lightyear_inputs_native` input_message.rs) | Guard stays; `src/net/tests/net_input_buffer_wrap.rs` pins the bounded wrong answer |
-| 13 | confirmed-state-at-or-ahead-never-reconciled | Mechanism replaced by the same checkpoint rewrite as #1 (source reading) | Moot: no prediction |
-
-## Fixed upstream, released in bevy 0.19.1 — mechanism records of retired vendor patches
-
-Both were root-caused here from vendored source, then found already fixed in the **0.19.1**
-milestone. 0.19.1 has shipped and both backports are retired; the files stay as mechanism records.
-
-| # | File | Target | Upstream fix | Our vendor entry |
-|---|------|--------|--------------|------------------|
-| 16 | [bevy-cascade-count-stale-local-parallel.md](bevy-cascade-count-stale-local-parallel.md) | bevy_light 0.19.0 — `check_dir_light_mesh_visibility` panics when cascade count grows at runtime | issue #24804, PR **#24807**, milestone 0.19.1 | **RETIRED in bevy 0.19.1** — the vendored `bevy_light` entry is gone; cascade count stays a live setting like `ShadowDistance` |
-| 17 | [bevy-shadow-view-ignores-light-render-layers.md](bevy-shadow-view-ignores-light-render-layers.md) | bevy_pbr 0.19.0 — shadow views never inherit the light's `RenderLayers`, so off-layer meshes never cast | issue #24792, PR **#24797**, milestone 0.19.1 | **RETIRED in bevy 0.19.1** — the backport is gone (`src/tests/bevy_shadow_view_render_layers.rs` now guards upstream's shape); `vendor/bevy_pbr-0.19.1-scalar-math` carries #14, #20 and the game's heightfield shadow |
-
-## Fixed upstream in bevy 0.20, not in our 0.19.1 pin
-
-| # | File | Target | Upstream fix | Our side |
-|---|------|--------|--------------|----------|
-| 19 | [bevy-empty-mesh-allocator-use-after-free.md](bevy-empty-mesh-allocator-use-after-free.md) | bevy_render 0.19.1: a zero-vertex mesh logs `Use-after-free … unallocated key` on every extraction | PR **#24960** (closes #24874), shipped in v0.20.0 as a `WARN` | No workaround needed: the game hands the renderer no zero-vertex mesh (#176) |
-
-## Cross-report unlocks — the things blocked on MORE THAN ONE fix
-
-- **Adaptive input delay (`balanced()`) — needs #1, #10 AND #11.** A delay that tracks the link would give
-  near-0 input latency on a good connection and safety on a bad one. It is unsafe today for three
-  independent failure paths: a *varying* delay corrupts the input stream (#10 — `Δend_tick != 1` strands stale
-  PRESSED inputs on the server and fabricates `SameAsPrecedent` ones on both ends), can invert the native
-  encoder range after resync (#11 — inferred trigger for an unbounded client allocation), and a delay that grows
-  into the link's natural lead walks the prediction margin to zero, where state rollback is silently dead
-  (#1). Any one alone is a shipping defect. This is the headline cross-report item.
-- **0-tick input delay — mostly #1, softly #8, and NOT what you would guess.** The intuition that 0-tick
-  squeezes the prediction margin is **backwards**: `sync_objective` subtracts input delay from the
-  prediction lead one-for-one (`lightyear_sync` timeline/input.rs:285-310), so 0-tick *maximises* the
-  margin — it is #1's own falsifier. `no_input_delay()` is also constant, so #10's wobble seeds never fire
-  and the anti-adaptive tripwire does not block it. What 0-tick really costs: the deepest prediction window
-  (→ deep rollbacks through chaotic contact, measured 5.6× median / 43× p90 correction amplification — the
-  bill #8 pays down) and zero jitter cushion, so a late input becomes a **dropped trigger pull** (we fail
-  closed on `for_tick`) instead of an unauthored round. An experiment to run (`SPIKE_INPUT_DELAY_TICKS=0`
-  was the lever; removed in the one-timeline demolition, run it from 317d21e), not a free win. What #1 changes is that input delay becomes a *feel* knob
-  we may tune by playtest instead of a correctness knob we must pin. Note the interaction with #13: lead
-  and input delay trade one-for-one, and #13 bites at lead ≤ 0 — so 0-tick delay is also what keeps us
-  clear of it.
-- **Predict-everyone (and with it, tank-tank collision a player can feel) — needs #8, plus work that is
-  not upstream's.** ADR-0017 names `avian-solver-constraint-order.md` as its explicit revisit condition.
-  But determinism is necessary, not sufficient: the bot has no `ControlledBy` and no client authoring its
-  input (so this is really predict-every-*player*, a mixed mode), and reliable remote fire needs input-side
-  rollback, which would break the tick-agnosticism of the crew/belt appliers. Note also what it does *not*
-  buy: `ServoAngles` and `FireEvent` **survive** predict-everyone (ADR-0016 and ADR-0021 both retracted the
-  earlier "deletable" claim), so there are no wire savings — the payoff is gameplay and the collapse of the
-  divergence error class.
-- **Tightening the rollback bars (`ROLLBACK_POSITION_M` / `ROLLBACK_ROTATION_RAD`, 5× coarser than the
-  1 cm / 0.01 rad reference) — needs #2 AND #8.** ADR-0015 calls them "a ratchet, not a setting" and names
-  exactly those two conditions ("contact-restore fix, upstream constraint ordering"). #2 is banked; #8 is
-  the open half.
-- **Retiring `vendor/bevy_pbr-0.19.1-scalar-math` — needs #14.** Bevy 0.19.1 shipped #17's fix, so
-  the shadow-view backport is gone; the vendored crate now carries only the `MeshUniform`
-  allocation fix (#14, still ours to file).
-
-Housekeeping: when an upstream fix ships, the matching workaround's removal condition is stated
-in each file. #12 carries an automatic tripwire — `src/tests/bevy_ktx2_uastc_fallback.rs` FAILS when
-bevy fixes the transcode arithmetic, flagging its workaround for retirement. #3 carries the
-INVERTED kind: `src/tests/shape_cast_reachability.rs` passes only while `src/` holds no shape cast, and
-fires when the first one lands and the parry defect becomes reachable again.
+`avian-nearest-warm-start-contact.md` records game policy and contains no upstream patch.

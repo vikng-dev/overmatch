@@ -1,79 +1,112 @@
-# Unknown contact features bypass warm-start distance matching
+# Contact matching treats two unknown feature IDs as the same feature
 
-Subject: the video game's server contact solver and environment rubble; game state only.
+Found in a game using avian3d. Local draft; not filed.
 
-**Target:** avian3d 0.7.0 and current upstream `main` (source inspection).
-**Status:** **DRAFT, not filed**. Checked read-only on 2026-11-08; unfixed on `main` at
-"Add missing `Without<ColliderDisabled>` in `solve_continuous` (#1101)".
+**Crate:** avian3d 0.8.0 (crates.io). **Status:** not sent. Source audit: Unchanged on `main` at 2c2d6934 (2026-11-04): MEASURED, `main`'s `src/` differs from 0.8.0 only in `dynamics/ccd/mod.rs` (#1101), and this diff applies to `main` with `patch --dry-run`.
 
-## Mechanism
+## Defect
 
-`ContactManifold::match_contacts` promises feature-ID matching with positional matching when IDs
-are unknown. The published implementation accepts equality of `PackedFeatureId::UNKNOWN` as
-identity, copies that predecessor's normal and tangent warm-start impulses, and breaks before
-checking anchor distance. `ContactPoint::new` initializes both IDs to `UNKNOWN`, so these points
-can all inherit the first predecessor's cache even when their anchors are far apart.
+`ContactManifold::match_contacts` (`src/collision/contact_types/mod.rs:435-476`) has two defects:
 
-The positional branch also parses as `(unknown && direct_match) || reversed_match`; the reversed
-orientation bypasses the unknown-feature condition and can match conflicting known IDs. Both
-orientations need the same admissibility gate.
+1. Its feature test accepts `contact.feature_id1 == previous.feature_id1 && …` when all of them are
+   `PackedFeatureId::UNKNOWN` (`0`), which is how `ContactPoint::new` initializes them. A point with
+   unknown features therefore copies the warm start of the first previous point that also has
+   unknown features, at any distance, and the positional branch documented for unknown features
+   never runs.
+2. The positional condition parses as `(unknown && direct) || swapped`, so the swapped-orientation
+   distance test applies to known-feature points too, matching points whose known IDs differ.
 
-Sources: published `avian3d-0.7.0/src/collision/contact_types/mod.rs`,
-`ContactManifold::match_contacts` and `ContactPoint::new`, read from the Cargo registry;
-[upstream matcher](https://github.com/avianphysics/avian/blob/main/src/collision/contact_types/mod.rs#L429).
-The shipped correction is at
-`vendor/avian3d-0.7.0-child-pose/src/collision/contact_types/mod.rs:435` (`known_features` and
-`same_features`) and its positional gate at that file's `:457`.
+## Minimal repro
 
-## Evidence
+In the module's scope:
 
-Our commit **"physics: match unknown contact features through their anchors (#235)"** adds the
-class witness `src/tests/avian_warm_start.rs`, `unknown_contact_features_match_by_position`.
-Fixture inputs: predecessor anchors at the origin and one metre along x, a matching radius of
-0.1 m, cached normal impulses of 5 and 11 N s, and a new point coincident with the latter.
-**MEASURED in that commit:** the published matcher copies 5 N s rather than the coincident
-point's 11 N s; the corrected witness passes. No geometry generation or full app is needed.
+```rust
+#[test]
+fn unknown_feature_ids_match_by_position() {
+    let far = Vector::X * 10.0;
+    let mut previous_far = ContactPoint::new(far, far, RVector::ZERO, 0.0);
+    previous_far.warm_start_normal_impulse = 5.0;
+    let mut previous_here = ContactPoint::new(Vector::ZERO, Vector::ZERO, RVector::ZERO, 0.0);
+    previous_here.warm_start_normal_impulse = 11.0;
 
-**MEASURED in the same commit:** its 60 s rubble wave still ends at 130 awake / 425 asleep.
-That is an observation, not a settling guarantee or an isolated measure of this patch's effect.
-The current witness also covers a nearby-predecessor case, owned by the separate
-[nearest-contact draft](avian-nearest-warm-start-contact.md).
+    let point = ContactPoint::new(Vector::ZERO, Vector::ZERO, RVector::ZERO, 0.0);
+    let mut manifold = ContactManifold::new([point], Vector::Y);
+    manifold.match_contacts(&[previous_far, previous_here], 0.1);
 
-## Upstream status and filing boundary
+    // 0.8.0 copies 5.0 from the point 10 units away.
+    assert_eq!(manifold.points[0].warm_start_normal_impulse, 11.0);
+}
+```
 
-The inspected `main` still accepts equal unknown IDs and has the positional precedence error.
-Read-only GitHub issue/PR searches for `warm`, `UNKNOWN`, `match_contacts`, `contact matching`,
-`nearest` and `anchor` found no matching defect report. Related
-[issue #1098](https://github.com/avianphysics/avian/issues/1098) concerns invalid sphere/trimesh
-geometry; [issue #734](https://github.com/avianphysics/avian/issues/734) proposes cache-free solving.
-Neither reports this matcher failure. [PR #480](https://github.com/avianphysics/avian/pull/480)
-adds orientation handling, and [PR #385](https://github.com/avianphysics/avian/pull/385) introduces
-the solver/matching machinery; their discussion does not identify this defect. Searches cannot
-establish that no report exists under different wording.
+The same case copied 5 instead of 11 on 0.7.0, whose matcher is the same (MEASURED, found in a game
+using avian3d); this test is DERIVED for 0.8.0, not compiled here.
 
-This is independently filable from nearest selection: fixing admissibility makes the distant
-fixture pass but still permits the wrong predecessor inside the radius. The other draft owns
-ranking admissible candidates and selection across manifolds.
+## Fix
 
-## Suggested upstream fix
+Against the pristine crate (`a/` and `b/` are the crate root):
 
-Require known IDs before accepting either orientation as a feature identity. Otherwise use
-anchor distance, with both orientations inside the unknown-feature condition. Copy both cached
-impulse fields only after a candidate passes. Retain the distant-point witness; also cover
-partially unknown IDs and conflicting known IDs at reversed nearby anchors. The existing witness
-measures the unknown-ID bypass, not those additional cases or the tangent field separately.
+```diff
+--- a/src/collision/contact_types/mod.rs
++++ b/src/collision/contact_types/mod.rs
+@@ -437,14 +437,20 @@
+         let distance_threshold_squared = distance_threshold.powi(2);
+ 
+         for contact in self.points.iter_mut() {
++            // A point with an unknown feature ID has no identity: two `UNKNOWN` IDs compare equal
++            // without naming the same feature, so such a point is matched by position only.
++            let unknown_features = contact.feature_id1 == PackedFeatureId::UNKNOWN
++                || contact.feature_id2 == PackedFeatureId::UNKNOWN;
++
+             for previous_contact in previous_contacts.iter() {
+                 // If the feature IDs match, copy the contact impulses over for warm starting.
+-                if (contact.feature_id1 == previous_contact.feature_id1
++                if !unknown_features
++                    && ((contact.feature_id1 == previous_contact.feature_id1
+                     && contact.feature_id2 == previous_contact.feature_id2) ||
+                     // we have to check both directions because the entities are sorted in order
+                     // of aabb.min.x, which could have changed even the two objects in contact are the same
+                     (contact.feature_id2 == previous_contact.feature_id1
+-                    && contact.feature_id1 == previous_contact.feature_id2)
++                    && contact.feature_id1 == previous_contact.feature_id2))
+                 {
+                     contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
+                     contact.warm_start_tangent_impulse =
+@@ -452,20 +458,17 @@
+                     break;
+                 }
+ 
+-                let unknown_features = contact.feature_id1 == PackedFeatureId::UNKNOWN
+-                    || contact.feature_id2 == PackedFeatureId::UNKNOWN;
+-
+                 // If the feature IDs are unknown and the contact positions match closely enough,
+-                // copy the contact impulses over for warm starting.
++                // in either orientation, copy the contact impulses over for warm starting.
+                 if unknown_features
+-                    && (contact.anchor1.distance_squared(previous_contact.anchor1)
++                    && ((contact.anchor1.distance_squared(previous_contact.anchor1)
+                         < distance_threshold_squared
+                         && contact.anchor2.distance_squared(previous_contact.anchor2)
+                             < distance_threshold_squared)
+-                    || (contact.anchor1.distance_squared(previous_contact.anchor2)
+-                        < distance_threshold_squared
+-                        && contact.anchor2.distance_squared(previous_contact.anchor1)
+-                            < distance_threshold_squared)
++                        || (contact.anchor1.distance_squared(previous_contact.anchor2)
++                            < distance_threshold_squared
++                            && contact.anchor2.distance_squared(previous_contact.anchor1)
++                                < distance_threshold_squared))
+                 {
+                     contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
+                     contact.warm_start_tangent_impulse =
+```
 
-## Our shipped workaround and its removal condition
+## Notes
 
-The vendored matcher above implements these gates; **"physics: match warm starts to the nearest
-admissible contact (#235)"** retains them while adding nearest selection. Remove this part of the
-patch when the replacement upstream implementation rejects unknown identities and applies the
-positional gate to both orientations, with positive correspondence tests passing. Keep the
-nearest-selection patch until its own removal condition holds. Other patches still require the
-vendored crate.
+A point with an unknown ID matches by position only, in either orientation; a point with known IDs
+matches by identity only. The first matching point and upstream's early exit remain unchanged.
+Overmatch's [nearest ranking](avian-nearest-warm-start-contact.md) is a game-side policy.
 
-## What fixing this unlocks for us
+## Local verification
 
-Retire the local admissibility correction and use upstream's cache correspondence for rubble
-contacts. No sleep rule or gameplay workaround needs removal, and this alone does not establish
-that every rubble island settles.
+The game's warm-start guards exercise the engine's identity rejection and first known-ID match,
+and the game seam's closest-point ranking within and across manifolds.

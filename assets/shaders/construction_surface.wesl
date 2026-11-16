@@ -34,6 +34,8 @@ import bevy_pbr::render::{
 @if(MAY_DISCARD)
 import super::construction_holes::{hole_at, SEE_THROUGH, INNER_WALL};
 
+import super::terrain_shadow::visibility;
+
 struct SurfaceParams {
     // x: the secondary pack's repeats per metre. yzw: unused.
     secondary: vec4<f32>,
@@ -132,6 +134,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 }
 
     pbr_input.material.base_color = alpha_discard(pbr_input.material.flags, pbr_input.material.alpha_cutoff, pbr_input.material.base_color);
+    pbr_input.directional_shadow_factor *= visibility(pbr_input.world_position.xyz);
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);

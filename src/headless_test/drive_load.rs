@@ -537,7 +537,7 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
     // DERIVED: a launch is capable while grip carries the grade and the rolling load,
     // `tan θ < μ − r`; a fixture grade past that is no capable launch on this ground.
     let ground = crate::ground_types::GroundTypes::load_shipped()
-        .get(crate::terrain_blend::BASE_GROUND)
+        .get(crate::terrain_surface::surface().base.ground.as_str())
         .contact();
     let kpa =
         crate::track::rig_geom::tank_ground_pressure_kpa(&crate::track::rig_geom::tiger_rig());
@@ -547,7 +547,7 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
         let (mut app, tank, rotation) = settled_on_grade(angle);
         let weight = app.world().resource::<TankBlueprint>().spec.mass * crate::track::derive::G;
         let rolling = crate::ground_types::GroundTypes::load_shipped()
-            .get(crate::terrain_blend::BASE_GROUND)
+            .get(crate::terrain_surface::surface().base.ground.as_str())
             .contact()
             .rolling_at(nominal_pressure(&app));
         let expected = weight * (angle.sin() + rolling * angle.cos());
@@ -741,7 +741,7 @@ fn a_gear_its_pedal_cannot_hold_steps_down_before_the_catch_carries_it() {
     // Fixture: the grade's resistance (N) and the pedal.
     let (resistance, pedal) = (46_500.0_f32, 0.25);
     let rolling = crate::ground_types::GroundTypes::load_shipped()
-        .get(crate::terrain_blend::BASE_GROUND)
+        .get(crate::terrain_surface::surface().base.ground.as_str())
         .contact()
         .rolling_at(crate::track::rig_geom::tank_ground_pressure_kpa(
             &crate::track::rig_geom::tiger_rig(),
@@ -966,7 +966,7 @@ fn empty_driver_station_coast_and_rollback() {
             let weight =
                 app.world().resource::<TankBlueprint>().spec.mass * crate::track::derive::G;
             let rolling = crate::ground_types::GroundTypes::load_shipped()
-                .get(crate::terrain_blend::BASE_GROUND)
+                .get(crate::terrain_surface::surface().base.ground.as_str())
                 .contact()
                 .rolling_at(nominal_pressure(&app));
             let equilibrium = coast_equilibrium(tp, gear, weight, angle, rolling);

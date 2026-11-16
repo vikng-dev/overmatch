@@ -19,7 +19,6 @@ use bevy_egui::{
 use super::CLEARANCE_SPAN_M;
 use crate::ground_types::GroundTypes;
 use crate::state::AppState;
-use crate::terrain_blend::{BASE_GROUND, BLEND_LAYERS};
 use crate::track::rig_geom::RigGeom;
 use crate::view::PlayerView;
 
@@ -93,12 +92,11 @@ fn panel(
                     Some(kpa) => format!("This tank bears {kpa:.1} kPa on the ground."),
                     None => "No running gear yet.".to_string(),
                 });
-                let mut packs = vec![format!("base: {BASE_GROUND}")];
-                packs.extend(
-                    BLEND_LAYERS
-                        .iter()
-                        .map(|layer| format!("{}: {}", layer.pack, layer.ground)),
-                );
+                let surface = crate::terrain_surface::surface();
+                let packs: Vec<String> = std::iter::once(&surface.base)
+                    .chain(&surface.layers)
+                    .map(|pack| format!("{}: {}", pack.pack, pack.ground))
+                    .collect();
                 ui.label(packs.join("\n"));
                 ui.separator();
                 for (name, ground) in &mut table.types {

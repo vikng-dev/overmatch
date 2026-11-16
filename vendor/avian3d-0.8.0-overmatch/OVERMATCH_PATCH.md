@@ -23,8 +23,8 @@ Each patch takes one form, named in its section:
 - **kept**: an edit inside an upstream file, with the reason no narrower form exists.
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
-Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff -ru`
-of `src/` against the published crate: 1087 in all (MEASURED), 1009 in upstream files and 78 in the
+Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff --minimal -ruN`
+of `src/` against the published crate: 871 in all (MEASURED), 793 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -40,29 +40,27 @@ manifolds fill four slots. No projected-anchor deduplication or lone-point fallb
 Kept as an upstream bug fix: separation must not displace bearing support or be rewarded.
 The selection runs before the contact modification hook, so a game-side pass cannot recover
 points it discarded. This patch has 156 fork lines (MEASURED, added plus removed against the
-cached published crate); the file has 161 including its pair-state field. Guard:
+cached published crate); the file has 187 including its pair-state field and warm-start correctness fix. Guard:
 `src/tests/avian_contact_pruning.rs` (R1–R7 and the upstream under-capacity witness).
 Mechanism, exact patch and compile proof: [local upstream draft](../../upstream/avian-prune-points-unsigned-depth.md).
 
 ## Child collider poses (`src/collision/collider/collider_transform/plugin.rs`): hook
 
-`ColliderTransformPlugin` no longer has `update_child_collider_position`, which assigned every child
-collider's `Position` and `Rotation` through `Mut` every step, changed or not: every child collider
-of every body, static bodies included, was marked changed every step, and
-`update_moved_collider_aabbs`, which skips a collider whose pose and shape ticks did not move,
-recomputed all their bounds. On the product map that is every building element and tree segment,
-none of which moves. The system, its registration and the plugin doc's claim to place colliders are
-deleted (42 fork lines, MEASURED).
+The upstream system and registration remain intact. The fork makes
+`update_child_collider_position` public and re-exports it (6 fork lines, MEASURED against pristine
+0.8.0 with `diff -ruN src/`). The game removes exactly one instance in
+`PhysicsPlacementPlugin::cleanup`, after every plugin has built and finished, then installs its
+change-aware placement in the same slot. All game removals use `RemoveSystemsOnly`, retaining
+ordering sets. Cleanup records its completion; admission refuses updates until both the physics
+and any installed frame-boundary replacement have completed. Removal errors name the missing
+system set or uninitializable schedule; an unexpected removal count also fails during setup.
 
-The placement law is the game's (`avian_ext::child_poses`): `place_child_colliders`, which the game
-runs in `PhysicsStepSystems::First` (the slot upstream used) and at the frame boundary where
-lightyear_avian ran its own child pass. It composes the same pose and writes a component only where
-its bits differ, visits only children whose offset, own pose, attachment or body changed, and reads
-`Reenabled` messages for re-enabled entities, whose re-enable moves no tick.
-`ColliderTransformPlugin` stays enabled: it also propagates `ColliderTransform` and adds the
-`pub(crate)` `AncestorMarkerPlugin`, which a disabled plugin would leave to the game.
+The game also replaces the published Lightyear integration's frame-boundary writer from
+`FramePlacementPlugin::cleanup`; no lightyear_avian3d fork remains. `ColliderTransformPlugin`
+stays enabled for transform propagation and ancestry marking.
 
-Guard: `src/tests/avian_child_pose_churn.rs`. Record: `upstream/avian-child-collider-pose-churn.md`.
+Guard: `src/tests/avian_child_pose_churn.rs`, including the shipped composition's schedule.
+Record: `upstream/avian-child-collider-pose-churn.md`.
 
 ## Attachment refusal: game-side
 
@@ -99,8 +97,8 @@ and short of a custom `AnyCollider` there is none. 21 fork lines (MEASURED).
 The game prepares the cache off the system thread for each construction chunk collider that is no
 sensor. Guard: `src/tests/avian_prepared_mass.rs`, which replaces the shape of a freshly prepared
 collider, so each invalidation stands alone (it fails with the scale invalidation removed and with
-the shape replacement's removed, MEASURED). Local upstream draft:
-`upstream/avian-prepared-collider-mass.md`.
+the shape replacement's removed, MEASURED). Historical mechanism pointer:
+`upstream/avian-prepared-collider-mass.md`; this is not a current upstream proposal.
 
 ## Complete collider batches and explicit mass ownership (`src/collision/collider/collider_hierarchy/plugin.rs`, `src/dynamics/rigid_body/mass_properties/`, `src/lib.rs`): kept
 
@@ -140,15 +138,15 @@ repair; a self-attached explicit body's edits). The construction's
 memberships or filters are empty: either empty term makes `CollisionLayers::interacts_with` false
 for every partner. The proxy stays in its one collider tree, so spatial queries still find it.
 Eligibility reads the proxy's current layers each step, sensor and standalone proxies included.
-The system reads `ColliderTrees` as `Res` (upstream asks `ResMut` and writes nothing), and a live
-moved proxy without bounds panics where upstream skipped it unseen. Upstream's own `unwrap`s stay.
+The system reads `ColliderTrees` as `Res` (upstream asks `ResMut` and writes nothing). A moved
+proxy without bounds follows upstream's skip; no engine-internal refusal remains.
 
 `CollisionDiagnostics::broad_phase_candidates` counts non-self BVH leaf visits before duplicate,
 layer and body filtering, summed from per-chunk counts; a candidate can be visited from both
 endpoints. The game's tick trace reads it for the ram and scheduled-collapse instruments.
 
 Kept: the prune sits inside the broad phase's private per-proxy loop, so the alternative is
-replacing the whole broad-phase plugin. 33 fork lines (MEASURED: 28 in the broad phase, 5 in the
+replacing the whole broad-phase plugin. 28 fork lines (MEASURED: 23 in the broad phase, 5 in the
 diagnostics).
 
 Guard: `src/tests/avian_broad_phase_layers.rs` (with the prune removed it fails: 2 candidates
@@ -189,23 +187,28 @@ four builders filtered `Without<Sleeping>` (the third: the disabled and static b
 and change ticks move), the clear's check removed (the fourth does not panic). Local upstream
 draft: `upstream/avian-sleeping-velocity-increments.md`.
 
-## Unreadable pair state (`src/collision/narrow_phase/system_param.rs`): kept
+## Unreadable pair state: game-side
 
-`update_contacts` reads a pair's two colliders and their bodies. It skips a pair whose colliders it
-cannot fetch only when one is of another collider type (that type's narrow phase updates the pair)
-or unposed (a client's replication lifted its pose for a frame); disabled and removed colliders
-lose their pairs first (`remove_collider_on`). It reads a body outside its body query as no body
-only when the body is disabled (`RigidBodyDisabled` or `Disabled`, whose pairs generate no
-constraints) or unposed. Anything else has lost a component every collider or body carries, and
-panics naming the pair or the body; upstream skips the pair or reads the body as absent, unseen.
+`avian_ext::required_state` checks posed, enabled colliders and bodies in `PhysicsStepSystems::First`,
+before child placement. Missing narrow-phase, metric and island-wake
+inputs panic naming the invariant. Its negative With/Without/Or queries are archetypal in Bevy
+0.20.1: healthy archetypes never match, so the healthy tick walks no entity population. Replicas
+without either pose component, disabled entities and bodies with no attached colliders are named
+legitimate absences. The attachment observer queues only owners that do not yet have RigidBody; First validates those
+links at admission, allowing a late body completed before play without walking every live link.
+Bevy's relationship-target hooks maintain the reciprocal collider list.
 
-Kept: both reads are inside the private per-pair closure. 57 fork lines (MEASURED; two filter
-queries on `NarrowPhase` and the two checks).
+The narrow phase's optional fetches are upstream's again: 0 fork lines (MEASURED). The size-metric
+refusal also lives in this game gate. Avian's enable observers can create a node before its first
+solver index supplies a timer; the game requires `SleepTimer` with `BodyIslandNode`, so every node
+is complete at creation, even for a body asleep since spawn. Admission refuses a lost timer.
+The wake walk retains its fail-fast link check, including wakes outside scheduled physics. The solver-membership tripwire stays with increments.
 
-Guards: `src/tests/avian_narrow_phase.rs` (two refusals, red on stock 0.8.0, MEASURED; two
-legitimate absences). Upstream's own defect on the same path, a body leaving and re-entering the
-body query, still panics the solver on 0.8.0 (MEASURED by the tripwire
-`src/tests/avian_body_query_gap.rs`); record: `upstream/avian-body-query-gap-stale-constraints.md`.
+Guards: `src/tests/avian_narrow_phase.rs`, `src/tests/avian_body_size_metrics.rs`,
+`src/tests/avian_island_sleep.rs` and the attachment witness in
+`src/tests/avian_child_pose_churn.rs`. The unposed and disabled cases remain admitted. The upstream
+body-query-gap defect still has its separate, deliberately unextended composition in
+`src/tests/avian_body_query_gap.rs`; record: `upstream/avian-body-query-gap-stale-constraints.md`.
 
 ## Per-collider swept CCD eligibility (`src/dynamics/ccd/mod.rs`): kept
 
@@ -214,7 +217,8 @@ conservative motion bound with its own threshold-scaled CCD thickness, before ma
 swept bounds or tree traversal. Thin children no longer select thicker children for a sweep.
 The body-wide bound includes off-centre rotation; a single collider keeps upstream eligibility.
 
-Kept as an upstream bug fix inside the private per-collider loop. Guards:
+Kept as an upstream bug fix inside the private per-collider loop. The CCD file, including the
+non-solid query, is 18 added + 4 removed = 22 fork lines (MEASURED). Guards:
 `src/tests/avian_swept_ccd.rs` (thick-child discrete contact, thin-child/single-collider protection,
 offset rotation). A local `LazyCell` defers sweep-shape mass properties until the first filtered
 TOI candidate, once per collider; the gate's thickness is reused. This small bug-fix-kind change
@@ -305,26 +309,30 @@ continuous collision's per-body floor remains unmeasured.
 through 561 manifolds, a crossover MEASURED on that stack (Bevy 0.19, two compute threads); nothing
 measured on this one supports carrying it.
 
-## Collider transform propagation on the compute pool (`src/collision/collider/collider_transform/plugin.rs`): kept
+## Collider-transform propagation dispatch (`src/collision/collider/collider_transform/plugin.rs`): kept bug fix
 
 Subject: the game's server physics step, game state only.
 
-`propagate_collider_transforms` walks each root's hierarchy. Avian 0.7 dispatched every root to the
-compute pool; 0.8.0 runs them serially below 4,096 roots, the floor of loops whose item is one
-body's update. Here an item is a whole hierarchy (a construction's every element, a piece's
-chunks), and the game's roots stay under the floor, so the pass was serial. The patch restores
-0.7's dispatch (`par_iter_mut`). Roots own disjoint hierarchies (upstream's own safety argument),
-so the dispatch changes no result.
+`propagate_collider_transforms` walks each root's hierarchy. Avian 0.8.0's 4,096-item floor counts
+roots, not the descendants walked; an item can be a whole construction or a piece's chunks.
+`par_iter_mut` dispatches those disjoint hierarchies without that per-body floor. Upstream's
+forest invariant already supplies its safety argument.
 
 MEASURED on the scheduled collapse (`scripts/perf/collapse.sh --target local --schedule
-scripts/perf/match-collapse.json --rehearsal --tanks 30 --clients 1`, debug server, compute pool
-10, one run each): the phase that holds the pass (`physics_prepare`) took 436.8 µs wall and
-443.7 µs CPU per tick serial, 176.6 µs wall and 621.5 µs CPU dispatched; the 0.7 stack, 184.8 and
-637.9. On a compute pool of two the 0.7 fork measured the pass level or faster than serial at the
-pile (its patch record); not re-measured on two threads here.
+scripts/perf/match-collapse.json --rehearsal --tanks 30 --clients 1`, Bevy 0.20.1 / Avian 0.8.0,
+debug server, compute pool 10, one run each): `physics_prepare`, the phase containing propagation,
+took 436.8 µs wall and 443.7 µs CPU per tick serial, against 176.6 µs wall and 621.5 µs CPU
+dispatched. The 0.7 stack measured 184.8 µs wall and 637.9 µs CPU in that comparison. Historical
+MEASURED evidence on Bevy 0.19 / Avian 0.7: the house-collapse pile's first and final phase
+segments, which contain propagation, were level or faster with compute pool 2 than 1 (phase A,
+median of 10 runs). That evidence lives in the 0.7 patch record at `ff62d411^:vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`,
+"Serial small loops". The hosted two-core allocation uses compute pool 2
+(`src/net/server_host.rs::task_pool_options`); the 0.8.0 comparison above used 10, not 2.
+No new timing measurement is claimed.
 
-Kept: the dispatch is one call inside an upstream system. 7 fork lines (MEASURED). No guard: no
-result depends on it.
+Kept as a bug fix: a per-entity floor does not measure hierarchy work. 6 fork lines (MEASURED),
+separate from the child-placement export. No result depends on dispatch, and no invariant test
+was removed by `00bb0a04`. Local draft: `upstream/avian-collider-propagation-floor-counts-roots.md`.
 
 ## Body size metrics once per body (`src/dynamics/rigid_body/body_size_metrics.rs`): kept
 
@@ -341,26 +349,24 @@ and recomputes each once. A body owns its metrics and reads only its own collide
 bodies run on the compute pool (`par_iter_many_unique_mut`, which takes only a set: a body visited
 twice is unrepresentable); a step with no stale body dispatches nothing. A changed collider whose
 body is despawned, disabled or no longer a rigid body is skipped, and a body with no collider is
-never stale (Avian removes its `RigidBodyColliders` with the last one), as upstream. An enabled body
-missing a component the pass reads panics naming the invariant; pristine 0.8.0's `if let Ok` skips
-it unseen with the rest, and the patch adds only the refusal and the stale set's filters.
+never stale (Avian removes its `RigidBodyColliders` with the last one), as upstream. The fetch uses
+upstream's optional form; incomplete posed, enabled bodies are refused by the game's First-stage
+gate before the pass can read stale state.
 `BodySizeMetricUpdates` holds the count of bodies the last pass recomputed: test instrumentation,
 read only by the guard, at one relaxed atomic add per recomputed body and one resource write per
 step. It cannot be `cfg(test)` (the game's tests build this crate as a dependency), and a feature
 switched on from the game's dev-dependencies would compile the fork and every crate above it in
 two feature sets.
 
-MEASURED on the scheduled collapse (the command above, one run each): the physics step's time
+MEASURED on the scheduled collapse (the previously recorded scheduled collapse, one run each): the physics step's time
 outside Avian's timed stages was 151 to 518 ms in the two ticks after each collapse and 2.35 s over
 the ten worst ticks; with the patch the worst is 0.6 ms and the ten worst sum to 3.9 ms. The run's
 worst tick fell from 599.9 to 82.7 ms (the 0.7 stack: 106.7 ms).
 
-Kept: the loop is inside an upstream system. 80 fork lines (MEASURED against published 0.8.0).
+Kept: the loop is inside an upstream system. 61 fork lines (MEASURED).
 
-Guard: `src/tests/avian_body_size_metrics.rs`, 4 tests. Mutants, each red (MEASURED): every body
-the pass cannot read skipped, as upstream (the refusal does not panic); every such body refused
-(the disabled body panics); the moved-centre filter without `RigidBodyColliders` (the body with no
-collider panics).
+Guards: `src/tests/avian_body_size_metrics.rs`: once-per-body recomputation and the named no-collider
+and disabled absences. Its missing-center witness now exercises the game's First-stage gate.
 
 ## Standalone key write-back: dropped
 
@@ -388,41 +394,25 @@ Witness: `src/tests/avian_moved_lists.rs`, 3 of 3 green on unpatched 0.8.0 (MEAS
 equal the scanning form after every step of a tick of 2,000 rehomes and 1,000 toggles and of
 20,000 generated operations, and a second mark lists the proxy once.
 
-## Warm-start matching (`src/collision/narrow_phase/mod.rs`, `src/collision/narrow_phase/system_param.rs`): hook
+## Warm-start matching: correctness fix and game-side ranking hook
 
 Subject: the game's server physics, contacts between bodies, game state only.
 
-Upstream's matcher has two defects the 0.7 fork patched in place. `ContactManifold::match_contacts`
-reads two `PackedFeatureId::UNKNOWN` ids as one identity, so a new point takes the first previous
-point's warm start at any distance, and its swapped-orientation distance test is not under the
-unknown-feature condition. The narrow phase calls it once per previous manifold, so a later
-manifold overwrites a closer predecessor from an earlier one.
+The engine's slice matcher accepts known feature IDs only by identity, and UNKNOWN IDs only by
+nearby anchors in either orientation. Known IDs retain upstream's first match, early exit and
+ordering. Correctness fix: `upstream/avian-unknown-contact-feature-identity.md`.
 
-The fork now calls the matcher through `narrow_phase::ContactMatcher`, a resource holding a function
-of the pair's new manifolds, its previous manifolds and the matching distance, where upstream ran
-its loop. Not a field of `NarrowPhaseConfig`, which derives `Reflect`, `PartialEq` and serde; not
-game-side, because the previous manifolds are a local of the private per-pair closure. Its default
-is upstream's loop, and upstream's `match_contacts` keeps its 0.8.0 signature and body. Upstream's
-gate stays: the matcher runs only with `NarrowPhaseConfig::match_contacts` on and at most four new
-manifolds, so a pair with more (a dense trimesh) starts cold, as upstream. 36 fork lines (MEASURED:
-24 in `mod.rs`, 12 at the call site and the field).
+The `ContactMatcher` resource defaults to upstream's per-manifold calls. The game installs
+`avian_ext::contact_match::match_pair` to rank admissible points across the entire pair, including
+known identities. The known-ID witness and the precise failure of upstream ordering are recorded
+once in `upstream/avian-nearest-warm-start-contact.md`; that policy is no upstream proposal.
+The matching gate and distance stay upstream's; the game keeps recycling off. No iterator API
+remains. 62 fork lines (MEASURED: 26 for correctness in contact types, 25 for the hook in narrow
+phase's module, 11 for its field and call site).
 
-The law is the game's (`avian_ext::contact_match::match_pair`, installed by `avian_ext::plugin`):
-each new point takes the closest admissible point among all the pair's previous manifolds; known
-ids admit the same ids in either order, UNKNOWN ids admit only anchors within the distance.
-
-A recycled pair returns before matching and keeps last step's manifolds. The game runs with
-recycling off (`recycle_distance: 0.0`, set where the game composes physics); turning it on stops
-matching for every recycled pair, and the pair guard below goes red (MEASURED).
-
-Guards: `src/tests/avian_warm_start.rs`, 3 tests. The two that rank predecessors are red with
-upstream's matcher (MEASURED: 5.0 taken where 11.0 is closest). The third requires a cold start with
-no admissible predecessor (an UNKNOWN point 1 m from its only one; a known point whose only one
-holds other ids, its anchors coincident in either orientation), red under each of three mutants of
-the law (MEASURED): UNKNOWN ids admitted at any distance, known ids admitted by distance, and known
-ids admitted by distance in the swapped orientation only, upstream's. Local upstream drafts:
-`upstream/avian-unknown-contact-feature-identity.md`,
-`upstream/avian-nearest-warm-start-contact.md`.
+Guards: `src/tests/avian_warm_start.rs` checks engine identity rejection and first known-ID match,
+game ranking within a manifold, and the shipped composition's known-ID pair ranking in either
+old-manifold order. The sphere witness asserts both generated IDs are known.
 
 ## Stationary non-touching pair cache (`src/collision/narrow_phase/stationary_miss.rs`, `src/collision/narrow_phase/system_param.rs`, `src/collision/contact_types/mod.rs`, `src/collision/diagnostics.rs`): module
 
@@ -529,7 +519,7 @@ Mutants, each red (MEASURED): an awake side counted as resting (the impact test)
 the sleeping set (the stationary, closed-miss and impulse tests), no island link (the closed-miss
 test).
 
-## Island rest history (`src/dynamics/solver/islands/sleeping.rs`): kept
+## Island rest history (`src/dynamics/solver/islands/sleeping.rs`, `src/dynamics/solver/islands/mod.rs`): kept
 
 Subject: the game's rigid-body rest, server physics, game state only.
 
@@ -537,18 +527,23 @@ Rest history belongs to each body. `WakeIslands` restarts the rest interval (`Sl
 bodies that were sleeping only: an island merged from an awake and a sleeping one is marked sleeping
 (`merge_islands`), and upstream's wake zeroed the awake members' timers with the rest. The removal
 hook of `Sleeping` restarts its own body's interval, which has lost the marker by the time its
-queued wake runs. A linked body without `BodyIslandNode` or `SleepTimer` panics in the wake
-("every linked island body retains BodyIslandNode and SleepTimer"), where upstream ended the walk
-and left the island partly awake.
+queued wake runs. The fork requires `SleepTimer` with `BodyIslandNode`, so enable observers
+construct complete nodes before their first solver index. One lifecycle behavior differs from
+pristine: a body enabled while asleep since spawn now wakes. The game's First-stage gate refuses
+any posed enabled node that subsequently loses its timer.
+`WakeIslands` expects every link to resolve to a live node with a timer:
+terminating a broken list after marking the island awake would strand its remaining sleepers.
+The tripwire also covers direct wake commands outside scheduled admission.
 
-Kept: the timer reset and the walk sit inside an upstream command and hook. 23 fork lines
-(MEASURED).
+Kept: the timer reset, node requirement and linked-list tripwire are one engine fix. 23 fork lines
+(MEASURED: 21 in sleeping, 2 on BodyIslandNode), including the `was_sleeping` tuple input.
 
 Guards: in `src/tests/avian_island_sleep.rs`,
-`waking_a_merged_island_preserves_already_awake_rest_time` and
-`a_linked_body_without_sleep_timer_is_refused`, both red on upstream 0.8.0 (MEASURED), and
-`removing_sleeping_restarts_the_woken_bodys_rest_interval`, red without the hook's reset (MEASURED).
-Record: `upstream/avian-island-rest-history.md`.
+`waking_a_merged_island_preserves_already_awake_rest_time`,
+`removing_sleeping_restarts_the_woken_bodys_rest_interval`,
+`a_linked_body_without_sleep_timer_is_refused` (direct wake),
+`a_sleeping_body_without_its_timer_is_refused_at_admission` (scheduled gate), and
+`a_newly_enabled_island_has_its_timer_before_its_first_solver_index` (complete node construction).
 
 ## Rest energy (`src/dynamics/solver/islands/sleeping.rs`, `src/dynamics/solver/islands/mod.rs`): hook
 
@@ -562,27 +557,19 @@ game installs its law (`avian_ext::rest_test::at_rest`): upstream's test, or kin
 under the rest speed's, `v² + ω·I_world·ω/m < (SleepThreshold::linear · PhysicsLengthUnit)²`. The
 law and its account are the 0.7 fork's.
 
-A body's timer is its own, so the test runs per body on the compute pool, as on the 0.7 fork, from
-the floor Avian 0.8.0 gives its other per-body loops (`MIN_PAR_ITER_ENTITIES`, 4,096 awake bodies;
-the 0.7 fork's measured 1,500 is not carried). Each body hands its island and rest time to a
-per-thread list; the islands' effects then commit in any order to one result: the wake bits are a
-union, and the split candidate is the sleepiest island, a tie going to the lesser island id
-(upstream's serial loop kept the first in query order). A body whose `SolverBodyIndex` names no
-live `SolverBodies` slot panics ("every indexed awake body has a live SolverBodies slot"), where
-upstream skipped it unseen, its timer and its island's wake vote with it: an index is inserted after
-its slot is pushed and removed with it.
+The rest test stays in upstream's serial loop: each body updates its timer and immediately
+commits its island's awake vote and split-candidate comparison. The retired pass used
+`par_for_each_mut(MIN_PAR_ITER_ENTITIES)` (`4778f6ce^`, `sleeping.rs:268-269`): above 4,096 awake
+bodies it dispatched and upstream's loop does not. The recorded peak near 160 bodies was serial
+in both (MEASURED). Whether dispatch pays above that floor is to be measured on the hosted
+two-core allocation (GitHub issue 367).
+The loop's `SolverBodies` miss
+uses upstream's skip. No parallel output buffer, dispatch policy or extra refusal remains.
 
-Kept as a hook: the test sits inside an upstream system. 143 fork lines (MEASURED: 137 in the
-system's file, the loop body re-indented under the parallel pass, and 6 in the re-export).
+Kept as a hook: the test sits inside an upstream system. 84 fork lines (MEASURED).
 
-Guards: in `src/tests/avian_island_sleep.rs`, the rest tests, all green. Without the game's law
-installed, `rest_depends_on_energy_per_mass_and_spin_axis` and
-`a_supported_bar_rests_through_periodic_one_tick_roll_pulses` fail; with the energy test alone,
-`the_original_velocity_test_still_allows_rest` and
-`a_long_bar_see_sawing_below_the_angular_limit_still_rests` fail (MEASURED). On the parallel pass,
-`rest_on_the_compute_pool_commits_every_body` (4,097 bodies, run alone in a child process on a
-compute pool of four threads, whatever pool its parent process holds) is red with a body's commit
-dropped and with its timer held at zero (MEASURED).
+Guards: in `src/tests/avian_island_sleep.rs`, the rest-law tests. The dispatch-only compute-pool
+witness is removed with the parallel implementation; the energy and velocity-law assertions stay.
 
 ## Compliant contact (`src/dynamics/solver/contact/normal_part.rs`): hook
 
@@ -662,25 +649,15 @@ trips Avian's `push_manifold` assertion, MEASURED); a landing judged at the slow
 (judged at the faster one it fails, MEASURED); and a recycled pair regenerated after reduction (the
 sink above).
 
-## Solver contact visits (`src/dynamics/solver/plugin.rs`, `src/dynamics/solver/diagnostics.rs`, `src/utils.rs`): kept
+## Solver contact visits: game-side
 
-Subject: the game's server physics, contacts between bodies, game state only.
+`avian_ext::solver_cost` reads public `ConstraintGraph::colors` and each color's constraint count
+at each warm-start, biased-solve, relaxation and restitution boundary. Overflow is serial; other
+colors follow Avian 0.8.0's rule exactly: one worker or fewer than 64 constraints is serial. The
+root dependency retains Avian's default parallel feature. The bounded census reads one length per
+color, never every constraint. Reset runs in `PhysicsStepSystems::First`.
 
-`SolverDiagnostics::{serial_contact_visits, parallel_contact_visits}` count the contact constraints
-each contact pass dispatches (warm start, the biased solve and the relaxation in every substep, and
-restitution once a step), serially or through parallel chunks; zero-restitution no-ops count. Each
-step's diagnostics reset clears them. Overflow constraints are serial; a color counts as its
-`par_for_each` dispatched it, which now returns that decision (the single-worker and short-slice
-serial cases included) without changing its thresholds, iteration or chunking. No counter feeds a
-physics decision. The game's work account reads them (`src/net/ram.rs`, `src/cost.rs`).
-
-Kept: counters inside three upstream systems and the dispatch decision of an upstream helper; no
-extension point sees either. 65 fork lines (MEASURED: 26 in the solver, 32 in the diagnostics, 7 in
-`par_for_each`).
-
-Guard: the game's `src/net/ram/avian_tests.rs`, which reads them through the game's work account.
-`contact_visits_cover_each_pass_and_reset_each_step` asserts visits = constraints × (3 × substeps +
-1) and, run alone in a child process on a compute pool of four threads, the classification: 4 floor
-contacts, every visit serial; 128, every visit parallel. Red with every dispatch counted serial
-(MEASURED: 2,432 serial where 2,432 parallel are due). The overflow star checks overflow's serial
-visits.
+`src/net/ram.rs` forwards these game-owned counts to `src/cost.rs`'s unchanged serialized fields.
+The engine's solver, diagnostics and slice-dispatch helper are pristine: 0 fork lines (MEASURED).
+The dispatch-contract tripwire is in the game module. `src/net/ram/avian_tests.rs` retains the
+pass-count, reset, serial/parallel and overflow assertions.

@@ -107,3 +107,163 @@ are identical before/after this construction-only change. This is one report com
 persistent output-pinning test. The published-crate check, formatting, CI clippy, CCD 4/4, metrics
 4/4 and signed probe passed. Log: `/private/tmp/ccd4-d4-gates.log`. Before merging main the
 source tree is MEASURED 856 added + 231 removed = 1,087 lines; CCD 18+4=22, metrics 60+20=80.
+
+## Release pricing: before and after
+
+All values below are **MEASURED**, three runs per case, local release rehearsal on the same
+Apple M4. Each timing cell is mean / p50 / p99 / worst in microseconds, nearest-rank quantiles.
+Before is `602c0a57`'s retained release record; after is the four decisions before merging main.
+Every after run held `scripts/build-lock`, with admitted one-minute load at or below 4. Both
+binaries were built with `scripts/serial-cargo build --release --locked --bin overmatch-server
+--bin overmatch --features dev_ui,bitprobe`. Every game process used the required unattended,
+hidden, muted environment. A separate unmeasured GPU warmup preceded measured runs.
+
+The driver repeats the earlier recipes and windows: 30 tanks/one real client through 60 s of
+the collapse rehearsal; one tank/one real client on the same open-ground spawn, ticks 257–512.
+Population, link, combat, continuity and schedule checks are retained. Capacity verdicts remain
+observations and are preserved in the raw record; these timings do not attest hosted capacity.
+
+| Run | CCD before | CCD after | Physics total before | Physics total after |
+|---|---|---|---|---|
+| 30-tank-1 | 772.479/899.834/2431.583/6009.792 | 132.064/96.583/895.500/4511.625 | 2201.431/1413.125/12724.083/17568.709 | 2350.740/775.000/12709.542/16891.084 |
+| 30-tank-2 | 462.527/425.500/1984.375/4776.958 | 142.980/103.500/673.584/4133.125 | 2390.315/1077.000/14247.750/17771.709 | 2782.821/766.250/13303.375/17161.542 |
+| 30-tank-3 | 744.608/859.042/2339.708/5444.458 | 119.177/91.667/664.625/4367.125 | 2149.578/1383.125/12088.542/16729.583 | 2303.698/701.625/12374.166/17139.667 |
+| 1-tank-1 | 32.595/50.500/113.166/141.292 | 4.721/6.375/13.667/16.708 | 195.219/198.625/410.292/453.375 | 168.187/160.042/303.458/323.000 |
+| 1-tank-2 | 30.671/49.417/65.916/102.291 | 4.761/6.167/14.166/27.208 | 193.907/197.875/328.250/380.500 | 167.549/162.417/282.833/326.375 |
+| 1-tank-3 | 33.435/50.250/85.208/104.792 | 4.773/6.250/14.500/22.958 | 196.131/197.125/340.459/346.500 | 166.568/160.584/304.042/373.625 |
+
+Same statistic order for per-tick counts. Swept colliders are counted after the per-collider
+gate, before swept bounds; fast bodies are results after the body gate; TOI queries are outer
+collider-pair dispatches, excluding internal Parry retries or subshape recursion. Temporary
+counters are reduced through existing per-body results, as before, and are removed after pricing.
+
+| Run | Phase | Ticks | Admitted load | Fast bodies | Swept colliders | TOI queries |
+|---|---|---:|---:|---|---|---|
+| 30-tank-1 | before | 3807 | 3.935 | 19.610/23.000/66.000/77.000 | 257.309/243.000/2139.000/6036.000 | 153.000/110.000/1951.000/5707.000 |
+| 30-tank-1 | after | 3777 | 3.701 | 22.431/25.000/74.000/83.000 | 120.438/100.000/849.000/5872.000 | 44.335/0.000/711.000/5556.000 |
+| 30-tank-2 | before | 3772 | 3.329 | 12.102/11.000/67.000/84.000 | 189.907/111.000/1999.000/5850.000 | 134.820/51.000/1890.000/5626.000 |
+| 30-tank-2 | after | 3786 | 3.604 | 24.218/28.000/60.000/76.000 | 130.160/109.000/580.000/5884.000 | 48.708/0.000/455.000/5556.000 |
+| 30-tank-3 | before | 3824 | 3.563 | 18.783/22.000/54.000/65.000 | 240.730/232.000/1851.000/6025.000 | 139.586/105.000/1677.000/5692.000 |
+| 30-tank-3 | after | 3782 | 3.912 | 20.364/23.000/53.000/62.000 | 106.109/89.000/586.000/5856.000 | 37.710/0.000/484.000/5556.000 |
+| 1-tank-1 | before | 256 | 3.350 | 0.574/1.000/1.000/1.000 | 6.316/11.000/11.000/11.000 | 2.871/5.000/5.000/5.000 |
+| 1-tank-1 | after | 256 | 3.476 | 0.602/1.000/1.000/1.000 | 2.406/4.000/4.000/4.000 | 0.000/0.000/0.000/0.000 |
+| 1-tank-2 | before | 256 | 3.746 | 0.574/1.000/1.000/1.000 | 6.316/11.000/11.000/11.000 | 2.871/5.000/5.000/5.000 |
+| 1-tank-2 | after | 256 | 3.329 | 0.613/1.000/1.000/1.000 | 2.453/4.000/4.000/4.000 | 0.000/0.000/0.000/0.000 |
+| 1-tank-3 | before | 256 | 3.999 | 0.613/1.000/1.000/1.000 | 6.746/11.000/11.000/11.000 | 3.066/5.000/5.000/5.000 |
+| 1-tank-3 | after | 256 | 3.796 | 0.609/1.000/1.000/1.000 | 2.438/4.000/4.000/4.000 | 0.000/0.000/0.000/0.000 |
+
+Open-ground fast ticks alone (MEASURED; acceleration ticks below the body gate excluded):
+
+| Run | Fast ticks | CCD | Physics total | Distinct (fast bodies, swept colliders, TOI queries) |
+|---|---:|---|---|---|
+| 1-tank-1 | 154 | 7.176/6.917/14.708/16.708 | 178.650/170.250/303.458/323.000 | [(1, 4, 0)] |
+| 1-tank-2 | 157 | 7.109/6.708/16.375/27.208 | 178.978/176.583/282.833/292.125 | [(1, 4, 0)] |
+| 1-tank-3 | 156 | 7.195/6.875/16.750/22.958 | 176.737/168.958/343.167/373.625 | [(1, 4, 0)] |
+
+Raw after samples, summaries, admission waits, capacity verdicts, scripts, recipes, binary digests
+and the exact temporary instrumentation diff are in [swept-ccd-pricing-after.json.gz](swept-ccd-pricing-after.json.gz).
+The [before record](swept-ccd-pricing.json.gz) is unchanged. Full after runner artifacts remain
+at `/private/tmp/ccd4-pricing`; capture log: `/private/tmp/ccd4-pricing-run.log`. No conclusion
+is drawn from a single run, and no observed timing or count becomes a test obligation.
+
+## Merged-tree source census
+
+Merged main `f279a1a57c58a7e56c9900bdff09bceb1db0f7f5` into this bay after pricing. The two conflicts were the Avian patch
+inventory and upstream index: both retain main's current seams, drafts and retirement records,
+plus this lane's two CCD proposals. Source merged without conflict. Temporary pricing counters
+were restored byte-for-byte to the shipping source before the merge; none ship.
+
+MEASURED again on the merged tree, using `diff --minimal -u` per source file against freshly
+extracted cached published archives, including fork-only source. Full per-file counts and archive
+digests: [swept-ccd-fork-lines.json](swept-ccd-fork-lines.json).
+
+| Crate | Added | Removed | Total |
+|---|---:|---:|---:|
+| avian3d | 704 | 167 | 871 |
+| bevy_pbr | 27 | 20 | 47 |
+| lightyear_netcode | 140 | 19 | 159 |
+| lightyear_avian3d | 0 | 0 | 0 |
+
+MEASURED combined fork total: **1077** lines. Avian includes **78** fork-only
+lines; CCD is **18+4=22**, metrics **43+18=61**, matching merged main for metrics.
+The index has **19** current draft rows, **13** targeting Avian. CCD proposals account for
+**7** non-solid query/skip lines and **15** eligibility/lazy-shape lines; the thickness proposal
+has no shipping lines. All other per-file counts were remeasured and are in the linked census.
+
+Across all three repetitions per case, MEASURED CCD means fell from 462.527–772.479 to
+119.177–142.980 us in the rehearsal, and from 30.671–33.435 to 4.721–4.773 us in open driving.
+Rehearsal physics means were 2,149.578–2,390.315 before and 2,303.698–2,782.821 us after;
+there is no consistent reduction in the total. Populations match but resulting contacts and
+fast-body counts differ; the table is a repeated workload observation, not a paired deterministic
+simulation or hosted two-core forecast. Every open-ground fast tick after the change had
+1 fast body, 4 swept colliders and 0 TOI pair queries, versus 1/11/5 before.
+
+## Track scorecard
+
+MEASURED: one full scorecard run on the merged tree. All law lines passed. The comparison
+is with the pre-existing local card saved before this run; it embeds no source revision, so
+these are observations across the available snapshots, not an isolated A/B attribution to CCD.
+The complete before/after cards are in [swept-ccd-scorecard.json.gz](swept-ccd-scorecard.json.gz).
+All rows of the selected observation families are shown below; moved outputs are not test gates.
+
+| Family | Case | Quantity | Before | After |
+|---|---|---|---:|---:|
+| turning | wide, short run-up | radius_m | 101.004 | 101.004 |
+| turning | wide, short run-up | speed_m_s | 4.92772 | 4.92772 |
+| turning | tight, short run-up | radius_m | 35.6274 | 35.6274 |
+| turning | tight, short run-up | speed_m_s | 4.90631 | 4.90631 |
+| turning | wide, long run-up | radius_m | 212.478 | 212.478 |
+| turning | wide, long run-up | speed_m_s | 9.95398 | 9.95398 |
+| turning | tight, long run-up | radius_m | 75.827 | 75.827 |
+| turning | tight, long run-up | speed_m_s | 9.25634 | 9.25634 |
+| turning | neutral pivot | radius_m | 0.00012752 | 0.00012752 |
+| turning | neutral pivot | speed_m_s | 1.63507e-05 | 1.63507e-05 |
+| acceleration | concrete | top_speed_m_s | 10.6489 | 10.6489 |
+| acceleration | dirt | top_speed_m_s | 10.5474 | 10.5474 |
+| acceleration | gravel | top_speed_m_s | 10.5992 | 10.5992 |
+| acceleration | mud | top_speed_m_s | 4.35821 | 4.35821 |
+| acceleration | sand | top_speed_m_s | 4.84958 | 4.84958 |
+| acceleration | sandy loam | top_speed_m_s | 10.6328 | 10.6328 |
+| climbing | step 0.2 m | max_rise_m | 0.210349 | 0.210349 |
+| climbing | step 0.2 m | time_s | 4.5625 | 4.5625 |
+| climbing | step 0.4 m | max_rise_m | 0.448245 | 0.447625 |
+| climbing | step 0.4 m | time_s | 5.09375 | 5.07812 |
+| climbing | step 0.6 m | max_rise_m | 0.616829 | 0.616829 |
+| climbing | step 0.6 m | time_s | 6.51562 | 6.51562 |
+| climbing | step 0.8 m | max_rise_m | 0.00444801 | 0.00394517 |
+| climbing | step 0.8 m | time_s | — | — |
+| climbing | step 1 m | max_rise_m | 0.00394517 | 0.00394517 |
+| climbing | step 1 m | time_s | — | — |
+| climbing | step 1.2 m | max_rise_m | 0.00394517 | 0.00394517 |
+| climbing | step 1.2 m | time_s | — | — |
+| walls | full width, 10 m | max_rise_m | 0.00394517 | 0.00394517 |
+| walls | Left belt lane only, x -1.957 .. -1.132 m | max_rise_m | 0.117589 | 0.0904063 |
+| walls | Right belt lane only, x 1.132 .. 1.957 m | max_rise_m | 0.0990936 | 0.0929793 |
+| trenches | 0.9012500047683716 | max_sink_m | 0.0575465 | 0.0575465 |
+| trenches | 0.9012500047683716 | time_s | 5.32812 | 5.32812 |
+| trenches | 1.8025000095367432 | max_sink_m | 0.112054 | 0.112054 |
+| trenches | 1.8025000095367432 | time_s | 5.5 | 5.5 |
+| trenches | 2.7037501335144043 | max_sink_m | 0.180908 | 0.180908 |
+| trenches | 2.7037501335144043 | time_s | 5.67188 | 5.67188 |
+| trenches | 4.506249904632568 | max_sink_m | 0.45413 | 0.447837 |
+| trenches | 4.506249904632568 | time_s | — | — |
+
+Card law verdicts (MEASURED): slope=True, ride=True, rubble=True.
+
+## Final verification and remaining work
+
+MEASURED on the merged tree: formatting passed; CI clippy passed with the required feature set
+and warnings denied; all 109 `tests::avian` tests passed, all 16 ordinary track-scorecard tests
+passed (8 demand-run observations ignored), the signed probe passed, and the full track scorecard
+ran once and passed (107.98 s). Its three law lines all passed. The merged signed-probe outputs
+are identical to the pre-merge outputs above. Log: `/private/tmp/ccd4-merged-gates.log`.
+
+Both published-crate patches dry-apply from their final Markdown text, and both offline library
+checks passed; per-collider was rechecked with lazy construction included. Sensor observer
+thickness remains compile-only and unshipped.
+
+All six lenses were applied locally to the changed items; no unresolved lane finding or backlog
+row names one. Independent landing review belongs to the orchestrator. No agent was spawned, no
+web access, external filing, push, reset, stash or target deletion was used. No lane work remains.
+The release prices precede the main merge; the final scorecard and source census use the merged
+tree. Local capacity was not established by the 30-tank runs.

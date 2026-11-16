@@ -1,0 +1,13 @@
+// From the bay, after scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch:
+// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/terrain-shadow/hull-mark-lit.ron target/debug/overmatch --offline
+// Hull marks (the visual layer of the game's damage model) outside the hill's shadow: the scene of
+// hull-mark-shadowed.ron under a 6° sun, which clears that hill at the far pad (DERIVED from the
+// height grid), so the struck face and its marks take the low sun directly.
+(
+    frames: (
+        out: "target/capture/terrain-shadow/hull-mark-lit.png",
+        at: [18.0, 21.0, 24.0],
+        size: (1280, 720), scale_factor: 1.0, ui: false, gizmos: false, step_s: 0.015625,
+    ),
+    scene: (sun_elevation_deg: 6.0, demo: HullMarks),
+)

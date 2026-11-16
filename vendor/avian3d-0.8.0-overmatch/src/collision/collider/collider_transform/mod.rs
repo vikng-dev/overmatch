@@ -2,7 +2,8 @@
 
 mod plugin;
 
-pub use plugin::ColliderTransformPlugin;
+// OVERMATCH PATCH: expose the system for application-owned scheduling.
+pub use plugin::{ColliderTransformPlugin, update_child_collider_position};
 
 use crate::prelude::*;
 use bevy::prelude::*;

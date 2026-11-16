@@ -230,7 +230,7 @@ pub(crate) fn template_plugin(app: &mut App) {
 pub(crate) const LINK_NODE: &str = "Link";
 const LINK_BOX_NODE: &str = "Link_Box";
 /// The pin markers, parented under `Link`: the only meaningful datums it carries.
-const PIN_START_NODE: &str = "Pin_Start";
+pub(crate) const PIN_START_NODE: &str = "Pin_Start";
 const PIN_END_NODE: &str = "Pin_End";
 /// The material the blend assigns to the shoe primitive. Named here only so the refusal below can
 /// say what is missing — nothing reads it, because the material arrives as an asset handle on the
@@ -719,6 +719,48 @@ fn hide_link_template(mut commands: Commands, fresh: Query<(Entity, &Name), Adde
     }
 }
 
+/// The shoe template's node: the nearest [`LINK_NODE`] ancestor of its start pin marker. Bevy also
+/// names the node's mesh primitive `Link`, so a name match alone can land on that childless
+/// primitive, depending on spawn order; pin ancestry cannot, and it keeps the read inside one
+/// instance when several tanks are live. The node's subtree is the track's: the belt draws it,
+/// with the material [`bind_link_template`] reads off its primitive.
+pub(crate) fn template_node(
+    pin_start: Entity,
+    parents: &Query<&ChildOf>,
+    names: &Query<&Name>,
+) -> Entity {
+    parents
+        .iter_ancestors(pin_start)
+        .find(|&ancestor| {
+            names
+                .get(ancestor)
+                .is_ok_and(|name| name.as_str() == LINK_NODE)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "track links: the pin markers have no `{LINK_NODE}` ancestor; parent \
+                 `{PIN_START_NODE}` and `{PIN_END_NODE}` under the shoe template node and re-export"
+            )
+        })
+}
+
+/// The shoe template's node among `nodes` ([`template_node`]); `None` when none of them is its
+/// start pin.
+pub(crate) fn find_template(
+    nodes: impl IntoIterator<Item = Entity>,
+    parents: &Query<&ChildOf>,
+    names: &Query<&Name>,
+) -> Option<Entity> {
+    nodes
+        .into_iter()
+        .find(|&node| {
+            names
+                .get(node)
+                .is_ok_and(|name| name.as_str() == PIN_START_NODE)
+        })
+        .map(|pin| template_node(pin, parents, names))
+}
+
 /// Bind once, latching on [`LinkTemplate`]. Retry while scene or mesh assets load; once a pin
 /// exists, the startup template gate guarantees a complete instance, so missing pieces refuse.
 /// Scan globally: `Link` is a scene-root sibling of the hull; multiple instances share the resource.
@@ -730,6 +772,7 @@ fn hide_link_template(mut commands: Commands, fresh: Query<(Entity, &Name), Adde
 fn bind_link_template(
     mut commands: Commands,
     named: Query<(Entity, &Name)>,
+    names: Query<&Name>,
     parents: Query<&ChildOf>,
     transforms: Query<&Transform>,
     children: Query<&Children>,
@@ -760,27 +803,7 @@ fn bind_link_template(
              the other; re-export the shoe template with both pin markers"
         ),
     };
-    // Resolve the pins' nearest `Link` ancestor: bevy also names its mesh-primitive child `Link`.
-    // A global name match can land on that childless mesh and starve binding, depending on spawn
-    // order. Pin ancestry also keeps this read inside one instance when several tanks are live.
-    let mut link = None;
-    let mut current = pin_start;
-    while let Ok(child_of) = parents.get(current) {
-        current = child_of.parent();
-        if named
-            .get(current)
-            .is_ok_and(|(_, n)| n.as_str() == LINK_NODE)
-        {
-            link = Some(current);
-            break;
-        }
-    }
-    let link_entity = link.unwrap_or_else(|| {
-        panic!(
-            "track links: the pin markers have no `{LINK_NODE}` ancestor; parent \
-             `{PIN_START_NODE}` and `{PIN_END_NODE}` under the shoe template node and re-export"
-        )
-    });
+    let link_entity = template_node(pin_start, &parents, &names);
     let marker = |entity| {
         transforms
             .get(entity)
@@ -801,20 +824,15 @@ fn bind_link_template(
         );
     }
 
-    // Search direct primitive children, then the node itself. A descendant search could bind
-    // `Link_Box`'s primitive, one level deeper. See the name ambiguity above.
+    // Bevy's glTF loader spawns each primitive as a child of its node (bevy_gltf 0.20.1
+    // `loader/mod.rs:1631`, `:1680`), so the shoe is a direct primitive child. A descendant search
+    // could bind `Link_Box`'s primitive, one level deeper. See the name ambiguity above.
     let (shoe_entity, source) = children
         .get(link_entity)
         .ok()
         .into_iter()
         .flatten()
         .find_map(|&child| meshes_of.get(child).ok().map(|mesh| (child, mesh)))
-        .or_else(|| {
-            meshes_of
-                .get(link_entity)
-                .ok()
-                .map(|mesh| (link_entity, mesh))
-        })
         .unwrap_or_else(|| {
             panic!(
                 "track links: the `{LINK_NODE}` template node carries no mesh primitive; \

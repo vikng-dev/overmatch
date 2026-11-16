@@ -1,8 +1,9 @@
 //! A capture plan's `scene.demo: TrackPrints(…)` (`dev_capture::plan::Demo`), a dev capture of the
-//! track prints (cosmetic terrain marks) on the offline route. At [`PLACE_AT_S`] the player's tank
-//! is set down at world XZ `(x, z)`, its travel heading `heading_deg` from `+Z` toward `+X`; once
-//! settled it drives straight, stops, pivots on the spot at `steer`, stops, and drives out of the
-//! pivot. The camera is then held low, about 10 m off, first on the straight drive's track and then
+//! track prints (cosmetic terrain marks) on the offline route. From the plan's app second `at`, once
+//! it has spawned, the player's tank is set down at world XZ `(x, z)`, its travel heading
+//! `heading_deg` from `+Z` toward `+X`; every later phase runs from that set-down. Once settled it
+//! drives straight, stops, pivots on the spot at `steer`, stops, and drives out of the pivot. The
+//! camera is then held low, about 10 m off, first on the straight drive's track and then
 //! on the pivot, each at the three relief levels in turn ([`crate::settings::TrackPrintRelief`],
 //! forced through [`super::ReliefOverride`]) for `OVERMATCH_CAPTURE` stills. Every phase boundary is
 //! logged with its app time.
@@ -24,10 +25,10 @@
 //!         ui: false,
 //!         gizmos: false,
 //!     ),
-//!     scene: (demo: Some(TrackPrints(x: 599.9, z: -599.9, heading_deg: 195.0))),
+//!     scene: (demo: Some(TrackPrints(x: 599.9, z: -599.9, heading_deg: 195.0, at: 10.0))),
 //! )
-//! TrackPrints(x: 302.5, z: 542.7, heading_deg: 315.0, steer: -1.0)   (sand)
-//! TrackPrints(x: 70.0, z: -20.0, heading_deg: 90.0)                  (the base pack)
+//! TrackPrints(x: 302.5, z: 542.7, heading_deg: 315.0, at: 10.0, steer: -1.0)   (sand)
+//! TrackPrints(x: 70.0, z: -20.0, heading_deg: 90.0, at: 10.0)                  (the base pack)
 //! ```
 //!
 //! Mounted only by the offline composition (`run_offline`): nothing it writes leaves the process.
@@ -38,16 +39,14 @@ use bevy::prelude::*;
 
 use crate::camera::{CameraCaptive, CaptiveCameraPlaced};
 use crate::command::TankCommand;
-use crate::dev_capture::plan::{self, DemoHold};
+use crate::dev_capture::plan::{self, DemoHold, PlanError};
 use crate::settings::{Settings, TrackPrintRelief};
 use crate::tank::{Controlled, Tank};
 use crate::view::PlayerView;
 
 use super::ReliefOverride;
 
-/// When the tank is set down, app seconds: the duel has spawned by then (TUNED).
-const PLACE_AT_S: f32 = 10.0;
-/// The phases after it, s each (TUNED). A stop is long enough for the hull to coast to rest,
+/// The phases after the set-down, s each (TUNED). A stop is long enough for the hull to coast to rest,
 /// which is when the box takes a pivot rather than a turn.
 const SETTLE_S: f32 = 3.0;
 const DRIVE_S: f32 = 6.0;
@@ -85,8 +84,9 @@ enum Phase {
 }
 
 impl Phase {
+    /// The scripted phase `t` seconds after the set-down.
     fn at(t: f32) -> Self {
-        let mut end = PLACE_AT_S;
+        let mut end = 0.0;
         for (phase, length) in [
             (Phase::Wait, 0.0),
             (Phase::Settle, SETTLE_S),
@@ -130,7 +130,8 @@ impl Phase {
         }
     }
 
-    /// The phase shown at app second `t`: the scripted one, with `hold` standing in for every view.
+    /// The phase shown `t` seconds after the set-down: the scripted one, with `hold` standing
+    /// in for every view.
     fn shown(t: f32, hold: Option<Phase>) -> Self {
         match (Phase::at(t), hold) {
             (Phase::DriveView(_) | Phase::PivotView(_), Some(held)) => held,
@@ -148,9 +149,12 @@ impl Phase {
 #[derive(Resource)]
 struct Demo {
     at: Vec2,
+    /// The plan's `at`: the app second from which the tank is set down, once it has spawned.
+    set_down_from: f32,
+    /// The app second it was set down, which every later phase runs from; `None` until then.
+    set_down_at: Option<f32>,
     /// Travel heading, rad from `+Z` toward `+X`.
     heading: f32,
-    /// The pivot's steer.
     pivot_steer: f32,
     /// The view held for good in place of the level cycle, at the player's own relief setting.
     hold: Option<Phase>,
@@ -167,6 +171,7 @@ pub(crate) fn offline_plugin(app: &mut App) {
         x,
         z,
         heading_deg: heading,
+        at: set_down_from,
         steer: pivot_steer,
         hold,
     }) = crate::dev_capture::plan().and_then(|plan| plan.scene.demo)
@@ -178,11 +183,13 @@ pub(crate) fn offline_plugin(app: &mut App) {
         DemoHold::Pivot => Phase::PivotView(0),
     });
     info!(
-        "track prints demo: armed at ({x}, {z}) heading {heading}°, set down at {PLACE_AT_S} s, \
+        "track prints demo: armed at ({x}, {z}) heading {heading}°, set down from {set_down_from} s, \
          hold {hold:?}"
     );
     app.insert_resource(Demo {
         at: Vec2::new(x, z),
+        set_down_from,
+        set_down_at: None,
         heading: heading.to_radians(),
         pivot_steer,
         hold,
@@ -192,6 +199,7 @@ pub(crate) fn offline_plugin(app: &mut App) {
         exit_from: None,
         exit_to: None,
     })
+    .add_systems(PostStartup, admit_spot)
     .add_systems(Update, (place, follow, report_hold).chain())
     .add_systems(
         RunFixedMainLoop,
@@ -202,11 +210,35 @@ pub(crate) fn offline_plugin(app: &mut App) {
     .add_systems(PostUpdate, hold_camera.in_set(CaptiveCameraPlaced));
 }
 
+/// Refuse a spot off the loaded terrain before play: [`crate::terrain_grid::spawn_pos`] requires
+/// its point inside the grid's span. The grid is decoded at `Startup`.
+fn admit_spot(demo: Res<Demo>, grid: Option<Res<crate::terrain_grid::HeightGrid>>) {
+    if let Err(error) = spot_on_terrain(demo.at, grid.as_deref()) {
+        plan::refuse(error);
+    }
+}
+
+fn spot_on_terrain(
+    at: Vec2,
+    grid: Option<&crate::terrain_grid::HeightGrid>,
+) -> Result<(), PlanError> {
+    match grid {
+        Some(grid) if !grid.contains_xz(at.x, at.y) => Err(PlanError::DemoOffTerrain {
+            x: at.x,
+            z: at.y,
+            half_extent: grid.half_extent(),
+        }),
+        // A flat world has no grid: `spawn_pos` stands the tank on its slab plane at any point.
+        _ => Ok(()),
+    }
+}
+
 /// Set the player's tank down on the demo's spot, once.
 fn place(
     time: Res<Time>,
     mut demo: ResMut<Demo>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
+    source: crate::tank::TankSimSource,
     mut tank: Query<
         (
             &mut Position,
@@ -217,18 +249,30 @@ fn place(
         (With<Tank>, With<Controlled>),
     >,
 ) {
-    if demo.phase != Phase::Wait || time.elapsed_secs() < PLACE_AT_S {
+    if demo.set_down_at.is_some() || time.elapsed_secs() < demo.set_down_from {
         return;
     }
-    let Ok((mut position, mut rotation, mut linear, mut angular)) = tank.single_mut() else {
-        warn_once!("track prints demo: no player tank at {PLACE_AT_S} s");
-        return;
+    let (mut position, mut rotation, mut linear, mut angular) = match tank.single_mut() {
+        Ok(tank) => tank,
+        // The player's tank has not spawned yet: the demo waits for it.
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => {
+            warn_once!(
+                "track prints demo: no player tank at {} s",
+                demo.set_down_from
+            );
+            return;
+        }
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("track prints demo: a composition controls one player tank")
+        }
     };
     // The hull faces its own −Z: a turn of `heading + π` about Y points it along the heading.
-    position.0 = crate::terrain_grid::spawn_pos(grid.as_deref(), demo.at);
     rotation.0 = Quat::from_rotation_y(demo.heading + std::f32::consts::PI);
+    position.0 =
+        crate::terrain_grid::spawn_pos(grid.as_deref(), demo.at, source.get().stance(rotation.0));
     linear.0 = Vec3::ZERO;
     angular.0 = Vec3::ZERO;
+    demo.set_down_at = Some(time.elapsed_secs());
     demo.phase = Phase::Settle;
     info!(
         "track prints demo: set down at {:.1} at t={:.2}s",
@@ -247,10 +291,10 @@ fn follow(
     prints: Option<Res<super::TrackPrints>>,
     mut commands: Commands,
 ) {
-    if demo.phase == Phase::Wait {
+    let Some(set_down) = demo.set_down_at else {
         return;
-    }
-    let now = Phase::shown(time.elapsed_secs(), demo.hold);
+    };
+    let now = Phase::shown(time.elapsed_secs() - set_down, demo.hold);
     if now == demo.phase {
         return;
     }
@@ -377,6 +421,75 @@ fn hold_camera(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fixture data: a flat two-sample grid over the fixture extent.
+    fn fixture_grid() -> crate::terrain_grid::HeightGrid {
+        crate::terrain_grid::HeightGrid::new(
+            vec![0.0; 4].into(),
+            2,
+            crate::terrain_grid::FIXTURE_EXTENT,
+        )
+    }
+
+    /// A plan's spot off the loaded terrain is refused before play, naming the field, rather than
+    /// reaching `spawn_pos`'s span assertion at the set-down. Mutant: dropping the check passes the
+    /// off-span spot.
+    #[test]
+    fn a_spot_off_the_terrain_is_refused_naming_the_field() {
+        let grid = fixture_grid();
+        let edge = grid.half_extent();
+        assert!(spot_on_terrain(Vec2::new(edge, -edge), Some(&grid)).is_ok());
+        let error = spot_on_terrain(Vec2::new(edge + 1.0, 0.0), Some(&grid))
+            .expect_err("a spot past the span is refused");
+        assert!(error.to_string().starts_with("scene.demo:"), "{error}");
+    }
+
+    /// The production `offline_plugin` refuses an off-terrain spot at startup, exit status 2 and
+    /// the field named, before the set-down can reach `spawn_pos`. The child mounts only the
+    /// plugin over a fixture grid, so a missing startup gate lets its first update reach `place`
+    /// and fail any other way. Mutant: dropping the `PostStartup` registration.
+    #[test]
+    fn an_off_terrain_spot_refuses_startup_before_the_set_down() {
+        const CHILD: &str = "OVERMATCH_TEST_DEMO_SPOT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut app = App::new();
+            app.insert_resource(fixture_grid());
+            offline_plugin(&mut app);
+            app.update();
+            panic!("the demo's startup gate let an off-terrain spot reach play");
+        }
+        let plan_path = std::env::temp_dir().join(format!(
+            "overmatch-demo-spot-{}.plan.ron",
+            std::process::id()
+        ));
+        std::fs::write(
+            &plan_path,
+            format!(
+                "(scene: (demo: TrackPrints(x: {}, z: 0.0, heading_deg: 0.0, at: 0.0)))",
+                fixture_grid().half_extent() + 1.0
+            ),
+        )
+        .expect("the temp directory takes the fixture plan");
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("the test binary has a path"),
+        )
+        .args([
+            "--exact",
+            "track_prints::demo::tests::an_off_terrain_spot_refuses_startup_before_the_set_down",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env(plan::VARIABLE, &plan_path)
+        .output()
+        .expect("the test binary runs one of its tests");
+        std::fs::remove_file(&plan_path).expect("the fixture plan is removed");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "startup refusal: {error}");
+        assert!(
+            error.contains("scene.demo:") && error.contains("choose x and z inside it"),
+            "{error}"
+        );
+    }
 
     /// The frame-cost runner measures the player's relief setting on a scene that must not change
     /// under it: with a view held, every second after the run shows that one view and no level is
