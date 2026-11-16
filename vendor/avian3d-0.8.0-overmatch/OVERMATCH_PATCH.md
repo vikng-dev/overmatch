@@ -465,8 +465,9 @@ installed, `rest_depends_on_energy_per_mass_and_spin_axis` and
 `a_supported_bar_rests_through_periodic_one_tick_roll_pulses` fail; with the energy test alone,
 `the_original_velocity_test_still_allows_rest` and
 `a_long_bar_see_sawing_below_the_angular_limit_still_rests` fail (MEASURED). On the parallel pass,
-`rest_on_the_compute_pool_commits_every_body` (4,097 bodies on a pool of more than one thread) is
-red with a body's commit dropped and with its timer held at zero (MEASURED).
+`rest_on_the_compute_pool_commits_every_body` (4,097 bodies, run alone in a child process on a
+compute pool of four threads, whatever pool its parent process holds) is red with a body's commit
+dropped and with its timer held at zero (MEASURED).
 
 ## Compliant contact (`src/dynamics/solver/contact/normal_part.rs`): hook
 
@@ -564,6 +565,7 @@ extension point sees either. 65 fork lines (MEASURED: 26 in the solver, 32 in th
 
 Guard: the game's `src/net/ram/avian_tests.rs`, which reads them through the game's work account.
 `contact_visits_cover_each_pass_and_reset_each_step` asserts visits = constraints × (3 × substeps +
-1) and, on a compute pool of more than one thread, the classification: 4 floor contacts, every visit
-serial; 128, every visit parallel. Red with every dispatch counted serial (MEASURED: 2,432 serial
-where 2,432 parallel are due). The overflow star checks overflow's serial visits.
+1) and, run alone in a child process on a compute pool of four threads, the classification: 4 floor
+contacts, every visit serial; 128, every visit parallel. Red with every dispatch counted serial
+(MEASURED: 2,432 serial where 2,432 parallel are due). The overflow star checks overflow's serial
+visits.

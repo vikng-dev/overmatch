@@ -710,20 +710,20 @@ fn the_original_velocity_test_still_allows_rest() {
 /// From Avian's floor for its per-body loops (`utils::MIN_PAR_ITER_ENTITIES`, 4,096 awake bodies,
 /// crate-private) the rest test runs per body on the compute pool, and every body's island still
 /// commits: the still bodies' islands sleep and a drifting body's stays awake. Fixture: 4,096 still
-/// cubes apart in zero gravity and one drifting at 1 m/s, over a compute pool of more than one
-/// thread. Fails if the parallel pass drops a body's commit (the drifting body's island sleeps) or
-/// its timer (no island sleeps).
+/// cubes apart in zero gravity and one drifting at 1 m/s, over the witness's own compute pool of
+/// four threads. Fails if the parallel pass drops a body's commit (the drifting body's island
+/// sleeps) or its timer (no island sleeps).
 #[test]
 fn rest_on_the_compute_pool_commits_every_body() {
-    // Fixture: a pool of four threads, unless another test of this process built the global pool
-    // first; Bevy's defaults give more than one compute thread from four cores.
-    let pool = bevy::tasks::ComputeTaskPool::get_or_init(|| {
-        bevy::tasks::TaskPoolBuilder::new().num_threads(4).build()
-    });
-    assert!(
-        pool.thread_num() > 1,
-        "fixture: the parallel rest pass needs a compute pool of more than one thread"
+    crate::headless_test::on_own_compute_pool(
+        module_path!(),
+        "rest_on_the_compute_pool_commits_every_body",
+        4,
+        rest_commits_every_body,
     );
+}
+
+fn rest_commits_every_body() {
     let mut app = physics_app();
     app.insert_resource(Gravity::ZERO);
     // Fixture: a 64 × 64 grid of cubes 2 m apart, none touching.

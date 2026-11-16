@@ -189,6 +189,51 @@ pub(crate) fn finish_plugins(app: &mut App) {
     app.cleanup();
 }
 
+/// Runs `witness` on a global compute pool of `threads` threads. The pool is built once per
+/// process, by whichever test reaches it first and at the machine's default size (one compute
+/// thread on two cores), so the test re-runs itself alone in a child process of this test binary,
+/// which builds the pool before anything else. `module` is the caller's `module_path!()` and `test`
+/// its function's name.
+pub(crate) fn on_own_compute_pool(
+    module: &str,
+    test: &str,
+    threads: usize,
+    witness: impl FnOnce(),
+) {
+    const CHILD: &str = "OVERMATCH_TEST_OWN_COMPUTE_POOL";
+    let (_, module) = module
+        .split_once("::")
+        .expect("a test module sits below the crate root");
+    let path = format!("{module}::{test}");
+    if std::env::var_os(CHILD).is_some_and(|child| child == path.as_str()) {
+        let pool = bevy::tasks::ComputeTaskPool::get_or_init(|| {
+            bevy::tasks::TaskPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+        });
+        assert_eq!(
+            pool.thread_num(),
+            threads,
+            "the child process built its compute pool before {path}"
+        );
+        witness();
+        return;
+    }
+    let output =
+        std::process::Command::new(std::env::current_exe().expect("the test binary has a path"))
+            .args(["--exact", &path])
+            .env(CHILD, &path)
+            .output()
+            .expect("the test binary runs one of its tests");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // An unknown name runs no test and exits 0: the child must report this one passed.
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{path} on a compute pool of {threads} threads:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Reports each boot gate separately so a timeout identifies the unavailable prerequisite.
 fn boot_diagnosis(app: &App, elapsed: Duration) -> String {
     let world = app.world();

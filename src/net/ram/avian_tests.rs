@@ -35,18 +35,18 @@ fn snapshot(app: &mut App) -> crate::cost::AvianStep {
 /// pool of more than one thread the fork's solver dispatches a color through parallel chunks from
 /// 64 constraints (`par_for_each(.., 64, ..)` in its `dynamics/solver/plugin.rs`), so a small
 /// batch's visits are all serial and a large one's all parallel; a dispatch counted in the other
-/// column breaks the classification.
+/// column breaks the classification. Fixture: a pool of four threads, the witness's own.
 #[test]
 fn contact_visits_cover_each_pass_and_reset_each_step() {
-    // Fixture: a pool of four threads, unless another test of this process built the global pool
-    // first; Bevy's defaults give more than one compute thread from four cores.
-    let pool = bevy::tasks::ComputeTaskPool::get_or_init(|| {
-        bevy::tasks::TaskPoolBuilder::new().num_threads(4).build()
-    });
-    assert!(
-        pool.thread_num() > 1,
-        "fixture: classifying the dispatch needs a compute pool of more than one thread"
+    crate::headless_test::on_own_compute_pool(
+        module_path!(),
+        "contact_visits_cover_each_pass_and_reset_each_step",
+        4,
+        contact_visits_by_dispatch,
     );
+}
+
+fn contact_visits_by_dispatch() {
     // Fixture sizes: one batch below the parallel floor, one above it.
     for (count, parallel) in [(4, false), (128, true)] {
         let mut app = physics_app();
