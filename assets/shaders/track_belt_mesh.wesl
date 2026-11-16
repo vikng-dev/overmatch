@@ -37,21 +37,7 @@ fn vertex(vertex_in: Vertex, @location(15) link: u32) -> VertexOutput {
     out.uv_b = vertex.uv_b;
 }
 
-@if(PREPASS_PIPELINE) {
-@if(NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
-@if(VERTEX_NORMALS) {
-    out.world_normal = mesh_functions::mesh_normal_local_to_world(link_direction(belt, link, vertex.normal), vertex_in.instance_index);
-}
-@if(VERTEX_TANGENTS) {
-    out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
-        world_from_local,
-        vec4<f32>(link_direction(belt, link, vertex.tangent.xyz), vertex.tangent.w),
-        vertex_in.instance_index
-    );
-}
-}
-}
-@else {
+@if(!PREPASS_PIPELINE || NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
 @if(VERTEX_NORMALS) {
     out.world_normal = mesh_functions::mesh_normal_local_to_world(link_direction(belt, link, vertex.normal), vertex_in.instance_index);
 }

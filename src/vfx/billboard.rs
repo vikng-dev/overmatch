@@ -78,11 +78,10 @@ pub(crate) struct VfxParams {
     pub frame: Vec4,
     /// x: erosion threshold, y: erosion sharpness, z: life fraction (LUT row), w: overall alpha.
     pub fade: Vec4,
-    /// x: emissive boost at LUT heat 1.0, y: BLEND CONTRACT flag the shader reads — `1.0` = additive
-    /// glow (`AlphaMode::Add`), `0.0` = alpha-over mass (`AlphaMode::Blend`). Both alpha modes share
-    /// the premultiplied blend state, so the shader must premultiply the additive path itself; this
-    /// lane tells it which (see `vfx_billboard.wesl`). z: soft-particle fade depth in metres
-    /// ([`soft_particle_depth`]), `0.0` = hard-edged. w: reserved.
+    /// x: emissive boost at LUT heat 1.0, y: blend flag (`vfx_billboard.wesl`'s fragment output),
+    /// `1.0` = additive glow (`AlphaMode::Add`), `0.0` = alpha-over mass (`AlphaMode::Blend`).
+    /// z: soft-particle fade depth in metres ([`soft_particle_depth`]), `0.0` = hard-edged.
+    /// w: reserved.
     pub glow: Vec4,
 }
 
