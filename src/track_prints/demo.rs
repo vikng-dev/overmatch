@@ -423,21 +423,73 @@ fn hold_camera(
 mod tests {
     use super::*;
 
+    /// Fixture data: a flat two-sample grid over the fixture extent.
+    fn fixture_grid() -> crate::terrain_grid::HeightGrid {
+        crate::terrain_grid::HeightGrid::new(
+            vec![0.0; 4].into(),
+            2,
+            crate::terrain_grid::FIXTURE_EXTENT,
+        )
+    }
+
     /// A plan's spot off the loaded terrain is refused before play, naming the field, rather than
     /// reaching `spawn_pos`'s span assertion at the set-down. Mutant: dropping the check passes the
     /// off-span spot.
     #[test]
     fn a_spot_off_the_terrain_is_refused_naming_the_field() {
-        let grid = crate::terrain_grid::HeightGrid::new(
-            vec![0.0; 4].into(),
-            2,
-            crate::terrain_grid::FIXTURE_EXTENT,
-        );
+        let grid = fixture_grid();
         let edge = grid.half_extent();
         assert!(spot_on_terrain(Vec2::new(edge, -edge), Some(&grid)).is_ok());
         let error = spot_on_terrain(Vec2::new(edge + 1.0, 0.0), Some(&grid))
             .expect_err("a spot past the span is refused");
         assert!(error.to_string().starts_with("scene.demo:"), "{error}");
+    }
+
+    /// The production `offline_plugin` refuses an off-terrain spot at startup, exit status 2 and
+    /// the field named, before the set-down can reach `spawn_pos`. The child mounts only the
+    /// plugin over a fixture grid, so a missing startup gate lets its first update reach `place`
+    /// and fail any other way. Mutant: dropping the `PostStartup` registration.
+    #[test]
+    fn an_off_terrain_spot_refuses_startup_before_the_set_down() {
+        const CHILD: &str = "OVERMATCH_TEST_DEMO_SPOT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut app = App::new();
+            app.insert_resource(fixture_grid());
+            offline_plugin(&mut app);
+            app.update();
+            panic!("the demo's startup gate let an off-terrain spot reach play");
+        }
+        let plan_path = std::env::temp_dir().join(format!(
+            "overmatch-demo-spot-{}.plan.ron",
+            std::process::id()
+        ));
+        std::fs::write(
+            &plan_path,
+            format!(
+                "(scene: (demo: TrackPrints(x: {}, z: 0.0, heading_deg: 0.0, at: 0.0)))",
+                fixture_grid().half_extent() + 1.0
+            ),
+        )
+        .expect("the temp directory takes the fixture plan");
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("the test binary has a path"),
+        )
+        .args([
+            "--exact",
+            "track_prints::demo::tests::an_off_terrain_spot_refuses_startup_before_the_set_down",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env(plan::VARIABLE, &plan_path)
+        .output()
+        .expect("the test binary runs one of its tests");
+        std::fs::remove_file(&plan_path).expect("the fixture plan is removed");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "startup refusal: {error}");
+        assert!(
+            error.contains("scene.demo:") && error.contains("choose x and z inside it"),
+            "{error}"
+        );
     }
 
     /// The frame-cost runner measures the player's relief setting on a scene that must not change
