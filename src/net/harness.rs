@@ -90,6 +90,16 @@ pub(crate) struct Script {
     pub(crate) fire_interval: u32,
     /// The server's spawned tank starts here instead of its lane spawn ([`SpawnPose`]).
     pub(crate) spawn_pose: Option<SpawnPose>,
+    /// [`Drive::Arc`]'s ticks at full throttle after the lead. This field, [`Self::arc_steer`] and
+    /// [`Self::straight_ticks`] belong to their courses, not to the grammar: no script sets them.
+    #[serde(skip)]
+    pub(crate) arc_ticks: u32,
+    /// [`Drive::Arc`]'s steer while it drives.
+    #[serde(skip)]
+    pub(crate) arc_steer: f32,
+    /// [`Drive::Straight`]'s ticks at full throttle after the lead.
+    #[serde(skip)]
+    pub(crate) straight_ticks: u32,
 }
 
 impl Default for Script {
@@ -102,6 +112,9 @@ impl Default for Script {
             fire_tick: 300,
             fire_interval: 256,
             spawn_pose: None,
+            arc_ticks: 256,
+            arc_steer: 0.3,
+            straight_ticks: 960,
         }
     }
 }
@@ -318,6 +331,9 @@ pub(crate) struct SimulateInput {
     /// Script length — exit after this many ticks.
     pub(crate) total: u32,
     drive: Drive,
+    /// The drive's ticks at full throttle after [`RUN_LEAD`], and its steer over them.
+    throttle_ticks: u32,
+    steer: f32,
     aim: Aim,
     range: f32,
     fire_tick: u32,
@@ -368,10 +384,18 @@ impl SimulateInput {
     pub(crate) fn new(script: &Script) -> Self {
         info!("harness: {script:?}");
         let course = script.drive == Drive::Straight;
+        let (throttle_ticks, steer) = match script.drive {
+            Drive::Arc => (script.arc_ticks, script.arc_steer),
+            Drive::Straight => (script.straight_ticks, 0.0),
+            Drive::Ram { throttle_ticks } | Drive::Park { throttle_ticks } => (throttle_ticks, 0.0),
+            Drive::Idle | Drive::Fire { .. } => (0, 0.0),
+        };
         Self {
             ticks: 0,
             total: script.ticks.unwrap_or(if course { 1280 } else { 600 }),
             drive: script.drive,
+            throttle_ticks,
+            steer,
             aim: script.aim,
             range: script.range_m,
             fire_tick: script.fire_tick,
@@ -539,19 +563,9 @@ pub(crate) fn buffer_input(
 impl SimulateInput {
     /// Tick `t`'s scripted drive, aim and triggers into `command`.
     fn write(&self, t: u32, command: &mut TankCommand) {
-        // Throttle and steer over the drive's window: the arc steers to exercise skid steer, the
-        // courses run dead straight along the spawn axis.
-        let (window, throttle, steer) = match self.drive {
-            Drive::Arc => (RUN_LEAD..RUN_LEAD + 256, 1.0, 0.3),
-            Drive::Straight => (RUN_LEAD..RUN_LEAD + 960, 1.0, 0.0),
-            Drive::Ram { throttle_ticks } | Drive::Park { throttle_ticks } => {
-                (RUN_LEAD..throttle_ticks + RUN_LEAD, 1.0, 0.0)
-            }
-            Drive::Idle | Drive::Fire { .. } => (0..0, 0.0, 0.0),
-        };
-        let driving = window.contains(&t);
-        command.throttle = if driving { throttle } else { 0.0 };
-        command.steer = if driving { steer } else { 0.0 };
+        let driving = (RUN_LEAD..RUN_LEAD + self.throttle_ticks).contains(&t);
+        command.throttle = if driving { 1.0 } else { 0.0 };
+        command.steer = if driving { self.steer } else { 0.0 };
         command.aim = Some(self.aim_at(t));
         command.range = self.range;
         (command.fire_primary, command.fire_secondary) = match self.drive {
@@ -1016,6 +1030,7 @@ mod tests {
                     pos: Vec3::new(149.3, 8.75, 293.9),
                     rot: bevy::math::Quat::IDENTITY,
                 }),
+                ..Script::default()
             }
         );
         let sweep = Script::parse("(drive: Idle, aim: Sweep, ticks: 256)").expect("valid");
@@ -1237,16 +1252,16 @@ mod tests {
             sim.write(t, &mut command);
             command
         };
-        let run = super::RUN_LEAD;
+        let (run, course) = (super::RUN_LEAD, Script::default());
         assert_eq!(at("()", run - 1).throttle, 0.0);
         let arc = at("()", run);
         assert_eq!(
             (arc.throttle, arc.steer, arc.fire_primary),
-            (1.0, 0.3, false)
+            (1.0, course.arc_steer, false)
         );
         let click = at("()", 300);
         assert!(click.fire_primary && click.throttle == 1.0 && !at("()", 301).fire_primary);
-        assert_eq!(at("()", run + 256).throttle, 0.0);
+        assert_eq!(at("()", run + course.arc_ticks).throttle, 0.0);
         let idle = at("(drive: Idle)", 300);
         assert_eq!((idle.throttle, idle.fire_primary), (0.0, false));
         let fire = "(drive: Fire(primary: true, secondary: true), fire_tick: 320, \
