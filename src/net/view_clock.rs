@@ -96,9 +96,12 @@ struct CompletionLine {
 #[derive(Resource, Default)]
 pub(crate) struct ViewClock {
     cursor: Option<TickInstant>,
-    /// The cursor's rate minus the nominal one simulation second per Real second.
+    /// The cursor's rate minus the stream's measured rate, simulation seconds per Real second.
     rate: f64,
     delta_s: Option<f64>,
+    /// The stream's measured rate, held with the applied delay while the window holds fewer
+    /// than two samples.
+    stream_rate: Option<f64>,
     stamps: BTreeMap<Tick, f64>,
     pub held: bool,
     pub received: u64,
@@ -250,6 +253,17 @@ impl ViewClock {
         self.maximum.get().map(|x| median + x)
     }
 
+    /// The stream's production rate over the retained samples, in simulation seconds per stamp
+    /// second: the ticks they span times T over the stamp time they span; lost ticks count.
+    /// Production phase telescopes out, so a schedule whose phase stays within p of a line reads
+    /// that line's rate to within p over the span. Equal end stamps read as unbounded.
+    fn window_rate(&self, tick_s: f64) -> Option<f64> {
+        let (&first, oldest) = self.samples.first_key_value()?;
+        let (&last, newest) = self.samples.last_key_value()?;
+        (last != first)
+            .then(|| f64::from(last - first) * tick_s / (newest.stamp_s - oldest.stamp_s))
+    }
+
     /// Diagnostic server work only; frame-start lateness already includes every work sample.
     fn usual_work_s(&self) -> Option<f64> {
         let mut work: Vec<_> = self.samples.values().map(|sample| sample.work_s).collect();
@@ -318,26 +332,28 @@ impl ViewClock {
         before.map(|(tick, _)| tick.into())
     }
 
-    /// Critically damped tracking of the inverse-map target about the nominal rate, exact over
-    /// any frame length; the target is taken to move at the nominal rate through the frame.
-    /// Ordinary progress stays within 0 to (1+v) simulation seconds per Real second.
+    /// Critically damped tracking of the inverse-map target about the stream's rate `base`,
+    /// exact over any frame length; the target is taken to move at `base` through the frame.
+    /// Returns the requested cursor in ticks, advanced by 0 to (1+v) simulation seconds per Real
+    /// second.
     fn pace(
         &mut self,
         previous: TickInstant,
         target: TickInstant,
         dt_s: f64,
         tick_s: f64,
+        base: f64,
         v: f64,
-    ) -> TickInstant {
+    ) -> f64 {
         let omega = bandwidth(v, tick_s);
-        // How far the cursor would lead the frame-end target, advancing at the nominal rate.
-        let lead_s = (number(previous) - number(target)) * tick_s + dt_s;
+        // How far the cursor would lead the frame-end target, advancing at the stream's rate.
+        let lead_s = (number(previous) - number(target)) * tick_s + base * dt_s;
         let decay = (-omega * dt_s).exp();
         let pull = self.rate + omega * lead_s;
         let lead_after_s = (lead_s + pull * dt_s) * decay;
-        self.rate = ((self.rate - omega * pull * dt_s) * decay).clamp(-1.0, v);
-        let advance_s = (lead_after_s - lead_s + dt_s).clamp(0.0, (1.0 + v) * dt_s);
-        instant(number(previous) + advance_s / tick_s)
+        self.rate = ((self.rate - omega * pull * dt_s) * decay).clamp(-base, 1.0 + v - base);
+        let advance_s = (lead_after_s - lead_s + base * dt_s).clamp(0.0, (1.0 + v) * dt_s);
+        number(previous) + advance_s / tick_s
     }
 
     fn advance(
@@ -349,12 +365,19 @@ impl ViewClock {
         admission_s: f64,
     ) -> Option<ViewCut> {
         self.held = false;
-        let target = self.target(&mut self.intervals()).or(self.delta_s)?;
+        let v = timing.view_rate;
+        let measured = self
+            .target(&mut self.intervals())
+            .zip(self.window_rate(tick_s));
+        // While an outage empties the window, the applied delay and the stream rate hold.
+        let (target, stream) = measured.or(self.delta_s.zip(self.stream_rate))?;
+        self.stream_rate = Some(stream);
         let delta = self.delta_s.get_or_insert(target);
-        *delta += (target - *delta).clamp(-timing.view_rate * dt_s, timing.view_rate * dt_s);
+        *delta += (target - *delta).clamp(-v * dt_s, v * dt_s);
         let desired_s = now_s - *delta;
         let target_cursor = self.inverse(desired_s)?;
         let newest = self.newest().expect("a target requires completed stamps");
+        let last = TickInstant::from(newest);
         let previous = self.cursor.unwrap_or(target_cursor);
         // A wall-time stall can create a long map segment, but its admitted simulation backlog
         // is bounded by the server's cap.
@@ -363,27 +386,28 @@ impl ViewClock {
             from: previous,
             to: target_cursor,
         });
-        let next = if cut.is_some() || self.cursor.is_none() {
+        let base = stream.min(1.0 + v);
+        let requested = if cut.is_some() || self.cursor.is_none() {
             self.rate = 0.0;
-            target_cursor
+            number(target_cursor)
         } else {
-            self.pace(previous, target_cursor, dt_s, tick_s, timing.view_rate)
+            self.pace(previous, target_cursor, dt_s, tick_s, base, v)
         };
-        let last = TickInstant::from(newest);
-        let next = if next > last {
-            self.rate = -1.0; // A hold stops the cursor; release accelerates from rest.
-            last
-        } else {
-            next
-        };
-        assert!(
-            next >= previous,
-            "pace never runs backward and newest never retires below the cursor"
-        );
+        let next = instant(requested).min(last);
         // Resolution: the public cursor quantizes fractions to U0F16. Sub-quantum rounding
         // cannot stop a representable cursor advance and is not a hold.
-        let quantum_s = tick_s / (f64::from(u16::MAX) + 1.0);
-        self.held = desired_s > self.stamps[&newest] + quantum_s && next == last;
+        let quantum = 1.0 / (f64::from(u16::MAX) + 1.0);
+        // The newest completed tick stops a request past it, or a target the inverse clamped to it.
+        self.held = next == last
+            && (requested > f64::from(newest.0) + quantum
+                || desired_s > self.stamps[&newest] + quantum * tick_s);
+        if self.held {
+            self.rate = -base; // A hold stops the cursor; release starts from rest.
+        }
+        assert!(
+            next >= previous,
+            "the advance is nonnegative and newest never retires below the cursor"
+        );
         self.cursor = Some(next);
         self.cuts += u64::from(cut.is_some());
         // Keep the cursor's predecessor and future map points through holds. Past points retire
@@ -421,11 +445,11 @@ impl ViewClock {
 }
 
 /// The pacing loop's natural frequency, per Real second, from the slew limit v and tick T.
-/// Resolution: critical damping absorbs a phase step without overshoot, which would spend the
-/// buffer the delay target sized. The rate response to target phase has L1 norm 2 omega / e,
-/// so omega = e v / T is the widest band for which production phase noise within one authority
-/// tick peak to peak moves the rate by at most v; larger phase steps (released backlogs)
-/// saturate at v.
+/// Resolution: from zero rate deviation, the critically damped response to a target phase step
+/// never overshoots, so it does not spend the buffer the delay target sized. The rate response
+/// to target phase has L1 norm 2 omega / e, so omega = e v / T is the widest band for which
+/// production phase noise within one authority tick peak to peak moves the rate by at most v;
+/// larger phase steps (released backlogs) saturate at v.
 fn bandwidth(v: f64, tick_s: f64) -> f64 {
     std::f64::consts::E * v / tick_s
 }

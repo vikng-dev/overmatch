@@ -17,15 +17,24 @@ be the maximum until its local receipt age exceeds W. W is required `view_window
 Applied delay slews toward the target at at most v seconds per Real second. Inverting the
 frame-start map gives a target cursor clamped to received endpoints; equal frame stamps choose
 the latest tick. The cursor does not follow that target segment by segment, which would replay
-each tick's production interval as playback speed. It advances at the nominal one simulation
-second per Real second, steered by a critically damped phase loop of natural frequency
-`omega = e v / T`. The loop's rate response to target phase has L1 norm `2 omega / e`, so
-production phase noise within one tick peak to peak moves the rate by at most v, and a slewing
-delay changes the rate by at most `v^2 / T` per second instead of stepping it. Ordinary progress
-is forward-only and capped at `(1+v)` simulation seconds per Real second; a released backlog
-closes at that cap. A sustained server slowdown `delta` leaves the loop `2 |delta| / omega` ahead
-of its target. A buffer exhaustion holds its newest completed tick and stops the cursor, which
-accelerates from rest on release; it extrapolates nothing. Target backlog measured in
+each tick's production interval as playback speed. It advances at the stream's measured rate,
+steered by a critically damped phase loop of natural frequency `omega = e v / T`. The measured
+rate is the window's: T times the ticks its retained samples span over the stamp time they span,
+capped at `1+v`. Production phase telescopes out of it, so a regular server at any speed up to
+`1+v` plays at that speed with no steady lead, and alternating intervals do not reach the rate;
+a nearest-rank median interval would flip between them and replay them as speed. After a speed
+change the window mixes both speeds until it turns over, W and a link time later; the loop
+carries the rate error meanwhile, with at most `2 |error| / omega` of lead or lag in the
+continuous limit.
+The loop's rate response to target phase has L1 norm `2 omega / e`, so production phase noise
+within one tick peak to peak moves the rate by at most v, and a slewing delay changes the rate
+by at most `v^2 / T` per second instead of stepping it. From zero rate deviation its response to
+a phase step does not overshoot. Progress is forward-only, because each frame's advance is
+clamped nonnegative and retained facts never retire the newest tick below the cursor, and is
+capped at `(1+v)` simulation seconds per Real second; a released backlog closes at that cap. A
+frame is held when the newest completed tick stops the cursor by more than a cursor quantum:
+the cursor's request lies past that tick, or the inverse clamped the target to it. A hold stops
+the cursor, which accelerates from rest on release; it extrapolates nothing. Target backlog measured in
 simulation ticks above `max(view_cut_s, admission_s)` cuts forward once, warns and counts the
 discontinuity. Server time admission and this continuity floor read the same required
 `admission_s` field; no client virtual-time default chooses it.
@@ -33,8 +42,9 @@ discontinuity. Server time admission and this continuity floor read the same req
 The target covers lateness, not production phase. A smooth cursor needs the production phase
 above its mean at the tick that sets the lateness maximum, and the nearest-rank median of
 alternating production intervals is the short one about half the time; on a link without
-lateness slack such production holds. The measurements and the open estimator question are in
-[the pacing report](../../scratch/view-rate-396.md).
+lateness slack such production holds. A sudden slowdown holds until the window turns over: the
+median interval and the window's rate both lag the new speed. The measurements and the open estimator
+question are in [the pacing report](../../scratch/view-rate-396.md).
 
 The retained maximum makes server-work spikes and network spikes equally expensive. A spike can
 produce a hold, a forward cut, then slow playback while delay grows and fast playback after the

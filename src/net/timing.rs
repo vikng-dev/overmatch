@@ -94,6 +94,10 @@ impl Timing {
             "assets/net_timing.ron: view_pending_s must fit the signed tick horizon; shorten cosmetic rig waiting"
         );
         assert!(
+            timing.view_rate < 1.0,
+            "assets/net_timing.ron: view_rate must be below 1: a delay rising at real time stops presentation time, and v < 1 bounds the pacing bandwidth e v / T by e / T; lower view_rate"
+        );
+        assert!(
             timing.stale_floor_s <= timing.stale_ceil_s,
             "assets/net_timing.ron: stale_floor_s must not exceed stale_ceil_s; fix the timing data"
         );
