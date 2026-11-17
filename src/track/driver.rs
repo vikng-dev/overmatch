@@ -188,6 +188,8 @@ struct Stall {
 pub struct Sensed {
     /// The hull's speed along its heading at this tick's start (m/s).
     pub(crate) speed: f32,
+    /// Both belts' mean speed at this tick's start (m/s); clutch closure follows the shaft.
+    belt_speed: f32,
     /// What resisted forward travel over the window (N): the belts' mean push less hull mass
     /// times the hull's mean acceleration along its heading.
     pub(crate) resistance: f32,
@@ -237,6 +239,7 @@ impl Sensed {
     pub(crate) fn steady(speed: f32, load: f32, grip: f32) -> Self {
         Self {
             speed,
+            belt_speed: speed,
             resistance: load,
             spread: [[0.0; 3]; 3],
             push_difference: 0.0,
@@ -429,6 +432,7 @@ impl DriverSense {
                 });
             Sensed {
                 speed: velocity.dot(heading),
+                belt_speed: belts,
                 resistance: resistance / count,
                 spread: window.evidence().spread,
                 push_difference: (left - right) / count,
@@ -495,11 +499,11 @@ impl DriverSense {
 /// is, over a window it pulled whole ([`Sensed::pulled`]), holding the most it nets lugging down
 /// ([`viable_pull`]). Any other gear is judged where its clutch closes from out, at the crank speed
 /// it lands on ([`landing_pull`]): where the cut lands, `v − R·t_cut/M_c` and no lower than rest,
-/// or at `v` for a launch. No clause admits a gear whose crank is forecast to land past the
+/// or at sensed belt speed for free selection. No clause admits a gear whose crank lands past the
 /// engine's crank limit. Reach is `max_step` either way, within the ladder.
 ///
-/// 1. Clutch ordered open: free choice among safe gears, restricted to the launch range at
-///    rest or rollback; an upper gear requires shaft speed at least its launch crank speed.
+/// 1. Clutch ordered open: free choice among safe gears in the launch range, at closed-clutch
+///    shaft speed, or the lowest gear inside the crank limit.
 ///    Highest viable, otherwise strongest, including a stall's strongest.
 /// 2. The hull stalls now ([`Sensed::stalled`]), its load only bounded from below:
 ///    the gear in reach that holds most. The engaged gear short: the highest viable gear in reach,
@@ -563,22 +567,23 @@ pub(super) fn choose(
             .max_by(|a, b| a.1.total_cmp(&b.1))
     };
     if st.launch == LaunchState::Unchosen {
-        // Rest includes contact creep. Above the launch range a rolling selection must close
-        // its clutch now, rather than treating an indefinitely slipping take-up as a free cut.
-        let top_free = if speed < park_engage_speed() {
-            tp.launch_gears.min(top)
-        } else {
-            top
-        };
+        let shaft_speed = dir * sensed.belt_speed;
+        // The lowest crank-safe gear bridges a ladder step whose upper gear cannot close yet.
+        // Other upper gears must close now; a skidding hull does not stand in for belt speed.
+        let lowest_safe = (1..=top).find(|&gear| {
+            shaft_speed * ratio(gear) / tp.sprocket_radius
+                <= tp.engine.crank_limit_rpm * super::transmission::RPM_TO_RAD
+        });
         let launch = |gear| {
             if gear > tp.launch_gears
-                && speed * ratio(gear) / tp.sprocket_radius < tp.launch_omega(command)
+                && Some(gear) != lowest_safe
+                && shaft_speed * ratio(gear) / tp.sprocket_radius < tp.launch_omega(command)
             {
                 return None;
             }
-            lands(gear, speed)
+            lands(gear, shaft_speed)
         };
-        let gears = 1..=top_free;
+        let gears = 1..=top;
         let chosen = if stall.is_some() {
             None
         } else {
@@ -589,8 +594,8 @@ pub(super) fn choose(
             st.gear = gear;
             st.launch = LaunchState::TakingUp;
         }
-        // No safe landing is a real overrun state: retain the gear. The open clutch isolates
-        // the crank until a ratio can be selected; the ceiling brake is absent while open.
+        // Beyond the top gear's crank-safe shaft speed no ratio can land. The open clutch
+        // isolates that genuine overrun until the belts slow enough to select a ratio.
         return;
     }
     // A hull the cut brings to rest is held there by the park latch, so no cut lands below rest.
@@ -1459,10 +1464,83 @@ mod tests {
         }
     }
 
-    /// A rolling launch may bypass the launch range only when that gear closes its clutch.
-    /// Fixture: unloaded readings just below and above the top gear's take-up speed.
+    /// Spawn selection must follow the sensed shaft when a skidding hull outruns its belts.
+    /// Fixture: hull speed above top-gear closure, belts stationary, on both ladders.
     #[test]
-    fn free_selection_admits_upper_gears_only_at_their_closed_clutch_speed() {
+    fn free_selection_reads_clutch_closure_from_belts() {
+        for (fp, tp) in class_drivetrains() {
+            for reverse in [false, true] {
+                let ladder = if reverse {
+                    &tp.gears_rev
+                } else {
+                    &tp.gears_fwd
+                };
+                let dir = if reverse { -1.0 } else { 1.0 };
+                let speed =
+                    dir * 2.0 * tp.launch_omega(1.0) * tp.sprocket_radius / ladder.last().unwrap();
+                let inp = driver_input(speed, 0.0, dir);
+                let mut sense = DriverSense::for_cut(tp.shift_ticks);
+                for _ in 0..=MIN_SAMPLES {
+                    sense.tick(FORWARD * speed, FORWARD, 0.0, MASS, pushing(0.0), DT);
+                    sense.drove(&pulling());
+                }
+                let sensed = sense
+                    .reading
+                    .expect("two closed samples supply shaft speed");
+                let mut state = TransmissionState {
+                    reverse,
+                    ..fresh(&tp)
+                };
+                choose(&mut state, &tp, &construction(&fp), &inp, 1.0, sensed);
+                assert_ne!(state.launch, LaunchState::Unchosen);
+                assert!(
+                    state.gear <= tp.launch_gears,
+                    "hull skid cannot close an upper gear's clutch"
+                );
+            }
+        }
+    }
+
+    /// A held pedal always selects a ratio within either ladder's crank-safe speed range.
+    /// The Driver must not strand spawn or direction-change take-up in neutral between ratios.
+    /// Fixture: sweep both speed signs, every pedal hundredth and 512 speed intervals per class.
+    #[test]
+    fn free_selection_has_no_gaps_inside_the_crank_safe_ladder() {
+        for (fp, tp) in class_drivetrains() {
+            for reverse in [false, true] {
+                let ladder = if reverse {
+                    &tp.gears_rev
+                } else {
+                    &tp.gears_fwd
+                };
+                let dir = if reverse { -1.0 } else { 1.0 };
+                let limit = tp.engine.crank_limit_rpm * RPM_TO_RAD * tp.sprocket_radius
+                    / ladder.last().expect("an admitted ladder has gears");
+                for speed_step in -512..512 {
+                    let speed = limit * speed_step as f32 / 512.0;
+                    for pedal_step in 1..=100 {
+                        let pedal = pedal_step as f32 / 100.0;
+                        let inp = driver_input(dir * speed, 0.0, dir * pedal);
+                        let mut state = TransmissionState {
+                            reverse,
+                            ..fresh(&tp)
+                        };
+                        choose(&mut state, &tp, &construction(&fp), &inp, pedal, felt(&inp));
+                        assert_ne!(
+                            state.launch,
+                            LaunchState::Unchosen,
+                            "held pedal stranded in neutral: reverse={reverse} speed={speed} pedal={pedal}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A rolling free choice admits a closed upper gear or the lowest crank-safe ratio.
+    /// Fixture: unloaded readings straddling the top gear's clutch-closure speed.
+    #[test]
+    fn free_selection_admits_closed_upper_gears_and_the_lowest_safe_gear() {
         for (fp, tp) in class_drivetrains() {
             for reverse in [false, true] {
                 let ladder = if reverse {
@@ -1472,41 +1550,40 @@ mod tests {
                 };
                 let top = ladder.len() as u8;
                 if top <= tp.launch_gears {
-                    continue;
-                } // This ladder has no upper launch exclusion.
+                    continue; // This ladder has no upper launch exclusion.
+                }
                 let dir = if reverse { -1.0 } else { 1.0 };
                 let closes =
                     tp.launch_omega(1.0) * tp.sprocket_radius / ladder[usize::from(top - 1)];
-                assert!(
-                    0.99 * closes > park_engage_speed(),
-                    "the fixture must really roll"
-                );
                 for share in [0.99, 1.01] {
-                    // Fixture: straddle clutch closure without the crank limit.
-                    let inp = driver_input(dir * share * closes, 0.0, dir);
+                    let speed = share * closes;
+                    let inp = driver_input(dir * speed, 0.0, dir);
                     let mut state = TransmissionState {
                         reverse,
                         ..fresh(&tp)
                     };
                     choose(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
-                    if share < 1.0 {
-                        assert!(
-                            state.gear < top,
-                            "a rolling reading below clutch closure cannot take the top gear"
-                        );
-                    } else {
-                        assert_eq!(
-                            state.gear, top,
-                            "a closed safe upper gear is available without a cut"
-                        );
+                    assert_ne!(
+                        state.launch,
+                        LaunchState::Unchosen,
+                        "both rolling cases select a gear"
+                    );
+                    let lowest_safe = (1..=top)
+                        .find(|&gear| {
+                            speed * ladder[usize::from(gear - 1)] / tp.sprocket_radius
+                                <= tp.engine.crank_limit_rpm * RPM_TO_RAD
+                        })
+                        .unwrap();
+                    if share > 1.0 {
+                        assert_eq!(state.gear, top, "a closed upper gear is freely available");
                     }
-                    if state.gear > tp.launch_gears {
-                        assert!(
-                            share * closes * ladder[usize::from(state.gear - 1)]
-                                / tp.sprocket_radius
-                                >= tp.launch_omega(1.0)
-                        );
-                    }
+                    assert!(
+                        state.gear <= tp.launch_gears
+                            || state.gear == lowest_safe
+                            || speed * ladder[usize::from(state.gear - 1)] / tp.sprocket_radius
+                                >= tp.launch_omega(1.0),
+                        "an upper take-up either closes now or is the lowest crank-safe ratio"
+                    );
                 }
             }
         }

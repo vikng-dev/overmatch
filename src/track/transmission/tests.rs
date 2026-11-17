@@ -2670,13 +2670,9 @@ fn fixed_intent_has_no_order_flips_after_one_transition_across_constructions() {
                                             );
                                             assert!(
                                                 changes <= 1,
-                                                "one settling transition per fixed Driver phase"
+                                                "fixed intent chattered: mean_held={held_mean} reverse={reverse} load={load_share} command={command} steer={steer} entry={mean}: {changes}"
                                             );
                                         }
-                                        assert!(
-                                            changes <= 1,
-                                            "fixed intent chattered: mean_held={held_mean} reverse={reverse} load={load_share} command={command} steer={steer} entry={mean}: {changes}"
-                                        );
                                     }
                                 }
                             }

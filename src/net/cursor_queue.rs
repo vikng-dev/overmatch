@@ -1,25 +1,11 @@
-//! Tick-stamped server announcements held until the interpolation cursor crosses their tick.
+//! The game's damage-model presentation: public fire announcements and own echoes release at
+//! max(arrival, crossing on `net::view_clock`). Arrival alone cannot fuse a shot with its hull's
+//! visible pose. Before a view epoch, announcements hold; nothing expires by time.
 //!
-//! Every interpolated hull renders at the interpolation cursor (`net::interp_delay` sizes its lag),
-//! but a server-announced EVENT arrives a derived delay earlier than the motion it belongs to: the
-//! wire hands it over `RTT/2` after the authority tick, while the stream draws that tick `RTT/2 +
-//! delay` later. Presenting at arrival therefore desynchronizes announcement from motion by the
-//! whole interpolation delay — an opponent's shot bangs before its hull visibly rocks. This queue
-//! is the scheduling rule that closes the seam: hold the announcement, release it when the cursor
-//! crosses the announcement's tick, with no free constant anywhere (release time IS the crossing).
-//!
-//! Mechanics, each pinned by a test below:
-//! - an announcement whose tick the cursor has already crossed releases on the same drain (a late
-//!   join or a long round trip presents immediately, exactly as before this queue existed);
-//! - a stalled cursor HOLDS — nothing here expires by time, only [`CursorQueue::CAP`] bounds memory;
-//! - a drain releases in tick order, arrival order within a tick;
-//! - entries are plain wire data, never entity-keyed, so a despawned subject cannot strand an
-//!   entry: every entry leaves on its crossing and the consumer re-resolves it there
-//!   (`net::client`'s resolve path, which already owns the missing-replica case).
-//!
-//! Member class: the fire announcement (`net::client::HeldFireEvents`, covering opponent fire
-//! and the fused own echo). The own being-hit cue presents at arrival by design — reaction
-//! time. Public flight paths enter their own buffer and sample this same fractional cursor.
+//! Releases are in tick order, arrival order within a tick. Entries are wire facts rather than
+//! entity mappings, so a despawn cannot strand them: the consumer resolves the subject at release.
+//! `CursorQueue::CAP` bounds retained facts. Public paths use their own buffer on the same cursor;
+//! owner-private hit cues have a separate receiver.
 
 use std::collections::VecDeque;
 
@@ -46,9 +32,8 @@ impl<T> Default for CursorQueue<T> {
 }
 
 impl<T> CursorQueue<T> {
-    /// DERIVED like `PendingFireEvents::CAP`: 256 exceeds the 60-fire synchronized 30-tank volley
-    /// and stays under the 2,048-entry `ShotId` dedup horizon, so a held id cannot outlive its
-    /// duplicate guard. A memory bound only — eviction is by capacity, never by time.
+    /// Resolution: 256 exceeds a 30-combatant x 2-weapon volley (60 fires, DERIVED),
+    /// below the 2,048-id dedup allocation. Eviction visibly omits the oldest cosmetic.
     const CAP: usize = 256;
 
     /// Hold one announcement. Returns the oldest entry evicted when the bound is hit.
@@ -78,13 +63,6 @@ impl<T> CursorQueue<T> {
         self.held = kept;
         due.sort_by_key(|(tick, _)| *tick - cursor_tick);
         due
-    }
-
-    /// Release everything regardless of tick — the no-cursor fallback (a client whose
-    /// interpolation timeline has not synced draws no interpolated motion to fuse with, so its
-    /// announcements present at arrival, exactly as before this queue existed).
-    pub(super) fn release_all(&mut self) -> Vec<(Tick, T)> {
-        self.held.drain(..).collect()
     }
 
     pub(super) fn clear(&mut self) {

@@ -925,7 +925,8 @@ impl TrackSpec {
     }
 
     /// Build the joint drive from construction, the measured wrap radii and the measured
-    /// half-tread. Only admitted running gear consumes these physical tables; structural
+    /// half-tread, returning admitted parameters and reflected belt inertia (kg).
+    /// Only admitted running gear consumes these physical tables; structural
     /// validation and the crank seed use [`Self::nominal_transmission_params`].
     pub(crate) fn transmission_params(
         &self,
@@ -933,13 +934,13 @@ impl TrackSpec {
         wrap: WrapRadii,
         half_tread: f32,
         mass_kg: f32,
-    ) -> Result<TransmissionParams, BevyError> {
-        self.powertrain.transmission.params(
-            wrap.sprocket,
-            half_tread,
-            self.reflected_inertia(roadwheels, wrap)?,
-            mass_kg,
-        )
+    ) -> Result<(TransmissionParams, f32), BevyError> {
+        let inertia = self.reflected_inertia(roadwheels, wrap)?;
+        let params =
+            self.powertrain
+                .transmission
+                .params(wrap.sprocket, half_tread, inertia, mass_kg)?;
+        Ok((params, inertia))
     }
 }
 
@@ -976,8 +977,8 @@ pub struct TransmissionSpec {
     pub couplings: Vec<crate::track::transmission::Coupling>,
     /// Rated climbing slope (degrees).
     pub(crate) rated_slope_deg: crate::provenance::Labelled<f32>,
-    /// Neutral-turn gearbox brake rating at the mean belt coordinate (N); required by Stop(Mean).
-    pub(crate) mean_hold_capacity_n: Option<crate::provenance::Labelled<f32>>,
+    /// Stand-in for the missing gearbox-brake torque and reduction; required by Stop(Mean).
+    pub(crate) mean_hold: Option<crate::provenance::Provenance>,
     /// Static/sliding brake ratio for latched stops.
     pub(crate) brake_static_factor: crate::provenance::Labelled<f32>,
 }
@@ -998,6 +999,18 @@ impl TransmissionSpec {
         Ok(mass_kg * crate::track::derive::G * self.rated_slope_deg.value.to_radians().sin() / 2.0)
     }
 
+    /// StandIn: the mean brake carries the service brakes' rated grade as a total mean force.
+    /// A sourced gearbox-brake torque and reduction would replace this rule.
+    pub(crate) fn mean_hold_capacity_n(&self, mass_kg: f32) -> Result<Option<f32>, BevyError> {
+        match &self.mean_hold {
+            None => Ok(None), // This construction has no mean brake.
+            Some(crate::provenance::Provenance::StandIn(note)) if !note.trim().is_empty() => {
+                Ok(Some(2.0 * self.brake_capacity_n(mass_kg)?))
+            }
+            Some(_) => Err("transmission.mean_hold: author StandIn with the missing gearbox-brake torque and reduction; the rated-grade rule supplies its capacity".into()),
+        }
+    }
+
     /// Adapt this RON shape into the shared authoring admission seam.
     pub(crate) fn params(
         &self,
@@ -1012,7 +1025,7 @@ impl TransmissionSpec {
             steering,
             couplings,
             rated_slope_deg: _,
-            mean_hold_capacity_n,
+            mean_hold: _,
             brake_static_factor,
         } = self;
         let brake_capacity_n = self.brake_capacity_n(mass_kg)?;
@@ -1037,7 +1050,7 @@ impl TransmissionSpec {
             couplings,
             steering_radius_rounding_share: steering.radius_rounding_share.0,
             brake_capacity_n,
-            mean_hold_capacity_n: mean_hold_capacity_n.as_ref().map(|rating| rating.value),
+            mean_hold_capacity_n: self.mean_hold_capacity_n(mass_kg)?,
             brake_static_factor: brake_static_factor.value,
             drag_fraction: engine.drag_fraction,
             engine_inertia_kgm2: engine.inertia_kgm2,
@@ -2374,7 +2387,7 @@ TankSpec(
                     capacity: Some(100_000.0),
                     radius_rounding_share: (0.01, Fixture("relative radius-table rounding bound: one percent")),
                 ),
-                mean_hold_capacity_n: None,
+                mean_hold: None,
                 rated_slope_deg: (30.0, Fixture("rated climbing slope")),
                 brake_static_factor: (1.5, Fixture("missing static to dynamic brake ratio; settled by measured breakaway and sliding torque")),
             ),
@@ -3332,6 +3345,46 @@ TankSpec(
             ServoSpec::test_limited(ServoRole::Pitch, 10.0, -8.0, 15.0),
         );
         assert!(spec.validate().is_ok());
+    }
+
+    /// The authored mean-brake stand-in selects the total rated-grade rule. Players rely on
+    /// the same grade support through the side-park to mean-hold handover, at any mass or slope.
+    /// Fixture: scale the inline construction's mass and slope independently.
+    #[test]
+    fn mean_brake_stand_in_carries_total_rated_grade() {
+        use crate::provenance::Provenance;
+        let spec = fixture();
+        for mass_share in [0.5, 2.0] {
+            for slope_share in [0.5, 1.0] {
+                let mass = spec.mass * mass_share;
+                let mut tr = spec.track.powertrain.transmission.clone();
+                tr.rated_slope_deg.value *= slope_share;
+                tr.mean_hold = Some(Provenance::StandIn(
+                    "gearbox-brake torque and reduction missing".into(),
+                ));
+                tr.couplings
+                    .push(crate::track::transmission::Coupling::Stop(
+                        crate::track::transmission::Output::Mean,
+                    ));
+                let params = tr
+                    .params(1.0, 1.0, 1.0, mass)
+                    .expect("the fixture construction is admitted");
+                let expected =
+                    mass * crate::track::derive::G * tr.rated_slope_deg.value.to_radians().sin();
+                assert_eq!(params.mean_hold_capacity_n, Some(expected));
+                assert_eq!(
+                    params.mean_hold_capacity_n,
+                    Some(2.0 * params.brake_capacity_n)
+                );
+                tr.mean_hold = Some(Provenance::Unknown("torque and reduction missing".into()));
+                assert!(
+                    tr.params(1.0, 1.0, 1.0, mass)
+                        .expect_err("the label must name the rule's stand-in job")
+                        .to_string()
+                        .contains("transmission.mean_hold")
+                );
+            }
+        }
     }
 
     /// Transmission-block runtime invariants: non-finite capacities NaN out the

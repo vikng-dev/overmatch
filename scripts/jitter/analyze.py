@@ -277,9 +277,9 @@ def frame_metrics(frames):
 
 
 def tick_to_wall(frames):
-    """Interpolator client-tick -> wall seconds, from frame (tick, t) pairs.
+    """Interpolator server-domain view tick -> client wall seconds, from frame pairs.
 
-    Frames carry both a predicted tick and a wall time; averaging t per tick
+    Frames carry a view tick (null before a stamp pair) and wall time; averaging t per tick
     gives a monotone map used to place tick-indexed series on the shared x axis
     and to project server ticks into client wall time.
     """

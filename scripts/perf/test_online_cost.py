@@ -107,10 +107,23 @@ class JitterObject(unittest.TestCase):
     def test_the_client_record_is_read_through_a_journal_prefix_and_a_broken_one_is_refused(self):
         # The AWS harness reads each client's starvation and view clock from this record alone; a
         # record dropped instead of refused would leave a window that looks covered.
-        line = ('[  101.000000] host overmatch[9]: INFO overmatch::net::frontier: client_jitter '
-                '{"period_s":1.0,"view_clock":{"stamp_interval_ms":null}} trailing')
-        self.assertEqual(jitter_object(line), {"period_s": 1.0, "view_clock": {"stamp_interval_ms": None}})
-        self.assertIsNone(jitter_object("INFO overmatch::net::frontier: net: FRONTIER interpolation resync #2"))
+        # Fixture: the current producer's full shape, including an unready stamp window.
+        value = {"period_s": 1.0, "ticks": {"received": 0, "frontier": 0},
+                 "arrival_ms": None, "headroom_ticks": None,
+                 "holds": {"events": 0, "ms": 0.0, "longest_ms": 0.0},
+                 "view_clock": {"usual_work_ms": 0.0, "stamp_interval_ms": None, "delta_star_ms": None,
+                                "stamp_lag_ms": None, "applied_delta_ms": None,
+                                "applied_above_latest_x_ms": None, "target_minus_applied_ms": None,
+                                "target_above_latest_x_ms": None, "cuts": 0,
+                                "completion": {key: 0 for key in ("completed_ticks", "sampled_ticks", "late_ticks",
+                                 "worst_lag_frames", "worst_lag_ms", "evicted_incomplete",
+                                 "completed_without_stamp", "unmapped_stamps", "receipt_overflow")}, "pending_ticks": 0}}
+        line = '[  101.000000] host overmatch[9]: INFO overmatch::net::frontier: client_jitter ' + json.dumps(value)
+        self.assertEqual(jitter_object(line), value)
+        for retired in ("min_delay_ms", "starved", "snaps", "estimate_error_ticks"):
+            with self.subTest(retired=retired), self.assertRaisesRegex(MalformedRecord, "unknown fields"):
+                jitter_object('client_jitter ' + json.dumps(value | {retired: {}}))
+        self.assertIsNone(jitter_object("INFO overmatch::net::frontier: net: view cut"))
         for broken in (line[:-40], line[:line.index("{")]):
             with self.subTest(broken), self.assertRaises(MalformedRecord):
                 jitter_object(broken)

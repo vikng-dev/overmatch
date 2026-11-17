@@ -92,7 +92,7 @@ fn client_app(api: &str, log: bool) -> App {
         bevy::image::CompressedImageFormats::ASTC_LDR,
     ));
 
-    let tick_duration = Duration::from_secs_f64(1.0 / 64.0);
+    let tick_duration = crate::net::server::TICK;
     app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(crate::net::plugin);
     app.add_plugins(physics::physics_plugins());
@@ -105,11 +105,8 @@ fn client_app(api: &str, log: bool) -> App {
         crate::overlay::plugin,
     ));
 
-    let interpolation = crate::net::interp_delay::install(&mut app, tick_duration);
-    let interpolation = crate::net::sync_margin::install(&mut app, interpolation);
+    crate::net::view_clock::install(&mut app);
     crate::net::frontier::install(&mut app);
-    crate::net::frontier::install_jitter_line(&mut app);
-    app.insert_resource(interpolation);
 
     app.init_resource::<ConnectRetry>()
         .add_systems(Update, drive_connection);
@@ -129,32 +126,23 @@ fn client_app(api: &str, log: bool) -> App {
     // `run`'s receive wiring, verbatim; no input writer, so the own tank's command stays idle.
     app.add_observer(diagnostics::log_connected)
         .add_observer(reset_shot_receive_state)
-        .add_observer(reset_link_state)
         .add_plugins(control_claim_plugin)
         .add_systems(
             Update,
             (
                 rig::attach_replicated_rig(),
-                receive_fire_events,
-                receive_damage_confirms,
                 diagnostics::nan_tripwire,
                 open_gameplay_gate,
                 log_local_tank_role,
             ),
         );
-    app.init_resource::<PendingRecoilKicks>()
-        .init_resource::<SeenShots>()
-        .init_resource::<HeldFireEvents>()
-        .init_resource::<PendingFireEvents>()
-        .init_resource::<SeenDamage>()
-        .init_resource::<SanctionedShots>()
-        .add_systems(FixedUpdate, age_sanctioned_shots)
-        .add_systems(
-            FixedUpdate,
-            apply_pending_recoil_kicks
-                .before(GameplaySet)
-                .run_if(in_state(AppState::Playing)),
-        );
+    install_fire_ingress(&mut app);
+    app.add_systems(
+        FixedUpdate,
+        apply_pending_recoil_kicks
+            .before(GameplaySet)
+            .run_if(in_state(AppState::Playing)),
+    );
 
     app.init_resource::<Probe>()
         .add_observer(record_connected)

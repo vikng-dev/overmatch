@@ -197,6 +197,8 @@ pub(crate) fn camera_constants(text: &str) -> Result<String, String> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Style {
+    cue_retain_per_60hz_frame: Sourced<f32>,
+    cue_zero_eps: Sourced<f32>,
     overlay_font_px: Sourced<f32>,
     overlay_text_srgb: Sourced<[f32; 3]>,
     text_srgb: Sourced<[f32; 3]>,
@@ -225,6 +227,28 @@ pub(crate) fn style_constants(text: &str) -> Result<String, String> {
         "const OVERLAY_FONT_PX: f32 = {:?};\n",
         data.overlay_font_px.0
     );
+    for (field, constant, value) in [
+        (
+            "cue_retain_per_60hz_frame",
+            "CUE_RETAIN",
+            data.cue_retain_per_60hz_frame.0,
+        ),
+        ("cue_zero_eps", "CUE_ZERO_EPS", data.cue_zero_eps.0),
+    ] {
+        if !value.is_finite() || value <= 0.0 || value >= 1.0 {
+            return Err(refuse(
+                STYLE_FILE,
+                field,
+                "author a finite intensity strictly between 0 and 1",
+            ));
+        }
+        writeln!(
+            out,
+            "pub(crate) const {constant}: f32 = {};",
+            literal(value)
+        )
+        .unwrap();
+    }
     let refresh_ns = std::time::Duration::try_from_secs_f64(data.net_debug_refresh_s.0)
         .ok()
         .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
@@ -353,12 +377,30 @@ mod tests {
                 "{error}"
             );
         }
+        for field in ["cue_retain_per_60hz_frame", "cue_zero_eps"] {
+            let missing = style
+                .lines()
+                .filter(|line| !line.trim_start().starts_with(field))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let error = style_constants(&missing).unwrap_err();
+            assert!(
+                error.contains(STYLE_FILE) && error.contains(field) && error.contains("author"),
+                "{error}"
+            );
+        }
         let error = style_constants(&replace_value(style, "overlay_font_px", "-1.0")).unwrap_err();
         assert!(error.contains("overlay_font_px"));
         let error =
             style_constants(&replace_value(style, "text_srgb", "(NaN, 0.0, 0.0)")).unwrap_err();
         assert!(error.contains("text_srgb"));
         for (field, value) in [
+            ("cue_retain_per_60hz_frame", "NaN"),
+            ("cue_retain_per_60hz_frame", "0.0"),
+            ("cue_retain_per_60hz_frame", "1.0"),
+            ("cue_zero_eps", "NaN"),
+            ("cue_zero_eps", "0.0"),
+            ("cue_zero_eps", "1.0"),
             ("net_debug_refresh_s", "NaN"),
             ("net_debug_refresh_s", "0.0"),
             ("net_debug_refresh_s", "1e100"),

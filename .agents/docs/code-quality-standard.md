@@ -314,7 +314,8 @@ stays. A commit whose purpose is cutting comments is welcome when each cut is on
 ### B3. The wire surface is fingerprinted
 
 `src/net/protocol.rs` holds `PROTOCOL_REV`, `WIRE_SURFACE`, a pinned
-`WIRE_SURFACE_HASH` (`0xf321_3c48_61b3_bfea`), and `PROTOCOL_FINGERPRINT` derived from them.
+`WIRE_SURFACE_HASH`, and `PROTOCOL_FINGERPRINT` derived from the wire pins and dependency versions.
+The live pin values belong to `protocol.rs`.
 ADR-0018 owns this.
 
 Renaming, reordering, merging or retyping anything that rides the wire changes the handshake and
@@ -336,11 +337,11 @@ Several look redundant or tautological *on purpose*. Deleting one removes an ala
 | `gpu_layout.rs` | Rust ↔ shader struct layout contract |
 | `determinism_deps.rs` | **tripwire** — fails if a dep bump splits `glam` and silently drops the `scalar-math` pin |
 | `net_input_buffer_wrap.rs` | **tripwire** — pins the inverted-range input encoding (bounded but mislabeled in lightyear 0.31.0) and its two enablers behind the connect-hang guard |
-| `net_interp_delay.rs` | **tripwire** — pins the `send_interval = 0` interpolation-delay collapse |
+| `view_clock.rs` and `view_clock/udp.rs` | Completed-stamp cursor and real-UDP buffering proofs |
 | `bevy_shadow_view_render_layers.rs` | guard — every shadow view carries the light's `RenderLayers` in the linked `bevy_pbr` (upstream #24797, shipped 0.19.1) |
 | `bevy_ktx2_uastc_fallback.rs` | **tripwire** — pins the KTX2/UASTC fallback slice panic |
 | `net_fire_release.rs` | mechanism proof for the MG fire-release leak |
-| `net_sync_margin.rs` | **tripwire** — pins the lightyear sync-margin term placement `net::sync_margin`'s derived laws re-size |
+| `tests/stream_presence.rs` | Stream visibility, removal, despawn and assembled-replica hold contracts |
 
 A tripwire's job is to **fail on a dependency bump**, telling you a local workaround is now
 retirable — or still needed. `determinism_deps.rs` is the clearest case: it asserts something

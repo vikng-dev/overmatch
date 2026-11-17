@@ -200,7 +200,7 @@ fn client_ui_app() -> App {
     app.insert_resource(lightyear::core::tick::TickDuration(
         std::time::Duration::from_secs_f64(1.0 / 64.0),
     ))
-    .init_resource::<super::sync_margin::ArrivalDelay>()
+    .init_resource::<super::view_clock::ViewClock>()
     .init_resource::<crate::WeaponClock>()
     .init_resource::<crate::firecontrol::Ranging>()
     .init_resource::<avian3d::collider_tree::ColliderTrees>()

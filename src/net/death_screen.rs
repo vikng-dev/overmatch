@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use super::battle::BattleState;
 use super::disclosure::{RespawnState, SpawnPickRefusal};
 use super::score::{Opening, Scoreboard};
+use super::view_clock::ViewClock;
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
 use crate::damage_cam::pen_cam::game::{GameDeathScreen, KillCamGate};
@@ -21,7 +22,7 @@ use crate::overlay::{self, Overlay, Overlays};
 use crate::state::PlayerInputSet;
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
-use crate::{CombatantId, CombatantLife, ShotClock};
+use crate::{CombatantId, CombatantLife};
 
 /// Temporary respawn binding.
 const RESPAWN_KEY: KeyCode = KeyCode::KeyR;
@@ -54,7 +55,7 @@ struct OwnRespawn<'w, 's> {
     boards: Query<'w, 's, &'static Scoreboard>,
     state: Query<'w, 's, Option<&'static RespawnState>, With<Controlled>>,
     battles: Query<'w, 's, &'static BattleState>,
-    clock: Option<Res<'w, ShotClock>>,
+    clock: Option<Res<'w, ViewClock>>,
     time: Res<'w, Time<Fixed>>,
 }
 
@@ -81,12 +82,9 @@ impl OwnRespawn<'_, '_> {
         }
     }
 
-    /// Whole seconds, rounded up, until the own knocked-out life's respawn opens on the client's
-    /// local tick (`ShotClock`, at or behind the tick a request pressed now is filed for, which is
-    /// the tick the server reads it on), so a request sent at zero is never early.
-    /// `None` when the key may be pressed: the opening is past, or no opening for
-    /// this life has arrived yet (no scoreboard, or one not yet updated for this knockout), when
-    /// the server decides the request.
+    /// Whole seconds, rounded up, until this life's respawn opens on the view cursor.
+    /// `None`: the opening passed or has not arrived (no scoreboard or no update for this life).
+    /// The authority decides admission when a request arrives.
     fn seconds_left(&self) -> Option<u32> {
         let (&combatant, &life) = match self.own.single() {
             Ok(own) => own,
@@ -109,7 +107,8 @@ impl OwnRespawn<'_, '_> {
             .clock
             .as_ref()
             .expect("a replicated scoreboard arrives only where the network clock is published");
-        match board.opening(combatant, life, clock.0)? {
+        let now = clock.now()?; // No presentation epoch before completed stamps.
+        match board.opening(combatant, life, crate::sim_tick::SimTick::new(now.tick().0))? {
             Opening::Open => None,
             Opening::In { ticks } => {
                 let seconds = f64::from(ticks) * self.time.timestep().as_secs_f64();
@@ -528,7 +527,17 @@ mod tests {
                 let mut fixed = Time::<Fixed>::default();
                 fixed.set_timestep(timestep);
                 world.insert_resource(fixed);
-                world.insert_resource(ShotClock(SimTick::new(start).after(TickSpan::of(elapsed))));
+                let mut view = ViewClock::default();
+                view.set_now(
+                    lightyear::core::tick::Tick(
+                        SimTick::new(start).after(TickSpan::of(elapsed)).raw(),
+                    )
+                    .into(),
+                );
+                world.insert_resource(view);
+                world.insert_resource(crate::ShotClock(
+                    SimTick::new(start).after(TickSpan::of(elapsed)),
+                ));
                 world.insert_resource(ButtonInput::<KeyCode>::default());
                 world.insert_resource(Overlays::default());
                 world.resource_mut::<Overlays>().declare_in_match(true);

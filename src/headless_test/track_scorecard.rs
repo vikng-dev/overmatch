@@ -2196,37 +2196,72 @@ fn assert_coast_and_sleep(bed: &mut Bed) -> usize {
 /// solver contacts that would carry the drive do not exist while the pair sleeps, so nothing but
 /// the demand itself can wake the island.
 #[test]
+#[cfg(feature = "bitprobe")]
 fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
     let mut bed = parked_over(&Side::ALL);
-    let mut settled = 0;
-    let budget = rest_tick_budget(&bed.app, bed.tank);
-    while !is_asleep(&bed) {
-        assert!(
-            settled < budget,
-            "parked fixture exceeded its impulse-derived rest watchdog"
-        );
-        bed.tick(0.0, 0.0);
-        settled += 1;
-    }
+    let settled = until_resting(&mut bed);
     assert!(
         is_asleep(&bed),
         "a parked tank with no drive demand may sleep with its pile"
     );
     println!("MEASURED asleep after {settled} ticks");
     let before = bed.hull().position;
-    // Fixture: half a second of full throttle, short enough that the belts stay on the row.
-    for _ in 0..TICKS / 2 {
+    let tp = bed
+        .app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .trans();
+    let idle = tp.engine.idle_rpm;
+    let floor = tp.launch_omega(1.0);
+    let floor_rpm = floor / crate::track::transmission::RPM_TO_RAD;
+    // DERIVED: full-pedal net torque is linear between curve knots below the governor.
+    // Its minimum bounds free-crank spool time J * delta_omega / torque. The watchdog also
+    // allows the keyboard's full travel and one sensing window; none is a drive-duration target.
+    let torque = tp
+        .engine
+        .torque_nm
+        .iter()
+        .filter(|(rpm, _)| *rpm >= idle && *rpm <= floor_rpm)
+        .map(|&(_, torque)| torque)
+        .chain([tp.torque_at(idle), tp.torque_at(floor_rpm)])
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        torque > 0.0,
+        "the wake fixture needs positive full-pedal spool torque"
+    );
+    let spool_s =
+        tp.engine_inertia * (floor - idle * crate::track::transmission::RPM_TO_RAD) / torque;
+    let budget = ((spool_s + 1.0 / crate::track::drive::drive_feel().rise_per_second.0) / DT).ceil()
+        as usize
+        + usize::from(tp.shift_ticks.get());
+    let mut driven_ticks = 0;
+    loop {
+        assert!(
+            driven_ticks < budget,
+            "the clutch must transmit within its inertia/torque spool watchdog"
+        );
         bed.tick(1.0, 0.0);
+        driven_ticks += 1;
+        let probe = bed
+            .app
+            .world()
+            .get::<crate::track::sim::TrackGripEffect>(bed.tank)
+            .expect("a driven tank publishes its transmission solve")
+            .transmission_probe;
+        if probe.clutch_force_n > 0.0 {
+            break;
+        }
     }
     assert!(!is_asleep(&bed), "throttle left the tank asleep");
     let moved = bed.hull().position - before;
     let ahead = moved.dot(bed.hull().forward());
     println!(
-        "MEASURED driven {} m in 0.5 s, {ahead} m of it ahead",
+        "MEASURED first clutch drive at tick {driven_ticks} ({} s); moved {} m, {ahead} m ahead; watchdog {budget} ticks",
+        driven_ticks as f32 * DT,
         moved.length()
     );
     assert!(
-        ahead > roundoff(before, TICKS / 2),
+        ahead > roundoff(before, driven_ticks),
         "throttle wake and park release gave no forward reaction: {ahead} m"
     );
     let moving_ticks = assert_coast_and_sleep(&mut bed);
@@ -2332,7 +2367,7 @@ fn a_braked_tank_on_a_slope_rests_where_it_stopped() {
 }
 
 /// Tick the parked tank with no demand, within its impulse-derived rest watchdog.
-fn until_resting(bed: &mut Bed) {
+fn until_resting(bed: &mut Bed) -> usize {
     let budget = rest_tick_budget(&bed.app, bed.tank);
     let mut ticks = 0;
     while !is_asleep(bed) {
@@ -2343,6 +2378,7 @@ fn until_resting(bed: &mut Bed) {
         bed.tick(0.0, 0.0);
         ticks += 1;
     }
+    ticks
 }
 
 /// The world bounds of every collider on the tank's body (m).

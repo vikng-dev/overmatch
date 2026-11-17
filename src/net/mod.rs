@@ -25,7 +25,7 @@ mod debris_stress;
 mod debug_hud;
 mod diagnostics;
 mod disclosure;
-/// Read-only starvation and resync instruments at the interpolation buffer's edge.
+/// View-clock hold and completion statistics.
 mod frontier;
 mod harness;
 mod he_stress;
@@ -37,8 +37,6 @@ mod hit_feel;
 /// The dedicated server's hosted mode: settings from the Worker, heartbeats, capacity, empty exit.
 mod hosting;
 mod input_gap;
-/// The interpolation buffer's size, derived from the measured link instead of pinned.
-mod interp_delay;
 /// Replicon round trips of the construction ledger: late, lossy and far-behind clients end with
 /// the authority's list or refuse the match, and a caught-up one is sent only what it lacks.
 #[cfg(test)]
@@ -52,7 +50,6 @@ mod matchmaking;
 pub(crate) mod physics;
 mod protocol;
 mod ram;
-mod resync;
 mod rig;
 mod rig_admission;
 /// The match score: knockouts and losses per combatant, and each knocked-out life's respawn
@@ -77,8 +74,6 @@ mod shot_transport;
 mod construction;
 pub(crate) mod spawn_map;
 mod spawn_placement;
-/// The downlink sync margins, derived from the measured link instead of pinned.
-mod sync_margin;
 #[cfg(test)]
 mod test_harness;
 /// The netcode boundary scan and the upstream lightyear tripwires.
@@ -89,7 +84,7 @@ mod timing;
 /// The net client's UI, screen by screen: every root owned, each screen drawing only its own.
 #[cfg(test)]
 mod ui_ownership;
-mod view_clock;
+pub(crate) mod view_clock;
 /// The quantised wire forms of the per-tick hull and belt state.
 mod wire_quant;
 mod world_reset;

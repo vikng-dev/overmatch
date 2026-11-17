@@ -622,7 +622,7 @@ fn publish_engine_rpm(
 fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     let spec = &blueprint.spec.track;
     let sus = spec.suspension.params();
-    let (geom, trans) = super::rig_geom::RigGeom::build(
+    let (geom, trans, inertia) = super::rig_geom::RigGeom::build(
         &blueprint,
         // The SIM artifact — the same file the ballistic walk is extracted from, so the running
         // gear and the armour are measured off one set of accessor bytes (ADR-0035).
@@ -631,7 +631,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         spec.link_count,
         &sus,
     );
-    let gear = TrackGear::from_construction(&blueprint, &geom, trans);
+    let gear = TrackGear::from_construction(&blueprint, &geom, trans, inertia);
     commands.insert_resource(gear.params.support_law());
     commands.insert_resource(gear);
     // Keep the marker-derived running gear alive as the game's single geometry source: the track
@@ -645,6 +645,7 @@ impl TrackGear {
         blueprint: &TankBlueprint,
         geom: &super::rig_geom::RigGeom,
         trans: TransmissionParams,
+        inertia: f32,
     ) -> Self {
         let resolution = super::forces::CONTACT_RESOLUTION;
         let spec = &blueprint.spec.track;
@@ -735,9 +736,6 @@ impl TrackGear {
             travel,
             PROBE_REACH,
         );
-        let inertia = spec
-            .reflected_inertia(&blueprint.spec.roadwheels, geom.wrap_radii())
-            .expect("running-gear admission certified the construction inertia");
         let grip = GripParams::of(
             &blueprint.spec,
             crate::track::rig_geom::tank_ground_pressure_kpa(geom),

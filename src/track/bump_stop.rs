@@ -116,7 +116,7 @@ impl TrackColliders {
     ) -> Self {
         let track = &blueprint.spec.track;
         let params = track.suspension.params();
-        let (geom, _) = RigGeom::build(
+        let (geom, _, _) = RigGeom::build(
             blueprint,
             glb,
             track.sprocket.teeth,

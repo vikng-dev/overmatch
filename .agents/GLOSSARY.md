@@ -302,9 +302,12 @@ _Avoid_: "determinism makes prediction more accurate" (it makes *replay* exact; 
 *Historical: the watchdog that worked around it was deleted with client prediction (ADR-0037); the
 client no longer rolls back.* The zero-margin failure: lightyear's receive-time rollback check is skipped for any sample stamped at-or-ahead of the current tick and never retried, so state rollback goes permanently, silently dead — measured 35–50 m divergence with fresh authority arriving and zero rollbacks. Pre-watchdog lat0 rollback counts measured this, not convergence.
 
-**Tick index** (predicted `P` / server `S` / confirmed `C` / interpolation `I`):
-The tick a given entity is a view of. A client's world is not a snapshot of one instant: every tank, the client's own included, renders at the *interpolation* index `I` (ADR-0037) — `P` survives as the input timeline's tick — and server-authoritative facts arrive on the *confirmed* frontier `C`. See `design/timelines-and-shear.md` for the offsets and their sources.
-_Avoid_: comparing `C` and `I` as if commensurable — `C` is a global replication-completeness frontier, `I` a per-entity render index.
+**Tick index** (server `S` / confirmed `C` / view `I` / local `L`):
+The tick an object or observation refers to. Every presented tank shares the server-domain view
+index `I`; confirmed `C` names the newest completed authority tick received. Their difference is
+presentation headroom. A client's local `L` counts its own updates and has no shared epoch with
+`S`, `C` or `I`.
+_Avoid_: subtracting a client's local count from an authority or view tick.
 
 **Shear**:
 The tick gap between two entities that interact. Interactions are only well-posed between entities on the same tick index; static world geometry has no index, which is why driving feels right and ramming does not. Ramming, un-learnable aim lead, and the incoherent opponent tracer are one phenomenon (ADR-0017).

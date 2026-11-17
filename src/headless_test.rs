@@ -845,8 +845,9 @@ fn pivot_clears_its_own_kinematic_yaw_floor() {
 /// Flat-fixture rest watchdog, scaled by the momentum the side discs and contacts must arrest.
 /// Crank momentum is reflected through the largest reduction; yaw momentum is expressed at the
 /// belt lever. DERIVED arrest time is P/min(two side brakes, contact grip). Fixture: four such
-/// intervals, each including a suspension damping time and Avian's sleep dwell, allow sequential
-/// hull, belt, support and sleep settling. This is a finite watchdog, not a physical stop target.
+/// intervals, each including a conservative suspension allowance and Avian's sleep dwell, allow sequential
+/// hull, belt, support and sleep settling. Terrain grip is a watchdog estimate for every flat
+/// fixture, including slabs and loose pieces; this is not a certificate of their contact force.
 fn rest_tick_budget(app: &App, tank: Entity) -> usize {
     use crate::track::sim::{TankTransmission, TrackDrive, TrackGear};
     use avian3d::prelude::{AngularVelocity, LinearVelocity, TimeToSleep};
@@ -877,8 +878,10 @@ fn rest_tick_budget(app: &App, tank: Entity) -> usize {
         "the rest fixture needs a resisting impulse"
     );
     let suspension = &spec.track.suspension;
-    let damping_time = 1.0 / (suspension.damping_ratio * suspension.ride_frequency);
-    (4.0 * (momentum / resistance + damping_time + world.resource::<TimeToSleep>().0)
+    // Fixture: 1/zeta ride periods, with ride_frequency in Hz. This allows TAU amplitude-
+    // decay times (omega_n = TAU * f), not a single physical decay time.
+    let suspension_allowance = 1.0 / (suspension.damping_ratio * suspension.ride_frequency);
+    (4.0 * (momentum / resistance + suspension_allowance + world.resource::<TimeToSleep>().0)
         * FIXED_TICKS_PER_SECOND as f32)
         .ceil() as usize
 }

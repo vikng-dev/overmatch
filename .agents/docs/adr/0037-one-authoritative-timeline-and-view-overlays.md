@@ -21,7 +21,7 @@ and the prediction-era clauses of [[0014-sim-view-split]], [[0021-fire-replicati
 ## Ruling
 
 Every hull — the client's own included — renders from the interpolated server stream, at a
-delay derived from the observed receipt stream (`net::interp_delay`). The client predicts nothing
+delay derived from completed frame-start stamps (`net::view_clock`). The client predicts nothing
 and reconciles nothing: there is one timeline of authoritative state, and everything the player must feel before that stream can show it is a
 **view overlay** — presentation computed beside the stream, never a second simulation corrected
 against the first.
@@ -82,18 +82,18 @@ presentation consumers (recoil microsim, belt view).
 
 ## Surviving levers (all threshold-clean by design, or named as debt)
 
-- `interp_delay` — the receipt-spread delay law, with bounded objective slew.
-- `sync_margin` — the downlink receipt distribution and interpolation margin.
+- `view_clock` — the completed-stamp presentation cursor, with bounded delay slew and playback
+  rate; its target covers server work and delivery lateness in one windowed term.
 - `input_arrival` — the server resolves input edges exactly once by arrival and link state;
   replicated weapon state is authoritative. The shot bundle presents from the server event.
 - `recoil_overlay` — the microsim-subtract own-recoil response (fork 1's candidate A).
 - `cursor_queue` — discrete facts present at the cursor crossing of their authority tick.
-- `frontier` — read-only starvation, impulse-coincidence and timeline-resync diagnostics. It
-  observes the sampled stream without projecting or blending hull poses.
+- `frontier` — read-only completed-tick arrival, headroom, hold and view-cut diagnostics.
+  It observes the sampled stream without projecting or blending hull poses.
 - `hit_feel` at arrival (under review, fork 2), the FRONTIER/INPUT-ARRIVAL instruments,
   the track-view snap detector (its render_error upper bracket is unpinned — the remaining
   discontinuity sources are respawn, terrain revision, and lightyear's freeze-then-step clamp),
-  servo view interpolation and the `RemoteServos` integrator, lightyear's clock steering, and
+  servo view interpolation and the `RemoteServos` integrator (slice 3/#187), and
   the wire-quantization guards (`HIT_EPS_HP`).
 - Named tuned-constant debt, complete: the belt phase heal rate, a `Taste` in
   `assets/driving/belt_phase_view.ron` (derived replacement sketched in `recoil_overlay`), and the

@@ -191,7 +191,7 @@ pub(crate) fn solve_limited(speeds: &[Speed], rows: &[Row], limits: &[ImpulseLim
             .find_map(|distance| {
                 search.neighbours(&seed, &mut Vec::with_capacity(rows.len()), distance)
             })
-            .expect("admitted conditioning must leave an optimal independent KKT basis resolvable above the rank threshold");
+            .expect("the loaded metric must leave an optimal independent KKT basis above the rank threshold; admission certifies only unloaded conditioning");
         assignments_tried += search.assignments_tried.get();
         result.assignments_tried = assignments_tried;
         let mut broke = false;

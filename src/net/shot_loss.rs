@@ -19,18 +19,15 @@ use lightyear::prelude::server::{
 };
 use lightyear::prelude::*;
 
-use super::client::{
-    HeldFireEvents, PendingFireEvents, PendingRecoilKicks, SeenDamage, SeenShots,
-    age_sanctioned_shots, receive_damage_confirms, receive_fire_events,
-};
+use super::client::install_fire_ingress;
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::hit_feel::LocalHitConfirmed;
 use super::protocol::{DamageReceipt, NetCrew, NetTank, VolumeSnapshot, protocol_id};
 use super::server::attach_replication_sender;
 use super::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
 use crate::ballistics::{
-    BallisticVolume, ComponentHealth, FireShell, FireShellOrigin, Impact, RoundBody,
-    SanctionedShots, ShellDamage, Shot, ShotSource,
+    BallisticVolume, ComponentHealth, FireShell, FireShellOrigin, Impact, RoundBody, ShellDamage,
+    Shot, ShotSource,
 };
 use crate::damage::VolumeOf;
 use crate::tank::{
@@ -342,10 +339,7 @@ fn fire_script(
     mut modes: ResMut<ScriptedShotModes>,
     mut commands: Commands,
 ) {
-    // Not until the observer is connected AND its timeline has synced: a shot fired into a link that
-    // nobody is listening on is not a lost shot, it is a shot with no observer — and a shot that
-    // arrives before the client's `LocalTimeline` has synced to the server's is rejected as absurdly
-    // stale by `fire_catch_up_ticks`, which would be a harness artefact, not a netcode finding.
+    // The fixture arms after the peer has received its shooter and idle stream.
     if !armed.0 {
         return;
     }
@@ -485,7 +479,7 @@ fn spawn_volley_roots(
     }
 }
 
-/// The fire script's arming flag: set by the test once the client is connected, synced, AND holding a
+/// The game's damage model: the fire script arms once the client is connected and holding a
 /// replica of the shooter tank (see [`fire_script`] — an unmapped shooter is now dropped at the gate).
 #[derive(Resource, Default)]
 struct FireArmed(bool);
@@ -741,6 +735,11 @@ fn build_server(port: u16) -> App {
         tick_duration: TICK,
     });
     super::protocol::plugin(&mut app);
+    app.world_mut().spawn((
+        super::tick_stamp::TickStamp::new(0.0, 0.0).unwrap(),
+        Replicate::to_clients(NetworkTarget::All),
+    ));
+
     super::disclosure::install_server(&mut app);
     // The authority's composition: the SIM half alone, exactly as `net::server::run` composes it.
     app.add_plugins(crate::ballistics::sim_plugin);
@@ -800,6 +799,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
         tick_duration: TICK,
     });
     super::protocol::plugin(&mut app);
+    super::view_clock::install(&mut app);
     // A CLIENT's composition: both halves. The view half is what dresses a shell with `ShellVisual`,
     // which is the signature the trail harness below attaches its ribbon on.
     app.add_plugins((
@@ -816,15 +816,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     // The game's damage model: replicas replay public paths and never reduce local HP pools.
     app.insert_resource(ClientReplica);
 
-    // Production fire/path ingress seams with their client-only resource defaults.
-    app.init_resource::<PendingRecoilKicks>();
-    app.init_resource::<SeenShots>();
-    app.init_resource::<HeldFireEvents>();
-    app.init_resource::<PendingFireEvents>();
-    app.init_resource::<SeenDamage>();
-    app.init_resource::<SanctionedShots>();
-    app.add_systems(Update, (receive_fire_events, receive_damage_confirms));
-    app.add_systems(FixedUpdate, age_sanctioned_shots);
+    install_fire_ingress(&mut app);
     app.add_observer(arm_fixture_weapons);
 
     app.init_resource::<ClientShells>();
@@ -888,10 +880,6 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     );
 
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
-    // The input timeline is what SYNCS `LocalTimeline` to the server's tick — the present `P` that
-    // `fire_catch_up_ticks` measures a shot's age against. Same fixed input delay as the shipping
-    // client, and inserted the same way: an app-global resource, after `ClientPlugins`.
-
     let client = app
         .world_mut()
         .spawn((
@@ -1048,8 +1036,7 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         "the client never connected over loopback UDP — the harness is broken, not the netcode"
     );
 
-    // Production ownership split: the shooter has exactly the input slot `claim_input_slot` would
-    // add, while the observer has only the interpolated replica and therefore cannot suppress it.
+    // The shooter owns its replica; the observer has only the public interpolated replica.
     let mut ownership_ready = false;
     for _ in 0..600 {
         step(&mut server, &mut shooter, &mut observer);
@@ -1317,14 +1304,9 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         bounced.len(),
     );
 
-    // THE CURSOR ABSORBS A STEADY TRANSPORT DELAY. The configured 12-tick raw receive delay used
-    // to force local-clock catch-up spawns (hidden keyed armor holds at the plate); under the
-    // cursor clock the delayed round presents at its own tick, age ~0, at the muzzle — so the
-    // delayed observer must record NO hidden hold. Reverting a presentation site to arrival-clock
-    // aging fast-forwards these shells ~12 ticks (~150 m, past the 125 m plate) and reds this.
-    // Catch-up survives only for a round arriving after its cursor crossing (a loss-repaired
-    // resend), whose seeded-deterministic age on this link stays under the shell's flight to the
-    // plate (RANGE / one tick of flight).
+    // The game's damage model: a steady receive delay moves the cursor; facts still release
+    // at their fire ticks. Aging on arrival can skip the fixture plate into a hidden cosmetic.
+    // Loss repair may still deliver a fact after its cursor crossing.
     let observed_catch_up_holds: Vec<_> = observer_catch_up_holds
         .iter()
         .copied()

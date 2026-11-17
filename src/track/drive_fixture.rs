@@ -41,12 +41,9 @@ pub(crate) fn compact_spec() -> crate::spec::TankSpec {
         value: 30.0,
         label: crate::provenance::Provenance::Fixture("compact rated climbing slope".into()),
     };
-    tr.mean_hold_capacity_n = Some(crate::provenance::Labelled {
-        value: 100_000.0,
-        label: crate::provenance::Provenance::Fixture(
-            "compact neutral-turn mean brake rating".into(),
-        ),
-    });
+    tr.mean_hold = Some(crate::provenance::Provenance::StandIn(
+        "compact gearbox-brake torque and reduction missing; rated-grade rule supplies mean capacity".into(),
+    ));
     tr.brake_static_factor = crate::provenance::Labelled {
         value: 1.4,
         label: crate::provenance::Provenance::Fixture("compact static breakaway multiplier".into()),
@@ -204,14 +201,12 @@ pub(crate) fn tiger_authoring() -> TransmissionAuthoring<'static> {
             Coupling::Stop(Output::Mean),
         ],
         steering_radius_rounding_share: 0.01, // Fixture: table rounding allowance.
-        brake_capacity_n: spec.mass
-            * super::derive::G
-            * brakes.rated_slope_deg.value.to_radians().sin()
-            / 2.0,
+        brake_capacity_n: brakes
+            .brake_capacity_n(spec.mass)
+            .expect("the fixture's rated grade is admitted"),
         mean_hold_capacity_n: brakes
-            .mean_hold_capacity_n
-            .as_ref()
-            .map(|rating| rating.value),
+            .mean_hold_capacity_n(spec.mass)
+            .expect("the fixture's mean brake is admitted"),
         brake_static_factor: brakes.brake_static_factor.value,
         drag_fraction: 0.25,
         engine_inertia_kgm2: 4.0,

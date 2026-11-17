@@ -70,7 +70,7 @@ TankSpec(
                 // Parking clamps both Argus side discs: Tigerfibel D 656/27 p. 41;
                 // Spielberger pp. 51-55. The neutral-turn gearbox brake acts on the mean.
                 couplings: [Clutch(Mean), Steering, Stop(Left), Stop(Right), Stop(Mean)],
-                mean_hold_capacity_n: Some((192_000.0, Unknown("neutral-turn gearbox-brake torque and its reduction to mean belt force are missing; OLVAR manual D 656/21+ Pt 2 or measured torque and reduction would settle the rating"))),
+                mean_hold: Some(StandIn("gearbox-brake torque and reduction to mean belt force are missing; mean hold carries the service brakes' rated slope until a sourced torque and reduction replace this rule (OLVAR manual D 656/21+ Pt 2 or measurement)")),
                 engine: (
                     // HL230 P45. idle INFERRED (~600, typical for the engine class);
                     // governed 2500 = the fleet condition from Nov 1943 [ANCHOR]; per-gear
@@ -153,7 +153,7 @@ TankSpec(
                     radius_rounding_share: (0.01, Resolution("relative radius-table rounding bound: one percent")),
                 ),
                 rated_slope_deg: (35.0, Measured("Spielberger, Der Panzerkampfwagen Tiger und seine Abarten, 6th ed. 1998, pp. 190-192: climbing ability 35 degrees up and down")),
-                brake_static_factor: (1.2, StandIn("Argus lining static/sliding ratio unknown; handbook design example substitutes until lining measurements: DARCOM-P 706-358 (1976), section 14-8, pp. 14-17 to 14-18: tank brake design example uses service factor 0.50 and static factor 0.60 for larger static pad-rotor friction; ratio 1.2")),
+                brake_static_factor: (1.2, StandIn("side-disc and gearbox-brake static/sliding lining ratios unknown; one handbook stand-in covers both devices until either has a sourced lining ratio: DARCOM-P 706-358 (1976), section 14-8, pp. 14-17 to 14-18: tank brake design example uses service factor 0.50 and static factor 0.60 for larger static pad-rotor friction; ratio 1.2")),
 
             ),
         ),

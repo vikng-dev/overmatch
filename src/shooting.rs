@@ -138,15 +138,15 @@ fn check_weapon_timestep(time: Res<Time<Fixed>>) {
 }
 
 /// Advance the local-only fallback clock after a completed fixed tick. Network compositions
-/// overwrite it from `LocalTimeline` before the next gameplay pass.
+/// publish the authority tick or client view tick before the next gameplay pass.
 pub(crate) fn advance_weapon_clock(mut clock: ResMut<crate::WeaponClock>) {
     clock.0 = clock.0.after(TickSpan::ONE);
 }
 
 /// Why a weapon's [`TankRoot`] resolves: [`crate::tank`]'s assembly spawns every weapon under its
 /// root in the root's own construction batch, and the root carries `Tank` (which requires its
-/// `TankCommand`). Authority poses are spawn-complete; the client presentation boundary retains
-/// the last stream pose through an interpolation resync.
+/// `TankCommand`). Authority poses are spawn-complete; the client's monotonic view cursor
+/// never revisits discarded pose history.
 const WEAPON_ROOT_IS_A_TANK: &str =
     "a weapon's TankRoot names its live, posed tank, assembled with it in one construction batch";
 /// Why a weapon's slot indexes its root's per-weapon state: `WeaponGate`, `WeaponLoads` and

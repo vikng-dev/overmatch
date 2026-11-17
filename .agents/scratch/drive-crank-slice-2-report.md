@@ -1,164 +1,166 @@
-# Drivetrain slice 2: final review closure
+# Drivetrain slice 2: review closure
 
-Subject: Overmatch's multiplayer video-game driving physics, game state only. The unstaffed
-proof concerns the game's damage model: a Driver station is out of action, represented by game
-state only. Lane `lane/drive-crank`, bay 2. The design narrative belongs to
-`.agents/docs/design/track-model/transmission-design.md`; this report records checked findings
-and observations for the owner's feel. No parameter was tuned to recover an old output.
+Subject: Overmatch's multiplayer video-game driving physics, game state only. Lane
+`lane/drive-crank`, bay 2. The game's damage-model proof represents an out-of-action Driver
+station as game state only. The design narrative remains in
+`.agents/docs/design/track-model/transmission-design.md`. No parameter was tuned to recover an
+old output; observations below are for the owner's judgement.
 
-## Checked findings
+## Checked review findings
 
-Every review/lens finding was checked against source. All actionable findings are addressed.
-The review's slower-throttle-launch inference is rejected by matched traces; see the diagnosis.
+Both supplied reviews were read in full and checked against source. Their actionable findings
+are real. The requested implementation choices are:
 
 | Finding | Disposition |
 |---|---|
-| P1: any positive hull reading opens the ladder | Fixed in `driver::choose`: rest uses `park_engage_speed()`. Above the launch range, a rolling selection also needs `speed * ratio / sprocket_radius >= launch_omega(command)`. No new number. The shared unchosen-launch path covers spawn and direction changes. Regression witnesses cover creep/rollback on both ladders and rolling readings below/above upper-gear clutch closure. Both new tests failed before the fix. |
-| P2: unexplained zero coasting count | Traced the full throttle phase before and after the selector fix; see below. Restored the moving-belt assertion. The prior report's explanation involving release braking was wrong: the first count reads the pre-release belts. |
-| P1/P2: wrong brake device | Deleted `mean_hold_brake_count`. The sheet authors the neutral-turn gearbox brake's independent `mean_hold_capacity_n = 192000`, labelled `Unknown`: missing shaft torque and reduction, settled by the OLVAR manual or measurements. Parking applies both side stops at their per-side rating and therefore resists differential motion. |
-| P3: two hold exits | One retiring-hold rule keeps it only while there is static support to preserve: a stationary mean with differential motion retains the mean row; exact belt rest transfers to both side rows; a sliding mean admits side stops immediately. An along-ladder request can then release park to its one-way launch stop. |
-| P3: provenance | The static/sliding ratio is `StandIn`, naming the missing lining fact and handbook example. The slope's `Measured` label describes only the slope. The rated-grade brake rule's citation is beside `TransmissionSpec::brake_capacity_n`. |
-| P3: conditioning claim | The refusal names actual speed, radius and inertia fields. The check's comment states its unloaded-metric precondition and derives why increasing effective belt inertia can worsen rank separation. There is no authored upper bound on contact slopes, so this is explicitly not a certificate of all loaded metrics. Runtime still requires a resolvable optimal independent KKT basis. |
-| P3: duplicated fixture facts | The drive fixture reads mass, slope, independent mean rating and static factor from the sheet, and gravity from `derive::G`. |
-| P3: unbounded rest loops | Finite watchdogs derive arrest time from reflected crank, belt, hull and angular momentum divided by the lesser of side-brake and contact force; suspension damping and Avian sleep dwell supply settling time. A labelled fixture margin allows sequential settling. All touched rest loops use this owner, including the previously fixed-duration helpers. |
-| Lens brevity: duplicated coupling geometry | `Coupling::jacobian` supplies admission and runtime clutch, steering and stop rows, preserving signed runtime ratios and positive admission magnitudes. |
-| Lens testing: pinned case count | Replaced `6048` with coverage for every catalogue construction, its side stops and each supported mean-hold class. The authority/order invariants remain. |
-| Lens error handling: late `TrackGear` check | `RigGeom::build` returns the admitted `TransmissionParams` with geometry; `TrackGear::from_construction` consumes them without revalidation. Geometry-only consumers explicitly discard the parameters. |
-| Lens brevity: duplicated test setup | Opposing/along-ladder handover setup shares one named throttle; every assertion remains. |
+| P2-1: free-selection gaps | Fixed: free selection admits the launch range, closed-clutch ratios and the lowest crank-safe gear. The construction supplies every boundary. The sweep covers all four class drivetrains, both ladders, both speed signs and pedal hundredths through each ladder's crank-safe speed range. The reported bands and both rolling subcases failed before the fix. Both rolling subcases now assert a selected launch state. |
+| P3-1: rest clause | Deleted: at rest or contact creep, upper ratios neither close their clutches nor qualify as the lowest crank-safe gear, which is already in the launch range. The creep/rollback witness remains. |
+| P2-2: gearbox-brake rating | Fixed: the sheet's `mean_hold` carries only a StandIn label naming missing gearbox-brake torque and reduction. `TransmissionSpec::mean_hold_capacity_n` derives total mean force as twice the side-brake owner's per-side capacity: weight times sine of rated slope. A sourced torque and reduction would replace this rule. The admission test varies mass and slope and refuses an Unknown label. |
+| P3-3: static factor | Fixed: the shared StandIn explicitly covers both side discs and the gearbox brake until either has a sourced lining ratio. |
+| P2-3: wake without drive | Fixed: the throttle phase ends at the first positive clutch force, read through the existing bitprobe telemetry. Its finite watchdog derives spool time from crank inertia and minimum full-pedal net torque, adding pedal travel and one sensing window. The release no longer starts after an arbitrary half-second with zero clutch drive. |
+| P3-2: solver panic | Reworded: runtime requires an independent optimal KKT basis resolvable in the loaded metric. Admission certifies only unloaded conditioning; it does not bound contact slopes. No stronger guarantee is claimed. |
+| P3-4: watchdog units | Corrected the units and classification: `1/(damping_ratio * ride_frequency)` uses Hz and is a Fixture allowance of `1/damping_ratio` ride periods, equal to TAU amplitude-decay times, not one physical decay time. The existing conservative allowance and four-interval Fixture margin remain. Terrain grip is explicitly a watchdog estimate for flat fixtures, including slabs and loose pieces, rather than their actual contact force. |
+| P3-5: unbraked paid shift | Confirmed and reported below, with no behavior change requested. |
+| P3-6: closure sense | Fixed: the Driver already receives current mean belt speed. Its reading now retains that speed; free-selection shaft speed and landing price consume it. A sensor-to-selector witness skids the hull over stationary belts on every class and both ladders. Paid-cut forecasting retains its existing hull ledger. |
+| P3-7: stale report | Replaced the stale report with current decisions and measurements, including the merged main commit and wire union below. |
+| Lens: fixture brake formula | The fixture calls `brake_capacity_n` and the mean-capacity owner; neither force law is copied. |
+| Lens: settling loop | `until_resting` returns elapsed ticks; the wake test uses it and retains the sleep assertion and measurement. |
+| Lens: duplicate assertion | Deleted the final duplicate; its richer diagnostic is in the per-tick assertion. |
+| Lens: sandbox readmission | The sandbox keeps the transmission and inertia admitted by `RigGeom::build`; retuning also consumes the admitted inertia. The chord-exact geometry rationale remains. |
+| Lens: late inertia check | Running-gear admission returns its reflected inertia with the transmission. `TrackGear::from_construction` consumes it directly; no fallible recalculation remains. Geometry-only callers discard the extra return explicitly. |
 
-The first post-change targeted run found two false fixture premises, investigated before changing
-expectations: `pivot_release_hands_static_load_to_side_stops_from_exact_rest` and
-`parked_static_load_survives_pivot_and_service_handover` selected their supposedly supported load
-from the side rating alone. The independent mean brake can be weaker. Their load now derives from
-the lesser of the side rating and half the mean rating, within that device's static interval.
-The exact-rest transfer and zero-mean assertions are retained. No production rating changed.
+Scope of the selection guarantee: a propulsive pedal with a sensing reading cannot remain
+unchosen inside the top ratio's crank-safe shaft-speed range. Above that construction limit no
+ratio can safely land; the existing open-clutch overrun remains deliberate. An initial ledger
+without enough closed samples is also a named, bounded initial state. Neither is one of the
+reported between-ratio gaps.
 
-A final read found that `TrackGear::bitprobe_startup` omitted the mean rating. Now that the
-rating is independent, startup telemetry emits it whenever the construction has a mean brake.
-This is diagnostic data only. The current-mechanics section of the design document also removes
-the false side-disc-to-mean linkage and states the shared handover and free-selection rules.
-The pre-telemetry full suite passed 2847 tests with zero failures
-and 50 ignored; the required checks were repeated after this final source edit.
+No lens-backlog row names an edited drivetrain item. The merge brings main's existing backlog
+forward. No new feature, operator switch, fallback or retained alternative is introduced. The
+wake witness reads the existing bitprobe feature, whose tracked probe runners are its user.
+The orchestrator owns the independent six-lens landing review; this lane neither pushes nor
+merges into main.
 
-No lens-backlog row names the edited items. The orchestrator owns the independent six-lens landing
-review. The existing general solver, independent ADMM/Cholesky reference, limit-face retention and
-assignment counting remain; cross-tick warm starting stays absent because nonunique impulses feed
-the Driver's `driving` observation. This change adds no switch, fallback or alternative solver.
+## Wire union
 
-## Wake-test diagnosis
+Merged main at `8337127d33a32389e144d872d0bda5f48d53c146`, including timing slice 2's revision
+105. The conflict in `src/net/protocol.rs` is resolved at **PROTOCOL_REV 106**. The normalized
+own-wire-type union hash is **`0x4d79ba6d019c1235`**, printed by the merged manifest tripwire and
+pinned. This includes the lane's `mean_hold`/`launch` transmission state and main's timing wire
+changes. The drivetrain authoring schema and sensor reading do not add wire state.
 
-**MEASURED before the selector fix**, command 1 for 32 ticks (half a simulated second): the loose-
-piece wake fixture selects F8 on the first driven tick and stays in `Slip` for all 32 ticks.
-At tick 0 its belts read `[0.008858673, 0.008858673]` m/s. At ticks 27–31 they read
-`[0, 0]`, `[0.54429775, 0.54429775]`, `[0, 0]`, `[0.5782018, 0.5782018]`, then
-`[0.034809906, 0.034809906]` m/s. The final hull reading is 0.12295915 m/s; forward travel is
-0.057429716 m. The first release count therefore sees both belts below the Driver's 0.05 m/s rest
-threshold, before any release braking. There are zero coasting counts. The alternating response is
-an observation of the existing delayed loose-piece/contact coupling, not a new law or target.
+## Observations for the owner
 
-**MEASURED after the fix:** F4 replaces F8, still `TakingUp`/`Slip` for all 32 throttle ticks.
-Every throttle-phase belt and hull sample is identical to before, including final belts
-`[0.034809906, 0.034809906]` m/s and 0.057429716 m forward travel. It is therefore wrong to infer a
-slower throttle-phase launch from the zero count. The crank is still spooling: it ends at
-199.49248 rad/s, below the 219.9115 rad/s take-up floor, and the clutch transmits zero force in
-every throttle tick. The small motion is the loose-piece/contact response released by the lever,
-not engine propulsion.
+All readings below are observations, never numerical acceptance conditions. Logs are outside git
+under `/tmp/drive-r5-*.log`; the existing belt-friction probe owns its per-tick CSV. No duration,
+ratio, force, inertia or contact parameter was tuned for these outputs.
 
-The distinction appears during pedal release. The raw command becomes zero immediately, while the
-served pedal falls by 0.0625 per tick (DERIVED from the authored 4/s slew and 64 Hz clock). Its
-take-up floor falls with it. At release tick 1, crank speed is 202.72093 rad/s and the floor is
-200.27654 rad/s (MEASURED), admitting clutch impulse. Both runs retain side park and have the same
-crank trajectory. The old F8 delivers 59.787137 kN through the clutch and both belts remain zero;
-the fixed F4 delivers 295.0365 kN, which, with the sampled ground reaction, causes the parked rows
-to break away on alternating ticks (MEASURED). Release ticks 1/3/5/7/9/11/13 end at belt speeds
-0.36795294/0.38693446/0.44527423/0.5018024/0.4740664/0.45720527/0.46654296 m/s in the fixed run
-(MEASURED). The next iteration counts each of those **seven** moving-belt ticks and asserts wake.
-The first release count is zero in both runs; later counts depend on release mechanics.
+### Mean hold and side-park handover on a slope
 
-For isolation, the old selector was temporarily replayed with the same final instrumentation and
-all other fixes present: the restored `moving_ticks > 0` assertion failed with zero. Restoring the
-fixed selector passes with seven. All temporary instrumentation and the selector mutation are
-removed. The count difference is caused by item 1, but the mechanism is the release transient,
-not a slower throttle phase or braking that happened before the first sample. The separate
-explicitly coasting-belt wake witness remains. No contact law or release parameter was changed.
+DERIVED from the shipped mass, gravity and rated slope: total mean sliding/static capacities are
+320.727/384.872 kN. Side capacities remain 160.363/192.436 kN each. The total mean rule shares the
+service-brake grade; it does not assert a sourced gearbox torque or lining ratio.
 
-## Observations for the owner's feel
+MEASURED by the existing 25-degree pivot probe: each case begins parked, holds full steer for
+64 s, then releases for 5 s. Held yaw averages the last 3 s. Downhill slide is displacement
+projected onto the world's downhill direction, in the horizontal plane; surface distances are
+DERIVED by dividing by cos(25 degrees). Planar hold travel also includes transverse motion.
 
-All probe readings here are MEASURED observations, not acceptance targets. Numerical comparisons
-from prior reports remain references, never obligations. Raw logs live outside git under
-`/tmp/drive-r4-*.log`; the existing belt-friction runner owns its CSV artifact.
+| Initial facing | Held yaw (rad/s) | Planar hold travel (m) | Downhill slide, planar / surface (m) | Planar release travel (m) |
+|---|---:|---:|---:|---:|
+| uphill | -0.083504 | 12.2131 | 12.1813 / 13.4406 | 0.02349 |
+| downhill | -0.124658 | 12.7913 | 12.7409 / 14.0580 | 0.04279 |
+| across | -0.006261 | 12.3185 | 12.3041 / 13.5760 | 0.03299 |
 
-### Brake interpretation
+MEASURED: every held tick retains the mean latch, with final hold belts exactly opposite:
+[0.236439, -0.236439], [0.236587, -0.236587], [0.236801, -0.236801] m/s respectively.
+All releases retain mean hold for 15 ticks, then side park for 305 ticks; final belts are zero.
+The pure construction tests also retain exact mean rest through parked-to-pivot and
+pivot-to-side-park handover across the supported class drivetrains and both load signs.
 
-Per-side sliding rating is `mass * derive::G * sin(rated_slope) / 2`, independently of ground grip
-(DERIVED). For the sheet's measured climb rating and mass this is 160.36 kN sliding and 192.44 kN
-static per side (DERIVED); the independent mean brake is 192/230.4 kN with the shared StandIn
-static ratio (DERIVED). The mean's force convention is total force at the mean belt coordinate.
+The stronger mean brake restores substantial uphill/downhill yaw, but the hull still moves
+roughly 12 m downhill during a long pivot. That remains outside the stated believable expectation
+that a tank asked to pivot within its rated grade does not slide away. It is **not** reported as
+resolved. The belts retain exact zero mean while the hull slides at the contacts. This is hull/contact
+slip while the mean constraint holds, not evidence that its rating should be increased again.
+The across-slope case also makes very little yaw. These are owner-visible observations of the
+remaining contact/steering behavior, left unchanged rather than hidden by a new rating or gate.
 
-The previous level service stop gave 5.806323 m/s², about 0.59 g (DERIVED from MEASURED starting
-speed and stop travel). This exceeds the research's MEASURED fleet range 0.29–0.50 g and the period
-manual's 0.36 g. It is an observation for feel, with no retuning. At the rated slope, equality of
-sliding brake force and gravity balances the grade; stopping there also depends on the existing
-rolling/contact response. A track that is not rolling still meets rolling resistance through hull
-travel in the current contact law (`forces::rolling_resistance`); whether it should is an owner's
-law question outside this lane.
+The game's damage-model unstaffed proof also passes: passive mean hold transfers to side park at
+release tick 1; actual Avian sleep begins at tick 77, within the 1043-tick watchdog (MEASURED).
 
-### Slab pull
+### Four feel observations
 
-MEASURED, zero-based driven ticks: **F4 at 0 → F5 at 94 → F8 at 183**. The latter two changes pay
-shift windows; final hull speed is **3.929259062 m/s**. In/Slip/Out occupy **61/155/40 ticks**.
-The faulty-selector run's F8-at-0, 2.498057842 m/s and 0/256/0 regime counts are prior MEASURED
-references, not targets. The corrected initial choice is within the sheet's launch range.
+1. **Pedal dead time.** MEASURED: a sleeping standing-start fixture sends its first positive clutch
+   force on completed driven tick 35, **0.546875 s** after demand. The slab pull independently
+   records its first positive clutch force at zero-based tick 34 (the same completed step),
+   **19.591 kN**. Before that the crank spools without track drive. DERIVED by reading merged main's
+   `crank_guards` shows the same outcome for this input: its slipping-clutch floor is
+   `launch_omega(propulsive).min(reachable)`; when the freely reachable crank remains below the
+   floor, its entire available torque accelerates the crank and none reaches the belts. Its
+   construction inertia and keyboard slew are the same. Main therefore also has spool dead time;
+   this is a source conclusion, not a claimed measurement of main's exact duration. Presentation
+   delay is additional, and the shipped sheet still has no engine sound loop.
+2. **Paid upshift to a slipping upper gear.** MEASURED on the 4-second slab pull, zero-based driven
+   ticks: **F4 at 0 -> F5 at 94 -> F8 at 183**. F8 is selected at **3.2806 m/s (11.810 km/h)**;
+   after its 20-tick cut, first take-up is tick 203 at **3.2938 m/s (11.858 km/h)** hull speed,
+   with **3.0136 m/s** belt speed. It slips for all **53 remaining steps, 0.828125 s**, with no
+   closure before capture ends. This is a lower bound on the full slip duration, not an invented
+   completion time. At the end the hull is **3.929259 m/s (14.145 km/h)**, still slipping. DERIVED:
+   F8's full-pedal 2100-rpm floor closes at **8.82778 m/s (31.78 km/h)** belt speed, from its
+   45.4-km/h-at-3000-rpm speed anchor. The paid-choice rule can select a viable slipping ratio;
+   the free-selection fix deliberately does not change that rule.
+3. **Unbraked paid change from a stall.** DERIVED from control ordering: an along-ladder request
+   releases park before the Driver starts a paid cut; the cut opens the clutch and disables the
+   one-way launch lever. Thus that case has no commanded stop for the **20-step / 0.3125-s**
+   window (ceil(0.31 s * 64 Hz), from the sheet and clock). Merged main's `update_park_latch`
+   retains park below its rest threshold during that window. The lane behavior is unchanged;
+   clutch-out motion on a grade is a feel decision, not silently restored to main's behavior.
+4. **Level service stop.** MEASURED: **2.183719 m/s** initial hull speed, **0.410641 m** peak forward
+   stopping travel, stop at tick **26**, park at tick **28**, **233.408 mm/s** peak reverse speed
+   and **8.017 mm** rock-back. DERIVED equivalent constant deceleration `v^2/(2*travel)` is
+   **5.806323 m/s^2 = 0.591878 g**. The probe asks for a run-up to at least F3 and actually brakes
+   in F5; the label does not constrain the braking gear. No brake or contact number was tuned.
 
-### Every 25-degree pivot release
+### Wake witness
 
-MEASURED by the existing 64-second hold / five-second release probe. Held yaw and rpm average the
-last three hold seconds. Travel is planar displacement over all 320 release ticks. The two along-
-slope held yaw readings change materially with the weaker independent mean rating; no rating was
-tuned in response.
+MEASURED: the loose-piece fixture sleeps after 58 settling ticks. Its first clutch drive occurs
+at tick 35 inside the 67-tick inertia/torque watchdog, after 0.06582 m of total hull motion.
+Release exercises 533 moving-belt ticks and then sustained sleep; the external-push arm moves
+0.003470 m along its push in two ticks and also returns to sleep. These are observations, not
+held tick counts. The raw-intent park latch versus slewed-pedal fuel split still exists on both
+this lane and main; release can send residual drive into its own side brakes.
 
-| Case | Held yaw (rad/s) | Held crank (rpm) | Release travel (m) | Final belts (m/s) | Side-park ticks / release ticks |
-|---|---:|---:|---:|---|---:|
-| uphill | -0.004955066 | 2055.2193 | 0.082886255 | [0, 0] | 305 / 320 |
-| downhill | -0.006217925 | 2055.0166 | 0.082052652 | [0, 0] | 305 / 320 |
-| across | -0.006260733 | 2055.8626 | 0.080393597 | [0, 0] | 305 / 320 |
-
-All three retain the mean row for the first 15 release ticks, then park. Hold travel is
-34.493518829 / 21.897665024 / 12.318467140 m respectively; release headings are
-3.123540401 / 3.083841562 / 1.721987605 rad (MEASURED). These observations include slope/contact
-motion and do not assert that the neutral gearbox brake holds every orientation on that grade.
-
-The shipped unstaffed proof passes: after the game's Driver station goes out of action, mean hold
-hands to both side stops at release tick **1**, sleep begins at tick **77**, inside the derived
-**1043-tick** watchdog (MEASURED). It asserts park present, mean latch absent, and actual Avian sleep.
-
-The level service-stop probe is unchanged: 2.183719158 m/s start, 0.410641074 m peak travel,
-5.806323051 m/s² equivalent deceleration (DERIVED from MEASURED speed/travel), park at tick 28,
-233.407974 mm/s peak reverse speed and 8.016706 mm rock-back (MEASURED). The probe requests a
-run-up of at least F3 and actually pulls the brake in F5; its label is not a gear constraint.
+The review's watchdog concern is a label error: the retained suspension allowance is
+`1/damping_ratio` periods at a frequency in Hz, equivalent to TAU amplitude-decay times. A trial
+using one actual decay time shortened the loose-piece sleep watchdog too far and failed the wake
+proof. No model parameter changed; the final code keeps the existing conservative Fixture
+allowance and states its units accurately.
 
 ## Verification
 
-MEASURED command results after the last source edit (temporary traces and the selector mutation
-are absent; the independent rating remains in startup telemetry):
+Required final checks and observation runs:
 
 - `cargo fmt --all --check`: pass.
 - CI clippy, `--locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`: pass.
-- `track::`: 377 passed, zero failures.
-- `net::protocol`: 18 passed, zero failures.
+- `track::`: 379 passed, zero failures.
+- `net::protocol`: 19 passed, zero failures, including the merged wire pin.
+- `trace::`: 10 passed, zero failures, including the state-hash pins.
 - `tests::doc_citations`: three passed, zero failures.
-- `spec::`: 54 passed, zero failures.
-- Final direct wake and unstaffed proofs: each passes; release count remains seven, transfer/sleep
-  remain ticks 1/77.
-- Full library suite, once after the final source edit: **2847 passed, zero failures, 50 ignored**.
-- Exact `check --no-default-features --bin overmatch-server`: pass. It retains three existing
-  dead-code warnings for audio data and the UI-only steering readout; CI-feature clippy is clean.
+- `spec::`: 55 passed, zero failures, including stand-in admission and its rated-grade rule.
+- Exact `check --no-default-features --bin overmatch-server`: pass; three existing dead-code
+  warnings for audio data and the UI-only steering readout remain. CI-feature clippy is clean.
+- Wake, unstaffed, slab-pull, 25-degree pivot and service-stop probes: pass. Their emergent
+  readings above are observations; a passing probe does not certify the slope-feel expectation.
+- Full library suite, once after the last source edit: **2838 passed, zero failures, 50 ignored**,
+  in 389.02 s (MEASURED).
 
-All compile/test commands use `scripts/serial-cargo`, with `OVERMATCH_UNATTENDED=1` and the
-runners' own headless mode. The explicitly requested server-only command uses no default features;
-the other builds use `dev_ui,bitprobe`.
+The red selection run failed both strengthened cases before the selector fix. A trial converting
+the conservative watchdog allowance to one decay time failed the wake proof; the final period
+label and existing allowance pass. Clippy's new-test `err().expect()` finding was replaced by
+`expect_err` before the final successful check. No temporary instrumentation or alternative
+implementation remains.
 
-`main` is already an ancestor, with no new commit to merge. `PROTOCOL_REV = 105`, one above main's
-104, and normalized own-wire-type hash **`0x322da02509ae4264`** stays pinned. This round changes
-authoring data, not a wire definition or codec; the protocol tests verify that the pin still
-matches. No pushes or merges into main are performed by this lane.
+All builds use `scripts/serial-cargo` and `OVERMATCH_UNATTENDED=1`. The explicitly requested
+server-only check uses no default features; all other builds use `dev_ui,bitprobe`. No source
+edit follows the start of the final full library suite.

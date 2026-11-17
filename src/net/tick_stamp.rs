@@ -1,4 +1,4 @@
-//! Frame start feeds the tick-to-time map; departure feeds the network absence bound.
+//! Frame start feeds the tick-to-time map; departure feeds the server-work diagnostic.
 //! The simulation tick rides each replication message's userdata; the stamp is a component
 //! on the globally visible scoreboard.
 
@@ -27,7 +27,7 @@ impl TickStamp {
         self.frame_start_s
     }
     pub(super) fn absence_bound_s(self, previous_frame_s: f64) -> f64 {
-        previous_frame_s - self.departure_s()
+        previous_frame_s - self.frame_start_s
     }
 
     pub(super) fn departure_s(self) -> f64 {
@@ -224,8 +224,8 @@ mod tests {
                         }),
                     )
                 });
-        // Fixture: NaN frame start in the stamp's postcard layout; the old component stays valid.
-        let bytes = postcard::to_allocvec(&(f64::NAN, 0.0_f32)).unwrap();
+        // Fixture: individually finite but unrepresentable server epoch; the old component stays valid.
+        let bytes = postcard::to_allocvec(&(1e30_f64, 0.0_f32)).unwrap();
         let carrier = client
             .world_mut()
             .spawn(TickStamp::new(0.0, 0.0).unwrap())
@@ -321,6 +321,8 @@ mod tests {
             (f64::INFINITY, 0.0),
             (f64::NEG_INFINITY, 0.0),
             (-1.0, 0.0),
+            (1e30, 0.0),
+            (0.0, 1e30),
             (0.0, f32::NAN),
             (0.0, f32::INFINITY),
             (0.0, f32::NEG_INFINITY),

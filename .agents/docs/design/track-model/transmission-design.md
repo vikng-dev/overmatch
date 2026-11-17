@@ -906,9 +906,9 @@ no propulsive pedal it can only return belt work to the crank; the idle catch th
 start a released tank creeping. A propulsive pedal permits both impulse directions, with a launch
 floor until the first solved lock. Before the sensing ledger has a reading, initial take-up waits
 for a chosen gear. This initial state is independent of belt speed. An explicit launch phase distinguishes this
-free choice from take-up of an already selected paid shift. Free selection uses the Driver's rest
-band and the authored launch range; a rolling gear above that range also needs shaft speed
-forecast from the current hull reading to reach at least its launch crank speed. Closing a paid
+free choice from take-up of an already selected paid shift. Free selection admits the authored launch range, ratios whose sensed belt speed closes the
+clutch, and the lowest gear inside the crank limit. That last gear bridges steps whose upper
+gear cannot close yet; hull skid does not stand in for shaft speed. Closing a paid
 cut retains its chosen ratio. Lock and slip are outcomes,
 recorded in `ClutchState`, rather than switches that choose a physical path. Without an operator,
 the passive spring clutch stays closed both ways with no fuel or idle catch; belt rollback may
@@ -952,10 +952,12 @@ Tigerfibel D 656/27 p. 41 parks on the hand lever; Spielberger pp. 51-55 describ
 hand actuation of the same two Argus discs. Parking applies both side-stop rows, each at the
 rated-grade per-side capacity; it resists mean and differential motion.
 The separate gearbox main-shaft button cancels clutch drag during neutral turns (British MI
-summary, Nov 1943, Preliminary Report No. 19). Its row acts on the mean alone and has its own
-authored force rating at that coordinate, labelled Unknown. Missing shaft torque and reduction
-would be settled by OLVAR manual D 656/21+ Pt 2 or measured torque/reduction. The side discs'
-rating does not establish the gearbox brake's rating; no gearbox torque law is inferred.
+summary, Nov 1943, Preliminary Report No. 19). Its row acts on the mean alone. Its StandIn rule carries the same rated slope as the service
+brakes: total mean capacity is weight times the sine of that slope, from the side-brake owner.
+The sheet carries only that stand-in label. Missing gearbox-brake torque and reduction would
+be settled by OLVAR manual D 656/21+ Pt 2 or measured torque/reduction; a sourced figure would
+replace the rule. The shared StandIn static/sliding factor covers both devices until either
+has a sourced lining ratio. No gearbox torque law is inferred.
 Rejected: the steering member's rating (difference, not common load), an unbounded hold (no
 source), and torque multiplied by a selected gear without sourced construction and torque.
 A construction without `Stop(Mean)` has no mean stop.
@@ -990,7 +992,7 @@ dynamic capacity. Released rollback and the released sub-idle stop can latch par
 steering request releases it. `dead`, `park_engage_speed` and `neutral_speed_m_s` are tastes in
 `assets/driving/actuation.ron`; only the last admits a passive pivot latch. None chooses static
 friction, clutch engagement or completion of a direction swap. The rated-grade rule above owns
-side-brake capacity; the neutral-turn gearbox brake torque remains Unknown.
+side-brake and stand-in mean capacity; the gearbox-brake torque and reduction remain missing.
 
 Crank energy alone may rise without fuel when a belt back-drives it. The passive invariant is on
 total crank-plus-belt kinetic energy in the absence of combustion and external work. A free crank
