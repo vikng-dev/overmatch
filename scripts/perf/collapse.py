@@ -437,7 +437,7 @@ def run_match(args, out, recipe):
     # DERIVED: the script outlives both admission and observation at the server's tick rate.
     ticks = math.ceil((args.duration + 2 * args.startup_grace + 60) / tick_seconds())
     script = out / "load.harness.ron"
-    script.write_text(f"(ticks: {ticks}, drive: Arc, aim: Sweep, fire_tick: {ticks})\n")
+    script.write_text(f"(ticks: {ticks}, drive: Arc, aim: Sweep(radius_m: 800, rate_rad_s: 1.28), fire_tick: {ticks})\n")
     def spawn(binary, logpath, extra):
         log = logpath.open("w")
         logs.append(log)

@@ -227,8 +227,9 @@ pub struct ServoRest(pub Quat);
 #[derive(Component, Clone, Copy)]
 pub struct ServoIndex(pub usize);
 
-/// Client-local presentation state, permanent on replicas. Non-owners consume published angles;
-/// the controlled tank integrates its own ahead-running aim. [`TankServos`] remains authoritative.
+/// Client-local presentation state, permanent on replicas. A replica this client does not drive
+/// holds its stream's angles at the view cursor (`net::rig`) and no fixed step moves them; the
+/// controlled tank integrates its own ahead-running aim. [`TankServos`] remains authoritative.
 #[derive(Component, Clone, PartialEq, Debug, Default)]
 pub(crate) struct RemoteServos(pub Vec<ServoState>);
 
@@ -243,6 +244,16 @@ impl ServoState {
     /// gunner sight to clamp how far the aim intent may lead the gun (the on-screen margin).
     pub fn current(&self) -> f32 {
         self.current
+    }
+
+    /// An angle presented from the stream: both blend endpoints at `angle` and no momentum, so
+    /// the view blend draws `angle` at any overstep.
+    pub(crate) fn presented(angle: f32) -> Self {
+        Self {
+            current: angle,
+            previous: angle,
+            velocity: 0.0,
+        }
     }
 
     /// Canonical fixed-field order consumed by the passive divergence hash.
@@ -406,22 +417,21 @@ pub(crate) fn drive_servos(
                 // sheet declares none.
                 return;
             }
-            // A replica this client does not drive presents published angles.
-            let published = remote.is_some() && !controlled;
+            let streamed = remote.is_some() && !controlled;
             let states = selected(
                 remote.map(|remote| &mut remote.into_inner().0),
                 authority.map(|authority| &mut authority.into_inner().states),
             );
+            if streamed {
+                return; // Stream-posed: see `RemoteServos`.
+            }
             // The game's damage model: requirements scale operator work; an engine in action
             // supplies whole power (`module_quality`). One reading serves every slot.
-            let facts = (!published).then(|| {
-                part_facts(
-                    volumes.expect(
-                        "an admitted tank with a servo carries its volume relationship target",
-                    ),
-                    &facets,
-                )
-            });
+            let facts = part_facts(
+                volumes
+                    .expect("an admitted tank with a servo carries its volume relationship target"),
+                &facets,
+            );
             for &(_, slot, node) in servos {
                 let (_, _, spec, _, command, ..) = nodes
                     .get(node)
@@ -430,12 +440,6 @@ pub(crate) fn drive_servos(
                     .get_mut(slot)
                     .expect("every registered servo slot belongs to its selected mechanism state");
                 state.previous = state.current;
-                let Some(facts) = &facts else {
-                    // A published angle is resolved truth, not an aim command with momentum.
-                    state.current = command.target;
-                    state.velocity = 0.0;
-                    continue;
-                };
                 let slew = evaluate(&spec.requires, &facts.quality);
                 let power = match spec.drive {
                     ServoDrive::Hand { .. } => 0.0,
@@ -796,6 +800,26 @@ mod tests {
         world.get::<TankServos>(root).unwrap().states[0]
     }
 
+    /// A continuous mount's angle is its unwrapped travel: turning through ±π it keeps counting,
+    /// never folding back to −π. The stream publishes this angle and the cursor blends it linearly
+    /// (`net::protocol::servo_angles_lerp`); a folded angle would make that blend swing the mount
+    /// the long way round on every crossing.
+    #[test]
+    fn a_continuous_mount_counts_its_travel_through_a_half_turn() {
+        use std::f32::consts::PI;
+        let (mut world, root, servo, _) = powered_world(1.0);
+        // Fixture: a mount just short of +π, turning toward it.
+        world.get_mut::<TankServos>(root).unwrap().states[0] =
+            ServoState::test_new(PI - 0.05, PI - 0.05, 0.5);
+        let mut last = PI - 0.05;
+        for _ in 0..64 {
+            let current = tick_powered(&mut world, root, servo).current;
+            assert!(current >= last, "{current} folded back from {last}");
+            last = current;
+        }
+        assert!(last > PI + 0.05, "the fixture turn crossed +π: {last}");
+    }
+
     /// The game's damage model: authority reads the engine HP share every tick. An engine out
     /// of action leaves only the operator's authored hand drive, including after powered motion.
     #[test]
@@ -866,27 +890,24 @@ mod tests {
         }
     }
 
-    /// A non-owner replica presents published truth even when local engine/operator facts
-    /// in the game's damage model are stale. Presentation must invent no momentum past it.
+    /// A replica this client does not drive is posed by its stream alone (`net::rig` writes it at
+    /// the view cursor). Integrating it here, from a command or stored momentum, would move its
+    /// turret off the cursor its hull is drawn at.
     #[test]
-    fn a_replica_consumes_truth_instead_of_simulating_a_second_drive() {
+    fn the_fixed_step_never_moves_a_streamed_replica() {
         let (mut world, root, servo, _) = powered_world(1.0);
+        // Fixture: a moving state and a command elsewhere, either of which an integrator follows.
+        let streamed = ServoState::test_new(0.3, 0.2, 0.55);
         world
             .entity_mut(root)
             .remove::<TankServos>()
-            .insert(RemoteServos(vec![ServoState::test_new(0.0, 0.0, 0.55)]));
-        world.get_mut::<ServoSpec>(servo).unwrap().requires =
-            vec![crate::damage::Group::Single(Part::Gunner)];
-        for target in [0.01, 0.01, -0.02] {
-            world.get_mut::<ServoCommand>(servo).unwrap().target = target;
-            world
-                .resource_mut::<Time<()>>()
-                .advance_by(Duration::from_secs_f32(1.0 / 64.0));
-            world.run_system_once(drive_servos).unwrap();
-            let state = world.get::<RemoteServos>(root).unwrap().0[0];
-            assert_eq!(state.current, target);
-            assert_eq!(state.velocity, 0.0);
-        }
+            .insert(RemoteServos(vec![streamed]));
+        world.get_mut::<ServoCommand>(servo).unwrap().target = -1.0;
+        world
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_secs_f32(1.0 / 64.0));
+        world.run_system_once(drive_servos).unwrap();
+        assert_eq!(world.get::<RemoteServos>(root).unwrap().0[0], streamed);
     }
 
     /// The controlled replica's ahead-running input is still a command. Its exception to
@@ -1257,9 +1278,16 @@ mod tests {
         world
     }
 
-    /// A replica whose remote vector lacks the registered slot.
+    /// A controlled replica, which integrates, whose remote vector lacks the registered slot.
     fn missing_remote_slot() -> World {
-        servo_on(RemoteServos(vec![]))
+        let mut world = servo_on((Controlled, RemoteServos(vec![])));
+        let root = world
+            .query_filtered::<Entity, With<RemoteServos>>()
+            .single(&world)
+            .unwrap();
+        // The game's damage model: the relationship supplies the volume set integration reads.
+        world.spawn(crate::damage::VolumeOf(root));
+        world
     }
 
     /// A root carrying both integrators, which no spawn path builds.

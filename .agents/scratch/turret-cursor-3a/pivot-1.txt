@@ -1,0 +1,16 @@
+turret-cursor pivot capture, seed 1: (drive: Pivot(steer: 1.0), aim: World((688.0, 12.0, -920.0)), ticks: 1600)
+SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10, seeded; window hidden; MEASURED, degrees
+Series: the observer's per-frame drawn bore (and hull) bearing of the turning remote.
+vs-server: drawn minus the server's per-tick value at the frame's view cursor.
+wobble: drawn minus its 1 s centred mean. held frames: frames that moved under 10%
+of the mean rate's per-frame motion.
+
+hull rate 5.81 deg/s; server bore drift over the window -0.000; 2954 frames at 6.04 ms mean
+bore: drawn rate 0.000 deg/s
+  vs-server p2p 0.0063, rms 0.0014
+  wobble p2p 0.0068, rms 0.0014, period none
+  per-frame step: max 0.0033, mean 0.0006 over 2953 frames
+hull: drawn rate 5.806 deg/s
+  vs-server p2p 0.0063, rms 0.0014
+  wobble p2p 0.4358, rms 0.0507, period none
+  per-frame step: max 0.3945, mean 0.0354 over 2953 frames; step over mean-rate motion min 0.000 max 1.282; held frames 5
