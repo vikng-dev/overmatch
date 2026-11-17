@@ -173,7 +173,7 @@ pub(crate) enum Aim {
     /// Sweep a hull-level point `radius_m` out around the tank at `rate_rad_s`, from dead ahead
     /// and positive to the right, recommitted every tick, as a player scanning with the mouse
     /// does. The radius is positive and inside the derived `AIM_LIMIT` envelope; the rate is
-    /// finite and nonzero.
+    /// nonzero and at most half a turn per tick.
     Sweep { radius_m: f32, rate_rad_s: f32 },
     /// Chase this world point, finite: the turret holds its bearing while the hull turns.
     World((f32, f32, f32)),
@@ -327,27 +327,39 @@ impl Script {
                 problem: "a nonzero steer demand within -1..=1",
             });
         }
-        if let Aim::Sweep { radius_m, .. } = self.aim
-            && !(radius_m.is_finite() && radius_m > 0.0)
-        {
-            return Err(ScriptError::Invalid {
-                field: "aim.radius_m",
-                problem: "use a positive radius",
-            });
-        }
-        if crate::command::ParsedAimIntent::try_from(self.aim.at(0)).is_err() {
-            return Err(ScriptError::Invalid {
-                field: "aim",
-                problem: "use a finite point inside the derived AIM_LIMIT envelope",
-            });
-        }
-        if let Aim::Sweep { rate_rad_s, .. } = self.aim
-            && !(rate_rad_s.is_finite() && rate_rad_s != 0.0)
-        {
-            return Err(ScriptError::Invalid {
-                field: "aim.rate_rad_s",
-                problem: "use a finite nonzero rate",
-            });
+        match self.aim {
+            Aim::Point(_) | Aim::World(_)
+                if crate::command::ParsedAimIntent::try_from(self.aim.at(0)).is_err() =>
+            {
+                return Err(ScriptError::Invalid {
+                    field: "aim",
+                    problem: "use a finite point inside the derived AIM_LIMIT envelope",
+                });
+            }
+            // A swept point's largest component is its radius, met dead ahead, so a radius inside
+            // the command's `AIM_LIMIT` box keeps every point of the sweep inside it.
+            Aim::Sweep { radius_m, .. }
+                if !(radius_m > 0.0 && radius_m <= *crate::aim::AIM_LIMIT) =>
+            {
+                return Err(ScriptError::Invalid {
+                    field: "aim.radius_m",
+                    problem: "use a positive radius within the derived AIM_LIMIT",
+                });
+            }
+            // At most half a turn per tick: a faster sweep aliases into a slower one turning the
+            // other way. Within it the swept angle stays finite for every admitted tick
+            // (|angle| <= π × u32::MAX), so no admitted sweep commands a non-finite aim.
+            Aim::Sweep { rate_rad_s, .. }
+                if !(rate_rad_s != 0.0
+                    && rate_rad_s.abs()
+                        <= std::f32::consts::PI / super::server::TICK.as_secs_f32()) =>
+            {
+                return Err(ScriptError::Invalid {
+                    field: "aim.rate_rad_s",
+                    problem: "use a nonzero rate of at most half a turn per tick",
+                });
+            }
+            _ => {}
         }
         if !(self.range_m.is_finite() && self.range_m > 0.0) {
             return Err(ScriptError::Invalid {
@@ -392,8 +404,9 @@ pub(crate) struct SimulateInput {
     fire_interval: u32,
     fire_until: Option<u32>,
     /// [`Drive::Fire`]'s primary: the earliest tick of its next click, and whether the weapon has
-    /// read unready since the previous one.
-    primary_next: u32,
+    /// read unready since the previous one. The tick is wider than a script tick, so no admitted
+    /// `fire_interval` wraps it.
+    primary_next: u64,
     primary_cleared: bool,
     /// [`Drive::Park`] has seen its hull stopped, and demands nothing from then on.
     parked: bool,
@@ -464,7 +477,7 @@ impl SimulateInput {
             fire_tick: script.fire_tick,
             fire_interval: script.fire_interval,
             fire_until: script.fire_until,
-            primary_next: script.fire_tick,
+            primary_next: u64::from(script.fire_tick),
             primary_cleared: true,
             parked: false,
             start: crate::cost::WorkloadStart::from_env(),
@@ -525,10 +538,12 @@ impl SimulateInput {
     /// reading. Never when the interval is zero.
     fn click_primary(&mut self, t: u32, ready: bool) -> bool {
         self.primary_cleared |= !ready;
-        let click =
-            self.fire_interval != 0 && t >= self.primary_next && self.primary_cleared && ready;
+        let click = self.fire_interval != 0
+            && u64::from(t) >= self.primary_next
+            && self.primary_cleared
+            && ready;
         if click {
-            self.primary_next = t + self.fire_interval;
+            self.primary_next = u64::from(t) + u64::from(self.fire_interval);
             self.primary_cleared = false;
         }
         click
@@ -1204,9 +1219,8 @@ mod tests {
     }
 
     /// A SCRIPT THAT CANNOT MEAN WHAT IT SAYS FAILS THE BOOT, NAMING ITS FIELD (ADR-0011): a typo,
-    /// a fire workload with no trigger, a non-finite aim, a sweep with no radius or no rate, a
-    /// range that is not positive, a degenerate spawn rotation. Each was a silent default or an ignored variable
-    /// under the levers the script replaced.
+    /// a fire workload with no trigger, a non-finite aim, a sweep with no radius or no rate or
+    /// either past its bound, a range that is not positive, a degenerate spawn rotation.
     #[test]
     fn a_script_outside_its_domain_is_refused_naming_the_field() {
         for (text, field) in [
@@ -1216,7 +1230,14 @@ mod tests {
                 "(aim: Sweep(radius_m: -800, rate_rad_s: 1))",
                 "aim.radius_m",
             ),
-            ("(aim: Sweep(radius_m: 1e30, rate_rad_s: 1))", "aim"),
+            (
+                "(aim: Sweep(radius_m: 1e30, rate_rad_s: 1))",
+                "aim.radius_m",
+            ),
+            (
+                "(aim: Sweep(radius_m: 800, rate_rad_s: 1e30))",
+                "aim.rate_rad_s",
+            ),
             (
                 "(aim: Sweep(radius_m: 800, rate_rad_s: 0))",
                 "aim.rate_rad_s",
@@ -1553,10 +1574,10 @@ mod tests {
 
     /// A FIRE PRIMARY CLICKS AS A PLAYER WAITING FOR READY DOES: from `fire_tick`, at least
     /// `fire_interval` apart, only on a ready weapon, and once per readiness, since the gate still
-    /// reads ready until a click's answer arrives and a second click then would be wasted. Shot
-    /// runners rely on every click becoming a shot whatever the tank's reload
-    /// (`scripts/shot/run-turret-cursor.py`). Fixture reloads either side of the interval, and a
-    /// fixture answer delay.
+    /// reads ready until a click's answer arrives and a second click then would be wasted; the
+    /// spacing's deadline never wraps, whatever the admitted interval. Shot runners rely on every
+    /// click becoming a shot whatever the tank's reload (`scripts/shot/run-turret-cursor.py`).
+    /// Fixture reloads either side of the interval, and a fixture answer delay.
     #[test]
     fn a_fire_primary_clicks_once_per_readiness() {
         let clicks = |interval: u32, reload: u32| {
@@ -1582,6 +1603,24 @@ mod tests {
         };
         assert_eq!(clicks(256, 192), [100, 356, 612, 868]);
         assert_eq!(clicks(1, 300), [100, 400, 700]);
+        // The widest admitted spacing after a click at the last ticks a script reaches: the next
+        // deadline lies past every tick and never wraps back into the script.
+        let mut sim = SimulateInput::new(
+            &Script::parse(&format!(
+                "(drive: Fire(primary: true), fire_tick: 0, fire_interval: {0}, ticks: {0})",
+                u32::MAX
+            ))
+            .unwrap(),
+        );
+        let mut command = TankCommand::default();
+        for (t, ready, click) in [
+            (u32::MAX - 3, true, true),
+            (u32::MAX - 2, false, false),
+            (u32::MAX - 1, true, false),
+        ] {
+            sim.write(t, ready, &mut command);
+            assert_eq!(command.fire_primary, click, "tick {t}");
+        }
     }
 
     /// THE WORKED SCRIPT THE MODULE DOC NAMES IS A VALID SCRIPT: it is the grammar's one example

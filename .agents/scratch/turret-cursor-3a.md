@@ -35,7 +35,8 @@ tests `public_servo_angles_skip_the_tank_that_holds_the_input_slot`,
 Tests (each names the invariant a mutant breaks):
 - `net::tests::stream_presence::tests::a_replica_barrel_is_drawn_where_the_stream_puts_it`: the
   shipped glb bound by `bind_tank_view` on a replica attached by the production composition; hull
-  yaw, turret yaw and gun pitch streamed; frames 0.37 ticks apart, a hold and a forward cut; the
+  yaw, turret yaw and gun pitch streamed; frames 0.37 ticks apart; a hold and a forward cut, from
+  stalls sized past the view's buffer by the shipped continuity budget; the
   propagated muzzle view node's direction against the bore composed from the stream at that
   frame's cursor with the servo pose law. Removing `.before(ServoView)` fails it (MEASURED: 0.0010
   rad off at cursor 160.05).
@@ -51,7 +52,7 @@ Tests (each names the invariant a mutant breaks):
 Server work: `publish_servo_angles` iterates tanks on the compute pool; the trace's `record_tick`
 prepares each tank's row on the pool and writes the rows in entity order.
 
-Wire: no `WIRE_TYPE_DEFS` type changed; the pins pass unchanged and `PROTOCOL_REV` stays 105.
+Wire: no `WIRE_TYPE_DEFS` type changed; the pins pass unchanged and `PROTOCOL_REV` is main's 106.
 
 ## Capture tooling
 
@@ -60,7 +61,7 @@ Wire: no `WIRE_TYPE_DEFS` type changed; the pins pass unchanged and `PROTOCOL_RE
 receiving through the seeded conditioner the runner's `CONDITIONER` names (80 ms, 10 ms),
 `OVERMATCH_UNATTENDED=1`, `OVERMATCH_MUTE=1`. Additions it needs: `Drive::Pivot { steer }` and
 `Aim::World` in the harness grammar, and `Aim::Sweep` now carries its radius and rate as script
-data; a drawn-bore (`bore`) field on trace frame rows and the skeleton bore on tick rows (the
+data, admitted inside `AIM_LIMIT` and half a turn per tick; a drawn-bore (`bore`) field on trace frame rows and the skeleton bore on tick rows (the
 authority's on the server, the client's presentation sample on a client); the fired direction `d`
 on the server's shot-trace `fire` row; a client shot-trace `drawn` row (a shell's first three drawn
 stations beside its shooter's drawn bore).
@@ -154,10 +155,10 @@ harness artefact, not an input-arrival defect. Readiness clicking removes it.
 ## Checks
 
 `cargo fmt --all --check`; CI clippy (`--workspace --all-targets --features dev_ui,bitprobe -D
-warnings`); `scripts/serial-cargo check --no-default-features --bin overmatch-server` (two pre-existing
-dead-field warnings in `src/tank/model.rs`); targeted tests `net::protocol net::rig
-net::tests::stream_presence tank::servo tank::spawn net::harness net::input_arrival trace::
-shot_trace`, 115 passed. The full library suite runs on CI.
+warnings`); `scripts/serial-cargo check --no-default-features --bin overmatch-server` (three
+pre-existing dead-code warnings, in `src/tank/model.rs` and `src/track/transmission.rs`); targeted
+tests `net::protocol net::rig net::tests::stream_presence tank::servo tank::spawn net::harness
+net::input_arrival trace:: shot_trace track::`, 494 passed. The full library suite runs on CI.
 
 Captures (ignored, wiped when the bay recycles):
 `/Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-1/dist/turret-cursor-3a/{fire-{1,2,3},pivot-{1,2,3},early-click,early-click-2}/`.
