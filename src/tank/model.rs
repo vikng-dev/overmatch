@@ -98,8 +98,16 @@ impl HullBody {
                 && tensor.is_finite(),
             "{fix}"
         );
-        // Avian diagonalizes the symmetric tensor and clamps non-positive eigenvalues to zero;
-        // requiring the smallest principal moment > 0 refuses those before a body can spawn.
+        // Sylvester's criterion on the raw symmetric remainder, before Avian's eigensolver can
+        // approximate small off-diagonal terms away. f64 products cover the f32 tensor's range
+        // without an absolute cutoff that would change admission with the body's scale.
+        let raw = tensor.as_dmat3();
+        assert!(
+            raw.x_axis.x > 0.0
+                && raw.x_axis.x * raw.y_axis.y - raw.x_axis.y * raw.x_axis.y > 0.0
+                && raw.determinant() > 0.0,
+            "{fix}"
+        );
         let inertia = AngularInertia::from_mat3_unchecked(tensor);
         let margin = inertia.principal.min_element();
         assert!(
@@ -888,6 +896,27 @@ pub(crate) fn rig_world_pose<F: bevy::ecs::query::QueryFilter>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's damage model: the load gate must refuse indefinite hull tensors even when
+    /// small off-diagonal terms fall below the eigensolver's absolute resolution.
+    #[test]
+    #[should_panic(expected = "rest-pose hull remainder must be finite and positive-definite")]
+    fn fixed_hull_admission_refuses_a_small_indefinite_remainder() {
+        // Fixture: the positive-diagonal indefinite case scaled by 1e-8 in inertia and 1e-4
+        // in offset; these preserve its definiteness under the parallel-axis theorem.
+        HullBody::new(
+            "fixture.tank.ron",
+            100.0,
+            Vec3::ZERO,
+            AngularInertia::new(Vec3::splat(100.0 * 1e-8)),
+            TurretBody {
+                mass: 10.0,
+                angular_inertia: AngularInertia::new(Vec3::splat(10.0 * 1e-8)),
+                centre_of_mass: Vec3::ZERO,
+            },
+            Transform::from_translation(Vec3::splat(1.7 * 1e-4)),
+        );
+    }
 
     /// The game's damage model: template admission must reject an impossible fixed hull before
     /// spawn. Positive diagonals alone miss an indefinite tensor; non-finite centres or moments

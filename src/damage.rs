@@ -1723,11 +1723,12 @@ mod tests {
     /// This is a class fixture, not a check of shipped materials or proxy construction.
     /// Fixture: box bodies, a twenty-degree slope, friction above tan(slope), and a fixed settling
     /// horizon and launch motion. Removing friction at detachment fails the resting body;
-    /// disabling motion fails the control. Rest is the solver's Sleeping state, not a speed
-    /// pinned to an earlier run.
+    /// disabling motion fails the control. Rest allows one unresolved gravity substep's motion.
     #[test]
     fn a_launched_turret_comes_to_rest_on_a_slope() {
-        use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody, Sleeping};
+        use avian3d::prelude::{
+            Collider, CollisionLayers, Gravity, LayerMask, RigidBody, Substeps,
+        };
         let mut app = physics_app();
         app.add_systems(Update, launch_turrets_on_cookoff);
 
@@ -1743,6 +1744,8 @@ mod tests {
         ));
         let mut turrets = Vec::new();
         let frictionless = crate::substances::contact_friction(0.0);
+        let rest = Transform::from_xyz(0.0, 0.5, 0.0);
+        let (width, height, depth) = (2.0, 1.0, 2.0); // Fixture box dimensions (m).
         for (i, friction) in [gripping, frictionless].into_iter().enumerate() {
             let tank = app
                 .world_mut()
@@ -1761,23 +1764,18 @@ mod tests {
                 .world_mut()
                 .spawn((
                     Turret,
-                    cuboid_body(1000.0, Cuboid::new(2.0, 1.0, 2.0)),
-                    Transform::from_xyz(0.0, 0.5, 0.0),
+                    cuboid_body(1000.0, Cuboid::new(width, height, depth)),
+                    rest,
                     ChildOf(tank),
                 ))
                 .id();
             app.world_mut().spawn((
                 ChildOf(turret),
-                Collider::cuboid(2.0, 1.0, 2.0),
+                Collider::cuboid(width, height, depth),
                 CollisionLayers::new([crate::Layer::Vehicle], LayerMask::ALL),
                 friction,
             ));
-            link_rig(
-                app.world_mut(),
-                tank,
-                turret,
-                Transform::from_xyz(0.0, 0.5, 0.0),
-            );
+            link_rig(app.world_mut(), tank, turret, rest);
             turrets.push((tank, turret));
         }
         for _ in 0..4 {
@@ -1798,24 +1796,36 @@ mod tests {
         for _ in 0..1900 {
             app.update();
         }
-        let speed = |app: &App, turret: Entity| {
+        // DERIVED: |v| + radius * |omega| bounds every box point's speed. Resolution: allow
+        // one unconstrained gravity kick per solver substep, independent of sleeping policy.
+        let radius = Vec3::new(width, height, depth).length() / 2.0;
+        let rest_tolerance = app.world().resource::<Gravity>().0.length()
+            * app.world().resource::<Time<Substeps>>().delta_secs();
+        let motion = |app: &App, turret: Entity| {
             app.world()
                 .get::<LinearVelocity>(turret)
                 .unwrap()
                 .0
                 .length()
+                + radius
+                    * app
+                        .world()
+                        .get::<AngularVelocity>(turret)
+                        .unwrap()
+                        .0
+                        .length()
         };
-        let launched = speed(&app, turrets[0].1);
-        let control = speed(&app, turrets[1].1);
+        let launched = motion(&app, turrets[0].1);
+        let control = motion(&app, turrets[1].1);
         println!(
             "game wreck fixture on slope: gripping {launched} m/s, frictionless {control} m/s"
         );
         assert!(
-            app.world().get::<Sleeping>(turrets[0].1).is_some(),
+            launched <= rest_tolerance,
             "the gripping assembly must rest, got {launched} m/s"
         );
         assert!(
-            app.world().get::<Sleeping>(turrets[1].1).is_none(),
+            control > rest_tolerance,
             "the frictionless control must keep sliding, got {control} m/s"
         );
     }
