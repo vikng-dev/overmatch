@@ -973,6 +973,8 @@ pub struct TransmissionSpec {
     pub couplings: Vec<crate::track::transmission::Coupling>,
     /// Per-side service/parking brake capacity at the sprocket (N).
     pub(crate) brake_force: crate::provenance::Labelled<f32>,
+    /// Mean stop rating (N), required by Stop(Mean); absent only without that device.
+    pub(crate) mean_hold_force: Option<crate::provenance::Labelled<f32>>,
     /// Static breakaway multiplier for an at-rest parking lever.
     pub(crate) brake_static_factor: crate::provenance::Labelled<f32>,
 }
@@ -992,6 +994,7 @@ impl TransmissionSpec {
             steering,
             couplings,
             brake_force,
+            mean_hold_force,
             brake_static_factor,
         } = self;
         TransmissionParams::from_authoring(&TransmissionAuthoring {
@@ -1007,10 +1010,15 @@ impl TransmissionSpec {
             max_step: gearbox.max_step.0,
             steer_radii_m: &steering.radii,
             reverse_steer_radii_m: &steering.reverse_radii,
-            steer_capacity_n: steering.capacity,
+            steer_capacity_n: match (couplings.contains(&crate::track::transmission::Coupling::Steering), steering.capacity) {
+                (true, Some(capacity)) => capacity,
+                (true, None) => return Err("transmission.steering.capacity: Steering requires its member rating; author capacity".into()),
+                (false, _) => 0.0, // No member: no capacity exists to apply.
+            },
             couplings,
             steering_radius_rounding_share: steering.radius_rounding_share.0,
             brake_capacity_n: brake_force.value,
+            mean_hold_capacity_n: mean_hold_force.as_ref().map(|rating| rating.value),
             brake_static_factor: brake_static_factor.value,
             drag_fraction: engine.drag_fraction,
             engine_inertia_kgm2: engine.inertia_kgm2,
@@ -1087,8 +1095,8 @@ pub struct GearboxSpec {
     pub(crate) shift_secs: Sourced<f32>,
 }
 
-/// Steering construction: two crank ratios derived from the first radius pair, checked against
-/// both ladders within the authored table rounding bound, with a per-output force rating.
+/// Construction radii. A Steering member derives its crank ratios from the first pair and checks
+/// both ladders within the rounding bound. Side-clutch radii impose no geared constraint.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SteeringSpec {
@@ -1099,7 +1107,7 @@ pub struct SteeringSpec {
     /// Steering-member force capacity PER OUTPUT (N): the member drives the two outputs
     /// differentially, so the belt-difference axis `F_s` carries up to 2× this (each side
     /// sees `F_s/2`, bounded by this datum — the gearing/grip-scale per-track cap).
-    pub capacity: f32,
+    pub capacity: Option<f32>,
     /// Relative rounding bound on the radius check, never a steering law coefficient.
     pub(crate) radius_rounding_share: Sourced<f32>,
 }
@@ -2344,9 +2352,10 @@ TankSpec(
                 steering: (
                     radii: [(4.0, 12.0), (6.4, 19.2), (9.6, 28.8), (14.4, 43.2)],
                     reverse_radii: [(4.0, 12.0), (6.4, 19.2)],
-                    capacity: 100_000.0,
+                    capacity: Some(100_000.0),
                     radius_rounding_share: (0.01, Fixture("relative radius-table rounding bound: one percent")),
                 ),
+                mean_hold_force: None,
                 brake_force: (50_000.0, Fixture("missing brake torque rating; settled by measured sprocket braking force")),
                 brake_static_factor: (1.5, Fixture("missing static to dynamic brake ratio; settled by measured breakaway and sliding torque")),
             ),
@@ -3347,7 +3356,7 @@ TankSpec(
                 engine(tr).idle_rpm = f32::from_bits(1)
             }),
             ("steering capacity", |tr| {
-                tr.steering.capacity = f32::INFINITY
+                tr.steering.capacity = Some(f32::INFINITY)
             }),
             ("brake_force", |tr| tr.brake_force.value = f32::INFINITY),
             ("brake_static_factor", |tr| {
@@ -3394,6 +3403,28 @@ TankSpec(
             err.contains("brake_static_factor"),
             "missing brake_static_factor should be named: {err}"
         );
+    }
+
+    /// Construction admission requires a member rating only when that member exists. A side
+    /// clutch construction must not invent a steering capacity merely to satisfy the sheet gate.
+    #[test]
+    fn steering_member_capacity_is_required_only_for_its_construction() {
+        let mut spec = fixture();
+        let tr = fixture_transmission(&mut spec);
+        tr.steering.capacity = None;
+        assert!(
+            tr.params(0.3, 1.0, 8000.0)
+                .unwrap_err()
+                .to_string()
+                .contains("steering.capacity")
+        );
+        tr.couplings = vec![
+            crate::track::transmission::Coupling::Clutch(crate::track::transmission::Output::Left),
+            crate::track::transmission::Coupling::Clutch(crate::track::transmission::Output::Right),
+            crate::track::transmission::Coupling::Stop(crate::track::transmission::Output::Left),
+            crate::track::transmission::Coupling::Stop(crate::track::transmission::Output::Right),
+        ];
+        assert!(tr.params(0.3, 1.0, 8000.0).is_ok()); // Fixture geometry and belt inertia.
     }
 
     /// The asset door relies on its own declared drivetrain remaining valid. Read that

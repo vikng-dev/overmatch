@@ -583,8 +583,8 @@ pub(super) fn choose(
             st.gear = gear;
             st.launch = LaunchState::TakingUp;
         }
-        // No safe landing is a real overrun state: retain the gear; the clutch guard and
-        // ceiling brake own protection until a ratio can be selected.
+        // No safe landing is a real overrun state: retain the gear. The open clutch isolates
+        // the crank until a ratio can be selected; the ceiling brake is absent while open.
         return;
     }
     // A hull the cut brings to rest is held there by the park latch, so no cut lands below rest.

@@ -262,7 +262,7 @@ fn toggle_drive_debug(keys: Res<ButtonInput<KeyCode>>, mut visible: ResMut<Drive
     visible.0 = debug_visible_after_f3(visible.0, keys.just_pressed(KeyCode::F3));
 }
 
-/// Compact normal-play row: `P` is the parking lever.
+/// Compact normal-play row: `P` is a latched passive stop (side park or mean hold).
 /// A paid shift has no extra marker. Before construction is ready only speed is shown.
 pub(crate) fn standard_drive_row(
     transmission: Option<(&TransmissionState, &DriveReadout)>,
@@ -274,7 +274,7 @@ pub(crate) fn standard_drive_row(
     };
 
     let mut gear = operating.gear_label.clone();
-    if state.park {
+    if state.park || state.mean_hold {
         gear.push('P');
     }
     let rpm = format!("{:>3.1}k", operating.rpm / 1_000.0);

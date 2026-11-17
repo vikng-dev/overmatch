@@ -3307,8 +3307,8 @@ mod tests {
     }
 
     /// Bot stopping consumes published grip capacity and delivered rolling. The forecast's
-    /// force minus unused grip must equal delivered braking; dropping rolling from either
-    /// publication or forecast breaks that composition even before contact saturation.
+    /// delivered braking cannot exceed its forecast capacity. The gap is an observation of
+    /// capacity the contact and drivetrain did not use, never a required saturation target.
     /// Fixture: the production adapter on flat mud, 4 m/s entry; travel is an observation.
     #[test]
     fn service_stop_reads_contact_capacity_and_records_rollback() {
@@ -3327,6 +3327,7 @@ mod tests {
         let mut peak = 0.0_f32;
         let mut reverse = 0.0_f32;
         let mut capacity = 0.0_f32;
+        let mut peak_gap = 0.0_f32;
         for _ in 0..64 * 20 {
             hull.app
                 .world_mut()
@@ -3358,23 +3359,21 @@ mod tests {
             let grip_force: f32 = contacts.0.iter().flatten().map(|c| c.traction.z).sum();
             let rolling: f32 = contacts.0.iter().flatten().map(|c| c.rolling_force.z).sum();
             assert!((effect.rolling_force.z - rolling).abs() < 1.0);
-            let unused_grip = expected - grip_force;
-            // Resolution: two separately accumulated f32 force sums, 2 N.
+            let forecast = decel * transmission::coupled_mass(&gear.construction);
+            let delivered = grip_force + rolling;
+            // Resolution: independently accumulated f32 contact sums, 2 N.
             assert!(
-                (decel * transmission::coupled_mass(&gear.construction)
-                    - unused_grip
-                    - effect.tangential_force.z)
-                    .abs()
-                    < 2.0,
-                "forecast less unused grip must equal delivered traction plus rolling"
+                delivered <= forecast + 2.0,
+                "delivered braking exceeds the bots' forecast"
             );
+            peak_gap = peak_gap.max(forecast - delivered);
             hull.speed -= effect.tangential_force.z / hull.mass / 64.0;
             hull.distance += hull.speed / 64.0;
             peak = peak.max(hull.distance);
             reverse = reverse.min(hull.speed);
         }
         println!(
-            "MEASURED mud service stop: capacity={capacity:.3} N peak={peak:.6} m rollback={:.6} m reverse={reverse:.6} m/s",
+            "MEASURED mud service stop: capacity={capacity:.3} N peak_forecast_gap={peak_gap:.3} N peak={peak:.6} m rollback={:.6} m reverse={reverse:.6} m/s",
             peak - hull.distance
         );
     }

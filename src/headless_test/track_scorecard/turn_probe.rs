@@ -376,11 +376,18 @@ fn run(case: &Case, hold_s: usize) {
     for col in series.cols.values_mut() {
         col.drain(..col.len() - LEAD_S * TICKS);
     }
+    let hold_origin = bed.hull().position;
     for tick in 0..hold_s * TICKS {
         bed.tick(case.throttle, case.steer);
         let windowed = tick >= (hold_s - WINDOW_S) * TICKS;
         record(&bed, z_c, &mut series, windowed.then_some(&mut bins));
     }
+    let release_heading = bed.hull().forward().x.atan2(-bed.hull().forward().z);
+    let hold_travel = (bed.hull().position - hold_origin).with_y(0.0).length();
+    println!(
+        "TURNPROBE-RELEASE MEASURED label={} heading_rad={release_heading:.9} hold_travel_m={hold_travel:.9}",
+        case.label
+    );
     for _ in 0..RELEASE_S * TICKS {
         bed.tick(case.throttle, 0.0);
         record(&bed, z_c, &mut series, None);
@@ -413,6 +420,8 @@ fn run(case: &Case, hold_s: usize) {
         "belt_alternation_mm_s": belt_alternation,
         "lead_ticks": LEAD_S * TICKS,
         "hold_ticks": hold_s * TICKS,
+        "release_heading_rad": release_heading,
+        "hold_travel_m": hold_travel,
         "release_ticks": RELEASE_S * TICKS,
         "window_ticks": WINDOW_S * TICKS,
         "tick_hz": TICKS,

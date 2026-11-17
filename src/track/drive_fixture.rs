@@ -36,9 +36,21 @@ pub(crate) fn compact_spec() -> crate::spec::TankSpec {
     tr.gearbox.shift_secs = crate::provenance::Sourced(0.2); // Fixture interruption.
     tr.steering.radii = vec![(3.0, 8.0), (7.2, 19.2), (15.0, 40.0)];
     tr.steering.reverse_radii = vec![(6.0, 16.0)];
-    tr.steering.capacity = 80_000.0;
-    tr.brake_force.value = 50_000.0;
-    tr.brake_static_factor.value = 1.4;
+    tr.steering.capacity = Some(80_000.0);
+    tr.brake_force = crate::provenance::Labelled {
+        value: 50_000.0,
+        label: crate::provenance::Provenance::Fixture("compact per-side brake rating".into()),
+    };
+    tr.mean_hold_force = Some(crate::provenance::Labelled {
+        value: 100_000.0,
+        label: crate::provenance::Provenance::Fixture(
+            "independent compact mean-stop rating".into(),
+        ),
+    });
+    tr.brake_static_factor = crate::provenance::Labelled {
+        value: 1.4,
+        label: crate::provenance::Provenance::Fixture("compact static breakaway multiplier".into()),
+    };
     spec
 }
 
@@ -127,6 +139,7 @@ pub(crate) fn lab_authoring() -> TransmissionAuthoring<'static> {
         ],
         steering_radius_rounding_share: 0.01, // Fixture: table rounding allowance.
         brake_capacity_n: 120_000.0,
+        mean_hold_capacity_n: None,
         brake_static_factor: 1.6,
         drag_fraction: 0.25,
         // Fixture: six kg m² resolves this curve's idle catch (DERIVED minimum about five).
@@ -190,6 +203,7 @@ pub(crate) fn tiger_authoring() -> TransmissionAuthoring<'static> {
         ],
         steering_radius_rounding_share: 0.01, // Fixture: table rounding allowance.
         brake_capacity_n: 96_000.0,
+        mean_hold_capacity_n: Some(192_000.0),
         brake_static_factor: 1.5,
         drag_fraction: 0.25,
         engine_inertia_kgm2: 4.0,
@@ -230,11 +244,31 @@ pub(crate) fn compact_drivetrain() -> (FixtureConstruction, TransmissionParams) 
     (fp, tp)
 }
 
-pub(crate) fn class_drivetrains() -> [(FixtureConstruction, TransmissionParams); 3] {
+/// Fixture: side clutches and brakes, with gear-independent radii and no geared steering member.
+pub(crate) fn side_clutch_drivetrain() -> (FixtureConstruction, TransmissionParams) {
+    let mut a = lab_authoring();
+    a.couplings = &[
+        Coupling::Clutch(Output::Left),
+        Coupling::Clutch(Output::Right),
+        Coupling::Stop(Output::Left),
+        Coupling::Stop(Output::Right),
+    ];
+    a.steer_radii_m = &[(3.0, 9.0); 5];
+    a.reverse_steer_radii_m = &[(3.0, 9.0)];
+    a.steer_capacity_n = 0.0;
+    (
+        lab_fp(),
+        TransmissionParams::from_authoring(&a)
+            .expect("Fixture side-clutch construction is admitted"),
+    )
+}
+
+pub(crate) fn class_drivetrains() -> [(FixtureConstruction, TransmissionParams); 4] {
     [
         (lab_fp(), lab_tp()),
         (grade_fixture_fp(), tiger_tp()),
         compact_drivetrain(),
+        side_clutch_drivetrain(),
     ]
 }
 

@@ -159,7 +159,7 @@ fn certify(speeds: &[Speed], rows: &[Row], solution: &Solution) {
             );
         }
         match outcome.state {
-            State::Stuck => assert!(gradient.abs() <= CHECK * (1.0 + constraint.target.abs())),
+            State::Interior => assert!(gradient.abs() <= CHECK * (1.0 + constraint.target.abs())),
             State::Lower => assert_eq!(outcome.impulse, bound.lower),
             State::Upper => assert_eq!(outcome.impulse, bound.upper),
         }
@@ -246,7 +246,7 @@ fn a_stop_snaps_to_zero_and_breakaway_uses_dynamic_capacity_in_the_same_step() {
     let stop = &stops[0];
     let held = solve(&[speed(0.0, 3.0, 5.0)], &stops);
     assert_eq!(held.speeds, [0.0]);
-    assert_eq!(held.rows[0].state, State::Stuck);
+    assert_eq!(held.rows[0].state, State::Interior);
     assert!(!held.rows[0].dynamic);
     for (initial, impulse) in [(0.0, 7.0), (0.01, 0.0), (-0.01, 0.0), (1.0, 0.0)] {
         let input = speed(initial, 3.0, impulse);
@@ -386,6 +386,258 @@ fn row_scaling_preserves_resisting_sign_and_static_breakaway() {
             let expected = (input.free_impulse + capacity) / input.inertia;
             // Resolution: separate row-unit conversion and speed accumulation round in f64.
             assert!((solution.speeds[0] - expected).abs() <= 16.0 * f64::EPSILON * expected.abs());
+        }
+    }
+}
+
+/// Independently clip the two-impulse box into a polygon, then check the variational inequality
+/// at every vertex. A linear functional's minimum is at a vertex, so this certifies the global
+/// convex minimum without production assignments, multipliers, elimination or rank decisions.
+fn certify_polygon(speeds: &[Speed], rows: &[Row], limits: &[ImpulseLimit], result: &Solution) {
+    // Resolution: independent f64 momentum and work certificate allowance.
+    const CHECK: f64 = 1e-8;
+    let mut polygon = vec![
+        [rows[0].bounds.lower, rows[1].bounds.lower],
+        [rows[0].bounds.upper, rows[1].bounds.lower],
+        [rows[0].bounds.upper, rows[1].bounds.upper],
+        [rows[0].bounds.lower, rows[1].bounds.upper],
+    ];
+    for limit in limits {
+        for (sign, bound) in [(1.0, limit.bounds.upper), (-1.0, -limit.bounds.lower)] {
+            let value = |p: [f64; 2]| {
+                sign * (limit.coefficients[0] * p[0] + limit.coefficients[1] * p[1]) - bound
+            };
+            let mut clipped = Vec::new();
+            for i in 0..polygon.len() {
+                let a = polygon[i];
+                let b = polygon[(i + 1) % polygon.len()];
+                let (va, vb) = (value(a), value(b));
+                if va <= 0.0 {
+                    clipped.push(a);
+                }
+                if (va < 0.0 && vb > 0.0) || (va > 0.0 && vb < 0.0) {
+                    let t = va / (va - vb);
+                    clipped.push([a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]);
+                }
+            }
+            polygon = clipped;
+        }
+    }
+    assert!(!polygon.is_empty(), "zero is feasible");
+    let impulse = [result.rows[0].impulse, result.rows[1].impulse];
+    for (i, row) in rows.iter().enumerate() {
+        assert!(impulse[i] >= row.bounds.lower - CHECK && impulse[i] <= row.bounds.upper + CHECK);
+    }
+    for limit in limits {
+        let value = limit.coefficients[0] * impulse[0] + limit.coefficients[1] * impulse[1];
+        assert!(value >= limit.bounds.lower - CHECK && value <= limit.bounds.upper + CHECK);
+    }
+    for (i, speed) in speeds.iter().enumerate() {
+        let actual = speed.inertia * (result.speeds[i] - speed.value);
+        let expected = speed.free_impulse
+            + rows
+                .iter()
+                .enumerate()
+                .map(|(j, r)| r.jacobian[i] * impulse[j])
+                .sum::<f64>();
+        assert!((actual - expected).abs() <= CHECK * (1.0 + actual.abs() + expected.abs()));
+    }
+    let gradient: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            r.jacobian
+                .iter()
+                .zip(&result.speeds)
+                .map(|(a, v)| a * v)
+                .sum::<f64>()
+                - r.target
+        })
+        .collect();
+    for vertex in polygon {
+        let work: f64 = (0..2).map(|i| gradient[i] * (vertex[i] - impulse[i])).sum();
+        let scale: f64 = (0..2)
+            .map(|i| gradient[i].abs() * (vertex[i].abs() + impulse[i].abs()))
+            .sum();
+        assert!(
+            work >= -CHECK * (1.0 + scale),
+            "aggregate optimum violates vertex certificate: {work}"
+        );
+    }
+}
+
+/// Callers rely on unused rated capacity remaining available to other paths. A filter on the
+/// original box assignments misses interior sliding optima on aggregate faces.
+#[test]
+fn combination_faces_have_checker_certified_optima_including_interior_sliding() {
+    let mut seed = 918713_u64; // Fixture generator seed and coefficients.
+    let mut random = || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (seed >> 32) as f64 / u32::MAX as f64
+    };
+    for case in 0..600 {
+        let speeds = [
+            speed(4.0 * random() - 2.0, 0.5 + random() * 5.0, random()),
+            speed(4.0 * random() - 2.0, 0.5 + random() * 5.0, -random()),
+        ];
+        let mut rows = [
+            row(&[1.0, random()], 0.5 + random() * 4.0),
+            row(&[random(), 1.0], 0.5 + random() * 4.0),
+        ];
+        if case % 3 == 0 {
+            rows[1].jacobian = rows[0].jacobian.clone();
+        }
+        rows[0].target = random() - 0.5;
+        rows[1].target = random() - 0.5;
+        let limits = [
+            ImpulseLimit {
+                coefficients: vec![1.0, 0.1 + random()],
+                bounds: Bounds {
+                    lower: -random(),
+                    upper: random(),
+                },
+            },
+            ImpulseLimit {
+                coefficients: vec![-random(), 1.0],
+                bounds: Bounds {
+                    lower: -random(),
+                    upper: random(),
+                },
+            },
+        ];
+        let result = solve_limited(&speeds, &rows, &limits);
+        certify_polygon(&speeds, &rows, &limits, &result);
+    }
+    // Fixture: unrestricted optimum (-1,-1); the aggregate allows only p0+p1 >= -1.
+    // The constrained optimum (-0.5,-0.5) has nonzero slip on BOTH interior rows.
+    let speeds = [speed(1.0, 1.0, 0.0), speed(1.0, 1.0, 0.0)];
+    let rows = [row(&[1.0, 0.0], 2.0), row(&[0.0, 1.0], 2.0)];
+    let limits = [ImpulseLimit {
+        coefficients: vec![1.0, 1.0],
+        bounds: Bounds {
+            lower: -1.0,
+            upper: 1.0,
+        },
+    }];
+    let result = solve_limited(&speeds, &rows, &limits);
+    certify_polygon(&speeds, &rows, &limits, &result);
+    assert_eq!(result.speeds, [0.5, 0.5]);
+}
+
+/// Dependent physical equalities can have unique impulses through a combination constraint.
+/// Snapping must retain an independent speed basis, not reject a valid aggregate assignment.
+#[test]
+fn a_combination_can_resolve_redundant_impulses_without_duplicate_speed_snaps() {
+    let speeds = [speed(1.0, 1.0, 0.0)];
+    let rows = [row(&[1.0], 2.0), row(&[1.0], 2.0)];
+    let limits = [ImpulseLimit {
+        coefficients: vec![1.0, -1.0],
+        bounds: Bounds {
+            lower: 0.0,
+            upper: 0.0,
+        },
+    }];
+    let result = solve_limited(&speeds, &rows, &limits);
+    certify_polygon(&speeds, &rows, &limits, &result);
+    assert_eq!(result.speeds, [0.0]);
+}
+
+/// A generic caller whose finite inputs overflow the effective mass has broken the numeric
+/// precondition. The failure is visible before any NaN can pass feasibility comparisons.
+#[test]
+#[should_panic(expected = "finite effective-mass system")]
+fn overflowing_combination_system_is_a_visible_bug() {
+    let speeds = [speed(0.0, 1e-300, 0.0)];
+    let rows = [row(&[1e100], 1.0)]; // Fixture finite inputs whose Gram product overflows f64.
+    let limits = [ImpulseLimit {
+        coefficients: vec![1.0],
+        bounds: Bounds {
+            lower: -1.0,
+            upper: 1.0,
+        },
+    }];
+    solve_limited(&speeds, &rows, &limits);
+}
+
+/// The same constrained optimum must survive changes of row-impulse units. A rank decision
+/// based on unscaled KKT columns would reject the interior aggregate face at these scales.
+#[test]
+fn combination_optimality_is_invariant_under_row_impulse_units() {
+    let speeds = [speed(1.0, 1.0, 0.0), speed(1.0, 1.0, 0.0)];
+    for scale in [1e-12, 1e-6, 1.0, 1e6, 1e12] {
+        // Fixture unit changes, not physical ratings.
+        let rows = [
+            row(&[scale, 0.0], 2.0 / scale),
+            row(&[0.0, 1.0 / scale], 2.0 * scale),
+        ];
+        let limits = [ImpulseLimit {
+            coefficients: vec![scale, 1.0 / scale],
+            bounds: Bounds {
+                lower: -1.0,
+                upper: 1.0,
+            },
+        }];
+        let result = solve_limited(&speeds, &rows, &limits);
+        certify_polygon(&speeds, &rows, &limits, &result);
+        // Resolution: f64 elimination and inverse changes of units.
+        assert!(result.speeds.iter().all(|v| (v - 0.5).abs() < 1e-10));
+    }
+    // Fixture: a linear zero-inertia objective coordinate is fixed by an aggregate face.
+    let mut linear = row(&[0.0], 2.0);
+    linear.target = 1.0;
+    let rows = [linear, row(&[1.0], 2.0)];
+    let limits = [ImpulseLimit {
+        coefficients: vec![1.0, 0.0],
+        bounds: Bounds {
+            lower: 0.0,
+            upper: 1.0,
+        },
+    }];
+    let result = solve_limited(&speeds[..1], &rows, &limits);
+    certify_polygon(&speeds[..1], &rows, &limits, &result);
+}
+
+/// A zero-width impulse is fixed, not an equality on physical speed. Inactive connections
+/// must deliver EXACTLY no impulse despite a nonzero target gap and an aggregate bound.
+#[test]
+fn singleton_impulses_do_not_create_a_physical_equality_or_roundoff_force() {
+    let speeds = [speed(100.0, 1.0, 0.0), speed(0.0, 2.0, 0.0)];
+    let rows = [row(&[1.0, -1.0], 0.0), row(&[0.0, 1.0], 10.0)];
+    let limits = [ImpulseLimit {
+        coefficients: vec![1.0, 0.0],
+        bounds: Bounds {
+            lower: 0.0,
+            upper: 1.0,
+        },
+    }];
+    let result = solve_limited(&speeds, &rows, &limits);
+    certify_polygon(&speeds, &rows, &limits, &result);
+    assert_eq!(
+        result.rows.iter().map(|r| r.impulse).collect::<Vec<_>>(),
+        [0.0, 0.0]
+    );
+    assert_eq!(result.speeds, [100.0, 0.0]);
+}
+
+/// Aggregate units change the dual multiplier inversely. Its sign test must scale with the
+/// normal, or a wrong lower face can precede the actual upper-face optimum in exact search.
+#[test]
+fn combination_units_cannot_accept_the_wrong_optimality_sign() {
+    for sign in [-1.0, 1.0] {
+        let speeds = [speed(sign, 1.0, 0.0), speed(sign, 1.0, 0.0)];
+        let rows = [row(&[1.0, 0.0], 2.0), row(&[0.0, 1.0], 2.0)];
+        for scale in [1e-12, 1.0, 1e12] {
+            // Fixture changes of aggregate units only.
+            let limits = [ImpulseLimit {
+                coefficients: vec![scale, scale],
+                bounds: Bounds {
+                    lower: -scale,
+                    upper: scale,
+                },
+            }];
+            let result = solve_limited(&speeds, &rows, &limits);
+            certify_polygon(&speeds, &rows, &limits, &result);
+            // Resolution: independently derived symmetric optimum, f64 accumulation allowance.
+            assert!(result.speeds.iter().all(|v| (v - sign * 0.5).abs() < 1e-10));
         }
     }
 }

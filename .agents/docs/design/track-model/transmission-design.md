@@ -933,13 +933,21 @@ the passive spring clutch stays closed both ways with no fuel or idle catch; bel
 motor the crank backward. A backward crank cannot combust, so the Driver cannot buy a gear cut
 against a price that assumes forward combustion. This changes no clutch or launch-lever order.
 
-The existing crank guards narrow friction bounds, never add an impulse to the crank alone.
-Steering has first claim on its crank-side construction rating; the clutch receives the remaining
-budget above the freely reachable floor and below the ceiling. Two closed side clutches share that
-budget; opening one leaves the remaining path the available budget. This conservative reservation
-keeps the sum of all coupling reactions within the guard without an iterative predictor or an
-energy clamp. The ceiling brake is a unilateral mean-speed row at the selected gear's crank limit,
-with the service-brake rating. It is intent-enabled rather than switched by a sampled crank speed.
+The crank guards bound the sum of actual coupling impulses in the block. Each clutch and the
+steering member retain their own friction rating; no unused steering capacity is reserved from
+the clutch. `block::ImpulseLimit` bounds a linear combination of row impulses, independently of
+any drivetrain meaning. The exact search includes active combination faces and their KKT
+multipliers. Merely filtering box assignments is insufficient: two independent unit-inertia rows
+with free speeds `(1,1)`, ratings `2`, and `p1+p2 >= -1` minimize at `(-0.5,-0.5)`, where both
+impulses are interior but neither physical slip is zero (DERIVED). The independent polygon
+checker certifies the variational inequality at every vertex of the feasible impulse polygon.
+The certificate covers changes of row and aggregate units. Fixed-width impulses are fixed
+coordinates, not speed equalities; an open connection delivers exactly zero impulse. Physical
+lock and static breakaway read physical row slip, since an active aggregate's shadow price can
+leave an interior impulse sliding.
+The ceiling brake follows each connected clutch output's weighted speed at the selected gear's
+crank limit: a mean clutch protects the mean, while a side clutch protects that side. Each stop's
+available device is used once; an inner side brake cannot also supply a second ceiling rating.
 
 Static capacity requires exact starting rest. A moving stop uses dynamic capacity, and one that
 exhausts static capacity re-solves at dynamic bounds in the same block call. A stop latch survives
@@ -950,11 +958,52 @@ for exactly resting belts before its stopped countdown and paid direction cut.
 A constructed mean stop can latch on a steer-only request below the authored pivot entry speed or
 on rollback. It remains latched if the load makes it slide. A `Free` construction has no such stop
 and can roll under engine braking without a speed-window regime change. Releasing steer retains
-the mean stop until both belts start a tick exactly at rest. The straight steering tie first
-arrests the differential motion; park then takes the common load. The two stop paths never double
-count the brake rating. The mean-stop rating remains a StandIn for its missing construction datum:
-twice the per-side brake rating. A layout with a mean stop must supply the steering tie needed to
+the mean stop until both belts start a tick exactly at rest. Brake, either ladder request and
+loss of staff share that gate and center the steering tie. Pending handover defers propulsion;
+park or the along-ladder launch lever then inherits static support from exact rest. The two
+stop paths never double count the brake rating. The mean stop has its own required `mean_hold_force` rating, labelled
+Unknown until its torque and construction are established; the current force equivalent is
+192 kN. Independent mean and side brake actuation is not established in the construction data,
+so their exclusion remains. A layout with a mean stop must supply the steering tie needed to
 arrest differential motion during handover.
+
+### Neutral mean hold
+
+The seed's mean-stop construction is inferred from Tigerfibel D 656/27 pp. 40-41 and D 656/30
+p. 58, including the holding-brake button in the neutral-turn drill. The torque, reduction and
+linkage are Unknown. The owner's ruling is to represent the bounded mean stop without modelling
+the gearbox-input brake's torque or gear; research must settle that construction before adding
+that law. Rejected: the steering member's rating (it carries difference, not common load), an
+unbounded hold (no source supports it), and a torque multiplied by the selected gear without a
+sourced torque and construction. A construction without `Stop(Mean)` has no mean stop.
+
+Static support must cover the full constrained demand, not just the starting reaction sum.
+For equal base belt inertias, set `m=(vL+vR)/2`, `d=(vL-vR)/2`, and let the steering step reduce
+`d` by `Delta` while the mean stays zero. Summing the implicit belt equations gives the required
+mean-stop force `R_L + R_R + (s_R-s_L) Delta` (DERIVED). Unequal ground slopes therefore couple
+a differential change into mean demand. The truthful handover invariant is: existing static
+support remains until its replacement starts at exact rest, and rest persists only while every
+coupled constraint, including that differential demand, fits its static capacity. A load sum
+below the rating alone does not prove this. The detent is unchanged; hull/contact motion within
+the tick belongs to the contact slice.
+
+### Released-motion policy
+
+A staffed Driver brakes released rollback outside a steer-only pivot with side park and retains
+its sub-idle stop along the ladder. A pivot retains its constructed mean stop through release,
+Brake intent and either ladder request until both belts start at exact rest. Side park or the
+along-ladder one-way launch lever then takes over; pending handover serves no propulsion against
+its own stop. Loss of staff retains the existing passive hold, centers steering, and permits that
+same exact-rest transfer so supported rest can sleep. A moving breached stop remains dynamic;
+its rating is never enlarged to guarantee an outcome.
+
+Rejected: idle-catch hill holding (it adds engine support beyond the brake rating), released
+rollback without braking (it runs away even within brake capacity), exempting all steering from
+rollback braking (only the pivot has its own constructed mean path), and another timer, latch or
+speed band to hide a coupling transition. The owner's brake ruling above also applies here.
+`P` on the HUD displays either passive-stop latch; it does not assert that a breached stop is
+stuck. Deriving a complete perceptible brake-state display remains open: launch and service can
+use Slip or In, and an unstaffed clutch can remain In with park applied.
 
 The retained `park` bit is the Driver's latch, not proof that a brake is stuck. A breach keeps its
 dynamic capacity. Released rollback and the released sub-idle stop can latch park; a motion or

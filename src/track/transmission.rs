@@ -177,7 +177,7 @@ pub struct TransmissionParams {
     /// Declared highest start gear and largest one-window gear step.
     pub launch_gears: u8,
     pub max_step: u8,
-    /// Per FORWARD gear `(κ_tight, κ_wide)` where `κ = half_tread / R` — the L600 detents.
+    /// Per forward gear `(κ_tight, κ_wide)` from the admitted crank ratios: κ = c·G/r.
     /// Each ladder declares its own radii.
     pub steer_kappa: Vec<(f32, f32)>,
     pub reverse_steer_kappa: Vec<(f32, f32)>,
@@ -198,8 +198,10 @@ pub struct TransmissionParams {
     pub steering_radius_rounding_share: f32,
     /// Per-side service/parking brake capacity at the sprocket (N).
     pub brake_capacity_n: f32,
-    /// Static breakaway capacity multiplier for a latched, at-rest belt. Dynamic dissipation,
-    /// service braking, and every moving slide use [`Self::brake_capacity_n`] unchanged.
+    /// Mean-stop force rating (N); None means this construction has no mean stop.
+    pub mean_hold_capacity_n: Option<f32>,
+    /// Static/dynamic multiplier for a latched, at-rest stop. Sliding uses that stop's own
+    /// force rating; service braking uses the side stops' dynamic rating.
     pub brake_static_factor: f32,
     /// Zero-throttle engine drag (compression braking): the MID-BAND anchor of the rising
     /// motoring-torque curve, as a fraction of peak torque. [`engine_drag`] equals
@@ -250,6 +252,8 @@ pub struct TransmissionAuthoring<'a> {
     pub couplings: &'a [Coupling],
     pub steering_radius_rounding_share: f32,
     pub brake_capacity_n: f32,
+    /// Mean-stop force rating (N); None means this construction has no mean stop.
+    pub mean_hold_capacity_n: Option<f32>,
     pub brake_static_factor: f32,
     /// See [`TransmissionParams::drag_fraction`].
     pub drag_fraction: f32,
@@ -349,8 +353,8 @@ impl TransmissionParams {
             ),
             (
                 "steering capacity + brake_force",
-                a.steer_capacity_n.is_finite()
-                    && a.steer_capacity_n > 0.0
+                (!a.couplings.contains(&Coupling::Steering)
+                    || (a.steer_capacity_n.is_finite() && a.steer_capacity_n > 0.0))
                     && a.brake_capacity_n.is_finite()
                     && a.brake_capacity_n > 0.0,
             ),
@@ -409,25 +413,36 @@ impl TransmissionParams {
         let gear = |v_kmh: &f32| omega_rated * a.sprocket_radius_m / (v_kmh / 3.6);
         let gears_fwd: Vec<f32> = a.forward_speeds_kmh.iter().map(gear).collect();
         let gears_rev: Vec<f32> = a.reverse_speeds_kmh.iter().map(gear).collect();
-        let steer_kappa: Vec<(f32, f32)> = a
-            .steer_radii_m
-            .iter()
-            .map(|&(tight, wide)| (a.half_tread_m / tight, a.half_tread_m / wide))
-            .collect();
+
         let peak_torque_nm = a
             .torque_nm
             .iter()
             .map(|point| point.1)
             .fold(0.0_f32, f32::max);
-        let reverse_steer_kappa = a
-            .reverse_steer_radii_m
-            .iter()
-            .map(|&(tight, wide)| (a.half_tread_m / tight, a.half_tread_m / wide))
-            .collect();
-        let steer_crank_ratio = (
-            steer_kappa[0].0 * a.sprocket_radius_m / gears_fwd[0],
-            steer_kappa[0].1 * a.sprocket_radius_m / gears_fwd[0],
-        );
+        let steering = a.couplings.contains(&Coupling::Steering);
+        let steer_crank_ratio = if steering {
+            let (tight, wide) = a.steer_radii_m[0];
+            let scale = a.half_tread_m * a.sprocket_radius_m / gears_fwd[0];
+            (scale / tight, scale / wide)
+        } else {
+            (0.0, 0.0)
+        };
+        let kappas = |gears: &[f32]| -> Vec<(f32, f32)> {
+            if !steering {
+                return Vec::new();
+            }
+            gears
+                .iter()
+                .map(|g| {
+                    (
+                        steer_crank_ratio.0 * g / a.sprocket_radius_m,
+                        steer_crank_ratio.1 * g / a.sprocket_radius_m,
+                    )
+                })
+                .collect()
+        };
+        let steer_kappa = kappas(&gears_fwd);
+        let reverse_steer_kappa = kappas(&gears_rev);
         let mut derived = Self {
             engine: EngineParams {
                 idle_rpm: a.idle_rpm,
@@ -450,6 +465,7 @@ impl TransmissionParams {
             steer_crank_ratio,
             steering_radius_rounding_share: a.steering_radius_rounding_share,
             brake_capacity_n: a.brake_capacity_n,
+            mean_hold_capacity_n: a.mean_hold_capacity_n,
             brake_static_factor: a.brake_static_factor,
             drag_fraction: a.drag_fraction,
             engine_inertia: a.engine_inertia_kgm2,
@@ -486,7 +502,7 @@ impl TransmissionParams {
             .expect("an engaged gear belongs to its admitted ladder")
     }
 
-    fn check_couplings_and_radii(&mut self, half_tread: f32) -> Result<(), BevyError> {
+    fn check_couplings_and_radii(&self, half_tread: f32) -> Result<(), BevyError> {
         let clutches: Vec<_> = self
             .couplings
             .iter()
@@ -516,6 +532,18 @@ impl TransmissionParams {
         if self.has_mean_hold() && !self.couplings.contains(&Coupling::Steering) {
             return Err("transmission.couplings: a mean stop needs a steering tie to arrest differential motion before side-stop handover; author that tie or remove the mean stop".into());
         }
+        if self.has_mean_hold() != self.mean_hold_capacity_n.is_some()
+            || self.mean_hold_capacity_n.is_some_and(|rating| {
+                !rating.is_finite()
+                    || rating <= 0.0
+                    || !(rating * self.brake_static_factor).is_finite()
+            })
+        {
+            return Err("transmission.mean_hold_force: author a positive finite rating exactly when Stop(Mean) is constructed".into());
+        }
+        if !self.couplings.contains(&Coupling::Steering) {
+            return Ok(());
+        }
         let bound = self.steering_radius_rounding_share;
         if !bound.is_finite() || !(0.0..1.0).contains(&bound) {
             return Err("transmission.steering.radius_rounding_share: author a finite rounding bound in [0,1)".into());
@@ -538,26 +566,6 @@ impl TransmissionParams {
                 }
             }
         }
-        self.steer_kappa = self
-            .gears_fwd
-            .iter()
-            .map(|g| {
-                (
-                    self.steer_crank_ratio.0 * g / self.sprocket_radius,
-                    self.steer_crank_ratio.1 * g / self.sprocket_radius,
-                )
-            })
-            .collect();
-        self.reverse_steer_kappa = self
-            .gears_rev
-            .iter()
-            .map(|g| {
-                (
-                    self.steer_crank_ratio.0 * g / self.sprocket_radius,
-                    self.steer_crank_ratio.1 * g / self.sprocket_radius,
-                )
-            })
-            .collect();
         Ok(())
     }
 
@@ -629,11 +637,13 @@ impl TransmissionParams {
         if !self.roundoff_force_scale().is_finite()
             || self.roundoff_force_scale() <= 0.0
             || !(2.0 * belt_inertia).is_finite()
-            || ![self.steer_crank_ratio.0, self.steer_crank_ratio.1]
-                .into_iter()
-                .all(|c| c.is_finite() && c > 0.0 && (c * self.steer_capacity_n).is_finite())
+            || (self.couplings.contains(&Coupling::Steering)
+                && ![self.steer_crank_ratio.0, self.steer_crank_ratio.1]
+                    .into_iter()
+                    .all(|c| c.is_finite() && c > 0.0 && (c * self.steer_capacity_n).is_finite()))
             || !(2.0 * self.brake_capacity_n).is_finite()
-            || !(2.0 * self.steer_capacity_n).is_finite()
+            || (self.couplings.contains(&Coupling::Steering)
+                && !(2.0 * self.steer_capacity_n).is_finite())
             || ![self.governed_speed(false), self.governed_speed(true)]
                 .into_iter()
                 .all(|speed| speed.is_finite() && speed > 0.0)
@@ -800,7 +810,7 @@ impl TransmissionParams {
     }
 }
 
-/// Clutch readout: ordered open, or an ordered coupling whose row slips or locks.
+/// Solved clutch feedback for the Driver and displays: ordered open, slipping or locked.
 /// A guard or reduced capacity never turns a closed order into free gear selection.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ClutchState {
@@ -926,9 +936,7 @@ impl TransmissionState {
     }
 }
 
-/// A compact operating-point readout of the joint drivetrain — the ONE place the HUD/legend
-/// reads gear and rpm from, so the display never re-derives drivetrain math (the gear/rpm
-/// relation lives here, beside the adapter that integrates on it).
+/// Shared gear/rpm readout for displays; the drivetrain owns their interpretation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DriveReadout {
     /// Engine rpm from crank state ω_e, including
@@ -939,11 +947,8 @@ pub struct DriveReadout {
     pub gear_label: String,
 }
 
-/// Read the drivetrain operating point THROUGH THE LAW: the engaged gear from
-/// [`TransmissionState`] against the active ladder, and the engine rpm from the CRANK STATE
-/// ω_e: the crank slips against the shaft at
-/// launch, rev-matches through shifts, and can turn backward when back-driven; the display shows
-/// exactly that state. Pure (no ECS), so the HUD and any legend share one implementation.
+/// Read actual crank rpm, including slip, shift matching and backward back-drive, and the
+/// engaged ladder's gear label.
 pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout {
     let ladder: &[f32] = if st.reverse {
         &tp.gears_rev
@@ -1237,7 +1242,7 @@ pub(super) fn force_margin(tp: &TransmissionParams) -> f32 {
     clippy::too_many_arguments,
     reason = "the force law reads construction, supply, shaft speed, ratio, command, load and clutch"
 )]
-fn gear_force(
+pub(super) fn candidate_pull(
     tp: &TransmissionParams,
     fp: &DriveConstruction,
     supply: DriveSupply,
@@ -1247,7 +1252,6 @@ fn gear_force(
     load: f32,
     clutch: ClutchState,
 ) -> f32 {
-    // A candidate price carries the hull with the belts, but uses the production row assembly.
     // An unlocked candidate starts at its launch floor; a locked candidate starts on its shaft.
     let mut price_construction = *fp;
     price_construction.belt_inertia = coupled_mass(fp) * 0.5;
@@ -1296,10 +1300,7 @@ fn gear_force(
         ratio,
     };
     let [fuel, catch, drag] = engine_torques(tp, supply, omega, command);
-    let drag = drag.clamp(
-        -tp.engine_inertia * omega.abs() / input.dt,
-        tp.engine_inertia * omega.abs() / input.dt,
-    );
+    let drag = bounded_drag(tp, omega, input.dt, drag);
     let (report, _, _) = advance_rows(
         &price_construction,
         tp,
@@ -1308,24 +1309,6 @@ fn gear_force(
         fuel + catch - drag,
     );
     report.forces.iter().sum()
-}
-
-/// Candidate pull at a hypothetical clutch operating point, before the contact grip cap.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the price reads construction, supply, shaft speed, ratio, command, load and the prior clutch"
-)]
-pub(super) fn candidate_pull(
-    tp: &TransmissionParams,
-    fp: &DriveConstruction,
-    supply: DriveSupply,
-    at: f32,
-    ratio: f32,
-    command: f32,
-    load: f32,
-    prior: ClutchState,
-) -> f32 {
-    gear_force(tp, fp, supply, at, ratio, command, load, prior)
 }
 
 /// Sustained pedal pull: a locked crank may lug; a take-up is priced at its launch floor.
@@ -1488,12 +1471,15 @@ fn passive_rows(
             tp.has_mean_hold(),
             "a mean-stop latch belongs to a constructed mean stop"
         );
-        // StandIn: the construction lacks a separate mean-hold rating; both side brakes supply it.
+        let rating = f64::from(
+            tp.mean_hold_capacity_n
+                .expect("a constructed mean stop has its own admitted rating"),
+        ) * f64::from(inp.dt);
         rows.push(Row {
             jacobian: vec![0.0, 0.5, 0.5],
             target: 0.0,
-            bounds: symmetric(2.0 * capacity * f64::from(tp.brake_static_factor)),
-            dynamic: Some(symmetric(2.0 * capacity)),
+            bounds: symmetric(rating * f64::from(tp.brake_static_factor)),
+            dynamic: Some(symmetric(rating)),
         });
     } else {
         for side in tp.couplings.iter().filter_map(|c| match c {
@@ -1546,8 +1532,6 @@ struct CouplingBudget {
     over_impulse: f64,
     signed_steer: f64,
     steering_capacity: f64,
-    steer_down: f64,
-    steer_up: f64,
 }
 
 fn coupling_budget(
@@ -1566,9 +1550,7 @@ fn coupling_budget(
         idle_floor(tp, inp.supply, st.omega_e)
             .unwrap_or(-((tp.engine.crank_limit_rpm + overrev_margin_rpm()) * RPM_TO_RAD))
     };
-    // Guards can only narrow friction bounds. Reserve the steering member's crank-side
-    // rating before allocating the remaining extraction/back-drive budget to the clutches;
-    // their combined reactions then cannot cross either freely reachable guard.
+    // The block bounds the actual sum of crank reactions, never reserved path ratings.
     let over = f64::from((tp.engine.crank_limit_rpm + overrev_margin_rpm()) * RPM_TO_RAD);
     let down_budget = f64::from(tp.engine_inertia) * (crank_free - f64::from(floor)).max(0.0);
     let up_budget = f64::from(tp.engine_inertia) * (over - crank_free).max(0.0);
@@ -1581,22 +1563,13 @@ fn coupling_budget(
     let signed_steer = f64::from(branch(inp.steer) * steer_ratio);
     let steering_capacity =
         2.0 * f64::from(tp.steer_capacity_n * inp.supply.transmission_condition) * dt;
-    let steering_rating = if tp.couplings.contains(&Coupling::Steering) {
-        signed_steer.abs() * steering_capacity
-    } else {
-        0.0
-    };
-    let steer_down = down_budget.min(steering_rating);
-    let steer_up = up_budget.min(steering_rating);
-    let floor_impulse = -(down_budget - steer_down);
-    let over_impulse = up_budget - steer_up;
+    let floor_impulse = -down_budget;
+    let over_impulse = up_budget;
     CouplingBudget {
         floor_impulse,
         over_impulse,
         signed_steer,
         steering_capacity,
-        steer_down,
-        steer_up,
     }
 }
 
@@ -1610,7 +1583,7 @@ fn advance_rows(
     controls: &Controls,
     tau_free: f32,
 ) -> (TransmissionReport, f32, f32) {
-    use super::block::{Bounds, Row, Speed, State, solve};
+    use super::block::{Bounds, ImpulseLimit, Row, Speed, solve_limited};
     let inp = &controls.input;
     let dt = f64::from(inp.dt);
     let k = f64::from(controls.ratio / tp.sprocket_radius);
@@ -1620,8 +1593,6 @@ fn advance_rows(
         over_impulse,
         signed_steer,
         steering_capacity,
-        steer_down,
-        steer_up,
     } = coupling_budget(tp, st, controls, tau_free);
     let mut speeds = vec![Speed {
         value: f64::from(st.omega_e),
@@ -1647,13 +1618,6 @@ fn advance_rows(
     let mut rows = Vec::new();
     let mut clutches = Vec::new();
     let mut steering = None;
-    let clutch_count = tp
-        .couplings
-        .iter()
-        .filter(
-            |c| matches!(c, Coupling::Clutch(o) if !controls.clutch_open && !o.inner(inp.steer)),
-        )
-        .count();
     for coupling in &tp.couplings {
         match *coupling {
             Coupling::Clutch(output) => {
@@ -1670,13 +1634,9 @@ fn advance_rows(
                     if open || (inp.supply.control_authority && controls.propulsive < dead()) {
                         0.0
                     } else {
-                        (-capacity).max(floor_impulse / clutch_count as f64)
+                        -capacity
                     };
-                let upper = if open {
-                    0.0
-                } else {
-                    capacity.min(over_impulse / clutch_count as f64)
-                };
+                let upper = if open { 0.0 } else { capacity };
                 clutches.push(rows.len());
                 rows.push(Row {
                     jacobian: vec![1.0, -dir * k * weights[0], -dir * k * weights[1]],
@@ -1687,29 +1647,11 @@ fn advance_rows(
             }
             Coupling::Stop(_) => {}
             Coupling::Steering => {
-                let signed = signed_steer;
-                let bounds = if signed == 0.0 {
-                    symmetric(steering_capacity)
-                } else {
-                    let down = steer_down / signed.abs();
-                    let up = steer_up / signed.abs();
-                    if signed > 0.0 {
-                        Bounds {
-                            lower: -up,
-                            upper: down,
-                        }
-                    } else {
-                        Bounds {
-                            lower: -down,
-                            upper: up,
-                        }
-                    }
-                };
                 steering = Some(rows.len());
                 rows.push(Row {
-                    jacobian: vec![-signed, 0.5, -0.5],
+                    jacobian: vec![-signed_steer, 0.5, -0.5],
                     target: 0.0,
-                    bounds,
+                    bounds: symmetric(steering_capacity),
                     dynamic: None,
                 });
             }
@@ -1725,17 +1667,34 @@ fn advance_rows(
         && !st.park
         && !controls.service
     {
-        rows.push(Row {
-            jacobian: vec![0.0, dir * 0.5, dir * 0.5],
-            target: f64::from(tp.engine.crank_limit_rpm * RPM_TO_RAD) / k,
-            bounds: Bounds {
-                lower: -2.0 * capacity,
-                upper: 0.0,
-            },
-            dynamic: None,
-        });
+        for output in tp.couplings.iter().filter_map(|c| match c {
+            Coupling::Clutch(output) if !output.inner(inp.steer) => Some(*output),
+            _ => None, // Only a connected drive output has a crank-speed ceiling to protect.
+        }) {
+            let weights = output.weights();
+            rows.push(Row {
+                jacobian: vec![0.0, dir * weights[0], dir * weights[1]],
+                target: f64::from(tp.engine.crank_limit_rpm * RPM_TO_RAD) / k,
+                bounds: Bounds {
+                    lower: -capacity / weights[0].max(weights[1]),
+                    upper: 0.0,
+                },
+                dynamic: None,
+            });
+        }
     }
-    let solved = solve(&speeds, &rows);
+
+    let solved = solve_limited(
+        &speeds,
+        &rows,
+        &[ImpulseLimit {
+            coefficients: rows.iter().map(|r| r.jacobian[0]).collect(),
+            bounds: Bounds {
+                lower: floor_impulse,
+                upper: over_impulse,
+            },
+        }],
+    );
     let mut forces = [0.0_f64; 2];
     for (row, outcome) in rows.iter().zip(&solved.rows) {
         for (force, coefficient) in forces.iter_mut().zip(&row.jacobian[1..]) {
@@ -1750,14 +1709,15 @@ fn advance_rows(
             .iter()
             .filter(|&&i| rows[i].bounds.lower != rows[i].bounds.upper)
             .all(|&i| {
-                solved.rows[i].state == State::Stuck
-                    || rows[i]
-                        .jacobian
-                        .iter()
-                        .zip(&solved.speeds)
-                        .map(|(a, v)| a * v)
-                        .sum::<f64>()
-                        == rows[i].target
+                (rows[i]
+                    .jacobian
+                    .iter()
+                    .zip(&solved.speeds)
+                    .map(|(a, v)| a * v)
+                    .sum::<f64>()
+                    - rows[i].target)
+                    .abs()
+                    <= rows[i].slip_tolerance(&solved.speeds)
             });
     st.clutch = if controls.clutch_open {
         ClutchState::Out
@@ -1876,16 +1836,21 @@ fn driver(
         DriveIntent::Axes(axes) => (if staffed { axes.throttle } else { 0.0 }, false),
         DriveIntent::Brake => (0.0, true),
     };
-    if brake {
+    let requested = command.abs() >= dead();
+    if brake || requests_other_ladder(command, st.reverse) || (st.mean_hold && requested) {
         input.steer = 0.0;
     }
-    let requested = command.abs() >= dead();
     let steer_only = !brake && !requested && input.steer.abs() >= dead();
     let dir = if st.reverse { -1.0 } else { 1.0 };
     let mean = (input.speeds[0] + input.speeds[1]) * 0.5;
+    // A passive latch survives loss of its operator. The straight tie can arrest differential
+    // motion; exact rest then admits the replacement side stops, including without staff.
+    if st.mean_hold && input.steer.abs() < dead() && input.speeds == [0.0; 2] {
+        st.park = true;
+        st.mean_hold = false;
+    }
     if staffed {
         if requested {
-            st.mean_hold = false;
             if requests_other_ladder(command, st.reverse) && input.speeds == [0.0; 2] {
                 st.park = true;
             }
@@ -1900,12 +1865,7 @@ fn driver(
             }
             // Steering intent releases the side stops; a constructed hold takes their mean.
             st.park = false;
-        } else if st.mean_hold {
-            if input.speeds == [0.0; 2] {
-                st.park = true;
-                st.mean_hold = false;
-            }
-        } else {
+        } else if !st.mean_hold {
             let speed = input.speeds[0].abs().max(input.speeds[1].abs());
             let stop_speed =
                 tp.engine.idle_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.ratio(st.reverse, 1);
@@ -1923,7 +1883,9 @@ fn driver(
     let opposing = requests_other_ladder(command, st.reverse);
     let dir = if st.reverse { -1.0 } else { 1.0 };
     let service = brake || opposing;
-    let propulsive = if brake || opposing {
+    // A pending mean-stop handover serves no propulsion against its own stop. The exact-rest
+    // transfer above admits the replacement lever's static capacity before the pedal can drive.
+    let propulsive = if brake || opposing || st.mean_hold {
         0.0
     } else {
         (input.throttle * dir).clamp(0.0, 1.0)
@@ -1972,6 +1934,12 @@ fn update_steer_detent(st: &mut TransmissionState, steer: f32) {
     };
 }
 
+/// Construction drag alone cannot reverse a free crank within one tick.
+fn bounded_drag(tp: &TransmissionParams, omega: f32, dt: f32, drag: f32) -> f32 {
+    let bound = tp.engine_inertia * omega.abs() / dt;
+    drag.clamp(-bound, bound)
+}
+
 /// Engine force law at the starting crank speed. Pedal, steering and shift matching request
 /// one fuel rack; idle catch and construction drag retain their own data-owned laws.
 #[expect(
@@ -2015,8 +1983,7 @@ fn crank_free_torque(
     let [tau_ind, tau_idle, tau_drag] = engine_torques(tp, supply, omega_e, u_fuel);
     // A discrete loss can stop the free crank, never drive it through zero. Clutch work
     // may still back-drive the settled crank in either direction.
-    let stop_drag = tp.engine_inertia * omega_e.abs() / inp.dt;
-    let tau_free = tau_ind + tau_idle - tau_drag.clamp(-stop_drag, stop_drag);
+    let tau_free = tau_ind + tau_idle - bounded_drag(tp, omega_e, inp.dt, tau_drag);
 
     let p_avail = if supply.engine_in_action {
         tp.torque_at(rpm) * omega_e.max(0.0)
@@ -2049,6 +2016,9 @@ pub(super) fn steer_ratio(
     inp: &TransmissionInput,
     gear: u8,
 ) -> f32 {
+    if !tp.couplings.contains(&Coupling::Steering) {
+        return 0.0;
+    }
     branch(inp.steer) * detent_kappa(tp, st, gear)
 }
 

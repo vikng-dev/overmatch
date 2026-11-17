@@ -1,7 +1,7 @@
 # Drivetrain slice 2: crank, clutch, steering
 
 Subject: Overmatch's video-game driving physics, game state only. Lane `lane/drive-crank`, bay 2.
-Implementation commit: `4be2f99d`. Base: `5c76e105`.
+Initial implementation: `4be2f99d`. Base: `5c76e105`. Review closure is recorded below.
 The implementation starts from the reviewed slice-1 block/stops base. No Avian, contact law,
 per-substep relocation or parallel-group change is included. No authored force, inertia, engine
 curve or steering radius was tuned to recover a prior observation.
@@ -14,8 +14,8 @@ curve or steering radius was tuned to recover a prior observation.
 | Clutch | One row per declared `Clutch(Mean)`, `Clutch(Left)` or `Clutch(Right)`. The mean row is `omega_e - dir*k*(vL+vR)/2 = 0`; side paths use their own output. Bounds express open, engine-brake-only or bidirectional drive, narrowed by the crank guard budget. Lock/slip are solved outcomes. |
 | Steering | Declared `Steering` supplies `d - sign(steer)*c*omega_e = 0`; straight has `c=0`. Tight/wide crank ratios derive from the first radius pair. Every forward/reverse radius checks the same ratio at load. Steering impulse reacts on the crank as well as the belts. |
 | Stops L/R | Declared `Stop(Left)` and `Stop(Right)`, joint with crank, clutch and steering. Park/service are two-sided; launch is one-sided. Static capacity requires exact starting rest and a lever. A held park retains that static budget under a service request; the row is not duplicated. Breakaway re-solves at dynamic bounds in the same call. |
-| Mean hold | Optional `Stop(Mean)`, a passive latch. It keeps its common-mode static support through steering release until the straight tie arrests differential motion and both belts start a tick exactly at rest. Only then do the side stops take over. Its rating remains the declared StandIn of twice the side brake capacity. |
-| Crank ceiling | A unilateral signed-mean row at `crank_limit/k`, bounded by service capacity. A staffed Driver enables it outside a shift and other full stops; a sampled crank-speed test does not switch it. Independent crank guard bounds remain. |
+| Mean hold | Optional `Stop(Mean)`, a passive latch. It keeps its common-mode static support through steering release until the straight tie arrests differential motion and both belts start a tick exactly at rest. Only then do park or the one-way launch stops take over. Its required `Unknown` sheet rating remains 192 kN, independently authored from the side rating. |
+| Crank ceiling | One unilateral row per connected clutch output at `crank_limit/k`: a mean clutch protects mean speed, side clutches protect their own side speeds, each using the service device once. A staffed Driver enables it outside a shift and other full stops; a sampled crank-speed test does not switch it. Independent crank guard bounds remain. |
 | Contact | Deferred to slice 4. The sampled affine ground law and late solver-contact reaction publication remain. |
 
 `Coupling` is construction data in the tank sheet and the inline fixtures. The generic production
@@ -25,24 +25,25 @@ missing or duplicate connections are refused before play, naming the constructio
 The two-side-clutch fixture supplies no steering tie and drives, turns and stops through `step`,
 including that same data admission and row assembly.
 
-The shared crank guard reserves the steering member's rated angular impulse first, then gives
-the remaining floor/ceiling budget to the closed clutch paths. Opening one side clutch leaves the
-remaining path the available budget. This is a conservative reservation: unused steering budget
-is not reassigned by a predictor. It can leave some instantaneous clutch capacity unused. It keeps
-the combined reactions within the freely reachable guards without a crank clamp or iteration.
-This is the lane's explicit decision where the design's clutch-only bound omitted steering's
-crank reaction; the combined-reaction test proves the bound.
+The shared crank guard bounds the actual linear combination of all crank-side row impulses.
+`block::ImpulseLimit` is a generic convex-polytope facility with no drivetrain knowledge. The
+exact search includes the active combination face and its KKT multiplier, so unused steering
+rating remains available to the clutch. The independent polygon checker proves momentum,
+feasibility and the variational inequality over every vertex, including redundant physical rows.
+A box-assignment feasibility filter would lose the optimum: unit free speeds `(1,1)`, unit
+inertias, impulse boxes `[-2,2]`, and `p1+p2 >= -1` minimize at `(-0.5,-0.5)`, where both impulses
+are interior but both physical slips are `0.5` (DERIVED). The bordered solve represents it exactly.
 
 ## Driver rules
 
 | Decision | Result |
 |---|---|
-| P1: active couplings | No speed test chooses a clutch or steering regime. Intent and paid interruption set bounds; the block decides lock/slip. `ClutchState` remains only a readout: `Out` means an open order, while a closed order reports `Slip` or `In`. Zero capacity under a guard does not manufacture a free gear selection. |
-| P2: passive stops | Park and mean hold latch from the named passive-entry conditions and survive speed changes or breakaway. Intent releases them. A passive handover retains the existing stop until its replacement can start at exact rest. |
+| P1: active couplings | No speed test chooses a clutch or steering regime. Intent and paid interruption set bounds; the block decides lock/slip. `ClutchState` is solved feedback consumed by the Driver and displays: `Out` means an open order, while a closed order reports `Slip` or `In`. Zero capacity under a guard does not manufacture a free gear selection. |
+| P2: passive stops | Park and mean hold latch from the named passive-entry conditions and survive speed changes or breakaway. Intent releases them. Every mean-stop exit retains it until its replacement can start at exact rest; propulsion waits during that transfer. |
 | Gear/ladder/shift | Existing gear law and authored interruption retained. Reversal countdown advances only with both belts exactly at rest; any motion refreshes it. Park stays two-sided through the pause and paid cut. A launch lever is not ordered during a cut. |
 | Clutch | Open through a shift or the initial state with no sensed gear choice; Unchosen, TakingUp and Locked are distinct states. At a staffed station with no propulsive pedal: engine-brake-only. With pedal: both directions, launch floor until the first solved lock. The initial no-ledger state is independent of speed. |
 | Stops | Brake intent (including a phase hold) or an opposite-ladder request orders service. A request along the ladder orders the rollback-opposing launch lever, replacing the old against-motion service switch. Released rollback/sub-idle stop and exact rest can latch park. |
-| Pivot | A steer-only request releases side park. A constructed mean stop can latch below the data-owned entry speed or on rollback, and persists through overload. Steering release retains it through exact-rest handover; Brake intent centers steering so that handover can finish. A construction without the mean stop can roll without crossing a mechanical regime boundary. |
+| Pivot | A steer-only request releases side park. A constructed mean stop can latch below the data-owned entry speed or on rollback, and persists through overload. Release, Brake, either ladder request and loss of staff share exact-rest handover. Requests center the tie and defer propulsion until the transfer can finish. A construction without the mean stop can roll without crossing a mechanical regime boundary. |
 | Free gear selection | A genuinely unchosen initial/new-ladder launch can select for free before closing. Starts/rollback use the launch range; a rolling unchosen entry may select any safe gear. A paid gear shift has already selected its ratio and retains it when closing. Prices retain the signed shaft speed. A real overrun with no safe landing retains its gear under the guards. |
 | Candidate pricing | Candidate acceleration uses the production row assembly with hull-coupled inertia. Sustained/landing fuel prices retain the engine-law envelope. Paid reverse rev matching reads the signed shaft along its ladder. |
 
@@ -65,8 +66,8 @@ invariants.
   The shipped radius values are unchanged. Synthetic tables that contradicted their own gear
   ladders were corrected to their construction relationship; they are Fixture data.
 - `brake_force` and `brake_static_factor` retain their values and now carry typed Unknown labels
-  naming the missing rating/comparison and what would settle them. Outcome-sized provenance
-  claims were removed. Future measured ratings can replace the unknowns without changing a law.
+  naming the missing rating/comparison and what would settle them. The sheet records the 20-degree sizing inference (DERIVED 0.343 g), the rejected grip-limit
+  sizing, and the inferred static-factor range 1.05-2.0. Future measured ratings can replace the unknowns without changing a law.
 - The old prescribed `neutral_d_full` field is gone. Instruments can read the tight member's
   speed at the governor as derived metadata; the solver always uses the actual crank.
 
@@ -77,10 +78,10 @@ allowances cover f32/f64 arithmetic rather than an earlier observation.
 
 | Proof | Evidence |
 |---|---|
-| 864 fixed-intent states | Three constructions, two mean paths, two ladders, three loads, three requests, two steer requests, two entry windows and two directions. The actual drivetrain integrates throughout. Within each fixed Driver phase, at most one settling transition and no subsequent order flips; a held reversal permits at most one direction cut. Paid direction/cut phases are explicit authorised transitions, not counted as chatter. The absent sensing ledger isolates gear decisions from the row-order test. |
-| No free energy | Without combustion or external work, total crank-plus-belt kinetic energy cannot rise, including steering and asymmetric rolling inputs. Existing free-crank tests prove drag cannot reverse it or increase its energy. A solved steering impulse cannot be billed to the belts alone. |
-| Locked radius | Across both ladders and detents on all class fixtures, synchronous unloaded rows hold and reproduce `R=b*abs(mean/d)` within the authored rounding bound plus subtraction roundoff. The expected half-tread comes from its construction owner. |
-| Static handover | A common load strictly between dynamic and static capacities survives pivot release to park or service. The holding mean remains exactly zero, replacement park can latch only from `[0,0]`, and rest persists. Park-to-pivot/service witnesses cover the other ownership direction. |
+| 6,048 fixed-intent states (DERIVED count) | Four constructions (including independent side clutches), each valid mean path, all three launch phases, staff/latch variations, unequal loads and reaction slopes, both ladders, three load classes, three requests, straight/wide/tight steer, both entry windows and motion directions. The actual drivetrain integrates throughout. Within each fixed Driver phase, at most one settling transition and no subsequent order flips; a held reversal permits at most one direction cut. Paid direction/cut phases are explicit authorised transitions, not counted as chatter. The absent sensing ledger isolates gear decisions from the row-order test. |
+| No free energy | Without combustion or external work, total crank-plus-belt kinetic energy cannot rise, including steering and asymmetric rolling inputs. Affine contacts additionally satisfy the backward-Euler energy inequality after billing their external endpoint work across launch, staff and latch states. Existing free-crank tests prove drag cannot reverse it or increase its energy. A solved steering impulse cannot be billed to the belts alone. |
+| Locked radius | Across both ladders and detents on every class fixture with a Steering member, synchronous unloaded rows hold and reproduce `R=b*abs(mean/d)` within the authored rounding bound plus subtraction roundoff. The expected half-tread comes from its construction owner. |
+| Static handover | Unequal loads and slopes with tight -> wide -> straight steering transfer existing support to park/service/either ladder request from exact rest when the full demand fits both devices. A separate derived overload witness proves that a below-rating starting reaction sum can still break away under differential deceleration. Loss of staff retains its passive support through stored-crank discharge; the shipped plugin proves eventual supported park and sleep on level ground. |
 | Two side clutches | The production path drives both belts, opens/brakes the inner path to turn, and stops both with service, with no steering tie. |
 | Combined crank guards | Both clutch and steering reactions together remain within freely reachable floor/ceiling bounds. No settlement clamp supplies missing energy. |
 | Load admission | Bad radius relationships, incomplete/duplicate coupling lists and a mean stop without its handover mechanism are refused before play. |
@@ -159,7 +160,7 @@ Retired test arms:
 - `a_ladder_that_cannot_launch_inside_the_crank_limit_is_refused_before_play`.
 - `forward_crank_rollback_keeps_gear_under_service`.
 
-## Wire and verification
+## Wire and initial verification
 
 Wire changed: `TransmissionState` adds the mean-stop latch and explicit launch phase. Its exhaustive
 projection and probe state schema contain ten fields; `LaunchState` is included in the wire type graph. `PROTOCOL_REV` advances 102 -> 103 in this
@@ -167,7 +168,7 @@ lane; `WIRE_TYPES_HASH` is `0x52df1f2c325e8ff4`. Registration/surface names are 
 canonical-state interface vector is re-pinned for the extra fields, and the inventory test mutates
 both new fields independently. Protocol tests verify the pin and compatibility contract.
 
-MEASURED validation results: **full library suite, run once: 2853 passed, 0 failed,
+Initial implementation validation (MEASURED): **full library suite, run once: 2853 passed, 0 failed,
 50 ignored, 349.84 s test execution**. The full run includes the corrected unmanned fixture,
 all load refusals, protocol/trace pins and production driving tests. The requested ignored
 measurement runners were also run explicitly as detailed below.
@@ -193,8 +194,8 @@ regime. This is an explicit retained passive construction policy.
   total crank-plus-belt energy with no fuel or external work, plus a free-crank dissipation proof.
 - One ratio per steering detent is approximate in the rounded table. The load gate states its
   rounding allowance; it neither restores each table entry as a separate law nor retunes radii.
-- A clutch-only crank guard ignores steering's crank reaction. The shared conservative budget
-  above protects their sum and states the unused-capacity limitation.
+- A clutch-only crank guard ignores steering's crank reaction. The generic aggregate bound
+  protects their actual sum without reserving unused ratings.
 - A launch-pending bit conflates a genuinely unchosen launch with take-up of an already selected
   paid shift. `LaunchState` makes that distinction explicit; it prevents a new free selection on
   closing a cut. The selected ratio and the data's one-window selector limit stay coherent.
@@ -205,8 +206,9 @@ regime. This is an explicit retained passive construction policy.
   gear's data-derived governor. Narrowed coupling bounds cannot teleport an invalid initial crank
   back under a guard. The independent motoring-force balance and guard assertions remain.
 - The brake-publication test demanded a fully saturated contact sample within 1 N. That trajectory
-  is not a contract of coupled recoverable shear. It now checks forecast force minus unused grip
-  against delivered traction plus rolling on every tick, keeping the composition witness.
+  is not a contract of coupled recoverable shear. The composition test compares delivered
+  traction plus rolling against the bots' actual forecast capacity (`delivered <= forecast`)
+  and reports unused capacity as an observation.
 - A one-way lever must not replace the two-sided park while a direction cut is still paid.
   The retained park now spans the whole pause/cut, before the new intent releases it.
 - The soil's K bounds recoverable strain per element, not global travel of a rotating hull.
@@ -320,17 +322,43 @@ Flat pivot belt speed changes from +/-0.287957 to +/-0.235883 m/s MEASURED, at
 neutral target. The 35-degree hull slides remain contact/grade observations; a held belt mean
 does not imply a held hull on a sliding ground contact.
 
-The across-slope diagnostic repeated this case twice more with identical motion. At the
-tight-to-wide transition the mean hold remains latched. MEASURED inputs: belt speeds
-`[0.22872825, -0.22872825]` m/s, sampled ground slopes `[83.25533, 806006.6]` N s/m,
-and reactions `[140303.55, 76738.63]` N. A read-only replay with the mean rating removed
-requires **339786.501 N MEASURED** to hold its mean, above the **288000 N DERIVED** static
-rating. The actual solve breaks to **192000 N MEASURED** dynamic force. Unequal implicit
-contact inertias couple the detent's sudden differential deceleration into the mean. The
-hold never hands over to park because the belts never regain exact rest. This is an overload
-under the new turn motion, not the missing make-before-break order; no contact or brake rating
-was changed to conceal it. The replay instrumentation was removed; the probe now records the
-mean latch so future captures can distinguish retained overload from handover.
+"Across" denotes only the starting heading. The 64-second held pivot releases at heading
+1.722 rad (MEASURED), 8.7 degrees beyond the fall line (DERIVED), after 12.3 m hold travel
+(MEASURED). From about 20 s it stalls at about -0.006 rad/s while backing downhill at
+-0.229 m/s (MEASURED); the right belt grips and the left slides.
+
+The 57 t weight is 559.2 kN, the 25-degree grade is 236.3 kN, and its along-hull share at release
+is `236.3 sin(1.722) = 233.6 kN` (DERIVED; f_long 233.8 kN MEASURED). Static mean capacity is
+288 kN and dynamic is 192 kN (DERIVED). At tight-to-wide, MEASURED starting belts are
+`[0.22872825,-0.22872825]` m/s, reaction slopes `[83.25533,806006.6]` N s/m and reactions
+`[140303.55,76738.63]` N. The crank drops 1985.8 -> 1966.2 rpm (MEASURED), so the half-difference
+drops 0.2287 -> 0.0763 m/s (DERIVED from the construction ratio 3.44/10.2), Delta=0.1524 m/s.
+
+With mean constrained to zero, summing the implicit belt equations cancels equal base belt
+inertia and gives `hold = R_L + R_R + (s_R-s_L) Delta` (DERIVED). Here the 217.0 kN starting load
+(MEASURED) plus the 122.8 kN differential-step term gives 339.9 kN (DERIVED), agreeing with the
+339.79 kN replay (MEASURED), beyond 288 kN. The extra term is differential motion loading the
+asymmetric soil response with the hull frozen for this solve, not gravity or a wrong mean row.
+
+The broad invariant "starting load inside static capacity stays at rest through any handover"
+is false. The supported invariant requires the FULL coupled demand, including differential
+changes, to fit static capacity; the existing stop persists until replacement starts at exact
+rest. The proof now covers unequal loads/slopes and tight -> wide -> straight. No detent patch
+or rating change hides breakaway. About 22 kN rolling plus 192 kN dynamic stop is only 214 kN
+against 233.6 kN grade, leaving 0.33 m/s^2 downhill (DERIVED); the logged 0.30 m/s^2 is MEASURED.
+Dynamic support ends at 20.1 degrees, static at 31.0 degrees (DERIVED, without rolling). In that
+band an undisturbed rest can hold while a breached slide cannot be arrested by this rating.
+Before this slice, uphill/downhill ended with about 236 kN along the hull and slid; across ended
+at heading 2.406 rad with 158 kN and held (MEASURED). Afterwards, across slides at 233.6 kN while
+uphill/downhill hold at 197/50 kN (MEASURED). Which starting heading reaches the band changed;
+the class did not. The owner's unresolved rating and gearbox-input construction are recorded as
+Unknown data; contact/hull response within the tick belongs to slice 4.
+
+Shipped-rough full-throttle release grows 25.5 -> 62.3 m and crank 2584 -> 2885 rpm (MEASURED,
+initial slice comparison). Full throttle downhill at a crank-limited top gear explains the
+class, but the upper-end motion remains for owner judgement. At 35 degrees every starting
+heading slides 365-387 m during hold in both initial versions (MEASURED); ground grip 0.574 is
+below tan(35 degrees)=0.700 (DERIVED), so belt mean support cannot prevent hull ground sliding.
 
 ### Slab-pull
 
@@ -367,6 +395,146 @@ Every value below is MEASURED. Counts cover the 1280-tick observation window.
 The rammed arrival differs with the drivetrain, so this compares two complete probe executions,
 not identical parked poses. Original parked-pose comparisons remain slice 5. The disappearance of
 released creep is visible here; it is not a changed sleep or contact rule.
+
+## Independent-review closure
+
+### Dispositions
+
+- **Lens P1:** fixed in `track/block.rs` and `transmission::advance_rows` with generic
+  `ImpulseLimit`, active combination faces and bordered KKT equations. The bound applies to
+  actual combined crank impulse; the advance reservation is deleted. Checker proof and the
+  interior-sliding counterexample are described above.
+- **Review P2-1:** `mean_hold_force` is required when `Stop(Mean)` exists and forbidden without
+  that construction, finite and positive with its static capacity checked at load. The sheet
+  retains 192 kN with `Unknown` provenance. No independent simultaneous brake linkage is
+  established; the existing mean/side exclusion stays. No gearbox-input torque law is added.
+- **P2-2:** one gate clears the mean latch, only when both belts start at exact rest. Release,
+  Brake, both ladder requests and loss of staff use it; requested motion centers steering and
+  defers propulsion while pending. Along-ladder intent then uses the statically admitted one-way
+  launch lever; other paths retain park through rest, reversal pause and paid cut. The state-space
+  proof asserts this gate for every observed exit, and the ramp proof holds steer during both
+  ladder requests to catch a bypass or a handover that could never finish.
+- **P2-3:** the state-space proof covers side clutches, all launch phases, staffed/unstaffed,
+  an already-latched hold, unequal loads, and nonzero unequal reaction slopes. Handover includes
+  a tight/wide/straight ramp; energy includes an affine-ground external-work account. The broad
+  starting-load handover invariant is rejected by the summed-equation derivation above.
+- **P2-4:** one-crank-ratio admission, kappa and member capacity apply only to a constructed
+  `Steering` member. The side-clutch Fixture has its own gear-independent radii and runs through
+  production admission and `step`; it supplies no steering member capacity or Driver kappa price.
+- **P2-5:** the production contact adapter compares delivered braking with the bots' forecast
+  (`delivered <= forecast`), recording the gap rather than requiring saturated stops.
+- **P2-6:** the sheet restores mean-hold citations, brake sizing and static-factor range; the
+  design owns the short "Neutral mean hold" and "Released-motion policy" rationale, rejected
+  alternatives and the owner's no-gearbox-input-brake ruling.
+- **P2-7:** the across-slope account is corrected above. Both sweeps print the release heading
+  and planar hold travel as named MEASURED values, also included in the JSON record.
+- **Review P3s:** `ClutchState` is documented as Driver/display feedback; the open-clutch comment
+  states that the ceiling brake is absent. Unstaffed passive handover can reach side park and
+  expose held rest to sleep. Kappa derives once and its field names `c G/r`. Inner and ceiling
+  braking cannot bill the same side device twice. Trace capacity follows the projection length;
+  the stale architecture constant reference is corrected. HUD `P` includes the mean latch and
+  the design retains the open complete-brake-display question. `net-22` is untouched.
+- **Lens P3s:** one helper owns the no-reversal drag bound; candidate pricing owns its
+  implementation directly; nested state fixtures, duplicate driving assertion, steering alias,
+  duplicate candidate rationale and readout prose are removed. The reversal pause assertion
+  derives time from the fixture input's timestep.
+
+### Gear walk and slab observation
+
+MEASURED level full-pedal gear walk: `[1,3,4,5,6,7,8]`; every paid step respects `max_step`.
+The earlier intermediate `[1,3,8]` is not reproduced. A paid cut retains its selected ratio on
+closure; it cannot re-enter free initial selection. The production Fixture test checks that rule.
+
+MEASURED slab-pull selector events: ticks 20 F2, 61 F3, 101 F4, 159 F5, 249 F8. There are no
+lower-gear returns, so the extra cuts are not hunting. Four complete 20-tick interruptions plus
+seven ticks of the fifth give 87 open ticks (DERIVED from the trace). The old open-clutch/free
+selection path could advance ratios without paying all these cuts; the explicit selected-launch
+phase now pays them. No Driver rule is changed to recover the old one-cut observation. Neither a
+particular gear sequence nor monotonicity is a class invariant: a different authored torque curve
+or load can legitimately require a downshift. Selector reach and paid-cut retention are class
+invariants and remain proved.
+
+MEASURED review slab-pull is unchanged from the initial slice-2 report: end speed 3.368829727 m/s;
+In/Slip/Out counts 117/52/87; left-belt alternation 0.011465541/0.099798590/0.274693251 m/s;
+whole-hull friction alternation 79.586403/232.096436/335.805176 kN. The straight solve does not use
+the removed steering reservation. These are observations, not targets.
+
+
+### Review probe readings
+
+Each review mechanical version ran one complete `turn_probe` filter (55 turn and 16 pivot cases),
+one slab-pull and one four-case rubble-park run. Candidate versions (aggregate bound, output
+ceiling, unit-invariant solver, shared hold-exit gate) each have one recorded run; their readings
+are retained in the metrics file. All four review versions reproduce identical readings for
+these runners. The final ceiling rule follows the clutch output; none of these observations reached a state that distinguishes the intermediate
+per-side ceiling. Final finite-system assertions change no admitted solve. Small text summaries
+are in `drive-crank-slice-2-review-metrics.json`; raw logs remain outside git in `/tmp`.
+
+All values in this table are MEASURED; "slice 2" is the reviewed implementation, not slice 1.
+Release is planar net displacement over five seconds. Hold travel printed at release starts
+immediately before the first held tick; old offline summaries used the first held sample.
+
+| Case | Yaw slice 2 -> review (rad/s) | Crank slice 2 -> review (rpm) | Release slice 2 -> review (m) |
+|---|---:|---:|---:|
+| Flat pivot | -0.105810386 -> -0.105810393 | 2047.904836 -> 2047.904837 | 0.000328684 -> 0.000328684 |
+| Flat F8 tight | -0.124229609 -> -0.124496819 | 2248.599407 -> 2253.341230 | 51.648485 -> 51.706278 |
+| Flat F8 wide | -0.046922591 -> -0.046977794 | 2382.204876 -> 2384.894376 | 53.007408 -> 53.017342 |
+| Pivot 25 deg uphill | -0.083505174 -> -0.083504148 | 2052.536924 -> 2052.536940 | 0.023488267 -> 0.023485437 |
+| Pivot 25 deg downhill | -0.124657843 -> -0.124657965 | 2054.860987 -> 2054.861070 | 0.042794878 -> 0.042793903 |
+| Pivot 25 deg across start | -0.006260826 -> -0.006260733 | 2055.862565 -> 2055.862583 | 4.313269076 -> 4.313269437 |
+| Shipped rough F2/F4 tight | -0.159931920 -> -0.150779226 | 2884.580235 -> 2677.847009 | 62.254679 -> 62.460270 |
+| Shipped rough F4 wide | -0.053649789 -> -0.047974520 | 2742.696822 -> 2711.334641 | 62.383562 -> 60.956724 |
+
+The across-start 25-degree pivot releases at heading 1.721987605 rad after 12.318467140 m hold
+travel (MEASURED); both along-start cases finish with parked zero-speed belts, across still slides.
+The maximum release change from the reviewed slice is 1.426838148 m on shipped-rough wide, and
+maximum yaw change is 0.009152693 rad/s on shipped-rough tight (MEASURED). Steering budget sharing
+changes the driven trajectory and therefore which shipped terrain is sampled. No old trajectory
+is a target. Rubble park reproduces the reviewed slice exactly: flat/rammed/house/yard travel
+0.000179421/0.020582624/0.001984692/0.005523772 m, each with 1280 sleeping observation ticks
+(MEASURED). Slab-pull and its five paid cuts are unchanged as recorded above.
+
+### Closing verification and additional findings
+
+MEASURED full-library run, once at the completed solver checkpoint: **2,865 passed, zero failed,
+50 ignored, 625.58 s**. It included the production unstaffed-pivot sleep test and the ordinary
+shipped-app tests. The all-exits hold gate and aggregate-unit sign certificate were tightened
+after that run; the final source passed the full `track::` filter (**372 passed**, 6,048 Driver
+entry configurations inside its state-space proof), the shipped unstaffed-sleep and full-pedal
+gear-walk tests, and steering-capacity construction admission. The full library was not repeated.
+`cargo fmt --all --check`, CI clippy with `--locked --workspace --all-targets --features
+dev_ui,bitprobe -- -D warnings`, `tests::doc_citations` (**3 passed**) and `net::protocol`
+(**26 passed**) pass. `PROTOCOL_REV` remains **103** and the normalized type pin remains
+`0x52df1f2c325e8ff4`; this closure changes no serialized field or variant.
+
+The braking forecast comparison passes on every tick of its stop/rebound window. MEASURED peak
+forecast-minus-delivered force is **166,751.562 N**, against a published contact capacity of
+**155,261.391 N**; the gap includes rebound and settled ticks. Peak stop travel is **1.860231 m**
+and rebound **0.023943 m** (MEASURED). The force relation is an upper capacity bound; its unused
+share is reported, never imposed as a saturation target.
+
+Additional root-level findings closed in this change:
+
+- A zero-width impulse is a fixed coordinate. Treating an open coupling as an interior speed
+  equality could create roundoff force; the search now fixes its impulse exactly instead.
+- Aggregate-face multipliers can leave physical interior rows sliding. Clutch feedback and static
+  breakaway therefore read physical row slip, and speed snapping uses an independent physical
+  equality basis. A combination can resolve dependent impulses without making duplicate speed
+  equalities independent.
+- Rank and multiplier-sign decisions must survive both row and aggregate unit changes. Symmetric
+  KKT equilibration and row-derived multiplier allowances preserve that contract; independent
+  polygon certificates cover both signs and the unit transforms. Unrepresentable effective-mass
+  arithmetic fails visibly before NaN can pass comparisons.
+- A ceiling belongs to its constructed clutch output. A mean clutch protects the mean speed;
+  side clutches protect their own outputs, and an inner side stop cannot be billed twice.
+- Every mean-stop exit uses one exact-rest gate, including an along-ladder request with steering
+  still held. Propulsion waits for that transfer, rather than fighting the retained brake.
+- Compact Fixture brake labels and its independent mean rating belong to that fixture, not to
+  inherited seed provenance. No shipped rating was adjusted.
+
+The four complete review turn/pivot sweeps, four slab pulls and four rubble-park sweeps pass.
+Raw logs remain in `/tmp`; only the **125 kB MEASURED text summary** is committed. No hosted
+run or owner play is claimed; those observations remain with the orchestrator's release judgement.
 
 ## What slice 3 needs
 

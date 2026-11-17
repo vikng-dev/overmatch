@@ -842,6 +842,53 @@ fn pivot_clears_its_own_kinematic_yaw_floor() {
     neutral_pivot_gate(&mut app, tank);
 }
 
+/// The game's damage model: a Driver knocked out during a pivot leaves a passive mean hold.
+/// The shipped simulation must retain support, transfer to side park at rest, and sleep;
+/// a permanently latched mean that keeps the rest gate false violates that player-visible state.
+#[test]
+fn an_unstaffed_pivot_hands_its_passive_hold_to_park_and_sleeps() {
+    use crate::damage::{CrewStation, Dead, VolumeOf};
+    use crate::track::sim::TankTransmission;
+    use avian3d::prelude::Sleeping;
+    let (mut app, tank) = booted_offline_sim();
+    for _ in 0..FIXED_TICKS_PER_SECOND {
+        drive_tick(&mut app, tank, 0.0, 1.0);
+    }
+    assert!(
+        app.world()
+            .get::<TankTransmission>(tank)
+            .unwrap()
+            .0
+            .mean_hold,
+        "the fixture must enter a constructed pivot hold"
+    );
+    let drivers: Vec<Entity> = app
+        .world_mut()
+        .query::<(Entity, &VolumeOf, &CrewStation)>()
+        .iter(app.world())
+        .filter(|(_, of, station)| of.0 == tank && **station == CrewStation::Driver)
+        .map(|(entity, ..)| entity)
+        .collect();
+    assert_eq!(drivers.len(), 1, "the fixture has one Driver station");
+    app.world_mut().entity_mut(drivers[0]).insert(Dead);
+    for _ in 0..8 * FIXED_TICKS_PER_SECOND {
+        // Fixture observation window, not a timing contract.
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        if app.world().get::<Sleeping>(tank).is_some() {
+            break;
+        }
+    }
+    let state = app.world().get::<TankTransmission>(tank).unwrap().0;
+    assert!(
+        state.park && !state.mean_hold,
+        "passive support must complete its exact-rest transfer"
+    );
+    assert!(
+        app.world().get::<Sleeping>(tank).is_some(),
+        "the shipped rest gate must admit supported unstaffed rest"
+    );
+}
+
 /// Full pedal must reach the declared ladder top without an out-of-range selector event.
 /// Fixture: firm level ground for 20 simulated seconds. Initial free selection is not a paid step.
 #[test]
