@@ -1013,13 +1013,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     for (si, report) in reports.iter().enumerate() {
         let pre_speed = rig.drive.sides[si].speed;
         rig.drive.sides[si] = TrackDriveSide {
-            // A capacity-satisfied brake is a stationary surface, exactly; a rigid friction
-            // row must not amplify floating-point stop-force cancellation into belt motion.
-            speed: if rig.hard_reactions[si].is_some() && tr.held[si] {
-                0.0
-            } else {
-                tr.next_speeds[si]
-            },
+            speed: tr.next_speeds[si],
             // Phase advects at the PRE-update speed — contact evaluation used those stations.
             phase: rig.drive.sides[si].phase + f64::from(pre_speed * dt),
         };

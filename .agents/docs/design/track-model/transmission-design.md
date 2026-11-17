@@ -184,13 +184,18 @@ B_{\max}=T_{\rm brake,sprocket}/r_s
 
 The Tiger’s declared \(r_s=0.3931\) m means 250 kN would equal **98.3 kN·m DERIVED** brake torque. That is only a comparison value, not valid provenance; ship values must come from an actual vehicle brake/output-torque source.
 
-Do not attenuate ground reaction with `(1-h)R`. Always apply `-R`, and turn the ADR-0026 hold into a capacity-limited STOP force. As built in [`apply_brake_stop_forces`](/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/src/track/transmission.rs:2662):
+Do not attenuate ground reaction with `(1-h)R`. Always apply `-R`, and turn the ADR-0026 hold
+into a capacity-limited STOP force. In `transmission::stop_rows`, the stops solve jointly with
+the neutral steering tie. An isolated side stop reduces to:
 
 \[
 B_i=\operatorname{clamp}\!\left(R_i-Q_i-\frac{v_iI}{\Delta t},\;-h B_{\max},\;+h B_{\max}\right)
 \]
 
-`Q_i` is THIS side's own assembled sprocket force — drive share, steering share and the L600 λ term — not the other side's; the brake reads the same `Q_i` it is about to be added to. `h` is the engagement envelope, the largest of the parking/hill-hold latch (1, full capacity), the governor hold-blend entry shape while unlatched, and the service-pedal command. `B_max` itself is two limits, not one — see the static/dynamic split under 2026-07-20 below.
+`Q_i` is this side's assembled sprocket force, including the other rows' delivered impulses over
+the step. `I` includes the sampled ground's affine slope times the step. `h` is full engagement
+when the Driver orders a stop; a launch lever restricts the impulse to its rollback-opposing
+half. `B_max` has static and dynamic limits — see the split below.
 
 Two corrections to this section's original form, both of which the implementation has always had: the brake is priced against THIS side's `Q_i`, never against `Q_{other,i}`, and the stop-force term `v_iI/\Delta t` is present.
 
@@ -691,16 +696,18 @@ counter, target, latch; 512 ticks) now guards stage-C determinism.
 The brake datum is now two limits. `brake_force` remains the dynamic per-side capacity for every
 service stop, moving belt, post-breach latched slide, and scheduler rollback-arrest calculation.
 The new required `brake_static_factor` multiplies it only when a parking or hill-hold latch is
-active, no service-brake command exists, and that individual belt is strictly inside the
-`PARK_ENGAGE_SPEED` at-rest band. Leaving the band selects dynamic capacity in that same tick.
+active, no service-brake command exists, and that individual belt starts exactly at rest. A
+nonzero starting speed uses dynamic capacity. If static capacity cannot hold the row, its bounds
+shrink to dynamic capacity and the block re-solves in the same tick. `PARK_ENGAGE_SPEED` still
+serves Driver decisions; it does not select friction capacity.
 
 Tiger authoring uses **1.5× INFERRED provisional**: static hold does no work, sourced material
 ratios span **1.05–2.0×**, and the Argus discs are described as self-energizing by both British
 Report No. 19 and D 656/30, but no numerical Argus rating survives. That produces
 `2 × 96,000 × 1.5 = 288,000 N` **DERIVED** static capacity against
 `57,000 × 9.81 × sin(30°) = 279,585 N` **DERIVED** demand, an **8,415 N DERIVED** margin.
-The real 30° park gate measured **0.0393 m MEASURED** drift over **4 s DERIVED**; the unchanged
-20° gate measured **0.0000 m MEASURED**. A synthetic **1.1× INFERRED test fixture** has only
+Historical observations with the speed-band selector: the real 30° park gate measured
+**0.0393 m MEASURED** drift over **4 s DERIVED**; the unchanged 20° gate measured **0.0000 m MEASURED**. A synthetic **1.1× INFERRED test fixture** has only
 **211,200 N DERIVED** static capacity, breaches, drops to **96,000 N/side MEASURED** dynamic
 capacity at the moving-band transition, and measured **−0.527 m/s MEASURED** belt speed plus
 **1.825 m MEASURED** downhill travel after **2 s DERIVED**. Service braking remains
@@ -905,15 +912,16 @@ about 1.25 m/s, then back into neutral: one track stalled and the pivot became a
 Whether the mean is held is construction data, `steering.neutral_mean: Free | Held`. Families that
 force only the difference with nothing on the mean path (Merritt-Brown's balance shaft, cross-drive
 in neutral) are `Free`. The Tiger is `Held`, DERIVED from its period drill (Tigerfibel pp. 40–41,
-D 656/30 p. 58; the button-is-holding-brake reading is an inference). Held, `apply_mean_hold` adds
-the mean-axis stop force after the engine and brake forces, split evenly, within twice
-`brake_capacity_for_regime` at the mean speed: the two-sided capacity that holds the parked tank,
-static at rest and dynamic once breached. It is passive and not charged to the engine. Where the two
-belts' implicit mobilities differ an even split moves `d` too, so the servo solves `d` with that
-split alongside it (`BeltTick::held_mean_force`) and `d` still lands; the parked brakes' two-sided
-stop is solved the same way, so they carry the mean evenly as on equal mobilities. Without it, a
-pivot on a slope missed its `d` target every tick, and a tank parked out of a 25° pivot broke one
-brake past its static capacity and slid (MEASURED, `pivot_probe`, 2026-11-11).
+D 656/30 p. 58; the button-is-holding-brake reading is an inference). Held, `stop_rows` adds a
+bounded mean row, with equal half weights and twice the per-side brake capacity: static only
+when the mean starts exactly at rest, dynamic when already moving or after breakaway in the same
+solve. It is passive and not charged to the engine. The neutral steering tie is a row in that same
+block, so unequal belt mobilities cannot cost a held pivot its commanded difference while both
+rows remain within capacity. The tie also lets the two parked side stops share unequal loads up
+to the steering member's transfer capacity; redundant row impulses need not be unique. Solving
+steering before the stops instead missed a slope pivot's difference target and broke one brake
+out of a parked 25° pivot despite capacity remaining on the other side (MEASURED, `pivot_probe`,
+2026-11-11).
 
 Rejected: the steering member's per-output capacity, because the member carries only the difference
 and the grade load is common mode; an ideal, unbounded hold, a claim no source makes; a holding-brake
