@@ -597,12 +597,21 @@ mod tests {
             .insert_resource(crate::shot_trace::ShotTrace::for_test(&path, None))
             .add_message::<MutateTickReceived>();
         install(&mut app);
+        app.insert_resource(Time::<Fixed>::from_duration(super::super::server::TICK))
+            .add_systems(
+                FixedPreUpdate,
+                |clock: Res<ViewClock>, mut trace: ResMut<crate::shot_trace::ShotTrace>| {
+                    // Fixture: unrelated transport count; compare against this fixed reader's cursor.
+                    trace.global_row(
+                        "probe",
+                        999,
+                        json!({"view": clock.now().map(|now| now.tick().0)}),
+                    );
+                },
+            );
         app.update();
-        // Fixture: unrelated local count, deliberately outside the authority pair.
-        app.world_mut()
-            .resource_mut::<crate::shot_trace::ShotTrace>()
-            .global_row("probe", 999, json!({}));
-        for tick in [1, 2] {
+        app.update(); // Waiting must be observed inside a fixed frame, too.
+        for tick in [1, 4] {
             let checkpoint = RepliconTick::new(tick);
             app.world_mut()
                 .resource_mut::<ReplicationCheckpointMap>()
@@ -619,22 +628,43 @@ mod tests {
             app.world_mut()
                 .write_message(MutateTickReceived { tick: checkpoint });
         }
-        app.update();
-        let view = app.world().resource::<ViewClock>().now().unwrap().tick().0;
-        app.world_mut()
-            .resource_mut::<crate::shot_trace::ShotTrace>()
-            .global_row("probe", 999, json!({}));
+        // Fixture: observe the first ready frame and subsequent cursor progress in fixed readers.
+        for _ in 0..8 {
+            app.update();
+        }
+        app.insert_resource(ViewClock::default());
+        app.update(); // Returning to waiting must clear the cached label before fixed readers.
         drop(app);
         let rows: Vec<Value> = std::fs::read_to_string(&path)
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert!(rows[0]["t"].is_null(), "waiting has no invented tick zero");
-        assert_eq!(
-            rows[1]["t"], view,
-            "every client row uses the installed view clock"
+        assert!(!rows.is_empty(), "the fixed reader must run");
+        assert!(
+            rows.iter().any(|row| row["view"].is_null()),
+            "waiting has no invented tick zero"
         );
+        assert!(
+            rows.last().unwrap()["view"].is_null(),
+            "the final fixed reader must observe waiting again"
+        );
+        let ready: Vec<_> = rows.iter().filter(|row| !row["view"].is_null()).collect();
+        assert!(
+            !ready.is_empty(),
+            "completed stamps must establish a view epoch"
+        );
+        assert_ne!(
+            ready.first().unwrap()["view"],
+            ready.last().unwrap()["view"],
+            "the reader must witness cursor progress, not only a constant label"
+        );
+        for row in rows {
+            assert_eq!(
+                row["t"], row["view"],
+                "fixed input trace readers need this frame's view label"
+            );
+        }
         std::fs::remove_file(path).unwrap();
     }
 

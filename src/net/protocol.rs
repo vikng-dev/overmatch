@@ -2235,32 +2235,98 @@ mod tests {
     /// while transport labels remain independent. A hold or waiting epoch cannot mature it.
     #[test]
     fn client_weapon_publication_follows_the_view_and_holds_without_an_epoch() {
+        use super::super::{
+            tick_stamp::{ReceivedStamps, TickStamp},
+            view_clock::ViewClock,
+        };
+        use bevy::time::TimeUpdateStrategy;
+        use bevy_replicon::client::server_mutate_ticks::MutateTickReceived;
+        use bevy_replicon::prelude::{ReplicationStorage, RepliconTick};
+        use lightyear::interpolation::timeline::InterpolationTimeline;
+        use lightyear::prelude::ReplicationCheckpointMap;
+
         let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ReplicationStorage>()
+            .init_resource::<ReplicationCheckpointMap>()
+            .init_resource::<InterpolationTimeline>()
+            .insert_resource(lightyear::core::tick::TickDuration(
+                super::super::server::TICK,
+            ))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                super::super::server::TICK,
+            ))
+            .add_message::<MutateTickReceived>();
         install_shot_clock(&mut app);
+        super::super::view_clock::install(&mut app);
         app.insert_resource(timeline_at(400)); // Fixture: deliberately leading transport labels.
-        let mut view = super::super::view_clock::ViewClock::default();
-        view.set_now(Tick(40).into());
-        app.insert_resource(view);
-        app.add_systems(PreUpdate, super::super::view_clock::publish_weapon_clock);
-        app.world_mut().run_schedule(PreUpdate);
-        // A render frame can move the view without any fixed gameplay tick.
-        app.world_mut()
-            .resource_mut::<super::super::view_clock::ViewClock>()
-            .set_now(Tick(41).into());
-        app.world_mut().run_schedule(PreUpdate);
-        assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), 41);
+        app.world_mut().resource_mut::<Time<Virtual>>().pause();
+        app.update();
+        assert!(app.world().resource::<ViewClock>().now().is_none());
+        let waiting = app.world().resource::<crate::WeaponClock>().0;
+        app.update();
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0, waiting);
+
+        // Fixture: completed authority stamps span several render frames of available view time.
+        for (tick, start) in [
+            (40, 0.0),
+            (44, 4.0 * super::super::server::TICK.as_secs_f64()),
+        ] {
+            let checkpoint = RepliconTick::new(tick);
+            app.world_mut()
+                .resource_mut::<ReplicationCheckpointMap>()
+                .record(checkpoint, Tick(tick));
+            app.world_mut()
+                .resource_mut::<ReplicationStorage>()
+                .global
+                .get_or_default::<ReceivedStamps>()
+                .queue
+                .push_back((checkpoint, TickStamp::new(start, 0.0).unwrap()));
+            app.world_mut()
+                .write_message(MutateTickReceived { tick: checkpoint });
+        }
+        app.update();
+        let before = app.world().resource::<crate::WeaponClock>().0;
+        let view_before = app.world().resource::<ViewClock>().now().unwrap();
+        // DERIVED fixture bound: traverse the four-tick stamp span, plus its delay and hold.
+        for _ in 0..12 {
+            app.update();
+            let view = app.world().resource::<ViewClock>().now().unwrap();
+            assert_eq!(
+                app.world().resource::<crate::WeaponClock>().0.raw(),
+                view.tick().0
+            );
+        }
+        let view = app.world().resource::<ViewClock>().now().unwrap();
+        let published = app.world().resource::<crate::WeaponClock>().0;
+        assert!(
+            view > view_before,
+            "the installed driver must progress on render frames"
+        );
+        assert_ne!(
+            published, before,
+            "the installed publisher must follow view progress"
+        );
+        assert_eq!(
+            app.world().resource::<Time<Fixed>>().elapsed(),
+            std::time::Duration::ZERO,
+            "publication must advance without fixed gameplay"
+        );
+        assert!(app.world().resource::<ViewClock>().held);
+
+        app.world_mut().resource_mut::<Time<Virtual>>().unpause();
         app.world_mut()
             .resource_mut::<LocalTimeline>()
             .apply_delta(100);
-        app.world_mut().run_schedule(FixedUpdate);
-        assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), 41);
-        app.world_mut()
-            .resource_mut::<super::super::view_clock::ViewClock>()
-            .set_synced(false);
-        app.world_mut().run_schedule(PreUpdate);
-        app.world_mut().run_schedule(FixedUpdate);
-        assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), 41);
+        app.update();
+        assert_eq!(app.world().resource::<ViewClock>().now(), Some(view));
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0, published);
+        assert!(app.world().resource::<Time<Fixed>>().elapsed() > std::time::Duration::ZERO);
         assert_eq!(app.world().resource::<crate::ShotClock>().0.raw(), 500);
+        app.insert_resource(ViewClock::default());
+        app.update();
+        assert!(app.world().resource::<ViewClock>().now().is_none());
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0, published);
     }
 
     /// The game's damage model: shot identity, deadline gates and replica catch-up all read

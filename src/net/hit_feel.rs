@@ -1,8 +1,8 @@
-//! View-layer combat feedback for network clients.
+//! The game's damage-model feedback for network clients.
 //!
 //! The player's own replicated [`NetCrew`] drives the damage flash. An owner-private, deduplicated
 //! [`DamageReceipt`] drives the outgoing hit marker. Neither path writes simulation state or feeds
-//! aim. Being-hit presents at ARRIVAL (reaction time).
+//! aim. Being-hit presents at ARRIVAL (reaction time). Cue retention is per 1/60-second frame.
 
 use bevy::prelude::*;
 
@@ -13,15 +13,9 @@ use crate::ballistics::ComponentHealth;
 use crate::damage::{CrewStation, TankVolumes};
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::tank::Controlled;
-use crate::ui_font::UiFonts;
+use crate::ui_font::{CUE_RETAIN, CUE_ZERO_EPS, UiFonts};
 
 use super::protocol::{DamageReceipt, NetCrew, health_bearing_volumes};
-
-// --- Feel dials (all in ONE place) -----------------------------------------------------------
-/// Damage-flash and marker retention per 60 Hz frame.
-const CUE_RETAIN: f32 = 0.86;
-/// Below this intensity the flash/marker is fully hidden (and its resource pinned to 0).
-const CUE_ZERO_EPS: f32 = 0.02;
 
 /// Damage-flash intensity ∈ [0, 1]: 1.0 the instant the player's own tank takes a hit, decaying to 0.
 /// Drives the screen-edge red frame's alpha.
@@ -372,9 +366,8 @@ mod tests {
 
     #[test]
     fn a_crew_swap_transposing_hp_is_not_a_hit() {
-        // Snapshot A: the gunner seat is alive+full, the loader seat is dead (0). Snapshot B, the tick
-        // a backfill swap COMPLETES: the live body moved, so the seats' HP transpose AND their `home`s
-        // swap with them. The full→0 seat is a personnel move, not an own-damage cue.
+        // The game's damage model: a swap moves a full HP pool to an out-of-action station.
+        // The pools and their `home`s transpose; the full→0 seat is no own-damage cue.
         let a = [seat(100, CrewStation::Gunner), seat(0, CrewStation::Loader)];
         let b = [seat(0, CrewStation::Loader), seat(100, CrewStation::Gunner)];
         assert_eq!(

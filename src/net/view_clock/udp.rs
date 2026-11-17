@@ -150,12 +150,9 @@ impl Pair {
         std::thread::sleep(Duration::from_millis(1));
     }
     fn frame(&mut self, run_server: bool) {
-        self.frame_for(FRAME, run_server);
-    }
-    fn frame_for(&mut self, duration: Duration, run_server: bool) {
-        self.at_s += duration.as_secs_f64();
+        self.at_s += FRAME.as_secs_f64();
         self.client
-            .insert_resource(TimeUpdateStrategy::ManualDuration(duration));
+            .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME));
         while run_server && self.at_s >= self.next_server_s {
             self.server_at(self.next_server_s);
             self.next_server_s += super::super::server::TICK.as_secs_f64();

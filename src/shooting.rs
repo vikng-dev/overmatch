@@ -166,8 +166,7 @@ const ROOT_HAS_SIM: &str = "a weapon's root carries the TankSim built in its con
 ///
 /// Per-tank, not controlled-only: a tank keeps loading whether you're in it or it's a network
 /// peer's. Client maturation feeds `crew_ui::update_status_panel`'s READY/reload countdown,
-/// belt count and swap countdown; it grants no local firing authority. Slice 3 moves the
-/// arrival-owned gate snapshot onto this cursor, so maturation and snapshot admission share time.
+/// belt count and swap countdown; it grants no local firing authority.
 fn tick_weapon_gate(
     clock: Res<crate::WeaponClock>,
     tanks: Query<Option<&TankVolumes>, With<Tank>>,
