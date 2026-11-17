@@ -307,7 +307,7 @@ def fixture_histogram(bins: list[int], p50: float, p95: float, top: float) -> di
 
 # Fixture: a live link with a few long gaps, its S at the clamp of the longest.
 ARRIVAL = {"state": "live", "silence_ms": 0.0, "stale_threshold_ms": 250.0, "stale_declarations": 1,
-           "stale_arrivals": 1, "gap_ms": fixture_histogram([600, 30, 5, 0, 0, 0, 2, 3] + [0] * 8 + [1], 0.0, 15.625, 260.0)}
+           "stale_arrivals": 2, "gap_ms": fixture_histogram([600, 30, 5, 0, 0, 0, 2, 3] + [0] * 8 + [1], 0.0, 15.625, 260.0)}
 
 
 def stats_row(clients: int, period_s: float, arrival: dict | None = ARRIVAL) -> dict:
@@ -318,7 +318,7 @@ def stats_row(clients: int, period_s: float, arrival: dict | None = ARRIVAL) -> 
             "tick_us": {"p50": 7000.0, "p95": 9000.0, "p99": 11000.0, "max": 20000.0, "total": 1.0},
             "wall": {"discarded_ms": 0.0}, "cpu_pct": 80.0, "rss_mb": 220.0, "send_us": {"p95": 500.0},
             "send_clients": [{"link": l, "bytes": 1, "bytes_per_s": 180000.0, "max_packets": 3} for l in links],
-            "inputs": [{"link": l, "counts": {"tick_exact": 630, "held": 10}} | ({"arrival": arrival} if arrival else {})
+            "inputs": [{"link": l} | ({"arrival": arrival} if arrival is not None else {})
                        for l in links]}
 
 
@@ -466,6 +466,10 @@ class MeasuredRun(unittest.TestCase):
         window_s = float(option(SETTINGS, "--window-s"))
         starved = harness.COLUMNS.index("starved_ms")
         self.assertEqual({float(row[starved]) for row in data_rows}, {2.5 * window_s})
+        clients = int(option(SETTINGS, "--clients"))
+        for column, field in (("stale_decl", "stale_declarations"), ("stale_arr", "stale_arrivals")):
+            self.assertEqual({int(row[harness.COLUMNS.index(column)]) for row in data_rows},
+                             {clients * ARRIVAL[field]})
         self.assertIn("proof, region-wide, tagged Purpose=harness: instances 0, volumes 0, network interfaces 0, "
                       "security groups 0, key pairs 0", self.fixture.stderr)
         world = self.fixture.world()
@@ -483,13 +487,15 @@ class MeasuredRun(unittest.TestCase):
         self.assertEqual(sorted((row[0], row[1]) for row in view["rows"]),
                          [(k, i) for k in range(1, clients + 1) for i in range(1, harness.WINDOWS + 1)])
         per_line = JITTER["view_clock"]
-        fits = math.floor(window_s / TIMING.view_window_s)
+        # Fixture journals emit on whole seconds: disjoint histograms need ceil(view_window_s)
+        # seconds between lines, even when the owned window is fractional.
+        fits = math.floor(window_s / max(1, math.ceil(TIMING.view_window_s)))
         for row in view["rows"]:
             lines = row[column["lines"]]
             self.assertEqual(row[column["done"]], per_line["completion"]["completed_ticks"] * lines)
             tiles, rest = divmod(row[column["int_n"]], per_line["stamp_interval_ms"]["n"])
             self.assertEqual(rest, 0)
-            self.assertIn(tiles, range(max(fits - 1, 1), fits + 1))
+            self.assertIn(tiles, range(max(fits - 1, 0), fits + 1))
             self.assertEqual(row[column["tgt_n"]], lines)
 
     def test_each_server_link_and_window_reads_that_windows_own_census(self):
@@ -560,6 +566,13 @@ class MeasuredRun(unittest.TestCase):
 
 
 class Failures(unittest.TestCase):
+    def test_an_unavailable_aws_executable_is_refused_with_the_command_cause_and_remedy(self):
+        # Preflight must tell the operator how to repair an OS failure before launching anything.
+        for error in (FileNotFoundError("fixture missing executable"), PermissionError("fixture permission denied")):
+            with self.subTest(error), mock.patch.object(harness.subprocess, "run", side_effect=error):
+                with self.assertRaisesRegex(harness.Refused, "aws .*sts get-caller-identity.*fixture.*install the AWS CLI"):
+                    harness.aws("sts", "get-caller-identity")
+
     def test_a_failure_names_its_cause_and_still_tears_down(self):
         clients, window_s = int(option(SETTINGS, "--clients")), float(option(SETTINGS, "--window-s"))
         no_view_clock = {key: value for key, value in JITTER.items() if key != "view_clock"}
@@ -690,6 +703,26 @@ class MachineCommands(unittest.TestCase):
 
 
 class Reading(unittest.TestCase):
+    def test_input_rows_join_by_link_and_require_the_current_arrival_fields(self):
+        # A reordered census must keep each link's counters; the retired counts object cannot
+        # substitute for a missing arrival field in a release's stats line.
+        row = stats_row(2, 30.0)
+        row["inputs"].reverse()
+        row["inputs"][0]["arrival"] = ARRIVAL | {"stale_declarations": 7, "stale_arrivals": 3}
+        parsed = harness.stats(harness.Fields(row, "fixture"))
+        self.assertEqual({entry.link: (entry.arrival.declarations, entry.arrival.stale_arrivals)
+                          for entry in parsed.inputs}, {"1v1": (7, 3), "0v1": (1, 2)})
+        for field in ("state", "gap_ms", "stale_threshold_ms", "stale_declarations", "stale_arrivals"):
+            broken = stats_row(1, 30.0)
+            broken["inputs"][0]["arrival"] = {k: v for k, v in ARRIVAL.items() if k != field}
+            broken["inputs"][0]["counts"] = {"held": 10, "tick_exact": 630}
+            with self.subTest(field), self.assertRaisesRegex(harness.Refused, rf"no `arrival\.{field}`"):
+                harness.stats(harness.Fields(broken, "fixture"))
+        broken = stats_row(1, 30.0)
+        del broken["inputs"][0]["link"]
+        with self.assertRaisesRegex(harness.Refused, "no `link`"):
+            harness.stats(harness.Fields(broken, "fixture"))
+
     def test_a_window_counts_only_inside_combat_after_the_warmup_with_every_client(self):
         def line(at, clients=4):
             return at, harness.Fields(stats_row(clients, 10.0), "fixture")
@@ -737,6 +770,21 @@ class Reading(unittest.TestCase):
         # Fixture: ten lines per view window over three view windows.
         lines = [dataclasses.replace(line, at=k * TIMING.view_window_s / 10) for k in range(1, 31)]
         self.assertEqual(len(harness.tiles(lines, 0.0, TIMING.view_window_s)), 3)
+
+    def test_integer_journal_timestamps_keep_fractional_view_windows_inside_and_disjoint(self):
+        # A 1.5 s view window cannot be sampled every 1.5 lines on a whole-second journal clock.
+        for width in (1.5, TIMING.view_window_s):
+            hist = harness.Histogram(1, 0.0, 0.0, 0.0, BIN_MS, (1,) + (0,) * 16)
+            lines = [harness.Jitter(float(k), 1.0, 0.0, 60.0, dataclasses.replace(hist), None, None,
+                                   (0,) * len(harness.COMPLETION), 0.0)
+                     for k in range(1, math.ceil(3 * width) + 2)]
+            taken = harness.tiles(lines, 0.25, width)
+            stamps = {id(line.intervals): line.at for line in lines}
+            ends = [stamps[id(h)] for h in taken]
+            self.assertTrue(ends)
+            self.assertGreaterEqual(ends[0] - width, 0.25)
+            self.assertTrue(all(b - width >= a for a, b in zip(ends, ends[1:])))
+            self.assertLessEqual(ends[-1], lines[-1].at)
 
     def test_sampled_cpu_is_percent_of_one_core_and_busy_is_of_the_whole_machine(self):
         # 2.5 CPU-seconds over 10 s is a quarter core; 300 of 400 jiffies not idle is 75 % busy.

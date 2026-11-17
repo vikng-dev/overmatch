@@ -11,10 +11,14 @@ Each names the invariant a mutant would break and who relies on it:
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -24,6 +28,7 @@ from online_cost import (  # noqa: E402
     aggregate,
     bots_spawned,
     jitter_object,
+    main,
     net_row,
     parse_stats_line,
     stress_cells,
@@ -32,9 +37,12 @@ from online_cost import (  # noqa: E402
 
 # The shape src/net/server_stats.rs prints (`stats_line`), keys in its order.
 STATS = (
-    'server_stats {"budget_us":15625,"clients":2,"cpu_pct":11.2,"entities":812,"overruns":0,'
+    'server_stats {"budget_us":15625,"clients":1,"cpu_pct":11.2,"entities":812,"overruns":0,'
     '"period_s":1.0,"projectiles":3,"rss_mb":null,"tanks":3,"tick_hz":64.0,'
-    '"tick_us":{"max":900,"p50":210,"p95":480},"ticks":64}'
+    '"tick_us":{"max":900,"p50":210,"p95":480,"p99":700,"total":20000},"ticks":64,'
+    '"inputs":[{"link":"9v1","arrival":{"state":"live","silence_ms":0,"gap_ms":null,'
+    '"stale_threshold_ms":100,"stale_declarations":1,"stale_arrivals":2}}],'
+    '"debris":{"live":0,"sleeping":0,"frozen":0}}'
 )
 
 
@@ -51,6 +59,29 @@ class ParseStatsLine(unittest.TestCase):
         self.assertEqual(parsed["tanks"], 3)
         self.assertEqual(parsed["cpu_pct"], 11.2)
         self.assertNotIn("rss_mb", parsed, "a null is a platform without the reading, not a zero")
+
+    def test_arrival_counters_stay_with_their_links_when_the_census_reorders(self):
+        # The operator's per-link table must not confuse links when the server's census reorders.
+        value = json.loads(STATS.removeprefix("server_stats "))
+        first = value["inputs"][0]
+        other = {"link": "7v2", "arrival": first["arrival"] | {"stale_declarations": 5, "stale_arrivals": 3}}
+        for entries in ([first, other], [other, first]):
+            value["inputs"] = entries
+            parsed = parse_stats_line("server_stats " + json.dumps(value))
+            self.assertEqual(parsed["inputs.9v1.arrival.stale_declarations"], 1)
+            self.assertEqual(parsed["inputs.9v1.arrival.stale_arrivals"], 2)
+            self.assertEqual(parsed["inputs.7v2.arrival.stale_declarations"], 5)
+            self.assertEqual(parsed["inputs.7v2.arrival.stale_arrivals"], 3)
+
+    def test_a_missing_arrival_field_names_the_field_instead_of_reading_the_retired_counts(self):
+        # A release with an obsolete census must fail visibly rather than produce an empty column.
+        for field in ("stale_declarations", "stale_arrivals"):
+            value = json.loads(STATS.removeprefix("server_stats "))
+            entry = value["inputs"][0]
+            del entry["arrival"][field]
+            entry["counts"] = {"held": 1, "tick_exact": 63}
+            with self.subTest(field), self.assertRaisesRegex(MalformedRecord, rf"inputs\[0\]\.arrival\.{field}"):
+                parse_stats_line("server_stats " + json.dumps(value))
 
     def test_reads_through_a_container_prefix_and_colour_codes(self):
         prefixed = "\x1b[2m2026-10-30T13:02:03Z\x1b[0m stdout F " + STATS
@@ -114,6 +145,21 @@ class BotsSpawned(unittest.TestCase):
         ]
         self.assertEqual(bots_spawned(lines), 2)
 
+    def test_a_missing_log_refuses_the_bot_census_but_an_empty_log_reports_zero(self):
+        # The night wrapper must not accept a fabricated zero-bot count after a failed log pull.
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "server.log"
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(sys, "argv", ["online_cost.py", "bots", str(log)]), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(main(), 2)
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn(str(log), err.getvalue())
+            log.write_text("")
+            with mock.patch.object(sys, "argv", ["online_cost.py", "bots", str(log)]), contextlib.redirect_stdout(out):
+                self.assertEqual(main(), 0)
+            self.assertEqual(out.getvalue(), "0\n")
+
     def test_a_count_line_reads_as_its_count(self):
         self.assertEqual(bots_spawned(["INFO server: spawned 10 bots (OVERMATCH_BOT=10)"]), 10)
 
@@ -121,11 +167,12 @@ class BotsSpawned(unittest.TestCase):
 def debris_line(tick_p50: float, live: int) -> str:
     # The shape src/net/server_stats.rs prints with the debris stress lever armed (`stats_line`).
     return (
-        'server_stats {"budget_us":15625,"clients":1,"cpu_pct":40.0,"entities":4000,"overruns":0,'
+        'server_stats {"budget_us":15625,"clients":0,"cpu_pct":40.0,"entities":4000,"overruns":0,'
         '"period_s":1.0,"projectiles":0,"rss_mb":90.0,"tanks":30,"tick_hz":64.0,'
         f'"tick_us":{{"max":3000,"p50":{tick_p50},"p95":2500}},"ticks":64,'
         '"physics_us":{"max":900,"p50":400,"p95":700},"send_us":{"max":300,"p50":100,"p95":200},'
-        f'"debris":{{"live":{live},"sleeping":120,"breaches":4,"released":{40 * live}}}'
+        f'"debris":{{"live":{live},"sleeping":120,"frozen":0,"breaches":4,"released":{40 * live}}},'
+        '"inputs":[]'
         "}"
     )
 
@@ -144,11 +191,12 @@ class StressTable(unittest.TestCase):
         self.assertEqual(cells["sleeping_max"], 120)
         self.assertEqual(cells["released"], 800, "released is cumulative: the window's count is last - first")
 
-    def test_an_off_condition_has_no_debris_cells_and_anchors_the_deltas(self):
-        # A line with no `debris` object (a server older than the census): its cells must read
-        # absent, not zero pieces, and every other lever's change is taken from its median, not from a neighbour's.
+    def test_an_off_condition_has_no_stress_release_count_and_anchors_the_deltas(self):
+        # The census always prints piece counts; only an armed stress lever prints `released`.
+        # Every lever's change is taken from the off median, not from a neighbour's.
         off = stress_cells(aggregate([parse_stats_line(STATS)]))
-        self.assertIsNone(off["live"])
+        self.assertEqual(off["live"], 0)
+        self.assertIsNone(off["released"])
         armed = stress_cells(aggregate([parse_stats_line(debris_line(1000, 10))]))
         rows = stress_rollup([("off", off), ("10:5", armed), ("off", off)])
         self.assertEqual([row[0] for row in rows], ["off", "10:5"])

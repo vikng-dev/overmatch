@@ -651,6 +651,7 @@ fn measure_input_and_answer_payload_sizes() {
             range: 100.0,
         },
         0.0,
+        Timing::shipped().recovery_fresh_copies,
     );
     println!(
         "MEASURED postcard bytes: TankInput click={}, idle={}, InputAnswer={} (payload only)",
@@ -764,22 +765,25 @@ fn wrapped_ids_keep_each_refusal_and_each_application_exact() {
     };
     client.issue(InputEdge::Repair, 0.0);
     client.issue(InputEdge::Fire, 0.0);
-    let _lost = client.message(default(), 0.0);
-    let _also_lost = client.message(default(), 0.5);
-    let resent = client.message(default(), 1.0);
+    let budget = Timing::shipped().recovery_fresh_copies;
+    for copy in 0..budget {
+        let _lost = client.message(default(), f64::from(copy), budget);
+    }
+    let now = f64::from(budget);
+    let resent = client.message(default(), now, budget);
     server.accept(resent, true).unwrap();
     server.command(false, false);
     assert_eq!(server.answer.resolved, 0);
     assert_eq!(server.answer.refused_mask, 3);
-    client.receive(server.answer, 1.0).unwrap();
+    client.receive(server.answer, now).unwrap();
     assert_eq!(client.refused, 2);
     assert!(client.pending.is_empty());
-    client.issue(InputEdge::Fire, 1.0);
+    client.issue(InputEdge::Fire, now);
     server
-        .accept(client.message(default(), 1.0), false)
+        .accept(client.message(default(), now, budget), false)
         .unwrap();
     assert!(server.command(false, false).fire_primary);
-    client.receive(server.answer, 2.0).unwrap();
+    client.receive(server.answer, now + 1.0).unwrap();
     assert_eq!(client.answer.resolved, client.issued);
 }
 
@@ -1145,4 +1149,40 @@ fn combat_release_sends_the_first_scripted_click_over_udp() {
     assert_eq!(pair.shots(), 1);
     assert_eq!(pair.state().answer.resolved, 1);
     assert_eq!(pair.state().answer.refused_mask, 0);
+}
+
+/// Recovery admission must follow the policy budget, including saturation at its type limit.
+/// Old pending edges age independently of a newly pressed edge on the same send.
+#[test]
+fn recovery_freshness_uses_the_authored_copy_budget() {
+    // Fixture: distinct policy budgets, including the largest representable choice.
+    for budget in [1, 4, u8::MAX] {
+        let mut client = ClientInput::default();
+        client.issue(InputEdge::Repair, 0.0);
+        for copy in 0..budget {
+            assert_eq!(
+                client
+                    .message(default(), f64::from(copy), budget)
+                    .fresh_from,
+                0
+            );
+        }
+        client.issue(InputEdge::Fire, f64::from(budget));
+        assert_eq!(
+            client
+                .message(default(), f64::from(budget), budget)
+                .fresh_from,
+            1
+        );
+        for _ in 1..budget {
+            client.message(default(), f64::from(budget), budget);
+        }
+        assert_eq!(
+            client
+                .message(default(), f64::from(budget), budget)
+                .fresh_from,
+            2
+        );
+        assert!(client.pending.iter().all(|edge| edge.copies == budget));
+    }
 }

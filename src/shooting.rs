@@ -261,10 +261,6 @@ fn fire(
     for (muzzle_entity, weapon, slot, root) in &weapons {
         let (command, tank_volumes, position, rotation, combatant) =
             tanks.get(root.0).expect(WEAPON_ROOT_IS_A_TANK);
-        // Input routing only — edge vs level is baked into the command fields themselves
-        // (`fire_primary` is a one-tick click latch, `fire_secondary` is authority-held state; see
-        // `TankCommand`), so a `Single` on Primary consumes the edge and an `Automatic` on
-        // Secondary reads the level, per the mode's contract.
         let triggered = match weapon.trigger {
             Trigger::Primary => command.fire_primary,
             Trigger::Secondary => command.fire_secondary,

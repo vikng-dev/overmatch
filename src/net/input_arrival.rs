@@ -359,12 +359,12 @@ impl ClientInput {
         }
         held
     }
-    fn message(&mut self, levels: InputLevels, now: f64) -> TankInput {
+    fn message(&mut self, levels: InputLevels, now: f64, fresh_copies: u8) -> TankInput {
         self.seq = self.seq.wrapping_add(1);
         let fresh_from = self
             .pending
             .iter()
-            .position(|edge| edge.copies < 2)
+            .position(|edge| edge.copies < fresh_copies)
             .unwrap_or(self.pending.len()) as u8;
         let message = TankInput {
             seq: self.seq,
@@ -377,7 +377,7 @@ impl ClientInput {
             fresh_from,
         };
         for edge in &mut self.pending {
-            edge.copies = (edge.copies + 1).min(2);
+            edge.copies = edge.copies.saturating_add(1).min(fresh_copies);
         }
         // Resolution: the first unechoed send must survive a blackout. Later sends may be
         // omitted from this display-only ring; an echo beyond them also retires its prefix.
@@ -601,7 +601,7 @@ pub(super) fn send_inputs(
             .last_send_s
             .is_none_or(|last| now - last >= fixed.timestep().as_secs_f64())
     {
-        let message = state.message(command.into(), now);
+        let message = state.message(command.into(), now, timing.recovery_fresh_copies);
         for mut sender in &mut links {
             sender.send::<TankInputChannel>(message.clone());
         }

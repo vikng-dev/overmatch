@@ -6,7 +6,7 @@ Review base: `dc8d3476`. The two supplied review files were read without modific
 | Finding | Disposition |
 |---|---|
 | P1-1 archive smoke | Fixed: `scripts/ci/archive-smoke.sh` matches the live `harness: input slot` line. No log was added. |
-| P1-2 AWS stats consumer | Server contract settled: use `$.inputs[*].arrival.stale_declarations` as an interval count, replacing `held%`; `$.inputs[*].arrival.stale_arrivals` counts accepted stale recoveries. Join rows by `$.inputs[*].link`. Both counters reset at each stats emission. Neither is a percentage or a substitute for tick matching. `scripts/aws/` and `scripts/perf/` are untouched; their consumer fix belongs to the other lane. |
+| P1-2 AWS stats consumer | Server contract settled: use `$.inputs[*].arrival.stale_declarations` as an interval count, replacing `held%`; `$.inputs[*].arrival.stale_arrivals` counts accepted stale recoveries. Join rows by `$.inputs[*].link`. Both counters reset at each stats emission. Neither is a percentage or a substitute for tick matching. Both consumers now read this shape. The AWS window table sums `stale_decl` and `stale_arr`; its input-gap table retains each link. The perf table flattens arrival readings under `inputs.<link>.arrival`. Missing required fields refuse the record by name. |
 | P2-1 malformed messages | Fixed: `receive_inputs` validates before resetting silence; refusal advances the same stale/lost laws as an empty receive. `last_refusal` has a production reader that suppresses repeated identical causes and clears after a valid message. The UDP scenario retains drive at stale, releases secondary fire, then brakes at lost while transport keepalives continue. |
 | P2-2 deleted coverage | Fixed: restored both ownership/body arrival orders through the production claim installer and camera plugin; merged focus-loss/cruise and closed-window coverage; restored `ArrivalDelay` teardown; restored combat and workload-barrier preservation of script tick zero. Retired native-input and timeline-sync assertions stay deleted. |
 | P2-3 recovery press | Fixed: `fresh_from` marks edges first sent in this message or the previous message, so one lost or superseded copy survives recovery. No wire field or client clock was added for freshness. The UDP test forces a second send with a selection edge before the server drains; it also exercises a dropped first copy. |
@@ -65,5 +65,51 @@ MEASURED in this bay, with `OVERMATCH_UNATTENDED=1` and compilation exclusively 
 | Full library suite, run once | 2,842 passed, 50 ignored, none failed; 315.26 seconds |
 
 No archive runtime smoke, hosted capture or external service write was performed. The archive
-script received the requested static shell checks. The AWS harness handoff and the two explicitly
-logged backlog residues remain separate from these passing local checks.
+script received the requested static shell checks. The two explicitly logged backlog residues
+remain separate from these passing local checks.
+
+## Landing review after the main merge
+
+`main` merged without conflicts; both Cargo files retain release `0.7.0-alpha.19`.
+Protocol revision 104 and its wire pin remain correct: no wire type changed.
+
+| Supplied finding | Disposition |
+|---|---|
+| Harness: missing AWS executable | Fixed: the subprocess boundary converts `OSError` to `Refused`, with the command, OS cause and install/PATH remedy. Offline witnesses cover missing and non-executable commands. |
+| Harness: missing bot log | Fixed: file errors reach the existing visible CLI handler. Only a successfully read empty log yields zero bots. |
+| Harness: repeated record-refusal rationale | Fixed: the marker comment retains its source and the `server_stats:` counterexample; the module doc owns the rationale. DERIVED: one comment line removed. |
+| Harness: fractional view window | Fixed: the fixture's whole-second journal cadence determines histogram spacing; a fractional-window witness checks containment and non-overlap. |
+| Recovery copy budget | Fixed: required `recovery_fresh_copies` in `assets/net_timing.ron` is labelled `Taste` for input recovery tolerance, loaded before play, and positive. Classification and saturation read that value. A witness includes the `u8` limit; no code default exists. |
+| Repeated trigger-routing prose | Fixed: removed the inline repeat; `TankCommand` and `fire` retain their owning docs. DERIVED: four comment lines removed. |
+| Client teardown intermediates | Fixed: both assertions use `app.world()` directly. DERIVED: two bindings removed. |
+
+All seven findings were verified and fixed; none was rejected. As requested, the second report's
+pre-existing findings remain: capture phase durations in `command::auto_fire`, settling/aim-hold
+timings in `tank::battle`, and padded overlay-guard prose in `death_screen::request_respawn`.
+The previously recorded net-15 and net-22 decisions also remain untouched.
+
+The producer audit verified every consumed server field against `server_stats::stats_line` and
+its census producers, and every consumed client field against `frontier::record_jitter` and
+`ViewClock::take_line`. The obsolete disconnected-input branch is removed: the server emits only
+connected input rows. Perf fixtures now include the unconditional debris census and current
+arrival shape, with no retired-count fallback.
+
+MEASURED after merging main, before the landing fixes: the full library suite passed once,
+2,846 passed, 50 ignored, zero failed in 407.30 seconds. Formatting, CI clippy, 434 net tests,
+three doc-citation tests, both Python suites and shellcheck of `scripts/aws/machine.sh` passed.
+
+MEASURED on the landing fixes, under the same unattended serial-cargo feature set:
+
+| Check | Result |
+|---|---|
+| Formatting and CI clippy | Passed |
+| `net::`, including protocol pins and the copy-budget witness | 435 passed, 7 ignored, zero failed |
+| `tests::doc_citations` | 3 passed, zero failed |
+| `python3 scripts/aws/test_harness.py` | 23 passed |
+| `python3 scripts/perf/test_online_cost.py` | 16 passed |
+| Supplied fractional-window counterexample | The offline whole-run view-clock test passed with a temporary `view_window_s = 1.5` policy file |
+| `shellcheck scripts/aws/machine.sh` | Passed; no shell script was edited |
+
+The full library suite was not repeated after these fixes; their changed Rust behavior is covered
+by the final net tests. All Python subprocess boundaries used offline fakes. No AWS calls or push
+occurred. `AGENTS.md` is unchanged.

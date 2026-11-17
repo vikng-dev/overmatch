@@ -2682,11 +2682,9 @@ mod tests {
             .world_mut()
             .spawn((RemoteId(PeerId::Netcode(99)), Connected))
             .id();
-        let world = app.world();
-        assert!(world.resource::<ArrivalDelay>().newest_remote().is_some());
+        assert_ne!(app.world().resource::<ArrivalDelay>().newest_remote(), None);
         app.world_mut().entity_mut(link).remove::<Connected>();
-        let world = app.world();
-        assert_eq!(world.resource::<ArrivalDelay>().newest_remote(), None);
+        assert_eq!(app.world().resource::<ArrivalDelay>().newest_remote(), None);
     }
 
     /// The game's damage model: a disconnected server cannot finish a cosmetic path.

@@ -12,6 +12,7 @@ pub(super) struct Timing {
     pub uplink_window_s: f64,
     pub stale_floor_s: f64,
     pub stale_ceil_s: f64,
+    pub recovery_fresh_copies: u8,
     pub link_warning_s: f64,
     pub refused_cue_s: f64,
     pub refused_pitch: f32,
@@ -32,6 +33,7 @@ impl Timing {
             uplink_window_s: Sourced<f64>,
             stale_floor_s: Sourced<f64>,
             stale_ceil_s: Sourced<f64>,
+            recovery_fresh_copies: Sourced<u8>,
             link_warning_s: Sourced<f64>,
             refused_cue_s: Sourced<f64>,
             refused_pitch: Sourced<f32>,
@@ -46,6 +48,7 @@ impl Timing {
             uplink_window_s: authored.uplink_window_s.0,
             stale_floor_s: authored.stale_floor_s.0,
             stale_ceil_s: authored.stale_ceil_s.0,
+            recovery_fresh_copies: authored.recovery_fresh_copies.0,
             link_warning_s: authored.link_warning_s.0,
             refused_cue_s: authored.refused_cue_s.0,
             refused_pitch: authored.refused_pitch.0,
@@ -67,6 +70,10 @@ impl Timing {
         assert!(
             timing.stale_floor_s <= timing.stale_ceil_s,
             "assets/net_timing.ron: stale_floor_s must not exceed stale_ceil_s; fix the timing data"
+        );
+        assert!(
+            timing.recovery_fresh_copies > 0,
+            "assets/net_timing.ron: recovery_fresh_copies must be positive; allow the first input copy during recovery"
         );
         timing
     }
