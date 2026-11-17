@@ -1,0 +1,81 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CanonicalImage",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:ap-southeast-1::image/*",
+      "Condition": {"StringEquals": {"ec2:Owner": "@IMAGE_OWNER@"}}
+    },
+    {
+      "Sid": "HostNetwork",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:ap-southeast-1:@ACCOUNT@:subnet/@SUBNET@",
+        "arn:aws:ec2:ap-southeast-1:@ACCOUNT@:security-group/@GROUP@"
+      ]
+    },
+    {
+      "Sid": "TaggedInstance",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:ap-southeast-1:@ACCOUNT@:instance/*",
+      "Condition": {"StringEquals": {
+        "ec2:InstanceType": "@INSTANCE_TYPE@",
+        "ec2:InstanceMarketType": "on-demand",
+        "aws:RequestTag/Project": "overmatch",
+        "aws:RequestTag/Purpose": "host"
+      }}
+    },
+    {
+      "Sid": "TaggedLaunchResources",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:ap-southeast-1:@ACCOUNT@:volume/*",
+        "arn:aws:ec2:ap-southeast-1:@ACCOUNT@:network-interface/*"
+      ],
+      "Condition": {"StringEquals": {
+        "aws:RequestTag/Project": "overmatch",
+        "aws:RequestTag/Purpose": "host"
+      }}
+    },
+    {
+      "Sid": "TagsOnlyAtLaunch",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": [
+        "arn:aws:ec2:ap-southeast-1:@ACCOUNT@:instance/*",
+        "arn:aws:ec2:ap-southeast-1:@ACCOUNT@:volume/*",
+        "arn:aws:ec2:ap-southeast-1:@ACCOUNT@:network-interface/*"
+      ],
+      "Condition": {"StringEquals": {"ec2:CreateAction": "RunInstances"}}
+    },
+    {
+      "Sid": "TerminateHosts",
+      "Effect": "Allow",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "arn:aws:ec2:ap-southeast-1:@ACCOUNT@:instance/*",
+      "Condition": {"StringEquals": {
+        "ec2:InstanceType": "@INSTANCE_TYPE@",
+        "aws:ResourceTag/Project": "overmatch",
+        "aws:ResourceTag/Purpose": "host"
+      }}
+    },
+    {
+      "Sid": "DescribeRegion",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeInstances",
+      "Resource": "*",
+      "Condition": {"StringEquals": {"ec2:Region": "ap-southeast-1"}}
+    },
+    {
+      "Sid": "CurrentUbuntu",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameters",
+      "Resource": "arn:aws:ssm:ap-southeast-1::parameter/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+    }
+  ]
+}

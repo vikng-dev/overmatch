@@ -1,0 +1,4 @@
+#!/bin/sh
+# Never inherit shell tracing into the credential handoff.
+set +x
+exec python3 -B "$(dirname "$0")/host_setup.py" "$@"
