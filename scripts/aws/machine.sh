@@ -10,8 +10,8 @@
 #   self      install this file as /usr/local/bin/om-harness, settings included.
 #   key       the operator's per-run public key for `ubuntu`, the results channel. After `self`, so
 #             a machine the operator can reach always answers `state`.
-#   packages  libasound2t64: both release binaries name libasound.so.2, which the Ubuntu server
-#             image lacks (the release image adds it: .github/actions/server-image/Dockerfile).
+#   packages  (client only) libasound2t64: the unchanged client links libasound.so.2;
+#             the dedicated server is built without audio and needs no package install.
 #   downloaded, verified, unpacked
 #             the release archive by explicit tag, checked against the checksum line the operator
 #             read from the release's own `.sha256`, unpacked into /opt/overmatch.
@@ -64,13 +64,15 @@ boot() {
   chmod 600 /home/ubuntu/.ssh/authorized_keys
   mark key
 
-  step=packages
-  if ! dpkg-query -W -f '${Status}' libasound2t64 2>/dev/null | grep -q 'install ok installed'; then
-    apt-get -o DPkg::Lock::Timeout=300 update -q
-    DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -q \
-      --no-install-recommends libasound2t64
+  if [[ "$ROLE" == client ]]; then
+    step=packages
+    if ! dpkg-query -W -f '${Status}' libasound2t64 2>/dev/null | grep -q 'install ok installed'; then
+      apt-get -o DPkg::Lock::Timeout=300 update -q
+      DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -q \
+        --no-install-recommends libasound2t64
+    fi
+    mark packages
   fi
-  mark packages
 
   step=download
   local archive="$STATE/${ARCHIVE_URL##*/}"

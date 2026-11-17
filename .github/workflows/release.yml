@@ -452,7 +452,7 @@ jobs:
           path: dist
 
       # The Linux runtime floor, which a player's machine has and a bare runner image may not:
-      # bevy's audio backend links `libasound.so.2` (`DT_NEEDED`, so a missing one is a failure to
+      # the client's audio backend links `libasound.so.2` (`DT_NEEDED`, so a missing one is a failure to
       # exec, not a warning). The rendering stack is NOT needed — the simulated client selects the
       # GPU-less root, so wgpu enumerates no adapter and winit is never mounted. The package was
       # renamed in the 64-bit-time_t transition, hence the fallback.

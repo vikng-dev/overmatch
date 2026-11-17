@@ -191,6 +191,7 @@ fn primary_window(app: &mut App) -> Mut<'_, Window> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "audio")]
     use bevy::audio::{GlobalVolume, Volume};
 
     use super::*;
@@ -272,6 +273,7 @@ mod tests {
                     .add(before_winit),
             );
             // What a later `AudioPlugin` build writes; unattended policy applies in PreStartup.
+            #[cfg(feature = "audio")]
             app.insert_resource(GlobalVolume::new(Volume::Linear(1.0)));
             app.world_mut().run_schedule(PreStartup);
             let window = primary_window(&mut app);
@@ -286,6 +288,7 @@ mod tests {
                 app.world()
                     .contains_resource::<crate::state::FocusPauseSuppressed>()
             );
+            #[cfg(feature = "audio")]
             assert_eq!(
                 app.world().resource::<GlobalVolume>().volume.to_linear(),
                 0.0

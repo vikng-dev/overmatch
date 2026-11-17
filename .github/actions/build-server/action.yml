@@ -153,13 +153,13 @@ runs:
           fi
         done < "${ASSETS}"
 
-    # Bevy needs alsa/udev + windowing libs to COMPILE on Linux even though the server runs headless.
+    # Bevy still needs udev + windowing libs to compile; the server omits audio.
     - name: Install Linux build dependencies
       shell: bash
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
-          pkg-config libasound2-dev libudev-dev \
+          pkg-config libudev-dev \
           libwayland-dev libxkbcommon-dev libx11-dev
 
     # One server build cache (`server-net`) — release, dispatch, deploy and bitprobe all warm the
@@ -174,7 +174,7 @@ runs:
     # thin LTO.
     - name: Build server
       shell: bash
-      run: cargo build --release --locked --bin overmatch-server
+      run: cargo build --release --locked --no-default-features --bin overmatch-server
 
     # Stage a self-contained folder: the binary alongside the assets it opens, so on its host
     # `./overmatch-server` resolves `assets/` beside itself and just runs, with no env. The assets
