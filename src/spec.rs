@@ -1881,6 +1881,9 @@ impl TankSpec {
                 return Err(format!("{what} must be finite and > 0 (got {value})").into());
             }
         }
+        if self.mass <= turret.mass.0 {
+            return Err("mass must exceed turret.mass to leave a hull after detachment; increase mass or correct turret.mass".into());
+        }
         let moments = turret.angular_inertia().principal;
         if !moments.is_finite() || moments.cmple(Vec3::ZERO).any() {
             return Err("turret.mass/inertia_extents yield an unrepresentable axis inertia; author dimensions and mass with finite positive cuboid moments".into());
@@ -3119,6 +3122,23 @@ TankSpec(
                 let err = spec.validate().unwrap_err().to_string();
                 assert!(err.starts_with(field), "{field} {value}: {err}");
             }
+        }
+    }
+
+    /// The game's damage model: the authority needs a positive remaining hull mass at cook-off.
+    /// Refuse both equality and an assembly heavier than its vehicle before any spawn.
+    #[test]
+    fn validate_refuses_a_vehicle_no_heavier_than_its_detachable_assembly() {
+        for ratio in [1.0, 0.5] {
+            // Fixture mass ratios.
+            let mut spec = fixture();
+            spec.mass = spec.turret.mass.0 * ratio;
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains("mass must exceed turret.mass"), "{err}");
+            assert!(
+                err.contains("increase mass or correct turret.mass"),
+                "{err}"
+            );
         }
     }
 

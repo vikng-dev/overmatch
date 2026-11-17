@@ -1,3 +1,7 @@
+use avian3d::prelude::{
+    AngularInertia, CenterOfMass, ComputedAngularInertia, ComputedCenterOfMass, ComputedMass, Mass,
+    NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass,
+};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -8,12 +12,29 @@ use crate::sim_tick::{SimTick, TickSpan};
 use crate::spec::{FireCycle, RecoilSpec, Trigger, ViewKind};
 use crate::track::sim::{TrackContacts, TrackDrive, TrackGrip};
 
+/// The game's damage model: explicit and solver mass properties change in the same transaction.
+/// Avian repeats these copies in Prepare. Publish them at spawn and detachment so the next
+/// tick's track drive, which reads Computed* before Prepare, sees the current body.
+pub(crate) fn explicit_mass(mass: f32, centre: Vec3, inertia: AngularInertia) -> impl Bundle {
+    (
+        Mass(mass),
+        CenterOfMass(centre),
+        inertia,
+        ComputedMass::new(mass),
+        ComputedCenterOfMass(centre),
+        ComputedAngularInertia::from(inertia),
+        NoAutoMass,
+        NoAutoCenterOfMass,
+        NoAutoAngularInertia,
+    )
+}
+
 #[derive(Component)]
 pub struct Turret;
 
 /// The turret's rigid-body data, built with its tank kind's template from the sheet's `turret`
 /// block and the tank's geometry, so the launch reads it from the entity rather than from the
-/// asset.
+/// asset. Template admission proves the remaining hull's inertia positive at every servo angle.
 #[derive(Component, Clone, Copy)]
 pub struct TurretBody {
     /// Mass (kg).

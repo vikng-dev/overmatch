@@ -7,8 +7,7 @@
 use std::time::Duration;
 
 use avian3d::prelude::{
-    AngularInertia, CollisionLayers, LayerMask, LinearVelocity, Mass, NoAutoAngularInertia,
-    NoAutoMass, RigidBody,
+    AngularInertia, CollisionLayers, LayerMask, LinearVelocity, Mass, NoAutoMass, RigidBody,
 };
 use bevy::ecs::message::Messages;
 use bevy::time::TimeUpdateStrategy;
@@ -119,10 +118,11 @@ fn tank(
             Transform::from_translation(at).with_rotation(Quat::from_rotation_y(yaw)),
             RigidBody::Kinematic,
             LinearVelocity(velocity),
-            Mass(50_000.0),
-            AngularInertia::new(Vec3::splat(1.0e5)),
-            NoAutoMass,
-            NoAutoAngularInertia,
+            crate::tank::explicit_mass(
+                50_000.0,
+                Vec3::ZERO,
+                AngularInertia::new(Vec3::splat(1.0e5)),
+            ),
             // A servo-less rig still carries its root's one (empty) integrator.
             crate::tank::TankServos::for_count(0),
         ))

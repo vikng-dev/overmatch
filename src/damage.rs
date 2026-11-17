@@ -14,9 +14,7 @@
 //! the turret; that hook triggers off `CookedOff` directly.
 
 use avian3d::prelude::{
-    AngularInertia, AngularVelocity, CenterOfMass, ComputedAngularInertia, ComputedCenterOfMass,
-    ComputedMass, LinearVelocity, Mass, NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass,
-    Position, Rotation,
+    AngularInertia, AngularVelocity, CenterOfMass, LinearVelocity, Mass, Position, Rotation,
 };
 use bevy::ecs::query::QueryData;
 use bevy::ecs::system::SystemParam;
@@ -29,7 +27,9 @@ use crate::ShotId;
 use crate::ballistics::ComponentHealth;
 use crate::command::{ConsumeCommandEdges, CrewSwap, TankCommand};
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, Rig, ServoCommand, ServoIndex, ServoSpec, Tank, Turret, TurretBody};
+use crate::tank::{
+    Controlled, Rig, ServoCommand, ServoIndex, ServoSpec, Tank, Turret, TurretBody, explicit_mass,
+};
 
 /// Semantic ownership: a ballistic volume belongs to a tank for gameplay aggregation. This is
 /// separate from `ChildOf`, which remains the model/transform hierarchy.
@@ -820,50 +820,16 @@ fn process_cookoffs(
 #[derive(Component)]
 pub struct LaunchedTurret;
 
-/// The game's damage model: explicit and solver mass properties change in the same transaction.
-/// Avian 0.8's mass-property Prepare pass repeats these copies on change; cook-off follows
-/// Writeback, so publishing them now also keeps same-tick readers consistent before that pass.
-#[derive(Bundle)]
-struct CookoffMass {
-    mass: Mass,
-    centre: CenterOfMass,
-    inertia: AngularInertia,
-    computed_mass: ComputedMass,
-    computed_centre: ComputedCenterOfMass,
-    computed_inertia: ComputedAngularInertia,
-    no_auto_mass: NoAutoMass,
-    no_auto_centre: NoAutoCenterOfMass,
-    no_auto_inertia: NoAutoAngularInertia,
-}
-
-impl CookoffMass {
-    fn new(mass: f32, centre: Vec3, inertia: AngularInertia) -> Self {
-        Self {
-            mass: Mass(mass),
-            centre: CenterOfMass(centre),
-            inertia,
-            computed_mass: ComputedMass::new(mass),
-            computed_centre: ComputedCenterOfMass(centre),
-            computed_inertia: inertia.into(),
-            no_auto_mass: NoAutoMass,
-            no_auto_centre: NoAutoCenterOfMass,
-            no_auto_inertia: NoAutoAngularInertia,
-        }
-    }
-}
-
-/// The game's damage model: one tank owns its mass subtraction and launches; only hierarchy
-/// changes need exclusive command application. The authority simulates both bodies; replicas
-/// receive hull poses and `LaunchedTurretPose`, never mass properties or a derived launch.
+/// The game's damage model: each tank computes its split independently; the serial flush commits
+/// mass, motion and hierarchy together. ChildOf must go before the RigidBody add hook runs.
+/// The authority simulates both bodies; replicas receive poses, never mass properties.
+/// The remaining hull depends on turret orientation: the full-vehicle box does not turn with it.
 fn launch_turrets_on_cookoff(
     cooked_ammo: Query<&VolumeOf, (With<CookedOff>, Added<CookedOff>)>,
-    turrets: Query<
-        (Entity, &GlobalTransform, &TurretBody),
-        (With<Turret>, Without<LaunchedTurret>),
-    >,
-    parents: Query<&ChildOf>,
+    turrets: Query<(&GlobalTransform, &TurretBody), With<Turret>>,
     hulls: Query<(
         Entity,
+        &Rig,
         &GlobalTransform,
         &Position,
         &Rotation,
@@ -875,123 +841,73 @@ fn launch_turrets_on_cookoff(
     )>,
     mut commands: Commands,
 ) {
-    // Several ammunition pools can empty together; each owner splits its body only once.
+    // Deduplicate simultaneous pools to avoid evaluating the same owner's split twice.
     let owners: std::collections::BTreeSet<_> = cooked_ammo.iter().map(VolumeOf::tank).collect();
+    let launch = cookoff_launch();
+    let ((lift, throw), (pitch, yaw)) = (launch.launch_velocity.0, launch.launch_spin.0);
     let mut effects = bevy::utils::Parallel::<Vec<_>>::default();
     hulls.par_iter_many(&owners).for_each(|hull| {
-        let (tank, hull_pose, position, rotation, mass, centre, inertia, velocity, spin) =
-            hull.expect("a tank root carries its spawn-built explicit mass properties and motion");
+        let (tank, rig, hull_pose, position, rotation, mass, centre, inertia, velocity, spin) =
+            hull.expect("a tank root carries its spawn-built rig, explicit mass properties and motion");
+        // No mounted assembly: a later pool can cook off after it left; fixtures may have none.
+        let Ok((global, body)) = turrets.get(rig.turret) else { return };
         let frame = Transform::from_translation(position.0).with_rotation(rotation.0);
-        let mut assemblies: Vec<_> = turrets
-            .iter()
-            .filter(|(turret, ..)| is_descendant_of(*turret, tank, &parents))
-            .collect();
-        assemblies.sort_unstable_by_key(|(turret, ..)| *turret);
-        let (mut mass, mut centre, mut inertia, mut velocity) =
-            (mass.0, centre.0, *inertia, velocity.0);
-        let mut launches = Vec::new();
-        for (turret, global, body) in assemblies {
-            // Global transforms share one propagation moment, so their relative pose is valid.
-            // Rebase onto the current physics pose: Writeback can have advanced the hull since.
-            let mut relative = global.reparented_to(hull_pose);
-            // The Assembly gate certifies unit scale; decomposition can perturb it by rounding.
-            relative.scale = Vec3::ONE;
-            let pose = frame * relative;
-            let turret_centre = relative.transform_point(body.centre_of_mass);
-            let remainder = mass - body.mass;
-            assert!(
-                remainder.is_finite() && remainder > 0.0,
-                "spawn-built vehicle mass must exceed its detachable assembly mass"
-            );
-            let new_centre = (mass * centre - body.mass * turret_centre) / remainder;
-            // Parallel-axis subtraction about the old centre, then translation to the new one:
-            // I_full = I_hull + m_hull PA(c_hull-c_full) + I_turret + m_turret PA(c_turret-c_full).
-            let tensor = inertia.tensor().to_mat3()
-                - body
-                    .angular_inertia
-                    .tensor()
-                    .rotated(relative.rotation)
-                    .shifted(body.mass, turret_centre - centre)
-                    .to_mat3()
-                - AngularInertia::ZERO
-                    .tensor()
-                    .shifted(remainder, new_centre - centre)
-                    .to_mat3();
-            // Sylvester's criterion refuses an inconsistent full/assembly model, before Avian's
-            // eigensolver could clamp a negative principal inertia and conceal that bug.
-            assert!(
-                tensor.is_finite()
-                    && tensor.x_axis.x > 0.0
-                    && tensor.x_axis.x * tensor.y_axis.y - tensor.x_axis.y * tensor.y_axis.x > 0.0
-                    && tensor.determinant() > 0.0,
-                "spawn-built vehicle inertia minus its assembly must leave positive hull inertia"
-            );
-            let carried = velocity + spin.0.cross(frame.rotation * (turret_centre - centre));
-            let ((lift, throw), (pitch, yaw)) = (
-                cookoff_launch().launch_velocity.0,
-                cookoff_launch().launch_spin.0,
-            );
-            launches.push((
-                turret,
-                pose,
-                CookoffMass::new(body.mass, body.centre_of_mass, body.angular_inertia),
-                LinearVelocity(carried + *pose.up() * lift + *pose.forward() * throw),
-                AngularVelocity(spin.0 + *pose.right() * pitch + *pose.up() * yaw),
-            ));
+        // Both globals share a propagation moment. Rebase their relative pose onto Writeback's
+        // current physics pose. The Assembly gate certifies unit scale; decomposition rounds it.
+        let mut relative = global.reparented_to(hull_pose);
+        relative.scale = Vec3::ONE;
+        let pose = frame * relative;
+        let turret_centre = relative.transform_point(body.centre_of_mass);
+        let remainder = mass.0 - body.mass;
+        assert!(
+            remainder.is_finite() && remainder > 0.0,
+            "TankSpec::validate admits mass > turret.mass; spawn must preserve that relation"
+        );
+        let new_centre = (mass.0 * centre.0 - body.mass * turret_centre) / remainder;
+        // Parallel-axis subtraction about the old centre, then translation to the new one:
+        // I_full = I_hull + m_hull PA(c_hull-c_full) + I_turret + m_turret PA(c_turret-c_full).
+        let tensor = inertia.tensor().to_mat3()
+            - body.angular_inertia.tensor().rotated(relative.rotation)
+                .shifted(body.mass, turret_centre - centre.0).to_mat3()
+            - AngularInertia::ZERO.tensor().shifted(remainder, new_centre - centre.0).to_mat3();
+        // Sylvester's criterion catches a broken admitted model before diagonalization clamps it.
+        assert!(
+            tensor.is_finite() && tensor.x_axis.x > 0.0
+                && tensor.x_axis.x * tensor.y_axis.y - tensor.x_axis.y * tensor.y_axis.x > 0.0
+                && tensor.determinant() > 0.0,
+            "TankTemplate admission guarantees positive remaining inertia at every servo angle; spawn and motion must preserve its model"
+        );
+        let carried = velocity.0 + spin.0.cross(frame.rotation * (turret_centre - centre.0));
+        effects.scope(|effects| effects.push((
+            tank,
+            explicit_mass(remainder, new_centre, AngularInertia::from_mat3_unchecked(tensor)),
             // LinearVelocity is the mass-centre velocity, not the body origin's velocity.
-            velocity += spin.0.cross(frame.rotation * (new_centre - centre));
-            (mass, centre, inertia) = (
-                remainder,
-                new_centre,
-                AngularInertia::from_mat3_unchecked(tensor),
-            );
-        }
-        if !launches.is_empty() {
-            effects.scope(|effects| {
-                effects.push((
-                    tank,
-                    CookoffMass::new(mass, centre, inertia),
-                    LinearVelocity(velocity),
-                    launches,
-                ))
-            });
-        } // A later ammunition pool can cook off after this tank's assembly has already left.
+            LinearVelocity(velocity.0 + spin.0.cross(frame.rotation * (new_centre - centre.0))),
+            rig.turret, pose, explicit_mass(body.mass, body.centre_of_mass, body.angular_inertia),
+            LinearVelocity(carried + *pose.up() * lift + *pose.forward() * throw),
+            AngularVelocity(spin.0 + *pose.right() * pitch + *pose.up() * yaw),
+        )));
     });
     let mut effects: Vec<_> = effects.drain().collect();
     effects.sort_unstable_by_key(|(tank, ..)| *tank);
-    // Entity order (tank, then assembly) defines the structural commit. Both halves and their
-    // computed properties become visible in this flush; no physics step can see a mismatched pair.
-    for (tank, mass, velocity, launches) in effects {
+    // Both halves become visible in this flush; no physics step sees a mismatched pair.
+    for (tank, mass, velocity, turret, pose, turret_mass, carried, spin) in effects {
         commands.entity(tank).insert((mass, velocity));
-        for (turret, pose, mass, velocity, spin) in launches {
-            // Remove ChildOf before RigidBody's on-add hook: pose is already world-space.
-            // Explicit Position/Rotation also prevent init_physics_transform from composing
-            // the former parent's transform a second time at command-flush time.
-            commands
-                .entity(turret)
-                .remove::<(ChildOf, Turret, ServoCommand, ServoIndex, ServoSpec)>()
-                .insert((
-                    Position(pose.translation),
-                    Rotation(pose.rotation),
-                    pose,
-                    crate::eased_dynamic_body(),
-                    mass,
-                    velocity,
-                    spin,
-                    LaunchedTurret,
-                ));
-        }
+        commands
+            .entity(turret)
+            .remove::<(ChildOf, Turret, ServoCommand, ServoIndex, ServoSpec)>()
+            .insert((
+                // Explicit physics pose prevents the add hook composing the former parent twice.
+                Position(pose.translation),
+                Rotation(pose.rotation),
+                pose,
+                crate::eased_dynamic_body(),
+                turret_mass,
+                carried,
+                spin,
+                LaunchedTurret,
+            ));
     }
-}
-
-fn is_descendant_of(mut entity: Entity, ancestor: Entity, parents: &Query<&ChildOf>) -> bool {
-    while let Ok(parent) = parents.get(entity) {
-        entity = parent.parent();
-        if entity == ancestor {
-            return true;
-        }
-    }
-    false
 }
 
 fn kill_crew(
@@ -1034,6 +950,7 @@ fn mark_dead_tanks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use avian3d::prelude::{ComputedAngularInertia, ComputedCenterOfMass, ComputedMass};
     use std::collections::HashMap;
 
     /// Build a part→quality map from `(part, quality)` pairs.
@@ -1475,7 +1392,7 @@ mod tests {
     /// The game's damage model: wreck physics must neither create mass nor lose carried momentum.
     /// The only addition is the authored launch's linear impulse and angular impulse about the
     /// fixed world origin. Keeping any full-vehicle mass property, omitting the new-centre velocity,
-    /// double-launching simultaneous pools, or mixing propagation and physics poses breaks this.
+    /// or mixing propagation and physics poses breaks this.
     #[test]
     fn detachment_conserves_mass_and_momentum_plus_the_stated_launch_impulse() {
         use avian3d::prelude::{Collider, ColliderDensity, Physics, PhysicsTime, RigidBody};
@@ -1483,16 +1400,12 @@ mod tests {
 
         let mut app = physics_app();
         app.world_mut().resource_mut::<Time<Physics>>().pause();
-        // Fixture: distinct mass ratios, non-central assembly, full 3D poses and motion. Only
-        // irrelevant sheet fields come from the seed; every mass/inertia input is owned here.
+        // Fixture: distinct mass ratios, non-central assembly, full 3D poses and motion.
         let mut cases = Vec::new();
         for (i, scale) in [0.7, 1.3, 2.1].into_iter().enumerate() {
-            let mut spec: crate::spec::TankSpec =
-                ron::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
-            spec.mass = 20_000.0 * scale;
-            spec.inertia_extents = (5.0, 3.0, 7.0);
-            spec.turret.mass.0 = 2300.0 * scale * scale;
-            spec.turret.inertia_extents.0 = (1.7, 1.2, 2.3);
+            let mass = 20_000.0 * scale;
+            let inertia = AngularInertia::from_shape(&Cuboid::new(5.0, 3.0, 7.0), mass);
+            let turret_mass = 2300.0 * scale * scale;
             let old = Transform::from_xyz(i as f32 * 20.0, 2.0, -3.0)
                 .with_rotation(Quat::from_euler(EulerRot::YXZ, 0.6, 0.2, -0.1));
             let current = Transform::from_translation(old.translation + Vec3::new(0.4, -0.1, 0.3))
@@ -1507,18 +1420,20 @@ mod tests {
             let linear = Vec3::new(4.0, -0.5, 7.0);
             let spin = Vec3::new(0.2, 0.9, -0.3);
             let body = TurretBody {
-                mass: spec.turret.mass.0,
-                angular_inertia: spec.turret.angular_inertia(),
+                mass: turret_mass,
+                angular_inertia: AngularInertia::from_shape(
+                    &Cuboid::new(1.7, 1.2, 2.3),
+                    turret_mass,
+                ),
                 centre_of_mass: Vec3::new(0.2, 0.1, -0.3),
             };
             let tank = app
                 .world_mut()
                 .spawn((
                     current,
-                    GlobalTransform::from(old),
                     Position(current.translation),
                     Rotation(current.rotation),
-                    CookoffMass::new(spec.mass, centre, spec.hull_angular_inertia()),
+                    explicit_mass(mass, centre, inertia),
                     LinearVelocity(linear),
                     AngularVelocity(spin),
                     RigidBody::Dynamic,
@@ -1549,7 +1464,8 @@ mod tests {
                     ChildOf(owner),
                 ));
             }
-            // Two simultaneous emptied pools must produce one split, not two new masses.
+            link_rig(app.world_mut(), tank, turret);
+            // Exercise the owner collection with simultaneous emptied pools.
             for _ in 0..2 {
                 app.world_mut().spawn((VolumeOf(tank), CookedOff));
             }
@@ -1567,15 +1483,10 @@ mod tests {
                 .to_mat3()
                 * (*pose.right() * pitch + *pose.up() * yaw)
                 + turret_centre.cross(impulse);
-            let p = spec.mass * linear;
-            let l = spec
-                .hull_angular_inertia()
-                .tensor()
-                .rotated(current.rotation)
-                .to_mat3()
-                * spin
+            let p = mass * linear;
+            let l = inertia.tensor().rotated(current.rotation).to_mat3() * spin
                 + current.transform_point(centre).cross(p);
-            cases.push((tank, turret, spec.mass, p + impulse, l + angular_impulse));
+            cases.push((tank, turret, mass, p + impulse, l + angular_impulse));
         }
         app.world_mut()
             .run_system_once(launch_turrets_on_cookoff)
@@ -1583,6 +1494,17 @@ mod tests {
         for pass in 0..2 {
             for &(tank, turret, total_mass, expected_p, expected_l) in &cases {
                 let world = app.world();
+                let body = world.get::<TurretBody>(turret).unwrap();
+                assert_eq!(world.get::<Mass>(turret).unwrap().0, body.mass);
+                assert_eq!(
+                    world.get::<CenterOfMass>(turret).unwrap().0,
+                    body.centre_of_mass
+                );
+                assert_eq!(
+                    *world.get::<AngularInertia>(turret).unwrap(),
+                    body.angular_inertia
+                );
+                assert!(world.get::<LaunchedTurret>(turret).is_some());
                 let mut mass = 0.0;
                 let (mut p, mut l) = (Vec3::ZERO, Vec3::ZERO);
                 for entity in [tank, turret] {
@@ -1658,7 +1580,7 @@ mod tests {
             GlobalTransform::from(pose),
             Position(pose.translation + Vec3::new(0.3, 0.0, -0.2)),
             Rotation(pose.rotation),
-            CookoffMass::new(
+            explicit_mass(
                 10_000.0,
                 Vec3::new(0.0, 0.5, 0.3),
                 AngularInertia::new(Vec3::new(40_000.0, 50_000.0, 60_000.0)),
@@ -1670,7 +1592,7 @@ mod tests {
 
     /// The game's damage model: a turret on `tank` at world `pose`, carrying fixture body data.
     fn turret_on(world: &mut World, tank: Entity, pose: GlobalTransform) -> Entity {
-        world
+        let turret = world
             .spawn((
                 Turret,
                 TurretBody {
@@ -1683,37 +1605,19 @@ mod tests {
                 ChildOf(tank),
                 pose,
             ))
-            .id()
+            .id();
+        link_rig(world, tank, turret);
+        turret
     }
 
-    /// The game's damage model: a launched turret's body is its own `TurretBody`: mass, mass centre
-    /// and inertia. A launch that carried a constant would hand the second tank the first one's
-    /// turret. Fixture body data.
-    #[test]
-    fn a_launched_turret_takes_its_mass_and_inertia_from_its_body_data() {
-        let mut app = App::new();
-        app.add_systems(Update, launch_turrets_on_cookoff);
-        let tank = app
-            .world_mut()
-            .spawn(hull(Transform::IDENTITY, Vec3::ZERO, Vec3::ZERO))
-            .id();
-        app.world_mut().spawn((VolumeOf(tank), CookedOff));
-        let turret = turret_on(app.world_mut(), tank, GlobalTransform::IDENTITY);
-        let body = *app.world().get::<TurretBody>(turret).unwrap();
-        app.update();
-        let world = app.world();
-        assert!(world.get::<LaunchedTurret>(turret).is_some());
-        assert_eq!(world.get::<Mass>(turret).unwrap().0, body.mass);
-        assert_eq!(
-            world.get::<CenterOfMass>(turret).unwrap().0,
-            body.centre_of_mass
-        );
-        assert_eq!(
-            *world
-                .get::<avian3d::prelude::AngularInertia>(turret)
-                .unwrap(),
-            body.angular_inertia
-        );
+    fn link_rig(world: &mut World, tank: Entity, turret: Entity) {
+        world.entity_mut(tank).insert(Rig {
+            hull: tank,
+            turret,
+            gunner_yaw: turret,
+            gun: turret,
+            muzzle: turret,
+        });
     }
 
     /// The game's damage model: velocity continuity at a cook-off. The detached assembly leaves
@@ -1799,7 +1703,7 @@ mod tests {
                     Transform::from_rotation(slope)
                         .with_translation(slope * Vec3::new(100.0 * i as f32, 1.0, 0.0)),
                     RigidBody::Static,
-                    CookoffMass::new(
+                    explicit_mass(
                         10_000.0,
                         Vec3::ZERO,
                         AngularInertia::new(Vec3::splat(50_000.0)),
@@ -1828,6 +1732,7 @@ mod tests {
                 CollisionLayers::new([crate::Layer::Vehicle], LayerMask::ALL),
                 friction,
             ));
+            link_rig(app.world_mut(), tank, turret);
             turrets.push((tank, turret));
         }
         for _ in 0..4 {
@@ -1900,7 +1805,7 @@ mod tests {
                 .spawn((
                     hull,
                     RigidBody::Static,
-                    CookoffMass::new(
+                    explicit_mass(
                         10_000.0,
                         Vec3::ZERO,
                         AngularInertia::new(Vec3::splat(50_000.0)),
@@ -1923,6 +1828,7 @@ mod tests {
                     ChildOf(tank),
                 ))
                 .id();
+            link_rig(app.world_mut(), tank, turret);
             armour.push(
                 app.world_mut()
                     .spawn((

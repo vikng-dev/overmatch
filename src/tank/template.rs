@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use avian3d::prelude::{
     AngularInertia, CenterOfMass, Collider, CollisionLayers, Friction, LayerMask, Mass,
-    NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass,
 };
 use bevy::prelude::*;
 
@@ -23,7 +22,7 @@ use super::integrity::authored_attachment;
 use super::model::{
     EngineSound, Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, TankRoot, TankServos, TankSim,
     TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate, WeaponGateState,
-    WeaponIndex, WeaponLoad, WeaponLoads, WeaponState,
+    WeaponIndex, WeaponLoad, WeaponLoads, WeaponState, explicit_mass,
 };
 use super::servo::{ServoCommand, ServoIndex, ServoMechanism, ServoRest, ServoSpec};
 use super::view::SimParts;
@@ -283,6 +282,14 @@ impl TankTemplate {
                 .mass_centre(at(rig.turret), &|node| nodes[node - 1].transform)
                 .expect("the turret node is a frame of the tank's armour set"),
         };
+        let turret_body = admit_detachment(
+            file,
+            spec,
+            geometry,
+            rig.turret,
+            geometry.nodes[rig.center_of_mass].root_position,
+            turret_body,
+        );
 
         let proxies = geometry
             .collision_proxies
@@ -546,12 +553,7 @@ impl TankTemplate {
             .insert((Turret, self.turret_body));
         let body = &self.root;
         commands.entity(root).insert((
-            body.mass,
-            body.angular_inertia,
-            NoAutoMass,
-            NoAutoAngularInertia,
-            NoAutoCenterOfMass,
-            body.centre_of_mass,
+            explicit_mass(body.mass.0, body.centre_of_mass.0, body.angular_inertia),
             body.capabilities.clone(),
             body.views.clone(),
             // Root visibility owns the gunner-view hide: set to `Hidden`, `InheritedVisibility`
@@ -938,6 +940,46 @@ fn hard_substance(
     }
 }
 
+/// The game's damage model: admit the body model before play, then carry it into each spawn.
+/// DERIVED: I_remaining = I_vehicle - R I_t R^T - (m M / (M-m)) PA(t-c).
+/// For every direction, the subtracted tensor is bounded by max(I_t) + m M/(M-m) d_max².
+/// Each servo is allowed any rotation; triangle bounds enclose its pivot-to-centre reach.
+/// Comparing that upper bound to min(I_vehicle) proves positivity at every allowed angle.
+/// It can over-refuse valid sheets: servo axes/limits can exclude the worst reach, and the
+/// largest turret moment and parallel-axis term need not align with the weakest vehicle axis.
+fn admit_detachment(
+    file: &str,
+    spec: &TankSpec,
+    geometry: &TankGeometry,
+    turret: usize,
+    centre: Vec3,
+    body: TurretBody,
+) -> TurretBody {
+    let (mut point, mut radius) = (body.centre_of_mass, 0.0);
+    let mut index = turret;
+    while index != 0 {
+        let node = &geometry.nodes[index];
+        if spec.servos.contains_key(&node.name) {
+            radius += point.length();
+            point = node.transform.translation;
+        } else {
+            point = node.transform.transform_point(point);
+        }
+        index = node
+            .parent
+            .expect("every model node descends from the scene wrapper");
+    }
+    let distance = (point - centre).length() + radius;
+    let lower = spec.hull_angular_inertia().principal.min_element();
+    let upper = body.angular_inertia.principal.max_element()
+        + body.mass * (spec.mass / (spec.mass - body.mass)) * distance * distance;
+    assert!(
+        lower.is_finite() && upper.is_finite() && lower > upper,
+        "{file}: mass/inertia_extents, turret.mass/inertia_extents, turret.node, model Center_Of_Mass and servo pivots cannot guarantee positive remaining hull inertia at every orientation (vehicle minimum {lower}, assembly bound {upper} kg m²); correct the masses, box dimensions or mass-centre/pivot geometry; this conservative bound ignores servo axes and limits and combines worst directions"
+    );
+    body
+}
+
 /// The tank's armour set ([`ArmourTemplate`]): its nodes, the frames among them (each servo, each
 /// recoiling barrel, and the turret assembly a launch detaches) and its volumes' primitives,
 /// `parts` as `(member id, node index in nodes, shape, surfaces, role)`.
@@ -1209,6 +1251,33 @@ mod tests {
             .clone();
         let entry = spec.servos.remove(&servo).expect("listed above");
         spec.servos.insert("FixtureMissingNode".into(), entry);
+        let blueprint = TankBlueprint::new(
+            "fixture.tank.ron".into(),
+            crate::bake::CertifiedAsset::fixture(spec, geometry),
+        );
+        TankTemplate::new(&blueprint, TrackColliders::of_blueprint(&blueprint, &glb));
+    }
+
+    /// The game's damage model: inconsistent full/assembly tensors must stop template admission,
+    /// even if the sheet's individually positive fields and the rest pose look usable.
+    #[test]
+    #[should_panic(
+        expected = "fixture.tank.ron: mass/inertia_extents, turret.mass/inertia_extents"
+    )]
+    fn inconsistent_detachment_inertia_is_refused_before_spawn() {
+        let (mut spec, glb) = shipped_sheet();
+        let geometry = crate::bake::extract_tank_geometry(
+            &glb,
+            &spec,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .unwrap();
+        // Fixture: positive masses and extents, but the assembly's inertia exceeds the vehicle's.
+        spec.mass = 30_000.0;
+        spec.inertia_extents = (3.0, 1.6, 3.0);
+        spec.turret.mass.0 = 8_000.0;
+        spec.turret.inertia_extents.0 = (10.0, 10.0, 10.0);
+        spec.validate().unwrap();
         let blueprint = TankBlueprint::new(
             "fixture.tank.ron".into(),
             crate::bake::CertifiedAsset::fixture(spec, geometry),

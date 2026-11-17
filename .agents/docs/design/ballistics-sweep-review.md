@@ -218,14 +218,16 @@ field-frame control panics instead of depositing dose along an invented directio
 - **B4, P1, unresolved:** `launch_turrets_on_cookoff` still prescribes the release's linear and
   angular increment (StandIns in `assets/damage/cookoff.ron`); the assembly does keep the hull
   motion at its mass centre and the hull's spin, so velocity is continuous up to that increment.
-  Momentum is not: the hull keeps the whole vehicle's mass, mass centre and inertia.
+  The mass split conserves carried momentum: the hull loses the detached assembly's mass and
+  inertia, its mass centre shifts, and both bodies keep their mass-centre velocities. The authored
+  launch increment adds momentum without a reaction on the hull.
   `Ammo` identifies only a volume with HP and ownership. Per-weapon stowage counts
   exist but do not assign contents to ammunition volumes; the reserve is currently infinite.
   Round filler energies exist, but neither propellant energy nor confinement, attachment failure
   work, a release force path or per-volume energetic contents are supplied. `TurretSpec` supplies
-  mass and inertia extents only. The launch now supplies the inherited motion; a conserving
-  release still needs the hull's mass, mass centre and inertia after detachment. These facts must
-  be supplied before deriving a release;
+  mass and inertia extents; geometry supplies a stand-in assembly centre. The residual hull
+  depends on turret orientation because the full-vehicle box does not turn with it. A derived
+  release still needs the energetic and attachment facts above;
   relabelling the current kick as an energy coefficient would leave the finding intact.
 - **B6, P1, unresolved:** the ground contact still functions the fuze with unbounded resistance
   and stops the round immediately. The old `stops_unresolved` catch-all is already gone. The
