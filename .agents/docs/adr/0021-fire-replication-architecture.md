@@ -1,12 +1,13 @@
 # Shot replication separates trajectory presentation from authoritative consequence
 
-> **Status: stands; the prediction phrasing is superseded by
-> [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15): the client's own firing
-> response is a view overlay (fire intent, own recoil response), not a predicted sim.
+> **Status: stands, with own-fire presentation governed by
+> [[0037-one-authoritative-timeline-and-view-overlays]]**: fire intent and own recoil response
+> are view overlays.
 
-The authority resolves every projectile contact, penetration, ricochet, and damage result. A
-client may predict its own firing response immediately, but no transient shot message grants
-gameplay authority. Replicated combat state remains the durable result; shot messages explain and
+Subject: the game's fire presentation and damage model; game state only. The authority resolves
+every projectile contact, penetration, ricochet and HP dose. Own fire presents from its server
+announcement ([[0037-one-authoritative-timeline-and-view-overlays]]); no transient shot message
+grants gameplay authority. Replicated combat state remains the durable result; shot messages explain and
 present discrete causes and confirmations.
 
 ## Identity and source facts
@@ -24,21 +25,27 @@ an asset, or a replicated entity's eventual components.
 
 | Fact | Delivery | Reason |
 |---|---|---|
-| Automatic-weapon `FireEvent`, `RicochetKeyframe`, `ImpactConfirm` | `FireVisualBatch` on `UnorderedUnreliable` | Frequent presentation may expire; it must not create reliable cosmetic debt. |
-| Single-shot `FireEvent`, `RicochetKeyframe`, `ImpactConfirm` | Individual message on `UnorderedReliable` | A cannon's start and post-bounce trajectory are sparse, legible events worth repairing. |
-| Owner-private `DamageConfirm` | Individual message on a separate `UnorderedReliable` channel | An authority-confirmed damaging action must reach its shooter exactly once and must not disclose target internals to observers. |
+| Owner `WeaponGate` and `WeaponLoads` | Ordered reliable replication insertion; unordered unreliable mutations with latest-state acknowledgement | Snapshots converge, but may coalesce several consumptions; they do not identify fires. |
+| Automatic-weapon `FireEvent` | `FireVisualBatch` on `FireChannel` (`UnorderedUnreliable`) | Frequent presentation may expire; it must not create reliable cosmetic debt. |
+| Single-shot `FireEvent` | Individual message on `OutcomeChannel` (`UnorderedReliable`) | Sparse starts are worth repairing; reliability supplies no finite arrival deadline. |
+| Every weapon's `FlightOutcome` (including ricochet and impact) | Individual message on `OutcomeChannel` (`UnorderedReliable`) | An announced round must follow the authority's complete path, including automatic fire; large paths may fragment. |
+| Owner-private `DamageConfirm` | Individual message on `DamageChannel` (`UnorderedReliable`) | An authority-confirmed dose must reach its shooter exactly once and must not disclose target internals to observers. |
 
-Automatic facts live in per-combatant queues and are admitted round-robin into bounded batches.
+DERIVED from `src/net/protocol.rs` channel/component registration and
+`src/net/shot_transport.rs` queue and send rules.
+
+Automatic start announcements live in per-combatant queues and are admitted round-robin into bounded batches.
 Current-tick facts outrank older repair copies when the admission budget saturates.
 Each fact is eligible for up to three admission opportunities and expires after 16 authority
 ticks. Under saturation, a fact can expire before its first opportunity or after only some repairs;
 the persisted producer cursor prevents the same producers from always winning, and a smaller repair
 may use residual budget after a larger fresh fact is refused. Batches use a serialized worst-case
 upper-bound cap of 1,100 bytes and a four-batch per-tick admission budget. All four values are
-**DERIVED STARTING DEFAULTS**, not measured product limits. The cap sits below Lightyear 0.28's
-**DERIVED 1,156-byte** unfragmented-message ceiling. The sizer includes the **DERIVED four-byte**
-maximum message ID and Bevy's **MEASURED nine-byte** encoding of a Lightyear recipient-mapped
-entity; `Entity::PLACEHOLDER` is not a valid worst case.
+**DERIVED STARTING DEFAULTS**, not measured product limits. `shot_transport.rs` derives Lightyear
+0.31.0's **DERIVED 1,162-byte** unfragmented-message ceiling from its 1,200-byte default MTU minus
+13 header bytes, 23 fragment-metadata bytes and a 2-byte payload-length prefix. The sizer includes
+the **DERIVED four-byte** maximum message type ID and **DERIVED ten-byte** postcard encoding of
+a recipient-mapped entity with bit 63 set; `Entity::PLACEHOLDER` is not a valid worst case.
 
 At 64 Hz, the four-batch admission ceiling is a **DERIVED 281,600 application bytes/s per public
 recipient** before Lightyear packing. This is a shot-visual work bound, not an observed link rate or a

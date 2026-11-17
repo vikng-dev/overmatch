@@ -69,8 +69,6 @@
 //! delay, the objective's pipeline tick, half RTT and [`INPUT_HEADROOM_TICKS`]. Coverage takes
 //! priority over deadband. This bounds the adaptive objective, not remote-estimate error or the
 //! clock controller's convergence; network delay alone can exhaust the available budget.
-//! The announcement recovery deadline still reads [`ArrivalStats::coverage`]'s long-ring tail:
-//! it bounds announcement/state skew, not the client's input lead.
 //!
 //! Research basis: `.agents/scratch/adaptive-cursor-frontier-2026-08-15.md` §1;
 //! uplink failure-mode inventory: `.agents/scratch/input-lead-budget-2026-08-14.md`.
@@ -150,12 +148,6 @@ impl ArrivalStats {
     /// and the receiver's frame schedule; this is not an independent bound on link delay.
     pub(super) fn spread(&self) -> Duration {
         Duration::from_secs_f64((self.qp_s - self.anchor_s).max(0.0))
-    }
-
-    /// `Q_p − Q_50`: the long-ring burst tail above the median, bounding announcement/state
-    /// skew for `net::fire_presentation`'s recovery wait.
-    pub(super) fn coverage(&self) -> Duration {
-        Duration::from_secs_f64((self.qp_s - self.q50_s).max(0.0))
     }
 
     /// Input lead excludes a sustained level increase once the short-window minimum has risen.

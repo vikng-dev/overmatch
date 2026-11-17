@@ -825,22 +825,20 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     } else {
         app.add_observer(claim_harness_input_slot);
     }
-    // The SAME plate, at the same pose, in the observer's world — a client shell must have armor to
-    // contact and hold at (see the module doc: zero pose divergence is deliberate here).
+    // The observer holds the same fixture plate. Replica paths remain authority-owned even when
+    // local armour geometry is available.
     spawn_plate(&mut app);
 
-    // The replica marker: shells fly and spark, but deposit no HP — and, decisively for this test, a
-    // `Shot`-carrying shell HOLDS at armor for the server's verdict instead of improvising a bounce.
+    // The game's damage model: replicas replay public paths and never reduce local HP pools.
     app.insert_resource(ClientReplica);
 
-    // The production client's fire-receive wiring, verbatim (`net::client::run`).
+    // Production fire/path ingress seams with their client-only resource defaults.
     app.init_resource::<PendingRecoilKicks>();
     app.init_resource::<SeenShots>();
     app.init_resource::<HeldFireEvents>();
     app.init_resource::<PendingFireEvents>();
     app.init_resource::<SeenDamage>();
     app.init_resource::<SanctionedShots>();
-    app.init_resource::<super::fire_presentation::OwnFireDiag>();
     app.add_systems(Update, (receive_fire_events, receive_damage_confirms));
     app.add_systems(FixedUpdate, age_sanctioned_shots);
     app.add_observer(arm_fixture_weapons);
