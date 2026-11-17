@@ -194,13 +194,22 @@ class Standing:
     root_size: int
     template: dict
 
+    @property
+    def image_owner(self) -> str:
+        # MEASURED from the decoded launch refusal: EC2 evaluates ec2:Owner as the owner
+        # alias when present, otherwise the owner id. This admits any public image published
+        # under that alias in the region. The key holder already chooses user data, so the
+        # image is not the boundary: IAM constrains region, type, on-demand, tags, the one
+        # security group and per-volume shape; the Worker constrains resource count.
+        return self.image.get("ImageOwnerAlias") or self.image["OwnerId"]
+
     def policy(self, group: str) -> dict:
         prefix = f"arn:aws:ec2:{REGION}:{self.account}:"
         policy = bind_template(self.template, {
             "@ACCOUNT@": self.account, "@REGION@": REGION,
             "@NETWORK_ARNS@": [prefix + "security-group/" + group,
                                  *[prefix + "subnet/" + subnet for subnet in self.subnets]],
-            "@IMAGE_OWNER@": self.image["OwnerId"], "@INSTANCE_TYPE@": self.kind,
+            "@IMAGE_OWNER@": self.image_owner, "@INSTANCE_TYPE@": self.kind,
             "@ROOT_SIZE@": self.root_size, "@PROJECT@": TAGS["Project"],
             "@PURPOSE@": TAGS["Purpose"], "@PARAMETER@": PARAMETER})
         # IAM's user-inline-policy interface limit excludes whitespace.
@@ -451,7 +460,7 @@ def simulate(standing: Standing, group: str, principal: dict | None) -> None:
     resources = [f"arn:aws:ec2:{REGION}::image/{standing.image['ImageId']}",
                  prefix + "subnet/" + standing.subnets[0], prefix + "security-group/" + group,
                  *[prefix + name + "/" + name for name in ("instance", "volume", "network-interface")]]
-    context = {"ec2:Region": REGION, "ec2:Owner": standing.image["OwnerId"],
+    context = {"ec2:Region": REGION, "ec2:Owner": standing.image_owner,
                "ec2:InstanceType": standing.kind, "ec2:InstanceMarketType": "on-demand",
                "aws:RequestTag/Project": TAGS["Project"], "aws:RequestTag/Purpose": TAGS["Purpose"],
                "aws:ResourceTag/Project": TAGS["Project"], "aws:ResourceTag/Purpose": TAGS["Purpose"],
@@ -496,7 +505,8 @@ def simulate(standing: Standing, group: str, principal: dict | None) -> None:
                   {"aws:RequestTag/" + key: None})
     check("different instance type", "ec2:RunInstances", resources[3], False, {"ec2:InstanceType": other_kind})
     check("Spot launch", "ec2:RunInstances", resources[3], False, {"ec2:InstanceMarketType": "spot"})
-    check("foreign image", "ec2:RunInstances", resources[0], False, {"ec2:Owner": "amazon"})
+    other_owner = "aws-marketplace" if standing.image_owner != "aws-marketplace" else "amazon"
+    check("foreign image", "ec2:RunInstances", resources[0], False, {"ec2:Owner": other_owner})
     check("different security group", "ec2:RunInstances", prefix + "security-group/foreign", False)
     check("tagged host termination", "ec2:TerminateInstances", resources[3], True)
     for key in TAGS:
