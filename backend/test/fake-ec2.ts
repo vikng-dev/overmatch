@@ -3,7 +3,7 @@ export const xmlResponse = (action: string, content: string) => new Response(`<?
 export const ec2Error = (code: string, status = 400) => new Response(`<Response><Errors><Error><Code>${code}</Code><Message>discard this outside text</Message></Error></Errors></Response>`, { status });
 const escape = (x: string) => x.replaceAll("&", "&amp;").replaceAll("<", "&lt;");
 export type Machine = { id: string; claim: string; version: string; state: string; script: string;
-	purpose?: string; project?: string; workerEnv?: string; launchedAt?: number; zone?: string };
+	purpose?: string; project?: string; workerEnv?: string; launchedAt?: number; launchTime?: string | null };
 
 /** Query positions have no meaning: decode resource specifications and tags by their wire keys. */
 export function resourceTags(q: URLSearchParams): Map<string, Record<string, string>> {
@@ -30,10 +30,11 @@ export class FakeEc2 {
 	badXml = false;
 	requestBodyHang = false;
 	private tags(m: Machine) {
-		return { Project: m.project ?? "overmatch", Purpose: m.purpose ?? "host", WorkerEnvironment: m.workerEnv ?? "aws-proving", Claim: m.claim, Version: m.version };
+		return { Project: m.project ?? "overmatch", Purpose: m.purpose ?? "host", ...(m.workerEnv === undefined ? {} : { WorkerEnvironment: m.workerEnv }), Claim: m.claim, Version: m.version };
 	}
 	private item(m: Machine): string {
-		return `<item><instanceId>${m.id}</instanceId><launchTime>${new Date(m.launchedAt ?? Date.now()).toISOString()}</launchTime><instanceState><name>${m.state}</name></instanceState><ipAddress>192.0.2.1</ipAddress><tagSet>` +
+		const launch = m.launchTime === null ? "" : `<launchTime>${escape(m.launchTime ?? new Date(m.launchedAt ?? Date.now()).toISOString())}</launchTime>`;
+		return `<item><instanceId>${m.id}</instanceId>${launch}<instanceState><name>${m.state}</name></instanceState><ipAddress>192.0.2.1</ipAddress><tagSet>` +
 			Object.entries(this.tags(m)).map(([k, v]) => `<item><key>${k}</key><value>${escape(v)}</value></item>`).join("") + `</tagSet></item>`;
 	}
 	async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -66,7 +67,7 @@ export class FakeEc2 {
 				const tags = resourceTags(q).get("instance")!;
 				m = { id: `i-${String(this.machines.length + 1).padStart(17, "0")}`, claim: tags.Claim,
 					version: tags.Version, workerEnv: tags.WorkerEnvironment, purpose: tags.Purpose, project: tags.Project,
-					zone, launchedAt: Date.now(), state: "running",
+					launchedAt: Date.now(), state: "running",
 					script: new TextDecoder().decode(Uint8Array.from(atob(q.get("UserData")!), (c) => c.charCodeAt(0))) };
 				this.machines.push(m);
 				this.tokens.set(token, { machine: m, body: q.toString() });
@@ -82,7 +83,7 @@ export class FakeEc2 {
 				const prefix = k.slice(0, -4) + "Value.";
 				const values = [...q].filter(([key]) => key.startsWith(prefix)).map(([, value]) => value);
 				const actual = name === "instance-state-name" ? m.state : this.tags(m)[name.slice(4) as keyof ReturnType<FakeEc2["tags"]>];
-				return values.includes(actual);
+				return actual !== undefined && values.includes(actual);
 			}));
 			return xmlResponse(action, `<reservationSet>${machines.map((m) => `<item><instancesSet>${this.item(m)}</instancesSet></item>`).join("")}</reservationSet>`);
 		}

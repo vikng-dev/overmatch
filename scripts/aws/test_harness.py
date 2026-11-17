@@ -275,8 +275,11 @@ elif name == "journalctl":
         sys.stderr.write("Failed to open the journal: Input/output error\n")
         sys.exit(1)
     print(os.environ.get("JOURNAL", ""), end="")
-elif name == "systemctl" and args[:2] == ["is-active", "--quiet"]:
-    sys.exit(0 if os.environ.get("UPDATER_ACTIVE") else 3)
+elif name == "systemctl" and args[:1] == ["show"]:
+    if os.environ.get("UPDATER_QUERY_FAILS"):
+        sys.exit(1)
+    print("LoadState=" + os.environ.get("UPDATER_LOAD", "masked"))
+    print("ActiveState=" + os.environ.get("UPDATER_STATE", "inactive"))
 elif name == "systemctl" and args[:1] == ["is-enabled"]:
     print("masked")
     sys.exit(1)
@@ -503,13 +506,32 @@ class HostedBoot(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((machine.root / "state/server.tar.gz").exists())
 
-    def test_an_updater_that_survives_masking_refuses_play_and_powers_off(self):
+    def test_every_unconfirmed_updater_state_refuses_play_reports_boot_updates_and_powers_off(self):
+        for active in ('active', 'activating', 'deactivating', 'reloading', '', 'future-state'):
+            with self.subTest(active=active):
+                machine = self.machine()
+                machine.env['UPDATER_STATE'] = active
+                result = machine.boot()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn(["systemctl", "start", "overmatch-server"], machine.calls())
+                self.assertIn(["systemctl", "--no-block", "poweroff"], machine.calls())
+                report = next(c for c in machine.calls() if c[0] == 'curl' and '--data' in c)
+                self.assertEqual(json.loads(report[report.index('--data') + 1]), {'reason': 'boot-updates'})
+
+    def test_failed_updater_query_refuses_play_through_boot_failed(self):
         machine = self.machine()
-        machine.env["UPDATER_ACTIVE"] = "1"
-        result = machine.boot()
-        self.assertNotEqual(result.returncode, 0)
+        machine.env['UPDATER_QUERY_FAILS'] = '1'
+        self.assertNotEqual(machine.boot().returncode, 0)
         self.assertNotIn(["systemctl", "start", "overmatch-server"], machine.calls())
         self.assertIn(["systemctl", "--no-block", "poweroff"], machine.calls())
+        report = next(c for c in machine.calls() if c[0] == 'curl' and '--data' in c)
+        self.assertEqual(json.loads(report[report.index('--data') + 1]), {'reason': 'boot-updates'})
+
+    def test_failed_or_absent_updaters_allow_play(self):
+        for values in ({'UPDATER_STATE': 'failed'}, {'UPDATER_LOAD': 'not-found', 'UPDATER_STATE': 'inactive'}):
+            machine = self.machine()
+            machine.env.update(values)
+            self.assertEqual(machine.boot().returncode, 0)
 
     def test_failed_checksum_reports_the_step_and_powers_off_without_starting_a_service(self):
         machine = self.machine()

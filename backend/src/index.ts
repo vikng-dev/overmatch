@@ -131,15 +131,16 @@ async function route(req: Request, env: Env): Promise<Response> {
 
 	// Cutover verification uses this Access-protected tool; dryRun creates no machine or fleet slot.
 	if (path === "/admin/aws-proof" && method === "POST") {
+		const cfg = config(env);
+		const provider = providerFor(env, cfg.providerTimeoutMs);
+		if (!provider.dryRun || !provider.verifyRelease) return error(404, "provider has no launch proof");
 		const denied = await accessDenied(req, env);
 		if (denied) return error(403, denied);
 		const b = await body(req);
 		if (!b || typeof b !== "object" || !("version" in b) || !validVersion(b.version)) return error(400, "version required");
 		const image = "imageId" in b ? b.imageId : undefined;
 		if (image !== undefined && (typeof image !== "string" || !/^ami-[0-9a-f]{17}$/.test(image))) return error(400, "invalid proof image");
-		const cfg = config(env), id = newId(b.version);
-		const provider = providerFor(env, cfg.providerTimeoutMs);
-		if (!provider.dryRun || !provider.verifyRelease) return error(404, "provider has no launch proof");
+		const id = newId(b.version);
 		try {
 			const [location] = await provider.locations();
 			if (!location) throw new Error("launch proof requires at least one provider location");

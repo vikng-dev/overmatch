@@ -67,6 +67,7 @@ For replacement and removal, explicitly name the deployment holding the credenti
 
 ```sh
 scripts/aws/host-setup rotate-key --env aws-proving
+scripts/aws/host-setup revoke-key --env aws-proving
 scripts/aws/host-setup teardown --env aws-proving
 ```
 
@@ -84,6 +85,12 @@ lost create response reconciled through key metadata. Failure of that cleanup is
 refusal. Separate Worker writes can leave a mismatched pair after an unconfirmed handoff: rerun
 `issue-key` if no key remains, or `rotate-key` if the old key remains, using the same target. Do not
 enable the provider until the handoff succeeds. No secret can be recovered from IAM metadata.
+
+`revoke-key --env TARGET` refuses while any `Project=overmatch` instances, volumes, interfaces or
+key pairs remain, across purposes and Worker environments. After draining every keyed Worker, it
+revokes all host-user keys and removes only that Worker's three hosting secrets, then proves their
+absence. It retains the standing user, inline policy and security group for the next slice.
+Interrupted removal is restartable; unrelated Worker secrets survive. No new key is created.
 
 `teardown` refuses while tagged instances, volumes, interfaces or key pairs remain; it never
 terminates a match implicitly. It revokes keys first, deletes the selected Worker's hosting secrets,

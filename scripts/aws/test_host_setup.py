@@ -199,7 +199,7 @@ class Setup(unittest.TestCase):
         # The review command and typos must never cross the AWS/Worker boundary.
         f = Fixture(self)
         self.assertEqual(f.run('plan').returncode, 0)
-        for args in [[], ['setup'], ['apply', '--region', 'elsewhere'], ['apply', 'extra'], ['issue-key'], ['rotate-key'], ['teardown'], ['issue-key', '--env', 'typo']]:
+        for args in [[], ['setup'], ['apply', '--region', 'elsewhere'], ['apply', 'extra'], ['issue-key'], ['rotate-key'], ['revoke-key'], ['teardown'], ['issue-key', '--env', 'typo']]:
             self.assertEqual(f.run(*args).returncode, 2)
         self.assertEqual(f.state['calls'], [])
         self.assertEqual(f.state['worker_calls'], [])
@@ -399,6 +399,35 @@ class Setup(unittest.TestCase):
         f = Fixture(self)
         self.assertIn('disable cli_history', f.run('apply', HISTORY='1').stderr)
         self.assertNotIn('create-user', f.ops())
+
+    def test_revoke_key_keeps_standing_parts_and_unrelated_secrets_and_is_restartable(self):
+        f = self.issued()
+        policy, groups = f.state['policy'], f.state['groups']
+        f.state['secrets'].append('UNRELATED')
+        f.save()
+        self.assertEqual(f.run('revoke-key', '--env', 'aws-proving').returncode, 0, f.output)
+        self.assertEqual((f.state['keys'], f.state['secrets']), ([], ['UNRELATED']))
+        self.assertEqual((f.state['user'], f.state['policy'], f.state['groups']), (True, policy, groups))
+        self.assertEqual(f.run('revoke-key', '--env', 'aws-proving').returncode, 0, f.output)
+        self.assertNotIn('delete-user', f.ops())
+        self.assertNotIn('delete-user-policy', f.ops())
+        self.assertNotIn('delete-security-group', f.ops())
+        reads = [c['args'] for c in f.state['calls'] if 'describe-instances' in c['args']]
+        self.assertTrue(all('Name=tag:Purpose,Values=host' not in c for c in reads))
+        self.assertTrue(all('Name=tag:WorkerEnvironment,Values=aws-proving' not in c for c in reads))
+
+    def test_revoke_key_refuses_live_project_resources_and_failed_revocation_preserves_worker_secrets(self):
+        f = self.issued()
+        f.state['instances'] = [{'State': {'Name': 'running'}}]
+        f.save()
+        self.assertEqual(f.run('revoke-key', '--env', 'aws-proving').returncode, 1)
+        self.assertEqual(f.state['keys'], [1])
+        f.state['instances'] = []
+        f.save()
+        self.assertEqual(f.run('revoke-key', '--env', 'aws-proving', FAIL_OLD_REVOKE='1').returncode, 1)
+        self.assertEqual(f.state['keys'], [1])
+        self.assertEqual(set(f.state['secrets']), set(setup.SECRETS))
+        self.assertEqual(f.run('revoke-key', '--env', 'aws-proving').returncode, 0, f.output)
 
     def test_teardown_is_restartable_and_refuses_to_orphan_running_hosts(self):
         f = self.issued()

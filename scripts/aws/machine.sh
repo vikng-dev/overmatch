@@ -108,16 +108,22 @@ boot() {
       apt-daily-upgrade.service unattended-upgrades.service snapd.service snapd.socket
       snapd.snap-repair.timer snapd.snap-repair.service)
     systemctl mask --now "${updaters[@]}" || echo 'updater stop reported failure; verifying masks and active state' >&2
-    local updater status
+    local updater status load active
     for updater in "${updaters[@]}"; do
       # is-enabled returns nonzero for a masked unit, including a mask for an absent package.
       status="$(systemctl is-enabled "$updater" 2>/dev/null)" || true
       [[ "$status" == masked ]]
+      # show succeeds for absent units (LoadState=not-found). A query failure enters boot_failed.
+      status="$(systemctl show --property=LoadState --property=ActiveState "$updater")"
+      load='' active=''
+      while IFS='=' read -r key value; do
+        case "$key" in LoadState) load="$value" ;; ActiveState) active="$value" ;; esac
+      done <<<"$status"
+      [[ -n "$load" ]]
+      if [[ "$load" != not-found ]]; then
+        [[ "$active" == inactive || "$active" == failed ]]
+      fi
     done
-    if systemctl is-active --quiet "${updaters[@]}"; then
-      echo 'background updater still active; refusing hosted play' >&2
-      false # Enter boot_failed while the failing phase is still in scope.
-    fi
     mark updates
   fi
 
@@ -127,9 +133,8 @@ boot() {
   mark downloaded
 
   step=verify
-  cd "$STATE"
   # The release edge checks the checksum's raw asset name; the local name is fixed, even for URL-encoded tags.
-  printf '%s  server.tar.gz\n' "${ARCHIVE_SHA256%% *}" | sha256sum --check --strict --quiet -
+  printf '%s  %s\n' "${ARCHIVE_SHA256%% *}" "$archive" | sha256sum --check --strict --quiet -
   mark verified
 
   step=unpack

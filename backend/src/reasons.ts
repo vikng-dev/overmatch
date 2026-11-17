@@ -3,6 +3,8 @@
 // echo env values (netcode key, report secret) or URLs. Diagnostics log `diag()` output only.
 
 export const REASONS = {
+	lifetimeExpired: "the host reached its maximum lifetime",
+	releaseVersionUnsupported: "releaseBuildMetadataUnsupported: server release versions cannot contain +",
 	releaseMissing: "no server release exists for this version",
 	releaseUnavailable: "the server release could not be verified",
 	noCapacity: "no capacity in the selected location",

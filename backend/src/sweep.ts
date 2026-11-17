@@ -21,7 +21,7 @@
 
 import { config, type Env } from "./config";
 import { bounded, settleAll } from "./deadline";
-import { providerFor, type DeploymentStatus, type ListedDeployment } from "./provider";
+import { ProviderError, outsideRpc, providerFor, type DeploymentStatus, type ListedDeployment } from "./provider";
 import { expireServerLogs, stopWithEvidence } from "./evidence";
 import { idOf, validVersion, versionOf, tagOf, claimHex } from "./ids";
 import { diag } from "./reasons";
@@ -60,6 +60,8 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	const turn = Math.floor(now / SWEEP_PERIOD_MS);
 	const result: SweepResult = { at: now, listed: 0, unattributed: 0, stopped: 0, failed: 0, error: null };
 	const fail = (what: string, err: unknown) => {
+		if (!(err instanceof ProviderError)) throw err;
+		result.failed++;
 		result.error = `${what}: ${diag(err)}`;
 		console.error("sweep", result.error);
 	};
@@ -85,8 +87,10 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	await settleAll(
 		checks.slice(0, SWEEP_MAX_CHECKS).map((d) => async () => {
 			if (provider.inventory.maxAgeMs !== null) {
-				if (d.launchedAt === undefined) throw new Error("lifetime-capped inventory must supply a launch time");
-				if (d.launchedAt + provider.inventory.maxAgeMs < now) {
+				if (d.launchedAt === undefined) throw new Error("lifetime-capped provider must return capped inventory");
+				if (d.launchedAt === "unreadable") {
+					fail(`host ${d.id} launch time unreadable; checking ownership`, new ProviderError("launchTime", 0, "unknown"));
+				} else if (d.launchedAt + provider.inventory.maxAgeMs <= now) {
 					stop.push({ id: d.id, serverId: "expired", why: "host exceeded independent lifetime guard" });
 					return;
 				}
@@ -118,7 +122,7 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	await settleAll(
 		[...claims].map(([version, list]) => async () => {
 			try {
-				const live = new Set<string>(await bounded(timeout, async () => registryFor(env, version).liveDeployments(list)));
+				const live = new Set<string>(await outsideRpc("registryClaims", timeout, async () => registryFor(env, version).liveDeployments(list)));
 				for (const claim of list) {
 					if (!live.has(claim.deploymentId) && !stop.some((s) => s.id === claim.deploymentId)) {
 						stop.push({ id: claim.deploymentId, serverId: claim.serverId, why: "no live claim" });
@@ -141,7 +145,6 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 					result.stopped++;
 					console.warn("sweep stopped", id, why);
 				} catch (err) {
-					result.failed++;
 					fail("stop", err);
 				}
 			}),
@@ -156,13 +159,13 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 					if (slot.created_at + cfg.startDeadlineMs + 3 * timeout > now) continue;
 					const version = versionOf(slot.server_id);
 					if (!version) throw new Error("fleet slot must carry a versioned server id");
-					if (await bounded(timeout, () => registryFor(env, version).claimExists(slot.server_id))) continue;
+					if (await outsideRpc("registryClaim", timeout, () => registryFor(env, version).claimExists(slot.server_id))) continue;
 					const id = await provider.findByTag(tagOf(slot.server_id));
 					if (id) await provider.stop(id);
 					await provider.releaseClaim!(slot.server_id);
-				} catch (err) { result.failed++; fail("slot", err); }
+				} catch (err) { fail("slot", err); }
 			}
-		} catch (err) { result.failed++; fail("slots", err); }
+		} catch (err) { fail("slots", err); }
 	}
 	await save(env, result, timeout);
 	return result;

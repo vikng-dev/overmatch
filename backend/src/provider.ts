@@ -1,6 +1,7 @@
 import type { Env } from "./config";
 import { edgegapFor } from "./edgegap";
 import { Ec2 } from "./ec2";
+import { bounded, DeadlineError } from "./deadline";
 
 export interface LocationData {
 	city: string;
@@ -40,14 +41,11 @@ export interface DeploymentStatus {
 	version: string | null;
 }
 
-export interface ListedDeployment {
-	id: string;
-	tags: string[];
-	/** Provider launch time, required when inventory.maxAgeMs enforces an independent lifetime. */
-	launchedAt?: number;
-}
+/** Capped inventory parses launch time at its edge; unreadable time is local to one host. */
+export type CappedDeployment = { id: string; tags: string[]; launchedAt: number | "unreadable" };
+export type ListedDeployment = CappedDeployment | { id: string; tags: string[]; launchedAt?: never };
 
-export interface Reservation { server_id: string; created_at: number }
+export type Reservation = { server_id: string; created_at: number };
 
 export interface Provider {
 	readonly starts: { attempts: number; retryBootInPlace: boolean };
@@ -86,6 +84,27 @@ export class ProviderError extends Error {
 	) {
 		super(`provider ${op}: HTTP ${status}`);
 		this.name = "ProviderError";
+	}
+}
+
+/** DO RPC preserves ordinary exception names, not custom properties. Expected outside failures
+ * cross Fleet RPC as data; unexpected exceptions still reject and fail the invocation. */
+export type FleetResult<T> = { ok: true; value: T } | { ok: false; cause: "storage" | "provider" };
+
+export async function fleetCall<T>(op: string, timeout: number, call: () => Promise<FleetResult<T>>): Promise<T> {
+	const result = await outsideRpc(op, timeout, call);
+	if (!result.ok) throw new ProviderError(`${op}:${result.cause}`, 0, "unknown");
+	return result.value;
+}
+
+/** Retry only platform transport failures, never remote invariant exceptions. */
+export async function outsideRpc<T>(op: string, timeout: number, call: () => Promise<T>): Promise<T> {
+	try { return await bounded(timeout, call); }
+	catch (err) {
+		if (err instanceof DeadlineError || (err instanceof Error && (("retryable" in err && err.retryable === true) || ("overloaded" in err && err.overloaded === true)))) {
+			throw new ProviderError(`${op}:transport`, 0, "unknown");
+		}
+		throw err;
 	}
 }
 

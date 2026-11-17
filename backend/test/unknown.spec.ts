@@ -1,6 +1,6 @@
 import { runDurableObjectAlarm } from "cloudflare:test";
 import { config } from "../src/config";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { age, env, heartbeat, join, launched, registry, ticket, webhook } from "./helpers";
 
 const V = "0.5.0";
@@ -9,6 +9,20 @@ const PARIS = [{ field: "city", values: ["Paris"], filter_type: "any" }];
 const LONDON = [{ field: "city", values: ["London"], filter_type: "any" }];
 
 describe("a deploy whose outcome is unknown", () => {
+	it("a null Edgegap deploy response preserves main's unknown-outcome reconciliation for the player", async () => {
+		const previous = vi.mocked(fetch).getMockImplementation()!;
+		vi.mocked(fetch).mockImplementation((input, init) => {
+			const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+			return url.pathname === "/v1/deploy" ? Promise.resolve(Response.json(null)) : previous(input, init);
+		});
+		const t = await join({ version: V, locations: ["Paris", "London"], pings: {} });
+		expect(await ticket(t)).toEqual({ state: "starting" });
+		expect((await registry(V).snapshot())[0].deployment_id).toBeNull();
+		vi.mocked(fetch).mockImplementation(previous);
+		await age(V, cfg.startDeadlineMs + cfg.statusPollMs);
+		await runDurableObjectAlarm(registry(V));
+		expect(edgegap.deployments.size).toBe(1);
+	});
 	it("starts no replacement; the alarm finds the deployment by tag and adopts it", async () => {
 		edgegap.loseDeployResponses = 1;
 		const t = await join({ version: V, locations: ["Paris", "London"], pings: { Paris: 10, London: 20 } });

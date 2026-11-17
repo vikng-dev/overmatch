@@ -2,7 +2,7 @@
   "maxServers": 2,
   "startAttempts": 2,
   "lifetimeMinutes": 1440,
-  "provenance": "Owner choices: hosting design decision 3, decision 5 and section 5's independent power-off guard. Sweep margin: owner operational choice, five minutes allows delayed shutdown and cron/API latency before the independent Worker guard. Location: StandIn regional display centroid, not a machine position; replace with provider location metadata if exposed.",
+  "provenance": "Owner choices: hosting design decision 3, decision 5 and section 5's independent power-off guard. Sweep margin: Resolution, five minutes allows clock skew and boot time between EC2 launch and the machine's own power-off timer; not a measured termination bound. Location: StandIn regional display centroid, not a machine position; replace with provider location metadata if exposed.",
   "sweepMarginMinutes": 5,
   "location": {
     "city": "Singapore",

@@ -3,49 +3,33 @@
 Subject: hosting for Overmatch, a multiplayer tank video game. Building lane `lane/aws-provider`,
 bay-3. This revision made no deployment, key handoff, AWS request, quota request or external comment.
 Only local checks and public primary-source reads ran. Production still selects Edgegap.
-The initial full configuration read printed pre-existing identifiers in tool output; later output
-was restricted, and no operator identifiers or credentials were added to the diff.
 
 ## Review dispositions
 
-Each claim was checked against the implementation. All fixes below are implemented; live proof
-is still outstanding. Counts and timings below are MEASURED only where explicitly stated.
+The two supplied reviews were read in full and checked against source. Finding numbers here refer
+to `lenses-provider-2.md` and `review-provider-2.md`, respectively.
 
-| Finding | Disposition and evidence |
+| Finding | Decision and evidence |
 |---|---|
-| P1-1 | Fixed: proving `secrets.required` is empty. Missing credentials/configuration cause typed refusals before launch; credentials are checked before admission. No secrets file. |
-| P2-1 | Both fixes: sweep compares EC2 `launchTime` with authored lifetime plus margin, before consulting claims; fresh heartbeats cannot exempt an old host. Both server roles use dedicated system user `overmatch`, no extra groups or sudo, `NoNewPrivileges=yes`. Hosted `ExecStopPost=+/usr/bin/systemctl --no-block poweroff` executes as root despite `User=overmatch`; no setuid/sudo is involved. Boot tests inspect this exact unit contract and prove harness roles still operate. |
-| P2-2 | Fixed: the factory owns accepted provider names, derives their union, and caches parsing per immutable environment. Registry and sweep consume only Provider capabilities/methods; neither imports EC2 or examines `PROVIDER`. The adapter comment is now true. |
-| P2-3 | Fixed instructions: attach the proving admin hostname/paths to the existing Access application whose audience is configured, or explicitly configure a separate application's audience. A new Access app does not inherit production's audience. |
-| P2-4 | Fixed proof observability: `/admin` exposes the actual Fleet reservation count; proof reads each ended machine's `StateReason.Code`, distinguishing machine shutdown from Worker termination. Forced-silent recovery is explicitly an offline-only row for the reason below, rather than a claimed live result. |
-| P3-1 | Fixed: `IdempotentParameterMismatch` is unknown; it can refer to a previously created machine. Tests exercise identical retries and retained ownership. |
-| P3-2 | Fixed fake: ClientToken idempotency is keyed by zone, with an explicit subnet-to-zone fixture map. Identical retries reuse the instance; changed parameters mismatch; another zone can create another instance. |
-| P3-3 | Fixed fake: Query filters are evaluated by name/value. Integration tests prove `Purpose=harness` and another Worker environment neither fill this cap nor get swept. |
-| P3-4 | Fixed: AWS's `post-x-www-form-urlencoded` signature vector now tests the exact POST body bytes, alongside the two GET vectors. |
-| P3-5 | Fixed filename, preserving `+`: release workflow `upload-server` uses the raw tag in the asset and checksum filename. Boot downloads to fixed local `server.tar.gz`; the release edge verifies the raw name, and boot verifies its digest under the local name. Encoded URLs and raw `+` checksum names are covered. |
-| P3-6 | Fixed: both successful and missing release lookups expire after `RELEASE_CACHE_MS`, one minute (Resolution: bound GitHub reads and stale publication/replacement metadata). Tests cover refresh after eviction. Other fetch failures remain retryable. Callers can still select a published older release; there is no invented minimum version. Lifecycle gates and the independent lifetime guard remain necessary for those releases. |
-| P3-7 | Fixed for every role: literal-path `rm /var/lib/om-harness/server.tar.gz` follows extraction. There is no later archive reader. |
-| P3-8 | Fixed: hosted boot masks/stops apt daily services/timers, unattended upgrades, snapd daemon/socket and snap repair services/timer before play. Absent units tolerate `mask --now` stop errors, but boot verifies every mask and refuses if any updater is active. Ubuntu documents the apt timers; this image's exact snap package/unit inventory remains unverified, so snap units are masked defensively. |
-| P3-9 | Fixed: EC2 capability requires HTTPS. Registry refuses `insecureOrigin` before a ticket or release lookup; hosted-script construction also refuses before user data could carry a report secret over HTTP. |
-| P3-10 | Fixed: `markEnded` is outside the stop catch again. A bookkeeping/replacement failure is no longer misreported as a provider stop failure. |
-| P3-11 | Fixed housekeeping: bundle output is ignored `backend/dist`; README's provider row names `provider.ts`; the future-slice comment and README's scratch-report link are gone; EC2 does not read or configure `JOIN_ATTEMPTS`; regional display coordinates moved to hosting data, labelled StandIn. Shared proving vars/bindings remain repeated because pinned Wrangler does not inherit them. |
-| P3-12 | Fixed: reservations read and malformed slot checks are inside recorded failure handling. Tests inject each fault and verify the D1 sweep result is saved. |
-| P3-13 | Fixed: every created instance, volume and network interface carries `WorkerEnvironment=WORKER_ENV`. Inventory, admission and sweep filter by it in addition to Project/Purpose. Isolation is covered from both environments' perspectives. |
-| P3-14 | Fixed instructions: deploy uses `CI=true` and closed stdin. Pinned Wrangler's `provisionBindings` writes resource identifiers back only interactively. No resource identifier is added to tracked configuration. |
-| P3-15 | Accepted as a correct limit, not a bug: the whole launch and each exchange are bounded. A stalled first call is unknown and reconciled; only a fast failure leaves time for retransmission or a capacity fallback. Expanding the bound is not needed for safety. |
+| Lens error P1, Fleet release | Fixed: Fleet returns typed storage/provider failures as RPC data; its adapter classifies retryable/overloaded platform faults and deadlines. `markEnded` persists its next attempt before release, logs the safe cause, and retains `stopping` and tickets on failure. Eviction/recovery is tested. `settleAll` completes the batch and rejects with every unhandled failure; invariants cannot disappear. |
+| Lens error P2, launch time; security P3-8 | The security review described the reachable code correctly: missing/unreadable time failed the entire EC2 listing. The lens described a latent undefined-time guard additionally swallowed by the task runner. Fixed: capped inventory requires time parsed at the EC2 edge, either a timestamp or named `unreadable`. Bad-time hosts count toward admission, log by host, and still receive ownership/orphan checks; other hosts proceed. Both bad-time forms and live ownership are tested. |
+| Lens error P2, server id | Fixed: reserve rejects malformed ids before EC2 reads or SQL persistence. Sweep catches typed outside failures only; corrupt stored ids reject loudly, tested separately from a storage outage. |
+| Lens error P2; security P3-3 | Fixed: every masked updater must report `inactive`, `failed` or `LoadState=not-found`. Other/empty states, including `activating`, and failed queries report `boot-updates`, refuse play and power off. Tests run the shipped script. |
+| Lens brevity, archive | Partly fixed: checksum uses `$archive`; unnecessary `cd` removed. Variable-path deletion rejected because this task requires a literal absolute delete path; literal `rm` retained. |
+| Lens brevity, fake zone | Fixed: removed stored `Machine.zone`; local zone still scopes ClientToken idempotency. |
+| Lens testing; security P3-10 | Fixed: fake never synthesizes an environment tag; owned fixtures specify `env.WORKER_ENV`. Untagged hosts remain invisible, explicitly tested and the reason for step 0. EC2 request locations read `hosting.location.city`. Other pre-existing coupled assertions remain in untouched tests. |
+| Security P3-1 | Fixed step 0: Project-only count across all purposes/environments, zero runtime resources, then standing `verify`. Standing group cannot also be zero without contradicting verification. |
+| Security P3-2 | Fixed: Registry alarms expire all live rows at the same provider-owned lifetime plus margin, independent of heartbeats. Expiry detaches/fails tickets before outside work, then confirms stop/release through durable retries. Heartbeats enforce expiry; placement excludes expired rows. |
+| Security P3-4, P3-5 | Accepted live limits: updater stop latency and the no-home server user are unmeasured until step 4; it records boot-attempt count and duration. No invented live result. |
+| Security P3-6 | Deferred by instruction: rate limits for `/v1/join` and `/v1/locations` remain an open cutover item. Distinct release versions can still drive GitHub reads and availability throttling. |
+| Security P3-7 | Fixed: margin labelled Resolution for clock skew and boot time before the machine timer. Sweep and Registry read one `inventory.maxAgeMs` owner. |
+| Security P3-9 | Fixed: restored main's unknown-outcome handling for non-ProviderError deploy exceptions, including null Edgegap JSON (regression test); no named failure justified rethrowing. Unsupported `/admin/aws-proof` returns 404 before Access/body checks, tested. |
+| Security P3-11 | Fixed: added tested `revoke-key --env`: teardown removes standing parts and rotation creates a key, so neither does exactly what step 7 needs. Revocation retains user/policy/group for the next slice. |
+| Security P3-12 | Fixed conservatively: stable-tag pattern excludes `+`, but the prerelease wildcard can admit it; upload-server uses raw tags. That proves the local name, not GitHub's asset name. EC2 refuses `+` with `releaseBuildMetadataUnsupported` before network/persistence. Edgegap's version syntax stays unchanged. |
 
-Lens findings, including pre-existing ones:
-
-- Error handling: malformed replacement ticket ids now throw an invariant error naming `newId`'s
-  version contract; they cannot silently strand the player.
-- Brevity: `ids.ts` owns claim-tag encoding and decoding; Fleet, Registry and sweep use it. Removed
-  the unused embed import and duplicate `NO_COLOR`. Retry tests compare serialized bytes directly.
-- Testing: boot loops read the authored attempt budget; malformed fleets are generated from the
-  cap. Query assertions and fake decoding use resource types and tag keys, never tag positions.
-  Shared join capacity, lifecycle deadline/retention and unknown-launch aging tests read config.
-- No backlog row names the edited hosting/backend files. Self-read covered all six lenses; this is
-  not the orchestrator's required independent pre-merge six-reviewer pass. Physical-law and
-  recurring server-update parallelism changes are outside this diff.
+The pre-existing Edgegap `findByTag` response-shape finding remains in its untouched file.
+No backlog rows name the edited files. No agents, live AWS calls, account-changing commands,
+external comments or deployments ran. Independent pre-merge lenses remain the orchestrator's work.
 
 ## Provider interface and ownership
 
@@ -54,7 +38,7 @@ beacons, with optional log pull. Its policy is expressed as:
 
 - `starts`: attempt budget and whether boot failures retry in the same location after confirmed stop;
 - `inventory`: whether listings establish ownership even without a valid claim, and an optional
-  maximum age; capped listings provide `launchedAt`;
+  maximum age shared by sweep and Registry; capped listings require parsed `launchedAt` or named `unreadable`;
 - `requiresHttps`, `usdPerVcpuMinute`;
 - optional `verifyRelease`, `reservations`, `releaseClaim`, and exact-shape `dryRun` methods.
 
@@ -65,8 +49,8 @@ for Edgegap branches. The existing Edgegap webhook HTTP contract remains until c
 It remains Access-protected and creates neither a machine nor a Fleet slot.
 
 `backend/aws-hosting.json` owns cap, start attempts, lifetime, sweep margin and regional display
-metadata. The margin is an operational choice of five minutes to allow shutdown and cron/API
-latency; this is not a measured cloud termination bound. The sweep's cap is independent of the
+metadata. The margin is a Resolution number: five minutes for clock skew and boot time between EC2 launch
+and the machine's own power-off timer; this is not a measured cloud termination bound. The sweep's cap is independent of the
 machine's scheduled shutdown. Failed AWS/sweep operations still defer cleanup; neither guard is a
 spend ceiling. The root contract and launch constraints remain owned by setup/policy data.
 
@@ -75,7 +59,7 @@ spend ceiling. The root contract and launch constraints remain owned by setup/po
 **Policy unchanged; `host-setup apply` does not need to be re-run for these fixes.** The actual
 policy template has no `aws:TagKeys` allowlist and permits extra creation tags. Its RequestTag
 conditions require Project/Purpose; CreateTags is restricted to RunInstances. Existing simulation
-cases still test that contract, and `test_host_setup.py` passes unchanged. No AWS permission was added.
+cases still test that contract, and `test_host_setup.py` passes. No AWS permission was added.
 
 `WORKER_ENV` is an immutable operator identity, distinct for every Worker. Never reuse it for a
 second live deployment. Drain before changing it: older machines without this tag, or with the
@@ -93,29 +77,28 @@ attempt to rely on inheritance that Wrangler does not implement.
 
 ## Local evidence
 
-MEASURED in this revision (final check results recorded below):
+MEASURED final local results:
 
-- Backend suite: 129 production-path tests and 81 EC2 tests pass in the Worker runtime, mounting
-  shipped environment configuration and real Registry/Fleet/HTTP wiring. The unreadable-Fleet
-  fault deliberately emits a runtime SQL error; the test verifies visible saved failure handling.
-- Typecheck passes; generated boot embedding check passes; production and proving local dry-run bundles pass.
-- `python3 scripts/aws/test_harness.py`: 28 tests pass, including both existing harness roles,
-  dedicated server identity, privileged exit hook, archive cleanup/build metadata, updater masking
-  before service start and refusal/power-off if an updater survives.
-- `python3 scripts/aws/test_host_setup.py`: 18 tests pass.
-- Shellcheck for `scripts/aws/machine.sh` and `scripts/aws/host-setup` passes; `git diff --check` passes.
-- No Rust changed; no cargo ran. There is no separately configured backend lint command.
-  The commit bypasses `scripts/hooks/pre-commit` because it unconditionally invokes cargo fmt,
-  which conflicts with this task's explicit no-cargo instruction.
+- Backend tests: 133 production-path tests and 88 EC2 tests pass in the shipped Worker runtime.
+- Backend typecheck and generated boot embedding check pass.
+- `python3 scripts/aws/test_harness.py`: 30 tests pass.
+- `python3 scripts/aws/test_host_setup.py`: 20 tests pass, including key-only revocation and retry.
+- Shellcheck passes for `scripts/aws/machine.sh` and `scripts/aws/host-setup`.
+- Local esbuild Worker bundle and `git diff --check` pass. No Wrangler deploy command ran,
+  including dry-run deploy; esbuild writes only ignored `backend/dist/worker.js`.
+- No separate backend lint command is configured. No Rust changed and no cargo ran; the
+  pre-commit hook checks only Rust formatting and is skipped for this commit.
 
-Primary sources checked: [AWS Instance launchTime](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_Instance.html),
-[EC2 idempotency](https://docs.aws.amazon.com/ec2/latest/devguide/ec2-api-idempotency.html),
-[AWS POST signing vector distributed with botocore](https://github.com/boto/botocore/tree/develop/tests/unit/auth/aws4_testsuite/post-x-www-form-urlencoded),
+The existing evidence test intentionally exercises a missing D1 table and emits its expected SQL
+error; the test passes. Intentional Fleet failures are handled as typed results with no unhandled
+test-run errors.
+
+Primary sources: [systemctl machine-readable state and properties](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html),
+[Cloudflare DO error classification](https://developers.cloudflare.com/durable-objects/best-practices/error-handling/),
+[AWS optional Instance launchTime](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_Instance.html),
 [Ubuntu automatic updates](https://documentation.ubuntu.com/server/how-to/software/automatic-updates/),
-and local pinned `wrangler@4.149.0` schema/source (`validateVars`, `provisionBindings`). Cloudflare's
-public environment documentation was unavailable to this reader; pinned source establishes the
-inheritance/writeback decisions. The current Ubuntu image's package list was not remotely mounted
-or inspected; no instance was launched to discover it.
+and the pinned local Wrangler source. The real Ubuntu unit inventory and stop duration remain
+unmeasured; no instance was launched to inspect them.
 
 ## Live proof — instructions only, not run
 
@@ -123,6 +106,33 @@ Every command below is for a separately authorized operator session, in a leased
 identifiers and credentials in process memory; do not print/store them, use shell tracing, put
 credentials in URLs or use a secrets file. No account spend figure is inferred here. Costs below
 name metered resources rather than account-specific prices. Region is always `ap-southeast-1`.
+
+0. **Read-only drain and standing verification, before deploy.** Count `Project=overmatch`
+   runtime resources across all purposes and environments; every count must be zero. An untagged
+   `Purpose=host` machine is invisible to this Worker's cap and sweep, as the named test proves:
+   this is the reason for step 0. The standing security group is the explicit exception to zero;
+   `verify` requires it, the keyless user and the policy. A literal zero of *all* tagged resources
+   would contradict that prerequisite. `host-setup apply` must already have installed the standing
+   parts in its separately authorized session; do not run it as part of this proof. From repo root:
+
+   ```sh
+   python3 - <<'PY'
+   import sys
+   sys.path.insert(0, "scripts/aws")
+   import host_setup as h
+   h.identity_account()
+   resources = h.tagged_resources(project_only=True)
+   for kind, rows in resources:
+       if kind != "SecurityGroups":
+           print(kind, len(rows))
+   if any(rows for kind, rows in resources if kind != "SecurityGroups"):
+       raise SystemExit("project resources remain across environments; proof refused")
+   PY
+   scripts/aws/host-setup verify
+   ```
+
+   Creates and changes nothing. Filtering only Project means a missing Purpose or environment
+   tag cannot hide a runtime resource. `verify` must pass before proceeding.
 
 1. **Deploy keylessly and configure Access.** From `backend/`:
 
@@ -199,6 +209,10 @@ name metered resources rather than account-specific prices. Region is always `ap
    budget). Both clients must join the same match. Leaving it running meters compute, disk,
    public address and traffic until termination. Successful play proves release fit on the explicit
    root, boot, reporting and the unchanged client contract. Cold-boot/WAN timings are observations.
+   Record the observed boot-attempt count from `/admin`'s `boot N` state label before match end,
+   including failed predecessors, and the observed boot duration against the configured start
+   deadline. The updater stop duration and no-home server user remain unmeasured until this step
+   passes. There is no live boot-attempt count from this lane.
 
 5. **Forced silent boot recovers — kept offline, not claimed by step 4.** There is no safe live
    forcing operation in the present provider interface: user data is fixed, no SSH key is installed,
@@ -251,33 +265,22 @@ name metered resources rather than account-specific prices. Region is always `ap
    PY
    ```
 
-7. **Drain all host resources and teardown.** Use setup's read-only `tagged_resources` reader with
-   the operator profile/region, printing counts only. All ephemeral resource
-   counts must be zero across host environments; the standing security group may remain. The reader
-   checks instances, volumes, interfaces and key pairs; auto-assigned public addresses disappear with
-   their instance/interface (there is no Elastic IP allocation path). Fleet
-   must also be empty in every previously keyed Worker. Then `scripts/aws/host-setup teardown --env
-   aws-proving` revokes the key, removes the three secrets and standing policy/user/security group,
-   and proves absence; it refuses live resources rather than ending a match. It creates nothing.
-   Leaving the unkeyed proving Worker/D1 deployed retains history and incurs their usage/storage,
-   with no launch authority; AWS absence ends instance/disk/address runtime charges. Remove that
-   Worker/D1 only under a separate explicit operator decision. Repeat deployment can succeed while
-   secrets are absent. Exact count-only drain and teardown sequence, from repo root:
+7. **Drain across environments; revoke only the key and Worker secrets.** Repeat step 0's
+   count-only Project read; all runtime counts must be zero. Every previously keyed Worker's Fleet
+   must also be empty. With pinned Wrangler on PATH:
 
    ```sh
-   python3 - <<'PY'
-   import sys
-   sys.path.insert(0, "scripts/aws")
-   import host_setup as h
-   h.identity_account()
-   resources = h.tagged_resources()
-   for kind, rows in resources:
-       print(kind, len(rows))
-   if any(rows for kind, rows in resources if kind != "SecurityGroups"):
-       raise SystemExit("host resources remain; teardown proof refused")
-   PY
-   scripts/aws/host-setup teardown --env aws-proving
+   scripts/aws/host-setup revoke-key --env aws-proving
+   scripts/aws/host-setup verify
    ```
+
+   The new tested `revoke-key` subcommand refuses live project resources, revokes host-user keys,
+   removes only the selected Worker's three hosting secrets, and proves both absent. The standing
+   IAM user, inline policy and security group stay for the next slice. `teardown` would remove those
+   parts and is deliberately not used. No key is created or machine terminated implicitly.
+   Unrelated secrets survive; interrupted removal is restartable. The unkeyed proving Worker/D1
+   retain history and their usage/storage; removing them remains a separate operator decision.
+   Deployment can succeed again without secrets.
 
 ## Remaining live limits
 

@@ -6,7 +6,7 @@ import type { Env } from "./config";
 import { bounded, DeadlineError } from "./deadline";
 import { parseXml, type Xml } from "./ec2-xml";
 import { host, machineScript } from "./host.generated";
-import { providerText, ProviderError, type Provider, type DeployRequest, type DeploymentStatus, type ListedDeployment } from "./provider";
+import { fleetCall, providerText, ProviderError, type Provider, type DeployRequest, type DeploymentStatus, type CappedDeployment } from "./provider";
 import { queryString, signV4 } from "./sigv4";
 import { serverRelease } from "./release";
 
@@ -101,8 +101,8 @@ export class Ec2 implements Provider {
 		if (typeof env.WORKER_ENV !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(env.WORKER_ENV)) throw new Error("config: WORKER_ENV must name this deployment (lowercase letters, digits, hyphens)");
 		this.workerEnv = env.WORKER_ENV;
 	}
-	releaseClaim(serverId: string): Promise<void> { return this.env.FLEET.getByName("ec2").release(serverId); }
-	reservations() { return this.env.FLEET.getByName("ec2").reservations(); }
+	releaseClaim(serverId: string): Promise<void> { return fleetCall("fleetRelease", this.timeoutMs, () => this.env.FLEET.getByName("ec2").release(serverId)); }
+	reservations() { return fleetCall("fleetList", this.timeoutMs, () => this.env.FLEET.getByName("ec2").reservations()); }
 
 	private async query(action: string, params: Record<string, string>, outerSignal?: AbortSignal): Promise<Xml> {
 		if (!this.env.AWS_ACCESS_KEY_ID || !this.env.AWS_SECRET_ACCESS_KEY) throw new ProviderError("credentials", 0, "refused");
@@ -145,9 +145,7 @@ export class Ec2 implements Provider {
 		const n = network(this.env.AWS_HOST_CONFIG);
 		const script = hostedScript(req);
 		const serverId = req.env.find((e) => e.key === "OVERMATCH_SERVER_ID")!.value;
-		let admitted: boolean;
-		try { admitted = await this.env.FLEET.getByName("ec2").reserve(serverId); }
-		catch { throw new ProviderError("admission", 0, "unknown"); }
+		const admitted = await fleetCall("fleetReserve", this.timeoutMs, () => this.env.FLEET.getByName("ec2").reserve(serverId));
 		if (!admitted) throw new ProviderError("cap", 0, "capacity");
 		for (const subnet of n.subnetIds) {
 			const params = launchFields(req, n, subnet, script, this.workerEnv);
@@ -189,8 +187,8 @@ export class Ec2 implements Provider {
 		return { items: xml.one("reservationSet").all("item").flatMap((r) => r.one("instancesSet").all("item")), next: xml.optional("nextToken") };
 	}
 
-	async deployments(maxPages: number): Promise<{ items: ListedDeployment[]; truncated: boolean }> {
-		const items: ListedDeployment[] = [];
+	async deployments(maxPages: number): Promise<{ items: CappedDeployment[]; truncated: boolean }> {
+		const items: CappedDeployment[] = [];
 		let next: string | null = null;
 		for (let page = 0; page < maxPages; page++) {
 			const params: Record<string, string> = { MaxResults: "100" };
@@ -202,9 +200,8 @@ export class Ec2 implements Provider {
 			if (next) params.NextToken = next;
 			const out = await this.describe(params);
 			for (const x of out.items) {
-				const launchedAt = Date.parse(x.one("launchTime").text);
-				if (!Number.isFinite(launchedAt)) throw new ProviderError("launchTime", 0, "unknown");
-				items.push({ id: x.one("instanceId").text, tags: claimTags(x), launchedAt });
+				const launchedAt = Date.parse(x.optional("launchTime") ?? "");
+				items.push({ id: x.one("instanceId").text, tags: claimTags(x), launchedAt: Number.isFinite(launchedAt) ? launchedAt : "unreadable" });
 			}
 			next = out.next;
 			if (!next) return { items, truncated: false };

@@ -88,6 +88,7 @@ type TicketRow = {
 
 /** A live server as the admin dashboard sees it: no key, no secret. */
 export type ServerSnapshot = {
+	boot_attempt: number;
 	id: string;
 	location: string;
 	deployment_id: string | null;
@@ -225,6 +226,7 @@ export class Registry extends DurableObject<Env> {
 			try { await this.release(version); }
 			catch (err) {
 				console.warn("release refused", diag(err));
+				if (err instanceof ProviderError && err.op === "releaseBuildMetadataUnsupported") return { ok: false, status: 400, error: REASONS.releaseVersionUnsupported };
 				return { ok: false, status: err instanceof ProviderError && err.outcome === "releaseMissing" ? 404 : 503,
 					error: err instanceof ProviderError && err.outcome === "releaseMissing" ? REASONS.releaseMissing : REASONS.releaseUnavailable };
 			}
@@ -263,6 +265,10 @@ export class Registry extends DurableObject<Env> {
 		if (!s || !live(s)) return { status: 410 };
 		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
 		const now = Date.now();
+		if (this.expired(s, now)) {
+			await this.finish(serverId, "ended", REASONS.lifetimeExpired);
+			return { status: 410 };
+		}
 		const written = this.sql.exec(
 			`UPDATE servers SET players = ?, capacity = ?, server_state = ?, last_seen = ?, peak_players = MAX(peak_players, ?)
 			 WHERE id = ? AND state IN ('starting', 'ready')`,
@@ -320,7 +326,7 @@ export class Registry extends DurableObject<Env> {
 	snapshot(): ServerSnapshot[] {
 		return this.sql
 			.exec<ServerSnapshot>(
-				`SELECT id, location, deployment_id, state, outcome, reason, players, capacity, server_state, address, port,
+				`SELECT boot_attempt, id, location, deployment_id, state, outcome, reason, players, capacity, server_state, address, port,
 				        created_at, ready_at, last_seen, ended_at, peak_players
 				 FROM servers ORDER BY created_at`,
 			)
@@ -353,6 +359,9 @@ export class Registry extends DurableObject<Env> {
 		const retry: string[] = [];
 		const work: (() => Promise<unknown>)[] = [];
 
+		for (const r of this.sql.exec<ServerRow>("SELECT * FROM servers WHERE state IN ('starting', 'ready')").toArray()) {
+			if (this.expired(r, now)) this.beginStop(r.id, "ended", REASONS.lifetimeExpired, undefined, now);
+		}
 		for (const r of this.sql.exec<ServerRow>("SELECT * FROM servers WHERE state = 'starting'").toArray()) {
 			if (r.created_at + this.cfg.startDeadlineMs <= now) {
 				retry.push(...(this.beginStop(r.id, "failed", REASONS.startTimeout, "starting", now) ?? []));
@@ -379,12 +388,22 @@ export class Registry extends DurableObject<Env> {
 		await this.reschedule();
 
 		// A slow capture holds a slot; replacements wait for the complete outbound batch.
-		await settleAll(work, OUTBOUND_CONCURRENCY);
+		await settleAll(work.map((task) => async () => {
+			try { await task(); }
+			catch (err) {
+				if (!(err instanceof ProviderError)) throw err;
+				console.error("alarm outside failure; durable markers retain retry", diag(err));
+			}
+		}), OUTBOUND_CONCURRENCY);
 		await this.replace(retry);
 		await this.reschedule();
 	}
 
 	// ---- internals ----------------------------------------------------------------------------
+
+	private expired(s: ServerRow, now: number): boolean {
+		return this.provider.inventory.maxAgeMs !== null && s.created_at + this.provider.inventory.maxAgeMs <= now;
+	}
 
 	private server(id: string): ServerRow | undefined {
 		return this.sql.exec<ServerRow>("SELECT * FROM servers WHERE id = ?", id).toArray()[0];
@@ -493,7 +512,7 @@ export class Registry extends DurableObject<Env> {
 		const candidates = this.sql
 			.exec<ServerRow>("SELECT * FROM servers WHERE state IN ('starting', 'ready') AND (server_state IS NULL OR server_state = 'open')")
 			.toArray()
-			.filter((s) => wanted.includes(s.location) && !excluded.has(s.location))
+			.filter((s) => !this.expired(s, now) && wanted.includes(s.location) && !excluded.has(s.location))
 			.map((s) => ({ s, load: this.load(s, now) }))
 			.filter(({ s, load }) => load < s.capacity)
 			.sort((a, b) => ping(a.s.location) - ping(b.s.location) || b.load - a.load || a.s.created_at - b.s.created_at);
@@ -546,7 +565,6 @@ export class Registry extends DurableObject<Env> {
 				env: serverEnvironment(this.cfg, serverId, t.origin, netcodeKey, reportSecret),
 			});
 		} catch (err) {
-			if (!(err instanceof ProviderError)) throw err;
 			console.warn("deploy failed", serverId, diag(err));
 			if (!definiteRejection(err)) {
 				// A deployment may exist: keep the claim and its tickets; the alarm reconciles by tag.
@@ -612,6 +630,7 @@ export class Registry extends DurableObject<Env> {
 		try {
 			found = await this.provider.findByTag(tagOf(serverId));
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			console.warn("deployment lookup failed", serverId, diag(err));
 			return;
 		}
@@ -644,6 +663,7 @@ export class Registry extends DurableObject<Env> {
 		try {
 			st = await this.provider.status(before.deployment_id, before.created_at + this.cfg.startDeadlineMs);
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			console.warn("status poll failed", serverId, diag(err));
 			return;
 		}
@@ -714,6 +734,10 @@ export class Registry extends DurableObject<Env> {
 			s.state,
 		).rowsWritten;
 		if (!moved) return null;
+		if (reason === REASONS.lifetimeExpired) {
+			this.sql.exec("UPDATE tickets SET server_id = NULL, attached_at = NULL, failed_reason = ? WHERE server_id = ?", reason, serverId);
+			return [];
+		}
 		// Tickets of a claim whose deployment may exist stay with it until its fate is known (`adopt`,
 		// `reconcile`): placing them now could start a second server for the same players.
 		return !this.provider.starts.retryBootInPlace && s.state === "starting" && this.fateKnown(s) ? this.releaseTickets(s, reason) : [];
@@ -790,6 +814,7 @@ export class Registry extends DurableObject<Env> {
 		try {
 			await stopWithEvidence(this.env, this.provider, serverId, deploymentId, this.cfg.providerTimeoutMs, this.server(serverId)!.created_at + this.cfg.startDeadlineMs);
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			console.error("stop failed, will retry", serverId, diag(err));
 			return;
 		}
@@ -799,7 +824,14 @@ export class Registry extends DurableObject<Env> {
 	private async markEnded(serverId: string): Promise<void> {
 		const s = this.server(serverId);
 		if (s?.state !== "stopping") return;
-		await this.provider.releaseClaim?.(serverId);
+		// Schedule before RPC: release failure must survive eviction even when no deployment was created.
+		this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", Date.now() + this.cfg.statusPollMs, serverId);
+		try { await this.provider.releaseClaim?.(serverId); }
+		catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
+			console.error("Fleet release failed; stopping row retains retry", diag(err));
+			return;
+		}
 		const now = Date.now();
 		if (!this.sql.exec("UPDATE servers SET state = 'ended', ended_at = ? WHERE id = ? AND state = 'stopping'", now, serverId).rowsWritten) return;
 		const retry = this.releaseTickets(s, s.reason ?? REASONS.startFailed);
@@ -824,14 +856,15 @@ export class Registry extends DurableObject<Env> {
 		const r = this.sql
 			.exec<{ t: number | null }>(
 				`SELECT MIN(t) AS t FROM (
-					SELECT MIN(created_at + ?, COALESCE(next_poll_at, 0)) AS t FROM servers WHERE state = 'starting'
-					UNION ALL SELECT last_seen + ? FROM servers WHERE state = 'ready'
+					SELECT MIN(created_at + ?1, COALESCE(next_poll_at, 0), COALESCE(created_at + ?3, created_at + ?1)) AS t FROM servers WHERE state = 'starting'
+					UNION ALL SELECT MIN(last_seen + ?2, COALESCE(created_at + ?3, last_seen + ?2)) FROM servers WHERE state = 'ready'
 					UNION ALL SELECT COALESCE(stop_at, 0) FROM servers WHERE state = 'stopping'
-					UNION ALL SELECT ended_at + ? FROM servers WHERE state = 'ended'
-					UNION ALL SELECT created_at + ? FROM tickets
+					UNION ALL SELECT ended_at + ?4 FROM servers WHERE state = 'ended'
+					UNION ALL SELECT created_at + ?5 FROM tickets
 				)`,
 				c.startDeadlineMs,
 				c.heartbeatDeadlineMs,
+				this.provider.inventory.maxAgeMs,
 				c.endedRetentionMs,
 				c.ticketTtlMs,
 			)

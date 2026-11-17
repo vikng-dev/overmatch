@@ -101,7 +101,7 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 				? [`<tr><td>${esc(version)}</td><td colspan="6">snapshot unavailable</td></tr>`]
 				: servers.map(
 						(s) =>
-							`<tr><td>${esc(version)}</td><td>${esc(s.location)}</td><td>${esc(s.state)}${s.server_state === "closing" ? " (closing)" : ""}</td>` +
+							`<tr><td>${esc(version)}</td><td>${esc(s.location)}</td><td>${esc(s.state)}${provider.starts.retryBootInPlace ? ` (boot ${s.boot_attempt + 1})` : ""}${s.server_state === "closing" ? " (closing)" : ""}</td>` +
 							`<td class="n">${s.players}/${s.capacity}</td><td>${s.address ? esc(`${s.address}:${s.port}`) : "-"}</td>` +
 							`<td class="n">${ago(now, s.created_at)}</td><td class="n">${s.last_seen ? ago(now, s.last_seen) : "-"}</td></tr>`,
 					),

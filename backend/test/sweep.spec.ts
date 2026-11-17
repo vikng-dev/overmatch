@@ -158,7 +158,7 @@ describe("the orphan sweep", () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp(0);
 		const down = vi.spyOn(Registry.prototype, "liveDeployments").mockImplementation(() => new Promise<never>(() => {}) as never);
-		expect(await sweep(env)).toMatchObject({ listed: 1, stopped: 0, error: "registry: DeadlineError" });
+		expect(await sweep(env)).toMatchObject({ listed: 1, stopped: 0, failed: 1, error: "registry: registryClaims:transport HTTP 0 unknown" });
 		down.mockRestore();
 		expect(running(s.deploymentId)).toBe(true);
 	});

@@ -23,14 +23,16 @@ export async function bounded<T>(ms: number, fn: (signal: AbortSignal) => Promis
 	}
 }
 
-/** Run `tasks` with at most `limit` in flight; each settles independently. */
+/** Finish every task with at most `limit` in flight; report every rejection to the caller. */
 export async function settleAll(tasks: (() => Promise<unknown>)[], limit: number): Promise<void> {
 	let next = 0;
+	const errors: unknown[] = [];
 	const worker = async () => {
 		while (next < tasks.length) {
 			const task = tasks[next++];
-			await task().catch(() => undefined);
+			try { await task(); } catch (err) { errors.push(err); }
 		}
 	};
 	await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
+	if (errors.length) throw new AggregateError(errors, "concurrent tasks failed");
 }

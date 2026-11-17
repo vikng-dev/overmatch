@@ -24,6 +24,10 @@ beforeEach(async () => {
 });
 
 describe("GET /admin", () => {
+	it("an unsupported provider proof is an unknown route before any Access check", async () => {
+		expect((await call("POST", "/admin/aws-proof", { version: "0.5.0" })).status).toBe(404);
+		expect(edgegap.calls).toHaveLength(0);
+	});
 	it("refuses a request without an Access token", async () => {
 		const res = await call("GET", "/admin");
 		expect(res.status).toBe(403);
