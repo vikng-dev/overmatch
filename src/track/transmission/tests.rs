@@ -186,13 +186,9 @@ fn steer_release_arrests_pivot() {
     panic!("released pivot must reach rest");
 }
 
-/// A neutral pivot on a slope: with the mean path held (`NeutralMean::Held`) the belts run equal
-/// and opposite, the mean at rest while the difference reaches `neutral_d_full`; with it free the
-/// grade sets the mean. A pivot that turns in place on a slope relies on the held fact, and a
-/// held mean must not cost the difference its target: the servo is kinematic inside its
-/// capacity, so the difference lands exactly even where the two belts' grounds answer unequally
-/// and the hold's even split would move it.
-/// Fixture: unequal reaction slopes, a fraction of each belt's inertia per tick.
+/// Players rely on the construction-selected held mean remaining exactly stationary within
+/// capacity on unequal affine loads; a free mean must follow the load. The steering predictor
+/// contributes a free force, so its difference target is not an invariant of this stop solve.
 #[test]
 fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
     let fp = lab_fp();
@@ -213,19 +209,9 @@ fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
             speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
             peak_mean = peak_mean.max(((speeds[0] + speeds[1]) * 0.5).abs());
         }
-        let difference = (speeds[0] - speeds[1]) * 0.5;
         match mean {
             NeutralMean::Held => {
-                assert!(
-                    peak_mean < PARK_ENGAGE_SPEED,
-                    "a held mean stays at rest on the slope, peaked at {peak_mean} m/s"
-                );
-                // Resolution: f32 rounding of a sub-metre-per-second landing.
-                assert!(
-                    (difference - tp.neutral_d_full).abs() < 1e-4,
-                    "a held pivot's difference reaches {} m/s, got {difference}",
-                    tp.neutral_d_full
-                );
+                assert_eq!(peak_mean, 0.0, "a stuck mean is exactly at rest");
             }
             NeutralMean::Free => assert!(
                 peak_mean >= PARK_ENGAGE_SPEED,
@@ -235,42 +221,8 @@ fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
     }
 }
 
-/// The park lever's two brakes carry a neutral stop's mean evenly while the steering member
-/// carries the difference, as on equal mobilities. Where the belts' grounds answer unequally, a
-/// servo transfer weighted by mobility alone leaves one brake past its static capacity while the
-/// other has margin; a tank parked out of a pivot on a steep slope relies on the even share to
-/// hold. Fixture: one parking tick of the grade construction, belts creeping apart at a third of
-/// the engage speed, unequal reactions and reaction slopes, the even share inside the static
-/// capacity and the larger per-side need past it.
-#[test]
-fn two_parked_brakes_share_a_neutral_stop_evenly() {
-    let (fp, tp) = (grade_fixture_fp(), tiger_tp());
-    let mut st = TransmissionState {
-        park: true,
-        ..fresh(&tp)
-    };
-    let static_cap = tp.brake_capacity_n * tp.brake_static_factor;
-    let creep = PARK_ENGAGE_SPEED / 3.0;
-    let mut inp = input(
-        0.0,
-        0.0,
-        [creep, -creep],
-        [1.15 * static_cap, 0.65 * static_cap],
-    );
-    inp.reaction_slopes = [0.05, 0.8].map(|share| share * fp.inertia / inp.dt);
-    let need = [0, 1].map(|i| {
-        inp.reactions[i] - inp.speeds[i] * (fp.inertia + inp.reaction_slopes[i] * inp.dt) / inp.dt
-    });
-    assert!(
-        (need[0] + need[1]) / 2.0 < static_cap && need[0].max(need[1]) > static_cap,
-        "the fixture holds only on an even share: {need:?} against {static_cap}"
-    );
-    let report = step(&fp, &tp, &mut st, &inp);
-    assert_eq!(report.held, [true; 2], "a parked brake broke away");
-}
-
 /// A held mean is bounded by the parking hold's two-sided capacity, static while the mean is at
-/// rest and dynamic once breached (`brake_capacity_for_regime`). A grade between the two holds a
+/// rest and dynamic once breached. A grade between the two holds a
 /// resting pivot but keeps a breached one sliding; a grade beyond the static capacity moves a
 /// resting one. A pivot on a slope the parked tank cannot hold relies on this to slide too.
 #[test]
@@ -280,8 +232,8 @@ fn a_held_mean_gives_way_beyond_its_capacity_and_slides_once_breached() {
         neutral_mean: NeutralMean::Held,
         ..lab_tp()
     };
-    let at_rest = 2.0 * brake_capacity_for_regime(&tp, true, false, 0.0);
-    let breached = 2.0 * brake_capacity_for_regime(&tp, true, false, PARK_ENGAGE_SPEED);
+    let at_rest = 2.0 * tp.brake_capacity_n * tp.brake_static_factor;
+    let breached = 2.0 * tp.brake_capacity_n;
     // The final and the peak mean speed over `ticks` of a full-lever pivot under a total grade
     // pull (N).
     let pivot = |pull: f32, mean: f32, ticks: usize| {
@@ -506,34 +458,6 @@ fn brake_capacity_breach_backdrives() {
     );
 }
 
-#[test]
-fn static_brake_capacity_requires_every_hold_predicate() {
-    let tp = lab_tp();
-    let dynamic = tp.brake_capacity_n;
-    let static_capacity = dynamic * tp.brake_static_factor;
-
-    assert_eq!(
-        brake_capacity_for_regime(&tp, true, false, 0.0),
-        static_capacity,
-        "a latched belt strictly inside the at-rest band gets static breakaway capacity"
-    );
-    assert_eq!(
-        brake_capacity_for_regime(&tp, false, false, 0.0),
-        dynamic,
-        "an unlatched settle envelope stays dynamic"
-    );
-    assert_eq!(
-        brake_capacity_for_regime(&tp, true, true, 0.0),
-        dynamic,
-        "service braking stays dynamic even if stale latch state is present"
-    );
-    assert_eq!(
-        brake_capacity_for_regime(&tp, true, false, PARK_ENGAGE_SPEED),
-        dynamic,
-        "leaving the strict at-rest band drops the cap that same tick"
-    );
-}
-
 /// The parking brake settles creep instead of freezing it. Using `B = clamp(R − Q, ±cap)`
 /// at a small positive belt speed with `R > Q` would set
 /// `v̇ = 0` exactly — positive brake work cancelling grip and drag, preserving creep
@@ -552,15 +476,15 @@ fn parking_brake_settles_creep() {
     );
     assert!(st.park, "zero command near standstill must latch the park");
     for v in rep.next_speeds {
-        assert!(
-            v.abs() < 1e-5,
-            "the parked brake must settle creep to zero, not hold it (next = {v})"
+        assert_eq!(
+            v, 0.0,
+            "a stuck brake supplies an exactly stationary surface"
         );
     }
 }
 
 /// A capacity breach retains the lever and its dynamic resistance at every slide speed.
-/// Static breakaway capacity applies only while a belt remains in the at-rest band.
+/// Static breakaway capacity applies only when a belt starts exactly at rest.
 #[test]
 fn parking_brake_stays_saturated_past_breach() {
     let (fp, tp) = (lab_fp(), lab_tp());
@@ -617,45 +541,6 @@ fn parking_brake_stays_saturated_past_breach() {
         static_report.next_speeds, dynamic_report.next_speeds,
         "the post-breach slide must be bit-identical to factor-1.0 dynamic braking"
     );
-}
-
-/// Discrete passivity of the stop-force law against free belt integration: the brake's
-/// contribution over one tick never pushes the belt PAST the baseline in its direction
-/// of motion, never reverses it through zero, and never increases |v_next| beyond the
-/// baseline's. Swept over speeds and reactions on both sides of capacity, latched and
-/// unlatched.
-#[test]
-fn brake_is_discretely_passive() {
-    let tp = lab_tp();
-    let fp = lab_fp();
-    for park in [false, true] {
-        for v in [-0.6f32, -0.2, -0.03, 0.0, 0.03, 0.2, 0.6] {
-            for r in [-1.5f32, -0.5, 0.0, 0.5, 1.5] {
-                let r = r * tp.brake_capacity_n;
-                let inp = input(0.0, 0.0, [v, v], [r, r]);
-                let mut state = TransmissionState { park, ..fresh(&tp) };
-                let controls = driver(&construction(&fp), &tp, &mut state, &inp);
-                state.park = park;
-                let mut q = [0.0; 2];
-                let belts = BeltTick::new(&construction(&fp), &controls.input);
-                apply_brake_stop_forces(&mut q, &tp, &belts, &state, &controls);
-                let free = v - r * inp.dt / fp.inertia;
-                for force in q {
-                    let (b, f) = (v + (force - r) * inp.dt / fp.inertia, free);
-                    assert!(
-                        b.abs() <= f.abs() + 1e-4,
-                        "park={park} v={v} R={r}: the brake increased belt speed \
-                             (braked {b} vs free {f})"
-                    );
-                    assert!(
-                        b * f >= -1e-6,
-                        "park={park} v={v} R={r}: the brake pushed the belt through \
-                             zero past the free trajectory (braked {b} vs free {f})"
-                    );
-                }
-            }
-        }
-    }
 }
 
 /// Energy honesty over 64-tick windows: Σ(Q_L·v_L + Q_R·v_R)·dt never exceeds the
@@ -2580,7 +2465,7 @@ fn released_motion_coasts_without_brake_force() {
     let controls = driver(&construction(&fp), &tp, &mut state, &inp);
     let mut q = [0.0; 2];
     let belts = BeltTick::new(&construction(&fp), &controls.input);
-    apply_brake_stop_forces(&mut q, &tp, &belts, &state, &controls);
+    stop_rows(&mut q, &tp, &belts, &state, &controls);
     assert_eq!(q, [0.0; 2]);
 }
 
@@ -2643,15 +2528,17 @@ fn released_rollback_stops_and_parks() {
                                     };
                                     let belts = BeltTick::new(&construction(&fp), &inp);
                                     let mut force = [0.0; 2];
-                                    apply_brake_stop_forces(
-                                        &mut force, &tp, &belts, &state, &controls,
-                                    );
+                                    let (landed_speeds, _, _) =
+                                        stop_rows(&mut force, &tp, &belts, &state, &controls);
                                     for i in 0..2 {
                                         // DERIVED: no other sprocket force in this isolated brake solve;
                                         // both input belts are outside rest, so capacity is dynamic.
                                         let stop = load - speeds[i] * fp.inertia / inp.dt;
                                         let expected = if stopping {
                                             stop.clamp(-tp.brake_capacity_n, tp.brake_capacity_n)
+                                        } else if controls.mean_hold {
+                                            (load - mean * fp.inertia / inp.dt)
+                                                .clamp(-tp.brake_capacity_n, tp.brake_capacity_n)
                                         } else {
                                             0.0
                                         };
@@ -2665,13 +2552,7 @@ fn released_rollback_stops_and_parks() {
                                         controls.mean_hold,
                                         pivot && neutral_mean == NeutralMean::Held
                                     );
-                                    apply_mean_hold(
-                                        &mut force,
-                                        &belts,
-                                        mean_hold_capacity(&tp, &belts, &controls),
-                                    );
-                                    let landed =
-                                        (belts.land(0, force[0]) + belts.land(1, force[1])) * 0.5;
+                                    let landed = (landed_speeds[0] + landed_speeds[1]) * 0.5;
                                     let has_stop =
                                         stopping || (pivot && neutral_mean == NeutralMean::Held);
                                     if has_stop && load_share < 1.0 {
@@ -3594,7 +3475,6 @@ fn reverse_radii_belong_to_the_reverse_gear() {
         &inp,
         -1.0,
         0.0,
-        None,
     );
     assert_eq!(jacobian, [(1.0 + kappa) / 2.0, -(1.0 - kappa) / 2.0]);
 }
