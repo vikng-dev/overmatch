@@ -104,10 +104,11 @@ WARMUP_S = 30
 BOOT_TIMEOUT_S = 300
 # Resolution: launch (or reboot) to the first SSH answer, six times the ~19 s it takes (MEASURED). Past
 # it the machine booted without a network: the image's cloud-init (26.2) ran its local stage before the
-# network card's driver was up ("The instance must have at least one eligible NIC" on the console;
-# MEASURED on 3 of the first 10 launches), so it fetched neither the network setup nor the user-data.
-# That is the race canonical/cloud-init issue 6697 reports, fixed upstream after 26.2; its recovery is a
-# reboot, so such a machine is rebooted once.
+# network card's driver was up ("The instance must have at least one eligible NIC" on the console), so
+# it fetched neither the network setup nor the user-data. That is the race canonical/cloud-init issue
+# 6697 reports, fixed upstream after 26.2; its recovery is a reboot, so such a machine is rebooted once.
+# MEASURED with cloud-init 26.2: c7a.large lost the race in 1 boot of 11, c7a.medium in 4 of 4 (its
+# reboot included), so no 1-vCPU c7a can serve here.
 REACH_TIMEOUT_S = 120
 # Resolution: start to input slot, per client; a client exits at 20 s without one, so this only
 # bounds a client that is still starting.

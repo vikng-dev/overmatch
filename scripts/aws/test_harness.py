@@ -222,8 +222,8 @@ SETTINGS = ["--tag", "v0.7.0-alpha.18", "--server-type", "c7a.large", "--client-
             "--bots", "26", "--clients", "4", "--window-s", "10"]
 FOREIGN = {"InstanceId": "i-0f0f0f0f0f0f0f0f0", "InstanceType": "c7a.medium", "State": {"Name": "running"},
            "Tags": [{"Key": "Name", "Value": "om-worker"}], "CpuOptions": {"CoreCount": 1, "ThreadsPerCore": 1}}
-CREATES = {"create-security-group", "authorize-security-group-ingress", "run-instances", "reboot-instances", "terminate-instances",
-           "delete-security-group"}
+WRITES = {"create-security-group", "authorize-security-group-ingress", "run-instances", "reboot-instances",
+           "terminate-instances", "delete-security-group"}
 LEAKS = re.compile(r"\b(?:i|sg|vol|eni|ami|subnet|vpc)-[0-9a-f]{8,}|192\.0\.2\.\d+|10\.0\.0\.\d+|123456789012|arn:aws")
 
 
@@ -391,7 +391,7 @@ class Failures(unittest.TestCase):
                 fixture = Fixture(self.addCleanup, seed=seed, **env)
                 self.assertEqual(fixture.main("run", *argv), status, fixture.stderr)
                 self.assertIn(cause, fixture.stderr)
-                self.assertEqual(CREATES & set(fixture.ops()), set())
+                self.assertEqual(WRITES & set(fixture.ops()), set())
                 self.assertIsNone(LEAKS.search(fixture.stdout + fixture.stderr))
 
     def test_teardown_removes_every_harness_resource_and_nothing_else(self):
