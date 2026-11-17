@@ -365,7 +365,9 @@ mod tests {
                 let bytes = world
                     .entity_mut(carrier)
                     .serialize(fns_id, bevy_replicon::prelude::RepliconTick::new(label.0));
-                let stamp: TickStamp = postcard::from_bytes(&bytes).unwrap();
+                let (frame_start_s, departure_offset_s): (f64, f32) =
+                    postcard::from_bytes(&bytes).unwrap();
+                let stamp = TickStamp::new(frame_start_s, departure_offset_s).unwrap();
                 let work = (tick / 16 + work_for(label.0)).as_secs_f64();
                 // Fixture: an independent send-to-prior-client-frame absence bound.
                 let previous_client_frame = start + work + 0.0625;

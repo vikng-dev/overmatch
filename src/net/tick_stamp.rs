@@ -287,18 +287,80 @@ mod tests {
         );
     }
 
-    /// Invalid peer stamps must be refused during decoding, before reaching timing arithmetic.
+    /// The client's timing arithmetic must receive only valid stamps; malformed payloads leave
+    /// the component and receipt queue untouched and retain the typed refusal for match-close.
     #[test]
-    fn wire_admission_refuses_nonfinite_and_negative_stamp_fields() {
+    fn wire_admission_refuses_malformed_stamp_payloads() {
+        use bevy_replicon::prelude::RepliconPlugins;
+        use bevy_replicon::shared::replication::registry::{
+            ReplicationRegistry, test_fns::TestFnsEntityExt,
+        };
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::state::app::StatesPlugin,
+            RepliconPlugins,
+        ));
+        let (_, fns_id) =
+            app.world_mut()
+                .resource_scope(|world, mut registry: Mut<ReplicationRegistry>| {
+                    registry.register_rule_fns(
+                        world,
+                        // The adapter exposes decode errors without the test helper's panic.
+                        replication().with_in_place(|decode, ctx, _stamp, message| {
+                            assert!(decode(ctx, message).is_err());
+                            Ok(())
+                        }),
+                    )
+                });
+        let initial = TickStamp::new(0.0, 0.0).unwrap();
+        let carrier = app.world_mut().spawn(initial).id();
         // Fixture: tuples have the same postcard field layout as the stamp's serialized struct.
         for fields in [
             (f64::NAN, 0.0_f32),
+            (f64::INFINITY, 0.0),
+            (f64::NEG_INFINITY, 0.0),
             (-1.0, 0.0),
+            (0.0, f32::NAN),
             (0.0, f32::INFINITY),
+            (0.0, f32::NEG_INFINITY),
             (0.0, -1.0),
         ] {
             let bytes = postcard::to_allocvec(&fields).unwrap();
-            assert!(postcard::from_bytes::<TickStamp>(&bytes).is_err());
+            app.world_mut()
+                .entity_mut(carrier)
+                .apply_write(bytes, fns_id, RepliconTick::new(1));
+            assert!(matches!(
+                app.world_mut()
+                    .resource_mut::<ReplicationStorage>()
+                    .global
+                    .remove::<wire::StampRefusal>(),
+                Some(wire::StampRefusal::Invalid(_))
+            ));
         }
+        // Fixture: empty and truncated payloads cannot supply both fields.
+        for bytes in [vec![], vec![0; size_of::<f64>() + size_of::<f32>() - 1]] {
+            app.world_mut()
+                .entity_mut(carrier)
+                .apply_write(bytes, fns_id, RepliconTick::new(1));
+            assert!(matches!(
+                app.world_mut()
+                    .resource_mut::<ReplicationStorage>()
+                    .global
+                    .remove::<wire::StampRefusal>(),
+                Some(wire::StampRefusal::Encoding(_))
+            ));
+        }
+        assert_eq!(
+            *app.world().entity(carrier).get::<TickStamp>().unwrap(),
+            initial
+        );
+        assert!(
+            app.world()
+                .resource::<ReplicationStorage>()
+                .global
+                .get::<ReceivedStamps>()
+                .is_none()
+        );
     }
 }

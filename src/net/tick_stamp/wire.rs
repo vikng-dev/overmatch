@@ -4,7 +4,7 @@
 
 use super::{ReceivedStamps, SerializationClock, TickStamp};
 use bevy_replicon::prelude::RuleFns;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 impl TickStamp {
     pub(in crate::net) fn new(
@@ -30,14 +30,6 @@ impl TickStamp {
 struct Fields {
     frame_start_s: f64,
     departure_offset_s: f32,
-}
-
-impl<'de> Deserialize<'de> for TickStamp {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let fields = Fields::deserialize(deserializer)?;
-        TickStamp::new(fields.frame_start_s, fields.departure_offset_s)
-            .map_err(serde::de::Error::custom)
-    }
 }
 
 pub(in crate::net) fn replication() -> RuleFns<TickStamp> {
