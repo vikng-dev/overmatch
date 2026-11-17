@@ -98,10 +98,10 @@ TAGS = {"Project": "overmatch", "Purpose": "harness"}
 WINDOWS = 8
 # Resolution: after the last client's slot, so its tank's spawn and the joins sit outside every window.
 WARMUP_S = 30
-# Resolution: launch to listening or ready. A fresh launch reached listening in 64-69 s with a Docker
-# install in it (MEASURED 2026-11-17, .agents/scratch/aws-ec2-measure-2026-11-17.md); this bounds a
-# slow mirror, not that time.
-BOOT_TIMEOUT_S = 600
+# Resolution: launch to listening or ready, ten times the ~30 s this boot takes on c7a (MEASURED by
+# this harness). A boot whose network never comes up (seen once: cloud-init's network stage with no
+# route) fails here instead of waiting out the cap.
+BOOT_TIMEOUT_S = 300
 # Resolution: start to input slot, per client; a client exits at 20 s without one, so this only
 # bounds a client that is still starting.
 SLOT_TIMEOUT_S = 60
