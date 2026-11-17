@@ -953,28 +953,51 @@ lever or service brakes act, Brake intent included, so `brake_force` is never co
 
 ## Released-motion policy
 
-The game's driving model: a staffed Driver with no throttle or steering request does not let the
-vehicle roll against its engaged gear. `update_park_latch` sets the existing park lever at any
-speed when mean belt motion opposes that ladder. The capacity-limited stop law brakes it to rest
-and keeps it parked. Above brake capacity it continues sliding with saturated brakes, just as a
-parked vehicle does; no engine catch enlarges that capacity. Releasing a reversal or a sliding
-pivot has the same outcome as being shoved backward while coasting.
+The game's driving model: with no throttle request, the Driver brakes motion against the engaged
+gear to rest, within brake capacity, unless the vehicle is in a neutral pivot, whose mean hold is
+its only stop. This requires staffed controls; steering requires served task work.
 
-An unparked coast along the gear above first-gear idle remains unbraked by the lever. Released sub-idle
-motion still parks. A steering request releases park, leaving a neutral pivot's construction-selected
-mean hold as its only stop (`Free` supplies none). Releasing steering ends that exception. A held
-opposite-ladder request uses service braking, waits at rest, then pays its direction cut. An
-intentional hill start still uses propulsive pedal and the one-way launch lever.
+`update_park_latch` sets the existing lever for rollback outside a neutral pivot, at any speed.
+At rest it retains the two-sided hold, except during the pivot. Brake capacity is dynamic while
+moving and static at rest. A load between those capacities holds an undisturbed parked vehicle
+but cannot arrest a moving one; beyond static capacity even rest breaks away. No engine catch
+enlarges those limits. A neutral pivot clears park and leaves its construction-selected mean
+hold as its only stop (`Free` supplies none). Held steering outside neutral has no exemption.
+
+Along-gear motion retains its existing released sub-idle stop when not steering. Above that
+threshold an unparked coast remains unbraked by the lever. That clause is not redundant with
+rollback parking; neither is the at-rest latch that holds an opposite request through its pause.
+A held opposite-ladder request uses service braking, waits at rest, then pays its direction cut.
+An intentional hill start still uses propulsive pedal and the one-way launch lever.
 
 With served task work and no propulsive pedal, `update_clutch_state` couples only motion along the
-engaged ladder outside rest and neutral pivots. Above that gear's idle speed this permits engine
-braking; below it, the idle catch can supply forward torque. The latter's interaction with a
-reversal request, the along-gear neutral boundary, and free launch-gear selection during rollback
-remain follow-up #392. This policy does not resolve them.
+engaged ladder outside park, mean rest and neutral pivots. The mean-rest check stays: after
+steering release, counter-rotating belts can have a resting mean without either belt being at
+rest or park set. Brake intent already removes propulsive pedal, so its duplicate clutch
+predicate and argument are removed. Above that gear's idle speed this permits engine braking; below it, the idle catch can supply
+forward torque. Its interaction with a reversal request, the along-gear neutral boundary, and
+free launch-gear selection during rollback remain follow-up #392.
 
-Chosen: set park while moving against the gear with no request, using the existing dynamic brake
-capacity until rest. Rejected: keeping the clutch coupled for an idle-catch hill hold, which makes
-the engine an extra stop outside the brake budget and causes the #373 feedback; leaving rollback
-declutched without braking, which lets a staffed vehicle run away even inside brake capacity;
-and a separate service-brake policy with another latch or speed band, since the park lever already
-carries the required stop and persistent hold.
+The HUD's `P` reads the retained park bit (`src/drive_hud.rs`, `standard_drive_row`), so it now
+shows while the Driver is braking rollback at speed. That bit still depends on history under
+the same powered rollback physics: pressing throttle after released braking retains park,
+whereas holding throttle through a failed climb leaves it off; service braking dominates both.
+Deriving `P` from perceptible braking state remains open. The clutch alone cannot distinguish
+it: an unstaffed vehicle can have its clutch In while retaining its two-sided park brake, and
+launch/service braking can use Slip or In. The HUD does not receive the authoritative brake
+regime, so a correct derivation needs more than a local display predicate.
+
+Chosen: the existing park lever supplies dynamic braking and persistent rest outside the neutral
+pivot. Rejected: keeping the clutch coupled for an idle-catch hill hold, which makes the engine
+an extra stop outside the brake budget and causes the #373 feedback; leaving rollback declutched
+without braking, which lets a staffed vehicle run away even inside brake capacity; exempting all
+steering rather than the neutral pivot; and another latch, timer or speed band to hide a regime
+boundary.
+
+A `Free` mean brings bounded but sustained on/off braking at `neutral_speed_m_s`: inside neutral
+it has no mean stop; outside, rollback sets the lever again. MEASURED across the class fixtures
+at half dynamic brake load: crossings persist in the final two seconds of a five-second run,
+in both ladders and from entries inside and outside neutral. It does not settle in that
+observation. This belongs to #392's neutral-boundary class. The trace and construction ranges
+live in `.agents/scratch/belt-tick/report.md`, "Round-4 held-steer reproduction and state
+enumeration"; they are observations, not numeric obligations. No band, timer or latch is added.

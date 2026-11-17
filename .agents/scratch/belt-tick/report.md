@@ -201,38 +201,41 @@ are arithmetic drivetrain fixtures, not rendered play or timings.
 The review's P1 is confirmed on `e56b22ab` production code, before the park edit. The new
 `released_rollback_stops_and_parks` fixture was first run with staffed controls, no input, park
 off, first gear, and rollback above first-gear idle. Per-side downhill load is half the dynamic
-brake capacity. This command failed with `released rollback must reach rest and park`:
+brake capacity. The original test failed on its first per-tick park assertion,
+`no request against gear must set park: shoved`, rather than at the runaway outcome:
 
 ```sh
 scripts/serial-cargo test --lib --features dev_ui,bitprobe \
   released_rollback_stops_and_parks -- --nocapture
 ```
 
-MEASURED lab trace: entry -1.4814816 m/s, tick 0 -1.598669 m/s, tick 127 -16.481482 m/s.
+A separate observation recorded this MEASURED lab trace: entry -1.4814816 m/s, tick 0
+-1.598669 m/s, tick 127 -16.481482 m/s.
 Park stayed off, clutch Out, no driving. DERIVED: the 60 kN per-side load on 8,000 kg belts
 adds -0.1171875 m/s per tick without any braking, matching the trace. This confirms the review's
 mechanism; no hand-worked P1 claim was disproved.
 
-After the edit, the expanded test exercises three entry routes on all three constructions and
+In round 3, the test exercised three entry routes on all three constructions and
 both ladders: an external shove into rollback, releasing the opposite key during an over-capacity
 slide, and releasing steering after a pivot slides beyond neutral. The key-release entries first
 run the actual held request and overload, then release. Each route branches to a load inside
 dynamic capacity and one beyond even static capacity. The shove fixture specifies resulting
 velocity; it does not claim collision integration.
 
-MEASURED: all 18 within-capacity entries reach a two-sided brake-held rest, first held at tick
+MEASURED in round 3: all 18 within-capacity entries reach a two-sided brake-held rest, first held at tick
 indices 1–15, and stay held through the observation. All 18 overloaded entries keep sliding with
 park set, clutch Out and no driving. Held speeds end within 5.4e-9 m/s of zero; the test reads the
 brake's held result and the owner's rest band rather than asserting floating cancellation is
-bit-exact zero. It asserts slowing of the mean, since steering can redistribute the two belts'
-motion while their mean slows. These outputs are observations, never numeric pass conditions.
+bit-exact zero. That release phase flattened the belt difference every tick; the state
+enumeration below carries both outputs into the next tick. These outputs are observations,
+never numeric pass conditions.
 
 `neutral_pivot_keeps_its_mean_hold_as_the_only_stop` checks both ladders and both construction
 choices (`Held`/`Free`): mean drift against the gear does not set park, service or one-way brakes,
 and only `Held` supplies a mean stop. `released_motion_coasts_without_brake_force` still proves
 that a coast along the gear stays unbraked. The policy and rejected alternatives are owned by the
-design doc linked below. #392's pre-existing scenarios are left open rather than folded into this
-last fix round; no hull-coupled reproduction of its below-idle reversal claim is made here.
+design doc linked below. #392 also owns the Free-mean threshold behavior measured below; no
+hull-coupled reproduction of its below-idle reversal claim is made here.
 
 ### Round-1 shipped-app observations (not re-measured in round 2)
 
@@ -321,14 +324,14 @@ Observations for the owner to judge by feel (MEASURED in the fixtures unless mar
 | Beyond static capacity, holding the opposite direction | Rollback continues with bounded service braking, clutch Out and no old-ladder catch. It no longer judders through rest, and a skipped-rest entry no longer produces a different coupled regime. Park releases when rollback agrees with the request; it does not flicker every tick. The cut waits for actual rest. |
 | Between dynamic and static limits during the reversal pause | Undisturbed rest holds. A fixture nudge of -0.1 m/s at tick 8 formerly returned to rest (within rounding) in all three members. It now continues sliding: the next means are -0.170313, -0.178947 and -0.152083 m/s. The dynamic brakes cannot recover rest, so the direction cut remains pending until the load eases or outside motion arrests it. |
 | Hill start | Propulsive pedal still launches through the one-way lever without rollback. Before/after fixture launch gears, final speeds and cut counts agree in the one comparison; no old output is pinned. |
-| Pivot | A within-capacity held mean still pivots in place; active steering keeps park and per-side brakes off. Releasing steering after a slide now brakes and parks within capacity. An overloaded rollback pivot now slides out of neutral without the old ladder catching it repeatedly. Rolling along the engaged ladder retains its neutral/geared transition, including the finite threshold crossings noted above. |
-| No input, rolling against the gear on a hill | MEASURED across the class: inside dynamic capacity, park sets immediately, brakes arrest the roll and hold rest. Beyond even static capacity, park stays set and the tank keeps sliding with clutch Out. Previously the unparked tank ran away inside capacity. |
-| Shoved backward while coasting | MEASURED as an external velocity change: the same stop applies, without a key press. The fixture models the shove's resulting motion, not a collision. |
-| Reversal key released during an overloaded slide | MEASURED: release sets park; after the load falls within capacity, it stops and holds. If overload persists it keeps sliding, without an old-gear catch. The held reversal's pause/cut behavior is unchanged. |
+| Pivot | Within dynamic capacity, a Held mean stops and pivots; only a neutral pivot keeps park and per-side brakes off. Outside neutral, held steering brakes rollback too. Between dynamic and static capacity, a moving Held mean cannot regain rest, although undisturbed rest holds. Beyond static capacity even rest breaks away. A Free mean has no stop inside neutral; its threshold behavior is measured below. Along-gear steering retains its neutral/geared transition. |
+| No throttle, rolling against the gear on a hill | Outside a neutral pivot, dynamic brakes arrest motion within capacity and park holds rest. Between dynamic and static capacity a moving entry keeps sliding; undisturbed park holds. Beyond static capacity rest also breaks away. On `e56b22ab`, release with no steering left the vehicle unbraked inside capacity; on `3b3f338e`, held steering outside neutral still did. |
+| Shoved backward while coasting | The same capacity-limited stop applies without a key press. A load between dynamic and static capacity cannot recover a moving entry. The fixture models velocity, not a collision. |
+| Reversal key released during an overloaded slide | Release applies park. A load below dynamic capacity permits stopping; a load between dynamic and static capacity or above static capacity keeps the moving entry sliding without an old-gear catch. The held reversal's pause/cut behavior is unchanged. |
 | Engine braking downhill along the gear | DERIVED: unchanged; the no-request rollback clause is false along the gear above the parking threshold. The existing coupling and unbraked-coast witnesses pass. Below gear idle the catch may power motion; #392 owns that pre-existing interaction. |
 
 No authored data was tuned to preserve an earlier output. Rendered slope feel remains for the
-owner; the slab and parked observations above are historical round-1 evidence, not round-3
+owner; the slab and parked observations above are historical round-1 evidence, not round-4
 validation of contact behavior.
 
 The contact defect is a separate solver integration change, left unfinished in this lane:
@@ -347,9 +350,10 @@ The contact defect is a separate solver integration change, left unfinished in t
 - #373: the reproduced reversal and steering-rollback clutch root is fixed across the class
   fixtures. Round 1 alone was incomplete. The owner's slope/pivot feel judgment and any
   different entry beyond those tested remain observations to assess, not discharged by this report.
-- #392: pre-existing below-idle catch opposing a reversal, the along-gear neutral boundary, and
-  free launch-gear selection while rolling against the ladder remain unchanged. The review's
-  hull-coupled P2-2 scenario is not established by these arithmetic fixtures.
+- #392: below-idle catch opposing a reversal, the along-gear neutral boundary, and
+  free launch-gear selection while rolling against the ladder remain open. The no-throttle
+  Free-mean on/off brake boundary is also this issue's class; see the round-4 trace below.
+  The review's hull-coupled P2-2 scenario is not established by these arithmetic fixtures.
 
 The shared solve belongs game-side, through Avian's public schedules and solver-body state,
 as the #353 comment and #358 prototype establish. A belt and its drivetrain are game degrees
@@ -359,6 +363,94 @@ The existing prototype's fixed anchor and single-manifold evidence does not disc
 moving-crank and shared-budget requirements. A frozen effective belt mobility or a later
 settlement of its impulse would preserve the rejected estimate-of-the-other-side approach.
 
+### Round-4 held-steer reproduction and state enumeration
+
+Before the production edit, the added held-steer entry in `released_rollback_stops_and_parks`
+failed on `3b3f338e` with `within-capacity rollback must slow: steering held`. The per-tick
+park assertion had already been removed, and both belt speeds were carried into each next tick.
+Command:
+
+```sh
+scripts/serial-cargo test --lib --features dev_ui,bitprobe \
+  released_rollback_stops_and_parks -- --nocapture
+```
+
+This confirms the review's last unbraked route. The selected exemption is `neutral_pivot`, not
+all steering. The design doc owns the one policy sentence and HUD implications. No band, timer
+or new latch hides the neutral boundary.
+
+The final fixture enumerates states, not entry routes: each class construction, both ladders,
+both mean constructions, no/along/against throttle, no/held steering, mean inside/outside neutral,
+motion along/against the engaged gear, and loads below dynamic, between dynamic and static, and
+above static capacity. Brake-only force is checked independently of powered thrust: a powered
+request can add engine force, so its total acceleration is not a brake-capacity oracle.
+Released rollback trajectories carry both belt outputs and assert stopping/holding or a
+capacity-limited slide. Park is asserted at rest, never on every moving tick.
+
+DERIVED coverage: 864 state entries = 3 class drivetrains × 2 mean constructions × 2 ladders ×
+3 throttle requests × 2 steering requests × 2 neutral-window positions × 2 motion directions ×
+3 loads. The brake-only solve checks every entry; 144 no-throttle rollback trajectories carry
+both belt speeds through five simulated seconds. A supported Held pivot also releases its actual
+counter-rotating outputs and must finish with both belts at rest and park set.
+
+| Throttle request | Motion / steering state | Expected outcome |
+|---|---|---|
+| None | Against gear, no steer, either window | Below dynamic capacity: stop and park, then hold. Between dynamic and static, or above static: a moving entry slides with bounded braking. |
+| None | Against gear, held steer outside neutral | Same dynamic brake budget. Held construction reaches its neutral pivot and holds the mean; Free construction has no stop once it reenters neutral. |
+| None | Either direction, held steer inside neutral | Only the construction's mean hold acts: Held arrests supported mean drift and preserves counter-rotation; Free follows the load until it leaves neutral. A moving Held mean beyond dynamic capacity slides. |
+| None | Along gear, not a neutral pivot | The existing unsteered sub-idle stop brakes; otherwise it coasts without stop-brake force. The coupled engine can still supply drag or below-idle catch. |
+| Along gear | Along gear | No two-sided stop request; propulsion and the one-way launch lever retain their own job. |
+| Along gear | Against gear | Capacity-limited service braking plus powered thrust; brake contribution is bounded independently of the engine. |
+| Against gear | Either motion direction, either steering/window state | Capacity-limited service braking; after reaching rest the existing reversal pause/cut permits launch on the requested ladder. It cannot use the old ladder's engine catch. |
+
+Clause audit: the neutral-pivot exemption replaces the all-steering exemption. The sub-idle
+along-gear stop is not redundant with rollback; the at-rest latch holds a reversal pause and
+requested motion releases it for launch. The clutch keeps park, signed-shaft, mean-rest and
+neutral-pivot predicates: each has independent states. In particular, released counter-rotation
+can have a resting mean with neither belt at rest. Only the duplicate Brake predicate and its
+argument are removed: Brake already makes propulsive pedal zero. No new threshold is added.
+
+HUD follow-up is listed, not patched: `standard_drive_row` still shows `P` from the retained
+park bit, including at-speed rollback braking. Powered rollback can have the same physics with
+either bit value. A clutch-only filter would incorrectly hide park on an unstaffed vehicle,
+whose clutch springs In; authoritative brake-regime telemetry is absent from this view. A sound
+fix needs more than a few local display lines, so no approximate HUD rule is introduced.
+
+**Free construction: bounded but sustained chatter, not settling.** MEASURED in all 12
+within-capacity held-steer trajectories (three constructions, both ladders, two entry windows),
+with per-side load half dynamic brake capacity. Crossings persist in the final two seconds of
+the five-second fixture observation:
+
+| Fixture ladder size (forward gears) | Final-window absolute mean range (m/s) | Neutral crossings in final 128 ticks |
+|---|---|---|
+| 5 | 0.405559–0.624645 | 70 |
+| 8 | 0.341318–0.657107 | 124 |
+| 3 | 0.374155–0.630033 | 98–107 |
+
+The range aggregates both ladder directions and both initial windows. One eight-gear fixture,
+forward ladder, entry inside neutral, records this MEASURED trace:
+
+| Tick | Input mean (m/s) | Next mean (m/s) | Park selected |
+|---|---|---|---|
+| 192 | -0.35018647 | -0.5080812 | false |
+| 193 | -0.5080812 | -0.3473689 | true |
+| 194 | -0.3473689 | -0.5052636 | false |
+| 195 | -0.5052636 | -0.34499663 | true |
+| 196 | -0.34499663 | -0.50289136 | false |
+| 197 | -0.50289136 | -0.34299928 | true |
+| 198 | -0.34299928 | -0.500894 | false |
+| 199 | -0.500894 | -0.3413176 | true |
+
+This is #392's regime-boundary class, not a discharged issue. It replaces the unbraked runaway
+with the selected bounded stop/release policy; no band, timer or latch suppresses it. The Held
+within-capacity trajectories settle on their mean hold, with no tail crossings. Loads between
+dynamic and static, and above static, leave the moving entries sliding; no trajectory assertion
+requires the two moving belts or their mean to change monotonically on every tick. Steering can
+exchange their motion. The independent brake-only table checks the capacity bound instead.
+
+Logs: `/tmp/belt-tick-r4-red.log` contains the failing held-steer reproduction;
+`/tmp/belt-tick-r4-final-tests.log` contains the final class observations and green targeted run.
+
 ## Verification and ratchet
 
 - `cargo fmt --all --check`: passed.
@@ -366,25 +458,26 @@ settlement of its impulse would preserve the rejected estimate-of-the-other-side
 - `track::transmission`: 105 tests passed, including both no-pedal clutch regressions and the
   two released-motion policy witnesses. The reversal test retains the modest-overload cycle witness.
 - `track::sim`: 32 tests passed.
-- `tests::doc_citations`: 3 tests passed. Total targeted: 140 passed.
-- Command: `scripts/serial-cargo test --lib --features dev_ui,bitprobe -- track::transmission track::sim tests::doc_citations --nocapture`.
+- `tests::doc_citations`: 3 tests passed. The shared drive-HUD format test also passed.
+  Total targeted: 141 passed.
+- Command: `scripts/serial-cargo test --lib --features dev_ui,bitprobe -- track::transmission track::sim standard_drive_row tests::doc_citations --nocapture`.
 - Test build emitted the existing linker unwind-table-size warning; no Rust warning blocked CI clippy.
 - Round-1 rigid-wall, slab and parked probes passed as observations, with the limits above;
-  none was re-run in rounds 2 or 3. The wall case is removed.
+  none was re-run in rounds 2 through 4. The wall case is removed.
 - No wire type definition changed; no protocol hash or revision update is needed. No fork
   file changed. The temporary observation harness is removed.
 - The six lenses were applied as a lane self-review: no failure handling, alternative path,
   per-asset rule, duplicated ownership, historical pass condition, or new serial work is
   introduced by the edited items. The tests use class fixtures and owner-supplied capacities
   and cut durations. No backlog row names any edited file, so none is removed.
-- The orchestrator's six lenses passed rounds 1 and 2. Independent review of this round's diff
+- The orchestrator's six lenses passed rounds 1 through 3. Independent review of this round's diff
   remains the orchestrator's pre-merge responsibility; no agents were spawned here.
 
 The new and retained policy witnesses distinguish these mutants:
 
 | Test | Mutant it rejects |
 |---|---|
-| `released_rollback_stops_and_parks` | Removing against-gear parking leaves no-request rollback unbraked (red on `e56b22ab`); an unbounded stop arrests the overloaded cases; a direction-only fix misses the reverse ladder or released-pivot entry. |
+| `released_rollback_stops_and_parks` | Exempting all steering leaves held-steer rollback unbraked (outcome red on `3b3f338e`); removing against-gear parking misses unsteered rollback; an unlimited brake violates the state-table force bound. Both ladders and all input states are enumerated. |
 | `neutral_pivot_keeps_its_mean_hold_as_the_only_stop` | Applying released-motion parking to an active neutral pivot substitutes per-side brakes for its construction-selected mean hold. |
 | `released_motion_coasts_without_brake_force` | Parking every released moving vehicle brakes a deliberate coast along the gear. |
 | `pending_reversal_does_not_power_rollback` / `steering_rollback_does_not_close_the_main_clutch` | Removing the no-pedal direction check transmits the old gear's catch against rollback; a park-only fix misses skipped rest and active steering. Both failed in round 2's mutation runs. |
