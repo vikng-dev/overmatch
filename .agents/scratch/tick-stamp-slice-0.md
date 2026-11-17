@@ -151,9 +151,10 @@ Sources are the locally pinned registry crates: `bevy_time-0.20.1`, `bevy_replic
   This means all mutate messages for that checkpoint were processed successfully, subject to
   Replicon's normal skips of obsolete/unknown entities. It does not mean the view has rendered
   the tick or that every older tick completed. Lightyear's server backend enables tracking through
-  its `interpolation` feature (`lightyear_replication/src/lib.rs:263–271`). The client cannot read
-  the remote setting, so exceeding the pending receipt cap of stamped arrivals with no completion
-  panics as a broken invariant; summary resets do not reset that check.
+  its `interpolation` feature (`lightyear_replication/src/lib.rs:263–271`). The clean-link test
+  `shipped_replication_completes_stamped_ticks_for_view_clock_samples` guards that build dependency
+  with the shipped client/server plugins and protocol. Incomplete ticks under network loss are
+  measured by `completed_ticks` and `evicted_incomplete`, without a runtime assertion.
 - If a mutate message is lost, that tick emits no completion event. Later ticks can complete
   independently. Recovery within the tracker horizon may finish the old tick; after it ages out,
   `confirm` returns false (`server_mutate_ticks.rs:112–143`). The separate `contains` API treats

@@ -63,7 +63,6 @@ pub(super) struct ViewClock {
     pending: HashMap<RepliconTick, Arrival>,
     receipt_order: VecDeque<RepliconTick>,
     completion: CompletionLine,
-    stamped_without_completion: usize,
 }
 
 impl ViewClock {
@@ -82,7 +81,6 @@ impl ViewClock {
                 self.completion.evicted_incomplete += 1;
             }
         }
-        self.stamped_without_completion += 1;
         self.receipt_order.push_back(checkpoint);
         self.pending.insert(
             checkpoint,
@@ -96,7 +94,6 @@ impl ViewClock {
     }
 
     fn complete(&mut self, checkpoint: RepliconTick, now_s: f64, previous_s: f64) {
-        self.stamped_without_completion = 0;
         self.completion.completed_ticks += 1;
         let Some(arrival) = self.pending.remove(&checkpoint) else {
             // Initial reliable state, receipt overflow or a skipped stale stamp can leave no
@@ -216,18 +213,14 @@ fn receive(
         }
     }
     // Lightyear's interpolation feature enables Replicon's server track_mutate_messages;
-    // without it no whole-tick completion events exist. That remote setting is not readable
-    // here, so continued stamped arrivals without completion must fail within the pending cap.
+    // without it no whole-tick completion events exist. The clean-link test
+    // shipped_replication_completes_stamped_ticks_for_view_clock_samples guards that build dependency.
     // Use every completion message, not just last_confirmed_checkpoint, which mirrors only the
     // newest completed tick. Replicon's contains() assumes old ticks complete after 64 ticks;
     // these events instead require every message of that particular tick to have been applied.
     for event in completed.read() {
         clock.complete(event.tick, now, now - real.delta_secs_f64());
     }
-    assert!(
-        clock.stamped_without_completion <= RECEIPT_CAP,
-        "stamped ticks exceeded the pending window without completion: Lightyear interpolation must enable Replicon track_mutate_messages"
-    );
 }
 
 #[cfg(test)]
@@ -294,35 +287,41 @@ mod tests {
         assert_eq!(readings[0], readings[1]);
     }
 
-    /// A client cannot silently collect stamps forever if the server's completion tracking is off.
+    /// View-clock samples rely on the shipped server tracking whole-tick mutation completion.
+    /// A clean UDP link must deliver completion events for ticks carrying the shipped stamp.
     #[test]
-    #[should_panic(expected = "stamped ticks exceeded the pending window without completion")]
-    fn stamped_ticks_without_completions_break_the_pending_window_invariant() {
-        use bevy::time::TimeUpdateStrategy;
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .init_resource::<Timing>()
-            .init_resource::<ReplicationStorage>()
-            .init_resource::<ReplicationCheckpointMap>()
-            .add_message::<MutateTickReceived>()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(
-                super::super::server::TICK,
-            ));
-        install(&mut app);
-        // Fixture: one more stamped tick than the pending window can retain, no completions.
-        for tick in 0..=RECEIPT_CAP as u32 {
-            let checkpoint = RepliconTick::new(tick);
-            app.world_mut()
-                .resource_mut::<ReplicationCheckpointMap>()
-                .record(checkpoint, Tick(tick));
-            app.world_mut()
-                .resource_mut::<ReplicationStorage>()
-                .global
-                .get_or_default::<ReceivedStamps>()
-                .queue
-                .push_back((checkpoint, stamp(f64::from(tick))));
-            app.update();
+    fn shipped_replication_completes_stamped_ticks_for_view_clock_samples() {
+        use bevy::ecs::message::MessageCursor;
+        use lightyear::prelude::{NetworkTarget, Replicate};
+        use std::time::Duration;
+
+        let _udp = super::super::test_harness::lock_real_udp_test();
+        let (mut server, mut client) = super::super::client::match_exit::in_match();
+        client.init_resource::<Timing>();
+        install(&mut client);
+        server
+            .world_mut()
+            .spawn((stamp(0.0), Replicate::to_clients(NetworkTarget::All)));
+        let mut completed = MessageCursor::<MutateTickReceived>::default();
+        // Fixture: allow initial reliable replication and subsequent stamped mutations to arrive.
+        for _ in 0..500 {
+            server.update();
+            std::thread::sleep(Duration::from_micros(300));
+            client.update();
+            let clock = client.world().resource::<ViewClock>();
+            let checkpoints = client.world().resource::<ReplicationCheckpointMap>();
+            if completed
+                .read(client.world().resource::<Messages<MutateTickReceived>>())
+                .any(|event| {
+                    checkpoints
+                        .get(event.tick)
+                        .is_some_and(|tick| clock.samples.contains_key(&tick))
+                })
+            {
+                return;
+            }
         }
+        panic!("view-clock samples require whole-tick completion events for stamped ticks");
     }
 
     /// D3 measures received production intervals, including missing ticks rather than a nominal T.
