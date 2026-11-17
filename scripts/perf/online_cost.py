@@ -25,11 +25,15 @@ THE STATS LINE (src/net/server_stats.rs) is one bare `println!` per period on st
                   "period_s":1.0,"projectiles":3,"rss_mb":61.5,"tanks":3,"tick_hz":64.0,
                   "tick_us":{"max":900,"p50":210,"p95":480},"ticks":64}
 
-`parse_stats_line` is the one place that knows that shape: the token `server_stats`, then one JSON
-object. Its keys are not fixed here: nested objects flatten to dotted keys (`tick_us.p95`), every
-numeric leaf is kept, nulls and strings are dropped. When the format moves, that function is the
-change. A line without the token, or whose object does not parse, is not a stats line and is
-skipped, so a server without the lever yields an empty table, not an error.
+`stats_object` is the one place that knows that shape: the record `server_stats {`, then one JSON
+object (`scripts/aws/harness.py` reads it too). Its twin `jitter_object` is the one place that knows
+the client's once-a-second `client_jitter {json}` record (src/net/frontier.rs), which only the AWS
+harness reads. `parse_stats_line` flattens a stats object: its keys are not fixed here; nested
+objects flatten to dotted keys (`tick_us.p95`), every numeric leaf is kept, nulls, strings and lists
+are dropped. When a format moves, its `*_object` is the change. A line without the record's marker
+is skipped, so a server without the lever yields an empty table, not an error; a marker whose object
+is missing or does not parse is refused (`MalformedRecord`), since a dropped period would leave a
+window that looks whole.
 
 THE WINDOW. The lines carry no clock, so the runner marks the window by content: at the window's
 start it saves the last stats line the server had printed (the marker), and at its end it saves
@@ -53,7 +57,11 @@ import sys
 from pathlib import Path
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-STATS_TOKEN = "server_stats"
+# src/net/server_stats.rs PREFIX, a space, then the object. The marker alone makes a record, so a
+# line cut before its object is refused, not skipped; a module path (`server_stats:`) is no marker.
+STATS_RECORD = re.compile(r"\bserver_stats(?:\s+|$)")
+# src/net/frontier.rs `record_jitter`: `client_jitter `, then the object, inside an `info!` line.
+JITTER_RECORD = re.compile(r"\bclient_jitter(?:\s+|$)")
 # One spawn line per bot (`server: spawned circling bot 3 tank …`), or one line naming a count
 # (`spawned 10 bots`). `\bspawned` never matches inside `respawned`.
 BOT_SPAWN = re.compile(r"\bspawned\b.*\bbots?\b", re.IGNORECASE)
@@ -75,25 +83,38 @@ def flatten(value: object, prefix: str = "") -> dict[str, float]:
     return out
 
 
-def parse_stats_line(line: str) -> dict[str, float] | None:
-    """THE format function: the stats of one `server_stats {json}` line, flattened, or None.
+class MalformedRecord(ValueError):
+    """A `server_stats` or `client_jitter` record whose object is missing or does not parse."""
 
-    Expected: the token, then one JSON object, anywhere in the line (a container log may prefix
-    it). Adapt the token or the decoding here, and only here.
-    """
+
+def record_object(line: str, record: re.Pattern, kind: str) -> dict | None:
+    """The object of the line's `<kind> {json}` record, which a journal or container log may
+    prefix: None for a line without the marker, MalformedRecord for a marker without one object."""
     clean = ANSI.sub("", line)
-    at = clean.rfind(STATS_TOKEN)
-    if at < 0:
-        return None
-    brace = clean.find("{", at + len(STATS_TOKEN))
-    if brace < 0:
+    found = record.search(clean)
+    if found is None:
         return None
     try:
-        value, _ = json.JSONDecoder().raw_decode(clean[brace:])
-    except json.JSONDecodeError:
-        return None
-    stats = flatten(value)
-    return stats or None
+        value, _ = json.JSONDecoder().raw_decode(clean, found.end())
+    except json.JSONDecodeError as error:
+        raise MalformedRecord(f"a {kind} record does not parse ({error.msg}): {clean.strip()[:160]}") from error
+    if not isinstance(value, dict):
+        raise MalformedRecord(f"a {kind} record holds no object: {clean.strip()[:160]}")
+    return value
+
+
+def stats_object(line: str) -> dict | None:
+    return record_object(line, STATS_RECORD, "server_stats")
+
+
+def jitter_object(line: str) -> dict | None:
+    return record_object(line, JITTER_RECORD, "client_jitter")
+
+
+def parse_stats_line(line: str) -> dict[str, float] | None:
+    """The stats of the line's `server_stats {json}` record, flattened; None for a line without one."""
+    value = stats_object(line)
+    return None if value is None else flatten(value)
 
 
 def after_marker(lines: list[str], marker: str) -> tuple[str, list[str]]:

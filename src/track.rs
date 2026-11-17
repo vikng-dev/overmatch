@@ -10,6 +10,7 @@
 //! The math modules (`oracle`/`route`/`wheels`/`wrap`) are pure (no ECS, no assets); `view` is the
 //! game's ECS adapter over `wrap`, mounted by the windowed clients only.
 
+pub(crate) mod block;
 pub mod drive;
 #[cfg(test)]
 pub(crate) mod drive_fixture;
