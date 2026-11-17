@@ -4,9 +4,10 @@
 > [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15): the client's own firing
 > response is a view overlay (fire intent, own recoil response), not a predicted sim.
 
-The authority resolves every projectile contact, penetration, ricochet, and damage result. A
-client may predict its own firing response immediately, but no transient shot message grants
-gameplay authority. Replicated combat state remains the durable result; shot messages explain and
+Subject: the game's fire presentation and damage model; game state only. The authority resolves
+every projectile contact, penetration, ricochet and HP dose. Own fire presents from its server
+announcement ([[0037-one-authoritative-timeline-and-view-overlays]]); no transient shot message
+grants gameplay authority. Replicated combat state remains the durable result; shot messages explain and
 present discrete causes and confirmations.
 
 ## Identity and source facts
@@ -24,11 +25,16 @@ an asset, or a replicated entity's eventual components.
 
 | Fact | Delivery | Reason |
 |---|---|---|
-| Automatic-weapon `FireEvent`, `RicochetKeyframe`, `ImpactConfirm` | `FireVisualBatch` on `UnorderedUnreliable` | Frequent presentation may expire; it must not create reliable cosmetic debt. |
-| Single-shot `FireEvent`, `RicochetKeyframe`, `ImpactConfirm` | Individual message on `UnorderedReliable` | A cannon's start and post-bounce trajectory are sparse, legible events worth repairing. |
-| Owner-private `DamageConfirm` | Individual message on a separate `UnorderedReliable` channel | An authority-confirmed damaging action must reach its shooter exactly once and must not disclose target internals to observers. |
+| Owner `WeaponGate` and `WeaponLoads` | Ordered reliable replication insertion; unordered unreliable mutations with latest-state acknowledgement | Snapshots converge, but may coalesce several consumptions; they do not identify fires. |
+| Automatic-weapon `FireEvent` | `FireVisualBatch` on `FireChannel` (`UnorderedUnreliable`) | Frequent presentation may expire; it must not create reliable cosmetic debt. |
+| Single-shot `FireEvent` | Individual message on `OutcomeChannel` (`UnorderedReliable`) | Sparse starts are worth repairing; reliability supplies no finite arrival deadline. |
+| Every weapon's `FlightOutcome` (including ricochet and impact) | Individual message on `OutcomeChannel` (`UnorderedReliable`) | An announced round must follow the authority's complete path, including automatic fire; large paths may fragment. |
+| Owner-private `DamageConfirm` | Individual message on `DamageChannel` (`UnorderedReliable`) | An authority-confirmed dose must reach its shooter exactly once and must not disclose target internals to observers. |
 
-Automatic facts live in per-combatant queues and are admitted round-robin into bounded batches.
+DERIVED from `src/net/protocol.rs` channel/component registration and
+`src/net/shot_transport.rs` queue and send rules.
+
+Automatic start announcements live in per-combatant queues and are admitted round-robin into bounded batches.
 Current-tick facts outrank older repair copies when the admission budget saturates.
 Each fact is eligible for up to three admission opportunities and expires after 16 authority
 ticks. Under saturation, a fact can expire before its first opportunity or after only some repairs;

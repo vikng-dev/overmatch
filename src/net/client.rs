@@ -29,7 +29,8 @@ use super::protocol::{
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::{
-    FlightOutcome, MAX_COSMETIC_CATCH_UP_TICKS, SanctionedInsert, SanctionedShots, ShotSource,
+    FireShell, FireShellOrigin, FlightOutcome, MAX_COSMETIC_CATCH_UP_TICKS, SanctionedInsert,
+    SanctionedShots, ShotSource,
 };
 use crate::command::{DeviceCommand, TankCommand};
 use crate::run_window::RunWindow;
@@ -1107,6 +1108,32 @@ fn close_lost_match(
     closed.write(verdict);
 }
 
+/// A malformed server weapon record is terminal outside input. Retire replicas and the link
+/// atomically before another cadence consumer can index them; the lobby renders the cause.
+pub(super) fn close_malformed_weapon_record(world: &mut World, reason: String) {
+    let roots: Vec<_> = world
+        .query_filtered::<Entity, With<NetTank>>()
+        .iter(world)
+        .collect();
+    let links: Vec<_> = world
+        .query_filtered::<Entity, With<NetcodeClient>>()
+        .iter(world)
+        .collect();
+    for root in roots {
+        world.despawn(root);
+    }
+    for link in links {
+        world.despawn(link);
+    }
+    // Socket-free replica consumers have no connection lifecycle.
+    if let Some(mut retry) = world.get_resource_mut::<ConnectRetry>() {
+        *retry = ConnectRetry::default();
+    }
+    world
+        .resource_mut::<Messages<super::matchmaking::MatchClosed>>()
+        .write(super::matchmaking::MatchClosed::Ended(reason));
+}
+
 /// The connect screens. The first connect is the [`Flow::Joining`](crate::flow::Flow) screen,
 /// spawned on entering it and labelled from [`ConnectRetry`]; a match's dropped link is
 /// `Overlay::ConnectStatus`, declared only in a match, in the `Declare` phase,
@@ -1597,9 +1624,11 @@ impl PendingFireEvents {
     }
 
     fn pop_front(&mut self) -> Option<PendingFire> {
-        self.order
-            .pop_front()
-            .and_then(|shot| self.by_shot.remove(&shot))
+        self.order.pop_front().map(|shot| {
+            self.by_shot
+                .remove(&shot)
+                .expect("each pending queue id has exactly one fire in the pending map")
+        })
     }
 
     fn requeue(&mut self, pending: PendingFire) {
@@ -2036,9 +2065,9 @@ fn resolve_pending_fire_events(
 ) {
     let pending_count = pending_fires.len();
     for _ in 0..pending_count {
-        let Some(pending) = pending_fires.pop_front() else {
-            return;
-        };
+        let pending = pending_fires.pop_front().expect(
+            "the captured pending count guarantees one queued fire per pass; deferred fires requeue",
+        );
         let shot = pending.fire.shot_id();
         if pending_fire_expired(pending.received_tick, now) {
             crate::shot_trace::record(
@@ -2071,6 +2100,70 @@ fn pending_fire_expired(received_tick: Tick, now: Tick) -> bool {
     now - received_tick > PendingFireEvents::TTL_TICKS
 }
 
+/// One released shot's wire/state facts — everything presentation needs except its age, which is
+/// the seam's to measure.
+#[derive(Clone, Copy)]
+struct ReleasedShot {
+    birth: Vec3,
+    origin: Vec3,
+    direction: Dir3,
+    /// The fired round, bound from the shooter's weapon data.
+    round: crate::rounds::Round,
+    tracer: bool,
+    mechanism: crate::spec::FireMechanism,
+    shooter: ShotSource,
+    shot: crate::ShotId,
+}
+
+/// The game's damage-model presentation: one announced round, muzzle dressing and recoil kick.
+/// Age is measured on the releasing cursor, not the leading local timeline, so a crossing release
+/// starts at the muzzle. `None` names a release beyond [`MAX_COSMETIC_CATCH_UP_TICKS`]; the caller
+/// records its omission.
+fn present_released_shot(
+    released_tick: Tick,
+    (cursor_tick, overstep): (Tick, f64),
+    shot: ReleasedShot,
+    recoil: &mut PendingRecoilKicks,
+    commands: &mut Commands,
+) -> Option<u32> {
+    // A release happens at or after the crossing, so the age is non-negative by construction; the
+    // clamp mirrors `fire_catch_up_ticks`' don't-rewind rule for a malformed tick.
+    let age = (f64::from(cursor_tick - released_tick) + overstep).max(0.0);
+    // Whole ticks feed the fixed-tick catch-up march; the dropped fraction is under one tick of
+    // shell flight.
+    let catch_up_ticks = age as u32;
+    if catch_up_ticks > MAX_COSMETIC_CATCH_UP_TICKS {
+        return None;
+    }
+    present_shot_at_age(catch_up_ticks, shot, recoil, commands);
+    Some(catch_up_ticks)
+}
+
+/// The trigger body the seam and the pre-sync arrival fallback share: one `FireShell` plus one
+/// queued barrel kick per released shot. Age policy lives at the call sites — this only writes it.
+fn present_shot_at_age(
+    catch_up_ticks: u32,
+    shot: ReleasedShot,
+    recoil: &mut PendingRecoilKicks,
+    commands: &mut Commands,
+) {
+    commands.trigger(FireShell {
+        shot_origin: FireShellOrigin::Reconstructed,
+        catch_up_ticks,
+        ..FireShell::of_round(
+            &shot.round,
+            shot.birth,
+            shot.origin,
+            shot.direction,
+            shot.mechanism,
+            shot.tracer,
+            Some(shot.shooter),
+            Some(shot.shot),
+        )
+    });
+    recoil.push(shot.shooter.tank, shot.shooter.weapon);
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "one presentation boundary owns reconstruction and its release record"
@@ -2086,7 +2179,7 @@ fn spawn_reconstructed_fire(
     commands: &mut Commands,
 ) {
     let event = &fire.event;
-    let facts = super::fire_presentation::ReleasedShot {
+    let facts = ReleasedShot {
         birth: event.birth,
         origin: event.origin,
         direction: fire.direction,
@@ -2102,21 +2195,12 @@ fn spawn_reconstructed_fire(
     };
     let catch_up_ticks = match cursor {
         // CURSOR clock: the seam measures the shot's age on the same clock that released it.
-        Some(cursor) => super::fire_presentation::present_released_shot(
-            event.fire_tick,
-            cursor,
-            facts,
-            pending_recoil,
-            commands,
-        ),
+        Some(cursor) => {
+            present_released_shot(event.fire_tick, cursor, facts, pending_recoil, commands)
+        }
         // Pre-sync arrival presentation has no cursor; age against the local timeline.
         None => fire_catch_up_ticks(event.fire_tick, now).inspect(|&catch_up_ticks| {
-            super::fire_presentation::present_shot_at_age(
-                catch_up_ticks,
-                facts,
-                pending_recoil,
-                commands,
-            );
+            present_shot_at_age(catch_up_ticks, facts, pending_recoil, commands);
         }),
     };
     let Some(catch_up_ticks) = catch_up_ticks else {
@@ -2204,7 +2288,7 @@ pub(super) fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time
 }
 
 /// The game's damage model: local/arrival age for ingress validity and pre-sync presentation
-/// (`spawn_reconstructed_fire`). Cursor releases use `fire_presentation::present_released_shot`
+/// (`spawn_reconstructed_fire`). Cursor releases use `present_released_shot`
 /// instead. `None` skips tracer and recoil; `Some(0)` spawns at the muzzle without rewinding.
 ///
 /// Lightyear's monotonic u32 `Tick` difference saturates to i32, so outside-input extremes stay
@@ -3443,6 +3527,9 @@ mod tests {
                 world.entity_mut(root).insert((
                     GameControlled,
                     Interpolated,
+                    TankSim {
+                        weapons: vec![crate::tank::WeaponState::default(); 2],
+                    },
                     WeaponGate {
                         weapons: vec![
                             WeaponGateState {
@@ -4142,5 +4229,95 @@ mod tests {
             assert!(reconnect_backoff_secs(n) <= reconnect_backoff_secs(n + 1));
             assert!(reconnect_backoff_secs(n) <= client_policy().reconnect_cap_s.0);
         }
+    }
+
+    #[derive(Resource, Default)]
+    struct CursorShells(Vec<(Option<ShotSource>, u32)>);
+
+    fn capture_cursor_shell(fire: On<FireShell>, mut captured: ResMut<CursorShells>) {
+        captured.0.push((fire.shooter, fire.catch_up_ticks));
+    }
+
+    /// A shot released at the cursor presents exactly once — one `FireShell`, one recoil
+    /// kick — younger than its first tick (`catch_up_ticks` 0), which keeps it under the muzzle
+    /// flash's stale gate. The fixture plants a `LocalTimeline` 16 ticks past the release as
+    /// wrong-clock bait: a mutant that ages the shot on the local/arrival timeline reports 16
+    /// (flash stale-gated, shell 16 ticks downrange) and reds the 0.
+    #[test]
+    fn a_cursor_released_shot_presents_once_younger_than_its_first_tick() {
+        let mut app = App::new();
+        app.init_resource::<CursorShells>();
+        app.init_resource::<PendingRecoilKicks>();
+        app.add_observer(capture_cursor_shell);
+        let mut local = LocalTimeline::default();
+        local.apply_delta(116);
+        app.insert_resource(local);
+        let shooter = app.world_mut().spawn_empty().id();
+        let points = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_points = points.clone();
+        app.add_observer(move |fire: On<FireShell>| {
+            captured_points
+                .lock()
+                .unwrap()
+                .push((fire.origin, fire.birth))
+        });
+        let facts = ReleasedShot {
+            birth: Vec3::new(1.0, 2.0, 8.0),
+            origin: Vec3::new(1.0, 2.0, 3.0),
+            direction: Dir3::NEG_Z,
+            round: crate::tank::WeaponRound::resolve("88mm_AP")
+                .expect("a shipped round")
+                .round,
+            tracer: true,
+            mechanism: crate::spec::FireMechanism::Single,
+            shooter: ShotSource {
+                tank: shooter,
+                weapon: 0,
+                round: 0,
+            },
+            shot: crate::ShotId {
+                combatant: crate::CombatantId(7),
+                weapon: 0,
+                fire_tick: 100,
+            },
+        };
+        let catch_up = app
+            .world_mut()
+            .run_system_once(
+                move |mut recoil: ResMut<PendingRecoilKicks>, mut commands: Commands| {
+                    present_released_shot(
+                        Tick(100),
+                        (Tick(100), 0.25),
+                        facts,
+                        &mut recoil,
+                        &mut commands,
+                    )
+                },
+            )
+            .expect("the seam runs");
+        assert_eq!(
+            catch_up,
+            Some(0),
+            "released a quarter-overstep before the cursor: age < 1 tick, never the local \
+             timeline's 16",
+        );
+        assert_eq!(
+            *points.lock().unwrap(),
+            vec![(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 2.0, 8.0))],
+            "the echoed birth and visual muzzle remain separate through presentation"
+        );
+        let world = app.world();
+        let captured = world.resource::<CursorShells>();
+        let &[(source, presented_catch_up)] = captured.0.as_slice() else {
+            panic!("exactly one bang presents, got {}", captured.0.len());
+        };
+        let source = source.expect("the bang carries its shooter");
+        assert_eq!((source.tank, source.weapon), (shooter, 0));
+        assert_eq!(presented_catch_up, 0);
+        assert_eq!(
+            world.resource::<PendingRecoilKicks>().queued(),
+            &[(shooter, 0)],
+            "one kick, through the same seam as the bang",
+        );
     }
 }

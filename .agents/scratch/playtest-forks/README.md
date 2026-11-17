@@ -129,41 +129,52 @@ The server owns disclosure. A live client must receive only the detail the curre
 
 ---
 
-## F4 — Remote automatic-fire continuity
+## F4 — Automatic-fire continuity
 
-**Status:** open · bounded default implemented 2026-07-13 · settle with impaired-network playtests
+Subject: the game's fire presentation and damage model; game state only.
 
-**The question.** How much loss or thinning in another tank's automatic-fire presentation remains
-readable before cadence, direction, or cause-and-effect feels broken?
+**Status:** open · settle owner and observer presentation with impaired-network playtests
 
-**Default — every authored automatic fact is eligible for bounded repair.** Fire, ricochet, and
-terminal visuals receive up to three unordered-unreliable admission opportunities and expire after
-16 authority ticks. Both values are **DERIVED STARTING DEFAULTS**. Admission pressure may permit
-fewer opportunities; instrumentation distinguishes expiry before the first from expiry after a
-partial repair. The receiver deduplicates by `ShotId`; missing visuals never change authority or
-owner-private damage confirmation. Without contention, the present spacing is the emission tick and
-the next two authority ticks—a **DERIVED 31.25 ms** first-to-last span at 64 Hz. This is not yet a
-claim of resilience to correlated loss.
+**The question.** How much loss or thinning in one's own or another tank's automatic-fire
+presentation remains readable before cadence, direction, or cause-and-effect feels broken?
 
-**Alternatives kept alive:** fewer copies under contention; longer or shorter presentation expiry;
-distance/visibility-aware tracer density that never hides a gameplay-visible tank; or a compact
-firing-generation/cadence state for recovery after correlated loss. Reliable per-round automatic
-traffic is deliberately not an alternative because stale retransmit debt scales with the burst.
+**Default — bounded announcement repair, no synthetic round.** Automatic starts receive up to
+three unordered-unreliable admission opportunities and expire after 16 authority ticks. Both values
+are **DERIVED STARTING DEFAULTS**. Admission pressure may permit fewer opportunities. Every weapon's
+paths are reliable (ADR-0021). The receiver deduplicates starts by `ShotId`; missing starts never
+change authority or owner-private damage confirmation. Without contention, current opportunities
+fall on the emission tick and the next two authority ticks: a **DERIVED 31.25 ms** first-to-last span
+at 64 Hz, not a claim of resilience to correlated loss.
 
-**Why it's a playtest call.** Independent-loss arithmetic cannot tell us whether real correlated
-loss looks like an acceptable hole in a burst or a misleading silence. Test at normal and adverse
-RTT/loss while several tanks fire, watching remote muzzle cadence, post-bounce continuation, late
-visuals, and whether confirmation still feels causally attached to the shot. **MEASURED on local
-loopback 2026-07-14:** all three server-traced copy opportunities fell inside a six-receive-update
-loss window; the covered automatic shot produced no presentation, while the following shot recovered
-exactly once. That establishes the current correlated-loss hole; it does not decide whether the hole
-is perceptually acceptable.
+For own fire, losing all start copies omits the cosmetic round, flash, report and recoil. The belt
+count still drops; a reliable damage confirmation can show a hit marker for a round never drawn.
+Late starts retain their paths, with flash and report suppressed past the cue window; starts past
+the catch-up horizon are omitted. See the player-outcome table in
+[fire presentation](../../docs/design/fire-presentation.md#player-outcomes).
 
-**Revert cost.** Low for copy count, expiry, and batch admission; medium for a firing-generation
-state because that widens the wire contract and join-in-progress model.
+**Alternatives preserved in prose and git:** fewer copies under contention; a different expiry;
+distance/visibility-aware tracer density that never hides a gameplay-visible tank; a compact
+firing-generation/cadence state for correlated-loss recovery; or the deleted own-gun belt-derived
+fallback introduced in `feb41576`. That fallback synthesized an unkeyed round from the current
+muzzle after a wait and swallowed the later announcement, so it lost the authoritative path and
+misclassified delayed starts. Reliable per-round automatic starts remain rejected because stale
+retransmit debt scales with the burst.
 
-**Lives in.** `src/net/shot_transport.rs`, `src/net/client.rs`, `src/net/shot_loss.rs`, and
-ADR-0021.
+**Why it's a playtest call.** Independent-loss arithmetic cannot tell us whether correlated loss
+looks like an acceptable hole or misleading silence. Test own and remote bursts at normal and
+adverse RTT/loss, watching muzzle cadence, path continuation, late visuals, the belt display and
+whether damage confirmation still feels attached to the shot. **MEASURED on local loopback
+2026-07-14:** all three server-traced opportunities fell inside a six-receive-update loss window;
+the covered automatic shot produced no presentation, while the following shot recovered exactly
+once. That establishes a correlated-loss hole, not its perceptual acceptability.
+
+**Revert cost.** Low for copy count, expiry and admission; medium for firing-generation state
+because it widens the wire and join-in-progress contract. Restoring the deleted fallback is medium:
+restore its belt/load history, timeout, synthesis and swallow joins from git, and reconsider its
+conflicts with ADR-0021's causality and authority-path rules. It cannot be a hidden fallback flag.
+
+**Lives in.** `src/net/shot_transport.rs`, `src/net/client.rs`, `src/net/fire_presentation.rs`,
+`src/net/shot_loss.rs`, ADR-0021 and the fire-presentation design doc.
 
 ---
 

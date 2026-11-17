@@ -1,4 +1,4 @@
-//! Own weapon-view cadence and authoritative fire reconstruction for the game's damage model.
+//! Own weapon-view cadence for the game's damage model.
 //!
 //! [`OwnFirePresentation`] seeds the view gate from the owner's replicated `WeaponGate`, then
 //! restores what the local cadence left over each arriving snapshot. `shooting::fire` and
@@ -12,13 +12,8 @@
 //! (bevy_replicon 0.45.5, `shared/replication/registry/receive_fns.rs::default_write`).
 //! Unconfirmed local reloads may refresh from the last arrived gate; that changes only the view.
 //!
-//! Every released round requires its announced `ShotId` and original fire data. Belt counts do
-//! not identify a shot or its path and never author a trajectory. Own and remote announcements
-//! share `net::client`'s cursor release and the keyed seam here. A lost automatic announcement
-//! omits its cosmetic round under ADR-0021; later announcements remain eligible for reconstruction.
-//!
-//! Scope: the controlled `Interpolated` root. Design and capture evidence:
-//! `.agents/docs/design/fire-presentation.md`.
+//! Announced rounds and their keyed paths are reconstructed by `net::client`.
+//! Scope: the controlled `Interpolated` root. Design: `.agents/docs/design/fire-presentation.md`.
 
 use core::time::Duration;
 use std::collections::VecDeque;
@@ -32,10 +27,9 @@ use lightyear::prelude::{Interpolated, LocalTimeline, LocalTimelineSync, PingMan
 
 use super::protocol::{InputBridge, NetTank};
 use super::sync_margin::ArrivalDelay;
-use crate::ballistics::{FireShell, FireShellOrigin, MAX_COSMETIC_CATCH_UP_TICKS, ShotSource};
 use crate::command::TankCommand;
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, WeaponGate, WeaponGateState, WeaponLoads};
+use crate::tank::{Controlled, TankSim, WeaponGate, WeaponGateState, WeaponLoads};
 
 /// Resolution: cap tick-keyed authored history to bound memory.
 const AUTHORED_TICKS: usize = 128;
@@ -46,6 +40,7 @@ const QUEUE_CAP: usize = 32;
 /// Install the own-fire presentation ledger. [`record_own_intent`] is mounted separately, by
 /// `net::client`, because it must be chained after the stamp that creates input provenance.
 pub(super) fn plugin(app: &mut App) {
+    app.add_message::<super::matchmaking::MatchClosed>();
     app.init_resource::<AuthoredIntent>();
     app.init_resource::<OwnFireDiag>();
     app.add_systems(Update, arm_own_fire_presentation);
@@ -55,11 +50,13 @@ pub(super) fn plugin(app: &mut App) {
     app.add_systems(
         RunFixedMainLoop,
         (
-            fold_arrivals.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
+            (admit_weapon_records, fold_arrivals)
+                .chain()
+                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
             stamp_gate_write_mark.in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
         ),
     );
-    app.add_systems(Update, heal_refused_presentations);
+    app.add_systems(Update, refresh_unconfirmed_reloads);
     // Before every `GameplaySet` consumer, after the attested command the bridge writes: the
     // presentation overwrites the owner's consumables, and the gate the cadence left is restored
     // over whatever arrived since. Before the Battle's hold, so a held tank presents no round.
@@ -80,10 +77,8 @@ struct SlotLedger {
     /// The gate the local cadence left last tick, restored over every arriving snapshot.
     presented_gate: WeaponGateState,
     /// The last state that provably ARRIVED (a replication write) — the base of the next
-    /// consumption fold and the refusal heal's restore source. Never the presented copy.
+    /// consumption fold and the reload refresh's restore source. Never the presented copy.
     last_arrived: WeaponGateState,
-    /// Belt count of the last arriving snapshot, the base of the next consumption delta.
-    seen_belt: u32,
     /// Local cadence consumptions awaiting server counts, keyed by their fixed tick. FIFO settles
     /// counts for the reload view; these entries never identify authority shots.
     pending_local: VecDeque<u32>,
@@ -95,7 +90,6 @@ impl SlotLedger {
         Self {
             presented_gate: arriving,
             last_arrived: arriving,
-            seen_belt: arriving.belt_remaining,
             ..Self::default()
         }
     }
@@ -108,11 +102,13 @@ impl SlotLedger {
     /// swap boundary undercounts by whatever the server fired between its refill and this
     /// snapshot. Returns the rounds this arrival accounted for.
     fn confirm(&mut self, arriving: WeaponGateState) -> u32 {
-        let belt_fired = self.seen_belt.saturating_sub(arriving.belt_remaining);
+        let belt_fired = self
+            .last_arrived
+            .belt_remaining
+            .saturating_sub(arriving.belt_remaining);
         let arm_edge =
             u32::from(self.last_arrived.ready_tick().is_none() && arriving.ready_tick().is_some());
         let fired = belt_fired.max(arm_edge);
-        self.seen_belt = arriving.belt_remaining;
         self.last_arrived = arriving;
         // Settle local reload-view counts oldest-first, without assigning shot identities.
         for _ in 0..fired {
@@ -143,76 +139,12 @@ impl OwnFirePresentation {
 /// Counts of local reload-view refreshes without server confirmation.
 #[derive(Resource, Default, Debug)]
 struct OwnFireDiag {
-    /// Presented reloads restored after the server stayed silent past the refusal deadline.
+    /// Presented reloads restored after the server stayed silent past the reload refresh window.
     healed: u64,
 }
 
-/// One released shot's wire/state facts — everything presentation needs except its age, which is
-/// the seam's to measure.
-#[derive(Clone, Copy)]
-pub(super) struct ReleasedShot {
-    pub(super) birth: Vec3,
-    pub(super) origin: Vec3,
-    pub(super) direction: Dir3,
-    /// The fired round, bound from the shooter's weapon data.
-    pub(super) round: crate::rounds::Round,
-    pub(super) tracer: bool,
-    pub(super) mechanism: crate::spec::FireMechanism,
-    pub(super) shooter: ShotSource,
-    pub(super) shot: crate::ShotId,
-}
-
-/// The game's damage-model presentation: one announced round, muzzle dressing and recoil kick.
-/// Age is measured on the releasing cursor, not the leading local timeline, so a crossing release
-/// starts at the muzzle. `None` names a release beyond [`MAX_COSMETIC_CATCH_UP_TICKS`]; the caller
-/// records its omission.
-pub(super) fn present_released_shot(
-    released_tick: Tick,
-    (cursor_tick, overstep): (Tick, f64),
-    shot: ReleasedShot,
-    recoil: &mut super::client::PendingRecoilKicks,
-    commands: &mut Commands,
-) -> Option<u32> {
-    // A release happens at or after the crossing, so the age is non-negative by construction; the
-    // clamp mirrors `fire_catch_up_ticks`' don't-rewind rule for a malformed tick.
-    let age = (f64::from(cursor_tick - released_tick) + overstep).max(0.0);
-    // Whole ticks feed the fixed-tick catch-up march; the dropped fraction is under one tick of
-    // shell flight.
-    let catch_up_ticks = age as u32;
-    if catch_up_ticks > MAX_COSMETIC_CATCH_UP_TICKS {
-        return None;
-    }
-    present_shot_at_age(catch_up_ticks, shot, recoil, commands);
-    Some(catch_up_ticks)
-}
-
-/// The trigger body the seam and the pre-sync arrival fallback share: one `FireShell` plus one
-/// queued barrel kick per released shot. Age policy lives at the call sites — this only writes it.
-pub(super) fn present_shot_at_age(
-    catch_up_ticks: u32,
-    shot: ReleasedShot,
-    recoil: &mut super::client::PendingRecoilKicks,
-    commands: &mut Commands,
-) {
-    commands.trigger(FireShell {
-        shot_origin: FireShellOrigin::Reconstructed,
-        catch_up_ticks,
-        ..FireShell::of_round(
-            &shot.round,
-            shot.birth,
-            shot.origin,
-            shot.direction,
-            shot.mechanism,
-            shot.tracer,
-            Some(shot.shooter),
-            Some(shot.shot),
-        )
-    });
-    recoil.push(shot.shooter.tank, shot.shooter.weapon);
-}
-
 /// Malformed outside input: one disclosed weapon record must name every spawn-built slot.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum WeaponRecordFault {
     SlotCount {
         expected: usize,
@@ -252,11 +184,37 @@ fn check_weapon_record(
     }
 }
 
-/// Arm the own tank once the server stream owns its gate, each slot's load as it arrived. Both
-/// arrive together: one spawn inserts them and one `CombatDisclosure` scope discloses them.
+/// Admit replicated weapon state before any fixed cadence or frame presentation consumes it.
+/// Before body attachment there are no weapon consumers; afterwards `TankSim` owns the slot count.
+/// A malformed server record ends the match visibly rather than leaving a partial live weapon.
+fn admit_weapon_records(
+    tanks: Query<
+        (Entity, &TankSim, &WeaponGate, &WeaponLoads),
+        (With<NetTank>, With<Interpolated>),
+    >,
+    mut commands: Commands,
+) {
+    for (entity, sim, gate, loads) in &tanks {
+        if let Err(fault) = check_weapon_record(gate, loads, sim.weapons.len()) {
+            refuse_weapon_record(entity, fault, &mut commands);
+            return;
+        }
+    }
+}
+
+fn refuse_weapon_record(entity: Entity, fault: WeaponRecordFault, commands: &mut Commands) {
+    let reason = format!("Malformed server weapon record: {fault}");
+    warn!("client: {entity} refused: {reason}");
+    commands.queue(move |world: &mut World| {
+        super::client::close_malformed_weapon_record(world, reason)
+    });
+}
+
+/// Arm from a complete owner record, admitting it if body attachment just made its count known. `WeaponLoads` gates arming because cadence reads
+/// loads beside the gate; both lists must be present before that presentation can start.
 fn arm_own_fire_presentation(
     tanks: Query<
-        (Entity, Ref<WeaponGate>, Ref<WeaponLoads>),
+        (Entity, &WeaponGate, &WeaponLoads, &TankSim),
         (
             With<NetTank>,
             With<Controlled>,
@@ -267,12 +225,11 @@ fn arm_own_fire_presentation(
     >,
     mut commands: Commands,
 ) {
-    for (entity, gate, loads) in &tanks {
-        if let Err(fault) = check_weapon_record(&gate, &loads, gate.weapons.len()) {
-            if gate.is_changed() || loads.is_changed() {
-                warn!("net: {entity} refused malformed own-fire state: {fault}");
-            }
-            continue;
+    for (entity, gate, loads, sim) in &tanks {
+        // Body attachment can occur during Update, after this frame's pre-loop admission.
+        if let Err(fault) = check_weapon_record(gate, loads, sim.weapons.len()) {
+            refuse_weapon_record(entity, fault, &mut commands);
+            return;
         }
         info!("net: {entity} own interpolated gate armed with the fire-presentation ledger");
         let slots = gate
@@ -298,55 +255,15 @@ fn stamp_gate_write_mark(mut roots: Query<(Ref<WeaponGate>, &mut OwnFirePresenta
 /// Fold proven gate arrivals into the ledger, ahead of this frame's fixed ticks. Value-blind
 /// arrival proof (module doc): a change tick moved since [`stamp_gate_write_mark`] is a
 /// replication write even when the value equals the presented copy; an unmoved one is silence —
-/// the signal [`heal_refused_presentations`] measures — never a fold.
-fn fold_arrivals(
-    arrival: Option<Res<ArrivalDelay>>,
-    timeline: Res<LocalTimeline>,
-    mut trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
-    mut roots: Query<(
-        Entity,
-        Ref<WeaponGate>,
-        Ref<WeaponLoads>,
-        &mut OwnFirePresentation,
-        Option<&crate::CombatantId>,
-    )>,
-) {
-    let revealed_tick = arrival
-        .as_ref()
-        .and_then(|estimator| estimator.newest_remote())
-        .map(|tick| tick.0);
-    for (entity, gate, loads, mut ledger, combatant) in &mut roots {
-        if let Err(fault) = check_weapon_record(&gate, &loads, ledger.slots.len()) {
-            if ledger.gate_write_mark != Some(gate.last_changed()) || loads.is_changed() {
-                warn!("net: {entity} refused malformed own-fire state: {fault}");
-            }
-            ledger.gate_write_mark = Some(gate.last_changed());
-            continue;
-        }
+/// the signal [`refresh_unconfirmed_reloads`] measures — never a fold.
+fn fold_arrivals(mut roots: Query<(Ref<WeaponGate>, &mut OwnFirePresentation)>) {
+    for (gate, mut ledger) in &mut roots {
         if ledger.gate_write_mark != Some(gate.last_changed()) {
-            // An unset mark (fresh arm) folds against the seed: zero rounds, unless a replication
-            // write landed between the arm and this fold, which confirms as any other.
+            // An unset mark (fresh arm) folds against the seed unless another arrival intervened.
             ledger.gate_write_mark = Some(gate.last_changed());
-            for (weapon, (entry, &arriving)) in
-                ledger.slots.iter_mut().zip(&gate.weapons).enumerate()
-            {
-                if arriving == entry.last_arrived {
-                    continue;
-                }
-                let fired = entry.confirm(arriving);
-                if fired > 0 {
-                    crate::shot_trace::record_global(
-                        &mut trace,
-                        "belt_rx",
-                        timeline.tick().0,
-                        || {
-                            serde_json::json!({
-                                "c": combatant.map(|id| id.0), "w": weapon,
-                                "rt": revealed_tick, "fired": fired,
-                                "belt": arriving.belt_remaining,
-                            })
-                        },
-                    );
+            for (entry, &arriving) in ledger.slots.iter_mut().zip(&gate.weapons) {
+                if arriving != entry.last_arrived {
+                    entry.confirm(arriving);
                 }
             }
         }
@@ -357,10 +274,6 @@ fn fold_arrivals(
 /// [`fold_arrivals`]; this is the presentation-side restore only.
 fn hold_presentation_gate(mut roots: Query<(&mut WeaponGate, &OwnFirePresentation)>) {
     for (mut gate, ledger) in &mut roots {
-        // Malformed arrivals are visibly refused by fold_arrivals; never restore a partial record.
-        if gate.weapons.len() != ledger.slots.len() {
-            continue;
-        }
         // Immutable deref first: a tick with no arriving snapshot must not flag the component.
         let arrived = ledger
             .slots
@@ -379,17 +292,13 @@ fn hold_presentation_gate(mut roots: Query<(&mut WeaponGate, &OwnFirePresentatio
 /// Carry the gate the cadence just left into the ledger, so the next arriving snapshot is
 /// recognizable as one — and file each local consumption (belt draw or ready→armed edge; the
 /// hold restored `presented_gate` at tick start, so any delta here is the cadence's own work)
-/// for the refusal deadline to measure.
+/// for the reload refresh window to measure.
 fn record_presentation_gate(
     timeline: Res<LocalTimeline>,
     mut roots: Query<(&WeaponGate, &mut OwnFirePresentation)>,
 ) {
     let now = timeline.tick().0;
     for (gate, mut ledger) in &mut roots {
-        // Malformed arrivals are visibly refused by fold_arrivals; never record partial cadence.
-        if gate.weapons.len() != ledger.slots.len() {
-            continue;
-        }
         let moved = ledger
             .slots
             .iter()
@@ -420,13 +329,13 @@ fn record_presentation_gate(
 /// Reload-view refresh window in remote ticks: one RTT for redundant inputs, plus downlink
 /// spread and a send interval. This sizes a view refresh, never proves announcement loss or refusal;
 /// a later authority consumption and its announcement are still accepted.
-fn refusal_wait_ticks(rtt: Duration, spread: Duration, tick: Duration) -> u32 {
+fn reload_refresh_wait_ticks(rtt: Duration, spread: Duration, tick: Duration) -> u32 {
     ((rtt.as_secs_f64() + spread.as_secs_f64()) / tick.as_secs_f64()).ceil() as u32 + 1
 }
 
 /// Refresh an unconfirmed local reload from the last arrived gate after the link-sized window.
 /// This presents no round and cannot suppress a later authority announcement or confirmation.
-fn heal_refused_presentations(
+fn refresh_unconfirmed_reloads(
     tick: Res<TickDuration>,
     arrival: Option<Res<ArrivalDelay>>,
     pings: Query<&PingManager>,
@@ -449,7 +358,7 @@ fn heal_refused_presentations(
             )
         }
     };
-    let wait = refusal_wait_ticks(pings.rtt(), arrival.stats.spread(), tick.0);
+    let wait = reload_refresh_wait_ticks(pings.rtt(), arrival.stats.spread(), tick.0);
     for (entity, mut gate, mut ledger) in &mut roots {
         for (slot, entry) in ledger.slots.iter_mut().enumerate() {
             let Some(&consumed_tick) = entry.pending_local.front() else {
@@ -604,6 +513,7 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
+    use crate::ballistics::FireShell;
 
     /// Fixture cadence and belt: 750 rpm on a 64 Hz clock gives `ceil(0.08 / 0.015625)` ticks.
     const PERIOD_TICKS: u32 = 6;
@@ -643,33 +553,6 @@ mod tests {
             ))
             .id();
         (world, root)
-    }
-
-    /// The game's damage model: a malformed peer record cannot confirm a consumption.
-    /// The reload view relies on retaining the last complete arrival.
-    #[test]
-    fn a_missing_load_refuses_the_whole_arrival_without_inventing_round_zero() {
-        let (mut world, root) = world_with_ledger(ready(BELT));
-        let before = world
-            .get::<OwnFirePresentation>(root)
-            .unwrap()
-            .slots
-            .clone();
-        world.get_mut::<WeaponLoads>(root).unwrap().weapons.clear();
-        world.get_mut::<WeaponGate>(root).unwrap().weapons[0] = ready(BELT - 1);
-        world.run_system_once(fold_arrivals).expect("fold runs");
-        assert_eq!(
-            world.get::<OwnFirePresentation>(root).unwrap().slots,
-            before
-        );
-        assert!(
-            check_weapon_record(
-                world.get::<WeaponGate>(root).unwrap(),
-                world.get::<WeaponLoads>(root).unwrap(),
-                1
-            )
-            .is_err()
-        );
     }
 
     fn gate_of(world: &World, root: Entity) -> WeaponGateState {
@@ -863,7 +746,7 @@ mod tests {
         assert_eq!(world.resource::<AuthoredIntent>().authored.len(), 1);
     }
 
-    /// V3: A LEGALITY RULE MUST NOT STUTTER THE OWNER'S OWN FLASH. `net::protocol`'s bridge runs on
+    /// A LEGALITY RULE MUST NOT STUTTER THE OWNER'S OWN FLASH. `net::protocol`'s bridge runs on
     /// the client too, so an unattested tick reaches `shooting::fire` with the trigger zeroed by
     /// `TankCommand::fail_consumables_closed` — for a round the player IS authoring. The
     /// presentation restores it from this client's own record of that tick.
@@ -928,28 +811,87 @@ mod tests {
         );
     }
 
-    /// In the game's damage model, a partial disclosed load list has no valid seed for the
-    /// own presentation. Refusing it prevents an invented round choice on the first consumption.
+    /// The game's damage model: neither equal truncation nor a short load list may reach
+    /// cadence's slot lookups. The owner must see a terminal cause before any weapon is consumed.
     #[test]
-    fn a_partial_weapon_record_cannot_arm_the_ledger() {
-        let mut world = World::new();
-        let root = world
-            .spawn((
-                NetTank,
-                Controlled,
-                Interpolated,
-                WeaponGate {
-                    weapons: vec![ready(BELT)],
-                },
-                WeaponLoads {
-                    weapons: Vec::new(),
-                },
-            ))
-            .id();
-        world
-            .run_system_once(arm_own_fire_presentation)
-            .expect("arming runs");
-        assert!(world.get::<OwnFirePresentation>(root).is_none());
+    fn truncated_server_weapon_records_are_refused_before_cadence() {
+        for (gates, loads, at_arm, already_armed) in [(1, 1), (2, 1), (1, 2), (0, 0)]
+            .into_iter()
+            .flat_map(|(gates, loads)| {
+                [(true, false), (false, false), (false, true)]
+                    .map(move |(at_arm, already_armed)| (gates, loads, at_arm, already_armed))
+            })
+        {
+            let mut app = App::new();
+            app.add_plugins((MinimalPlugins, plugin));
+            app.insert_resource(LocalTimeline::default());
+            app.insert_resource(TickDuration(crate::net::test_harness::TICK));
+            let root = app
+                .world_mut()
+                .spawn((
+                    NetTank,
+                    Controlled,
+                    Interpolated,
+                    TankSim {
+                        weapons: vec![crate::tank::WeaponState::default(); 2],
+                    },
+                    WeaponGate {
+                        weapons: vec![ready(BELT); gates],
+                    },
+                    WeaponLoads {
+                        weapons: vec![
+                            crate::tank::WeaponLoad {
+                                loaded: 0,
+                                selected: 0,
+                                fuze_modes: Vec::new(),
+                            };
+                            loads
+                        ],
+                    },
+                ))
+                .id();
+            assert_eq!(
+                check_weapon_record(
+                    app.world().get::<WeaponGate>(root).unwrap(),
+                    app.world().get::<WeaponLoads>(root).unwrap(),
+                    2,
+                ),
+                Err(WeaponRecordFault::SlotCount {
+                    expected: 2,
+                    gates,
+                    loads
+                }),
+            );
+            if already_armed {
+                app.world_mut()
+                    .entity_mut(root)
+                    .insert(OwnFirePresentation::with_slots(vec![
+                        SlotLedger::seeded(
+                            ready(BELT)
+                        );
+                        2
+                    ]));
+            }
+            if at_arm {
+                app.world_mut().run_schedule(Update);
+            } else {
+                app.world_mut().run_schedule(RunFixedMainLoop);
+            }
+            assert!(
+                app.world().get_entity(root).is_err(),
+                "no partial weapon reaches cadence or arming"
+            );
+            let messages = app
+                .world()
+                .resource::<Messages<super::super::matchmaking::MatchClosed>>();
+            let reasons: Vec<_> = messages.get_cursor().read(messages).cloned().collect();
+            assert_eq!(
+                reasons,
+                vec![super::super::matchmaking::MatchClosed::Ended(format!(
+                    "Malformed server weapon record: expected 2 weapon slots, received {gates} gates and {loads} loads"
+                ))]
+            );
+        }
     }
 
     /// The ledger arms only on the own interpolated gate — never an opponent's, whose gate the
@@ -965,6 +907,9 @@ mod tests {
                 NetTank,
                 Controlled,
                 Interpolated,
+                TankSim {
+                    weapons: vec![crate::tank::WeaponState::default(); 2],
+                },
                 WeaponGate {
                     weapons: vec![ready(BELT - 7), ready(0)],
                 },
@@ -1006,7 +951,7 @@ mod tests {
             .get::<OwnFirePresentation>(own)
             .expect("armed ledger");
         assert_eq!(ledger.slots.len(), 2, "one entry per weapon slot");
-        assert_eq!(ledger.slots[0].seen_belt, BELT - 7);
+        assert_eq!(ledger.slots[0].last_arrived.belt_remaining, BELT - 7);
         assert!(
             ledger
                 .slots
@@ -1042,7 +987,7 @@ mod tests {
     /// THE CHANGE-TICK BRACKET, both directions. Silence (a local write, then no replication
     /// write since the stamp) must fold NOTHING even though the live value differs from
     /// `last_arrived` — folding it would count this client's own arm as server-confirmed and the
-    /// refusal heal could never fire (an unconditional fold reds the first half). A write with a
+    /// reload refresh could never fire (an unconditional fold reds the first half). A write with a
     /// value EQUAL to the presented copy (the fused happy path) must fold — a value diff as the
     /// arrival detector is blind to it and the cannon's consumption becomes invisible (reds the
     /// second half).
@@ -1096,16 +1041,17 @@ mod tests {
     #[test]
     fn the_reload_refresh_window_uses_the_measured_link() {
         const TICK: Duration = Duration::from_nanos(1_000_000_000 / 64);
-        assert_eq!(refusal_wait_ticks(Duration::ZERO, Duration::ZERO, TICK), 1);
+        assert_eq!(
+            reload_refresh_wait_ticks(Duration::ZERO, Duration::ZERO, TICK),
+            1
+        );
         // Fixture: ceil((100 ms RTT + 60 ms spread) / 15.625 ms tick) + one send interval.
         assert_eq!(
-            refusal_wait_ticks(Duration::from_millis(100), Duration::from_millis(60), TICK),
+            reload_refresh_wait_ticks(Duration::from_millis(100), Duration::from_millis(60), TICK),
             12,
         );
     }
 
-    /// Reload-view fixture: TickDuration, timelines, the estimator digest, and
-    /// the armed ledger root.
     fn heal_world(newest_remote: u32) -> (World, Entity) {
         let (mut world, root) = world_with_ledger(ready(BELT));
         world.insert_resource(lightyear::core::tick::TickDuration(
@@ -1135,7 +1081,7 @@ mod tests {
             ledger.slots[0].pending_local.push_back(FIRE_TICK);
         }
         world
-            .run_system_once(heal_refused_presentations)
+            .run_system_once(refresh_unconfirmed_reloads)
             .expect("heal runs");
         assert_eq!(
             gate_of(&world, root),
@@ -1148,7 +1094,7 @@ mod tests {
         assert_eq!(world.resource::<OwnFireDiag>().healed, 1);
         assert!(
             world.resource::<CapturedShells>().0.is_empty(),
-            "a refused round presents nothing",
+            "a reload refresh presents no round",
         );
         assert!(
             world
@@ -1158,7 +1104,7 @@ mod tests {
             "and kicks nothing",
         );
 
-        // A consumption still inside the deadline is in flight, not refused.
+        // A consumption still inside the window is still awaiting confirmation.
         let (mut world, root) = heal_world(300);
         world.spawn(PingManager::default());
         {
@@ -1169,7 +1115,7 @@ mod tests {
             ledger.slots[0].pending_local.push_back(299);
         }
         world
-            .run_system_once(heal_refused_presentations)
+            .run_system_once(refresh_unconfirmed_reloads)
             .expect("heal runs");
         assert_eq!(
             gate_of(&world, root),
@@ -1184,91 +1130,5 @@ mod tests {
 
     fn capture_shell(fire: On<FireShell>, mut captured: ResMut<CapturedShells>) {
         captured.0.push((fire.shooter, fire.catch_up_ticks));
-    }
-
-    /// A shot released at the cursor presents exactly once — one `FireShell`, one recoil
-    /// kick — younger than its first tick (`catch_up_ticks` 0), which keeps it under the muzzle
-    /// flash's stale gate. The fixture plants a `LocalTimeline` 16 ticks past the release as
-    /// wrong-clock bait: a mutant that ages the shot on the local/arrival timeline reports 16
-    /// (flash stale-gated, shell 16 ticks downrange) and reds the 0.
-    #[test]
-    fn a_cursor_released_shot_presents_once_younger_than_its_first_tick() {
-        let mut app = App::new();
-        app.init_resource::<CapturedShells>();
-        app.init_resource::<super::super::client::PendingRecoilKicks>();
-        app.add_observer(capture_shell);
-        let mut local = LocalTimeline::default();
-        local.apply_delta(116);
-        app.insert_resource(local);
-        let shooter = app.world_mut().spawn_empty().id();
-        let points = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let captured_points = points.clone();
-        app.add_observer(move |fire: On<FireShell>| {
-            captured_points
-                .lock()
-                .unwrap()
-                .push((fire.origin, fire.birth))
-        });
-        let facts = ReleasedShot {
-            birth: Vec3::new(1.0, 2.0, 8.0),
-            origin: Vec3::new(1.0, 2.0, 3.0),
-            direction: Dir3::NEG_Z,
-            round: crate::tank::WeaponRound::resolve("88mm_AP")
-                .expect("a shipped round")
-                .round,
-            tracer: true,
-            mechanism: crate::spec::FireMechanism::Single,
-            shooter: ShotSource {
-                tank: shooter,
-                weapon: 0,
-                round: 0,
-            },
-            shot: crate::ShotId {
-                combatant: crate::CombatantId(7),
-                weapon: 0,
-                fire_tick: 100,
-            },
-        };
-        let catch_up = app
-            .world_mut()
-            .run_system_once(
-                move |mut recoil: ResMut<super::super::client::PendingRecoilKicks>,
-                      mut commands: Commands| {
-                    present_released_shot(
-                        Tick(100),
-                        (Tick(100), 0.25),
-                        facts,
-                        &mut recoil,
-                        &mut commands,
-                    )
-                },
-            )
-            .expect("the seam runs");
-        assert_eq!(
-            catch_up,
-            Some(0),
-            "released a quarter-overstep before the cursor: age < 1 tick, never the local \
-             timeline's 16",
-        );
-        assert_eq!(
-            *points.lock().unwrap(),
-            vec![(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 2.0, 8.0))],
-            "the echoed birth and visual muzzle remain separate through presentation"
-        );
-        let world = app.world();
-        let captured = world.resource::<CapturedShells>();
-        let &[(source, presented_catch_up)] = captured.0.as_slice() else {
-            panic!("exactly one bang presents, got {}", captured.0.len());
-        };
-        let source = source.expect("the bang carries its shooter");
-        assert_eq!((source.tank, source.weapon), (shooter, 0));
-        assert_eq!(presented_catch_up, 0);
-        assert_eq!(
-            world
-                .resource::<super::super::client::PendingRecoilKicks>()
-                .queued(),
-            &[(shooter, 0)],
-            "one kick, through the same seam as the bang",
-        );
     }
 }
