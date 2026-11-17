@@ -12,6 +12,8 @@ if (!Number.isFinite(vcpuPerServer) || vcpuPerServer <= 0) {
 export interface Env {
 	// aws-proving uses EC2; production stays Edgegap until cutover.
 	PROVIDER: string;
+	// Operator-owned immutable identity; every EC2 deployment needs a distinct value.
+	WORKER_ENV: string;
 	FLEET: DurableObjectNamespace<import("./fleet").Fleet>;
 	AWS_ACCESS_KEY_ID?: string;
 	AWS_SECRET_ACCESS_KEY?: string;
@@ -33,7 +35,7 @@ export interface Env {
 	SERVER_STATS_S: string;
 	SERVER_LOG_RETENTION_DAYS: string;
 	ENDED_RETENTION_S: string;
-	JOIN_ATTEMPTS: string;
+	JOIN_ATTEMPTS?: string;
 	LOCATIONS_CACHE_S: string;
 	PROVIDER_TIMEOUT_S: string;
 	USD_PER_VCPU_MINUTE?: string;
@@ -54,14 +56,12 @@ export interface Config {
 	serverStatsS: number;
 	serverLogRetentionMs: number;
 	endedRetentionMs: number;
-	joinAttempts: number;
 	locationsCacheMs: number;
 	providerTimeoutMs: number;
 	vcpuPerServer: number;
-	usdPerVcpuMinute: number | null;
 }
 
-function num(env: Env, key: keyof Env, min: number): number {
+export function num(env: Env, key: keyof Env, min: number): number {
 	const raw = env[key];
 	const v = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
 	if (!Number.isFinite(v) || v < min) throw new Error(`config: ${String(key)}=${String(raw)} (need a number >= ${min})`);
@@ -83,11 +83,9 @@ export function config(env: Env): Config {
 		serverStatsS: num(env, "SERVER_STATS_S", 0.001),
 		serverLogRetentionMs: num(env, "SERVER_LOG_RETENTION_DAYS", 1) * 24 * 60 * 60 * s,
 		endedRetentionMs: num(env, "ENDED_RETENTION_S", 0) * s,
-		joinAttempts: num(env, "JOIN_ATTEMPTS", 1),
 		locationsCacheMs: num(env, "LOCATIONS_CACHE_S", 0) * s,
 		providerTimeoutMs: num(env, "PROVIDER_TIMEOUT_S", 0.05) * s,
 		vcpuPerServer,
-		usdPerVcpuMinute: env.PROVIDER === "ec2" ? null : num(env, "USD_PER_VCPU_MINUTE", 0),
 	};
 }
 

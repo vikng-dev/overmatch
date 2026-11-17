@@ -57,3 +57,14 @@ export function timingSafeEqual(a: string, b: string): boolean {
 	for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
 	return diff === 0;
 }
+
+/** The Edgegap tag that identifies a claim's deployment: the random half of the server id (32 hex,
+ *  35 characters with the prefix; Edgegap allows 40). */
+export function tagOf(serverId: string): string {
+	return `om-${serverId.slice(serverId.indexOf(".") + 1)}`;
+}
+
+/** The random server-id half carried by a well-formed claim tag, otherwise null. */
+export function claimHex(tag: string): string | null {
+	return /^om-([0-9a-f]{32})$/.exec(tag)?.[1] ?? null;
+}

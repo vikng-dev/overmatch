@@ -1,9 +1,10 @@
 import { runDurableObjectAlarm } from "cloudflare:test";
+import { config } from "../src/config";
 import { describe, expect, it } from "vitest";
-import { age, heartbeat, join, launched, registry, ticket, webhook } from "./helpers";
+import { age, env, heartbeat, join, launched, registry, ticket, webhook } from "./helpers";
 
 const V = "0.5.0";
-const S = 1000;
+const cfg = config(env);
 const PARIS = [{ field: "city", values: ["Paris"], filter_type: "any" }];
 const LONDON = [{ field: "city", values: ["London"], filter_type: "any" }];
 
@@ -14,7 +15,7 @@ describe("a deploy whose outcome is unknown", () => {
 		expect(edgegap.deployments.size).toBe(1); // Paris exists; no London started for the same claim
 		expect(await ticket(t)).toEqual({ state: "starting" });
 
-		await age(V, 6 * S);
+		await age(V, cfg.statusPollMs + 1);
 		await runDurableObjectAlarm(registry(V)); // reconciles by tag
 		const s = launched(0);
 		expect((await registry(V).snapshot())[0].deployment_id).toBe(s.deploymentId);
@@ -39,12 +40,12 @@ describe("a deploy whose outcome is unknown", () => {
 		edgegap.failDeploysUnanswered = 1;
 		const t = await join({ version: V, locations: ["Paris", "London"], pings: { Paris: 10, London: 20 } });
 		expect(edgegap.deployments.size).toBe(0);
-		await age(V, 6 * S);
+		await age(V, cfg.statusPollMs + 1);
 		await runDurableObjectAlarm(registry(V)); // lookup: nothing yet; still within the deadline
 		expect(edgegap.deployments.size).toBe(0);
 		expect(await ticket(t)).toEqual({ state: "starting" });
 
-		await age(V, 60 * S);
+		await age(V, cfg.startDeadlineMs);
 		await runDurableObjectAlarm(registry(V)); // past the deadline, absence confirmed: retry elsewhere
 		expect(edgegap.deployments.size).toBe(1);
 		expect(edgegap.deployment(0).body.filters).toEqual(LONDON);
@@ -56,7 +57,7 @@ describe("a deploy whose outcome is unknown", () => {
 		edgegap.hangStatus.add("dep1");
 		const t = await join({ version: V, locations: ["Paris", "London"], pings: { Paris: 10, London: 20 } });
 		expect(edgegap.deployment(0).body.filters).toEqual(PARIS);
-		await age(V, 61 * S);
+		await age(V, cfg.startDeadlineMs + cfg.statusPollMs);
 		await runDurableObjectAlarm(registry(V)); // deadline: the Paris deployment is found and stopped
 		expect(edgegap.deployment(0).status).toBe("Status.TERMINATED");
 		expect(edgegap.deployment(1).body.filters).toEqual(LONDON);

@@ -12,14 +12,15 @@
 //   GET    /v1/locations?page&limit   paginated (`pagination.has_next`)
 //   GET    /v1/locations/beacons      not paginated (`count`)
 
-import type { Env } from "./config";
+import { num, type Env } from "./config";
 import { bounded } from "./deadline";
 
 import { ProviderError, type Provider, type Beacon, type LocationData, type DeployRequest, type DeploymentStatus, type ListedDeployment } from "./provider";
 
 /** The provider the Worker's env names, every call bounded by `timeoutMs`. */
 export function edgegapFor(env: Env, timeoutMs: number): Provider {
-	return new Edgegap(env.EDGEGAP_API, env.EDGEGAP_TOKEN, env.EDGEGAP_APP, env.EDGEGAP_PORT_NAME, timeoutMs);
+	return new Edgegap(env.EDGEGAP_API, env.EDGEGAP_TOKEN, env.EDGEGAP_APP, env.EDGEGAP_PORT_NAME, timeoutMs,
+		num(env, "JOIN_ATTEMPTS", 1), num(env, "USD_PER_VCPU_MINUTE", 0));
 }
 
 // Resolution: request up to 100 records per exchange to amortize HTTP calls; follow shorter pages.
@@ -31,13 +32,18 @@ const MAX_PAGES = 50;
 export const SERVER_LOG_BODY_MAX_BYTES = 16 * 1024 * 1024;
 
 export class Edgegap implements Provider {
+	readonly inventory = { scoped: false, maxAgeMs: null };
+	readonly requiresHttps = false;
+	readonly starts;
 	constructor(
 		private readonly api: string,
 		private readonly token: string,
 		private readonly app: string,
 		private readonly portName: string,
 		private readonly timeoutMs: number,
-	) {}
+		attempts: number,
+		readonly usdPerVcpuMinute: number,
+	) { this.starts = { attempts, retryBootInPlace: false }; }
 
 	/** One HTTP exchange, request through body read, bounded by `timeoutMs`. A timeout or a network
 	 *  failure is a ProviderError with status 0: the provider gave no answer. */

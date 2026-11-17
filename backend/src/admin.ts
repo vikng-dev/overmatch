@@ -6,6 +6,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { config, type Env } from "./config";
 import { registryFor, type ServerSnapshot } from "./registry";
 import { lastSweep } from "./sweep";
+import { providerFor } from "./provider";
 
 /** Concurrent Registry calls per request; the platform allows six outgoing connections. */
 const FANOUT = 5;
@@ -43,6 +44,9 @@ interface SessionRow {
 
 export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 	const cfg = config(env);
+	const provider = providerFor(env, cfg.providerTimeoutMs);
+	const rate = provider.usdPerVcpuMinute;
+	const slots = provider.reservations ? (await provider.reservations()).length : null;
 	const monthStart = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), 1);
 
 	const [liveVersions, totals, recent, swept] = await Promise.all([
@@ -85,7 +89,7 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 		batch.forEach((version, j) => live.push({ version, servers: snaps[j] }));
 	}
 
-	const usd = (vcpuMinutes: number) => cfg.usdPerVcpuMinute === null ? "unknown" : `$${(vcpuMinutes * cfg.usdPerVcpuMinute).toFixed(2)}`;
+	const usd = (vcpuMinutes: number) => rate === null ? "unknown" : `$${(vcpuMinutes * rate).toFixed(2)}`;
 	if (!totals) throw new Error("admin totals: an aggregate without GROUP BY must return one row");
 	const excluded = (count: number) => count ? ` (${count} ${count === 1 ? "session" : "sessions"} excluded: vCPU unknown)` : "";
 	const allServers = live.flatMap((l) => l.servers ?? []);
@@ -143,6 +147,7 @@ th{color:var(--mute);font-weight:500}.n{text-align:right;font-variant-numeric:ta
 <div><b>${usd(totals.all_vcpu_minutes)}</b><span>est. compute all time${excluded(totals.all_unknown)}</span></div>
 <div><b>${totals.failures}/${totals.sessions}</b><span>failed starts / sessions</span></div>
 </div>
+${slots === null ? "" : `<p>Fleet: ${slots} reservations</p>`}
 <h2>Live</h2>
 <div class="wrap"><table><tr><th>version</th><th>location</th><th>state</th><th class="n">players</th><th>address</th><th class="n">age</th><th class="n">last heartbeat</th></tr>
 ${liveRows || '<tr><td colspan="7">none</td></tr>'}</table></div>
@@ -150,7 +155,7 @@ ${liveRows || '<tr><td colspan="7">none</td></tr>'}</table></div>
 <h2>Recent sessions</h2>
 <div class="wrap"><table><tr><th>requested (UTC)</th><th>version</th><th>location</th><th>outcome</th><th class="n">peak</th><th class="n">minutes</th><th class="n">vCPU</th><th class="n">est. compute</th><th>reason</th></tr>
 ${recentRows || '<tr><td colspan="9">none</td></tr>'}</table></div>
-${cfg.usdPerVcpuMinute === null ? '<p style="color:var(--mute)">EC2 cost is unknown here; this dashboard has no EC2 billing model.</p>' : `<p style="color:var(--mute)">Cost is DERIVED: each session's minutes from request to end (or now while live) × its recorded vCPU × the current $${cfg.usdPerVcpuMinute}/vCPU-min rate, compute only (egress not included). Sessions with unrecorded vCPU show unknown and are excluded from cost totals. Reconcile against the Edgegap invoice.</p>`}
+${rate === null ? '<p style="color:var(--mute)">EC2 cost is unknown here; this dashboard has no EC2 billing model.</p>' : `<p style="color:var(--mute)">Cost is DERIVED: each session's minutes from request to end (or now while live) × its recorded vCPU × the current $${rate}/vCPU-min rate, compute only (egress not included). Sessions with unrecorded vCPU show unknown and are excluded from cost totals. Reconcile against the Edgegap invoice.</p>`}
 </body></html>`;
 }
 

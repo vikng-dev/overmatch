@@ -44,7 +44,7 @@ export async function recordCrash(env: Env, serverId: string, crash: string, tim
  * killed during capture cannot make its stop retries refetch the same body and die again.
  * Handled capture failures still stop in this invocation; an interrupted one needs a later stop. */
 export async function stopWithEvidence(env: Env, provider: Provider, serverId: string, deploymentId: string, timeoutMs: number, absenceAfter?: number): Promise<void> {
-	if (!provider.containerLogs) return provider.stop(deploymentId, absenceAfter); // EC2 has no log pull; journal push belongs to its next slice.
+	if (!provider.containerLogs) return provider.stop(deploymentId, absenceAfter);
 	try {
 		const mark = await bounded(timeoutMs, () => env.DB.prepare(
 			`INSERT INTO server_logs (server_id, deployment_id, captured_at, log, truncated, error)

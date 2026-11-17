@@ -1,15 +1,16 @@
 // The orphan sweep. Every minute (`triggers.crons` in wrangler.jsonc, `scheduled` in index.ts) the
 // Worker lists provider deployments and stops each one tagged `om-<hex>` (`tagOf` in
-// registry.ts) that no live claim owns. A failed stop needs no bookkeeping: the deployment is still
+// ids.ts) that no live claim owns. A failed stop needs no bookkeeping: the deployment is still
 // listed a minute later and judged again, until the provider no longer lists it.
 //
-// Ownership is decided by the Registry alone, never by D1 history. A tag carries the random half of
+// Below the independent age cap, ownership is decided by the Registry, never by D1 history. A tag carries the random half of
 // a server id; the deployment's status names its app version, which is the Registry's name and the
 // id's other half (`idOf`). The Registry writes a claim's row before its deploy call, so a
 // deployment of a valid version that no live row of that Registry owns (`liveDeployments`) is
 // stopped at once. Decisions are per deployment: with several `om-` tags, one live claim keeps it.
 // An Edgegap deployment without a valid version is counted `unattributed` and left to its
-// max_duration. EC2 listings are scoped by both ownership tags, so a host without a valid version
+// max_duration. EC2 listings are scoped by project, purpose and Worker environment; an expired host is stopped
+// before reading its claim, and a host without a valid version
 // or claim is stopped too. A status read or Registry that does not answer stops nothing it would
 // have decided.
 //
@@ -20,9 +21,9 @@
 
 import { config, type Env } from "./config";
 import { bounded, settleAll } from "./deadline";
-import { providerFor, type DeploymentStatus } from "./provider";
+import { providerFor, type DeploymentStatus, type ListedDeployment } from "./provider";
 import { expireServerLogs, stopWithEvidence } from "./evidence";
-import { idOf, validVersion, versionOf } from "./ids";
+import { idOf, validVersion, versionOf, tagOf, claimHex } from "./ids";
 import { diag } from "./reasons";
 import { registryFor } from "./registry";
 
@@ -36,11 +37,10 @@ export const SWEEP_MAX_STOPS = 25;
 const SWEEP_PERIOD_MS = 60_000;
 /** Below the platform's six simultaneous outbound connections per invocation. */
 const CONCURRENCY = 5;
-const TAG = /^om-([0-9a-f]{32})$/;
 
 export interface SweepResult {
 	at: number;
-	/** Edgegap deployments carrying an `om-` tag; EC2 machines carrying both ownership tags. */
+	/** Edgegap deployments carrying an `om-` tag; EC2 machines in this Worker environment. */
 	listed: number;
 	/** Tagged deployments whose status named no valid version. EC2 still stops them by ownership tags. */
 	unattributed: number;
@@ -64,13 +64,13 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 		console.error("sweep", result.error);
 	};
 
-	const tagged: { id: string; hexes: string[] }[] = [];
+	const tagged: (ListedDeployment & { hexes: string[] })[] = [];
 	try {
 		const out = await provider.deployments(SWEEP_MAX_PAGES);
 		if (out.truncated) console.warn("sweep: listing truncated at", SWEEP_MAX_PAGES, "pages");
 		for (const d of out.items) {
-			const hexes = d.tags.map((t) => TAG.exec(t)?.[1]).filter((h): h is string => !!h);
-			if (hexes.length || env.PROVIDER === "ec2") tagged.push({ id: d.id, hexes });
+			const hexes = d.tags.map((t) => claimHex(t)).filter((h): h is string => !!h);
+			if (hexes.length || provider.inventory.scoped) tagged.push({ ...d, hexes });
 		}
 	} catch (err) {
 		fail("list", err);
@@ -84,6 +84,13 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	const claims = new Map<string, Claim[]>();
 	await settleAll(
 		checks.slice(0, SWEEP_MAX_CHECKS).map((d) => async () => {
+			if (provider.inventory.maxAgeMs !== null) {
+				if (d.launchedAt === undefined) throw new Error("lifetime-capped inventory must supply a launch time");
+				if (d.launchedAt + provider.inventory.maxAgeMs < now) {
+					stop.push({ id: d.id, serverId: "expired", why: "host exceeded independent lifetime guard" });
+					return;
+				}
+			}
 			let st: DeploymentStatus;
 			try {
 				st = await provider.status(d.id);
@@ -95,11 +102,11 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 			const version = st.version;
 			if (!validVersion(version)) {
 				result.unattributed++;
-				if (env.PROVIDER === "ec2") stop.push({ id: d.id, serverId: "unattributed", why: "host has no valid version tag" });
+				if (provider.inventory.scoped) stop.push({ id: d.id, serverId: "unattributed", why: "host has no valid version tag" });
 				else console.warn("sweep: no version in status, left to max_duration", d.id);
 				return;
 			}
-			if (env.PROVIDER === "ec2" && !d.hexes.length) {
+			if (provider.inventory.scoped && !d.hexes.length) {
 				stop.push({ id: d.id, serverId: "unattributed", why: "host has no claim tag" });
 				return;
 			}
@@ -141,20 +148,21 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 		CONCURRENCY,
 	);
 
-	if (env.PROVIDER === "ec2") {
-		const fleet = env.FLEET.getByName("ec2");
-		for (const slot of await fleet.reservations()) {
-			// A bounded deploy may still be answering; eventual EC2 visibility needs the start window.
-			if (slot.created_at + cfg.startDeadlineMs + 3 * timeout > now) continue;
-			const version = versionOf(slot.server_id);
-			if (!version) throw new Error("fleet slot must carry a versioned server id");
-			try {
-				if (await bounded(timeout, () => registryFor(env, version).claimExists(slot.server_id))) continue;
-				const id = await provider.findByTag(`om-${slot.server_id.split(".")[1]}`);
-				if (id) await provider.stop(id);
-				await fleet.release(slot.server_id);
-			} catch (err) { result.failed++; fail("slot", err); }
-		}
+	if (provider.reservations) {
+		try {
+			for (const slot of await provider.reservations()) {
+				try {
+					// A bounded deploy may still be answering; eventual visibility needs the start window.
+					if (slot.created_at + cfg.startDeadlineMs + 3 * timeout > now) continue;
+					const version = versionOf(slot.server_id);
+					if (!version) throw new Error("fleet slot must carry a versioned server id");
+					if (await bounded(timeout, () => registryFor(env, version).claimExists(slot.server_id))) continue;
+					const id = await provider.findByTag(tagOf(slot.server_id));
+					if (id) await provider.stop(id);
+					await provider.releaseClaim!(slot.server_id);
+				} catch (err) { result.failed++; fail("slot", err); }
+			}
+		} catch (err) { result.failed++; fail("slots", err); }
 	}
 	await save(env, result, timeout);
 	return result;

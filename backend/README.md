@@ -275,14 +275,16 @@ calls the real Edgegap API, so a join there starts a billed deployment.
 | WebSocket or write-on-change heartbeats | `heartbeat()`; the body is already the full record |
 | Push instead of ticket polling | the ticket already distinguishes `starting` |
 | Server-side ping address | reserved optional field on locations and join candidates |
-| Another provider | `Provider` in `src/edgegap.ts` |
+| Another provider | `Provider` and the factory in `src/provider.ts` |
 | CI deploy | `.github/workflows/backend.yml` tests only |
 
 ## EC2 proving deployment
 
 `PROVIDER` selects one adapter per environment: production is `edgegap`; `aws-proving` is `ec2`.
 The proving Worker has separate Registry/Fleet objects and a separate, automatically provisioned D1
-database. Apply its D1 migrations after deployment. It reads only the three secrets documented in
+database. Apply its D1 migrations after deployment. Deploy non-interactively
+(`CI=true npx wrangler deploy --env aws-proving </dev/null`) so auto-provisioning never writes
+resource identifiers into the tracked config. It reads only the three secrets documented in
 [`host-setup.md`](../scripts/aws/host-setup.md); no provider fallback exists. Its admin cost is unknown:
 the Edgegap rate does not price EC2.
 
@@ -296,8 +298,14 @@ image on each launch without adding DescribeImages permission.
 `POST /admin/aws-proof` is EC2-only and requires the same Access assertion as `/admin`.
 Body `{ "version": "<published version>" }` dry-runs the native parameter; adding `imageId` dry-runs
 that concrete image. Every subnet is checked with the actual launch fields and `DryRun=true`.
-Only AWS's `DryRunOperation` counts as success; no machine or admission slot is created.
+Only AWS's `DryRunOperation` counts as success; no machine or admission slot is created. The cutover
+slice uses this endpoint for launch verification. `/admin` also shows the Fleet reservation count;
+a drained deployment must show zero.
 
-The lane report and exact live-proof sequence are
-[`.agents/scratch/aws-provider-slice-3.md`](../.agents/scratch/aws-provider-slice-3.md).
 Journal upload and client picker changes belong to later slices; `/v1` and Rust are unchanged.
+
+`WORKER_ENV` is the immutable deployment identity on every EC2-created instance, volume and
+interface. Listings, admission and the sweep use it alongside the project/purpose tags. Give every
+Worker a distinct value and drain it before changing the value. Shared vars and bindings are
+repeated under `aws-proving` because Wrangler 4.149 does not inherit them. AWS secrets are optional
+at deploy time and refused on use when absent; never use a secrets file.

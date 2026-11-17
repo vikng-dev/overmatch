@@ -2,9 +2,22 @@
 export const xmlResponse = (action: string, content: string) => new Response(`<?xml version="1.0"?><${action}Response xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">${content}</${action}Response>`);
 export const ec2Error = (code: string, status = 400) => new Response(`<Response><Errors><Error><Code>${code}</Code><Message>discard this outside text</Message></Error></Errors></Response>`, { status });
 const escape = (x: string) => x.replaceAll("&", "&amp;").replaceAll("<", "&lt;");
-export type Machine = { id: string; claim: string; version: string; state: string; script: string };
+export type Machine = { id: string; claim: string; version: string; state: string; script: string;
+	purpose?: string; project?: string; workerEnv?: string; launchedAt?: number; zone?: string };
+
+/** Query positions have no meaning: decode resource specifications and tags by their wire keys. */
+export function resourceTags(q: URLSearchParams): Map<string, Record<string, string>> {
+	return new Map([...q].filter(([k]) => /^TagSpecification\.\d+\.ResourceType$/.test(k)).map(([k, kind]) => {
+		const prefix = k.slice(0, -"ResourceType".length);
+		return [kind, Object.fromEntries([...q].filter(([key]) => key.startsWith(prefix) && key.endsWith(".Key"))
+			.map(([key, value]) => [value, q.get(key.slice(0, -3) + "Value")!]))];
+	}));
+}
 export class FakeEc2 {
 	requests: URLSearchParams[] = [];
+	// Fixture subnets occupy different zones, matching setup's one offering subnet per zone.
+	zones = new Map([["subnet-00000000000000001", "fixture-a"], ["subnet-00000000000000002", "fixture-b"]]);
+	private tokens = new Map<string, { machine: Machine; body: string }>();
 	machines: Machine[] = [];
 	jwks: unknown = null;
 	releaseRequests = 0;
@@ -16,9 +29,12 @@ export class FakeEc2 {
 	stopPending = false;
 	badXml = false;
 	requestBodyHang = false;
+	private tags(m: Machine) {
+		return { Project: m.project ?? "overmatch", Purpose: m.purpose ?? "host", WorkerEnvironment: m.workerEnv ?? "aws-proving", Claim: m.claim, Version: m.version };
+	}
 	private item(m: Machine): string {
-		return `<item><instanceId>${m.id}</instanceId><instanceState><name>${m.state}</name></instanceState><ipAddress>192.0.2.1</ipAddress><tagSet>` +
-			Object.entries({ Project: "overmatch", Purpose: "host", Claim: m.claim, Version: m.version }).map(([k, v]) => `<item><key>${k}</key><value>${escape(v)}</value></item>`).join("") + `</tagSet></item>`;
+		return `<item><instanceId>${m.id}</instanceId><launchTime>${new Date(m.launchedAt ?? Date.now()).toISOString()}</launchTime><instanceState><name>${m.state}</name></instanceState><ipAddress>192.0.2.1</ipAddress><tagSet>` +
+			Object.entries(this.tags(m)).map(([k, v]) => `<item><key>${k}</key><value>${escape(v)}</value></item>`).join("") + `</tagSet></item>`;
 	}
 	async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
 		const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
@@ -40,10 +56,20 @@ export class FakeEc2 {
 			if (error) return ec2Error(error.code, error.status);
 			if (q.get("DryRun") === "true") return ec2Error("DryRunOperation", 412);
 			const claim = q.get("ClientToken")!;
-			let m = this.machines.find((x) => x.claim === claim);
+			const zone = this.zones.get(q.get("NetworkInterface.1.SubnetId")!);
+			if (!zone) throw new Error("fixture must name the subnet's zone");
+			const token = `${zone}:${claim}`;
+			const previous = this.tokens.get(token);
+			if (previous && previous.body !== q.toString()) return ec2Error("IdempotentParameterMismatch");
+			let m = previous?.machine;
 			if (!m) {
-				m = { id: `i-${String(this.machines.length + 1).padStart(17, "0")}`, claim, version: q.get("TagSpecification.1.Tag.4.Value")!, state: "running", script: new TextDecoder().decode(Uint8Array.from(atob(q.get("UserData")!), (c) => c.charCodeAt(0))) };
+				const tags = resourceTags(q).get("instance")!;
+				m = { id: `i-${String(this.machines.length + 1).padStart(17, "0")}`, claim: tags.Claim,
+					version: tags.Version, workerEnv: tags.WorkerEnvironment, purpose: tags.Purpose, project: tags.Project,
+					zone, launchedAt: Date.now(), state: "running",
+					script: new TextDecoder().decode(Uint8Array.from(atob(q.get("UserData")!), (c) => c.charCodeAt(0))) };
 				this.machines.push(m);
+				this.tokens.set(token, { machine: m, body: q.toString() });
 			}
 			if (this.loseResponses-- > 0) throw new TypeError("fixture network lost the answer");
 			return xmlResponse(action, `<instancesSet><item><instanceId>${m.id}</instanceId></item></instancesSet>`);
@@ -51,7 +77,13 @@ export class FakeEc2 {
 		if (action === "DescribeInstances") {
 			const id = q.get("InstanceId.1");
 			if (id && !this.machines.some((m) => m.id === id)) return ec2Error("InvalidInstanceID.NotFound");
-			const machines = this.machines.filter((m) => id ? m.id === id : m.state !== "terminated");
+			const filters = [...q].filter(([k]) => /^Filter\.\d+\.Name$/.test(k));
+			const machines = this.machines.filter((m) => (!id || m.id === id) && filters.every(([k, name]) => {
+				const prefix = k.slice(0, -4) + "Value.";
+				const values = [...q].filter(([key]) => key.startsWith(prefix)).map(([, value]) => value);
+				const actual = name === "instance-state-name" ? m.state : this.tags(m)[name.slice(4) as keyof ReturnType<FakeEc2["tags"]>];
+				return values.includes(actual);
+			}));
 			return xmlResponse(action, `<reservationSet>${machines.map((m) => `<item><instancesSet>${this.item(m)}</instancesSet></item>`).join("")}</reservationSet>`);
 		}
 		if (action === "TerminateInstances") {

@@ -37,6 +37,7 @@
 	// Tunables. Every one is data read through src/config.ts; none is restated in logic.
 	"vars": {
 		"PROVIDER": "edgegap",
+		"WORKER_ENV": "production",
 		"EDGEGAP_API": "https://api.edgegap.com",
 		"EDGEGAP_APP": "Overmatch",
 		"EDGEGAP_PORT_NAME": "game",
@@ -89,15 +90,11 @@
         "migrations_dir": "migrations"
       }
     ],
-    "secrets": {
-      "required": [
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_HOST_CONFIG"
-      ]
-    },
+    // Secrets may be absent at first deploy; typed credentials/config refusals guard EC2.
+    "secrets": { "required": [] },
     "vars": {
       "PROVIDER": "ec2",
+      "WORKER_ENV": "aws-proving",
       "CAPACITY": "30",
       "HEARTBEAT_INTERVAL_S": "5",
       "HEARTBEAT_DEADLINE_S": "15",
@@ -109,7 +106,6 @@
       "SERVER_STATS_S": "5",
       "SERVER_LOG_RETENTION_DAYS": "14",
       "ENDED_RETENTION_S": "600",
-      "JOIN_ATTEMPTS": "2",
       "LOCATIONS_CACHE_S": "600",
       "PROVIDER_TIMEOUT_S": "10",
       "LOCATION_HINT": "apac",

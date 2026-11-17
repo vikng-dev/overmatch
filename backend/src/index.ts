@@ -3,11 +3,10 @@
 
 import { accessDenied, adminPage } from "./admin";
 import { config, serverEnvironment, type Env } from "./config";
-import { newId, randomHex, validVersion, versionOf } from "./ids";
+import { newId, randomHex, validVersion, versionOf, tagOf } from "./ids";
 import { diag } from "./reasons";
-import { Ec2 } from "./ec2";
-import { serverRelease } from "./release";
-import { registryFor, tagOf } from "./registry";
+import { providerFor, providerName } from "./provider";
+import { registryFor } from "./registry";
 import { sweep } from "./sweep";
 import type { HeartbeatRequest, JoinRequest } from "./types";
 
@@ -130,8 +129,8 @@ async function route(req: Request, env: Env): Promise<Response> {
 		return known ? new Response(null, { status: 204 }) : error(404, "unknown webhook");
 	}
 
-	// Access-protected proving tool: RunInstances always carries DryRun=true; no fleet slot is taken.
-	if (path === "/admin/aws-proof" && method === "POST" && env.PROVIDER === "ec2") {
+	// Cutover verification uses this Access-protected tool; dryRun creates no machine or fleet slot.
+	if (path === "/admin/aws-proof" && method === "POST") {
 		const denied = await accessDenied(req, env);
 		if (denied) return error(403, denied);
 		const b = await body(req);
@@ -139,9 +138,13 @@ async function route(req: Request, env: Env): Promise<Response> {
 		const image = "imageId" in b ? b.imageId : undefined;
 		if (image !== undefined && (typeof image !== "string" || !/^ami-[0-9a-f]{17}$/.test(image))) return error(400, "invalid proof image");
 		const cfg = config(env), id = newId(b.version);
+		const provider = providerFor(env, cfg.providerTimeoutMs);
+		if (!provider.dryRun || !provider.verifyRelease) return error(404, "provider has no launch proof");
 		try {
-			await new Ec2(env, cfg.providerTimeoutMs).dryRun({ version: b.version, city: "Singapore", tag: tagOf(id), clientIp: null, webhookUrl: "",
-				release: await serverRelease(b.version, cfg.providerTimeoutMs), env: serverEnvironment(cfg, id, url.origin, randomHex(32), randomHex(32)) }, image);
+			const [location] = await provider.locations();
+			if (!location) throw new Error("launch proof requires at least one provider location");
+			await provider.dryRun({ version: b.version, city: location.city, tag: tagOf(id), clientIp: null, webhookUrl: "",
+				release: await provider.verifyRelease(b.version, cfg.providerTimeoutMs), env: serverEnvironment(cfg, id, url.origin, randomHex(32), randomHex(32)) }, image);
 			return json({ proof: "authorized", image: image === undefined ? "public-parameter" : "concrete", creates: false });
 		} catch (err) {
 			console.warn("AWS proof refused", diag(err));
@@ -161,6 +164,7 @@ async function route(req: Request, env: Env): Promise<Response> {
 export default {
 	async fetch(req: Request, env: Env): Promise<Response> {
 		try {
+			providerName(env);
 			return await route(req, env);
 		} catch (err) {
 			console.error("unhandled", diag(err));

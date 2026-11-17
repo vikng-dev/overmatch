@@ -3,6 +3,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { config, type Env } from "./config";
 import { Ec2, MAX_HOSTS } from "./ec2";
+import { tagOf } from "./ids";
 
 export class Fleet extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
@@ -14,7 +15,7 @@ export class Fleet extends DurableObject<Env> {
 		if (out.truncated) return false; // The complete fleet is needed before admitting a launch.
 		const slots = this.reservations();
 		if (slots.some((s) => s.server_id === serverId)) return true;
-		const claims = new Set(slots.map((s) => `om-${s.server_id.split(".")[1]}`));
+		const claims = new Set(slots.map((s) => tagOf(s.server_id)));
 		const unmanaged = out.items.filter((d) => !d.tags.some((tag) => claims.has(tag))).length;
 		if (slots.length + unmanaged >= MAX_HOSTS) return false;
 		this.ctx.storage.sql.exec("INSERT INTO slots VALUES (?, ?)", serverId, Date.now());

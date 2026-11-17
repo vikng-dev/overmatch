@@ -264,7 +264,10 @@ if name == "install":
 elif name == "curl" and "-o" in args:
     Path(args[args.index("-o") + 1]).write_bytes(b"fixture archive")
 elif name == "sha256sum":
-    sys.stdin.read()
+    line = sys.stdin.read().strip()
+    _, filename = line.split(None, 1)
+    if not Path(filename.lstrip("*")).is_file():
+        sys.exit(1)
 elif name == "dpkg-query":
     sys.exit(1)
 elif name == "journalctl":
@@ -272,11 +275,16 @@ elif name == "journalctl":
         sys.stderr.write("Failed to open the journal: Input/output error\n")
         sys.exit(1)
     print(os.environ.get("JOURNAL", ""), end="")
+elif name == "systemctl" and args[:2] == ["is-active", "--quiet"]:
+    sys.exit(0 if os.environ.get("UPDATER_ACTIVE") else 3)
+elif name == "systemctl" and args[:1] == ["is-enabled"]:
+    print("masked")
+    sys.exit(1)
 elif name == "systemctl" and args[:1] == ["is-active"]:
     print("active")
 '''
 MACHINE_COMMANDS = ("install", "shutdown", "chown", "dpkg-query", "apt-get", "curl", "sha256sum", "tar",
-                    "systemctl", "journalctl")
+                    "systemctl", "journalctl", "useradd")
 # Where each machine path machine.sh names lands under a test's root.
 MACHINE_PATHS = {"/var/lib/om-harness": "state", "/opt/overmatch": "opt", "/usr/local/bin/om-harness": "om-harness",
                  "/etc/overmatch-report-header": "report-header", "/etc/overmatch-host.env": "host.env",
@@ -457,9 +465,9 @@ def option(argv: list[str], name: str) -> str:
 class HostedBoot(unittest.TestCase):
     """The provider and harness share this entrypoint; the hosted role must keep its lifetime guards."""
 
-    def machine(self):
-        values = {"ROLE": "hosted", "CAP_MIN": 1440, "ARCHIVE_URL": "https://release.example/server.tar.gz",
-                  "ARCHIVE_SHA256": "a" * 64 + "  server.tar.gz", "HOSTED_API": "https://worker.example",
+    def machine(self, archive_name="server.tar.gz"):
+        values = {"ROLE": "hosted", "CAP_MIN": 1440, "ARCHIVE_URL": "https://release.example/" + archive_name.replace("+", "%2B"),
+                  "ARCHIVE_SHA256": "a" * 64 + "  " + archive_name, "HOSTED_API": "https://worker.example",
                   "HOSTED_SERVER_ID": "fixture-server", "HOSTED_REPORT_SECRET": "fixture-report",
                   "HOSTED_ENV_B64": base64.b64encode(b'OVERMATCH_SERVER_ID="fixture-server"\n').decode()}
         script = (HERE / "machine.sh").read_text().replace(harness.SETTINGS_MARK,
@@ -477,8 +485,31 @@ class HostedBoot(unittest.TestCase):
         unit = (machine.root / "units/overmatch-server.service").read_text()
         self.assertIn("ExecStopPost=+/usr/bin/systemctl --no-block poweroff", unit)
         self.assertIn("EnvironmentFile=", unit)
+        self.assertIn("User=overmatch", unit)
+        self.assertIn("NoNewPrivileges=yes", unit)
+        self.assertIn(["useradd", "--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "overmatch"], calls)
+        self.assertNotIn("sudo", unit)
+        mask = next(i for i, c in enumerate(calls) if c[:3] == ["systemctl", "mask", "--now"])
+        start = calls.index(["systemctl", "start", "overmatch-server"])
+        self.assertLess(mask, start)
+        self.assertTrue({"apt-daily.timer", "apt-daily-upgrade.timer", "unattended-upgrades.service", "snapd.service", "snapd.socket"} <= set(calls[mask]))
+        self.assertFalse((machine.root / "state/server.tar.gz").exists())
         self.assertEqual((machine.root / "host.env").stat().st_mode & 0o777, 0o600)
         self.assertEqual((machine.root / "report-header").stat().st_mode & 0o777, 0o600)
+
+    def test_url_encoded_build_metadata_still_verifies_and_removes_the_local_archive(self):
+        machine = self.machine("server+fixture.tar.gz")
+        result = machine.boot()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((machine.root / "state/server.tar.gz").exists())
+
+    def test_an_updater_that_survives_masking_refuses_play_and_powers_off(self):
+        machine = self.machine()
+        machine.env["UPDATER_ACTIVE"] = "1"
+        result = machine.boot()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(["systemctl", "start", "overmatch-server"], machine.calls())
+        self.assertIn(["systemctl", "--no-block", "poweroff"], machine.calls())
 
     def test_failed_checksum_reports_the_step_and_powers_off_without_starting_a_service(self):
         machine = self.machine()

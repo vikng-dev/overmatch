@@ -6,15 +6,15 @@ import production from "../production-server.json";
 import hosting from "../aws-hosting.json";
 import { Ec2 } from "../src/ec2";
 import { host, machineScript } from "../src/host.generated";
+import { newId, tagOf } from "../src/ids";
 import { adminPage } from "../src/admin";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { sha256Hex } from "../src/ids";
-import { config } from "../src/config";
+import { config, serverEnvironment } from "../src/config";
 import { sweep } from "../src/sweep";
 import { signV4 } from "../src/sigv4";
-import { FakeEc2 } from "./fake-ec2";
+import { FakeEc2, resourceTags } from "./fake-ec2";
 import { age, call, env, heartbeat, join, registry, ticket } from "./helpers";
-import { MISSING_RELEASE_CACHE_MS } from "../src/release";
+import { RELEASE_CACHE_MS } from "../src/release";
 import { REASONS } from "../src/reasons";
 
 let ec2: FakeEc2;
@@ -49,11 +49,12 @@ describe("EC2 request contract", () => {
 			if (key.startsWith("aws:RequestTag/")) continue;
 			expect(context[key], key).toBe(expected === "@INSTANCE_TYPE@" ? production.instance_type : expected);
 		}
-		for (const [i, kind] of ["instance", "volume", "network-interface"].entries()) {
-			const prefix = `TagSpecification.${i + 1}`;
-			expect(q.get(`${prefix}.ResourceType`)).toBe(kind);
+		const specifications = resourceTags(q);
+		expect([...specifications.keys()].sort()).toEqual(["instance", "network-interface", "volume"]);
+		for (const kind of specifications.keys()) {
 			const statement = policy.Statement.find((s) => s.Resource.endsWith?.(`:*:${kind}/*`))!;
-			const tags = Object.fromEntries([1, 2, 3, 4].map((j) => [q.get(`${prefix}.Tag.${j}.Key`), q.get(`${prefix}.Tag.${j}.Value`)]));
+			const tags = specifications.get(kind)!;
+			expect(tags.WorkerEnvironment).toBe(env.WORKER_ENV);
 			for (const [key, value] of Object.entries(statement.Condition!.StringLike!)) {
 				if (!key.startsWith("aws:RequestTag/")) continue;
 				const bound = ({ "@PROJECT@": "overmatch", "@PURPOSE@": "host" } as Record<string, string>)[value];
@@ -81,6 +82,17 @@ describe("EC2 request contract", () => {
 		expect([...new Set(ec2.requests.map((r) => r.get("Action")))]).toEqual(["DescribeInstances", "RunInstances"]);
 	});
 
+	it.each(["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_HOST_CONFIG"] as const)("absent %s refuses before admission or an AWS request", async (missing) => {
+		const id = newId(V);
+		const p = new Ec2({ ...env, [missing]: undefined }, cfg.providerTimeoutMs);
+		await expect(p.deploy({ version: V, city: "Singapore", tag: tagOf(id), clientIp: null, webhookUrl: "",
+			release: { url: "https://release.example/server.tar.gz", checksum: "a".repeat(64) + "  server.tar.gz" },
+			env: serverEnvironment(cfg, id, "https://worker.example", "fixture-key", "fixture-report") }))
+			.rejects.toMatchObject({op: missing === "AWS_HOST_CONFIG" ? "config" : "credentials", outcome: "refused"});
+		expect(ec2.requests).toHaveLength(0);
+		expect(await env.FLEET.getByName("ec2").reservations()).toHaveLength(0);
+	});
+
 	it("embeds the harness boot exactly once with hosted settings, without packages or SSH", async () => {
 		await join(request());
 		const m = ec2.machines[0];
@@ -105,6 +117,13 @@ describe("EC2 request contract", () => {
 			headers: { range: "bytes=0-9", "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
 			accessKey: "fixture-access", secretKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", region: "us-east-1", service: "s3", date: new Date("2013-05-24T00:00:00Z") });
 		expect(signed.authorization.split("Signature=")[1]).toBe("f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41");
+	});
+	it("matches AWS's POST form-body SigV4 vector, hashing the exact transmitted bytes", async () => {
+		// AWS test suite as distributed by botocore: tests/unit/auth/aws4_testsuite/post-x-www-form-urlencoded.
+		const signed = await signV4({ method: "POST", url: new URL("https://example.amazonaws.com/"), body: "Param1=value1",
+			headers: { "content-type": "application/x-www-form-urlencoded" }, accessKey: "fixture-access",
+			secretKey: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", region: "us-east-1", service: "service", date: new Date("2015-08-30T12:36:00Z") });
+		expect(signed.authorization.split("Signature=")[1]).toBe("ff11897932ad3f4e8b18135d722051e5ac45fc38421b1da7b9d196a0fe09473a");
 	});
 
 });
@@ -154,33 +173,35 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 		expect(await env.FLEET.getByName("ec2").reservations()).toHaveLength(0);
 	});
 
-	it("a silent boot stays starting until confirmed termination, then relaunches once in the same location", async () => {
-		const t = await join(request());
-		ec2.stopPending = true;
-		await deadline();
-		expect(ec2.machines).toHaveLength(1);
-		expect(await ticket(t)).toEqual({ state: "starting" });
-		ec2.stopPending = false;
-		await age(V, cfg.statusPollMs + 1);
-		await runDurableObjectAlarm(registry(V));
-		expect(ec2.machines).toHaveLength(2);
-		expect(ec2.machines[0].state).toBe("terminated");
-		expect(await ticket(t)).toEqual({ state: "starting" });
-		// A player attaching during the second boot inherits its attempt budget.
-		const late = await join(request());
-		await deadline();
-		expect(ec2.machines).toHaveLength(2);
-		for (const id of [t, late]) expect(await ticket(id)).toEqual({ state: "failed", reason: REASONS.startTimeout });
+	it("silent boots wait for confirmed termination, preserve location and exhaust the owner's budget", async () => {
+		const tickets = [await join(request())];
+		for (let attempt = 0; attempt < hosting.startAttempts; attempt++) {
+			ec2.stopPending = true;
+			await deadline();
+			expect(ec2.machines).toHaveLength(attempt + 1);
+			expect(await ticket(tickets[0])).toEqual({ state: "starting" });
+			ec2.stopPending = false;
+			await age(V, cfg.statusPollMs + 1);
+			await runDurableObjectAlarm(registry(V));
+			expect(ec2.machines[attempt].state).toBe("terminated");
+			if (attempt + 1 < hosting.startAttempts) {
+				expect(ec2.machines).toHaveLength(attempt + 2);
+				// A late join inherits the current boot's budget, so it cannot extend the chain.
+				tickets.push(await join(request()));
+			}
+		}
+		expect(ec2.machines).toHaveLength(hosting.startAttempts);
+		for (const id of tickets) expect(await ticket(id)).toEqual({ state: "failed", reason: REASONS.startTimeout });
 		expect(await env.FLEET.getByName("ec2").reservations()).toHaveLength(0);
 	});
 
 	it("a boot-step end report uses the same single fresh-machine budget", async () => {
 		const t = await join(request());
-		for (let i = 0; i < 2; i++) {
+		for (let i = 0; i < hosting.startAttempts; i++) {
 			const s = ec2.settings(ec2.machines[i]);
 			await call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, { reason: "boot-verify" }, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
 		}
-		expect(ec2.machines).toHaveLength(2);
+		expect(ec2.machines).toHaveLength(hosting.startAttempts);
 		expect((await ticket(t)).state).toBe("failed");
 	});
 
@@ -188,7 +209,7 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 		ec2.loseResponses = 1;
 		await join(request());
 		expect(ec2.launches()).toHaveLength(2);
-		expect(await sha256Hex(ec2.launches()[0].toString())).toBe(await sha256Hex(ec2.launches()[1].toString()));
+		expect(ec2.launches()[0].toString()).toBe(ec2.launches()[1].toString());
 		expect(ec2.machines).toHaveLength(1);
 	});
 
@@ -233,18 +254,100 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 	});
 
 	it("tagged machines lacking version or claim tags are swept too, never hidden from the cap", async () => {
-		ec2.machines.push({ id: "i-00000000000000091", claim: "", version: "", state: "running", script: "" },
-			{ id: "i-00000000000000092", claim: "", version: V, state: "running", script: "" });
+		ec2.machines.push(...Array.from({ length: MAX_HOSTS }, (_, i) => ({
+			id: `i-${String(i + 91).padStart(17, "0")}`, claim: "", version: i % 2 ? V : "", state: "running", script: "",
+		})));
 		const t = await join(request());
 		expect((await ticket(t)).reason).toBe(REASONS.noCapacity);
 		expect(ec2.launches()).toHaveLength(0);
-		expect(await sweep(env)).toMatchObject({ listed: 2, stopped: 2 });
+		expect(await sweep(env)).toMatchObject({ listed: ec2.machines.length, stopped: ec2.machines.length });
 		expect(ec2.machines.every((m) => m.state === "terminated")).toBe(true);
+	});
+
+	it("inventory excludes harness and foreign environments from admission and sweeping", async () => {
+		const foreign = Array.from({ length: MAX_HOSTS + 1 }, (_, i) => ({
+			id: `i-${String(i + 70).padStart(17, "0")}`, claim: "", version: "", state: "running", script: "",
+			purpose: i % 2 ? "host" : "harness", workerEnv: i % 2 ? "other-worker" : env.WORKER_ENV,
+		}));
+		ec2.machines.push(...foreign);
+		await join(request());
+		expect(await provider().deployments(1)).toMatchObject({ items: [{ id: ec2.machines.at(-1)!.id }], truncated: false });
+		expect(await sweep(env)).toMatchObject({ listed: 1, stopped: 0 });
+		expect(foreign.every((m) => m.state === "running")).toBe(true);
+		expect(ec2.launches()).toHaveLength(1);
+	});
+
+	it("a foreign Worker can neither see nor sweep this Worker's machine", async () => {
+		await join(request());
+		const other = { ...env, WORKER_ENV: "other-worker" };
+		expect((await new Ec2(other, cfg.providerTimeoutMs).deployments(1)).items).toEqual([]);
+		expect(await sweep(other)).toMatchObject({ listed: 0, stopped: 0 });
+		expect(ec2.machines[0].state).toBe("running");
+	});
+
+	it("the independent age guard ends even a currently heartbeating live claim", async () => {
+		await join(request());
+		const m = ec2.machines[0], settings = ec2.settings(m), now = Date.now();
+		const maxAge = (hosting.lifetimeMinutes + hosting.sweepMarginMinutes) * 60_000;
+		m.launchedAt = now - maxAge + 1;
+		await heartbeat(settings.OVERMATCH_SERVER_ID, settings.OVERMATCH_REPORT_SECRET, {players: 1, capacity: cfg.capacity, state: "open"});
+		expect(await sweep(env, now)).toMatchObject({ stopped: 0 });
+		expect(await sweep(env, now + 2)).toMatchObject({ stopped: 1 });
+		expect(m.state).toBe("terminated");
+	});
+
+	it.each(["malformed", "unreadable"])("a %s Fleet slot still records the sweep result", async (fault) => {
+		await runInDurableObject(env.FLEET.getByName("ec2"), (_, state) => {
+			if (fault === "unreadable") state.storage.sql.exec("DROP TABLE slots");
+			else state.storage.sql.exec("INSERT INTO slots VALUES (?, ?)", "malformed-fixture", 0);
+		});
+		expect(await sweep(env)).toMatchObject({ failed: 1, error: expect.stringContaining("slot") });
+		expect(await env.DB.prepare("SELECT failed FROM sweep WHERE id = 1").first()).toMatchObject({ failed: 1 });
+	});
+
+	it("refreshes cached hits after the same bounded lifetime as misses, including eviction", async () => {
+		await join(request());
+		await abortAllDurableObjects();
+		ec2.releaseMalformed = true;
+		expect((await call("POST", "/v1/join", request())).status).toBe(200);
+		await runInDurableObject(registry(V), (_, state) => {
+			state.storage.sql.exec("UPDATE catalog SET fetched_at = fetched_at - ?", RELEASE_CACHE_MS + 1);
+		});
+		expect((await call("POST", "/v1/join", request())).status).toBe(503);
+		expect(ec2.launches()).toHaveLength(1);
+	});
+
+	it("keeps raw build metadata in release checksums while encoding the download URL", async () => {
+		await join(request("0.8.0+fixture"));
+		expect(ec2.machines[0].script).toContain("%2Bfixture");
+		expect(ec2.machines[0].script).toContain("  overmatch-server-v0.8.0+fixture-x86_64-unknown-linux-gnu.tar.gz");
+	});
+
+	it("refuses plaintext origins before creating a ticket, slot or release lookup", async () => {
+		const response = await registry(V).join(V, ["Singapore"], {}, null, "http://worker.example");
+		expect(response).toMatchObject({ok: false, status: 400, error: expect.stringContaining("insecureOrigin")});
+		expect(ec2.requests).toHaveLength(0);
+		expect(ec2.releaseRequests).toBe(0);
+		expect(await env.FLEET.getByName("ec2").reservations()).toHaveLength(0);
+	});
+
+	it("the fake preserves zonal token idempotency and detects changed parameters", async () => {
+		await join(request());
+		const same = new URLSearchParams(ec2.launches()[0]);
+		const endpoint = "https://ec2.ap-southeast-1.amazonaws.com/";
+		await ec2.fetch(endpoint, {body: same.toString()});
+		expect(ec2.machines).toHaveLength(1);
+		same.set("InstanceType", "fixture-other-type");
+		expect(await (await ec2.fetch(endpoint, {body: same.toString()})).text()).toContain("IdempotentParameterMismatch");
+		same.set("NetworkInterface.1.SubnetId", [...ec2.zones.keys()][1]);
+		await ec2.fetch(endpoint, {body: same.toString()});
+		expect(ec2.machines).toHaveLength(2);
 	});
 
 	it("EC2 admin cost remains explicitly unknown rather than applying Edgegap's price", async () => {
 		const html = await adminPage(env);
 		expect(html).toContain("EC2 cost is unknown here");
+		expect(html).toContain("Fleet: 0 reservations");
 		expect(html).not.toContain("Edgegap invoice");
 		expect(html).not.toContain("$0.00");
 	});
@@ -255,7 +358,7 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 		expect(ec2.releaseRequests).toBe(1);
 		ec2.releaseMissing = false;
 		await runInDurableObject(registry(V), (_, state) => {
-			state.storage.sql.exec("UPDATE catalog SET fetched_at = fetched_at - ?", MISSING_RELEASE_CACHE_MS + 1);
+			state.storage.sql.exec("UPDATE catalog SET fetched_at = fetched_at - ?", RELEASE_CACHE_MS + 1);
 		});
 		expect((await call("POST", "/v1/join", request())).status).toBe(200);
 		expect(ec2.machines).toHaveLength(1);
@@ -287,19 +390,30 @@ describe("AWS error codes own the outcome, independent of HTTP status", () => {
 		expect(ec2.machines).toHaveLength(1);
 	});
 
-	it.each(["UnauthorizedOperation", "AuthFailure", "InvalidClientTokenId", "SignatureDoesNotMatch", "RequestExpired", "MissingAuthenticationToken", "IdempotentParameterMismatch", "InvalidParameter", "InvalidParameterValue", "InvalidParameterCombination", "MissingParameter", "Unsupported", "UnsupportedOperation", "InvalidAMIID.NotFound", "InvalidAMIID.Unavailable", "InvalidAMIID.Malformed", "InvalidBlockDeviceMapping", "InvalidSubnetID.NotFound", "InvalidSubnetID.Malformed", "InvalidGroup.NotFound", "InvalidGroupId.Malformed", "InvalidKeyPair.NotFound", "InvalidInstanceID.Malformed", "OperationNotPermitted", "Blocked", "PendingVerification"])("%s refuses once with no cross-provider fallback", async (code) => {
+	it.each(["UnauthorizedOperation", "AuthFailure", "InvalidClientTokenId", "SignatureDoesNotMatch", "RequestExpired", "MissingAuthenticationToken", "InvalidParameter", "InvalidParameterValue", "InvalidParameterCombination", "MissingParameter", "Unsupported", "UnsupportedOperation", "InvalidAMIID.NotFound", "InvalidAMIID.Unavailable", "InvalidAMIID.Malformed", "InvalidBlockDeviceMapping", "InvalidSubnetID.NotFound", "InvalidSubnetID.Malformed", "InvalidGroup.NotFound", "InvalidGroupId.Malformed", "InvalidKeyPair.NotFound", "InvalidInstanceID.Malformed", "OperationNotPermitted", "Blocked", "PendingVerification"])("%s refuses once with no cross-provider fallback", async (code) => {
 		ec2.errors = [{ code, status: 503 }];
 		const t = await join(request());
 		expect((await ticket(t)).reason).toBe(REASONS.startRefused);
 		expect(ec2.launches()).toHaveLength(1);
 	});
 
-	it.each(["InternalError", "InternalFailure", "Unavailable", "ServiceUnavailable", "RequestLimitExceeded", "Throttling", "ThrottlingException", "RequestTimeout", "FutureUnknownCode"])("%s preserves unknown fate and retries the same launch", async (code) => {
+	it.each(["InternalError", "InternalFailure", "Unavailable", "ServiceUnavailable", "RequestLimitExceeded", "Throttling", "ThrottlingException", "RequestTimeout", "FutureUnknownCode", "IdempotentParameterMismatch"])("%s preserves unknown fate and retries the same launch", async (code) => {
 		ec2.errors = [{ code, status: 400 }];
 		await join(request());
 		expect(ec2.launches()).toHaveLength(2);
-		expect(await sha256Hex(ec2.launches()[0].toString())).toBe(await sha256Hex(ec2.launches()[1].toString()));
+		expect(ec2.launches()[0].toString()).toBe(ec2.launches()[1].toString());
 		expect(ec2.machines).toHaveLength(1);
+	});
+
+	it("repeated idempotent-parameter mismatch retains an unknown claim and slot for reconciliation", async () => {
+		ec2.errors = Array.from({length: 2}, () => ({code: "IdempotentParameterMismatch", status: 400}));
+		const t = await join(request());
+		expect(await ticket(t)).toEqual({state: "starting"});
+		expect(await env.FLEET.getByName("ec2").reservations()).toHaveLength(1);
+		await age(V, cfg.statusPollMs + 1);
+		await runDurableObjectAlarm(registry(V));
+		expect(await ticket(t)).toEqual({state: "starting"});
+		expect(ec2.launches()).toHaveLength(2);
 	});
 
 	it("NotFound keeps a new instance unknown until the registry's visibility deadline, then accepts absence", async () => {

@@ -1,5 +1,6 @@
+import { config } from "../src/config";
 import { describe, expect, it } from "vitest";
-import { bringUp, call, heartbeat, join, launched, registry, ticket } from "./helpers";
+import { bringUp, env, call, heartbeat, join, launched, registry, ticket } from "./helpers";
 
 const V = "0.5.0";
 
@@ -33,7 +34,7 @@ describe("join-or-create", () => {
 	it("reserves the early-access capacity before the first heartbeat, then sends overflow to a new server", async () => {
 		const req = { version: V, locations: ["Paris"], pings: {} };
 		const tickets: string[] = [];
-		const capacity = 30; // ASSUMED early-access player limit chosen in #220.
+		const capacity = config(env).capacity;
 		for (let i = 0; i < capacity; i++) tickets.push(await join(req));
 		expect(edgegap.count("POST", "/v1/deploy")).toBe(1);
 		expect(edgegap.env(edgegap.deployment(0), "OVERMATCH_CAPACITY")).toBe(String(capacity));

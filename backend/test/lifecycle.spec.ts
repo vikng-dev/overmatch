@@ -1,10 +1,11 @@
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { config } from "../src/config";
 import type { Registry } from "../src/registry";
 import { describe, expect, it } from "vitest";
 import { age, bringUp, env, call, heartbeat, join, launched, registry, ticket, webhook } from "./helpers";
 
 const V = "0.5.0";
-const S = 1000;
+const cfg = config(env);
 
 async function session(serverId: string) {
 	return env.DB.prepare("SELECT * FROM sessions WHERE server_id = ?").bind(serverId).first<Record<string, unknown>>();
@@ -148,7 +149,7 @@ describe("readiness", () => {
 		const s = launched();
 		await heartbeat(s.id, s.secret, { players: 0, capacity: 10, state: "open" });
 		edgegap.ready(edgegap.deployment(0));
-		await age(V, 6 * S);
+		await age(V, cfg.statusPollMs + 1);
 		expect(await runDurableObjectAlarm(registry(V))).toBe(true);
 		expect((await ticket(t)).state).toBe("ready");
 	});
@@ -166,13 +167,13 @@ describe("the alarm", () => {
 		release();
 		await pending;
 		expect(seen.alarm).not.toBeNull();
-		expect(seen.alarm!).toBeLessThanOrEqual(seen.created + 60 * S);
+		expect(seen.alarm!).toBeLessThanOrEqual(seen.created + cfg.startDeadlineMs);
 	});
 
 	it("drops a server that never becomes ready and stops its deployment", async () => {
 		const t = await join({ version: V, locations: ["Paris", "London"], pings: { Paris: 20, London: 25 } });
 		const s = launched();
-		await age(V, 61 * S); // > START_DEADLINE_S = 60
+		await age(V, cfg.startDeadlineMs + cfg.statusPollMs);
 		expect(await runDurableObjectAlarm(registry(V))).toBe(true);
 		expect(edgegap.deployment(0).status).toBe("Status.TERMINATED");
 		expect((await registry(V).snapshot())[0]).toMatchObject({ state: "ended", outcome: "failed" });
@@ -186,7 +187,7 @@ describe("the alarm", () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		await join({ version: V, locations: ["London"], pings: {} });
 		const b = launched(1);
-		await age(V, 61 * S); // both past the start deadline
+		await age(V, cfg.startDeadlineMs + cfg.statusPollMs); // both past the start deadline
 		const release = edgegap.holdStops();
 		const sweep = runDurableObjectAlarm(registry(V)); // stops Paris first, held
 		await new Promise((r) => setTimeout(r, 50));
@@ -201,7 +202,7 @@ describe("the alarm", () => {
 
 	it("fails the ticket when no selected location is left to try", async () => {
 		const t = await join({ version: V, locations: ["Paris"], pings: {} });
-		await age(V, 61 * S);
+		await age(V, cfg.startDeadlineMs + cfg.statusPollMs);
 		await runDurableObjectAlarm(registry(V));
 		expect(edgegap.deployments.size).toBe(1);
 		expect(await ticket(t)).toEqual({ state: "failed", reason: "the server did not become ready in time" });
@@ -210,11 +211,11 @@ describe("the alarm", () => {
 	it("drops a silent server, stops it, and records it lost", async () => {
 		const t = await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp(0, 3);
-		await age(V, 10 * S);
+		await age(V, cfg.heartbeatDeadlineMs / 2);
 		await runDurableObjectAlarm(registry(V));
 		expect((await registry(V).snapshot())[0].state).toBe("ready");
 
-		await age(V, 6 * S); // 16 s since the last heartbeat > HEARTBEAT_DEADLINE_S = 15
+		await age(V, cfg.heartbeatDeadlineMs / 2 + 1);
 		await runDurableObjectAlarm(registry(V));
 		expect(edgegap.deployment(0).status).toBe("Status.TERMINATED");
 		expect((await ticket(t)).state).toBe("failed");
@@ -230,7 +231,7 @@ describe("the alarm", () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp(0);
 		await call("POST", `/v1/servers/${s.id}/end`, {}, { authorization: `Bearer ${s.secret}` });
-		await age(V, 601 * S);
+		await age(V, Math.max(cfg.endedRetentionMs, cfg.heartbeatDeadlineMs) + cfg.statusPollMs);
 		await runDurableObjectAlarm(registry(V));
 		expect(await registry(V).snapshot()).toEqual([]);
 		expect(await runDurableObjectAlarm(registry(V))).toBe(false);
@@ -246,7 +247,7 @@ describe("the alarm", () => {
 		const ended = await bringUp(2, 1);
 		expect((await call("POST", `/v1/servers/${ended.id}/end`, {}, { authorization: `Bearer ${ended.secret}` })).status).toBe(204);
 
-		await age(V, 601 * S); // DERIVED: beyond ENDED_RETENTION_S and HEARTBEAT_DEADLINE_S.
+		await age(V, Math.max(cfg.endedRetentionMs, cfg.heartbeatDeadlineMs) + cfg.statusPollMs);
 		expect((await heartbeat(closed.id, closed.secret, { players: 1, capacity: 10, state: "closed" })).status).toBe(204);
 		expect(await runDurableObjectAlarm(registry(V))).toBe(true);
 		const rows = await registry(V).snapshot();
@@ -265,7 +266,7 @@ describe("cleanup is bounded", () => {
 		await join({ version: V, locations: ["London"], pings: {} });
 		const b = await bringUp(1, 1); // B: ready, about to go silent
 		edgegap.hangStatus.add(launched(0).deploymentId);
-		await age(V, 16 * S); // A is due a status poll; B is past HEARTBEAT_DEADLINE_S
+		await age(V, cfg.heartbeatDeadlineMs + 1); // A is due a status poll; B is past HEARTBEAT_DEADLINE_S
 		const sweep = runDurableObjectAlarm(registry(V)).then(() => "done");
 		const outcome = await Promise.race([sweep, new Promise((r) => setTimeout(() => r("stalled"), 3000))]);
 		expect(outcome).toBe("done");
@@ -278,18 +279,18 @@ describe("cleanup is durable", () => {
 	it("a failed stop is retried by the alarm until Edgegap confirms, and only then is history ended", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp(0, 1);
-		await age(V, 16 * S); // silent past HEARTBEAT_DEADLINE_S
+		await age(V, cfg.heartbeatDeadlineMs + 1); // silent past HEARTBEAT_DEADLINE_S
 		edgegap.failStops = 2;
 		await runDurableObjectAlarm(registry(V));
 		expect(edgegap.deployment(0).status).toBe("Status.READY"); // still running, still billed
 		expect((await session(s.id))?.ended_at).toBeNull();
 
-		await age(V, 601 * S); // well past ENDED_RETENTION_S: the row must not be forgotten
+		await age(V, Math.max(cfg.endedRetentionMs, cfg.heartbeatDeadlineMs) + cfg.statusPollMs); // Retention must not forget an unconfirmed stop.
 		await runDurableObjectAlarm(registry(V));
 		expect((await registry(V).snapshot()).map((r) => r.id)).toContain(s.id);
 		expect(edgegap.deployment(0).status).toBe("Status.READY");
 
-		await age(V, 6 * S);
+		await age(V, cfg.statusPollMs + 1);
 		await runDurableObjectAlarm(registry(V)); // third attempt succeeds
 		expect(edgegap.deployment(0).status).toBe("Status.TERMINATED");
 		expect(await session(s.id)).toMatchObject({ outcome: "lost" });
@@ -303,7 +304,7 @@ describe("cleanup is durable", () => {
 		edgegap.failStops = 1;
 		expect((await call("POST", `/v1/servers/${s.id}/end`, {}, { authorization: `Bearer ${s.secret}` })).status).toBe(204);
 		expect(edgegap.deployment(0).status).toBe("Status.READY");
-		await age(V, 6 * S);
+		await age(V, cfg.statusPollMs + 1);
 		await runDurableObjectAlarm(registry(V));
 		expect(edgegap.deployment(0).status).toBe("Status.TERMINATED");
 	});
@@ -312,13 +313,13 @@ describe("cleanup is durable", () => {
 		const release = edgegap.holdDeploys();
 		const pending = join({ version: V, locations: ["Paris"], pings: {} });
 		await new Promise((r) => setTimeout(r, 50));
-		await age(V, 61 * S);
+		await age(V, cfg.startDeadlineMs + cfg.statusPollMs);
 		await runDurableObjectAlarm(registry(V)); // the claim times out while its deploy is in flight
 		edgegap.failStops = 1;
 		release();
 		await pending;
 		expect(edgegap.deployment(0).status).toBe("Status.DEPLOYING"); // the first stop failed
-		await age(V, 6 * S);
+		await age(V, cfg.statusPollMs + 1);
 		await runDurableObjectAlarm(registry(V));
 		expect(edgegap.deployment(0).status).toBe("Status.TERMINATED");
 	});

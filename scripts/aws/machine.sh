@@ -100,38 +100,63 @@ boot() {
     mark packages
   fi
 
+  if [[ "$ROLE" == hosted ]]; then
+    step=updates
+    # Ubuntu's apt timers can run at startup. Mask before starting play; absent units are harmless.
+    # The image's snap packaging varies, so cover both timer and daemon refresh paths defensively.
+    local updaters=(apt-daily.timer apt-daily.service apt-daily-upgrade.timer
+      apt-daily-upgrade.service unattended-upgrades.service snapd.service snapd.socket
+      snapd.snap-repair.timer snapd.snap-repair.service)
+    systemctl mask --now "${updaters[@]}" || echo 'updater stop reported failure; verifying masks and active state' >&2
+    local updater status
+    for updater in "${updaters[@]}"; do
+      # is-enabled returns nonzero for a masked unit, including a mask for an absent package.
+      status="$(systemctl is-enabled "$updater" 2>/dev/null)" || true
+      [[ "$status" == masked ]]
+    done
+    if systemctl is-active --quiet "${updaters[@]}"; then
+      echo 'background updater still active; refusing hosted play' >&2
+      false # Enter boot_failed while the failing phase is still in scope.
+    fi
+    mark updates
+  fi
+
   step=download
-  local archive="$STATE/${ARCHIVE_URL##*/}"
+  local archive="$STATE/server.tar.gz"
   curl -fsSL --retry 3 -o "$archive" "$ARCHIVE_URL"
   mark downloaded
 
   step=verify
   cd "$STATE"
-  printf '%s\n' "$ARCHIVE_SHA256" | sha256sum --check --strict --quiet -
+  # The release edge checks the checksum's raw asset name; the local name is fixed, even for URL-encoded tags.
+  printf '%s  server.tar.gz\n' "${ARCHIVE_SHA256%% *}" | sha256sum --check --strict --quiet -
   mark verified
 
   step=unpack
   install -d -m 755 "$INSTALL"
   tar -xzf "$archive" --strip-components=1 -C "$INSTALL"
-  # The verified archive stays on this ephemeral volume until termination.
+  rm /var/lib/om-harness/server.tar.gz
   mark unpacked
 
   if [[ "$ROLE" == server || "$ROLE" == hosted ]]; then
-    step=start
     local environment stop_post
+    step=user
+    useradd --system --no-create-home --shell /usr/sbin/nologin overmatch
     if [[ "$ROLE" == hosted ]]; then
       environment='EnvironmentFile=/etc/overmatch-host.env'
       stop_post='ExecStopPost=+/usr/bin/systemctl --no-block poweroff'
     else
-      environment="Environment=OVERMATCH_BOT=$BOTS OVERMATCH_SERVER_STATS_S=$STATS_S NO_COLOR=1"
+      environment="Environment=OVERMATCH_BOT=$BOTS OVERMATCH_SERVER_STATS_S=$STATS_S"
       stop_post=''
     fi
+    step=start
     cat >/etc/systemd/system/overmatch-server.service <<UNIT
 [Unit]
 Description=Overmatch dedicated server
 
 [Service]
-User=ubuntu
+User=overmatch
+NoNewPrivileges=yes
 WorkingDirectory=$INSTALL
 $environment
 Environment=NO_COLOR=1

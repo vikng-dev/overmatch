@@ -8,19 +8,20 @@ import { parseXml, type Xml } from "./ec2-xml";
 import { host, machineScript } from "./host.generated";
 import { providerText, ProviderError, type Provider, type DeployRequest, type DeploymentStatus, type ListedDeployment } from "./provider";
 import { queryString, signV4 } from "./sigv4";
+import { serverRelease } from "./release";
 
 // Owner choices: hosting design decisions 3 and 5, and section 5's independent lifetime guard.
 export const MAX_HOSTS = hosting.maxServers;
 export const BOOT_ATTEMPTS = hosting.startAttempts;
 export const HOST_CAP_MIN = hosting.lifetimeMinutes;
-export const EC2_LOCATION = { city: "Singapore", country: "Singapore", continent: "Asia", latitude: 1.35, longitude: 103.82 };
+export const EC2_LOCATION = hosting.location;
 // Resolution: DescribeInstances pages are limited to 100 records; a 1 MiB body cap bounds parsing memory.
 const API = `https://ec2.${host.region}.amazonaws.com/`;
 // Resolution: one bounded retransmission recovers a lost answer without holding a join indefinitely.
 const CALL_ATTEMPTS = 2;
 const CAPACITY = new Set(["InsufficientInstanceCapacity", "InsufficientHostCapacity", "InstanceLimitExceeded", "VcpuLimitExceeded", "InsufficientFreeAddressesInSubnet"]);
 
-const REFUSED = new Set(["UnauthorizedOperation", "AuthFailure", "InvalidClientTokenId", "SignatureDoesNotMatch", "RequestExpired", "MissingAuthenticationToken", "IdempotentParameterMismatch", "InvalidParameter", "InvalidParameterValue", "InvalidParameterCombination", "MissingParameter", "Unsupported", "UnsupportedOperation", "InvalidAMIID.NotFound", "InvalidAMIID.Unavailable", "InvalidAMIID.Malformed", "InvalidBlockDeviceMapping", "InvalidSubnetID.NotFound", "InvalidSubnetID.Malformed", "InvalidGroup.NotFound", "InvalidGroupId.Malformed", "InvalidKeyPair.NotFound", "InvalidInstanceID.Malformed", "OperationNotPermitted", "Blocked", "PendingVerification"]);
+const REFUSED = new Set(["UnauthorizedOperation", "AuthFailure", "InvalidClientTokenId", "SignatureDoesNotMatch", "RequestExpired", "MissingAuthenticationToken", "InvalidParameter", "InvalidParameterValue", "InvalidParameterCombination", "MissingParameter", "Unsupported", "UnsupportedOperation", "InvalidAMIID.NotFound", "InvalidAMIID.Unavailable", "InvalidAMIID.Malformed", "InvalidBlockDeviceMapping", "InvalidSubnetID.NotFound", "InvalidSubnetID.Malformed", "InvalidGroup.NotFound", "InvalidGroupId.Malformed", "InvalidKeyPair.NotFound", "InvalidInstanceID.Malformed", "OperationNotPermitted", "Blocked", "PendingVerification"]);
 
 export function ec2Outcome(code: string): "capacity" | "refused" | "unknown" {
 	if (CAPACITY.has(code)) return "capacity";
@@ -36,6 +37,7 @@ export function hostedScript(req: DeployRequest): string {
 	for (const name of ["OVERMATCH_API", "OVERMATCH_SERVER_ID", "OVERMATCH_REPORT_SECRET"]) {
 		if (!values[name]) throw new Error(`EC2 launch requires ${name}`);
 	}
+	if (new URL(values.OVERMATCH_API).protocol !== "https:") throw new ProviderError("insecureOrigin", 0, "refused");
 	const environment = req.env.map(({ key, value }) => {
 		if (!/^OVERMATCH_[A-Z_]+$/.test(key) || /[\r\n\0]/.test(value)) throw new Error("invalid hosted environment");
 		return `${key}="${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"\n`;
@@ -64,7 +66,7 @@ function network(raw: string | undefined): Network {
 	throw new ProviderError("config", 0, "refused");
 }
 
-function launchFields(req: DeployRequest, n: Network, subnet: string, script: string): Record<string, string> {
+function launchFields(req: DeployRequest, n: Network, subnet: string, script: string, workerEnv: string): Record<string, string> {
 	const params: Record<string, string> = {
 		ImageId: `resolve:ssm:${host.parameter}`, InstanceType: production.instance_type, MinCount: "1", MaxCount: "1",
 		ClientToken: req.tag, "Placement.Tenancy": "default", "InstanceMarketOptions.MarketType": "on-demand",
@@ -80,7 +82,7 @@ function launchFields(req: DeployRequest, n: Network, subnet: string, script: st
 	["instance", "volume", "network-interface"].forEach((kind, i) => {
 		const prefix = `TagSpecification.${i + 1}`;
 		params[`${prefix}.ResourceType`] = kind;
-		Object.entries({ ...host.tags, Claim: req.tag, Version: req.version }).forEach(([key, value], j) => {
+		Object.entries({ ...host.tags, WorkerEnvironment: workerEnv, Claim: req.tag, Version: req.version }).forEach(([key, value], j) => {
 			params[`${prefix}.Tag.${j + 1}.Key`] = key;
 			params[`${prefix}.Tag.${j + 1}.Value`] = value;
 		});
@@ -89,7 +91,18 @@ function launchFields(req: DeployRequest, n: Network, subnet: string, script: st
 }
 
 export class Ec2 implements Provider {
-	constructor(private readonly env: Env, private readonly timeoutMs: number) {}
+	readonly starts = { attempts: BOOT_ATTEMPTS, retryBootInPlace: true };
+	readonly inventory = { scoped: true, maxAgeMs: (HOST_CAP_MIN + hosting.sweepMarginMinutes) * 60_000 };
+	readonly usdPerVcpuMinute = null;
+	readonly requiresHttps = true;
+	readonly verifyRelease = serverRelease;
+	private readonly workerEnv: string;
+	constructor(private readonly env: Env, private readonly timeoutMs: number) {
+		if (typeof env.WORKER_ENV !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(env.WORKER_ENV)) throw new Error("config: WORKER_ENV must name this deployment (lowercase letters, digits, hyphens)");
+		this.workerEnv = env.WORKER_ENV;
+	}
+	releaseClaim(serverId: string): Promise<void> { return this.env.FLEET.getByName("ec2").release(serverId); }
+	reservations() { return this.env.FLEET.getByName("ec2").reservations(); }
 
 	private async query(action: string, params: Record<string, string>, outerSignal?: AbortSignal): Promise<Xml> {
 		if (!this.env.AWS_ACCESS_KEY_ID || !this.env.AWS_SECRET_ACCESS_KEY) throw new ProviderError("credentials", 0, "refused");
@@ -128,6 +141,7 @@ export class Ec2 implements Provider {
 	}
 
 	private async launch(req: DeployRequest, signal: AbortSignal): Promise<string> {
+		if (!this.env.AWS_ACCESS_KEY_ID || !this.env.AWS_SECRET_ACCESS_KEY) throw new ProviderError("credentials", 0, "refused");
 		const n = network(this.env.AWS_HOST_CONFIG);
 		const script = hostedScript(req);
 		const serverId = req.env.find((e) => e.key === "OVERMATCH_SERVER_ID")!.value;
@@ -136,7 +150,7 @@ export class Ec2 implements Provider {
 		catch { throw new ProviderError("admission", 0, "unknown"); }
 		if (!admitted) throw new ProviderError("cap", 0, "capacity");
 		for (const subnet of n.subnetIds) {
-			const params = launchFields(req, n, subnet, script);
+			const params = launchFields(req, n, subnet, script, this.workerEnv);
 			for (let attempt = 0; attempt < CALL_ATTEMPTS; attempt++) {
 				try {
 					if (signal.aborted) throw new ProviderError("RunInstances", 0, "unknown");
@@ -158,7 +172,7 @@ export class Ec2 implements Provider {
 	async dryRun(req: DeployRequest, imageId?: string): Promise<void> {
 		const n = network(this.env.AWS_HOST_CONFIG);
 		for (const subnet of n.subnetIds) {
-			const params = launchFields(req, n, subnet, hostedScript(req));
+			const params = launchFields(req, n, subnet, hostedScript(req), this.workerEnv);
 			params.DryRun = "true";
 			if (imageId !== undefined) params.ImageId = imageId;
 			try {
@@ -180,12 +194,18 @@ export class Ec2 implements Provider {
 		let next: string | null = null;
 		for (let page = 0; page < maxPages; page++) {
 			const params: Record<string, string> = { MaxResults: "100" };
-			Object.entries(host.tags).forEach(([k, v], i) => { params[`Filter.${i + 1}.Name`] = `tag:${k}`; params[`Filter.${i + 1}.Value.1`] = v; });
-			params["Filter.3.Name"] = "instance-state-name";
-			["pending", "running", "shutting-down", "stopping", "stopped"].forEach((v, i) => { params[`Filter.3.Value.${i + 1}`] = v; });
+			const tags = Object.entries({ ...host.tags, WorkerEnvironment: this.workerEnv });
+			tags.forEach(([k, v], i) => { params[`Filter.${i + 1}.Name`] = `tag:${k}`; params[`Filter.${i + 1}.Value.1`] = v; });
+			const state = `Filter.${tags.length + 1}`;
+			params[`${state}.Name`] = "instance-state-name";
+			["pending", "running", "shutting-down", "stopping", "stopped"].forEach((v, i) => { params[`${state}.Value.${i + 1}`] = v; });
 			if (next) params.NextToken = next;
 			const out = await this.describe(params);
-			for (const x of out.items) items.push({ id: x.one("instanceId").text, tags: claimTags(x) });
+			for (const x of out.items) {
+				const launchedAt = Date.parse(x.one("launchTime").text);
+				if (!Number.isFinite(launchedAt)) throw new ProviderError("launchTime", 0, "unknown");
+				items.push({ id: x.one("instanceId").text, tags: claimTags(x), launchedAt });
+			}
 			next = out.next;
 			if (!next) return { items, truncated: false };
 		}

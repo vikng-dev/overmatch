@@ -1,8 +1,8 @@
 import { bounded } from "./deadline";
 import { providerText, ProviderError } from "./provider";
 
-// Resolution: bound repeated nonexistent-version reads while letting a newly published tag recover within a minute.
-export const MISSING_RELEASE_CACHE_MS = 60_000;
+// Resolution: one minute bounds GitHub reads and how long published or replaced assets remain stale, for hits and misses.
+export const RELEASE_CACHE_MS = 60_000;
 
 export interface ServerRelease { url: string; checksum: string }
 
