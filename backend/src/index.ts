@@ -2,7 +2,7 @@
 // status codes. No state lives here. The contract is src/types.ts + contract/*.json.
 
 import { accessDenied, adminPage } from "./admin";
-import { config, ConfigurationError, serverEnvironment, type Env } from "./config";
+import { config, ConfigurationError, SERVER_SETTING_DOMAINS, serverEnvironment, type Env } from "./config";
 import { newId, randomHex, validVersion, versionOf, tagOf } from "./ids";
 import { diag } from "./reasons";
 import { ProviderError, providerFor, platformCall, isRecord } from "./provider";
@@ -14,6 +14,8 @@ export { Fleet } from "./fleet";
 export { Registry } from "./registry";
 
 const MAX_LOCATIONS = 64;
+// src/net/matchmaking/contract.rs:51: client RTTs are whole milliseconds stored as u32.
+const MAX_PING_MS = 2 ** 32 - 1;
 
 function json(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -79,24 +81,29 @@ function parseJoin(b: unknown): JoinRequest {
 	if (!Array.isArray(locations) || locations.length === 0 || locations.length > MAX_LOCATIONS) {
 		invalid(`locations: expected 1-${MAX_LOCATIONS} location ids`);
 	}
-	if (!locations.every((l) => typeof l === "string" && l.length > 0 && l.length <= 128)) invalid("locations: expected strings");
+	const locationId = (l: unknown): l is string => typeof l === "string" && l.isWellFormed() && l.length > 0 && l.length <= 128;
+	if (!locations.every(locationId)) invalid("locations: expected 1-128 character Unicode location ids");
 	const p = pings === undefined ? {} : pings;
 	if (typeof p !== "object" || p === null || Array.isArray(p)) invalid("pings: expected an object of location id to ms");
-	const out: Record<string, number> = {};
+	if (Object.keys(p).length > MAX_LOCATIONS) invalid(`pings: expected at most ${MAX_LOCATIONS} locations`);
+	const entries: [string, number][] = [];
 	for (const [k, v] of Object.entries(p)) {
-		if (typeof v !== "number" || !Number.isFinite(v) || v < 0) invalid(`pings.${k}: expected a non-negative number`);
-		out[k] = v;
+		if (!locationId(k)) invalid("pings: expected 1-128 character Unicode location ids");
+		if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > MAX_PING_MS) invalid(`pings: expected integer ms from 0 to ${MAX_PING_MS}`);
+		entries.push([k, v]);
 	}
-	return { version, locations: [...new Set(locations as string[])], pings: out };
+	return { version, locations: [...new Set(locations as string[])], pings: Object.fromEntries(entries) };
 }
 
 function parseHeartbeat(b: unknown): HeartbeatRequest {
 	if (!isRecord(b)) invalid("body must be a JSON object");
 	const { players, capacity, state } = b;
-	if (!Number.isInteger(players) || (players as number) < 0) invalid("players: expected a non-negative integer");
-	if (!Number.isInteger(capacity) || (capacity as number) < 1) invalid("capacity: expected a positive integer");
+	// Counts fit the hosted netcode ceiling; SQLite LIMIT receives only 0..capacity arrivals.
+	const domain = SERVER_SETTING_DOMAINS.CAPACITY;
+	if (typeof capacity !== "number" || !Number.isInteger(capacity) || capacity < domain.min || capacity > domain.max) invalid(`capacity: expected an integer from ${domain.min} to ${domain.max}`);
+	if (typeof players !== "number" || !Number.isInteger(players) || players < 0 || players > capacity) invalid("players: expected an integer from 0 to capacity");
 	if (state !== "open" && state !== "closed" && state !== "closing") invalid('state: expected "open", "closed" or "closing"');
-	return { players: players as number, capacity: capacity as number, state };
+	return { players, capacity, state };
 }
 
 async function route(req: Request, env: Env): Promise<Response> {
@@ -142,8 +149,10 @@ async function route(req: Request, env: Env): Promise<Response> {
 			r = await platformCall("heartbeat", async () => registryFor(env, version).heartbeat(id, secret, hb));
 		} else {
 			if (!isRecord(b)) invalid("body must be a JSON object");
-			if (b.reason !== undefined && typeof b.reason !== "string") invalid("reason: expected text");
-			if (b.crash !== undefined && typeof b.crash !== "string") invalid("crash: expected text");
+			// Diagnostics accept arbitrary Unicode text, including empty text; history keeps a short
+			// reason and evidence.ts owns redaction and the bounded UTF-8 crash tail.
+			if (b.reason !== undefined && (typeof b.reason !== "string" || !b.reason.isWellFormed())) invalid("reason: expected Unicode text");
+			if (b.crash !== undefined && (typeof b.crash !== "string" || !b.crash.isWellFormed())) invalid("crash: expected Unicode text");
 			// An omitted reason is the protocol's ordinary exit report.
 			const reason = b.reason === undefined ? "exit" : b.reason;
 			const crash = b.crash;

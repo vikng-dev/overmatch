@@ -1,13 +1,13 @@
 import { runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Edgegap, edgegapFor } from "../src/edgegap";
-import { config } from "../src/config";
+import { config, SERVER_SETTING_DOMAINS } from "../src/config";
 import worker from "../src/index";
 import { adminPage } from "../src/admin";
 import { stopWithEvidence } from "../src/evidence";
 import { recordEvent } from "../src/history";
 import { lastSweep, sweep } from "../src/sweep";
-import { call, env, join, registry } from "./helpers";
+import { call, env, join, launched, registry } from "./helpers";
 
 const V = "0.5.0";
 const cfg = config(env);
@@ -111,7 +111,8 @@ describe("outside failures have typed recovery; invariant failures fail the invo
 	it.each([
 		["EDGEGAP_API", "not-a-url"], ["EDGEGAP_TOKEN", "fixture\r\nheader"],
 		["EDGEGAP_APP", ""], ["EDGEGAP_PORT_NAME", ""],
-		["CAPACITY", "NaN"], ["HEARTBEAT_DEADLINE_S", "1e308"],
+		["CAPACITY", "NaN"], ["CAPACITY", "1.5"], ["EMPTY_EXIT_S", "0"], ["HEARTBEAT_DEADLINE_S", "1e308"],
+		["ACCESS_TEAM_DOMAIN", "///"], ["ACCESS_AUD", ""],
 		["ACCESS_TEAM_DOMAIN", "not-a-url"], ["PROVIDER", "unknown"], ["LOCATION_HINT", "unknown"],
 	])("operator %s is refused at request startup without logging its value", async (key, value) => {
 		const log = vi.spyOn(console, "error");
@@ -119,7 +120,73 @@ describe("outside failures have typed recovery; invariant failures fail the invo
 		expect(res.status).toBe(503);
 		expect(await res.json()).toEqual({ error: expect.stringContaining(`config: ${key}:`) });
 		expect(log).toHaveBeenCalledWith("configuration refused", expect.stringContaining(`config: ${key}:`));
-		if (value) expect(log.mock.calls.flat().join(" ")).not.toContain(value);
+		// Numeric bounds belong in the diagnostic; opaque malformed text must never be echoed.
+		if (value && !Number.isFinite(Number(value))) expect(log.mock.calls.flat().join(" ")).not.toContain(value);
+	});
+
+	it.each([
+		["players", -1], ["players", 0.5], ["players", 1e100], ["players", Number.MAX_SAFE_INTEGER],
+		["players", SERVER_SETTING_DOMAINS.CAPACITY.max + 1],
+		["capacity", 0], ["capacity", 1.5], ["capacity", 1e100], ["capacity", SERVER_SETTING_DOMAINS.CAPACITY.max + 1],
+	])("heartbeat %s=%s is refused before Registry SQL can see it", async (field, value) => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const server = launched();
+		const before = await registry(V).snapshot();
+		const log = vi.spyOn(console, "warn");
+		const res = await call("POST", `/v1/servers/${server.id}/heartbeat`, { players: 0, capacity: SERVER_SETTING_DOMAINS.CAPACITY.max, state: "open", [field]: value }, { authorization: `Bearer ${server.secret}` });
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({ error: expect.stringContaining(`${field}:`) });
+		expect(log).toHaveBeenCalledWith("request refused", "fields");
+		expect(await registry(V).snapshot()).toEqual(before);
+	});
+
+	it("heartbeat counts admit both ends of the server-owned integer domain", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const server = launched();
+		for (const capacity of [SERVER_SETTING_DOMAINS.CAPACITY.min, SERVER_SETTING_DOMAINS.CAPACITY.max]) {
+			for (const players of [0, capacity]) {
+				const res = await call("POST", `/v1/servers/${server.id}/heartbeat`, { players, capacity, state: "open" }, { authorization: `Bearer ${server.secret}` });
+				expect(res.status).toBe(204);
+				expect((await registry(V).snapshot())[0]).toMatchObject({ players, capacity });
+			}
+		}
+	});
+
+	it("a heartbeat cannot report more players than its own capacity", async () => {
+		const id = "Zml4dHVyZQ." + "a".repeat(32);
+		const res = await call("POST", `/v1/servers/${id}/heartbeat`, { players: 2, capacity: 1, state: "open" });
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({ error: "players: expected an integer from 0 to capacity" });
+	});
+
+	it("ping entries are bounded by the location-selection budget", async () => {
+		const pings = Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`fixture-${i}`, 1]));
+		expect((await call("POST", "/v1/join", { version: V, locations: ["Paris"], pings })).status).toBe(400);
+		expect(edgegap.calls).toHaveLength(0);
+	});
+
+	it.each([-1, 0.5, 2 ** 32, 1e100])("ping %s is refused before placement", async (value) => {
+		const res = await call("POST", "/v1/join", { version: V, locations: ["Paris"], pings: { Paris: value } });
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({ error: expect.stringContaining("integer ms") });
+		expect(edgegap.calls).toHaveLength(0);
+	});
+
+	it.each([0, 2 ** 32 - 1])("a u32 ping boundary %s is admitted for placement", async (value) => {
+		await join({ version: V, locations: ["Paris", "London"], pings: { Paris: value } });
+		expect(edgegap.deployment(0).body.filters).toEqual([{ field: "city", values: ["Paris"], filter_type: "any" }]);
+	});
+
+	it.each([["empty", ""], ["too long", "x".repeat(129)], ["unpaired surrogate", "\ud800"]])("location and ping ids share the same Unicode string domain: %s", async (_label, id) => {
+		for (const payload of [{ version: V, locations: [id] }, { version: V, locations: ["Paris"], pings: { [id]: 1 } }]) {
+			expect((await call("POST", "/v1/join", payload)).status).toBe(400);
+		}
+		expect(edgegap.calls).toHaveLength(0);
+	});
+
+	it.each(["reason", "crash"])("malformed Unicode %s is refused before Registry work", async (field) => {
+		const id = "Zml4dHVyZQ." + "a".repeat(32);
+		expect((await call("POST", `/v1/servers/${id}/end`, { [field]: "\ud800" })).status).toBe(400);
 	});
 
 	it("admin D1 outages are typed while SQL bugs still fail the invocation", async () => {

@@ -216,11 +216,61 @@ also treats environment bindings as non-inherited. Required shared values remain
 Provider-only values are omitted from the proving environment. This is intentional, not an
 attempt to rely on inheritance that Wrangler does not implement.
 
+### Worker value-domain closure
+
+All four error-handling P2s, the brevity P3 and both pre-existing testing P2s in
+`lenses-provider-5.md` are closed. Authenticated heartbeat counts are integers: capacity uses the
+server's netcode ceiling, and players are between zero and that heartbeat's capacity. Refusal is
+`RequestError` at HTTP admission, before Registry SQL. The arrival `LIMIT` cannot receive an
+unbounded JavaScript number. Join pings use the shipped client's whole-millisecond `u32` domain;
+their keys use the same Unicode id domain as selected locations, and both collections use the
+selection budget. Non-finite, fractional, negative and overflowing request numbers refuse.
+
+Decision: `SERVER_SETTING_DOMAINS` in `backend/src/config.ts` is the one Worker table for all
+forwarded numeric settings. Rust owns the domains: capacity and hosted durations in
+`src/net/hosting.rs`, stats periods in `src/net/server_stats.rs`. There is no shared data source
+across the Rust and TypeScript parsers, and this lane must not edit Rust. The table gives the Rust
+line references, and the boundary tests read the table rather than copying its bounds. Existing
+stricter Worker minima for heartbeat and stats stay unchanged. Rust `Duration`'s representable
+range supplies the stats upper bound (DERIVED: floating-point seconds must be less than 2^64).
+The generated server id, API origin, key and report token already satisfy the hosted string
+parsers; no operator-controlled string is forwarded as one of those generated credentials.
+Heartbeat/start deadlines are Worker-only settings, not parsed or received by the game server;
+their existing finite, positive seconds and finite conversion checks remain. All other consumed
+numeric operator settings retain their minima and finite-conversion checks, with decimal syntax
+admission; empty, nonnumeric, non-finite and overflowing representations are configuration errors.
+
+Disabled Access or keyless hosting now requires an absent setting. Supplied empty, whitespace-only,
+control-character, ill-formed Unicode or wrong-shaped optional settings are named
+`ConfigurationError`s. Access validates the supplied URL before normalization, even if the audience
+is absent, and requires an HTTP(S) origin without credentials, path, query or fragment. AWS keys
+are visible ASCII tokens without spaces; network JSON retains its exact security-group/subnet
+shape and uniqueness gate. Unselected provider settings remain unused. Optional Edgegap retry
+and price settings are required when that provider is selected; malformed or missing values
+already refuse, and numeric admission now also tests empty and non-decimal representations.
+
+The string request sweep retained version/id/nonce/image/request-id grammars, native IP parsing
+and the existing 404/410/401 outcomes for unknown identifiers or credentials. Location ids and
+diagnostics now also reject ill-formed Unicode. Diagnostic text remains free-form (empty is
+allowed), with the existing short reason and redacted UTF-8 tail retention owned by history and
+evidence. The server state remains its three-value enum. No placement, launch, retry, lifecycle
+or retention policy changed.
+
+`providerName` is deleted; its two callers project the admitted provider directly. The failed-ticket
+format test reads the configured startup deadline, and the adapter forwarding test reads the
+configured application name. Tests witness rejected heartbeat inputs leaving the real Registry
+snapshot unchanged, accepted integer endpoints reaching it, ping endpoints reaching placement,
+and malformed optional settings refusing even when another setting leaves the capability absent.
+
+Operational exception: an accidental source search printed configuration identifiers from generated
+bindings. It read no credential files. Subsequent searches excluded generated bindings. No account
+command or live AWS request ran.
+
 ## Local evidence
 
 MEASURED final local results:
 
-- Backend tests: 206 production-path tests and 100 EC2 tests pass in the shipped Worker runtime.
+- Backend tests: 246 production-path tests and 100 EC2 tests pass in the shipped Worker runtime.
 - Backend typecheck and generated boot embedding check pass.
 - `python3 scripts/aws/test_harness.py`: 28 tests pass.
 - `python3 scripts/aws/test_host_setup.py`: 20 tests pass, including key-only revocation and retry.

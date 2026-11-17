@@ -54,7 +54,7 @@ describe("join-or-create", () => {
 	it("starts in the lowest-ping selected location, with the city filter and OVERMATCH_* env", async () => {
 		await join({ version: V, locations: ["Mumbai", "Singapore", "Paris"], pings: { Mumbai: 144, Singapore: 45, Paris: 228 } });
 		const d = edgegap.deployment(0);
-		expect(d.body.app_name).toBe("Overmatch");
+		expect(d.body.app_name).toBe(env.EDGEGAP_APP);
 		expect(d.body.version_name).toBe(V);
 		expect(d.body.filters).toEqual([{ field: "city", values: ["Singapore"], filter_type: "any" }]);
 		const vars = d.body.env_vars as { key: string; value: string; is_hidden: boolean }[];

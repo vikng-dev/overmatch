@@ -57,8 +57,8 @@ describe("GET /admin", () => {
 
 	it("is closed when Access is not configured", async () => {
 		const req = new Request("https://x.test/admin", { headers: { "cf-access-jwt-assertion": await token() } });
-		expect(await accessDenied(req, { ...env, ACCESS_AUD: "" })).toMatch(/not configured/);
-		expect(await accessDenied(req, { ...env, ACCESS_TEAM_DOMAIN: "" })).toMatch(/not configured/);
+		expect(await accessDenied(req, { ...env, ACCESS_AUD: undefined })).toMatch(/not configured/);
+		expect(await accessDenied(req, { ...env, ACCESS_TEAM_DOMAIN: undefined })).toMatch(/not configured/);
 	});
 
 	it.each(["not-json", JSON.stringify({ keys: [{ kty: "RSA", kid: "k1", alg: "RS256", n: "bad", e: "AQAB" }] })])("an unreadable Access key response is a visible refusal: %s", async (raw) => {

@@ -568,7 +568,7 @@ describe("operator-only provider-key authorization proof", () => {
 		const pair = await keys;
 		ec2.jwks = { keys: [{ ...(await exportJWK(pair.publicKey)), kid: "proof", alg: "RS256", use: "sig" }] };
 		return { "cf-access-jwt-assertion": await new SignJWT({})
-			.setProtectedHeader({alg: "RS256", kid: "proof"}).setIssuer(env.ACCESS_TEAM_DOMAIN).setAudience(env.ACCESS_AUD)
+			.setProtectedHeader({alg: "RS256", kid: "proof"}).setIssuer(cfg.access!.issuer).setAudience(cfg.access!.audience)
 			.setIssuedAt().setExpirationTime("5m").sign(pair.privateKey) };
 	}
 	it("requires Access before reading releases or calling AWS", async () => {

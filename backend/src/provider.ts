@@ -195,10 +195,8 @@ export function parseProviderName(name: string): ProviderName {
 	return name as ProviderName;
 }
 
-export function providerName(env: Env): ProviderName { return config(env).provider.name; }
-
 export function providerFor(env: Env, timeoutMs: number): Provider {
-	return implementations[providerName(env)](env, timeoutMs);
+	return implementations[config(env).provider.name](env, timeoutMs);
 }
 
 /** Bound outside text before decoding so a stalled or oversized response cannot exhaust the Worker. */

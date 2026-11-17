@@ -41,8 +41,8 @@ export interface Env {
 	PROVIDER_TIMEOUT_S: string;
 	USD_PER_VCPU_MINUTE?: string;
 	LOCATION_HINT: string;
-	ACCESS_TEAM_DOMAIN: string;
-	ACCESS_AUD: string;
+	ACCESS_TEAM_DOMAIN?: string;
+	ACCESS_AUD?: string;
 }
 
 export class ConfigurationError extends Error {
@@ -77,19 +77,41 @@ export interface Config {
 	vcpuPerServer: number;
 }
 
+// src/net/hosting.rs owns the server's domains; the Worker mirrors them before launch.
+// Rust and TypeScript have no shared bounds source. Existing Worker minima stay stricter where noted.
+export const SERVER_SETTING_DOMAINS = {
+	CAPACITY: { min: 1, max: 256, integer: true }, // hosting.rs:126,219 (netcode ceiling)
+	HEARTBEAT_INTERVAL_S: { min: 1, max: 86_400 }, // hosting.rs:289-292; Worker minimum: 1 s
+	EMPTY_EXIT_S: { min: 0, exclusiveMin: true, max: 86_400 }, // hosting.rs:289-292
+	// Unknown: no operating-frequency or storage budget establishes the Worker's 1 ms minimum.
+	SERVER_STATS_S: { min: 0.001, max: 2 ** 64, exclusiveMax: true }, // server_stats.rs:295-312
+} satisfies Record<string, { min: number; max: number; integer?: boolean; exclusiveMin?: boolean; exclusiveMax?: boolean }>;
+
 function num(env: Env, key: keyof Env, min: number, scale = 1): number {
 	const raw = env[key];
-	const v = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
+	const v = typeof raw === "string" && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.exec(raw.trim())?.[0] === raw.trim() ? Number(raw) : NaN;
 	if (!Number.isFinite(v) || v < min || !Number.isFinite(v * scale)) {
 		throw new ConfigurationError(key, `need a finite number >= ${min} with a finite converted value`);
 	}
 	return v * scale;
 }
 
+function serverNumber(env: Env, key: keyof typeof SERVER_SETTING_DOMAINS, scale = 1): number {
+	const domain = SERVER_SETTING_DOMAINS[key];
+	const value = num(env, key, domain.min);
+	if (value > domain.max || ("exclusiveMax" in domain && value === domain.max)
+		|| ("exclusiveMin" in domain && value === domain.min) || ("integer" in domain && !Number.isInteger(value))) {
+		throw new ConfigurationError(key, `need ${"integer" in domain ? "an integer" : "seconds"} ${"exclusiveMin" in domain ? ">" : ">="} ${domain.min} and ${"exclusiveMax" in domain ? "<" : "<="} ${domain.max}`);
+	}
+	return value * scale;
+}
+
 function optionalText(env: Env, key: keyof Env): string | null {
 	const raw = env[key];
-	if (raw === undefined || raw === "") return null;
-	if (typeof raw !== "string") throw new ConfigurationError(key, "need text");
+	if (raw === undefined) return null;
+	if (typeof raw !== "string" || raw.trim() === "" || !raw.isWellFormed() || /[\u0000-\u001f\u007f]/.test(raw)) {
+		throw new ConfigurationError(key, "need nonempty text without control characters (unset is absent)");
+	}
 	return raw;
 }
 
@@ -99,8 +121,14 @@ function requiredText(env: Env, key: keyof Env): string {
 	return value;
 }
 
+function optionalToken(env: Env, key: keyof Env): string | null {
+	const value = optionalText(env, key);
+	if (value !== null && /[^\x21-\x7e]/.test(value)) throw new ConfigurationError(key, "need a visible ASCII token without spaces (unset is absent)");
+	return value;
+}
+
 function settingUrl(raw: string, key: keyof Env): URL {
-	if (typeof raw !== "string") throw new ConfigurationError(key, "need an HTTP(S) URL");
+	if (typeof raw !== "string" || !raw.isWellFormed() || /\s|[\u0000-\u001f\u007f]/.test(raw)) throw new ConfigurationError(key, "need an HTTP(S) URL");
 	let url: URL;
 	try { url = new URL(raw); }
 	catch (err) {
@@ -123,7 +151,8 @@ function header(value: string, key: keyof Env): Headers {
 
 function network(raw: string | undefined): Network | null {
 	// A keyless Worker is deployable; launch refuses a missing network before reserving a slot.
-	if (raw === undefined || raw === "") return null;
+	if (raw === undefined) return null;
+	if (typeof raw !== "string") throw new ConfigurationError("AWS_HOST_CONFIG", "need a JSON object with securityGroupId and unique subnetIds");
 	let n: unknown;
 	try { n = JSON.parse(raw); }
 	catch (err) {
@@ -153,9 +182,8 @@ function providerConfig(env: Env): ProviderConfig {
 	if (typeof workerEnv !== "string" || /^[a-z][a-z0-9-]{0,62}$/.exec(workerEnv)?.[0] !== workerEnv) {
 		throw new ConfigurationError("WORKER_ENV", "need this deployment's lowercase letters, digits and hyphens");
 	}
-	const accessKey = optionalText(env, "AWS_ACCESS_KEY_ID");
-	if (accessKey !== null) header(accessKey, "AWS_ACCESS_KEY_ID");
-	return { name, workerEnv, accessKey, secretKey: optionalText(env, "AWS_SECRET_ACCESS_KEY"), network: network(env.AWS_HOST_CONFIG) };
+	const accessKey = optionalToken(env, "AWS_ACCESS_KEY_ID");
+	return { name, workerEnv, accessKey, secretKey: optionalToken(env, "AWS_SECRET_ACCESS_KEY"), network: network(env.AWS_HOST_CONFIG) };
 }
 
 const configurations = new WeakMap<Env, Config>();
@@ -166,8 +194,12 @@ export function config(env: Env): Config {
 	const cached = configurations.get(env);
 	if (cached) return cached;
 	const provider = providerConfig(env);
-	const team = optionalText(env, "ACCESS_TEAM_DOMAIN")?.replace(/\/+$/, "");
-	const issuer = team ? settingUrl(team, "ACCESS_TEAM_DOMAIN").href.replace(/\/+$/, "") : null;
+	const team = optionalText(env, "ACCESS_TEAM_DOMAIN");
+	const teamUrl = team === null ? null : settingUrl(team, "ACCESS_TEAM_DOMAIN");
+	if (teamUrl && (!/^\/*$/.test(teamUrl.pathname) || teamUrl.search || teamUrl.hash)) {
+		throw new ConfigurationError("ACCESS_TEAM_DOMAIN", "need an HTTP(S) origin without a path, query or fragment");
+	}
+	const issuer = teamUrl?.origin ?? null;
 	const audience = optionalText(env, "ACCESS_AUD");
 	const access = issuer && audience ? { issuer, keys: new URL(`${issuer}/cdn-cgi/access/certs`), audience } : null;
 	const hint = env.LOCATION_HINT;
@@ -177,16 +209,15 @@ export function config(env: Env): Config {
 	const s = 1000;
 	const cfg: Config = {
 		provider, access, locationHint: hint as DurableObjectLocationHint | "",
-		capacity: num(env, "CAPACITY", 1),
-		heartbeatIntervalMs: num(env, "HEARTBEAT_INTERVAL_S", 1, s),
+		capacity: serverNumber(env, "CAPACITY"),
+		heartbeatIntervalMs: serverNumber(env, "HEARTBEAT_INTERVAL_S", s),
 		heartbeatDeadlineMs: num(env, "HEARTBEAT_DEADLINE_S", 1, s),
 		startDeadlineMs: num(env, "START_DEADLINE_S", 1, s),
 		statusPollMs: num(env, "STATUS_POLL_S", 1, s),
 		reservationTtlMs: num(env, "RESERVATION_TTL_S", 0, s),
 		ticketTtlMs: num(env, "TICKET_TTL_S", 1, s),
-		emptyExitS: num(env, "EMPTY_EXIT_S", 0),
-		// Unknown: no operating-frequency or storage budget establishes this 1 ms minimum.
-		serverStatsS: num(env, "SERVER_STATS_S", 0.001),
+		emptyExitS: serverNumber(env, "EMPTY_EXIT_S"),
+		serverStatsS: serverNumber(env, "SERVER_STATS_S"),
 		serverLogRetentionMs: num(env, "SERVER_LOG_RETENTION_DAYS", 1, 24 * 60 * 60 * s),
 		endedRetentionMs: num(env, "ENDED_RETENTION_S", 0, s),
 		locationsCacheMs: num(env, "LOCATIONS_CACHE_S", 0, s),
