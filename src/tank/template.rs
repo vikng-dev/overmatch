@@ -13,9 +13,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use avian3d::prelude::{
-    AngularInertia, CenterOfMass, Collider, CollisionLayers, Friction, LayerMask, Mass,
-};
+use avian3d::prelude::{AngularInertia, Collider, CollisionLayers, Friction, LayerMask};
 use bevy::prelude::*;
 
 use super::integrity::authored_attachment;
@@ -178,9 +176,9 @@ struct ProxyEntry {
 /// The root's authored body.
 struct RootBody {
     hull: HullBody,
-    mass: Mass,
+    mass: f32,
     angular_inertia: AngularInertia,
-    centre_of_mass: CenterOfMass,
+    centre_of_mass: Vec3,
     capabilities: TankCapabilities,
     views: TankViews,
     /// Every local recoil/tracer slot, in weapon slot order.
@@ -284,11 +282,13 @@ impl TankTemplate {
                 .expect("the turret node is a frame of the tank's armour set"),
         };
         let assembly = &geometry.nodes[rig.turret];
+        let centre_of_mass = geometry.nodes[rig.center_of_mass].root_position;
+        let angular_inertia = spec.hull_angular_inertia();
         let hull_body = HullBody::new(
             file,
             spec.mass,
-            geometry.nodes[rig.center_of_mass].root_position,
-            spec.hull_angular_inertia(),
+            centre_of_mass,
+            angular_inertia,
             turret_body,
             Transform::from_translation(assembly.root_position)
                 .with_rotation(assembly.root_rotation),
@@ -338,9 +338,9 @@ impl TankTemplate {
         };
         let root = RootBody {
             hull: hull_body,
-            mass: Mass(spec.mass),
-            angular_inertia: spec.hull_angular_inertia(),
-            centre_of_mass: CenterOfMass(geometry.nodes[rig.center_of_mass].root_position),
+            mass: spec.mass,
+            angular_inertia,
+            centre_of_mass,
             // Per-tank capability requirements (design §7b) — read by `track::sim::drive_target`.
             capabilities: TankCapabilities {
                 requirements: spec.capabilities.clone(),
@@ -557,7 +557,7 @@ impl TankTemplate {
             .insert((Turret, self.turret_body));
         let body = &self.root;
         commands.entity(root).insert((
-            explicit_mass(body.mass.0, body.centre_of_mass.0, body.angular_inertia),
+            explicit_mass(body.mass, body.centre_of_mass, body.angular_inertia),
             body.hull,
             body.capabilities.clone(),
             body.views.clone(),
@@ -1223,9 +1223,74 @@ mod tests {
         TankTemplate::new(&blueprint, TrackColliders::of_blueprint(&blueprint, &glb));
     }
 
+    /// The game's damage model: the spawned rest-pose assembly and admitted hull must rebuild
+    /// the full vehicle. Wreck physics relies on template admission using the actual assembly
+    /// frame and vehicle centre, rather than identity or zero in their place.
+    #[test]
+    fn spawned_rest_bodies_rebuild_the_full_vehicle() {
+        use avian3d::prelude::{CenterOfMass, Mass};
+        use bevy::ecs::system::SystemState;
+        use bevy::transform::helper::TransformHelper;
+
+        let (_, template) = shipped_construction();
+        let mut world = World::new();
+        let root = world.spawn(Transform::IDENTITY).id();
+        template.assemble(&mut world.commands(), root);
+        world.flush();
+        let turret = world.get::<Rig>(root).unwrap().turret;
+        let mut transforms = SystemState::<TransformHelper>::new(&mut world);
+        let rest = transforms
+            .get(&world)
+            .unwrap()
+            .compute_global_transform(turret)
+            .unwrap()
+            .compute_transform();
+        let assembly = *world.get::<TurretBody>(turret).unwrap();
+        let mass = world.get::<Mass>(root).unwrap().0;
+        let centre = world.get::<CenterOfMass>(root).unwrap().0;
+        let full = world
+            .get::<AngularInertia>(root)
+            .unwrap()
+            .tensor()
+            .to_mat3();
+        let (hull_mass, hull_centre, hull_inertia) =
+            world.get::<HullBody>(root).unwrap().properties();
+        let assembly_centre = rest.transform_point(assembly.centre_of_mass);
+        let hull_moment = hull_mass * hull_centre;
+        let assembly_moment = assembly.mass * assembly_centre;
+        let vehicle_moment = mass * centre;
+        // Resolution: absolute floors in kg, kg m and kg m² plus relative f32 allowance for
+        // frame composition, principal-axis diagonalization and cancellation of summands.
+        assert!((hull_mass + assembly.mass - mass).abs() <= 1e-5 + mass.abs() * 1e-5);
+        assert!(
+            (hull_moment + assembly_moment - vehicle_moment).length()
+                <= 1e-5
+                    + (hull_moment.length() + assembly_moment.length() + vehicle_moment.length())
+                        * 1e-5
+        );
+        let hull = hull_inertia
+            .tensor()
+            .shifted(hull_mass, hull_centre - centre)
+            .to_mat3();
+        let assembly = assembly
+            .angular_inertia
+            .tensor()
+            .rotated(rest.rotation)
+            .shifted(assembly.mass, assembly_centre - centre)
+            .to_mat3();
+        let scale: f32 = [hull, assembly, full]
+            .into_iter()
+            .flat_map(|tensor| tensor.to_cols_array())
+            .map(f32::abs)
+            .sum();
+        for error in (hull + assembly - full).to_cols_array() {
+            assert!(error.abs() <= 1e-3 + scale * 1e-5, "inertia error {error}");
+        }
+    }
+
     /// The game's damage model: an invalid rest-pose mass split is refused by template build,
     /// before the first spawn. Fixture: a finite positive full-vehicle box too small to contain
-    /// the assembly's inertia, independent of its live servo travel.
+    /// the assembly's inertia at rest.
     #[test]
     #[should_panic(expected = "fixture.tank.ron: mass/inertia_extents full-vehicle box")]
     fn an_impossible_rest_pose_is_refused_at_template_build() {
@@ -1319,10 +1384,6 @@ mod tests {
     #[test]
     fn the_spawn_stance_covers_the_running_gears_ground_contact() {
         let (blueprint, template) = shipped_construction();
-        println!(
-            "DERIVED shipped sheet rest-pose hull margin: {} kg m²",
-            template.root.hull.properties().2.principal.min_element()
-        );
         let track = &blueprint.spec.track;
         let params = track.suspension.params();
         let geom = crate::track::rig_geom::RigGeom::build(

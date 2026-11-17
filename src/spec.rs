@@ -1269,12 +1269,15 @@ pub struct LinkAngleSpec {
 pub struct TankSpec {
     /// The name a player reads for this vehicle: the kill feed's, the pen cam's.
     pub display_name: String,
-    /// Total mass (kg) — authored balance data; the collision proxy contributes none (ADR-0011).
+    /// Full-vehicle mass (kg) with the assembly at its rest pose; the hull body is derived from it.
+    /// Authored balance data; the collision proxy contributes none (ADR-0011).
     pub mass: f32,
-    /// Hull box full dimensions (x, y, z metres) approximating the angular-inertia distribution.
+    /// Full-vehicle inertia box dimensions (x, y, z metres) with the assembly at its rest pose;
+    /// the hull body's inertia is derived from this distribution.
     pub inertia_extents: (f32, f32, f32),
-    /// The turret as a free body once a cook-off blows it off: its own mass and inertia box, which
-    /// the hull's `mass` / `inertia_extents` do not describe.
+    /// The game's damage model: the detachable assembly's own mass and inertia box. `mass` and
+    /// `inertia_extents` describe the full vehicle with this assembly at rest; subtracting it
+    /// derives the hull body.
     pub turret: TurretSpec,
     /// Gunner yaw servo, independently of the detachable assembly. None is for unarmed tooling
     /// sheets with no Gunner view; playable rigs must name a declared Yaw servo.
@@ -3134,7 +3137,7 @@ TankSpec(
         }
     }
 
-    /// Spawn and the game's damage model need every full-vehicle moment, not just the minimum.
+    /// Spawn and the game's damage model require finite positive full-vehicle moments.
     /// Fixture: one squared extent overflows while the moment about that axis stays finite;
     /// tiny positive extents instead underflow every moment. Both must fail at sheet admission.
     #[test]

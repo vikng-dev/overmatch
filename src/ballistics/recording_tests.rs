@@ -112,17 +112,19 @@ fn tank(
     velocity: Vec3,
     volumes: &[Volume],
 ) -> (Entity, Vec<Entity>) {
+    // Fixture full-vehicle body.
+    let (mass, centre, inertia) = (
+        50_000.0,
+        Vec3::ZERO,
+        AngularInertia::new(Vec3::splat(1.0e5)),
+    );
     let root = app
         .world_mut()
         .spawn((
             Transform::from_translation(at).with_rotation(Quat::from_rotation_y(yaw)),
             RigidBody::Kinematic,
             LinearVelocity(velocity),
-            crate::tank::explicit_mass(
-                50_000.0,
-                Vec3::ZERO,
-                AngularInertia::new(Vec3::splat(1.0e5)),
-            ),
+            crate::tank::explicit_mass(mass, centre, inertia),
             // A servo-less rig still carries its root's one (empty) integrator.
             crate::tank::TankServos::for_count(0),
         ))
@@ -136,12 +138,9 @@ fn tank(
     };
     let hull = crate::tank::HullBody::new(
         "recording-fixture.tank.ron",
-        app.world().get::<Mass>(root).unwrap().0,
-        app.world()
-            .get::<avian3d::prelude::CenterOfMass>(root)
-            .unwrap()
-            .0,
-        *app.world().get::<AngularInertia>(root).unwrap(),
+        mass,
+        centre,
+        inertia,
         assembly,
         Transform::IDENTITY,
     );
