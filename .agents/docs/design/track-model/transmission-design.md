@@ -906,8 +906,10 @@ no propulsive pedal it can only return belt work to the crank; the idle catch th
 start a released tank creeping. A propulsive pedal permits both impulse directions, with a launch
 floor until the first solved lock. Before the sensing ledger has a reading, initial take-up waits
 for a chosen gear. This initial state is independent of belt speed. An explicit launch phase distinguishes this
-free choice from take-up of an already selected paid shift; closing a cut retains its chosen
-ratio. Lock and slip are outcomes,
+free choice from take-up of an already selected paid shift. Free selection uses the Driver's rest
+band and the authored launch range; a rolling gear above that range also needs shaft speed
+forecast from the current hull reading to reach at least its launch crank speed. Closing a paid
+cut retains its chosen ratio. Lock and slip are outcomes,
 recorded in `ClutchState`, rather than switches that choose a physical path. Without an operator,
 the passive spring clutch stays closed both ways with no fuel or idle catch; belt rollback may
 motor the crank backward. A backward crank cannot combust, so the Driver cannot buy a gear cut
@@ -936,23 +938,24 @@ launch lever; Brake intent or a request against the ladder orders service brakin
 for exactly resting belts before its stopped countdown and paid direction cut.
 
 A constructed mean stop can latch on a steer-only request below the authored pivot entry speed or
-on rollback. It remains latched if the load makes it slide. A `Free` construction has no such stop
-and can roll under engine braking without a speed-window regime change. Releasing steer retains
-the mean stop until both belts start a tick exactly at rest. Brake, either ladder request and
-loss of staff share that gate and center the steering tie while static support remains. Pending handover defers propulsion;
-park or the along-ladder launch lever then inherits static support from exact rest. The two
-stop paths never double count the brake rating. Construction data names how many side brake
-devices the mean path links; its capacity is that count times the derived per-side rating.
-A layout with a mean stop supplies the steering tie needed to arrest differential motion.
+on rollback. An active pivot can keep that brake latched while sliding. On a requested exit,
+retain the mean row only while it has static support to preserve: its mean is exactly stationary
+but its belts still counter-rotate. Centering the steering tie arrests that differential motion;
+exact belt rest then transfers to side park or the along-ladder one-way launch lever. Pending
+handover defers propulsion. A sliding mean has no static support to preserve and transfers to side
+stops immediately. Brake, either ladder request, steer release and loss of staff use that same
+handover. A layout with a mean stop supplies the steering tie needed to complete it.
 
 ### Neutral mean hold
 
 Tigerfibel D 656/27 p. 41 parks on the hand lever; Spielberger pp. 51-55 describes foot and
-hand actuation of the same two Argus discs. The sheet states that construction count; parking
-therefore derives its hold from the side brakes, with no independent authored force.
-The gearbox main-shaft button cancels clutch drag during neutral turns (British MI summary,
-Nov 1943, Preliminary Report No. 19). Its torque and reduction are Unknown; OLVAR manual
-D 656/21+ Pt 2 or measured torque/reduction would settle them. No gearbox torque law is inferred.
+hand actuation of the same two Argus discs. Parking applies both side-stop rows, each at the
+rated-grade per-side capacity; it resists mean and differential motion.
+The separate gearbox main-shaft button cancels clutch drag during neutral turns (British MI
+summary, Nov 1943, Preliminary Report No. 19). Its row acts on the mean alone and has its own
+authored force rating at that coordinate, labelled Unknown. Missing shaft torque and reduction
+would be settled by OLVAR manual D 656/21+ Pt 2 or measured torque/reduction. The side discs'
+rating does not establish the gearbox brake's rating; no gearbox torque law is inferred.
 Rejected: the steering member's rating (difference, not common load), an unbounded hold (no
 source), and torque multiplied by a selected gear without sourced construction and torque.
 A construction without `Stop(Mean)` has no mean stop.
@@ -970,12 +973,9 @@ the tick belongs to the contact slice.
 ### Released-motion policy
 
 A staffed Driver brakes released rollback outside a steer-only pivot with side park and retains
-its sub-idle stop along the ladder. A pivot retains its constructed mean stop through release,
-Brake intent and either ladder request until both belts start at exact rest. Side park or the
-along-ladder one-way launch lever then takes over; pending handover serves no propulsion against
-its own stop. A hold starting with nonzero mean slip has no static support left to preserve: every requested exit proceeds immediately. Loss of staff retains the existing passive hold, centers steering, and permits that
-same exact-rest transfer so supported rest can sleep. A moving breached stop remains dynamic;
-its rating is never enlarged to guarantee an outcome.
+its sub-idle stop along the ladder. A pivot's retiring mean hold follows the static-support
+handover above, including loss of staff, so supported rest can sleep. A breached stop uses its
+dynamic rating; no rating is enlarged to guarantee an outcome.
 
 Rejected: idle-catch hill holding (it adds engine support beyond the brake rating), released
 rollback without braking (it runs away even within brake capacity), exempting all steering from
@@ -990,7 +990,7 @@ dynamic capacity. Released rollback and the released sub-idle stop can latch par
 steering request releases it. `dead`, `park_engage_speed` and `neutral_speed_m_s` are tastes in
 `assets/driving/actuation.ron`; only the last admits a passive pivot latch. None chooses static
 friction, clutch engagement or completion of a direction swap. The rated-grade rule above owns
-brake capacity; the neutral-turn gearbox brake torque remains Unknown.
+side-brake capacity; the neutral-turn gearbox brake torque remains Unknown.
 
 Crank energy alone may rise without fuel when a belt back-drives it. The passive invariant is on
 total crank-plus-belt kinetic energy in the absence of combustion and external work. A free crank

@@ -975,7 +975,7 @@ fn build_rig(
     suspension.0 = track.suspension.params();
     // The two AUTHORED counts the rig owns; every other number below is measured or derived from
     // them. `teeth` sets the chord-exact sprocket pitch circle, `link_count` IS the material loop.
-    let geom = RigGeom::build(
+    let (geom, _) = RigGeom::build(
         &blueprint,
         &tiger_sim_glb(),
         track.sprocket.teeth,

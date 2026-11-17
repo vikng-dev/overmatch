@@ -482,7 +482,13 @@ impl TransmissionParams {
     }
 
     /// Construction data becomes the full row family here; runtime removes inactive members.
-    /// Sign reflections preserve conditioning, so positive ratio/detent magnitudes cover both ladders and steer signs.
+    /// Certifies the unloaded metric only: both effective belt inertias equal `belt_inertia`.
+    /// Runtime requires a resolvable optimal independent KKT basis, including any crank-limit
+    /// border, in the actual metric M_i = belt_inertia + reaction_slopes[i] * dt. There is no authored
+    /// upper bound on those contact slopes. For the mean clutch/steering pair at equal M, the
+    /// Gram determinant is (1/(2M) + k²c²/(2M)) / engine_inertia + k²/(4M²): increasing M
+    /// can reduce rank separation, so this admission is not a loaded-metric certificate.
+    /// Sign reflections preserve conditioning; positive magnitudes cover both ladders and signs.
     fn check_row_conditioning(&self, belt_inertia: f32) -> Result<(), BevyError> {
         for gear in self.gears_fwd.iter().chain(&self.gears_rev) {
             let k = f64::from(*gear / self.sprocket_radius);
@@ -493,17 +499,7 @@ impl TransmissionParams {
             ] {
                 let mut rows = Vec::new();
                 for coupling in &self.couplings {
-                    rows.push(match coupling {
-                        Coupling::Clutch(output) => {
-                            let w = output.weights();
-                            [1.0, -k * w[0], -k * w[1]]
-                        }
-                        Coupling::Steering => [-c, 0.5, -0.5],
-                        Coupling::Stop(output) => {
-                            let w = output.weights();
-                            [0.0, w[0], w[1]]
-                        }
-                    });
+                    rows.push(coupling.jacobian(k, c));
                 }
                 for output in self.couplings.iter().filter_map(|c| {
                     if let Coupling::Clutch(o) = c {
@@ -524,7 +520,7 @@ impl TransmissionParams {
                     &rows,
                     0, // This construction's crank coordinate.
                 ) {
-                    return Err("transmission.couplings / steering.radii / gearbox speeds / engine.inertia_kgm2: row conditioning falls below the solver rank resolution; separate near-dependent ratios or correct the inertias".into());
+                    return Err("transmission.couplings / steering.radii / steering.reverse_radii / gearbox.forward_speeds_kmh / gearbox.reverse_speeds_kmh / engine.rated_rpm / engine.inertia_kgm2 / track.link_mass / track.link_count / roadwheels[].spin_inertia_kgm2 / roadwheels[].tread.radius / track.sprocket.spin_inertia_kgm2 / track.idler.spin_inertia_kgm2 / track.sprocket.teeth / track.idler.radius: row conditioning falls below the solver rank resolution; separate near-dependent ratios or correct the inertias".into());
                 }
             }
         }
@@ -590,7 +586,7 @@ impl TransmissionParams {
                     || !(rating * self.brake_static_factor).is_finite()
             })
         {
-            return Err("transmission.mean_hold_brake_count: link positive finite brake capacity exactly when Stop(Mean) is constructed".into());
+            return Err("transmission.mean_hold_capacity_n: author a positive finite independent mean-brake rating exactly when Stop(Mean) is constructed".into());
         }
         if !self.couplings.contains(&Coupling::Steering) {
             return Ok(());
@@ -1505,6 +1501,23 @@ pub enum Coupling {
     Stop(Output),
 }
 
+impl Coupling {
+    /// Geometry in crank/left/right speed coordinates; signed ratios select runtime direction.
+    fn jacobian(self, shaft_ratio: f64, steer_ratio: f64) -> [f64; 3] {
+        match self {
+            Self::Clutch(output) => {
+                let w = output.weights();
+                [1.0, -shaft_ratio * w[0], -shaft_ratio * w[1]]
+            }
+            Self::Steering => [-steer_ratio, 0.5, -0.5],
+            Self::Stop(output) => {
+                let w = output.weights();
+                [0.0, w[0], w[1]]
+            }
+        }
+    }
+}
+
 /// Passive couplings alone own static/dynamic capacity and make-before-break stop transfer.
 fn passive_rows(
     tp: &TransmissionParams,
@@ -1529,15 +1542,15 @@ fn passive_rows(
                 .expect("a constructed mean stop has its own admitted rating"),
         ) * f64::from(inp.dt);
         rows.push(Row {
-            jacobian: vec![0.0, 0.5, 0.5],
+            jacobian: Coupling::Stop(Output::Mean).jacobian(0.0, 0.0).to_vec(),
             target: 0.0,
             bounds: symmetric(rating * f64::from(tp.brake_static_factor)),
             dynamic: Some(symmetric(rating)),
         });
     } else {
-        for side in tp.couplings.iter().filter_map(|c| match c {
-            Coupling::Stop(Output::Left) => Some(0),
-            Coupling::Stop(Output::Right) => Some(1),
+        for (coupling, side) in tp.couplings.iter().filter_map(|c| match c {
+            Coupling::Stop(Output::Left) => Some((*c, 0)),
+            Coupling::Stop(Output::Right) => Some((*c, 1)),
             _ => None, // Drive paths and the inactive mean stop do not supply side brakes.
         }) {
             let inner = tp.couplings.iter().any(|c| matches!(c, Coupling::Clutch(output)
@@ -1561,10 +1574,8 @@ fn passive_rows(
                     }
                 };
                 let lever = st.park || (!controls.service && !inner);
-                let mut jacobian = vec![0.0; 3];
-                jacobian[side + 1] = 1.0;
                 rows.push(Row {
-                    jacobian,
+                    jacobian: coupling.jacobian(0.0, 0.0).to_vec(),
                     target: 0.0,
                     bounds: bounds(if lever {
                         capacity * f64::from(tp.brake_static_factor)
@@ -1674,7 +1685,6 @@ fn advance_rows(
     for coupling in &tp.couplings {
         match *coupling {
             Coupling::Clutch(output) => {
-                let weights = output.weights();
                 let open = controls.clutch_open || output.inner(inp.steer);
                 let capacity = if open {
                     0.0
@@ -1692,7 +1702,7 @@ fn advance_rows(
                 let upper = if open { 0.0 } else { capacity };
                 clutches.push(rows.len());
                 rows.push(Row {
-                    jacobian: vec![1.0, -dir * k * weights[0], -dir * k * weights[1]],
+                    jacobian: coupling.jacobian(dir * k, signed_steer).to_vec(),
                     target: 0.0,
                     bounds: Bounds { lower, upper },
                     dynamic: None,
@@ -1702,7 +1712,7 @@ fn advance_rows(
             Coupling::Steering => {
                 steering = Some(rows.len());
                 rows.push(Row {
-                    jacobian: vec![-signed_steer, 0.5, -0.5],
+                    jacobian: coupling.jacobian(dir * k, signed_steer).to_vec(),
                     target: 0.0,
                     bounds: symmetric(steering_capacity),
                     dynamic: None,
@@ -1892,20 +1902,18 @@ fn driver(
     };
     let requested = command.abs() >= dead();
     let mean = (input.speeds[0] + input.speeds[1]) * 0.5;
-    let sliding_exit =
-        st.mean_hold && mean != 0.0 && (requested || brake || input.steer.abs() < dead());
-    if sliding_exit {
-        st.park = true;
-        st.mean_hold = false;
-    }
-    if brake || requests_other_ladder(command, st.reverse) || (st.mean_hold && requested) {
+    if brake
+        || requests_other_ladder(command, st.reverse)
+        || (st.mean_hold && mean == 0.0 && requested)
+    {
         input.steer = 0.0;
     }
     let steer_only = !brake && !requested && input.steer.abs() >= dead();
     let dir = if st.reverse { -1.0 } else { 1.0 };
-    // A passive latch survives loss of its operator. The straight tie can arrest differential
-    // motion; exact rest then admits the replacement side stops, including without staff.
-    if st.mean_hold && input.steer.abs() < dead() && input.speeds == [0.0; 2] {
+    // Keep a retiring mean hold only while it has static support to preserve. The straight
+    // steering tie arrests differential motion before exact-rest transfer to both side discs.
+    let retiring = requested || brake || input.steer.abs() < dead();
+    if st.mean_hold && retiring && (mean != 0.0 || input.speeds == [0.0; 2]) {
         st.park = true;
         st.mean_hold = false;
     }

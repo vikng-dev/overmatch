@@ -499,7 +499,8 @@ impl DriverSense {
 /// engine's crank limit. Reach is `max_step` either way, within the ladder.
 ///
 /// 1. Clutch ordered open: free choice among safe gears, restricted to the launch range at
-///    rest or rollback; highest viable, otherwise strongest, including a stall's strongest.
+///    rest or rollback; an upper gear requires shaft speed at least its launch crank speed.
+///    Highest viable, otherwise strongest, including a stall's strongest.
 /// 2. The hull stalls now ([`Sensed::stalled`]), its load only bounded from below:
 ///    the gear in reach that holds most. The engaged gear short: the highest viable gear in reach,
 ///    else the one that holds most.
@@ -562,23 +563,28 @@ pub(super) fn choose(
             .max_by(|a, b| a.1.total_cmp(&b.1))
     };
     if st.launch == LaunchState::Unchosen {
-        // A rolling open clutch may select any safe gear for free. Only a start or rollback
-        // uses the construction's launch range; the signed shaft price is retained in both.
-        let top_free = if speed <= 0.0 {
+        // Rest includes contact creep. Above the launch range a rolling selection must close
+        // its clutch now, rather than treating an indefinitely slipping take-up as a free cut.
+        let top_free = if speed < park_engage_speed() {
             tp.launch_gears.min(top)
         } else {
             top
+        };
+        let launch = |gear| {
+            if gear > tp.launch_gears
+                && speed * ratio(gear) / tp.sprocket_radius < tp.launch_omega(command)
+            {
+                return None;
+            }
+            lands(gear, speed)
         };
         let gears = 1..=top_free;
         let chosen = if stall.is_some() {
             None
         } else {
-            gears
-                .clone()
-                .rev()
-                .find(|&gear| viable(gear, lands(gear, speed)))
+            gears.clone().rev().find(|&gear| viable(gear, launch(gear)))
         }
-        .or_else(|| strongest(gears, &|gear| lands(gear, speed)).map(|(gear, _)| gear));
+        .or_else(|| strongest(gears, &launch).map(|(gear, _)| gear));
         if let Some(gear) = chosen {
             st.gear = gear;
             st.launch = LaunchState::TakingUp;
@@ -1424,6 +1430,83 @@ mod tests {
                     choose(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
                     assert_eq!(state.gear, expected, "R={resistance} from gear {start}");
                     assert_eq!(state.shift_ticks, 0, "the choice at rest is free");
+                }
+            }
+        }
+    }
+
+    /// Spawn and direction changes must treat contact creep as rest on either ladder.
+    /// Fixture: a reading halfway inside the Driver's rest band, including rollback.
+    #[test]
+    fn free_selection_keeps_creep_inside_the_launch_range() {
+        for (fp, tp) in class_drivetrains() {
+            for reverse in [false, true] {
+                let dir = if reverse { -1.0 } else { 1.0 };
+                for reading in [-0.5, 0.0, 0.5] {
+                    let inp = driver_input(dir * reading * park_engage_speed(), 0.0, dir);
+                    let mut state = TransmissionState {
+                        reverse,
+                        ..fresh(&tp)
+                    };
+                    choose(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
+                    assert!(
+                        state.gear <= tp.launch_gears,
+                        "contact creep cannot admit an upper launch gear: reverse={reverse} reading={reading} gear={}",
+                        state.gear
+                    );
+                }
+            }
+        }
+    }
+
+    /// A rolling launch may bypass the launch range only when that gear closes its clutch.
+    /// Fixture: unloaded readings just below and above the top gear's take-up speed.
+    #[test]
+    fn free_selection_admits_upper_gears_only_at_their_closed_clutch_speed() {
+        for (fp, tp) in class_drivetrains() {
+            for reverse in [false, true] {
+                let ladder = if reverse {
+                    &tp.gears_rev
+                } else {
+                    &tp.gears_fwd
+                };
+                let top = ladder.len() as u8;
+                if top <= tp.launch_gears {
+                    continue;
+                } // This ladder has no upper launch exclusion.
+                let dir = if reverse { -1.0 } else { 1.0 };
+                let closes =
+                    tp.launch_omega(1.0) * tp.sprocket_radius / ladder[usize::from(top - 1)];
+                assert!(
+                    0.99 * closes > park_engage_speed(),
+                    "the fixture must really roll"
+                );
+                for share in [0.99, 1.01] {
+                    // Fixture: straddle clutch closure without the crank limit.
+                    let inp = driver_input(dir * share * closes, 0.0, dir);
+                    let mut state = TransmissionState {
+                        reverse,
+                        ..fresh(&tp)
+                    };
+                    choose(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
+                    if share < 1.0 {
+                        assert!(
+                            state.gear < top,
+                            "a rolling reading below clutch closure cannot take the top gear"
+                        );
+                    } else {
+                        assert_eq!(
+                            state.gear, top,
+                            "a closed safe upper gear is available without a cut"
+                        );
+                    }
+                    if state.gear > tp.launch_gears {
+                        assert!(
+                            share * closes * ladder[usize::from(state.gear - 1)]
+                                / tp.sprocket_radius
+                                >= tp.launch_omega(1.0)
+                        );
+                    }
                 }
             }
         }

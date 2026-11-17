@@ -378,7 +378,7 @@ impl TrackGear {
     }
 
     /// One side's belt translation and reflected wheel inertia (kg).
-    #[cfg(all(test, feature = "bitprobe"))]
+    #[cfg(test)]
     pub(crate) fn belt_inertia(&self) -> f32 {
         self.construction.belt_inertia
     }
@@ -551,6 +551,9 @@ impl TrackGear {
             out.u32(&format!("transmission.couplings[{i}]"), tag);
         }
         out.f32("transmission.brake_capacity_n", tp.brake_capacity_n);
+        if let Some(rating) = tp.mean_hold_capacity_n {
+            out.f32("transmission.mean_hold_capacity_n", rating);
+        }
         out.f32("transmission.brake_static_factor", tp.brake_static_factor);
         out.f32("transmission.drag_fraction", tp.drag_fraction);
         out.f32("transmission.engine_inertia", tp.engine_inertia);
@@ -619,7 +622,7 @@ fn publish_engine_rpm(
 fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     let spec = &blueprint.spec.track;
     let sus = spec.suspension.params();
-    let geom = super::rig_geom::RigGeom::build(
+    let (geom, trans) = super::rig_geom::RigGeom::build(
         &blueprint,
         // The SIM artifact — the same file the ballistic walk is extracted from, so the running
         // gear and the armour are measured off one set of accessor bytes (ADR-0035).
@@ -628,7 +631,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         spec.link_count,
         &sus,
     );
-    let gear = TrackGear::from_construction(&blueprint, &geom);
+    let gear = TrackGear::from_construction(&blueprint, &geom, trans);
     commands.insert_resource(gear.params.support_law());
     commands.insert_resource(gear);
     // Keep the marker-derived running gear alive as the game's single geometry source: the track
@@ -641,6 +644,7 @@ impl TrackGear {
     pub(crate) fn from_construction(
         blueprint: &TankBlueprint,
         geom: &super::rig_geom::RigGeom,
+        trans: TransmissionParams,
     ) -> Self {
         let resolution = super::forces::CONTACT_RESOLUTION;
         let spec = &blueprint.spec.track;
@@ -705,18 +709,6 @@ impl TrackGear {
             gearbox.forward_speeds_kmh.len(),
             gearbox.reverse_speeds_kmh.len()
         );
-        // Measured geometry: the sprocket pin-line pitch radius is the rest running gear's first
-        // circle (chord-exact `derive::sprocket_pitch_radius(geom.pitch, teeth)` by construction), and
-        // the half-tread is `geom.plane_x` — the same measured values the belt/envelope ride.
-        let trans = spec
-            .transmission_params(
-                &blueprint.spec.roadwheels,
-                geom.wrap_radii(),
-                geom.plane_x,
-                blueprint.spec.mass,
-            )
-            .expect("TankSpec transmission was validated before TrackGear construction");
-
         let mut pin_radius = 0.0_f32;
         for side in Side::ALL {
             for point in &loop_pts[side.index()] {

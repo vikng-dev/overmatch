@@ -842,6 +842,47 @@ fn pivot_clears_its_own_kinematic_yaw_floor() {
     neutral_pivot_gate(&mut app, tank);
 }
 
+/// Flat-fixture rest watchdog, scaled by the momentum the side discs and contacts must arrest.
+/// Crank momentum is reflected through the largest reduction; yaw momentum is expressed at the
+/// belt lever. DERIVED arrest time is P/min(two side brakes, contact grip). Fixture: four such
+/// intervals, each including a suspension damping time and Avian's sleep dwell, allow sequential
+/// hull, belt, support and sleep settling. This is a finite watchdog, not a physical stop target.
+fn rest_tick_budget(app: &App, tank: Entity) -> usize {
+    use crate::track::sim::{TankTransmission, TrackDrive, TrackGear};
+    use avian3d::prelude::{AngularVelocity, LinearVelocity, TimeToSleep};
+    let world = app.world();
+    let spec = &world.resource::<TankBlueprint>().spec;
+    let gear = world.resource::<TrackGear>();
+    let tp = gear.trans();
+    let state = world.get::<TankTransmission>(tank).unwrap().0;
+    let drive = world.get::<TrackDrive>(tank).unwrap();
+    let k = tp
+        .gears_fwd
+        .iter()
+        .chain(&tp.gears_rev)
+        .copied()
+        .fold(0.0, f32::max)
+        / tp.sprocket_radius;
+    let momentum = spec.mass * world.get::<LinearVelocity>(tank).unwrap().length()
+        + spec.hull_angular_inertia().principal.max_element()
+            * world.get::<AngularVelocity>(tank).unwrap().length()
+            / tp.half_tread_m
+        + gear.belt_inertia() * drive.sides.iter().map(|side| side.speed.abs()).sum::<f32>()
+        + tp.engine_inertia * state.omega_e.abs() * k;
+    let ground = crate::ground_types::GroundTypes::load_shipped();
+    let mu = gear.grip().pair(ground.terrain_friction());
+    let resistance = (2.0 * tp.brake_capacity_n).min(mu * spec.mass * crate::track::derive::G);
+    assert!(
+        resistance > 0.0,
+        "the rest fixture needs a resisting impulse"
+    );
+    let suspension = &spec.track.suspension;
+    let damping_time = 1.0 / (suspension.damping_ratio * suspension.ride_frequency);
+    (4.0 * (momentum / resistance + damping_time + world.resource::<TimeToSleep>().0)
+        * FIXED_TICKS_PER_SECOND as f32)
+        .ceil() as usize
+}
+
 /// The game's damage model: a Driver knocked out during a pivot leaves a passive mean hold.
 /// The shipped simulation must retain support, transfer to side park at rest, and sleep;
 /// a permanently latched mean that keeps the rest gate false violates that player-visible state.
@@ -871,10 +912,22 @@ fn an_unstaffed_pivot_hands_its_passive_hold_to_park_and_sleeps() {
         .collect();
     assert_eq!(drivers.len(), 1, "the fixture has one Driver station");
     app.world_mut().entity_mut(drivers[0]).insert(Dead);
-    // Eventual rest has no player-owned deadline; the test runner owns the hang watchdog.
-    loop {
+    let budget = rest_tick_budget(&app, tank);
+    let mut transition = None;
+    for tick in 0..budget {
         drive_tick(&mut app, tank, 0.0, 0.0);
+        let state = app.world().get::<TankTransmission>(tank).unwrap().0;
+        if !state.mean_hold && transition.is_none() {
+            assert!(
+                state.park,
+                "the mean hold must hand support to both side discs"
+            );
+            transition = Some(tick);
+        }
         if app.world().get::<Sleeping>(tank).is_some() {
+            println!(
+                "MEASURED unstaffed hold-to-park tick={transition:?}, sleep tick={tick}, impulse-derived watchdog={budget}"
+            );
             break;
         }
     }
@@ -1690,9 +1743,10 @@ fn a_drivetrain_advances_once_per_tick_whatever_wakes_its_island() {
     );
     let resting = |app: &App, tank: Entity| app.world().get::<Sleeping>(tank).is_some();
     let mut ticks = 0;
+    let budget = rest_tick_budget(&app, a) + rest_tick_budget(&app, b);
     while !(resting(&app, a) && resting(&app, b)) {
         assert!(
-            ticks < 8 * FIXED_TICKS_PER_SECOND,
+            ticks < budget,
             "two parked tanks with no demand must come to rest"
         );
         drive_tick(&mut app, a, 0.0, 0.0);
@@ -2255,9 +2309,10 @@ fn a_resting_tank_keeps_its_belt_press_on_fixed_structure() {
     let resting = |app: &App| app.world().get::<Sleeping>(tank).is_some();
     let mut last = Vec::new();
     let mut ticks = 0;
+    let budget = rest_tick_budget(&app, tank);
     while !resting(&app) {
         assert!(
-            ticks < 8 * FIXED_TICKS_PER_SECOND,
+            ticks < budget,
             "a tank parked on fixed structure must come to rest"
         );
         drive_tick(&mut app, tank, 0.0, 0.0);

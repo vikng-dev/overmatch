@@ -2532,8 +2532,13 @@ fn construction_refuses_an_unresolved_idle_catch() {
 /// Gear selection is isolated by an absent ledger; a chosen gear and its crank still integrate.
 #[test]
 fn fixed_intent_has_no_order_flips_after_one_transition_across_constructions() {
-    let mut count = 0;
-    for (fp, base) in class_drivetrains() {
+    let classes = class_drivetrains();
+    let expected: Vec<_> = classes
+        .iter()
+        .map(|(_, tp)| [true, tp.couplings.contains(&Coupling::Steering)])
+        .collect();
+    let mut covered = vec![[false; 2]; classes.len()];
+    for (class, (fp, base)) in classes.into_iter().enumerate() {
         for held_mean in [true, false] {
             let mut tp = base.clone();
             tp.couplings.retain(|c| *c != Coupling::Stop(Output::Mean));
@@ -2569,7 +2574,7 @@ fn fixed_intent_has_no_order_flips_after_one_transition_across_constructions() {
                             ] {
                                 for window_share in [0.5, 2.0] {
                                     for motion in [dir, -dir] {
-                                        count += 1;
+                                        covered[class][usize::from(held_mean)] = true;
                                         let mean = motion
                                             * window_share
                                             * driver_actuation().neutral_speed_m_s.value;
@@ -2682,12 +2687,12 @@ fn fixed_intent_has_no_order_flips_after_one_transition_across_constructions() {
         }
     }
     assert_eq!(
-        count, 6048,
-        "the enumerated issue classes must remain complete"
+        covered, expected,
+        "each catalogue construction covers side stops and every constructed mean-hold class"
     );
 }
 
-/// Fixture: every geared-steering construction with two side brakes linked to its mean hold.
+/// Fixture: every geared-steering construction with an independently rated mean hold.
 fn mean_hold_drivetrains() -> impl Iterator<Item = (FixtureConstruction, TransmissionParams)> {
     class_drivetrains()
         .into_iter()
@@ -2695,10 +2700,20 @@ fn mean_hold_drivetrains() -> impl Iterator<Item = (FixtureConstruction, Transmi
         .map(|(fp, mut tp)| {
             if !tp.has_mean_hold() {
                 tp.couplings.push(Coupling::Stop(Output::Mean));
-                tp.mean_hold_capacity_n = Some(2.0 * tp.brake_capacity_n); // Fixture linkage.
+                tp.mean_hold_capacity_n = Some(2.0 * tp.brake_capacity_n); // Fixture mean-brake rating.
             }
             (fp, tp)
         })
+}
+
+/// Fixture load per side inside both devices' static interval, above the weaker sliding rating.
+fn handover_load_per_side(tp: &TransmissionParams) -> f32 {
+    let capacity = tp.brake_capacity_n.min(
+        tp.mean_hold_capacity_n
+            .expect("the handover fixture constructs a mean brake")
+            / 2.0,
+    );
+    capacity * (1.0 + tp.brake_static_factor) * 0.5
 }
 
 /// Releasing a pivot must transfer a supported common-mode load without losing static grip.
@@ -2709,7 +2724,7 @@ fn pivot_release_hands_static_load_to_side_stops_from_exact_rest() {
     for (fp, tp) in mean_hold_drivetrains() {
         for reverse in [false, true] {
             for direction in [-1.0, 1.0] {
-                let load = direction * tp.brake_capacity_n * (1.0 + tp.brake_static_factor) * 0.5;
+                let load = direction * handover_load_per_side(&tp);
                 for brake in [false, true] {
                     let mut st = TransmissionState {
                         reverse,
@@ -2956,7 +2971,7 @@ fn invalid_coupling_construction_is_refused_before_play() {
 fn parked_static_load_survives_pivot_and_service_handover() {
     for (fp, tp) in mean_hold_drivetrains() {
         for sign in [-1.0, 1.0] {
-            let load = sign * tp.brake_capacity_n * (1.0 + tp.brake_static_factor) * 0.5;
+            let load = sign * handover_load_per_side(&tp);
             for pivot in [false, true] {
                 let mut state = TransmissionState {
                     park: true,
@@ -3122,20 +3137,13 @@ fn supported_driver_handover_keeps_support_through_an_unequal_ground_steer_ramp(
                         match path {
                             0 => {}
                             1 => inp.intent = DriveIntent::Brake,
-                            2 => {
+                            2 | 4 => {
+                                let throttle = if path == 2 { -1.0 } else { 1.0 };
                                 inp.intent = DriveIntent::Axes(DriveAxes {
-                                    throttle: -1.0,
+                                    throttle,
                                     steer: 1.0,
                                 });
-                                inp.throttle = -1.0;
-                                inp.steer = 1.0;
-                            }
-                            4 => {
-                                inp.intent = DriveIntent::Axes(DriveAxes {
-                                    throttle: 1.0,
-                                    steer: 1.0,
-                                });
-                                inp.throttle = 1.0;
+                                inp.throttle = throttle;
                                 inp.steer = 1.0;
                             }
                             _ => unreachable!("the fixture enumerates four driver handover paths"),
@@ -3322,7 +3330,7 @@ fn a_mean_stop_requires_its_own_positive_rating_and_no_other_construction_consum
         TransmissionParams::from_authoring(&a)
             .unwrap_err()
             .to_string()
-            .contains("mean_hold_brake_count")
+            .contains("mean_hold_capacity_n")
     );
     for rating in [0.0, -1.0, f32::INFINITY, f32::NAN] {
         // Fixture malformed asset inputs.
@@ -3335,7 +3343,7 @@ fn a_mean_stop_requires_its_own_positive_rating_and_no_other_construction_consum
         TransmissionParams::from_authoring(&a)
             .unwrap_err()
             .to_string()
-            .contains("mean_hold_brake_count")
+            .contains("mean_hold_capacity_n")
     );
 }
 

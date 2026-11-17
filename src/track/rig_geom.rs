@@ -240,14 +240,15 @@ impl RigGeom {
     /// the two authored counts the caller owns (the sandbox tunes `link_count` against
     /// [`LinkWindow`]); everything else is measured or derived. `params` validates the authored
     /// loop and suspension on both sides and supplies the sandbox's cached window readout.
-    /// The rest pose itself is knob-free by construction.
+    /// The rest pose itself is knob-free by construction. Returns its admitted transmission
+    /// parameters with the geometry so sim construction consumes that admission directly.
     pub(crate) fn build(
         blueprint: &TankBlueprint,
         glb_path: &Path,
         teeth: u32,
         link_count: usize,
         params: &SuspensionParams,
-    ) -> Self {
+    ) -> (Self, super::transmission::TransmissionParams) {
         // The module's only file read; `rebuild` reuses its measurements. Mass supplies nominal
         // ground pressure as well as readouts; geometry still comes only from the sim artifact.
         let model = DerivedModel::build(blueprint.spec.mass, glb_path);
@@ -292,7 +293,7 @@ impl RigGeom {
         );
         geom.validate(params)
             .unwrap_or_else(|error| panic!("{}: {error}", blueprint.file));
-        blueprint
+        let transmission = blueprint
             .spec
             .track
             .transmission_params(
@@ -307,7 +308,7 @@ impl RigGeom {
                     blueprint.file
                 )
             });
-        geom
+        (geom, transmission)
     }
 
     /// The radii the belt turns its wrapped wheels at: each side's rest sprocket and idler
@@ -1055,6 +1056,7 @@ pub(crate) fn tiger_rig() -> RigGeom {
         link_count,
         &SuspensionParams::default(),
     )
+    .0
 }
 
 #[cfg(test)]

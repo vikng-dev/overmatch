@@ -2153,12 +2153,12 @@ fn belts_moving(bed: &Bed) -> bool {
 }
 
 /// Sleep must wait for coasting belts, then persist without a new input. The parked island's
-/// economy relies on both. Eventual settling has no player deadline; the sustained window is
+/// economy relies on both. The watchdog follows fixture momentum; the sustained window is
 /// DERIVED as twice Avian's own sleep duration, rather than accepting one sleeping frame.
 fn assert_coast_and_sleep(bed: &mut Bed) -> usize {
     let mut moving_ticks = 0;
-    let mut tick = 0;
-    loop {
+    let budget = rest_tick_budget(&bed.app, bed.tank);
+    for tick in 0..budget {
         let coasting = belts_moving(bed);
         bed.tick(0.0, 0.0);
         if coasting {
@@ -2171,7 +2171,6 @@ fn assert_coast_and_sleep(bed: &mut Bed) -> usize {
         if is_asleep(bed) {
             break;
         }
-        tick += 1;
     }
     assert!(
         is_asleep(bed),
@@ -2200,7 +2199,12 @@ fn assert_coast_and_sleep(bed: &mut Bed) -> usize {
 fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
     let mut bed = parked_over(&Side::ALL);
     let mut settled = 0;
+    let budget = rest_tick_budget(&bed.app, bed.tank);
     while !is_asleep(&bed) {
+        assert!(
+            settled < budget,
+            "parked fixture exceeded its impulse-derived rest watchdog"
+        );
         bed.tick(0.0, 0.0);
         settled += 1;
     }
@@ -2223,10 +2227,14 @@ fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
     );
     assert!(
         ahead > roundoff(before, TICKS / 2),
-        "throttle gave no forward reaction: {ahead} m"
+        "throttle wake and park release gave no forward reaction: {ahead} m"
     );
     let moving_ticks = assert_coast_and_sleep(&mut bed);
     println!("MEASURED release had {moving_ticks} ticks with moving belts");
+    assert!(
+        moving_ticks > 0,
+        "the driven belts must exercise the coasting wake gate"
+    );
 
     // Fixture: an external velocity change beyond Avian's rest threshold. With no command,
     // the body must wake, move, and return to sustained sleep under the same belt condition.
@@ -2323,12 +2331,13 @@ fn a_braked_tank_on_a_slope_rests_where_it_stopped() {
     }
 }
 
-/// Tick the parked tank with no demand until it rests. Fixture watchdog: 8 s.
+/// Tick the parked tank with no demand, within its impulse-derived rest watchdog.
 fn until_resting(bed: &mut Bed) {
+    let budget = rest_tick_budget(&bed.app, bed.tank);
     let mut ticks = 0;
     while !is_asleep(bed) {
         assert!(
-            ticks < 8 * TICKS,
+            ticks < budget,
             "a parked tank with no demand must come to rest"
         );
         bed.tick(0.0, 0.0);

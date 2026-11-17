@@ -41,9 +41,11 @@ pub(crate) fn compact_spec() -> crate::spec::TankSpec {
         value: 30.0,
         label: crate::provenance::Provenance::Fixture("compact rated climbing slope".into()),
     };
-    tr.mean_hold_brake_count = Some(crate::provenance::Labelled {
-        value: 2,
-        label: crate::provenance::Provenance::Fixture("two linked side brakes".into()),
+    tr.mean_hold_capacity_n = Some(crate::provenance::Labelled {
+        value: 100_000.0,
+        label: crate::provenance::Provenance::Fixture(
+            "compact neutral-turn mean brake rating".into(),
+        ),
     });
     tr.brake_static_factor = crate::provenance::Labelled {
         value: 1.4,
@@ -164,6 +166,8 @@ pub(crate) const TIGER_BELT_INERTIA: f32 = 4_750.0;
 /// adapter. Exposed as the authoring struct so validator tests can mutate one field and
 /// re-validate.
 pub(crate) fn tiger_authoring() -> TransmissionAuthoring<'static> {
+    let spec = super::rig_geom::tiger_spec();
+    let brakes = &spec.track.powertrain.transmission;
     TransmissionAuthoring {
         idle_rpm: 600.0,
         governed_rpm: 2500.0,
@@ -200,9 +204,15 @@ pub(crate) fn tiger_authoring() -> TransmissionAuthoring<'static> {
             Coupling::Stop(Output::Mean),
         ],
         steering_radius_rounding_share: 0.01, // Fixture: table rounding allowance.
-        brake_capacity_n: 57_000.0 * 9.81 * 35.0_f32.to_radians().sin() / 2.0,
-        mean_hold_capacity_n: Some(57_000.0 * 9.81 * 35.0_f32.to_radians().sin()),
-        brake_static_factor: 1.2,
+        brake_capacity_n: spec.mass
+            * super::derive::G
+            * brakes.rated_slope_deg.value.to_radians().sin()
+            / 2.0,
+        mean_hold_capacity_n: brakes
+            .mean_hold_capacity_n
+            .as_ref()
+            .map(|rating| rating.value),
+        brake_static_factor: brakes.brake_static_factor.value,
         drag_fraction: 0.25,
         engine_inertia_kgm2: 4.0,
         clutch_capacity_nm: 2400.0,
@@ -309,7 +319,7 @@ pub(crate) fn fresh(tp: &TransmissionParams) -> TransmissionState {
 pub(crate) fn grade_fixture_fp() -> FixtureConstruction {
     let mut fp = lab_fp();
     fp.inertia = TIGER_BELT_INERTIA;
-    fp.grip.side_weight = 57_000.0 * super::derive::G / 2.0;
+    fp.grip.side_weight = super::rig_geom::tiger_spec().mass * super::derive::G / 2.0;
     fp
 }
 
