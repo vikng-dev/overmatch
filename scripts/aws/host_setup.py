@@ -70,7 +70,7 @@ def wrangler_environment() -> dict[str, str]:
 
 
 def command(argv: list[str], *, env: dict[str, str], data: str | None = None,
-            cwd: Path = ROOT) -> subprocess.CompletedProcess:
+            secret: bool = False, cwd: Path = ROOT) -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(argv, input=data, cwd=cwd, env=env,
                                 capture_output=True, text=True, timeout=180)
@@ -80,11 +80,11 @@ def command(argv: list[str], *, env: dict[str, str], data: str | None = None,
         raise Refused(f"{Path(argv[0]).name} did not finish within the CLI timeout; retry") from error
     except OSError as error:
         raise Refused(f"cannot execute {Path(argv[0]).name}; check its installation") from error
-    # Even a child that echoes auth or its stdin cannot return those values in diagnostics.
+    # Even a child that echoes auth or a secret on its stdin cannot return those values in diagnostics.
     hidden = {os.environ[name] for name in (*CLOUDFLARE_AUTH, "CLOUDFLARE_GLOBAL_KEY",
                                           "CF_API_TOKEN", "CF_API_KEY", "CF_EMAIL")
               if os.environ.get(name)}
-    if data and data.rstrip("\n"):
+    if secret and data and data.rstrip("\n"):
         hidden.add(data.rstrip("\n"))
     for value in sorted(hidden, key=len, reverse=True):
         result.stdout = result.stdout.replace(value, "<REDACTED>")
@@ -92,9 +92,9 @@ def command(argv: list[str], *, env: dict[str, str], data: str | None = None,
     return result
 
 
-def wrangler(*args: str, data: str | None = None) -> subprocess.CompletedProcess:
+def wrangler(*args: str, data: str | None = None, secret: bool = False) -> subprocess.CompletedProcess:
     env = wrangler_environment()
-    result = command(["wrangler", *args], env=env, data=data, cwd=ROOT / "backend")
+    result = command(["wrangler", *args], env=env, data=data, secret=secret, cwd=ROOT / "backend")
     if result.returncode:
         if "CLOUDFLARE_API_TOKEN" in env:
             fix = "check CLOUDFLARE_API_TOKEN; export a valid token with access to the configured account"
@@ -313,7 +313,7 @@ def worker_args(target: str) -> list[str]:
 
 def put_secret(name: str, value: str, target: str) -> None:
     # stdout/stderr are captured even on failure: Wrangler diagnostics must never echo credentials.
-    wrangler("secret", "put", name, *worker_args(target), data=value + "\n")
+    wrangler("secret", "put", name, *worker_args(target), data=value + "\n", secret=True)
 
 
 def keys() -> list[dict]:
