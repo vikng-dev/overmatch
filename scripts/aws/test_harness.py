@@ -681,12 +681,12 @@ class Reading(unittest.TestCase):
         # floor that may all lie below it, and an open-ended last bin across it leaves the count unknown.
         columns = [harness.SERVER_COLUMNS.index(name) for name in ("gaps>=floor", "gaps>=ceil")]
         bins = len(ARRIVAL["gap_ms"]["bins"])
+        open_from_ms = (bins - 1) * BIN_MS
         for i in range(bins):
             gaps = harness.Histogram(1, 0.0, 0.0, 0.0, BIN_MS, tuple(int(j == i) for j in range(bins)))
             row = harness.server_cells("0v1", 1, harness.Arrival("live", gaps, 100.0, 0, 0), TIMING)
             for column, bound_s in zip(columns, (TIMING.stale_floor_s, TIMING.stale_ceil_s)):
-                lowest_edge_ms = (bins - 1) * BIN_MS
-                expected = None if lowest_edge_ms < bound_s * 1e3 else int(i * BIN_MS >= bound_s * 1e3)
+                expected = None if open_from_ms < bound_s * 1e3 else int(i * BIN_MS >= bound_s * 1e3)
                 self.assertEqual(row[column], expected, (i, bound_s))
 
     def test_a_view_window_histogram_is_taken_once_per_view_window(self):
