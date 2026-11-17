@@ -181,7 +181,9 @@ After those test corrections, the direct wake and slope reruns each pass. Final 
 all pass. `scripts/serial-cargo check --no-default-features --bin overmatch-server` passes on the
 final source. All test/probe runs used `OVERMATCH_UNATTENDED=1` and their existing headless mode.
 
-Merged `main` at `f81ab128`, bringing timing slice 1, the audio-free server and AWS scripts.
+Merged `main` at `f81ab128`, bringing timing slice 1, the audio-free server and AWS scripts;
+then included `26c2c746`'s hosting-only changes. Rust sources, assets, build inputs and the wire
+graph are identical across that final hosting merge.
 `PROTOCOL_REV = 105`; normalized own-wire-type pin **`0x322da02509ae4264`**. The protocol tests
 confirm the combined wire graph. The full suite was not repeated after the two expectation and
 probe-only telemetry corrections; production physics did not change after that full run.
