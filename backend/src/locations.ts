@@ -1,4 +1,4 @@
-import type { Beacon, LocationData } from "./edgegap";
+import type { Beacon, LocationData } from "./provider";
 import type { BeaconOut, ContinentOut } from "./types";
 
 /** A location's id is its city: the value Edgegap's deploy `filters` takes. */

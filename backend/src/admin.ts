@@ -85,7 +85,7 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 		batch.forEach((version, j) => live.push({ version, servers: snaps[j] }));
 	}
 
-	const usd = (vcpuMinutes: number) => (vcpuMinutes * cfg.usdPerVcpuMinute).toFixed(2);
+	const usd = (vcpuMinutes: number) => cfg.usdPerVcpuMinute === null ? "unknown" : `$${(vcpuMinutes * cfg.usdPerVcpuMinute).toFixed(2)}`;
 	if (!totals) throw new Error("admin totals: an aggregate without GROUP BY must return one row");
 	const excluded = (count: number) => count ? ` (${count} ${count === 1 ? "session" : "sessions"} excluded: vCPU unknown)` : "";
 	const allServers = live.flatMap((l) => l.servers ?? []);
@@ -107,7 +107,7 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 	const recentRows = recent.results
 		.map((r) => {
 			const minutes = ((r.ended_at ?? now) - r.requested_at) / 60000;
-			const cost = r.vcpu === null ? "unknown" : `$${usd(minutes * r.vcpu)}`;
+			const cost = r.vcpu === null ? "unknown" : usd(minutes * r.vcpu);
 			return `<tr><td>${iso(r.requested_at)}</td><td>${esc(r.version)}</td><td>${esc(r.location)}</td>` +
 				`<td>${r.ended_at === null ? "live" : esc(r.outcome ?? "")}</td><td class="n">${r.peak_players}</td>` +
 				`<td class="n">${minutes.toFixed(1)}</td><td class="n">${r.vcpu ?? "unknown (unrecorded)"}</td>` +
@@ -139,8 +139,8 @@ th{color:var(--mute);font-weight:500}.n{text-align:right;font-variant-numeric:ta
 <div><b>${allServers.length}</b><span>live servers</span></div>
 <div><b>${players}</b><span>players</span></div>
 <div><b>${totals.month_minutes.toFixed(0)}</b><span>server-minutes this month</span></div>
-<div><b>$${usd(totals.month_vcpu_minutes)}</b><span>est. compute this month${excluded(totals.month_unknown)}</span></div>
-<div><b>$${usd(totals.all_vcpu_minutes)}</b><span>est. compute all time${excluded(totals.all_unknown)}</span></div>
+<div><b>${usd(totals.month_vcpu_minutes)}</b><span>est. compute this month${excluded(totals.month_unknown)}</span></div>
+<div><b>${usd(totals.all_vcpu_minutes)}</b><span>est. compute all time${excluded(totals.all_unknown)}</span></div>
 <div><b>${totals.failures}/${totals.sessions}</b><span>failed starts / sessions</span></div>
 </div>
 <h2>Live</h2>
@@ -150,7 +150,7 @@ ${liveRows || '<tr><td colspan="7">none</td></tr>'}</table></div>
 <h2>Recent sessions</h2>
 <div class="wrap"><table><tr><th>requested (UTC)</th><th>version</th><th>location</th><th>outcome</th><th class="n">peak</th><th class="n">minutes</th><th class="n">vCPU</th><th class="n">est. compute</th><th>reason</th></tr>
 ${recentRows || '<tr><td colspan="9">none</td></tr>'}</table></div>
-<p style="color:var(--mute)">Cost is DERIVED: each session's minutes from request to end (or now while live) × its recorded vCPU × the current $${cfg.usdPerVcpuMinute}/vCPU-min rate, compute only (egress not included). Sessions with unrecorded vCPU show unknown and are excluded from cost totals. Reconcile against the Edgegap invoice.</p>
+${cfg.usdPerVcpuMinute === null ? '<p style="color:var(--mute)">EC2 cost is unknown here; this dashboard has no EC2 billing model.</p>' : `<p style="color:var(--mute)">Cost is DERIVED: each session's minutes from request to end (or now while live) × its recorded vCPU × the current $${cfg.usdPerVcpuMinute}/vCPU-min rate, compute only (egress not included). Sessions with unrecorded vCPU show unknown and are excluded from cost totals. Reconcile against the Edgegap invoice.</p>`}
 </body></html>`;
 }
 

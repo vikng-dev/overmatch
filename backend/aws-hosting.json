@@ -1,0 +1,6 @@
+{
+  "maxServers": 2,
+  "startAttempts": 2,
+  "lifetimeMinutes": 1440,
+  "provenance": "Owner choices: hosting design decision 3, decision 5 and section 5's independent power-off guard."
+}

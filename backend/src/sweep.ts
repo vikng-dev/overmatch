@@ -1,16 +1,17 @@
 // The orphan sweep. Every minute (`triggers.crons` in wrangler.jsonc, `scheduled` in index.ts) the
-// Worker lists every Edgegap deployment and stops each one tagged `om-<hex>` (`tagOf` in
+// Worker lists provider deployments and stops each one tagged `om-<hex>` (`tagOf` in
 // registry.ts) that no live claim owns. A failed stop needs no bookkeeping: the deployment is still
-// listed a minute later and judged again, until Edgegap no longer lists it.
+// listed a minute later and judged again, until the provider no longer lists it.
 //
 // Ownership is decided by the Registry alone, never by D1 history. A tag carries the random half of
 // a server id; the deployment's status names its app version, which is the Registry's name and the
 // id's other half (`idOf`). The Registry writes a claim's row before its deploy call, so a
 // deployment of a valid version that no live row of that Registry owns (`liveDeployments`) is
 // stopped at once. Decisions are per deployment: with several `om-` tags, one live claim keeps it.
-// A deployment whose status names no valid version cannot be routed and is never stopped here: it is
-// logged and counted `unattributed`, and left to Edgegap's max_duration. A status read or a Registry
-// that does not answer stops nothing it would have decided.
+// An Edgegap deployment without a valid version is counted `unattributed` and left to its
+// max_duration. EC2 listings are scoped by both ownership tags, so a host without a valid version
+// or claim is stopped too. A status read or Registry that does not answer stops nothing it would
+// have decided.
 //
 // Bounds per sweep: SWEEP_MAX_PAGES listing pages (a hard bound far above the fleet; hitting it is
 // logged), SWEEP_MAX_CHECKS status reads and SWEEP_MAX_STOPS stops, CONCURRENCY calls in flight,
@@ -19,9 +20,9 @@
 
 import { config, type Env } from "./config";
 import { bounded, settleAll } from "./deadline";
-import { edgegapFor, type DeploymentStatus } from "./edgegap";
+import { providerFor, type DeploymentStatus } from "./provider";
 import { expireServerLogs, stopWithEvidence } from "./evidence";
-import { idOf, validVersion } from "./ids";
+import { idOf, validVersion, versionOf } from "./ids";
 import { diag } from "./reasons";
 import { registryFor } from "./registry";
 
@@ -39,9 +40,9 @@ const TAG = /^om-([0-9a-f]{32})$/;
 
 export interface SweepResult {
 	at: number;
-	/** Deployments carrying an `om-` tag. */
+	/** Edgegap deployments carrying an `om-` tag; EC2 machines carrying both ownership tags. */
 	listed: number;
-	/** Tagged deployments whose status named no valid version: never stopped here. */
+	/** Tagged deployments whose status named no valid version. EC2 still stops them by ownership tags. */
 	unattributed: number;
 	stopped: number;
 	failed: number;
@@ -54,7 +55,7 @@ type Claim = { serverId: string; deploymentId: string };
 export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	const cfg = config(env);
 	const timeout = cfg.providerTimeoutMs;
-	const provider = edgegapFor(env, timeout);
+	const provider = providerFor(env, timeout);
 	await expireServerLogs(env, now - cfg.serverLogRetentionMs, timeout);
 	const turn = Math.floor(now / SWEEP_PERIOD_MS);
 	const result: SweepResult = { at: now, listed: 0, unattributed: 0, stopped: 0, failed: 0, error: null };
@@ -69,7 +70,7 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 		if (out.truncated) console.warn("sweep: listing truncated at", SWEEP_MAX_PAGES, "pages");
 		for (const d of out.items) {
 			const hexes = d.tags.map((t) => TAG.exec(t)?.[1]).filter((h): h is string => !!h);
-			if (hexes.length) tagged.push({ id: d.id, hexes });
+			if (hexes.length || env.PROVIDER === "ec2") tagged.push({ id: d.id, hexes });
 		}
 	} catch (err) {
 		fail("list", err);
@@ -94,7 +95,12 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 			const version = st.version;
 			if (!validVersion(version)) {
 				result.unattributed++;
-				console.warn("sweep: no version in status, left to max_duration", d.id);
+				if (env.PROVIDER === "ec2") stop.push({ id: d.id, serverId: "unattributed", why: "host has no valid version tag" });
+				else console.warn("sweep: no version in status, left to max_duration", d.id);
+				return;
+			}
+			if (env.PROVIDER === "ec2" && !d.hexes.length) {
+				stop.push({ id: d.id, serverId: "unattributed", why: "host has no claim tag" });
 				return;
 			}
 			claims.set(version, [...(claims.get(version) ?? []), ...d.hexes.map((hex) => ({ serverId: idOf(version, hex), deploymentId: d.id }))]);
@@ -135,6 +141,21 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 		CONCURRENCY,
 	);
 
+	if (env.PROVIDER === "ec2") {
+		const fleet = env.FLEET.getByName("ec2");
+		for (const slot of await fleet.reservations()) {
+			// A bounded deploy may still be answering; eventual EC2 visibility needs the start window.
+			if (slot.created_at + cfg.startDeadlineMs + 3 * timeout > now) continue;
+			const version = versionOf(slot.server_id);
+			if (!version) throw new Error("fleet slot must carry a versioned server id");
+			try {
+				if (await bounded(timeout, () => registryFor(env, version).claimExists(slot.server_id))) continue;
+				const id = await provider.findByTag(`om-${slot.server_id.split(".")[1]}`);
+				if (id) await provider.stop(id);
+				await fleet.release(slot.server_id);
+			} catch (err) { result.failed++; fail("slot", err); }
+		}
+	}
 	await save(env, result, timeout);
 	return result;
 }

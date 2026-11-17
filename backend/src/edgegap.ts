@@ -1,4 +1,4 @@
-// The one provider adapter. Everything Edgegap-specific — endpoints, auth header, status strings,
+// The Edgegap provider adapter. Everything Edgegap-specific — endpoints, auth header, status strings,
 // port naming, pagination — stays in this file; the registry sees only `Provider`.
 //
 // Endpoints (Edgegap OpenAPI as published in docs.edgegap.com, fetched 2026-10-12):
@@ -15,76 +15,7 @@
 import type { Env } from "./config";
 import { bounded } from "./deadline";
 
-export interface LocationData {
-	city: string;
-	country: string;
-	continent: string;
-	latitude: number;
-	longitude: number;
-}
-
-export interface Beacon {
-	host: string;
-	fqdn: string | null;
-	udp_port: number | null;
-	tcp_port: number | null;
-	location: LocationData;
-}
-
-export interface DeployRequest {
-	version: string;
-	city: string;
-	/** Unique to the claim; how a deployment whose deploy response was lost is found again. */
-	tag: string;
-	clientIp: string | null;
-	env: { key: string; value: string; hidden: boolean }[];
-	webhookUrl: string;
-}
-
-export type DeploymentPhase = "pending" | "ready" | "error" | "terminated" | "gone";
-
-export interface DeploymentStatus {
-	phase: DeploymentPhase;
-	address: string | null;
-	port: number | null;
-	tags: string[];
-	/** The app version the deployment runs (Edgegap `app_version`), as named at deploy. */
-	version: string | null;
-}
-
-export interface ListedDeployment {
-	id: string;
-	tags: string[];
-}
-
-export interface Provider {
-	/** Resolves to the deployment id. Rejects with `ProviderError`; `definiteRejection` tells a
-	 *  refusal (nothing was created) from an unknown outcome (something may have been). */
-	deploy(req: DeployRequest): Promise<string>;
-	/** The active deployment carrying `tag`, or null. */
-	findByTag(tag: string): Promise<string | null>;
-	/** Every active deployment of the account, all pages up to `maxPages`; `truncated` when more
-	 *  pages remained. */
-	deployments(maxPages: number): Promise<{ items: ListedDeployment[]; truncated: boolean }>;
-	status(deploymentId: string): Promise<DeploymentStatus>;
-	/** Idempotent: an already-stopped or unknown deployment is success. */
-	stop(deploymentId: string): Promise<void>;
-	containerLogs(deploymentId: string): Promise<string>;
-	locations(): Promise<LocationData[]>;
-	beacons(): Promise<Beacon[]>;
-}
-
-/** A failed provider call. It carries the operation and HTTP status only; error bodies are
- * discarded unread because they may echo request values. Locally refused log bodies use 413. */
-export class ProviderError extends Error {
-	constructor(
-		readonly op: string,
-		readonly status: number,
-	) {
-		super(`edgegap ${op}: HTTP ${status}`);
-		this.name = "ProviderError";
-	}
-}
+import { ProviderError, type Provider, type Beacon, type LocationData, type DeployRequest, type DeploymentStatus, type ListedDeployment } from "./provider";
 
 /** The provider the Worker's env names, every call bounded by `timeoutMs`. */
 export function edgegapFor(env: Env, timeoutMs: number): Provider {
@@ -280,10 +211,4 @@ export function interpretStatus(s: V1DeploymentStatus, portName: string): Deploy
 	const port = s.ports?.[portName]?.external ?? null;
 	if (s.running && s.public_ip && port !== null) return { phase: "ready", address: s.public_ip, port, ...base };
 	return { phase: "pending", address: null, port: null, ...base };
-}
-
-/** True when Edgegap answered the deploy with a refusal, so nothing was created. A timeout, a lost
- *  connection, a 5xx or a 408 leaves the outcome unknown: a deployment may exist. */
-export function definiteRejection(err: unknown): boolean {
-	return err instanceof ProviderError && err.status >= 400 && err.status < 500 && err.status !== 408;
 }

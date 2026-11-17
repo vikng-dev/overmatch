@@ -3,6 +3,8 @@
 // echo env values (netcode key, report secret) or URLs. Diagnostics log `diag()` output only.
 
 export const REASONS = {
+	releaseMissing: "no server release exists for this version",
+	releaseUnavailable: "the server release could not be verified",
 	noCapacity: "no capacity in the selected location",
 	startRefused: "the provider refused to start the server",
 	startFailed: "the server failed to start",
@@ -27,7 +29,8 @@ export function serverReason(raw: string): string {
  *  status. Never a message or body. */
 export function diag(err: unknown): string {
 	if (err && typeof err === "object" && "op" in err && "status" in err) {
-		return `${(err as { op: string }).op} HTTP ${(err as { status: number }).status}`;
+		const outcome = "outcome" in err ? (err as { outcome: unknown }).outcome : undefined;
+		return `${(err as { op: string }).op} HTTP ${(err as { status: number }).status}${typeof outcome === "string" ? ` ${outcome}` : ""}`;
 	}
 	return err instanceof Error ? err.name : typeof err;
 }

@@ -23,12 +23,16 @@ beforeEach(async () => {
 
 // Reset runtime state and wipe each registry so its constructor recreates the schema.
 afterEach(async () => {
-	for (const id of await listDurableObjectIds(env.REGISTRY)) {
-		await runInDurableObject(env.REGISTRY.get(id), async (_, state) => {
-			await state.storage.deleteAlarm();
-			await state.storage.deleteAll();
-		});
+	async function clear(namespace: DurableObjectNamespace) {
+		for (const id of await listDurableObjectIds(namespace)) {
+			await runInDurableObject(namespace.get(id), async (_, state) => {
+				await state.storage.deleteAlarm();
+				await state.storage.deleteAll();
+			});
+		}
 	}
+	await clear(env.REGISTRY);
+	await clear(env.FLEET);
 	await abortAllDurableObjects();
 	await reset();
 });

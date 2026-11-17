@@ -123,8 +123,9 @@ send gp3, `VolumeSize` equal to the current image root size, `Iops=3000`, `Throu
 MEASURED on this lane: the public Ubuntu 26.04 amd64 image reports an **8 GiB gp3 root** through
 `DescribeImages.BlockDeviceMappings`, matched to `RootDeviceName`. DERIVED: the policy's per-volume
 size cap is that reported root size, the minimum root needed to boot this image. It is discovered
-again on apply/verify, not a second authored disk size. The provider slice must confirm its
-audio-free release fits that disk. The policy requires gp3 and caps every volume at that size,
+again on apply/verify and checked against `host-image.json`, the measured root mapping used by the
+provider. A changed root refuses setup until that contract and the Worker are rebuilt. The live
+provider proof must confirm its audio-free release fits that disk. The policy requires gp3 and caps every volume at that size,
 **3000 IOPS and 125 MiB/s**, the documented gp3 included baselines. No `IfExists` weakens these
 requirements: absent IAM context keys fail closed. Explicit launch fields avoid relying on EC2
 populating context from omitted defaults; only the provider-key dry-run can prove that context.

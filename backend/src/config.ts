@@ -10,6 +10,12 @@ if (!Number.isFinite(vcpuPerServer) || vcpuPerServer <= 0) {
 }
 
 export interface Env {
+	// aws-proving uses EC2; production stays Edgegap until cutover.
+	PROVIDER: string;
+	FLEET: DurableObjectNamespace<import("./fleet").Fleet>;
+	AWS_ACCESS_KEY_ID?: string;
+	AWS_SECRET_ACCESS_KEY?: string;
+	AWS_HOST_CONFIG?: string;
 	REGISTRY: DurableObjectNamespace<import("./registry").Registry>;
 	DB: D1Database;
 	EDGEGAP_API: string;
@@ -30,7 +36,7 @@ export interface Env {
 	JOIN_ATTEMPTS: string;
 	LOCATIONS_CACHE_S: string;
 	PROVIDER_TIMEOUT_S: string;
-	USD_PER_VCPU_MINUTE: string;
+	USD_PER_VCPU_MINUTE?: string;
 	LOCATION_HINT: string;
 	ACCESS_TEAM_DOMAIN: string;
 	ACCESS_AUD: string;
@@ -52,7 +58,7 @@ export interface Config {
 	locationsCacheMs: number;
 	providerTimeoutMs: number;
 	vcpuPerServer: number;
-	usdPerVcpuMinute: number;
+	usdPerVcpuMinute: number | null;
 }
 
 function num(env: Env, key: keyof Env, min: number): number {
@@ -81,6 +87,20 @@ export function config(env: Env): Config {
 		locationsCacheMs: num(env, "LOCATIONS_CACHE_S", 0) * s,
 		providerTimeoutMs: num(env, "PROVIDER_TIMEOUT_S", 0.05) * s,
 		vcpuPerServer,
-		usdPerVcpuMinute: num(env, "USD_PER_VCPU_MINUTE", 0),
+		usdPerVcpuMinute: env.PROVIDER === "ec2" ? null : num(env, "USD_PER_VCPU_MINUTE", 0),
 	};
+}
+
+/** The server's hosted environment has one owner for both launch and the operator's dry-run proof. */
+export function serverEnvironment(cfg: Config, serverId: string, origin: string, key: string, secret: string) {
+	return [
+		{ key: "OVERMATCH_SERVER_ID", value: serverId, hidden: false },
+		{ key: "OVERMATCH_API", value: origin, hidden: false },
+		{ key: "OVERMATCH_NETCODE_KEY", value: key, hidden: true },
+		{ key: "OVERMATCH_REPORT_SECRET", value: secret, hidden: true },
+		{ key: "OVERMATCH_CAPACITY", value: String(cfg.capacity), hidden: false },
+		{ key: "OVERMATCH_HEARTBEAT_INTERVAL_S", value: String(cfg.heartbeatIntervalMs / 1000), hidden: false },
+		{ key: "OVERMATCH_EMPTY_EXIT_S", value: String(cfg.emptyExitS), hidden: false },
+		{ key: "OVERMATCH_SERVER_STATS_S", value: String(cfg.serverStatsS), hidden: false },
+	];
 }

@@ -213,6 +213,10 @@ def discover(account: str) -> Standing:
              if b["DeviceName"] == images[0]["RootDeviceName"]]
     if len(roots) != 1 or type(roots[0]["VolumeSize"]) is not int or roots[0]["VolumeSize"] <= 0:
         raise Refused("Ubuntu image has no single positive EBS root size; refuse the image")
+    root_contract = decode((ROOT / "scripts/aws/host-image.json").read_text(), "host-image.json")
+    if (images[0]["RootDeviceName"] != root_contract["rootDeviceName"]
+            or roots[0]["VolumeSize"] != root_contract["rootSizeGiB"]):
+        raise Refused("current Ubuntu root differs from host-image.json; review the image, update its measured root contract and rebuild the Worker")
     standing = Standing(account, [s["SubnetId"] for s in usable], groups[0] if groups else None,
                         images[0], kind, port, vpc, roots[0]["VolumeSize"], template)
     # Bind and validate all local/discovered inputs before the first cloud mutation.

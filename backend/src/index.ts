@@ -2,13 +2,16 @@
 // status codes. No state lives here. The contract is src/types.ts + contract/*.json.
 
 import { accessDenied, adminPage } from "./admin";
-import type { Env } from "./config";
-import { validVersion, versionOf } from "./ids";
+import { config, serverEnvironment, type Env } from "./config";
+import { newId, randomHex, validVersion, versionOf } from "./ids";
 import { diag } from "./reasons";
-import { registryFor } from "./registry";
+import { Ec2 } from "./ec2";
+import { serverRelease } from "./release";
+import { registryFor, tagOf } from "./registry";
 import { sweep } from "./sweep";
 import type { HeartbeatRequest, JoinRequest } from "./types";
 
+export { Fleet } from "./fleet";
 export { Registry } from "./registry";
 
 const MAX_LOCATIONS = 64;
@@ -125,6 +128,25 @@ async function route(req: Request, env: Env): Promise<Response> {
 		const requestId = typeof rid === "string" && /^[A-Za-z0-9-]{1,64}$/.test(rid) ? rid : null;
 		const known = await registryFor(env, version).webhook(id, m[2], requestId);
 		return known ? new Response(null, { status: 204 }) : error(404, "unknown webhook");
+	}
+
+	// Access-protected proving tool: RunInstances always carries DryRun=true; no fleet slot is taken.
+	if (path === "/admin/aws-proof" && method === "POST" && env.PROVIDER === "ec2") {
+		const denied = await accessDenied(req, env);
+		if (denied) return error(403, denied);
+		const b = await body(req);
+		if (!b || typeof b !== "object" || !("version" in b) || !validVersion(b.version)) return error(400, "version required");
+		const image = "imageId" in b ? b.imageId : undefined;
+		if (image !== undefined && (typeof image !== "string" || !/^ami-[0-9a-f]{17}$/.test(image))) return error(400, "invalid proof image");
+		const cfg = config(env), id = newId(b.version);
+		try {
+			await new Ec2(env, cfg.providerTimeoutMs).dryRun({ version: b.version, city: "Singapore", tag: tagOf(id), clientIp: null, webhookUrl: "",
+				release: await serverRelease(b.version, cfg.providerTimeoutMs), env: serverEnvironment(cfg, id, url.origin, randomHex(32), randomHex(32)) }, image);
+			return json({ proof: "authorized", image: image === undefined ? "public-parameter" : "concrete", creates: false });
+		} catch (err) {
+			console.warn("AWS proof refused", diag(err));
+			return error(503, "AWS launch authorization not confirmed; inspect the failure kind in Worker logs");
+		}
 	}
 
 	if (path === "/admin" && method === "GET") {
