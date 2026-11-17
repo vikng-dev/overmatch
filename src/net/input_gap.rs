@@ -37,6 +37,7 @@ pub(super) struct InputGap {
     gaps: VecDeque<(f64, f64)>,
     maximum: WindowMax,
     declarations: u64,
+    stale_arrivals: u64,
 }
 
 impl InputGap {
@@ -57,7 +58,8 @@ impl InputGap {
             "silence_ms": self.silence_s() * 1e3,
             "gap_ms": histogram(&mut gaps, tick_s),
             "stale_threshold_ms": self.threshold(tick_s, timing) * 1e3,
-            "stale_declarations": std::mem::take(&mut self.declarations)})
+            "stale_declarations": std::mem::take(&mut self.declarations),
+            "stale_arrivals": std::mem::take(&mut self.stale_arrivals)})
     }
 
     fn threshold(&self, tick_s: f64, timing: &Timing) -> f64 {
@@ -66,8 +68,8 @@ impl InputGap {
         })
     }
 
-    /// Classify against the OLD threshold before admitting the arrival's gap. Slice 1 uses this
-    /// result for click fate; a connection's first arrival is neither a gap nor a recovery.
+    /// Classify against the old threshold before admitting the arrival's gap; a connection's
+    /// first arrival is neither a gap nor a recovery.
     fn receive(
         &mut self,
         arrived: bool,
@@ -101,6 +103,7 @@ impl InputGap {
             State::Active { silence_s, stale } => {
                 if arrived {
                     let classification = if *silence_s > threshold {
+                        self.stale_arrivals += 1;
                         Arrival::Stale
                     } else {
                         Arrival::Live
@@ -290,7 +293,7 @@ mod tests {
         assert_eq!(gap.silence_s(), 0.0);
     }
 
-    /// Slice 1 must refuse a stale arrival before its own gap can enlarge S and admit it.
+    /// The census counts stale arrivals before their own gaps can enlarge S and admit them.
     #[test]
     fn an_arrival_is_classified_before_its_gap_enters_the_window() {
         let tick = super::super::server::TICK.as_secs_f64();
@@ -309,5 +312,12 @@ mod tests {
             Some(Arrival::Stale)
         );
         assert_eq!(gap.threshold(tick, &timing), 4.0 * tick);
+        // A subsequent live arrival cannot add another would-be refusal.
+        assert_eq!(
+            gap.receive(true, 5.0 * tick, tick, tick, &timing),
+            Some(Arrival::Live)
+        );
+        assert_eq!(gap.take_line(tick, &timing)["stale_arrivals"], 1);
+        assert_eq!(gap.take_line(tick, &timing)["stale_arrivals"], 0);
     }
 }

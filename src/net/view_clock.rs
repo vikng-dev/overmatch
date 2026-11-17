@@ -63,6 +63,7 @@ pub(super) struct ViewClock {
     pending: HashMap<RepliconTick, Arrival>,
     receipt_order: VecDeque<RepliconTick>,
     completion: CompletionLine,
+    stamped_without_completion: usize,
 }
 
 impl ViewClock {
@@ -81,6 +82,7 @@ impl ViewClock {
                 self.completion.evicted_incomplete += 1;
             }
         }
+        self.stamped_without_completion += 1;
         self.receipt_order.push_back(checkpoint);
         self.pending.insert(
             checkpoint,
@@ -94,6 +96,7 @@ impl ViewClock {
     }
 
     fn complete(&mut self, checkpoint: RepliconTick, now_s: f64, previous_s: f64) {
+        self.stamped_without_completion = 0;
         self.completion.completed_ticks += 1;
         let Some(arrival) = self.pending.remove(&checkpoint) else {
             // Initial reliable state, receipt overflow or a skipped stale stamp can leave no
@@ -179,14 +182,13 @@ impl ViewClock {
         let target = self.target(&mut intervals);
         let today_lag = self.stamp_at(cursor).map(|stamp| now_s - stamp);
         let latest_x = self.samples.last_key_value().map(|(_, sample)| sample.x_s);
-        let completion = std::mem::take(&mut self.completion);
         json!({
             "delta_star_ms": target.map(|s| s * 1e3),
             "today_stamp_lag_ms": today_lag.map(|s| s * 1e3),
             "target_minus_today_ms": target.zip(today_lag).map(|(target, today)| (target - today) * 1e3),
             "target_above_latest_x_ms": target.zip(latest_x).map(|(target, x)| (target - x) * 1e3),
             "stamp_interval_ms": histogram(&mut intervals, tick_s),
-            "completion": completion,
+            "completion": std::mem::take(&mut self.completion),
             "pending_ticks": self.pending.len(),
         })
     }
@@ -213,12 +215,19 @@ fn receive(
             clock.completion.unmapped_stamps += 1;
         }
     }
+    // Lightyear's interpolation feature enables Replicon's server track_mutate_messages;
+    // without it no whole-tick completion events exist. That remote setting is not readable
+    // here, so continued stamped arrivals without completion must fail within the pending cap.
     // Use every completion message, not just last_confirmed_checkpoint, which mirrors only the
     // newest completed tick. Replicon's contains() assumes old ticks complete after 64 ticks;
     // these events instead require every message of that particular tick to have been applied.
     for event in completed.read() {
         clock.complete(event.tick, now, now - real.delta_secs_f64());
     }
+    assert!(
+        clock.stamped_without_completion <= RECEIPT_CAP,
+        "stamped ticks exceeded the pending window without completion: Lightyear interpolation must enable Replicon track_mutate_messages"
+    );
 }
 
 #[cfg(test)]
@@ -283,6 +292,37 @@ mod tests {
             readings.push(clock.samples[&Tick(1)].x_s);
         }
         assert_eq!(readings[0], readings[1]);
+    }
+
+    /// A client cannot silently collect stamps forever if the server's completion tracking is off.
+    #[test]
+    #[should_panic(expected = "stamped ticks exceeded the pending window without completion")]
+    fn stamped_ticks_without_completions_break_the_pending_window_invariant() {
+        use bevy::time::TimeUpdateStrategy;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Timing>()
+            .init_resource::<ReplicationStorage>()
+            .init_resource::<ReplicationCheckpointMap>()
+            .add_message::<MutateTickReceived>()
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                super::super::server::TICK,
+            ));
+        install(&mut app);
+        // Fixture: one more stamped tick than the pending window can retain, no completions.
+        for tick in 0..=RECEIPT_CAP as u32 {
+            let checkpoint = RepliconTick::new(tick);
+            app.world_mut()
+                .resource_mut::<ReplicationCheckpointMap>()
+                .record(checkpoint, Tick(tick));
+            app.world_mut()
+                .resource_mut::<ReplicationStorage>()
+                .global
+                .get_or_default::<ReceivedStamps>()
+                .queue
+                .push_back((checkpoint, stamp(f64::from(tick))));
+            app.update();
+        }
     }
 
     /// D3 measures received production intervals, including missing ticks rather than a nominal T.

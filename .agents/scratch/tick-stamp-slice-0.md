@@ -2,7 +2,7 @@
 
 Subject: Overmatch's netcode timing only. References to the game's damage-model tests concern game state only. This slice measures; no input handling or presentation reads the new records.
 
-The sections through the first Validation record round 1 (`6d3b567e`). The round-2 section below supersedes their implementation and completion-check descriptions; their proof numbers remain historical observations.
+The sections through the first Validation record round 1 (`6d3b567e`). The round-2 section below, with the closing corrections reflected in its implementation claims, supersedes their implementation and completion-check descriptions; proof numbers remain historical observations.
 
 ## Implementation and wire
 
@@ -85,26 +85,33 @@ review finding was rejected.
 their sum must be finite and nonnegative; the decoder refuses invalid peer values before timing
 arithmetic. MEASURED postcard payload: **12 fixed bytes**, **4 more** than round 1. The ordered
 registration surface is unchanged, so `WIRE_SURFACE_HASH` remains `0xfba98390117f50c7`;
-the affected definitions/codec pin is now `WIRE_TYPES_HASH = 0xbe9e48fdef318ef5`.
+the round-2 definitions/codec pin was `WIRE_TYPES_HASH = 0xbe9e48fdef318ef5`. The closing
+serialization/refusal correction changes that full-source codec manifest to
+`WIRE_TYPES_HASH = 0xdc746cf1dbc42659` and `PROTOCOL_REV` **100 → 101**, retaining the same
+twelve-byte field layout. Invalid decoding preserves its typed cause in replication storage;
+after receive, it enters the existing `ServerGone` match-close path, which removes the link,
+stops reconnecting and shows the player the cause.
 
 DERIVED sparse scoreboard mutation cost under the same compact-entity assumptions as round 1:
 **15–19 bytes/client/tick** before shared framing and packet-boundary effects; when the scoreboard
 already has a row, **13 added bytes**, plus any row-length-prefix growth. The added four payload
 bytes cost **256 bytes/client/second at 64 Hz**, before packet effects. The `f32` offset avoids a
 fixed integer-duration ceiling while limiting rounding to half an offset ULP. A fixed `u16` or
-`u32` microsecond count would impose a maximum frame duration. This is the pre-replication send
-boundary, not a socket timestamp: serialization and transport work after that read remain in the
-observed absence bound.
+`u32` microsecond count would impose a maximum frame duration. Departure is read inside the stamp serialization callback, not at a socket timestamp. Remaining
+collection/serialization (including reuse of cached stamp bytes for other clients), message
+framing/queueing, transport/delivery and whole-tick completion wait to the previous client frame
+remain in x, alongside the unknown epoch offset and offset rounding. No send is delayed or newly
+ordered against other frame work.
 
 | Item | Disposition |
 |---|---|
-| P1: frame start versus departure | Done. `publish` runs in `PostUpdate`, before `ServerSystems::Send`, using a fresh monotonic `Instant` from the runner's clock seam. The map retains frame start; x subtracts frame start plus departure offset. `Time<Real>` supplies the frame origin, never departure. |
+| P1: frame start versus departure | Done. `publish` records frame start and exposes the runner's clock seam before `ServerSystems::Send`; the codec reads departure during serialization. The map retains frame start; x subtracts frame start plus departure offset. `Time<Real>` supplies the frame origin, never departure. |
 | P2.4: completion | Done. Delete all per-entity atomicity state and consume every `MutateTickReceived` after replication receive. Match it to the first retained stamp arrival; sample x with the preceding completion-frame Real sample. Summaries count later-frame completions and their maximum frame/ms lag. |
 | P2.2: provenance | Done. Each of the four numbers has its own `(value, Taste("…"))` label, loaded through `Sourced` and `from_shipped_str`; missing/blank/Fixture provenance is refused by the shipped reader. |
-| P2.3: first arrival | Done. `AwaitingFirstArrival` accrues neither silence nor gaps. First arrival returns `First`; active arrivals return `Live` or `Stale` against S before inserting their gap. This remains measurement only. |
-| P3.5 and testing lens | Done. The runner mounts the shipped protocol with its physics dependencies, advances the injected clock inside `FixedUpdate`, and asserts departure and x against independent fixture work. A frame-start-only mutant fails. The completion-frame test distinguishes short/long client frames and a later-frame completion across a summary boundary. Input assertions derive declarations and recovery S from the authored floor/ceiling; a separate fixture witnesses classify-before-admit. |
-| P3.6: Ledger history | Done. The dependency is named in the stamp codec module and at its protocol registration: Ledger's `replicate_diff` enables Replicon's global history decoding. It is retained deliberately. |
-| P3.7: compositions | Done. The decoder itself caps `ReceivedStamps`, including protocol-only apps without a view consumer. The shared protocol installs publication; the dedicated-server-only duplicate is deleted. The runner proof exercises that installation. |
+| P2.3: first arrival | Done. `AwaitingFirstArrival` accrues neither silence nor gaps. First arrival returns `First`; active arrivals return `Live` or `Stale` against S before inserting their gap. The per-link census counts `stale_arrivals` per emission period. This remains measurement only. |
+| P3.5 and testing lens | Done. The runner mounts the shipped protocol with its physics dependencies, advances the injected clock in `FixedUpdate` and after publication in pre-send `PostUpdate`, and asserts serialized departure and x against independent fixture work. Reading departure in publication fails too; fixture output is not labelled measured. The completion-frame test distinguishes short/long client frames and a later-frame completion across a summary boundary. Input assertions derive declarations and recovery S from the authored floor/ceiling; a separate fixture witnesses classify-before-admit. |
+| P3.6: Ledger history | Done. The dependency is owned by the stamp codec module, with a pointer at protocol registration: Ledger's `replicate_diff` enables Replicon's global history decoding. It is retained deliberately. |
+| P3.7: compositions | Done. The decoder itself caps `ReceivedStamps`, including protocol-only apps without a view consumer. The shared protocol installs publication for every server composition, gated on Replicon's running-server state; clients only forward decoder refusals. The runner proof exercises that installation. |
 | P3.8: per-frame scans | Done. Raw windows expire by front-pop; a monotonic maximum deque replaces full-window max scans. Each deque entry is pushed/popped at most once. Sorting is confined to summary emission. |
 | P3.9: one number, one job | Done. `view_window_s` owns the observation window only. Pending completion receipts have an independent Resolution cap derived from the upstream tracker horizon. |
 | P3.10: disconnected counts | Done. Last-period input counts survive disconnect and emit with `arrival.state = not_connected_at_emission`. The disconnected link's arrival history/declaration counter is not retained; that absence is explicit rather than a fabricated live row. |
@@ -131,7 +138,11 @@ Sources are the locally pinned registry crates: `bevy_time-0.20.1`, `bevy_replic
   that Instant. The dedicated runner sets `ManualInstant` before `app.update`.
 - Replicon `src/server.rs:185–201` chains preparation, collection and message send inside
   `ServerSystems::Send`. Lightyear `src/server.rs:52` writes authoritative tick userdata before
-  that same set. Game publication orders before that boundary (`src/net/tick_stamp.rs:71–90`).
+  that same set. Game publication orders before that boundary; departure is read by the codec inside
+  `collect_changes`. `src/server/replication_messages/serialized_data.rs:34–51,96–111` caches the
+  serialized component bytes for reuse across clients; `server.rs:1106–1165` subsequently frames
+  and queues messages. The simulation tick rides each replication message's userdata; the stamp
+  rides the scoreboard component.
 - Replicon `src/client.rs:314–315` holds mutations until their required reliable update has
   applied. `apply_mutate_message` processes mutations and then confirms the message
   (`:498–549`); entity changes flush before that return (`:995–1001`).
@@ -139,7 +150,10 @@ Sources are the locally pinned registry crates: `bevy_time-0.20.1`, `bevy_replic
   advertised total (`src/client.rs:859–868`; `src/client/server_mutate_ticks.rs:179–204`).
   This means all mutate messages for that checkpoint were processed successfully, subject to
   Replicon's normal skips of obsolete/unknown entities. It does not mean the view has rendered
-  the tick or that every older tick completed.
+  the tick or that every older tick completed. Lightyear's server backend enables tracking through
+  its `interpolation` feature (`lightyear_replication/src/lib.rs:263–271`). The client cannot read
+  the remote setting, so exceeding the pending receipt cap of stamped arrivals with no completion
+  panics as a broken invariant; summary resets do not reset that check.
 - If a mutate message is lost, that tick emits no completion event. Later ticks can complete
   independently. Recovery within the tracker horizon may finish the old tick; after it ages out,
   `confirm` returns false (`server_mutate_ticks.rs:112–143`). The separate `contains` API treats

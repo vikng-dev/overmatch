@@ -1,11 +1,14 @@
 //! Frame start feeds the tick-to-time map; departure feeds the network absence bound.
-//! Tick identity rides Replicon's checkpoint userdata on the globally visible scoreboard.
+//! The simulation tick rides each replication message's userdata; the stamp is a component
+//! on the globally visible scoreboard.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
-use bevy_replicon::prelude::{Remote, RepliconTick, ServerSystems};
+use bevy_replicon::prelude::{
+    ClientSystems, Remote, ReplicationStorage, RepliconTick, ServerState, ServerSystems,
+};
 use serde::Serialize;
 
 mod wire;
@@ -53,12 +56,12 @@ impl ReceivedStamps {
 }
 
 /// The runner's clock seam also serves departure reads, including in injected-clock proofs.
-#[derive(Resource)]
-pub(super) struct DepartureClock(Box<dyn Fn() -> Instant + Send + Sync>);
+#[derive(Resource, Clone)]
+pub(super) struct DepartureClock(Arc<dyn Fn() -> Instant + Send + Sync>);
 
 impl DepartureClock {
     pub(super) fn new(now: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
-        Self(Box::new(now))
+        Self(Arc::new(now))
     }
 }
 
@@ -68,26 +71,52 @@ impl Default for DepartureClock {
     }
 }
 
-pub(super) fn install_server(app: &mut App) {
-    app.init_resource::<DepartureClock>()
-        .add_systems(PostUpdate, publish.before(ServerSystems::Send));
+struct SerializationClock {
+    frame_start: Instant,
+    clock: DepartureClock,
 }
 
-fn publish(
+/// Shared protocol installation covers every server composition and every decoding client.
+/// Publication runs only on a running server; clients only forward decoder refusals.
+pub(super) fn install(app: &mut App) {
+    app.init_resource::<DepartureClock>()
+        .add_message::<super::matchmaking::ServerGone>()
+        .add_systems(
+            PostUpdate,
+            publish
+                .before(ServerSystems::Send)
+                .run_if(in_state(ServerState::Running)),
+        )
+        .add_systems(PreUpdate, refuse_peer_stamp.after(ClientSystems::Receive));
+}
+
+pub(super) fn publish(
     real: Res<Time<Real>>,
     clock: Res<DepartureClock>,
+    mut storage: ResMut<ReplicationStorage>,
     mut stamps: Query<&mut TickStamp, Without<Remote>>,
 ) {
-    let frame_start = real
-        .last_update()
-        .expect("TimePlugin samples Real before PostUpdate");
-    // Resolution: f32 seconds adds four fixed bytes without capping long frames. Subsecond work
-    // has at most half an f32 ULP of rounding; unlike integer microseconds it cannot overflow Duration.
-    let offset = (clock.0)().duration_since(frame_start).as_secs_f64() as f32;
-    let departure = TickStamp::new(real.elapsed_secs_f64(), offset)
+    storage.global.insert(SerializationClock {
+        frame_start: real
+            .last_update()
+            .expect("TimePlugin samples Real before PostUpdate"),
+        clock: clock.clone(),
+    });
+    let frame = TickStamp::new(real.elapsed_secs_f64(), 0.0)
         .expect("the monotonic frame clock produces finite nonnegative stamps");
     for mut stamp in &mut stamps {
-        *stamp = departure;
+        *stamp = frame;
+    }
+}
+
+fn refuse_peer_stamp(
+    mut storage: ResMut<ReplicationStorage>,
+    mut gone: MessageWriter<super::matchmaking::ServerGone>,
+) {
+    // A valid stream has no refusal. Replicon's decoder cannot write ECS messages directly.
+    if let Some(refusal) = storage.global.remove::<wire::StampRefusal>() {
+        warn!("client: refusing server tick stamp: {refusal}");
+        gone.write(super::matchmaking::ServerGone(refusal.to_string()));
     }
 }
 
@@ -169,6 +198,93 @@ mod tests {
         assert_eq!(received.queue.len(), RECEIPT_CAP);
         assert_eq!(received.queue.front().unwrap().0, RepliconTick::new(1));
         assert_eq!(received.overflow, 1);
+    }
+
+    /// The player relies on decoder refusals reaching the ordinary match-close path, including
+    /// the lobby cause and no reconnect. The test adapter exposes errors the codec helper panics on.
+    #[test]
+    fn an_invalid_stamp_closes_the_match_with_its_typed_cause() {
+        use super::super::matchmaking::MatchClosed;
+        use bevy::ecs::message::MessageCursor;
+        use bevy_replicon::shared::replication::registry::{
+            ReplicationRegistry, test_fns::TestFnsEntityExt,
+        };
+        use lightyear::prelude::client::NetcodeClient;
+        let _udp = super::super::test_harness::lock_real_udp_test();
+        let (mut server, mut client) = super::super::client::match_exit::in_match();
+        let (_, fns_id) =
+            client
+                .world_mut()
+                .resource_scope(|world, mut registry: Mut<ReplicationRegistry>| {
+                    registry.register_rule_fns(
+                        world,
+                        replication().with_in_place(|decode, ctx, _stamp, message| {
+                            assert!(decode(ctx, message).is_err());
+                            Ok(())
+                        }),
+                    )
+                });
+        // Fixture: NaN frame start in the stamp's postcard layout; the old component stays valid.
+        let bytes = postcard::to_allocvec(&(f64::NAN, 0.0_f32)).unwrap();
+        let carrier = client
+            .world_mut()
+            .spawn(TickStamp::new(0.0, 0.0).unwrap())
+            .id();
+        client
+            .world_mut()
+            .entity_mut(carrier)
+            .apply_write(bytes, fns_id, RepliconTick::new(1));
+        let refusal = client
+            .world()
+            .resource::<ReplicationStorage>()
+            .global
+            .get::<wire::StampRefusal>()
+            .unwrap();
+        assert!(matches!(refusal, wire::StampRefusal::Invalid(_)));
+        let cause = refusal.to_string();
+        let mut closed = MessageCursor::<MatchClosed>::default();
+        let mut observed = false;
+        // Fixture: allow deferred link removal and the lobby transition to settle.
+        for _ in 0..8 {
+            server.update();
+            client.update();
+            let causes: Vec<_> = closed
+                .read(client.world().resource::<Messages<MatchClosed>>())
+                .cloned()
+                .collect();
+            if !causes.is_empty() {
+                assert_eq!(causes, [MatchClosed::Ended(cause.clone())]);
+                observed = true;
+                break;
+            }
+        }
+        assert!(observed, "a refused stamp must close the match visibly");
+        super::super::client::match_exit::advance_past_reconnect_window(&mut client);
+        for _ in 0..8 {
+            server.update();
+            client.update();
+        }
+        assert_eq!(
+            client
+                .world_mut()
+                .query_filtered::<(), With<NetcodeClient>>()
+                .iter(client.world())
+                .count(),
+            0,
+            "a refused link cannot reconnect"
+        );
+        assert_eq!(
+            *client.world().resource::<State<crate::flow::Flow>>().get(),
+            crate::flow::Flow::Lobby
+        );
+        assert!(
+            client
+                .world_mut()
+                .query::<&Text>()
+                .iter(client.world())
+                .any(|text| text.0.contains(&cause)),
+            "the lobby must show the refusal cause"
+        );
     }
 
     /// Invalid peer stamps must be refused during decoding, before reaching timing arithmetic.
