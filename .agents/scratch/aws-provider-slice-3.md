@@ -353,9 +353,15 @@ name metered resources rather than account-specific prices. Region is always `ap
    cost; its account plan/usage remains the operator's responsibility. Use the HTTPS proving origin.
 
 2. **Issue the key only after the deployed Worker and Access checks.** From repo root, with pinned
-   Wrangler on PATH:
+   Wrangler on PATH and the native authentication exports described in
+   [`host-setup.md`](../../scripts/aws/host-setup.md). For the operator shell that already exports
+   `CLOUDFLARE_GLOBAL_KEY` and `CLOUDFLARE_EMAIL`, prepare Wrangler's key name without printing it:
 
    ```sh
+   set +x
+   unset CLOUDFLARE_API_TOKEN
+   export CLOUDFLARE_API_KEY="${CLOUDFLARE_GLOBAL_KEY:?export the account key first}"
+   export CLOUDFLARE_EMAIL
    export PATH="$PWD/backend/node_modules/.bin:$PATH"
    scripts/aws/host-setup issue-key --env aws-proving
    scripts/aws/host-setup verify
