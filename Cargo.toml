@@ -71,7 +71,6 @@ lightyear = { version = "0.31.0", default-features = false, features = [
     "std",
     "client", "server",
     "replication", "interpolation",
-    "input_native",
     "netcode", "udp",
     "avian3d",
 ] }
@@ -125,8 +124,6 @@ objc2-foundation = { version = "0.2.2", features = ["NSThread", "NSValue"] }
 # `std` already turns on the `std` their defaults name.
 [dev-dependencies]
 lightyear_core = { version = "0.31.0", default-features = false }
-lightyear_inputs = { version = "0.31.0", default-features = false }
-lightyear_inputs_native = { version = "0.31.0", default-features = false }
 
 [features]
 # Clients retain Bevy's default audio; the release server recipe uses --no-default-features.

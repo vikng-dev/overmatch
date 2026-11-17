@@ -826,6 +826,7 @@ pub struct NetClientPlugin;
 
 impl Plugin for NetClientPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(net::input_feedback_plugin);
         gate_player_input(app);
         // The screen state, mounted before every plugin that spawns or gates on it; its writer is
         // `net::client`'s, which owns the link facts it derives from.

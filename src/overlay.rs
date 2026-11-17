@@ -88,7 +88,7 @@ impl Overlay {
     pub(crate) const SCOREBOARD_Z: i32 = Overlay::Death.zindex() + 10;
 
     /// Blocks player input and frees the cursor for menus, reconnecting (no driving until the link
-    /// returns) and map clicks. `feed_action_state` zeroes the wire command so the tank coasts rather
+    /// returns) and map clicks. `feed_frame_input` zeroes the wire command so the tank coasts rather
     /// than driving blind under the map. `Death`/`ViewDead` leave it captured: R respawn and Lshift
     /// view-switch run in `PlayerInputSet`, which requires capture. Simulation continues.
     const fn blocks_input(self) -> bool {
@@ -126,7 +126,7 @@ pub(crate) fn death_tint() -> impl Bundle {
 pub(crate) struct Overlays {
     active: BTreeSet<Overlay>,
     /// [`declare_screen`]'s per-frame `Flow` projection, false by default (input blocked).
-    /// A flag keeps the fixed-clock `feed_action_state` reader independent of `Flow`.
+    /// A flag keeps the frame-rate `feed_frame_input` reader independent of `Flow`.
     in_match: bool,
 }
 
@@ -157,8 +157,8 @@ impl Overlays {
 }
 
 /// Shared input license for cursor ownership, `state::cursor_locked`/`PlayerInputSet` and
-/// `feed_action_state`: unfocused, off-match (lobby/connect), or [`Overlay::blocks_input`] means
-/// release the cursor and read no device; `feed_action_state` decides what the wire carries
+/// `feed_frame_input`: unfocused, off-match (lobby/connect), or [`Overlay::blocks_input`] means
+/// release the cursor and read no device; `feed_frame_input` decides what the wire carries
 /// instead. Pass live focus separately so the fixed-schedule consumer need not use a stale set
 /// value.
 pub(crate) fn input_blocked(overlays: &Overlays, window_focused: bool) -> bool {
@@ -247,7 +247,7 @@ pub(crate) fn plugin(app: &mut App) {
         .init_resource::<RefocusGrab>()
         // Match overlays cannot survive into the next screen.
         .add_systems(OnExit(Flow::InMatch), clear_overlays)
-        // `feed_action_state` is the fourth link, in `FixedPreUpdate`: it reads [`input_blocked`]
+        // `feed_frame_input` is the fourth link, in `PostUpdate`: it reads [`input_blocked`]
         // from the previous frame's reconciled declarations.
         .configure_sets(
             Update,

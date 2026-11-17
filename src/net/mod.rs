@@ -15,11 +15,6 @@ mod compatibility;
 /// Tick-stamped server announcements held until the interpolation cursor crosses their tick, so an
 /// event presents in sync with the interpolated motion it belongs to.
 mod cursor_queue;
-/// Real-UDP probes of the controlled tank's input path: the device's command filed on every tick of
-/// a frame, the death flow's neutral one while dead, and a click the bridge restores never filed
-/// again.
-#[cfg(test)]
-mod death_flow_input;
 mod death_screen;
 // The kill cam's composed schedule under test mounts the death screen, the reader of its gate.
 #[cfg(test)]
@@ -30,21 +25,17 @@ mod debris_stress;
 mod debug_hud;
 mod diagnostics;
 mod disclosure;
-/// The owner's fire presentation: intent edges on the local tick, the arriving gate reconciled as a
-/// legality report instead of read as permission to draw.
-mod fire_presentation;
 /// Read-only starvation and resync instruments at the interpolation buffer's edge.
 mod frontier;
 mod harness;
 mod he_stress;
+mod input_arrival;
+mod input_feedback;
 pub(crate) use harness::{env_flag, env_parse, env_text, env_value, refuse_start};
 mod contact_census;
 mod hit_feel;
 /// The dedicated server's hosted mode: settings from the Worker, heartbeats, capacity, empty exit.
 mod hosting;
-/// Real-UDP probe of the client's one-input-message-per-tick send cadence.
-#[cfg(test)]
-mod input_cadence;
 mod input_gap;
 /// The interpolation buffer's size, derived from the measured link instead of pinned.
 mod interp_delay;
@@ -86,7 +77,7 @@ mod shot_transport;
 mod construction;
 pub(crate) mod spawn_map;
 mod spawn_placement;
-/// The sync margins on both wire timelines, derived from the measured link instead of pinned.
+/// The downlink sync margins, derived from the measured link instead of pinned.
 mod sync_margin;
 #[cfg(test)]
 mod test_harness;
@@ -112,6 +103,7 @@ pub(super) use battle_hud::plugin as battle_hud_plugin;
 pub(super) use death_screen::plugin as death_screen_plugin;
 pub(super) use debug_hud::plugin as debug_hud_plugin;
 pub(super) use hit_feel::plugin as hit_feel_plugin;
+pub(super) use input_feedback::plugin as input_feedback_plugin;
 pub(crate) use protocol::NetBot;
 pub(super) use spawn_map::plugin as spawn_map_plugin;
 

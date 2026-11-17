@@ -34,7 +34,7 @@ Player-hosted online Battles are deferred. The foundation does not need listen-s
 
 The client sends intent; the server simulates and confirms consequences (one timeline, ADR-0037).
 
-- Controls, weapon response, recoil, audio, muzzle effects, and the beginning of a local shot happen immediately.
+- The trigger click sounds immediately. The shot bundle (report, muzzle effects, recoil and round) presents from the server stream; input answers and refused cues are read on arrival.
 - Penetration, ricochet, damage, crew and tank-module effects, knockout, and Progression consequences are authoritative.
 - **Damage confirmation** comes only from authoritative damage. The current hit-marker-like presentation is disposable; the amount of information disclosed is a playtest fork.
 - The server filters live combat disclosure before transmission. A client must not receive privileged internal damage truth merely because the current UI hides it.

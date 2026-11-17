@@ -3,8 +3,8 @@
 > **Status: accepted; shipped in declared `PROTOCOL_REV = 17`. Owner-prediction half
 > superseded by [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15): the wire
 > shape survives verbatim (one atomic gate, absolute `ready_tick`, arrival never writes live
-> sim), but nothing predicts or rollback-restores it — the client reads it as a legality
-> report (`fire_presentation`).
+> sim). The client matures its owner-private copy for the status panel
+> (READY, reload and swap countdowns, belt count); only the server fires.
 
 The complete decision that permits a weapon to fire is one root-resident `WeaponGate`, replicated
 by the authority and predicted by the owner. Its per-slot state is an absolute `ready_tick`, a

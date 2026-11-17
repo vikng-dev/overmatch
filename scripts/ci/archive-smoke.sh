@@ -158,7 +158,7 @@ failed=0
 # `client: connected` is the netcode handshake; a protocol-id mismatch (the CRLF class) dies here.
 grep -q "client: connected" "$client_log" || { echo "smoke: the client never connected" >&2; failed=1; }
 # The server replicated a tank this client owns — a connect that never becomes a session is not one.
-grep -q -- "— input slot" "$client_log" || { echo "smoke: the client never got an input slot" >&2; failed=1; }
+grep -q -- "harness: input slot" "$client_log" || { echo "smoke: the client never got an input slot" >&2; failed=1; }
 # It played the script out rather than being cut short by the in-app watchdog.
 grep -q "simulation script complete" "$client_log" ||
     { echo "smoke: the client never completed its script" >&2; failed=1; }

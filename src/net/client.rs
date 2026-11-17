@@ -18,8 +18,6 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::client::*;
-use lightyear::prelude::input::client::InputSystems;
-use lightyear::prelude::input::native::{ActionState, InputMarker, NativeBuffer};
 use lightyear::prelude::{Controlled as NetControlled, *};
 use serde_json::json;
 
@@ -255,22 +253,6 @@ fn recv_conditioner_mode(
         RecvConditionerMode::Seeded(seed)
     } else {
         RecvConditionerMode::Stock
-    }
-}
-
-/// Resolution: input-buffer scheduling depth. The three-tick choice matches Lightyear 0.31.0's
-/// `balanced()` cap for jitter headroom; no minimum is derived for the authoritative timeline.
-/// Delay stays fixed so input-buffer end ticks advance once per local tick.
-/// See `src/net/tests/net_fire_release.rs`.
-pub(crate) const SHIPPING_INPUT_DELAY_TICKS: u16 = 3;
-
-/// Lightyear 0.31.0 saturates effective RTT ticks at `u16::MAX`. Cover that domain without
-/// overflowing its prediction-allowance sum; the client runs no gameplay prediction (ADR-0037).
-pub(crate) fn shipping_input_delay() -> InputDelayConfig {
-    InputDelayConfig {
-        minimum_input_delay_ticks: SHIPPING_INPUT_DELAY_TICKS,
-        maximum_input_delay_before_prediction: SHIPPING_INPUT_DELAY_TICKS,
-        maximum_predicted_ticks: u16::MAX - SHIPPING_INPUT_DELAY_TICKS,
     }
 }
 
@@ -520,22 +502,20 @@ pub fn run() -> AppExit {
     // Register the shared protocol before creating the client link. The step lightyear publishes as
     // `TickDuration`; `net::interp_delay` derives its gap term from the same binding.
     let tick_duration = Duration::from_secs_f64(1.0 / 64.0);
+    // LocalTimeline uses lightyear's default InputTimelineConfig: no input delay and default
+    // SyncConfig. Its objective leads the remote estimate by RTT/2 + 4*jitter + 3 ticks
+    // (DERIVED from lightyear_sync's input objective). Arrival-owned input never waits on it.
     app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(super::plugin);
     app.add_plugins(physics::physics_plugins());
-    // `fire_presentation` owns local cadence; arriving gates report legality, and
-    // `shooting::fire` receives locally authored consumables rather than the attested echo.
-    app.add_plugins(super::fire_presentation::plugin);
     // Shared server/offline systems drive cosmetic shells, servos and recoil here too.
     app.add_plugins(SimPlugin);
     // Server-authoritative combat: replicas fly shells cosmetically but never deposit HP or apply
     // hit impulse. Private crew detail and public life state arrive independently from the server;
     // the client never runs `DamageConsequences` to decide either one.
     app.insert_resource(crate::ClientReplica);
-    // Windowed clients mount presentation/device gather; `feed_action_state` files render-rate
-    // `DeviceCommand` each tick. Scripts own `ActionState` instead, even when windowed: the
-    // reverse bridge overwrites device-written `TankCommand` before sim readers, retaining real
-    // camera/HUD/rendering for diagnostics. Headless scripts mount no presentation or devices.
+    // Windowed devices snapshot before the fixed loop and send once after it. Scripts own the
+    // frame input in headless and windowed automation alike.
     if !headless {
         app.add_plugins(NetClientPlugin);
     }
@@ -564,19 +544,6 @@ pub fn run() -> AppExit {
         Ok(link) => link,
         Err(error) => harness::refuse_start(error),
     };
-    let input_delay = shipping_input_delay();
-    // The install-time sync margins hold only over a session's pre-arm window; `net::sync_margin`'s
-    // derived law rewrites both once the link is measured.
-    let sync_config = SyncConfig {
-        jitter_multiple: 2,
-        jitter_margin: 1.0,
-        ..default()
-    };
-    info!(
-        "client: input delay = {SHIPPING_INPUT_DELAY_TICKS} ticks — CONSTANT by design \
-         (DERIVED {:.1}ms)",
-        f64::from(SHIPPING_INPUT_DELAY_TICKS) * tick_duration.as_secs_f64() * 1000.0
-    );
     if template.seeded.is_some() {
         app.add_systems(
             PreUpdate,
@@ -587,18 +554,10 @@ pub fn run() -> AppExit {
     // Mounts the deriving system; the returned config is the entity's starting value, rewritten
     // every frame.
     let interpolation = super::interp_delay::install(&mut app, tick_duration);
-    // Mounts the sync-margin laws on both wire timelines: the input timeline's floor/deadband
-    // (rewritten every frame once the own tank's role resolves interpolated) and the interpolation
-    // timeline's sync margins (static for the session). Receives the SAME `input_delay` the
-    // timeline below is built with, so its rebuilds cannot change the delay's shape.
-    let interpolation =
-        super::sync_margin::install(&mut app, sync_config, input_delay, interpolation);
+    let interpolation = super::sync_margin::install(&mut app, interpolation);
     // Read-only timeline-resync instrument and the per-second `client_jitter` line.
     super::frontier::install(&mut app);
     super::frontier::install_jitter_line(&mut app);
-    // App-global configs follow `ClientPlugins`: its `On<Insert<InputTimelineConfig>>` observer
-    // seeds delay immediately, before stamping/sending, rather than at the first timeline shift.
-    app.insert_resource(InputTimelineConfig::new(sync_config, input_delay));
     // Every replica — the own hull included — rides the interpolation buffer behind the server
     // estimate, so it is also the dominant own-input latency term. `net::interp_delay` owns the
     // sizing law and rewrites `min_delay` every frame.
@@ -656,34 +615,22 @@ pub fn run() -> AppExit {
     install_replica_consumers(&mut app);
     if simulate {
         app.add_systems(Update, harness::simulate_watchdog)
-            .add_systems(
-                FixedPreUpdate,
-                // Writer → stamp → tick-keyed own copy, before Lightyear buffers input.
-                (
-                    harness::buffer_input,
-                    stamp_input_tick,
-                    super::fire_presentation::record_own_intent,
-                )
-                    .chain()
-                    .in_set(InputSystems::WriteClientInputs),
-            );
+            .add_systems(FixedPreUpdate, harness::buffer_input);
     } else {
         install_device_feed(&mut app);
     }
-    install_input_buffer_guard(&mut app);
-    install_input_send_cadence(&mut app);
 
     // `NetClientPlugin` mounts the windowed overlay authority: Esc/focus presence →
     // `overlay::input_blocked` → sole `cursor_owner` and `PlayerInputSet`'s locked-cursor gate,
     // including initial grab. Headless scripts have no overlay authority; scripted clients
-    // omit `feed_action_state`, so overlay idling cannot fight `harness::buffer_input`.
+    // omit `feed_frame_input`, so overlay idling cannot fight `harness::buffer_input`.
 
     app.run()
 }
 
 /// The game's netcode and damage-model presentation: the common replica consumer schedule,
 /// shared by the client and socket-free resync replay. Requires the protocol, physics, sim,
-/// own-fire presentation and frontier resources; link setup and input authorship stay with the
+/// frontier resources; link setup and input authorship stay with the
 /// composition root. Keeping the mount shared makes a new consumer part of the replay too.
 pub(super) fn install_replica_consumers(app: &mut App) {
     app.add_observer(diagnostics::log_connected)
@@ -1288,11 +1235,10 @@ where
     }
 }
 
-/// Input can precede the body; player-facing ownership cannot. `Rig` and `TankViews` enter
+/// Player-facing ownership waits for the complete body. `Rig` and `TankViews` enter
 /// together in `tank::template::TankTemplate::assemble`, after the body's children are assembled.
 fn control_claim_plugin(app: &mut App) {
-    app.add_observer(claim_input_slot)
-        .add_observer(claim_complete_tank);
+    app.add_observer(claim_complete_tank);
 }
 
 fn claim_complete_tank(
@@ -1303,123 +1249,6 @@ fn claim_complete_tank(
     // Either ownership or the body may arrive first. Until both exist, there is no local tank.
     if complete.contains(add.entity) {
         commands.entity(add.entity).insert(GameControlled);
-    }
-}
-
-/// File input from Lightyear ownership even while interpolation has not attached the body.
-fn claim_input_slot(add: On<Add<NetControlled>>, mut commands: Commands) {
-    info!("client: controlled entity {} — input slot", add.entity);
-    commands.entity(add.entity).insert((
-        InputMarker::<TankCommand>::default(),
-        ActionState::<TankCommand>::default(),
-    ));
-}
-
-/// Fixed ticks that have buffered local input, the count at the last staged input message, and
-/// whether this frame stages another.
-#[derive(Resource, Default)]
-struct InputSendCadence {
-    buffered_ticks: u64,
-    staged_at: Option<u64>,
-    due: bool,
-}
-
-/// Stage at most one input message per fixed tick. Lightyear's `prepare_input_message` runs once
-/// per `PostUpdate` frame and, on a frame that ran no fixed tick, re-stages the same `end_tick` with
-/// the same window, so without this gate the upload scales with frame rate rather than tick rate.
-///
-/// The gate keys on a count of fixed ticks that ran `InputSystems::BufferClientInputs`, never on
-/// tick numbers: a `LocalTimelineShift` or an input-delay change cannot alias a freshly buffered
-/// tick onto the last staged one. The first frame after each buffering tick stages, so the input
-/// lead is unchanged.
-///
-/// Redundancy is lightyear's, untouched: each message carries the last `packet_redundancy` (5)
-/// ticks, so at a steady 64 Hz a tick's command rides the messages of its own tick and the next
-/// four — first-to-last copy span 62.5 ms (DERIVED: 4 × 15.625 ms), surviving four consecutive
-/// lost messages. A frame that runs several fixed ticks stages one message ending on the latest;
-/// past five ticks in one frame the earliest falls outside that window. Both predate this gate.
-pub(super) fn install_input_send_cadence(app: &mut App) {
-    app.init_resource::<InputSendCadence>()
-        .add_systems(
-            FixedPreUpdate,
-            count_buffered_tick.after(InputSystems::BufferClientInputs),
-        )
-        .add_systems(
-            PostUpdate,
-            decide_input_send.before(InputSystems::PrepareInputMessage),
-        )
-        .configure_sets(
-            PostUpdate,
-            InputSystems::PrepareInputMessage.run_if(input_send_due),
-        );
-}
-
-fn count_buffered_tick(mut cadence: ResMut<InputSendCadence>) {
-    cadence.buffered_ticks += 1;
-}
-
-/// Unsynced, lightyear skips `prepare_input_message` itself (its `SyncedLocalTimeline` parameter),
-/// so nothing is recorded as staged.
-fn decide_input_send(sync: Res<LocalTimelineSync>, mut cadence: ResMut<InputSendCadence>) {
-    let buffered = cadence.buffered_ticks;
-    cadence.due = sync.is_synced() && cadence.staged_at != Some(buffered);
-    if cadence.due {
-        cadence.staged_at = Some(buffered);
-    }
-}
-
-fn input_send_due(cadence: Res<InputSendCadence>) -> bool {
-    cadence.due
-}
-
-/// Refuse inverted native-input encoder intervals. Lightyear 0.31.0's installed timeline-shift
-/// observer moves buffer start/remote ticks together; clearing a future buffer would conceal a
-/// broken timeline invariant and discard authored input. The upstream encoder still mislabels
-/// inverted ranges (`src/net/tests/net_input_buffer_wrap.rs`).
-pub(super) fn install_input_buffer_guard(app: &mut App) {
-    app.add_systems(
-        PostUpdate,
-        assert_input_buffer_ranges.before(InputSystems::PrepareInputMessage),
-    );
-}
-
-fn assert_input_buffer_ranges(
-    timeline: Res<LocalTimeline>,
-    sync: Res<LocalTimelineSync>,
-    sender: Query<Entity, With<Client>>,
-    buffers: Query<&NativeBuffer<TankCommand>, With<InputMarker<TankCommand>>>,
-) {
-    if buffers.is_empty() {
-        return;
-    }
-    match sender.single() {
-        Ok(_) => {}
-        // Replicas disappear with Connected, so a linkless buffer can hold no authored range.
-        Err(QuerySingleError::NoEntities(_)) => {
-            for buffer in &buffers {
-                assert!(
-                    buffer.start_tick.is_none()
-                        && buffer.is_empty()
-                        && buffer.last_remote_tick.is_none(),
-                    "an input buffer holding a range outlived its client link: lightyear despawns \
-                     the own replica with the link's Connected"
-                );
-            }
-            return;
-        }
-        Err(error @ QuerySingleError::MultipleEntities(_)) => {
-            panic!("one client connection per App (`spawn_matched_link` refuses a second): {error}")
-        }
-    }
-    let end = timeline.tick() + sync.input_delay() as i32;
-    for buffer in &buffers {
-        if let Some(start) = buffer.start_tick {
-            assert!(
-                start - end <= 0,
-                "input-buffer start {start:?} exceeds encoder end {end:?}: timeline shifts move \
-                 buffer indices with the local tick, and shipping input delay is fixed"
-            );
-        }
     }
 }
 
@@ -1641,15 +1470,12 @@ impl SeenDamage {
 }
 
 /// Reset server-clocked state on link end: an earlier new-server tick must not be rejected by
-/// `sync_margin::ArrivalDelay` or `fire_presentation::AuthoredIntent`; pending edges must not
-/// replay on the next tank.
+/// `sync_margin::ArrivalDelay`.
 fn reset_link_state(
     _ended: On<Remove<Connected>>,
     mut arrival: ResMut<super::sync_margin::ArrivalDelay>,
-    mut intent: ResMut<super::fire_presentation::AuthoredIntent>,
 ) {
     arrival.reset_for_new_link();
-    *intent = default();
 }
 
 /// The game's damage model: this composition has one server link, and its cosmetic paths
@@ -2269,7 +2095,7 @@ pub(super) fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time
 /// bounded; network publication refuses timeline exhaustion rather than privately wrapping.
 /// Ahead-of-local fire ticks (clock skew or malicious input) yield zero; elapsed ticks through
 /// [`MAX_COSMETIC_CATCH_UP_TICKS`] fast-forward (normal case DERIVED approximately 10); older
-/// ticks refuse without a catch-up loop. The local input timeline normally leads server time.
+/// ticks refuse without a catch-up loop. The framework local timeline supplies this presentation clock.
 fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
     let elapsed = now - fire;
     if elapsed < 0 {
@@ -2282,7 +2108,7 @@ fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
 /// The game's damage-model presentation: derive barrel kicks from local `Weapon` specs via
 /// `shooting::kick_recoil`, shared with local fire (barrel/recoil gates included). Wire facts
 /// carry only shooter/slot; `WeaponIndex` selects the muzzle's spec, and `apply_recoil` springs
-/// the velocity home. Fused own echoes use this queue too; local fire applied no barrel kick.
+/// the velocity home. Every authority fire fact uses this queue.
 ///
 /// `FixedUpdate`, before `GameplaySet`, with `apply_recoil`'s Playing gate: kicks spring in the
 /// same tick. Render-rate TankSim writes would vary across 0/1/2-tick frames.
@@ -2307,87 +2133,48 @@ fn apply_pending_recoil_kicks(
     }
 }
 
-/// The windowed client's command onto the wire each tick: [`feed_action_state`], then the stamp and
-/// the client's own record of what it filed.
+/// Sample the frame after devices, before the immediate message send.
 pub(super) fn install_device_feed(app: &mut App) {
     app.add_systems(
-        FixedPreUpdate,
-        (
-            feed_action_state,
-            stamp_input_tick,
-            super::fire_presentation::record_own_intent,
-        )
-            .chain()
-            .in_set(InputSystems::WriteClientInputs),
+        PostUpdate,
+        feed_frame_input.before(super::input_arrival::send_inputs),
     );
 }
-
-/// File render-rate [`DeviceCommand`] into each tick's controlled `ActionState`. Unowned slots, a
-/// closed window, off-match screens and blocking overlays file idle, so tanks coast and menu
-/// clicks do not fire. An unfocused window files the set throttle notch and nothing else:
-/// cruise holds its pedal, and no key or button held at the focus loss stays on the wire. Device
-/// writers include drive/aim/range/crew UI; death flow neutralizes their device. Levels repeat
-/// across the frame, edges clear after its first tick. The reverse protocol bridge returns
-/// buffered input to `TankCommand`, never read here.
-fn feed_action_state(
+fn feed_frame_input(
     overlays: Res<crate::overlay::Overlays>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    drive_input: Res<crate::command::DriveInput>,
+    drive: Res<crate::command::DriveInput>,
     mut device: ResMut<DeviceCommand>,
-    mut slots: Query<
-        (&mut ActionState<TankCommand>, Has<GameControlled>),
-        With<InputMarker<TankCommand>>,
-    >,
+    mut own: Query<&mut TankCommand, With<GameControlled>>,
+    mut frame: ResMut<super::input_arrival::FrameInput>,
+    (bindings, keys, mouse): (
+        Res<crate::command::Bindings>,
+        Res<ButtonInput<KeyCode>>,
+        Res<ButtonInput<MouseButton>>,
+    ),
 ) {
-    // `overlay::input_blocked` reads the same terms to release the cursor and gate
-    // `PlayerInputSet` through `state::cursor_locked`, so drive/aim/respawn cannot latch while
-    // this files no device, with no second inference to synchronize.
     let focused = match windows.single() {
         Ok(window) => Some(window.focused),
-        // The primary window has closed at exit: no player is left to drive for.
         Err(QuerySingleError::NoEntities(_)) => None,
-        Err(error @ QuerySingleError::MultipleEntities(_)) => {
-            panic!("the device feed has exactly one primary window until exit: {error}")
-        }
+        Err(error @ QuerySingleError::MultipleEntities(_)) => panic!("one primary window: {error}"),
     };
-    let command = match focused {
-        None => TankCommand::default(),
-        // Off-match or under a blocking overlay, whatever the focus.
-        Some(_) if crate::overlay::input_blocked(&overlays, true) => TankCommand::default(),
+    frame.command = match focused {
+        _ if own.is_empty() || crate::overlay::input_blocked(&overlays, true) => default(),
         Some(true) => device.0,
         Some(false) => TankCommand {
-            throttle: drive_input.set_throttle(),
+            throttle: drive.set_throttle(),
             ..default()
         },
+        None => default(),
     };
-    for (mut state, controlled) in &mut slots {
-        state.0 = if controlled {
-            command
-        } else {
-            TankCommand::default()
-        };
-    }
+    frame.secondary_cycle = focused == Some(true)
+        && !own.is_empty()
+        && !crate::overlay::input_blocked(&overlays, true)
+        && bindings.fire_secondary.just_pressed(&keys, &mouse)
+        && bindings.fire_secondary.just_released(&keys, &mouse);
     device.0.clear_edges();
-}
-
-/// Sole input-provenance writer: stamp Lightyear's filing tick, `local_tick + input_delay`,
-/// using `LocalTimelineSync::input_delay()` exactly as `buffer_action_state` does.
-/// `InputSystems::WriteClientInputs` chains after `feed_action_state` / `harness::buffer_input`
-/// and before `BufferClientInputs`. Pre-sync buffering is gated by `SyncedLocalTimeline`,
-/// so a pre-sync stamp never reaches the wire.
-///
-/// The stamp stays inert through both buffers and the wire. `net::protocol` attests the actual
-/// simulated tick; inherited/repeated/fabricated/frozen input retains a different tick. See
-/// `bridge_action_state_to_tank_command` and `TankCommand::fail_consumables_closed`.
-pub(super) fn stamp_input_tick(
-    timeline: Res<LocalTimeline>,
-    sync: Res<LocalTimelineSync>,
-    mut slots: Query<&mut ActionState<TankCommand>, With<InputMarker<TankCommand>>>,
-) {
-    let delay = sync.input_delay() as i32;
-    let for_tick = timeline.tick() + delay;
-    for mut state in &mut slots {
-        state.0.for_tick = for_tick.0;
+    for mut command in &mut own {
+        command.clear_edges();
     }
 }
 
@@ -2403,6 +2190,7 @@ pub(super) mod match_exit;
 /// unavailable to external integration tests. Recoil probes exercise the local-spec derivation.
 #[cfg(test)]
 mod tests {
+
     /// Lightyear ownership can precede the body; the player's camera must survive that join gap.
     #[test]
     fn joining_before_body_attachment_keeps_the_camera_alive() {
@@ -2419,7 +2207,6 @@ mod tests {
             .add_plugins(control_claim_plugin);
         let own = app.world_mut().spawn((NetControlled, NetTank)).id();
         app.update();
-        assert!(app.world().get::<InputMarker<TankCommand>>(own).is_some());
         assert!(app.world().get::<GameControlled>(own).is_none());
         attach_control_fixture(app.world_mut(), own);
         assert!(app.world().get::<GameControlled>(own).is_some());
@@ -2454,16 +2241,6 @@ mod tests {
         assert!(app.world().get::<GameControlled>(remote).is_none());
         app.world_mut().entity_mut(remote).insert(NetControlled);
         assert!(app.world().get::<GameControlled>(remote).is_some());
-        assert!(
-            app.world()
-                .get::<InputMarker<TankCommand>>(remote)
-                .is_some()
-        );
-        assert!(
-            app.world()
-                .get::<ActionState<TankCommand>>(remote)
-                .is_some()
-        );
     }
 
     /// Loading needs the own bound view and a playable snapshot, in either arrival order.
@@ -2517,72 +2294,21 @@ mod tests {
     /// The device feed must expose duplicate primary windows as a construction bug: treating
     /// them as an absent window silently makes a live player's controls inert.
     #[test]
-    #[should_panic(expected = "the device feed has exactly one primary window")]
+    #[should_panic(expected = "one primary window")]
     fn device_feed_refuses_duplicate_primary_windows() {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         world.init_resource::<crate::overlay::Overlays>();
         world.init_resource::<crate::command::DriveInput>();
         world.init_resource::<DeviceCommand>();
+        world.init_resource::<super::super::input_arrival::FrameInput>();
+        world.init_resource::<crate::command::Bindings>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<ButtonInput<MouseButton>>();
         for _ in 0..2 {
             world.spawn((PrimaryWindow, Window::default()));
         }
-        world.run_system_once(feed_action_state).unwrap();
-    }
-
-    /// A closed window files neutral input and consumes the frame's edges, so a closing client
-    /// cannot keep its last drive level, a set cruise notch included, or replay a click when no
-    /// window owns the device. Mutant: a closed window taken for an unfocused one files the notch.
-    #[test]
-    fn device_feed_files_idle_when_the_window_has_closed() {
-        use bevy::ecs::system::RunSystemOnce;
-        let mut world = World::new();
-        let mut overlays = crate::overlay::Overlays::default();
-        overlays.declare_in_match(true);
-        world.insert_resource(overlays);
-        // One throttle tap through the shipped gather sets a notch.
-        let bindings = crate::command::Bindings::default();
-        let mut keys = ButtonInput::<KeyCode>::default();
-        keys.press(bindings.throttle.pos);
-        keys.release(bindings.throttle.pos);
-        world.insert_resource(bindings);
-        world.insert_resource(keys);
-        world.init_resource::<ButtonInput<MouseButton>>();
-        world.init_resource::<crate::firecontrol::Ranging>();
-        world.init_resource::<Time<Real>>();
-        world.init_resource::<crate::command::DriveInput>();
-        world.insert_resource(DeviceCommand(TankCommand {
-            throttle: 1.0,
-            fire_primary: true,
-            ..default()
-        }));
-        let slot = world
-            .spawn((
-                ActionState(TankCommand {
-                    throttle: 1.0,
-                    ..default()
-                }),
-                InputMarker::<TankCommand>::default(),
-                GameControlled,
-                TankCommand::default(),
-            ))
-            .id();
-        world
-            .run_system_once(crate::command::gather_commands)
-            .unwrap();
-        assert_ne!(
-            world
-                .resource::<crate::command::DriveInput>()
-                .set_throttle(),
-            0.0,
-            "the tap sets a notch"
-        );
-        world.run_system_once(feed_action_state).unwrap();
-        assert_eq!(
-            world.get::<ActionState<TankCommand>>(slot).unwrap().0,
-            TankCommand::default()
-        );
-        assert!(!world.resource::<DeviceCommand>().0.has_edge());
+        world.run_system_once(feed_frame_input).unwrap();
     }
 
     use bevy::ecs::system::RunSystemOnce;
@@ -2776,263 +2502,6 @@ mod tests {
         }
     }
 
-    /// Exercise private `input_delay_ticks` through its public config-insert observer. Native
-    /// encoding needs the same delay before and after even a saturated RTT; restoring the
-    /// upstream `fixed_input_delay` helper makes the high-latency cases fail.
-    #[test]
-    fn input_delay_is_constant() {
-        let tick = crate::net::test_harness::TICK;
-        let margin = SyncConfig::default().jitter_margin(Duration::ZERO, tick);
-        // Fixture: cross the old allowance and u16 saturation, then reach the largest effective
-        // RTT Duration can hold. Upstream adds its margin before the saturating tick cast.
-        for (rtt, jitter) in [
-            (Duration::ZERO, Duration::ZERO),
-            (Duration::from_secs(4), Duration::from_secs(3)),
-            (tick * u32::from(u16::MAX - 1), Duration::ZERO),
-            (tick * u32::from(u16::MAX), Duration::ZERO),
-            (Duration::from_secs(1_000_000_000), Duration::from_secs(3)),
-            (Duration::MAX - margin, Duration::ZERO),
-            (Duration::ZERO, Duration::MAX / 8),
-        ] {
-            let mut app = input_delay_app(rtt, jitter);
-            assert_eq!(
-                app.world().resource::<LocalTimelineSync>().input_delay(),
-                SHIPPING_INPUT_DELAY_TICKS,
-                "RTT {rtt:?}, jitter {jitter:?} must not change native-input write ticks",
-            );
-            app.world_mut().trigger(LocalTimelineShift { delta: -1 });
-            assert_eq!(
-                app.world().resource::<LocalTimelineSync>().input_delay(),
-                SHIPPING_INPUT_DELAY_TICKS,
-                "timeline-shift recomputation must preserve the delay",
-            );
-        }
-    }
-
-    fn input_delay_app(rtt: Duration, jitter: Duration) -> App {
-        use lightyear::connection::network_topology::{NetworkTopology, NetworkingMetadata};
-
-        let mut app = crate::net::test_harness::base_app();
-        app.add_plugins(ClientPlugins {
-            tick_duration: crate::net::test_harness::TICK,
-        });
-        super::super::protocol::plugin(&mut app);
-        let mut link = Link::default();
-        link.stats.rtt = rtt;
-        link.stats.jitter = jitter;
-        let client = app.world_mut().spawn((Client, link)).id();
-        app.world_mut().resource_mut::<NetworkingMetadata>().mode = NetworkTopology::Client(client);
-        app.insert_resource(InputTimelineConfig::new(
-            SyncConfig::default(),
-            shipping_input_delay(),
-        ));
-        app
-    }
-
-    /// A buffer holding one (absent) slot at `start`, with a remote high-water mark beside it.
-    fn one_slot_buffer(start: Tick, last_remote: Tick) -> NativeBuffer<TankCommand> {
-        let mut buffer = NativeBuffer::<TankCommand>::default();
-        buffer.set_empty(start);
-        buffer.last_remote_tick = Some(last_remote);
-        buffer
-    }
-
-    /// A buffer with a start tick and a remote mark but no slots — the shape a stranded buffer
-    /// is left in when every slot has been popped.
-    fn slotless_buffer(start: Tick, last_remote: Tick) -> NativeBuffer<TankCommand> {
-        let mut buffer = NativeBuffer::<TankCommand>::default();
-        buffer.start_tick = Some(start);
-        buffer.last_remote_tick = Some(last_remote);
-        buffer
-    }
-
-    /// Encoder boundaries must expose inverted internal ranges rather than erase authored input.
-    /// Both retained slots and a popped-empty buffer still carry an interval start.
-    #[test]
-    fn installed_input_buffer_guard_refuses_inverted_ranges() {
-        for buffer in [
-            slotless_buffer(Tick(313), Tick(312)),
-            one_slot_buffer(Tick(313), Tick(312)),
-        ] {
-            let mut app = App::new();
-            install_input_buffer_guard(&mut app);
-            let mut timeline = LocalTimeline::default();
-            timeline.apply_delta(20); // Fixture: encoder end precedes retained start.
-            app.insert_resource(timeline);
-            app.init_resource::<LocalTimelineSync>();
-            app.world_mut().spawn(Client);
-            app.world_mut()
-                .spawn((InputMarker::<TankCommand>::default(), buffer));
-            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                app.world_mut().run_schedule(PostUpdate);
-            }));
-            let refused =
-                refused.expect_err("an inverted encoder interval is a bug, never a buffer reset");
-            let message = refused
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| refused.downcast_ref::<&str>().copied())
-                .expect("the invariant names its cause");
-            assert!(message.contains("exceeds encoder end"), "{message}");
-        }
-    }
-
-    /// Mount the shipped native input protocol: backward shifts move both indices, preserve
-    /// snapshots and allow the next write. A local clearing repair cannot make this test pass.
-    #[test]
-    fn native_timeline_shift_preserves_the_input_buffer() {
-        // Fixture: effective RTT exceeds the upstream helper's finite prediction allowance.
-        let mut app = input_delay_app(Duration::from_secs(4), Duration::from_secs(3));
-        // Fixture timeline 313 shifts to 20; use the shipped delay for buffered indices.
-        app.world_mut()
-            .resource_mut::<LocalTimeline>()
-            .apply_delta(313);
-        let delay = i32::from(app.world().resource::<LocalTimelineSync>().input_delay());
-        let mut buffer = NativeBuffer::<TankCommand>::default();
-        let held = ActionState(TankCommand {
-            throttle: 0.75,
-            for_tick: (313 + delay) as u32,
-            ..default()
-        });
-        buffer.set(Tick((313 + delay) as u32), held.clone());
-        buffer.last_remote_tick = Some(Tick((312 + delay) as u32));
-        let slot = app
-            .world_mut()
-            .spawn((InputMarker::<TankCommand>::default(), buffer))
-            .id();
-        // The recovered link recomputes delay during the same backward shift. With the
-        // upstream helper this shrinks delay while the retained start moves only by delta.
-        let mut links = app.world_mut().query::<&mut Link>();
-        for mut link in links.iter_mut(app.world_mut()) {
-            link.stats = default();
-        }
-        app.world_mut().trigger(LocalTimelineShift { delta: -293 });
-        assert_eq!(app.world().resource::<LocalTimeline>().tick(), Tick(20));
-        app.world_mut()
-            .run_system_once(assert_input_buffer_ranges)
-            .unwrap();
-        let mut buffer = app
-            .world_mut()
-            .get_mut::<NativeBuffer<TankCommand>>(slot)
-            .unwrap();
-        let shifted = Tick((20 + delay) as u32);
-        assert_eq!(buffer.start_tick, Some(shifted));
-        assert_eq!(buffer.last_remote_tick, Some(Tick((19 + delay) as u32)));
-        assert_eq!(
-            buffer.get(shifted),
-            Some(&held),
-            "shift indices, never re-author provenance"
-        );
-        let next = shifted + 1;
-        buffer.set(
-            next,
-            ActionState(TankCommand {
-                for_tick: next.0,
-                ..default()
-            }),
-        );
-        assert_eq!(buffer.get(next).unwrap().0.for_tick, next.0);
-    }
-
-    /// A resync that shifts the timeline AND shrinks the input delay must not suppress the next
-    /// freshly buffered tick. DERIVED counterexample: local tick 100 at delay 4 stages input tick
-    /// 104; a +20 shift recomputes the delay to 3; the next fixed tick (121) buffers input tick 124
-    /// — the same number a watermark shifted by +20 would hold.
-    #[test]
-    fn a_resync_that_shrinks_the_input_delay_still_stages_the_next_tick() {
-        let mut app = crate::net::test_harness::base_app();
-        app.add_plugins(ClientPlugins {
-            tick_duration: crate::net::test_harness::TICK,
-        });
-        super::super::protocol::plugin(&mut app);
-        install_input_send_cadence(&mut app);
-        let set_delay = |app: &mut App, ticks: u16| {
-            app.insert_resource(InputTimelineConfig::new(
-                SyncConfig::default(),
-                InputDelayConfig::fixed_input_delay(ticks),
-            ));
-        };
-        let fixed_tick = |app: &mut App| {
-            app.world_mut().run_schedule(FixedFirst);
-            app.world_mut().run_schedule(FixedPreUpdate);
-        };
-        let frame_stages = |app: &mut App| {
-            app.world_mut().run_system_once(decide_input_send).unwrap();
-            app.world().resource::<InputSendCadence>().due
-        };
-
-        set_delay(&mut app, 4);
-        app.world_mut()
-            .resource_mut::<LocalTimeline>()
-            .apply_delta(99);
-        app.world_mut()
-            .resource_mut::<LocalTimelineSync>()
-            .set_synced(true);
-        fixed_tick(&mut app);
-        assert_eq!(app.world().resource::<LocalTimeline>().tick(), Tick(100));
-        assert_eq!(app.world().resource::<LocalTimelineSync>().input_delay(), 4);
-        assert!(frame_stages(&mut app), "tick 100 stages input tick 104");
-        assert!(
-            !frame_stages(&mut app),
-            "a frame with no new tick stages nothing"
-        );
-
-        // Lightyear's observer shifts `LocalTimeline` between staging frames.
-        app.world_mut().trigger(LocalTimelineShift { delta: 20 });
-        assert_eq!(app.world().resource::<LocalTimeline>().tick(), Tick(120));
-        set_delay(&mut app, 3);
-        assert_eq!(app.world().resource::<LocalTimelineSync>().input_delay(), 3);
-
-        fixed_tick(&mut app);
-        assert_eq!(app.world().resource::<LocalTimeline>().tick(), Tick(121));
-        assert!(
-            frame_stages(&mut app),
-            "the first frame of fixed tick 121 (input tick 124) must stage its message"
-        );
-        assert!(!frame_stages(&mut app), "and only once");
-    }
-
-    /// The stamp must name the tick lightyear will FILE the command under (`local_tick +
-    /// input_delay`), not the tick that authored it — otherwise the bridge's comparison is off by
-    /// the delay and every consumable fails closed forever. This inserts the same fixed-delay
-    /// `InputTimelineConfig` as the shipping client, after `ClientPlugins` exactly as the client
-    /// does, so removing `+ delay` — or inserting the config where lightyear's seeding observer
-    /// cannot see it — fails the assertion.
-    #[test]
-    fn stamp_names_the_tick_the_command_will_be_read_on() {
-        let mut app = App::new();
-        app.add_plugins(bevy::state::app::StatesPlugin)
-            .add_plugins(ClientPlugins {
-                tick_duration: Duration::from_secs_f64(1.0 / 64.0),
-            });
-        let world = app.world_mut();
-        let mut timeline = LocalTimeline::default();
-        timeline.apply_delta(42);
-        world.insert_resource(timeline);
-        world.insert_resource(InputTimelineConfig::new(
-            SyncConfig::default(),
-            shipping_input_delay(),
-        ));
-        world.spawn((Client, Link::default()));
-        let entity = world
-            .spawn((
-                ActionState(TankCommand::default()),
-                InputMarker::<TankCommand>::default(),
-            ))
-            .id();
-
-        world.run_system_once(stamp_input_tick).unwrap();
-
-        assert_eq!(
-            world
-                .get::<ActionState<TankCommand>>(entity)
-                .unwrap()
-                .0
-                .for_tick,
-            42 + u32::from(SHIPPING_INPUT_DELAY_TICKS),
-            "the stamp names Lightyear's delayed input-buffer tick",
-        );
-    }
     use crate::spec::{FireCycle, RecoilSpec, Trigger};
     use crate::tank::WeaponState;
 
@@ -3205,26 +2674,17 @@ mod tests {
     /// clock, so the next server's earlier ticks are accepted.
     #[test]
     fn a_link_ending_resets_its_clock_keyed_state() {
-        use super::super::fire_presentation::AuthoredIntent;
         use super::super::sync_margin::ArrivalDelay;
         let mut app = App::new();
         app.insert_resource(ArrivalDelay::test_with_newest_remote(Tick(5_000)))
-            .insert_resource(AuthoredIntent::test_with_authored(5_000))
             .add_observer(reset_link_state);
         let link = app
             .world_mut()
             .spawn((RemoteId(PeerId::Netcode(99)), Connected))
             .id();
-        let world = app.world();
-        assert!(
-            world.resource::<ArrivalDelay>().newest_remote().is_some()
-                && !world.resource::<AuthoredIntent>().is_empty(),
-            "fixture: a connected link's state"
-        );
+        assert_ne!(app.world().resource::<ArrivalDelay>().newest_remote(), None);
         app.world_mut().entity_mut(link).remove::<Connected>();
-        let world = app.world();
-        assert_eq!(world.resource::<ArrivalDelay>().newest_remote(), None);
-        assert!(world.resource::<AuthoredIntent>().is_empty());
+        assert_eq!(app.world().resource::<ArrivalDelay>().newest_remote(), None);
     }
 
     /// The game's damage model: a disconnected server cannot finish a cosmetic path.
@@ -3463,7 +2923,7 @@ mod tests {
 
     /// The game's damage-model presentation: the owning client must consume every received
     /// server path, whether its announcement precedes or follows the replicated belt change.
-    /// The shipped own-fire plugin runs before the receive/release seam here: even an already
+    /// An already
     /// received fire can still be held for the cursor when the belt arrives.
     #[test]
     fn belt_arrival_cannot_discard_an_announced_round_or_its_path() {
@@ -3476,11 +2936,7 @@ mod tests {
         for announcement_first in [false, true] {
             for path_first in [false, true] {
                 let mut app = fire_receive_app();
-                app.add_plugins((
-                    MinimalPlugins,
-                    super::super::fire_presentation::plugin,
-                    crate::ballistics::sim_plugin,
-                ));
+                app.add_plugins((MinimalPlugins, crate::ballistics::sim_plugin));
                 app.insert_resource(crate::ClientReplica)
                     .init_resource::<SanctionedShots>()
                     .insert_resource(lightyear::core::tick::TickDuration(
@@ -3532,8 +2988,6 @@ mod tests {
                     world.entity_mut(muzzle).insert(GlobalTransform::IDENTITY);
                 }
                 // Arm from a complete snapshot and close the initial arrival bracket.
-                world.run_schedule(Update);
-                world.run_schedule(RunFixedMainLoop);
                 let event = fire_event(root, 7, 100);
                 let shot = event.shot_id();
                 let round = world
@@ -3569,11 +3023,9 @@ mod tests {
                     consume_and_release(world, event.clone(), Tick(116), Some((Tick(90), 0.0)));
                 }
                 world.get_mut::<WeaponGate>(root).unwrap().weapons[0].belt_remaining -= 1;
-                world.run_schedule(RunFixedMainLoop);
                 world
                     .resource_mut::<InterpolationTimeline>()
                     .set_now(TickInstant::from(Tick(105)));
-                world.run_schedule(Update);
                 if announcement_first {
                     release_at(world, Tick(116), Some((Tick(105), 0.0)));
                 } else {
@@ -3972,33 +3424,6 @@ mod tests {
         );
     }
 
-    /// FUSED OWN FIRE: the echo of a locally-fired round is the round's one presentation — the
-    /// local fire tick drew nothing, so the echo must present the shell and carry the kick.
-    #[test]
-    fn the_own_echo_is_the_rounds_one_presentation() {
-        let mut app = fire_receive_app();
-        let world = app.world_mut();
-        let own = spawn_shooter(world, 7);
-        world.entity_mut(own).insert((
-            ActionState::<TankCommand>::default(),
-            InputMarker::<TankCommand>::default(),
-        ));
-
-        let fused_event = fire_event(own, 7, 43);
-        let fused_shot = fused_event.shot_id();
-        consume_and_release(world, fused_event, Tick(50), None);
-        assert_eq!(
-            world.resource::<ReconstructedFireShells>().0,
-            vec![(fused_shot, own)],
-            "fused: the echo is the own round's one presentation",
-        );
-        assert_eq!(
-            world.resource::<PendingRecoilKicks>().0,
-            vec![(own, 0)],
-            "fused: the echo carries the barrel kick",
-        );
-    }
-
     /// A mapped `FireEvent.shooter` is only a display/recoil handle. Two receiver-local mappings
     /// for the same wire fact must share its stable identity, so the production visual-fact seam
     /// spawns once and its sanctioned outcome remains available under that one [`ShotId`].
@@ -4293,5 +3718,123 @@ mod tests {
             &[(shooter, 0)],
             "one kick, through the same seam as the bang",
         );
+    }
+}
+
+#[cfg(test)]
+mod arrival_device_tests {
+    use super::super::input_arrival::FrameInput;
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn fixture() -> (World, Entity) {
+        let mut world = World::new();
+        world.init_resource::<crate::overlay::Overlays>();
+        world
+            .resource_mut::<crate::overlay::Overlays>()
+            .declare_in_match(true);
+        world.init_resource::<crate::command::DriveInput>();
+        world.init_resource::<crate::command::Bindings>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<DeviceCommand>();
+        world.init_resource::<FrameInput>();
+        world.spawn((
+            PrimaryWindow,
+            Window {
+                focused: true,
+                ..default()
+            },
+        ));
+        let tank = world.spawn((GameControlled, TankCommand::default())).id();
+        (world, tank)
+    }
+
+    /// Fast rendering must not reissue a click from the raw latch before the next fixed tick.
+    #[test]
+    fn a_frame_send_drains_the_device_edge_even_without_a_fixed_tick() {
+        let (mut world, tank) = fixture();
+        world.resource_mut::<DeviceCommand>().0.fire_primary = true;
+        world.get_mut::<TankCommand>(tank).unwrap().fire_primary = true;
+        world.run_system_once(feed_frame_input).unwrap();
+        assert!(world.resource::<FrameInput>().command.fire_primary);
+        assert!(!world.get::<TankCommand>(tank).unwrap().fire_primary);
+        world.resource_mut::<DeviceCommand>().0 = *world.get::<TankCommand>(tank).unwrap();
+        world.run_system_once(feed_frame_input).unwrap();
+        assert!(!world.resource::<FrameInput>().command.fire_primary);
+    }
+
+    /// Device-feed consumers retain cruise on focus loss, but closing the window must neutralize
+    /// drive and drain clicks. Treating a closed window as unfocused would leave cruise engaged.
+    #[test]
+    fn an_unfocused_window_keeps_cruise_but_a_closed_window_files_idle() {
+        let (mut world, tank) = fixture();
+        world.init_resource::<crate::firecontrol::Ranging>();
+        world.init_resource::<Time<Real>>();
+        let key = world.resource::<crate::command::Bindings>().throttle.pos;
+        let mut keys = world.resource_mut::<ButtonInput<KeyCode>>();
+        keys.press(key);
+        keys.release(key);
+        world
+            .run_system_once(crate::command::gather_commands)
+            .unwrap();
+        let notch = world
+            .resource::<crate::command::DriveInput>()
+            .set_throttle();
+        assert_ne!(
+            notch, 0.0,
+            "fixture: a tap sets cruise through the shipped gather"
+        );
+        let window = world
+            .query_filtered::<Entity, With<PrimaryWindow>>()
+            .single(&world)
+            .unwrap();
+        world.get_mut::<Window>(window).unwrap().focused = false;
+        for closed in [false, true] {
+            if closed {
+                world.despawn(window);
+            }
+            world.resource_mut::<DeviceCommand>().0 = TankCommand {
+                throttle: 1.0,
+                steer: 1.0,
+                fire_primary: true,
+                fire_secondary: true,
+                ..default()
+            };
+            world.get_mut::<TankCommand>(tank).unwrap().fire_primary = true;
+            world.run_system_once(feed_frame_input).unwrap();
+            assert_eq!(
+                world.resource::<FrameInput>().command,
+                TankCommand {
+                    throttle: if closed { 0.0 } else { notch },
+                    ..default()
+                }
+            );
+            assert!(!world.resource::<DeviceCommand>().0.has_edge());
+            assert!(!world.get::<TankCommand>(tank).unwrap().has_edge());
+            assert!(!world.resource::<FrameInput>().secondary_cycle);
+        }
+    }
+
+    /// Bevy can expose both transitions in one poll; a final released level must retain the tap.
+    #[test]
+    fn the_device_feed_retains_a_sub_frame_trigger_tap() {
+        let (mut world, _) = fixture();
+        let binding = world.resource::<crate::command::Bindings>().fire_secondary;
+        match binding {
+            crate::command::ButtonBinding::Key(key) => {
+                let mut keys = world.resource_mut::<ButtonInput<KeyCode>>();
+                keys.press(key);
+                keys.release(key);
+            }
+            crate::command::ButtonBinding::Mouse(button) => {
+                let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
+                mouse.press(button);
+                mouse.release(button);
+            }
+        }
+        world.run_system_once(feed_frame_input).unwrap();
+        assert!(world.resource::<FrameInput>().secondary_cycle);
+        assert!(!world.resource::<FrameInput>().command.fire_secondary);
     }
 }

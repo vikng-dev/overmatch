@@ -32,8 +32,7 @@ use core::time::Duration;
 use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimeline};
 use lightyear::prelude::{PingManager, SyncConfig};
 use lightyear_sync::prelude::client::RemoteTimeline;
-use lightyear_sync::timeline::input::{InputDelayConfig, InputTimelineConfig, LocalTimelineSync};
-use lightyear_sync::timeline::sync::{SyncAdjustment, SyncTargetTimeline, TimelineSync};
+use lightyear_sync::timeline::sync::{SyncTargetTimeline, TimelineSync};
 
 /// The game's fixed tick (64 Hz), matching `ClientPlugins { tick_duration }` in `net::client`.
 const TICK: Duration = Duration::from_nanos(1_000_000_000 / 64);
@@ -88,38 +87,6 @@ fn jitter_margin_composes_multiple_and_floor() {
     );
 }
 
-/// The input objective's fixed terms, with rtt = jitter = 0 and no input delay: floor + 1 pipeline
-/// tick + deadband, each paid exactly once. Distinct fractional values make every term's presence
-/// individually visible — dropping the pipeline tick, dropping either margin, or paying one twice
-/// all move the result by ≥ 0.25 tick.
-#[test]
-fn input_objective_pays_floor_pipeline_and_deadband_once_each() {
-    let config = InputTimelineConfig::new(
-        SyncConfig {
-            jitter_multiple: 2,
-            jitter_margin: 0.25,
-            error_margin: 0.75,
-            ..SyncConfig::default()
-        },
-        InputDelayConfig::fixed_input_delay(0),
-    );
-    let remote = RemoteTimeline::default();
-    let objective = LocalTimelineSync::default().sync_objective(
-        &remote,
-        &config,
-        &PingManager::default(),
-        TICK,
-    );
-    let lead = (objective - remote.current_estimate()).to_f32();
-    let expected = 0.25 + 1.0 + 0.75;
-    assert!(
-        (lead - expected).abs() < 1.0 / 256.0,
-        "lightyear's input objective moved: lead {lead} ticks at zero rtt/jitter, expected \
-         {expected} (floor 0.25 + pipeline 1 + deadband 0.75) — the uplink law's term placement is \
-         stale; re-derive src/net/sync_margin.rs"
-    );
-}
-
 /// The interpolation objective honors the sync floor on top of the delay term: with
 /// `remote_send_interval = 0` (our per-tick server) and zero jitter, the cursor sits exactly
 /// `min_delay + floor · tick` behind the estimate. Fires if the downlink margin stops flowing
@@ -147,41 +114,5 @@ fn interp_objective_honors_the_sync_floor() {
         lag.abs_diff(expected) < Duration::from_millis(1),
         "lightyear's interpolation objective moved: cursor sits {lag:?} behind the estimate, \
          expected {expected:?} — re-derive the downlink margins in src/net/sync_margin.rs"
-    );
-}
-
-/// `error_margin` IS the speed controller's deadband: inside it the controller does nothing,
-/// beyond it three consecutive same-sign errors adjust speed. The uplink law's reclassification
-/// (deadband = measured jitter) rides on exactly this behavior; fires if lightyear decouples the
-/// field from the controller.
-#[test]
-fn error_margin_is_the_speed_controller_deadband() {
-    // The controller's hysteresis is private in 0.31.0; `TimelineSync::speed_adjustment` is the
-    // public entry to it, reached through the local clock's controller with a zero input delay.
-    let config = InputTimelineConfig::new(
-        SyncConfig {
-            error_margin: 0.32,
-            ..SyncConfig::default()
-        },
-        InputDelayConfig::fixed_input_delay(0),
-    );
-    let mut controller = LocalTimelineSync::default();
-    assert!(
-        matches!(
-            controller.speed_adjustment(&config, 0.2),
-            SyncAdjustment::DoNothing
-        ),
-        "an error inside the deadband must not adjust speed"
-    );
-    let mut controller = LocalTimelineSync::default();
-    let mut last = controller.speed_adjustment(&config, 0.5);
-    for _ in 0..2 {
-        last = controller.speed_adjustment(&config, 0.5);
-    }
-    assert!(
-        matches!(last, SyncAdjustment::SpeedAdjust(_)),
-        "three consecutive same-sign errors beyond the deadband must adjust speed — \
-         lightyear's controller gating changed; re-derive the deadband law in \
-         src/net/sync_margin.rs"
     );
 }

@@ -6534,8 +6534,6 @@ dependencies = [
  "libm",
  "lightyear",
  "lightyear_core",
- "lightyear_inputs",
- "lightyear_inputs_native",
  "lightyear_sync",
  "lightyear_transport",
  "objc-sys",

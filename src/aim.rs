@@ -745,7 +745,7 @@ pub(crate) mod tests {
 
     /// Fixture: fixed integration step, seconds.
     const TICK: f32 = 1.0 / 64.0;
-    /// Fixture gap, ticks: shipping delay (`net::client::SHIPPING_INPUT_DELAY_TICKS`, 3) plus
+    /// Fixture gap, ticks: a synthetic three-tick uplink plus
     /// authoring frame, without prediction (ADR-0037). Sim code cannot import netcode
     /// (`src/net/tests/net_boundary.rs`); this copy only sets test stress, never an assertion's
     /// expected answer, so drift cannot falsely pass a law.

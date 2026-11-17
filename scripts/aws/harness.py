@@ -197,6 +197,8 @@ def aws(*args: str) -> dict:
     argv = ["aws", "--profile", PROFILE, "--region", REGION, "--output", "json", *args]
     try:
         run = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=180)
+    except OSError as error:
+        raise Refused(f"{' '.join(argv)}: {error}; install the AWS CLI and make `aws` executable on PATH") from error
     except subprocess.TimeoutExpired as error:
         raise Refused(f"aws {' '.join(args[:2])}: no answer in 180 s") from error
     if run.returncode != 0:
@@ -719,17 +721,14 @@ class Arrival:
 @dataclass(frozen=True)
 class Inputs:
     link: str
-    held: int
-    tick_exact: int
-    arrival: Arrival | None  # None: the link was not connected at the line
+    arrival: Arrival
 
 
 def inputs(row: Fields) -> Inputs:
-    state = row.get("arrival.state", str)
-    arrival = None if state == "not_connected_at_emission" else Arrival(
-        state, histogram(row, "arrival.gap_ms"), row.num("arrival.stale_threshold_ms"),
+    arrival = Arrival(
+        row.get("arrival.state", str), histogram(row, "arrival.gap_ms"), row.num("arrival.stale_threshold_ms"),
         row.count("arrival.stale_arrivals"), row.count("arrival.stale_declarations"))
-    return Inputs(row.get("link", str), row.count("counts.held"), row.count("counts.tick_exact"), arrival)
+    return Inputs(row.get("link", str), arrival)
 
 
 @dataclass(frozen=True)
@@ -754,7 +753,7 @@ def stats(row: Fields) -> Stats:
     sent = row.each("send_clients")
     census = tuple(map(inputs, row.each("inputs")))
     links = sorted(link.get("link", str) for link in sent)
-    connected = sorted(entry.link for entry in census if entry.arrival)
+    connected = sorted(entry.link for entry in census)
     if len(set(links)) != len(links) or connected != links:
         raise Refused(f"{row.where}: `inputs` holds connected entries for {connected}, not one for each "
                       f"`send_clients` link {links}")
@@ -936,19 +935,19 @@ def interval(series: list[Sample], start: float, end: float) -> Interval:
 
 COLUMNS = ["win", "at_s", "tanks", "proj", "p50_ms", "p95_ms", "p99_ms", "max_ms", "overrun", "drop_ms",
            "srv_cpu%", "srv_mb", "srv_busy%", "steal%", "send_p95_us", "link_kB/s", "link_max_kB/s",
-           "held%", "starved_ms", "cli_busy%", "cli_cpu%", "cli_cpu_max%", "cli_mb"]
+           "stale_decl", "stale_arr", "starved_ms", "cli_busy%", "cli_cpu%", "cli_cpu_max%", "cli_mb"]
 
 
 def window_cells(index: int, window: Window, combat_open: float, server: Interval, client: Interval,
                  lines: list[list[Jitter]]) -> list[float | None]:
     row = window.row
-    reads = sum(link.held + link.tick_exact for link in row.inputs)
     units = [f"om-client-{k}" for k in range(1, len(lines) + 1)]
     cpu = [client.cpu_pct(u) for u in units]
     return [index, window.start - combat_open, row.tanks, row.projectiles, *row.tick_ms, row.overruns,
             row.discarded_ms, row.cpu_pct, row.rss_mb, server.busy_pct(), server.steal_pct(), row.send_p95_us,
             statistics.median(row.link_kb_per_s), max(row.link_kb_per_s),
-            100.0 * sum(link.held for link in row.inputs) / reads if reads else None,  # None: no input read
+            sum(link.arrival.declarations for link in row.inputs),
+            sum(link.arrival.stale_arrivals for link in row.inputs),
             max(sum(line.starved_ms for line in own) for own in lines), client.busy_pct(), statistics.median(cpu),
             max(cpu), statistics.median(client.rss_mb(u) for u in units)]
 
@@ -1056,7 +1055,7 @@ def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], 
     views, views_json = table(CLIENT_COLUMNS, [client_cells(k, i, inside[i - 1][k - 1], start, timing)
                                                for k in range(1, s.clients + 1) for i, _, start, _ in spans], 2)
     # Each connected link at each line, links in first-seen order.
-    arrivals = {(link.link, i): link.arrival for i, w in enumerate(windows, 1) for link in w.row.inputs if link.arrival}
+    arrivals = {(link.link, i): link.arrival for i, w in enumerate(windows, 1) for link in w.row.inputs}
     links = list(dict.fromkeys(link for link, _ in arrivals))
     gaps, gaps_json = table(SERVER_COLUMNS, [server_cells(link, i, arrivals[link, i], timing) for link in links
                                              for i in range(1, len(windows) + 1) if (link, i) in arrivals], 3)
@@ -1077,7 +1076,8 @@ def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], 
         "",
         "Window cells are MEASURED: one server_stats line each (tick percentiles over the window's own ticks, "
         "*_ms; srv_cpu% of one core; link_* the per-link payload kB/s the server queued, IP/UDP headers "
-        "excluded; held% of input reads with no input for their tick), the clients' client_jitter lines "
+        "excluded; stale_decl and stale_arr sum each connected link's stale declarations and stale arrivals "
+        "since the preceding stats line), the clients' client_jitter lines "
         "(starved_ms: the most any client's presented cursor ran past its newest tick), and the 1 Hz samplers "
         "(*_busy% and steal% of the whole machine; cli_cpu% of one core per client; *_mb resident). "
         "median/min/max rows are DERIVED across the windows. at_s: window start, s after combat opened.",

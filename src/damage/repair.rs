@@ -222,15 +222,13 @@ mod tests {
         (world, tank, modules)
     }
 
-    fn press(world: &mut World, tank: Entity, tick: u32, authored: u32) {
+    fn press(world: &mut World, tank: Entity) {
         *world.get_mut::<ParsedTankCommand>(tank).unwrap() =
             ParsedTankCommand::try_from(TankCommand {
                 repair: true,
-                for_tick: authored,
                 ..default()
             })
-            .unwrap()
-            .attest(tick);
+            .unwrap();
         world.run_system_once(toggle_repairs).unwrap();
     }
 
@@ -263,7 +261,7 @@ mod tests {
                 .elapsed
                 .is_none()
         );
-        press(&mut world, tank, 1, 1);
+        press(&mut world, tank);
         let deadlines = POOL_HP.map(finishing_tick);
         for tick in 1..=deadlines.into_iter().max().unwrap() {
             advance(&mut world, 1);
@@ -282,7 +280,7 @@ mod tests {
         let (mut world, tank, modules) = fixture();
         let health = &mut *world.get_mut::<ComponentHealth>(modules[0]).unwrap();
         health.set_held(crate::ballistics::POOL_UNITS_PER_HP);
-        press(&mut world, tank, 1, 1);
+        press(&mut world, tank);
         assert!(
             world
                 .get::<ModuleRepair>(modules[0])
@@ -305,14 +303,14 @@ mod tests {
     #[test]
     fn cancel_keeps_finished_modules_and_drops_unfinished_work() {
         let (mut world, tank, modules) = fixture();
-        press(&mut world, tank, 1, 1);
+        press(&mut world, tank);
         let [first, second] = POOL_HP.map(finishing_tick);
         assert!(
             first < second,
             "fixture: the larger pool is still under repair"
         );
         advance(&mut world, first);
-        press(&mut world, tank, 2, 2);
+        press(&mut world, tank);
         assert!(is_whole(&world, modules[0]));
         assert!(
             world
@@ -323,7 +321,7 @@ mod tests {
         );
         advance(&mut world, second);
         assert!(world.get::<ComponentHealth>(modules[1]).unwrap().is_empty());
-        press(&mut world, tank, 3, 3);
+        press(&mut world, tank);
         advance(&mut world, second - 1);
         assert!(world.get::<ComponentHealth>(modules[1]).unwrap().is_empty());
         advance(&mut world, 1);
@@ -379,7 +377,7 @@ mod tests {
             crate::damage::ModuleSupply::Held,
             ComponentHealth::full(10),
         ));
-        press(&mut world, tank, 1, 1);
+        press(&mut world, tank);
         world.run_system_once(gates).unwrap();
         advance(
             &mut world,
@@ -433,7 +431,7 @@ mod tests {
         world.entity_mut(tank).insert(TankKnockedOut {
             reason: super::super::KnockoutReason::CrewLoss,
         });
-        press(&mut world, tank, 1, 1);
+        press(&mut world, tank);
         assert!(
             world
                 .get::<ModuleRepair>(modules[0])
@@ -442,7 +440,7 @@ mod tests {
                 .is_none()
         );
         world.entity_mut(tank).remove::<TankKnockedOut>();
-        press(&mut world, tank, 2, 2);
+        press(&mut world, tank);
         world.entity_mut(tank).insert(TankKnockedOut {
             reason: super::super::KnockoutReason::CrewLoss,
         });
@@ -472,38 +470,13 @@ mod tests {
             health.drain();
             world.entity_mut(pool).insert(health);
         }
-        press(&mut world, tank, 1, 1);
+        press(&mut world, tank);
         advance(&mut world, finishing_tick(capacity));
         for pool in pools {
             assert!(world.get::<ComponentHealth>(pool).unwrap().is_empty());
         }
     }
 
-    /// The game's damage model: the server's hold-last input must neither cancel an active repair
-    /// nor restart a cancelled one. Removing consumable attestation breaks both halves.
-    #[test]
-    fn held_input_neither_cancels_nor_starts_twice() {
-        let (mut world, tank, modules) = fixture();
-        press(&mut world, tank, 1, 1);
-        advance(&mut world, 1);
-        press(&mut world, tank, 2, 1);
-        assert!(
-            world
-                .get::<ModuleRepair>(modules[0])
-                .unwrap()
-                .elapsed
-                .is_some()
-        );
-        press(&mut world, tank, 3, 3);
-        press(&mut world, tank, 4, 3);
-        assert!(
-            world
-                .get::<ModuleRepair>(modules[0])
-                .unwrap()
-                .elapsed
-                .is_none()
-        );
-    }
     /// The game's damage model: replicas are presentation only. Removing either authority-only
     /// schedule gate lets a client start or advance work and creates a second timeline.
     #[test]

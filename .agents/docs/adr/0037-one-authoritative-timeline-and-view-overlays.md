@@ -83,9 +83,9 @@ presentation consumers (recoil microsim, belt view).
 ## Surviving levers (all threshold-clean by design, or named as debt)
 
 - `interp_delay` — the receipt-spread delay law, with bounded objective slew.
-- `sync_margin` — derived margins, both wire directions.
-- `fire_presentation` — client owns fire start/stop and cadence; the replicated `WeaponGate`
-  is a legality report consumed as a belt-delta ledger, threshold-free.
+- `sync_margin` — the downlink receipt distribution and interpolation margin.
+- `input_arrival` — the server resolves input edges exactly once by arrival and link state;
+  replicated weapon state is authoritative. The shot bundle presents from the server event.
 - `recoil_overlay` — the microsim-subtract own-recoil response (fork 1's candidate A).
 - `cursor_queue` — discrete facts present at the cursor crossing of their authority tick.
 - `frontier` — read-only starvation, impulse-coincidence and timeline-resync diagnostics. It

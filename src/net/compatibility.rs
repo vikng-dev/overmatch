@@ -61,6 +61,7 @@ impl Compatibility {
     /// * `armaments`: the game's damage model binds fuze modes and round facts from the embedded
     ///   round-type, round and gun registries, so a handshake-matched receiver can refuse an
     ///   unresolvable index as malformed input rather than wait for data skew to resolve.
+    /// * `shooting`: the shared hull-recoil response scales round momentum from embedded data.
     /// * `aim`: the input admission policy must agree before peers connect.
     /// * `ground`: the ground-type table beside the binary sets the server's ground response and
     ///   each client's prints and drawn belt sink; a peer holding another table draws sinkage the
@@ -94,6 +95,7 @@ impl Compatibility {
                             crate::armaments_index::GUN_FILES,
                         ),
                     ),
+                    ("shooting", bytes_digest(crate::shooting::SHOOTING_RON)),
                     ("aim", bytes_digest(crate::aim::INPUT_RON)),
                     ("ground", fnv1a_64(FNV_OFFSET_BASIS, &ground_types)),
                 ]
@@ -526,6 +528,10 @@ mod tests {
             bytes_digest(crate::substances::MATERIALS_RON)
         );
         assert_eq!(stated("aim"), bytes_digest(crate::aim::INPUT_RON));
+        assert_eq!(
+            stated("shooting"),
+            bytes_digest(crate::shooting::SHOOTING_RON)
+        );
         assert_eq!(
             stated("armaments"),
             armaments_digest(

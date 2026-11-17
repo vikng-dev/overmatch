@@ -1,0 +1,10 @@
+(
+    spatial_scale: (0.02, Taste("world audio falloff: reciprocal distance at unity gain")),
+    listener_ear_gap: (0.2, Taste("stereo panning width in metres")),
+    click_volume: (0.5, Taste("trigger switch and refusal feedback mix level")),
+    report_volume: (1.0, Taste("weapon report mix level")),
+    engine_volume: (0.35, Taste("continuous engine mix level beneath weapon reports")),
+    engine_speed_tau: (0.12, Taste("engine playback speed exponential slew time in seconds")),
+    engine_lug_fraction: (0.8, Taste("engine playback floor as a fraction of authored idle crank rate")),
+    engine_overshoot_fraction: (1.05, Taste("engine playback ceiling as a fraction of authored governed crank rate")),
+)

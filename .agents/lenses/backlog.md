@@ -21,7 +21,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | net-09 | P2 | `src/net/spawn_map.rs::SPAWN_LIMIT_FRACTION` | base-truths: Bare number in code | Fixed map-relative clearance does not guarantee grounding for a larger hull or smaller map. | Derive the admissible region from terrain extent and constructed footprint, shared by client and authority. | ratchet |
 | net-10 | P2 | `src/net/spawn_map.rs::ui_map_shows_the_world_the_click_math_points_at` | base-truths: Asset-specific gate | Valid symmetric maps fail the mirror-correlation requirement; flat maps make correlation undefined. | Prove coordinate orientation with an asymmetric inline fixture. | ratchet |
 | net-11 | P3 | `src/net/matchmaking/worker.rs::Reply`, `TicketResponse::answer` | error-handling: Erased error | HTTP, decoding, resolution, thread-start and malformed-answer failures cross live workflow boundaries as strings. | Preserve typed variants until the UI or logging boundary. | ratchet |
-| net-12 | P3 | `src/net/tests/net_fire_release.rs::Fix` | code-branching: Test arm of a deleted path | `HeldLast` retains and executes a retired detector alongside production `ForTick`. | Delete the retired implementation and selector; retain regression inputs against production `attest`. | ratchet |
 | net-15 | P3 | `src/net/resync.rs::hold_unknown_history` | base-truths: Compensation | Unknown retained history is treated as removal, then repaired by restoring components and maintaining markers. | Represent unknown history separately in interpolation's presence decision; delete removal-and-restoration repairs. | ratchet |
 | net-17 | P3 | `src/net/hit_feel.rs::CUE_RETAIN` | base-truths: Bare number in code | Confirmation-marker and flash decay consume embedded retention and cutoff tastes. | Move them into required presentation data naming their effect families. | ratchet |
 | net-22 | P2 | `src/net/protocol.rs::apply_servo_angles`, `src/tank/servo.rs::drive_servos` | error-handling: One timeline | Non-owner angles apply at arrival while hulls render at the shared delay (ADR-0037), so a remote's turret leads its hull by the delay. Older than this chain; one reviewer rated it P1. About .6° at 5.85°/s and an ASSUMED 100 ms (DERIVED); a look call. Remote twin of issue 187 | Decide with issue 187: one presentation clock for angles | ratchet |
@@ -30,7 +29,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
-| view-12 | P3 | `src/sfx/mod.rs::SPATIAL_SCALE` | base-truths: Bare number in code | Falloff, ear separation, mix levels, engine slew and playback bands are embedded presentation tastes. | Move them into required audio data with separate job labels. | ratchet |
 
 
 ## dev
