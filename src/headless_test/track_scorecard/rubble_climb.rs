@@ -971,7 +971,7 @@ struct ParkTick {
     clutch: String,
     park: bool,
     belt_reaction: [f32; 2],
-    /// Belt surface speed per side (m/s), which the contact hook gives the runs' and stops' faces.
+    /// Belt surface speed per side (m/s), which substep preparation gives the runs' and stops' faces.
     belt_speed: [f32; 2],
     awake: usize,
     /// Awake pieces in the tank's island, and of those (and of the rest) the ones whose own
@@ -1229,6 +1229,45 @@ fn park_summary(ticks: &[ParkTick]) -> Value {
     })
 }
 
+#[derive(Component)]
+struct ArrivalBrakes;
+
+fn hold_arrival_brakes(
+    mut tanks: Query<&mut crate::command::ParsedTankCommand, With<ArrivalBrakes>>,
+) {
+    for mut command in &mut tanks {
+        *command = crate::command::ParsedTankCommand::hold();
+    }
+}
+
+/// Sleeping is Avian's rest verdict; its retained velocities are resume state, not motion.
+fn at_rest(bed: &Bed) -> bool {
+    let world = bed.app.world();
+    let belts = world
+        .get::<crate::track::sim::TrackDrive>(bed.tank)
+        .unwrap();
+    if belts.sides.iter().any(|s| s.speed != 0.0) {
+        return false;
+    }
+    if world.get::<Sleeping>(bed.tank).is_some() {
+        return true;
+    }
+    let threshold = world.get::<SleepThreshold>(bed.tank).unwrap();
+    let hull = bed.hull();
+    crate::avian_ext::rest_test::at_rest(
+        &avian3d::dynamics::solver::solver_body::SolverBody {
+            linear_velocity: hull.velocity,
+            angular_velocity: hull.angular,
+            ..avian3d::dynamics::solver::solver_body::SolverBody::DUMMY
+        },
+        threshold,
+        world.resource::<PhysicsLengthUnit>().0,
+        *world.get::<ComputedMass>(bed.tank).unwrap(),
+        *world.get::<ComputedAngularInertia>(bed.tank).unwrap(),
+        Rotation(hull.rotation),
+    )
+}
+
 /// The tank on `heap`, driven at full throttle from the given approach in m until its hull origin
 /// passes the heap's middle, then braked to a stop; or on flat ground for `None`. Returns the bed
 /// and the arrival's record.
@@ -1257,15 +1296,30 @@ pub(super) fn park_arrival(heap: Option<(Heap, f32)>, label: &str) -> (Bed, Valu
                 driven += 1;
             }
             let reached = bed.hull().position.z <= middle;
-            // Zero demand parks only a tank released under first gear's idle speed: brake to a
-            // stop first, as `net::harness`'s park recipe does.
+            bed.app.add_systems(
+                FixedUpdate,
+                hold_arrival_brakes
+                    .after(crate::command::ParseCommands)
+                    .before(crate::state::GameplaySet),
+            );
+            bed.app
+                .world_mut()
+                .entity_mut(bed.tank)
+                .insert(ArrivalBrakes);
             let mut braked = 0;
-            while bed.hull().velocity.length() >= crate::track::transmission::park_engage_speed()
-                && braked < 5 * TICKS
-            {
-                bed.tick(-1.0, 0.0);
+            // Fixture watchdog: refusal is visible if this arrival never reaches rest.
+            while !at_rest(&bed) && braked < 30 * TICKS {
+                bed.tick(0.0, 0.0);
                 braked += 1;
             }
+            assert!(
+                at_rest(&bed),
+                "{label}: arrival did not rest under service brakes"
+            );
+            bed.app
+                .world_mut()
+                .entity_mut(bed.tank)
+                .remove::<ArrivalBrakes>();
             let arrival = json!({
                 "driven_s": driven as f32 * DT,
                 "braked_s": braked as f32 * DT,
@@ -1281,6 +1335,18 @@ pub(super) fn park_arrival(heap: Option<(Heap, f32)>, label: &str) -> (Bed, Valu
 /// One parked case ([`park_arrival`]), parked `PARK_S` with no demand, read after `PARK_SETTLE_S`.
 fn park_case(heap: Option<(Heap, f32)>, label: &str, tag: &str) {
     let (mut bed, arrival) = park_arrival(heap, label);
+    // Flat starts settled; every heap arrival has already reached its first resting tick.
+    // Fixture watchdog for the flat bed's initial settling as well.
+    for _ in 0..30 * TICKS {
+        if at_rest(&bed) {
+            break;
+        }
+        bed.tick(0.0, 0.0);
+    }
+    assert!(
+        at_rest(&bed),
+        "{label}: park measurement requires a resting start"
+    );
     let begin = bed.hull().position;
     let mut ticks = Vec::with_capacity(PARK_S * TICKS);
     for _ in 0..PARK_S * TICKS {
@@ -1317,7 +1383,7 @@ fn park_case(heap: Option<(Heap, f32)>, label: &str, tag: &str) {
 /// Each piece in the tank's island still failing the rest test this tick (awake, its rest timer
 /// under `TimeToSleep`), with its motion and every touching manifold in the hull's frame: the other
 /// collider's role, the normal into the piece, the deepest overlap, the compliant law and conveyor
-/// velocity the contact hook set, and the solver's mean force on the piece over the step. The force
+/// velocity the solver used, and the solver's mean force on the piece over the step. The force
 /// is the collider pair's, repeated on each of its manifolds.
 fn wedge_read(bed: &mut Bed, tick: usize) -> Vec<Value> {
     use avian3d::dynamics::solver::islands::BodyIslandNode;
@@ -1395,7 +1461,10 @@ fn wedge_read(bed: &mut Bed, tick: usize) -> Vec<Value> {
                         "points": manifold.points.len(),
                         "k": law.as_ref().map(|c| c.stiffness),
                         "c": law.as_ref().map(|c| c.damping),
-                        "conveyor": local(manifold.tangent_velocity),
+                        "conveyor": local(world.resource::<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>().colors.iter()
+                            .flat_map(|c| &c.contact_constraints)
+                            .find(|c| c.contact_id == pair.contact_id && c.manifold_index == manifold_index)
+                            .map_or(Vec3::ZERO, |c| c.tangent_velocity)),
                         "force": local(force),
                     }));
                 }

@@ -38,7 +38,7 @@ pub(crate) fn install(app: &mut App) {
                 start
                     .after(SubstepSolverSystems::WarmStart)
                     .before(advance_drivetrains),
-                end.after(advance_drivetrains)
+                end.after(update_belt_surfaces)
                     .before(SubstepSolverSystems::SolveConstraints),
             ),
         )

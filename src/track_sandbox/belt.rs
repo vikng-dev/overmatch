@@ -112,7 +112,6 @@ pub(super) fn apply_belt_support_field(
                 &avian3d::prelude::ComputedAngularInertia,
                 &avian3d::prelude::ComputedCenterOfMass,
             ),
-            &'static crate::track::sim::TrackDrive,
             &'static mut crate::track::sim::TrackRise,
         ),
         With<Hull>,
@@ -127,7 +126,6 @@ pub(super) fn apply_belt_support_field(
     mut dynamics: ResMut<SideDynamics>,
     mut grip: ResMut<BeltGrip>,
     mut grip_elements: ResMut<BeltGripElements>,
-    // The transmission's shared parameters stay grouped.
     transmission_params: (
         Res<RigTransmission>,
         ResMut<TransState>,
@@ -150,9 +148,9 @@ pub(super) fn apply_belt_support_field(
 ) {
     let (transmission, mut trans_state, mut pending) = transmission_params;
     let (geom, rig_spec, envelope) = rig;
-    let (hull_entity, hull_pos, hull_rot, (mut forces, mass, inertia, com), _motion, mut rise) =
-        hull.single_mut()
-            .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
+    let (hull_entity, hull_pos, hull_rot, (mut forces, mass, inertia, com), mut rise) = hull
+        .single_mut()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let affine = bevy::math::Affine3A::from_rotation_translation(hull_rot.0, hull_pos.0);
     // The game adapter's hull body (`track::sim::apply_track_forces`).
     let hull_body = crate::track::sim::HullBody {
@@ -259,7 +257,7 @@ pub(super) fn apply_belt_support_field(
         crate::track::sim::belt_reactions(&reports, &hull_body, hull_pos.0, dt);
 
     // Orders stay constant while the physics substeps advance the mechanical state.
-    let tick = transmission::DriveTick::new(
+    let mut tick = transmission::DriveTick::new(
         &construction,
         &transmission.0,
         transmission::DriveState {
@@ -280,9 +278,9 @@ pub(super) fn apply_belt_support_field(
             dt,
         },
     );
+    tick.warm = std::mem::take(&mut pending.1);
     pending.0 = Some(tick);
 
-    // Apply sampled forces in per-side emission order.
     touches.0.clear();
     for (si, report) in reports.into_iter().enumerate() {
         let side = Side::ALL[si];
@@ -320,14 +318,18 @@ pub(super) fn apply_belt_support_field(
 
 /// Empty until the first sampled pass; built with the rig's other simulation storage.
 #[derive(Resource, Default)]
-pub(super) struct PendingDrivetrain(Option<transmission::DriveTick>);
+pub(super) struct PendingDrivetrain(Option<transmission::DriveTick>, transmission::WarmStart);
 
 pub(super) fn drivetrain_plugin(app: &mut App) {
     use avian3d::prelude::*;
     app.init_resource::<PendingDrivetrain>()
         .add_systems(
             SubstepSchedule,
-            advance_drivetrain
+            (
+                advance_drivetrain,
+                update_belt_surfaces.ambiguous_with(crate::avian_ext::solver_cost::VisitCounts),
+            )
+                .chain()
                 .after(SubstepSolverSystems::WarmStart)
                 .before(SubstepSolverSystems::SolveConstraints)
                 .run_if(sim_running)
@@ -358,6 +360,34 @@ fn advance_drivetrain(
     }
 }
 
+fn update_belt_surfaces(
+    mut graph: ResMut<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>,
+    contacts: Res<avian3d::prelude::ContactGraph>,
+    faces: Query<(
+        &crate::track::stop_contacts::BeltFace,
+        &avian3d::prelude::ColliderOf,
+    )>,
+    poses: Query<(&avian3d::prelude::Position, &avian3d::prelude::Rotation)>,
+    pending: Res<PendingDrivetrain>,
+    hull: Query<&crate::track::sim::TrackDrive, With<Hull>>,
+) {
+    crate::track::stop_contacts::update_surface_velocities(
+        &mut graph,
+        &contacts,
+        &faces,
+        &poses,
+        |body| {
+            let motion = hull
+                .get(body)
+                .expect("every sandbox belt face belongs to its one hull");
+            pending
+                .0
+                .as_ref()
+                .map_or_else(|| motion.sides.map(|s| s.speed), |tick| tick.state.speeds)
+        },
+    );
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the sandbox commits its one owner's mechanical state and telemetry"
@@ -376,6 +406,7 @@ fn commit_drivetrain(
         return;
     }; // No sample before the first fixed pass.
     let report = tick.report(substeps.0);
+    pending.1 = tick.warm;
     state.0 = tick.state.transmission;
     state.1.drove(&report);
     telemetry.0 = Some(report);

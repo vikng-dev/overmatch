@@ -1,253 +1,211 @@
 # Drivetrain slice 3: Relocate
 
-Subject: Overmatch's multiplayer tank video-game driving physics, game state only.
-The game's damage-model observations concern engine HP pools and simulated source availability.
-Lane `lane/drive-relocate`, bay 2, based on `3fb3c393`.
+Subject: the game's driving physics, game state only. Where an engine's HP state is involved,
+the subject is the game's damage model: an HP pool emptied means the engine is knocked out.
+Lane `lane/drive-relocate`, bay 2. Fixes follow the independent review and six lens verdicts
+for `63cf3d97`; `main` was merged first, retaining both sides of `src/headless_test.rs`.
 
-## Ownership and schedule
+## Current schedule and ownership
 
-The full row design was read from the owner's untracked main-checkout document,
-`/Users/Yan/github/vikng-dev/overmatch/.agents/scratch/drivetrain-rows-design-2026-11-17.md`.
-This report records implementation decisions and observations; that document owns the design narrative.
+- FixedUpdate samples contact, shapes commands and makes one Driver decision. A server-local,
+  spawn-built `DrivetrainStep` owns pending mechanics and the last accepted block assignment.
+- Each physics substep advances the crank and belts after WarmStart. Surface preparation then
+  writes each belt-face constraint's velocity before SolveConstraints. PostSubstep publishes
+  belts, phases, crank and tick outcomes once, after the entire substep loop.
+- The resting trial advances the same mechanical sequence on the last sampled loads. Its h is
+  derived from Avian's upcoming physics interval, including the physics clock's relative speed;
+  the previous Time<Physics> delta is stale at FixedUpdate. A late island wake retains an accepted
+  trial, without advancing it again or opening another Driver ledger sample.
+- The sandbox uses the same integrator, assignment history and surface preparation.
 
-- `FixedUpdate`: contact sampling, command slew and one Driver decision prepare `DriveTick`.
-  `DrivetrainStep` retains its orders, affine-load reference speeds and mechanical scratch.
-- `SubstepSchedule`: after `SubstepSolverSystems::WarmStart`, before `SolveConstraints`,
-  `advance_drivetrains` calls the single `transmission::advance` with `Time<Substeps>`.
-- `PhysicsSchedule`, `SolverSystems::PostSubstep`: publish belts, phases, crank and outcomes,
-  record delivered mean forces in the Driver ledger, then project public engine RPM.
-  **DERIVED from vendored source:** this set follows the entire substep loop, rather than each
-  individual substep. No new fork patch is required or made.
-- The resting trial runs the same `DriveTick::advance` sequence. A wake before contact sampling
-  replaces the trial with a sampled pass; a later physics wake retains the accepted sequence,
-  without repeating it or opening a fictitious ledger sample.
-- The sandbox prepares and advances the same core on the same schedule boundaries. Its harness
-  records after physics writeback so it observes the completed drivetrain.
+Verified against `vendor/avian3d-0.8.0-overmatch`: `contact/mod.rs` defines the public
+`ContactConstraint::tangent_velocity` as world-space v2-v1 (m/s), and `ContactConstraint::solve`
+passes it to the tangent solve during Relax. `solver/plugin.rs` prepares and solves the public
+`ConstraintGraph.colors[*].contact_constraints`; the separate ContactConstraints resource is not
+the active store. No fork patch is needed.
 
-Sampled loads remain one tick's affine law: `R(v) = R(v_ref) + slope*(v-v_ref)`. Each substep
-uses its current speed in that law, with the slope implicit in its effective belt inertia.
-Force telemetry sent to the Driver is impulse divided by total elapsed substep time. The
-bitprobe retains the last substep's coherent operating point; its named work counters cover the
-tick. A tick counts as held/locked only if every substep was; drive and brake sliding count if any substep did.
+Surface preparation is the sole game writer. The narrow-phase hook only filters geometry,
+wakes bodies and sets material friction. Thus a belt contact uses its own substep's belt speed,
+rather than `63cf3d97`'s tick-start speed. Sampled ground remains a tick-constant affine load,
+implicit in each belt's effective inertia; the previous tick's solver reaction is still billed
+once to the belts. This does not yet add the design's joint belt/contact rows.
 
-Deleted: the speed/phase landing in `belt_tick`, the combined production `transmission::step`,
-`RestingStep`, the fixed-update `settle_rest` commit, and the sandbox's separate phase landing
-and hard-contact speed override. Arithmetic fixtures call the same advance for one interval;
-tick-level invariants call its physics substep sequence.
+Owner-local preparation, trials, advances and publication retain parallel tank iteration.
+Surface preparation reads immutable owner states and writes disjoint graph constraints in parallel.
+Its ordering after all advances is a data dependency: a belt-on-belt contact reads both owners.
+Avian's graph is the atomic effect boundary. Its VisitCounts reader only inspects graph lengths,
+which surface-velocity writes leave invariant, so those systems need no mutual order.
 
-`DrivetrainStep` is required by spawn-built `TrackGripElements`, with a spawn-observer witness.
-It is never registered for replication. No definition in `WIRE_TYPE_DEFS` changes:
-`PROTOCOL_REV` remains **106**; the manifest tests pass without a re-pin.
+## Finding dispositions
 
-## Equality and class invariants
+- **P1-1:** option (b), current-substep constraint velocities; hook velocity write deleted.
+  The energy book now charges actual substep friction impulses at those velocities, including
+  Avian's partial warm-start share. Its engine-energy bound is unchanged.
+- **P2-1:** TrackDrive publication uses `set_if_neq`. The resting publication witness names
+  replication volume as its consumer and asserts no component change tick.
+- **P2-2:** DriveTick carries the accepted KKT faces across substeps. At commit it returns them
+  to spawn-built server-local history for the next tick. A changed ordered row Jacobian/static
+  layout or impulse-limit layout invalidates history; only no history starts Interior (fixed
+  coordinates still use their required face). Every trial checks feasibility and optimality.
+  Candidate Driver pricing has its own cold, hypothetical solve, never a tank's live history.
+- **P2-3:** arrival uses explicit brake intent, with a visible watchdog refusal. Park travel
+  begins at the first tick with both belts held and the hull passing the production rest law;
+  a sleeping hull's stored velocities are resume state, not integrated motion.
+- **P2-4:** `locked` means every substep locked. This changes what the Driver samples: its held
+  window now certifies the whole interval whose mean delivered force it receives, rather than
+  only the end state. The launch observation and attribution are below; no parameter was tuned.
+- **Parallel-work P2:** apply_track_forces reads TrackDrive immutably.
+- **P3:** deleted-item doc citations and their narratives now name current entry points; tests
+  read SubstepCount from an app mounting the shipped physics installer. The resting trial uses
+  Avian's physics interval. Unread row/work counters are bitprobe-only. Commit takes pending
+  work before checking body type. The no-pending comment names stopped gameplay and late wakes.
+  drive_servos documents its previous-tick EngineRpm read. Redundant query items, cfg blocks,
+  repeated rationale and component lookups are removed. The pre-existing second-spec speed
+  ripple is an observation; contact, launch and independently derived load checks remain.
 
-The production substep installer is mounted in the equality witness. Across all four class
-constructions, **Fixture** counts of 1, 6 and 11 substeps reproduce the direct advance sequence
-at every intermediate state and at publication. The comparison includes raw floating-point bits
-(crank, both belt speeds, both f64 phases, signed zero included), plus the complete transmission
-state. Canonical state remains unchanged inside the loop. A paid shift decrements once per tick.
-The adapter's equality bound is **exactly zero**: both paths receive identical duration values
-and perform the same operations in the same order.
+No WIRE_TYPE_DEFS definition changes; PROTOCOL_REV remains **106**.
 
-The tick-level slice-2 witnesses now run complete substep sequences: fixed-intent order stability,
-passive crank-plus-belt energy, locked authored radii, exact-zero stops and static-load stop
-handover. The radius allowance remains the data owner's rounding share plus f32 subtraction
-roundoff. The energy allowance is **Resolution, DERIVED**: storing speeds in f32 at each of N
-substeps contributes at most `gamma(2N) = 2N*epsilon/(1-2N*epsilon)` to squared-speed energy,
-using f32 epsilon conservatively as unit roundoff. At N=6 this is about `1.430514e-6` relative;
-the zero-energy corner stays exactly zero. It is not fitted to an observed energy change.
+## Independent invariants
 
-The engine admission gate still certifies a whole-tick explicit torque interval. This is
-conservative for every subdivision, so relocation needs no relaxed admission or new parameter.
+The production schedule witness compares every intermediate crank/belt/phase bit and complete
+transmission state against direct advances for four class constructions and Fixture substep
+counts 1, 6 and 11. It checks delayed publication, one paid-shift decrement per tick, and an
+active belt contact's current-substep velocity. The geometric witness covers both collider
+orders, rotated radial/lateral faces and consecutive positive, negative and zero speeds.
 
-## First cost reading
+The independent duration oracle removes all coupling rows from a free-belt Fixture and derives
+`v_end = v_start + F*t/I`, without reading the integrator. It checks a whole tick for one,
+app-configured and eleven substeps. Its allowance is DERIVED from f32 rounding stores and duration
+division, not from measured outputs. Accepted-face reuse and layout invalidation have a separate
+block witness. No emergent output is pinned.
 
-**MEASURED:** Apple M4, macOS 26.5.2, local compute pool, `edit` profile, features
-`dev_ui,bitprobe`, three runs before and after on the same machine. Each measured fixture
-uses 640 fixed ticks after its existing settling/run-up. These are local observations, not
-hosted two-core or release-profile performance claims.
+## Re-measured cost
 
-The ignored `drive_relocate_cost_probe` brackets the production drivetrain systems only:
-the driving pass, every substep advance and the final commit/RPM publication. Geometry/contact
-sampling, Driver pricing and resting trials are included; other Avian work is excluded. Query
-dispatch and bracket overhead are included, with no overhead subtraction.
+MEASURED: Apple M4, edit profile, features dev_ui,bitprobe; the same four fixtures, three runs,
+640 measured ticks after their run-up. Brackets include driving preparation, sleeping trials,
+all mechanical advances, surface preparation and publication; other Avian work and diagnostic
+conveyor-work collection are outside them. No overhead subtraction. These are local measurements,
+not release-profile or hosted two-core claims. The before wall times were visibly noisy;
+assignment counts are deterministic across the three before runs.
 
-| Existing fixture | Before mean us/tick, runs 1 / 2 / 3 | After mean us/tick, runs 1 / 2 / 3 |
-|---|---|---|
-| parked-yard | 63.390 / 63.261 / 63.071 | 163.010 / 163.601 / 164.230 |
-| flat cost g2 tight | 141.015 / 141.063 / 140.543 | 379.256 / 400.467 / 412.582 |
-| flat cost g4 wide | 140.165 / 140.971 / 140.827 | 380.450 / 421.718 / 412.728 |
-| flat cost neutral pivot | 94.672 / 94.887 / 95.650 | 129.647 / 131.560 / 135.444 |
+| Fixture | Before us/tick, runs 1 / 2 / 3 | After us/tick, runs 1 / 2 / 3 | Assignments/substep mean/max, before -> after |
+|---|---|---|---|
+| parked-yard | 201.061 / 482.020 / 451.948 | 92.510 / 94.123 / 92.743 | 38.057812/39 -> 1.003125/7 |
+| flat cost g2 tight | 419.572 / 607.696 / 441.356 | 142.132 / 144.750 / 143.389 | 95.191667/492 -> 1.191667/492 |
+| flat cost g4 wide | 420.750 / 493.977 / 788.442 | 140.949 / 142.735 / 142.676 | 95.163281/236 -> 1.061458/236 |
+| flat cost neutral pivot | 149.119 / 167.911 / 294.202 | 144.302 / 140.711 / 140.815 | 8.004948/27 -> 1.011719/27 |
 
-**MEASURED** work below was identical in all three runs. Every fixture recorded 3,840 advances
-(640 ticks times the configured six substeps, DERIVED). Sleeping trials are included.
+MEASURED assignment means/maxima repeat exactly across all three runs. Each fixture has 3840
+advances (DERIVED 640 ticks * the app's six substeps). Mean rows/substep remain 4 parked, 5 in
+both turns and 3 in the pivot. The rare search maxima remain in moving fixtures; warm starting
+reduces typical work, not the admitted worst-case enumeration. No force, inertia or taste was tuned.
 
-| Fixture | Rows / tank / substep, mean and max | KKT assignments / tank / substep, mean / max | Active Avian tank contact points / tick, mean / max |
-|---|---:|---:|---:|
-| parked-yard | 4 / 4 | 38.057812 / 39 | 9.175 / 132 |
-| flat cost g2 tight | 5 / 5 | 95.191667 / 492 | 0.000 / 0 |
-| flat cost g4 wide | 5 / 5 | 95.163281 / 236 | 0.000 / 0 |
-| flat cost neutral pivot | 3 / 3 | 8.004948 / 27 | 0.000 / 0 |
 
-The g2/g4 names are the existing run-up selectors, not locked gears. The parked case uses the
-existing yard arrival and brake, including its transition into sleep; sleeping graph contacts
-are not active solver rows. Its observed point maximum is 132, rather than the design's older
-failed-run observation of 91. The flat turn/pivot fixtures use sampled ground and have no Avian
-contact points. These are drivetrain rows only: slice 4 has not added belt contact rows.
-
-Mechanical assignment counts exclude Driver candidate pricing; total tick counters include it.
-The existing before counter omitted resting-trial work, so it is not used as a before/after work
-comparison. The wall-clock brackets include that work in both implementations.
-
-The design's typical-one-assignment assumption is false on these fixtures. **DERIVED from
-`block::solve_limited`:** each call starts from an interior/fixed-coordinate seed; accepted
-assignments are reused only across static-to-dynamic stages within that call, not across
-substeps. This slice does not change the solver search. Its five physical rows plus the crank
-impulse-limit face can have six ternary coordinates: `3^6 = 729` assignments per stage, rather
-than the design's five-coordinate `3^5 = 243`. Thus the measured maximum of 492 is explained by
-the actual admitted system, not a convergence retry or an unbounded loop. Row staging can add
-further finite searches when a static stop breaks. Assignment caching/solver pricing remains a
-real cost question for the later slice, not an assumed saving in this report.
-
-Raw cost logs: `/tmp/drive-relocate-before-cost.log` and `/tmp/drive-relocate-final-cost.log`.
+Raw logs: `/tmp/drive-fix-before-cost.log`, `/tmp/drive-fix-after-cost.log`.
 Reproduce with `OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless scripts/serial-cargo test --lib
 --features dev_ui,bitprobe drive_relocate_cost_probe -- --ignored --nocapture`.
 
-All owner-local passes use `par_iter_mut`: contact preparation, sleeping trials, substep advances
-and publication. A tank's successive substeps and its block's assignment trials are serial by
-state dependency. The nested Avian schedule orders our system after warm starting and before the
-biased solve; the post-loop publication must precede sleeping and downstream readers. Those
-schedule dependencies do not serialize independent tanks within the system. Contact effects on
-other owners keep the existing source/entity and side/contact commit order. Slice 4 owns contact
-rows; slice 5 owns grouping and hosted dispatch pricing.
+For reference, the original slice-2 -> 63cf3d97 means were MEASURED 63 -> 163 us parked,
+141 -> 379-422 us turning, and 95 -> 130-135 us pivoting. The old cold mechanical assignment
+means/maxima per substep were 38.057812/39, 95.191667/492, 95.163281/236 and 8.004948/27.
 
-## Probe observations beside slice 2
+## Moved observations and attribution
 
-**MEASURED:** fresh before captures use the slice-2 implementation at this lane's base;
-its report is `.agents/scratch/drive-crank-slice-2-report.md`. The 25-degree before readings
-also reproduce that report. No model or asset parameter was changed to recover an old output.
-The rigid-wall probe remains slice 4's restoration task.
+### Rammed park
 
-### Slab pull
+The existing saved summary did not record reverse/driving/brake-slide flags. An instrumented
+replay of the unchanged arrival reproduced its saved release z=-12.512791634 m and release
+travel 3.754382133 m. MEASURED during its 320-tick brake window: reverse selected at zero-based
+tick 40, drive first delivered at tick 60; 280 ticks in reverse and 203 delivering drive.
+Brake sliding occurred only in ticks 0-7. It reversed under power; this was not a sustained
+braked slide off the heap. The old held -1 axis became reverse demand after the reversal hold.
+The old travel included subsequent stopping, so it was not a parked-state creep measurement.
 
-End hull speed after four seconds: **3.929259062 -> 3.424832106 m/s**.
+MEASURED after explicit brakes, travel from the first resting tick over the 25-second release:
 
-| Clutch outcome | Ticks, slice 2 -> relocated | Left belt alternation amplitude m/s, slice 2 -> relocated | Left/right friction sign flips, slice 2 -> relocated |
-|---|---:|---:|---|
-| out | 40 -> 80 | 0.273659 -> 0.101335 | 38/36 -> 25/27 |
-| slip | 155 -> 101 | 0.154561 -> 0.103393 | 69/69 -> 32/32 |
-| in | 61 -> 75 | 0.010222 -> 0.002351 | 3/9 -> 9/6 |
-
-The recorded gear sequences differ: slice 2 starts F4, shifts to F5 at driven tick 94 and F8 at
-183; relocation first records F1, then F2 at 20, F3 at 63, F4 at 104 and F7 at 151. These are
-zero-based probe ticks. It therefore spends 80 ticks in paid cuts instead of 40. This is an
-observation of the existing selector under the relocated dynamics, not a gear-parameter change;
-the capture does not retain the pre-demand selector reading/launch state to isolate its initial
-F1 choice. The lower end speed accompanies this different launch/cut sequence.
-
-### Rubble park
-
-Travel covers the full 25-second release; the final window is the last 20 seconds.
-
-| Fixture | Slice-2 travel m | Relocated travel m | Final-window sleep ticks, slice 2 / relocated |
+| Fixture | Old release-based travel m | New rest-based travel m | New final-window sleep ticks |
 |---|---:|---:|---:|
-| flat | 0.000179421 | 0.000179421 | 1280 / 1280 of 1280 |
-| rammed | 0.021932388 | 3.754382133 | 1280 / 1280 of 1280 |
-| house | 0.014056585 | 0.017055145 | 1280 / 1280 of 1280 |
-| yard | 0.025241429 | 0.023554930 | 1280 / 1280 of 1280 |
+| flat | 0.000179421 | 0.000179421 | 1280/1280 |
+| rammed | 3.754382133 | 0.054024875 | 1280/1280 |
+| house | 0.017055145 | 0.016133204 | 1280/1280 |
+| yard | 0.023554930 | 0.024185244 | 1280/1280 |
 
-Both runs finish every park fixture's observation window asleep with both belts exactly zero.
-The rammed-house arrivals are materially different: slice 2 never reaches the heap middle in
-its 15-second drive and brakes for 0.046875 s, starting release at z=-16.182514 m. Relocation
-reaches the middle after 9.484375 s, then exhausts the fixture's five-second brake window and
-starts release at z=-12.512792 m, behind the crossed middle at z=-20.055725 m. `park_arrival`
-uses a held -1 axis request, which can request reverse after the transmission stops, and exits
-on whole-hull speed or the cap; it does **not** guarantee a stopped release state. Thus the
-3.754382 m reading includes post-window stopping travel, rather than showing sustained creep
-of the sleeping parked state. The raw moved observation is retained; neither the fixture nor
-the drivetrain was adjusted to make these arrivals agree.
+The new rammed arrival reaches the middle after 7.796875 s, brakes for 0.40625 s and starts
+park measurement at z=-20.435371399 m. It no longer reverses under power. The arrival has also
+changed through the current-substep contact coupling; the shorter drive-to-middle time is an
+observation of that dynamics change, separate from correcting the measurement origin. The
+54 mm observation includes residual settling within the production rest envelope; it does not
+claim 54 mm of motion after sleep. Every final window has belts exactly zero and 1280/1280
+sleeping ticks. Raw logs: `/tmp/drive-fix-{before,after}-park.log`.
 
-### 25-degree held pivots and release
 
-Each case holds full steer for 64 seconds, then releases for five. Yaw averages the last three
-held seconds. All distances below are planar. These are observations, not acceptance targets.
+### Slab launch and pull
 
-| Facing | Held yaw rad/s, slice 2 -> relocated | Hold travel m, slice 2 -> relocated | Release travel m, slice 2 -> relocated |
+The original slice-2 -> 63cf3d97 observation was MEASURED 3.929259062 -> 3.424832106 m/s
+at four seconds, with first recorded F4 -> F1 and paid-cut ticks 40 -> 80. The latter adds
+DERIVED 40/64 = 0.625 s of interrupted drive. The original report lacked pre-throttle state.
+
+The unchanged replay before this fix reproduces 3.424832106 m/s. Immediately before demand:
+F1, park=true, clutch=Slip, launch=Locked, crank=61.73857 rad/s; the Driver reading has
+observed=false, speed=0.0028977322 m/s, belt_speed=0, resistance=-41.972633 N. These are
+MEASURED observations, not launch requirements.
+
+MEASURED after current-substep surface preparation: before demand, F1/park=true/clutch=Slip,
+launch=Unchosen and the same crank speed 61.73857 rad/s; sensed speed=-0.0004749672 m/s,
+resistance=-37.342133 N, observed=false. The first driven tick selects F4, then F5 at tick 85
+and F8 at tick 151. It spends 40 ticks out, 171 slipping and 45 in; end hull speed is
+4.331298351 m/s after four seconds.
+
+Attribution: current-substep contact coupling changes the settling history. Previously a
+mechanical interval had latched launch=Locked before demand; now it stays Unchosen. The
+canonical latch is set by a locked mechanical solve (`advance_rows`), while zero demand cannot
+choose a launch gear (`driver::choose`). An Unchosen launch enters the launch-domain choice;
+the old Locked state bypassed that choice and began in the already engaged F1. The captured
+pre-demand state explains the changed first gear. The all-substeps-locked Driver sampling rule
+remains in force in both fix-run captures; it is a separate change from slice 2, not a new
+setting introduced to recover F4. The new end speed and cut sequence are observations of this
+coupling and selector history, not targets.
+
+| Clutch | Ticks, 63cf3d97 -> fix | Left belt alternation amplitude m/s | Friction sign flips L/R |
 |---|---:|---:|---:|
-| uphill | -0.083504148 -> -0.083516655 | 12.213123322 -> 12.213111877 | 0.023485437 -> 0.023502829 |
-| downhill | -0.124657965 -> -0.124655377 | 12.791346550 -> 12.791519165 | 0.042793903 -> 0.042827494 |
-| across | -0.006260733 -> -0.006261558 | 12.318467140 -> 12.318470955 | 0.032994319 -> 0.033002805 |
+| Out | 80 -> 40 | 0.101335 -> 0.159197 | 25/27 -> 22/21 |
+| Slip | 101 -> 171 | 0.103393 -> 0.113343 | 32/32 -> 71/70 |
+| In | 75 -> 45 | 0.002351 -> 0.004957 | 9/6 -> 6/0 |
 
-Every held tick retains mean hold in both implementations; the held belts remain exactly
-opposite. Every release retains mean hold for 15 ticks, then side park for 305, finishing at
-exact zero belt speed. The tiny yaw/travel changes are retained without tuning.
+Raw launch/state summaries: `/tmp/drive-fix-{before,after}-slab.log`;
+series: `target/belt-friction/fix-{before,after}-slab-pull.csv`.
 
-Raw logs are `/tmp/drive-relocate-{before,final}-{slab,park,pivot}.log`. Per-tick slab CSVs are
-`target/belt-friction/relocate-{before,final}-slab-pull.csv`. The final-source captures reproduce
-all preceding relocated JSON summaries exactly after removing the capture tag. Reproduction uses
-the existing `belt_friction_probe` with `BELT_FRICTION_ONLY=slab-pull`, `rubble_park_probe`, and `pivot_probe`
-with `TURN_PROBE_ONLY='pivot slope25'`, all with `OVERMATCH_UNATTENDED=1`,
-`OVERMATCH_WINDOW=headless`, `scripts/serial-cargo test --lib --features dev_ui,bitprobe`, and
-`-- --ignored --nocapture`.
 
-## Investigated expectation
+### Other observations
 
-The existing free-hull coast test asserted that a held pedal with an emptied engine could never
-travel farther than a released pedal. **MEASURED** after relocation: 13.903220 m held versus
-13.858035 m released over its three-second fixture, final speeds 4.206536 versus 4.189877 m/s.
-That ordering is not a law: pedal intent changes clutch impulse bounds and the launch floor even
-when combustion is absent (`advance_rows`, `coupling_budget`). The source invariant is zero fuel
-and idle-catch torque with dissipative motoring torque. The adapter witness now asserts those
-facts under both pedal requests and reports the two coast distances as observations. The pure
-`absent_combustion_keeps_drag_at_full_pedal` witness independently checks that construction drag
-is identical at the same operating point. No production force law or calibration changes for this
-failure.
-
-## Diagnostic interval correction
-
-The first full library run was **MEASURED: 2838 passed, 2 failed, 51 ignored**. Both failures
-were the existing independent landing-force residual witnesses, on declared grounds and on the
-course. They found a real diagnostic error: the probe retained the last substep's crank delta
-but the tick report overwrote its duration with total tick time. Dividing that delta by the tick
-understated inferred crank acceleration. The same report also overwrote the probe's side forces
-with tick means, mixing another interval.
-
-The probe now retains one coherent last mechanical interval (including its `h` and forces),
-while `TransmissionReport` still supplies whole-tick mean forces to the Driver. The forecast
-consumer reads the paid cut's tick duration from `sim_tick::sim_timestep`, independently of the
-mechanical probe's duration. Its original same-instant residual assertion and Driver resolution
-are unchanged. This correction changes diagnostics, not mechanical state or force laws.
-Both original landing witnesses pass with their assertions and resolution unchanged.
-
-The second full library run was **MEASURED: 2839 passed, 1 failed, 51 ignored**. The remaining
-failure was the standing-matter energy book. It assumed one force/speed interval per tick and
-charged the conveyor at the published end speed. **MEASURED:** its old accounting reported
-9208.256 J against the unchanged 9081.167 J engine bound at fixture tick 192. That accounting
-cannot represent the sum of the relocated intervals.
-
-`BeltWorkProbe` now integrates each substep's sprocket work and time-centred travel. The book
-subtracts belt kinetic gain and the previously billed hard reaction's work from that integrated
-work. The current narrow-phase hook reads canonical belts before the substep loop, so its
-conveyor charge uses tick-start belt speeds. This changes only diagnostic accounting; the engine
-energy bound and all physical laws remain unchanged. The corrected book and both landing beds
-passed in the 37-test focused preflight and again in the final full suite.
+The original 25-degree held-pivot changes were MEASURED below 1.5e-4 relative in yaw, with
+sampled ground and no active solver belt contacts. No physical or game parameter changed in
+this fix. The game's damage-model coast observation remains: with an engine HP pool emptied,
+a held pedal can let stored crank motion push the belts through the clutch; its travel ordering
+against a released pedal is not a law. The source invariants remain zero combustion/idle catch
+and dissipative construction drag.
 
 ## Verification
 
-All checks below ran after the last Rust source edit, with `OVERMATCH_UNATTENDED=1` and
-`OVERMATCH_WINDOW=headless` for headless runs. Compiling commands used `scripts/serial-cargo`.
+Final-source checks, all through scripts/serial-cargo where compiling, with features
+dev_ui,bitprobe except the explicitly requested no-default-feature server check:
 
-- `cargo fmt --all --check`: passed.
-- CI clippy, `--locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`: passed.
-- Required `track::`, `trace::`, `net::protocol`, `tests::doc_citations` run with
-  `--lib --features dev_ui,bitprobe`: **MEASURED: 413 passed, 0 failed**.
-- `check --no-default-features --bin overmatch-server`: passed, with three existing dead-code
-  warnings (weapon audio clips, engine-sound fields, UI steering-governor readout).
-- Full library suite, `test --lib --features dev_ui,bitprobe`: **MEASURED: 2840 passed,
-  0 failed, 51 ignored**. The ignored cost and physical probes were also run explicitly and passed.
-- Wire registration, codec and type-manifest pins passed; no wire definition changed and
-  `PROTOCOL_REV` remains **106**.
+- cargo fmt --all --check: passed.
+- CI clippy --locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings: passed.
+- Targeted track:: (384), headless track_scorecard (16), net::protocol (18),
+  tests::doc_citations (3): MEASURED **421 passed**, none failed; nine probe tests ignored by the
+  ordinary scorecard run. Cost, slab and park probes were separately run explicitly and passed.
+- check --no-default-features --bin overmatch-server: passed; the same three pre-existing
+  dead-code warnings for weapon audio, engine sound fields and steering readout.
+- Full library suite: MEASURED **2851 passed, 0 failed, 51 ignored**, once on final production source.
+- Wire registration, codec and type-manifest tests passed unchanged: PROTOCOL_REV=106.
 
-Final logs: `/tmp/drive-relocate-final-{fmt,cost,slab,park,pivot,targeted,server,suite}.log` and
-`/tmp/drive-relocate-clippy-final.log`. The source stayed fixed throughout final verification.
-The orchestrator's independent six-lens review and merge remain outside this building lane.
+Final-source logs are `/tmp/drive-fix-final-{fmt,clippy,track,scorecard,protocol,docs,server,suite}.log`.
+All physical captures repeat the preceding fix-run summaries exactly after the diagnostic cache
+correction; that correction changes only the energy book's first-substep warm-start accounting.
+Production source stayed fixed through the final checks. The layout-invalidation test fixture
+was then strengthened to distinguish a wrongly retained face from a fresh Interior seed;
+the final block run passed **15 tests**, with formatting and CI clippy passing again.
+Follow-up logs: `/tmp/drive-fix-commit-{fmt,clippy,block}.log`.
+
+The six-lens independent review and merge to main belong to the orchestrator. This lane does not push.

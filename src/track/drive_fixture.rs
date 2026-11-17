@@ -100,7 +100,14 @@ pub(crate) fn step(
         speeds: input.speeds,
         phases: [0.0; 2],
     };
-    let report = super::transmission::advance(&fp, tp, &mut mechanical, &orders, input.dt);
+    let report = super::transmission::advance(
+        &fp,
+        tp,
+        &mut mechanical,
+        &orders,
+        &mut super::block::WarmStart::default(),
+        input.dt,
+    );
     *state = mechanical.transmission;
     report
 }
@@ -123,7 +130,7 @@ pub(crate) fn substep_tick(
         },
         input,
     );
-    let count = avian3d::prelude::SubstepCount::default().0;
+    let count = app_substeps();
     let h = std::time::Duration::from_secs_f32(input.dt)
         .div_f64(f64::from(count))
         .as_secs_f32();
@@ -405,4 +412,15 @@ pub(crate) fn affordable_launch(
                 ClutchState::Slip,
             ) >= felt(inp).resistance
         })
+}
+
+/// Arithmetic fixtures read the same physics plugin's resource as the shipped app.
+pub(crate) fn app_substeps() -> u32 {
+    use bevy::prelude::*;
+    static COUNT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, crate::offline_physics()));
+        app.world().resource::<avian3d::prelude::SubstepCount>().0
+    })
 }

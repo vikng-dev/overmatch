@@ -301,20 +301,13 @@ impl Bed {
                 ) as f64
                     / 1000.0,
             );
-            work.push(
-                self.app
-                    .world()
-                    .get::<crate::track::sim::TrackGripEffect>(self.tank)
-                    .unwrap()
-                    .transmission_probe
-                    .assignments_tried,
-            );
             let probe = self
                 .app
                 .world()
                 .get::<crate::track::sim::TrackGripEffect>(self.tank)
                 .unwrap()
                 .transmission_probe;
+            work.push(probe.assignments_tried);
             mechanical[0] += probe.mechanical_advances;
             mechanical[1] += probe.mechanical_rows;
             mechanical[2] += probe.mechanical_assignments;
@@ -3064,8 +3057,8 @@ fn the_drivetrains_books_close_over_standing_matter() {
         read = bed
             .hard_reactions()
             .map(|hard| hard.map_or(0.0, |hard| hard.belt));
-        // The narrow-phase hook precedes substeps and reads the canonical tick-start belts.
-        let charge = (read[0] * work.start_speeds[0] + read[1] * work.start_speeds[1]) * DT;
+        // Friction is billed at the surface speed of the substep that delivered it.
+        let charge = work.conveyor_work_j as f32;
         let excess =
             energy(bed) - held - (gravity + support + rows) * DT + paid as f32 - charge + bill;
         bill = charge;

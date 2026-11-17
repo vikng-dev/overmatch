@@ -2798,9 +2798,7 @@ fn no_fuel_or_external_work_cannot_raise_total_kinetic_energy() {
                     // Resolution: each of N substeps rounds speeds to f32. Squared speed
                     // contributes at most gamma(2N) relative error, with epsilon used as a
                     // conservative unit roundoff; the zero-energy corner is exact.
-                    let rounding = 2.0
-                        * f64::from(avian3d::prelude::SubstepCount::default().0)
-                        * f64::from(f32::EPSILON);
+                    let rounding = 2.0 * f64::from(app_substeps()) * f64::from(f32::EPSILON);
                     let allowance = rounding / (1.0 - rounding);
                     assert!(
                         after <= before * (1.0 + allowance),
@@ -3311,6 +3309,7 @@ fn unused_steering_rating_cannot_reduce_a_powered_launch() {
             &mut st,
             &controls,
             fuel + catch - bounded_drag(&tp, omega, inp.dt, drag),
+            &mut WarmStart::default(),
         );
         assert!(
             steering.abs() < 2.0 * tp.steer_capacity_n,
@@ -3431,4 +3430,49 @@ fn construction_refuses_consistent_but_unresolved_steering_rows() {
         error.contains("conditioning") && error.contains("steering.radii"),
         "{error}"
     );
+}
+
+/// Tick duration belongs to physics: the hull/contact consumers rely on F*t/I, independent of
+/// subdivision. This oracle derives the impulse without reading the integrator's equations.
+#[test]
+fn free_belts_gain_force_times_tick_duration_over_inertia() {
+    let mut fp = lab_fp();
+    fp.inertia = 8192.0; // Fixture reflected mass, kg.
+    let mut tp = lab_tp();
+    tp.couplings.clear(); // Fixture: free belts, no clutch, steering or stop rows.
+    let force = [1024.0, 2048.0]; // Fixture constant applied forces, N.
+    let mut inp = input(0.0, 0.0, [4.0, 5.0], force.map(|f| -f));
+    inp.dt = 0.125; // Fixture tick, s.
+    for n in [1, app_substeps(), 11] {
+        let mut tick = DriveTick::new(
+            &construction(&fp),
+            &tp,
+            DriveState {
+                transmission: TransmissionState {
+                    park: false,
+                    launch: LaunchState::Locked,
+                    ..fresh(&tp)
+                },
+                speeds: inp.speeds,
+                phases: [0.0; 2],
+            },
+            &inp,
+        );
+        let h = std::time::Duration::from_secs_f32(inp.dt)
+            .div_f64(f64::from(n))
+            .as_secs_f32();
+        for _ in 0..n {
+            tick.advance(&construction(&fp), &tp, h);
+        }
+        for (i, force) in force.into_iter().enumerate() {
+            let expected = f64::from(inp.speeds[i])
+                + f64::from(force) * f64::from(inp.dt) / f64::from(fp.inertia);
+            // Resolution, DERIVED: N f32 stores plus duration division; epsilon bounds each rounding.
+            let relative = (f64::from(n) + 1.0) * f64::from(f32::EPSILON);
+            assert!(
+                (f64::from(tick.state.speeds[i]) - expected).abs()
+                    <= expected.abs() * relative / (1.0 - relative)
+            );
+        }
+    }
 }

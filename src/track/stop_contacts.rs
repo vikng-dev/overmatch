@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use super::forces::LinkRise;
 use super::oracle::ContactOracle;
 use super::side::Side;
-use super::sim::{TrackDrive, TrackRise};
+use super::sim::TrackRise;
 use super::terrain::{FieldSurface, TrackField};
 use crate::contact_transfer::ContactTransfers;
 
@@ -112,6 +112,23 @@ impl BeltFace {
         rise <= 0.0 || depth > rise + VACATED_SLACK_M
     }
 
+    /// The moving face's world-space surface velocity (m/s) at the manifold centre.
+    pub(crate) fn velocity(
+        &self,
+        centre: Vec3,
+        outward: Vec3,
+        pose: (Vec3, Quat),
+        speed: f32,
+    ) -> Vec3 {
+        let (position, rotation) = pose;
+        rotation
+            * self.direction(
+                rotation.inverse() * (centre - position),
+                rotation.inverse() * outward,
+            )
+            * speed
+    }
+
     /// Positive belt travel in the hull frame. Radial contact follows its plane's tangent;
     /// a lateral face reads the closest edge of its closed outer outline in `(z, y)`.
     pub(crate) fn direction(&self, point: Vec3, outward: Vec3) -> Vec3 {
@@ -138,7 +155,7 @@ impl BeltFace {
 }
 
 /// Avian 0.8 permits one hook set. The construction sweep judges speculative points first;
-/// surviving shoe contacts carry the belt's motion and the field's grip at the patch.
+/// surviving shoe contacts carry the field's grip. Substep preparation owns surface velocity.
 #[derive(SystemParam)]
 pub(crate) struct WorldContacts<'w, 's> {
     sweep: crate::construction::breakage::SweepContacts<'w, 's>,
@@ -147,7 +164,6 @@ pub(crate) struct WorldContacts<'w, 's> {
         'w,
         's,
         (
-            &'static TrackDrive,
             &'static TrackRise,
             &'static Position,
             &'static Rotation,
@@ -172,7 +188,7 @@ impl CollisionHooks for WorldContacts<'_, '_> {
             let Ok((face, of)) = self.faces.get(collider) else {
                 continue; // Ordinary collider: its surface stands still on its body.
             };
-            let (drive, rise, position, rotation, resting) = self
+            let (rise, position, rotation, resting) = self
                 .belts
                 .get(of.body)
                 .expect("a moving shoe face hangs on its spawn-built driving body");
@@ -204,11 +220,6 @@ impl CollisionHooks for WorldContacts<'_, '_> {
             for manifold in &mut contacts.manifolds {
                 let centre = manifold.points.iter().map(|p| p.point).sum::<Vec3>()
                     / manifold.points.len() as f32;
-                let local = rotation.0.inverse() * (centre - position.0);
-                let outward = rotation.0.inverse() * (-sign * manifold.normal);
-                let direction = rotation.0 * face.direction(local, outward);
-                manifold.tangent_velocity +=
-                    sign * direction * drive.sides[face.side.index()].speed;
                 if self.surfaces.contains(other) {
                     manifold.friction = self
                         .field
@@ -223,6 +234,52 @@ impl CollisionHooks for WorldContacts<'_, '_> {
         }
         !contacts.manifolds.is_empty()
     }
+}
+
+/// Avian 0.8.0 `ContactConstraint::tangent_velocity` is world-space v2 - v1 (m/s),
+/// read by `ContactConstraint::solve` during Relax. Every substep replaces it from that
+/// substep's belt speeds, after owner-local advances and before the solve. Colors own
+/// disjoint constraints; both bodies are immutable inputs, including belt-on-belt pairs.
+pub(crate) fn update_surface_velocities(
+    constraints: &mut avian3d::dynamics::solver::constraint_graph::ConstraintGraph,
+    contacts: &avian3d::prelude::ContactGraph,
+    faces: &Query<(&BeltFace, &ColliderOf)>,
+    poses: &Query<(&Position, &Rotation)>,
+    speeds: impl Fn(Entity) -> [f32; 2] + Sync + Send,
+) {
+    use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
+    constraints
+        .colors
+        .par_splat_map_mut(ComputeTaskPool::get(), None, |_, colors| {
+            for constraint in colors.iter_mut().flat_map(|c| &mut c.contact_constraints) {
+                let (_, pair) = contacts
+                    .get_by_id(constraint.contact_id)
+                    .expect("a prepared constraint retains its contact pair");
+                let mut velocity = Vec3::ZERO;
+                let mut belt_contact = false;
+                for (collider, sign) in [(pair.collider1, -1.0), (pair.collider2, 1.0)] {
+                    let Ok((face, of)) = faces.get(collider) else {
+                        continue; // Ordinary surface: no belt motion on its body.
+                    };
+                    belt_contact = true;
+                    let (position, rotation) = poses
+                        .get(of.body)
+                        .expect("a belt face has its body's physics pose");
+                    let points = &pair.manifolds[constraint.manifold_index].points;
+                    let centre = points.iter().map(|p| p.point).sum::<Vec3>() / points.len() as f32;
+                    velocity += sign
+                        * face.velocity(
+                            centre,
+                            -sign * constraint.normal,
+                            (position.0, rotation.0),
+                            speeds(of.body)[face.side.index()],
+                        );
+                }
+                if belt_contact {
+                    constraint.tangent_velocity = velocity;
+                }
+            }
+        });
 }
 
 /// One solver point's impulse on a moving shoe, with its outward unit normal. The solver
@@ -316,6 +373,7 @@ pub(crate) fn reactions(
 mod tests {
     use super::*;
     use crate::contact_transfer::ContactTransfer;
+    use crate::track::sim::TrackDrive;
     use avian3d::collision::contact_types::ContactId;
     use avian3d::prelude::{ContactManifold, ContactPoint};
     use bevy::ecs::system::RunSystemOnce;
@@ -338,7 +396,7 @@ mod tests {
     /// collider Avian puts first. Drivers rely on the front wrap moving downward and the
     /// bottom moving rearward, including a lateral contact's nearest outline edge.
     #[test]
-    fn the_composed_hook_moves_each_face_at_belt_speed_in_either_pair_order() {
+    fn each_substep_moves_each_face_at_its_own_speed_in_either_pair_order() {
         for rotation in [
             Quat::IDENTITY,
             Quat::from_rotation_y(0.43) * Quat::from_rotation_z(0.31),
@@ -418,13 +476,29 @@ mod tests {
                         -sign * (rotation * outward),
                     ));
                     world
-                        .run_system_once(move |hooks: WorldContacts, mut commands: Commands| {
+                        .run_system_once(move |hooks: WorldContacts, mut commands: Commands,
+                            faces: Query<(&BeltFace, &ColliderOf)>, poses: Query<(&Position, &Rotation)>| {
+                            use avian3d::collision::contact_types::{ContactEdge, ContactGraph};
+                            use avian3d::dynamics::solver::{contact::ContactConstraint, constraint_graph::ConstraintGraph, solver_body::SolverBodyIndex};
                             assert!(hooks.modify_contacts(&mut pair, &mut commands));
                             assert_eq!(pair.manifolds[0].friction, 0.37);
-                            let expected = sign * (rotation * direction) * 2.0;
-                            assert!(
-                                (pair.manifolds[0].tangent_velocity - expected).length() < 1e-5
-                            );
+                            assert_eq!(pair.manifolds[0].tangent_velocity, Vec3::ZERO, "the hook never publishes tick-start belt speed");
+                            let mut contacts = ContactGraph::default();
+                            let id = contacts.add_edge_with(ContactEdge::new(pair.collider1, pair.collider2), |p| p.manifolds.clone_from(&pair.manifolds)).unwrap();
+                            let mut graph = ConstraintGraph::default();
+                            graph.colors[0].contact_constraints.push(ContactConstraint {
+                                body_index1: SolverBodyIndex::INVALID, body_index2: SolverBodyIndex::INVALID,
+                                relative_dominance: 0, friction: 0.37, restitution: 0.0,
+                                tangent_velocity: Vec3::ZERO, normal: pair.manifolds[0].normal,
+                                tangent1: Vec3::X, points: Vec::new(), contact_id: id, manifold_index: 0,
+                            });
+                            // Fixture: distinct consecutive substep speeds; overwrites must not accumulate.
+                            for speed in [2.0, -3.0, 0.0] {
+                                update_surface_velocities(&mut graph, &contacts, &faces, &poses, |_| [speed; 2]);
+                                let expected = sign * (rotation * direction) * speed;
+                                // Resolution: repeated world/local rotations may differ by f32 roundoff.
+                                assert!((graph.colors[0].contact_constraints[0].tangent_velocity - expected).length() < 1e-5);
+                            }
                         })
                         .unwrap();
                 }

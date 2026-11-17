@@ -9,6 +9,8 @@
 //! The rejected `STEER_SERVO_BAND` proportional servo loses authority with vehicle scale;
 //! steering instead spends a bounded row impulse in the joint block.
 
+pub(crate) use super::block::WarmStart;
+
 use std::num::NonZeroU8;
 
 use bevy::ecs::error::BevyError;
@@ -1084,8 +1086,10 @@ pub struct TransmissionInput {
 pub struct TransmissionReport {
     pub next_speeds: [f32; 2],
     /// Assignment trials in the mechanical solve (candidate pricing reports its own work).
+    #[cfg(feature = "bitprobe")]
     pub assignments_tried: usize,
     /// Mechanical rows evaluated; candidate pricing is counted separately.
+    #[cfg(feature = "bitprobe")]
     pub rows: usize,
     /// Each side's capacity-limited brake supplied the exact stop force: a held constraint.
     pub held: [bool; 2],
@@ -1365,6 +1369,7 @@ pub(super) fn candidate_pull(
         &mut state,
         &controls,
         fuel + catch - drag,
+        &mut WarmStart::default(),
     );
     report.forces.iter().sum()
 }
@@ -1655,6 +1660,7 @@ fn advance_rows(
     st: &mut TransmissionState,
     controls: &Controls,
     tau_free: f32,
+    warm: &mut WarmStart,
 ) -> (TransmissionReport, f32, f32) {
     use super::block::{Bounds, ImpulseLimit, Row, Speed, solve_limited};
     let inp = &controls.input;
@@ -1766,6 +1772,7 @@ fn advance_rows(
                 upper: over_impulse,
             },
         }],
+        warm,
     );
     let mut forces = [0.0_f64; 2];
     for (row, outcome) in rows.iter().zip(&solved.rows) {
@@ -1828,7 +1835,9 @@ fn advance_rows(
     (
         TransmissionReport {
             next_speeds,
+            #[cfg(feature = "bitprobe")]
             assignments_tried: solved.assignments_tried,
+            #[cfg(feature = "bitprobe")]
             rows: rows.len(),
             held,
             brakes_slide,
@@ -2175,6 +2184,7 @@ pub(crate) fn advance(
     tp: &TransmissionParams,
     state: &mut DriveState,
     orders: &Orders,
+    warm: &mut WarmStart,
     h: f32,
 ) -> TransmissionReport {
     assert!(
@@ -2211,7 +2221,8 @@ pub(crate) fn advance(
         #[cfg(feature = "bitprobe")]
         &mut probe,
     );
-    let (mut report, clutch_torque, steer_force) = advance_rows(fp, tp, st, &controls, torque);
+    let (mut report, clutch_torque, steer_force) =
+        advance_rows(fp, tp, st, &controls, torque, warm);
     report.power_available = power;
     #[cfg(feature = "bitprobe")]
     {

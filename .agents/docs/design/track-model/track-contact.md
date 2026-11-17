@@ -52,7 +52,7 @@ pass's points, and a fixed construction under it keeps that pass's reaction in i
 starts from rest under an acceleration below `SleepThreshold`'s 0.15 m/s over `TimeToSleep`'s
 0.5 s, 0.3 m/s² (DERIVED), would sleep before reaching the threshold. Each pass judges what motion
 cannot show (`track::sim::apply_track_forces`), and one that finds the tank not at rest zeroes
-its timer (`track::sim::settle_rest`): drive demand, a belt its brake does not hold, a brake meeting a
+its timer (`track::sim::commit_drivetrains`): drive demand, a belt its brake does not hold, a brake meeting a
 stop beyond its capacity, every gripping patch at or past its budget, or a sampled support whose
 body is not static. A tank creeping past its grip limit keeps creeping:
 `contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_limits` judges the
@@ -64,10 +64,11 @@ nothing it carries, and a joint per tank and support, which would carry the link
 on cost. The drivetrain is no part of the rest: a sleeping tank's hull and contacts stand still, but
 its transmission steps each tick on its last pass's belt loads with the belts at rest
 (`track::sim::wake_driven_tanks`). A step that holds both belts and slides no brake is staged and
-commits if the tank still rests once the tick's wakes have applied (`track::sim::settle_rest`), so a
+commits once after the physics substeps, even after a late island wake
+(`track::sim::commit_drivetrains`), so a
 repaired engine spools up under the resting hull; any other step is discarded and wakes the tank,
 whose full pass runs that tick from the same state, as does a tank whose island another body's wake
-reaches: a drivetrain advances once per tick. Drive demand (a pedal, a steer, or a belt
+reaches: a drivetrain runs one substep sequence per tick. Drive demand (a pedal, a steer, or a belt
 still coasting) wakes the tank before any trial: under a pedal the lever holds a belt only against
 rollback, a sign test on contact jitter that frozen loads cannot answer, and an awake twin's belts
 crept from the first tick of full throttle (MEASURED once), so its full pass moves it within its

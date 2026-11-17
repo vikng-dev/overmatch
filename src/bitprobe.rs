@@ -261,6 +261,8 @@ pub(crate) struct ElementOutputProbe {
 pub(crate) struct BeltWorkProbe {
     pub start_speeds: [f32; 2],
     pub sprocket_work_j: [f64; 2],
+    /// Solver friction charged at each substep's surface velocity (J).
+    pub conveyor_work_j: f64,
     /// Time-centred travel for force work, distinct from explicit phase advection.
     pub travel_m: [f64; 2],
 }
@@ -307,6 +309,8 @@ pub(crate) struct TransmissionProbe {
     pub tau_c: f32,
     pub engaged: bool,
     pub locked: bool,
+    pub driving: bool,
+    pub brakes_slide: bool,
     pub shifting: bool,
     pub clutch_force_n: f32,
     pub steering_force_n: f32,

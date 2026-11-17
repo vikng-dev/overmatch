@@ -38,6 +38,7 @@ pub(crate) fn prepare_orders(
 pub(crate) struct DriveTick {
     pub state: DriveState,
     pub(crate) orders: Orders,
+    pub(crate) warm: super::super::block::WarmStart,
     last: Option<TransmissionReport>,
     steps: u32,
     elapsed: f64,
@@ -47,14 +48,18 @@ pub(crate) struct DriveTick {
     locked: bool,
     driving: bool,
     brakes_slide: bool,
+    #[cfg(feature = "bitprobe")]
     assignments: usize,
+    #[cfg(feature = "bitprobe")]
     rows: usize,
     #[cfg(feature = "bitprobe")]
     max_rows: usize,
     #[cfg(feature = "bitprobe")]
     max_assignments: usize,
     #[cfg(feature = "bitprobe")]
-    belt_work: crate::bitprobe::BeltWorkProbe,
+    pub(crate) belt_work: crate::bitprobe::BeltWorkProbe,
+    #[cfg(feature = "bitprobe")]
+    pub(crate) hard_impulses: Vec<bevy::prelude::Vec3>,
 }
 
 impl DriveTick {
@@ -68,6 +73,7 @@ impl DriveTick {
         Self {
             state,
             orders,
+            warm: super::super::block::WarmStart::default(),
             last: None,
             steps: 0,
             elapsed: 0.0,
@@ -77,12 +83,16 @@ impl DriveTick {
             locked: true,
             driving: false,
             brakes_slide: false,
+            #[cfg(feature = "bitprobe")]
             assignments: 0,
+            #[cfg(feature = "bitprobe")]
             rows: 0,
             #[cfg(feature = "bitprobe")]
             max_rows: 0,
             #[cfg(feature = "bitprobe")]
             max_assignments: 0,
+            #[cfg(feature = "bitprobe")]
+            hard_impulses: Vec::new(),
             #[cfg(feature = "bitprobe")]
             belt_work: crate::bitprobe::BeltWorkProbe {
                 start_speeds: state.speeds,
@@ -92,7 +102,7 @@ impl DriveTick {
     }
 
     pub fn advance(&mut self, fp: &DriveConstruction, tp: &TransmissionParams, h: f32) {
-        let report = super::advance(fp, tp, &mut self.state, &self.orders, h);
+        let report = super::advance(fp, tp, &mut self.state, &self.orders, &mut self.warm, h);
         let dt = f64::from(h);
         self.elapsed += dt;
         self.steps += 1;
@@ -104,10 +114,10 @@ impl DriveTick {
         self.locked &= report.locked;
         self.driving |= report.driving;
         self.brakes_slide |= report.brakes_slide;
-        self.assignments += report.assignments_tried;
-        self.rows += report.rows;
         #[cfg(feature = "bitprobe")]
         {
+            self.assignments += report.assignments_tried;
+            self.rows += report.rows;
             self.max_assignments = self.max_assignments.max(report.assignments_tried);
             self.max_rows = self.max_rows.max(report.rows);
             for i in 0..2 {
@@ -135,10 +145,10 @@ impl DriveTick {
         report.locked = self.locked;
         report.driving = self.driving;
         report.brakes_slide = self.brakes_slide;
-        report.assignments_tried = self.assignments;
-        report.rows = self.rows;
         #[cfg(feature = "bitprobe")]
         {
+            report.assignments_tried = self.assignments;
+            report.rows = self.rows;
             report.bitprobe.assignments_tried = self.assignments + self.orders.candidates;
             report.bitprobe.mechanical_assignments = self.assignments;
             report.bitprobe.mechanical_rows = self.rows;
@@ -146,6 +156,8 @@ impl DriveTick {
             report.bitprobe.max_substep_assignments = self.max_assignments;
             report.bitprobe.max_substep_rows = self.max_rows;
             report.bitprobe.belt_work = self.belt_work;
+            report.bitprobe.driving = self.driving;
+            report.bitprobe.brakes_slide = self.brakes_slide;
         }
         report
     }
