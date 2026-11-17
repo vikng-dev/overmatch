@@ -34,8 +34,7 @@ pub struct Turret;
 
 /// The turret's rigid-body data, built with its tank kind's template from the sheet's `turret`
 /// block and the tank's geometry, so the launch reads it from the entity rather than from the
-/// asset. The template checks it against the full-vehicle body and allowed assembly poses
-/// before spawning.
+/// asset. The template derives the fixed hull body from this assembly at rest before spawning.
 #[derive(Component, Clone, Copy)]
 pub struct TurretBody {
     /// Mass (kg).
@@ -48,6 +47,76 @@ pub struct TurretBody {
     /// centre and `materials.ron` no density for most of its substances; per-substance densities,
     /// or an authored centre node as the hull has, replace it.
     pub centre_of_mass: Vec3,
+}
+
+/// The game's damage model: the hull's fixed rigid body, admitted at template build and carried
+/// on the root from spawn. Private fields keep every instance behind the rest-pose load gate.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct HullBody {
+    mass: f32,
+    centre: Vec3,
+    inertia: AngularInertia,
+}
+
+impl HullBody {
+    /// Subtract the assembly at its authored rest pose from the full vehicle. The sheet gate
+    /// admits finite positive full-vehicle moments and mass greater than assembly mass.
+    pub(crate) fn new(
+        file: &str,
+        mass: f32,
+        centre: Vec3,
+        inertia: AngularInertia,
+        assembly: TurretBody,
+        rest: Transform,
+    ) -> Self {
+        let remainder = mass - assembly.mass;
+        let assembly_centre = rest.transform_point(assembly.centre_of_mass);
+        let hull_centre = (mass * centre - assembly.mass * assembly_centre) / remainder;
+        // Parallel-axis theorem about the vehicle centre, then the hull's own centre:
+        // I_full = I_h + m_h PA(c_h-c_full) + R I_a Rᵀ + m_a PA(c_a-c_full).
+        let tensor = inertia.tensor().to_mat3()
+            - assembly
+                .angular_inertia
+                .tensor()
+                .rotated(rest.rotation)
+                .shifted(assembly.mass, assembly_centre - centre)
+                .to_mat3()
+            - AngularInertia::ZERO
+                .tensor()
+                .shifted(remainder, hull_centre - centre)
+                .to_mat3();
+        let fix = format!(
+            "{file}: mass/inertia_extents full-vehicle box and model Center_Of_Mass versus \
+             turret.mass/inertia_extents and assembly rest position (turret.node and model frames): \
+             rest-pose hull remainder must be finite and positive-definite. Reconcile the \
+             full-vehicle box with the assembly's mass, inertia and rest position"
+        );
+        assert!(
+            remainder.is_finite()
+                && remainder > 0.0
+                && hull_centre.is_finite()
+                && tensor.is_finite(),
+            "{fix}"
+        );
+        // Avian diagonalizes the symmetric tensor and clamps non-positive eigenvalues to zero;
+        // requiring the smallest principal moment > 0 refuses those before a body can spawn.
+        let inertia = AngularInertia::from_mat3_unchecked(tensor);
+        let margin = inertia.principal.min_element();
+        assert!(
+            inertia.principal.is_finite() && margin > 0.0,
+            "{fix}; smallest rest-pose moment {margin} kg m²"
+        );
+        debug!("{file}: DERIVED rest-pose hull inertia margin {margin} kg m²");
+        Self {
+            mass: remainder,
+            centre: hull_centre,
+            inertia,
+        }
+    }
+
+    pub(crate) fn properties(self) -> (f32, Vec3, AngularInertia) {
+        (self.mass, self.centre, self.inertia)
+    }
 }
 
 #[derive(Component)]
@@ -814,4 +883,54 @@ pub(crate) fn rig_world_pose<F: bevy::ecs::query::QueryFilter>(
         rotation *= local.rotation;
     }
     Some((position, rotation))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The game's damage model: template admission must reject an impossible fixed hull before
+    /// spawn. Positive diagonals alone miss an indefinite tensor; non-finite centres or moments
+    /// must not become a solver body. Fixture: independently varied box moments and rest offsets.
+    #[test]
+    fn fixed_hull_admission_refuses_nonfinite_and_nonpositive_remainders() {
+        let assembly = TurretBody {
+            mass: 10.0,
+            angular_inertia: AngularInertia::new(Vec3::splat(10.0)),
+            centre_of_mass: Vec3::ZERO,
+        };
+        for (moments, offset) in [
+            (Vec3::splat(10.0), Vec3::ZERO),        // Zero remainder.
+            (Vec3::splat(9.0), Vec3::ZERO),         // Negative remainder.
+            (Vec3::splat(100.0), Vec3::splat(1.7)), // Positive diagonal, indefinite tensor.
+            (Vec3::splat(f32::INFINITY), Vec3::ZERO),
+            (Vec3::splat(100.0), Vec3::splat(f32::NAN)),
+        ] {
+            let refusal = std::panic::catch_unwind(|| {
+                HullBody::new(
+                    "fixture.tank.ron",
+                    100.0,
+                    Vec3::ZERO,
+                    AngularInertia::new(moments),
+                    assembly,
+                    Transform::from_translation(offset),
+                )
+            })
+            .err()
+            .expect("invalid rest-pose remainder must be refused before spawn");
+            let message = refusal
+                .downcast_ref::<String>()
+                .expect("gate names the file and fix");
+            for required in [
+                "fixture.tank.ron",
+                "mass/inertia_extents",
+                "Center_Of_Mass",
+                "turret.mass/inertia_extents",
+                "rest position",
+                "Reconcile",
+            ] {
+                assert!(message.contains(required), "missing {required}: {message}");
+            }
+        }
+    }
 }

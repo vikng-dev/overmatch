@@ -10,9 +10,6 @@
 //! crew box primitive in volume order. Nothing names a collision proxy's or a track's colliders,
 //! which are created after them.
 
-mod detachment;
-
-use detachment::admit_detachment;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -23,9 +20,9 @@ use bevy::prelude::*;
 
 use super::integrity::authored_attachment;
 use super::model::{
-    EngineSound, Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, TankRoot, TankServos, TankSim,
-    TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate, WeaponGateState,
-    WeaponIndex, WeaponLoad, WeaponLoads, WeaponState, explicit_mass,
+    EngineSound, Gun, GunBarrel, Hull, HullBody, Muzzle, Rig, Roadwheel, TankRoot, TankServos,
+    TankSim, TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate,
+    WeaponGateState, WeaponIndex, WeaponLoad, WeaponLoads, WeaponState, explicit_mass,
 };
 use super::servo::{ServoCommand, ServoIndex, ServoMechanism, ServoRest, ServoSpec};
 use super::view::SimParts;
@@ -180,6 +177,7 @@ struct ProxyEntry {
 
 /// The root's authored body.
 struct RootBody {
+    hull: HullBody,
     mass: Mass,
     angular_inertia: AngularInertia,
     centre_of_mass: CenterOfMass,
@@ -285,13 +283,15 @@ impl TankTemplate {
                 .mass_centre(at(rig.turret), &|node| nodes[node - 1].transform)
                 .expect("the turret node is a frame of the tank's armour set"),
         };
-        admit_detachment(
+        let assembly = &geometry.nodes[rig.turret];
+        let hull_body = HullBody::new(
             file,
-            spec,
-            geometry,
-            rig.turret,
+            spec.mass,
             geometry.nodes[rig.center_of_mass].root_position,
+            spec.hull_angular_inertia(),
             turret_body,
+            Transform::from_translation(assembly.root_position)
+                .with_rotation(assembly.root_rotation),
         );
 
         let proxies = geometry
@@ -337,6 +337,7 @@ impl TankTemplate {
             servos: TankServos::for_count(spec.servos.len()),
         };
         let root = RootBody {
+            hull: hull_body,
             mass: Mass(spec.mass),
             angular_inertia: spec.hull_angular_inertia(),
             centre_of_mass: CenterOfMass(geometry.nodes[rig.center_of_mass].root_position),
@@ -557,6 +558,7 @@ impl TankTemplate {
         let body = &self.root;
         commands.entity(root).insert((
             explicit_mass(body.mass.0, body.centre_of_mass.0, body.angular_inertia),
+            body.hull,
             body.capabilities.clone(),
             body.views.clone(),
             // Root visibility owns the gunner-view hide: set to `Hidden`, `InheritedVisibility`
@@ -1221,6 +1223,27 @@ mod tests {
         TankTemplate::new(&blueprint, TrackColliders::of_blueprint(&blueprint, &glb));
     }
 
+    /// The game's damage model: an invalid rest-pose mass split is refused by template build,
+    /// before the first spawn. Fixture: a finite positive full-vehicle box too small to contain
+    /// the assembly's inertia, independent of its live servo travel.
+    #[test]
+    #[should_panic(expected = "fixture.tank.ron: mass/inertia_extents full-vehicle box")]
+    fn an_impossible_rest_pose_is_refused_at_template_build() {
+        let (mut spec, glb) = shipped_sheet();
+        let geometry = crate::bake::extract_tank_geometry(
+            &glb,
+            &spec,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .unwrap();
+        spec.inertia_extents = (0.01, 0.01, 0.01);
+        let blueprint = TankBlueprint::new(
+            "fixture.tank.ron".into(),
+            crate::bake::CertifiedAsset::fixture(spec, geometry),
+        );
+        TankTemplate::new(&blueprint, TrackColliders::of_blueprint(&blueprint, &glb));
+    }
+
     /// Spawn clearance must enclose constructed points at any rotation, including mirrored and
     /// nonuniform scale. Fixtures vary translation, scale and orientation independently; omitting
     /// either construction term breaks the bound on a transformed point.
@@ -1296,6 +1319,10 @@ mod tests {
     #[test]
     fn the_spawn_stance_covers_the_running_gears_ground_contact() {
         let (blueprint, template) = shipped_construction();
+        println!(
+            "DERIVED shipped sheet rest-pose hull margin: {} kg m²",
+            template.root.hull.properties().2.principal.min_element()
+        );
         let track = &blueprint.spec.track;
         let params = track.suspension.params();
         let geom = crate::track::rig_geom::RigGeom::build(
