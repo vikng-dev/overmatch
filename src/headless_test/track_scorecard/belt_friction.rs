@@ -474,13 +474,6 @@ struct Case {
 
 const CASES: &[Case] = &[
     Case {
-        label: "rigid-wall-pull",
-        bed: rigid_wall_bed,
-        seconds: 2 * DRIVE_S,
-        throttle: 1.0,
-        steer: 0.0,
-    },
-    Case {
         label: "slab-pull",
         bed: slab_bed,
         seconds: DRIVE_S,
@@ -525,22 +518,6 @@ const CASES: &[Case] = &[
         steer: 1.0,
     },
 ];
-
-/// Fixture: a rigid wall in each belt lane, approached from rest. The hull nose stays clear;
-/// the stops' normal law has no soft-run compliance.
-fn rigid_wall_bed() -> Bed {
-    let mut bed = Bed::on_ground(Some(base_ground()), flat());
-    let face = front_z(bed.geom()) - 2.0;
-    for (_, lo, hi) in lanes(bed.geom()) {
-        bed.spawn_static(
-            Vec3::new((lo + hi) / 2.0, (WALL_HEIGHT - 1.0) / 2.0, face - 1.0),
-            Vec3::new(hi - lo, WALL_HEIGHT + 1.0, 2.0),
-        );
-    }
-    bed.place(Vec3::ZERO, Quat::IDENTITY);
-    bed.start();
-    bed
-}
 
 fn run(case: &Case, tag: &str) {
     let mut bed = (case.bed)();

@@ -874,12 +874,12 @@ fn steady_launch_slip_transmits_the_bounded_free_torque() {
     }
 }
 
-/// The game's driving model bounds a healthy crank under both a loaded launch and a
-/// back-driven coast. The clutch's floor cannot create energy or reverse propulsive force: the
+/// The game's driving model bounds a healthy crank under a loaded launch and powered rollback.
+/// The clutch's floor cannot create energy or reverse propulsive force: the
 /// torque it transmits stays within capacity and never turns backward beyond the crank
-/// arithmetic's roundoff, and once the crank has spooled it drives forward. Fixture: first gear, the Driver feeling the hull ride its belts
-/// against the fixture's reactions; a full-weight lug at rest (the launch slips) and a 2 m/s
-/// back-driven coast (the clutch is in).
+/// arithmetic's roundoff, and once the crank has spooled it drives forward. Fixture: first gear,
+/// a loaded launch from rest (Slip) and an already-coupled climb rolling back at 2 m/s (In),
+/// both under full pedal. The Driver feels the hull ride its belts against the fixture's reactions.
 #[test]
 fn stall_guard_holds_crank_under_grade_lug() {
     let (fp, tp) = (lab_fp(), lab_tp());
@@ -893,14 +893,17 @@ fn stall_guard_holds_crank_under_grade_lug() {
             "full-W lug",
         ),
         (
-            0.0,
+            1.0,
             [-2.0, -2.0],
             [-40_000.0, -40_000.0],
             ClutchState::In,
-            "coast backslide",
+            "powered rollback",
         ),
     ] {
-        let mut st = fresh(&tp);
+        let mut st = TransmissionState {
+            clutch: regime,
+            ..fresh(&tp)
+        };
         let mut inp = input(throttle, 0.0, speeds, reactions);
         // The fixture's belts carry equal reactions, so the reading has no push difference.
         inp.sensed = driver_input(speeds[0], reactions[0] + reactions[1], throttle).sensed;
@@ -2787,103 +2790,117 @@ fn rev_match_requires_a_window_or_steering_and_authority() {
     }
 }
 
-/// A sliding reversal retains its direction and refreshes the pause; only rest permits a cut.
-/// Fixture: grade force exceeds both static and dynamic brake capacity.
+/// A pending reversal uses brakes, never the old ladder's catch against rollback. The player
+/// relies on the same control regime whether rest was sampled or skipped between ticks.
+/// Removing the no-pedal direction check couples the skipped-rest entry on its second tick.
 #[test]
-fn reversal_beyond_brake_capacity_refuses_the_direction_cut() {
-    let (fp, tp) = (grade_fixture_fp(), tiger_tp());
-    let load = tp.brake_capacity_n * tp.brake_static_factor * 3.0; // Fixture: beyond static and service capacity.
-    let mut state = TransmissionState {
-        park: false,
-        ..fresh(&tp)
-    };
-    let mut speed = 2.0;
-    for _ in 0..64 * 5 {
-        let mut inp = input(-1.0, 0.0, [speed; 2], [load * 0.5; 2]);
-        inp.sensed = driver_input(speed, load, -1.0).sensed;
-        let report = step(&fp, &tp, &mut state, &inp);
-        speed = report.next_speeds[0];
-        assert!(!state.reverse && !report.shifting);
-    }
-    assert!(speed < -PARK_ENGAGE_SPEED);
-    assert!(state.reversal_hold_ticks > 0);
-}
-
-/// A reversal request cannot turn an over-capacity slide into an engine-powered stop on
-/// alternate ticks. The Driver must keep braking until rest permits the direction cut.
-#[test]
-fn an_over_capacity_slide_does_not_cycle_through_rest() {
+fn pending_reversal_does_not_power_rollback() {
     for (fp, tp) in class_drivetrains() {
         for reverse in [false, true] {
-            // Fixture: load beyond both brake capacities, initially moving with the engaged ladder.
             let dir = if reverse { -1.0 } else { 1.0 };
-            let load = tp.brake_capacity_n * tp.brake_static_factor * 1.5;
-            let mut state = TransmissionState {
-                reverse,
-                park: false,
-                ..fresh(&tp)
+            let ladder = if reverse {
+                &tp.gears_rev
+            } else {
+                &tp.gears_fwd
             };
-            let mut speed = dir * 2.0;
-            let mut sliding = false;
-            let mut min_speed = 0.0_f32;
-            for tick in 0..64 * 5 {
-                let mut inp = input(-dir, 0.0, [speed; 2], [dir * load; 2]);
-                inp.sensed = driver_input(speed, dir * 2.0 * load, -dir).sensed;
-                let report = step(&fp, &tp, &mut state, &inp);
-                let next = report.next_speeds[0];
-                if sliding {
-                    assert!(
-                        next * dir < 0.0,
-                        "over-capacity slide returned to rest at tick {tick}"
-                    );
+            // Fixture: exceed even maximum clutch pull plus brakes by enough to skip the rest
+            // band in one tick. The bound is independent of the solved clutch torque.
+            let load = 2.0 * tp.brake_capacity_n * tp.brake_static_factor
+                + tp.clutch_capacity * ladder[0] / tp.sprocket_radius * 0.5
+                + 4.0 * PARK_ENGAGE_SPEED * fp.inertia * TICK_HZ;
+            // Fixture: the same overload from latched and skipped-rest entries, plus the
+            // modest overload from a moving reversal that can otherwise cycle through rest.
+            for (entry, load) in [
+                (0.0, load),
+                (2.0 * PARK_ENGAGE_SPEED, load),
+                (2.0, 1.5 * tp.brake_capacity_n * tp.brake_static_factor),
+            ] {
+                let mut state = TransmissionState {
+                    reverse,
+                    reversal_hold_ticks: (driver_actuation().reversal_hold_s.value * TICK_HZ).ceil()
+                        as u8,
+                    ..fresh(&tp)
+                };
+                let mut speeds = [dir * entry; 2];
+                for tick in 0..TICK_HZ as usize * 5 {
+                    let mut inp = input(-dir, 0.0, speeds, [dir * load; 2]);
+                    inp.sensed = driver_input(speeds[0], dir * 2.0 * load, -dir).sensed;
+                    let report = step(&fp, &tp, &mut state, &inp);
+                    if speeds[0] * dir <= -PARK_ENGAGE_SPEED {
+                        assert!(
+                            !report.driving,
+                            "old ladder powered rollback: entry={entry} tick={tick}"
+                        );
+                        assert_eq!(state.clutch, ClutchState::Out);
+                        assert!(
+                            report.next_speeds.iter().all(|v| v * dir < 0.0),
+                            "an over-capacity slide cannot return to rest"
+                        );
+                    }
+                    if tick == 0 && entry == 2.0 * PARK_ENGAGE_SPEED {
+                        assert!(
+                            report
+                                .next_speeds
+                                .iter()
+                                .all(|v| v * dir <= -PARK_ENGAGE_SPEED),
+                            "fixture must cross zero without sampling the rest band"
+                        );
+                        assert!(!state.park);
+                    }
                     assert_eq!(
                         state.reverse, reverse,
                         "sliding cannot complete a direction cut"
                     );
+                    assert!(!report.shifting);
+                    speeds = report.next_speeds;
                 }
-                sliding |= next * dir < -PARK_ENGAGE_SPEED;
-                min_speed = min_speed.min(next * dir);
-                speed = next;
+                assert!(speeds.iter().all(|v| v * dir < -PARK_ENGAGE_SPEED));
+                assert!(state.reversal_hold_ticks > 0);
+                println!(
+                    "MEASURED pending reversal gears={} reverse={reverse} entry={entry} final={} park={} clutch={:?}",
+                    tp.gears_fwd.len(),
+                    speeds[0],
+                    state.park,
+                    state.clutch
+                );
             }
-            assert!(sliding, "fixture must exceed the available brake hold");
-            println!(
-                "MEASURED over-capacity reversal: reverse={reverse} final={speed} min_along_ladder={min_speed} park={} clutch={:?}",
-                state.park, state.clutch
-            );
         }
     }
 }
 
-/// The direction-cut pause must retain a within-capacity park on every tick. Releasing it on
-/// the requested direction alone would let the old ladder's idle catch power the held vehicle.
+/// Steering without pedal cannot couple the old ladder against rollback when mean drift leaves
+/// neutral. A player whose pivot hold is overloaded relies on no powered catch returning it.
 #[test]
-fn a_direction_request_holds_rest_until_its_ladder_is_engaged() {
+fn steering_rollback_does_not_close_the_main_clutch() {
     for (fp, tp) in class_drivetrains() {
         for reverse in [false, true] {
             let dir = if reverse { -1.0 } else { 1.0 };
-            // Fixture: grade inside moving and static capacities, with a full opposite request.
-            let load = dir * tp.brake_capacity_n * 0.5;
+            // Fixture: start inside the neutral window on a load beyond the static hold.
+            let load = dir * 1.5 * tp.brake_capacity_n * tp.brake_static_factor;
+            let mut speeds = [-dir * 0.95 * driver_actuation().neutral_speed_m_s.value; 2];
             let mut state = TransmissionState {
                 reverse,
                 ..fresh(&tp)
             };
-            let mut speeds = [0.0; 2];
-            // The owner's reversal pause and paid shift window must both be exercised.
-            let pause = (driver_actuation().reversal_hold_s.value * TICK_HZ).ceil() as u8;
-            state.reversal_hold_ticks = pause;
-            let ticks = usize::from(pause) + usize::from(tp.shift_ticks.get());
-            for _ in 0..ticks {
-                let mut inp = input(-dir, 0.0, speeds, [load; 2]);
-                inp.sensed = driver_input(0.0, load * 2.0, -dir).sensed;
-                let report = step(&fp, &tp, &mut state, &inp);
-                speeds = report.next_speeds;
+            let mut left_neutral = false;
+            for _ in 0..TICK_HZ as usize * 5 {
+                let mean = (speeds[0] + speeds[1]) * 0.5;
+                let report = step(&fp, &tp, &mut state, &input(0.0, 1.0, speeds, [load; 2]));
                 assert_eq!(
-                    speeds, [0.0; 2],
-                    "a held direction cut cannot move the vehicle"
+                    state.clutch,
+                    ClutchState::Out,
+                    "rollback is not engine braking"
                 );
-                assert!(state.park);
+                assert!(!report.driving);
+                speeds = report.next_speeds;
+                let next = (speeds[0] + speeds[1]) * 0.5;
+                assert!(
+                    next * dir < mean * dir,
+                    "an overloaded unpowered mean keeps sliding"
+                );
+                left_neutral |= next.abs() >= driver_actuation().neutral_speed_m_s.value;
             }
-            assert_ne!(state.reverse, reverse, "rest must permit the requested cut");
+            assert!(left_neutral, "fixture must exercise drift beyond neutral");
         }
     }
 }

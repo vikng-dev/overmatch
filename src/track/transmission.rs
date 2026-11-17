@@ -1475,6 +1475,10 @@ pub(crate) fn brake_capacity_for_regime(
     }
 }
 
+fn requests_other_ladder(command: f32, reverse: bool) -> bool {
+    command.abs() >= DEAD && (command < 0.0) != reverse
+}
+
 /// A moving reversal refreshes the stopped countdown. Release cancels the countdown;
 /// only a complete at-rest hold permits one paid direction cut.
 fn swap_ladder_direction(
@@ -1484,8 +1488,7 @@ fn swap_ladder_direction(
     command: f32,
     brake: bool,
 ) {
-    let opposite = command.abs() >= DEAD && (command < 0.0) != st.reverse;
-    if !opposite || brake {
+    if !requests_other_ladder(command, st.reverse) || brake {
         st.reversal_hold_ticks = 0;
         return;
     }
@@ -1562,7 +1565,7 @@ fn driver(
         (1..=ladder.len() as u8).contains(&st.gear),
         "a direction swap selects first gear on its admitted ladder"
     );
-    let opposing = command * dir < -DEAD;
+    let opposing = requests_other_ladder(command, st.reverse);
     let against_motion = command.abs() >= DEAD
         && input
             .speeds
@@ -1640,8 +1643,7 @@ fn update_steer_detent(st: &mut TransmissionState, steer: f32) {
     };
 }
 
-/// At rest the lever is on. Drive on the engaged ladder releases it once moving in that
-/// direction; rollback during a direction request cannot release it before the ladder swaps.
+/// At rest the lever is on. Drive releases it once moving in the requested direction.
 /// Steering releases it for a neutral turn. Released sub-idle motion stops and parks.
 fn update_park_latch(
     st: &mut TransmissionState,
@@ -1663,10 +1665,7 @@ fn update_park_latch(
         st.park = false;
     } else if speed < PARK_ENGAGE_SPEED || (!requested && !steering && speed < stop_speed) {
         st.park = true;
-    } else if requested
-        && (command < 0.0) == st.reverse
-        && command * (inp.speeds[0] + inp.speeds[1]) > 0.0
-    {
+    } else if requested && command * (inp.speeds[0] + inp.speeds[1]) > 0.0 {
         st.park = false;
     }
 }
@@ -1685,6 +1684,8 @@ fn neutral_pivot(inp: &TransmissionInput, mean: f32) -> bool {
 
 /// The Driver holding it `open` (a shift window, or no gear chosen yet), a two-sided parked
 /// hold and neutral turns open the clutch; otherwise it engages as [`engagement`] states.
+/// With no propulsive pedal the Driver couples only motion along the engaged ladder for engine
+/// braking: rolling against it needs brakes and a stopped direction cut, not an idle-catch hold.
 fn update_clutch_state(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1697,7 +1698,8 @@ fn update_clutch_state(
     let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
     st.clutch = if open
         || (st.park && (brake || propulsive < DEAD))
-        || (propulsive < DEAD && (mean.abs() < PARK_ENGAGE_SPEED || neutral_pivot(inp, mean)))
+        || (propulsive < DEAD
+            && (shaft_omega <= 0.0 || mean.abs() < PARK_ENGAGE_SPEED || neutral_pivot(inp, mean)))
     {
         ClutchState::Out
     } else {
