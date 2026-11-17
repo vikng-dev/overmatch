@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["numpy"]
+# dependencies = []
 # ///
 """Scientific-integrity tests for the shot trace join."""
 
@@ -15,10 +15,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from analyze import analyze, load, verification_failures  # noqa: E402
+from analyze import TraceInputError, analyze, load, verification_failures  # noqa: E402
 
 
 def row(kind: str, tick: int, combatant: int, fire_tick: int, **extra) -> dict:
+    if kind == "fire":
+        extra.setdefault("smoke", False)
     if kind == "send":
         extra.setdefault("rcpt", 1)  # FIXTURE DATA: one recipient unless a case states another.
     if kind == "path_tx":
@@ -27,6 +29,13 @@ def row(kind: str, tick: int, combatant: int, fire_tick: int, **extra) -> dict:
     if kind == "path_rx":
         extra.setdefault("result", "Duplicate" if extra.get("dup") else "Inserted")
     return {"k": kind, "t": tick, "c": combatant, "w": 0, "ft": fire_tick, **extra}
+
+
+def received_own(tick: int, combatant: int, fire_tick: int) -> list[dict]:
+    return [{"k": "controlled", "t": tick, "c": combatant},
+            {"k": "capture_end", "t": tick + 10},
+            row("fire_rx", tick, combatant, fire_tick),
+            row("spawn", tick, combatant, fire_tick, src="obs")]
 
 
 class JoinIntegrityTests(unittest.TestCase):
@@ -62,11 +71,11 @@ class JoinIntegrityTests(unittest.TestCase):
 class StrictVerificationTests(unittest.TestCase):
     def test_own_damage_confirm_duplicate_receive_rows_reaches_one_marker(self) -> None:
         server = [
-            row("fire", 10, 100, 10, cal=0.088),
+            row("fire", 10, 100, 10, cal=0.088, smoke=True),
             row("dmg", 12, 100, 10, hp=5.0),
         ]
         client = [
-            row("spawn", 10, 100, 10, src="own"),
+            *received_own(10, 100, 10),
             row("dmg_rx", 13, 100, 10, own=True, dup=False, dt=12),
             row("dmg_rx", 14, 100, 10, own=True, dup=True, dt=12),
             row("marker", 13, 100, 10),
@@ -91,11 +100,11 @@ class StrictVerificationTests(unittest.TestCase):
 
     def test_strict_rejects_missing_duplicate_and_stray_shooter_markers(self) -> None:
         server = [
-            row("fire", 10, 100, 10, cal=0.088),
+            row("fire", 10, 100, 10, cal=0.088, smoke=True),
             row("dmg", 12, 100, 10, hp=5.0),
         ]
         client = [
-            row("spawn", 10, 100, 10, src="own"),
+            *received_own(10, 100, 10),
             row("dmg_rx", 13, 100, 10, own=True, dup=False, dt=12),
             row("marker", 13, 100, 10),
             row("marker", 14, 100, 10),
@@ -114,11 +123,11 @@ class StrictVerificationTests(unittest.TestCase):
 
     def test_strict_rejects_missing_shooter_marker(self) -> None:
         server = [
-            row("fire", 10, 100, 10, cal=0.088),
+            row("fire", 10, 100, 10, cal=0.088, smoke=True),
             row("dmg", 12, 100, 10, hp=5.0),
         ]
         client = [
-            row("spawn", 10, 100, 10, src="own"),
+            *received_own(10, 100, 10),
             row("dmg_rx", 13, 100, 10, own=True, dup=False, dt=12),
         ]
 
@@ -129,11 +138,11 @@ class StrictVerificationTests(unittest.TestCase):
 
     def test_main_gun_sanctioned_bounce_reaches_post_bounce_trail_station(self) -> None:
         server = [
-            row("fire", 10, 100, 10, cal=0.088),
+            row("fire", 10, 100, 10, cal=0.088, smoke=True),
             row("path_tx", 12, 100, 10, seq=0),
         ]
         client = [
-            row("spawn", 10, 100, 10, src="own"),
+            row("fire_rx", 13, 100, 10), row("spawn", 13, 100, 10),
             row("path_rx", 13, 100, 10, seq=0, dup=False, bt=12),
             row("path_done", 13, 100, 10, seq=0, res="bounce", held=1),
             row("trail", 13, 100, 10, seq=0, res="post_bounce_consumed"),
@@ -146,16 +155,16 @@ class StrictVerificationTests(unittest.TestCase):
 
     def test_strict_rejects_main_gun_trail_with_no_row_or_unrendered_result(self) -> None:
         server = [
-            row("fire", 10, 100, 10, cal=0.088),
+            row("fire", 10, 100, 10, cal=0.088, smoke=True),
             row("path_tx", 12, 100, 10, seq=0),
-            row("fire", 20, 100, 20, cal=0.088),
+            row("fire", 20, 100, 20, cal=0.088, smoke=True),
             row("path_tx", 22, 100, 20, seq=0),
         ]
         client = [
-            row("spawn", 10, 100, 10, src="own"),
+            row("fire_rx", 13, 100, 10), row("spawn", 13, 100, 10),
             row("path_rx", 13, 100, 10, seq=0, dup=False, bt=12),
             row("path_done", 13, 100, 10, seq=0, res="bounce", held=1),
-            row("spawn", 20, 100, 20, src="own"),
+            row("fire_rx", 23, 100, 20), row("spawn", 23, 100, 20),
             row("path_rx", 23, 100, 20, seq=0, dup=False, bt=22),
             row("path_done", 23, 100, 20, seq=0, res="bounce", held=1),
             row("trail", 23, 100, 20, seq=0, res="post_bounce_unrendered"),
@@ -166,8 +175,29 @@ class StrictVerificationTests(unittest.TestCase):
         self.assertEqual(result["trail"], {"no_row": 1, "unrendered": 1})
         self.assertEqual(
             verification_failures(result),
-            ["main_gun_trail_failures=2"],
+            ["smoke_trail_failures=2"],
         )
+
+    def test_completed_capture_requires_playback_of_received_paths(self):
+        for impact in ("bounce", "state"):
+            server = [row("fire", 10, 100, 10), row("path_tx", 12, 100, 10, seq=0, impact=impact)]
+            client = [row("fire_rx", 13, 100, 10), row("spawn", 13, 100, 10),
+                      row("path_rx", 13, 100, 10, seq=0), {"k": "capture_end", "t": 20}]
+            with self.subTest(impact=impact):
+                self.assertIn("pending_public_paths=1", verification_failures(analyze({}, client, {}, server)))
+                client.append(row("path_done", 15, 100, 10, seq=0))
+                self.assertEqual(verification_failures(analyze({}, client, {}, server)), [])
+
+    def test_smoke_choice_controls_ribbon_evidence_independently_of_calibre(self):
+        for smoke, caliber, failures in [(True, 0.008, ["smoke_trail_failures=1"]),
+                                         (False, 0.088, [])]:
+            server = [row("fire", 10, 100, 10, cal=caliber, smoke=smoke),
+                      row("path_tx", 12, 100, 10, seq=0)]
+            client = [row("fire_rx", 13, 100, 10), row("spawn", 13, 100, 10),
+                      row("path_rx", 13, 100, 10, seq=0),
+                      row("path_done", 15, 100, 10, seq=0)]
+            with self.subTest(smoke=smoke):
+                self.assertEqual(verification_failures(analyze({}, client, {}, server)), failures)
 
     def test_strict_reports_every_lifecycle_failure_class(self) -> None:
         server = [
@@ -202,261 +232,60 @@ class StrictVerificationTests(unittest.TestCase):
 
 
 class OwnFireIdentityTests(unittest.TestCase):
-    """The server fails closed on unattested input ticks (ADR-0022/0029), so a client's own
-    predicted fire may execute 1-3 ticks late (retimed), never execute (rejected), or appear
-    only on the server's own schedule (own echo). These are classified, never strict-fatal —
-    except an own echo whose fire_rx never arrived, which is a genuine delivery loss."""
+    """The game's damage model: every client presents server shots, including its own."""
 
-    def test_retimed_own_prediction_is_classified_not_lost_or_no_spawn(self) -> None:
-        # Client predicts its own round at ft=10; the server re-times it to ft=11. The echo of
-        # the server's fire arrives (fire_rx) and its spawn is rightly echo-dropped.
-        server = [row("fire", 11, 100, 11, cal=0.0079)]
+    def test_controlled_identity_scores_missing_private_receipts_without_local_fire(self):
+        # MG verification must detect a missing receipt even if the client received no private fact.
+        server = [row("fire", 10, 100, 10), row("dmg", 11, 100, 10)]
         client = [
-            row("spawn", 10, 100, 10, src="own"),
-            row("fire_rx", 19, 100, 11, dup=False, cu=8),
+            {"k": "controlled", "t": 1, "c": 100},
+            row("fire_rx", 12, 100, 10),
+            row("spawn", 13, 100, 10, src="obs"),
         ]
-
-        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
-
-        self.assertEqual(result["retimed_own_prediction"], 1)
-        self.assertEqual(result["retimed_delta_hist"], {1: 1})
-        self.assertEqual(result["rejected_own_prediction"], 0)
-        self.assertEqual(result["own_echo"], 0)
-        self.assertEqual(result["lost"], 0)
-        self.assertEqual(result["no_spawn"], 0)
-        self.assertEqual(verification_failures(result), [])
-
-    def test_rejected_own_prediction_is_classified_not_lost(self) -> None:
-        # Client predicts at ft=10; no server fire lands within 3 ticks — the attestation
-        # fail-closed path declined it. The server fires on its own schedule at ft=30 instead,
-        # which the client observes as a delivered own echo.
-        server = [row("fire", 30, 100, 30, cal=0.0079)]
-        client = [
-            row("spawn", 10, 100, 10, src="own"),
-            row("fire_rx", 38, 100, 30, dup=False, cu=8),
-        ]
-
-        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
-
-        self.assertEqual(result["rejected_own_prediction"], 1)
-        self.assertEqual(result["rejected_own_keys"], [(100, 0, 10)])
-        self.assertEqual(result["retimed_own_prediction"], 0)
-        self.assertEqual(result["own_echo"], 1)
-        self.assertEqual(result["own_echo_delivered"], 1)
-        self.assertEqual(result["lost"], 0)
-        self.assertEqual(verification_failures(result), [])
-
-    def test_own_echo_with_fire_rx_is_not_no_spawn_and_strict_passes(self) -> None:
-        # A server-scheduled own round with no matching client prediction: the fire_rx is the
-        # delivery proof and the missing spawn is the echo-drop working, not a defect.
-        server = [
-            row("fire", 10, 100, 10, cal=0.0079),
-            row("fire", 30, 100, 30, cal=0.0079),
-        ]
-        client = [
-            row("spawn", 10, 100, 10, src="own"),
-            row("fire_rx", 38, 100, 30, dup=False, cu=8),
-        ]
-
-        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
-
+        result = analyze({}, client, {}, server)
         self.assertEqual(result["own_shots"], 1)
-        self.assertEqual(result["own_echo"], 1)
-        self.assertEqual(result["own_echo_delivered"], 1)
-        self.assertEqual(result["own_echo_lost"], 0)
-        self.assertEqual(result["no_spawn"], 0)
-        self.assertEqual(verification_failures(result), [])
-
-    def test_own_echo_without_fire_rx_is_a_strict_fatal_loss(self) -> None:
-        # The echo at ft=30 never produced a fire_rx, and the client trace runs 70 ticks past
-        # it — that is a genuine delivery loss, not end-of-run truncation.
-        server = [
-            row("fire", 30, 100, 30, cal=0.0079),
-            row("fire", 100, 100, 100, cal=0.0079),
-        ]
-        client = [
-            row("spawn", 100, 100, 100, src="own"),
-        ]
-
-        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
-
-        self.assertEqual(result["own_echo"], 1)
-        self.assertEqual(result["own_echo_lost"], 1)
-        self.assertEqual(result["own_echo_lost_keys"], [(100, 0, 30)])
-        self.assertEqual(result["excluded_at_trace_end"], 0)
-        self.assertEqual(verification_failures(result), ["own_echo_lost=1"])
-
-    def test_retimed_pair_without_fire_rx_is_a_strict_fatal_loss(self) -> None:
-        # Proximity pairing explains the tick drift; it does not excuse the transport. The
-        # re-timed round at ft=11 never produced a fire_rx and the client trace runs 89 ticks
-        # past it — a genuine delivery loss, not end-of-run truncation.
-        server = [
-            row("fire", 11, 100, 11, cal=0.0079),
-            row("fire", 100, 100, 100, cal=0.0079),
-        ]
-        client = [
-            row("spawn", 10, 100, 10, src="own"),
-            row("spawn", 100, 100, 100, src="own"),
-        ]
-
-        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
-
-        self.assertEqual(result["retimed_own_prediction"], 1)
-        self.assertEqual(result["retimed_lost"], 1)
-        self.assertEqual(result["retimed_lost_keys"], [(100, 0, 11)])
-        self.assertEqual(result["excluded_at_trace_end"], 0)
-        self.assertEqual(verification_failures(result), ["retimed_lost=1"])
-
-    def test_own_echo_far_after_client_end_is_fatal_not_excluded(self) -> None:
-        # The exclusion bound is two-sided: a fire 20 ticks PAST the client trace's last row
-        # is outside the 16-tick window and stays a strict-fatal loss (a signed comparison
-        # would have excused it), while the 20-tick end skew is within the overlap guard.
-        server = [
-            row("fire", 100, 100, 100, cal=0.0079),
-            row("fire", 120, 100, 120, cal=0.0079),
-        ]
-        client = [
-            row("spawn", 100, 100, 100, src="own"),
-        ]
-
-        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
-
-        self.assertEqual(result["own_echo"], 1)
-        self.assertEqual(result["own_echo_lost"], 1)
-        self.assertEqual(result["excluded_at_trace_end"], 0)
-        self.assertEqual(verification_failures(result), ["own_echo_lost=1"])
-
-    def test_strict_refuses_a_client_trace_that_ends_early(self) -> None:
-        # The client capture stops 100 ticks before the server's: overlap is not established,
-        # so the verifier refuses the run loudly instead of classifying per-key verdicts
-        # against a shrunken client denominator.
-        server = [
-            row("fire", 100, 100, 100, cal=0.0079),
-            row("fire", 200, 100, 200, cal=0.0079),
-        ]
-        client = [
-            row("spawn", 100, 100, 100, src="own"),
-        ]
-
-        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
-
-        self.assertEqual(result["client_trace_end_gap_ticks"], 100)
-        failures = verification_failures(result)
-        self.assertIn("client_trace_ended_early_by_ticks=100", failures)
-        self.assertEqual(failures[0], "client_trace_ended_early_by_ticks=100")
-
-    def test_retimed_shot_damage_confirm_and_marker_are_authored_not_stray(self) -> None:
-        # A correctly re-timed round's damage confirm rides the AUTHORITATIVE server key
-        # (ft=11), not the client's predicted key (ft=10): its marker must count as authored,
-        # never as stray.
-        server = [
-            row("fire", 11, 100, 11, cal=0.088),
-            row("dmg", 13, 100, 11, hp=5.0),
-        ]
-        client = [
-            row("spawn", 10, 100, 10, src="own"),
-            row("fire_rx", 19, 100, 11, dup=False, cu=8),
-            row("dmg_rx", 20, 100, 11, own=True, dup=False, dt=13),
-            row("marker", 20, 100, 11),
-        ]
-
-        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
-
-        self.assertEqual(result["retimed_own_prediction"], 1)
-        self.assertEqual(
-            result["damage"],
-            {
-                "server": 1,
-                "authored_expected": 1,
-                "delivered": 1,
-                "marked": 1,
-                "missing_delivery": 0,
-                "missing_marker": 0,
-                "duplicate_markers": 0,
-                "stray_markers": 0,
-            },
-        )
-        self.assertEqual(verification_failures(result), [])
-
-    def test_own_echo_damage_confirm_and_marker_are_authored_not_stray(self) -> None:
-        # A server-scheduled own round that damages: the echo key carries the damage confirm
-        # and marker, which must count as authored even though the client never predicted it.
-        server = [
-            row("fire", 10, 100, 10, cal=0.088),
-            row("fire", 30, 100, 30, cal=0.088),
-            row("dmg", 32, 100, 30, hp=5.0),
-        ]
-        client = [
-            row("spawn", 10, 100, 10, src="own"),
-            row("fire_rx", 38, 100, 30, dup=False, cu=8),
-            row("dmg_rx", 40, 100, 30, own=True, dup=False, dt=32),
-            row("marker", 40, 100, 30),
-        ]
-
-        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
-
-        self.assertEqual(result["own_echo"], 1)
-        self.assertEqual(result["own_echo_delivered"], 1)
         self.assertEqual(result["damage"]["authored_expected"], 1)
-        self.assertEqual(result["damage"]["marked"], 1)
-        self.assertEqual(result["damage"]["stray_markers"], 0)
-        self.assertEqual(verification_failures(result), [])
+        self.assertEqual(verification_failures(result), [
+            "incomplete_capture=1", "missing_shooter_damage_confirms=1", "missing_shooter_markers=1"])
 
-    def test_own_echo_at_trace_end_is_excluded_not_fatal(self) -> None:
-        # The server fired after the client capture's last recorded row: delivery was
-        # unobservable, so the key is excluded_at_trace_end rather than scored as lost.
-        server = [
-            row("fire", 10, 100, 10, cal=0.0079),
-            row("fire", 20, 100, 20, cal=0.0079),
-        ]
-        client = [
-            row("spawn", 10, 100, 10, src="own"),
-        ]
+    def test_mg_capture_refuses_empty_damage_and_missing_completion_evidence(self):
+        # An armor runner must not certify a run that only exercised ground contacts.
+        result = analyze({}, [{"k": "controlled", "t": 1, "c": 100}], {}, [])
+        self.assertEqual(verification_failures(result),
+                         ["incomplete_capture=1", "no_shooter_damage=1"])
 
-        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
+    def test_declared_shooter_cannot_pass_without_controlled_identity(self):
+        result = analyze({}, [{"k": "capture_end", "t": 10, "shooter": True}], {}, [])
+        self.assertEqual(verification_failures(result),
+                         ["missing_controlled_identity=1", "no_shooter_damage=1"])
 
-        self.assertEqual(result["own_echo"], 1)
-        self.assertEqual(result["own_echo_lost"], 0)
-        self.assertEqual(result["excluded_at_trace_end"], 1)
-        self.assertEqual(verification_failures(result), [])
+    def test_own_and_remote_fires_require_delivery_and_exactly_one_spawn_even_at_end(self):
+        # No prediction-era echo exemption may hide a missing spawn or a final lost shot.
+        server = [row("fire", 10, 100, 10), row("fire", 10, 200, 10)]
+        client = [{"k": "controlled", "t": 1, "c": 100}, row("fire_rx", 12, 100, 10)]
+        result = analyze({}, client, {}, server)
+        self.assertEqual(verification_failures(result), ["lost_shots=1", "no_spawn_shots=1",
+                                                               "incomplete_capture=1", "no_shooter_damage=1"])
 
-    def test_cross_tank_lost_fire_stays_strict_fatal(self) -> None:
-        # Another tank's fire never arriving is unchanged: strict exactly-once, no proximity
-        # re-join, no trace-end exclusion.
-        server = [
-            row("fire", 10, 100, 10, cal=0.0079),
-            row("fire", 10, 200, 10, cal=0.0079),
-        ]
-        client = [
-            row("spawn", 10, 100, 10, src="own"),
-        ]
+    def test_strict_refuses_a_client_trace_that_ends_early(self):
+        result = analyze({}, [{"k": "capture_end", "t": 100}], {},
+                         [row("fire", 200, 100, 200)])
+        self.assertIn("client_trace_ended_early_by_ticks=100", verification_failures(result))
 
-        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
+    def test_quiet_observation_tail_is_capture_coverage_not_a_lost_client(self):
+        server = [row("fire", 10, 100, 10), {"k": "reliable_outbox", "t": 90}]
+        client = [row("fire_rx", 12, 100, 10), row("spawn", 13, 100, 10, src="obs"),
+                  {"k": "capture_end", "t": 100}]
+        self.assertEqual(verification_failures(analyze({}, client, {}, server)), [])
 
-        self.assertEqual(result["expected"], 1)
-        self.assertEqual(result["lost"], 1)
-        self.assertEqual(result["retimed_own_prediction"], 0)
-        self.assertEqual(result["own_echo"], 0)
-        self.assertEqual(verification_failures(result), ["lost_shots=1"])
-
-
-    def test_fire_with_no_connected_recipient_is_unaddressed_not_lost(self) -> None:
-        # A fire on a tick whose transport row names no public recipient (no client connected
-        # yet) could never reach this client; the same fire on a tick WITH a recipient but no
-        # send row stays a strict loss.
-        server = [
-            row("fire", 1, 100, 1, cal=0.0079),
-            {"k": "transport", "t": 1, "public_recipient_count": 0},
-            row("fire", 10, 100, 10, cal=0.0079),
-            {"k": "transport", "t": 10, "public_recipient_count": 1},
-        ]
-        client = [row("spawn", 12, 300, 12, src="own")]
-
-        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
-
+    def test_fire_with_no_connected_recipient_is_unaddressed_not_lost(self):
+        server = [row("fire", 1, 100, 1),
+                  {"k": "transport", "t": 1, "public_recipient_count": 0},
+                  row("fire", 10, 100, 10),
+                  {"k": "transport", "t": 10, "public_recipient_count": 1}]
+        result = analyze({}, [{"k": "capture_end", "t": 12}], {}, server)
         self.assertEqual(result["unaddressed"], 1)
         self.assertEqual(result["expected"], 1)
-        self.assertEqual(result["lost"], 1)
         self.assertEqual(verification_failures(result), ["lost_shots=1"])
 
 
@@ -623,6 +452,25 @@ class TransportCopyTests(unittest.TestCase):
 
 
 class TraceInputTests(unittest.TestCase):
+    def test_conflicting_controlled_ids_refuse_with_file_and_identities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "client.jsonl"
+            path.write_text('{"k":"controlled","t":1,"c":7}\n'
+                            '{"k":"controlled","t":2,"c":8}\n')
+            with self.assertRaisesRegex(TraceInputError, r"client.jsonl:2:.*controlled.*7.*8.*recapture"):
+                load(path)
+
+    def test_missing_shot_identity_refuses_instead_of_shrinking_denominator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.jsonl"
+            for field in ("t", "c", "w", "ft", "smoke"):
+                fire = row("fire", 10, 100, 10, smoke=False)
+                del fire[field]
+                path.write_text(json.dumps(fire) + "\n")
+                with self.subTest(field=field), self.assertRaisesRegex(
+                        TraceInputError, rf"server.jsonl:1:.*fire.*{field}.*recapture"):
+                    load(path)
+
     def test_only_the_final_row_may_be_torn(self):
         # The game's damage-model report must not certify a stream with missing middle evidence.
         with tempfile.TemporaryDirectory() as directory:
@@ -638,9 +486,73 @@ class TraceInputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "trace.jsonl"
             for kind, field in [("send", "rcpt"), ("transport", "public_recipient_count")]:
-                path.write_text(json.dumps({"k": kind}) + "\n")
-                with self.assertRaisesRegex(ValueError, field):
+                for value in (None, -1, True, 1.5, "1"):
+                    item = row(kind, 10, 100, 10, **{field: value})
+                    if value is None:
+                        del item[field]
+                    path.write_text(json.dumps(item) + "\n")
+                    with self.subTest(kind=kind, value=value), self.assertRaisesRegex(
+                            TraceInputError, rf"trace.jsonl:1:.*{kind}\.{field}.*recapture"):
+                        load(path)
+
+    def test_own_damage_requires_a_checked_tick_before_lead_accounting(self):
+        # The game's damage-model report reads dt only for own receipts, duplicates included at admission.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "client.jsonl"
+            for value in (None, -1, True, 1.5, "1"):
+                item = row("dmg_rx", 12, 100, 10, own=True, dt=value)
+                if value is None:
+                    del item["dt"]
+                path.write_text(json.dumps(item) + "\n")
+                with self.subTest(value=value), self.assertRaisesRegex(
+                        TraceInputError, r"client.jsonl:1:.*dmg_rx\.dt.*recapture"):
                     load(path)
+            item["dt"] = 0
+            path.write_text(json.dumps(item) + "\n")
+            self.assertEqual(load(path)[1], [item])
+            del item["dt"]
+            item["own"] = False
+            path.write_text(json.dumps(item) + "\n")
+            self.assertEqual(load(path)[1], [item])
+
+    def test_bounce_requires_a_checked_ordinal_before_ribbon_accounting(self):
+        # The game's damage-model smoke report must join each bounce to its ribbon evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.jsonl"
+            fire = row("fire", 10, 100, 10, smoke=True)
+            for value in (None, -1, True, 1.5, "1"):
+                item = row("path_tx", 12, 100, 10, seq=0, ordinal=value)
+                if value is None:
+                    del item["ordinal"]
+                path.write_text(json.dumps(fire) + "\n" + json.dumps(item) + "\n")
+                with self.subTest(value=value), self.assertRaisesRegex(
+                        TraceInputError, r"server.jsonl:2:.*path_tx\.ordinal.*recapture"):
+                    load(path)
+            item["ordinal"] = 0
+            path.write_text(json.dumps(fire) + "\n" + json.dumps(item) + "\n")
+            self.assertEqual(analyze({}, [], *load(path))["trail"], {"no_row": 1})
+
+    def test_path_impact_cannot_silently_skip_smoke_verification(self):
+        # The game's damage-model report must distinguish a checked non-bounce from missing evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.jsonl"
+            fire = row("fire", 10, 100, 10, smoke=True)
+            for value in (None, "unknown", 1, [], {}):
+                item = row("path_tx", 12, 100, 10, seq=0, impact=value)
+                if value is None:
+                    del item["impact"]
+                path.write_text(json.dumps(fire) + "\n" + json.dumps(item) + "\n")
+                with self.subTest(value=value), self.assertRaisesRegex(
+                        TraceInputError, r"server.jsonl:2:.*path_tx\.impact.*recapture"):
+                    load(path)
+            for impact in ("bounce", "through", "stopped", "ground", "state"):
+                item = row("path_tx", 12, 100, 10, seq=0, impact=impact)
+                if impact != "bounce":
+                    del item["ordinal"]
+                path.write_text(json.dumps(fire) + "\n" + json.dumps(item) + "\n")
+                with self.subTest(impact=impact):
+                    result = analyze({}, [], *load(path))
+                    self.assertEqual(result["trail"], {"no_row": 1} if impact == "bounce" else {})
 
 
 if __name__ == "__main__":

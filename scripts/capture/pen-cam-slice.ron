@@ -3,7 +3,7 @@
 // plate cut draws pen_cam_slice.wgsl; UI must remain enabled because the corner is an image node.
 // From the checkout root, with an empty config directory, hidden and silent under the build lock:
 //
-//   scripts/build-lock env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 \
+//   scripts/build-lock env OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden \
 //     OVERMATCH_CONFIG_DIR=/tmp/overmatch-slice-empty-config \
 //     OVERMATCH_CAPTURE=scripts/capture/pen-cam-slice.ron target/debug/overmatch --offline
 //

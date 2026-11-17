@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["numpy"]
+# dependencies = []
 # ///
 """The game's damage model: join fire, public-path playback, damage receipts and trail evidence.
 
@@ -15,19 +15,30 @@ import argparse
 import json
 import sys
 from collections import defaultdict
+from enum import StrEnum
 from pathlib import Path
 
-import numpy as np
+# Resolution: allow half a second at the shipped 64 Hz for independently exiting clients and
+# the runner's server shutdown. Delivery and playback checks never exclude shots in this overlap.
+TRACE_END_MAX_SKEW_TICKS = 32
 
-# DERIVED from `ballistics::TRACER_MAX_CALIBER`: at/above this, the shell owns the smoke ribbon
-# whose post-bounce consumption rows are under analysis.
-MAIN_GUN_MIN_CALIBER = 0.02
-# End-of-trace exclusion window: a server fire within this many ticks of the client trace's
-# last recorded row (on either side) cannot fairly be scored as lost — the capture stopped
-# before catch-up delivery could land. ASSUMED diagnostic tail allowance: 16 ticks.
-# Twice this window is also the
-# maximum client/server trace-end skew the strict verifier accepts before refusing the run.
-TRACE_END_WINDOW_TICKS = 16
+
+class TraceInputError(ValueError):
+    """Outside trace input refused before any lifecycle accounting."""
+
+
+class PathImpact(StrEnum):
+    BOUNCE = "bounce"
+    THROUGH = "through"
+    STOPPED = "stopped"
+    GROUND = "ground"
+    STATE = "state"
+
+
+SHOT_KINDS = frozenset((
+    "fire", "dmg", "send", "path_tx", "kf", "term", "fire_rx", "path_rx", "path_done",
+    "spawn", "end", "dmg_rx", "marker", "trail", "tank_strike", "cf",
+))
 
 
 def load(path: Path) -> tuple[dict, list[dict]]:
@@ -35,6 +46,7 @@ def load(path: Path) -> tuple[dict, list[dict]]:
     a hard-killed process can lose its unflushed remainder (src/trace.rs `JsonlSink`)."""
     meta: dict = {}
     rows: list[dict] = []
+    controlled = None
     with path.open() as f:
         for number, line in enumerate(f, 1):
             if not line.strip():
@@ -43,14 +55,48 @@ def load(path: Path) -> tuple[dict, list[dict]]:
                 row = json.loads(line)
             except json.JSONDecodeError as error:
                 if any(rest.strip() for rest in f):
-                    raise ValueError(f"{path}:{number}: malformed row before the tail") from error
+                    raise TraceInputError(f"{path}:{number}: malformed row before the tail") from error
                 break  # A killed producer may leave only its final row torn.
             if not isinstance(row, dict):
-                raise ValueError(f"{path}:{number}: a trace row must be an object")
-            if row.get("k") in ("send", "transport"):
-                field = "rcpt" if row["k"] == "send" else "public_recipient_count"
+                raise TraceInputError(f"{path}:{number}: a trace row must be an object")
+            kind = row.get("k")
+            if not isinstance(kind, str):
+                raise TraceInputError(f"{path}:{number}: missing row kind k; recapture with SPIKE_SHOT_TRACE")
+            required = ("t", "c", "w", "ft") if kind in SHOT_KINDS else (() if kind == "meta" else ("t",))
+            if kind == "controlled":
+                required += ("c",)
+            if kind in ("path_tx", "path_rx", "path_done"):
+                required += ("seq",)
+            if kind in ("send", "transport"):
+                required += ("rcpt" if kind == "send" else "public_recipient_count",)
+            if kind == "dmg_rx" and row.get("own"):
+                required += ("dt",)
+            if kind == "path_tx":
+                try:
+                    row["impact"] = PathImpact(row.get("impact"))
+                except ValueError as error:
+                    raise TraceInputError(
+                        f"{path}:{number}: path_tx.impact must be bounce, through, stopped, ground or state; "
+                        "recapture with SPIKE_SHOT_TRACE using the current binary") from error
+                if row["impact"] == PathImpact.BOUNCE:
+                    required += ("ordinal",)
+            for field in required:
                 if type(row.get(field)) is not int or row[field] < 0:
-                    raise ValueError(f"{path}:{number}: {field} must be a nonnegative integer")
+                    raise TraceInputError(
+                        f"{path}:{number}: {kind}.{field} must be a nonnegative integer; "
+                        "recapture with SPIKE_SHOT_TRACE using the current binary")
+            bool_fields = {"fire": ("smoke",), "tank_strike": ("armour",),
+                           "capture_end": ("shooter",)}.get(kind, ())
+            for field in bool_fields:
+                if type(row.get(field)) is not bool:
+                    raise TraceInputError(
+                        f"{path}:{number}: {kind}.{field} must be a boolean; recapture with the current binary")
+            if kind == "controlled":
+                if controlled is not None and controlled != row["c"]:
+                    raise TraceInputError(
+                        f"{path}:{number}: conflicting controlled identities {controlled} and {row['c']}; "
+                        "recapture one controlled combatant per client trace")
+                controlled = row["c"]
             if row.get("k") == "meta":
                 meta = row
             else:
@@ -67,24 +113,6 @@ def tick_diff(now: int, then: int) -> int:
     """Lightyear-style signed wrapping tick difference (`Tick - Tick -> i32`)."""
     delta = (int(now) - int(then)) & 0xFFFF_FFFF
     return delta if delta <= 0x7FFF_FFFF else delta - 0x1_0000_0000
-
-
-def pct(values, q: float) -> float:
-    a = np.asarray(values, dtype=float)
-    return float(np.percentile(a, q)) if len(a) else float("nan")
-
-
-def fmt_ticks(values, hz: float) -> str:
-    if not len(values):
-        return "      (none)"
-    a = np.asarray(values, dtype=float)
-    ms = 1000.0 / hz
-    return (
-        f"  n={len(a):<6d} p50={pct(a, 50):5.1f}t  p95={pct(a, 95):5.1f}t  "
-        f"p99={pct(a, 99):5.1f}t  max={a.max():5.0f}t"
-        f"   ({pct(a, 50) * ms:5.1f} / {pct(a, 95) * ms:5.1f} / "
-        f"{pct(a, 99) * ms:5.1f} / {a.max() * ms:5.1f} ms)"
-    )
 
 
 def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> dict:
@@ -150,127 +178,32 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
         if value is not None:
             transport[field] = value
 
-    # --- the client's OWN shots vs the shots it OBSERVES ----------------------------------
-    # The shooter never receives a `fire_rx` for its own round (`receive_fire_events` drops the
-    # echo of any tank it simulates locally), so own shots must be excluded from the delivery
-    # accounting or every one of them reads as a lost fire. A `spawn src="own"` row is exactly
-    # that marker.
-    own = {k for k, kinds in client.items() if any(s.get("src") == "own" for s in kinds.get("spawn", []))}
-    fired = set(server.keys()) & {k for k, kinds in server.items() if kinds.get("fire")}
+    # Own fire uses the same server identity and presentation path as remote fire (ADR-0037).
+    # Control is recorded at the input edge, independently of whether any receipt arrives.
+    own_ids = {r["c"] for r in crows if r["k"] == "controlled"}
+    c_own = next(iter(own_ids), None)
+    fired = {k for k, kinds in server.items() if kinds.get("fire")}
+    own_identity = {k for k in fired if k[0] == c_own}
 
-    # The client's own tank id: the combatant carrying `spawn src="own"` rows. A single client
-    # trace records exactly one locally-simulated shooter, so more than one id is a join defect.
-    own_ids = {k[0] for k in own}
-    assert len(own_ids) <= 1, f"multiple own-tank ids in one client trace: {sorted(own_ids)}"
-    c_own = next(iter(own_ids)) if own_ids else None
-
-    # --- own-tank fire identity under input attestation (ADR-0022/0029) -------------------
-    # The server fails closed on unattested input ticks, so the client's own predicted fire is
-    # NOT guaranteed to execute at its predicted tick: under jitter the server re-times it 1-3
-    # ticks later, or rejects it outright and fires on its own later schedule. Tick-exact
-    # identity binds authoritative facts, but the client's own predicted and executed fire
-    # streams must be re-joined by tick proximity, not equality. Cross-tank fires (the client
-    # never predicted them) keep strict tick-exact semantics below.
-    own_matched = own & fired
-    client_only_own = sorted(own - fired)
-    server_only_own = sorted(k for k in fired - own if k[0] == c_own)
-
-    # a. retimed_own_prediction: greedy 1:1 pairing per (c, w) stream in tick order — a
-    #    server-only fire at U consumes the earliest still-unpaired client-only fire at T with
-    #    1 <= U - T <= 3 (the measured attestation re-timing window).
-    RETIME_MAX_TICKS = 3
-    retime_pool: dict[tuple[int, int], list[tuple[int, int, int]]] = defaultdict(list)
-    for k in client_only_own:
-        retime_pool[(k[0], k[1])].append(k)
-    retimed_pairs: list[tuple[tuple[int, int, int], tuple[int, int, int]]] = []
-    for sk in server_only_own:
-        pool = retime_pool[(sk[0], sk[1])]
-        match = next(
-            (ck for ck in pool if 1 <= tick_diff(sk[2], ck[2]) <= RETIME_MAX_TICKS), None
-        )
-        if match is not None:
-            pool.remove(match)  # a pairing consumes both keys
-            retimed_pairs.append((match, sk))
-    retimed_server_keys = {sk for _ck, sk in retimed_pairs}
-    retimed_deltas = [tick_diff(sk[2], ck[2]) for ck, sk in retimed_pairs]
-
-    # b. rejected_own_prediction: client-only own keys left unpaired — the client predicted,
-    #    the server declined the unattested tick (fail-closed) and never executed that round.
-    rejected_own = sorted(k for pool in retime_pool.values() for k in pool)
-
-    # c. own_echo: server-only own-tank keys left unpaired — the server's own re-scheduled
-    #    rounds, observed by this client as fire_rx with the spawn correctly suppressed by the
-    #    echo-drop.
-    own_echo = [k for k in server_only_own if k not in retimed_server_keys]
-
-    # DELIVERY for a re-timed or re-scheduled own round still means a fire_rx row: proximity
-    # pairing explains WHY the key drifted off the prediction, it does not excuse the
-    # transport. A missing fire_rx on either is a genuine loss and stays strict-fatal —
-    # unless the server fired so close to the end of the client capture that delivery could
-    # not have been recorded (see the exclusion window below).
-    retimed_missing_rx = [sk for _ck, sk in retimed_pairs if not client[sk].get("fire_rx")]
-    own_echo_delivered = [k for k in own_echo if client[k].get("fire_rx")]
-    own_echo_missing = [k for k in own_echo if not client[k].get("fire_rx")]
-
-    # The exclusion bound is TWO-SIDED (|Δ| <= window): a signed test would exclude any fire
-    # arbitrarily far past the client trace's end, letting a stalled client capture excuse
-    # every later loss.
     last_client_tick = max((r["t"] for r in crows if "t" in r), default=None)
     last_server_tick = max((r["t"] for r in srows if "t" in r), default=None)
-
-    def at_trace_end(key: tuple[int, int, int]) -> bool:
-        return (
-            last_client_tick is not None
-            and abs(tick_diff(last_client_tick, key[2])) <= TRACE_END_WINDOW_TICKS
-        )
-
-    excluded_at_trace_end = sorted(
-        k for k in own_echo_missing + retimed_missing_rx if at_trace_end(k)
-    )
-    own_echo_lost = [k for k in own_echo_missing if k not in excluded_at_trace_end]
-    retimed_lost = [k for k in retimed_missing_rx if k not in excluded_at_trace_end]
-
-    # Overlap guard: every per-key verdict above presumes the two captures cover the same
-    # span. If the client trace ends more than two exclusion windows before the server trace,
-    # overlap is NOT established and the strict verifier refuses the run outright (fail loud,
-    # never classify against a shrunken client denominator).
     client_trace_end_gap = (
         tick_diff(last_server_tick, last_client_tick)
-        if last_server_tick is not None and last_client_tick is not None
-        else 0
+        if last_server_tick is not None and last_client_tick is not None else 0
     )
-
-    # d. Cross-tank fires: semantics completely unchanged — strict tick-exact exactly-once.
-    #    A fire on a tick whose transport row records no public recipient at all (no client
-    #    connected yet — e.g. a bot firing at server start) had no one to reach: it is not
-    #    expected. A fire on a tick WITH recipients stays strict even if no send row exists,
-    #    so a fact the server failed to send is still a loss.
     unaddressed_ticks = {
-        r["t"]
-        for r in srows
-        if r.get("k") == "transport" and r["public_recipient_count"] == 0
+        r["t"] for r in srows
+        if r["k"] == "transport" and r["public_recipient_count"] == 0
     }
     unaddressed = {
-        k
-        for k in fired - own
-        if k[0] != c_own and any(f["t"] in unaddressed_ticks for f in server[k]["fire"])
+        k for k in fired
+        if any(f["t"] in unaddressed_ticks for f in server[k]["fire"])
     }
-    observed_expected = {k for k in fired - own if k[0] != c_own} - unaddressed
-
-    # Damage/marker accounting joins on the AUTHORITATIVE key: a correctly re-timed or
-    # re-scheduled own round's damage confirm rides the server's fire key, not the client's
-    # predicted one. Resolve own identity to the tick-exact matches plus the retimed and echo
-    # server keys, or a correct marker on a re-timed shot reads as stray.
-    own_identity = own | retimed_server_keys | set(own_echo)
+    observed_expected = fired - unaddressed
 
     # --- delivery / dedup -----------------------------------------------------------------
-    delivered, lost = 0, []
-    for key in sorted(observed_expected):
-        rx = client[key].get("fire_rx", [])
-        if not rx:
-            lost.append(key)
-            continue
-        delivered += 1
+    lost = [key for key in sorted(observed_expected) if not client[key].get("fire_rx")]
+    delivered = len(observed_expected) - len(lost)
     # Dedup rejections are counted trace-wide: the visual copies of an own-tank echo are just
     # as much real dedup traffic as those of a cross-tank fire.
     dup_rows = sum(1 for r in crows if r["k"] == "fire_rx" and r.get("dup"))
@@ -284,8 +217,7 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
     ]
 
     # --- fire catch-up: (P − S) + one-way latency, per observed FireEvent -----------------
-    # The direct measurement of the "~10-tick catch-up" that ADR-0032 records as DERIVED, never
-    # measured. Own shots carry cu=0 by construction, so only observed fire matters here.
+    # Receive age is the local timeline minus the authoritative fire tick, for every shooter.
     fire_cu = [r["cu"] for r in crows if r["k"] == "fire_rx" and not r.get("dup") and "cu" in r]
 
     dmg_lead = [
@@ -341,8 +273,8 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
                 paths["missing_delivery"] += 1
             if any(r.get("seq") == seq for r in client.get(key, {}).get("path_done", [])):
                 paths["completed"] += 1
-            elif received and sent.get("impact") != "state":
-                # A still-future effect at the trace boundary is observable as pending.
+            elif received:
+                # A still-future path at the trace boundary is observable as pending.
                 paths["pending"] += 1
 
     # --- how each observed shell's picture ENDED ------------------------------------------
@@ -375,14 +307,13 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
         "stray_markers": stray_markers,
     }
 
-    # --- renderer boundary: sanctioned main-gun bounce -> captured post-bounce ribbon station -----
+    # Authored flight smoke, independent of calibre, requires captured ribbon consumption.
     trail = defaultdict(int)
     for key, kinds in server.items():
-        is_main_gun = any(float(fire.get("cal", 0.0)) >= MAIN_GUN_MIN_CALIBER for fire in kinds.get("fire", []))
-        if not is_main_gun:
+        if not any(fire["smoke"] for fire in kinds.get("fire", [])):
             continue
         for kf in kinds.get("path_tx", []):
-            if kf.get("impact") != "bounce":
+            if kf["impact"] != PathImpact.BOUNCE:
                 continue
             seq = kf["ordinal"]
             rows = [r for r in client.get(key, {}).get("trail", []) if r.get("seq") == seq]
@@ -402,23 +333,13 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
     return {
         "hz": hz,
         "server_fires": len(fired),
-        "own_shots": len(own_matched),
-        "own_predicted": len(own),
-        # Own-tank identity drift under fail-closed input attestation (ADR-0022/0029):
-        "retimed_own_prediction": len(retimed_pairs),
-        "retimed_delta_hist": {
-            int(d): retimed_deltas.count(d) for d in sorted(set(retimed_deltas))
-        },
-        "rejected_own_prediction": len(rejected_own),
-        "rejected_own_keys": rejected_own,
-        "own_echo": len(own_echo),
-        "own_echo_delivered": len(own_echo_delivered),
-        "own_echo_lost": len(own_echo_lost),
-        "own_echo_lost_keys": own_echo_lost,
-        "retimed_lost": len(retimed_lost),
-        "retimed_lost_keys": retimed_lost,
-        "excluded_at_trace_end": len(excluded_at_trace_end),
-        "trace_end_window_ticks": TRACE_END_WINDOW_TICKS,
+        "own_shots": len(own_identity),
+        "shooter_armour_contacts": sum(
+            bool(r["armour"]) for key in own_identity for r in server[key].get("tank_strike", [])),
+        "controlled_combatant": c_own,
+        "capture_completed": any(r["k"] == "capture_end" for r in crows),
+        "declared_shooter": c_own is not None or any(
+            r["k"] == "capture_end" and r.get("shooter") for r in crows),
         "client_trace_end_gap_ticks": client_trace_end_gap,
         "expected": len(observed_expected),
         "unaddressed": len(unaddressed),
@@ -447,19 +368,10 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
 
 
 def verification_failures(summary: dict) -> list[str]:
-    """Return machine-readable violations for facts that a trace actually emitted.
+    """Check every authoritative fire, path and own private receipt, without tail exclusions.
 
-    Empty categories are valid: this verifier checks evidence from one scenario, not a required
-    scenario matrix. Receive duplicates are expected visual-copy traffic; only duplicate shell spawns
-    and duplicate shooter-marker boundaries violate the exactly-once contracts.
-
-    Fatal: cross-tank lost/no_spawn, multi_spawn, and any own-tank round — echoed OR
-    proximity-paired as retimed — with no fire_rx (a genuine delivery loss). NOT fatal,
-    reported only: delivered retimed and rejected own predictions — those are the fail-closed
-    input-attestation design (ADR-0022/0029) working as specified — and keys excluded at the
-    end of the trace, where delivery could not have been captured. A client trace that ends
-    more than two exclusion windows before the server's is refused outright: without capture
-    overlap none of the per-key verdicts are trustworthy.
+    A declared shooter requires completion and nonempty private-damage evidence, so a missed
+    target cannot pass the MG runner. Other captures may have empty categories.
     """
     failures: list[str] = []
 
@@ -468,18 +380,23 @@ def verification_failures(summary: dict) -> list[str]:
             failures.append(f"{name}={count}")
 
     gap = int(summary["client_trace_end_gap_ticks"])
-    if gap > 2 * TRACE_END_WINDOW_TICKS:
+    if gap > TRACE_END_MAX_SKEW_TICKS:
         add("client_trace_ended_early_by_ticks", gap)
     add("lost_shots", summary["lost"])
-    add("own_echo_lost", summary["own_echo_lost"])
-    add("retimed_lost", summary["retimed_lost"])
     add("duplicate_shots", summary["multi_spawn"])
     add("no_spawn_shots", summary["no_spawn"])
 
     paths = summary["paths"]
     add("public_path_failures", paths.get("missing_delivery", 0) + paths.get("refused", 0))
 
+    if summary["capture_completed"]:
+        add("pending_public_paths", paths.get("pending", 0))
+
     damage = summary["damage"]
+    if summary["declared_shooter"]:
+        add("missing_controlled_identity", int(summary["controlled_combatant"] is None))
+        add("incomplete_capture", int(not summary["capture_completed"]))
+        add("no_shooter_damage", int(damage["authored_expected"] == 0))
     add("missing_shooter_damage_confirms", damage["missing_delivery"])
     add("missing_shooter_markers", damage["missing_marker"])
     add("duplicate_shooter_markers", damage["duplicate_markers"])
@@ -487,7 +404,7 @@ def verification_failures(summary: dict) -> list[str]:
 
     trail = summary["trail"]
     add(
-        "main_gun_trail_failures",
+        "smoke_trail_failures",
         sum(trail.get(outcome, 0) for outcome in ("unrendered", "ribbon_missing", "no_row")),
     )
     return failures
@@ -556,19 +473,19 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    cmeta, crows = load(Path(args.client))
-    smeta, srows = load(Path(args.server))
+    try:
+        cmeta, crows = load(Path(args.client))
+        smeta, srows = load(Path(args.server))
+    except (TraceInputError, OSError) as error:
+        print(f"trace refused: {error}", file=sys.stderr)
+        return 2
     if not crows and not srows:
         print("no rows in either trace — was SPIKE_SHOT_TRACE armed?", file=sys.stderr)
         return 1
 
     a = analyze(cmeta, crows, smeta, srows)
     failures = verification_failures(a)
-    if args.json:
-        payload = {k: v for k, v in a.items() if k not in ("server", "client", "expected_keys")}
-        print(json.dumps(payload, indent=2, default=float))
-    else:
-        report(a, args.samples)
+    report(a, 0 if args.json else args.samples)
     if args.strict and failures:
         print("strict verification failed: " + ", ".join(failures), file=sys.stderr)
         return 1

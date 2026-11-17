@@ -35,17 +35,25 @@ out = Path(os.environ['OUT'])
 print('listening', flush=True)
 while not (out / 'first.pid').exists(): time.sleep(0.01)
 print('client connected', flush=True)
-while True: time.sleep(1)
+while True:
+    if os.environ['FAKE_FAILURE'] in ('server-failure', 'server-clean-exit') and (out / 'second.done').exists():
+        raise SystemExit(17 if os.environ['FAKE_FAILURE'] == 'server-failure' else 0)
+    time.sleep(0.01)
 ''')
             client = binary / "overmatch"
-            client.write_text(f'''#!{sys.executable}
+            client.write_text(fr'''#!{sys.executable}
 import os
 from pathlib import Path
 import time
 assert os.environ['OVERMATCH_UNATTENDED'] == '1'
 assert os.environ['OVERMATCH_WINDOW'] == 'hidden'
 out = Path(os.environ['OUT'])
-first = Path(os.environ['OVERMATCH_HARNESS']).name in ('target.harness.ron', 'a.harness.ron')
+harness = Path(os.environ['OVERMATCH_HARNESS'])
+first = harness.name in ('target.harness.ron', 'a.harness.ron')
+if harness.name == 'shooter.harness.ron':
+    import re
+    fields = dict(re.findall(r'(\w+): (\d+)', harness.read_text()))
+    assert 0 < int(fields['fire_until']) < int(fields['ticks']), 'the capture observes after release'
 role = 'first' if first else 'second'
 (out / (role + '.pid')).write_text(str(os.getpid()))
 ready = Path(os.environ['SPIKE_WORKLOAD_READY'])
@@ -60,11 +68,18 @@ while not ready.exists(): time.sleep(0.01)
 assert (out / 'first.slot').exists() and (out / 'second.slot').exists()
 if not first and os.environ['FAKE_FAILURE'] == 'execution': raise SystemExit(8)
 (out / (role + '.done')).touch()
+if not first and os.environ['FAKE_FAILURE'] in ('server-failure', 'server-clean-exit'):
+    time.sleep(0.3)  # Fixture: server has exited before the runner requests shutdown.
 ''')
             analyzer = binary / "uv"
             analyzer.write_text('''#!/bin/sh
 [ -f "$OUT/first.done" ] && [ -f "$OUT/second.done" ] || exit 9
 touch "$OUT/analyzed"
+if [ "$FAKE_FAILURE" = armour ]; then
+    echo '{"shooter_armour_contacts": 0}'
+else
+    echo '{"shooter_armour_contacts": 1}'
+fi
 ''')
             for executable in (server, client, analyzer):
                 executable.chmod(0o755)
@@ -86,7 +101,7 @@ touch "$OUT/analyzed"
                 os.kill(int((out / "first.pid").read_text()), 0)
                 (out / "admit-second").touch()
                 stdout, stderr = process.communicate(timeout=10)
-                self.assertEqual((out / "analyzed").exists(), failure == "none", stdout + stderr)
+                self.assertEqual((out / "analyzed").exists(), failure in ("none", "armour"), stdout + stderr)
                 if failure == "none":
                     self.assertEqual(process.returncode, 0, stdout + stderr)
                 else:
@@ -117,6 +132,14 @@ touch "$OUT/analyzed"
         for runner in RUNNERS:
             with self.subTest(runner=runner.name):
                 self.run_case(runner, "execution")
+
+    def test_mg_requires_plate_contacts_in_addition_to_private_receipts(self):
+        self.assertIn("MG fixture reached no armour plate", self.run_case(RUNNERS[0], "armour"))
+
+    def test_mg_server_exit_after_last_input_refuses_analysis(self):
+        for failure in ("server-failure", "server-clean-exit"):
+            with self.subTest(failure=failure):
+                self.assertIn("server exited unexpectedly", self.run_case(RUNNERS[0], failure))
 
 
 if __name__ == "__main__":

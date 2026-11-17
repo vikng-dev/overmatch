@@ -8,7 +8,7 @@
 // `east/board_6`. The preview's camera stands east of the house looking at the slope, a trunk to
 // either side. From the checkout root, hidden and silent under the machine's build lock:
 //
-//   OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 \
+//   OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden \
 //     OVERMATCH_CAPTURE=scripts/capture/wood-preview.ron \
 //     scripts/build-lock target/debug/overmatch --offline
 //

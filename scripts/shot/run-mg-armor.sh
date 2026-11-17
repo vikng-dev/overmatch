@@ -46,11 +46,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# The flat patch (scripts/harness/flat-patch.ron): the lane-spawn default sits at world origin,
-# which on the heightmap world is a slope — the tanks slide apart and the hull-local -8,0,0 aim
-# never touches armor (verified: zero damage rows in a full run). Lane 1 puts the shooter at +8 x,
-# so aim -8,0,0 points back at the target.
-env OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" \
+# The game's damage-model fixture: the final aim is on the target hull. During traverse,
+# fire also crosses its lowered forward barrel, reducing that module's HP pool. The trace
+# records the actual struck volumes so the report can distinguish armour from modules.
+env OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_HARNESS="$REPO/scripts/harness/mg-armor.ron" \
   SPIKE_SHOT_TRACE="$OUT/server" \
   "$SERVER" >"$OUT/server.log" 2>&1 &
 SERVER_PID=$!
@@ -63,20 +62,21 @@ grep -q "listening" "$OUT/server.log"
 
 # OVERMATCH_SERVER: the local server this script just started, named explicitly (a scripted
 # client with no target falls back to the same address).
-# OVERMATCH_WINDOW=hidden: a headless client cannot load the mipped-KTX2 tank glb — bevy_image 0.20.1
-# slices the UASTC source with the RGBA32 destination block geometry on the uncompressed
-# transcode path, the path taken when no RenderApp exists (ktx2.rs:209). Windowed transcodes to
-# a 4x4-block GPU format and loads fine, so captures are windowed-only until the upstream fix.
-# DERIVED: both scripts play from the shared tool barrier; the target runs
-# 128 ticks longer so it is still present when the shooter's last rounds arrive.
-printf '(drive: Idle, ticks: %s)\n' "$((TICKS + 128))" >"$OUT/target.harness.ron"
+# Resolution: a fixed 128-tick observation tail avoids cross-process settlement plumbing
+# just for this capture. MEASURED over three runs: last shooter receipt 22-47 ticks
+# after last trigger input, cursor lag at receipt 9.5-27.2 ticks. DERIVED conservative need:
+# ceil(47 + 27.2) = 75 ticks; 128 leaves 53 ticks of scheduling/retransmission margin.
+# Both clients keep the same script length. The watchdog bounds stalled execution; strict
+# analysis fails loudly if delivery or playback remains unfinished at the capture boundary.
+QUIET_TICKS=128
+printf '(drive: Idle, aim: Point((0, -160, -800)), range_m: 12, ticks: %s)\n' "$TICKS" >"$OUT/target.harness.ron"
 env SPIKE_WORKLOAD_READY="$READY" OVERMATCH_HARNESS="$OUT/target.harness.ron" OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
   SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 SPIKE_SHOT_TRACE="$OUT/target" \
   "$CLIENT" >"$OUT/target.log" 2>&1 &
 TARGET_PID=$!
 
-# Lane assignment is connect-order: the first client to CONNECT gets lane 0, and the shooter's
-# hull-local -8,0,0 aim assumes the target holds lane 0. A fixed sleep raced that under load
+# Lane assignment is connect-order: the first client to CONNECT gets lane 0; the fixture aim
+# assumes the target holds lane 0. A fixed sleep raced that under load
 # (shooter connected first, took lane 0, aimed away — zero hits, gate-failed run).
 #
 # COLD-START MODE: the first capture after a rebuild can stall >10 s on Metal pipeline
@@ -90,7 +90,7 @@ for _ in {1..150}; do
 done
 grep -q "client connected" "$OUT/server.log"
 
-printf '(drive: Fire(secondary: true), aim: Point((-8, 0, 0)), range_m: 12, ticks: %s)\n' "$TICKS" \
+printf '(drive: Fire(secondary: true), fire_until: %s, aim: Point((-8.5, 1.6, -8.5)), range_m: 12, ticks: %s)\n' "$((TICKS - QUIET_TICKS))" "$TICKS" \
   >"$OUT/shooter.harness.ron"
 env SPIKE_WORKLOAD_READY="$READY" OVERMATCH_HARNESS="$OUT/shooter.harness.ron" OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
   SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 \
@@ -103,13 +103,30 @@ wait "$SHOOTER_PID"
 SHOOTER_PID=""
 wait "$TARGET_PID"
 TARGET_PID=""
-kill "$SERVER_PID" 2>/dev/null || true
-wait "$SERVER_PID" 2>/dev/null || true
+# Only a SIGTERM requested here is a successful server shutdown. A crash after the final
+# shot must not be hidden by otherwise complete traces.
+shutdown_sent=0
+kill -TERM "$SERVER_PID" 2>/dev/null && shutdown_sent=1
+server_status=0
+wait "$SERVER_PID" 2>/dev/null || server_status=$?
 SERVER_PID=""
+if [[ "$shutdown_sent" != 1 || "$server_status" != 143 ]]; then
+  echo "server exited unexpectedly (status=$server_status, shutdown_sent=$shutdown_sent); see $OUT/server.log" >&2
+  exit 1
+fi
 
 uv run scripts/shot/analyze.py \
   --client "$OUT/shooter.client.jsonl" \
   --server "$OUT/server.server.jsonl" \
   --samples 0 --json --strict >"$OUT/summary.json"
+
+python3 - "$OUT/summary.json" <<'PYTHON'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if json.loads(path.read_text())["shooter_armour_contacts"] == 0:
+    sys.exit(f"MG fixture reached no armour plate; adjust fixture aim and recapture: {path}")
+PYTHON
 
 echo "MG shot verification passed -> $OUT/summary.json"

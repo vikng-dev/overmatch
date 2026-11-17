@@ -9,7 +9,7 @@ Holding the build lock keeps every `scripts/serial-cargo` compile off the machin
 before each condition the runner also waits for any other `rustc` to finish (at most
 --quiet-wait-s) and records what it saw. It holds the machine awake (`caffeinate -ims -w`) while
 it runs. No process takes a screen or makes a sound: the server is headless, the one client
-GPU-less (`OVERMATCH_WINDOW=headless`, `OVERMATCH_UNATTENDED=1`, `OVERMATCH_MUTE=1`).
+GPU-less (`OVERMATCH_WINDOW=headless`, `OVERMATCH_UNATTENDED=1`).
 
 Conditions (default `pile flat rubble rubble flat pile`: each twice, as a palindrome, so a drift
 linear in time cancels from each condition's mean). Each runs a fresh local server and one
@@ -268,7 +268,7 @@ def measure(args, name, condition, pose, out, record):
         f"spawn_pose: (at: ({at[0]:.3f}, {at[1]:.3f}), "
         f"rot: ({rot[0]:.6f}, {rot[1]:.6f}, {rot[2]:.6f}, {rot[3]:.6f})))\n")
     base = {k: v for k, v in os.environ.items() if not k.startswith(("OVERMATCH_", "SPIKE_"))}
-    base.update(BEVY_ASSET_ROOT=str(ROOT), OVERMATCH_UNATTENDED="1", OVERMATCH_MUTE="1",
+    base.update(BEVY_ASSET_ROOT=str(ROOT), OVERMATCH_UNATTENDED="1",
                 OVERMATCH_HARNESS=str(script), NO_COLOR="1")
     recorder = IDLE_RECORDER
     if condition == "rubble":

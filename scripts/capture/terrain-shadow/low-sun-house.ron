@@ -1,5 +1,5 @@
 // From the bay, after scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch:
-// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_START=-346.3,-83.8,135 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/terrain-shadow/low-sun-house.ron target/debug/overmatch --offline
+// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_START=-346.3,-83.8,135 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_CAPTURE=scripts/capture/terrain-shadow/low-sun-house.ron target/debug/overmatch --offline
 // The baked terrain shadow on everything that stands in it: a 2° sun puts the house_0033 cluster
 // (and the tank beside it) in a hill's shadow, so the ground, the tank's plates, decor, belts, the
 // house and its rubble must all read dark. Two charges bring the house down between the frames.

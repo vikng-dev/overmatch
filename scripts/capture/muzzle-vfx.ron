@@ -9,7 +9,7 @@
 // window's logical size. From the checkout root, hidden and silent under the machine's build lock:
 //
 //   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_TARGET=ahead SPIKE_AUTO_FIRE=1 \
-//     OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 \
+//     OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden \
 //     OVERMATCH_CAPTURE=scripts/capture/muzzle-vfx.ron target/debug/overmatch --offline
 //
 // writes target/capture/muzzle-vfx-<second>.png at each frame second, then exits. Times and size

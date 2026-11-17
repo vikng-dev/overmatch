@@ -5,7 +5,7 @@
 // machine's build lock:
 //
 //   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_UNATTENDED=1 \
-//     OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/impact-vfx.ron \
+//     OVERMATCH_WINDOW=hidden OVERMATCH_CAPTURE=scripts/capture/impact-vfx.ron \
 //     target/debug/overmatch --offline
 //
 // writes target/capture/impact-vfx-<second>.png at each frame second, then exits. The fixed frame

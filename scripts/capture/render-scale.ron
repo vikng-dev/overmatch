@@ -7,7 +7,7 @@
 //
 //   cfg=$(mktemp -d); printf '(version: 1, render_scale: Percent50)\n' >"$cfg/video.ron"
 //   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_START=599.9,-599.9,195 \
-//     OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CONFIG_DIR="$cfg" \
+//     OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_CONFIG_DIR="$cfg" \
 //     OVERMATCH_CAPTURE=scripts/capture/render-scale.ron target/debug/overmatch --offline
 //
 // writes target/capture/render-scale.png and logs "render scale: 3D main pass 640x360 inside a

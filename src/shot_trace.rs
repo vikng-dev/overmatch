@@ -4,7 +4,7 @@
 //! compositions. `send` records transport admission, not delivery acknowledgement. Every row but
 //! `meta` carries `us`, the wall clock in microseconds since the Unix epoch when it was written: the
 //! one clock a server and its clients on the same machine share, so cross-process intervals are read
-//! from it, never from the ticks, whose timelines differ by the prediction lead. See
+//! from it, never from the ticks, whose local timelines can differ. See
 //! [`scripts/shot/analyze.py`](../../scripts/shot/analyze.py) for field-level checks.
 
 use bevy::prelude::*;
@@ -161,6 +161,7 @@ pub fn server_plugin(app: &mut App) {
     if install(app, "server") {
         app.add_observer(record_walk_crossings)
             .add_observer(record_unresolved_contact)
+            .add_observer(record_tank_strike)
             .add_systems(FixedLast, record_walk_world);
     }
 }
@@ -205,6 +206,35 @@ fn record_walk_crossings(
             }),
         );
     }
+}
+
+/// The game's damage model: distinguish authored armour faces from HP-bearing modules.
+/// The MG capture uses the names as evidence of which fixture surfaces its aim reached.
+fn record_tank_strike(
+    strike: On<crate::ballistics::ShellStrike>,
+    volumes: Query<
+        (
+            Has<crate::ballistics::ComponentHealth>,
+            Has<crate::ballistics::ExternalArmour>,
+        ),
+        With<crate::damage::VolumeOf>,
+    >,
+    names: Query<&Name>,
+    parents: Query<&ChildOf>,
+    clock: Res<crate::ShotClock>,
+    mut trace: ResMut<ShotTrace>,
+) {
+    let Ok((pool, external)) = volumes.get(strike.struck) else {
+        return; // Environment faces have no tank volume ownership.
+    };
+    let (_, name) = crate::damage::hit_ancestor(strike.struck, &names, &parents)
+        .expect("a tank volume is a named sim node or its primitive child");
+    trace.row(
+        "tank_strike",
+        clock.0.raw(),
+        strike.shot,
+        json!({ "volume": name.as_str(), "armour": !pool && !external }),
+    );
 }
 
 /// The game's damage model: an authority armour contact must have a resolved verdict.

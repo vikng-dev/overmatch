@@ -64,7 +64,7 @@ LOGS_RATE_LIMITED = 75
 REPLICATION_TRACE = "lightyear_replication::server=trace"
 # The levers this runner sets on its own server and clients; --server-env may not replace one.
 RUNNER_KEYS = frozenset({
-    "OVERMATCH_UNATTENDED", "OVERMATCH_WINDOW", "OVERMATCH_MUTE", "OVERMATCH_LOADTEST",
+    "OVERMATCH_UNATTENDED", "OVERMATCH_WINDOW", "OVERMATCH_LOADTEST",
     "OVERMATCH_RAM", "OVERMATCH_BOT", "OVERMATCH_SERVER_STATS_S", "OVERMATCH_SERVER_BIND",
     "OVERMATCH_SERVER", "OVERMATCH_HARNESS",
 })
@@ -427,7 +427,7 @@ def run_match(args, out, recipe):
     address = "127.0.0.1:5888" if local else args.target
     # Inherited stress/trace levers would silently add a second workload.
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OVERMATCH_", "SPIKE_"))}
-    env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1", NO_COLOR="1")
+    env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", NO_COLOR="1")
     env["OVERMATCH_LOADTEST"] = json.dumps(recipe, separators=(",", ":"))
     if args.replication_trace:
         env["RUST_LOG"] = env.get("RUST_LOG", "info") + "," + REPLICATION_TRACE
@@ -821,7 +821,7 @@ def run_ram(args, out, recipe):
     local = args.target == "local"
     address = "127.0.0.1:5888" if local else args.target
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OVERMATCH_", "SPIKE_"))}
-    env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1",
+    env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless",
                NO_COLOR="1", OVERMATCH_RAM=json.dumps(recipe, separators=(",", ":")),
                OVERMATCH_BOT="0", OVERMATCH_SERVER_STATS_S="1")
     dt = tick_seconds()
@@ -986,7 +986,7 @@ def run(args, out):
     sampled = False
     window = collections.deque()
     env = os.environ.copy()
-    env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1",
+    env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless",
                OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_BOT="0", OVERMATCH_DEBRIS_STRESS="off",
                OVERMATCH_SERVER_STATS_S=str(STATS_PERIOD_S), OVERMATCH_HE_STRESS=f"{args.bursts}:{args.period}",
                RUST_BACKTRACE="1")
@@ -1123,7 +1123,6 @@ def main():
             print("OVERMATCH_SERVER_STATS_S=1")
             print("OVERMATCH_UNATTENDED=1")
             print("OVERMATCH_WINDOW=headless")
-            print("OVERMATCH_MUTE=1")
             for key, value in args.server_env:
                 print(f"{key}={value}")
             return 0

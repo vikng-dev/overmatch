@@ -88,6 +88,9 @@ pub(crate) struct Script {
     /// Ticks between a [`Drive::Fire`] primary's clicks; zero clicks none. Default 256 (DERIVED:
     /// four seconds at the fixed 64 Hz).
     pub(crate) fire_interval: u32,
+    /// Exclusive end of a Fire workload's triggers; later ticks keep aiming with no demand.
+    /// Shot runners use this quiet part of the capture to observe delivery and cursor playback.
+    pub(crate) fire_until: Option<u32>,
     /// The server's spawned tank starts at this point and turn instead of a map point
     /// ([`SpawnPose`]).
     pub(crate) spawn_pose: Option<SpawnPose>,
@@ -112,6 +115,7 @@ impl Default for Script {
             range_m: 800.0,
             fire_tick: 300,
             fire_interval: 256,
+            fire_until: None,
             spawn_pose: None,
             arc_ticks: 256,
             arc_steer: 0.3,
@@ -246,6 +250,17 @@ impl std::fmt::Display for ScriptLoadError {
 impl std::error::Error for ScriptLoadError {}
 
 impl Script {
+    fn total_ticks(&self) -> u32 {
+        // Resolution: default capture budgets at 64 Hz: 20 s for the straight course's
+        // 4 s lead + 15 s throttle + 1 s coast; otherwise 9.375 s covers the arc's
+        // 4 s lead + 4 s throttle + 1.375 s coast (DERIVED). Runners can author ticks.
+        self.ticks.unwrap_or(if self.drive == Drive::Straight {
+            1280
+        } else {
+            600
+        })
+    }
+
     /// The script `text` holds, validated; the error names the field.
     fn parse(text: &str) -> Result<Self, ScriptError> {
         let script: Self = ron::Options::default()
@@ -278,6 +293,21 @@ impl Script {
             return Err(ScriptError::Invalid {
                 field: "drive",
                 problem: "a Fire workload fires the primary, the secondary or both",
+            });
+        }
+        if let Some(until) = self.fire_until
+            && (until >= self.total_ticks()
+                || !match self.drive {
+                    Drive::Fire { primary, secondary } => {
+                        (primary && self.fire_interval != 0 && self.fire_tick < until)
+                            || (secondary && until > FIRE_WARMUP + 1)
+                    }
+                    _ => false,
+                })
+        {
+            return Err(ScriptError::Invalid {
+                field: "fire_until",
+                problem: "a Fire workload needs an end before ticks with at least one trigger demand",
             });
         }
         match self.aim {
@@ -341,6 +371,7 @@ pub(crate) struct SimulateInput {
     range: f32,
     fire_tick: u32,
     fire_interval: u32,
+    fire_until: Option<u32>,
     /// [`Drive::Park`] has seen its hull stopped, and demands nothing from then on.
     parked: bool,
     clock: ScriptClock,
@@ -371,6 +402,8 @@ enum ScriptClock {
         at: Duration,
         first_fire_logged: bool,
     },
+    /// Completion was emitted; subsequent Update calls cannot repeat the capture boundary.
+    Finished,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -382,11 +415,15 @@ enum ScriptTimeout {
 // ASSUMED startup and scheduling slack, shared by both wall-clock bounds.
 const WATCHDOG_SLACK: Duration = Duration::from_secs(20);
 
+// Resolution: delay held fire by 192 combat ticks / 64 Hz = 3 s so fixture hulls can
+// settle (MEASURED: flat patch rests by tick 174 after admission). Aim keeps slewing
+// during firing; this is no guarantee of aim convergence.
+const FIRE_WARMUP: u32 = 192;
+
 impl SimulateInput {
     /// Called after `LogPlugin` has built, so the script it logs reaches the run's log.
     pub(crate) fn new(script: &Script) -> Self {
         info!("harness: {script:?}");
-        let course = script.drive == Drive::Straight;
         let (throttle_ticks, steer) = match script.drive {
             Drive::Arc => (script.arc_ticks, script.arc_steer),
             Drive::Straight => (script.straight_ticks, 0.0),
@@ -395,7 +432,7 @@ impl SimulateInput {
         };
         Self {
             ticks: 0,
-            total: script.ticks.unwrap_or(if course { 1280 } else { 600 }),
+            total: script.total_ticks(),
             drive: script.drive,
             throttle_ticks,
             steer,
@@ -403,6 +440,7 @@ impl SimulateInput {
             range: script.range_m,
             fire_tick: script.fire_tick,
             fire_interval: script.fire_interval,
+            fire_until: script.fire_until,
             parked: false,
             start: crate::cost::WorkloadStart::from_env(),
             clock: ScriptClock::AwaitingSlot {
@@ -432,7 +470,7 @@ impl SimulateInput {
                 };
                 true
             }
-            ScriptClock::Released { .. } => false,
+            ScriptClock::Released { .. } | ScriptClock::Finished => false,
         }
     }
 
@@ -452,12 +490,8 @@ impl SimulateInput {
         }
     }
 
-    /// The scripted secondary trigger's held window: from the warmup boundary to the end of the
-    /// run.
+    /// The scripted secondary's warmup predicate; `write` also applies the firing cutoff.
     fn holding_secondary(t: u32) -> bool {
-        // DERIVED: 192 combat ticks / 64 Hz = 3 s for settling and aim before the held trigger.
-        // The first secondary input is the following combat tick.
-        const FIRE_WARMUP: u32 = 192;
         t > FIRE_WARMUP
     }
 
@@ -504,12 +538,14 @@ pub(crate) fn buffer_input(
         (
             &mut ActionState<TankCommand>,
             Option<&avian3d::prelude::LinearVelocity>,
+            Option<&crate::CombatantId>,
         ),
         With<InputMarker<TankCommand>>,
     >,
+    mut trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
     use bevy::ecs::query::QuerySingleError;
-    let (mut state, velocity) = match slots.single_mut() {
+    let (mut state, velocity, combatant) = match slots.single_mut() {
         Ok(slot) => slot,
         // Before tank replication (or between lives), there is no local input slot.
         Err(QuerySingleError::NoEntities(_)) => return,
@@ -540,6 +576,15 @@ pub(crate) fn buffer_input(
     }
     if sim.release(now) {
         info!("{}", release_stamp(timeline.tick().0, now, &time));
+        if let Some(trace) = trace.as_mut() {
+            let combatant =
+                combatant.expect("a traced input slot carries its replicated combatant");
+            trace.global_row(
+                "controlled",
+                timeline.tick().0,
+                serde_json::json!({ "c": combatant.0 }),
+            );
+        }
     }
     if sim.ticks >= sim.total {
         return;
@@ -571,10 +616,11 @@ impl SimulateInput {
         command.steer = if driving { self.steer } else { 0.0 };
         command.aim = Some(self.aim_at(t));
         command.range = self.range;
+        let firing = self.fire_until.is_none_or(|until| t < until);
         (command.fire_primary, command.fire_secondary) = match self.drive {
             Drive::Fire { primary, secondary } => (
-                primary && self.clicking_primary(t),
-                secondary && Self::holding_secondary(t),
+                primary && firing && self.clicking_primary(t),
+                secondary && firing && Self::holding_secondary(t),
             ),
             Drive::Arc | Drive::Straight => (t == self.fire_tick, false),
             // A recoil impulse would disturb the resting contact under study.
@@ -604,18 +650,27 @@ impl SimulateInput {
 
 /// Exit once the released script has played out; separately bound startup and execution.
 pub(crate) fn simulate_watchdog(
-    simulate: ResMut<SimulateInput>,
+    mut simulate: ResMut<SimulateInput>,
     time: Res<Time<Real>>,
     fixed: Res<Time<Fixed>>,
     mut exit: MessageWriter<AppExit>,
+    timeline: Res<LocalTimeline>,
+    mut trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
     let now = time.startup().elapsed();
     if simulate.ticks >= simulate.total && matches!(simulate.clock, ScriptClock::Released { .. }) {
+        simulate.clock = ScriptClock::Finished;
         info!(
             "client: simulation script complete, exiting ticks={} app_s={:.3}",
             simulate.ticks,
             now.as_secs_f64()
         );
+        crate::shot_trace::record_global(&mut trace, "capture_end", timeline.tick().0, || {
+            serde_json::json!({
+                "ticks": simulate.ticks,
+                "shooter": matches!(simulate.drive, Drive::Fire { .. }),
+            })
+        });
         exit.write(AppExit::Success);
     } else if let Some(timeout) = simulate.timeout(now, fixed.timestep()) {
         match timeout {
@@ -1013,7 +1068,7 @@ mod tests {
     fn a_full_script_parses_every_field() {
         let script = Script::parse(
             "(ticks: Some(2048), drive: Fire(primary: true, secondary: true), \
-             aim: Point((8, 1.2, -2)), range_m: 12, fire_tick: 320, fire_interval: 128, \
+             aim: Point((8, 1.2, -2)), range_m: 12, fire_tick: 320, fire_interval: 128, fire_until: 1800, \
              spawn_pose: (at: (149.3, 293.9), rot: (0, 0, 0, 1)))",
         )
         .expect("a valid script");
@@ -1029,6 +1084,7 @@ mod tests {
                 range_m: 12.0,
                 fire_tick: 320,
                 fire_interval: 128,
+                fire_until: Some(1800),
                 spawn_pose: Some(SpawnPose {
                     at: Vec2::new(149.3, 293.9),
                     rot: bevy::math::Quat::IDENTITY,
@@ -1191,6 +1247,83 @@ mod tests {
                 .0
                 .fire_primary
         );
+    }
+
+    /// The game's damage model: shot captures must observe the final server echoes after the
+    /// trigger is released, without extending the script or its watchdog.
+    #[test]
+    fn fire_window_leaves_a_neutral_observation_tail() {
+        let mut sim = SimulateInput::new(&Script::parse(
+            "(drive: Fire(primary: true, secondary: true), fire_tick: 0, fire_interval: 1, fire_until: 250, ticks: 300)"
+        ).unwrap()); // Fixture tick counts; both triggers would otherwise stay held.
+        let mut command = crate::command::TankCommand::default();
+        sim.write(249, &mut command);
+        assert!(command.fire_primary && command.fire_secondary);
+        for t in 250..sim.total {
+            sim.write(t, &mut command);
+            assert!(!command.fire_primary && !command.fire_secondary);
+            assert!(command.aim.is_some(), "the observation tail keeps its aim");
+        }
+        let tick = Duration::from_secs_f64(1.0 / 64.0); // Fixture timestep.
+        sim.hold_slot(Duration::ZERO);
+        sim.release(Duration::ZERO);
+        assert_eq!(
+            sim.timeout(tick * sim.total + WATCHDOG_SLACK + tick, tick),
+            Some(ScriptTimeout::Completion)
+        );
+        for text in [
+            "(fire_until: 250)",
+            "(drive: Fire(secondary: true), fire_until: 0)",
+            "(drive: Fire(secondary: true), ticks: 250, fire_until: 250)",
+            "(drive: Fire(secondary: true), fire_until: 193)",
+            "(drive: Fire(primary: true), fire_tick: 250, fire_until: 250)",
+            "(drive: Fire(primary: true), fire_tick: 0, fire_interval: 0, fire_until: 250)",
+        ] {
+            let error = Script::parse(text).expect_err("an empty firing window is refused");
+            assert!(error.to_string().contains("fire_until"), "{text}: {error}");
+        }
+    }
+
+    /// The game's damage-model capture boundary is a transition: both fixed-tick and Update
+    /// watchdog calls can see completion before AppExit is consumed, but readers get one end row.
+    #[test]
+    fn repeated_watchdog_calls_record_one_capture_end() {
+        use bevy::prelude::*;
+
+        let path = std::env::temp_dir().join(format!(
+            "overmatch-capture-end-{}.jsonl",
+            std::process::id()
+        ));
+        let mut sim = SimulateInput::new(&Script::parse("(ticks: 2)").unwrap());
+        sim.hold_slot(Duration::ZERO);
+        sim.release(Duration::ZERO);
+        sim.ticks = sim.total;
+        let mut app = App::new();
+        app.insert_resource(sim)
+            .insert_resource(Time::<Real>::default())
+            .insert_resource(Time::<Fixed>::from_hz(64.0))
+            .init_resource::<lightyear::prelude::LocalTimeline>()
+            .insert_resource(crate::shot_trace::ShotTrace::for_test(&path))
+            .add_systems(Update, super::simulate_watchdog);
+        app.update();
+        app.update();
+        assert!(matches!(
+            app.world().resource::<SimulateInput>().clock,
+            super::ScriptClock::Finished
+        ));
+        drop(app); // Drop flushes the trace before reading its rows.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "completion is emitted once, even before the app exits"
+        );
+        assert_eq!(rows[0]["k"], "capture_end");
+        std::fs::remove_file(path).unwrap();
     }
 
     /// Frame runners must open on the frame rows' clock even when window initialization delays

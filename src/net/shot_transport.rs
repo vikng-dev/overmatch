@@ -482,6 +482,7 @@ fn queue_fire(
             "o": [event.origin.x, event.origin.y, event.origin.z],
             "tr": event.tracer,
             "cal": fire.caliber,
+            "smoke": fire.effects.smoke.is_some(),
         })
     });
     transport.enqueue_public(

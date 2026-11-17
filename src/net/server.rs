@@ -1730,7 +1730,6 @@ mod tests {
             .env("OVERMATCH_SERVER_BIND", "127.0.0.1")
             .env("OVERMATCH_UNATTENDED", "1")
             .env("OVERMATCH_WINDOW", "headless")
-            .env("OVERMATCH_MUTE", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
