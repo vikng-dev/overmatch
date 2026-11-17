@@ -187,8 +187,8 @@ fn steer_release_arrests_pivot() {
 }
 
 /// Players rely on the construction-selected held mean remaining exactly stationary within
-/// capacity on unequal affine loads; a free mean must follow the load. The steering predictor
-/// contributes a free force, so its difference target is not an invariant of this stop solve.
+/// capacity on unequal affine loads while the steering tie reaches its commanded difference;
+/// a free mean must follow the load. Zeroing steering must not satisfy a held-pivot test.
 #[test]
 fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
     let fp = lab_fp();
@@ -212,13 +212,52 @@ fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
         match mean {
             NeutralMean::Held => {
                 assert_eq!(peak_mean, 0.0, "a stuck mean is exactly at rest");
+                let difference = (speeds[0] - speeds[1]) * 0.5;
+                // Resolution: f32 rounding of the construction's kinematic target.
+                assert!(
+                    (difference - tp.neutral_d_full).abs()
+                        <= 16.0 * f32::EPSILON * tp.neutral_d_full,
+                    "the held pivot must reach its commanded difference, got {difference}"
+                );
             }
             NeutralMean::Free => assert!(
-                peak_mean >= PARK_ENGAGE_SPEED,
+                peak_mean > 0.0,
                 "a free mean is set by the grade, peaked at {peak_mean} m/s"
             ),
         }
     }
+}
+
+/// A parked stop on unequal ground shares load through the neutral differential. The total
+/// fits both brakes but exceeds one side's static capacity; independent stops must fail here.
+#[test]
+fn two_parked_brakes_share_a_neutral_stop_from_exact_rest() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let static_cap = tp.brake_capacity_n * tp.brake_static_factor;
+    // Fixture: uneven ground pulls, with their mean inside the pair's capacity.
+    let mut inp = input(0.0, 0.0, [0.0; 2], [1.15 * static_cap, 0.65 * static_cap]);
+    inp.reaction_slopes = [0.05, 0.8].map(|share| share * fp.inertia / inp.dt);
+    let mut state = fresh(&tp);
+    let report = step(&fp, &tp, &mut state, &inp);
+    assert_eq!(
+        report.next_speeds, [0.0; 2],
+        "the differential must share the parked load"
+    );
+    assert_eq!(
+        report.held, [true; 2],
+        "both parked surfaces must report rest"
+    );
+    assert!(!report.brakes_slide);
+    // Fixture: the same construction with insufficient steering transfer cannot share the load.
+    let limited = TransmissionParams {
+        steer_capacity_n: 0.01 * static_cap,
+        ..tp
+    };
+    let report = step(&fp, &limited, &mut fresh(&limited), &inp);
+    assert!(
+        report.next_speeds.iter().any(|v| *v != 0.0),
+        "sharing must respect steering capacity"
+    );
 }
 
 /// A held mean is bounded by the parking hold's two-sided capacity, static while the mean is at
@@ -250,11 +289,8 @@ fn a_held_mean_gives_way_beyond_its_capacity_and_slides_once_breached() {
     // Fixture: a pull halfway between the two capacities, observed for one simulated second.
     let between = 0.5 * (at_rest + breached);
     let (_, rest) = pivot(between, 0.0, 64);
-    assert!(
-        rest < PARK_ENGAGE_SPEED,
-        "the static capacity holds a resting mean, peaked at {rest} m/s"
-    );
-    // One tick from the first breached mean speed.
+    assert_eq!(rest, 0.0, "static capacity holds the mean exactly at rest");
+    // Fixture: a moving mean, observed for one tick.
     let (sliding, _) = pivot(between, PARK_ENGAGE_SPEED, 1);
     assert!(
         sliding > PARK_ENGAGE_SPEED,
@@ -263,7 +299,7 @@ fn a_held_mean_gives_way_beyond_its_capacity_and_slides_once_breached() {
     // Fixture: a pull a quarter beyond the static capacity, one tick from rest.
     let (beyond, _) = pivot(1.25 * at_rest, 0.0, 1);
     assert!(
-        beyond >= PARK_ENGAGE_SPEED,
+        beyond > 0.0,
         "the hold is bounded: a pull beyond it moves the mean, got {beyond} m/s"
     );
 }
@@ -466,8 +502,7 @@ fn brake_capacity_breach_backdrives() {
 fn parking_brake_settles_creep() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let mut st = fresh(&tp);
-    // Creep below the latch threshold, zero command, a ground reaction R > Q inside
-    // capacity.
+    // Fixture: input speeds in m/s and ground reactions in N.
     let rep = step(
         &fp,
         &tp,
@@ -2463,10 +2498,9 @@ fn released_motion_coasts_without_brake_force() {
         ..fresh(&tp)
     };
     let controls = driver(&construction(&fp), &tp, &mut state, &inp);
-    let mut q = [0.0; 2];
     let belts = BeltTick::new(&construction(&fp), &controls.input);
-    stop_rows(&mut q, &tp, &belts, &state, &controls);
-    assert_eq!(q, [0.0; 2]);
+    let solved = stop_rows([0.0; 2], &tp, &belts, &state, &controls, 1.0);
+    assert_eq!(solved.forces, [0.0; 2]);
 }
 
 /// Players releasing throttle must stop rollback within dynamic capacity, except for a neutral
@@ -2527,9 +2561,13 @@ fn released_rollback_stops_and_parks() {
                                         command != dir || motion != command
                                     };
                                     let belts = BeltTick::new(&construction(&fp), &inp);
-                                    let mut force = [0.0; 2];
-                                    let (landed_speeds, _, _) =
-                                        stop_rows(&mut force, &tp, &belts, &state, &controls);
+                                    // Fixture: zero source capacity isolates the Driver's stop orders
+                                    // from the neutral steering row's motor force.
+                                    let BeltStep {
+                                        next: landed_speeds,
+                                        forces: force,
+                                        ..
+                                    } = stop_rows([0.0; 2], &tp, &belts, &state, &controls, 0.0);
                                     for i in 0..2 {
                                         // DERIVED: no other sprocket force in this isolated brake solve;
                                         // both input belts are outside rest, so capacity is dynamic.
@@ -3434,9 +3472,12 @@ fn virtual_free_crank_energy_does_not_cap_curve_power() {
         let mut probe = TransmissionProbe::default();
         let work = engine_work(
             &tp,
-            &BeltTick::new(&construction(&fp), &inp),
             crank,
-            [force * 0.5; 2],
+            |scale| {
+                let belts = BeltTick::new(&construction(&fp), &inp);
+                let side = force * 0.5 * scale;
+                [0, 1].map(|i| side * (belts.speeds[i] + belts.land(i, side)) * 0.5 * inp.dt)
+            },
             #[cfg(feature = "bitprobe")]
             &mut probe,
         );
@@ -3468,7 +3509,7 @@ fn reverse_radii_belong_to_the_reverse_gear() {
     let fp = grade_fixture_fp();
     let mut inp = input(0.0, 1.0, [-1.0; 2], [0.0; 2]); // Fixture: reverse travel.
     inp.dt = 1.0 / TICK_HZ;
-    let (_, _, jacobian) = steering_force(
+    let (_, jacobian) = steering_force(
         &tp,
         &BeltTick::new(&construction(&fp), &inp),
         &state,

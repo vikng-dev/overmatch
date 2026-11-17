@@ -1,6 +1,5 @@
-//! Bounded linear rows over independent inertias. `solve` accepts free impulses and an optional
-//! previous assignment, returning speeds and row impulses in the caller's units. Rows sharing a
-//! speed solve together; this local dependency requires assignment trials to be serial.
+//! Bounded linear rows over independent inertias. `solve` accepts free impulses, returning speeds
+//! and row impulses in the caller's units. Rows sharing a speed solve together; this local dependency requires assignment trials to be serial.
 //!
 //! With fixed bounds the dual objective is `p·(A u - target) + p·W p/2`, where
 //! `u = speed + free_impulse/inertia` and `W = A M^-1 A^T`. Its box optimality conditions
@@ -60,19 +59,13 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(a, b)| a * b).sum()
 }
 
-/// An empty previous assignment is a cold start. Otherwise its length must match the rows;
-/// callers retain the returned states in the same row order when warm starting another solve.
-pub(crate) fn solve(speeds: &[Speed], rows: &[Row], previous: &[State]) -> Solution {
+pub(crate) fn solve(speeds: &[Speed], rows: &[Row]) -> Solution {
     assert!(
         speeds.iter().all(|s| s.value.is_finite()
             && s.inertia.is_finite()
             && s.inertia > 0.0
             && s.free_impulse.is_finite()),
         "block speeds have finite state and positive finite inertia"
-    );
-    assert!(
-        previous.is_empty() || previous.len() == rows.len(),
-        "a warm assignment names every row in its construction order"
     );
     let start: Vec<_> = speeds.iter().map(|s| s.value).collect();
     let free: Vec<_> = speeds
@@ -116,11 +109,7 @@ pub(crate) fn solve(speeds: &[Speed], rows: &[Row], previous: &[State]) -> Solut
             row.bounds
         });
     }
-    let mut seed = if previous.is_empty() {
-        vec![State::Stuck; rows.len()]
-    } else {
-        previous.to_vec()
-    };
+    let mut seed = vec![State::Stuck; rows.len()];
     loop {
         let search = Search {
             speeds,
@@ -306,16 +295,23 @@ impl Search<'_> {
 /// Gaussian elimination with row pivoting. `None` means a dependent stuck set, not a failed solve.
 fn eliminate(matrix: &mut [Vec<f64>]) -> Option<Vec<f64>> {
     let n = matrix.len();
-    let scale = matrix
-        .iter()
-        .flat_map(|r| &r[..n])
-        .map(|x| x.abs())
-        .fold(0.0, f64::max);
+    // Normalize each row by its inertial norm on both axes: a change of row units then
+    // leaves the rank test unchanged. The normalized Gram matrix has unit diagonal.
+    let norms: Vec<_> = (0..n).map(|i| matrix[i][i].sqrt()).collect();
+    if norms.contains(&0.0) {
+        return None; // A zero row cannot be part of an independent stuck set.
+    }
+    for (i, line) in matrix.iter_mut().enumerate() {
+        for j in 0..n {
+            line[j] /= norms[i] * norms[j];
+        }
+        line[n] /= norms[i];
+    }
     for col in 0..n {
         let pivot = (col..n)
             .max_by(|&a, &b| matrix[a][col].abs().total_cmp(&matrix[b][col].abs()))
             .expect("an unfinished square system has a pivot candidate");
-        if matrix[pivot][col].abs() <= RESOLUTION * scale {
+        if matrix[pivot][col].abs() <= RESOLUTION {
             return None;
         }
         matrix.swap(col, pivot);
@@ -330,6 +326,9 @@ fn eliminate(matrix: &mut [Vec<f64>]) -> Option<Vec<f64>> {
     let mut answer = vec![0.0; n];
     for i in (0..n).rev() {
         answer[i] = (matrix[i][n] - dot(&matrix[i][i + 1..n], &answer[i + 1..n])) / matrix[i][i];
+    }
+    for (value, norm) in answer.iter_mut().zip(norms) {
+        *value /= norm;
     }
     Some(answer)
 }

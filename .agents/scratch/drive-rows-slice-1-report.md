@@ -1,158 +1,190 @@
-# Drivetrain slice 1: block and stops
+# Drivetrain slice 1: block, stops and neutral steering
 
 Subject: the multiplayer tank video game's driving physics, game state only.
 
-## Built interface
+## Interface and slice boundary
 
-`track::block::solve(&[Speed], &[Row], &[State]) -> Solution` is engine-independent f64 math.
-A speed carries value, inertia and free impulse. A row carries its coefficient vector, target,
-finite lower/upper impulse bounds and optional dynamic bounds inside its static bounds. An empty
-assignment starts cold; otherwise the supplied assignment is tried first, then increasing Hamming
-distance. The result carries speeds and each impulse, stuck/lower/upper state and dynamic outcome.
-Dependent stuck sets are rejected as assignment candidates. Static eligibility requires exact
-starting row rest. Broken static bounds shrink once per row and solve again in the same call.
-Speed-coordinate elimination substitutes stuck targets, including exact zero for coordinate stops
-and exact opposite speeds for the zero mean.
+`track::block::solve(&[Speed], &[Row]) -> Solution` is engine-independent f64 math. Speeds carry
+value, inertia and free impulse; rows carry coefficients, target, finite impulse bounds and
+optional dynamic bounds inside their static bounds. The result carries speeds, row impulses,
+assignment states and dynamic outcomes. Each call starts cold. Assignment storage, and an input
+for its warm start, belong to the slice that supplies that user.
 
-`transmission::stop_rows` builds current side stops or the mean hold from construction capacities
-and unchanged Driver controls. Existing clutch, steering and ceiling-brake forces enter as free
-impulses. The sampled ground's slope remains in effective inertia. Sprocket forces include row
-impulses, while the speeds come directly from the block. No engine API, contact adapter, Driver
-choice, replicated type, crank law, work gate or recirculation law was added or replaced.
+The solver searches independent stuck sets and bounded assignments. Static eligibility requires
+exact starting row rest; breakaway shrinks bounds and re-solves in the same call. Each Gram row
+is normalized by its inertial norm on both axes before rank testing, so changing a row's units
+cannot turn independence into dependence. Stuck targets are substituted into speed coordinates;
+a coordinate stop is exactly zero, and a held mean has exactly opposite belt speeds.
 
-Removing the named even-stop predictor also removes its look-ahead contribution to steering.
-The remaining steering predictor receives the clutch force, and its result is free input to the
-stop block. A held mean's steering difference on unequal affine loads is therefore an observation,
-not an exact-target promise. The production mean-rest invariant remains tested. Differential
-load sharing is proved in the generic block fixture; production steering becomes a row in slice 2.
+`transmission::stop_rows` puts the neutral half-difference tie in the same block as the side stops
+or mean hold. Its target is steer command times the construction's neutral full difference; its
+impulse bounds follow per-output steering capacity, step and source work scale. There is no crank
+coefficient. The delivered neutral force and landed speeds supply the existing source work
+budget, excluding passive stop work. Geared steering and clutch forces remain free inputs;
+their existing work estimate, crank law, Driver choices, contact path and wire remain unchanged.
+The affine sampled-ground slope remains in effective belt inertia. Stop surfaces report held
+from exact landed rest, including redundant rows at a bound with zero slip.
 
-## Deleted
+A parked differential can transfer unequal loads between the two stops up to steering capacity.
+The speeds are unique; redundant brake/tie impulses need not be unique or split exactly evenly.
+The production test requires the pair to hold a load that exceeds one side's capacity but fits
+the pair, and requires motion when the available steering transfer cannot carry that load.
 
-DERIVED line counts below count each original function from its declaration through its closing
-brace, excluding documentation and blank separators.
+## Review findings
 
-| Item | Function lines removed |
-|---|---:|
-| `brake_capacity_for_regime` (whole selector, including speed test) | 12 |
-| `BeltTick::held_mean_force` | 11 |
-| `apply_brake_stop_forces` | 33 |
-| `mean_hold_capacity` | 10 |
-| `even_stop_capacity` | 18 |
-| `apply_mean_hold` | 13 |
+1. Neutral steering and stops now solve together. The production parked-load test starts at
+   exact rest; the held-pivot test requires both exact mean rest and the construction's commanded
+   difference on unequal affine ground. Geared steering on the crank remains slice 2.
+2. The original rammed-park table was not a comparison of like arrivals. The drive-phase
+   investigation and corrected interpretation are below.
+3. The badly scaled independent-row counterexample is covered: unit inertias/free impulses,
+   row coefficients `[1,0]` and `[0,1e-6]`, and bounds ±10 and ±1e7 (all inline Fixture data).
+   Its cancelling impulses are independently DERIVED as −1 and −1e6; both speeds must be zero.
+4. The random-block certificate computes static sufficiency independently by cyclic coordinate
+   minimization with initially eligible static bounds, then any dynamic breakaway. It compares
+   expected regime flags as well as momentum, feasibility and variational inequalities. It does
+   not select bounds from production's flags or share production elimination/assignment code.
+5. The unused warm-start argument and its test arms are removed.
+6. The held-pivot test now rejects zero steering.
+7. `transmission-design.md` names the current rows and exact-rest static eligibility, retaining
+   its historical observations and rationale.
+8. The stop/breakaway fixture lives in one array reused by each solve and certificate.
+9. The creep setup comment now only labels fixture units; the beyond-capacity hold assertion
+   requires positive mean motion, independent of the Driver's parking threshold.
 
-The contact-conditioned zero-speed initializer and its comments in `sim::belt_tick` occupied
-7 lines; one direct assignment replaces them. The steering predictor lost 8 lines net, including
-its argument and documentation. The obsolete tests removed are
-`two_parked_brakes_share_a_neutral_stop_evenly` (25 function lines),
-`static_brake_capacity_requires_every_hold_predicate` (26), and
-`brake_is_discretely_passive` (32). Their analytic-selector/passivity evidence is superseded by
-the block optimality certificate, exact-rest/breakaway and coupled-load proofs. The old even-share
-steering promise belongs to the deleted predictor, not to the slice-1 free-force adapter.
+The rank, held-pivot and parked-load regression tests were each run before their fixes and each
+failed on the reported defect. No authored value was tuned to recover an observation.
 
-## Proofs
+## Drive-phase investigation
 
-- 600 inline Fixture blocks, each cold, warm and with perturbed free impulses: an independent
-  certificate reconstructs momentum, verifies impulse feasibility and checks the dual variational
-  inequality at both endpoints of every bound. These are sufficient global convex optimality
-  conditions. It uses none of the production elimination, assignment or dot-product code. Cases
-  include varying dimension, targets, asymmetric bounds, redundant scaled rows, zero rows and
-  static-to-dynamic transitions.
-- A stuck coordinate stop is exactly `0.0`; a held zero mean sums to exactly zero. Production
-  parking and unequal-affine-load mean-hold tests also require exact rest.
-- Breakaway uses dynamic impulse over inertia in the breaking call. Nonzero starting slip gets
-  dynamic capacity even below the former speed band. A labelled floating-point allowance applies
-  to nonzero arithmetic; rest assertions remain exact.
-- A differential plus two stops holds unequal loads whose larger individual demand exceeds one
-  stop capacity but whose total fits the pair. Its nonzero transfer and momentum certificate
-  reject independent side clamping.
-- A shaft with one clutch and one brake per output, and no steering tie, solves through the same
-  interface. Opening one clutch lets its brake hold that output while the other side remains
-  independently connected.
+MEASURED on this machine: the saved first run plus two new runs at `4ae55756` all produced the
+same rammed arrival and parking readings. The saved reviewed slice-1 run plus two new runs at
+`3d35b27c` likewise all produced the same readings for that side. Test-only changes and temporary
+capacity diagnostics were present in the new slice-1 runs; they did not change its physics.
 
-## Design claims checked
+| Reading | Original base (three runs) | Reviewed slice 1 (three runs) |
+|---|---:|---:|
+| Drive time, s | 15.0 (cap) | 10.6875 |
+| Reached the standing house's middle | No | Yes |
+| Braking time, s | 0.515625 | 5.0 (cap) |
+| Top drive speed, m/s | 3.373702049 | 3.373703480 |
+| Released-window travel, m | 0.367229104 | 10.279593468 |
+| Park ticks / window ticks | 1280 / 1280 | 574 / 1280 |
+| Clutch In ticks | 0 | 706 |
+| Belt-moving ticks | 0 | 706 |
+| Maximum absolute belt speed, m/s | 0 | 0.495896 |
 
-The named slice-1 functions and the cited `sim` override were present. Their cited line numbers
-matched this base closely enough to locate them, but all edits use symbols. Affine mobility,
-clutch/steering/work ordering, Driver stop orders, service capacity and construction validation
-were checked in source. The existing probes are ignored library tests, and their runner has no
-window or GPU; the rigid-wall case is absent on this base, as the design states.
+The launch lever's capacity hypothesis was instrumented at its actual production input: a
+nonzero belt speed inside the old rest band, one-way lever ordered without service braking, and
+rollback-opposing stop demand above dynamic capacity. MEASURED witness count: zero in each of
+the two repeated slice-1 runs. Changing static eligibility therefore cannot alter the lever's
+force on these trajectories. The new exact-rest rule nevertheless follows the design's row
+table: a moving lever receives dynamic capacity, and static breakaway re-solves immediately.
 
-Corrections/qualifications found:
+MEASURED arithmetic-only comparison, two further identical runs: leave the reviewed solver and
+all capacities unchanged, but use the former `BeltTick::land` f32 arithmetic whenever all row
+impulses are zero. Both crossed the house at 11.546875 s, braked in 0.703125 s, travelled
+0.236919537 m after release, and recorded 1280 park/Out ticks, zero belt-moving ticks and 1239
+asleep ticks. The capacity witness count was again zero. Top speed was 3.373702288 m/s.
 
-- The tight radius/speed ratio is approximately constant, not identical across all eight authored
-  rows. DERIVED from the rounded table: 1.2279069767 to 1.2290322581 m per km/h. A future admission
-  check needs an explicit construction/rounding decision; no steering data changed here.
-- The cited public `tangent_part` field is on each `ContactConstraintPoint`, not on its enclosing
-  `ContactConstraint`. A future stripping adapter must visit its points.
-- The finite `3^m` assignment bound is per fixed-bound solve. Static breakaway can restart the
-  solve, so it is not an upper bound for the whole static/dynamic call. The generic interface
-  deliberately does not bake in five rows or three speeds.
-- Keeping steering as a free force while deleting the even-stop look-ahead does not preserve the
-  old exact pivot difference on unequal affine loads. The slice boundary explicitly keeps only
-  the mean-stop invariant; jointly solving that difference is slice 2.
+This intervention changes no force or bound: it changes free-landing roundoff. Its different
+obstacle arrival and successful braking establish sensitivity of the collision/break trajectory
+to that arithmetic. It does not reproduce the original base's stall, so it is not a claim that
+this one arithmetic site accounts for every subsequent difference. The removed look-ahead does
+not act during this drive: full-throttle driving is outside the neutral regime, and the launch
+lever is one-sided. The changed drive phase is a numerically sensitive house collision, not loss
+of launch-lever static capacity. There was no run-to-run scatter within any repeated group on
+this machine; deterministic sensitivity is not evidence of nondeterministic execution. The f32
+comparison arm and all diagnostics are removed; the committed block keeps its f64 arithmetic.
 
-The idle curve is end-clamped: its 600 rpm idle reads 1300 N m from the first 800 rpm point
-(DERIVED from the sheet and `raw_torque_at`). Avian source confirms positive-friction tangent
-creation, friction only during Relax, bounds from the current normal impulse, public per-point
-tangent parts, single-threaded substep scheduling, and the carried tangent warm-start field.
-`ContactTransfers::friction` currently reads tangent-part impulses, so slice 4 needs a deliberate
-publication path for game rows. No named XPBD joint/constraint construction was found in `src`.
-The failed solver, hand-derived contact-response/gain tables and parallel-copy cost are not relied
-on by this slice and remain unverified; no claim of their correctness or cost is made here.
+Most of the reviewed slice-1 run's released-window travel is creeping in gear before park is
+latched, not a stop row losing a parked hold. The tank itself drives into a standing house; the
+two sides reach different obstacle configurations and braking states. Their travel totals are
+observations of different arrivals, not a like-for-like parking comparison or a contact fix.
+Nothing in them is an acceptance target.
 
-## Slice 2 handoff
+## Earlier observations retained
 
-The solver accepts arbitrary coefficient rows, one-sided bounds, moving targets, redundant
-constraints and a previous assignment. Slice 2 still needs the crank speed/inertia in the actual
-block, clutch and crank-geared steering rows, the ceiling row, Driver P1/P2 orders, and replacement
-of the analytic clutch/steering/crank-settlement/work paths. The production caller starts cold;
-it does not yet retain assignments between ticks. Orders/warm-assignment storage and the common
-substep integrator remain part of the later relocation work. No wire fields were added to hold
-that cache, and no later slice was implemented.
+MEASURED, one original paired slab-pull run (`drive-rows-before` / `drive-rows-after`): final hull
+speed 3.572333 / 3.554014 m/s; engaged-clutch left-belt alternation 0.104948 / 0.103886 m/s and
+total delivered-friction alternation 257.18634 / 259.69501 kN; open-clutch left-belt alternation
+0.280471 / 0.281113 m/s and delivered-friction alternation 335.18671 / 341.41586 kN. These are
+observations, not invariant bounds. The rigid-wall probe is absent on this base.
 
-## Validation and probe observations
+MEASURED, the original paired rubble-park run's other cases: flat travel 0.000179421 /
+0.000179421 m, house 0.00235261 / 0.04054038 m, yard 0.00329008 / 0.00359984 m. All had 1280
+asleep ticks in the final observation window. The rammed case is interpreted above.
 
-All final commands passed:
+## Validation and current observations
+
+MEASURED pivot observations: one complete sweep at `4ae55756` and one at the final source,
+each covering all 16 cases. The closing window is the runner's final three seconds of its
+64-second hold; travel is planar net displacement over the hold or its five-second release.
+Every closing window has belt speeds +0.287957 / −0.287957 m/s (rounded); the after mean is exactly
+zero. The construction's target is 0.287957221 m/s, read from each probe's rig. These are observations,
+not stored expectations. In the table, arrows are original base → final source.
+
+| Ground | Closing yaw, rad/s | Hold travel, m | Release travel, m |
+|---|---:|---:|---:|
+| flat | -0.128212 → -0.128212 | 0.030481 → 0.030481 | 0.000546 → 0.000546 |
+| slope5 uphill | -0.129147 → -0.129147 | 2.742561 → 2.742561 | 0.006846 → 0.006846 |
+| slope5 downhill | -0.128560 → -0.128560 | 2.698096 → 2.698095 | 0.005791 → 0.005791 |
+| slope5 across | -0.125650 → -0.125650 | 2.537159 → 2.537159 | 0.007336 → 0.007336 |
+| slope10 uphill | -0.130111 → -0.130111 | 5.422625 → 5.422629 | 0.015787 → 0.015786 |
+| slope10 downhill | -0.128636 → -0.128636 | 5.399934 → 5.399935 | 0.014898 → 0.014898 |
+| slope10 across | -0.117816 → -0.117816 | 5.039417 → 5.039419 | 0.012301 → 0.012301 |
+| slope15 uphill | -0.116515 → -0.116515 | 8.155975 → 8.155975 | 0.025219 → 0.025218 |
+| slope15 downhill | -0.113761 → -0.113761 | 8.158844 → 8.158846 | 0.024704 → 0.024704 |
+| slope15 across | -0.114937 → -0.114937 | 7.699623 → 7.699619 | 0.014556 → 0.014554 |
+| slope25 uphill | -0.007204 → -0.007204 | 14.607827 → 14.607821 | 0.045340 → 4.053671 |
+| slope25 downhill | -0.014843 → -0.014843 | 14.653071 → 14.653071 | 0.044546 → 3.982860 |
+| slope25 across | -0.082080 → -0.082079 | 14.761036 → 14.761046 | 0.046988 → 0.046990 |
+| slope35 uphill | -0.000003 → -0.000109 | 367.389793 → 365.281762 | 0.037092 → 0.000713 |
+| slope35 downhill | 0.001086 → 0.001824 | 366.278435 → 366.234695 | 0.036974 → 0.038547 |
+| slope35 across | -0.000075 → -0.000095 | 367.363888 → 367.362083 | 0.000718 → 0.000782 |
+
+The longitudinal 25° release changes materially. MEASURED at the first zero-steer tick in the
+uphill case: the reaction magnitudes total about 287.0 kN; both belts land at +0.106561 m/s
+and park remains latched with the clutch Out. DERIVED from the shipped construction: the pair's
+dynamic capacity is 192 kN, versus 288 kN static. The preceding mean hold starts at exact zero
+mean and can use static capacity; the replacing side stops start on counter-rotating belts and
+must use dynamic capacity. The original speed-band selector could capture these moving belts
+with static capacity. Under the row table, steering transfers differential load but cannot add
+common-mode brake capacity. Thus the remaining release slide follows the exact-rest rule,
+not an unequal-ground tie defect. No speed band or Driver change was added to recover the old
+reading. The 35° cases' large hull travel also remains an observation of contact/grade limits.
+
+MEASURED current rubble-park observations: all cases once, with rammed repeated a second time;
+the two current rammed results are identical. Window counts are over 1280 ticks. These arrivals
+remain different from the original base; the rammed comparison is not like-for-like.
+
+| Case | Release travel, m | Asleep ticks | Park ticks | Clutch In ticks | Belt-moving ticks |
+|---|---:|---:|---:|---:|---:|
+| flat | 0.000179421 | 1280 | 1280 | 0 | 0 |
+| rammed | 10.340805054 | 533 | 563 | 717 | 717 |
+| house | 0.040540382 | 1280 | 1280 | 0 | 0 |
+| yard | 0.003599836 | 1280 | 1280 | 0 | 0 |
+
+The current rammed arrival still crosses at 10.6875 s and reaches the 5 s braking cap. Its
+maximum belt speed in the window is 0.495881349 m/s; most travel again precedes parked rest.
+
+MEASURED current slab-pull observation, one run: final hull speed 3.568040371 m/s;
+engaged-clutch left-belt alternation 0.104372494 m/s and total delivered-friction alternation
+255.921600 kN; open-clutch values 0.266415715 m/s and 324.168060 kN. The original paired readings
+are retained above for comparison; no contact change was made.
+
+Passed final checks:
 
 - `cargo fmt --all --check`.
 - `scripts/serial-cargo clippy --locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`.
-- `scripts/serial-cargo test --lib --features dev_ui,bitprobe track::`: 376 passed.
+- `scripts/serial-cargo test --lib --features dev_ui,bitprobe track::`: 378 passed.
 - `scripts/serial-cargo test --lib --features dev_ui,bitprobe tests::doc_citations`: 3 passed.
-- `scripts/serial-cargo test --lib --features dev_ui,bitprobe`: run once; 2852 passed,
-  0 failed, 50 ignored, 442.39 s (MEASURED).
-- The ignored `belt_friction_probe` selected with `BELT_FRICTION_ONLY=slab-pull`, and
-  `rubble_park_probe` with all of its cases: each passed before and after.
+- The ignored full `pivot_probe`, `rubble_park_probe` (all cases and a rammed repeat), and
+  `belt_friction_probe` selected with `BELT_FRICTION_ONLY=slab-pull`: passed.
 
-All builds/tests used the queue and `--features dev_ui,bitprobe`; all probe invocations used
-`OVERMATCH_UNATTENDED=1` and their existing headless runner. Before/after tags are
-`drive-rows-before` and `drive-rows-after`. Process logs are `/tmp/drive-rows-*.log` on this
-machine; the observations below are the durable record. No rigid-wall case exists here, so none
-was restored or run.
+`scripts/serial-cargo test --lib --features dev_ui,bitprobe` ran once: **2854 passed, 0 failed,
+50 ignored**, 352.79 s (MEASURED).
 
-MEASURED slab-pull observations (one paired run):
-
-| Reading | Before | After |
-|---|---:|---:|
-| Final hull speed, m/s | 3.572333 | 3.554014 |
-| Engaged-clutch left-belt alternation amplitude, m/s | 0.104948 | 0.103886 |
-| Engaged-clutch total delivered-friction alternation, kN | 257.18634 | 259.69501 |
-| Engaged-clutch left/right sign flips | 150 / 146 | 138 / 152 |
-| Open-clutch left-belt alternation amplitude, m/s | 0.280471 | 0.281113 |
-| Open-clutch total delivered-friction alternation, kN | 335.18671 | 341.41586 |
-
-MEASURED rubble-park observations (one paired run; asleep ticks are over the runner's final
-1280-tick observation window):
-
-| Case | Parking travel before, m | After, m | Asleep ticks before | After |
-|---|---:|---:|---:|---:|
-| Flat | 0.000179421 | 0.000179421 | 1280 | 1280 |
-| Rammed | 0.367229 | 10.279593 | 805 | 542 |
-| House | 0.00235261 | 0.04054038 | 1280 | 1280 |
-| Yard | 0.00329008 | 0.00359984 | 1280 | 1280 |
-
-MEASURED rammed-case belt-moving ticks increased from 0 to 706; maximum absolute belt speed
-in that window changed from 0 to 0.495896 m/s. This is a substantial parking change. It is an
-observation of the changed brake/static-rest and free-steering path, not a new acceptance target
-or a diagnosed contact fix. Nothing was tuned to recover an earlier result. Flat's residual belt
-speed is now exactly zero; the before run reported a 1.37e-15 m/s residual on one side.
-
+All compiles use `scripts/serial-cargo` with `--features dev_ui,bitprobe`; probes use
+`OVERMATCH_UNATTENDED=1` and their existing headless runner. Logs use `/tmp/drive-rows-r2-*.log`;
+the tables here are the durable observations. No contact, Avian, wire or Driver code changed.

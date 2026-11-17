@@ -22,12 +22,111 @@ fn row(jacobian: &[f64], capacity: f64) -> Row {
     }
 }
 
+/// Cyclic coordinate minimization is independent of the production assignment/elimination
+/// solver. It first solves with every eligible static bound, then shrinks only rows whose slip
+/// cannot be held. The certificate must reject dynamic-only solvers even when their KKT signs fit.
+fn reference_bounds(speeds: &[Speed], rows: &[Row]) -> (Vec<Bounds>, Vec<bool>) {
+    // Resolution: reference iteration budget and work-gap allowance for these small f64 fixtures.
+    const SWEEPS: usize = 100_000;
+    const GAP: f64 = 1e-12;
+    let mut dynamic: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            row.dynamic.is_some()
+                && row
+                    .jacobian
+                    .iter()
+                    .enumerate()
+                    .fold(-row.target, |gap, (i, a)| gap + a * speeds[i].value)
+                    != 0.0
+        })
+        .collect();
+    loop {
+        let bounds: Vec<_> = rows
+            .iter()
+            .zip(&dynamic)
+            .map(|(row, &sliding)| {
+                if sliding {
+                    row.dynamic
+                        .expect("a sliding reference row has dynamic bounds")
+                } else {
+                    row.bounds
+                }
+            })
+            .collect();
+        let mut velocity: Vec<_> = speeds
+            .iter()
+            .map(|s| s.value + s.free_impulse / s.inertia)
+            .collect();
+        let mut impulses = vec![0.0; rows.len()];
+        let gradient = |row: &Row, velocity: &[f64]| {
+            row.jacobian
+                .iter()
+                .zip(velocity)
+                .fold(-row.target, |sum, (a, v)| sum + a * v)
+        };
+        let mut converged = false;
+        for _ in 0..SWEEPS {
+            for (i, row) in rows.iter().enumerate() {
+                let curvature: f64 = row
+                    .jacobian
+                    .iter()
+                    .zip(speeds)
+                    .map(|(a, s)| a * a / s.inertia)
+                    .sum();
+                if curvature == 0.0 {
+                    continue;
+                } // A zero reference row cannot change speeds.
+                let next = (impulses[i] - gradient(row, &velocity) / curvature)
+                    .clamp(bounds[i].lower, bounds[i].upper);
+                for (j, v) in velocity.iter_mut().enumerate() {
+                    *v += row.jacobian[j] * (next - impulses[i]) / speeds[j].inertia;
+                }
+                impulses[i] = next;
+            }
+            let gap: f64 = rows
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    let g = gradient(row, &velocity);
+                    g * (impulses[i]
+                        - if g > 0.0 {
+                            bounds[i].lower
+                        } else {
+                            bounds[i].upper
+                        })
+                })
+                .sum();
+            if gap <= GAP {
+                converged = true;
+                break;
+            }
+        }
+        assert!(
+            converged,
+            "the independent reference must converge before certifying a block"
+        );
+        let mut broke = false;
+        for (i, row) in rows.iter().enumerate() {
+            // Resolution: distinguish a reference minimizer's nonzero slip from iteration error.
+            if !dynamic[i] && row.dynamic.is_some() && gradient(row, &velocity).abs() > 1e-7 {
+                dynamic[i] = true;
+                broke = true;
+            }
+        }
+        if !broke {
+            return (bounds, dynamic);
+        }
+    }
+}
+
 /// Independent convex optimality certificate: feasible impulses, momentum balance and the
 /// variational inequality for every coordinate of the dual box imply its global minimum.
 /// No elimination, assignment search, dot product or tolerance is shared with production.
 fn certify(speeds: &[Speed], rows: &[Row], solution: &Solution) {
     // Resolution: independent certificate allowance for f64 accumulation and final target snap.
     const CHECK: f64 = 1e-8;
+    let (expected_bounds, expected_dynamic) = reference_bounds(speeds, rows);
     for (i, input) in speeds.iter().enumerate() {
         let mut momentum = input.free_impulse;
         for (constraint, outcome) in rows.iter().zip(&solution.rows) {
@@ -39,32 +138,16 @@ fn certify(speeds: &[Speed], rows: &[Row], solution: &Solution) {
             "the drivetrain relies on equal impulse at every connected inertia"
         );
     }
-    for (constraint, outcome) in rows.iter().zip(&solution.rows) {
-        let starting_gap = constraint
-            .jacobian
-            .iter()
-            .enumerate()
-            .fold(-constraint.target, |gap, (i, a)| gap + a * speeds[i].value);
-        if constraint.dynamic.is_some() && starting_gap != 0.0 {
-            assert!(
-                outcome.dynamic,
-                "a moving row cannot borrow static capacity"
-            );
-        }
-        let bound = match (outcome.dynamic, constraint.dynamic) {
-            (true, Some(bound)) => bound,
-            _ => constraint.bounds,
-        };
+    for (index, (constraint, outcome)) in rows.iter().zip(&solution.rows).enumerate() {
+        assert_eq!(
+            outcome.dynamic, expected_dynamic[index],
+            "static capacity sufficiency is decided independently"
+        );
+        let bound = expected_bounds[index];
         assert!(outcome.impulse >= bound.lower && outcome.impulse <= bound.upper);
         let mut gradient = -constraint.target;
         for (i, coefficient) in constraint.jacobian.iter().enumerate() {
             gradient += coefficient * solution.speeds[i];
-        }
-        if constraint.dynamic.is_some() && gradient.abs() > CHECK {
-            assert!(
-                outcome.dynamic,
-                "static breakaway must re-solve with sliding capacity"
-            );
         }
         // In one dimension a linear functional attains its minimum at an endpoint. Checking
         // both endpoints proves gradient * (candidate - impulse) >= 0 throughout the interval.
@@ -138,15 +221,7 @@ fn random_redundant_blocks_satisfy_an_independent_optimality_certificate() {
         if case % 3 == 0 {
             rows.push(row(&vec![0.0; n], 0.0));
         }
-        let cold = solve(&speeds, &rows, &[]);
-        certify(&speeds, &rows, &cold);
-        let previous: Vec<_> = cold.rows.iter().map(|r| r.state).collect();
-        let warm = solve(&speeds, &rows, &previous);
-        certify(&speeds, &rows, &warm);
-        assert_eq!(
-            warm.speeds, cold.speeds,
-            "warm starts preserve the unique optimum"
-        );
+        certify(&speeds, &rows, &solve(&speeds, &rows));
         let perturbed: Vec<_> = speeds
             .iter()
             .map(|s| Speed {
@@ -154,7 +229,7 @@ fn random_redundant_blocks_satisfy_an_independent_optimality_certificate() {
                 ..*s
             })
             .collect();
-        certify(&perturbed, &rows, &solve(&perturbed, &rows, &previous));
+        certify(&perturbed, &rows, &solve(&perturbed, &rows));
     }
 }
 
@@ -167,14 +242,16 @@ fn a_stop_snaps_to_zero_and_breakaway_uses_dynamic_capacity_in_the_same_step() {
         lower: -2.0,
         upper: 2.0,
     });
-    let held = solve(&[speed(0.0, 3.0, 5.0)], &[stop.clone()], &[]);
+    let stops = [stop];
+    let stop = &stops[0];
+    let held = solve(&[speed(0.0, 3.0, 5.0)], &stops);
     assert_eq!(held.speeds, [0.0]);
     assert_eq!(held.rows[0].state, State::Stuck);
     assert!(!held.rows[0].dynamic);
     for (initial, impulse) in [(0.0, 7.0), (0.01, 0.0), (-0.01, 0.0), (1.0, 0.0)] {
         let input = speed(initial, 3.0, impulse);
-        let result = solve(&[input], &[stop.clone()], &[]);
-        certify(&[input], &[stop.clone()], &result);
+        let result = solve(&[input], &stops);
+        certify(&[input], &stops, &result);
         if impulse > stop.bounds.upper {
             let dynamic = stop.dynamic.expect("the fixture has sliding capacity");
             // Resolution: the free step and row response round separately in f64.
@@ -191,7 +268,7 @@ fn a_stop_snaps_to_zero_and_breakaway_uses_dynamic_capacity_in_the_same_step() {
         }
     }
     let moving = speed(4.0, 3.0, 0.0);
-    let sliding = solve(&[moving], &[stop], &[]);
+    let sliding = solve(&[moving], &stops);
     assert_eq!(
         sliding.speeds[0],
         moving.value - 2.0 / moving.inertia,
@@ -209,13 +286,13 @@ fn unequal_loads_share_through_a_differential_and_a_held_mean_is_exact() {
         row(&[1.0, 0.0], 4.0),
         row(&[0.0, 1.0], 4.0),
     ];
-    let solution = solve(&speeds, &rows, &[]);
+    let solution = solve(&speeds, &rows);
     certify(&speeds, &rows, &solution);
     assert_eq!(solution.speeds, [0.0, 0.0]);
     assert_ne!(solution.rows[0].impulse, 0.0);
     let moving = [speed(1.0, 3.0, 0.0), speed(-0.5, 7.0, 0.0)];
     let mean = [row(&[0.5, 0.5], 10.0)];
-    let held = solve(&moving, &mean, &[]);
+    let held = solve(&moving, &mean);
     certify(&moving, &mean, &held);
     assert_eq!(held.speeds[0] + held.speeds[1], 0.0);
 }
@@ -235,14 +312,14 @@ fn clutch_and_brake_layout_uses_the_same_block() {
         row(&[0.0, 1.0, 0.0], 3.0),
         row(&[0.0, 0.0, 1.0], 2.0),
     ];
-    let coupled = solve(&speeds, &rows, &[]);
+    let coupled = solve(&speeds, &rows);
     certify(&speeds, &rows, &coupled);
     let mut released = rows;
     released[0].bounds = Bounds {
         lower: 0.0,
         upper: 0.0,
     };
-    let open = solve(&speeds, &released, &[]);
+    let open = solve(&speeds, &released);
     certify(&speeds, &released, &open);
     assert_eq!(
         open.speeds[1], 0.0,
@@ -252,4 +329,20 @@ fn clutch_and_brake_layout_uses_the_same_block() {
         coupled.speeds[1] > open.speeds[1],
         "a loaded clutch can overpower that side's brake"
     );
+}
+
+/// Independent axes remain solvable regardless of row units. The drivetrain may mix angular
+/// and linear ratios; a block-wide rank threshold would discard the smaller independent row.
+#[test]
+fn independent_rows_with_different_scales_both_stop_their_speeds() {
+    // Fixture: unit inertias with unit free impulses; row units differ by six orders.
+    let speeds = [speed(0.0, 1.0, 1.0), speed(0.0, 1.0, 1.0)];
+    let rows = [row(&[1.0, 0.0], 10.0), row(&[0.0, 1e-6], 1e7)];
+    let solution = solve(&speeds, &rows);
+    certify(&speeds, &rows, &solution);
+    assert_eq!(solution.speeds, [0.0, 0.0]);
+    // Resolution: independently derived cancelling impulses, allowing f64 elimination roundoff.
+    for (outcome, expected) in solution.rows.iter().zip([-1.0, -1e6]) {
+        assert!((outcome.impulse - expected).abs() <= 1e-10 * expected.abs());
+    }
 }

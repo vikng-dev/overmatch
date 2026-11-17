@@ -1833,18 +1833,8 @@ fn steering_tie(
     }
 }
 
-/// The steering member's contribution to this tick: the difference-axis force `F_s`, the L600
-/// constraint force λ, and λ's per-output Jacobian `j`. Returned as `(f_s, lambda, j)`; a tick
-/// that commands neither leaves all three at zero.
-///
-/// The servo is a capacity-limited KINEMATIC one, semi-implicit like the brakes and λ: the `F_s`
-/// that lands `d` exactly on target after this tick's integration (each side landing through
-/// [`BeltTick`], `F_s/2` on the left and `−F_s/2` on the right), clamped to the per-output
-/// convention's bound. Exact inside capacity, honest slip beyond it — and no proportional band:
-/// a proportional band permits steady droop when the target lies inside that band.
-/// The difference-axis bound is twice the per-output capacity because each output receives
-/// half of `F_s`; see [`TransmissionParams::steer_capacity_n`]. Stops consume this force as a
-/// free impulse; their solve does not change this steering predictor.
+/// Geared steering's force predictor: `(lambda, j)` is applied before the stop block.
+/// Neutral steering instead solves as a row beside the stops in [`stop_rows`].
 fn steering_force(
     tp: &TransmissionParams,
     belts: &BeltTick,
@@ -1852,19 +1842,13 @@ fn steering_force(
     inp: &TransmissionInput,
     m: f32,
     f_c: f32,
-) -> (f32, f32, [f32; 2]) {
-    let mut f_s = 0.0;
+) -> (f32, [f32; 2]) {
     let mut lambda = 0.0;
     let mut j = [0.0f32; 2];
     let steer_capacity = inp.supply.transmission_condition * tp.steer_capacity_n;
     let clutch = [f_c / 2.0; 2];
     let b0 = branch(m);
-    if neutral_turn(inp, m) {
-        let (tie, target) = steering_tie(tp, st, inp, m, b0);
-        f_s = belts
-            .constraint_force(tie, clutch, target)
-            .clamp(-2.0 * steer_capacity, 2.0 * steer_capacity);
-    } else {
+    if !neutral_turn(inp, m) {
         // The geared-radius constraint g = d − s·κ·|m| = 0, solved semi-implicitly:
         // λ is the force that lands g at zero after this tick's integration, clamped
         // so each output's share stays inside the per-output capacity (beyond it the
@@ -1904,7 +1888,7 @@ fn steering_force(
             j = j0;
         }
     }
-    (f_s, lambda, j)
+    (lambda, j)
 }
 
 /// Signed sprocket work after the declared recirculation loss. The split is physical:
@@ -1923,7 +1907,8 @@ fn recirculated_work(tp: &TransmissionParams, sides: [f32; 2]) -> f32 {
 /// The engine's work allocation for one tick: a common force scale and the remaining crank
 /// energy (J). The game's damage model has one source budget: combustion's free-crank step
 /// plus stored crank inertia. Positive/recirculated work uses each sprocket's midpoint speed,
-/// so acceleration from rest costs energy on the tick it happens.
+/// so acceleration from rest costs energy on the tick it happens. `sides_at` supplies signed
+/// sprocket work at a source scale, including neutral steering delivered beside passive stops.
 struct EngineWork {
     scale: f32,
     crank_energy: f32,
@@ -1931,9 +1916,8 @@ struct EngineWork {
 
 fn engine_work(
     tp: &TransmissionParams,
-    belts: &BeltTick,
     crank: CrankTick,
-    motor: [f32; 2],
+    sides_at: impl Fn(f32) -> [f32; 2],
     #[cfg(feature = "bitprobe")] probe: &mut TransmissionProbe,
 ) -> EngineWork {
     let omega_free = crank.omega_e + crank.tau_free * crank.dt / tp.engine_inertia;
@@ -1943,19 +1927,13 @@ fn engine_work(
     let energy = 0.5 * tp.engine_inertia * omega_free * omega_free;
     let spendable =
         (energy - 0.5 * tp.engine_inertia * crank.omega_floor.max(0.0).powi(2)).max(0.0);
-    let sides_at = |scale: f32| {
-        [0, 1].map(|i| {
-            let force = motor[i] * scale;
-            force * (belts.speeds[i] + belts.land(i, force)) * 0.5 * crank.dt
-        })
-    };
     let work = |scale| recirculated_work(tp, sides_at(scale));
     let scale = if work(1.0) <= spendable {
         1.0
     } else {
         let (mut lo, mut hi) = (0.0, 1.0);
         // Resolution: 24 bisections resolve the unit force scale to f32's mantissa. Positive
-        // work is convex in scale; zero is feasible even with an empty engine and stopped crank.
+        // work is checked at every accepted scale; zero delivers no motor work.
         for _ in 0..24 {
             let mid = (lo + hi) * 0.5;
             if work(mid) <= spendable {
@@ -1982,16 +1960,25 @@ fn engine_work(
     }
 }
 
-/// Stops receive the existing clutch/steering forces as free impulses. The affine ground slope
-/// belongs in effective inertia; row impulses and returned sprocket forces exclude that ground.
-/// A lever or mean hold has static capacity only at exact starting rest; service stays dynamic.
+struct BeltStep {
+    next: [f32; 2],
+    forces: [f32; 2],
+    held: [bool; 2],
+    brakes_slide: bool,
+    neutral_force: f32,
+}
+
+/// Stops and the neutral steering tie share a block. Clutch and geared steering forces stay
+/// free inputs; the affine ground slope belongs in effective inertia. A lever or mean hold
+/// has static capacity only at exact starting rest; service stays dynamic.
 fn stop_rows(
-    q: &mut [f32; 2],
+    mut q: [f32; 2],
     tp: &TransmissionParams,
     belts: &BeltTick,
     st: &TransmissionState,
     controls: &Controls,
-) -> ([f32; 2], [bool; 2], bool) {
+    steering_scale: f32,
+) -> BeltStep {
     use super::block::{Bounds, Row, Speed, State, solve};
     let dt = f64::from(controls.input.dt);
     let speeds = [0, 1].map(|i| Speed {
@@ -2056,32 +2043,62 @@ fn stop_rows(
             }),
         });
     }
-    let result = solve(&speeds, &rows, &[]);
+    let stop_count = rows.len();
+    let mean = (belts.speeds[0] + belts.speeds[1]) * 0.5;
+    let neutral = neutral_turn(&controls.input, mean);
+    if neutral {
+        // The half-difference weights put half the row impulse on each output, hence twice
+        // the per-output rating. The source work budget scales this capacity, not its target.
+        let capacity = 2.0
+            * f64::from(controls.input.supply.transmission_condition)
+            * f64::from(tp.steer_capacity_n)
+            * f64::from(steering_scale)
+            * dt;
+        rows.push(Row {
+            jacobian: vec![0.5, -0.5],
+            target: f64::from(controls.input.steer * tp.neutral_d_full),
+            bounds: Bounds {
+                lower: -capacity,
+                upper: capacity,
+            },
+            dynamic: None,
+        });
+    }
+    let result = solve(&speeds, &rows);
     let mut held = [false; 2];
     let mut slides = false;
     for (i, (row, outcome)) in rows.iter().zip(&result.rows).enumerate() {
         for (force, coefficient) in q.iter_mut().zip(&row.jacobian) {
             *force += (coefficient * outcome.impulse / dt) as f32;
         }
-        if !controls.mean_hold {
-            held[i] = outcome.state == State::Stuck;
+        if i < stop_count {
+            if !controls.mean_hold {
+                // Redundant stops can sit at a bound with zero slip; the surface still holds.
+                held[i] = result.speeds[i] == 0.0;
+            }
+            // A launch lever's zero bound leaves useful forward travel free, not sliding on a brake.
+            slides |= outcome.state != State::Stuck
+                && outcome.impulse != 0.0
+                && row
+                    .jacobian
+                    .iter()
+                    .zip(&result.speeds)
+                    .map(|(a, v)| a * v)
+                    .sum::<f64>()
+                    != 0.0;
         }
-        // A launch lever's zero bound leaves useful forward travel free, not sliding on a brake.
-        slides |= outcome.state != State::Stuck
-            && outcome.impulse != 0.0
-            && row
-                .jacobian
-                .iter()
-                .zip(&result.speeds)
-                .map(|(a, v)| a * v)
-                .sum::<f64>()
-                != 0.0;
     }
-    (
-        [result.speeds[0] as f32, result.speeds[1] as f32],
+    BeltStep {
+        next: [result.speeds[0] as f32, result.speeds[1] as f32],
+        forces: q,
         held,
-        slides,
-    )
+        brakes_slide: slides,
+        neutral_force: if neutral {
+            (result.rows[stop_count].impulse / dt) as f32
+        } else {
+            0.0
+        },
+    }
 }
 
 /// The Driver holds the crank ceiling with service brakes. Below it no brake acts; beyond
@@ -2339,39 +2356,56 @@ pub(crate) fn step(
     };
     let f_c_pre_scale = k * dir * tau_c;
 
-    let (f_s_pre_scale, lambda, j) = steering_force(tp, &belts, st, inp, m, f_c_pre_scale);
-
+    let (lambda_pre_scale, j) = steering_force(tp, &belts, st, inp, m, f_c_pre_scale);
+    let motor = [
+        f_c_pre_scale * 0.5 + lambda_pre_scale * j[0],
+        f_c_pre_scale * 0.5 + lambda_pre_scale * j[1],
+    ];
+    let land = |scale| {
+        let mut q = motor.map(|force| force * scale);
+        apply_ceiling_brakes(&mut q, tp, &belts, st, &controls, crank);
+        stop_rows(q, tp, &belts, st, &controls, scale)
+    };
+    let neutral = neutral_turn(inp, m);
     let work = engine_work(
         tp,
-        &belts,
         crank,
-        [
-            (f_c_pre_scale + f_s_pre_scale) * 0.5 + lambda * j[0],
-            (f_c_pre_scale - f_s_pre_scale) * 0.5 + lambda * j[1],
-        ],
+        |scale| {
+            let mut forces = motor.map(|force| force * scale);
+            let next = if neutral {
+                let solved = land(scale);
+                forces[0] += solved.neutral_force * 0.5;
+                forces[1] -= solved.neutral_force * 0.5;
+                solved.next
+            } else {
+                [belts.land(0, forces[0]), belts.land(1, forces[1])]
+            };
+            [0, 1].map(|i| forces[i] * (belts.speeds[i] + next[i]) * 0.5 * dt)
+        },
         #[cfg(feature = "bitprobe")]
         &mut bitprobe,
     );
     let power_scale = work.scale;
-    let f_c = f_c_pre_scale * power_scale;
-    let f_s = f_s_pre_scale * power_scale;
-    let lambda = lambda * power_scale;
+    #[cfg(feature = "bitprobe")]
+    let f_s_pre_scale = if neutral {
+        land(1.0).neutral_force
+    } else {
+        0.0
+    };
+    let BeltStep {
+        next,
+        forces: q,
+        held,
+        brakes_slide,
+        ..
+    } = land(power_scale);
 
     // --- Integrate the crank: J·ω̇_e = τ_free − τ_c (the transmitted torque scaled by the
     // power gate exactly as the belt-side force was — one bookkeeping for both ends of the
-    // clutch). The work allocation below also charges steering and caps any clutch re-anchor
+    // clutch). The work allocation also charges steering and caps any clutch re-anchor
     // at the crank energy left after both sprockets have done their work.
     let omega_integrated = omega_e + (tau_free - tau_c * power_scale) * dt / tp.engine_inertia;
     st.omega_e = omega_integrated;
-
-    // --- Assemble per-side sprocket forces.
-    let mut q = [
-        f_c / 2.0 + f_s / 2.0 + lambda * j[0],
-        f_c / 2.0 - f_s / 2.0 + lambda * j[1],
-    ];
-
-    apply_ceiling_brakes(&mut q, tp, &belts, st, &controls, crank);
-    let (next, held, brakes_slide) = stop_rows(&mut q, tp, &belts, st, &controls);
 
     let locked = settle_crank(
         st,
@@ -2388,7 +2422,7 @@ pub(crate) fn step(
             .min((2.0 * work.crank_energy / tp.engine_inertia).sqrt());
     #[cfg(feature = "bitprobe")]
     {
-        let sample = (dir * m, g, dir * f_c, propulsive);
+        let sample = (dir * m, g, dir * f_c_pre_scale * power_scale, propulsive);
         force_probe(tp, inp, sample, st.clutch, &mut bitprobe);
         bitprobe.power_scale = power_scale;
         bitprobe.omega_end = st.omega_e;
@@ -2408,7 +2442,7 @@ pub(crate) fn step(
         f_other: tied_force,
         f_c_pre_scale,
         f_s_pre_scale,
-        lambda,
+        lambda: lambda_pre_scale * power_scale,
         j,
         omega_integrated,
         forces: q,
