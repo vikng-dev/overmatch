@@ -240,14 +240,19 @@ impl RigGeom {
     /// the two authored counts the caller owns (the sandbox tunes `link_count` against
     /// [`LinkWindow`]); everything else is measured or derived. `params` validates the authored
     /// loop and suspension on both sides and supplies the sandbox's cached window readout.
-    /// The rest pose itself is knob-free by construction.
+    /// The rest pose itself is knob-free by construction. Returns its admitted transmission
+    /// parameters and reflected belt inertia with the geometry; sim construction consumes both.
     pub(crate) fn build(
         blueprint: &TankBlueprint,
         glb_path: &Path,
         teeth: u32,
         link_count: usize,
         params: &SuspensionParams,
-    ) -> Self {
+    ) -> (
+        Self,
+        super::transmission::TransmissionParams,
+        crate::spec::ReflectedBeltInertia,
+    ) {
         // The module's only file read; `rebuild` reuses its measurements. Mass supplies nominal
         // ground pressure as well as readouts; geometry still comes only from the sim artifact.
         let model = DerivedModel::build(blueprint.spec.mass, glb_path);
@@ -292,17 +297,22 @@ impl RigGeom {
         );
         geom.validate(params)
             .unwrap_or_else(|error| panic!("{}: {error}", blueprint.file));
-        blueprint
+        let (transmission, inertia) = blueprint
             .spec
             .track
-            .transmission_params(&blueprint.spec.roadwheels, geom.wrap_radii(), geom.plane_x)
+            .transmission_params(
+                &blueprint.spec.roadwheels,
+                geom.wrap_radii(),
+                geom.plane_x,
+                blueprint.spec.mass,
+            )
             .unwrap_or_else(|error| {
                 panic!(
                     "{}: {error}; correct the running-gear construction facts",
                     blueprint.file
                 )
             });
-        geom
+        (geom, transmission, inertia)
     }
 
     /// The radii the belt turns its wrapped wheels at: each side's rest sprocket and idler
@@ -1050,6 +1060,7 @@ pub(crate) fn tiger_rig() -> RigGeom {
         link_count,
         &SuspensionParams::default(),
     )
+    .0
 }
 
 #[cfg(test)]

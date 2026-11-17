@@ -914,31 +914,39 @@ impl TrackSpec {
     pub(crate) fn nominal_transmission_params(
         &self,
         roadwheels: &[RoadwheelSpec],
+        mass_kg: f32,
     ) -> Result<TransmissionParams, BevyError> {
         let nominal = WrapRadii {
             sprocket: 1.0,
             idler: self.idler.radius,
         };
         self.inertia_terms(roadwheels, nominal)?;
-        self.powertrain.transmission.params(1.0, 1.0, 1.0)
+        self.powertrain.transmission.params(1.0, 1.0, 1.0, mass_kg)
     }
 
     /// Build the joint drive from construction, the measured wrap radii and the measured
-    /// half-tread. Only admitted running gear consumes these physical tables; structural
+    /// half-tread, returning admitted parameters and reflected belt inertia (kg).
+    /// Only admitted running gear consumes these physical tables; structural
     /// validation and the crank seed use [`Self::nominal_transmission_params`].
     pub(crate) fn transmission_params(
         &self,
         roadwheels: &[RoadwheelSpec],
         wrap: WrapRadii,
         half_tread: f32,
-    ) -> Result<TransmissionParams, BevyError> {
-        self.powertrain.transmission.params(
-            wrap.sprocket,
-            half_tread,
-            self.reflected_inertia(roadwheels, wrap)?,
-        )
+        mass_kg: f32,
+    ) -> Result<(TransmissionParams, ReflectedBeltInertia), BevyError> {
+        let inertia = self.reflected_inertia(roadwheels, wrap)?;
+        let params =
+            self.powertrain
+                .transmission
+                .params(wrap.sprocket, half_tread, inertia, mass_kg)?;
+        Ok((params, ReflectedBeltInertia(inertia)))
     }
 }
+
+/// Admitted per-side belt translation and reflected wheel inertia (kg).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReflectedBeltInertia(pub(crate) f32);
 
 /// The measured radii at which the belt turns the wheels it wraps (m). The sprocket turns at its
 /// chord-exact pitch radius. The idler turns with the pin line wrapped around it, so at its
@@ -961,8 +969,7 @@ pub struct PowertrainSpec {
     pub transmission: TransmissionSpec,
 }
 
-/// The declared drivetrain block: a fixed-radius geared regenerative box (the L600 family, the
-/// one law `track::transmission` runs). Authoring rule (tiger-transmission-data.md): per-gear
+/// The declared drivetrain block: engine, gears and a list of drive/stop couplings. Authoring rule (tiger-transmission-data.md): per-gear
 /// SPEEDS are the anchors; total reductions derive at build time against the spec's own
 /// sprocket radius, so the ladder survives the open 19-vs-20-tooth sprocket discrepancy.
 #[derive(Deserialize, Clone)]
@@ -971,28 +978,63 @@ pub struct TransmissionSpec {
     pub engine: EngineSpec,
     pub gearbox: GearboxSpec,
     pub steering: SteeringSpec,
-    /// Per-side service/parking brake capacity at the sprocket (N).
-    pub brake_force: f32,
-    /// Static breakaway multiplier for an at-rest parking lever.
-    pub brake_static_factor: f32,
+    pub couplings: Vec<crate::track::transmission::Coupling>,
+    /// Rated climbing slope (degrees).
+    pub(crate) rated_slope_deg: crate::provenance::Labelled<f32>,
+    /// Stand-in for the missing gearbox-brake torque and reduction; required by Stop(Mean).
+    pub(crate) mean_hold: Option<crate::provenance::Provenance>,
+    /// Static/sliding brake ratio for latched stops.
+    pub(crate) brake_static_factor: crate::provenance::Labelled<f32>,
 }
 
 impl TransmissionSpec {
-    /// Adapt this RON shape into the shared validated authoring seam. Both asset validation and
-    /// synchronous sim construction call this mapping, so the accepted domain cannot drift.
+    /// Owner decision: sliding side brakes balance the rated grade, independently of ground grip.
+    /// AMCP 706-355 sections 3-2.1 and 8-28: size service brakes to the rated grade.
+    pub(crate) fn brake_capacity_n(&self, mass_kg: f32) -> Result<f32, BevyError> {
+        if !mass_kg.is_finite()
+            || mass_kg <= 0.0
+            || !self.rated_slope_deg.value.is_finite()
+            || !(0.0..90.0).contains(&self.rated_slope_deg.value)
+            || self.rated_slope_deg.value == 0.0
+        {
+            return Err("transmission.rated_slope_deg / mass: author a finite positive mass and a slope strictly between 0 and 90 degrees".into());
+        }
+        // Two belts share weight equally; this is the force balance, not a capacity multiplier.
+        Ok(mass_kg * crate::track::derive::G * self.rated_slope_deg.value.to_radians().sin() / 2.0)
+    }
+
+    /// StandIn: the mean brake carries the service brakes' rated grade as a total mean force.
+    /// A sourced gearbox-brake torque and reduction would replace this rule.
+    pub(crate) fn mean_hold_capacity_n(&self, mass_kg: f32) -> Result<Option<f32>, BevyError> {
+        use crate::track::transmission::{Coupling, Output};
+        match (self.couplings.contains(&Coupling::Stop(Output::Mean)), &self.mean_hold) {
+            (false, None) => Ok(None), // This construction has no mean brake.
+            (true, Some(crate::provenance::Provenance::StandIn(note))) if !note.trim().is_empty() => {
+                Ok(Some(2.0 * self.brake_capacity_n(mass_kg)?))
+            }
+            (false, Some(_)) => Err("transmission.mean_hold: remove the orphaned StandIn or construct Stop(Mean) with a steering tie".into()),
+            (true, _) => Err("transmission.mean_hold: author StandIn with the missing gearbox-brake torque and reduction for Stop(Mean); the rated-grade rule supplies its capacity".into()),
+        }
+    }
+
+    /// Adapt this RON shape into the shared authoring admission seam.
     pub(crate) fn params(
         &self,
         sprocket_radius_m: f32,
         half_tread_m: f32,
         belt_inertia: f32,
+        mass_kg: f32,
     ) -> Result<TransmissionParams, BevyError> {
         let Self {
             engine,
             gearbox,
             steering,
-            brake_force,
+            couplings,
+            rated_slope_deg: _,
+            mean_hold: _,
             brake_static_factor,
         } = self;
+        let brake_capacity_n = self.brake_capacity_n(mass_kg)?;
         TransmissionParams::from_authoring(&TransmissionAuthoring {
             idle_rpm: engine.idle_rpm,
             governed_rpm: engine.governed_rpm,
@@ -1006,11 +1048,16 @@ impl TransmissionSpec {
             max_step: gearbox.max_step.0,
             steer_radii_m: &steering.radii,
             reverse_steer_radii_m: &steering.reverse_radii,
-            steer_capacity_n: steering.capacity,
-            neutral_mean: steering.neutral_mean.0,
-            recirculation: steering.recirculation,
-            brake_capacity_n: *brake_force,
-            brake_static_factor: *brake_static_factor,
+            steer_capacity_n: match (couplings.contains(&crate::track::transmission::Coupling::Steering), steering.capacity) {
+                (true, Some(capacity)) => capacity,
+                (true, None) => return Err("transmission.steering.capacity: Steering requires its member rating; author capacity".into()),
+                (false, _) => 0.0, // No member: no capacity exists to apply.
+            },
+            couplings,
+            steering_radius_rounding_share: steering.radius_rounding_share.0,
+            brake_capacity_n,
+            mean_hold_capacity_n: self.mean_hold_capacity_n(mass_kg)?,
+            brake_static_factor: brake_static_factor.value,
             drag_fraction: engine.drag_fraction,
             engine_inertia_kgm2: engine.inertia_kgm2,
             clutch_capacity_nm: engine.clutch_capacity_nm,
@@ -1086,8 +1133,8 @@ pub struct GearboxSpec {
     pub(crate) shift_secs: Sourced<f32>,
 }
 
-/// The steering member: per-gear fixed radii (the L600's two detents), its force capacity, and the
-/// regenerative power path.
+/// Construction radii. A Steering member derives its crank ratios from the first pair and checks
+/// both ladders within the rounding bound. Side-clutch radii impose no geared constraint.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SteeringSpec {
@@ -1098,14 +1145,9 @@ pub struct SteeringSpec {
     /// Steering-member force capacity PER OUTPUT (N): the member drives the two outputs
     /// differentially, so the belt-difference axis `F_s` carries up to 2× this (each side
     /// sees `F_s/2`, bounded by this datum — the gearing/grip-scale per-track cap).
-    pub capacity: f32,
-    /// Inner→outer recirculation efficiency η.
-    pub recirculation: f32,
-    /// Whether the mean track speed is held in a neutral turn (`track::transmission::NeutralMean`).
-    pub(crate) neutral_mean: Sourced<crate::track::transmission::NeutralMean>,
-    // Neutral differential speed derives from first-gear construction:
-    // `neutral_d_full = κ_tight(F1) × v1_governed`. An authored share would replace
-    // the radii/speed relationship with an unprovenanced feel scalar.
+    pub capacity: Option<f32>,
+    /// Relative rounding bound on the radius check, never a steering law coefficient.
+    pub(crate) radius_rounding_share: Sourced<f32>,
 }
 
 /// The ride model: three numbers, everything else derives. Spring rate `k = m·(2πf)²`,
@@ -1959,7 +2001,7 @@ impl TankSpec {
         }
         // Structural rules need no geometry. Running-gear admission checks the physical
         // tables, side inertia equality and coupling divisor against the actual pitch radius.
-        let transmission = t.nominal_transmission_params(&self.roadwheels)?;
+        let transmission = t.nominal_transmission_params(&self.roadwheels, self.mass)?;
         // Engine audio data: the firing rate divides by neither, but both are DIVISORS in the
         // playback law (`sfx`) — a 0-cylinder engine pops at 0 Hz and a 0 Hz recording makes the
         // anchor infinite.
@@ -2192,7 +2234,7 @@ mod tests {
         );
         let params = spec
             .track
-            .nominal_transmission_params(&spec.roadwheels)
+            .nominal_transmission_params(&spec.roadwheels, spec.mass)
             .expect("transmission admission precedes aggregate checks");
         let peak_torque = params.torque_at(params.peak_torque_rpm);
         assert!(
@@ -2323,6 +2365,7 @@ TankSpec(
         idler: (spin_inertia_kgm2: ((left: 4.0, right: 4.0), Fixture("fixture idlers")), radius: (left: 0.4, right: 0.4), nodes: (left: "Idler_L", right: "Idler_R")),
         powertrain: (
             transmission: (
+                couplings: [Clutch(Mean), Steering, Stop(Left), Stop(Right)],
                 engine: (
                     idle_rpm: 600.0,
                     governed_rpm: 2000.0,
@@ -2345,14 +2388,14 @@ TankSpec(
 
                 ),
                 steering: (
-                    radii: [(4.0, 12.0), (6.0, 18.0), (9.0, 27.0), (14.0, 42.0)],
-                    reverse_radii: [(4.0, 12.0), (6.0, 18.0)],
-                    capacity: 100_000.0,
-                    recirculation: 0.9,
-                    neutral_mean: (Free, Fixture("fixture steering family")),
+                    radii: [(4.0, 12.0), (6.4, 19.2), (9.6, 28.8), (14.4, 43.2)],
+                    reverse_radii: [(4.0, 12.0), (6.4, 19.2)],
+                    capacity: Some(100_000.0),
+                    radius_rounding_share: (0.01, Fixture("relative radius-table rounding bound: one percent")),
                 ),
-                brake_force: 50_000.0,
-                brake_static_factor: 1.5,
+                mean_hold: None,
+                rated_slope_deg: (30.0, Fixture("rated climbing slope")),
+                brake_static_factor: (1.5, Fixture("missing static to dynamic brake ratio; settled by measured breakaway and sliding torque")),
             ),
         ),
         suspension: (
@@ -3310,66 +3353,129 @@ TankSpec(
         assert!(spec.validate().is_ok());
     }
 
+    /// The authored mean-brake stand-in selects the total rated-grade rule. Players rely on
+    /// the same grade support through the side-park to mean-hold handover, at any mass or slope.
+    /// Fixture: scale the inline construction's mass and slope independently.
+    #[test]
+    fn mean_brake_stand_in_carries_total_rated_grade() {
+        use crate::provenance::Provenance;
+        let spec = fixture();
+        for mass_share in [0.5, 2.0] {
+            for slope_share in [0.5, 1.0] {
+                let mass = spec.mass * mass_share;
+                let mut tr = spec.track.powertrain.transmission.clone();
+                tr.rated_slope_deg.value *= slope_share;
+                tr.mean_hold = Some(Provenance::StandIn(
+                    "gearbox-brake torque and reduction missing".into(),
+                ));
+                tr.couplings
+                    .push(crate::track::transmission::Coupling::Stop(
+                        crate::track::transmission::Output::Mean,
+                    ));
+                let params = tr
+                    .params(1.0, 1.0, 1.0, mass)
+                    .expect("the fixture construction is admitted");
+                let expected =
+                    mass * crate::track::derive::G * tr.rated_slope_deg.value.to_radians().sin();
+                assert_eq!(params.mean_hold_capacity_n, Some(expected));
+                assert_eq!(
+                    params.mean_hold_capacity_n,
+                    Some(2.0 * params.brake_capacity_n)
+                );
+                for label in [
+                    None,
+                    Some(Provenance::Unknown("torque and reduction missing".into())),
+                    Some(Provenance::StandIn(String::new())),
+                ] {
+                    tr.mean_hold = label;
+                    let error = tr
+                        .params(1.0, 1.0, 1.0, mass)
+                        .expect_err("Stop(Mean) requires a named StandIn fix")
+                        .to_string();
+                    assert!(
+                        error.contains("transmission.mean_hold") && error.contains("StandIn"),
+                        "{error}"
+                    );
+                }
+                tr.couplings.retain(|coupling| {
+                    *coupling
+                        != crate::track::transmission::Coupling::Stop(
+                            crate::track::transmission::Output::Mean,
+                        )
+                });
+                tr.mean_hold = Some(Provenance::StandIn("missing torque and reduction".into()));
+                let error = tr
+                    .params(1.0, 1.0, 1.0, mass)
+                    .expect_err("an orphaned mean-brake label is refused")
+                    .to_string();
+                assert!(
+                    error.contains("transmission.mean_hold")
+                        && error.contains("remove")
+                        && error.contains("StandIn"),
+                    "{error}"
+                );
+            }
+        }
+    }
+
     /// Transmission-block runtime invariants: non-finite capacities NaN out the
     /// brake engagement scaling, hunting shift bands and unordered ladders break the shift
     /// logic's assumptions, and the u8 gear index must be able to address every gear. Each
     /// rejection is named.
     #[test]
     fn validate_rejects_broken_transmission_blocks() {
-        fn engine(tr: &mut TransmissionSpec) -> &mut EngineSpec {
-            &mut tr.engine
-        }
-        fn gearbox(tr: &mut TransmissionSpec) -> &mut GearboxSpec {
-            &mut tr.gearbox
-        }
         let cases: [(&str, fn(&mut TransmissionSpec)); 15] = [
             // Engine audio data: both are DIVISORS in the playback law — a 0-cylinder engine pops
             // at 0 Hz (silence played at speed 0) and a 0 Hz recording makes the anchor infinite.
-            ("cylinders", |tr| engine(tr).cylinders = 0),
+            ("cylinders", |tr| tr.engine.cylinders = 0),
             ("clip_pop_hz", |tr| {
-                engine(tr)
+                tr.engine
                     .sound
                     .as_mut()
                     .expect("the fixture authors a sound block")
                     .clip_pop_hz = 0.0;
             }),
             ("clip_pop_hz", |tr| {
-                engine(tr)
+                tr.engine
                     .sound
                     .as_mut()
                     .expect("the fixture authors a sound block")
                     .clip_pop_hz = f32::NAN;
             }),
             // Coupling requires positive crank inertia and finite clutch capacity.
-            ("inertia_kgm2", |tr| engine(tr).inertia_kgm2 = 0.0),
+            ("inertia_kgm2", |tr| tr.engine.inertia_kgm2 = 0.0),
             ("clutch_capacity_nm", |tr| {
-                engine(tr).clutch_capacity_nm = f32::NAN;
+                tr.engine.clutch_capacity_nm = f32::NAN;
             }),
             // The game's driving model requires idle above its authored stall-guard band;
             // the drag regularisation independently reaches rest.
             ("engine.idle_rpm floor", |tr| {
-                engine(tr).idle_rpm = f32::from_bits(1)
+                tr.engine.idle_rpm = f32::from_bits(1)
             }),
             ("steering capacity", |tr| {
-                tr.steering.capacity = f32::INFINITY
+                tr.steering.capacity = Some(f32::INFINITY)
             }),
-            ("brake_force", |tr| tr.brake_force = f32::INFINITY),
+            ("rated_slope_deg", |tr| {
+                tr.rated_slope_deg.value = f32::INFINITY
+            }),
             ("brake_static_factor", |tr| {
-                tr.brake_static_factor = f32::NAN
+                tr.brake_static_factor.value = f32::NAN
             }),
-            ("brake_static_factor", |tr| tr.brake_static_factor = 0.99),
-            ("launch_gears", |tr| gearbox(tr).launch_gears = Sourced(0)),
-            ("max_step", |tr| gearbox(tr).max_step = Sourced(0)),
+            ("brake_static_factor", |tr| {
+                tr.brake_static_factor.value = 0.99
+            }),
+            ("launch_gears", |tr| tr.gearbox.launch_gears = Sourced(0)),
+            ("max_step", |tr| tr.gearbox.max_step = Sourced(0)),
             ("ladder shape", |tr| {
-                gearbox(tr).forward_speeds_kmh.swap(2, 3);
+                tr.gearbox.forward_speeds_kmh.swap(2, 3);
             }),
             // 300 ascending reverse gears: passes ordering and hysteresis, but cannot be
             // addressed by the runtime's u8 gear index.
             ("ladder shape", |tr| {
-                gearbox(tr).reverse_speeds_kmh = (1..=300).map(|i| i as f32).collect();
+                tr.gearbox.reverse_speeds_kmh = (1..=300).map(|i| i as f32).collect();
                 tr.steering.reverse_radii = vec![(4.0, 12.0); 300]; // Fixture rows isolate index admission.
             }),
-            ("drag_fraction", |tr| engine(tr).drag_fraction = 1.5),
+            ("drag_fraction", |tr| tr.engine.drag_fraction = 1.5),
         ];
         for (needle, mutate) in cases {
             let mut spec = fixture();
@@ -3379,7 +3485,11 @@ TankSpec(
         }
         // A block missing one of its tables is refused at parse, by name: every table is
         // required data, so no law runs on an absent one.
-        let missing = FIXTURE_RON.replace("brake_static_factor: 1.5,", "");
+        let missing = FIXTURE_RON
+            .lines()
+            .filter(|line| !line.contains("brake_static_factor:"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_ne!(
             missing, FIXTURE_RON,
             "the fixture authors brake_static_factor"
@@ -3392,6 +3502,28 @@ TankSpec(
             err.contains("brake_static_factor"),
             "missing brake_static_factor should be named: {err}"
         );
+    }
+
+    /// Construction admission requires a member rating only when that member exists. A side
+    /// clutch construction must not invent a steering capacity merely to satisfy the sheet gate.
+    #[test]
+    fn steering_member_capacity_is_required_only_for_its_construction() {
+        let mut spec = fixture();
+        let tr = fixture_transmission(&mut spec);
+        tr.steering.capacity = None;
+        assert!(
+            tr.params(0.3, 1.0, 8000.0, 18_000.0)
+                .unwrap_err()
+                .to_string()
+                .contains("steering.capacity")
+        );
+        tr.couplings = vec![
+            crate::track::transmission::Coupling::Clutch(crate::track::transmission::Output::Left),
+            crate::track::transmission::Coupling::Clutch(crate::track::transmission::Output::Right),
+            crate::track::transmission::Coupling::Stop(crate::track::transmission::Output::Left),
+            crate::track::transmission::Coupling::Stop(crate::track::transmission::Output::Right),
+        ];
+        assert!(tr.params(0.3, 1.0, 8000.0, 18_000.0).is_ok()); // Fixture geometry and belt inertia.
     }
 
     /// The asset door relies on its own declared drivetrain remaining valid. Read that
@@ -3523,17 +3655,17 @@ TankSpec(
         assert!(spec.validate().is_ok());
         assert!(
             spec.track
-                .nominal_transmission_params(&spec.roadwheels)
+                .nominal_transmission_params(&spec.roadwheels, spec.mass)
                 .is_ok()
         );
         assert!(
             spec.track
-                .transmission_params(&spec.roadwheels, lab_wrap(0.5), 1.0)
+                .transmission_params(&spec.roadwheels, lab_wrap(0.5), 1.0, spec.mass)
                 .is_ok()
         );
         assert!(
             spec.track
-                .transmission_params(&spec.roadwheels, lab_wrap(1.0), 1.0)
+                .transmission_params(&spec.roadwheels, lab_wrap(1.0), 1.0, spec.mass)
                 .is_err()
         );
     }

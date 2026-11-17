@@ -424,6 +424,7 @@ fn house_bed() -> Bed {
         app,
         tank,
         rest_y,
+        assignment_work: AssignmentWork::default(),
         pieces: Vec::new(),
     };
     // Fixture: well clear of the house and of what falls from it.
@@ -1159,7 +1160,7 @@ fn park_summary(ticks: &[ParkTick]) -> Value {
     let belt_moving = count(&|t| {
         t.belt_speed
             .iter()
-            .any(|s| s.abs() >= crate::track::transmission::PARK_ENGAGE_SPEED)
+            .any(|s| s.abs() >= crate::track::transmission::park_engage_speed())
     });
     // Per class of tank collider touched: moving pieces per tick, their mean and greatest speed.
     let mut touch = std::collections::BTreeMap::<&str, (usize, f32, f32)>::new();
@@ -1259,7 +1260,7 @@ fn park_arrival(heap: Option<(Heap, f32)>, label: &str) -> (Bed, Value) {
             // Zero demand parks only a tank released under first gear's idle speed: brake to a
             // stop first, as `net::harness`'s park recipe does.
             let mut braked = 0;
-            while bed.hull().velocity.length() >= crate::track::transmission::PARK_ENGAGE_SPEED
+            while bed.hull().velocity.length() >= crate::track::transmission::park_engage_speed()
                 && braked < 5 * TICKS
             {
                 bed.tick(-1.0, 0.0);
@@ -1310,6 +1311,7 @@ fn park_case(heap: Option<(Heap, f32)>, label: &str, tag: &str) {
         "window": park_summary(&ticks[PARK_SETTLE_S * TICKS..]),
     });
     println!("RUBBLEPARK {line}");
+    bed.assignment_work.print(label);
 }
 
 /// Each piece in the tank's island still failing the rest test this tick (awake, its rest timer

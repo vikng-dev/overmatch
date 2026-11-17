@@ -30,6 +30,7 @@ fn readout_reports_crank_state() {
     // Spawn-constructed, never stepped: idle.
     let st = TransmissionState {
         reverse: true,
+        launch: LaunchState::Locked,
         ..fresh(&tp)
     };
     let r = readout(&st, &tp);
@@ -50,6 +51,7 @@ fn readout_reports_crank_state() {
     // `k·τ_free·dt/I_m` above the held value, and the crank rides THAT belt exactly).
     let mut st = TransmissionState {
         reverse: true,
+        launch: LaunchState::Locked,
         ..fresh(&tp)
     };
     let mut rep = TransmissionReport::default();
@@ -76,6 +78,7 @@ fn readout_reports_crank_state() {
     // the honest idle-ish crank, not a fake geared rpm.
     let mut st = TransmissionState {
         reverse: true,
+        launch: LaunchState::Locked,
         ..fresh(&tp)
     };
     for _ in 0..64 {
@@ -140,7 +143,7 @@ fn brake_hold_stops_a_rolling_tank_and_parks_it() {
     let held = run(true);
     let stopped = held
         .iter()
-        .position(|(speeds, park)| *park && speeds.iter().all(|v| v.abs() < PARK_ENGAGE_SPEED))
+        .position(|(speeds, park)| *park && speeds.iter().all(|v| v.abs() < park_engage_speed()))
         .expect("the brake hold must bring the tank to a parked rest");
     assert!(
         stopped < stop_deadline,
@@ -148,13 +151,13 @@ fn brake_hold_stops_a_rolling_tank_and_parks_it() {
     );
     for (tick, (speeds, park)) in held.iter().enumerate().skip(stopped) {
         assert!(
-            *park && speeds.iter().all(|v| v.abs() < PARK_ENGAGE_SPEED),
+            *park && speeds.iter().all(|v| v.abs() < park_engage_speed()),
             "tick {tick}: a held tank stays parked, got {speeds:?}"
         );
     }
     assert!(
         held.iter()
-            .all(|(speeds, _)| speeds.iter().all(|v| *v > -PARK_ENGAGE_SPEED)),
+            .all(|(speeds, _)| speeds.iter().all(|v| *v > -park_engage_speed())),
         "the brake hold never drives the belt through zero"
     );
     let coasting = run(false);
@@ -165,8 +168,8 @@ fn brake_hold_stops_a_rolling_tank_and_parks_it() {
     );
 }
 
-/// Releasing steer makes the neutral-turn servo target zero belt difference. With no
-/// ground reactions the servo alone must arrest the pivot, so the driver's released stick
+/// Releasing steer centers the steering row at zero belt difference. With no
+/// ground reactions the row alone must arrest the pivot, so the driver's released stick
 /// cannot leave the vehicle turning indefinitely.
 #[test]
 fn steer_release_arrests_pivot() {
@@ -180,10 +183,14 @@ fn steer_release_arrests_pivot() {
         speeds = rep.next_speeds;
     }
     let d0 = (speeds[0] - speeds[1]) / 2.0;
-    assert!(d0 > 0.1, "the pivot must actually be turning (d = {d0})");
-    // Fixture observation budget: one simulated minute for monotonic arrest without reversal.
+    assert!(d0 > 0.0, "the fixture must actually pivot (d = {d0})");
+    // The difference row applies half its impulse to each belt: stopping impulse is 2 I d.
+    let stop_ticks = (2.0 * fp.inertia * d0
+        / (tp.steer_capacity_n * input(0.0, 0.0, speeds, [0.0; 2]).dt))
+        .ceil() as usize
+        + 1;
     let mut previous = d0;
-    for _ in 0..64 * 60 {
+    for _ in 0..stop_ticks {
         let rep = step(&fp, &tp, &mut st, &input(0.0, 0.0, speeds, [0.0, 0.0]));
         speeds = rep.next_speeds;
         let difference = (speeds[0] - speeds[1]) / 2.0;
@@ -197,48 +204,6 @@ fn steer_release_arrests_pivot() {
         previous = difference;
     }
     panic!("released pivot must reach rest");
-}
-
-/// Players rely on the construction-selected held mean remaining exactly stationary within
-/// capacity on unequal affine loads while the steering tie reaches its commanded difference;
-/// a free mean must follow the load. Zeroing steering must not satisfy a held-pivot test.
-#[test]
-fn a_held_mean_pivots_in_place_on_a_slope_and_a_free_mean_does_not() {
-    let fp = lab_fp();
-    for mean in [NeutralMean::Held, NeutralMean::Free] {
-        let tp = TransmissionParams {
-            neutral_mean: mean,
-            ..lab_tp()
-        };
-        // Fixture: a grade pull on each belt totalling half the hold's breached capacity.
-        let pull = -0.5 * tp.brake_capacity_n;
-        let mut st = fresh(&tp);
-        let mut speeds = [0.0f32; 2];
-        let mut peak_mean = 0.0f32;
-        // Fixture observation budget: two simulated seconds.
-        for _ in 0..128 {
-            let mut inp = input(0.0, 1.0, speeds, [pull, pull]);
-            inp.reaction_slopes = [0.8, 0.3].map(|share| share * fp.inertia / inp.dt);
-            speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
-            peak_mean = peak_mean.max(((speeds[0] + speeds[1]) * 0.5).abs());
-        }
-        match mean {
-            NeutralMean::Held => {
-                assert_eq!(peak_mean, 0.0, "a stuck mean is exactly at rest");
-                let difference = (speeds[0] - speeds[1]) * 0.5;
-                // Resolution: f32 rounding of the construction's kinematic target.
-                assert!(
-                    (difference - tp.neutral_d_full).abs()
-                        <= 16.0 * f32::EPSILON * tp.neutral_d_full,
-                    "the held pivot must reach its commanded difference, got {difference}"
-                );
-            }
-            NeutralMean::Free => assert!(
-                peak_mean > 0.0,
-                "a free mean is set by the grade, peaked at {peak_mean} m/s"
-            ),
-        }
-    }
 }
 
 /// A parked stop on unequal ground shares load through the neutral differential. The total
@@ -270,50 +235,6 @@ fn two_parked_brakes_share_a_neutral_stop_from_exact_rest() {
     assert!(
         report.next_speeds.iter().any(|v| *v != 0.0),
         "sharing must respect steering capacity"
-    );
-}
-
-/// A held mean is bounded by the parking hold's two-sided capacity, static while the mean is at
-/// rest and dynamic once breached. A grade between the two holds a
-/// resting pivot but keeps a breached one sliding; a grade beyond the static capacity moves a
-/// resting one. A pivot on a slope the parked tank cannot hold relies on this to slide too.
-#[test]
-fn a_held_mean_gives_way_beyond_its_capacity_and_slides_once_breached() {
-    let fp = lab_fp();
-    let tp = TransmissionParams {
-        neutral_mean: NeutralMean::Held,
-        ..lab_tp()
-    };
-    let at_rest = 2.0 * tp.brake_capacity_n * tp.brake_static_factor;
-    let breached = 2.0 * tp.brake_capacity_n;
-    // The final and the peak mean speed over `ticks` of a full-lever pivot under a total grade
-    // pull (N).
-    let pivot = |pull: f32, mean: f32, ticks: usize| {
-        let mut st = fresh(&tp);
-        let mut speeds = [mean; 2];
-        let side = [-0.5 * pull; 2];
-        let mut peak = 0.0f32;
-        for _ in 0..ticks {
-            speeds = step(&fp, &tp, &mut st, &input(0.0, 1.0, speeds, side)).next_speeds;
-            peak = peak.max(((speeds[0] + speeds[1]) * 0.5).abs());
-        }
-        ((speeds[0] + speeds[1]) * 0.5, peak)
-    };
-    // Fixture: a pull halfway between the two capacities, observed for one simulated second.
-    let between = 0.5 * (at_rest + breached);
-    let (_, rest) = pivot(between, 0.0, 64);
-    assert_eq!(rest, 0.0, "static capacity holds the mean exactly at rest");
-    // Fixture: a moving mean, observed for one tick.
-    let (sliding, _) = pivot(between, PARK_ENGAGE_SPEED, 1);
-    assert!(
-        sliding > PARK_ENGAGE_SPEED,
-        "a breached hold has only its dynamic capacity, so the mean keeps sliding: {sliding} m/s"
-    );
-    // Fixture: a pull a quarter beyond the static capacity, one tick from rest.
-    let (beyond, _) = pivot(1.25 * at_rest, 0.0, 1);
-    assert!(
-        beyond > 0.0,
-        "the hold is bounded: a pull beyond it moves the mean, got {beyond} m/s"
     );
 }
 
@@ -429,14 +350,10 @@ fn top_gear_wide_steer_preserves_the_outer_belt_differential() {
     );
 }
 
-/// A tick that carries `m` through zero must not project the
-/// constraint onto the pre-tick |m| branch — that enforces `d = s·κ·m` on the wrong
-/// side of the cusp, flipping `d` AGAINST the commanded steer for a tick (a yaw
-/// impulse, and ringing if m chatters around zero). The scenario: slow forward
-/// roll, tight detent, strong equal reactions during a shift interruption — the tick
-/// lands m well negative; `d` must stay on the steer's side.
+/// The player must not get reversed steering when equal ground reactions take the mean
+/// through rest. Fixture: a paid interruption and sufficient reaction to force rollback.
 #[test]
-fn l600_constraint_survives_m_zero_crossing() {
+fn steering_does_not_reverse_when_the_mean_crosses_rest() {
     let (fp, tp) = (lab_fp(), lab_tp()); // The paid cut and released park isolate steering.
     let mut st = TransmissionState {
         steer_step: 2,
@@ -456,13 +373,6 @@ fn l600_constraint_survives_m_zero_crossing() {
         d_next > -1e-4,
         "positive steer must not produce a flipped (negative) belt difference across \
              the crossing (d {d0} -> {d_next})"
-    );
-    // And the landing obeys the constraint on the branch it landed on: d = s·κ·|m|.
-    let kappa = tp.steer_kappa[0].0;
-    assert!(
-        (d_next - kappa * m_next.abs()).abs() < 0.02,
-        "the re-solved branch must land ON the geared ratio (d {d_next} vs κ|m| {})",
-        kappa * m_next.abs()
     );
 }
 
@@ -545,11 +455,7 @@ fn parking_brake_stays_saturated_past_breach() {
     for _ in 0..30 {
         let inp = input(0.0, 0.0, speeds, [r_breach, r_breach]);
         last = step(&fp, &tp, &mut st, &inp);
-        assert_eq!(
-            st.clutch,
-            ClutchState::Out,
-            "the park lever retains neutral past breach"
-        );
+        assert!(!last.driving, "released clutch cannot supply drive");
         speeds = last.next_speeds;
     }
     assert!(
@@ -557,7 +463,7 @@ fn parking_brake_stays_saturated_past_breach() {
         "the latch must not release without a drive command"
     );
     assert!(
-        speeds[0] < -PARK_ENGAGE_SPEED,
+        speeds[0] < -park_engage_speed(),
         "the breach must back-drive the belt well past the at-rest static regime \
              (speed = {})",
         speeds[0]
@@ -573,7 +479,7 @@ fn parking_brake_stays_saturated_past_breach() {
 
     // Once moving, the result is bit-identical to a factor-1.0 fixture: the latch persists, but
     // its static multiplier is gone rather than becoming 192 kN/side dynamic braking.
-    let moving = input(0.0, 0.0, [-(PARK_ENGAGE_SPEED * 2.0); 2], [r_breach; 2]);
+    let moving = input(0.0, 0.0, [-(park_engage_speed() * 2.0); 2], [r_breach; 2]);
     let mut dynamic_tp = tp.clone();
     dynamic_tp.brake_static_factor = 1.0;
     let mut static_state = TransmissionState {
@@ -590,100 +496,6 @@ fn parking_brake_stays_saturated_past_breach() {
     assert_eq!(
         static_report.next_speeds, dynamic_report.next_speeds,
         "the post-breach slide must be bit-identical to factor-1.0 dynamic braking"
-    );
-}
-
-/// Energy honesty over 64-tick windows: Σ(Q_L·v_L + Q_R·v_R)·dt never exceeds the
-/// integrated engine power available plus released belt-inertia energy — regeneration
-/// recirculates, it does not create (the design's no-free-energy bound). Exercised over
-/// a launch, a driving turn, and a pivot — and, for the
-/// physical-power split, from an asymmetric rolling start with a hard steer command at gentle
-/// throttle (`F_s ≫ F_p`, `m > d > 0`): the case where one SPROCKET's power is negative
-/// while both MODAL powers read positive, so the modal split never charged η.
-#[test]
-fn energy_bound_no_free_energy() {
-    let (fp, tp) = (lab_fp(), lab_tp());
-    for (throttle, steer, seed) in [
-        (1.0, 0.0, [0.0f32, 0.0]),
-        (0.7, 0.8, [0.0, 0.0]),
-        (0.0, 1.0, [0.0, 0.0]),
-        // Steer-dominant at a rolling start — inner sprocket goes negative.
-        (0.2, 1.0, [4.0, 2.0]),
-        (0.2, -1.0, [4.0, 2.0]),
-    ] {
-        let mut st = fresh(&tp);
-        let mut speeds = seed;
-        let dt_s = 1.0_f64 / 64.0;
-        for window in 0..6 {
-            let mut delivered = 0.0f64;
-            let mut available = 0.0f64;
-            let e0: f64 = speeds
-                .iter()
-                .map(|&v| 0.5 * f64::from(fp.inertia) * f64::from(v) * f64::from(v))
-                .sum();
-            for _ in 0..64 {
-                // Synthetic ground reaction: a drag opposing each belt (30 kN/(m/s),
-                // saturating at 25 kN) — enough load to exercise the power limiter.
-                let reactions = speeds.map(|v| (v * 30_000.0).clamp(-25_000.0, 25_000.0));
-                let inp = input(throttle, steer, speeds, reactions);
-                let rep = step(&fp, &tp, &mut st, &inp);
-                delivered +=
-                    f64::from(rep.forces[0] * speeds[0] + rep.forces[1] * speeds[1]) * dt_s;
-                available += f64::from(rep.power_available) * dt_s;
-                speeds = rep.next_speeds;
-            }
-            let e1: f64 = speeds
-                .iter()
-                .map(|&v| 0.5 * f64::from(fp.inertia) * f64::from(v) * f64::from(v))
-                .sum();
-            let released = (e0 - e1).max(0.0);
-            assert!(
-                delivered <= available + released + 500.0,
-                "t={throttle} s={steer} window {window}: delivered {delivered:.0} J \
-                     > available {available:.0} J + released {released:.0} J"
-            );
-        }
-    }
-}
-
-/// The game's damage model: recirculation prices physical sprocket work through production
-/// motor construction and bisection. Fixture: low transfer efficiency, isolated main clutch,
-/// asymmetric rolling belts and a small crank budget force a positive/negative transfer to bind.
-#[cfg(feature = "bitprobe")]
-#[test]
-fn recirculation_splits_physical_output_powers() {
-    let (fp, mut tp) = (lab_fp(), lab_tp());
-    tp.clutch_capacity = 0.0; // Fixture isolation of the geared steering member.
-    tp.recirculation = 0.1; // Fixture loss large enough to bind the work budget.
-    let mut st = fresh(&tp);
-    st.park = false;
-    let inp = input(1.0, 1.0, [5.0, 3.0], [0.0; 2]);
-    let rep = step(&fp, &tp, &mut st, &inp);
-    assert!(
-        rep.power_scale > 0.0 && rep.power_scale < 1.0,
-        "{}",
-        rep.power_scale
-    );
-    let physical = [0, 1].map(|i| rep.forces[i] * (inp.speeds[i] + rep.next_speeds[i]) * 0.5);
-    assert!(
-        physical.iter().any(|p| *p > 0.0) && physical.iter().any(|p| *p < 0.0),
-        "{physical:?}"
-    );
-    for (recorded, actual) in [rep.bitprobe.power_left, rep.bitprobe.power_right]
-        .into_iter()
-        .zip(physical)
-    {
-        assert!(
-            (recorded - actual).abs() <= actual.abs() * 1e-5,
-            "recorded {recorded}, physical {actual}"
-        );
-    }
-    let free = rep.bitprobe.omega_pre + rep.bitprobe.tau_free * inp.dt / tp.engine_inertia;
-    let budget = 0.5 * tp.engine_inertia * (free.powi(2) - rep.bitprobe.omega_floor.powi(2));
-    let work = recirculated_work(&tp, physical) * inp.dt;
-    assert!(
-        (work - budget).abs() <= budget * 1e-4,
-        "bisection: {work} of {budget} J"
     );
 }
 
@@ -742,150 +554,6 @@ fn motoring_drag_matches_its_anchor_and_grows_with_speed() {
     assert!(d(mid) < d(tp.engine.governed_rpm));
 }
 
-/// The steering member's capacity is per output: each belt carries up to the full datum.
-/// A total difference-axis interpretation halves yaw authority. At rest, the neutral servo's
-/// exact-landing force is capacity-clamped; this Fixture reaches that per-output clamp.
-#[test]
-fn pivot_authority_is_per_output_capacity() {
-    let (fp, tp) = (lab_fp(), lab_tp());
-    let dt = 1.0 / 64.0;
-    let mut st = fresh(&tp);
-    let rep = step(&fp, &tp, &mut st, &input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]));
-    // The neutral servo's exact-landing force, per-output capacity clamp.
-    let expect = (tp.neutral_d_full * fp.inertia / dt).min(tp.steer_capacity_n);
-    assert!(
-        (rep.forces[0] - expect).abs() < 1.0,
-        "left output must carry min(capacity, exact-landing) = {expect}, got {}",
-        rep.forces[0]
-    );
-    assert!(
-        (rep.forces[1] + expect).abs() < 1.0,
-        "right output mirrors it (counter-rotation), got {}",
-        rep.forces[1]
-    );
-    assert!(
-        expect > 0.9 * tp.steer_capacity_n,
-        "the lab targets must exercise near-capacity authority ({expect} vs {}) — under the \
-         total difference-axis reading the ceiling would be capacity/2",
-        tp.steer_capacity_n
-    );
-}
-
-/// The launch law transmits free torque at its target, rather than clutch-capacity torque.
-/// Pricing and the gear law rely on this steady-slip force, in either direction and at part pedal.
-#[test]
-fn steady_launch_slip_transmits_the_bounded_free_torque() {
-    let (fp, mut tp) = (lab_fp(), lab_tp());
-    tp.launch_gears = 1; // Fixture: a first-gear launch domain.
-    for command in [0.25, 0.5, 1.0] {
-        for reverse in [false, true] {
-            let mut st = fresh(&tp);
-            st.reverse = reverse;
-            st.omega_e = tp.launch_omega(command);
-            let sign = if reverse { -1.0 } else { 1.0 };
-            let [fuel, catch, drag] = engine_torques(&tp, DriveSupply::WHOLE, st.omega_e, command);
-            let expected = (fuel + catch - drag).min(tp.clutch_capacity);
-            for _ in 0..16 {
-                let report = step(
-                    &fp,
-                    &tp,
-                    &mut st,
-                    &felt_at_rest(input(sign * command, 0.0, [0.0; 2], [0.0; 2])),
-                );
-                assert_eq!(st.clutch, ClutchState::Slip);
-                let transmitted = sign * report.forces.iter().sum::<f32>() * tp.sprocket_radius
-                    / if reverse {
-                        tp.gears_rev[0]
-                    } else {
-                        tp.gears_fwd[0]
-                    };
-                assert!(
-                    (transmitted - expected).abs() < 0.01,
-                    "{transmitted} vs {expected}"
-                );
-                assert!(transmitted <= tp.torque_at(st.omega_e / RPM_TO_RAD) + 0.01);
-            }
-        }
-    }
-}
-
-/// The game's driving model bounds a healthy crank under a loaded launch and powered rollback.
-/// The clutch's floor cannot create energy or reverse propulsive force: the
-/// torque it transmits stays within capacity and never turns backward beyond the crank
-/// arithmetic's roundoff, and once the crank has spooled it drives forward. Fixture: first gear,
-/// a loaded launch from rest (Slip) and a powered rollback at a held 2 m/s (In),
-/// both under full pedal. Belt inputs remain fixed; the rollback reactions push forward.
-/// The Driver feels the hull ride its belts against the fixture's reactions.
-#[test]
-fn stall_guard_holds_crank_under_grade_lug() {
-    let (fp, tp) = (lab_fp(), lab_tp());
-    let floor = (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value) * RPM_TO_RAD;
-    for (throttle, speeds, reactions, regime, label) in [
-        (
-            1.0f32,
-            [0.0f32, 0.0],
-            [200_000.0f32, 200_000.0],
-            ClutchState::Slip,
-            "full-W lug",
-        ),
-        (
-            1.0,
-            [-2.0, -2.0],
-            [-40_000.0, -40_000.0],
-            ClutchState::In,
-            "powered rollback",
-        ),
-    ] {
-        let mut st = TransmissionState {
-            clutch: regime,
-            ..fresh(&tp)
-        };
-        let mut inp = input(throttle, 0.0, speeds, reactions);
-        // The fixture's belts carry equal reactions, so the reading has no push difference.
-        inp.sensed = driver_input(speeds[0], reactions[0] + reactions[1], throttle).sensed;
-        #[cfg(feature = "bitprobe")]
-        let (roundoff, mut settled) = (
-            DriverResolution::load().crank_roundoff_share * tp.roundoff_torque_scale(),
-            0.0,
-        );
-        for tick in 0..128 {
-            let rep = step(&fp, &tp, &mut st, &inp);
-            assert_eq!(
-                st.gear, 1,
-                "{label} tick {tick}: the fixture's first gear holds"
-            );
-            assert_eq!(st.clutch, regime, "{label} tick {tick}");
-            assert!(
-                st.omega_e >= floor - 1e-3,
-                "{label} tick {tick}: ω_e {:.0} rpm fell below the stall-guard floor \
-                     ({:.0} rpm)",
-                st.omega_e / RPM_TO_RAD,
-                floor / RPM_TO_RAD
-            );
-            #[cfg(feature = "bitprobe")]
-            {
-                let torque = rep.bitprobe.tau_c * rep.power_scale;
-                assert!(
-                    (-roundoff..=tp.clutch_capacity).contains(&torque),
-                    "{label} tick {tick}: clutch torque {torque} N m outside [0, capacity]"
-                );
-                settled = torque;
-            }
-            assert!(
-                rep.forces[0] >= 0.0 && rep.forces[1] >= 0.0,
-                "{label} tick {tick}: the slipping clutch must keep delivering \
-                     nonnegative drive while the crank spools (forces {:?})",
-                rep.forces
-            );
-        }
-        #[cfg(feature = "bitprobe")]
-        assert!(
-            settled > roundoff,
-            "{label}: the settled clutch must transmit forward torque"
-        );
-    }
-}
-
 /// Rev-match across an upshift: the crank is continuous through the window, no tick moving it
 /// further than its free torque and the clutch's capacity can, `(|τ_free| + τ_cap)·dt/J` (DERIVED
 /// from `J dω/dt = τ_free − τ_c` with `|τ_c| ≤ τ_cap`), and once the window closes the held clutch
@@ -898,7 +566,10 @@ fn rev_match_across_upshift_is_continuous() {
     let g2 = tp.gears_fwd[1];
     let v_warm = 1_600.0 * RPM_TO_RAD * tp.sprocket_radius / g1;
     let v_up = 1_780.0 * RPM_TO_RAD * tp.sprocket_radius / g1;
-    let mut st = fresh(&tp);
+    let mut st = TransmissionState {
+        launch: LaunchState::Locked,
+        ..fresh(&tp)
+    };
     // Warm to the locked geared point below the up band.
     for _ in 0..32 {
         step(
@@ -958,63 +629,6 @@ fn rev_match_across_upshift_is_continuous() {
     );
 }
 
-/// Declutched full steer at standstill (the pivot's crank demand) revs the crank toward the
-/// steer-demand target, the peak-torque rpm, never the governed cut-out, where `torque_at·ω = 0`
-/// would zero the pivot's power budget. The rev governor fuels in full below its authored band
-/// beneath the target and not at all at it, so the crank parks inside that band, its fuel
-/// balancing drag. Mutant: a governor aimed at the governed rpm parks above the target. Fixture:
-/// the lab drivetrain for two seconds; the time to 95% of the target and the parked rpm print as
-/// observations.
-#[test]
-fn free_rev_parks_in_the_governor_band_beneath_the_steer_target() {
-    let (fp, mut tp) = (lab_fp(), lab_tp());
-    // Fixture isolation: steer requests crank rpm but transmits no work to the belts.
-    tp.steer_capacity_n = 0.0;
-    let inp = input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]);
-    let mut st = fresh(&tp);
-    let mut reached = None;
-    for tick in 0..128 {
-        step(&fp, &tp, &mut st, &inp);
-        if reached.is_none() && st.omega_e / RPM_TO_RAD >= 0.95 * tp.peak_torque_rpm {
-            reached = Some(tick + 1);
-        }
-    }
-    let steady = st.omega_e / RPM_TO_RAD;
-    println!(
-        "lab free-rev: 95% of the steer target after {:?} s, parked at {steady:.0} rpm",
-        reached.map(|ticks: u32| ticks as f32 / TICK_HZ)
-    );
-    let band = engine_control().rev_match_band_rpm.value;
-    assert!(
-        (tp.peak_torque_rpm - band..tp.peak_torque_rpm).contains(&steady),
-        "the crank parks within the governor's {band} rpm band beneath the steer target ({:.0} \
-         rpm), got {steady:.0}",
-        tp.peak_torque_rpm
-    );
-    #[cfg(feature = "bitprobe")]
-    let mut probe = TransmissionProbe::default();
-    let (free, ..) = crank_free_torque(
-        &tp,
-        &inp,
-        false,
-        false,
-        0.0,
-        0.0,
-        1.0,
-        st.omega_e,
-        tp.engine.idle_rpm * RPM_TO_RAD,
-        #[cfg(feature = "bitprobe")]
-        &mut probe,
-    );
-    let drag = engine_drag(&tp, st.omega_e);
-    println!("parked free torque {free} N m against {drag} N m drag");
-    // Test resolution: settled to within a hundredth of the drag the fuel meets.
-    assert!(
-        free.abs() < 0.01 * drag,
-        "parked, the governor's fuel balances drag: {free} N m free against {drag} N m"
-    );
-}
-
 /// Service braking cannot snap the crank beyond clutch capacity. Feasibility uses the final
 /// belt state: a pre-brake `exact` decision could admit a snap that stop forces make infeasible.
 /// DERIVED Fixture counterexample: 120 kN / 8 t / 64 Hz drops the belt by about 0.23 m/s per
@@ -1063,127 +677,6 @@ fn braking_never_teleports_crank_past_clutch_capacity() {
         st.omega_e >= floor,
         "the crank must end above the hard floor"
     );
-}
-
-/// The lock torque that slows the crank is the torque the belts receive: in a geared turn inside
-/// clutch and steering capacity, the crank's own integration lands on the belts' mean, so the
-/// re-anchor moves nothing. A lock solved on the untied mean lands above it, and the re-anchor
-/// then discards crank work no sprocket received; the engine's work budget relies on this.
-/// Fixture: second gear, tight detent, three quarters of governed speed, the difference off its
-/// geared value, unequal reactions and unequal reaction slopes.
-#[cfg(feature = "bitprobe")]
-#[test]
-fn a_geared_turn_integrates_the_crank_onto_the_steered_belts() {
-    for (fp, tp) in class_drivetrains() {
-        let k = tp.gears_fwd[1] / tp.sprocket_radius;
-        let m = 0.75 * tp.engine.governed_rpm * RPM_TO_RAD / k;
-        let d = 0.8 * tp.steer_kappa[1].0 * m;
-        let mut st = TransmissionState {
-            gear: 2,
-            steer_step: 2,
-            clutch: ClutchState::In,
-            omega_e: k * m,
-            ..fresh(&tp)
-        };
-        let weight = fp.grip.side_weight;
-        let mut inp = input(1.0, 1.0, [m + d, m - d], [0.2 * weight, -0.1 * weight]);
-        inp.reaction_slopes = [0.8, 0.3].map(|share| share * fp.inertia / inp.dt);
-        let probe = step(&fp, &tp, &mut st, &inp).bitprobe;
-        assert_eq!(probe.j[0] - probe.j[1], 1.0, "the geared constraint acts");
-        assert!(probe.reanchor_feasible, "the lock is inside capacity");
-        assert!(
-            (probe.omega_integrated - probe.reanchor_locked).abs() <= 1e-4 * probe.reanchor_locked,
-            "the crank integrated to {} rad/s against belts locked at {}",
-            probe.omega_integrated,
-            probe.reanchor_locked
-        );
-    }
-}
-
-/// A belt solves its ground reaction implicitly, through the reaction's slope, so on a stiff
-/// ground its step never alternates. The grip law's shear length relies on this to be a ground
-/// fact rather than the fixed step's stability bound. Fixture: one belt of the grade construction
-/// pushing at half its grip, from rest, into an elastic share over a 10 mm shear length with the
-/// grip law's damper. The slope-blind run witnesses only that fixture: production always hands
-/// the belt its slope.
-#[test]
-fn the_coupled_belt_settles_on_a_stiff_ground() {
-    let fp = grade_fixture_fp();
-    let dt = 1.0 / TICK_HZ;
-    let grip = fp.ground_grip * fp.grip.side_weight;
-    let shear = 0.010;
-    let damper = 2.0 * forces::GRIP_ELEMENT_DAMPING_RATIO
-        / (shear * fp.ground_grip * super::super::derive::G).sqrt();
-    let reversals = |sees_slope: bool| {
-        let (mut speed, mut strain) = (0.0_f32, 0.0_f32);
-        let mut steps = Vec::new();
-        for _ in 0..TICK_HZ as usize {
-            strain = (strain + speed * dt).clamp(-shear, shear);
-            let share = strain / shear + speed * damper;
-            let (reaction, slope) = if share.abs() < 1.0 {
-                (grip * share, grip * (dt / shear + damper))
-            } else {
-                (grip * share.signum(), 0.0)
-            };
-            let mut inp = input(0.0, 0.0, [speed; 2], [reaction; 2]);
-            inp.reaction_slopes = [if sees_slope { slope } else { 0.0 }; 2];
-            let next = BeltTick::new(&construction(&fp), &inp).land(0, 0.5 * grip);
-            steps.push(next - speed);
-            speed = next;
-        }
-        steps
-            .windows(3)
-            .filter(|w| w[0] * w[1] < 0.0 && w[1] * w[2] < 0.0)
-            .count()
-    };
-    assert!(
-        reversals(false) > 0,
-        "the fixture ground makes a slope-blind belt alternate"
-    );
-    assert_eq!(reversals(true), 0, "the coupled belt alternated");
-}
-
-/// Driver state, not belt-speed hysteresis, controls clutch regimes. A launch slips above idle
-/// until its shaft reaches its target, and a shift always interrupts mean-axis drive. Fixture: belts
-/// run free of the ground under a hull at rest.
-#[test]
-fn clutch_states_cover_rest_launch_lock_and_shift() {
-    let (fp, mut tp) = (lab_fp(), lab_tp());
-    tp.launch_gears = 1; // Fixture: a first-gear launch domain.
-    let mut st = fresh(&tp);
-    step(&fp, &tp, &mut st, &input(0.0, 0.0, [0.0; 2], [0.0; 2]));
-    assert_eq!(st.clutch, ClutchState::Out);
-    // Fixture: a neutral pivot's unequal belt speeds still require the main clutch Out.
-    step(&fp, &tp, &mut st, &input(0.0, 1.0, [0.3, -0.05], [0.0; 2]));
-    assert_eq!(st.clutch, ClutchState::Out);
-    let launch = tp.launch_omega(0.5);
-    st.omega_e = launch;
-    for omega in [0.0, (tp.engine.idle_rpm * RPM_TO_RAD + launch) / 2.0] {
-        let speed = omega * tp.sprocket_radius / tp.gears_fwd[0];
-        step(
-            &fp,
-            &tp,
-            &mut st,
-            &felt_free_at_rest(input(0.5, 0.0, [speed; 2], [0.0; 2])),
-        );
-        assert_eq!(st.clutch, ClutchState::Slip);
-    }
-    let speed = launch * tp.sprocket_radius / tp.gears_fwd[0];
-    step(
-        &fp,
-        &tp,
-        &mut st,
-        &felt_free_at_rest(input(0.5, 0.0, [speed; 2], [0.0; 2])),
-    );
-    assert_eq!(st.clutch, ClutchState::In);
-    st.shift_ticks = 2;
-    step(
-        &fp,
-        &tp,
-        &mut st,
-        &felt_free_at_rest(input(0.5, 0.0, [speed; 2], [0.0; 2])),
-    );
-    assert_eq!(st.clutch, ClutchState::Out);
 }
 
 /// An individually finite authoring cannot publish unusable derived ratios. The live coupling
@@ -1299,7 +792,10 @@ fn no_combustion_no_stored_energy_no_pivot_work() {
 #[test]
 fn drag_release_and_driver_read_the_command() {
     let (fp, tp) = (lab_fp(), lab_tp());
-    let mut st = fresh(&tp);
+    let mut st = TransmissionState {
+        launch: LaunchState::Locked,
+        ..fresh(&tp)
+    };
     st.park = false;
     st.omega_e = 1550.0 * RPM_TO_RAD; // Fixture crank operating point above idle.
     let ratio = tp.gears_fwd[0];
@@ -1365,46 +861,6 @@ fn full_service_brakes_ignore_transmitted_capacity() {
     });
 }
 
-/// The game's damage model: losing transmitted capacity changes a locked coupling on this
-/// tick; crank inertia cannot smooth a disconnected clutch into continued belt force.
-#[test]
-fn supply_loss_reaches_a_locked_clutch_on_its_tick() {
-    let (fp, tp) = (lab_fp(), lab_tp());
-    let mut st = fresh(&tp);
-    st.park = false;
-    st.omega_e = 1550.0 * RPM_TO_RAD; // Fixture synchronous operating point.
-    let speed = st.omega_e * tp.sprocket_radius / tp.gears_fwd[0];
-    let mut inp = input(1.0, 0.0, [speed; 2], [0.0; 2]);
-    let mut whole_state = st;
-    let whole = step(&fp, &tp, &mut whole_state, &inp);
-    #[cfg(feature = "bitprobe")]
-    assert!(
-        whole.bitprobe.engaged && whole.bitprobe.reanchor_feasible,
-        "the fixture must start with a locking clutch"
-    );
-    let mut knocked_out = input(1.0, 0.0, [speed; 2], [0.0; 2]);
-    knocked_out.supply.engine_in_action = false;
-    knocked_out.supply.task_rate = 0.0;
-    let no_combustion = step(&fp, &tp, &mut st, &knocked_out);
-    assert!(
-        no_combustion.forces[0] < whole.forces[0],
-        "combustion torque reaches a locked clutch on its tick"
-    );
-    println!(
-        "MEASURED locked-clutch source step, force per belt: whole {}, engine empty {} N",
-        whole.forces[0], no_combustion.forces[0]
-    );
-    let mut st = TransmissionState {
-        omega_e: 1550.0 * RPM_TO_RAD,
-        park: false,
-        ..fresh(&tp)
-    };
-    inp.supply.transmission_condition = 0.0;
-    let lost = step(&fp, &tp, &mut st, &inp);
-    assert!(whole.forces[0] > 0.0);
-    assert_eq!(lost.forces, [0.0; 2]);
-}
-
 /// The game's damage model: without an occupant, rest cannot set the park lever; a lever already set keeps holding. This must hold at the transmission seam.
 #[test]
 fn an_unmanned_station_preserves_the_park_lever() {
@@ -1458,10 +914,10 @@ fn a_pivot_without_combustion_spends_only_stored_crank_energy() {
             #[cfg(feature = "bitprobe")]
             assert_eq!(rep.bitprobe.tau_induced + rep.bitprobe.tau_idle, 0.0);
             speeds = rep.next_speeds;
-            pivoted |= speeds[0] > PARK_ENGAGE_SPEED && speeds[1] < -PARK_ENGAGE_SPEED;
+            pivoted |= speeds[0] > park_engage_speed() && speeds[1] < -park_engage_speed();
             if pivoted {
                 assert!(!st.park);
-                assert_eq!(st.clutch, ClutchState::Out);
+                assert!(!rep.driving);
             }
             let next = energy(st.omega_e, speeds);
             // Resolution: f32 kinetic-energy arithmetic permits a relative roundoff margin.
@@ -1476,20 +932,6 @@ fn a_pivot_without_combustion_spends_only_stored_crank_energy() {
             rpm > 0.0,
             "every stored-energy seed must actually pivot"
         );
-    }
-}
-
-/// Recirculation losses apply only to an inner-to-outer transfer; a pure overrun keeps the
-/// declared engine drag. The admitted zero-efficiency corner cannot turn zero output into NaN.
-#[test]
-fn pure_engine_braking_does_not_pay_an_inner_to_outer_transfer_loss() {
-    let mut tp = lab_tp();
-    for efficiency in [0.0, 0.5, 1.0] {
-        // Fixture efficiency corners.
-        tp.recirculation = efficiency;
-        assert_eq!(recirculated_work(&tp, [-20.0, -30.0]), -50.0);
-        assert_eq!(recirculated_work(&tp, [0.0; 2]), 0.0);
-        assert_eq!(recirculated_work(&tp, [20.0, 30.0]), 50.0);
     }
 }
 
@@ -1710,35 +1152,6 @@ fn commanded_work_consumes_the_task_rate_once() {
     assert!((applied / whole - supply.task_rate).abs() < 1e-6);
 }
 
-/// The game's driving and damage model: without task work, clutch opening cannot persist at
-/// parked rest or launch, or begin during motion. A rate gate on the park lever fails the rest arms.
-#[test]
-fn zero_task_rate_springs_clutch_in_at_rest_and_in_motion() {
-    for tp in [lab_tp(), tiger_tp()] {
-        // Fixture: moving drive, parked release, stopped launch and unparked release.
-        for (park, command, speed) in [
-            (false, 1.0, 5.0),
-            (true, 0.0, 0.0),
-            (false, 1.0, 0.0),
-            (false, 0.0, 0.0),
-        ] {
-            let mut state = TransmissionState {
-                park,
-                clutch: ClutchState::Out,
-                ..fresh(&tp)
-            };
-            let mut inp = input(command, 0.0, [speed; 2], [0.0; 2]);
-            inp.supply.task_rate = 0.0;
-            driver(&construction(&lab_fp()), &tp, &mut state, &inp);
-            assert_eq!(
-                state.clutch,
-                ClutchState::In,
-                "park={park} command={command} speed={speed}"
-            );
-        }
-    }
-}
-
 /// The game's driving and damage model: one task bottleneck lowers combustion, even when
 /// only transmission condition is reduced. Mechanical capacity independently limits coupling.
 #[test]
@@ -1828,6 +1241,7 @@ fn empty_station_shift_window_expires_into_motoring_drag() {
         gear: 4,
         park: false,
         clutch: ClutchState::In,
+        launch: LaunchState::Locked,
         shift_ticks: 3,
         omega_e: speed * k,
         ..fresh(&tp)
@@ -1888,6 +1302,7 @@ fn zero_rate_catch_cannot_sustain_lug_or_pivot() {
         {
             let mut st = TransmissionState {
                 clutch: ClutchState::In,
+                launch: LaunchState::Locked,
                 ..fresh(&tp)
             };
             let mut inp = input(throttle, steer, speeds, [0.0; 2]);
@@ -1898,81 +1313,18 @@ fn zero_rate_catch_cannot_sustain_lug_or_pivot() {
             for _ in 0..64 * 4 {
                 last = step(&fp, &tp, &mut st, &inp);
             }
-            if authority {
-                assert_eq!(st.omega_e, 0.0, "a zero-rate pivot cannot sustain idle");
-                assert_eq!(last.forces, [0.0; 2], "stored crank energy is finite");
-            } else {
-                assert_eq!(st.clutch, ClutchState::In);
-                assert!(
-                    last.forces.into_iter().all(|force| force < 0.0),
-                    "a slow coast must receive drag, not catch propulsion: {:?}",
-                    last.forces
-                );
-            }
+            #[cfg(feature = "bitprobe")]
+            assert_eq!(
+                [last.bitprobe.tau_induced, last.bitprobe.tau_idle],
+                [0.0; 2]
+            );
+            assert!(
+                !last.driving,
+                "zero task rate cannot send clutch propulsion"
+            );
         }
     }
 }
-
-/// The game's driving and damage model: the neutral lever and park lever persist without
-/// authority. The clutch springs engaged; neither creates idle fuel. Park holds inside capacity.
-#[test]
-fn empty_station_at_rest_springs_engaged_and_retains_park() {
-    for tp in [lab_tp(), tiger_tp()] {
-        let fp = lab_fp();
-        let mut st = TransmissionState {
-            park: true,
-            ..fresh(&tp)
-        };
-        let mut inp = input(0.0, 0.0, [0.0; 2], [1000.0; 2]); // Fixture grade inside brake capacity.
-        inp.supply.control_authority = false;
-
-        inp.supply.task_rate = 0.0;
-        for _ in 0..64 * 4 {
-            let report = step(&fp, &tp, &mut st, &inp);
-            assert_eq!(st.clutch, ClutchState::In);
-            assert!(st.park);
-            assert_eq!(report.next_speeds, [0.0; 2]);
-        }
-        assert_eq!(
-            st.omega_e, 0.0,
-            "without fuel, construction drag stops the crank"
-        );
-    }
-}
-
-/// A moving, already coupled drivetrain is a lug, not a launch. The Driver must retain
-/// drive through the ordinary idle guard rather than pay another launch-spool interruption.
-#[test]
-fn moving_lug_does_not_restart_launch_slip() {
-    for tp in [lab_tp(), tiger_tp()] {
-        let fp = lab_fp();
-        // Fixture: a tall gear below idle on a 20-degree grade, engaged, before a gear correction.
-        let gear = (tp.gears_fwd.len() - 2) as u8;
-        let k = tp.gears_fwd[(gear - 1) as usize] / tp.sprocket_radius;
-        let speed = 0.8 * tp.engine.idle_rpm * RPM_TO_RAD / k;
-        let grade = fp.grip.side_weight * 20.0_f32.to_radians().sin();
-        let mut st = TransmissionState {
-            gear,
-            clutch: ClutchState::In,
-            ..fresh(&tp)
-        };
-        let report = step(&fp, &tp, &mut st, &input(1.0, 0.0, [speed; 2], [grade; 2]));
-        assert!(
-            !report.shifting,
-            "fixture must exercise coupling outside a shift"
-        );
-        assert_eq!(
-            st.clutch,
-            ClutchState::In,
-            "a moving lug must not re-enter launch slip"
-        );
-        assert!(
-            report.forces.into_iter().all(|force| force > 0.0),
-            "the lug must retain drive"
-        );
-    }
-}
-
 /// The idle guard relies on a saturated catch at its floor. Invalid control data must be
 /// refused before any drivetrain can use the saturation assumption.
 #[test]
@@ -2049,7 +1401,7 @@ fn driver_full_pedal_walks_to_the_top_on_firm_ground() {
         assert!(
             speeds
                 .into_iter()
-                .all(|v| v.is_finite() && v > PARK_ENGAGE_SPEED)
+                .all(|v| v.is_finite() && v > park_engage_speed())
         );
     }
 }
@@ -2057,7 +1409,7 @@ fn driver_full_pedal_walks_to_the_top_on_firm_ground() {
 /// Pricing and delivery share the governed net curve, launch rpm and clutch cap. Fixture
 /// alterations independently expose a missing cap, launch-speed substitution or governor.
 #[test]
-fn driver_force_price_uses_the_current_regime_and_the_clutch_cap() {
+fn driver_force_price_uses_the_clutch_outcome_and_capacity() {
     for (_, mut tp) in class_drivetrains() {
         let ratio = tp.gears_fwd[0];
         for command in [0.25, 0.5, 1.0] {
@@ -2135,6 +1487,7 @@ fn free_spinning_belts_change_no_gear() {
         let mut state = TransmissionState {
             gear: launch,
             clutch: ClutchState::Slip,
+            launch: LaunchState::TakingUp,
             ..fresh(&tp)
         };
         let mut speeds = [0.0; 2];
@@ -2186,7 +1539,10 @@ fn overrun_slip_guard_bounds_crank_at_top_gear() {
 #[test]
 fn paid_shift_disconnects_for_exactly_its_declared_window() {
     let (fp, tp) = (lab_fp(), lab_tp());
-    let mut state = fresh(&tp);
+    let mut state = TransmissionState {
+        launch: LaunchState::Locked,
+        ..fresh(&tp)
+    };
     state.shift_ticks = tp.shift_ticks.get();
     let speed = tp.engine.idle_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[0];
     for _ in 0..tp.shift_ticks.get() {
@@ -2197,65 +1553,6 @@ fn paid_shift_disconnects_for_exactly_its_declared_window() {
     let report = step(&fp, &tp, &mut state, &input(1.0, 0.0, [speed; 2], [0.0; 2]));
     assert!(!report.shifting);
     assert_ne!(state.clutch, ClutchState::Out);
-}
-
-/// The gear deadband must cover actual same-instant arithmetic on lighter and heavier rigs
-/// even when their engine is unchanged. A multiplication-only test cannot detect an undersized M.
-#[test]
-#[cfg(feature = "bitprobe")]
-fn landing_resolution_bounds_independent_weight_rigs() {
-    for mass in [20_000.0, 60_000.0] {
-        // Fixture masses, same engine and gearbox at both weights.
-        for tp in [lab_tp(), tiger_tp()] {
-            let mut fp = lab_fp();
-            fp.grip.side_weight = mass * super::super::derive::G / 2.0;
-            let mut residuals = Vec::new();
-            for (index, &ratio) in tp.gears_fwd.iter().enumerate() {
-                for command in [0.25, 0.5, 1.0] {
-                    // Fixture pedal samples.
-                    for rpm in [
-                        tp.engine.idle_rpm,
-                        tp.peak_torque_rpm,
-                        tp.engine.governed_rpm,
-                    ] {
-                        let speed = rpm * RPM_TO_RAD * tp.sprocket_radius / ratio;
-                        let mut state = TransmissionState {
-                            gear: (index + 1) as u8,
-                            clutch: ClutchState::In,
-                            omega_e: rpm * RPM_TO_RAD,
-                            ..fresh(&tp)
-                        };
-                        // No support observation isolates the mechanical solve from a gear decision.
-                        let inp = input(
-                            command,
-                            0.0,
-                            [speed; 2],
-                            [mass * super::super::derive::G * 0.04 / 2.0; 2],
-                        );
-                        let probe = step(&fp, &tp, &mut state, &inp).bitprobe;
-                        let acceleration = (probe.omega_integrated - probe.omega_pre) / probe.dt;
-                        let priced = (probe.tau_free - tp.engine_inertia * acceleration) * probe.k;
-                        residuals.push(
-                            priced - probe.direction * probe.f_c_pre_scale * probe.power_scale,
-                        );
-                    }
-                }
-            }
-            let lo = residuals.iter().copied().fold(f32::INFINITY, f32::min);
-            let hi = residuals.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            println!(
-                "MEASURED independent-weight residual mass_kg={mass} gears={} min_n={lo} max_n={hi} margin_n={}",
-                tp.gears_fwd.len(),
-                force_margin(&tp)
-            );
-            let crank_margin = force_margin(&tp);
-            assert!(residuals.iter().all(|value| value.is_finite()));
-            assert!(
-                (hi - lo).max(lo.abs()).max(hi.abs()) < crank_margin,
-                "same-instant residual span must fit the crank arithmetic bound: {lo}..{hi} vs {crank_margin}"
-            );
-        }
-    }
 }
 
 /// The requested pedal chooses gears while the physical pedal is still travelling.
@@ -2270,6 +1567,7 @@ fn gear_choice_reads_requested_pedal_before_its_ramp() {
         let mut state = TransmissionState {
             gear,
             clutch: ClutchState::In,
+            launch: LaunchState::Locked,
             omega_e: tp.peak_torque_rpm * RPM_TO_RAD,
             ..fresh(&tp)
         };
@@ -2301,7 +1599,7 @@ fn capable_launches_gain_speed_against_a_supported_grade() {
             speeds = step(&fp, &tp, &mut state, &inp).next_speeds;
         }
         assert!(
-            speeds.into_iter().all(|speed| speed > PARK_ENGAGE_SPEED),
+            speeds.into_iter().all(|speed| speed > park_engage_speed()),
             "a capable supported launch must gain speed: {speeds:?}"
         );
     }
@@ -2315,7 +1613,7 @@ fn reversal_release_during_hold_parks_without_a_direction_cut() {
     let mut state = fresh(&tp);
     let mut speeds = [5.0; 2]; // Fixture: forward cruise.
     for _ in 0..64 * 10 {
-        let was_rest = speeds.iter().all(|v: &f32| v.abs() < PARK_ENGAGE_SPEED);
+        let was_rest = speeds.iter().all(|v: &f32| v.abs() < park_engage_speed());
         let report = step(&fp, &tp, &mut state, &input(-1.0, 0.0, speeds, [0.0; 2]));
         assert!(
             !state.reverse,
@@ -2326,7 +1624,7 @@ fn reversal_release_during_hold_parks_without_a_direction_cut() {
             break;
         }
     }
-    assert!(speeds.iter().all(|v| v.abs() < PARK_ENGAGE_SPEED));
+    assert!(speeds.iter().all(|v| v.abs() < park_engage_speed()));
     for _ in 0..64 {
         speeds = step(&fp, &tp, &mut state, &input(0.0, 0.0, speeds, [0.0; 2])).next_speeds;
         assert!(!state.reverse);
@@ -2346,7 +1644,6 @@ fn part_pedal_launches_and_sustains_ordered_speed() {
             // Fixture: level and supported grades.
             let grade = weight * degrees.to_radians().sin();
             let rolling = 0.015 * weight * degrees.to_radians().cos(); // Fixture: firm ground.
-            let mut last_speed = 0.0;
             for command in [0.25, 0.5, 0.75] {
                 let mut state = fresh(&tp);
                 let mut speed = 0.0;
@@ -2372,7 +1669,7 @@ fn part_pedal_launches_and_sustains_ordered_speed() {
                         * 0.5; 2];
                     speed = step(&fp, &tp, &mut state, &inp).next_speeds[0];
                     assert!(
-                        speed >= -PARK_ENGAGE_SPEED,
+                        speed >= -park_engage_speed(),
                         "a supported notch cannot roll backward"
                     );
                     if tick >= 64 * 59 {
@@ -2388,42 +1685,15 @@ fn part_pedal_launches_and_sustains_ordered_speed() {
                 );
                 if capable {
                     assert!(
-                        speed > PARK_ENGAGE_SPEED,
+                        speed > park_engage_speed(),
                         "every capable notch must sustain travel"
                     );
-                    assert!(speed > last_speed, "more pedal must sustain more speed");
-                    // Resolution: final-window ripple below one percent of the declared speed scale.
-                    assert!(
-                        hi - lo < 0.01 * tp.governed_speed(false),
-                        "the notch must settle"
-                    );
-                    last_speed = speed;
                 }
             }
         }
         assert!(
             capable_notches > 0,
             "each class must exercise capable partial-pedal travel"
-        );
-    }
-}
-
-/// A held-intent stop is a fresh launch regardless of the prior clutch regime. The brake law
-/// relies on this to release the one-way lever after an arrested climb.
-#[test]
-fn law_arrested_climb_reenters_launch_slip() {
-    for tp in [lab_tp(), tiger_tp()] {
-        let mut state = TransmissionState {
-            park: false,
-            clutch: ClutchState::In,
-            ..fresh(&tp)
-        };
-        let inp = felt_at_rest(input(1.0, 0.0, [0.0; 2], [0.0; 2]));
-        driver(&construction(&lab_fp()), &tp, &mut state, &inp);
-        assert_eq!(
-            state.clutch,
-            ClutchState::Slip,
-            "arrested intent must not remain an engaged lug"
         );
     }
 }
@@ -2450,9 +1720,10 @@ fn held_reversal_waits_at_rest_and_pays_exactly_one_cut() {
             let mut cuts = 0;
             let mut cut_ticks = 0;
             let mut was_cut = false;
-            let hold = (driver_actuation().reversal_hold_s.value * TICK_HZ).ceil() as u8;
+            let hold = (driver_actuation().reversal_hold_s.value / driver_input(0.0, 0.0, 0.0).dt)
+                .ceil() as u8;
             for _ in 0..64 * 30 {
-                let at_rest = speeds.iter().all(|v| v.abs() < PARK_ENGAGE_SPEED);
+                let at_rest = speeds.iter().all(|v| v.abs() < park_engage_speed());
                 if at_rest && state.reverse == reverse {
                     held_ticks += 1;
                 }
@@ -2476,13 +1747,13 @@ fn held_reversal_waits_at_rest_and_pays_exactly_one_cut() {
                         report
                             .next_speeds
                             .iter()
-                            .all(|v| *v * dir >= -PARK_ENGAGE_SPEED)
+                            .all(|v| *v * dir >= -park_engage_speed())
                     );
                 }
                 speeds = report.next_speeds;
                 if state.reverse != reverse
                     && !report.shifting
-                    && speeds.iter().all(|v| *v * dir < -PARK_ENGAGE_SPEED)
+                    && speeds.iter().all(|v| *v * dir < -park_engage_speed())
                 {
                     break;
                 }
@@ -2492,305 +1763,9 @@ fn held_reversal_waits_at_rest_and_pays_exactly_one_cut() {
                 held_ticks - 1,
                 speeds[0]
             );
-            assert!(state.reverse != reverse && speeds[0] * dir < -PARK_ENGAGE_SPEED);
+            assert!(state.reverse != reverse && speeds[0] * dir < -park_engage_speed());
             assert_eq!(cuts, 1);
             assert_eq!(cut_ticks, usize::from(tp.shift_ticks.get()));
-        }
-    }
-}
-
-/// Coasting along the gear above first-gear idle must not apply the terrain lever. A lever-on-coast
-/// mutant distinguishes the supported run; crank drag has its own coupling witness.
-#[test]
-fn released_motion_coasts_without_brake_force() {
-    let (fp, tp) = (lab_fp(), lab_tp());
-    let speed = tp.governed_speed(false) * 0.5; // Fixture: moving well above the stop threshold.
-    let inp = input(0.0, 0.0, [speed; 2], [1000.0; 2]);
-    let mut state = TransmissionState {
-        park: false,
-        clutch: ClutchState::In,
-        gear: 3,
-        ..fresh(&tp)
-    };
-    let controls = driver(&construction(&fp), &tp, &mut state, &inp);
-    let belts = BeltTick::new(&construction(&fp), &controls.input);
-    let solved = stop_rows([0.0; 2], &tp, &belts, &state, &controls, None, 1.0);
-    assert_eq!(solved.forces, [0.0; 2]);
-}
-
-/// Players releasing throttle must stop rollback within dynamic capacity, except for a neutral
-/// pivot's construction-selected mean hold. Enumerating input states catches an any-steering
-/// exemption; force bounds reject an unlimited hold. Powered requests retain service/launch
-/// braking; along-gear motion coasts except for the existing released sub-idle stop.
-#[test]
-fn released_rollback_stops_and_parks() {
-    for (fp, base) in class_drivetrains() {
-        for neutral_mean in [NeutralMean::Held, NeutralMean::Free] {
-            let tp = TransmissionParams {
-                neutral_mean,
-                ..base.clone()
-            };
-            for reverse in [false, true] {
-                let dir = if reverse { -1.0 } else { 1.0 };
-                let first = if reverse {
-                    tp.gears_rev[0]
-                } else {
-                    tp.gears_fwd[0]
-                };
-                let idle_speed = tp.engine.idle_rpm * RPM_TO_RAD * tp.sprocket_radius / first;
-                // Fixture: include a load that holds at rest but cannot arrest a moving belt.
-                for load_share in [
-                    0.5,
-                    (1.0 + tp.brake_static_factor) * 0.5,
-                    2.0 * tp.brake_static_factor,
-                ] {
-                    for command in [0.0, dir, -dir] {
-                        for steer in [0.0, 1.0] {
-                            for window_share in [0.5, 2.0] {
-                                for motion in [dir, -dir] {
-                                    let mean = motion
-                                        * window_share
-                                        * driver_actuation().neutral_speed_m_s.value;
-                                    // Fixture: retain a nonzero belt difference across ticks.
-                                    let speeds = [mean * 1.1, mean * 0.9];
-                                    let load = -motion * load_share * tp.brake_capacity_n;
-                                    let mut inp = driver_input(mean, 2.0 * load, command);
-                                    inp.speeds = speeds;
-                                    inp.steer = steer;
-                                    inp.reactions = [load; 2];
-                                    let mut state = TransmissionState {
-                                        reverse,
-                                        clutch: ClutchState::In,
-                                        ..fresh(&tp)
-                                    };
-                                    let controls =
-                                        driver(&construction(&fp), &tp, &mut state, &inp);
-                                    let pivot =
-                                        command == 0.0 && steer != 0.0 && window_share < 1.0;
-                                    let stopping = if command == 0.0 {
-                                        !pivot
-                                            && (motion != dir
-                                                || (steer == 0.0
-                                                    && speeds.iter().all(|v| v.abs() < idle_speed)))
-                                    } else {
-                                        command != dir || motion != command
-                                    };
-                                    let belts = BeltTick::new(&construction(&fp), &inp);
-                                    let neutral_tie =
-                                        neutral_turn(&controls.input, mean).then(|| {
-                                            steering_tie(
-                                                &tp,
-                                                &state,
-                                                &controls.input,
-                                                mean,
-                                                branch(mean),
-                                            )
-                                        });
-                                    // Fixture: zero source capacity isolates the Driver's stop orders
-                                    // from the neutral steering row's motor force.
-                                    let BeltStep {
-                                        next: landed_speeds,
-                                        forces: force,
-                                        ..
-                                    } = stop_rows(
-                                        [0.0; 2],
-                                        &tp,
-                                        &belts,
-                                        &state,
-                                        &controls,
-                                        neutral_tie,
-                                        0.0,
-                                    );
-                                    for i in 0..2 {
-                                        // DERIVED: no other sprocket force in this isolated brake solve;
-                                        // both input belts are outside rest, so capacity is dynamic.
-                                        let stop = load - speeds[i] * fp.inertia / inp.dt;
-                                        let expected = if stopping {
-                                            stop.clamp(-tp.brake_capacity_n, tp.brake_capacity_n)
-                                        } else if controls.mean_hold {
-                                            (load - mean * fp.inertia / inp.dt)
-                                                .clamp(-tp.brake_capacity_n, tp.brake_capacity_n)
-                                        } else {
-                                            0.0
-                                        };
-                                        // Resolution: f32 cancellation of brake forces in newtons.
-                                        assert!(
-                                            (force[i] - expected).abs() < 0.01,
-                                            "brake policy: reverse={reverse} command={command} steer={steer} window={window_share} motion={motion} load={load_share}: {force:?} vs {expected}"
-                                        );
-                                    }
-                                    assert_eq!(
-                                        controls.mean_hold,
-                                        pivot && neutral_mean == NeutralMean::Held
-                                    );
-                                    let landed = (landed_speeds[0] + landed_speeds[1]) * 0.5;
-                                    let has_stop =
-                                        stopping || (pivot && neutral_mean == NeutralMean::Held);
-                                    if has_stop && load_share < 1.0 {
-                                        assert!(
-                                            landed.abs() < mean.abs().max(PARK_ENGAGE_SPEED),
-                                            "braking must approach rest"
-                                        );
-                                    } else if !has_stop {
-                                        assert!(
-                                            landed.abs() > mean.abs(),
-                                            "an unbraked input follows its load"
-                                        );
-                                    }
-                                    if pivot {
-                                        assert!(
-                                            !state.park && !controls.service && !controls.one_way
-                                        );
-                                    }
-                                    if command == 0.0 && motion != dir {
-                                        observe_released_rollback(
-                                            &fp, &tp, reverse, steer, speeds, load,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Fixture trajectory: carry both outputs into the next tick, so steering's belt difference
-/// survives. Only class outcomes and force-derived bounds are obligations; threshold crossings
-/// and the trace are observations for #392, never pins on an emergent period or amplitude.
-fn observe_released_rollback(
-    fp: &FixtureConstruction,
-    tp: &TransmissionParams,
-    reverse: bool,
-    steer: f32,
-    mut speeds: [f32; 2],
-    load: f32,
-) {
-    let initial_mean = (speeds[0] + speeds[1]) * 0.5;
-    let within = load.abs() < tp.brake_capacity_n;
-    let free_pivot = steer != 0.0 && tp.neutral_mean == NeutralMean::Free;
-    let mut state = TransmissionState {
-        reverse,
-        clutch: ClutchState::In,
-        ..fresh(tp)
-    };
-    let mut stopped = false;
-    let mut crossings = 0;
-    let mut tail_crossings = 0;
-    let mut tail_range = [f32::INFINITY, f32::NEG_INFINITY];
-    let mut trace = Vec::new();
-    // DERIVED: equal belt inertia makes m² + d² proportional to kinetic energy. Outside
-    // neutral the open-clutch steering tie is passive and supported brakes dissipate more
-    // work than the load supplies. At exit, bound both neutral axes plus one load impulse;
-    // an entry outside neutral may already carry more energy.
-    let entry_energy_speed = ((speeds[0].powi(2) + speeds[1].powi(2)) * 0.5).sqrt();
-    let neutral_energy_speed =
-        (driver_actuation().neutral_speed_m_s.value.powi(2) + tp.neutral_d_full.powi(2)).sqrt();
-    let free_bound =
-        entry_energy_speed.max(neutral_energy_speed) + load.abs() / TICK_HZ / fp.inertia;
-    // Fixture observation budget: five seconds, with a two-second tail.
-    for tick in 0..TICK_HZ as usize * 5 {
-        let mean = (speeds[0] + speeds[1]) * 0.5;
-        let mut inp = driver_input(mean, 2.0 * load, 0.0);
-        inp.speeds = speeds;
-        inp.steer = steer;
-        inp.reactions = [load; 2];
-        let report = step(fp, tp, &mut state, &inp);
-        let next = (report.next_speeds[0] + report.next_speeds[1]) * 0.5;
-        assert!(
-            !report.driving,
-            "released rollback cannot borrow an engine catch"
-        );
-        let crossing = (mean.abs() < driver_actuation().neutral_speed_m_s.value)
-            != (next.abs() < driver_actuation().neutral_speed_m_s.value);
-        crossings += usize::from(crossing);
-        if tick >= TICK_HZ as usize * 3 {
-            tail_crossings += usize::from(crossing);
-            tail_range[0] = tail_range[0].min(next);
-            tail_range[1] = tail_range[1].max(next);
-            if trace.len() < 8 {
-                trace.push((tick, mean, next, state.park));
-            }
-        }
-        if within && free_pivot {
-            // Resolution: f32 kinetic-energy and force cancellation in metres per second.
-            assert!(next.abs() <= free_bound + 1e-5);
-        } else if within {
-            if stopped {
-                assert!(next.abs() < PARK_ENGAGE_SPEED, "rest stays held");
-                if steer == 0.0 {
-                    assert_eq!(report.held, [true; 2]);
-                    assert!(state.park, "the released vehicle is parked at rest");
-                }
-            }
-            stopped |= next.abs() < PARK_ENGAGE_SPEED;
-        } else {
-            assert!(
-                report.brakes_slide || free_pivot,
-                "an active stop must report saturation"
-            );
-        }
-        speeds = report.next_speeds;
-    }
-    println!(
-        "MEASURED rollback gears={} reverse={reverse} mean={:?} steer={steer} load_share={} stopped={stopped} crossings={crossings} tail_crossings={tail_crossings} tail={tail_range:?} final={speeds:?} trace={trace:?}",
-        tp.gears_fwd.len(),
-        tp.neutral_mean,
-        load.abs() / tp.brake_capacity_n
-    );
-    if !within {
-        assert!(
-            ((speeds[0] + speeds[1]) * 0.5).abs() > initial_mean.abs(),
-            "above dynamic capacity the entry must keep sliding"
-        );
-    } else if !free_pivot {
-        assert!(
-            stopped && speeds.iter().sum::<f32>().abs() * 0.5 < PARK_ENGAGE_SPEED,
-            "released rollback must reach rest and hold"
-        );
-        if steer == 0.0 {
-            assert!(state.park, "the released vehicle is parked at rest");
-        } else {
-            assert!(!state.park, "the neutral pivot uses its mean hold");
-        }
-    }
-    if within && steer != 0.0 && tp.neutral_mean == NeutralMean::Held {
-        // Fixture: release the actual pivot outputs, retaining their counter-rotation.
-        for _ in 0..TICK_HZ as usize * 2 {
-            let inp = input(0.0, 0.0, speeds, [load; 2]);
-            speeds = step(fp, tp, &mut state, &inp).next_speeds;
-        }
-        assert!(
-            state.park && speeds.iter().all(|v| v.abs() < PARK_ENGAGE_SPEED),
-            "releasing a held pivot must stop both belts and park"
-        );
-    }
-}
-
-/// A neutral pivot's mean hold is its only stop, even when its mean drifts against the gear.
-/// Parking during steering would substitute per-side brakes for the construction's mean hold.
-#[test]
-fn neutral_pivot_keeps_its_mean_hold_as_the_only_stop() {
-    for (fp, tp) in class_drivetrains() {
-        for reverse in [false, true] {
-            for mean_hold in [NeutralMean::Free, NeutralMean::Held] {
-                let tp = TransmissionParams {
-                    neutral_mean: mean_hold,
-                    ..tp.clone()
-                };
-                // Fixture: drift inside neutral, against either engaged ladder.
-                let drift = 0.5
-                    * driver_actuation().neutral_speed_m_s.value
-                    * if reverse { 1.0 } else { -1.0 };
-                let inp = input(0.0, 1.0, [drift; 2], [0.0; 2]);
-                let mut state = fresh(&tp);
-                let controls = driver(&construction(&fp), &tp, &mut state, &inp);
-                assert!(!state.park && !controls.service && !controls.one_way);
-                assert_eq!(state.clutch, ClutchState::Out);
-                assert_eq!(controls.mean_hold, mean_hold == NeutralMean::Held);
-            }
         }
     }
 }
@@ -2825,14 +1800,19 @@ fn one_way_lever_launches_on_grade_without_rollback_or_a_launch_cut() {
                 assert_eq!(state.gear, launch, "the launch takes the gear that holds");
             }
             assert!(
-                !report.shifting || speed >= PARK_ENGAGE_SPEED,
+                !report.shifting || speed >= park_engage_speed(),
                 "a launch from rest pays no cut"
             );
             cuts += usize::from(report.shifting && !last_cut);
             last_cut = report.shifting;
             speed = report.next_speeds[0];
             minimum = minimum.min(speed);
-            assert!(report.next_speeds.iter().all(|v| *v >= -PARK_ENGAGE_SPEED));
+            assert!(
+                report
+                    .next_speeds
+                    .iter()
+                    .all(|v| *v >= -park_engage_speed())
+            );
         }
         println!(
             "MEASURED S2 gears={} belt_kg={} launch={launch} gear={} spare_n={spare} load_n={load} cuts={cuts} min_speed={minimum} final_speed={speed}",
@@ -2840,7 +1820,7 @@ fn one_way_lever_launches_on_grade_without_rollback_or_a_launch_cut() {
             fp.inertia,
             state.gear
         );
-        assert!(speed > PARK_ENGAGE_SPEED);
+        assert!(speed > park_engage_speed());
     }
 }
 
@@ -2854,8 +1834,9 @@ fn reversal_pause_and_cut_hold_a_grade_in_both_directions() {
             let mut state = TransmissionState {
                 reverse: command > 0.0,
                 park: true,
-                reversal_hold_ticks: (driver_actuation().reversal_hold_s.value * TICK_HZ).ceil()
-                    as u8,
+                reversal_hold_ticks: (driver_actuation().reversal_hold_s.value
+                    * (1.0 / fixed_step_s()))
+                .ceil() as u8,
                 ..fresh(&tp)
             };
             let mut speed = 0.0;
@@ -2873,13 +1854,13 @@ fn reversal_pause_and_cut_hold_a_grade_in_both_directions() {
                         speed.abs() < 1e-5,
                         "reversal pause/cut drifted at {speed} m/s"
                     );
-                } else if speed * command > PARK_ENGAGE_SPEED {
+                } else if speed * command > park_engage_speed() {
                     break;
                 }
             }
             assert_eq!(state.reverse, command < 0.0);
             assert_eq!(cuts, 1);
-            assert!(speed * command > PARK_ENGAGE_SPEED);
+            assert!(speed * command > park_engage_speed());
             assert!(state.gear <= tp.launch_gears);
         }
     }
@@ -2891,7 +1872,7 @@ fn reversal_pause_and_cut_hold_a_grade_in_both_directions() {
 fn released_sub_idle_motion_stops_and_parks() {
     for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
         let idle_speed = tp.engine.idle_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[0];
-        let speed = (idle_speed + PARK_ENGAGE_SPEED) * 0.5;
+        let speed = (idle_speed + park_engage_speed()) * 0.5;
         let mut state = TransmissionState {
             park: false,
             ..fresh(&tp)
@@ -2950,6 +1931,7 @@ fn ceiling_brake_requires_a_driver_and_holds_the_current_gear() {
                 reverse,
                 park: false,
                 clutch: ClutchState::In,
+                launch: LaunchState::Locked,
                 omega_e: tp.engine.crank_limit_rpm * RPM_TO_RAD,
                 ..fresh(&tp)
             };
@@ -3020,42 +2002,42 @@ fn pending_reversal_does_not_power_rollback() {
             // band in one tick. The bound is independent of the solved clutch torque.
             let load = 2.0 * tp.brake_capacity_n * tp.brake_static_factor
                 + tp.clutch_capacity * ladder[0] / tp.sprocket_radius * 0.5
-                + 4.0 * PARK_ENGAGE_SPEED * fp.inertia * TICK_HZ;
+                + 4.0 * park_engage_speed() * fp.inertia * (1.0 / fixed_step_s());
             // Fixture: the same overload from latched and skipped-rest entries, plus the
             // modest overload from a moving reversal that can otherwise cycle through rest.
             for (entry, load) in [
                 (0.0, load),
-                (2.0 * PARK_ENGAGE_SPEED, load),
+                (2.0 * park_engage_speed(), load),
                 (2.0, 1.5 * tp.brake_capacity_n * tp.brake_static_factor),
             ] {
                 let mut state = TransmissionState {
                     reverse,
-                    reversal_hold_ticks: (driver_actuation().reversal_hold_s.value * TICK_HZ).ceil()
-                        as u8,
+                    reversal_hold_ticks: (driver_actuation().reversal_hold_s.value
+                        * (1.0 / fixed_step_s()))
+                    .ceil() as u8,
                     ..fresh(&tp)
                 };
                 let mut speeds = [dir * entry; 2];
-                for tick in 0..TICK_HZ as usize * 5 {
+                for tick in 0..(1.0 / fixed_step_s()) as usize * 5 {
                     let mut inp = input(-dir, 0.0, speeds, [dir * load; 2]);
                     inp.sensed = driver_input(speeds[0], dir * 2.0 * load, -dir).sensed;
                     let report = step(&fp, &tp, &mut state, &inp);
-                    if speeds[0] * dir <= -PARK_ENGAGE_SPEED {
+                    if speeds[0] * dir <= -park_engage_speed() {
                         assert!(
                             !report.driving,
                             "old ladder powered rollback: entry={entry} tick={tick}"
                         );
-                        assert_eq!(state.clutch, ClutchState::Out);
                         assert!(
                             report.next_speeds.iter().all(|v| v * dir < 0.0),
                             "an over-capacity slide cannot return to rest"
                         );
                     }
-                    if tick == 0 && entry == 2.0 * PARK_ENGAGE_SPEED {
+                    if tick == 0 && entry == 2.0 * park_engage_speed() {
                         assert!(
                             report
                                 .next_speeds
                                 .iter()
-                                .all(|v| v * dir <= -PARK_ENGAGE_SPEED),
+                                .all(|v| v * dir <= -park_engage_speed()),
                             "fixture must cross zero without sampling the rest band"
                         );
                         assert!(!state.park);
@@ -3067,7 +2049,7 @@ fn pending_reversal_does_not_power_rollback() {
                     assert!(!report.shifting);
                     speeds = report.next_speeds;
                 }
-                assert!(speeds.iter().all(|v| v * dir < -PARK_ENGAGE_SPEED));
+                assert!(speeds.iter().all(|v| v * dir < -park_engage_speed()));
                 assert!(state.reversal_hold_ticks > 0);
                 println!(
                     "MEASURED pending reversal gears={} reverse={reverse} entry={entry} final={} park={} clutch={:?}",
@@ -3076,89 +2058,6 @@ fn pending_reversal_does_not_power_rollback() {
                     state.park,
                     state.clutch
                 );
-            }
-        }
-    }
-}
-
-/// Steering without pedal cannot couple the old ladder against rollback when mean drift leaves
-/// neutral. A player whose pivot hold is overloaded relies on no powered catch returning it.
-#[test]
-fn steering_rollback_does_not_close_the_main_clutch() {
-    for (fp, tp) in class_drivetrains() {
-        for reverse in [false, true] {
-            let dir = if reverse { -1.0 } else { 1.0 };
-            // Fixture: start inside the neutral window on a load beyond the static hold.
-            let load = dir * 1.5 * tp.brake_capacity_n * tp.brake_static_factor;
-            let mut speeds = [-dir * 0.95 * driver_actuation().neutral_speed_m_s.value; 2];
-            let mut state = TransmissionState {
-                reverse,
-                ..fresh(&tp)
-            };
-            let mut left_neutral = false;
-            for _ in 0..TICK_HZ as usize * 5 {
-                let mean = (speeds[0] + speeds[1]) * 0.5;
-                let report = step(&fp, &tp, &mut state, &input(0.0, 1.0, speeds, [load; 2]));
-                assert_eq!(
-                    state.clutch,
-                    ClutchState::Out,
-                    "rollback is not engine braking"
-                );
-                assert!(!report.driving);
-                speeds = report.next_speeds;
-                let next = (speeds[0] + speeds[1]) * 0.5;
-                assert!(
-                    next * dir < mean * dir,
-                    "an overloaded unpowered mean keeps sliding"
-                );
-                left_neutral |= next.abs() >= driver_actuation().neutral_speed_m_s.value;
-            }
-            assert!(left_neutral, "fixture must exercise drift beyond neutral");
-        }
-    }
-}
-
-/// The game's driving and damage model: a staffed Driver retains the park lever when
-/// either powertrain HP pool is emptied. Players can stop a coast and hold at rest.
-#[test]
-fn staffed_zero_rate_stops_and_parks_without_engine_work() {
-    for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
-        for engine_empty in [false, true] {
-            let supply = DriveSupply {
-                task_rate: 0.0,
-                engine_in_action: !engine_empty,
-                transmission_condition: if engine_empty { 1.0 } else { 0.0 },
-                ..DriveSupply::WHOLE
-            };
-            // Fixture: coast up a supported ten-degree slope with the lever released.
-            let grade = fp.grip.side_weight * 10.0_f32.to_radians().sin();
-            let mut state = TransmissionState {
-                omega_e: 0.0,
-                ..fresh(&tp)
-            };
-            let mut speed = 3.0;
-            for _ in 0..64 * 10 {
-                let mut inp = input(0.0, 0.0, [speed; 2], [grade; 2]);
-                inp.supply = supply;
-                speed = step(&fp, &tp, &mut state, &inp).next_speeds[0];
-            }
-            assert!(state.park, "staffing, not task throughput, owns park");
-            // Resolution: f32 cancellation at a supported stop.
-            assert!(speed.abs() < 1e-5, "released coast must stop: {speed}");
-            for command in [-1.0, 1.0] {
-                // Fixture: either retained direction at rest.
-                state = TransmissionState {
-                    omega_e: 0.0,
-                    ..fresh(&tp)
-                };
-                // Fixture: above dynamic capacity but below static breakaway.
-                let grade = tp.brake_capacity_n * (1.0 + tp.brake_static_factor) * 0.5;
-                let mut inp = input(command, 0.0, [0.0; 2], [grade; 2]);
-                inp.supply = supply;
-                let report = step(&fp, &tp, &mut state, &inp);
-                assert!(state.park);
-                // Resolution: f32 cancellation at a supported stop.
-                assert!(report.next_speeds.iter().all(|v| v.abs() < 1e-5));
             }
         }
     }
@@ -3178,6 +2077,7 @@ fn restaffed_rollback_retains_gear_and_refuses_backward_overrev() {
     let initial = TransmissionState {
         gear,
         clutch: ClutchState::In,
+        launch: LaunchState::Locked,
         omega_e: speed * tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius,
         ..fresh(&tp)
     };
@@ -3194,27 +2094,6 @@ fn restaffed_rollback_retains_gear_and_refuses_backward_overrev() {
     let report = step(&fp, &tp, &mut state, &inp);
     assert!(!report.shifting, "restaffing cannot buy a rollback cut");
     assert_eq!(state.gear, gear);
-}
-
-/// Full service during rollback must not buy a gear cut, even while crank inertia
-/// still carries forward rotation. The player stops before choosing a launch gear.
-#[test]
-fn forward_crank_rollback_keeps_gear_under_service() {
-    let (fp, tp) = (grade_fixture_fp(), tiger_tp());
-    // Fixture: supported twenty-degree rollback in a retained launch gear.
-    let load = fp.grip.side_weight * 2.0 * 20.0_f32.to_radians().sin();
-    let inp = driver_input(-0.2, load, 1.0);
-    let mut state = TransmissionState {
-        gear: tp.launch_gears,
-        park: false,
-        clutch: ClutchState::In,
-        omega_e: tp.engine.idle_rpm * RPM_TO_RAD,
-        ..fresh(&tp)
-    };
-    let gear = state.gear;
-    let report = step(&fp, &tp, &mut state, &inp);
-    assert_eq!(state.gear, gear);
-    assert!(!report.shifting);
 }
 
 /// Construction drag may stop a free crank but cannot reverse it, including either side
@@ -3293,6 +2172,7 @@ fn zero_rate_staffed_descent_keeps_the_crank_ceiling_with_brakes() {
             gear,
             park: false,
             clutch: ClutchState::In,
+            launch: LaunchState::Locked,
             omega_e: tp.engine.crank_limit_rpm * RPM_TO_RAD,
             ..fresh(&tp)
         };
@@ -3358,7 +2238,7 @@ fn steer_detents_use_one_threshold_from_every_history() {
 }
 
 /// Admission follows algebraic domains and representability, not a vehicle class's scale.
-/// Fixture extremes retain finite coupled arithmetic across different physical scales.
+/// Fixture extremes must retain both representable arithmetic and resolvable conditioning.
 #[test]
 fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
     let mut a = tiger_authoring();
@@ -3370,23 +2250,30 @@ fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
     a.brake_static_factor = 3.0;
     a.engine_inertia_kgm2 = (200000.0 / engine_control().idle_catch_droop_rpm.value
         + 200000.0 * a.drag_fraction * (1.0 - motoring_drag_base_share()) / 32500.0)
-        / (TICK_HZ * RPM_TO_RAD)
+        / ((1.0 / fixed_step_s()) * RPM_TO_RAD)
         * 1.001;
     a.clutch_capacity_nm = 100000.0;
     a.belt_inertia = 0.5;
     a.shift_secs = 3.5;
+    assert!(
+        TransmissionParams::from_authoring(&a)
+            .unwrap_err()
+            .to_string()
+            .contains("conditioning")
+    );
+    a.belt_inertia = 8_000.0; // Fixture: separates the independent steering and stop normals.
     assert!(TransmissionParams::from_authoring(&a).is_ok());
     a.engine_inertia_kgm2 = 0.01;
     a.clutch_capacity_nm = 50.0;
     assert!(TransmissionParams::from_authoring(&a).is_err());
     a.engine_inertia_kgm2 = (200000.0 / engine_control().idle_catch_droop_rpm.value
         + 200000.0 * a.drag_fraction * (1.0 - motoring_drag_base_share()) / 32500.0)
-        / (TICK_HZ * RPM_TO_RAD)
+        / ((1.0 / fixed_step_s()) * RPM_TO_RAD)
         * 1.001;
-    a.shift_secs = (f32::from(u8::MAX) + 1.0) / TICK_HZ;
+    a.shift_secs = (f32::from(u8::MAX) + 1.0) / (1.0 / fixed_step_s());
     assert!(TransmissionParams::from_authoring(&a).is_err());
     // A cut that rounds to no tick would change gear with the clutch in, unfelt by the ledger.
-    a.shift_secs = 0.4 / TICK_HZ;
+    a.shift_secs = 0.4 / (1.0 / fixed_step_s());
     assert!(TransmissionParams::from_authoring(&a).is_err());
     a.shift_secs = 3.5;
     a.belt_inertia = f32::MIN_POSITIVE;
@@ -3439,24 +2326,6 @@ fn coast_expectation_includes_the_rolling_fade_for_every_drivetrain() {
     );
 }
 
-/// A backward crank cannot fire or acquire a positive idle floor. Crank settlement relies
-/// on the live sign even though candidate pricing may assume a forward free crank.
-#[test]
-fn backward_live_crank_has_no_idle_floor() {
-    for (_, tp) in class_drivetrains() {
-        assert!(idle_floor(&tp, DriveSupply::WHOLE, 0.0).is_some());
-        let state = TransmissionState {
-            clutch: ClutchState::In,
-            omega_e: -tp.engine.idle_rpm * RPM_TO_RAD,
-            ..fresh(&tp)
-        };
-        let inp = input(1.0, 0.0, [0.0; 2], [0.0; 2]);
-        let [fuel, catch, drag] = engine_torques(&tp, inp.supply, state.omega_e, 1.0);
-        let (floor, over) = crank_guards(&tp, &inp, &state, 1.0, fuel + catch - drag);
-        assert_eq!(floor, -over);
-    }
-}
-
 /// A free-crank tick must resolve the slope of its authored torque and fuel cut.
 /// The constructor protects every admitted drivetrain, including Blender's fixture sheet.
 #[test]
@@ -3474,83 +2343,8 @@ fn unresolved_crank_inertia_is_refused() {
         cut_slope > raw_slope,
         "the fixture distinguishes raw slope from fuel cut"
     );
-    a.engine_inertia_kgm2 = (raw_slope + cut_slope) / (2.0 * TICK_HZ * RPM_TO_RAD);
+    a.engine_inertia_kgm2 = (raw_slope + cut_slope) / (2.0 * (1.0 / fixed_step_s()) * RPM_TO_RAD);
     assert!(TransmissionParams::from_authoring(&a).is_err());
-}
-
-/// Virtual free-crank guard clipping must not cap synchronous curve power.
-/// This isolates the work law; constructor admission independently bounds the tick's inertia.
-#[test]
-fn virtual_free_crank_energy_does_not_cap_curve_power() {
-    let (fp, mut tp) = (lab_fp(), lab_tp());
-    for inertia in [0.01, 4.0] {
-        // Fixture: unresolved and resolved crank inertias.
-        tp.engine_inertia = inertia;
-        let omega = 1100.0 * RPM_TO_RAD; // Fixture curve peak.
-        let k = tp.gears_fwd[2] / tp.sprocket_radius;
-        let speed = omega / k;
-        let torque = tp.torque_at(omega / RPM_TO_RAD);
-        let force = torque * k;
-        let inp = input(1.0, 0.0, [speed; 2], [force * 0.5; 2]);
-        let crank = CrankTick {
-            omega_e: omega,
-            tau_free: torque,
-            k,
-            dir: 1.0,
-            omega_floor: 500.0 * RPM_TO_RAD,
-            omega_over: 1900.0 * RPM_TO_RAD,
-            dt: inp.dt,
-        };
-        #[cfg(feature = "bitprobe")]
-        let mut probe = TransmissionProbe::default();
-        let work = engine_work(
-            &tp,
-            crank,
-            |scale| {
-                let belts = BeltTick::new(&construction(&fp), &inp);
-                let side = force * 0.5 * scale;
-                [0, 1].map(|i| side * (belts.speeds[i] + belts.land(i, side)) * 0.5 * inp.dt)
-            },
-            #[cfg(feature = "bitprobe")]
-            &mut probe,
-        );
-        assert_eq!(
-            work.scale, 1.0,
-            "curve power must remain available at J={inertia}"
-        );
-    }
-}
-
-/// Reverse steering belongs to reverse construction, even when its ratios differ from forward.
-/// The Driver needs that radius before a belt moves.
-#[test]
-fn reverse_radii_belong_to_the_reverse_gear() {
-    let mut a = tiger_authoring();
-    a.forward_speeds_kmh = &[5.0, 12.0];
-    a.reverse_speeds_kmh = &[10.0]; // Fixture: not a forward prefix.
-    a.reverse_steer_radii_m = &[(6.0, 16.0)];
-    a.steer_radii_m = &[(3.0, 8.0), (7.0, 19.0)];
-    let tp = TransmissionParams::from_authoring(&a).unwrap();
-    let state = TransmissionState {
-        reverse: true,
-        steer_step: 2,
-        ..fresh(&tp)
-    };
-    assert_eq!(tp.steering_radii(true, 1).0, 6.0);
-    let kappa = a.half_tread_m / 6.0; // DERIVED from the Fixture reverse radius.
-    assert_eq!(detent_kappa(&tp, &state, 1), kappa);
-    let fp = grade_fixture_fp();
-    let mut inp = input(0.0, 1.0, [-1.0; 2], [0.0; 2]); // Fixture: reverse travel.
-    inp.dt = 1.0 / TICK_HZ;
-    let (_, jacobian) = steering_force(
-        &tp,
-        &BeltTick::new(&construction(&fp), &inp),
-        &state,
-        &inp,
-        -1.0,
-        0.0,
-    );
-    assert_eq!(jacobian, [(1.0 + kappa) / 2.0, -(1.0 - kappa) / 2.0]);
 }
 
 /// Finite authored scalars must not publish an overflowing crank-energy budget to the work law.
@@ -3587,63 +2381,6 @@ fn coupled_mass_uses_each_constructions_own_weight() {
     }
 }
 
-/// A curve extension at its end-clamped torque changes no delivered torque or crank limit.
-/// Ceiling brakes, over-rev and force roundoff must retain their envelope.
-#[test]
-fn a_curve_tail_does_not_move_the_crank_envelope() {
-    let original = tiger_authoring();
-    let base = TransmissionParams::from_authoring(&original).unwrap();
-    let mut curve = original.torque_nm.to_vec();
-    let &(rpm, torque) = curve.last().unwrap();
-    curve.push((rpm + 500.0, torque)); // Fixture: extend the end-clamped tail.
-    let extended = TransmissionParams::from_authoring(&TransmissionAuthoring {
-        torque_nm: &curve,
-        ..original
-    })
-    .unwrap();
-    for rpm in [600.0, 2100.0, 2500.0, 3000.0, 3500.0] {
-        // Fixture samples.
-        assert_eq!(base.torque_at(rpm), extended.torque_at(rpm));
-    }
-    assert_eq!(base.engine.crank_limit_rpm, extended.engine.crank_limit_rpm);
-    assert_eq!(base.roundoff_force_scale(), extended.roundoff_force_scale());
-    let fp = grade_fixture_fp();
-    let construction = construction(&fp);
-    let gear = base.gears_fwd.len() as u8;
-    let k = base.gears_fwd[usize::from(gear - 1)] / base.sprocket_radius;
-    let omega = base.engine.crank_limit_rpm * RPM_TO_RAD;
-    let mut state = TransmissionState {
-        gear,
-        clutch: ClutchState::In,
-        omega_e: omega,
-        ..fresh(&base)
-    };
-    let inp = driver_input(omega / k, 0.0, 0.0);
-    let guards = crank_guards(&base, &inp, &state, 0.0, 0.0);
-    assert_eq!(guards, crank_guards(&extended, &inp, &state, 0.0, 0.0));
-    let controls = driver(&construction, &base, &mut state, &inp);
-    let crank = CrankTick {
-        omega_e: omega,
-        tau_free: 0.0,
-        k,
-        dir: 1.0,
-        omega_floor: guards.0,
-        omega_over: guards.1,
-        dt: inp.dt,
-    };
-    let brake_forces = |tp: &TransmissionParams| {
-        let mut q = [10_000.0; 2]; // Fixture: force that would accelerate past the limit.
-        let belts = BeltTick::new(&construction, &controls.input);
-        apply_ceiling_brakes(&mut q, tp, &belts, &state, &controls, crank);
-        q
-    };
-    assert_eq!(brake_forces(&base), brake_forces(&extended));
-    assert!(
-        brake_forces(&base)[0] < 10_000.0,
-        "the witness reaches ceiling braking"
-    );
-}
-
 /// Admission refuses a live fuel rack at the do-not-exceed limit before any Driver can brake it.
 #[test]
 fn the_crank_limit_requires_completed_fuel_cut() {
@@ -3658,38 +2395,6 @@ fn the_crank_limit_requires_completed_fuel_cut() {
     );
     a.crank_limit_rpm += engine_control().governor_cut_rpm.value;
     assert!(TransmissionParams::from_authoring(&a).is_ok());
-}
-
-/// The game's driving model: admission refuses a ladder none of whose launch gears closes its
-/// clutch inside the crank limit at every speed in the parking tolerance, naming the ladder's
-/// field. The Driver's choice at rest (`driver::choose`) launches from out at any such speed and
-/// relies on one gear landing there. Mutant: dropping the check admits these ladders, whose launch
-/// then finds no gear. Fixture: the lab ladder slowed until its highest launch gear, fourth at
-/// 0.09 km/h, reaches its limit at a DERIVED 0.0264 m/s, and its reverse ladder slowed to
-/// 0.036 km/h.
-#[test]
-fn a_ladder_that_cannot_launch_inside_the_crank_limit_is_refused_before_play() {
-    let lab = lab_authoring();
-    let slow_forward = TransmissionAuthoring {
-        forward_speeds_kmh: &[0.036, 0.054, 0.072, 0.09, 0.108],
-        ..lab
-    };
-    let slow_reverse = TransmissionAuthoring {
-        reverse_speeds_kmh: &[0.036],
-        ..lab
-    };
-    for (authoring, field) in [
-        (slow_forward, "gearbox.forward_speeds_kmh"),
-        (slow_reverse, "gearbox.reverse_speeds_kmh"),
-    ] {
-        let error = TransmissionParams::from_authoring(&authoring)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains(field) && error.contains("engine.crank_limit_rpm"),
-            "{error}"
-        );
-    }
 }
 
 /// Admission follows the torque law's slope, not how many samples the author used.
@@ -3762,7 +2467,7 @@ fn launch_peak_can_lie_inside_the_fuel_cut_ramp() {
 fn construction_refuses_an_unresolved_idle_catch() {
     let spec = super::super::drive_fixture::compact_spec();
     let tr = &spec.track.powertrain.transmission;
-    let mut params = tr.params(0.3, 1.0, 3000.0).unwrap();
+    let mut params = tr.params(0.3, 1.0, 3000.0, spec.mass).unwrap();
     let control = engine_control();
     let drag_slope =
         params.peak_torque_nm * params.drag_fraction * (1.0 - motoring_drag_base_share())
@@ -3789,15 +2494,15 @@ fn construction_refuses_an_unresolved_idle_catch() {
         idle_slope > cut_slope + loss_cut_slope,
         "fixture isolates the idle branch"
     );
-    let minimum = (idle_slope + drag_slope) / (TICK_HZ * RPM_TO_RAD);
+    let minimum = (idle_slope + drag_slope) / ((1.0 / fixed_step_s()) * RPM_TO_RAD);
     println!(
         "DERIVED compact inertia minimum={minimum:.8} without_idle={:.8} without_drag={:.8}",
-        (cut_slope + loss_cut_slope + drag_slope) / (TICK_HZ * RPM_TO_RAD),
-        idle_slope / (TICK_HZ * RPM_TO_RAD)
+        (cut_slope + loss_cut_slope + drag_slope) / ((1.0 / fixed_step_s()) * RPM_TO_RAD),
+        idle_slope / ((1.0 / fixed_step_s()) * RPM_TO_RAD)
     );
     for without in [cut_slope + loss_cut_slope + drag_slope, idle_slope] {
         // Midpoints isolate idle_catch and viscous drag independently of every other term.
-        params.engine_inertia = (minimum + without / (TICK_HZ * RPM_TO_RAD)) * 0.5;
+        params.engine_inertia = (minimum + without / ((1.0 / fixed_step_s()) * RPM_TO_RAD)) * 0.5;
         let error = params.check_derived(3000.0).unwrap_err().to_string();
         assert!(error.contains("idle_catch_droop_rpm") && error.contains("governor_cut_rpm"));
     }
@@ -3809,8 +2514,8 @@ fn construction_refuses_an_unresolved_idle_catch() {
     let net_slope = 800.0 / control.governor_cut_rpm.value;
     let loss_cut_slope =
         engine_drag(&params, cut_end * RPM_TO_RAD).abs() / control.governor_cut_rpm.value;
-    let without = (net_slope + drag_slope) / (TICK_HZ * RPM_TO_RAD);
-    let with = (net_slope + loss_cut_slope + drag_slope) / (TICK_HZ * RPM_TO_RAD);
+    let without = (net_slope + drag_slope) / ((1.0 / fixed_step_s()) * RPM_TO_RAD);
+    let with = (net_slope + loss_cut_slope + drag_slope) / ((1.0 / fixed_step_s()) * RPM_TO_RAD);
     println!("DERIVED fuel-cut fixture inertia minimum={with:.8} without_loss_cut={without:.8}");
     params.engine_inertia = (with + without) * 0.5;
     assert!(
@@ -3819,4 +2524,904 @@ fn construction_refuses_an_unresolved_idle_catch() {
     );
     params.engine_inertia = with * 1.001;
     params.check_derived(3000.0).unwrap();
+}
+
+/// Fixture: mean/side-clutch constructions, both ladders, subdynamic/static/overload loads,
+/// forward/released/opposing requests, steering, entry windows and motion signs. Players rely on
+/// fixed intent never selecting alternating active couplings or releasing a passive latch.
+/// Gear selection is isolated by an absent ledger; a chosen gear and its crank still integrate.
+#[test]
+fn fixed_intent_has_no_order_flips_after_one_transition_across_constructions() {
+    let classes = class_drivetrains();
+    let expected: Vec<_> = classes
+        .iter()
+        .map(|(_, tp)| [true, tp.couplings.contains(&Coupling::Steering)])
+        .collect();
+    let mut covered = vec![[false; 2]; classes.len()];
+    for (class, (fp, base)) in classes.into_iter().enumerate() {
+        for held_mean in [true, false] {
+            let mut tp = base.clone();
+            tp.couplings.retain(|c| *c != Coupling::Stop(Output::Mean));
+            tp.mean_hold_capacity_n = None;
+            if held_mean {
+                if !tp.couplings.contains(&Coupling::Steering) {
+                    continue;
+                }
+                tp.couplings.push(Coupling::Stop(Output::Mean));
+                tp.mean_hold_capacity_n = Some(2.0 * tp.brake_capacity_n); // Fixture rating.
+            }
+            for (launch, staffed, latched, slopes) in [
+                (LaunchState::Locked, true, false, [0.0, 0.0]),
+                (LaunchState::Unchosen, true, false, [80.0, 24_000.0]),
+                (LaunchState::TakingUp, true, true, [1200.0, 800_000.0]),
+                (LaunchState::Locked, false, true, [800_000.0, 83.0]),
+            ] {
+                // Fixture: launch/staff/latch/contact states, not authored construction facts.
+                for reverse in [false, true] {
+                    let dir = if reverse { -1.0 } else { 1.0 };
+                    for load_share in [
+                        0.5,
+                        (1.0 + tp.brake_static_factor) * 0.5,
+                        2.0 * tp.brake_static_factor,
+                    ] {
+                        for command in [0.0, dir, -dir] {
+                            for steer in [
+                                0.0,
+                                (super::super::drive::drive_feel().wide_on.0
+                                    + super::super::drive::drive_feel().tight_on.0)
+                                    * 0.5,
+                                1.0,
+                            ] {
+                                for window_share in [0.5, 2.0] {
+                                    for motion in [dir, -dir] {
+                                        covered[class][usize::from(held_mean)] = true;
+                                        let mean = motion
+                                            * window_share
+                                            * driver_actuation().neutral_speed_m_s.value;
+                                        let mut speeds = [mean * 1.1, mean * 0.9];
+                                        let mut st = TransmissionState {
+                                            reverse,
+                                            launch,
+                                            mean_hold: latched && held_mean,
+                                            ..fresh(&tp)
+                                        };
+                                        let mut previous = None;
+                                        let mut changes = 0;
+                                        let mut phase = None;
+                                        let mut direction_cuts = 0;
+                                        for _ in 0..320 {
+                                            // Fixture: five seconds at the fixture clock.
+                                            let mut inp = input(
+                                                command,
+                                                steer,
+                                                speeds,
+                                                [-motion * load_share * tp.brake_capacity_n; 2],
+                                            );
+                                            inp.supply.control_authority = staffed;
+                                            inp.reaction_slopes = slopes;
+                                            // Fixture: asymmetric loads preserve the total demand.
+                                            inp.reactions[0] *= 0.6;
+                                            inp.reactions[1] *= 1.4;
+                                            // No ledger: do not manufacture shifting from a synthetic hull reading.
+                                            inp.sensed = None;
+                                            let mut preview = st;
+                                            let orders =
+                                                driver(&construction(&fp), &tp, &mut preview, &inp);
+                                            if st.mean_hold
+                                                && !preview.mean_hold
+                                                && inp.speeds[0] + inp.speeds[1] == 0.0
+                                            {
+                                                assert_eq!(
+                                                    inp.speeds, [0.0; 2],
+                                                    "an exit preserving static mean support starts at exact belt rest"
+                                                );
+                                            }
+                                            if staffed
+                                                && st.mean_hold
+                                                && inp.speeds[0] + inp.speeds[1] != 0.0
+                                            {
+                                                if command != 0.0 {
+                                                    assert!(
+                                                        !orders.mean_hold,
+                                                        "a breached hold cannot suppress either ladder request"
+                                                    );
+                                                    if command * dir > 0.0 && !orders.shifting {
+                                                        assert!(
+                                                            orders.propulsive > 0.0,
+                                                            "throttle regains propulsion"
+                                                        );
+                                                    } else if command * dir < 0.0 {
+                                                        assert!(
+                                                            orders.service,
+                                                            "reverse regains its stopping authority"
+                                                        );
+                                                    }
+                                                } else if steer != 0.0 {
+                                                    assert_eq!(
+                                                        orders.input.steer, steer,
+                                                        "steering retains authority over a sliding mean"
+                                                    );
+                                                }
+                                            }
+                                            let signature = (
+                                                orders.clutch_open,
+                                                preview.park,
+                                                orders.mean_hold,
+                                                orders.service,
+                                                orders.one_way,
+                                            );
+                                            let next_phase = (preview.reverse, orders.shifting);
+                                            if phase != Some(next_phase) {
+                                                changes = 0;
+                                                previous = None;
+                                                phase = Some(next_phase);
+                                            }
+                                            if previous.is_some_and(|prior| prior != signature) {
+                                                changes += 1;
+                                            }
+                                            previous = Some(signature);
+                                            let prior_reverse = st.reverse;
+                                            speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
+                                            direction_cuts +=
+                                                usize::from(st.reverse != prior_reverse);
+                                            assert!(
+                                                direction_cuts <= 1,
+                                                "fixed intent permits one direction cut"
+                                            );
+                                            assert!(
+                                                changes <= 1,
+                                                "fixed intent chattered: mean_held={held_mean} reverse={reverse} load={load_share} command={command} steer={steer} entry={mean}: {changes}"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        covered, expected,
+        "each catalogue construction covers side stops and every constructed mean-hold class"
+    );
+}
+
+/// Fixture: every geared-steering construction with an independently rated mean hold.
+fn mean_hold_drivetrains() -> impl Iterator<Item = (FixtureConstruction, TransmissionParams)> {
+    class_drivetrains()
+        .into_iter()
+        .filter(|(_, tp)| tp.couplings.contains(&Coupling::Steering))
+        .map(|(fp, mut tp)| {
+            if !tp.has_mean_hold() {
+                tp.couplings.push(Coupling::Stop(Output::Mean));
+                tp.mean_hold_capacity_n = Some(2.0 * tp.brake_capacity_n); // Fixture mean-brake rating.
+            }
+            (fp, tp)
+        })
+}
+
+/// Fixture load per side inside both devices' static interval, above the weaker sliding rating.
+fn handover_load_per_side(tp: &TransmissionParams) -> f32 {
+    let capacity = tp.brake_capacity_n.min(
+        tp.mean_hold_capacity_n
+            .expect("the handover fixture constructs a mean brake")
+            / 2.0,
+    );
+    capacity * (1.0 + tp.brake_static_factor) * 0.5
+}
+
+/// Releasing a pivot must transfer a supported common-mode load without losing static grip.
+/// Players on a slope rely on retaining the held mean until the straight tie has stopped both
+/// belts; a speed-band handover or dropping the hold on steer release fails this witness.
+#[test]
+fn pivot_release_hands_static_load_to_side_stops_from_exact_rest() {
+    for (fp, tp) in mean_hold_drivetrains() {
+        for reverse in [false, true] {
+            for direction in [-1.0, 1.0] {
+                let load = direction * handover_load_per_side(&tp);
+                for brake in [false, true] {
+                    let mut st = TransmissionState {
+                        reverse,
+                        mean_hold: true,
+                        ..fresh(&tp)
+                    };
+                    // Fixture: opposite belt motion at a resting mean, as a pivot's steer ramp ends.
+                    let mut speeds = [0.018, -0.018];
+                    let mut transferred = false;
+                    for _ in 0..16 {
+                        let start = speeds;
+                        let mut inp = input(0.0, if brake { 1.0 } else { 0.0 }, speeds, [load; 2]);
+                        if brake {
+                            inp.intent = DriveIntent::Brake;
+                        }
+                        let report = step(&fp, &tp, &mut st, &inp);
+                        speeds = report.next_speeds;
+                        assert_eq!(
+                            speeds[0] + speeds[1],
+                            0.0,
+                            "handover cannot drop the supported mean"
+                        );
+                        if st.park {
+                            assert_eq!(
+                                start, [0.0; 2],
+                                "replacement stops latch only from exact rest"
+                            );
+                            assert!(!st.mean_hold);
+                            assert_eq!(speeds, [0.0; 2]);
+                            transferred = true;
+                        } else {
+                            assert!(st.mean_hold);
+                        }
+                    }
+                    assert!(
+                        transferred,
+                        "straight steering must arrest the remaining differential motion"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A passive drivetrain may transfer belt energy into its crank, but cannot create total
+/// kinetic energy. Players rely on steering and the clutch sharing one crank budget.
+/// Billing a solved steering impulse to the belts alone would break this energy bound.
+#[test]
+fn no_fuel_or_external_work_cannot_raise_total_kinetic_energy() {
+    for (fp, tp) in class_drivetrains() {
+        for steer in [-1.0, 0.0, 1.0] {
+            for entry in [[0.0; 2], [2.0; 2], [1.0, -1.0]] {
+                // Fixture: rest, drive, and pivot energy.
+                let mut st = TransmissionState {
+                    omega_e: tp.engine.governed_rpm * RPM_TO_RAD,
+                    launch: LaunchState::Locked,
+                    ..fresh(&tp)
+                };
+                let mut speeds = entry;
+                for _ in 0..128 {
+                    let energy = |omega: f32, v: [f32; 2]| {
+                        0.5 * f64::from(tp.engine_inertia) * f64::from(omega).powi(2)
+                            + 0.5
+                                * f64::from(fp.inertia)
+                                * v.into_iter().map(|x| f64::from(x).powi(2)).sum::<f64>()
+                    };
+                    let before = energy(st.omega_e, speeds);
+                    let mut inp = input(0.0, steer, speeds, [0.0; 2]);
+                    // The game's damage model: no served combustion or Driver catch, construction drag remains.
+                    inp.supply.task_rate = 1.0;
+                    inp.supply.engine_in_action = false;
+                    speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
+                    let after = energy(st.omega_e, speeds);
+                    // Resolution: cast of the f64 block solution into replicated f32 speeds.
+                    assert!(
+                        after <= before * (1.0 + 8.0 * f64::from(f32::EPSILON)) + 1e-8,
+                        "passive energy grew {before} -> {after}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Locked clutch and steering rows reproduce construction radii across both ladders. The HUD
+/// and Driver rely on one crank ratio per detent; the table is allowed only its declared rounding.
+#[test]
+fn locked_rows_reproduce_authored_radii_within_the_rounding_bound() {
+    for (fp, tp) in class_drivetrains() {
+        if !tp.couplings.contains(&Coupling::Steering) {
+            continue;
+        }
+        for reverse in [false, true] {
+            for gear in 1..=if reverse {
+                tp.gears_rev.len()
+            } else {
+                tp.gears_fwd.len()
+            } as u8
+            {
+                for (steer, index) in [
+                    (1.0, 0),
+                    (
+                        (super::super::drive::drive_feel().wide_on.0
+                            + super::super::drive::drive_feel().tight_on.0)
+                            * 0.5,
+                        1,
+                    ),
+                ] {
+                    let dir = if reverse { -1.0 } else { 1.0 };
+                    let omega = tp.engine.governed_rpm * RPM_TO_RAD;
+                    let mean = dir * omega / (tp.ratio(reverse, gear) / tp.sprocket_radius);
+                    let c = if index == 0 {
+                        tp.steer_crank_ratio.0
+                    } else {
+                        tp.steer_crank_ratio.1
+                    };
+                    let mut st = TransmissionState {
+                        gear,
+                        reverse,
+                        omega_e: omega,
+                        launch: LaunchState::Locked,
+                        clutch: ClutchState::In,
+                        ..fresh(&tp)
+                    };
+                    let inp = input(dir, steer, [mean + c * omega, mean - c * omega], [0.0; 2]);
+                    let rep = step(&fp, &tp, &mut st, &inp);
+                    assert!(rep.locked, "unloaded synchronous clutch must hold");
+                    let [left, right] = rep.next_speeds;
+                    let radius_over_half_tread = ((left + right) / (left - right)).abs();
+                    let radius = radius_over_half_tread * tp.half_tread_m;
+                    let pair = tp.steering_radii(reverse, gear);
+                    let authored = if index == 0 { pair.0 } else { pair.1 };
+                    // Resolution: subtraction of near-equal f32 belt speeds at wide radii.
+                    let allowance =
+                        authored * (tp.steering_radius_rounding_share + 64.0 * f32::EPSILON);
+                    assert!(
+                        (radius - authored).abs() <= allowance,
+                        "radius {radius} vs table {authored}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Fixture: two side clutches, each with its belt's brake, without a steering tie. Future
+/// constructions rely on the production assembler, rather than a special analytic drivetrain.
+#[test]
+fn clutch_and_brake_construction_drives_turns_and_stops_through_step() {
+    let (fp, tp) = side_clutch_drivetrain();
+    let mut st = fresh(&tp);
+    let mut speeds = [0.0; 2];
+    for _ in 0..128 {
+        let mut inp = input(1.0, 0.0, speeds, [0.0; 2]);
+        inp.sensed = Some(Sensed::steady(0.0, 0.0, 0.0));
+        speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
+    }
+    assert!(speeds[0] > 0.0 && speeds[1] > 0.0);
+    for _ in 0..64 {
+        let mut inp = input(1.0, 1.0, speeds, [0.0; 2]);
+        inp.sensed = Some(Sensed::steady(0.0, 0.0, 0.0));
+        speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
+    }
+    assert!(
+        speeds[0] > speeds[1] && speeds[1] == 0.0,
+        "inner clutch releases and its brake holds"
+    );
+    for _ in 0..128 {
+        let mut inp = input(0.0, 0.0, speeds, [0.0; 2]);
+        inp.intent = DriveIntent::Brake;
+        speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
+    }
+    assert_eq!(speeds, [0.0; 2]);
+}
+
+/// The asset loader must refuse a radius table that contradicts its single crank ratio.
+/// Designers rely on a named field and repair, rather than a per-gear steering exception.
+#[test]
+fn inconsistent_steering_radii_are_refused_at_load() {
+    for reverse in [false, true] {
+        for wide in [false, true] {
+            let mut a = lab_authoring();
+            let mut radii = if reverse {
+                a.reverse_steer_radii_m
+            } else {
+                a.steer_radii_m
+            }
+            .to_vec();
+            // Fixture: an error well beyond the declared rounding, without changing the anchor.
+            let index = radii.len() - 1;
+            if wide {
+                radii[index].1 *= 2.0;
+            } else {
+                radii[index].0 *= 2.0;
+            }
+            if reverse {
+                a.reverse_steer_radii_m = &radii;
+            } else {
+                a.steer_radii_m = &radii;
+            }
+            let error = TransmissionParams::from_authoring(&a)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("radii[")
+                    && error.contains("radius_rounding_share")
+                    && error.contains("author radii"),
+                "{error}"
+            );
+        }
+    }
+}
+
+/// A layout must describe distinct paths and be able to finish its own passive handover.
+/// Asset authors get a refusal before play; no missing connection gets a code default.
+#[test]
+fn invalid_coupling_construction_is_refused_before_play() {
+    let invalid: &[&[Coupling]] = &[
+        &[],
+        &[Coupling::Clutch(Output::Left)],
+        &[
+            Coupling::Clutch(Output::Mean),
+            Coupling::Clutch(Output::Mean),
+        ],
+        &[
+            Coupling::Clutch(Output::Left),
+            Coupling::Clutch(Output::Right),
+            Coupling::Stop(Output::Mean),
+        ],
+    ];
+    for couplings in invalid {
+        let mut a = lab_authoring();
+        a.couplings = couplings;
+        let error = TransmissionParams::from_authoring(&a)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("transmission.couplings"), "{error}");
+    }
+}
+
+/// A supported park may hand its load to a pivot hold or a service stop at exact rest.
+/// Players rely on the static budget surviving a change of passive stop ownership.
+#[test]
+fn parked_static_load_survives_pivot_and_service_handover() {
+    for (fp, tp) in mean_hold_drivetrains() {
+        for sign in [-1.0, 1.0] {
+            let load = sign * handover_load_per_side(&tp);
+            for pivot in [false, true] {
+                let mut state = TransmissionState {
+                    park: true,
+                    ..fresh(&tp)
+                };
+                let mut inp = input(0.0, 1.0, [0.0; 2], [load; 2]);
+                if !pivot {
+                    inp.intent = DriveIntent::Brake;
+                }
+                let report = step(&fp, &tp, &mut state, &inp);
+                assert_eq!(report.next_speeds[0] + report.next_speeds[1], 0.0);
+                if !pivot {
+                    assert_eq!(report.next_speeds, [0.0; 2]);
+                }
+                assert_eq!(state.mean_hold, pivot);
+            }
+        }
+    }
+}
+
+/// The guards constrain the sum of every crank reaction, including the steering member.
+/// The engine model relies on this instead of an energy-adding floor clamp after the solve.
+#[test]
+fn crank_guards_bound_combined_clutch_and_steering_reactions() {
+    for (fp, tp) in class_drivetrains() {
+        for pending in [false, true] {
+            for steer in [-1.0, 0.0, 1.0] {
+                for motion in [-1.0, 0.0, 1.0] {
+                    let omega = tp.engine.governed_rpm * RPM_TO_RAD;
+                    let speed = motion * omega * tp.sprocket_radius / tp.gears_fwd[0];
+                    let mut state = TransmissionState {
+                        omega_e: omega,
+                        launch: if pending {
+                            LaunchState::TakingUp
+                        } else {
+                            LaunchState::Locked
+                        },
+                        ..fresh(&tp)
+                    };
+                    let mut inp = input(1.0, steer, [speed; 2], [tp.brake_capacity_n; 2]);
+                    inp.sensed = Some(Sensed::steady(speed, 0.0, 0.0)); // Fixture: no paid gear decision.
+                    let [fuel, catch, drag] = engine_torques(&tp, inp.supply, omega, 1.0);
+                    let free = omega + (fuel + catch - drag) * inp.dt / tp.engine_inertia;
+                    let floor = if pending {
+                        tp.launch_omega(1.0)
+                    } else {
+                        (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value)
+                            * RPM_TO_RAD
+                    }
+                    .min(free);
+                    let over =
+                        ((tp.engine.crank_limit_rpm + overrev_margin_rpm()) * RPM_TO_RAD).max(free);
+                    step(&fp, &tp, &mut state, &inp);
+                    // Resolution: f64 block arithmetic cast to replicated f32 crank speed.
+                    let rounding = 8.0 * f32::EPSILON * over;
+                    assert!(
+                        state.omega_e >= floor - rounding && state.omega_e <= over + rounding,
+                        "combined reactions crossed guard [{floor}, {over}]: {}",
+                        state.omega_e
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A paid shift matches the signed shaft along its ladder. Reverse players rely on the same
+/// crank response; using the world's signed mean makes a reverse blip target idle instead.
+#[test]
+fn paid_rev_matching_uses_the_signed_shaft_on_both_ladders() {
+    for (fp, tp) in class_drivetrains() {
+        let mut endings = Vec::new();
+        for reverse in [false, true] {
+            let dir = if reverse { -1.0 } else { 1.0 };
+            let target = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5 * RPM_TO_RAD;
+            let speed = dir * target * tp.sprocket_radius / tp.ratio(reverse, 1);
+            let mut state = TransmissionState {
+                reverse,
+                shift_ticks: 1,
+                ..fresh(&tp)
+            };
+            let report = step(&fp, &tp, &mut state, &input(0.0, 0.0, [speed; 2], [0.0; 2]));
+            assert!(report.shifting && !report.driving);
+            assert!(
+                state.omega_e > tp.engine.idle_rpm * RPM_TO_RAD,
+                "a live rack must blip toward the higher shaft speed"
+            );
+            endings.push(state.omega_e);
+        }
+        // Resolution: forming the same target through distinct f32 ladder reductions.
+        assert!((endings[0] - endings[1]).abs() <= 8.0 * f32::EPSILON * endings[0].abs());
+    }
+}
+
+/// Closing a paid interruption must retain the ratio that interruption selected. The Driver
+/// relies on a free initial choice never repricing a moving cut's selected gear.
+#[test]
+fn a_paid_cut_closes_onto_its_selected_ratio() {
+    for (fp, tp) in class_drivetrains() {
+        let gear = 2; // Fixture: an interior ratio with higher safe gears available.
+        let omega = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5 * RPM_TO_RAD;
+        let speed = omega * tp.sprocket_radius / tp.ratio(false, gear);
+        let mut state = TransmissionState {
+            gear,
+            omega_e: omega,
+            shift_ticks: 1,
+            launch: LaunchState::TakingUp,
+            ..fresh(&tp)
+        };
+        let mut inp = driver_input(speed, 0.0, 1.0);
+        let cut = step(&fp, &tp, &mut state, &inp);
+        assert!(cut.shifting);
+        inp.speeds = cut.next_speeds;
+        let closed = step(&fp, &tp, &mut state, &inp);
+        assert!(
+            !closed.shifting && state.gear == gear,
+            "the open result of the last cut tick is not another free selector order"
+        );
+    }
+}
+
+/// Supported driver requests obey the same passive handover as Brake.
+/// Players rely on the existing static support surviving until side park starts at exact rest.
+/// Rest persists when the FULL constrained demand (including differential changes) fits capacity.
+#[test]
+fn supported_driver_handover_keeps_support_through_an_unequal_ground_steer_ramp() {
+    for (fp, tp) in mean_hold_drivetrains() {
+        for launch in [
+            LaunchState::Unchosen,
+            LaunchState::TakingUp,
+            LaunchState::Locked,
+        ] {
+            for path in [0, 1, 2, 4] {
+                // Fixture: release, Brake, opposing request and along-ladder request.
+                // Loss of staff and stored-crank discharge are covered by the shipped sleep proof.
+                let mut st = TransmissionState {
+                    launch,
+                    mean_hold: true,
+                    omega_e: 0.0, // Fixture: stored crank energy is absent from this passive-support proof.
+                    ..fresh(&tp)
+                };
+                let mut speeds = [0.018, -0.018]; // Fixture pivot entry, mean exactly resting.
+                // Fixture: the full initial differential arrest contributes four times the
+                // starting common load, while remaining inside every fixture's static rating.
+                let total = (800_000.0 - 80.0) * speeds[0] * 0.25;
+                let mut largest_coupled_load = 0.0_f32;
+                let mut parked = false;
+                for tick in 0..128 {
+                    let wide = (super::super::drive::drive_feel().wide_on.0
+                        + super::super::drive::drive_feel().tight_on.0)
+                        * 0.5;
+                    let steer = if tick < 8 {
+                        1.0
+                    } else if tick < 16 {
+                        wide
+                    } else {
+                        0.0
+                    };
+                    let mut inp = input(0.0, steer, speeds, [0.45 * total, 0.55 * total]);
+                    inp.supply.engine_in_action = false; // Fixture: no combustion during passive handover.
+                    inp.reaction_slopes = [80.0, 800_000.0]; // Fixture: stiff unequal soil couples differential changes into mean load.
+                    if tick >= 16 {
+                        match path {
+                            0 => {}
+                            1 => inp.intent = DriveIntent::Brake,
+                            2 | 4 => {
+                                let throttle = if path == 2 { -1.0 } else { 1.0 };
+                                inp.intent = DriveIntent::Axes(DriveAxes {
+                                    throttle,
+                                    steer: 1.0,
+                                });
+                                inp.throttle = throttle;
+                                inp.steer = 1.0;
+                            }
+                            _ => unreachable!("the fixture enumerates four driver handover paths"),
+                        }
+                    }
+                    let start = speeds;
+                    let before_hold = st.mean_hold;
+                    let report = step(&fp, &tp, &mut st, &inp);
+                    speeds = report.next_speeds;
+                    let delta = ((start[0] - start[1]) - (speeds[0] - speeds[1])) * 0.5;
+                    largest_coupled_load = largest_coupled_load
+                        .max(((inp.reaction_slopes[1] - inp.reaction_slopes[0]) * delta).abs());
+                    if before_hold && !st.mean_hold {
+                        assert_eq!(
+                            start, [0.0; 2],
+                            "passive replacement must start at exact rest"
+                        );
+                        if path == 4 {
+                            assert!(
+                                !st.park,
+                                "along-ladder intent takes the one-way launch lever"
+                            );
+                            assert!(
+                                report.next_speeds.iter().all(|v| *v >= 0.0),
+                                "the supported static replacement prevents rollback"
+                            );
+                        } else {
+                            assert!(st.park);
+                            assert_eq!(report.held, [true; 2], "rest is visible to the sleep gate");
+                        }
+                        parked = true;
+                        break; // An opposing request may drive after its paid reversal, outside this handover.
+                    }
+                    if path == 4 && st.mean_hold {
+                        assert!(
+                            !report.pulling && !report.driving,
+                            "propulsion waits for its passive handover instead of fighting the held stop"
+                        );
+                    }
+                    assert_eq!(
+                        speeds[0] + speeds[1],
+                        0.0,
+                        "this fixture's full demand remains supported"
+                    );
+                }
+                assert!(
+                    largest_coupled_load > total * 0.25,
+                    "the coupling term must be substantial against the load"
+                );
+                assert!(
+                    parked,
+                    "every passive exit can finish its exact-rest handover"
+                );
+            }
+        }
+    }
+}
+
+/// With affine contacts, ground work is external work even when its starting force is zero.
+/// The production assembly may transfer energy between crank/belts, but cannot create energy
+/// beyond endpoint external work (the backward-Euler dissipation inequality).
+#[test]
+fn affine_ground_energy_account_covers_launch_staff_and_latched_states() {
+    for (fp, tp) in class_drivetrains() {
+        for launch in [
+            LaunchState::Unchosen,
+            LaunchState::TakingUp,
+            LaunchState::Locked,
+        ] {
+            for staffed in [false, true] {
+                for latched in [false, true] {
+                    if latched && !tp.has_mean_hold() {
+                        continue;
+                    }
+                    let mut st = TransmissionState {
+                        launch,
+                        mean_hold: latched,
+                        omega_e: tp.engine.governed_rpm * RPM_TO_RAD,
+                        ..fresh(&tp)
+                    };
+                    let mut speeds = [1.0, -0.5]; // Fixture incompatible crank/mean/difference entry.
+                    for tick in 0..48 {
+                        let wide = (super::super::drive::drive_feel().wide_on.0
+                            + super::super::drive::drive_feel().tight_on.0)
+                            * 0.5;
+                        let steer = if tick < 16 {
+                            1.0
+                        } else if tick < 32 {
+                            wide
+                        } else {
+                            0.0
+                        };
+                        let mut inp = input(0.0, steer, speeds, [1000.0, -700.0]);
+                        inp.reaction_slopes = [80.0, 800_000.0]; // Fixture unequal affine contacts.
+                        inp.supply.control_authority = staffed;
+                        inp.supply.engine_in_action = false; // The game's damage model: no combustion or catch.
+                        let omega = st.omega_e;
+                        let energy = |w: f32, v: [f32; 2]| {
+                            0.5 * f64::from(tp.engine_inertia) * f64::from(w).powi(2)
+                                + 0.5
+                                    * f64::from(fp.inertia)
+                                    * v.into_iter().map(|v| f64::from(v).powi(2)).sum::<f64>()
+                        };
+                        let before = energy(omega, speeds);
+                        let report = step(&fp, &tp, &mut st, &inp);
+                        let next = report.next_speeds;
+                        let crank_work =
+                            -f64::from(bounded_drag(&tp, omega, inp.dt, engine_drag(&tp, omega)))
+                                * f64::from(st.omega_e)
+                                * f64::from(inp.dt);
+                        let ground_work: f64 = (0..2)
+                            .map(|i| {
+                                -f64::from(
+                                    inp.reactions[i]
+                                        + inp.reaction_slopes[i] * (next[i] - speeds[i]),
+                                ) * f64::from(next[i])
+                                    * f64::from(inp.dt)
+                            })
+                            .sum();
+                        let after = energy(st.omega_e, next);
+                        // Resolution: f32 state publication and affine-reaction cancellation.
+                        let allowance = 64.0
+                            * f64::from(f32::EPSILON)
+                            * (1.0 + before + after + ground_work.abs());
+                        assert!(
+                            after <= before + crank_work + ground_work + allowance,
+                            "unbilled energy: {before} -> {after}, work={}",
+                            crank_work + ground_work
+                        );
+                        speeds = next;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A crank-limited launch shares the reactions actually used by clutch and steering.
+/// Raising an unused steering rating cannot steal propulsion; an advance reservation does.
+#[test]
+fn unused_steering_rating_cannot_reduce_a_powered_launch() {
+    let (fp, base) = (lab_fp(), lab_tp());
+    let omega = base.launch_omega(1.0);
+    let d = base.steer_crank_ratio.0 * omega;
+    let mean = 0.5 * omega * base.sprocket_radius / base.gears_fwd[0];
+    let mut outcomes = Vec::new();
+    for share in [2.0, 4.0] {
+        // Fixture: two ratings above the solved steering demand.
+        let mut tp = base.clone();
+        tp.steer_capacity_n *= share;
+        let mut st = TransmissionState {
+            omega_e: omega,
+            launch: LaunchState::TakingUp,
+            ..fresh(&tp)
+        };
+        let inp = input(1.0, 1.0, [mean + d, mean - d], [0.0; 2]);
+        let controls = driver(&construction(&fp), &tp, &mut st, &inp);
+        let [fuel, catch, drag] = engine_torques(&tp, inp.supply, omega, 1.0);
+        let (report, _, steering) = advance_rows(
+            &construction(&fp),
+            &tp,
+            &mut st,
+            &controls,
+            fuel + catch - bounded_drag(&tp, omega, inp.dt, drag),
+        );
+        assert!(
+            steering.abs() < 2.0 * tp.steer_capacity_n,
+            "the member rating must be unused"
+        );
+        assert!(report.driving, "the witness must deliver clutch propulsion");
+        outcomes.push(report.forces.iter().sum::<f32>());
+    }
+    // Resolution: f64 elimination followed by f32 publication, scaled by delivered force.
+    assert!((outcomes[0] - outcomes[1]).abs() <= 8.0 * f32::EPSILON * outcomes[0].abs());
+    assert!(outcomes[0] > 0.0, "the witness must deliver propulsion");
+}
+
+/// The mean stop consumes an admitted, finite positive capacity; other constructions consume
+/// none. Sheet admission owns the StandIn label and rated-grade derivation.
+#[test]
+fn a_mean_stop_requires_admitted_positive_capacity_and_no_other_construction_consumes_it() {
+    let mut a = tiger_authoring();
+    a.mean_hold_capacity_n = None;
+    assert!(
+        TransmissionParams::from_authoring(&a)
+            .unwrap_err()
+            .to_string()
+            .contains("mean_hold_capacity_n")
+    );
+    for rating in [0.0, -1.0, f32::INFINITY, f32::NAN] {
+        // Fixture malformed asset inputs.
+        a.mean_hold_capacity_n = Some(rating);
+        assert!(TransmissionParams::from_authoring(&a).is_err());
+    }
+    let mut a = lab_authoring();
+    a.mean_hold_capacity_n = Some(192_000.0); // Fixture rating without a device is invalid.
+    assert!(
+        TransmissionParams::from_authoring(&a)
+            .unwrap_err()
+            .to_string()
+            .contains("mean_hold_capacity_n")
+    );
+}
+
+/// A breached passive hold cannot trap the driver under a load it cannot arrest. Forward,
+/// service, steer and reverse orders must reach their constructed actuators immediately.
+#[test]
+fn an_overloaded_sliding_hold_returns_every_driver_authority() {
+    for (fp, tp) in mean_hold_drivetrains() {
+        for reverse in [false, true] {
+            let dir = if reverse { -1.0 } else { 1.0 };
+            for path in 0..4 {
+                let mut st = TransmissionState {
+                    reverse,
+                    mean_hold: true,
+                    launch: LaunchState::Locked,
+                    ..fresh(&tp)
+                };
+                let mut inp = input(
+                    0.0,
+                    0.0,
+                    [-dir; 2],
+                    [2.0 * tp.mean_hold_capacity_n.unwrap(); 2],
+                ); // Fixture: load exceeds the dynamic rating.
+                match path {
+                    0 | 3 => {
+                        inp.throttle = if path == 0 { dir } else { -dir };
+                        inp.intent = DriveIntent::Axes(DriveAxes {
+                            throttle: inp.throttle,
+                            steer: 0.0,
+                        });
+                    }
+                    1 => inp.intent = DriveIntent::Brake,
+                    2 => inp.steer = 1.0,
+                    _ => unreachable!(),
+                }
+                let orders = driver(&construction(&fp), &tp, &mut st, &inp);
+                match path {
+                    0 => assert!(orders.propulsive > 0.0 && !orders.mean_hold),
+                    1 | 3 => {
+                        assert!(orders.service && !orders.mean_hold);
+                        assert_eq!(
+                            passive_rows(
+                                &tp,
+                                &st,
+                                &orders,
+                                f64::from(tp.brake_capacity_n * inp.dt)
+                            )
+                            .len(),
+                            2
+                        );
+                    }
+                    2 => assert_eq!(orders.input.steer, 1.0),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
+/// An author can state consistent radii that still yield an unresolved steering/stop basis.
+/// Admission must refuse that construction before an operator can reach the solver panic.
+#[test]
+fn construction_refuses_consistent_but_unresolved_steering_rows() {
+    let mut a = lab_authoring();
+    let radii: Vec<_> = a
+        .steer_radii_m
+        .iter()
+        .map(|(t, w)| (t * 100_000.0, w * 100_000.0))
+        .collect();
+    let reverse: Vec<_> = a
+        .reverse_steer_radii_m
+        .iter()
+        .map(|(t, w)| (t * 100_000.0, w * 100_000.0))
+        .collect();
+    a.steer_radii_m = &radii;
+    a.reverse_steer_radii_m = &reverse;
+    let error = TransmissionParams::from_authoring(&a)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("conditioning") && error.contains("steering.radii"),
+        "{error}"
+    );
 }

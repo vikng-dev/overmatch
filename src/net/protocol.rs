@@ -39,7 +39,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// at, and a whole copy only to a client without one or behind the retained history; the hull
 /// marks replicate whole. The owner's ahead-running aim integrates the authority's servo law
 /// (`tank::servo`), so a change to that law changes this revision too.
-pub const PROTOCOL_REV: u32 = 105;
+pub const PROTOCOL_REV: u32 = 106;
 
 /// The compatibility record's wire term: the pinned wire manifest, [`PROTOCOL_REV`] and the crate
 /// version.
@@ -846,7 +846,7 @@ const WIRE_SURFACE_HASH: u64 = 0xb35d6c7c3c7bbe9e;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x1c863b9a5768591f;
+const WIRE_TYPES_HASH: u64 = 0x4d79ba6d019c1235;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing; replicon's
@@ -1687,6 +1687,7 @@ mod tests {
         ("src/track/sim.rs", "EngineRpm"),
         ("src/track/transmission.rs", "TransmissionState"),
         ("src/track/transmission.rs", "ClutchState"),
+        ("src/track/transmission.rs", "LaunchState"),
         ("src/tank/model.rs", "WeaponGate"),
         ("src/tank/model.rs", "WeaponGateState"),
         ("src/tank/model.rs", "LoadRate"),

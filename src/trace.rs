@@ -412,16 +412,12 @@ fn record_tick(
         Option<Res<LocalTimeline>>,
         Option<Res<crate::net::view_clock::ViewClock>>,
     ),
-    // The server's ownership marker (`spawn_player_tank` inserts `ControlledBy` on every player
-    // tank; the ownerless test bot has none). It is the SERVER-side half of the cross-world identity
-    // the hash join pairs on: the client's own predicted tank carries the game `Controlled` marker
-    // (already in the roots query), the server's authoritative copy of that same logical tank carries
-    // `ControlledBy` instead — neither replicates the other's marker, so `own` is computed per role
-    // below. Empty result on a client / single-player, which is correct (they pair on `Controlled`).
+    // The cross-world pairing key `own` is "the player's own tank" in each role. On a client and
+    // in single-player it is the game `Controlled` marker (in the roots query). On the server it is
+    // `ControlledBy`, which `spawn_player_tank` inserts on every player tank (the ownerless test bot
+    // has none); neither marker replicates to the other side, so this query is empty off-server.
     owners: Query<(), With<ControlledBy>>,
 ) {
-    // The composition role selects which marker means "the player's own tank" for the
-    // world-independent pairing key `own`.
     let (role, sim_fields) = (trace.role, trace.sim_fields);
     let local_tick = timeline.as_deref().map_or_else(
         || next_local_tick(&mut tick_counter),
@@ -500,11 +496,6 @@ fn record_tick(
             // — the collision-stress signal the jitter correlates with.
             let (hull_contacts, penetration) = contacts.get(&entity).copied().unwrap_or((0, 0.0));
 
-            // The cross-world pairing key. Client / SP: the game `Controlled` marker (own predicted tank).
-            // Server: `ControlledBy` (the authoritative copy of that same player tank). Kept per-role so a
-            // 2-player world stays correct — on the client only OUR avatar carries `Controlled`, while the
-            // server marks every player tank `ControlledBy` its own link. Single-player has no server
-            // role, so `own` falls through to `Controlled` there too.
             let own = if role == "server" {
                 owners.get(entity).is_ok()
             } else {
@@ -543,7 +534,6 @@ fn record_tick(
             // boundary explicit so the analyzer omits private-state and combined equality for the pair.
             let disclosed_element_hash = own.then_some(hash.elm);
 
-            // `mut` for the `simf` verbose dump below.
             let mut row = json!({
                 "k": "tick",
                 "tick": tick_no,
@@ -625,7 +615,8 @@ fn record_tick(
                     .collect();
                 // Canonical transmission order; null on non-owned replicas (owner-only wire state).
                 let trn = transmission.map_or(Value::Null, |transmission| {
-                    let mut trn = Vec::with_capacity(8);
+                    let mut trn =
+                        Vec::with_capacity(transmission_state_projection(&transmission.0).len());
                     for field in transmission_state_projection(&transmission.0) {
                         match field {
                             TransmissionProjectionValue::U8(value) => trn.push(Value::from(value)),

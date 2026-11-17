@@ -144,7 +144,7 @@ fn install_recipe(app: &mut App, recipe: Recipe) {
 fn runup(spec: &TankSpec, margin: f32) -> (f32, f32) {
     let drive = spec
         .track
-        .nominal_transmission_params(&spec.roadwheels)
+        .nominal_transmission_params(&spec.roadwheels, spec.mass)
         .expect("spawn uses an admitted tank transmission");
     let speed = drive.governed_speed(false);
     let top = drive

@@ -152,6 +152,7 @@ fn record(bed: &Bed, z_c: f32, series: &mut Series, bins: Option<&mut [[f32; 4];
     series.push("detent", f32::from(state.steer_step));
     series.push("shift", f32::from(state.shift_ticks));
     series.push("park", f32::from(u8::from(state.park)));
+    series.push("mean_hold", f32::from(u8::from(state.mean_hold)));
     series.push(
         "clutch",
         match state.clutch {
@@ -375,11 +376,18 @@ fn run(case: &Case, hold_s: usize) {
     for col in series.cols.values_mut() {
         col.drain(..col.len() - LEAD_S * TICKS);
     }
+    let hold_origin = bed.hull().position;
     for tick in 0..hold_s * TICKS {
         bed.tick(case.throttle, case.steer);
         let windowed = tick >= (hold_s - WINDOW_S) * TICKS;
         record(&bed, z_c, &mut series, windowed.then_some(&mut bins));
     }
+    let release_heading = bed.hull().forward().x.atan2(-bed.hull().forward().z);
+    let hold_travel = (bed.hull().position - hold_origin).with_y(0.0).length();
+    println!(
+        "TURNPROBE-RELEASE MEASURED label={} heading_rad={release_heading:.9} hold_travel_m={hold_travel:.9}",
+        case.label
+    );
     for _ in 0..RELEASE_S * TICKS {
         bed.tick(case.throttle, 0.0);
         record(&bed, z_c, &mut series, None);
@@ -412,6 +420,8 @@ fn run(case: &Case, hold_s: usize) {
         "belt_alternation_mm_s": belt_alternation,
         "lead_ticks": LEAD_S * TICKS,
         "hold_ticks": hold_s * TICKS,
+        "release_heading_rad": release_heading,
+        "hold_travel_m": hold_travel,
         "release_ticks": RELEASE_S * TICKS,
         "window_ticks": WINDOW_S * TICKS,
         "tick_hz": TICKS,
@@ -430,7 +440,7 @@ fn run(case: &Case, hold_s: usize) {
             "grip": ground.grip,
             "rolling": ground.rolling_resistance,
             "radii": trans.steer_radii_m,
-            "neutral_d_full": trans.neutral_d_full,
+            "tight_speed_at_governor": trans.steering_speed_at_governor(),
             "wide_on": crate::track::drive::drive_feel().wide_on.0,
             "tight_on": crate::track::drive::drive_feel().tight_on.0,
             "rise_per_second": crate::track::drive::drive_feel().rise_per_second.0,
@@ -440,6 +450,7 @@ fn run(case: &Case, hold_s: usize) {
         "series": series.cols,
     });
     println!("TURNPROBE {line}");
+    bed.assignment_work.print(&case.label);
 }
 
 /// Straight full throttle from rest on the level grid until the top gear has held `CRUISE_S`:
@@ -638,10 +649,12 @@ fn brake_stop(gear: u8) {
         "latch_travel_m": latch_at,
         "stop_travel_m": peak,
         "stop_ticks": peak_tick,
+        "average_deceleration_m_s2": pull_speed * pull_speed / (2.0 * peak),
         "rock_back_mm": (peak - along(&bed)) * 1e3,
         "peak_reverse_mm_s": -reverse_speed * 1e3,
     });
     println!("TURNPROBE-BRAKE {line}");
+    bed.assignment_work.print("brake");
 }
 
 /// The shipped map's ground under candidate drops: (x, z, mean slope rad, roughness m), where

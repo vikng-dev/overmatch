@@ -1386,7 +1386,7 @@ mod tests {
         let (blueprint, template) = shipped_construction();
         let track = &blueprint.spec.track;
         let params = track.suspension.params();
-        let geom = crate::track::rig_geom::RigGeom::build(
+        let (geom, _, _) = crate::track::rig_geom::RigGeom::build(
             &blueprint,
             &crate::assets::asset_root().join(super::super::spawn::TANK_SIM_GLB_PATH),
             track.sprocket.teeth,

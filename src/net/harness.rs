@@ -713,7 +713,7 @@ impl SimulateInput {
             return;
         }
         // No replicated velocity yet is no reading of a stop.
-        if speed.is_none_or(|speed| speed >= crate::track::transmission::PARK_ENGAGE_SPEED) {
+        if speed.is_none_or(|speed| speed >= crate::track::transmission::park_engage_speed()) {
             command.throttle = -1.0;
         } else {
             self.parked = true;
@@ -1101,10 +1101,13 @@ mod tests {
     /// speed is unknown, then no demand for good, whatever the hull does next. It never fires.
     #[test]
     fn park_runs_then_brakes_to_a_stop_and_then_demands_nothing() {
-        use crate::track::transmission::PARK_ENGAGE_SPEED;
+        use crate::track::transmission::park_engage_speed;
         let script = super::Script::parse("(drive: Park(throttle_ticks: 100))").unwrap();
         let mut sim = super::SimulateInput::new(&script);
-        let (moving, stopped) = (Some(2.0 * PARK_ENGAGE_SPEED), Some(0.5 * PARK_ENGAGE_SPEED));
+        let (moving, stopped) = (
+            Some(2.0 * park_engage_speed()),
+            Some(0.5 * park_engage_speed()),
+        );
         let mut at = |tick, speed| {
             let mut command = crate::command::TankCommand::default();
             sim.write(tick, true, &mut command);

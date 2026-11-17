@@ -328,7 +328,7 @@ fn run(strike: Strike, shift: bool, digest: bool) -> Log {
             }
             for _ in 0..ticks(BRAKE_S) {
                 let forward = app.world().get::<LinearVelocity>(tank).unwrap().0.z
-                    > crate::track::transmission::PARK_ENGAGE_SPEED;
+                    > crate::track::transmission::park_engage_speed();
                 drive_tick(&mut app, tank, if forward { -1.0 } else { 0.0 }, 0.0);
                 observe(&mut app, tank, &stages, &mut log);
             }

@@ -425,13 +425,12 @@ pub(super) fn harness_record(
     if let Some(t) = &trans_telemetry.0 {
         writeln!(
             log.writer,
-            "{{\"t\":\"tr\",\"k\":{k},\"gear\":{},\"rev\":{},\"step\":{},\"shift\":{},\"rpm\":{:.1},\"scale\":{:.4},\"pavail\":{:.0},\"q\":[{:.1},{:.1}]}}",
+            "{{\"t\":\"tr\",\"k\":{k},\"gear\":{},\"rev\":{},\"step\":{},\"shift\":{},\"rpm\":{:.1},\"pavail\":{:.0},\"q\":[{:.1},{:.1}]}}",
             t.gear,
             u8::from(t.reverse),
             t.steer_step,
             u8::from(t.shifting),
             t.rpm,
-            t.power_scale,
             t.power_available,
             t.forces[0],
             t.forces[1],

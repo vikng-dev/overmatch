@@ -75,6 +75,7 @@ TankSpec(
         idler: (spin_inertia_kgm2: ((left: 4.0, right: 4.0), Derived("nominal rotating design: two 8 kg point masses at 0.5 m from the axis; I = sum(m*r^2) = 4 kg m^2")), radius: (left: 0.5, right: 0.5), nodes: (left: "Idler_L", right: "Idler_R")),
         powertrain: (
             transmission: (
+                couplings: [Clutch(Mean), Steering, Stop(Left), Stop(Right)],
                 engine: (
                     idle_rpm: 600.0,
                     governed_rpm: 2000.0,
@@ -96,15 +97,14 @@ TankSpec(
                     shift_secs: (0.3, Derived("nominal gearbox design: a shift uncouples the drive for 0.3 s")),
                 ),
                 steering: (
-                    radii: [(4.0, 12.0), (6.0, 18.0)],
+                    radii: [(4.0, 12.0), (6.4, 19.2)],
                     reverse_radii: [(4.0, 12.0)],
                     capacity: 1.0,
-                    recirculation: 0.9,
-                    neutral_mean: (Free, Derived("nominal steering design: the box forces only the speed difference and nothing holds the mean path")),
+                    radius_rounding_share: (0.01, Resolution("relative radius-table rounding bound: one percent")),
                 ),
-                brake_force: 1.0,
+                rated_slope_deg: (30.0, Unknown("nominal testbed climbing grade; no physical chassis measurement, settled by a measured climbing rating for a built chassis")),
                 // Static breakaway multiplier for the at-rest parking lever.
-                brake_static_factor: 1.5,
+                brake_static_factor: (1.5, Unknown("missing static to dynamic brake ratio; settled by measured breakaway and sliding torque")),
             ),
         ),
         suspension: (

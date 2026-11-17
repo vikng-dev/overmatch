@@ -62,12 +62,15 @@ TankSpec(
         // Belt inertia is DERIVED from the links and every declared rotating wheel assembly.
         // The crank/flywheel inertia remains engine-side in the transmission below.
         powertrain: (
-            // The DECLARED drivetrain (phase 2.5) — authored from the anchored tables in
-            // .agents/docs/design/track-model/tiger-transmission-data.md. It SHIPS everywhere, MP
-            // included (REV 14 replicates the full TransmissionState atomically).
+            // Drivetrain anchors: .agents/docs/design/track-model/tiger-transmission-data.md.
+            // The full TransmissionState replicates atomically.
             // Architecture: "wheel controlled hydraulic operated regenerative" [ANCHOR] — the
-            // L600 fixed-radius box, the one law `track::transmission` runs.
+            // L600 fixed-radius box: a mean clutch and a differential steering member.
             transmission: (
+                // Parking clamps both Argus side discs: Tigerfibel D 656/27 p. 41;
+                // Spielberger pp. 51-55. The neutral-turn gearbox brake acts on the mean.
+                couplings: [Clutch(Mean), Steering, Stop(Left), Stop(Right), Stop(Mean)],
+                mean_hold: Some(StandIn("gearbox-brake torque and reduction to mean belt force are missing; mean hold carries the service brakes' rated slope until a sourced torque and reduction replace this rule (OLVAR manual D 656/21+ Pt 2 or measurement)")),
                 engine: (
                     // HL230 P45. idle INFERRED (~600, typical for the engine class);
                     // governed 2500 = the fleet condition from Nov 1943 [ANCHOR]; per-gear
@@ -145,41 +148,13 @@ TankSpec(
                     // Treating capacity as the total difference-axis bound instead yields
                     // DERIVED 373 kN·m, below scrub. INFERRED sizing; no published
                     // steering-member torque rating reachable.
-                    capacity: 250_000.0,
-                    // Neutral differential speed is DERIVED from first-gear construction:
-                    // neutral_d_full = κ_tight(F1) × v1_governed. An authored share would
-                    // replace this radii/speed relationship with an unprovenanced feel scalar.
-                    // Mechanical recirculation efficiency ~0.9 — INFERRED.
-                    recirculation: 0.9,
-                    // The L 600 C forces only the speed difference; the period pivot drill holds
-                    // the mean as well. StandIn: the hold's capacity is the two-sided brake_force
-                    // below until the holding brake's own torque through the engaged gear is
-                    // sourced, so a held pivot keeps the slopes the parked tank keeps.
-                    neutral_mean: (Held, Derived("Tigerfibel D 656/27 (1943) pp. 40-41, 'Wenden auf der Stelle': shift down to 1st-3rd, press the clutch, pull right or left, press the large button on the gearbox. D 656/30 p. 58 labels a 'Druckknopf fuer Haltebremse' on the gearbox controls. Inferred, named by neither manual: the button is that holding brake, and holding the gearbox through the engaged low gear holds the mean of the two tracks")),
+                    capacity: Some(250_000.0),
+                    // Resolution: the rounded radius table checks one crank ratio per detent.
+                    radius_rounding_share: (0.01, Resolution("relative radius-table rounding bound: one percent")),
                 ),
-                // Per-side brake capacity at the sprocket, with two DERIVED anchors:
-                //   (1) the settled 20° park-hold capability (ADR-0026 records 20°
-                //       holds; the test course has 20° ramps): W·sin 20°/2 =
-                //       57 000 × 9.81 × 0.342 / 2 ≈ 95.6 kN/side — 96 kN holds it
-                //       with margin;
-                //   (2) 192 kN total = 0.343 g service decel — inside the 0.2–0.35 g
-                //       historical band for WWII heavy tanks (even modern heavy trucks
-                //       certify ~0.5 g).
-                // Rejected grip-limit sizing is circular: 250 kN sized against
-                // μ·W/2 — the very friction it was meant to be tested by — and implied
-                // DERIVED 2.9 MW through two 1940s Argus discs at speed: energy-impossible.
-                // The dynamic datum still governs every moving slide and service-brake stop;
-                // static breakaway is authored separately below.
-                // StandIn: twice this also bounds the held mean in a neutral turn (neutral_mean).
-                brake_force: 96_000.0,
-                // INFERRED provisional — static breakaway vs dynamic dissipation are different
-                // physical limits (static hold does no work; sourced material ratios span
-                // 1.05–2.0×). The Tiger's Argus discs are documented as self-energizing in both
-                // British Report No. 19 and D 656/30, but no numerical Argus rating
-                // survives; supersede when sourced. At 1.5×, the DERIVED static capacity is
-                // 2 × 96,000 × 1.5 = 288,000 N total against the DERIVED 30° demand
-                // 57,000 × 9.81 × sin(30°) = 279,585 N: an 8,415 N DERIVED margin.
-                brake_static_factor: 1.5,
+                rated_slope_deg: (35.0, Measured("Spielberger, Der Panzerkampfwagen Tiger und seine Abarten, 6th ed. 1998, pp. 190-192: climbing ability 35 degrees up and down")),
+                brake_static_factor: (1.2, StandIn("side-disc and gearbox-brake static/sliding lining ratios unknown; one handbook stand-in covers both devices until either has a sourced lining ratio: DARCOM-P 706-358 (1976), section 14-8, pp. 14-17 to 14-18: tank brake design example uses service factor 0.50 and static factor 0.60 for larger static pad-rotor friction; ratio 1.2")),
+
             ),
         ),
         // The ride model — everything else derives: spring rate m·(2πf)², static deflection
