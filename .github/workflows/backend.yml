@@ -2,8 +2,9 @@ name: Backend
 
 # Typecheck and test the matchmaking Worker (backend/). Triggered like CI, and gated INSIDE the job
 # (backend/ci-scope.sh) rather than by workflow `paths:` filters: a path-skipped workflow leaves a
-# required check pending forever. When the range does not touch backend/, the job still runs and
-# succeeds as a no-op that says why. Nothing here deploys.
+# required check pending forever. The dependency-free embed check always runs: its inputs live
+# outside backend/, and embed-host.mjs alone owns that list. Only typechecking and tests are scoped.
+# Nothing here deploys.
 
 on:
   push:
@@ -41,11 +42,13 @@ jobs:
           HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-node@v7
-        if: steps.scope.outputs.affected == 'true'
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: backend/package-lock.json
+
+      - name: Check embedded host inputs
+        run: node scripts/embed-host.mjs --check
 
       - name: Install
         if: steps.scope.outputs.affected == 'true'
