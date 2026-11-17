@@ -14,9 +14,16 @@ automatic shutdown. The owner keeps the key-in-Worker design with this limitatio
 Use the signed-in `overmatch` AWS profile. Setup checks the runtime account name is `Overmatch`
 (case insensitive). Identifiers stay in memory; none are tracked inputs or printed. AWS CLI history
 must be disabled in that profile: setup refuses before sending requests if history is enabled.
-The script opens no credential or AWS configuration file. Parent AWS and Cloudflare credential
-and environment overrides are stripped from every child. Wrangler uses its existing saved OAuth
-login; no parent Cloudflare API token is needed.
+The script opens no credential or AWS configuration file. AWS children use only the named profile
+and receive no Cloudflare variables. Wrangler children receive no AWS variables. Wrangler
+authentication passes through only the exported native `CLOUDFLARE_API_TOKEN` **alone**, or
+`CLOUDFLARE_API_KEY` + `CLOUDFLARE_EMAIL`; with no Cloudflare variables, it uses the existing saved
+OAuth login. `CLOUDFLARE_GLOBAL_KEY` is not mapped: operators using that shell name must export its
+value as `CLOUDFLARE_API_KEY` themselves, with tracing off, and export `CLOUDFLARE_EMAIL`. Missing,
+empty, conflicting or rejected credentials refuse with the variable name and repair. The account
+is pinned by `account_id` in `backend/wrangler.jsonc`, so no account-id environment override passes
+through. These native names are verified in pinned Wrangler 4.149.0's
+`getAuthFromEnv`/`getActiveAccountId` in `backend/node_modules/wrangler/wrangler-dist/cli.js`.
 
 Now, after review, the orchestrator runs from the repository root:
 
@@ -95,22 +102,24 @@ Interrupted removal is restartable; unrelated Worker secrets survive. No new key
 `teardown` refuses while tagged instances, volumes, interfaces or key pairs remain; it never
 terminates a match implicitly. It revokes keys first, deletes the selected Worker's hosting secrets,
 inline policy, user and security group, then proves absence. Unrelated secrets survive. A keyless
-setup can be removed with the same command using an existing target Worker and saved Wrangler login.
+setup can be removed with the same command using an existing target Worker and Wrangler authentication.
 Interrupted removal is restartable; image availability and the production allocation are irrelevant.
 
 ## Credential handling
 
 AWS stdout -> anonymous subprocess pipe -> in-memory forwarder -> Wrangler stdin. Shell tracing,
 core dumps, Wrangler disk logs and metrics are disabled. Child output is captured even on failure;
-credential fields are never printed or passed in Wrangler argv, files or environment variables.
+AWS credential fields are never printed or passed in Wrangler argv, files or environment variables.
+Cloudflare authentication values and echoed stdin are redacted from captured child output; raw
+child diagnostics are never printed.
 Key **identifiers**, unlike secret values, appear in AWS `delete-access-key` argv during revocation
 and can be observed by local process inspection. The script's own output names neither field.
 
 `WRANGLER_LOG=log` preserves version and secret-list stdout in pinned Wrangler; those outputs are
 captured and parsed. `WRANGLER_WRITE_LOGS=false` prevents disk logs. The version must match
 `backend/package.json`. `AWS_CLI_HISTORY_FILE` points below the null device so a history-enabled
-CLI fails before it can persist key creation responses. Parent AWS, Cloudflare and Wrangler
-settings cannot override these guards.
+CLI fails before it can persist key creation responses. Parent environment settings cannot
+override these guards.
 
 ## Provider contract and policy
 

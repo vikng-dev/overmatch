@@ -35,7 +35,7 @@ STATE=/var/lib/om-harness
 INSTALL=/opt/overmatch
 # The scripted client's session (src/net/harness.rs `Script`): hull parked, never firing, turret
 # sweeping (~1.3 rad/s) so every tick carries a changing aim, the way a scanning player's does.
-CLIENT_SCRIPT='(drive: Idle, aim: Sweep, ticks: %s)'
+CLIENT_SCRIPT='(drive: Idle, aim: Sweep(radius_m: 800, rate_rad_s: 1.28), ticks: %s)'
 
 uptime_s() {
   local up _

@@ -629,6 +629,7 @@ pub(super) fn install_replica_consumers(app: &mut App) {
             Update,
             (
                 rig::attach_replicated_rig().run_if(|view: Res<ViewClock>| view.now().is_some()),
+                rig::present_streamed_aim(),
                 diagnostics::nan_tripwire,
                 open_gameplay_gate,
             ),

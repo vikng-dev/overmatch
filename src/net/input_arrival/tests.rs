@@ -1151,9 +1151,25 @@ fn combat_release_sends_the_first_scripted_click_over_udp() {
             ..default()
         }))
         .add_systems(FixedPreUpdate, buffer_input);
-    pair.client
+    // A one-weapon fixture tank whose primary is ready.
+    let bore = pair
+        .client
         .world_mut()
-        .spawn(lightyear::prelude::Controlled);
+        .spawn(crate::tank::WeaponIndex(0))
+        .id();
+    pair.client.world_mut().spawn((
+        lightyear::prelude::Controlled,
+        crate::tank::Rig {
+            hull: bore,
+            turret: bore,
+            gunner_yaw: bore,
+            gun: bore,
+            muzzle: bore,
+        },
+        crate::tank::WeaponGate {
+            weapons: vec![crate::tank::WeaponGateState::default()],
+        },
+    ));
     let battle = pair
         .client
         .world_mut()

@@ -69,7 +69,7 @@
 #   holding `overmatch` and, for a local server, `overmatch-server`; default target/release),
 #   ASSET_ROOT (default the repo), DURATION_S (60), WARMUP_S (20), COOLDOWN_S (5), MIN_ROWS (DURATION_S*20),
 #   STARTUP_GRACE_S (90), CLIENT_WORKLOAD and LOAD_WORKLOAD (harness script fields,
-#   src/net/harness.rs; default `drive: Idle, aim: Sweep`: parked, turret sweeping, no fire), BASE_FIELDS
+#   src/net/harness.rs; default `drive: Idle, aim: Sweep(radius_m: 800, rate_rad_s: 1.28)`: parked, turret sweeping, no fire), BASE_FIELDS
 #   (`pen_cam_corner: Off, kill_cam: Off,`), SERVER_ENV (env words for a LOCAL server, e.g.
 #   `OVERMATCH_BOT=10`; it always gets OVERMATCH_SERVER_BIND=127.0.0.1, so it never listens on the
 #   network and the host firewall has nothing to ask), STATS_PERIOD_S (the local server's
@@ -96,8 +96,8 @@ MIN_ROWS="${MIN_ROWS:-$((DURATION_S * 20))}"
 STARTUP_GRACE_S="${STARTUP_GRACE_S:-90}"
 TARGET="${TARGET:-local}"
 DEPLOYMENT="${DEPLOYMENT:-}"
-CLIENT_WORKLOAD="${CLIENT_WORKLOAD:-drive: Idle, aim: Sweep}"
-LOAD_WORKLOAD="${LOAD_WORKLOAD:-drive: Idle, aim: Sweep}"
+CLIENT_WORKLOAD="${CLIENT_WORKLOAD:-drive: Idle, aim: Sweep(radius_m: 800, rate_rad_s: 1.28)}"
+LOAD_WORKLOAD="${LOAD_WORKLOAD:-drive: Idle, aim: Sweep(radius_m: 800, rate_rad_s: 1.28)}"
 SERVER_ENV="${SERVER_ENV:-}"
 BASE_FIELDS="${BASE_FIELDS:-pen_cam_corner: Off, kill_cam: Off,}"
 STATS_PERIOD_S="${STATS_PERIOD_S:-1}"
