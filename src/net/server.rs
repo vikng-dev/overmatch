@@ -84,6 +84,7 @@ pub fn run() {
     ));
     app.add_plugins(super::server_runner::plugin);
     app.add_plugins(super::plugin);
+    super::tick_stamp::install_server(&mut app);
     super::disclosure::install_server(&mut app);
     super::construction::install_server(&mut app);
     // A capture plan's wall cue (`OVERMATCH_CAPTURE`, its `wall`): inert without one.

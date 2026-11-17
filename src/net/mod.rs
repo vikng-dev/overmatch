@@ -45,6 +45,7 @@ mod hosting;
 /// Real-UDP probe of the client's one-input-message-per-tick send cadence.
 #[cfg(test)]
 mod input_cadence;
+mod input_gap;
 /// The interpolation buffer's size, derived from the measured link instead of pinned.
 mod interp_delay;
 /// Replicon round trips of the construction ledger: late, lossy and far-behind clients end with
@@ -92,9 +93,12 @@ mod test_harness;
 /// The netcode boundary scan and the upstream lightyear tripwires.
 #[cfg(test)]
 mod tests;
+mod tick_stamp;
+mod timing;
 /// The net client's UI, screen by screen: every root owned, each screen drawing only its own.
 #[cfg(test)]
 mod ui_ownership;
+mod view_clock;
 /// The quantised wire forms of the per-tick hull and belt state.
 mod wire_quant;
 mod world_reset;
@@ -120,6 +124,7 @@ pub(crate) const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Shared protocol, physics, and safety wiring. Both endpoints must mount it identically.
 fn plugin(app: &mut App) {
+    app.init_resource::<timing::Timing>();
     protocol::plugin(app);
     rig_admission::plugin(app);
     battle::install_hold(app);

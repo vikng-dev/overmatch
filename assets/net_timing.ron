@@ -1,0 +1,9 @@
+// Taste: view buffering memory; one late downlink sample influences the target for this long.
+// Taste: uplink tolerance memory; one arrival gap influences the stale threshold for this long.
+// Taste: input honesty window; bound silence tolerance without making cold links special.
+(
+    view_window_s: 10.0,
+    uplink_window_s: 10.0,
+    stale_floor_s: 0.100,
+    stale_ceil_s: 0.250,
+)

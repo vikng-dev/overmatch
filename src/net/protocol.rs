@@ -41,7 +41,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// at, and a whole copy only to a client without one or behind the retained history; the hull
 /// marks replicate whole. The owner's ahead-running aim integrates the authority's servo law
 /// (`tank::servo`), so a change to that law changes this revision too.
-pub const PROTOCOL_REV: u32 = 98;
+pub const PROTOCOL_REV: u32 = 99;
 
 /// The compatibility record's wire term: the pinned wire manifest, [`PROTOCOL_REV`] and the crate
 /// version.
@@ -802,6 +802,7 @@ const WIRE_SURFACE: &[&str] = &[
     "Ledger",
     "Piece",
     "Scoreboard",
+    "TickStamp",
     "BattleState",
     "WorldGeneration",
     // Message channels (`Name|Mode|Direction`), followed by their message types.
@@ -833,7 +834,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x71ba39380c57d0bd;
+const WIRE_SURFACE_HASH: u64 = 0xfba98390117f50c7;
 
 // Wire coverage: `plugin_registrations_match_wire_surface` binds registration order and channel
 // semantics to `WIRE_SURFACE`; `wire_surface_is_pinned` binds that list to the handshake. Neither
@@ -848,7 +849,7 @@ const WIRE_SURFACE_HASH: u64 = 0x71ba39380c57d0bd;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x9ba4e95b1c4ccbfc;
+const WIRE_TYPES_HASH: u64 = 0x909cff9054b52400;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol; replicon's
@@ -901,6 +902,8 @@ pub(crate) fn plugin(app: &mut App) {
     // The match score (one world entity): sent whole when a knockout changes it, a late joiner
     // takes it once.
     app.component::<super::score::Scoreboard>().replicate();
+    app.component::<super::tick_stamp::TickStamp>()
+        .replicate_with(super::tick_stamp::replication());
     app.component::<super::battle::BattleState>().replicate();
     app.component::<crate::world::WorldGeneration>().replicate();
 
@@ -1788,6 +1791,7 @@ mod tests {
         ("src/construction/breakage.rs", "Hole"),
         ("src/construction/breakage.rs", "Piece"),
         ("src/net/score.rs", "Scoreboard"),
+        ("src/net/tick_stamp.rs", "TickStamp"),
         ("src/net/battle.rs", "BattleState"),
         ("src/world.rs", "WorldGeneration"),
         ("src/net/battle.rs", "BattlePhase"),
@@ -1989,6 +1993,7 @@ mod tests {
     /// into [`WIRE_TYPES_HASH`] after the type definitions. Codec tests live outside this fold.
     const WIRE_CODEC_SOURCES: &[&str] = &[
         "src/net/wire_quant.rs",
+        "src/net/tick_stamp/wire.rs",
         "src/net/admission/denial.rs",
         "src/net/debris_stress/pose.rs",
     ];

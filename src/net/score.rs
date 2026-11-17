@@ -218,6 +218,7 @@ fn spawn_scoreboard(mut commands: Commands, battle: BattleState) {
     commands.spawn((
         Name::new("Scoreboard"),
         Scoreboard::default(),
+        super::tick_stamp::TickStamp(0.0),
         battle,
         Replicate::to_clients(NetworkTarget::All),
     ));

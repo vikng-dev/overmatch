@@ -25,6 +25,10 @@
 //! - `min_delay_ms`: at the line, the `min_delay` applied and the delay law's target from the
 //!   current digest (`net::interp_delay`, which pursues it only once armed); `rtt_ms` beside it.
 //!
+//! - `view_clock`: the observation-only stamp record (`net::view_clock`): raw signed `delta_star_ms`,
+//!   today's signed cursor lag on the stamp map and their offset-cancelling difference; a stamp
+//!   interval histogram over the view window, and first-entity-application lag counts per line.
+//!
 //! Distributions are nearest-rank `min`, `p50`, `p95`, `max`, each a measured sample, and null
 //! when the period holds none; `estimate_error_ticks` is `min` and `max`.
 
@@ -57,6 +61,7 @@ pub(super) fn install(app: &mut App) {
 /// Mount the `client_jitter` line on [`install`]'s snap detector. It reads the arrival estimator
 /// (`net::sync_margin`), so it mounts only in a composition that has one.
 pub(super) fn install_jitter_line(app: &mut App) {
+    super::view_clock::install(app);
     app.init_resource::<JitterRecord>();
     app.add_systems(PostUpdate, record_jitter.after(count_interp_resyncs));
 }
@@ -269,6 +274,7 @@ fn record_jitter(
         Query<(&RemoteTimeline, &PingManager), (With<Client>, With<Connected>)>,
     ),
     mut record: ResMut<JitterRecord>,
+    mut view_clock: ResMut<super::view_clock::ViewClock>,
 ) {
     let link = (!links.is_empty())
         .then(|| {
@@ -348,6 +354,7 @@ fn record_jitter(
         })),
         "min_delay_ms": {"applied": ms(config.min_delay), "target": ms(target)},
         "rtt_ms": ms(pings.rtt()),
+        "view_clock": view_clock.take_line(now, tick.0.as_secs_f64(), cursor),
     });
     info!("client_jitter {line}");
     record.arrivals_ms.clear();

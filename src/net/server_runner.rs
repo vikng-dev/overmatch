@@ -299,6 +299,47 @@ mod tests {
         }
     }
 
+    /// D1's tick label and frame time must survive both server stalls and catch-up frames.
+    /// The stamp's consumer is the checkpoint sent after this same runner's single tick.
+    #[test]
+    fn each_labelled_tick_carries_its_monotonic_frame_start_stamp() {
+        use super::super::tick_stamp::{self, TickStamp};
+        use lightyear::prelude::LocalTimeline;
+        let tick = super::super::server::TICK;
+        let clock = TestClock {
+            now: Arc::new(Mutex::new(Instant::now())),
+            sleeps: default(),
+            oversleep: Duration::ZERO,
+        };
+        // Fixture: a server stall, then enough small frames to spend its admitted debt.
+        let (mut app, _) = probe(clock, [vec![tick * 8], vec![tick / 16; 16]].concat());
+        tick_stamp::install_server(&mut app);
+        app.world_mut().spawn(TickStamp(0.0));
+        let readings = Arc::new(Mutex::new(Vec::new()));
+        let captured = readings.clone();
+        app.add_systems(
+            PostUpdate,
+            move |real: Res<Time<Real>>,
+                  timeline: Res<LocalTimeline>,
+                  stamps: Query<&TickStamp>| {
+                let stamp = stamps
+                    .single()
+                    .expect("the runner fixture has one global stamp");
+                captured
+                    .lock()
+                    .unwrap()
+                    .push((timeline.tick(), stamp.0, real.elapsed_secs_f64()));
+            },
+        );
+        assert_eq!(app.run(), bevy::app::AppExit::Success);
+        let readings = readings.lock().unwrap();
+        for (index, &(tick, stamp, frame_start)) in readings.iter().enumerate() {
+            assert_eq!(tick.0 as usize, index + 1);
+            assert_eq!(stamp, frame_start);
+        }
+        assert!(readings.windows(2).all(|pair| pair[1].1 >= pair[0].1));
+    }
+
     /// A batch's own cost is new wall time, admitted once the batch is spent; re-capping it while
     /// debt remains would drop ticks Bevy's loop had already admitted.
     #[test]
