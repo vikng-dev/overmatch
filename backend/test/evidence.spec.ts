@@ -123,7 +123,7 @@ describe("stopped match servers leave evidence for the operator", () => {
 		// Fixture D1 fault affects only the crash sink; stop evidence and session history still work.
 		await env.DB.prepare("ALTER TABLE server_crashes RENAME TO fixture_crashes_unavailable").run();
 		try {
-			expect((await call("POST", `/v1/servers/${s.id}/end`, { crash: "panic fixture" }, { authorization: `Bearer ${s.secret}` })).status).toBe(500);
+			await expect(call("POST", `/v1/servers/${s.id}/end`, { crash: "panic fixture" }, { authorization: `Bearer ${s.secret}` })).rejects.toThrow("no such table");
 			expect(edgegap.deployment().status).toBe("Status.TERMINATED");
 			expect(edgegap.deployments.size).toBe(2);
 			expect((await registry(V).snapshot()).find((row) => row.id === s.id)!.state).toBe("ended");
@@ -238,7 +238,7 @@ describe("stopped match servers leave evidence for the operator", () => {
 		await end(s);
 		expect(cancelled).toBe(true);
 		expect(bytesRead).toBe(SERVER_LOG_BODY_MAX_BYTES + chunkBytes);
-		expect(await archive(s.deploymentId)).toMatchObject({ log: null, error: "logs HTTP 413" });
+		expect(await archive(s.deploymentId)).toMatchObject({ log: null, error: "logs HTTP 413 unknown" });
 		expect(edgegap.deployment().status).toBe("Status.TERMINATED");
 	});
 
@@ -254,7 +254,7 @@ describe("stopped match servers leave evidence for the operator", () => {
 		} finally {
 			// Reset the live object while its fetch is pending, preserving its SQLite and D1 state.
 			await abortAllDurableObjects();
-			await ending;
+			await expect(ending).rejects.toThrow("abortAllDurableObjects");
 		}
 		await age(V, config(env).statusPollMs + 1);
 		await runDurableObjectAlarm(registry(V));
@@ -273,7 +273,7 @@ describe("stopped match servers leave evidence for the operator", () => {
 			const warn = vi.spyOn(console, "warn");
 			await end(s);
 			expect(edgegap.deployment().status).toBe("Status.TERMINATED");
-			expect(await archive(s.deploymentId)).toMatchObject({ log: null, error: `logs HTTP ${failure === "timeout" ? 0 : failure === "malformed" ? 502 : failure}` });
+			expect(await archive(s.deploymentId)).toMatchObject({ log: null, error: `logs HTTP ${failure === "timeout" ? "0 unknown" : failure === "malformed" ? 502 : failure}` });
 			expect(warn).toHaveBeenCalledWith("server log capture failed; stopping anyway", s.id, s.deploymentId, expect.any(String));
 			warn.mockRestore();
 		});
@@ -349,7 +349,7 @@ describe("stopped match servers leave evidence for the operator", () => {
 
 	it("a D1 outage cannot veto the provider stop", async () => {
 		const d = edgegap.foreign([], V);
-		const broken = { ...env, DB: { prepare: () => { throw new Error("D1 unavailable"); } } as unknown as D1Database };
+		const broken = { ...env, DB: { prepare: () => { throw new Error("D1_ERROR: Network connection lost."); } } as unknown as D1Database };
 		await stopWithEvidence(broken, edgegapFor(env, config(env).providerTimeoutMs), "fixture", d.id, config(env).providerTimeoutMs);
 		expect(d.status).toBe("Status.TERMINATED");
 	});
@@ -360,13 +360,13 @@ describe("stopped match servers leave evidence for the operator", () => {
 		const broken = { ...env, DB: { prepare: (sql: string) => {
 			if (refuseMark) {
 				refuseMark = false;
-				throw new Error("fixture marker write refused");
+				throw new Error("D1_ERROR: D1 DB reset because its code was updated.");
 			}
 			return env.DB.prepare(sql);
 		} } as unknown as D1Database };
 		await stopWithEvidence(broken, edgegapFor(env, config(env).providerTimeoutMs), "fixture", d.id, config(env).providerTimeoutMs);
 		expect(edgegap.count("GET", `/v1/deployment/${d.id}/container-logs`)).toBe(0);
-		expect(await archive(d.id)).toMatchObject({ log: null, error: "Error" });
+		expect(await archive(d.id)).toMatchObject({ log: null, error: "evidenceStorage:storage HTTP 0 unknown" });
 		expect(d.status).toBe("Status.TERMINATED");
 	});
 

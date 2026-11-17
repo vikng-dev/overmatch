@@ -5,7 +5,7 @@ import { accessDenied, adminPage } from "./admin";
 import { config, serverEnvironment, type Env } from "./config";
 import { newId, randomHex, validVersion, versionOf, tagOf } from "./ids";
 import { diag } from "./reasons";
-import { providerFor, providerName } from "./provider";
+import { ProviderError, providerFor, providerName } from "./provider";
 import { registryFor } from "./registry";
 import { sweep } from "./sweep";
 import type { HeartbeatRequest, JoinRequest } from "./types";
@@ -26,7 +26,8 @@ function error(status: number, message: string): Response {
 async function body(req: Request): Promise<unknown> {
 	try {
 		return await req.json();
-	} catch {
+	} catch (err) {
+		if (!(err instanceof SyntaxError)) throw err;
 		return undefined;
 	}
 }
@@ -148,6 +149,7 @@ async function route(req: Request, env: Env): Promise<Response> {
 				release: await provider.verifyRelease(b.version, cfg.providerTimeoutMs), env: serverEnvironment(cfg, id, url.origin, randomHex(32), randomHex(32)) }, image);
 			return json({ proof: "authorized", image: image === undefined ? "public-parameter" : "concrete", creates: false });
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			console.warn("AWS proof refused", diag(err));
 			return error(503, "AWS launch authorization not confirmed; inspect the failure kind in Worker logs");
 		}
@@ -164,21 +166,12 @@ async function route(req: Request, env: Env): Promise<Response> {
 
 export default {
 	async fetch(req: Request, env: Env): Promise<Response> {
-		try {
-			providerName(env);
-			return await route(req, env);
-		} catch (err) {
-			console.error("unhandled", diag(err));
-			return error(500, "internal error");
-		}
+		providerName(env);
+		return route(req, env);
 	},
 
 	// The orphan sweep (src/sweep.ts), on the `triggers.crons` schedule in wrangler.jsonc.
 	async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-		try {
-			await sweep(env);
-		} catch (err) {
-			console.error("sweep failed", diag(err));
-		}
+		await sweep(env);
 	},
 } satisfies ExportedHandler<Env>;

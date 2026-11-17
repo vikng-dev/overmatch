@@ -1,6 +1,6 @@
 // One EC2 admission owner across version registries. The read/count/insert has no await;
 // slots survive eviction and are released only after refusal, confirmed stop or swept absence.
-import { ProviderError, type FleetResult, type Reservation } from "./provider";
+import { isPlatformFault, ProviderError, type FleetResult, type Reservation } from "./provider";
 import { diag } from "./reasons";
 import { DurableObject } from "cloudflare:workers";
 import { config, type Env } from "./config";
@@ -37,13 +37,13 @@ export class Fleet extends DurableObject<Env> {
 	release(serverId: string): FleetResult<void> {
 		return this.storage(() => { this.ctx.storage.sql.exec("DELETE FROM slots WHERE server_id = ?", serverId); });
 	}
-	reservations(): FleetResult<Reservation[]> { return this.storage(() => this.slots()); }
-	private slots(): Reservation[] {
-		return this.ctx.storage.sql.exec<Reservation>("SELECT * FROM slots").toArray();
+	reservations(): FleetResult<Reservation[]> {
+		return this.storage(() => this.ctx.storage.sql.exec<Reservation>("SELECT * FROM slots").toArray());
 	}
 	private storage<T>(call: () => T): FleetResult<T> {
 		try { return { ok: true, value: call() }; }
 		catch (err) {
+			if (!isPlatformFault(err)) throw err;
 			console.error("Fleet storage failed", diag(err));
 			return { ok: false, cause: "storage" };
 		}

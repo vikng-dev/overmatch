@@ -29,7 +29,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { config, serverEnvironment, type Config, type Env } from "./config";
-import { definiteRejection, providerFor, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./provider";
+import { outsideJson, isRecord, isLocation, isBeacon, definiteRejection, providerFor, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./provider";
 import { RELEASE_CACHE_MS, type ServerRelease } from "./release";
 import { settleAll } from "./deadline";
 import { recordCrash, stopWithEvidence } from "./evidence";
@@ -192,6 +192,7 @@ export class Registry extends DurableObject<Env> {
 		try {
 			cat = await this.catalog();
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			return { ok: false, error: `location list unavailable: ${String(err)}` };
 		}
 		const matches = new Map<string, number>();
@@ -217,6 +218,7 @@ export class Registry extends DurableObject<Env> {
 		try {
 			known = new Set((await this.catalog()).locations.map(locationId));
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			return { ok: false, status: 503, error: `location list unavailable: ${String(err)}` };
 		}
 		const unknown = locations.filter((l) => !known.has(l));
@@ -225,10 +227,11 @@ export class Registry extends DurableObject<Env> {
 		if (this.provider.verifyRelease) {
 			try { await this.release(version); }
 			catch (err) {
+				if (!(err instanceof ProviderError)) throw err;
 				console.warn("release refused", diag(err));
-				if (err instanceof ProviderError && err.op === "releaseBuildMetadataUnsupported") return { ok: false, status: 400, error: REASONS.releaseVersionUnsupported };
-				return { ok: false, status: err instanceof ProviderError && err.outcome === "releaseMissing" ? 404 : 503,
-					error: err instanceof ProviderError && err.outcome === "releaseMissing" ? REASONS.releaseMissing : REASONS.releaseUnavailable };
+				if (err.op === "releaseBuildMetadataUnsupported") return { ok: false, status: 400, error: REASONS.releaseVersionUnsupported };
+				return { ok: false, status: err.outcome === "releaseMissing" ? 404 : 503,
+					error: err.outcome === "releaseMissing" ? REASONS.releaseMissing : REASONS.releaseUnavailable };
 			}
 		}
 		const ticket = newId(version);
@@ -311,6 +314,7 @@ export class Registry extends DurableObject<Env> {
 			try {
 				st = await this.provider.status(requestId);
 			} catch (err) {
+				if (!(err instanceof ProviderError)) throw err;
 				console.warn("webhook status read failed", serverId, diag(err));
 				return true;
 			}
@@ -426,9 +430,14 @@ export class Registry extends DurableObject<Env> {
 		const k = `release:${version}`;
 		const row = this.sql.exec<{ body: string; fetched_at: number }>("SELECT body, fetched_at FROM catalog WHERE k = ?", k).toArray()[0];
 		if (row) {
-			const cached = JSON.parse(row.body) as ServerRelease | null;
+			const cached = outsideJson(row.body, "releaseCache");
+			let release: ServerRelease | null = null;
+			if (cached !== null) {
+				if (!isRecord(cached) || typeof cached.url !== "string" || typeof cached.checksum !== "string") throw new ProviderError("releaseCache", 0, "unknown");
+				release = { url: cached.url, checksum: cached.checksum };
+			}
 			if (row.fetched_at + RELEASE_CACHE_MS > Date.now()) {
-				if (cached) return cached;
+				if (release) return release;
 				throw new ProviderError("release", 404, "releaseMissing");
 			}
 		}
@@ -446,7 +455,8 @@ export class Registry extends DurableObject<Env> {
 
 	private async catalog(): Promise<Catalog> {
 		const row = this.sql.exec<{ body: string; fetched_at: number }>("SELECT body, fetched_at FROM catalog WHERE k = 'edgegap'").toArray()[0];
-		if (row && row.fetched_at + this.cfg.locationsCacheMs > Date.now()) return JSON.parse(row.body) as Catalog;
+		const cached = row ? cachedCatalog(row.body) : null;
+		if (row && cached && row.fetched_at + this.cfg.locationsCacheMs > Date.now()) return cached;
 		try {
 			const [locations, beacons] = await Promise.all([this.provider.locations(), this.provider.beacons()]);
 			const cat: Catalog = { locations, beacons };
@@ -457,9 +467,10 @@ export class Registry extends DurableObject<Env> {
 			);
 			return cat;
 		} catch (err) {
-			if (row) {
+			if (!(err instanceof ProviderError)) throw err;
+			if (cached) {
 				console.warn("location refresh failed, serving the stale list", diag(err));
-				return JSON.parse(row.body) as Catalog;
+				return cached;
 			}
 			throw err;
 		}
@@ -565,6 +576,7 @@ export class Registry extends DurableObject<Env> {
 				env: serverEnvironment(this.cfg, serverId, t.origin, netcodeKey, reportSecret),
 			});
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			console.warn("deploy failed", serverId, diag(err));
 			if (!definiteRejection(err)) {
 				// A deployment may exist: keep the claim and its tickets; the alarm reconciles by tag.
@@ -588,7 +600,10 @@ export class Registry extends DurableObject<Env> {
 		if (!row) {
 			// The claim was forgotten (retention) before its deploy answered: one stop is all that is left.
 			await stopWithEvidence(this.env, this.provider, serverId, deploymentId, this.cfg.providerTimeoutMs)
-				.catch((err) => console.error("stop of forgotten claim failed", serverId, diag(err)));
+				.catch((err) => {
+					if (!(err instanceof ProviderError)) throw err;
+					console.error("stop of forgotten claim failed", serverId, diag(err));
+				});
 			return;
 		}
 		if (row.state === "ended" && !row.deployment_id) {
@@ -709,7 +724,7 @@ export class Registry extends DurableObject<Env> {
 				// A heartbeat expiry or clean end can win the stop transition while a panic is reporting.
 				// Preserve its cause even if the stop/history already completed; old end calls still get 410.
 				this.sql.exec("UPDATE servers SET outcome = 'failed', reason = ? WHERE id = ?", REASONS.serverCrashed, serverId);
-				// Persist before provider requests; failure returns 500 after stop/ticket cleanup.
+				// Persist before provider requests; failure rejects the invocation after stop/ticket cleanup.
 				await recordCrash(this.env, serverId, crash, this.cfg.providerTimeoutMs);
 				await this.record({ kind: "crashed", serverId });
 			}
@@ -898,4 +913,11 @@ const OUTBOUND_CONCURRENCY = 5;
 
 function live(s: ServerRow): boolean {
 	return s.state === "starting" || s.state === "ready";
+}
+
+function cachedCatalog(raw: string): Catalog {
+	const value = outsideJson(raw, "catalogCache");
+	if (!isRecord(value) || !Array.isArray(value.locations) || !value.locations.every(isLocation)
+		|| !Array.isArray(value.beacons) || !value.beacons.every(isBeacon)) throw new ProviderError("catalogCache", 0, "unknown");
+	return { locations: value.locations, beacons: value.beacons };
 }

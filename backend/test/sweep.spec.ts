@@ -145,7 +145,7 @@ describe("the orphan sweep", () => {
 		const other = await leakedAfterEnd(1, "London");
 		edgegap.hangStops.add(hung);
 		const started = Date.now();
-		expect(await sweep(env)).toMatchObject({ stopped: 1, failed: 1, error: "stop: stop HTTP 0" });
+		expect(await sweep(env)).toMatchObject({ stopped: 1, failed: 1, error: "stop: stop HTTP 0 unknown" });
 		expect(Date.now() - started).toBeLessThan(5 * S); // PROVIDER_TIMEOUT_S is 0.5 in vitest.config.ts
 		expect(running(other)).toBe(false);
 		expect(running(hung)).toBe(true);

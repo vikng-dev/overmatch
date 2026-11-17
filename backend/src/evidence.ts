@@ -1,5 +1,5 @@
 import type { Env } from "./config";
-import { bounded } from "./deadline";
+import { d1Call, ProviderError } from "./provider";
 import type { Provider } from "./provider";
 import { diag } from "./reasons";
 
@@ -34,7 +34,7 @@ function sanitizedTail(raw: string, providerToken: string): { log: string; trunc
 /** Keep the first panic even if provider log capture fails or the deployment id is still unknown. */
 export async function recordCrash(env: Env, serverId: string, crash: string, timeoutMs: number): Promise<void> {
 	const tail = sanitizedTail(crash, env.EDGEGAP_TOKEN);
-	await bounded(timeoutMs, () => env.DB.prepare(
+	await d1Call("evidenceStorage", timeoutMs, () => env.DB.prepare(
 		`INSERT INTO server_crashes (server_id, captured_at, crash, truncated) VALUES (?1, ?2, ?3, ?4)
 		 ON CONFLICT (server_id) DO NOTHING`,
 	).bind(serverId, Date.now(), tail.log, Number(tail.truncated)).run());
@@ -46,26 +46,28 @@ export async function recordCrash(env: Env, serverId: string, crash: string, tim
 export async function stopWithEvidence(env: Env, provider: Provider, serverId: string, deploymentId: string, timeoutMs: number, absenceAfter?: number): Promise<void> {
 	if (!provider.containerLogs) return provider.stop(deploymentId, absenceAfter);
 	try {
-		const mark = await bounded(timeoutMs, () => env.DB.prepare(
+		const mark = await d1Call("evidenceStorage", timeoutMs, () => env.DB.prepare(
 			`INSERT INTO server_logs (server_id, deployment_id, captured_at, log, truncated, error)
 			 VALUES (?1, ?2, ?3, NULL, 0, 'capture incomplete') ON CONFLICT (deployment_id) DO NOTHING`,
 		).bind(serverId, deploymentId, Date.now()).run());
 		if (mark.meta.changes > 0) {
 			const tail = sanitizedTail(await provider.containerLogs(deploymentId), env.EDGEGAP_TOKEN);
-			await bounded(timeoutMs, () => env.DB.prepare(
+			await d1Call("evidenceStorage", timeoutMs, () => env.DB.prepare(
 				"UPDATE server_logs SET log = ?2, truncated = ?3, error = NULL WHERE deployment_id = ?1",
 			).bind(deploymentId, tail.log, Number(tail.truncated)).run());
 		}
 	} catch (err) {
+		if (!(err instanceof ProviderError)) throw err;
 		const error = diag(err);
 		console.warn("server log capture failed; stopping anyway", serverId, deploymentId, error);
 		try {
-			await bounded(timeoutMs, () => env.DB.prepare(
+			await d1Call("evidenceStorage", timeoutMs, () => env.DB.prepare(
 				`INSERT INTO server_logs (server_id, deployment_id, captured_at, log, truncated, error) VALUES (?1, ?2, ?3, NULL, 0, ?4)
 				 ON CONFLICT (deployment_id) DO UPDATE SET captured_at = excluded.captured_at, error = excluded.error
 				 WHERE server_logs.log IS NULL`,
 			).bind(serverId, deploymentId, Date.now(), error).run());
 		} catch (writeError) {
+			if (!(writeError instanceof ProviderError)) throw writeError;
 			console.warn("server log failure record failed", serverId, diag(writeError));
 		}
 	}
@@ -74,11 +76,12 @@ export async function stopWithEvidence(env: Env, provider: Provider, serverId: s
 
 export async function expireServerLogs(env: Env, before: number, timeoutMs: number): Promise<void> {
 	try {
-		await bounded(timeoutMs, () => env.DB.batch([
+		await d1Call("evidenceStorage", timeoutMs, () => env.DB.batch([
 			env.DB.prepare("DELETE FROM server_logs WHERE captured_at < ?1").bind(before),
 			env.DB.prepare("DELETE FROM server_crashes WHERE captured_at < ?1").bind(before),
 		]));
 	} catch (err) {
+		if (!(err instanceof ProviderError)) throw err;
 		console.warn("server log retention failed", diag(err));
 	}
 }

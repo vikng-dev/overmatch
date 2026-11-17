@@ -2,11 +2,12 @@
 // D1). Cloudflare Access sits in front of the route; this module also verifies the Access JWT, and
 // with ACCESS_TEAM_DOMAIN or ACCESS_AUD unset it refuses every request (fail closed).
 
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createRemoteJWKSet, customFetch, errors, jwtVerify } from "jose";
 import { config, type Env } from "./config";
 import { registryFor, type ServerSnapshot } from "./registry";
+import { diag } from "./reasons";
 import { lastSweep } from "./sweep";
-import { providerFor } from "./provider";
+import { outsideRpc, providerFetch, ProviderError, providerFor } from "./provider";
 
 /** Concurrent Registry calls per request; the platform allows six outgoing connections. */
 const FANOUT = 5;
@@ -19,12 +20,13 @@ export async function accessDenied(req: Request, env: Env): Promise<string | nul
 	const token = req.headers.get("cf-access-jwt-assertion");
 	if (!token) return "missing Cf-Access-Jwt-Assertion";
 	const url = `${team}/cdn-cgi/access/certs`;
-	if (jwks?.url !== url) jwks = { url, set: createRemoteJWKSet(new URL(url)) };
+	if (jwks?.url !== url) jwks = { url, set: createRemoteJWKSet(new URL(url), { [customFetch]: (input, init) => providerFetch("accessKeys", input, init) }) };
 	try {
 		// jose checks `exp` only when present; Access always issues it, so its absence is a refusal.
 		await jwtVerify(token, jwks.set, { issuer: team, audience: env.ACCESS_AUD, requiredClaims: ["exp"] });
 		return null;
 	} catch (err) {
+		if (!(err instanceof errors.JOSEError) && !(err instanceof ProviderError)) throw err;
 		return `invalid Access token: ${err instanceof Error ? err.message : String(err)}`;
 	}
 }
@@ -80,10 +82,13 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 		const batch = versions.slice(i, i + FANOUT);
 		const snaps = await Promise.all(
 			batch.map((v) =>
-				registryFor(env, v)
-					.snapshot()
+				outsideRpc("adminSnapshot", cfg.providerTimeoutMs, () => registryFor(env, v).snapshot())
 					.then((s) => s.filter((x) => x.state !== "ended"))
-					.catch(() => null),
+					.catch((err) => {
+						if (!(err instanceof ProviderError)) throw err;
+						console.warn("admin snapshot unavailable", v, diag(err));
+						return null;
+					}),
 			),
 		);
 		batch.forEach((version, j) => live.push({ version, servers: snaps[j] }));

@@ -20,8 +20,8 @@
 // (`rotated`), so candidates that keep failing cannot hold the budget from the rest.
 
 import { config, type Env } from "./config";
-import { bounded, settleAll } from "./deadline";
-import { ProviderError, outsideRpc, providerFor, type DeploymentStatus, type ListedDeployment } from "./provider";
+import { settleAll } from "./deadline";
+import { ProviderError, d1Call, outsideRpc, providerFor, type DeploymentStatus, type ListedDeployment } from "./provider";
 import { expireServerLogs, stopWithEvidence } from "./evidence";
 import { idOf, validVersion, versionOf, tagOf, claimHex } from "./ids";
 import { diag } from "./reasons";
@@ -181,7 +181,7 @@ export function rotated<T extends { id: string }>(items: T[], turn: number): T[]
 
 async function save(env: Env, r: SweepResult, timeout: number): Promise<void> {
 	try {
-		await bounded(timeout, () =>
+		await d1Call("sweepSave", timeout, () =>
 			env.DB.prepare(
 				`INSERT INTO sweep (id, at, listed, unattributed, stopped, failed, error) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
 				 ON CONFLICT (id) DO UPDATE SET at = excluded.at, listed = excluded.listed, unattributed = excluded.unattributed,
@@ -191,6 +191,7 @@ async function save(env: Env, r: SweepResult, timeout: number): Promise<void> {
 				.run(),
 		);
 	} catch (err) {
+		if (!(err instanceof ProviderError)) throw err;
 		console.error("sweep state write failed", diag(err));
 	}
 }
@@ -198,8 +199,9 @@ async function save(env: Env, r: SweepResult, timeout: number): Promise<void> {
 /** The last sweep's result, for /admin; null before the first sweep or if D1 does not answer. */
 export async function lastSweep(env: Env): Promise<SweepResult | null> {
 	try {
-		return await env.DB.prepare("SELECT at, listed, unattributed, stopped, failed, error FROM sweep WHERE id = 1").first<SweepResult>();
+		return await d1Call("sweepRead", config(env).providerTimeoutMs, () => env.DB.prepare("SELECT at, listed, unattributed, stopped, failed, error FROM sweep WHERE id = 1").first<SweepResult>());
 	} catch (err) {
+		if (!(err instanceof ProviderError)) throw err;
 		console.error("sweep state read failed", diag(err));
 		return null;
 	}

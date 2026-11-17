@@ -133,13 +133,14 @@ boot() {
   mark downloaded
 
   step=verify
-  # The release edge checks the checksum's raw asset name; the local name is fixed, even for URL-encoded tags.
+  # The release edge checks the checksum's asset name; verification uses the fixed local name.
   printf '%s  %s\n' "${ARCHIVE_SHA256%% *}" "$archive" | sha256sum --check --strict --quiet -
   mark verified
 
   step=unpack
   install -d -m 755 "$INSTALL"
   tar -xzf "$archive" --strip-components=1 -C "$INSTALL"
+  # Delete rule: spell out the path so the delete cannot follow a changed variable.
   rm /var/lib/om-harness/server.tar.gz
   mark unpacked
 

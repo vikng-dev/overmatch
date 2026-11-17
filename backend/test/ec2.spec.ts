@@ -151,6 +151,24 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 		expect(ec2.machines).toHaveLength(MAX_HOSTS);
 	});
 
+	it.each(["RunInstances", "release"])("an internal %s exception fails the join instead of retaining an unknown claim", async (operation) => {
+		vi.mocked(fetch).mockImplementation((input, init) => {
+			const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+			if ((operation === "release" && url.hostname === "github.com")
+				|| (operation === "RunInstances" && new URLSearchParams(String(init?.body)).get("Action") === operation)) throw new Error("fixture adapter invariant");
+			return ec2.fetch(input, init);
+		});
+		await expect(join(request())).rejects.toThrow("fixture adapter invariant");
+	});
+
+	it.each(["{", '{"url":null,"checksum":42}'])("old cached release JSON %s is refused visibly before launch", async (raw) => {
+		await runInDurableObject(registry(V), (_, state) => { state.storage.sql.exec("INSERT INTO catalog VALUES (?, ?, ?)", `release:${V}`, raw, Date.now()); });
+		const response = await call("POST", "/v1/join", request());
+		expect(response.status).toBe(503);
+		expect(await response.json()).toEqual({ error: REASONS.releaseUnavailable });
+		expect(ec2.requests).toHaveLength(0);
+	});
+
 	it("same-version concurrent joins share one launch and one cached release fetch", async () => {
 		const tickets = await Promise.all([join(request()), join(request())]);
 		expect(ec2.machines).toHaveLength(1);
@@ -226,12 +244,16 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 
 	it("sweeps orphan machines and orphan slots, preserving a live version's machine", async () => {
 		await join(request());
-		await join(request("0.8.1-fixture"));
-		await runInDurableObject(registry(V), (_, state) => { state.storage.sql.exec("DELETE FROM servers"); });
+		const live = ec2.machines[0];
+		const orphanId = newId("0.8.1-fixture");
+		const orphan = { id: "i-00000000000000999", claim: tagOf(orphanId), version: "0.8.1-fixture", state: "running", script: "", workerEnv: env.WORKER_ENV };
+		ec2.machines.push(orphan);
+		await runInDurableObject(env.FLEET.getByName("ec2"), (_, state) => { state.storage.sql.exec("INSERT INTO slots VALUES (?, ?)", orphanId, 0); });
 		const result = await sweep(env, Date.now() + cfg.startDeadlineMs + 3 * cfg.providerTimeoutMs + 1);
 		expect(result.stopped).toBe(1);
-		expect(ec2.machines.map((m) => m.state)).toEqual(["terminated", "running"]);
-		expect(await provider().reservations()).toHaveLength(1);
+		expect(orphan.state).toBe("terminated");
+		expect(live.state).toBe("running");
+		expect((await provider().reservations()).map((slot) => slot.server_id)).toEqual([ec2.settings(live).OVERMATCH_SERVER_ID]);
 	});
 
 	it.each(["checksum", "archive"])("a missing %s refuses before tickets, admission or any AWS request", async (what) => {
@@ -311,10 +333,10 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 		await expect(sweep(env)).rejects.toThrow("versioned server id");
 	});
 
-	it("Fleet storage failure is recorded and sweep retries after storage recovers", async () => {
+	it("a missing Fleet table fails the invocation instead of being retried as storage downtime", async () => {
 		await runInDurableObject(env.FLEET.getByName("ec2"), (_, state) => { state.storage.sql.exec("DROP TABLE slots"); });
-		expect(await sweep(env)).toMatchObject({ failed: 1, error: expect.stringContaining("fleetList:storage") });
-		expect(await env.DB.prepare("SELECT failed FROM sweep WHERE id = 1").first()).toMatchObject({ failed: 1 });
+		await expect(sweep(env)).rejects.toThrow("no such table: slots");
+		expect(await env.DB.prepare("SELECT failed FROM sweep WHERE id = 1").first()).toBeNull();
 		await abortAllDurableObjects();
 		expect(await sweep(env)).toMatchObject({ failed: 0 });
 	});
@@ -322,7 +344,11 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 	it("failed Fleet release retains a stopping row and tickets across eviction, then retries durably", async () => {
 		const t = await join(request());
 		await runInDurableObject(env.FLEET.getByName("ec2"), (_, state) => {
-			state.storage.sql.exec("CREATE TRIGGER refuse_release BEFORE DELETE ON slots BEGIN SELECT RAISE(FAIL, 'fixture storage failure'); END");
+			const exec = state.storage.sql.exec.bind(state.storage.sql);
+			vi.spyOn(state.storage.sql, "exec").mockImplementation((sql, ...bindings) => {
+				if (sql.startsWith("DELETE FROM slots")) throw Object.assign(new Error("fixture transient storage fault"), { retryable: true });
+				return exec(sql, ...bindings);
+			});
 		});
 		const log = vi.spyOn(console, "error");
 		await deadline();
@@ -331,7 +357,6 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 		expect(await ticket(t)).toEqual({ state: "starting" });
 		expect(log).toHaveBeenCalledWith("Fleet release failed; stopping row retains retry", expect.stringContaining("fleetRelease:storage"));
 		await abortAllDurableObjects();
-		await runInDurableObject(env.FLEET.getByName("ec2"), (_, state) => { state.storage.sql.exec("DROP TRIGGER refuse_release"); });
 		await age(V, cfg.statusPollMs + 1);
 		await runDurableObjectAlarm(registry(V));
 		expect((await registry(V).snapshot())[0].state).toBe("ended");
@@ -533,6 +558,13 @@ describe("operator-only provider-key authorization proof", () => {
 		expect(ec2.machines).toHaveLength(0);
 		expect(await provider().reservations()).toHaveLength(0);
 	});
+	it("a proof's missing-location invariant fails the request instead of refusing authorization", async () => {
+		const locations = vi.spyOn(Ec2.prototype, "locations").mockResolvedValue([]);
+		await expect(call("POST", "/admin/aws-proof", {version: V}, await authorization())).rejects.toThrow("at least one provider location");
+		locations.mockRestore();
+		expect(ec2.requests).toHaveLength(0);
+	});
+
 	it("an authorization refusal is visible and is never counted as a passed proof", async () => {
 		ec2.errors = [{code: "UnauthorizedOperation", status: 403}];
 		expect((await call("POST", "/admin/aws-proof", {version: V}, await authorization())).status).toBe(503);

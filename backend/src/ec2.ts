@@ -6,7 +6,7 @@ import type { Env } from "./config";
 import { bounded, DeadlineError } from "./deadline";
 import { parseXml, type Xml } from "./ec2-xml";
 import { host, machineScript } from "./host.generated";
-import { fleetCall, providerText, ProviderError, type Provider, type DeployRequest, type DeploymentStatus, type CappedDeployment } from "./provider";
+import { fleetCall, providerFetch, providerText, ProviderError, type Provider, type DeployRequest, type DeploymentStatus, type CappedDeployment } from "./provider";
 import { queryString, signV4 } from "./sigv4";
 import { serverRelease } from "./release";
 
@@ -62,7 +62,9 @@ function network(raw: string | undefined): Network {
 			&& Array.isArray(n.subnetIds) && n.subnetIds.length > 0
 			&& n.subnetIds.every((s: unknown) => typeof s === "string" && /^subnet-[0-9a-f]{17}$/.test(s))
 			&& new Set(n.subnetIds).size === n.subnetIds.length) return n as Network;
-	} catch { /* The operator sees a typed refusal, never the secret's contents. */ }
+	} catch (err) {
+		if (!(err instanceof SyntaxError)) throw err;
+	}
 	throw new ProviderError("config", 0, "refused");
 }
 
@@ -113,7 +115,7 @@ export class Ec2 implements Provider {
 					headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
 					accessKey: this.env.AWS_ACCESS_KEY_ID!, secretKey: this.env.AWS_SECRET_ACCESS_KEY!,
 					region: host.region, service: "ec2", date: new Date() });
-				const res = await fetch(API, { method: "POST", headers, body, signal: outerSignal ? AbortSignal.any([signal, outerSignal]) : signal });
+				const res = await providerFetch(action, API, { method: "POST", headers, body, signal: outerSignal ? AbortSignal.any([signal, outerSignal]) : signal });
 				const xml = parseXml(await providerText(res, 1024 * 1024, action, "unknown"));
 				const errors = xml.all("Errors");
 				if (errors.length) {
@@ -127,8 +129,8 @@ export class Ec2 implements Provider {
 				return xml;
 			});
 		} catch (err) {
-			if (err instanceof ProviderError || err instanceof MissingInstance || err instanceof DryRunAccepted) throw err;
-			throw new ProviderError(action, 0, "unknown");
+			if (err instanceof DeadlineError) throw new ProviderError(action, 0, "unknown");
+			throw err;
 		}
 	}
 
@@ -157,7 +159,7 @@ export class Ec2 implements Provider {
 					if (!/^i-[0-9a-f]{17}$/.test(id)) throw new ProviderError("RunInstances", 0, "unknown");
 					return id;
 				} catch (err) {
-					if (!(err instanceof ProviderError)) throw new ProviderError("RunInstances", 0, "unknown");
+					if (!(err instanceof ProviderError)) throw err;
 					if (err.outcome === "capacity") break; // Definite refusal: the next subnet may have room.
 					if (err.outcome === "refused" || attempt + 1 === CALL_ATTEMPTS) throw err;
 				}

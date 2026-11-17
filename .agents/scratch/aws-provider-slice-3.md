@@ -1,10 +1,101 @@
-# Hosting slice 3: EC2 provider review closure
+# Hosting slice 3: EC2 provider error-rule closure
 
 Subject: hosting for Overmatch, a multiplayer tank video game. Building lane `lane/aws-provider`,
 bay-3. This revision made no deployment, key handoff, AWS request, quota request or external comment.
 Only local checks and public primary-source reads ran. Production still selects Edgegap.
 
-## Review dispositions
+## Error-rule closure
+
+Decision: use one rule across every Worker catch in the lane's diff. Parse outside failures once
+at their native I/O, JSON, response-schema or persisted-cache edge; catch only those typed errors
+for refusal, a safe cause log, durable retry or unknown-outcome reconciliation. An unexpected
+exception propagates and fails the invocation. Native response-stream errors have no stable
+platform subtype: their small, I/O-only broad catch states that reason beside it. The batch runner
+collects all task failures and rethrows them; HTTP and scheduled entry points have no swallowing catch.
+
+This **supersedes the earlier instruction and Security P3-9 disposition to restore main's broad
+deploy catch**. It is a small production change for **Edgegap**, which remains the selected provider:
+a malformed/null deploy or list body is now typed at the adapter edge. A deploy's unknown outcome
+is reconciled by tag as before; malformed inventory cannot prove absence. An internal bug now fails
+the request instead of leaving a ticket waiting behind an `unknown` result. Status, location,
+beacon and log bodies are validated at that same edge; ordinary JSON is bounded before parsing.
+
+Fleet returns typed failures only for documented platform reset/overload flags; missing tables,
+constraints and other SQL invariants propagate. RPC deadlines/transport faults are classified
+separately from remote exceptions. D1 has message-only infrastructure faults, so its edge accepts
+only the documented exact `D1_ERROR` causes; schema errors stay bugs. Evidence and sweep-state
+handling follow the same rule. The admin snapshot displays transport unavailability, while snapshot
+invariants fail the request; the launch proof catches only ProviderError. Cached release/catalog
+JSON from earlier builds is parsed and shape-checked once, producing a typed visible refusal if invalid.
+
+The two brevity P3s are closed: `Fleet.slots` is inlined into the storage callback, and updater
+failures share an environment-value subtest table. The retired `+` metadata-success test and its
+fixture override are deleted. The hosted success fixture uses one supported release filename and
+still verifies the fixed local archive before unpacking/removal. The literal absolute `rm` stays:
+the delete rule takes precedence over the lens; its inline comment explains that a changed variable
+must not redirect deletion. The orphan test admits one live host, then seeds orphan machine/slot
+state and asserts cleanup/preservation by identity. It also passes with `maxServers` temporarily
+set to one; the tracked configuration was restored immediately after that check.
+
+### Complete catch audit
+
+Line numbers name the final source. Every catch in every source file in the lane's diff was examined;
+other edited source/scripts/tests contain no JavaScript catch. The additional evidence tests were
+updated because they now distinguish documented D1 transport faults from schema bugs.
+
+| File:line | What it catches | Typed or propagated |
+|---|---|---|
+| `backend/src/registry.ts:194` | catalog read for locations | ProviderError: visible location refusal; bugs propagate |
+| `backend/src/registry.ts:220` | join catalog read | ProviderError: 503 refusal; bugs propagate |
+| `backend/src/registry.ts:229` | join release verification/cache read | ProviderError: 400/404/503 refusal and safe cause log; bugs propagate |
+| `backend/src/registry.ts:316` | webhook status read | ProviderError: log cause and leave alarm recovery; bugs propagate |
+| `backend/src/registry.ts:397` | alarm task | ProviderError: log durable retry; bugs propagate into the batch rejection |
+| `backend/src/registry.ts:446` | release verifier | Only releaseMissing becomes the negative cache; all other errors propagate |
+| `backend/src/registry.ts:469` | catalog refresh | ProviderError: log cause and serve a parsed stale catalog, or propagate without cache; bugs propagate |
+| `backend/src/registry.ts:578` | deploy | ProviderError: definite refusal or unknown outcome reconciled by tag; bugs propagate |
+| `backend/src/registry.ts:603` | forgotten claim stop | ProviderError: log cause; next sweep can retry the still-listed host; bugs propagate |
+| `backend/src/registry.ts:647` | claim lookup | ProviderError: log cause, retain durable reconciliation; bugs propagate |
+| `backend/src/registry.ts:680` | status poll | ProviderError: log cause, retain durable poll; bugs propagate |
+| `backend/src/registry.ts:831` | deployment stop | ProviderError: log cause, retain durable stopping row; bugs propagate |
+| `backend/src/registry.ts:845` | Fleet release | ProviderError: log cause, retain stopping row and tickets; bugs propagate |
+| `backend/src/fleet.ts:19` | provider inventory | ProviderError becomes logged FleetResult provider failure; bugs propagate |
+| `backend/src/fleet.ts:45` | local SQL storage | Only documented retryable/overloaded flags become logged FleetResult storage failure; SQL/schema bugs propagate |
+| `backend/src/sweep.ts:77` | inventory listing | ProviderError: log cause and record failure for a later sweep; bugs propagate |
+| `backend/src/sweep.ts:101` | host status | ProviderError: log cause and record failure for a later sweep; bugs propagate |
+| `backend/src/sweep.ts:131` | Registry ownership RPC | ProviderError: log cause and record failure for a later sweep; bugs propagate |
+| `backend/src/sweep.ts:147` | host stop | ProviderError: log cause and record failure for a later sweep; bugs propagate |
+| `backend/src/sweep.ts:166` | individual reservation cleanup | ProviderError: log cause and record failure for a later sweep; bugs propagate |
+| `backend/src/sweep.ts:168` | reservation inventory | ProviderError: log cause and record failure for a later sweep; bugs propagate |
+| `backend/src/sweep.ts:193` | sweep-state write | Typed D1/transport/deadline failure logs cause; bugs propagate |
+| `backend/src/sweep.ts:203` | sweep-state read | Typed D1/transport/deadline failure logs cause and shows no snapshot; bugs propagate |
+| `backend/src/ec2.ts:65` | operator network JSON | SyntaxError/schema refusal becomes ProviderError config; bugs propagate |
+| `backend/src/ec2.ts:131` | signed HTTP/XML query | DeadlineError becomes typed unknown outcome; every other exception propagates |
+| `backend/src/ec2.ts:139` | bounded deploy | DeadlineError becomes typed unknown outcome; every other exception propagates |
+| `backend/src/ec2.ts:161` | launch attempt | ProviderError controls bounded retransmission/capacity handling; bugs propagate |
+| `backend/src/ec2.ts:181` | dry-run query | Only typed DryRunAccepted confirms proof; every other exception propagates |
+| `backend/src/ec2.ts:242` | instance status | Typed MissingInstance is unknown until absence deadline, then gone; others propagate |
+| `backend/src/ec2.ts:259` | instance stop | Typed MissingInstance is unknown until absence deadline, then confirmed absent; others propagate |
+| `backend/src/edgegap.ts:63` | bounded exchange and parsed-response handler | Only DeadlineError becomes typed unknown outcome; all other errors propagate |
+| `backend/src/provider.ts:110` | native fetch only, after argument validation | Network TypeError/AbortError/TimeoutError becomes ProviderError unknown; other errors propagate |
+| `backend/src/provider.ts:119` | outside JSON syntax | SyntaxError becomes ProviderError unknown; other errors propagate |
+| `backend/src/provider.ts:141` | bounded RPC | DeadlineError/documented retryable or overloaded flags become ProviderError transport; bugs propagate |
+| `backend/src/provider.ts:165` | D1 operation | Exact documented D1_ERROR infrastructure messages become ProviderError storage; all other errors propagate |
+| `backend/src/provider.ts:208` | fatal UTF-8 decode only | Native decoder TypeError becomes ProviderError; other errors propagate |
+| `backend/src/provider.ts:230` | native network stream read/cancel only | Broad: platform stream errors have no stable subtype; become ProviderError, with the reason stated inline |
+| `backend/src/release.ts:30` | release HTTP/checksum verification | Only DeadlineError becomes releaseUnavailable; every other exception propagates |
+| `backend/src/index.ts:29` | client JSON body | Only SyntaxError becomes the visible malformed-body refusal; bugs propagate |
+| `backend/src/index.ts:151` | launch proof | ProviderError: log safe cause and refuse proof; bugs propagate |
+| `backend/src/admin.ts:28` | Access JWT/JWKS verification | JOSEError/ProviderError: visible Access refusal; bugs propagate |
+| `backend/src/admin.ts:87` | Registry snapshot | ProviderError transport/deadline: log cause and show snapshot unavailable; bugs propagate |
+| `backend/src/evidence.ts:59` | capture/marker write | ProviderError: log cause, persist failure and continue stop; bugs propagate |
+| `backend/src/evidence.ts:69` | failure-record write | ProviderError: log cause and continue stop; bugs propagate |
+| `backend/src/evidence.ts:83` | retention write | ProviderError: log cause; later sweep retries retention; bugs propagate |
+| `backend/src/ids.ts:27` | outside id decoding | Native InvalidCharacterError/UTF-8 TypeError becomes malformed id, visibly refused by routing; bugs propagate |
+| `backend/src/deadline.ts:33` | independent cleanup task | Every rejection collected, then propagated in AggregateError after the batch completes |
+| `backend/src/index.ts:168` (removed HTTP catch) | route/config exceptions | Propagated directly to the platform; no synthetic successful invocation with a 500 response |
+| `backend/src/index.ts:174` (removed scheduled catch) | sweep exceptions | Propagated directly; invariant failures fail the scheduled invocation |
+
+## Prior review dispositions
 
 The two supplied reviews were read in full and checked against source. Finding numbers here refer
 to `lenses-provider-2.md` and `review-provider-2.md`, respectively.
@@ -17,17 +108,17 @@ to `lenses-provider-2.md` and `review-provider-2.md`, respectively.
 | Lens error P2; security P3-3 | Fixed: every masked updater must report `inactive`, `failed` or `LoadState=not-found`. Other/empty states, including `activating`, and failed queries report `boot-updates`, refuse play and power off. Tests run the shipped script. |
 | Lens brevity, archive | Partly fixed: checksum uses `$archive`; unnecessary `cd` removed. Variable-path deletion rejected because this task requires a literal absolute delete path; literal `rm` retained. |
 | Lens brevity, fake zone | Fixed: removed stored `Machine.zone`; local zone still scopes ClientToken idempotency. |
-| Lens testing; security P3-10 | Fixed: fake never synthesizes an environment tag; owned fixtures specify `env.WORKER_ENV`. Untagged hosts remain invisible, explicitly tested and the reason for step 0. EC2 request locations read `hosting.location.city`. Other pre-existing coupled assertions remain in untouched tests. |
+| Lens testing; security P3-10 | Fixed: fake never synthesizes an environment tag; owned fixtures specify `env.WORKER_ENV`. Untagged hosts remain invisible, explicitly tested and the reason for step 0. EC2 request locations read `hosting.location.city`. The orphan machine/slot assertion is now independent of the configured cap, as described above. |
 | Security P3-1 | Fixed step 0: Project-only count across all purposes/environments, zero runtime resources, then standing `verify`. Standing group cannot also be zero without contradicting verification. |
 | Security P3-2 | Fixed: Registry alarms expire all live rows at the same provider-owned lifetime plus margin, independent of heartbeats. Expiry detaches/fails tickets before outside work, then confirms stop/release through durable retries. Heartbeats enforce expiry; placement excludes expired rows. |
 | Security P3-4, P3-5 | Accepted live limits: updater stop latency and the no-home server user are unmeasured until step 4; it records boot-attempt count and duration. No invented live result. |
 | Security P3-6 | Deferred by instruction: rate limits for `/v1/join` and `/v1/locations` remain an open cutover item. Distinct release versions can still drive GitHub reads and availability throttling. |
 | Security P3-7 | Fixed: margin labelled Resolution for clock skew and boot time before the machine timer. Sweep and Registry read one `inventory.maxAgeMs` owner. |
-| Security P3-9 | Fixed: restored main's unknown-outcome handling for non-ProviderError deploy exceptions, including null Edgegap JSON (regression test); no named failure justified rethrowing. Unsupported `/admin/aws-proof` returns 404 before Access/body checks, tested. |
+| Security P3-9 | Superseded by the owner's error rule above: malformed Edgegap responses are typed at the edge and reconciled; internal deploy exceptions propagate. Unsupported `/admin/aws-proof` still returns 404 before Access/body checks. |
 | Security P3-11 | Fixed: added tested `revoke-key --env`: teardown removes standing parts and rotation creates a key, so neither does exactly what step 7 needs. Revocation retains user/policy/group for the next slice. |
 | Security P3-12 | Fixed conservatively: stable-tag pattern excludes `+`, but the prerelease wildcard can admit it; upload-server uses raw tags. That proves the local name, not GitHub's asset name. EC2 refuses `+` with `releaseBuildMetadataUnsupported` before network/persistence. Edgegap's version syntax stays unchanged. |
 
-The pre-existing Edgegap `findByTag` response-shape finding remains in its untouched file.
+The Edgegap `findByTag` response-shape finding is closed by edge parsing; malformed inventory remains unknown rather than proving absence.
 No backlog rows name the edited files. No agents, live AWS calls, account-changing commands,
 external comments or deployments ran. Independent pre-merge lenses remain the orchestrator's work.
 
@@ -79,22 +170,23 @@ attempt to rely on inheritance that Wrangler does not implement.
 
 MEASURED final local results:
 
-- Backend tests: 133 production-path tests and 88 EC2 tests pass in the shipped Worker runtime.
+- Backend tests: 153 production-path tests and 93 EC2 tests pass in the shipped Worker runtime.
 - Backend typecheck and generated boot embedding check pass.
-- `python3 scripts/aws/test_harness.py`: 30 tests pass.
+- `python3 scripts/aws/test_harness.py`: 28 tests pass.
 - `python3 scripts/aws/test_host_setup.py`: 20 tests pass, including key-only revocation and retry.
-- Shellcheck passes for `scripts/aws/machine.sh` and `scripts/aws/host-setup`.
+- Shellcheck passes for `scripts/aws/machine.sh`, `scripts/aws/host-setup` and `backend/ci-scope.sh`.
 - Local esbuild Worker bundle and `git diff --check` pass. No Wrangler deploy command ran,
   including dry-run deploy; esbuild writes only ignored `backend/dist/worker.js`.
 - No separate backend lint command is configured. No Rust changed and no cargo ran; the
   pre-commit hook checks only Rust formatting and is skipped for this commit.
 
-The existing evidence test intentionally exercises a missing D1 table and emits its expected SQL
-error; the test passes. Intentional Fleet failures are handled as typed results with no unhandled
-test-run errors.
+Invariant tests deliberately exercise missing D1/Fleet tables and internal adapter exceptions;
+those rejections are asserted and their runtime diagnostics are expected. Recognized transient
+storage fixtures separately prove durable recovery. There are no unhandled test-run errors.
 
 Primary sources: [systemctl machine-readable state and properties](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html),
 [Cloudflare DO error classification](https://developers.cloudflare.com/durable-objects/best-practices/error-handling/),
+[Cloudflare D1 documented error causes](https://developers.cloudflare.com/d1/observability/debug-d1/),
 [AWS optional Instance launchTime](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_Instance.html),
 [Ubuntu automatic updates](https://documentation.ubuntu.com/server/how-to/software/automatic-updates/),
 and the pinned local Wrangler source. The real Ubuntu unit inventory and stop duration remain

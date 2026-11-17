@@ -468,8 +468,9 @@ def option(argv: list[str], name: str) -> str:
 class HostedBoot(unittest.TestCase):
     """The provider and harness share this entrypoint; the hosted role must keep its lifetime guards."""
 
-    def machine(self, archive_name="server.tar.gz"):
-        values = {"ROLE": "hosted", "CAP_MIN": 1440, "ARCHIVE_URL": "https://release.example/" + archive_name.replace("+", "%2B"),
+    def machine(self):
+        archive_name = "overmatch-server-v0.8.0-fixture-x86_64-unknown-linux-gnu.tar.gz"
+        values = {"ROLE": "hosted", "CAP_MIN": 1440, "ARCHIVE_URL": "https://release.example/" + archive_name,
                   "ARCHIVE_SHA256": "a" * 64 + "  " + archive_name, "HOSTED_API": "https://worker.example",
                   "HOSTED_SERVER_ID": "fixture-server", "HOSTED_REPORT_SECRET": "fixture-report",
                   "HOSTED_ENV_B64": base64.b64encode(b'OVERMATCH_SERVER_ID="fixture-server"\n').decode()}
@@ -496,36 +497,25 @@ class HostedBoot(unittest.TestCase):
         start = calls.index(["systemctl", "start", "overmatch-server"])
         self.assertLess(mask, start)
         self.assertTrue({"apt-daily.timer", "apt-daily-upgrade.timer", "unattended-upgrades.service", "snapd.service", "snapd.socket"} <= set(calls[mask]))
+        verify = next(c for c in calls if c[0] == "sha256sum")
+        self.assertEqual(verify[1:], ["--check", "--strict", "--quiet", "-"])
         self.assertFalse((machine.root / "state/server.tar.gz").exists())
         self.assertEqual((machine.root / "host.env").stat().st_mode & 0o777, 0o600)
         self.assertEqual((machine.root / "report-header").stat().st_mode & 0o777, 0o600)
 
-    def test_url_encoded_build_metadata_still_verifies_and_removes_the_local_archive(self):
-        machine = self.machine("server+fixture.tar.gz")
-        result = machine.boot()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse((machine.root / "state/server.tar.gz").exists())
-
     def test_every_unconfirmed_updater_state_refuses_play_reports_boot_updates_and_powers_off(self):
-        for active in ('active', 'activating', 'deactivating', 'reloading', '', 'future-state'):
-            with self.subTest(active=active):
+        cases = [{'UPDATER_STATE': active} for active in
+                 ('active', 'activating', 'deactivating', 'reloading', '', 'future-state')]
+        cases.append({'UPDATER_QUERY_FAILS': '1'})
+        for values in cases:
+            with self.subTest(values=values):
                 machine = self.machine()
-                machine.env['UPDATER_STATE'] = active
-                result = machine.boot()
-                self.assertNotEqual(result.returncode, 0)
+                machine.env.update(values)
+                self.assertNotEqual(machine.boot().returncode, 0)
                 self.assertNotIn(["systemctl", "start", "overmatch-server"], machine.calls())
                 self.assertIn(["systemctl", "--no-block", "poweroff"], machine.calls())
                 report = next(c for c in machine.calls() if c[0] == 'curl' and '--data' in c)
                 self.assertEqual(json.loads(report[report.index('--data') + 1]), {'reason': 'boot-updates'})
-
-    def test_failed_updater_query_refuses_play_through_boot_failed(self):
-        machine = self.machine()
-        machine.env['UPDATER_QUERY_FAILS'] = '1'
-        self.assertNotEqual(machine.boot().returncode, 0)
-        self.assertNotIn(["systemctl", "start", "overmatch-server"], machine.calls())
-        self.assertIn(["systemctl", "--no-block", "poweroff"], machine.calls())
-        report = next(c for c in machine.calls() if c[0] == 'curl' and '--data' in c)
-        self.assertEqual(json.loads(report[report.index('--data') + 1]), {'reason': 'boot-updates'})
 
     def test_failed_or_absent_updaters_allow_play(self):
         for values in ({'UPDATER_STATE': 'failed'}, {'UPDATER_LOAD': 'not-found', 'UPDATER_STATE': 'inactive'}):

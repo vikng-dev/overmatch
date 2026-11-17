@@ -24,7 +24,8 @@ function unb64url(s: string): string | null {
 	try {
 		const bin = atob(s.replaceAll("-", "+").replaceAll("_", "/"));
 		return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
-	} catch {
+	} catch (err) {
+		if (!(err instanceof TypeError) && !(err instanceof DOMException && err.name === "InvalidCharacterError")) throw err;
 		return null;
 	}
 }

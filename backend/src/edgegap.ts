@@ -13,9 +13,9 @@
 //   GET    /v1/locations/beacons      not paginated (`count`)
 
 import { num, type Env } from "./config";
-import { bounded } from "./deadline";
+import { bounded, DeadlineError } from "./deadline";
 
-import { ProviderError, type Provider, type Beacon, type LocationData, type DeployRequest, type DeploymentStatus, type ListedDeployment } from "./provider";
+import { cancelProviderBody, providerFetch, providerText, outsideJson, isRecord, isLocation, ProviderError, type Provider, type Beacon, type LocationData, type DeployRequest, type DeploymentStatus, type ListedDeployment } from "./provider";
 
 /** The provider the Worker's env names, every call bounded by `timeoutMs`. */
 export function edgegapFor(env: Env, timeoutMs: number): Provider {
@@ -48,29 +48,31 @@ export class Edgegap implements Provider {
 	/** One HTTP exchange, request through body read, bounded by `timeoutMs`. A timeout or a network
 	 *  failure is a ProviderError with status 0: the provider gave no answer. */
 	private async request<T>(op: string, method: string, path: string, body: unknown, handle: (res: Response) => Promise<T>): Promise<T> {
+		const encoded = body === undefined ? undefined : JSON.stringify(body);
 		const auth = this.token.startsWith("token ") ? this.token : `token ${this.token}`;
 		try {
 			return await bounded(this.timeoutMs, async (signal) => {
-				const res = await fetch(`${this.api}${path}`, {
+				const res = await providerFetch(op, `${this.api}${path}`, {
 					method,
 					headers: { authorization: auth, "content-type": "application/json", accept: "application/json" },
-					body: body === undefined ? undefined : JSON.stringify(body),
+					body: encoded,
 					signal,
 				});
 				return handle(res);
 			});
 		} catch (err) {
-			if (err instanceof ProviderError) throw err;
-			throw new ProviderError(op, 0);
+			if (err instanceof DeadlineError) throw new ProviderError(op, 0, "unknown");
+			throw err;
 		}
 	}
 
-	private async json<T>(res: Response, what: string): Promise<T> {
+	private async json<T>(res: Response, what: string, parse: (value: unknown) => T): Promise<T> {
 		if (!res.ok) {
-			await res.body?.cancel();
+			await cancelProviderBody(res, "response");
 			throw new ProviderError(what, res.status);
 		}
-		return (await res.json()) as T;
+		// Resolution: cap ordinary JSON at 1 MiB before parsing.
+		return parse(outsideJson(await providerText(res, 1024 * 1024, what, "unknown"), what));
 	}
 
 	async deploy(req: DeployRequest): Promise<string> {
@@ -83,37 +85,39 @@ export class Edgegap implements Provider {
 			env_vars: req.env.map((e) => ({ key: e.key, value: e.value, is_hidden: e.hidden })),
 			webhook_url: req.webhookUrl,
 		};
-		const out = await this.request("deploy", "POST", "/v1/deploy", body, (res) => this.json<{ request_id: string }>(res, "deploy"));
-		if (!out.request_id) throw new ProviderError("deploy", 502);
-		return out.request_id;
+		const out = await this.request("deploy", "POST", "/v1/deploy", body, (res) => this.json(res, "deploy", (value) => {
+			if (!isRecord(value) || typeof value.request_id !== "string" || !value.request_id) throw malformed("deploy");
+			return value.request_id;
+		}));
+		return out;
 	}
 
 	async status(deploymentId: string): Promise<DeploymentStatus> {
 		return this.request("status", "GET", `/v1/status/${encodeURIComponent(deploymentId)}`, undefined, async (res) => {
 			if (res.status === 404 || res.status === 410) {
-				await res.body?.cancel();
+				await cancelProviderBody(res, "response");
 				return { phase: "gone", address: null, port: null, tags: [], version: null };
 			}
-			return interpretStatus(await this.json<V1DeploymentStatus>(res, "status"), this.portName);
+			return interpretStatus(await this.json(res, "status", parseStatus), this.portName);
 		});
 	}
 
 	async findByTag(tag: string): Promise<string | null> {
 		const query = JSON.stringify({ filters: [{ field: "tags", operator: "eq", value: tag }] });
 		const out = await this.request("list", "GET", `/v1/deployments?query=${encodeURIComponent(query)}`, undefined, (res) =>
-			this.json<{ data?: { request_id?: string; tags?: string[] }[] }>(res, "list"),
+			this.json(res, "list", parseList),
 		);
-		return (out.data ?? []).find((d) => d.request_id && (d.tags ?? []).includes(tag))?.request_id ?? null;
+		return out.data.find((d) => d.tags.includes(tag))?.request_id ?? null;
 	}
 
 	async deployments(maxPages: number): Promise<{ items: ListedDeployment[]; truncated: boolean }> {
 		const items: ListedDeployment[] = [];
 		for (let page = 1; page <= maxPages; page++) {
 			const out = await this.request("list", "GET", `/v1/deployments?page=${page}&limit=${PAGE_LIMIT}`, undefined, (res) =>
-				this.json<{ data?: { request_id?: string; tags?: string[] }[]; pagination?: { has_next?: boolean } }>(res, "list"),
+				this.json(res, "list", parseList),
 			);
-			for (const d of out.data ?? []) if (d.request_id) items.push({ id: d.request_id, tags: d.tags ?? [] });
-			if (!out.pagination?.has_next) return { items, truncated: false };
+			for (const d of out.data) items.push({ id: d.request_id, tags: d.tags });
+			if (!out.pagination.has_next) return { items, truncated: false };
 		}
 		return { items, truncated: true };
 	}
@@ -121,40 +125,20 @@ export class Edgegap implements Provider {
 	async stop(deploymentId: string): Promise<void> {
 		await this.request("stop", "DELETE", `/v1/stop/${encodeURIComponent(deploymentId)}`, undefined, async (res) => {
 			if (res.ok || res.status === 404 || res.status === 410) {
-				await res.body?.cancel();
+				await cancelProviderBody(res, "response");
 				return;
 			}
-			await this.json(res, "stop");
+			throw new ProviderError("stop", res.status);
 		});
 	}
 
 	async containerLogs(deploymentId: string): Promise<string> {
 		return this.request("logs", "GET", `/v1/deployment/${encodeURIComponent(deploymentId)}/container-logs`, undefined, async (res) => {
 			if (!res.ok) {
-				await res.body?.cancel();
+				await cancelProviderBody(res, "response");
 				throw new ProviderError("logs", res.status);
 			}
-			if (!res.body) throw new ProviderError("logs", 502);
-			const reader = res.body.getReader();
-			const decoder = new TextDecoder();
-			const parts: string[] = [];
-			let bytes = 0;
-			try {
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					bytes += value.byteLength;
-					if (bytes > SERVER_LOG_BODY_MAX_BYTES) {
-						await reader.cancel();
-						throw new ProviderError("logs", 413);
-					}
-					parts.push(decoder.decode(value, { stream: true }));
-				}
-				parts.push(decoder.decode());
-			} finally {
-				reader.releaseLock();
-			}
-			const out: unknown = JSON.parse(parts.join(""));
+			const out = outsideJson(await providerText(res, SERVER_LOG_BODY_MAX_BYTES, "logs", "unknown"), "logs");
 			if (!out || typeof out !== "object" || Array.isArray(out)) throw new ProviderError("logs", 502);
 			const fields = out as Record<string, unknown>;
 			for (const key of ["logs", "crash_logs"]) {
@@ -173,27 +157,19 @@ export class Edgegap implements Provider {
 		const all: LocationData[] = [];
 		for (let page = 1; page <= MAX_PAGES; page++) {
 			const out = await this.request("locations", "GET", `/v1/locations?page=${page}&limit=${PAGE_LIMIT}`, undefined, (res) =>
-				this.json<{ locations?: LocationData[]; pagination?: { has_next?: boolean } }>(res, "locations"),
+				this.json(res, "locations", parseLocations),
 			);
-			all.push(...(out.locations ?? []));
-			if (!out.pagination?.has_next) return all;
+			all.push(...out.locations);
+			if (!out.pagination.has_next) return all;
 		}
 		throw new ProviderError("locations", 502);
 	}
 
 	async beacons(): Promise<Beacon[]> {
 		const out = await this.request("beacons", "GET", "/v1/locations/beacons", undefined, (res) =>
-			this.json<{ locations?: Partial<Beacon>[] }>(res, "beacons"),
+			this.json(res, "beacons", parseBeacons),
 		);
-		return (out.locations ?? [])
-			.filter((b): b is Partial<Beacon> & { host: string; location: LocationData } => !!b.host && !!b.location)
-			.map((b) => ({
-				host: b.host,
-				fqdn: b.fqdn ?? null,
-				udp_port: b.udp_port ?? null,
-				tcp_port: b.tcp_port ?? null,
-				location: b.location,
-			}));
+		return out;
 	}
 }
 
@@ -217,4 +193,46 @@ export function interpretStatus(s: V1DeploymentStatus, portName: string): Deploy
 	const port = s.ports?.[portName]?.external ?? null;
 	if (s.running && s.public_ip && port !== null) return { phase: "ready", address: s.public_ip, port, ...base };
 	return { phase: "pending", address: null, port: null, ...base };
+}
+
+const malformed = (op: string) => new ProviderError(op, 502, "unknown");
+const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string");
+function pagination(value: Record<string, unknown>, op: string): { has_next: boolean } {
+	if (!isRecord(value.pagination) || typeof value.pagination.has_next !== "boolean") throw malformed(op);
+	return { has_next: value.pagination.has_next };
+}
+function parseList(value: unknown): { data: { request_id: string; tags: string[] }[]; pagination: { has_next: boolean } } {
+	if (!isRecord(value) || !Array.isArray(value.data)) throw malformed("list");
+	const data = value.data.map((row) => {
+		if (!isRecord(row) || typeof row.request_id !== "string" || !row.request_id || (row.tags !== undefined && !strings(row.tags))) throw malformed("list");
+		return { request_id: row.request_id, tags: row.tags === undefined ? [] : row.tags as string[] };
+	});
+	return { data, pagination: pagination(value, "list") };
+}
+function parseStatus(value: unknown): V1DeploymentStatus {
+	if (!isRecord(value) || !["current_status", "running", "error"].some((key) => key in value)) throw malformed("status");
+	for (const key of ["current_status", "public_ip", "app_version"]) if (value[key] !== undefined && typeof value[key] !== "string") throw malformed("status");
+	for (const key of ["running", "error"]) if (value[key] !== undefined && typeof value[key] !== "boolean") throw malformed("status");
+	if (value.tags !== undefined && !strings(value.tags)) throw malformed("status");
+	if (value.ports !== undefined) {
+		if (!isRecord(value.ports)) throw malformed("status");
+		for (const port of Object.values(value.ports)) {
+			if (!isRecord(port) || (port.external !== undefined && (!Number.isInteger(port.external) || Number(port.external) < 1 || Number(port.external) > 65535))) throw malformed("status");
+		}
+	}
+	return value as V1DeploymentStatus;
+}
+function parseLocations(value: unknown): { locations: LocationData[]; pagination: { has_next: boolean } } {
+	if (!isRecord(value) || !Array.isArray(value.locations) || !value.locations.every(isLocation)) throw malformed("locations");
+	return { locations: value.locations, pagination: pagination(value, "locations") };
+}
+function parseBeacons(value: unknown): Beacon[] {
+	if (!isRecord(value) || !Array.isArray(value.locations)) throw malformed("beacons");
+	return value.locations.map((row) => {
+		if (!isRecord(row) || typeof row.host !== "string" || !row.host || !isLocation(row.location)
+			|| (row.fqdn != null && typeof row.fqdn !== "string")) throw malformed("beacons");
+		for (const key of ["udp_port", "tcp_port"]) if (row[key] != null && (!Number.isInteger(row[key]) || Number(row[key]) < 1 || Number(row[key]) > 65535)) throw malformed("beacons");
+		return { host: row.host, fqdn: row.fqdn == null ? null : row.fqdn as string,
+			udp_port: row.udp_port == null ? null : row.udp_port as number, tcp_port: row.tcp_port == null ? null : row.tcp_port as number, location: row.location };
+	});
 }

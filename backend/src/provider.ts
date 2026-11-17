@@ -57,8 +57,8 @@ export interface Provider {
 	reservations?(): Promise<Reservation[]>;
 	/** Cutover verification uses the provider's exact launch shape without creating a machine. */
 	dryRun?(req: DeployRequest, imageId?: string): Promise<void>;
-	/** Resolves to the deployment id. Rejects with `ProviderError`; `definiteRejection` tells a
-	 *  refusal (nothing was created) from an unknown outcome (something may have been). */
+	/** Resolves to the deployment id; outside failures reject with `ProviderError`, bugs propagate.
+	 *  `definiteRejection` distinguishes refusal from unknown outcome (something may exist). */
 	deploy(req: DeployRequest): Promise<string>;
 	/** The active deployment carrying `tag`, or null. */
 	findByTag(tag: string): Promise<string | null>;
@@ -97,12 +97,74 @@ export async function fleetCall<T>(op: string, timeout: number, call: () => Prom
 	return result.value;
 }
 
-/** Retry only platform transport failures, never remote invariant exceptions. */
+/** Cloudflare names reset and overload faults with these flags; SQL/schema errors lack them.
+ * https://developers.cloudflare.com/durable-objects/best-practices/error-handling/ */
+export function isPlatformFault(err: unknown): boolean {
+	return err instanceof Error && (("retryable" in err && err.retryable === true) || ("overloaded" in err && err.overloaded === true));
+}
+
+/** Serialize and validate caller-owned arguments before entering the network catch. */
+export async function providerFetch(op: string, input: string | URL, init?: RequestInit): Promise<Response> {
+	new Request(input, init);
+	try { return await fetch(input, init); }
+	catch (err) {
+		// Fetch reports network failure as TypeError, with no narrower subtype after argument validation.
+		if (err instanceof TypeError || (err instanceof DOMException && (err.name === "AbortError" || err.name === "TimeoutError"))) throw new ProviderError(op, 0, "unknown");
+		throw err;
+	}
+}
+
+export function outsideJson(raw: string, op: string): unknown {
+	try { return JSON.parse(raw); }
+	catch (err) {
+		if (err instanceof SyntaxError) throw new ProviderError(op, 0, "unknown");
+		throw err;
+	}
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+export function isLocation(value: unknown): value is LocationData {
+	return isRecord(value) && ["city", "country", "continent"].every((key) => typeof value[key] === "string")
+		&& typeof value.latitude === "number" && Number.isFinite(value.latitude) && typeof value.longitude === "number" && Number.isFinite(value.longitude);
+}
+export function isBeacon(value: unknown): value is Beacon {
+	return isRecord(value) && typeof value.host === "string" && (value.fqdn === null || typeof value.fqdn === "string")
+		&& ["udp_port", "tcp_port"].every((key) => value[key] === null || (Number.isInteger(value[key]) && Number(value[key]) > 0 && Number(value[key]) <= 65535))
+		&& isLocation(value.location);
+}
+
+/** Classify platform transport failures, never remote invariant exceptions. */
 export async function outsideRpc<T>(op: string, timeout: number, call: () => Promise<T>): Promise<T> {
 	try { return await bounded(timeout, call); }
 	catch (err) {
-		if (err instanceof DeadlineError || (err instanceof Error && (("retryable" in err && err.retryable === true) || ("overloaded" in err && err.overloaded === true)))) {
+		if (err instanceof DeadlineError || isPlatformFault(err)) {
 			throw new ProviderError(`${op}:transport`, 0, "unknown");
+		}
+		throw err;
+	}
+}
+
+// D1 exposes these infrastructure failures as messages, not typed codes. Match only documented
+// causes behind D1_ERROR; SQL/schema errors must propagate. https://developers.cloudflare.com/d1/observability/debug-d1/
+const D1_OUTSIDE_FAILURES = new Set([
+	"D1 DB reset because its code was updated.",
+	"Internal error while starting up D1 DB storage caused object to be reset.",
+	"Network connection lost.",
+	"Replica disconnected from primary.",
+	"Internal error in D1 DB storage caused object to be reset.",
+	"Cannot resolve D1 DB due to transient issue on remote node.",
+	"Can't read from request stream because client disconnected.",
+	"D1 DB is overloaded. Requests queued for too long.",
+	"D1 DB is overloaded. Too many requests queued.",
+	"D1 DB is overloaded. Too many resources consumed within a 10 second window",
+]);
+export async function d1Call<T>(op: string, timeout: number, call: () => Promise<T>): Promise<T> {
+	try { return await outsideRpc(op, timeout, call); }
+	catch (err) {
+		if (err instanceof Error && err.message.startsWith("D1_ERROR: ") && D1_OUTSIDE_FAILURES.has(err.message.slice("D1_ERROR: ".length))) {
+			throw new ProviderError(`${op}:storage`, 0, "unknown");
 		}
 		throw err;
 	}
@@ -141,16 +203,37 @@ export async function providerText(res: Response, maxBytes: number, op: string, 
 	const reader = res.body.getReader();
 	const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 	let bytes = 0, text = "";
+	const decode = (value?: Uint8Array) => {
+		try { return decoder.decode(value, { stream: value !== undefined }); }
+		catch (err) {
+			if (err instanceof TypeError) throw new ProviderError(op, res.status, outcome);
+			throw err;
+		}
+	};
 	try {
 		while (true) {
-			const { done, value } = await reader.read();
-			if (done) return text + decoder.decode();
+			const { done, value } = await providerIo(() => reader.read(), op, res.status, outcome);
+			if (done) return text + decode();
 			bytes += value.byteLength;
 			if (bytes > maxBytes) {
-				await reader.cancel();
-				throw new ProviderError(op, res.status, outcome);
+				await providerIo(() => reader.cancel(), op, res.status, outcome);
+				throw new ProviderError(op, 413, outcome);
 			}
-			text += decoder.decode(value, { stream: true });
+			text += decode(value);
 		}
 	} finally { reader.releaseLock(); }
+}
+
+/** Only native network stream operations belong here; application callbacks must run outside it. */
+async function providerIo<T>(call: () => Promise<T>, op: string, status: number, outcome: NonNullable<ProviderError["outcome"]>): Promise<T> {
+	try { return await call(); }
+	catch {
+		// Network response streams reject with arbitrary platform errors, without a stable subtype.
+		throw new ProviderError(op, status, outcome);
+	}
+}
+export async function cancelProviderBody(res: Response, op: string): Promise<void> {
+	if (!res.body) return;
+	if (res.body.locked) throw new Error("provider body must be unlocked before cancellation");
+	await providerIo(() => res.body!.cancel(), op, res.status, "unknown");
 }

@@ -9,19 +9,22 @@ const PARIS = [{ field: "city", values: ["Paris"], filter_type: "any" }];
 const LONDON = [{ field: "city", values: ["London"], filter_type: "any" }];
 
 describe("a deploy whose outcome is unknown", () => {
-	it("a null Edgegap deploy response preserves main's unknown-outcome reconciliation for the player", async () => {
+	it("a null Edgegap deploy body is typed at the edge and reconciled for the player", async () => {
 		const previous = vi.mocked(fetch).getMockImplementation()!;
-		vi.mocked(fetch).mockImplementation((input, init) => {
+		vi.mocked(fetch).mockImplementation(async (input, init) => {
 			const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
-			return url.pathname === "/v1/deploy" ? Promise.resolve(Response.json(null)) : previous(input, init);
+			const response = await previous(input, init);
+			return url.pathname === "/v1/deploy" ? Response.json(null) : response;
 		});
-		const t = await join({ version: V, locations: ["Paris", "London"], pings: {} });
-		expect(await ticket(t)).toEqual({ state: "starting" });
-		expect((await registry(V).snapshot())[0].deployment_id).toBeNull();
-		vi.mocked(fetch).mockImplementation(previous);
-		await age(V, cfg.startDeadlineMs + cfg.statusPollMs);
-		await runDurableObjectAlarm(registry(V));
-		expect(edgegap.deployments.size).toBe(1);
+		try {
+			const t = await join({ version: V, locations: ["Paris", "London"], pings: {} });
+			expect(await ticket(t)).toEqual({ state: "starting" });
+			expect((await registry(V).snapshot())[0].deployment_id).toBeNull();
+			await age(V, cfg.statusPollMs + 1);
+			await runDurableObjectAlarm(registry(V));
+			expect((await registry(V).snapshot())[0].deployment_id).toBe(launched(0).deploymentId);
+			expect(edgegap.deployments.size).toBe(1);
+		} finally { vi.mocked(fetch).mockImplementation(previous); }
 	});
 	it("starts no replacement; the alarm finds the deployment by tag and adopts it", async () => {
 		edgegap.loseDeployResponses = 1;
