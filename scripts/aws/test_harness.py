@@ -111,6 +111,10 @@ elif op == "run-instances":
     state["volumes"].append({"VolumeId": new_id("vol"), "Instance": iid, "Tags": tags_for("volume")})
     state["interfaces"].append({"NetworkInterfaceId": new_id("eni"), "Instance": iid, "Tags": tags_for("network-interface")})
     out = {"Instances": [{"InstanceId": iid}]}
+elif op == "reboot-instances":
+    for i in state["instances"]:
+        if i["InstanceId"] in opts("--instance-ids"):
+            i["Reboots"] = i.get("Reboots", 0) + 1
 elif op == "terminate-instances":
     ids = opts("--instance-ids")
     for i in state["instances"]:
@@ -144,7 +148,9 @@ instance = next(i for i in state["instances"] if i.get("PublicIpAddress") == hos
 role = {t["Key"]: t["Value"] for t in instance["Tags"]}["Role"]
 with open(os.environ["SSH_CALLS"], "a") as log:
     log.write(json.dumps({"role": role, "words": words}) + "\n")
-if os.environ.get("UNREACHABLE") == role:
+# NETLESS=<role>:<n>: that machine's first n boots come up without a network.
+netless_role, _, netless_boots = os.environ.get("NETLESS", "").partition(":")
+if netless_role == role and instance.get("Reboots", 0) < int(netless_boots):
     sys.stderr.write("ssh: connect to host port 22: Operation timed out\n")
     sys.exit(255)
 clients, window = int(os.environ["FIXTURE_CLIENTS"]), float(os.environ["FIXTURE_WINDOW_S"])
@@ -216,7 +222,7 @@ SETTINGS = ["--tag", "v0.7.0-alpha.18", "--server-type", "c7a.large", "--client-
             "--bots", "26", "--clients", "4", "--window-s", "10"]
 FOREIGN = {"InstanceId": "i-0f0f0f0f0f0f0f0f0", "InstanceType": "c7a.medium", "State": {"Name": "running"},
            "Tags": [{"Key": "Name", "Value": "om-worker"}], "CpuOptions": {"CoreCount": 1, "ThreadsPerCore": 1}}
-CREATES = {"create-security-group", "authorize-security-group-ingress", "run-instances", "terminate-instances",
+CREATES = {"create-security-group", "authorize-security-group-ingress", "run-instances", "reboot-instances", "terminate-instances",
            "delete-security-group"}
 LEAKS = re.compile(r"\b(?:i|sg|vol|eni|ami|subnet|vpc)-[0-9a-f]{8,}|192\.0\.2\.\d+|10\.0\.0\.\d+|123456789012|arn:aws")
 
@@ -343,7 +349,7 @@ class MeasuredRun(unittest.TestCase):
 class Failures(unittest.TestCase):
     def test_a_failed_boot_names_its_cause_and_still_tears_down(self):
         for env, cause in [({"BOOT_FAIL": "verify"}, "checksum mismatch"),
-                           ({"UNREACHABLE": "client"}, "never answered SSH")]:
+                           ({"NETLESS": "client:2"}, "two boots without a network")]:
             with self.subTest(cause), mock.patch.object(harness, "REACH_TIMEOUT_S", 0):
                 fixture = Fixture(self.addCleanup, **env)
                 self.assertEqual(fixture.main("run", *SETTINGS), 1)
@@ -352,6 +358,16 @@ class Failures(unittest.TestCase):
                 self.assertEqual([i for i in world["instances"] if i["State"]["Name"] != "terminated"], [])
                 self.assertEqual((world["groups"], world["volumes"]), ([], []))
                 self.assertIn("security groups 0", fixture.stderr)
+
+    def test_a_boot_without_a_network_is_rebooted_once_and_left_out_of_the_cold_start_samples(self):
+        with mock.patch.object(harness, "REACH_TIMEOUT_S", 0):
+            fixture = Fixture(self.addCleanup, NETLESS="client:1")
+            self.assertEqual(fixture.main("run", *SETTINGS), 0, fixture.stderr)
+        rebooted = [option(c["argv"], "--instance-ids") for c in fixture.calls() if c["argv"][7] == "reboot-instances"]
+        client = next(i["InstanceId"] for i in fixture.world()["instances"] if tags(i)["Role"] == "client")
+        self.assertEqual(rebooted, [client])
+        self.assertIn("client boot after a reboot, not a cold-start sample", fixture.stdout)
+        self.assertIn("server cold start", fixture.stdout)
 
     def test_refusals_come_before_anything_is_created(self):
         def setting(name, value):

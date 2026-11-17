@@ -20,7 +20,8 @@ RUN, in order (progress on stderr, the table on stdout):
   2. Two security groups: server (UDP PORT from the client group only, SSH from the operator's
      address) and client (SSH from the operator's address).
   3. Both machines, booting `machine.sh` as user-data (its header lists the boot steps), launched
-     with shutdown behaviour `terminate` and powering themselves off at the run's cap.
+     with shutdown behaviour `terminate` and powering themselves off at the run's cap. A machine
+     that boots without a network is rebooted once (REACH_TIMEOUT_S).
   4. Cold start per machine: launch call to kernel start to each boot step to server listening.
   5. Clients, one at a time, each started once the one before holds its input slot: a client
      without one 20 s after launch exits (src/net/harness.rs, WATCHDOG_SLACK), and a cold client
@@ -101,9 +102,12 @@ WARMUP_S = 30
 # Resolution: launch to listening or ready, ten times the ~30 s this boot takes on c7a (MEASURED by
 # this harness).
 BOOT_TIMEOUT_S = 300
-# Resolution: launch to the first SSH answer, six times the ~19 s it takes (MEASURED). Past it the
-# machine booted without a network: Ubuntu 26.04's cloud-init then retries the metadata token for
-# minutes (seen on 2 of the first 6 launches; canonical/cloud-init issue 6697 reports the same on 24.04).
+# Resolution: launch (or reboot) to the first SSH answer, six times the ~19 s it takes (MEASURED). Past
+# it the machine booted without a network: the image's cloud-init (26.2) ran its local stage before the
+# network card's driver was up ("The instance must have at least one eligible NIC" on the console;
+# MEASURED on 3 of the first 10 launches), so it fetched neither the network setup nor the user-data.
+# That is the race canonical/cloud-init issue 6697 reports, fixed upstream after 26.2; its recovery is a
+# reboot, so such a machine is rebooted once.
 REACH_TIMEOUT_S = 120
 # Resolution: start to input slot, per client; a client exits at 20 s without one, so this only
 # bounds a client that is still starting.
@@ -362,6 +366,7 @@ class Machine:
     boot_at: float = 0.0  # operator clock at the machine's kernel start
     boot_error: float = 0.0  # half the shortest offset round trip
     phases: dict[str, float] = field(default_factory=dict)
+    rebooted: bool = False  # after a boot without a network (REACH_TIMEOUT_S)
 
     def argv(self) -> list[str]:
         return ["ssh", "-i", str(self.state_dir / "key"), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
@@ -490,12 +495,18 @@ def wait_booted(machines: list[Machine]) -> None:
     deadline = time.time() + BOOT_TIMEOUT_S
     waiting = list(machines)
     last: dict[str, str] = {}
+    reach_by = {m.role: m.launched_at + REACH_TIMEOUT_S for m in machines}
     while waiting:
         for machine in list(waiting):
             done = machine.run("state")
-            if done.returncode != 0 and machine.role not in last and time.time() > machine.launched_at + REACH_TIMEOUT_S:
-                raise Refused(f"{machine.role} machine never answered SSH {REACH_TIMEOUT_S} s after launch: most "
-                              "likely it booted without a network (see REACH_TIMEOUT_S); run again")
+            if done.returncode != 0 and machine.role not in last and time.time() > reach_by[machine.role]:
+                if machine.rebooted:
+                    raise Refused(f"{machine.role} machine never answered SSH, after its launch or after a reboot: "
+                                  "two boots without a network (see REACH_TIMEOUT_S); run again")
+                aws("ec2", "reboot-instances", "--instance-ids", machine.instance_id)
+                machine.rebooted, reach_by[machine.role] = True, time.time() + REACH_TIMEOUT_S
+                say(f"{machine.role}: no SSH {REACH_TIMEOUT_S} s after launch, a boot without a network; rebooted it")
+                continue
             if done.returncode != 0:  # sshd or the key is not up yet: the boot is still under way
                 continue
             state = boot_state(done.stdout)
@@ -714,10 +725,12 @@ def table(header: list[str], rows: list[list[str]]) -> str:
 
 
 def cold_start(machine: Machine) -> str:
-    """Seconds since the launch call at each boot step: kernel start, then the boot's own marks."""
+    """Seconds since the launch call at each boot step: kernel start, then the boot's own marks. A
+    rebooted machine's marks are of its second boot, so they are no cold-start sample."""
     steps = [("kernel", 0.0)] + sorted(machine.phases.items(), key=lambda item: item[1])
     marks = ", ".join(f"{name} {machine.boot_at + at - machine.launched_at:.1f}" for name, at in steps)
-    return f"{machine.role} cold start, s since the launch call (±{machine.boot_error:.2f}): {marks}"
+    kind = "boot after a reboot, not a cold-start sample" if machine.rebooted else "cold start"
+    return f"{machine.role} {kind}, s since the launch call (±{machine.boot_error:.2f}): {marks}"
 
 
 def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], log: ServerLog,
@@ -751,7 +764,7 @@ def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], 
     ]
     results = {"settings": s.__dict__, "host": host, "columns": COLUMNS, "rows": rows, "spread": spread,
                "cold_start": {m.role: {"launch_to_kernel_s": m.boot_at - m.launched_at, "error_s": m.boot_error,
-                                       "phases_s": m.phases} for m in (server, client)}}
+                                       "phases_s": m.phases, "rebooted": m.rebooted} for m in (server, client)}}
     return scrub("\n".join(lines)), results
 
 
