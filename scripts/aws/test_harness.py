@@ -163,7 +163,8 @@ if cmd == "state" and os.environ.get("STATE_FAILS") == role:
     sys.stderr.write("Failed to open the journal: Input/output error\n")
     sys.exit(1)
 if cmd == "state":
-    lines = ["userdata 10.0", "guard 10.1", "self 10.2", "key 10.3", "packages 20.0", "downloaded 22.0"]
+    lines = ["userdata 10.0", "guard 10.1", "self 10.2", "key 10.3"]
+    lines += (["packages 20.0"] if role == "client" else []) + ["downloaded 22.0"]
     if role == "server" and os.environ.get("BOOT_FAIL") == "verify":
         lines.append("failed verify 22.3")
     else:
@@ -538,6 +539,23 @@ class MeasuredRun(unittest.TestCase):
             self.assertEqual(calls[guard][1], "-h")
             cap = int(calls[guard][2].removeprefix("+"))
             self.assertGreater(cap * 60, harness.WARMUP_S + harness.WINDOWS * window_s)
+
+    def test_server_boot_needs_no_package_manager_but_client_keeps_its_audio_runtime(self):
+        # The server host must reach systemd without consulting a package manager or mirror.
+        launches = [c["argv"][8:] for c in self.fixture.calls() if c["argv"][7] == "run-instances"]
+        for argv in launches:
+            user_data = Path(option(argv, "--user-data").removeprefix("file://")).read_text()
+            machine = MachineScript(self.addCleanup, user_data)
+            booted = machine.boot()
+            self.assertEqual(booted.returncode, 0, booted.stderr)
+            packages = [call for call in machine.calls() if call[0] in ("dpkg-query", "apt-get")]
+            if "ROLE=server" in user_data:
+                self.assertEqual(packages, [])
+                self.assertNotIn("packages", machine.phases())
+                self.assertIn(["systemctl", "start", "overmatch-server"], machine.calls())
+            else:
+                self.assertTrue(any(call[0] == "apt-get" and "libasound2t64" in call for call in packages))
+                self.assertIn("packages", machine.phases())
 
     def test_the_game_port_is_open_only_to_the_client_group_and_ssh_only_to_the_operator(self):
         groups = {}

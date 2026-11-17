@@ -353,7 +353,6 @@ fn fire(
                 fire_tick: clock.0.raw(),
             }
         });
-        // Hand off to ballistics: fire the chambered round down the bore at its muzzle speed.
         {
             let shapes: Vec<_> = proxies
                 .iter()
@@ -403,8 +402,6 @@ fn fire(
             let impulse = recoil_impulse(bore, fired.body.mass, fired.muzzle_speed);
             apply_explicit_impulse(forces, impulse, muzzle_position);
         }
-        // Arm an absolute deadline per mechanism. `Single`: crew-gated reload. `Automatic`: consume
-        // one belt round, then arm either the crew-gated swap or the ungated cyclic interval.
         {
             let mut gate = gates
                 .get_mut(root.0)

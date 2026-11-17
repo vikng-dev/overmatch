@@ -2,10 +2,13 @@
 
 use super::input_arrival::ClientInput;
 use super::timing::Timing;
+#[cfg(feature = "audio")]
 use crate::command::{Bindings, TankDeviceSet};
 use crate::flow::{Flow, FlowScoped};
+#[cfg(feature = "audio")]
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::ui_font::UiFonts;
+#[cfg(feature = "audio")]
 use bevy::audio::{PlaybackSettings, Volume};
 use bevy::prelude::*;
 
@@ -24,14 +27,15 @@ pub(crate) fn plugin(app: &mut App) {
         .init_resource::<Timing>()
         .init_resource::<ClientInput>()
         .add_systems(OnEnter(Flow::InMatch), spawn)
-        .add_systems(
-            Update,
-            trigger_click
-                .in_set(TankDeviceSet)
-                .in_set(PlayerInputSet)
-                .in_set(GameplaySet),
-        )
         .add_systems(PostUpdate, update.after(super::input_arrival::send_inputs));
+    #[cfg(feature = "audio")]
+    app.add_systems(
+        Update,
+        trigger_click
+            .in_set(TankDeviceSet)
+            .in_set(PlayerInputSet)
+            .in_set(GameplaySet),
+    );
 }
 fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
@@ -74,6 +78,7 @@ fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
         });
 }
 /// The primary binding's immediate click belongs to sfx::play_fire_click. This is its second route.
+#[cfg(feature = "audio")]
 fn trigger_click(
     bindings: Res<Bindings>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -92,16 +97,17 @@ fn update(
     state: Res<ClientInput>,
     time: Res<Time<Real>>,
     timing: Res<Timing>,
-    clips: Res<crate::sfx::SfxClips>,
+    #[cfg(feature = "audio")] clips: Res<crate::sfx::SfxClips>,
     mut feedback: ResMut<Feedback>,
     mut marks: Query<
         (&mut Visibility, Has<LinkWarning>),
         Or<(With<LinkWarning>, With<RefusedMark>)>,
     >,
-    mut commands: Commands,
+    #[cfg(feature = "audio")] mut commands: Commands,
 ) {
     if state.refused > feedback.seen {
         feedback.until = time.elapsed_secs_f64() + timing.refused_cue_s;
+        #[cfg(feature = "audio")]
         commands.spawn((
             AudioPlayer::new(clips.click.clone()),
             PlaybackSettings::DESPAWN

@@ -184,6 +184,7 @@ mod settings;
 /// trigger click and the 88's report) plus the RPM-driven engine loop every tank carries. Owns the
 /// game's one spatial-falloff law and the listener the camera wears. Mounted by both windowed
 /// clients (ADR-0014 — never the server, which has no audio device).
+#[cfg(feature = "audio")]
 mod sfx;
 mod shooting;
 /// The SHOT-LIFECYCLE recorder (`SPIKE_SHOT_TRACE=<path>`): an env-gated JSONL log of what happens to
@@ -359,11 +360,13 @@ pub(crate) fn gpu_less_default_plugins(
 /// `PbrPlugin` registers a glTF extension handler at build.
 pub(crate) fn server_plugin_floor() -> bevy::app::PluginGroupBuilder {
     use bevy::{
-        a11y, animation, audio, clipboard, gilrs, gizmos, gizmos_render, input_focus, light,
-        picking, scene, sprite, sprite_render, text, ui, ui_render, ui_widgets,
-        world_serialization,
+        a11y, animation, clipboard, gilrs, gizmos, gizmos_render, input_focus, light, picking,
+        scene, sprite, sprite_render, text, ui, ui_render, ui_widgets, world_serialization,
     };
-    gpu_less_default_plugins(None)
+    let plugins = gpu_less_default_plugins(None);
+    #[cfg(feature = "audio")]
+    let plugins = plugins.disable::<bevy::audio::AudioPlugin>();
+    plugins
         .set(net::server_host::host_task_pools())
         .disable::<ui::UiPlugin>()
         .disable::<ui_render::UiRenderPlugin>()
@@ -392,7 +395,6 @@ pub(crate) fn server_plugin_floor() -> bevy::app::PluginGroupBuilder {
         .disable::<a11y::AccessibilityPlugin>()
         .disable::<gilrs::GilrsPlugin>()
         .disable::<clipboard::ClipboardPlugin>()
-        .disable::<audio::AudioPlugin>()
         .disable::<animation::AnimationPlugin>()
         .disable::<gizmos::GizmoPlugin>()
         .disable::<gizmos_render::GizmoRenderPlugin>()
@@ -796,6 +798,7 @@ impl Plugin for ClientPlugin {
         // View-layer audio (view-only, ADR-0014 — the server never mounts this): the trigger click,
         // each weapon's authored report on the fire seam, and the per-tank engine loop. An
         // unattended run (`windowed_runtime`) silences it.
+        #[cfg(feature = "audio")]
         app.add_plugins(sfx::plugin);
         // Offline frame-budget sweeps need no server; both client roots mount this recorder.
         // Idle unless `SPIKE_FRAME_COST` is set.
@@ -889,6 +892,7 @@ impl Plugin for NetClientPlugin {
         // View-layer audio (see `ClientPlugin`): the trigger click, each weapon's authored report,
         // and the engine loop on own AND remote tanks — every root carries the public `EngineRpm`,
         // so one code path. An unattended run (`windowed_runtime`) silences it.
+        #[cfg(feature = "audio")]
         app.add_plugins(sfx::plugin);
         // The pen cam's shooter corner over the player's own hits (view-only; the store it reads
         // is the link's, `net::shot_explanation`).

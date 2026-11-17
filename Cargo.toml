@@ -25,7 +25,7 @@ publish = false
 # now a panic rather than an invisible ground.
 # `jpeg`: not the terrain any more — kept because bevy's default formats stop at PNG/HDR/KTX2 and
 # dropping it would silently break any JPG that shows up in a glTF or a future asset.
-bevy = { version = "0.20.1", features = ["debug", "jpeg", "basis-universal"] }
+bevy = { version = "0.20.1", default-features = false, features = ["2d", "3d", "ui", "debug", "jpeg", "basis-universal"] }
 avian3d = { version = "0.8", features = ["serialize"] }
 # Already in the tree through avian3d (same locked version — this adds no compiled crate); named
 # directly only by `avian_ext::contact_reduction`, whose per-pair scratch stays on the stack.
@@ -126,6 +126,9 @@ objc2-foundation = { version = "0.2.2", features = ["NSThread", "NSValue"] }
 lightyear_core = { version = "0.31.0", default-features = false }
 
 [features]
+# Clients retain Bevy's default audio; the release server recipe uses --no-default-features.
+default = ["audio"]
+audio = ["bevy/audio"]
 bitprobe = ["dep:flate2"]
 dev_ui = ["dep:bevy_egui"]
 
@@ -159,6 +162,7 @@ doctest = false
 name = "overmatch"
 path = "src/main.rs"
 test = false
+required-features = ["audio"]
 
 [[bin]]
 name = "overmatch-server"

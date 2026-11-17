@@ -8,6 +8,7 @@
 //! it creates a sink), so no mount order lets an unattended run make a sound. There is no player
 //! volume setting for it to override.
 
+#[cfg(feature = "audio")]
 use bevy::audio::{GlobalVolume, Volume};
 use bevy::prelude::*;
 
@@ -24,13 +25,14 @@ pub(crate) fn plugin(app: &mut App) {
 
 /// Make this run unattended (module doc).
 pub(crate) fn mount(app: &mut App) {
+    #[cfg(feature = "audio")]
     app.add_systems(PreStartup, |mut commands: Commands| {
         commands.insert_resource(GlobalVolume::new(Volume::Linear(0.0)));
     });
     app.insert_resource(crate::state::FocusPauseSuppressed);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "audio"))]
 mod tests {
     use super::*;
 

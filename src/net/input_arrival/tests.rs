@@ -342,7 +342,10 @@ fn uplink_blackout_refuses_an_old_click_and_answers_its_fate() {
     let mut pair = Pair::new();
     pair.blackout(true, true);
     pair.click();
-    pair.steps(pair.over_ceiling());
+    let budget = Timing::shipped().recovery_fresh_copies;
+    pair.steps(pair.over_ceiling().max(usize::from(budget)));
+    assert_eq!(pair.state().pending.front().unwrap().copies, budget);
+    assert!(pair.server.world().get::<Loss>(pair.up).unwrap().dropped > 0);
     pair.blackout(true, false);
     pair.steps(20);
     assert_eq!(pair.shots(), 0);
@@ -993,55 +996,74 @@ fn the_bridge_applies_only_the_controlling_links_command_and_holds_disconnected_
     );
 }
 
-/// Fire-control players rely on one recovery press surviving a lost or superseded first copy.
-/// A second edge forces another UDP send before the server drains the newest message.
+/// Fire-control players rely on the last eligible recovery copy surviving earlier lost or
+/// superseded copies. A new edge bypasses the tick send gate when the budget permits a resend.
 #[test]
-fn a_recovery_press_survives_one_lost_or_superseded_copy() {
+fn a_recovery_press_survives_the_authored_lost_or_superseded_copy_budget() {
     let _guard = lock_real_udp_test();
+    let budget = Timing::shipped().recovery_fresh_copies;
     for lost in [false, true] {
         let mut pair = Pair::new();
         for _ in 0..pair.over_ceiling() {
             pair.server.update();
         }
-        pair.client
-            .insert_resource(TimeUpdateStrategy::ManualDuration(TICK / 4));
         pair.click();
-        pair.client.update();
-        let first = pair.state().seq;
-        if lost {
-            pair.blackout(true, true);
-            std::thread::sleep(Duration::from_millis(2));
-            pair.server.update();
-            assert!(pair.server.world().get::<Loss>(pair.up).unwrap().dropped > 0);
-            pair.blackout(true, false);
+        for _ in 1..budget {
+            pair.client.update();
+            if lost {
+                pair.blackout(true, true);
+                let before = pair.server.world().get::<Loss>(pair.up).unwrap().dropped;
+                for _ in 0..100 {
+                    std::thread::sleep(Duration::from_millis(1));
+                    pair.server.update();
+                    if pair.server.world().get::<Loss>(pair.up).unwrap().dropped > before {
+                        break;
+                    }
+                }
+                assert!(pair.server.world().get::<Loss>(pair.up).unwrap().dropped > before);
+                pair.blackout(true, false);
+            }
         }
-        pair.client
-            .world_mut()
-            .resource_mut::<FrameInput>()
-            .command
-            .select_round = Some(RoundSelect {
-            weapon: 0,
-            step: crate::command::RoundStep::Next,
-        });
-        pair.client.update();
-        let second = pair.state().seq;
         assert_eq!(
-            second,
-            first.wrapping_add(1),
-            "the edge bypasses the tick send gate"
+            pair.state().pending.front().map_or(0, |edge| edge.copies),
+            budget - 1
+        );
+        if budget > 1 {
+            pair.client
+                .insert_resource(TimeUpdateStrategy::ManualDuration(TICK / 4));
+            pair.client
+                .world_mut()
+                .resource_mut::<FrameInput>()
+                .command
+                .select_round = Some(RoundSelect {
+                weapon: 0,
+                step: crate::command::RoundStep::Next,
+            });
+        }
+        let previous = pair.state().seq;
+        pair.client.update();
+        let eligible = pair.state().seq;
+        assert_eq!(
+            eligible,
+            previous.wrapping_add(1),
+            "a fresh edge sends immediately, including between ticks"
         );
         for _ in 0..100 {
             std::thread::sleep(Duration::from_millis(1));
             pair.server.update();
-            if pair.server_input().answer.seq == second {
+            if pair.server_input().answer.seq == eligible {
                 break;
             }
         }
-        assert_eq!(pair.server_input().answer.seq, second);
-        assert_eq!(pair.server_input().answer.resolved, 2);
+        let selects = usize::from(budget > 1);
+        assert_eq!(pair.server_input().answer.seq, eligible);
+        assert_eq!(pair.server_input().answer.resolved, 1 + selects as u16);
         assert_eq!(pair.server_input().answer.refused_mask, 0);
         assert_eq!(pair.shots(), 1);
-        assert_eq!(pair.server.world().resource::<Observations>().selects, 1);
+        assert_eq!(
+            pair.server.world().resource::<Observations>().selects,
+            selects
+        );
     }
 }
 

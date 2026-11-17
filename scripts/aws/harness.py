@@ -725,9 +725,8 @@ class Inputs:
 
 
 def inputs(row: Fields) -> Inputs:
-    state = row.get("arrival.state", str)
     arrival = Arrival(
-        state, histogram(row, "arrival.gap_ms"), row.num("arrival.stale_threshold_ms"),
+        row.get("arrival.state", str), histogram(row, "arrival.gap_ms"), row.num("arrival.stale_threshold_ms"),
         row.count("arrival.stale_arrivals"), row.count("arrival.stale_declarations"))
     return Inputs(row.get("link", str), arrival)
 

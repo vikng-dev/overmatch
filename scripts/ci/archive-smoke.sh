@@ -58,6 +58,19 @@ client_log="$logs/client.log"
 # described by the line it prints.
 [ -x "$server_bin" ] || { echo "smoke: $server_bin is not executable" >&2; exit 1; }
 [ -x "$client_bin" ] || { echo "smoke: $client_bin is not executable" >&2; exit 1; }
+# Linux runners may have ALSA for the client. Inspect the server's complete loader closure,
+# including indirect dependencies, so that installed package cannot hide a server requirement.
+if [ "$(uname -s)" = Linux ]; then
+    if ! server_libs=$(ldd "$server_bin" 2>&1); then
+        printf 'smoke: cannot resolve server libraries:\n%s\n' "$server_libs" >&2
+        exit 1
+    fi
+    printf 'smoke: server libraries:\n%s\n' "$server_libs"
+    if grep -q -E 'libasound\.so|not found' <<<"$server_libs"; then
+        echo "smoke: server must resolve every library without ALSA" >&2
+        exit 1
+    fi
+fi
 if [ -n "${SMOKE_EXPECT_API:-}" ] && ! grep -q -a -F -- "$SMOKE_EXPECT_API" "$client_bin"; then
     echo "smoke: $client_bin does not carry the Worker URL $SMOKE_EXPECT_API" >&2
     exit 1
