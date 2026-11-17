@@ -37,15 +37,13 @@ pub(crate) fn compact_spec() -> crate::spec::TankSpec {
     tr.steering.radii = vec![(3.0, 8.0), (7.2, 19.2), (15.0, 40.0)];
     tr.steering.reverse_radii = vec![(6.0, 16.0)];
     tr.steering.capacity = Some(80_000.0);
-    tr.brake_force = crate::provenance::Labelled {
-        value: 50_000.0,
-        label: crate::provenance::Provenance::Fixture("compact per-side brake rating".into()),
+    tr.rated_slope_deg = crate::provenance::Labelled {
+        value: 30.0,
+        label: crate::provenance::Provenance::Fixture("compact rated climbing slope".into()),
     };
-    tr.mean_hold_force = Some(crate::provenance::Labelled {
-        value: 100_000.0,
-        label: crate::provenance::Provenance::Fixture(
-            "independent compact mean-stop rating".into(),
-        ),
+    tr.mean_hold_brake_count = Some(crate::provenance::Labelled {
+        value: 2,
+        label: crate::provenance::Provenance::Fixture("two linked side brakes".into()),
     });
     tr.brake_static_factor = crate::provenance::Labelled {
         value: 1.4,
@@ -202,9 +200,9 @@ pub(crate) fn tiger_authoring() -> TransmissionAuthoring<'static> {
             Coupling::Stop(Output::Mean),
         ],
         steering_radius_rounding_share: 0.01, // Fixture: table rounding allowance.
-        brake_capacity_n: 96_000.0,
-        mean_hold_capacity_n: Some(192_000.0),
-        brake_static_factor: 1.5,
+        brake_capacity_n: 57_000.0 * 9.81 * 35.0_f32.to_radians().sin() / 2.0,
+        mean_hold_capacity_n: Some(57_000.0 * 9.81 * 35.0_f32.to_radians().sin()),
+        brake_static_factor: 1.2,
         drag_fraction: 0.25,
         engine_inertia_kgm2: 4.0,
         clutch_capacity_nm: 2400.0,
@@ -239,7 +237,7 @@ pub(crate) fn compact_drivetrain() -> (FixtureConstruction, TransmissionParams) 
         .track
         .powertrain
         .transmission
-        .params(0.3, 1.0, fp.inertia)
+        .params(0.3, 1.0, fp.inertia, spec.mass)
         .expect("inline Fixture drivetrain must be admitted");
     (fp, tp)
 }
@@ -256,6 +254,8 @@ pub(crate) fn side_clutch_drivetrain() -> (FixtureConstruction, TransmissionPara
     a.steer_radii_m = &[(3.0, 9.0); 5];
     a.reverse_steer_radii_m = &[(3.0, 9.0)];
     a.steer_capacity_n = 0.0;
+    let rated_slope_deg = 28.0_f32; // Fixture: this construction's own climb rating.
+    a.brake_capacity_n = 2.0 * lab_fp().grip.side_weight * rated_slope_deg.to_radians().sin() / 2.0;
     (
         lab_fp(),
         TransmissionParams::from_authoring(&a)

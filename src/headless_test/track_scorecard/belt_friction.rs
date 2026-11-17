@@ -561,6 +561,7 @@ fn run(case: &Case, tag: &str) {
         "end_hull_m_s": ticks.last().map(|t| t.hull_speed),
     });
     println!("BELTFRICTION {line}");
+    bed.assignment_work.print(label);
 }
 
 /// The tank on its layer of pieces (`parked_over`), settled.

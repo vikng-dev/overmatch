@@ -14,7 +14,6 @@ use lightyear::link::{LinkReceiveSystems, RecvPayload};
 use lightyear::prelude::client::{
     Client, ClientPlugins, Connect, Connected, NetcodeClient, NetcodeConfig,
 };
-use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::server::{
     NetcodeConfig as ServerNetcodeConfig, NetcodeServer, ServerPlugins, ServerUdpIo, Start,
 };
@@ -22,8 +21,7 @@ use lightyear::prelude::*;
 
 use super::client::{
     HeldFireEvents, PendingFireEvents, PendingRecoilKicks, SeenDamage, SeenShots,
-    age_sanctioned_shots, install_input_buffer_guard, install_input_send_cadence,
-    receive_damage_confirms, receive_fire_events, shipping_input_delay,
+    age_sanctioned_shots, receive_damage_confirms, receive_fire_events,
 };
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::hit_feel::LocalHitConfirmed;
@@ -34,7 +32,6 @@ use crate::ballistics::{
     BallisticVolume, ComponentHealth, FireShell, FireShellOrigin, Impact, RoundBody,
     SanctionedShots, ShellDamage, Shot, ShotSource,
 };
-use crate::command::TankCommand;
 use crate::damage::VolumeOf;
 use crate::tank::{
     Muzzle, TankRoot, TankServos, Weapon, WeaponGate, WeaponGateState, WeaponIndex, WeaponRound,
@@ -797,22 +794,11 @@ enum HarnessClient {
     FanoutReceiver,
 }
 
-fn claim_harness_input_slot(add: On<Add<Controlled>>, mut commands: Commands) {
-    // `net::client::claim_input_slot` is private. Reproduce its minimum production bundle here so
-    // `receive_fire_events` recognizes this client's own replicated tank and suppresses its echo.
-    commands.entity(add.entity).insert((
-        InputMarker::<TankCommand>::default(),
-        ActionState::<TankCommand>::default(),
-    ));
-}
-
 fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> App {
     let mut app = base_app();
     app.add_plugins(ClientPlugins {
         tick_duration: TICK,
     });
-    install_input_buffer_guard(&mut app);
-    install_input_send_cadence(&mut app);
     super::protocol::plugin(&mut app);
     // A CLIENT's composition: both halves. The view half is what dresses a shell with `ShellVisual`,
     // which is the signature the trail harness below attaches its ribbon on.
@@ -822,8 +808,6 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     ));
     if role == HarnessClient::Observer {
         crate::vfx::mount_trail_loss_harness(&mut app);
-    } else {
-        app.add_observer(claim_harness_input_slot);
     }
     // The observer holds the same fixture plate. Replica paths remain authority-owned even when
     // local armour geometry is available.
@@ -907,10 +891,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     // The input timeline is what SYNCS `LocalTimeline` to the server's tick — the present `P` that
     // `fire_catch_up_ticks` measures a shot's age against. Same fixed input delay as the shipping
     // client, and inserted the same way: an app-global resource, after `ClientPlugins`.
-    app.insert_resource(InputTimelineConfig::new(
-        SyncConfig::default(),
-        shipping_input_delay(),
-    ));
+
     let client = app
         .world_mut()
         .spawn((
@@ -1074,18 +1055,13 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         step(&mut server, &mut shooter, &mut observer);
         let shooter_slot = shooter
             .world_mut()
-            .query_filtered::<(), (
-                With<NetTank>,
-                With<Controlled>,
-                With<ActionState<TankCommand>>,
-                With<InputMarker<TankCommand>>,
-            )>()
+            .query_filtered::<(), (With<NetTank>, With<Controlled>)>()
             .iter(shooter.world())
             .next()
             .is_some();
         let observer_replica = observer
             .world_mut()
-            .query_filtered::<(), (With<NetTank>, Without<ActionState<TankCommand>>)>()
+            .query_filtered::<(), (With<NetTank>, Without<lightyear::prelude::Controlled>)>()
             .iter(observer.world())
             .next()
             .is_some();

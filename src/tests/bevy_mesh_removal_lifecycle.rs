@@ -77,18 +77,18 @@ impl Lab {
     /// `update` extracts and prepares that frame, with one camera drawing into an image.
     fn new() -> Self {
         let mut app = App::new();
-        app.add_plugins(
-            crate::default_plugins()
-                .set(WindowPlugin {
-                    primary_window: None,
-                    exit_condition: bevy::window::ExitCondition::DontExit,
-                    ..default()
-                })
-                .disable::<bevy::winit::WinitPlugin>()
-                .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
-                .disable::<bevy::log::LogPlugin>()
-                .disable::<bevy::audio::AudioPlugin>(),
-        );
+        let plugins = crate::default_plugins()
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .disable::<bevy::winit::WinitPlugin>()
+            .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
+            .disable::<bevy::log::LogPlugin>();
+        #[cfg(feature = "audio")]
+        let plugins = plugins.disable::<bevy::audio::AudioPlugin>();
+        app.add_plugins(plugins);
         // Bevy's default answer to a wgpu error is to stop rendering and request an exit, which
         // would leave every later frame's render world stale under the invariants.
         app.insert_resource(RenderErrorHandler(|error, _, _| {

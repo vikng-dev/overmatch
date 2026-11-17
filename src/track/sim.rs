@@ -709,7 +709,12 @@ impl TrackGear {
         // circle (chord-exact `derive::sprocket_pitch_radius(geom.pitch, teeth)` by construction), and
         // the half-tread is `geom.plane_x` — the same measured values the belt/envelope ride.
         let trans = spec
-            .transmission_params(&blueprint.spec.roadwheels, geom.wrap_radii(), geom.plane_x)
+            .transmission_params(
+                &blueprint.spec.roadwheels,
+                geom.wrap_radii(),
+                geom.plane_x,
+                blueprint.spec.mass,
+            )
             .expect("TankSpec transmission was validated before TrackGear construction");
 
         let mut pin_radius = 0.0_f32;

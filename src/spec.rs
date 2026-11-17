@@ -914,13 +914,14 @@ impl TrackSpec {
     pub(crate) fn nominal_transmission_params(
         &self,
         roadwheels: &[RoadwheelSpec],
+        mass_kg: f32,
     ) -> Result<TransmissionParams, BevyError> {
         let nominal = WrapRadii {
             sprocket: 1.0,
             idler: self.idler.radius,
         };
         self.inertia_terms(roadwheels, nominal)?;
-        self.powertrain.transmission.params(1.0, 1.0, 1.0)
+        self.powertrain.transmission.params(1.0, 1.0, 1.0, mass_kg)
     }
 
     /// Build the joint drive from construction, the measured wrap radii and the measured
@@ -931,11 +932,13 @@ impl TrackSpec {
         roadwheels: &[RoadwheelSpec],
         wrap: WrapRadii,
         half_tread: f32,
+        mass_kg: f32,
     ) -> Result<TransmissionParams, BevyError> {
         self.powertrain.transmission.params(
             wrap.sprocket,
             half_tread,
             self.reflected_inertia(roadwheels, wrap)?,
+            mass_kg,
         )
     }
 }
@@ -971,15 +974,29 @@ pub struct TransmissionSpec {
     pub gearbox: GearboxSpec,
     pub steering: SteeringSpec,
     pub couplings: Vec<crate::track::transmission::Coupling>,
-    /// Per-side service/parking brake capacity at the sprocket (N).
-    pub(crate) brake_force: crate::provenance::Labelled<f32>,
-    /// Mean stop rating (N), required by Stop(Mean); absent only without that device.
-    pub(crate) mean_hold_force: Option<crate::provenance::Labelled<f32>>,
+    /// Rated climbing slope (degrees); brakes stop and hold at this grade.
+    pub(crate) rated_slope_deg: crate::provenance::Labelled<f32>,
+    /// Number of side brake devices linked to the mean hold; required by Stop(Mean).
+    pub(crate) mean_hold_brake_count: Option<crate::provenance::Labelled<u8>>,
     /// Static breakaway multiplier for an at-rest parking lever.
     pub(crate) brake_static_factor: crate::provenance::Labelled<f32>,
 }
 
 impl TransmissionSpec {
+    /// Owner decision: sliding brakes balance the rated grade, independently of ground grip.
+    pub(crate) fn brake_capacity_n(&self, mass_kg: f32) -> Result<f32, BevyError> {
+        if !mass_kg.is_finite()
+            || mass_kg <= 0.0
+            || !self.rated_slope_deg.value.is_finite()
+            || !(0.0..90.0).contains(&self.rated_slope_deg.value)
+            || self.rated_slope_deg.value == 0.0
+        {
+            return Err("transmission.rated_slope_deg / mass: author a finite positive mass and a slope strictly between 0 and 90 degrees".into());
+        }
+        // Two belts share weight equally; this is the force balance, not a capacity multiplier.
+        Ok(mass_kg * crate::track::derive::G * self.rated_slope_deg.value.to_radians().sin() / 2.0)
+    }
+
     /// Adapt this RON shape into the shared validated authoring seam. Both asset validation and
     /// synchronous sim construction call this mapping, so the accepted domain cannot drift.
     pub(crate) fn params(
@@ -987,16 +1004,24 @@ impl TransmissionSpec {
         sprocket_radius_m: f32,
         half_tread_m: f32,
         belt_inertia: f32,
+        mass_kg: f32,
     ) -> Result<TransmissionParams, BevyError> {
         let Self {
             engine,
             gearbox,
             steering,
             couplings,
-            brake_force,
-            mean_hold_force,
+            rated_slope_deg: _,
+            mean_hold_brake_count,
             brake_static_factor,
         } = self;
+        if mean_hold_brake_count
+            .as_ref()
+            .is_some_and(|count| !(1..=2).contains(&count.value))
+        {
+            return Err("transmission.mean_hold_brake_count: name a positive linked device count no greater than the two side brakes".into());
+        }
+        let brake_capacity_n = self.brake_capacity_n(mass_kg)?;
         TransmissionParams::from_authoring(&TransmissionAuthoring {
             idle_rpm: engine.idle_rpm,
             governed_rpm: engine.governed_rpm,
@@ -1017,8 +1042,8 @@ impl TransmissionSpec {
             },
             couplings,
             steering_radius_rounding_share: steering.radius_rounding_share.0,
-            brake_capacity_n: brake_force.value,
-            mean_hold_capacity_n: mean_hold_force.as_ref().map(|rating| rating.value),
+            brake_capacity_n,
+            mean_hold_capacity_n: mean_hold_brake_count.as_ref().map(|count| f32::from(count.value) * brake_capacity_n),
             brake_static_factor: brake_static_factor.value,
             drag_fraction: engine.drag_fraction,
             engine_inertia_kgm2: engine.inertia_kgm2,
@@ -1963,7 +1988,7 @@ impl TankSpec {
         }
         // Structural rules need no geometry. Running-gear admission checks the physical
         // tables, side inertia equality and coupling divisor against the actual pitch radius.
-        let transmission = t.nominal_transmission_params(&self.roadwheels)?;
+        let transmission = t.nominal_transmission_params(&self.roadwheels, self.mass)?;
         // Engine audio data: the firing rate divides by neither, but both are DIVISORS in the
         // playback law (`sfx`) — a 0-cylinder engine pops at 0 Hz and a 0 Hz recording makes the
         // anchor infinite.
@@ -2196,7 +2221,7 @@ mod tests {
         );
         let params = spec
             .track
-            .nominal_transmission_params(&spec.roadwheels)
+            .nominal_transmission_params(&spec.roadwheels, spec.mass)
             .expect("transmission admission precedes aggregate checks");
         let peak_torque = params.torque_at(params.peak_torque_rpm);
         assert!(
@@ -2355,8 +2380,8 @@ TankSpec(
                     capacity: Some(100_000.0),
                     radius_rounding_share: (0.01, Fixture("relative radius-table rounding bound: one percent")),
                 ),
-                mean_hold_force: None,
-                brake_force: (50_000.0, Fixture("missing brake torque rating; settled by measured sprocket braking force")),
+                mean_hold_brake_count: None,
+                rated_slope_deg: (30.0, Fixture("rated climbing slope")),
                 brake_static_factor: (1.5, Fixture("missing static to dynamic brake ratio; settled by measured breakaway and sliding torque")),
             ),
         ),
@@ -3358,7 +3383,9 @@ TankSpec(
             ("steering capacity", |tr| {
                 tr.steering.capacity = Some(f32::INFINITY)
             }),
-            ("brake_force", |tr| tr.brake_force.value = f32::INFINITY),
+            ("rated_slope_deg", |tr| {
+                tr.rated_slope_deg.value = f32::INFINITY
+            }),
             ("brake_static_factor", |tr| {
                 tr.brake_static_factor.value = f32::NAN
             }),
@@ -3413,7 +3440,7 @@ TankSpec(
         let tr = fixture_transmission(&mut spec);
         tr.steering.capacity = None;
         assert!(
-            tr.params(0.3, 1.0, 8000.0)
+            tr.params(0.3, 1.0, 8000.0, 18_000.0)
                 .unwrap_err()
                 .to_string()
                 .contains("steering.capacity")
@@ -3424,7 +3451,7 @@ TankSpec(
             crate::track::transmission::Coupling::Stop(crate::track::transmission::Output::Left),
             crate::track::transmission::Coupling::Stop(crate::track::transmission::Output::Right),
         ];
-        assert!(tr.params(0.3, 1.0, 8000.0).is_ok()); // Fixture geometry and belt inertia.
+        assert!(tr.params(0.3, 1.0, 8000.0, 18_000.0).is_ok()); // Fixture geometry and belt inertia.
     }
 
     /// The asset door relies on its own declared drivetrain remaining valid. Read that
@@ -3556,17 +3583,17 @@ TankSpec(
         assert!(spec.validate().is_ok());
         assert!(
             spec.track
-                .nominal_transmission_params(&spec.roadwheels)
+                .nominal_transmission_params(&spec.roadwheels, spec.mass)
                 .is_ok()
         );
         assert!(
             spec.track
-                .transmission_params(&spec.roadwheels, lab_wrap(0.5), 1.0)
+                .transmission_params(&spec.roadwheels, lab_wrap(0.5), 1.0, spec.mass)
                 .is_ok()
         );
         assert!(
             spec.track
-                .transmission_params(&spec.roadwheels, lab_wrap(1.0), 1.0)
+                .transmission_params(&spec.roadwheels, lab_wrap(1.0), 1.0, spec.mass)
                 .is_err()
         );
     }

@@ -319,9 +319,10 @@ fn spawn_camera(mut commands: Commands) {
         // tank in the gunner sight" mechanism — see `render_policy`.
         crate::render_policy::CameraProfile::BattlefieldThirdPerson,
         // WHAT THIS CAMERA HEARS. Every spatial emitter pans and attenuates against this one
-        // listener; the ear gap is the panning width (`sfx::LISTENER_EAR_GAP`), and bevy's default
+        // listener; the ear gap is the panning width (`sfx::listener_ear_gap`), and bevy's default
         // of 4 m would hard-pan anything closer than that.
-        SpatialListener::new(crate::sfx::LISTENER_EAR_GAP),
+        #[cfg(feature = "audio")]
+        SpatialListener::new(crate::sfx::listener_ear_gap()),
         // WHAT THE PLAYER LOOKS THROUGH. The one declaration behind every reader of the live view
         // — both LOD ladders, the belt selector, the aim projection, the HUD reprojection — none of
         // which may infer "the player's view" from how many cameras happen to exist (`view`).

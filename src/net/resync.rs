@@ -334,12 +334,9 @@ mod tests {
                 super::super::physics::physics_plugins(),
                 super::super::plugin,
                 crate::SimPlugin,
-                super::super::fire_presentation::plugin,
             ));
         super::super::frontier::install(&mut app);
         super::super::client::install_replica_consumers(&mut app);
-        super::super::client::install_input_buffer_guard(&mut app);
-        super::super::client::install_input_send_cadence(&mut app);
         finish(&mut app);
         crate::headless_test::start_fixed_clock(&mut app);
         app.world_mut()

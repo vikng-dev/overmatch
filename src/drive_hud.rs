@@ -441,7 +441,7 @@ mod tests {
         .unwrap();
         let tp = spec
             .track
-            .nominal_transmission_params(&spec.roadwheels)
+            .nominal_transmission_params(&spec.roadwheels, spec.mass)
             .unwrap();
         // Fixture: backward rotations covering visible rpm and values rounding to zero.
         for rpm in [-3100.0_f32, -40.0, -0.0] {

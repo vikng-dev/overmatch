@@ -317,26 +317,22 @@ removed from spec struct, RON, validation, and the L600 neutral path (which now 
 ±0.281 m/s); gate `pivot_tiger_clears_each_steering_adapters_yaw_floor` (its L600 leg)
 ≥ 0.10 rad/s.
 
-### 4. Brake datum re-anchored (was circular)
+### 4. Brake capacity from rated grade
 
-`brake_force: 250_000` per side was sized by the grip-limit rule against μ = 0.9 —
-circular (sized against the very friction it was to be tested by) and energy-impossible
-(~2.9 MW through two 1940s Argus discs at speed; §3 above already flagged that ship
-values need a real brake source). Re-anchored (final value set in the review round below)
-to a DUAL documented anchor: the settled 20° park-hold capability (W·sin 20°/2 ≈
-95.6 kN/side) and 0.343 g total service decel (inside the 0.2–0.35 g band realistic for
-WWII 57-t heavies) → `brake_force: 96_000` per side. The stop-force law
-`B = clamp(R − Q − vI/dt, ±cap)` and the park latch are untouched — only the datum moved.
-Measured service-brake stop 6 → 1 m/s: **2.23 s** (analytic ≈ 0.5 s input slew +
-5.0 m/s ÷ ~3.6 m/s² brake+drag), coast unchanged (10.7 s); neither time is gated (a
-per-tank budget, ADR-0034) — the brake law is gated on lab data by
-`brake_is_discretely_passive`, the coast drag by `coast_drag_reaches_belt_through_coupling`;
-the 20° hold measured drift 0.000 m over 4 s with the latch engaged (the drift gate was
-later retired — emergent holding is never required; the latch requirement is gated by
-`static_brake_capacity_requires_every_hold_predicate`). At this stage, before
-the static/dynamic split below, 30° ramps
-back-drove (139.8 kN/side DERIVED demand > dynamic capacity). Supersede the inferred
-values with a real Argus brake/output-torque rating when sourced.
+The sheet authors its rated climbing slope. Per-side sliding brake capacity is
+`mass * g * sin(rated_slope) / 2` (DERIVED), following AMCP 706-355 sections 3-2.1 and 8-28:
+service brakes stop and hold on the steepest rated grade; parking holds there independently.
+The seed's 35 degrees is MEASURED from Spielberger, 6th ed. 1998, pp. 190-192.
+DARCOM-P 706-358 (1976), section 14-8 uses service/static brake factors 0.50/0.60;
+the ratio 1.2 is MEASURED as that design assumption, not an Argus lining measurement.
+This gives 160.36 kN per side sliding, 192.44 kN static (DERIVED).
+
+Rejected: sizing against ground grip, because ground material is not brake construction;
+a 20-degree holding target, because it underspecifies the rated grade; an inferred class
+stopping band, because no source established it. Peak brake power does not rule out a
+force rating: each stop dissipates the same kinetic energy regardless of stopping distance.
+Tigerfibel D 656/27 p. 34 gives 12 m from 33 km/h: average 3.50 m/s² and about 1.83 MW
+initial power under constant deceleration (DERIVED). Neither is a capacity measurement.
 
 ### Review round (same day) — three adversarial findings, dispositions
 
@@ -362,10 +358,8 @@ values with a real Argus brake/output-torque rating when sourced.
    returns the whole force to the curvature servo whose target is then 0 (active arrest).
    Test: `hybrid_steer_release_arrests_pivot`. Measured pivot rates unchanged
    (0.654 / 0.131 rad/s).
-3. **84 kN broke the settled 20° hill-hold (Medium).** The single 0.3 g anchor
-   (167.7 kN total) sat just under the 20° slope demand (191.2 kN total) that ADR-0026
-   and the test course had settled as capability. Re-anchored to the dual anchor above
-   (96 kN/side) and the previously missing slope-park gate now pins it.
+3. The brake capacity derives from the rated grade as stated above; a historical park result
+   supplies no brake specification.
 
 ## Stage A (2026-07-19) — signed shaft correctness
 
@@ -697,25 +691,11 @@ counter, target, latch; 512 ticks) now guards stage-C determinism.
 
 ### Static brake capacity + steering visibility (2026-07-20)
 
-The brake datum is now two limits. `brake_force` remains the dynamic per-side capacity for every
-service stop, moving belt, post-breach latched slide, and scheduler rollback-arrest calculation.
-The new required `brake_static_factor` multiplies it only when a parking or hill-hold latch is
-active, no service-brake command exists, and that individual belt starts exactly at rest. A
-nonzero starting speed uses dynamic capacity. If static capacity cannot hold the row, its bounds
-shrink to dynamic capacity and the block re-solves in the same tick. `PARK_ENGAGE_SPEED` still
-serves Driver decisions; it does not select friction capacity.
-
-Tiger authoring uses **1.5× INFERRED provisional**: static hold does no work, sourced material
-ratios span **1.05–2.0×**, and the Argus discs are described as self-energizing by both British
-Report No. 19 and D 656/30, but no numerical Argus rating survives. That produces
-`2 × 96,000 × 1.5 = 288,000 N` **DERIVED** static capacity against
-`57,000 × 9.81 × sin(30°) = 279,585 N` **DERIVED** demand, an **8,415 N DERIVED** margin.
-Historical observations with the speed-band selector: the real 30° park gate measured
-**0.0393 m MEASURED** drift over **4 s DERIVED**; the unchanged 20° gate measured **0.0000 m MEASURED**. A synthetic **1.1× INFERRED test fixture** has only
-**211,200 N DERIVED** static capacity, breaches, drops to **96,000 N/side MEASURED** dynamic
-capacity at the moving-band transition, and measured **−0.527 m/s MEASURED** belt speed plus
-**1.825 m MEASURED** downhill travel after **2 s DERIVED**. Service braking remains
-**2.36 s MEASURED** from 6 to 1 m/s.
+Brakes have static and sliding limits. The sliding capacity derives from rated grade and mass.
+`brake_static_factor` multiplies it only for an eligible at-rest passive lever. Exact starting
+row rest admits static capacity; nonzero starting slip uses sliding capacity. A static breach
+shrinks its bounds and re-solves in the same tick. Driver admission bands do not select friction.
+The rated-grade rule and the sourced static factor above own the capacities.
 
 The offline FixedRadii HUD now renders the live detent with the authored gear-table radius:
 `STEER I R~165m` for F8 wide and `STEER II R~3m` for F1 tight, blank at released detent. The
@@ -959,23 +939,23 @@ A constructed mean stop can latch on a steer-only request below the authored piv
 on rollback. It remains latched if the load makes it slide. A `Free` construction has no such stop
 and can roll under engine braking without a speed-window regime change. Releasing steer retains
 the mean stop until both belts start a tick exactly at rest. Brake, either ladder request and
-loss of staff share that gate and center the steering tie. Pending handover defers propulsion;
+loss of staff share that gate and center the steering tie while static support remains. Pending handover defers propulsion;
 park or the along-ladder launch lever then inherits static support from exact rest. The two
-stop paths never double count the brake rating. The mean stop has its own required `mean_hold_force` rating, labelled
-Unknown until its torque and construction are established; the current force equivalent is
-192 kN. Independent mean and side brake actuation is not established in the construction data,
-so their exclusion remains. A layout with a mean stop must supply the steering tie needed to
-arrest differential motion during handover.
+stop paths never double count the brake rating. Construction data names how many side brake
+devices the mean path links; its capacity is that count times the derived per-side rating.
+A layout with a mean stop supplies the steering tie needed to arrest differential motion.
 
 ### Neutral mean hold
 
-The seed's mean-stop construction is inferred from Tigerfibel D 656/27 pp. 40-41 and D 656/30
-p. 58, including the holding-brake button in the neutral-turn drill. The torque, reduction and
-linkage are Unknown. The owner's ruling is to represent the bounded mean stop without modelling
-the gearbox-input brake's torque or gear; research must settle that construction before adding
-that law. Rejected: the steering member's rating (it carries difference, not common load), an
-unbounded hold (no source supports it), and a torque multiplied by the selected gear without a
-sourced torque and construction. A construction without `Stop(Mean)` has no mean stop.
+Tigerfibel D 656/27 p. 41 parks on the hand lever; Spielberger pp. 51-55 describes foot and
+hand actuation of the same two Argus discs. The sheet states that construction count; parking
+therefore derives its hold from the side brakes, with no independent authored force.
+The gearbox main-shaft button cancels clutch drag during neutral turns (British MI summary,
+Nov 1943, Preliminary Report No. 19). Its torque and reduction are Unknown; OLVAR manual
+D 656/21+ Pt 2 or measured torque/reduction would settle them. No gearbox torque law is inferred.
+Rejected: the steering member's rating (difference, not common load), an unbounded hold (no
+source), and torque multiplied by a selected gear without sourced construction and torque.
+A construction without `Stop(Mean)` has no mean stop.
 
 Static support must cover the full constrained demand, not just the starting reaction sum.
 For equal base belt inertias, set `m=(vL+vR)/2`, `d=(vL-vR)/2`, and let the steering step reduce
@@ -993,7 +973,7 @@ A staffed Driver brakes released rollback outside a steer-only pivot with side p
 its sub-idle stop along the ladder. A pivot retains its constructed mean stop through release,
 Brake intent and either ladder request until both belts start at exact rest. Side park or the
 along-ladder one-way launch lever then takes over; pending handover serves no propulsion against
-its own stop. Loss of staff retains the existing passive hold, centers steering, and permits that
+its own stop. A hold starting with nonzero mean slip has no static support left to preserve: every requested exit proceeds immediately. Loss of staff retains the existing passive hold, centers steering, and permits that
 same exact-rest transfer so supported rest can sleep. A moving breached stop remains dynamic;
 its rating is never enlarged to guarantee an outcome.
 
@@ -1009,8 +989,8 @@ The retained `park` bit is the Driver's latch, not proof that a brake is stuck. 
 dynamic capacity. Released rollback and the released sub-idle stop can latch park; a motion or
 steering request releases it. `dead`, `park_engage_speed` and `neutral_speed_m_s` are tastes in
 `assets/driving/actuation.ron`; only the last admits a passive pivot latch. None chooses static
-friction, clutch engagement or completion of a direction swap. Brake force and static factor on the
-tank sheet are Unknown: a measured brake rating and breakaway/sliding comparison would settle them.
+friction, clutch engagement or completion of a direction swap. The rated-grade rule above owns
+brake capacity; the neutral-turn gearbox brake torque remains Unknown.
 
 Crank energy alone may rise without fuel when a belt back-drives it. The passive invariant is on
 total crank-plus-belt kinetic energy in the absence of combustion and external work. A free crank

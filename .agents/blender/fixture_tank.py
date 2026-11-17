@@ -102,7 +102,7 @@ TankSpec(
                     capacity: 1.0,
                     radius_rounding_share: (0.01, Resolution("relative radius-table rounding bound: one percent")),
                 ),
-                brake_force: (1.0, Unknown("missing brake torque rating; settled by measured sprocket braking force")),
+                rated_slope_deg: (30.0, Unknown("nominal testbed climbing grade; no physical chassis measurement, settled by a measured climbing rating for a built chassis")),
                 // Static breakaway multiplier for the at-rest parking lever.
                 brake_static_factor: (1.5, Unknown("missing static to dynamic brake ratio; settled by measured breakaway and sliding torque")),
             ),

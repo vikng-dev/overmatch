@@ -6519,7 +6519,7 @@ dependencies = [
 
 [[package]]
 name = "overmatch"
-version = "0.7.0-alpha.18"
+version = "0.7.0-alpha.19"
 dependencies = [
  "avian3d",
  "bevy",
@@ -6534,8 +6534,6 @@ dependencies = [
  "libm",
  "lightyear",
  "lightyear_core",
- "lightyear_inputs",
- "lightyear_inputs_native",
  "lightyear_sync",
  "lightyear_transport",
  "objc-sys",

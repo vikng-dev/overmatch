@@ -296,7 +296,7 @@ instance; divergence remains the sim-determinism question.* The two error classe
 _Avoid_: "determinism makes prediction more accurate" (it makes *replay* exact; the guess is bounded by information, not reproducibility)
 
 **Prediction margin**:
-*Historical (pre-ADR-0037).* How many ticks the client ran ahead of the confirmed state it received. Input delay eats it: `InputDelayConfig::balanced()` at loopback RTT absorbed all latency into delay, margin hit zero, and every confirmed update arrived at-or-ahead of the current tick. The client now predicts nothing and runs a fixed input delay of `SHIPPING_INPUT_DELAY_TICKS`.
+*Historical (pre-ADR-0037).* How many ticks the client ran ahead of the confirmed state it received. Input delay eats it: `InputDelayConfig::balanced()` at loopback RTT absorbed all latency into delay, margin hit zero, and every confirmed update arrived at-or-ahead of the current tick. The client now renders the server stream; device messages are admitted on arrival without tick targeting.
 
 **Check starvation**:
 *Historical: the watchdog that worked around it was deleted with client prediction (ADR-0037); the

@@ -4,7 +4,7 @@
 //! simulation state; the report's variant roll is view-local randomness. Mounted by the windowed
 //! client compositions only — the dedicated server runs without an audio device.
 //!
-//! Every world-placed emitter is spatial and shares one falloff law ([`SPATIAL_SCALE`]); the
+//! Every world-placed emitter is spatial and shares the mix's distance scale; the
 //! listener rides the one 3-D camera (`camera::spawn_camera`).
 //!
 //! No tank fact lives here. Clips, the recording's measured pop rate, cylinder count and the crank
@@ -25,41 +25,27 @@ use crate::tank::{EngineSound, Muzzle, TankRoot, Weapon, WeaponIndex};
 use crate::track::sim::EngineRpm;
 use crate::vfx::ViewRng;
 
-/// Spatial falloff scale. Bevy's attenuation is `1/(distance × scale)`, so this puts unity gain at
-/// 50 m and overrides `AudioPlugin`'s default of 1.0 (unity at 1 m — battlefield distances would
-/// arrive inaudible).
-const SPATIAL_SCALE: f32 = 0.02;
+mod mix;
+use mix::mix;
 
-/// Listener ear separation (m) — the stereo panning width, not a head measurement. Bevy's default
-/// is 4 m, which pans anything closer than that hard to one side.
-pub(crate) const LISTENER_EAR_GAP: f32 = 0.2;
-
-/// Emitter volumes. The click sits under the world sounds (it is a switch, not an event in the
-/// world); the engine sits under both, since it plays continuously on every tank in earshot.
-const CLICK_VOLUME: f32 = 0.5;
-const REPORT_VOLUME: f32 = 1.0;
-const ENGINE_VOLUME: f32 = 0.35;
+pub(crate) fn listener_ear_gap() -> f32 {
+    mix().listener_ear_gap.0
+}
+pub(crate) fn click_volume() -> f32 {
+    mix().click_volume.0
+}
 
 /// The trigger click, non-spatial (it happens at the player's own hand). The one fixed clip path in
 /// this layer: it is player UI feedback for a device edge, not a sound any vehicle makes.
 const CLICK_CLIP: &str = "sfx/click/click_1.ogg";
 
-/// Time constant (s) of the exponential approach toward the mapped speed — the sim's crank speed
-/// steps at the fixed rate, and an unsmoothed `set_speed` per frame reads as a warble.
-const ENGINE_SPEED_TAU: f32 = 0.12;
-
-/// Playback-speed band, as fractions of the authored crank band: a lugging engine is held at the
-/// speed it would run at [`ENGINE_LUG_FRACTION`] of idle, and an over-revved crank at
-/// [`ENGINE_OVERSHOOT_FRACTION`] of the governor. The only two numbers the band costs — the speeds
-/// themselves are the vehicle's.
-const ENGINE_LUG_FRACTION: f32 = 0.8;
-const ENGINE_OVERSHOOT_FRACTION: f32 = 1.05;
-
 pub fn plugin(app: &mut App) {
     app.init_resource::<ViewRng>()
         .init_resource::<LastReportVariant>()
         // The one falloff law for every spatial emitter in the game.
-        .insert_resource(DefaultSpatialScale(SpatialScale::new(SPATIAL_SCALE)))
+        .insert_resource(DefaultSpatialScale(SpatialScale::new(
+            mix().spatial_scale.0,
+        )))
         .init_resource::<crate::assets::PresentationLoads>()
         .add_systems(PreStartup, setup_sfx_clips)
         .add_observer(on_weapon_report)
@@ -78,8 +64,8 @@ pub fn plugin(app: &mut App) {
 /// fixed path; every other entry arrives from a tank's spec-derived components. `AssetServer::load`
 /// already dedupes by path — this map is what lets a play site reach a handle without one.
 #[derive(Resource)]
-struct SfxClips {
-    click: Handle<AudioSource>,
+pub(crate) struct SfxClips {
+    pub(crate) click: Handle<AudioSource>,
     tank: HashMap<String, Handle<AudioSource>>,
 }
 
@@ -243,7 +229,7 @@ fn play_fire_click(
     }
     commands.spawn((
         AudioPlayer::new(clips.click.clone()),
-        PlaybackSettings::DESPAWN.with_volume(Volume::Linear(CLICK_VOLUME)),
+        PlaybackSettings::DESPAWN.with_volume(Volume::Linear(mix().click_volume.0)),
     ));
 }
 
@@ -254,7 +240,7 @@ struct LastReportVariant(Option<usize>);
 
 /// Each weapon's report, on the same `FireShell` seam the flash rides. The firing weapon is
 /// resolved from the event's own `shooter` (tank root + weapon slot) — the same lookup
-/// `net::fire_presentation` uses — and its authored clip list is the whole gate: a weapon with an
+/// `net::client` uses — and its authored clip list is the whole gate: a weapon with an
 /// empty list is silent, and a shell with no shooter (a sandbox or test round) belongs to no
 /// weapon at all.
 #[expect(
@@ -301,7 +287,7 @@ fn on_weapon_report(
         AudioPlayer::new(clip),
         PlaybackSettings::DESPAWN
             .with_spatial(true)
-            .with_volume(Volume::Linear(REPORT_VOLUME)),
+            .with_volume(Volume::Linear(mix().report_volume.0)),
         Transform::from_translation(fire.origin),
     ));
 }
@@ -353,7 +339,7 @@ fn attach_engine_loops(
             paused: rpm.rpm() == 0.0,
             ..PlaybackSettings::LOOP
                 .with_spatial(true)
-                .with_volume(Volume::Linear(ENGINE_VOLUME))
+                .with_volume(Volume::Linear(mix().engine_volume.0))
                 .with_speed(law.speed(rpm.rpm()).max(law.min))
         };
         commands.spawn((
@@ -374,8 +360,8 @@ fn drive_engine_speed(
     tanks: Query<&EngineRpm>,
     emitters: Query<(&ChildOf, &EngineEmitter, &SpatialAudioSink)>,
 ) {
-    // Frame-rate-independent exponential approach over ENGINE_SPEED_TAU.
-    let blend = 1.0 - (-time.delta_secs() / ENGINE_SPEED_TAU).exp();
+    // Frame-rate-independent exponential approach over mix().engine_speed_tau.0.
+    let blend = 1.0 - (-time.delta_secs() / mix().engine_speed_tau.0).exp();
     for (parent, emitter, sink) in &emitters {
         let Ok(rpm) = tanks.get(parent.parent()) else {
             continue;
@@ -403,7 +389,7 @@ fn drive_engine_speed(
 ///     `ln 2 / ln(governed/idle)`, which by construction lands the governed crank exactly one
 ///     octave above the idle anchor.
 ///   * THE BAND'S EDGES — the speed is clamped to what the law itself yields at
-///     [`ENGINE_LUG_FRACTION`] of idle and [`ENGINE_OVERSHOOT_FRACTION`] of governed, so a stalled
+///     the mix's lug fraction of idle and the mix's overshoot fraction of governed, so a stalled
 ///     turning crank cannot slide into sub-bass and an over-revved one cannot run away.
 ///     A stopped crank returns zero and its emitter pauses.
 #[derive(Clone, Copy)]
@@ -427,8 +413,8 @@ impl EngineSpeedLaw {
             max: f32::INFINITY,
         };
         Self {
-            min: law.speed(ENGINE_LUG_FRACTION * sound.idle_rpm),
-            max: law.speed(ENGINE_OVERSHOOT_FRACTION * sound.governed_rpm),
+            min: law.speed(mix().engine_lug_fraction.0 * sound.idle_rpm),
+            max: law.speed(mix().engine_overshoot_fraction.0 * sound.governed_rpm),
             ..law
         }
     }
@@ -563,14 +549,20 @@ mod tests {
     fn the_band_clamps_at_the_lug_and_overshoot_fractions() {
         let sound = fixture();
         let law = EngineSpeedLaw::for_engine(&sound);
-        let floor = law.speed(ENGINE_LUG_FRACTION * sound.idle_rpm);
-        let ceiling = law.speed(ENGINE_OVERSHOOT_FRACTION * sound.governed_rpm);
+        let floor = law.speed(mix().engine_lug_fraction.0 * sound.idle_rpm);
+        let ceiling = law.speed(mix().engine_overshoot_fraction.0 * sound.governed_rpm);
         // The game's damage model: a crank at rest has no running loop; a turning crank
         // stays inside the pitch band.
         assert_eq!(law.speed(0.0), 0.0);
         assert_eq!(law.speed(-100.0), 0.0);
-        assert_eq!(law.speed(0.5 * sound.idle_rpm), floor);
-        assert_eq!(law.speed(100.0 * sound.governed_rpm), ceiling);
+        assert_eq!(
+            law.speed(0.5 * mix().engine_lug_fraction.0 * sound.idle_rpm),
+            floor
+        );
+        assert_eq!(
+            law.speed(2.0 * mix().engine_overshoot_fraction.0 * sound.governed_rpm),
+            ceiling
+        );
         // The edges bracket the authored band rather than cutting into it.
         assert!(floor < law.speed(sound.idle_rpm));
         assert!(ceiling > law.speed(sound.governed_rpm));

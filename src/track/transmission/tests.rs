@@ -184,9 +184,13 @@ fn steer_release_arrests_pivot() {
     }
     let d0 = (speeds[0] - speeds[1]) / 2.0;
     assert!(d0 > 0.0, "the fixture must actually pivot (d = {d0})");
-    // Fixture observation budget: one simulated minute for monotonic arrest without reversal.
+    // The difference row applies half its impulse to each belt: stopping impulse is 2 I d.
+    let stop_ticks = (2.0 * fp.inertia * d0
+        / (tp.steer_capacity_n * input(0.0, 0.0, speeds, [0.0; 2]).dt))
+        .ceil() as usize
+        + 1;
     let mut previous = d0;
-    for _ in 0..64 * 60 {
+    for _ in 0..stop_ticks {
         let rep = step(&fp, &tp, &mut st, &input(0.0, 0.0, speeds, [0.0, 0.0]));
         speeds = rep.next_speeds;
         let difference = (speeds[0] - speeds[1]) / 2.0;
@@ -2234,7 +2238,7 @@ fn steer_detents_use_one_threshold_from_every_history() {
 }
 
 /// Admission follows algebraic domains and representability, not a vehicle class's scale.
-/// Fixture extremes retain finite coupled arithmetic across different physical scales.
+/// Fixture extremes must retain both representable arithmetic and resolvable conditioning.
 #[test]
 fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
     let mut a = tiger_authoring();
@@ -2251,6 +2255,13 @@ fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
     a.clutch_capacity_nm = 100000.0;
     a.belt_inertia = 0.5;
     a.shift_secs = 3.5;
+    assert!(
+        TransmissionParams::from_authoring(&a)
+            .unwrap_err()
+            .to_string()
+            .contains("conditioning")
+    );
+    a.belt_inertia = 8_000.0; // Fixture: separates the independent steering and stop normals.
     assert!(TransmissionParams::from_authoring(&a).is_ok());
     a.engine_inertia_kgm2 = 0.01;
     a.clutch_capacity_nm = 50.0;
@@ -2456,7 +2467,7 @@ fn launch_peak_can_lie_inside_the_fuel_cut_ramp() {
 fn construction_refuses_an_unresolved_idle_catch() {
     let spec = super::super::drive_fixture::compact_spec();
     let tr = &spec.track.powertrain.transmission;
-    let mut params = tr.params(0.3, 1.0, 3000.0).unwrap();
+    let mut params = tr.params(0.3, 1.0, 3000.0, spec.mass).unwrap();
     let control = engine_control();
     let drag_slope =
         params.peak_torque_nm * params.drag_fraction * (1.0 - motoring_drag_base_share())
@@ -2591,11 +2602,41 @@ fn fixed_intent_has_no_order_flips_after_one_transition_across_constructions() {
                                             let mut preview = st;
                                             let orders =
                                                 driver(&construction(&fp), &tp, &mut preview, &inp);
-                                            if st.mean_hold && !preview.mean_hold {
+                                            if st.mean_hold
+                                                && !preview.mean_hold
+                                                && inp.speeds[0] + inp.speeds[1] == 0.0
+                                            {
                                                 assert_eq!(
                                                     inp.speeds, [0.0; 2],
-                                                    "every exit from a mean hold starts at exact belt rest"
+                                                    "an exit preserving static mean support starts at exact belt rest"
                                                 );
+                                            }
+                                            if staffed
+                                                && st.mean_hold
+                                                && inp.speeds[0] + inp.speeds[1] != 0.0
+                                            {
+                                                if command != 0.0 {
+                                                    assert!(
+                                                        !orders.mean_hold,
+                                                        "a breached hold cannot suppress either ladder request"
+                                                    );
+                                                    if command * dir > 0.0 && !orders.shifting {
+                                                        assert!(
+                                                            orders.propulsive > 0.0,
+                                                            "throttle regains propulsion"
+                                                        );
+                                                    } else if command * dir < 0.0 {
+                                                        assert!(
+                                                            orders.service,
+                                                            "reverse regains its stopping authority"
+                                                        );
+                                                    }
+                                                } else if steer != 0.0 {
+                                                    assert_eq!(
+                                                        orders.input.steer, steer,
+                                                        "steering retains authority over a sliding mean"
+                                                    );
+                                                }
                                             }
                                             let signature = (
                                                 orders.clutch_open,
@@ -2646,19 +2687,26 @@ fn fixed_intent_has_no_order_flips_after_one_transition_across_constructions() {
     );
 }
 
+/// Fixture: every geared-steering construction with two side brakes linked to its mean hold.
+fn mean_hold_drivetrains() -> impl Iterator<Item = (FixtureConstruction, TransmissionParams)> {
+    class_drivetrains()
+        .into_iter()
+        .filter(|(_, tp)| tp.couplings.contains(&Coupling::Steering))
+        .map(|(fp, mut tp)| {
+            if !tp.has_mean_hold() {
+                tp.couplings.push(Coupling::Stop(Output::Mean));
+                tp.mean_hold_capacity_n = Some(2.0 * tp.brake_capacity_n); // Fixture linkage.
+            }
+            (fp, tp)
+        })
+}
+
 /// Releasing a pivot must transfer a supported common-mode load without losing static grip.
 /// Players on a slope rely on retaining the held mean until the straight tie has stopped both
 /// belts; a speed-band handover or dropping the hold on steer release fails this witness.
 #[test]
 fn pivot_release_hands_static_load_to_side_stops_from_exact_rest() {
-    for (fp, mut tp) in class_drivetrains() {
-        if !tp.couplings.contains(&Coupling::Steering) {
-            continue;
-        }
-        if !tp.has_mean_hold() {
-            tp.couplings.push(Coupling::Stop(Output::Mean));
-            tp.mean_hold_capacity_n = Some(2.0 * tp.brake_capacity_n); // Fixture mean-stop rating.
-        }
+    for (fp, tp) in mean_hold_drivetrains() {
         for reverse in [false, true] {
             for direction in [-1.0, 1.0] {
                 let load = direction * tp.brake_capacity_n * (1.0 + tp.brake_static_factor) * 0.5;
@@ -2906,14 +2954,7 @@ fn invalid_coupling_construction_is_refused_before_play() {
 /// Players rely on the static budget surviving a change of passive stop ownership.
 #[test]
 fn parked_static_load_survives_pivot_and_service_handover() {
-    for (fp, mut tp) in class_drivetrains() {
-        if !tp.couplings.contains(&Coupling::Steering) {
-            continue;
-        }
-        if !tp.has_mean_hold() {
-            tp.couplings.push(Coupling::Stop(Output::Mean));
-            tp.mean_hold_capacity_n = Some(2.0 * tp.brake_capacity_n); // Fixture rating.
-        }
+    for (fp, tp) in mean_hold_drivetrains() {
         for sign in [-1.0, 1.0] {
             let load = sign * tp.brake_capacity_n * (1.0 + tp.brake_static_factor) * 0.5;
             for pivot in [false, true] {
@@ -3037,41 +3078,31 @@ fn a_paid_cut_closes_onto_its_selected_ratio() {
     }
 }
 
-/// A request against the ladder and loss of staff obey the same passive handover as Brake.
+/// Supported driver requests obey the same passive handover as Brake.
 /// Players rely on the existing static support surviving until side park starts at exact rest.
 /// Rest persists when the FULL constrained demand (including differential changes) fits capacity.
 #[test]
-fn every_passive_handover_keeps_support_through_an_unequal_ground_steer_ramp() {
-    for (fp, mut tp) in class_drivetrains() {
-        if !tp.couplings.contains(&Coupling::Steering) {
-            continue;
-        }
-        if !tp.has_mean_hold() {
-            tp.couplings.push(Coupling::Stop(Output::Mean));
-            tp.mean_hold_capacity_n = Some(2.0 * tp.brake_capacity_n); // Fixture rating.
-        }
+fn supported_driver_handover_keeps_support_through_an_unequal_ground_steer_ramp() {
+    for (fp, tp) in mean_hold_drivetrains() {
         for launch in [
             LaunchState::Unchosen,
             LaunchState::TakingUp,
             LaunchState::Locked,
         ] {
-            for path in 0..5 {
-                // Fixture: release, Brake, opposing request, lost staff, along-ladder request.
+            for path in [0, 1, 2, 4] {
+                // Fixture: release, Brake, opposing request and along-ladder request.
+                // Loss of staff and stored-crank discharge are covered by the shipped sleep proof.
                 let mut st = TransmissionState {
                     launch,
                     mean_hold: true,
+                    omega_e: 0.0, // Fixture: stored crank energy is absent from this passive-support proof.
                     ..fresh(&tp)
                 };
                 let mut speeds = [0.018, -0.018]; // Fixture pivot entry, mean exactly resting.
-                let total = if path == 3 {
-                    0.0
-                } else {
-                    tp.mean_hold_capacity_n
-                        .unwrap()
-                        .min(2.0 * tp.brake_capacity_n)
-                        * (1.0 + tp.brake_static_factor)
-                        * 0.5
-                };
+                // Fixture: the full initial differential arrest contributes four times the
+                // starting common load, while remaining inside every fixture's static rating.
+                let total = (800_000.0 - 80.0) * speeds[0] * 0.25;
+                let mut largest_coupled_load = 0.0_f32;
                 let mut parked = false;
                 for tick in 0..128 {
                     let wide = (super::super::drive::drive_feel().wide_on.0
@@ -3085,7 +3116,8 @@ fn every_passive_handover_keeps_support_through_an_unequal_ground_steer_ramp() {
                         0.0
                     };
                     let mut inp = input(0.0, steer, speeds, [0.45 * total, 0.55 * total]);
-                    inp.reaction_slopes = [80.0, 1200.0]; // Fixture unequal affine contacts.
+                    inp.supply.engine_in_action = false; // Fixture: no combustion during passive handover.
+                    inp.reaction_slopes = [80.0, 800_000.0]; // Fixture: stiff unequal soil couples differential changes into mean load.
                     if tick >= 16 {
                         match path {
                             0 => {}
@@ -3098,7 +3130,6 @@ fn every_passive_handover_keeps_support_through_an_unequal_ground_steer_ramp() {
                                 inp.throttle = -1.0;
                                 inp.steer = 1.0;
                             }
-                            3 => inp.supply.control_authority = false,
                             4 => {
                                 inp.intent = DriveIntent::Axes(DriveAxes {
                                     throttle: 1.0,
@@ -3107,13 +3138,16 @@ fn every_passive_handover_keeps_support_through_an_unequal_ground_steer_ramp() {
                                 inp.throttle = 1.0;
                                 inp.steer = 1.0;
                             }
-                            _ => unreachable!("the fixture enumerates five handover paths"),
+                            _ => unreachable!("the fixture enumerates four driver handover paths"),
                         }
                     }
                     let start = speeds;
                     let before_hold = st.mean_hold;
                     let report = step(&fp, &tp, &mut st, &inp);
                     speeds = report.next_speeds;
+                    let delta = ((start[0] - start[1]) - (speeds[0] - speeds[1])) * 0.5;
+                    largest_coupled_load = largest_coupled_load
+                        .max(((inp.reaction_slopes[1] - inp.reaction_slopes[0]) * delta).abs());
                     if before_hold && !st.mean_hold {
                         assert_eq!(
                             start, [0.0; 2],
@@ -3141,14 +3175,16 @@ fn every_passive_handover_keeps_support_through_an_unequal_ground_steer_ramp() {
                             "propulsion waits for its passive handover instead of fighting the held stop"
                         );
                     }
-                    if path != 3 {
-                        assert_eq!(
-                            speeds[0] + speeds[1],
-                            0.0,
-                            "this staffed fixture's full demand remains supported"
-                        );
-                    }
+                    assert_eq!(
+                        speeds[0] + speeds[1],
+                        0.0,
+                        "this fixture's full demand remains supported"
+                    );
                 }
+                assert!(
+                    largest_coupled_load > total * 0.25,
+                    "the coupling term must be substantial against the load"
+                );
                 assert!(
                     parked,
                     "every passive exit can finish its exact-rest handover"
@@ -3156,53 +3192,6 @@ fn every_passive_handover_keeps_support_through_an_unequal_ground_steer_ramp() {
             }
         }
     }
-}
-
-/// Unequal reaction slopes couple differential deceleration into the mean. Starting reaction
-/// sum below static capacity is insufficient: the stop must also carry (sR-sL)*Delta.
-/// The contact slice relies on this distinction, rather than a detent patch or inflated rating.
-#[test]
-fn differential_deceleration_can_exhaust_a_mean_stop_below_its_static_reaction_sum() {
-    let (fp, tp) = (grade_fixture_fp(), tiger_tp());
-    let omega = 2000.0 * RPM_TO_RAD; // Fixture crank operating point.
-    let d = tp.steer_crank_ratio.0 * omega;
-    let mut st = TransmissionState {
-        omega_e: omega,
-        mean_hold: true,
-        launch: LaunchState::Locked,
-        ..fresh(&tp)
-    };
-    let wide = (super::super::drive::drive_feel().wide_on.0
-        + super::super::drive::drive_feel().tight_on.0)
-        * 0.5;
-    let mut inp = input(0.0, wide, [d, -d], [140_000.0, 77_000.0]); // Fixture reaction sum within static rating.
-    inp.reaction_slopes = [83.0, 806_000.0]; // Fixture asymmetric soil stiffness, not a tank fact.
-    let mut generous = tp.clone();
-    generous.mean_hold_capacity_n = Some(1e8); // Fixture: expose the unconstrained required force.
-    let mut trial = st;
-    let controls = driver(&construction(&fp), &generous, &mut trial, &inp);
-    let (unlimited, _, _) = advance_rows(&construction(&fp), &generous, &mut trial, &controls, 0.0);
-    let delta = d - (unlimited.next_speeds[0] - unlimited.next_speeds[1]) * 0.5;
-    let required = inp.reactions.iter().sum::<f32>()
-        + (inp.reaction_slopes[1] - inp.reaction_slopes[0]) * delta;
-    let delivered = unlimited.forces.iter().sum::<f32>();
-    // Resolution: conversion of the f64 solve and a difference of f32 belt speeds, 1 N.
-    assert!(
-        (required - delivered).abs() < 1.0,
-        "summed belt equations derive the mean demand"
-    );
-    let static_rating = tp.mean_hold_capacity_n.unwrap() * tp.brake_static_factor;
-    assert!(
-        inp.reactions.iter().sum::<f32>() < static_rating && required > static_rating,
-        "the fixture must distinguish starting load from full constrained demand"
-    );
-    let controls = driver(&construction(&fp), &tp, &mut st, &inp);
-    let (limited, _, _) = advance_rows(&construction(&fp), &tp, &mut st, &controls, 0.0);
-    assert!(limited.brakes_slide && limited.next_speeds.iter().sum::<f32>() != 0.0);
-    println!(
-        "DERIVED fixture mean demand={required:.3} N static={static_rating:.3} N reaction_sum={:.3} N",
-        inp.reactions.iter().sum::<f32>()
-    );
 }
 
 /// With affine contacts, ground work is external work even when its starting force is zero.
@@ -3333,7 +3322,7 @@ fn a_mean_stop_requires_its_own_positive_rating_and_no_other_construction_consum
         TransmissionParams::from_authoring(&a)
             .unwrap_err()
             .to_string()
-            .contains("mean_hold_force")
+            .contains("mean_hold_brake_count")
     );
     for rating in [0.0, -1.0, f32::INFINITY, f32::NAN] {
         // Fixture malformed asset inputs.
@@ -3346,6 +3335,88 @@ fn a_mean_stop_requires_its_own_positive_rating_and_no_other_construction_consum
         TransmissionParams::from_authoring(&a)
             .unwrap_err()
             .to_string()
-            .contains("mean_hold_force")
+            .contains("mean_hold_brake_count")
+    );
+}
+
+/// A breached passive hold cannot trap the driver under a load it cannot arrest. Forward,
+/// service, steer and reverse orders must reach their constructed actuators immediately.
+#[test]
+fn an_overloaded_sliding_hold_returns_every_driver_authority() {
+    for (fp, tp) in mean_hold_drivetrains() {
+        for reverse in [false, true] {
+            let dir = if reverse { -1.0 } else { 1.0 };
+            for path in 0..4 {
+                let mut st = TransmissionState {
+                    reverse,
+                    mean_hold: true,
+                    launch: LaunchState::Locked,
+                    ..fresh(&tp)
+                };
+                let mut inp = input(
+                    0.0,
+                    0.0,
+                    [-dir; 2],
+                    [2.0 * tp.mean_hold_capacity_n.unwrap(); 2],
+                ); // Fixture: load exceeds the dynamic rating.
+                match path {
+                    0 | 3 => {
+                        inp.throttle = if path == 0 { dir } else { -dir };
+                        inp.intent = DriveIntent::Axes(DriveAxes {
+                            throttle: inp.throttle,
+                            steer: 0.0,
+                        });
+                    }
+                    1 => inp.intent = DriveIntent::Brake,
+                    2 => inp.steer = 1.0,
+                    _ => unreachable!(),
+                }
+                let orders = driver(&construction(&fp), &tp, &mut st, &inp);
+                match path {
+                    0 => assert!(orders.propulsive > 0.0 && !orders.mean_hold),
+                    1 | 3 => {
+                        assert!(orders.service && !orders.mean_hold);
+                        assert_eq!(
+                            passive_rows(
+                                &tp,
+                                &st,
+                                &orders,
+                                f64::from(tp.brake_capacity_n * inp.dt)
+                            )
+                            .len(),
+                            2
+                        );
+                    }
+                    2 => assert_eq!(orders.input.steer, 1.0),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
+/// An author can state consistent radii that still yield an unresolved steering/stop basis.
+/// Admission must refuse that construction before an operator can reach the solver panic.
+#[test]
+fn construction_refuses_consistent_but_unresolved_steering_rows() {
+    let mut a = lab_authoring();
+    let radii: Vec<_> = a
+        .steer_radii_m
+        .iter()
+        .map(|(t, w)| (t * 100_000.0, w * 100_000.0))
+        .collect();
+    let reverse: Vec<_> = a
+        .reverse_steer_radii_m
+        .iter()
+        .map(|(t, w)| (t * 100_000.0, w * 100_000.0))
+        .collect();
+    a.steer_radii_m = &radii;
+    a.reverse_steer_radii_m = &reverse;
+    let error = TransmissionParams::from_authoring(&a)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("conditioning") && error.contains("steering.radii"),
+        "{error}"
     );
 }

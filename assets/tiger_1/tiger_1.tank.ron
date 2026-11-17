@@ -67,12 +67,12 @@ TankSpec(
             // Architecture: "wheel controlled hydraulic operated regenerative" [ANCHOR] — the
             // L600 fixed-radius box: a mean clutch and a differential steering member.
             transmission: (
-                // Mean hold inferred from the neutral-turn drill and holding-brake button:
-                // Tigerfibel D 656/27 pp. 40-41; D 656/30 p. 58. Torque and linkage are unknown.
-                // Independent simultaneous mean and side brake actuation is not established;
-                // the construction model retains their exclusion until the linkage is sourced.
+                // Parking hand lever and foot pedal work the same two Argus discs (Tigerfibel
+                // D 656/27 p. 41; Spielberger pp. 51-55). Mean and side paths share their rating.
+                // Unknown: the neutral-turn gearbox main-shaft brake torque; OLVAR manual
+                // D 656/21+ Pt 2 or a measured torque/reduction would settle it.
                 couplings: [Clutch(Mean), Steering, Stop(Left), Stop(Right), Stop(Mean)],
-                mean_hold_force: Some((192_000.0, Unknown("missing mean-stop torque rating and brake linkage construction; retained 192 kN force equivalent, settled by sourced or measured holding torque and its reduction. No gearbox-input brake law is inferred"))),
+                mean_hold_brake_count: Some((2, Measured("two Argus discs worked by the hand lever and foot pedal; Tigerfibel D 656/27 p. 41; Spielberger pp. 51-55"))),
                 engine: (
                     // HL230 P45. idle INFERRED (~600, typical for the engine class);
                     // governed 2500 = the fleet condition from Nov 1943 [ANCHOR]; per-gear
@@ -154,10 +154,8 @@ TankSpec(
                     // Resolution: the rounded radius table checks one crank ratio per detent.
                     radius_rounding_share: (0.01, Resolution("relative radius-table rounding bound: one percent")),
                 ),
-                // Unknown: no brake rating or static/dynamic comparison has been reached.
-                // StandIn: the mean stop uses twice this per-side rating until it has its own datum.
-                brake_force: (96_000.0, Unknown("missing Argus sprocket brake torque rating; 96 kN per side sized for a 20 degree hold (DERIVED 0.343 g total, within an inferred 0.2-0.35 g class band with no sourced Argus rating); grip-limit sizing rejected as circular against mu*weight/2; settled by measured or sourced sprocket braking force")),
-                brake_static_factor: (1.5, Unknown("missing Argus static to dynamic brake ratio; inferred range 1.05-2.0, retained 1.5; settled by measured breakaway and sliding torque")),
+                rated_slope_deg: (35.0, Measured("Spielberger, Der Panzerkampfwagen Tiger und seine Abarten, 6th ed. 1998, pp. 190-192: climbing ability 35 degrees up and down; service brake sized to stop and hold at rated grade per AMCP 706-355 sections 3-2.1 and 8-28")),
+                brake_static_factor: (1.2, Measured("DARCOM-P 706-358 (1976), section 14-8, pp. 14-17 to 14-18: tank brake design example uses service factor 0.50 and static factor 0.60 for larger static pad-rotor friction; ratio 1.2")),
 
             ),
         ),

@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::battle_mode::BattleMode;
-use super::protocol::InputBridge;
+use super::input_arrival::InputBridge;
 use super::score::Scoreboard;
 use crate::CombatantId;
 pub(crate) use crate::command::HoldCommands;

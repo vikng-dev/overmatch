@@ -23,13 +23,18 @@ THE STATS LINE (src/net/server_stats.rs) is one bare `println!` per period on st
 
     server_stats {"budget_us":15625,"clients":2,"cpu_pct":11.2,"entities":812,"overruns":0,
                   "period_s":1.0,"projectiles":3,"rss_mb":61.5,"tanks":3,"tick_hz":64.0,
-                  "tick_us":{"max":900,"p50":210,"p95":480},"ticks":64}
+                  "tick_us":{"max":900,"p50":210,"p95":480},"ticks":64,"inputs":[]}
 
-`parse_stats_line` is the one place that knows that shape: the token `server_stats`, then one JSON
-object. Its keys are not fixed here: nested objects flatten to dotted keys (`tick_us.p95`), every
-numeric leaf is kept, nulls and strings are dropped. When the format moves, that function is the
-change. A line without the token, or whose object does not parse, is not a stats line and is
-skipped, so a server without the lever yields an empty table, not an error.
+`stats_object` is the one place that knows that shape: the record `server_stats {`, then one JSON
+object (`scripts/aws/harness.py` reads it too). Its twin `jitter_object` is the one place that knows
+the client's once-a-second `client_jitter {json}` record (src/net/frontier.rs), which only the AWS
+harness reads. `parse_stats_line` flattens a stats object: its keys are not fixed here; nested
+objects flatten to dotted keys (`tick_us.p95`), every numeric leaf is kept, nulls, strings and lists
+are dropped. Input arrival records join by `inputs[*].link` and flatten under
+`inputs.<link>.arrival`; their stale counters are required. When a format moves, update its reader.
+A line without the record's marker is skipped, so a server without the lever yields an empty table, not an error; a marker whose object
+is missing or does not parse is refused (`MalformedRecord`), since a dropped period would leave a
+window that looks whole.
 
 THE WINDOW. The lines carry no clock, so the runner marks the window by content: at the window's
 start it saves the last stats line the server had printed (the marker), and at its end it saves
@@ -53,7 +58,10 @@ import sys
 from pathlib import Path
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-STATS_TOKEN = "server_stats"
+# src/net/server_stats.rs PREFIX, a space, then the object; a module path (`server_stats:`) is no marker.
+STATS_RECORD = re.compile(r"\bserver_stats(?:\s+|$)")
+# src/net/frontier.rs `record_jitter`: `client_jitter `, then the object, inside an `info!` line.
+JITTER_RECORD = re.compile(r"\bclient_jitter(?:\s+|$)")
 # One spawn line per bot (`server: spawned circling bot 3 tank …`), or one line naming a count
 # (`spawned 10 bots`). `\bspawned` never matches inside `respawned`.
 BOT_SPAWN = re.compile(r"\bspawned\b.*\bbots?\b", re.IGNORECASE)
@@ -75,25 +83,61 @@ def flatten(value: object, prefix: str = "") -> dict[str, float]:
     return out
 
 
-def parse_stats_line(line: str) -> dict[str, float] | None:
-    """THE format function: the stats of one `server_stats {json}` line, flattened, or None.
+class MalformedRecord(ValueError):
+    """A `server_stats` or `client_jitter` record whose required object or fields cannot be read."""
 
-    Expected: the token, then one JSON object, anywhere in the line (a container log may prefix
-    it). Adapt the token or the decoding here, and only here.
-    """
+
+def record_object(line: str, record: re.Pattern, kind: str) -> dict | None:
+    """The object of the line's `<kind> {json}` record, which a journal or container log may
+    prefix: None for a line without the marker, MalformedRecord for a marker without one object."""
     clean = ANSI.sub("", line)
-    at = clean.rfind(STATS_TOKEN)
-    if at < 0:
-        return None
-    brace = clean.find("{", at + len(STATS_TOKEN))
-    if brace < 0:
+    found = record.search(clean)
+    if found is None:
         return None
     try:
-        value, _ = json.JSONDecoder().raw_decode(clean[brace:])
-    except json.JSONDecodeError:
+        value, _ = json.JSONDecoder().raw_decode(clean, found.end())
+    except json.JSONDecodeError as error:
+        raise MalformedRecord(f"a {kind} record does not parse ({error.msg}): {clean.strip()[:160]}") from error
+    if not isinstance(value, dict):
+        raise MalformedRecord(f"a {kind} record holds no object: {clean.strip()[:160]}")
+    return value
+
+
+def stats_object(line: str) -> dict | None:
+    return record_object(line, STATS_RECORD, "server_stats")
+
+
+def jitter_object(line: str) -> dict | None:
+    return record_object(line, JITTER_RECORD, "client_jitter")
+
+
+def parse_stats_line(line: str) -> dict[str, float] | None:
+    """The stats of the line's `server_stats {json}` record, flattened; None for a line without one."""
+    value = stats_object(line)
+    if value is None:
         return None
-    stats = flatten(value)
-    return stats or None
+    parsed = flatten(value)
+    entries = value.get("inputs")
+    if not isinstance(entries, list):
+        raise MalformedRecord("a server_stats record: `inputs` must be an array")
+    seen = set()
+    for index, entry in enumerate(entries):
+        path = f"inputs[{index}]"
+        if not isinstance(entry, dict):
+            raise MalformedRecord(f"a server_stats record: `{path}` must be an object")
+        link = entry.get("link")
+        if not isinstance(link, str) or not link or link in seen:
+            raise MalformedRecord(f"a server_stats record: `{path}.link` must be a unique nonempty string")
+        seen.add(link)
+        arrival = entry.get("arrival")
+        if not isinstance(arrival, dict):
+            raise MalformedRecord(f"a server_stats record: `{path}.arrival` must be an object")
+        for counter in ("stale_declarations", "stale_arrivals"):
+            count = arrival.get(counter)
+            if type(count) is not int or count < 0:
+                raise MalformedRecord(f"a server_stats record: `{path}.arrival.{counter}` must be a nonnegative integer")
+        parsed.update(flatten(arrival, f"inputs.{link}.arrival"))
+    return parsed
 
 
 def after_marker(lines: list[str], marker: str) -> tuple[str, list[str]]:
@@ -139,7 +183,7 @@ def bots_spawned(log_lines: list[str]) -> int:
 
 
 def read_lines(path: Path) -> list[str]:
-    return path.read_text(errors="replace").splitlines() if path.exists() else []
+    return path.read_text(errors="replace").splitlines()
 
 
 def cmd_server_window(args: argparse.Namespace) -> int:
@@ -302,8 +346,7 @@ def read_conditions(tsv: Path) -> list[tuple[str, str, Path]]:
 
 
 def stress_cells(stats: dict[str, dict[str, float]]) -> dict[str, float | None]:
-    """One condition's stress columns from its aggregated stats; None where the key is absent (an
-    `off` server prints no `debris` object)."""
+    """One condition's stress columns; None for absent readings. Only an armed lever has `released`."""
     return {header: (stats[key][agg] if key in stats else None) for header, key, agg in STRESS_COLUMNS}
 
 

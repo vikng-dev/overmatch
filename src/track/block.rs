@@ -62,7 +62,6 @@ pub(crate) enum State {
 #[derive(Debug)]
 pub(crate) struct RowResult {
     pub impulse: f64,
-    pub state: State,
     /// The row exhausted static capacity during this call, or began sliding.
     pub dynamic: bool,
 }
@@ -71,6 +70,20 @@ pub(crate) struct RowResult {
 pub(crate) struct Solution {
     pub speeds: Vec<f64>,
     pub rows: Vec<RowResult>,
+    /// Deterministic work across every static-to-dynamic stage.
+    pub assignments_tried: usize,
+    assignment: Vec<State>,
+}
+
+#[cfg(feature = "bitprobe")]
+thread_local! {
+    static ASSIGNMENT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Per-worker diagnostic work; a mechanical tick drains it around its candidate and final solves.
+#[cfg(feature = "bitprobe")]
+pub(super) fn take_assignment_work() -> usize {
+    ASSIGNMENT_WORK.with(|work| work.replace(0))
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -164,8 +177,10 @@ pub(crate) fn solve_limited(speeds: &[Speed], rows: &[Row], limits: &[ImpulseLim
             seed[i] = State::Lower;
         }
     }
+    let mut assignments_tried = 0;
     loop {
         let search = Search {
+            assignments_tried: std::cell::Cell::new(0),
             speeds,
             rows,
             bounds: &bounds,
@@ -176,7 +191,9 @@ pub(crate) fn solve_limited(speeds: &[Speed], rows: &[Row], limits: &[ImpulseLim
             .find_map(|distance| {
                 search.neighbours(&seed, &mut Vec::with_capacity(rows.len()), distance)
             })
-            .expect("a nonempty compact impulse polytope has an optimum with an independent KKT assignment");
+            .expect("admitted conditioning must leave an optimal independent KKT basis resolvable above the rank threshold");
+        assignments_tried += search.assignments_tried.get();
+        result.assignments_tried = assignments_tried;
         let mut broke = false;
         for (i, row) in rows.iter().enumerate() {
             if !dynamic[i]
@@ -191,14 +208,16 @@ pub(crate) fn solve_limited(speeds: &[Speed], rows: &[Row], limits: &[ImpulseLim
             result.rows[i].dynamic = dynamic[i];
         }
         if !broke {
+            #[cfg(feature = "bitprobe")]
+            ASSIGNMENT_WORK.with(|work| work.set(work.get() + assignments_tried));
             return result;
         }
-        seed = result.rows.iter().map(|r| r.state).collect();
-        seed.resize(rows.len() + limits.len(), State::Interior);
+        seed = result.assignment;
     }
 }
 
 struct Search<'a> {
+    assignments_tried: std::cell::Cell<usize>,
     speeds: &'a [Speed],
     rows: &'a [Row],
     bounds: &'a [Bounds],
@@ -251,102 +270,7 @@ impl Search<'_> {
     }
 
     fn trial(&self, states: &[State]) -> Option<Solution> {
-        if !self.limits.is_empty() {
-            return self.limited_trial(states);
-        }
-        let stuck: Vec<_> = states
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| (*s == State::Interior).then_some(i))
-            .collect();
-        let mut impulses: Vec<_> = states
-            .iter()
-            .zip(self.bounds)
-            .map(|(state, bound)| match state {
-                State::Interior => 0.0,
-                State::Lower => bound.lower,
-                State::Upper => bound.upper,
-            })
-            .collect();
-        let mut velocity = self.free.to_vec();
-        for (row, p) in self.rows.iter().zip(&impulses) {
-            for ((v, a), s) in velocity.iter_mut().zip(&row.jacobian).zip(self.speeds) {
-                *v += a * p / s.inertia;
-            }
-        }
-        let mut matrix: Vec<Vec<f64>> = stuck
-            .iter()
-            .map(|&i| {
-                let mut line: Vec<_> = stuck
-                    .iter()
-                    .map(|&j| {
-                        self.rows[i]
-                            .jacobian
-                            .iter()
-                            .zip(&self.rows[j].jacobian)
-                            .zip(self.speeds)
-                            .map(|((a, b), s)| a * b / s.inertia)
-                            .sum()
-                    })
-                    .collect();
-                line.push(self.rows[i].target - dot(&self.rows[i].jacobian, &velocity));
-                line
-            })
-            .collect();
-        assert!(
-            matrix.iter().flatten().all(|v| v.is_finite()),
-            "admitted row coefficients and inertias produce a finite effective-mass system"
-        );
-        // A dependent stuck set has no unique impulse; a vertex assignment represents it instead.
-        let solved = eliminate(&mut matrix)?;
-        for (&row, p) in stuck.iter().zip(solved) {
-            impulses[row] = p;
-            for ((v, a), s) in velocity
-                .iter_mut()
-                .zip(&self.rows[row].jacobian)
-                .zip(self.speeds)
-            {
-                *v += a * p / s.inertia;
-            }
-        }
-        for (i, row) in self.rows.iter().enumerate() {
-            let p = impulses[i];
-            let bound = self.bounds[i];
-            let allowance = RESOLUTION * bound.lower.abs().max(bound.upper.abs());
-            let slip = dot(&row.jacobian, &velocity) - row.target;
-            let tolerance = row.slip_tolerance(&velocity);
-            if p < bound.lower - allowance
-                || p > bound.upper + allowance
-                || match states[i] {
-                    State::Interior => slip.abs() > tolerance,
-                    State::Lower => bound.lower != bound.upper && slip < -tolerance,
-                    State::Upper => bound.lower != bound.upper && slip > tolerance,
-                }
-            {
-                return None;
-            } // This assignment violates the box optimality conditions.
-            impulses[i] = p.clamp(bound.lower, bound.upper);
-        }
-        snap(&mut velocity, self.rows, &stuck);
-        assert!(
-            velocity.iter().chain(&impulses).all(|v| v.is_finite()),
-            "an accepted finite independent block produces finite speeds and impulses"
-        );
-        Some(Solution {
-            speeds: velocity,
-            rows: impulses
-                .into_iter()
-                .zip(states)
-                .map(|(impulse, &state)| RowResult {
-                    impulse,
-                    state,
-                    dynamic: false,
-                })
-                .collect(),
-        })
-    }
-
-    fn limited_trial(&self, states: &[State]) -> Option<Solution> {
+        self.assignments_tried.set(self.assignments_tried.get() + 1);
         let n = self.rows.len();
         let interior: Vec<_> = (0..n).filter(|&i| states[i] == State::Interior).collect();
         let active: Vec<_> = (0..self.limits.len())
@@ -438,6 +362,7 @@ impl Search<'_> {
             {
                 return None;
             }
+            impulses[i] = impulses[i].clamp(bound.lower, bound.upper);
             if states[i] == State::Interior && correction == 0.0 {
                 snapped.push(i);
             }
@@ -500,7 +425,7 @@ impl Search<'_> {
                     line
                 })
                 .collect();
-            if eliminate(&mut gram).is_none() {
+            if eliminate_bordered(&mut gram, independent.len()).is_none() {
                 independent.pop();
             }
         }
@@ -510,13 +435,13 @@ impl Search<'_> {
             "an accepted finite independent block produces finite speeds and impulses"
         );
         Some(Solution {
+            assignments_tried: 0,
+            assignment: states.to_vec(),
             speeds: velocity,
             rows: impulses
                 .into_iter()
-                .zip(states)
-                .map(|(impulse, &state)| RowResult {
+                .map(|impulse| RowResult {
                     impulse,
-                    state,
                     dynamic: false,
                 })
                 .collect(),
@@ -586,45 +511,60 @@ fn eliminate_bordered(matrix: &mut [Vec<f64>], interior: usize) -> Option<Vec<f6
     Some(answer)
 }
 
-/// Gaussian elimination with row pivoting. `None` means a dependent stuck set, not a failed solve.
-fn eliminate(matrix: &mut [Vec<f64>]) -> Option<Vec<f64>> {
-    let n = matrix.len();
-    // Normalize each row by its inertial norm on both axes: a change of row units then
-    // leaves the rank test unchanged. The normalized Gram matrix has unit diagonal.
-    let norms: Vec<_> = (0..n).map(|i| matrix[i][i].sqrt()).collect();
-    if norms.contains(&0.0) {
-        return None; // A zero row cannot be part of an independent stuck set.
-    }
-    for (i, line) in matrix.iter_mut().enumerate() {
-        for j in 0..n {
-            line[j] /= norms[i] * norms[j];
+/// A three-speed construction's limit bounds impulse on one of those speeds. Its normal is
+/// already a column of the row matrix, so it cannot resolve a dependent impulse basis. Direct
+/// minors identify physical independence without squaring small angles into Gram cancellation.
+pub(super) fn conditioning_resolvable(
+    inertias: &[f64; 3],
+    rows: &[[f64; 3]],
+    limited_coordinate: usize,
+) -> bool {
+    for mask in 1usize..(1 << rows.len()) {
+        let free: Vec<_> = (0..rows.len()).filter(|i| mask & (1 << i) != 0).collect();
+        let nf = free.len();
+        let independent = match free.as_slice() {
+            [a] => rows[*a].iter().any(|x| *x != 0.0),
+            [a, b] => (0..3).any(|i| {
+                (i + 1..3).any(|j| rows[*a][i] * rows[*b][j] != rows[*a][j] * rows[*b][i])
+            }),
+            [a, b, c] => {
+                let (a, b, c) = (rows[*a], rows[*b], rows[*c]);
+                a[0] * (b[1] * c[2] - b[2] * c[1])
+                    + a[1] * (b[2] * c[0] - b[0] * c[2])
+                    + a[2] * (b[0] * c[1] - b[1] * c[0])
+                    != 0.0
+            }
+            _ => false, // More rows than speeds are dependent.
+        };
+        if !independent {
+            continue;
         }
-        line[n] /= norms[i];
-    }
-    for col in 0..n {
-        let pivot = (col..n)
-            .max_by(|&a, &b| matrix[a][col].abs().total_cmp(&matrix[b][col].abs()))
-            .expect("an unfinished square system has a pivot candidate");
-        if matrix[pivot][col].abs() <= RESOLUTION {
-            return None;
-        }
-        matrix.swap(col, pivot);
-        for row in col + 1..n {
-            let factor = matrix[row][col] / matrix[col][col];
-            let (before, after) = matrix.split_at_mut(row);
-            for (value, pivot) in after[0][col..=n].iter_mut().zip(&before[col][col..=n]) {
-                *value -= factor * pivot;
+        for active in [false, true] {
+            if active && free.iter().all(|&i| rows[i][limited_coordinate] == 0.0) {
+                continue;
+            }
+            let size = nf + usize::from(active);
+            let mut matrix = vec![vec![0.0; size + 1]; size];
+            for (i, &a) in free.iter().enumerate() {
+                for (j, &b) in free.iter().enumerate() {
+                    matrix[i][j] = rows[a]
+                        .iter()
+                        .zip(&rows[b])
+                        .zip(inertias)
+                        .map(|((x, y), m)| x * y / m)
+                        .sum();
+                }
+                if active {
+                    matrix[i][nf] = rows[a][limited_coordinate];
+                    matrix[nf][i] = rows[a][limited_coordinate];
+                }
+            }
+            if eliminate_bordered(&mut matrix, nf).is_none() {
+                return false;
             }
         }
     }
-    let mut answer = vec![0.0; n];
-    for i in (0..n).rev() {
-        answer[i] = (matrix[i][n] - dot(&matrix[i][i + 1..n], &answer[i + 1..n])) / matrix[i][i];
-    }
-    for (value, norm) in answer.iter_mut().zip(norms) {
-        *value /= norm;
-    }
-    Some(answer)
+    true
 }
 
 /// Eliminate speed coordinates, then substitute exact targets. In particular a coordinate stop

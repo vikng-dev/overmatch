@@ -12,6 +12,10 @@ pub(super) struct Timing {
     pub uplink_window_s: f64,
     pub stale_floor_s: f64,
     pub stale_ceil_s: f64,
+    pub recovery_fresh_copies: u8,
+    pub link_warning_s: f64,
+    pub refused_cue_s: f64,
+    pub refused_pitch: f32,
 }
 
 impl FromWorld for Timing {
@@ -29,6 +33,10 @@ impl Timing {
             uplink_window_s: Sourced<f64>,
             stale_floor_s: Sourced<f64>,
             stale_ceil_s: Sourced<f64>,
+            recovery_fresh_copies: Sourced<u8>,
+            link_warning_s: Sourced<f64>,
+            refused_cue_s: Sourced<f64>,
+            refused_pitch: Sourced<f32>,
         }
         let authored: Authored = from_shipped_str(
             "assets/net_timing.ron",
@@ -40,12 +48,19 @@ impl Timing {
             uplink_window_s: authored.uplink_window_s.0,
             stale_floor_s: authored.stale_floor_s.0,
             stale_ceil_s: authored.stale_ceil_s.0,
+            recovery_fresh_copies: authored.recovery_fresh_copies.0,
+            link_warning_s: authored.link_warning_s.0,
+            refused_cue_s: authored.refused_cue_s.0,
+            refused_pitch: authored.refused_pitch.0,
         };
         for (field, value) in [
             ("view_window_s", timing.view_window_s),
             ("uplink_window_s", timing.uplink_window_s),
             ("stale_floor_s", timing.stale_floor_s),
             ("stale_ceil_s", timing.stale_ceil_s),
+            ("link_warning_s", timing.link_warning_s),
+            ("refused_cue_s", timing.refused_cue_s),
+            ("refused_pitch", f64::from(timing.refused_pitch)),
         ] {
             assert!(
                 value.is_finite() && value > 0.0,
@@ -55,6 +70,10 @@ impl Timing {
         assert!(
             timing.stale_floor_s <= timing.stale_ceil_s,
             "assets/net_timing.ron: stale_floor_s must not exceed stale_ceil_s; fix the timing data"
+        );
+        assert!(
+            timing.recovery_fresh_copies > 0,
+            "assets/net_timing.ron: recovery_fresh_copies must be positive; allow the first input copy during recovery"
         );
         timing
     }

@@ -450,6 +450,7 @@ fn run(case: &Case, hold_s: usize) {
         "series": series.cols,
     });
     println!("TURNPROBE {line}");
+    bed.assignment_work.print(&case.label);
 }
 
 /// Straight full throttle from rest on the level grid until the top gear has held `CRUISE_S`:
@@ -648,10 +649,12 @@ fn brake_stop(gear: u8) {
         "latch_travel_m": latch_at,
         "stop_travel_m": peak,
         "stop_ticks": peak_tick,
+        "average_deceleration_m_s2": pull_speed * pull_speed / (2.0 * peak),
         "rock_back_mm": (peak - along(&bed)) * 1e3,
         "peak_reverse_mm_s": -reverse_speed * 1e3,
     });
     println!("TURNPROBE-BRAKE {line}");
+    bed.assignment_work.print("brake");
 }
 
 /// The shipped map's ground under candidate drops: (x, z, mean slope rad, roughness m), where

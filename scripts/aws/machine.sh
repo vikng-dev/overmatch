@@ -1,0 +1,198 @@
+#!/bin/bash
+# machine.sh — the machine side of scripts/aws/harness.py. Both machines boot with it as their
+# user-data; the operator then runs its commands over SSH as `sudo -n om-harness <command>`.
+#
+# BOOT (cloud-init runs it as root with no arguments), in order, each step appending
+# `<step> <seconds since kernel start>` to $STATE/phases, a failing one appending `failed <step>`:
+#   guard     schedule this machine's own power-off at CAP_MIN minutes. The harness launches every
+#             machine with shutdown behaviour `terminate`, so the power-off deletes the machine and
+#             its volume whatever happens to the operator.
+#   self      install this file as /usr/local/bin/om-harness, settings included.
+#   key       the operator's per-run public key for `ubuntu`, the results channel. After `self`, so
+#             a machine the operator can reach always answers `state`.
+#   packages  (client only) libasound2t64: the unchanged client links libasound.so.2;
+#             the dedicated server is built without audio and needs no package install.
+#   downloaded, verified, unpacked
+#             the release archive by explicit tag, checked against the checksum line the operator
+#             read from the release's own `.sha256`, unpacked into /opt/overmatch.
+#   started   (server) the server under systemd, unit `overmatch-server`.
+#   ready     the machine has nothing left to do at boot.
+#
+# COMMANDS (operator, over SSH):
+#   state                 the phases file; the server also its unit state and listening line.
+#   host                  CPU count and model.
+#   uptime-echo           one CLOCK_BOOTTIME reading per stdin line: the operator's clock offset.
+#   start-client <k> <server ip:port> <ticks>
+#                         client k as transient unit `om-client-<k>`, playing CLIENT_SCRIPT.
+#   client-state <k>      its unit state and the kernel time of its first `input slot` line.
+#   sample <unit>...      start the 1 Hz sampler (unit `om-sampler`) of those units and the host.
+#   samples               the sampler's lines.
+#   journal <unit>        that unit's journal, kernel-time stamped.
+# @settings
+set -Eeuo pipefail
+
+STATE=/var/lib/om-harness
+INSTALL=/opt/overmatch
+# The scripted client's session (src/net/harness.rs `Script`): hull parked, never firing, turret
+# sweeping (~1.3 rad/s) so every tick carries a changing aim, the way a scanning player's does.
+CLIENT_SCRIPT='(drive: Idle, aim: Sweep, ticks: %s)'
+
+uptime_s() {
+  local up _
+  read -r up _ </proc/uptime
+  printf '%s' "$up"
+}
+
+mark() { printf '%s %s\n' "$1" "$(uptime_s)" >>"$STATE/phases"; }
+
+boot() {
+  install -d -m 755 "$STATE"
+  mark userdata
+  step=guard
+  trap 'mark "failed $step"' ERR
+  shutdown -h "+$CAP_MIN"
+  mark guard
+
+  step=self
+  install -m 755 "$0" /usr/local/bin/om-harness
+  mark self
+
+  step=key
+  install -d -m 700 -o ubuntu -g ubuntu /home/ubuntu/.ssh
+  printf '%s\n' "$PUBKEY" >>/home/ubuntu/.ssh/authorized_keys
+  chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+  chmod 600 /home/ubuntu/.ssh/authorized_keys
+  mark key
+
+  if [[ "$ROLE" == client ]]; then
+    step=packages
+    if ! dpkg-query -W -f '${Status}' libasound2t64 2>/dev/null | grep -q 'install ok installed'; then
+      apt-get -o DPkg::Lock::Timeout=300 update -q
+      DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -q \
+        --no-install-recommends libasound2t64
+    fi
+    mark packages
+  fi
+
+  step=download
+  local archive="$STATE/${ARCHIVE_URL##*/}"
+  curl -fsSL --retry 3 -o "$archive" "$ARCHIVE_URL"
+  mark downloaded
+
+  step=verify
+  (cd "$STATE" && printf '%s\n' "$ARCHIVE_SHA256" | sha256sum --check --strict --quiet -)
+  mark verified
+
+  step=unpack
+  install -d -m 755 "$INSTALL"
+  tar -xzf "$archive" --strip-components=1 -C "$INSTALL"
+  rm "$archive"
+  mark unpacked
+
+  if [[ "$ROLE" == server ]]; then
+    step=start
+    cat >/etc/systemd/system/overmatch-server.service <<UNIT
+[Unit]
+Description=Overmatch dedicated server (scripts/aws/harness.py)
+
+[Service]
+User=ubuntu
+WorkingDirectory=$INSTALL
+Environment=OVERMATCH_BOT=$BOTS OVERMATCH_SERVER_STATS_S=$STATS_S NO_COLOR=1
+ExecStart=$INSTALL/overmatch-server
+LogRateLimitIntervalSec=0
+UNIT
+    systemctl daemon-reload
+    systemctl start overmatch-server
+    mark started
+  fi
+  mark ready
+}
+
+# The kernel time of the first journal line of <unit> holding <text>; nothing when the query
+# succeeds and no line holds it. A failed query fails the caller, its error on stderr.
+first_line_s() {
+  local journal line
+  journal="$(journalctl -u "$1" -o short-monotonic --no-pager -q)" || return
+  line="$(grep -m1 -F -- "$2" <<<"$journal")" || [[ $? == 1 ]] || return
+  [[ -z "$line" ]] || sed -E 's/^\[ *([0-9.]+)\].*/\1/' <<<"$line"
+}
+
+cmd_state() {
+  cat "$STATE/phases" 2>/dev/null || true
+  if [[ "$ROLE" == server && -f /etc/systemd/system/overmatch-server.service ]]; then
+    echo "unit $(systemctl is-active overmatch-server || true)"
+    local at
+    at="$(first_line_s overmatch-server 'server: starting, listening')"
+    [[ -z "$at" ]] || echo "listening $at"
+  fi
+}
+
+cmd_uptime_echo() {
+  local _line
+  while read -r _line; do
+    uptime_s
+    echo
+  done
+}
+
+cmd_start_client() {
+  local k="$1" server="$2" ticks="$3"
+  # shellcheck disable=SC2059 # CLIENT_SCRIPT is the format.
+  printf "$CLIENT_SCRIPT\n" "$ticks" >"$STATE/client-$k.ron"
+  systemd-run --quiet --unit "om-client-$k" -p User=ubuntu -p WorkingDirectory="$INSTALL" \
+    --setenv=OVERMATCH_SERVER="$server" --setenv=OVERMATCH_HARNESS="$STATE/client-$k.ron" \
+    --setenv=NO_COLOR=1 "$INSTALL/overmatch"
+}
+
+cmd_client_state() {
+  local unit="om-client-$1" at
+  echo "unit $(systemctl is-active "$unit" || true)"
+  at="$(first_line_s "$unit" 'input slot')"
+  [[ -z "$at" ]] || echo "slot $at"
+}
+
+# One line per second: `<boot s> <unit>=<cpu usec>,<rss kB> ... cpu <the /proc/stat cpu fields>`.
+# Builtins only inside the loop, so the sampler's own cost stays out of what it samples.
+cmd_sample_loop() {
+  local units=("$@") pids=() unit line key value cpu rss stat
+  for unit in "${units[@]}"; do pids+=("$(systemctl show -p MainPID --value "$unit")"); done
+  while :; do
+    line="$(uptime_s)"
+    for i in "${!units[@]}"; do
+      cpu=- rss=-
+      while read -r key value; do
+        [[ "$key" == usage_usec ]] && cpu="$value" && break
+      done <"/sys/fs/cgroup/system.slice/${units[$i]}.service/cpu.stat" || true
+      while read -r key value _; do
+        [[ "$key" == VmRSS: ]] && rss="$value" && break
+      done <"/proc/${pids[$i]}/status" || true
+      line+=" ${units[$i]}=$cpu,$rss"
+    done
+    read -r stat </proc/stat
+    printf '%s %s\n' "$line" "$stat" >>"$STATE/samples"
+    sleep 1
+  done
+}
+
+cmd_sample() {
+  systemd-run --quiet --unit om-sampler /usr/local/bin/om-harness sample-loop "$@"
+}
+
+main() {
+  case "${1:-}" in
+    "") boot ;;
+    state) cmd_state ;;
+    host) printf 'cpus %s\nmodel %s\n' "$(nproc)" "$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)" ;;
+    uptime-echo) cmd_uptime_echo ;;
+    start-client) shift; cmd_start_client "$@" ;;
+    client-state) shift; cmd_client_state "$@" ;;
+    sample) shift; cmd_sample "$@" ;;
+    sample-loop) shift; cmd_sample_loop "$@" ;;
+    samples) cat "$STATE/samples" 2>/dev/null || true ;;
+    journal) journalctl -u "$2" -o short-monotonic --no-pager -q ;;
+    *) echo "om-harness: unknown command '$1'" >&2; exit 2 ;;
+  esac
+}
+
+main "$@"

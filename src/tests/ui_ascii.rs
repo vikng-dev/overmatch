@@ -74,6 +74,7 @@ const BARLOW_TEXT_FILES: &[&str] = &[
     "src/net/death_screen.rs",
     "src/net/debug_hud.rs",
     "src/net/hit_feel.rs",
+    "src/net/input_feedback.rs",
     "src/net/spawn_map.rs",
     // The Join menu: its own labels, and the reasons the other files compose for it.
     "src/net/matchmaking/lobby_ui.rs",

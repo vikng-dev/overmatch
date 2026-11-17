@@ -871,8 +871,8 @@ fn an_unstaffed_pivot_hands_its_passive_hold_to_park_and_sleeps() {
         .collect();
     assert_eq!(drivers.len(), 1, "the fixture has one Driver station");
     app.world_mut().entity_mut(drivers[0]).insert(Dead);
-    for _ in 0..8 * FIXED_TICKS_PER_SECOND {
-        // Fixture observation window, not a timing contract.
+    // Eventual rest has no player-owned deadline; the test runner owns the hang watchdog.
+    loop {
         drive_tick(&mut app, tank, 0.0, 0.0);
         if app.world().get::<Sleeping>(tank).is_some() {
             break;
@@ -1263,31 +1263,49 @@ fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
     );
 }
 
-/// A cold contact field must arrest below both moving capacities and keep moving above
-/// either static capacity. Settling can breach a static brake before the field is loaded;
+/// A cold contact field must arrest below both moving capacities. Persistent downhill motion
+/// requires gravity to exceed both the static holding path and rolling resistance. Settling can breach a static brake before the field is loaded;
 /// static capacity alone therefore promises no capture. The transmission's
 /// `brake_capacity_breach_backdrives` test pins stationary hold and static breakaway.
 /// Fixture: tilted planes, a fresh parked tank, 60 s capture and 8 s sliding observations, under
 /// production rest: a tank whose grip or brakes slide is not at rest however slowly it moves.
 #[test]
-fn contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_limits() {
+fn contact_law_brakes_capture_below_moving_limits_and_move_above_total_resistance() {
     use avian3d::prelude::Position;
     let spec = crate::track::rig_geom::tiger_spec();
     let tr = &spec.track.powertrain.transmission;
     let weight = spec.mass * crate::track::derive::G;
-    let brake_limit = (2.0 * tr.brake_force.value * tr.brake_static_factor.value / weight)
+    let brake_limit =
+        (2.0 * tr.brake_capacity_n(spec.mass).unwrap() * tr.brake_static_factor.value / weight)
+            .min(1.0)
+            .asin();
+    let moving_brake_limit = (2.0 * tr.brake_capacity_n(spec.mass).unwrap() / weight)
         .min(1.0)
         .asin();
-    let moving_brake_limit = (2.0 * tr.brake_force.value / weight).min(1.0).asin();
+    let pressure = {
+        let (app, _) = booted_offline_sim();
+        nominal_pressure(&app)
+    };
     for (name, ground) in crate::ground_types::GroundTypes::load_shipped().types {
         let ground_limit = ground.grip.value.atan();
+        let rolling = ground.contact().rolling_at(pressure);
+        // sin(theta) > min(mu*cos(theta), brake/weight) + rolling*cos(theta).
+        // Solving each branch gives the lower angle beyond all available resistance.
+        let moving_limit = (ground.grip.value + rolling).atan().min(
+            rolling.atan()
+                + ((brake_limit.sin() / (1.0 + rolling * rolling).sqrt()).min(1.0)).asin(),
+        );
         for above in [false, true] {
             let brake = if above {
                 brake_limit
             } else {
                 moving_brake_limit
             };
-            let limit = ground_limit.min(brake);
+            let limit = if above {
+                moving_limit
+            } else {
+                ground_limit.min(brake)
+            };
             if limit == 0.0 && !above {
                 continue; // Zero grip has no positive holding-slope interval.
             }
@@ -1354,7 +1372,7 @@ fn contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_
             if above {
                 assert!(
                     travel > speed_precision && late_max_speed > speed_precision,
-                    "{name}: above the lower static limit must keep moving"
+                    "{name}: gravity beyond static hold plus rolling resistance must keep moving"
                 );
             } else {
                 assert!(

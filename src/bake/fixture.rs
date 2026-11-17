@@ -256,7 +256,7 @@ TankSpec(
                     capacity: 1.0,
                     radius_rounding_share: (0.01, Fixture(\"relative radius-table rounding bound: one percent\")),
                 ),
-                brake_force: (1.0, Fixture(\"missing brake torque rating; settled by measured sprocket braking force\")),
+                rated_slope_deg: (30.0, Fixture(\"rated climbing slope\")),
                 brake_static_factor: (1.5, Fixture(\"missing static to dynamic brake ratio; settled by measured breakaway and sliding torque\")),
             ),
         ),

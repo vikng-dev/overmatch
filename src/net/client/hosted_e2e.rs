@@ -96,7 +96,6 @@ fn client_app(api: &str, log: bool) -> App {
     app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(crate::net::plugin);
     app.add_plugins(physics::physics_plugins());
-    app.add_plugins(crate::net::fire_presentation::plugin);
     app.add_plugins(SimPlugin);
     app.insert_resource(crate::ClientReplica);
     // The Join menu's state lives beside its UI tree, which needs the fonts and the overlay set.
@@ -106,18 +105,10 @@ fn client_app(api: &str, log: bool) -> App {
         crate::overlay::plugin,
     ));
 
-    let input_delay = shipping_input_delay();
-    let sync_config = SyncConfig {
-        jitter_multiple: 2,
-        jitter_margin: 1.0,
-        ..default()
-    };
     let interpolation = crate::net::interp_delay::install(&mut app, tick_duration);
-    let interpolation =
-        crate::net::sync_margin::install(&mut app, sync_config, input_delay, interpolation);
+    let interpolation = crate::net::sync_margin::install(&mut app, interpolation);
     crate::net::frontier::install(&mut app);
     crate::net::frontier::install_jitter_line(&mut app);
-    app.insert_resource(InputTimelineConfig::new(sync_config, input_delay));
     app.insert_resource(interpolation);
 
     app.init_resource::<ConnectRetry>()
@@ -164,8 +155,6 @@ fn client_app(api: &str, log: bool) -> App {
                 .before(GameplaySet)
                 .run_if(in_state(AppState::Playing)),
         );
-    install_input_buffer_guard(&mut app);
-    install_input_send_cadence(&mut app);
 
     app.init_resource::<Probe>()
         .add_observer(record_connected)

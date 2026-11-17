@@ -1030,7 +1030,7 @@ fn build_rig(
     // but does not represent the pin polygon.
     let transmission = RigTransmission(
         track
-            .transmission_params(&spec.roadwheels, geom.wrap_radii(), geom.plane_x)
+            .transmission_params(&spec.roadwheels, geom.wrap_radii(), geom.plane_x, spec.mass)
             .expect("the Tiger's transmission block is validated at bake"),
     );
     commands.insert_resource(TransState::fresh(&transmission.0));
@@ -1468,7 +1468,12 @@ fn apply_rig_counts(
     track.link_count = counts.link_count;
     track.sprocket.teeth = counts.teeth;
     let wrap = next.wrap_radii();
-    let derived = track.transmission_params(&blueprint.spec.roadwheels, wrap, next.plane_x);
+    let derived = track.transmission_params(
+        &blueprint.spec.roadwheels,
+        wrap,
+        next.plane_x,
+        blueprint.spec.mass,
+    );
     let derived = match derived {
         Ok(derived) => derived,
         Err(error) => {

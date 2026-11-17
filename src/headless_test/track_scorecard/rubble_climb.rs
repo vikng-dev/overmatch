@@ -424,6 +424,7 @@ fn house_bed() -> Bed {
         app,
         tank,
         rest_y,
+        assignment_work: AssignmentWork::default(),
         pieces: Vec::new(),
     };
     // Fixture: well clear of the house and of what falls from it.
@@ -1310,6 +1311,7 @@ fn park_case(heap: Option<(Heap, f32)>, label: &str, tag: &str) {
         "window": park_summary(&ticks[PARK_SETTLE_S * TICKS..]),
     });
     println!("RUBBLEPARK {line}");
+    bed.assignment_work.print(label);
 }
 
 /// Each piece in the tank's island still failing the rest test this tick (awake, its rest timer

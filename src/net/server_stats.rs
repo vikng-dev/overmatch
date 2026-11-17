@@ -20,17 +20,8 @@
 //!   outside `frame_us`. Every reading is an `Ok` value or an `Err` with a named
 //!   typed absence. The host's THP mode and CPU topology log once when this recorder starts;
 //! - `overruns`: ticks longer than the fixed timestep, `budget_us`;
-//! - `inputs`: per link, `tick_exact` and `held` counts of the input snapshots the bridge reads,
-//!   `last_for_tick_offset` (`for_tick - server_tick`), `min_buffer_lookahead` and
-//!   `max_buffer_lookahead` (the input buffer's newest remote tick − server tick at those reads),
-//!   the ready messages Lightyear's receive gate `accepted` or dropped (`lookahead_rejected` past
-//!   its future bound, `past_rejected` past its past bound), and `min_message_lookahead` and
-//!   `max_message_lookahead` (`end_tick - server_tick`) observed before the gate. Offsets are
-//!   signed ticks; null means no matching tick/message in this period. Counts reset per row.
-//!   `arrival` is `net::input_gap`'s always-collected record: silence, the window's raw arrival-gap
-//!   histogram, would-be stale threshold and declarations since the preceding line. Disconnected
-//!   links keep their final period counts with `not_connected_at_emission` instead of an arrival
-//!   record; a newly connected link has a row even before its first input;
+//! - `inputs`: each connected link's input-arrival histogram, silence, stale threshold and
+//!   declarations since the preceding line, including the awaiting-first-arrival state;
 //! - `wall`: the runner's `discarded_ms` (wall time past the admission cap dropped this period)
 //!   and `discarding_batches` (admitted batches that dropped any), and `drift_ms`, how far
 //!   simulated time trails wall time since startup (`server_runner::WallLedger`);
@@ -114,24 +105,16 @@ use bevy::prelude::*;
 use bevy::utils::Parallel;
 use bevy_replicon::prelude::ServerSystems;
 use bevy_replicon::server::server_tick::ServerTick;
-use lightyear::input::input_message::InputMessage;
 use lightyear::link::LinkSystems;
-use lightyear::prelude::input::native::{ActionState, NativeBuffer, NativeStateSequence};
-use lightyear::prelude::input::server::InputSystems;
 use lightyear::prelude::server::ClientOf;
-use lightyear::prelude::{
-    Connected, ConnectionSystems, ControlledBy, Link, LocalTimeline, MessageReceiver, Tick,
-};
+use lightyear::prelude::{Connected, ConnectionSystems, Link};
 use serde_json::{Value, json};
-
-use crate::command::{ParsedTankCommand, TankCommand};
 
 use super::contact_census::PieceRecords;
 use super::debris_stress::DebrisCensus;
 use super::harness::{LeverError, env_text};
 use super::loadtest::Loadtest;
 use super::server_host::{QuotaAbsence, Throttle, quota_cpus, read_throttle};
-use super::sync_margin::MAX_INPUT_LOOKAHEAD_TICKS;
 use crate::ballistics::Projectile;
 use crate::construction::{
     Body,
@@ -154,131 +137,8 @@ const LEVER: &str = "OVERMATCH_SERVER_STATS_S";
 /// The line's grep anchor.
 const PREFIX: &str = "server_stats";
 
-/// Fact: lightyear_inputs 0.31.0 `MAX_INPUT_PAST_TICKS` in src/server.rs sets its past-input gate to 64;
-/// receive_input_message applies it beside the lookahead gate, before any buffer write.
-const MAX_INPUT_PAST_TICKS: i32 = 64;
-
-#[derive(Default, serde::Serialize)]
-struct InputCounts {
-    tick_exact: u64,
-    held: u64,
-    last_for_tick_offset: Option<i32>,
-    min_buffer_lookahead: Option<i32>,
-    max_buffer_lookahead: Option<i32>,
-    accepted: u64,
-    lookahead_rejected: u64,
-    past_rejected: u64,
-    min_message_lookahead: Option<i32>,
-    max_message_lookahead: Option<i32>,
-}
-
-/// Fold `value` into a period's signed minimum and maximum.
-fn widen(min: &mut Option<i32>, max: &mut Option<i32>, value: i32) {
-    *min = Some(min.map_or(value, |min| min.min(value)));
-    *max = Some(max.map_or(value, |max| max.max(value)));
-}
-
-/// Census reduction only: independent input evaluation stays in the bridge. FixedPreUpdate
-/// has applied Lightyear's snapshot; no ActionState writer intervenes before InputBridge.
-fn count_input_use(
-    timeline: Res<LocalTimeline>,
-    tanks: Query<
-        (
-            &ActionState<TankCommand>,
-            &ControlledBy,
-            Option<&NativeBuffer<TankCommand>>,
-        ),
-        (With<TankCommand>, With<ParsedTankCommand>),
-    >,
-    mut stats: ResMut<ServerStats>,
-) {
-    for (action, owner, buffer) in &tanks {
-        let counts = stats.input_by_client.entry(owner.owner).or_default();
-        let offset = Tick(action.0.for_tick) - timeline.tick();
-        if offset == 0 {
-            counts.tick_exact += 1;
-        } else {
-            counts.held += 1;
-        }
-        counts.last_for_tick_offset = Some(offset);
-        // Lightyear inserts the buffer with the client's first input message, which also sets
-        // its newest remote tick; until then the tank has no buffer to read.
-        if let Some(newest) = buffer.and_then(|buffer| buffer.last_remote_tick) {
-            widen(
-                &mut counts.min_buffer_lookahead,
-                &mut counts.max_buffer_lookahead,
-                newest - timeline.tick(),
-            );
-        }
-    }
-}
-
-/// One link's ready input messages this frame, against Lightyear's receive gate.
-#[derive(Default)]
-struct MessageCensus {
-    accepted: u64,
-    lookahead_rejected: u64,
-    past_rejected: u64,
-    min: Option<i32>,
-    max: Option<i32>,
-}
-
-/// Lightyear drains these messages in ReceiveInputs. Retaining every message observes the gate
-/// without consuming, rewriting or refusing anything here (0.31.0 receive.rs).
-fn count_input_lookahead(
-    timeline: Res<LocalTimeline>,
-    mut receivers: Query<
-        (
-            Entity,
-            &mut MessageReceiver<InputMessage<NativeStateSequence<TankCommand>>>,
-        ),
-        (With<ClientOf>, With<Connected>),
-    >,
-    mut stats: ResMut<ServerStats>,
-    mut worker_counts: Local<Parallel<Vec<(Entity, MessageCensus)>>>,
-) {
-    let tick = timeline.tick();
-    let worker_counts = &mut *worker_counts;
-    // Each link owns its queue; integer sums and extrema commute at the census boundary.
-    receivers.par_iter_mut().for_each(|(link, mut receiver)| {
-        let mut census = MessageCensus::default();
-        receiver.retain_messages(|message| {
-            let offset = message.end_tick - tick;
-            widen(&mut census.min, &mut census.max, offset);
-            if offset > MAX_INPUT_LOOKAHEAD_TICKS {
-                census.lookahead_rejected += 1;
-            } else if offset < -MAX_INPUT_PAST_TICKS {
-                census.past_rejected += 1;
-            } else {
-                census.accepted += 1;
-            }
-            true
-        });
-        // A link with no ready message contributes no reading this frame.
-        if census.max.is_some() {
-            worker_counts.scope(|counts| counts.push((link, census)));
-        }
-    });
-    for counts in worker_counts.iter_mut() {
-        for (link, census) in counts.drain(..) {
-            let counts = stats.input_by_client.entry(link).or_default();
-            counts.accepted += census.accepted;
-            counts.lookahead_rejected += census.lookahead_rejected;
-            counts.past_rejected += census.past_rejected;
-            for offset in census.min.into_iter().chain(census.max) {
-                widen(
-                    &mut counts.min_message_lookahead,
-                    &mut counts.max_message_lookahead,
-                    offset,
-                );
-            }
-        }
-    }
-}
-
 /// Arm the stats line when the lever is set.
 pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
-    super::input_gap::install(app);
     let period = period_from(env_text(LEVER)?.as_deref())?;
     super::ram::install(app, period.is_some())?;
     let Some(period) = period else {
@@ -318,16 +178,8 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         sequence: 0,
         send_bytes: 0,
         send_by_client: BTreeMap::new(),
-        input_by_client: BTreeMap::new(),
     });
-    app.add_systems(
-        PreUpdate,
-        count_input_lookahead.in_set(InputSystems::ValidateInputs),
-    );
-    app.add_systems(
-        FixedUpdate,
-        count_input_use.before(super::protocol::InputBridge),
-    );
+
     app.init_resource::<PhaseStarts>();
     super::contact_census::install(app);
     phases::install(app);
@@ -493,7 +345,6 @@ struct ServerStats {
     sequence: u64,
     send_bytes: u64,
     send_by_client: BTreeMap<Entity, SendCounts>,
-    input_by_client: BTreeMap<Entity, InputCounts>,
 }
 
 /// One link's queued sends over a period.
@@ -988,24 +839,11 @@ fn emit_line(
         let (bytes, max_packets) = send_by_client.get(&link).map_or((0, 0), |sent| (sent.bytes, sent.max_packets));
         json!({"link": link.to_string(), "bytes": bytes, "bytes_per_s": bytes as f64 / elapsed.as_secs_f64(), "max_packets": max_packets})
     }).collect();
-    let mut input_counts = std::mem::take(&mut stats.input_by_client);
-    let mut arrival_rows = arrivals.take_lines(fixed.timestep().as_secs_f64());
-    let mut inputs: Vec<_> = census
-        .clients
-        .iter()
-        .map(|link| {
-            // A new connection can have no tank or messages yet; its zero census is still a row.
-            let counts = input_counts.remove(&link).unwrap_or_default();
-            let arrival = arrival_rows
-                .remove(&link)
-                .expect("every connected link has an InputGap summary prepared in parallel");
-            json!({"link": link.to_string(), "counts": counts, "arrival": arrival})
-        })
+    let inputs: Vec<_> = arrivals
+        .take_lines(fixed.timestep().as_secs_f64())
+        .into_iter()
+        .map(|(link, arrival)| json!({"link": link.to_string(), "arrival": arrival}))
         .collect();
-    inputs.extend(input_counts.into_iter().map(|(link, counts)| {
-        json!({"link": link.to_string(), "counts": counts,
-            "arrival": {"state": "not_connected_at_emission"}})
-    }));
     let workload = load.map(|mut load| {
         let mut value = load.json(&record, &census.constructions, &census.loose, now, elapsed);
         value["pieces"] = pieces.clone();
@@ -1210,178 +1048,6 @@ mod tests {
             sequence: 0,
             send_bytes: 0,
             send_by_client: BTreeMap::new(),
-            input_by_client: BTreeMap::new(),
-        }
-    }
-
-    /// Operators must distinguish a missing tick's held command from a tick-exact input, and
-    /// attribute it to its client. Counting buffers or post-attestation commands loses that fact.
-    /// The buffer's reach is the newest input past the simulated tick, signed so a clock running
-    /// ahead reads positive; a client that has sent nothing yet has no reach, not a zero one.
-    #[test]
-    fn input_counts_follow_the_bridge_snapshot_and_keep_clients_separate() {
-        use bevy::ecs::system::RunSystemOnce;
-        let mut world = World::new();
-        let mut timeline = LocalTimeline::default();
-        // Fixture: consecutive server ticks and two clients with different input provenance.
-        timeline.apply_delta(100);
-        world.insert_resource(timeline);
-        world.insert_resource(fixture_stats());
-        let first = world.spawn_empty().id();
-        let second = world.spawn_empty().id();
-        // Only the first client has sent an input yet, for tick 103.
-        for (owner, for_tick, newest) in [(first, 100, Some(103)), (second, 99, None)] {
-            let mut tank = world.spawn((
-                ActionState(TankCommand {
-                    for_tick,
-                    ..default()
-                }),
-                TankCommand::default(),
-                ControlledBy {
-                    owner,
-                    lifetime: default(),
-                },
-            ));
-            if let Some(newest) = newest {
-                let mut buffer = NativeBuffer::<TankCommand>::default();
-                buffer.last_remote_tick = Some(Tick(newest));
-                tank.insert(buffer);
-            }
-        }
-        world.run_system_once(count_input_use).unwrap();
-        world.resource_mut::<LocalTimeline>().apply_delta(1);
-        world.run_system_once(count_input_use).unwrap();
-        let counts = &world.resource::<ServerStats>().input_by_client;
-        assert_eq!(counts[&first].tick_exact, 1);
-        assert_eq!(counts[&first].held, 1);
-        assert_eq!(counts[&first].last_for_tick_offset, Some(-1));
-        assert_eq!(counts[&second].tick_exact, 0);
-        assert_eq!(counts[&second].held, 2);
-        assert_eq!(counts[&second].last_for_tick_offset, Some(-2));
-        assert_eq!(
-            (
-                counts[&first].min_buffer_lookahead,
-                counts[&first].max_buffer_lookahead
-            ),
-            (Some(2), Some(3))
-        );
-        assert_eq!(counts[&second].max_buffer_lookahead, None);
-    }
-
-    /// The clamp and census mirror both private library gates. Drive its actual receive path:
-    /// each gate is accepted, one past it is dropped, every message lands in exactly one count,
-    /// and the census leaves all of them available. Changing either upstream bound in either
-    /// direction must fail this tripwire.
-    #[test]
-    fn the_lookahead_census_matches_lightyears_receive_gate_without_consuming_messages() {
-        use bevy::ecs::system::RunSystemOnce;
-        use lightyear::prelude::*;
-        use lightyear_inputs::input_message::{ActionStateSequence, InputTarget, PerTargetData};
-        type Inputs = InputMessage<NativeStateSequence<TankCommand>>;
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
-            .add_plugins(lightyear::prelude::client::ClientPlugins {
-                tick_duration: super::super::server::TICK,
-            });
-        app.add_plugins(lightyear_inputs::server::ServerInputPlugin::<
-            NativeStateSequence<TankCommand>,
-        >::default());
-        app.add_channel::<super::super::protocol::SpawnChannel>(ChannelSettings::default());
-        app.insert_resource(fixture_stats());
-        app.finish();
-        app.cleanup();
-        app.world_mut().resource_mut::<Time<Virtual>>().pause();
-        // Fixture: messages adjacent to each gate, delivered without a socket or a clock step, at
-        // a server tick far enough from zero that the past gate is not hidden by tick saturation.
-        let link = app
-            .world_mut()
-            .spawn((
-                ClientOf,
-                Connected,
-                RemoteId(PeerId::Netcode(1)),
-                lightyear::connection::host::HostClient { buffer: Vec::new() },
-                MessageSender::<Inputs>::default(),
-                MessageReceiver::<Inputs>::default(),
-            ))
-            .id();
-        app.world_mut()
-            .resource_mut::<LocalTimeline>()
-            .apply_delta(1_000);
-        let tick = app.world().resource::<LocalTimeline>().tick();
-        let offsets = [
-            -MAX_INPUT_PAST_TICKS - 1,
-            -MAX_INPUT_PAST_TICKS,
-            MAX_INPUT_LOOKAHEAD_TICKS,
-            MAX_INPUT_LOOKAHEAD_TICKS + 1,
-        ];
-        let accepted =
-            |offset: i32| (-MAX_INPUT_PAST_TICKS..=MAX_INPUT_LOOKAHEAD_TICKS).contains(&offset);
-        let mut targets = Vec::new();
-        for offset in offsets {
-            let target = app
-                .world_mut()
-                .spawn(NativeBuffer::<TankCommand>::default())
-                .id();
-            let end = tick + offset;
-            let mut source = NativeBuffer::<TankCommand>::default();
-            source.set(end, ActionState(TankCommand::default()));
-            let mut message = Inputs::new(end);
-            message.inputs.push(PerTargetData {
-                target: InputTarget::Entity(target),
-                states: NativeStateSequence::<TankCommand>::build_from_input_buffer(
-                    &source, 1, end,
-                )
-                .unwrap(),
-            });
-            targets.push((offset, target));
-            app.world_mut()
-                .get_mut::<MessageSender<Inputs>>(link)
-                .unwrap()
-                .send::<super::super::protocol::SpawnChannel>(message);
-        }
-        app.update(); // Local delivery fills the receiver in Last.
-        app.world_mut()
-            .run_system_once(count_input_lookahead)
-            .unwrap();
-        let counts = &app.world().resource::<ServerStats>().input_by_client[&link];
-        assert_eq!(
-            (
-                counts.accepted,
-                counts.lookahead_rejected,
-                counts.past_rejected
-            ),
-            (2, 1, 1)
-        );
-        assert_eq!(
-            (counts.min_message_lookahead, counts.max_message_lookahead),
-            (Some(offsets[0]), Some(offsets[3]))
-        );
-        let mut received = Vec::new();
-        app.world_mut()
-            .get_mut::<MessageReceiver<Inputs>>(link)
-            .unwrap()
-            .retain_messages(|message| {
-                received.push(message.end_tick - tick);
-                true
-            });
-        assert_eq!(received, offsets);
-        // The missing server relationship kept delivery pending for the census. Attach it now
-        // and let the plugin's private receive_input_message system drain the real receiver.
-        let server = app.world_mut().spawn_empty().id();
-        app.world_mut()
-            .entity_mut(link)
-            .insert(lightyear::link::prelude::LinkOf { endpoint: server });
-        app.update();
-        for (offset, target) in targets {
-            let buffer = app
-                .world()
-                .get::<NativeBuffer<TankCommand>>(target)
-                .unwrap();
-            assert_eq!(
-                buffer.last_remote_tick,
-                accepted(offset).then_some(tick + offset),
-                "the real receive path must accept at each mirrored gate and drop one past it",
-            );
         }
     }
 
@@ -1593,7 +1259,7 @@ mod tests {
         .init_asset::<Mesh>()
         .init_resource::<crate::contact_transfer::ContactTransfers>()
         .init_resource::<crate::construction::breakage::SweepAccount>()
-        .init_resource::<LocalTimeline>()
+        .init_resource::<lightyear::prelude::LocalTimeline>()
         .insert_resource(Gravity(Vec3::ZERO));
         install(&mut app).unwrap();
         app.finish();

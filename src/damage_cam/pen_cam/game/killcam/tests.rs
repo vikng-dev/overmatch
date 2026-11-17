@@ -721,6 +721,7 @@ fn mount_device(app: &mut App) {
     crate::sight::plugin(app);
     crate::aim::client_plugin(app);
     crate::crew_ui::plugin(app);
+    #[cfg(feature = "audio")]
     crate::sfx::mount_fire_click(app);
     app.init_resource::<DeviceRead>().add_systems(
         RunFixedMainLoop,
@@ -855,6 +856,7 @@ fn let_go(app: &mut App) {
 /// Alive before and after, the same keys drive, fire, click, aim, switch the view and swap crew,
 /// from the first frame of the new life.
 #[test]
+#[cfg(feature = "audio")]
 fn the_death_flow_owns_the_device() {
     let first_notch = crate::track::drive::drive_feel().notch_step();
     for replay in [

@@ -1700,7 +1700,7 @@ mod tests {
             let mut fp = lab_fp();
             fp.inertia = 3000.0; // Fixture arithmetic coupling.
             fp.grip.side_weight = spec.mass * super::super::derive::G / 2.0;
-            let tp = tr.params(0.3, 1.0, fp.inertia).unwrap(); // Fixture sprocket radius and half-tread.
+            let tp = tr.params(0.3, 1.0, fp.inertia, spec.mass).unwrap(); // Fixture sprocket radius and half-tread.
             let inp = driver_input(0.0, 0.0, 1.0);
             let selected = affordable_launch(&tp, &inp, 1.0)
                 .expect("fuel-governed peak must select a capable launch");

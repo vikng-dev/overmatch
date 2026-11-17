@@ -258,6 +258,7 @@ pub(crate) struct ElementOutputProbe {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct TransmissionProbe {
+    pub assignments_tried: usize,
     pub throttle: f32,
     pub steer: f32,
     pub side_commands: [f32; 2],

@@ -27,7 +27,7 @@ It replaces the flat `reload: f32` + `tracer_every: u32` pair, under which the 8
 
 **One absolute deadline, three derived meanings.** `WeaponGateState::ready_tick` is cyclic recovery for an `Automatic` with rounds, a belt swap for a dry `Automatic`, and a per-round reload for a `Single`. `paused_at_tick` records a stable crew-work pause when needed. The belt refills only on a crew-gate-met tick at or after the shifted swap deadline. There is no changing float timer and no per-tick-changing gate state; see ADR-0029.
 
-**`Trigger` demotes to pure input routing.** Which command field a weapon reads (`Primary` → `fire_primary`, `Secondary` → `fire_secondary`) stays `Trigger`; *how* the weapon consumes it derives from the mode — `Single` consumes a click edge, `Automatic` reads a held level. The original mechanism change left `TankCommand` and the wire untouched. ADR-0029 later added `WeaponGate` to the wire without changing this input-routing decision.
+**`Trigger` is pure input routing.** Which command field a weapon reads (`Primary` → `fire_primary`, `Secondary` → `fire_secondary`) stays `Trigger`; *how* the weapon consumes it derives from the mode — `Single` consumes a click edge, `Automatic` reads a held level. The original mechanism change left `TankCommand` and the wire untouched. ADR-0029 later added `WeaponGate` to the wire without changing this input-routing decision.
 
 **Belts start full.** `WeaponGateState::for_mode` spawns an `Automatic` with `belt_remaining = belt_size` — a fresh belt is spawn config, like a loaded 88. Starting dry would hand every MG a phantom first swap, or a crew-dead spawn whose belt never fills.
 

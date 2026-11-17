@@ -10,13 +10,13 @@ use bevy::prelude::*;
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
 // authority-vs-replica discriminator — `Predicted`/`Interpolated` are role markers, not provenance.
 use lightyear::prelude::client::Remote;
-use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::disclosure::{NetTankStatus, RespawnState, apply_net_tank_status};
+use super::input_arrival::{InputAnswer, InputAnswerChannel, TankInput, TankInputChannel};
 use crate::ballistics::ComponentHealth;
-use crate::command::{CommandError, DeviceClaim, ParsedTankCommand, TankCommand};
+use crate::command::{DeviceClaim, ParsedTankCommand};
 use crate::damage::{CrewStation, Crewman, Dead, LaunchedTurret, PendingSwap, TankVolumes};
 use crate::damage_cam::wire::ShotExplanation;
 use crate::fingerprint::{fingerprint_field, fnv1a_64};
@@ -42,7 +42,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// at, and a whole copy only to a client without one or behind the retained history; the hull
 /// marks replicate whole. The owner's ahead-running aim integrates the authority's servo law
 /// (`tank::servo`), so a change to that law changes this revision too.
-pub const PROTOCOL_REV: u32 = 103;
+pub const PROTOCOL_REV: u32 = 105;
 
 /// The compatibility record's wire term: the pinned wire manifest, [`PROTOCOL_REV`] and the crate
 /// version.
@@ -820,8 +820,10 @@ const WIRE_SURFACE: &[&str] = &[
     "ShotExplanation",
     "SetSpawnPoint",
     "WorldShed",
-    // The input protocol — `InputPlugin::<TankCommand>`:
-    "TankCommand",
+    "TankInputChannel|SequencedUnreliable|ClientToServer",
+    "InputAnswerChannel|SequencedUnreliable|ServerToClient",
+    "TankInput",
+    "InputAnswer",
     // Replicated sim-state components, in order:
     "Position",
     "Rotation",
@@ -835,7 +837,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0xfba98390117f50c7;
+const WIRE_SURFACE_HASH: u64 = 0xb35d6c7c3c7bbe9e;
 
 // Wire coverage: `plugin_registrations_match_wire_surface` binds registration order and channel
 // semantics to `WIRE_SURFACE`; `wire_surface_is_pinned` binds that list to the handshake. Neither
@@ -850,10 +852,10 @@ const WIRE_SURFACE_HASH: u64 = 0xfba98390117f50c7;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x52df1f2c325e8ff4;
+const WIRE_TYPES_HASH: u64 = 0x322da02509ae4264;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
-/// replicated physics components; lightyear's wire framing / input protocol; replicon's
+/// replicated physics components; lightyear's wire framing; replicon's
 /// replication messages and diff delivery, which lightyear 0.31 replicates through). A bump of any
 /// can change the on-wire bytes or what a receiver makes of them without touching any source in
 /// this tree. Re-pinning any version changes the handshake directly; house process also bumps
@@ -968,7 +970,21 @@ pub(crate) fn plugin(app: &mut App) {
     app.register_message::<super::construction::WorldShed>()
         .add_direction(NetworkDirection::ServerToClient);
 
-    app.add_plugins(input::native::InputPlugin::<TankCommand>::default());
+    app.add_channel::<TankInputChannel>(ChannelSettings {
+        mode: ChannelMode::SequencedUnreliable,
+        ..default()
+    })
+    .add_direction(NetworkDirection::ClientToServer);
+    app.add_channel::<InputAnswerChannel>(ChannelSettings {
+        mode: ChannelMode::SequencedUnreliable,
+        ..default()
+    })
+    .add_direction(NetworkDirection::ServerToClient);
+    app.register_message::<TankInput>()
+        .add_direction(NetworkDirection::ClientToServer);
+    app.register_message::<InputAnswer>()
+        .add_direction(NetworkDirection::ServerToClient);
+    super::input_arrival::install(app);
 
     super::physics::lightyear_plugin(app);
     // The hull pose interpolates on the cursor; everything else applies the confirmed value on
@@ -1001,8 +1017,7 @@ pub(crate) fn plugin(app: &mut App) {
     // applied on arrival like the transmission it is read off.
     app.component::<TankTransmission>().replicate();
     app.component::<EngineRpm>().replicate();
-    // Complete weapon eligibility state: one atomic snapshot. `net::fire_presentation` reconciles
-    // it as a legality report against the locally authored cadence.
+    // Complete weapon eligibility state: one atomic server snapshot.
     app.component::<WeaponGate>().replicate();
     // Each weapon's loaded and selected round: authority-written, read beside the gate.
     app.component::<WeaponLoads>().replicate();
@@ -1033,76 +1048,15 @@ pub(crate) fn plugin(app: &mut App) {
             .before(DeviceClaim),
     );
     app.add_systems(FixedUpdate, mirror_swap_from_net_crew.in_set(GameplaySet));
-    // The sim reads `TankCommand`; bridge it before all `GameplaySet` consumers, including replay.
-    app.add_systems(
-        FixedUpdate,
-        bridge_action_state_to_tank_command
-            .in_set(InputBridge)
-            .after(crate::command::ParseCommands)
-            .before(GameplaySet),
-    );
 }
 
-/// The input bridge's ordering handle: every writer that must land on top of the attested command
-/// orders after this set (`net::fire_presentation`, which replaces the owner's consumables with
-/// what this client authored).
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct InputBridge;
-
-/// Bridge Lightyear input to the simulation command.
-///
-/// Invariant: consumable actions commit only when `for_tick == LocalTimeline::tick()`. Level inputs
-/// may hold last; stale, fabricated, or frozen input must never spend ammo or create an entity.
-/// `SHIPPING_INPUT_DELAY_TICKS` removes delay-wobble sources, while this attestation fails closed for
-/// all remaining input-buffer substitutions. See `src/net/tests/net_fire_release.rs`.
-fn bridge_action_state_to_tank_command(
-    timeline: Res<LocalTimeline>,
-    mut tanks: Query<(
-        Entity,
-        &ActionState<TankCommand>,
-        &mut TankCommand,
-        &mut ParsedTankCommand,
-        Option<&ControlledBy>,
-    )>,
-    mut refused: Local<bevy::platform::collections::HashMap<Entity, CommandError>>,
-) {
-    let tick = timeline.tick();
-    for (entity, action, mut command, mut parsed, owner) in &mut tanks {
-        *parsed = match attest(action.0, tick) {
-            Ok(parsed) => {
-                refused.remove(&entity);
-                parsed
-            }
-            Err(cause) => {
-                if refused.insert(entity, cause) != Some(cause) {
-                    warn!(tank = ?entity, link = ?owner.map(|owner| owner.owner), %cause,
-                        "net: refused malformed input; filing idle command");
-                }
-                ParsedTankCommand::default()
-            }
-        };
-        *command = parsed.command();
-    }
-    // Replicas/links can leave; refusal history belongs only to live input slots.
-    refused.retain(|entity, _| tanks.contains(*entity));
-}
-
-/// Copy the absolute `ActionState` snapshot, committing consumables only when `for_tick`
-/// attests this tick. `net::client::stamp_input_tick` stamps Lightyear's filing tick; inherited,
-/// repeated, fabricated or frozen values retain another tick's stamp. Proof, never detection.
-pub(super) fn attest(command: TankCommand, tick: Tick) -> Result<ParsedTankCommand, CommandError> {
-    ParsedTankCommand::try_from(command).map(|command| command.attest(tick.0))
-}
-
-/// In-crate tests for the input-attestation seam.
+/// In-crate tests for the shared wire and replica construction.
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
-    use lightyear::prelude::Tick;
 
     use super::*;
-    use crate::command::{AimIntent, CrewSwap};
-    use crate::damage::CrewStation;
+    use crate::command::TankCommand;
 
     /// A static body spawned by `Transform` alone — the shape `scatter` and the test course use —
     /// lands where its transform says under the NETCODE physics composition, not at the origin.
@@ -1652,7 +1606,6 @@ mod tests {
         ".component::<",        // `app.component::<T>().replicate()` chains
         CHANNEL_MARKER,         // `app.add_channel::<T>(..)` — also carries mode + direction
         ".register_message::<", // `app.register_message::<T>()`
-        "InputPlugin::<",       // `InputPlugin::<T>::default()` — the input protocol
     ];
 
     /// The marker that identifies a channel registration, whose lane CONFIG (not just its type name)
@@ -1847,7 +1800,12 @@ mod tests {
         ("src/damage.rs", "KnockoutReason"),
         ("src/net/protocol.rs", "SetSpawnPoint"),
         ("src/lib.rs", "ShotId"),
-        ("src/command.rs", "TankCommand"),
+        ("src/net/input_arrival.rs", "TankInputChannel"),
+        ("src/net/input_arrival.rs", "InputAnswerChannel"),
+        ("src/net/input_arrival.rs", "TankInput"),
+        ("src/net/input_arrival.rs", "InputAnswer"),
+        ("src/net/input_arrival.rs", "InputLevels"),
+        ("src/net/input_arrival.rs", "InputEdge"),
         ("src/command.rs", "AimIntent"),
         ("src/command.rs", "CrewSwap"),
         ("src/command.rs", "RoundSelect"),
@@ -2296,484 +2254,5 @@ mod tests {
             network_gameplay_tick(world.resource::<LocalTimeline>().tick()),
             Err(NetworkTickExhausted)
         );
-    }
-
-    /// The game's damage model: even an attested malformed command files idle input. A peer
-    /// cannot poison movement, a servo or an action by making another field appear valid.
-    #[test]
-    fn malformed_attested_commands_file_idle_at_the_link_boundary() {
-        let mut world = World::new();
-        world.init_resource::<LocalTimeline>();
-        let link = world.spawn_empty().id();
-        let slot = world
-            .spawn((
-                ActionState(TankCommand::default()),
-                TankCommand::default(),
-                ControlledBy {
-                    owner: link,
-                    lifetime: default(),
-                },
-            ))
-            .id();
-        for mut malformed in [
-            TankCommand {
-                throttle: f32::NAN,
-                ..default()
-            },
-            TankCommand {
-                steer: 2.0,
-                ..default()
-            },
-            TankCommand {
-                range: -1.0,
-                ..default()
-            },
-            TankCommand {
-                aim: Some(AimIntent::World(Vec3::splat(f32::NAN))),
-                ..default()
-            },
-            TankCommand {
-                aim: Some(AimIntent::HullLocal(Vec3::splat(
-                    *crate::aim::AIM_LIMIT * 2.0,
-                ))),
-                ..default()
-            },
-        ] {
-            malformed.fire_primary = true;
-            malformed.fire_secondary = true;
-            world.get_mut::<ActionState<TankCommand>>(slot).unwrap().0 = malformed;
-            world
-                .run_system_once(bridge_action_state_to_tank_command)
-                .unwrap();
-            assert_eq!(
-                *world.get::<TankCommand>(slot).unwrap(),
-                TankCommand::default()
-            );
-            let parsed = world.get::<ParsedTankCommand>(slot).unwrap();
-            assert_eq!(parsed.command(), TankCommand::default());
-            assert!(parsed.aim().is_none());
-        }
-    }
-
-    /// A command the player authored FOR `tick` — the attested case.
-    fn authored_for(tick: i32, cmd: TankCommand) -> TankCommand {
-        TankCommand {
-            for_tick: Tick(tick as u32).0,
-            ..cmd
-        }
-    }
-
-    fn fire_click() -> TankCommand {
-        TankCommand {
-            fire_primary: true,
-            ..default()
-        }
-    }
-
-    /// The game's damage model: every stale input form must fail consumables closed at every lag
-    /// while holding movement levels and aim/range absolutes. These include hold-last,
-    /// `SameAsPrecedent` gap-fill, stale un-overwritable entries and `Absent` freezing
-    /// (`update_action_state` skips application). A tolerance window would re-latch a frozen
-    /// click each reload or keep automatic fire cycling after release; provenance needs no
-    /// diagnosis of why input is stale.
-    #[test]
-    fn unattested_tick_keeps_movement_levels_fails_consumables_closed() {
-        let held = TankCommand {
-            throttle: 0.7,
-            steer: -0.3,
-            fire_secondary: true,
-            aim: Some(AimIntent::World(Vec3::new(1.0, 2.0, 3.0))),
-            range: 850.0,
-            fire_primary: true,
-            crew_swap: Some(CrewSwap::Start(CrewStation::Gunner, CrewStation::Loader)),
-            select_round: Some(crate::command::RoundSelect {
-                weapon: 0,
-                step: crate::command::RoundStep::Next,
-            }),
-            toggle_fuze: Some(0),
-            respawn: true,
-            repair: true,
-            for_tick: 0,
-        };
-        let mut world = World::new();
-        let entity = world
-            .spawn((ActionState(held), TankCommand::default()))
-            .id();
-
-        // Fixture: authored at tick 5, lags 1..=256 (DERIVED four seconds at 64 Hz), plus
-        // an unstamped default after the clock moves. No reload mechanism is mounted.
-        let rows = (6..262).map(|now| (5, now)).chain([(0, 7)]);
-        for (authored, now) in rows {
-            world.insert_resource(timeline_at(now));
-            world.get_mut::<ActionState<TankCommand>>(entity).unwrap().0 =
-                authored_for(authored, held);
-            world.get_mut::<TankCommand>(entity).unwrap().clear_edges();
-            world
-                .run_system_once(bridge_action_state_to_tank_command)
-                .unwrap();
-
-            let cmd = *world.get::<TankCommand>(entity).unwrap();
-            let lag = format!("authored for {authored}, stepped at {now}");
-            assert_eq!(cmd.throttle, 0.7, "throttle level held ({lag})");
-            assert_eq!(cmd.steer, -0.3, "steer level held ({lag})");
-            assert_eq!(cmd.aim, held.aim, "aim absolute held ({lag})");
-            assert_eq!(cmd.range, 850.0, "range absolute held ({lag})");
-            assert!(
-                !cmd.fire_secondary,
-                "automatic-fire level fails closed ({lag})"
-            );
-            assert!(!cmd.fire_primary, "fire edge cleared ({lag})");
-            assert_eq!(cmd.crew_swap, None, "crew-swap edge cleared ({lag})");
-            assert_eq!(cmd.select_round, None, "round-select edge cleared ({lag})");
-            assert_eq!(cmd.toggle_fuze, None, "fuze-toggle edge cleared ({lag})");
-            assert!(!cmd.respawn, "respawn edge cleared ({lag})");
-            assert!(!cmd.repair, "repair edge cleared ({lag})");
-        }
-    }
-
-    /// An attested tick bridges the whole command, EDGES and the held trigger included: a
-    /// genuinely-held trigger keeps the `Automatic` cycling (sustained fire is not fabricated
-    /// fire), and the own click commits on the tick it was authored for.
-    #[test]
-    fn attested_tick_fires_edge() {
-        let mut world = World::new();
-        world.insert_resource(timeline_at(8));
-        let entity = world
-            .spawn((
-                ActionState(authored_for(
-                    8,
-                    TankCommand {
-                        fire_secondary: true,
-                        ..fire_click()
-                    },
-                )),
-                TankCommand::default(),
-            ))
-            .id();
-
-        world
-            .run_system_once(bridge_action_state_to_tank_command)
-            .unwrap();
-
-        let cmd = world.get::<TankCommand>(entity).unwrap();
-        assert!(cmd.fire_primary, "an attested edge must bridge through");
-        assert!(
-            cmd.fire_secondary,
-            "an attested held trigger must bridge through — sustained fire is not fabricated fire",
-        );
-    }
-
-    /// MEASURED input-state payload cost using real `NativeStateSequence<TankCommand>` postcard
-    /// encoding (`lightyear_serde::default_serialize`), excluding packet framing. `for_tick`
-    /// changes each tick and defeats `SameAsPrecedent`: at `packet_redundancy: 5`, an idle stream
-    /// needs five full commands instead of one plus four one-byte repeat markers. Aiming already
-    /// changes every slot, so the stamp adds only its own bytes there. Both regimes print below.
-    ///
-    /// The ceiling guards bandwidth growth. Shrink the attested payload (a fire-only substruct
-    /// with full stamp) rather than removing/narrowing provenance: a held input re-attests at
-    /// stamp wrap (`u8`: 256 ticks, DERIVED 4 s at 64 Hz), re-latching edges. At most one message
-    /// per tick (`net::client::install_input_send_cadence`) makes payload bytes × tick rate the
-    /// steady client→server payload rate regardless of frame rate. Unstamped compression pays
-    /// only for unchanged commands; shipping stamps defeat it even without aim movement.
-    #[test]
-    fn input_message_wire_cost() {
-        use lightyear::prelude::input::native::NativeStateSequence;
-
-        const REDUNDANCY: usize = 5; // lightyear `InputConfig::packet_redundancy` default
-        // One input message per tick: `net::client::install_input_send_cadence`.
-        const MESSAGES_PER_S: usize = 64;
-
-        // `ActionStateSequence` is the trait carrying `build_from_input_buffer`.
-        use lightyear::prelude::input::native::NativeBuffer;
-        use lightyear_inputs::input_message::ActionStateSequence;
-
-        fn encoded_len(buffer: &NativeBuffer<TankCommand>, end: Tick) -> usize {
-            let seq = NativeStateSequence::<TankCommand>::build_from_input_buffer(
-                buffer, REDUNDANCY, end,
-            )
-            .expect("buffer has entries");
-            postcard::to_allocvec(&seq)
-                .expect("postcard encodes the sequence")
-                .len()
-        }
-
-        // Fixed-command fixture: only the stamp changes, maximizing its compression penalty.
-        let held = |tick: i32, stamped: bool| {
-            ActionState(TankCommand {
-                throttle: 1.0,
-                fire_secondary: true,
-                aim: Some(AimIntent::World(Vec3::new(0.0, 1.5, -40.0))),
-                range: 800.0,
-                for_tick: if stamped { Tick(tick as u32).0 } else { 0 },
-                ..default()
-            })
-        };
-
-        let mut unstamped = NativeBuffer::<TankCommand>::default();
-        let mut stamped = NativeBuffer::<TankCommand>::default();
-        // Postcard varints: tick 100 costs one byte; fixture tick 100_000 (DERIVED ≈26 min at
-        // 64 Hz) costs several. Low ticks would understate stamp cost.
-        const T0: i32 = 100_000;
-        for tick in T0..T0 + 10 {
-            unstamped.set(Tick(tick as u32), held(tick, false));
-            stamped.set(Tick(tick as u32), held(tick, true));
-        }
-
-        let before = encoded_len(&unstamped, Tick((T0 + 9) as u32));
-        let after = encoded_len(&stamped, Tick((T0 + 9) as u32));
-        let delta = after - before;
-
-        println!(
-            "IDLE (worst case for the stamp — nothing but `for_tick` changes, so run-compression \
-             was fully paying off): {before} B -> {after} B (+{delta} B/message) = +{:.1} KB/s \
-             upstream per client at {MESSAGES_PER_S} messages/s",
-            (delta * MESSAGES_PER_S) as f64 / 1024.0,
-        );
-
-        // Moving-aim fixture: commands already differ each tick; only stamp bytes are extra.
-        let aiming = |tick: i32, stamped: bool| {
-            ActionState(TankCommand {
-                throttle: 1.0,
-                fire_secondary: true,
-                aim: Some(AimIntent::World(Vec3::new(0.01 * tick as f32, 1.5, -40.0))),
-                range: 800.0,
-                for_tick: if stamped { Tick(tick as u32).0 } else { 0 },
-                ..default()
-            })
-        };
-        let mut aim_unstamped = NativeBuffer::<TankCommand>::default();
-        let mut aim_stamped = NativeBuffer::<TankCommand>::default();
-        for tick in T0..T0 + 10 {
-            aim_unstamped.set(Tick(tick as u32), aiming(tick, false));
-            aim_stamped.set(Tick(tick as u32), aiming(tick, true));
-        }
-        let aim_before = encoded_len(&aim_unstamped, Tick((T0 + 9) as u32));
-        let aim_after = encoded_len(&aim_stamped, Tick((T0 + 9) as u32));
-        let aim_delta = aim_after - aim_before;
-        println!(
-            "AIMING (the realistic regime — the `aim` point already changed every tick and \
-             compression was already dead): {aim_before} B -> {aim_after} B \
-             (+{aim_delta} B/message) = +{:.1} KB/s upstream per client at {MESSAGES_PER_S} \
-             messages/s",
-            (aim_delta * MESSAGES_PER_S) as f64 / 1024.0,
-        );
-
-        assert!(
-            after <= 256,
-            "the attested input payload is {after} B/message ({:.1} KB/s upstream) — TankCommand has \
-             grown fat enough that per-tick attestation costs real bandwidth. Shrink the ATTESTED \
-             payload (a fire-only sub-struct carrying the full stamp); do NOT drop attestation, \
-             which keeps the server from firing rounds nobody asked for, and do NOT narrow the \
-             stamp, which a held command would re-attest once per wrap.",
-            (after * MESSAGES_PER_S) as f64 / 1024.0,
-        );
-    }
-
-    /// The game's damage model: the owner's atomic snapshot must carry both the reduced
-    /// module's held share and its progress, then the full pool and idle timer together. Either a missing
-    /// publish or a missing apply strands the owner's panel and fails this round trip.
-    #[test]
-    fn module_repair_progress_and_completion_round_trip_in_private_snapshot() {
-        use crate::damage::repair::ModuleRepair;
-        use crate::damage::{FunctionRole, VolumeOf};
-        let mut world = World::new();
-        let source = world.spawn(NetCrew::default()).id();
-        // Fixture: 21 HP capacity, 1 HP held, independent of a tank asset.
-        let mut health = ComponentHealth::full(21);
-        health.set_held(crate::ballistics::POOL_UNITS_PER_HP);
-        let repair = ModuleRepair::from_snapshot(Some(0.25), &health)
-            .expect("fixture repair is active on a reduced module");
-        let module = world
-            .spawn((VolumeOf(source), FunctionRole::Engine, health, repair))
-            .id();
-        world.run_system_once(publish_net_crew).unwrap();
-        let snapshot = world.get::<NetCrew>(source).unwrap().clone();
-        assert_eq!(snapshot.volumes[0].repair, Some(0.25));
-        let replica = world.spawn((Remote, snapshot)).id();
-        let view_module = world
-            .spawn((
-                VolumeOf(replica),
-                FunctionRole::Engine,
-                ComponentHealth::full(21),
-            ))
-            .id();
-        world.run_system_once(apply_net_crew).unwrap();
-        let view_health = world.get::<ComponentHealth>(view_module).unwrap();
-        assert_eq!(view_health.held(), crate::ballistics::POOL_UNITS_PER_HP);
-        assert_eq!(
-            world
-                .get::<ModuleRepair>(view_module)
-                .unwrap()
-                .fraction(view_health),
-            Some(0.25)
-        );
-        world.get_mut::<ComponentHealth>(module).unwrap().refill();
-        world.get_mut::<ModuleRepair>(module).unwrap().elapsed = None;
-        world.run_system_once(publish_net_crew).unwrap();
-        *world.get_mut::<NetCrew>(replica).unwrap() = world.get::<NetCrew>(source).unwrap().clone();
-        world.run_system_once(apply_net_crew).unwrap();
-        let health = world.get::<ComponentHealth>(view_module).unwrap();
-        assert_eq!(health.held(), health.capacity());
-        assert!(
-            world
-                .get::<ModuleRepair>(view_module)
-                .unwrap()
-                .elapsed
-                .is_none()
-        );
-    }
-
-    /// The game's damage model: a full pool has no repair work denominator. The client must
-    /// refuse an active repair beside it atomically, preserving the previous valid snapshot.
-    #[test]
-    fn a_full_pool_cannot_arrive_with_active_repair_progress() {
-        use crate::damage::{FunctionRole, VolumeOf};
-        let mut world = World::new();
-        let full = ComponentHealth::full(21); // Fixture pool.
-        let root = world
-            .spawn((
-                Remote,
-                NetCrew {
-                    volumes: vec![VolumeSnapshot {
-                        held: full.capacity(),
-                        repair: Some(0.5),
-                        crew: None,
-                    }],
-                    swap: None,
-                },
-            ))
-            .id();
-        let initial = ComponentHealth::holding(21, crate::ballistics::POOL_UNITS_PER_HP);
-        let module = world
-            .spawn((VolumeOf(root), FunctionRole::Engine, initial))
-            .id();
-        world.run_system_once(apply_net_crew).unwrap();
-        assert_eq!(*world.get::<ComponentHealth>(module).unwrap(), initial);
-        assert!(
-            world
-                .get::<crate::damage::repair::ModuleRepair>(module)
-                .unwrap()
-                .elapsed
-                .is_none()
-        );
-    }
-
-    /// The game's damage model: peer repair metadata cannot be silently discarded on a
-    /// non-module while the rest of its record changes HP. Refuse the whole record instead.
-    #[test]
-    fn repair_progress_on_a_non_module_is_refused_atomically() {
-        use crate::damage::VolumeOf;
-        let mut world = World::new();
-        let initial = ComponentHealth::holding(21, crate::ballistics::POOL_UNITS_PER_HP); // Fixture.
-        let root = world
-            .spawn((
-                Remote,
-                NetCrew {
-                    volumes: vec![VolumeSnapshot {
-                        held: 2 * initial.held(),
-                        repair: Some(0.5),
-                        crew: None,
-                    }],
-                    swap: None,
-                },
-            ))
-            .id();
-        let volume = world.spawn((VolumeOf(root), initial)).id();
-        world.run_system_once(apply_net_crew).unwrap();
-        assert_eq!(*world.get::<ComponentHealth>(volume).unwrap(), initial);
-    }
-
-    /// The game's damage model: a new authoritative snapshot must replace mismatched local
-    /// seat pools, occupant homes and `Dead` markers atomically. Fixture: local seats hold swapped
-    /// homes and both `Dead` markers, while authority has a full Gunner pool and a knocked-out
-    /// Loader. Local swapping followed by index-based HP application and latched knockout markers
-    /// would mismatch occupant and pool. Public knockout state is outside this system.
-    #[test]
-    fn crew_swap_does_not_false_kill_on_replica() {
-        use crate::ballistics::ComponentHealth;
-        use crate::damage::{Crewman, Dead, VolumeOf};
-
-        const POINTS: u32 = 1000;
-        const FULL: u32 = POINTS * crate::ballistics::POOL_UNITS_PER_HP;
-
-        let mut world = World::new();
-
-        // The game's damage-model fixture: authority has full Gunner / empty Loader pools, no
-        // pending swap. `VolumeOf` populates `TankVolumes` in seat spawn order.
-        let root = world
-            .spawn((
-                Remote,
-                NetCrew {
-                    volumes: vec![
-                        VolumeSnapshot {
-                            repair: None,
-                            held: FULL,
-                            crew: Some(CrewSnapshot {
-                                home: CrewStation::Gunner,
-                                dead: false,
-                            }),
-                        },
-                        VolumeSnapshot {
-                            repair: None,
-                            held: 0,
-                            crew: Some(CrewSnapshot {
-                                home: CrewStation::Loader,
-                                dead: true,
-                            }),
-                        },
-                    ],
-                    swap: None,
-                },
-            ))
-            .id();
-
-        // The game's damage-model fixture: seat A has full HP but the wrong home and `Dead`.
-        let seat_a = world
-            .spawn((
-                CrewStation::Gunner,
-                Crewman {
-                    home: CrewStation::Loader,
-                },
-                ComponentHealth::full(POINTS),
-                Dead,
-                VolumeOf(root),
-            ))
-            .id();
-
-        // The game's damage-model fixture: seat B has empty HP and `Dead`, but the wrong home.
-        let seat_b = world
-            .spawn((
-                CrewStation::Loader,
-                Crewman {
-                    home: CrewStation::Gunner,
-                },
-                ComponentHealth::holding(POINTS, 0),
-                Dead,
-                VolumeOf(root),
-            ))
-            .id();
-
-        world.run_system_once(apply_net_crew).unwrap();
-
-        assert_eq!(
-            world.get::<ComponentHealth>(seat_a).unwrap().held(),
-            FULL,
-            "seat A keeps the authoritative full HP",
-        );
-        assert_eq!(
-            world.get::<Crewman>(seat_a).unwrap().home,
-            CrewStation::Gunner,
-            "seat A's occupant home is re-derived from the snapshot (not the flipped Loader)",
-        );
-        assert!(
-            world.get::<Dead>(seat_a).is_none(),
-            "the LIVE crewman must not end up dead — the false-death corruption is healed",
-        );
-
-        assert_eq!(
-            world.get::<Crewman>(seat_b).unwrap().home,
-            CrewStation::Loader,
-        );
-        assert!(world.get::<Dead>(seat_b).is_some(), "seat B stays dead");
     }
 }

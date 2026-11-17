@@ -295,7 +295,12 @@ impl RigGeom {
         blueprint
             .spec
             .track
-            .transmission_params(&blueprint.spec.roadwheels, geom.wrap_radii(), geom.plane_x)
+            .transmission_params(
+                &blueprint.spec.roadwheels,
+                geom.wrap_radii(),
+                geom.plane_x,
+                blueprint.spec.mass,
+            )
             .unwrap_or_else(|error| {
                 panic!(
                     "{}: {error}; correct the running-gear construction facts",
