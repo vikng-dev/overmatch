@@ -1002,14 +1002,10 @@ fn build_rig(
         geom.hull_rest_y,
         geom.plane_x,
     );
-    // The bake’s RigGeom construction refuses an unreachable authored loop before this spawn.
-    geom.validate(&suspension.0)
-        .expect("the bake validates the authored running gear before publishing its blueprint");
-
     let rig = RigSpec {
         weight_n: spec.mass * derive::G,
         engage_depth: track.suspension.engage,
-        belt_inertia: inertia,
+        belt_inertia: inertia.0,
         grip: crate::track::forces::GripParams::of(
             spec,
             crate::track::rig_geom::tank_ground_pressure_kpa(&geom),
@@ -1461,14 +1457,12 @@ fn apply_rig_counts(
     let mut track = blueprint.spec.track.clone();
     track.link_count = counts.link_count;
     track.sprocket.teeth = counts.teeth;
-    let wrap = next.wrap_radii();
-    let derived = track.transmission_params(
+    let (derived, inertia) = match track.transmission_params(
         &blueprint.spec.roadwheels,
-        wrap,
+        next.wrap_radii(),
         next.plane_x,
         blueprint.spec.mass,
-    );
-    let (derived, inertia) = match derived {
+    ) {
         Ok(derived) => derived,
         Err(error) => {
             warn!("track sandbox: refused construction tuning: {error}");
@@ -1479,7 +1473,7 @@ fn apply_rig_counts(
             return;
         }
     };
-    rig.belt_inertia = inertia;
+    rig.belt_inertia = inertia.0;
     transmission.0 = derived;
     *geom = next;
     *pin_belt = PinBelt::for_rig(&geom);

@@ -248,7 +248,11 @@ impl RigGeom {
         teeth: u32,
         link_count: usize,
         params: &SuspensionParams,
-    ) -> (Self, super::transmission::TransmissionParams, f32) {
+    ) -> (
+        Self,
+        super::transmission::TransmissionParams,
+        crate::spec::ReflectedBeltInertia,
+    ) {
         // The module's only file read; `rebuild` reuses its measurements. Mass supplies nominal
         // ground pressure as well as readouts; geometry still comes only from the sim artifact.
         let model = DerivedModel::build(blueprint.spec.mass, glb_path);

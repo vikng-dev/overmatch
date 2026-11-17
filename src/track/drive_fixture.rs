@@ -259,8 +259,12 @@ pub(crate) fn side_clutch_drivetrain() -> (FixtureConstruction, TransmissionPara
     a.steer_radii_m = &[(3.0, 9.0); 5];
     a.reverse_steer_radii_m = &[(3.0, 9.0)];
     a.steer_capacity_n = 0.0;
-    let rated_slope_deg = 28.0_f32; // Fixture: this construction's own climb rating.
-    a.brake_capacity_n = 2.0 * lab_fp().grip.side_weight * rated_slope_deg.to_radians().sin() / 2.0;
+    let mut spec = super::rig_geom::tiger_spec();
+    let brakes = &mut spec.track.powertrain.transmission;
+    brakes.rated_slope_deg.value = 28.0; // Fixture: this construction's own climb rating.
+    a.brake_capacity_n = brakes
+        .brake_capacity_n(2.0 * lab_fp().grip.side_weight / super::derive::G)
+        .expect("the fixture's rated grade is admitted");
     (
         lab_fp(),
         TransmissionParams::from_authoring(&a)

@@ -645,7 +645,7 @@ impl TrackGear {
         blueprint: &TankBlueprint,
         geom: &super::rig_geom::RigGeom,
         trans: TransmissionParams,
-        inertia: f32,
+        inertia: crate::spec::ReflectedBeltInertia,
     ) -> Self {
         let resolution = super::forces::CONTACT_RESOLUTION;
         let spec = &blueprint.spec.track;
@@ -701,9 +701,6 @@ impl TrackGear {
             sus.damping_ratio,
         );
 
-        // The declared transmission, derived from the authored tables against the MEASURED sprocket
-        // radius and half-tread (tiger-transmission-data.md rule: speeds are the anchors, reductions
-        // derive, so the ladder survives the 19-vs-20-tooth discrepancy).
         let gearbox = &spec.powertrain.transmission.gearbox;
         info!(
             "declared transmission: {}F/{}R",
@@ -746,7 +743,7 @@ impl TrackGear {
             grip.hull_coupling,
             grip.step_shear_per_grip_m(crate::sim_tick::sim_timestep().as_secs_f32()) * 1e3,
         );
-        let construction = transmission::DriveConstruction::new(grip, inertia);
+        let construction = transmission::DriveConstruction::new(grip, inertia.0);
         Self {
             loop_pts,
             count: resolution.stations,

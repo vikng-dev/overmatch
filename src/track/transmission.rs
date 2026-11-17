@@ -586,7 +586,7 @@ impl TransmissionParams {
                     || !(rating * self.brake_static_factor).is_finite()
             })
         {
-            return Err("transmission.mean_hold_capacity_n: author a positive finite independent mean-brake rating exactly when Stop(Mean) is constructed".into());
+            return Err("transmission.mean_hold_capacity_n: derived capacity must be finite and positive exactly when Stop(Mean) is constructed; admit transmission.mean_hold as StandIn through the construction seam".into());
         }
         if !self.couplings.contains(&Coupling::Steering) {
             return Ok(());

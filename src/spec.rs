@@ -934,15 +934,19 @@ impl TrackSpec {
         wrap: WrapRadii,
         half_tread: f32,
         mass_kg: f32,
-    ) -> Result<(TransmissionParams, f32), BevyError> {
+    ) -> Result<(TransmissionParams, ReflectedBeltInertia), BevyError> {
         let inertia = self.reflected_inertia(roadwheels, wrap)?;
         let params =
             self.powertrain
                 .transmission
                 .params(wrap.sprocket, half_tread, inertia, mass_kg)?;
-        Ok((params, inertia))
+        Ok((params, ReflectedBeltInertia(inertia)))
     }
 }
+
+/// Admitted per-side belt translation and reflected wheel inertia (kg).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReflectedBeltInertia(pub(crate) f32);
 
 /// The measured radii at which the belt turns the wheels it wraps (m). The sprocket turns at its
 /// chord-exact pitch radius. The idler turns with the pin line wrapped around it, so at its
@@ -1002,12 +1006,14 @@ impl TransmissionSpec {
     /// StandIn: the mean brake carries the service brakes' rated grade as a total mean force.
     /// A sourced gearbox-brake torque and reduction would replace this rule.
     pub(crate) fn mean_hold_capacity_n(&self, mass_kg: f32) -> Result<Option<f32>, BevyError> {
-        match &self.mean_hold {
-            None => Ok(None), // This construction has no mean brake.
-            Some(crate::provenance::Provenance::StandIn(note)) if !note.trim().is_empty() => {
+        use crate::track::transmission::{Coupling, Output};
+        match (self.couplings.contains(&Coupling::Stop(Output::Mean)), &self.mean_hold) {
+            (false, None) => Ok(None), // This construction has no mean brake.
+            (true, Some(crate::provenance::Provenance::StandIn(note))) if !note.trim().is_empty() => {
                 Ok(Some(2.0 * self.brake_capacity_n(mass_kg)?))
             }
-            Some(_) => Err("transmission.mean_hold: author StandIn with the missing gearbox-brake torque and reduction; the rated-grade rule supplies its capacity".into()),
+            (false, Some(_)) => Err("transmission.mean_hold: remove the orphaned StandIn or construct Stop(Mean) with a steering tie".into()),
+            (true, _) => Err("transmission.mean_hold: author StandIn with the missing gearbox-brake torque and reduction for Stop(Mean); the rated-grade rule supplies its capacity".into()),
         }
     }
 
@@ -3376,12 +3382,37 @@ TankSpec(
                     params.mean_hold_capacity_n,
                     Some(2.0 * params.brake_capacity_n)
                 );
-                tr.mean_hold = Some(Provenance::Unknown("torque and reduction missing".into()));
+                for label in [
+                    None,
+                    Some(Provenance::Unknown("torque and reduction missing".into())),
+                    Some(Provenance::StandIn(String::new())),
+                ] {
+                    tr.mean_hold = label;
+                    let error = tr
+                        .params(1.0, 1.0, 1.0, mass)
+                        .expect_err("Stop(Mean) requires a named StandIn fix")
+                        .to_string();
+                    assert!(
+                        error.contains("transmission.mean_hold") && error.contains("StandIn"),
+                        "{error}"
+                    );
+                }
+                tr.couplings.retain(|coupling| {
+                    *coupling
+                        != crate::track::transmission::Coupling::Stop(
+                            crate::track::transmission::Output::Mean,
+                        )
+                });
+                tr.mean_hold = Some(Provenance::StandIn("missing torque and reduction".into()));
+                let error = tr
+                    .params(1.0, 1.0, 1.0, mass)
+                    .expect_err("an orphaned mean-brake label is refused")
+                    .to_string();
                 assert!(
-                    tr.params(1.0, 1.0, 1.0, mass)
-                        .expect_err("the label must name the rule's stand-in job")
-                        .to_string()
-                        .contains("transmission.mean_hold")
+                    error.contains("transmission.mean_hold")
+                        && error.contains("remove")
+                        && error.contains("StandIn"),
+                    "{error}"
                 );
             }
         }
@@ -3393,39 +3424,33 @@ TankSpec(
     /// rejection is named.
     #[test]
     fn validate_rejects_broken_transmission_blocks() {
-        fn engine(tr: &mut TransmissionSpec) -> &mut EngineSpec {
-            &mut tr.engine
-        }
-        fn gearbox(tr: &mut TransmissionSpec) -> &mut GearboxSpec {
-            &mut tr.gearbox
-        }
         let cases: [(&str, fn(&mut TransmissionSpec)); 15] = [
             // Engine audio data: both are DIVISORS in the playback law — a 0-cylinder engine pops
             // at 0 Hz (silence played at speed 0) and a 0 Hz recording makes the anchor infinite.
-            ("cylinders", |tr| engine(tr).cylinders = 0),
+            ("cylinders", |tr| tr.engine.cylinders = 0),
             ("clip_pop_hz", |tr| {
-                engine(tr)
+                tr.engine
                     .sound
                     .as_mut()
                     .expect("the fixture authors a sound block")
                     .clip_pop_hz = 0.0;
             }),
             ("clip_pop_hz", |tr| {
-                engine(tr)
+                tr.engine
                     .sound
                     .as_mut()
                     .expect("the fixture authors a sound block")
                     .clip_pop_hz = f32::NAN;
             }),
             // Coupling requires positive crank inertia and finite clutch capacity.
-            ("inertia_kgm2", |tr| engine(tr).inertia_kgm2 = 0.0),
+            ("inertia_kgm2", |tr| tr.engine.inertia_kgm2 = 0.0),
             ("clutch_capacity_nm", |tr| {
-                engine(tr).clutch_capacity_nm = f32::NAN;
+                tr.engine.clutch_capacity_nm = f32::NAN;
             }),
             // The game's driving model requires idle above its authored stall-guard band;
             // the drag regularisation independently reaches rest.
             ("engine.idle_rpm floor", |tr| {
-                engine(tr).idle_rpm = f32::from_bits(1)
+                tr.engine.idle_rpm = f32::from_bits(1)
             }),
             ("steering capacity", |tr| {
                 tr.steering.capacity = Some(f32::INFINITY)
@@ -3439,18 +3464,18 @@ TankSpec(
             ("brake_static_factor", |tr| {
                 tr.brake_static_factor.value = 0.99
             }),
-            ("launch_gears", |tr| gearbox(tr).launch_gears = Sourced(0)),
-            ("max_step", |tr| gearbox(tr).max_step = Sourced(0)),
+            ("launch_gears", |tr| tr.gearbox.launch_gears = Sourced(0)),
+            ("max_step", |tr| tr.gearbox.max_step = Sourced(0)),
             ("ladder shape", |tr| {
-                gearbox(tr).forward_speeds_kmh.swap(2, 3);
+                tr.gearbox.forward_speeds_kmh.swap(2, 3);
             }),
             // 300 ascending reverse gears: passes ordering and hysteresis, but cannot be
             // addressed by the runtime's u8 gear index.
             ("ladder shape", |tr| {
-                gearbox(tr).reverse_speeds_kmh = (1..=300).map(|i| i as f32).collect();
+                tr.gearbox.reverse_speeds_kmh = (1..=300).map(|i| i as f32).collect();
                 tr.steering.reverse_radii = vec![(4.0, 12.0); 300]; // Fixture rows isolate index admission.
             }),
-            ("drag_fraction", |tr| engine(tr).drag_fraction = 1.5),
+            ("drag_fraction", |tr| tr.engine.drag_fraction = 1.5),
         ];
         for (needle, mutate) in cases {
             let mut spec = fixture();

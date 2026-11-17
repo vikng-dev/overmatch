@@ -3317,9 +3317,10 @@ fn unused_steering_rating_cannot_reduce_a_powered_launch() {
     assert!(outcomes[0] > 0.0, "the witness must deliver propulsion");
 }
 
-/// Required ratings belong to the declared device, never a code default or another brake.
+/// The mean stop consumes an admitted, finite positive capacity; other constructions consume
+/// none. Sheet admission owns the StandIn label and rated-grade derivation.
 #[test]
-fn a_mean_stop_requires_its_own_positive_rating_and_no_other_construction_consumes_it() {
+fn a_mean_stop_requires_admitted_positive_capacity_and_no_other_construction_consumes_it() {
     let mut a = tiger_authoring();
     a.mean_hold_capacity_n = None;
     assert!(

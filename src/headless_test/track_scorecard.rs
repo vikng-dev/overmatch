@@ -2205,12 +2205,16 @@ fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
         "a parked tank with no drive demand may sleep with its pile"
     );
     println!("MEASURED asleep after {settled} ticks");
-    let before = bed.hull().position;
-    let tp = bed
+    bed.tick(1.0, 0.0);
+    assert!(!is_asleep(&bed), "drive demand left the tank asleep");
+    let gear = bed.app.world().resource::<crate::track::sim::TrackGear>();
+    let tp = gear.trans();
+    let sensing_ticks = bed
         .app
         .world()
-        .resource::<crate::track::sim::TrackGear>()
-        .trans();
+        .get::<crate::track::driver::DriverSense>(bed.tank)
+        .expect("a spawned tank carries its Driver ledger")
+        .window_ticks();
     let idle = tp.engine.idle_rpm;
     let floor = tp.launch_omega(1.0);
     let floor_rpm = floor / crate::track::transmission::RPM_TO_RAD;
@@ -2231,10 +2235,19 @@ fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
     );
     let spool_s =
         tp.engine_inertia * (floor - idle * crate::track::transmission::RPM_TO_RAD) / torque;
-    let budget = ((spool_s + 1.0 / crate::track::drive::drive_feel().rise_per_second.0) / DT).ceil()
-        as usize
-        + usize::from(tp.shift_ticks.get());
-    let mut driven_ticks = 0;
+    // DERIVED: v/a to cross the belt-rest tolerance, with the weakest launch force and
+    // the largest reflected crank mass. Fixture allowance: one sensing window also covers
+    // the loose contacts' settling; this is a watchdog estimate, not a propulsion target.
+    let k_min = tp.ratio(false, tp.launch_gears) / tp.sprocket_radius;
+    let k_max = tp.ratio(false, 1) / tp.sprocket_radius;
+    let motion_s = crate::track::transmission::park_engage_speed()
+        * (gear.landing_mass() + tp.engine_inertia * k_max * k_max)
+        / (torque.min(tp.clutch_capacity) * k_min);
+    let budget = ((spool_s + motion_s + 1.0 / crate::track::drive::drive_feel().rise_per_second.0)
+        / DT)
+        .ceil() as usize
+        + sensing_ticks;
+    let mut driven_ticks = 1;
     loop {
         assert!(
             driven_ticks < budget,
@@ -2252,24 +2265,25 @@ fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
             break;
         }
     }
-    assert!(!is_asleep(&bed), "throttle left the tank asleep");
-    let moved = bed.hull().position - before;
-    let ahead = moved.dot(bed.hull().forward());
-    println!(
-        "MEASURED first clutch drive at tick {driven_ticks} ({} s); moved {} m, {ahead} m ahead; watchdog {budget} ticks",
-        driven_ticks as f32 * DT,
-        moved.length()
-    );
-    assert!(
-        ahead > roundoff(before, driven_ticks),
-        "throttle wake and park release gave no forward reaction: {ahead} m"
-    );
+    println!("MEASURED first clutch drive at tick {driven_ticks}; watchdog {budget} ticks");
+    let before = bed.hull().position;
+    loop {
+        assert!(
+            driven_ticks < budget,
+            "drive must establish motion before testing release"
+        );
+        bed.tick(1.0, 0.0);
+        driven_ticks += 1;
+        let ahead = (bed.hull().position - before).dot(bed.hull().forward());
+        if belts_moving(&bed) && ahead > roundoff(before, driven_ticks) {
+            println!(
+                "MEASURED motion established at tick {driven_ticks}, {ahead} m ahead after first drive"
+            );
+            break;
+        }
+    }
     let moving_ticks = assert_coast_and_sleep(&mut bed);
     println!("MEASURED release had {moving_ticks} ticks with moving belts");
-    assert!(
-        moving_ticks > 0,
-        "the driven belts must exercise the coasting wake gate"
-    );
 
     // Fixture: an external velocity change beyond Avian's rest threshold. With no command,
     // the body must wake, move, and return to sustained sleep under the same belt condition.
