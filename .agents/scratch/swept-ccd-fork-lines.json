@@ -1,0 +1,182 @@
+{
+  "avian3d": {
+    "version": "0.8.0",
+    "archive_sha256": "ca7479ccec5f1440675946bada8c805f2b6d514af78e1d2b0937ca53b1e2c543",
+    "added": 704,
+    "removed": 167,
+    "total": 871,
+    "files": {
+      "collider_tree/diagnostics.rs": {
+        "added": 9,
+        "removed": 0,
+        "total": 9
+      },
+      "collider_tree/update.rs": {
+        "added": 43,
+        "removed": 20,
+        "total": 63
+      },
+      "collision/broad_phase/bvh_broad_phase.rs": {
+        "added": 20,
+        "removed": 3,
+        "total": 23
+      },
+      "collision/collider/collider_hierarchy/plugin.rs": {
+        "added": 18,
+        "removed": 5,
+        "total": 23
+      },
+      "collision/collider/collider_transform/mod.rs": {
+        "added": 2,
+        "removed": 1,
+        "total": 3
+      },
+      "collision/collider/collider_transform/plugin.rs": {
+        "added": 5,
+        "removed": 4,
+        "total": 9
+      },
+      "collision/collider/parry/mod.rs": {
+        "added": 21,
+        "removed": 0,
+        "total": 21
+      },
+      "collision/contact_types/contact_graph.rs": {
+        "added": 4,
+        "removed": 4,
+        "total": 8
+      },
+      "collision/contact_types/mod.rs": {
+        "added": 128,
+        "removed": 59,
+        "total": 187
+      },
+      "collision/diagnostics.rs": {
+        "added": 17,
+        "removed": 0,
+        "total": 17
+      },
+      "collision/narrow_phase/mod.rs": {
+        "added": 24,
+        "removed": 1,
+        "total": 25
+      },
+      "collision/narrow_phase/stationary_miss.rs": {
+        "added": 78,
+        "removed": 0,
+        "total": 78
+      },
+      "collision/narrow_phase/system_param.rs": {
+        "added": 61,
+        "removed": 7,
+        "total": 68
+      },
+      "dynamics/ccd/mod.rs": {
+        "added": 18,
+        "removed": 4,
+        "total": 22
+      },
+      "dynamics/integrator/mod.rs": {
+        "added": 36,
+        "removed": 8,
+        "total": 44
+      },
+      "dynamics/rigid_body/body_size_metrics.rs": {
+        "added": 43,
+        "removed": 18,
+        "total": 61
+      },
+      "dynamics/rigid_body/forces/plugin.rs": {
+        "added": 15,
+        "removed": 3,
+        "total": 18
+      },
+      "dynamics/rigid_body/mass_properties/mod.rs": {
+        "added": 28,
+        "removed": 3,
+        "total": 31
+      },
+      "dynamics/rigid_body/mass_properties/system_param.rs": {
+        "added": 8,
+        "removed": 2,
+        "total": 10
+      },
+      "dynamics/solver/contact/normal_part.rs": {
+        "added": 24,
+        "removed": 1,
+        "total": 25
+      },
+      "dynamics/solver/islands/mod.rs": {
+        "added": 7,
+        "removed": 1,
+        "total": 8
+      },
+      "dynamics/solver/islands/sleeping.rs": {
+        "added": 80,
+        "removed": 23,
+        "total": 103
+      },
+      "dynamics/solver/solver_body/mod.rs": {
+        "added": 13,
+        "removed": 0,
+        "total": 13
+      },
+      "lib.rs": {
+        "added": 2,
+        "removed": 0,
+        "total": 2
+      }
+    }
+  },
+  "bevy_pbr": {
+    "version": "0.20.1",
+    "archive_sha256": "1138d6ed9bbcc43a4d83878062869c20d4292f1112b177acfc1a20cf6ae14f3e",
+    "added": 27,
+    "removed": 20,
+    "total": 47,
+    "files": {
+      "render/mesh.rs": {
+        "added": 27,
+        "removed": 20,
+        "total": 47
+      }
+    }
+  },
+  "lightyear_netcode": {
+    "version": "0.31.0",
+    "archive_sha256": "2cf16a8bb3ed7746dc8808a2a6c4d026b7bb174692bb70beaf3c42bbd85cae28",
+    "added": 140,
+    "removed": 19,
+    "total": 159,
+    "files": {
+      "client.rs": {
+        "added": 12,
+        "removed": 0,
+        "total": 12
+      },
+      "lib.rs": {
+        "added": 1,
+        "removed": 1,
+        "total": 2
+      },
+      "server.rs": {
+        "added": 117,
+        "removed": 17,
+        "total": 134
+      },
+      "server_plugin.rs": {
+        "added": 10,
+        "removed": 1,
+        "total": 11
+      }
+    }
+  },
+  "lightyear_avian3d": {
+    "version": "0.31.0",
+    "archive_sha256": "d0ea43838ce698bd3b21b0298b74a6838b3f1942052f4ccea2489413d766c739",
+    "added": 0,
+    "removed": 0,
+    "total": 0,
+    "files": {}
+  }
+}

@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff --minimal -ruN`
-of `src/` against the published crate: 855 in all (MEASURED), 777 in upstream files and 78 in the
+of `src/` against the published crate: 875 in all (MEASURED), 797 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -210,14 +210,42 @@ Guards: `src/tests/avian_narrow_phase.rs`, `src/tests/avian_body_size_metrics.rs
 body-query-gap defect still has its separate, deliberately unextended composition in
 `src/tests/avian_body_query_gap.rs`; record: `upstream/avian-body-query-gap-stale-constraints.md`.
 
-## Disabled colliders in continuous collision (`src/dynamics/ccd/mod.rs`): kept until upstream releases #1101
+## Per-collider swept CCD eligibility (`src/dynamics/ccd/mod.rs`): kept
 
-`solve_continuous` fetches each fast body's colliders through a query without
-`Without<ColliderDisabled>`, so a disabled collider still attached to a fast body (its
-`RigidBodyColliders` keeps it) is swept and can stop the body at an impact it does not take part in.
-Upstream fixed it after 0.8.0 (avian #1101) by adding the filter; the fork carries that line. 6 fork
-lines (MEASURED, the query reformatted). No guard of the game's; drop the patch with the release
-that carries #1101.
+The body gate stays an early-out. Each supported moving collider then compares the body's
+conservative motion bound with its own threshold-scaled CCD thickness, before mass properties,
+swept bounds or tree traversal. Thin children no longer select thicker children for a sweep.
+The body-wide bound includes off-centre rotation; a single collider keeps upstream eligibility.
+
+Kept as an upstream bug fix inside the private per-collider loop. The CCD file, including the
+non-solid query, is 18 added + 4 removed = 22 fork lines (MEASURED). Guards:
+`src/tests/avian_swept_ccd.rs` (thick-child discrete contact, thin-child/single-collider protection,
+offset rotation). A local `LazyCell` defers sweep-shape mass properties until the first filtered
+TOI candidate, once per collider; the gate's thickness is reused. This small bug-fix-kind change
+is folded into the same independent published-crate patch: `upstream/avian-ccd-decide-per-collider.md`.
+The merged-tree source census and repeated release measurements live in the
+[continuing lane report](../../.agents/scratch/swept-ccd-decisions-and-price.md).
+The [controlled collapse record](../../.agents/scratch/swept-ccd-controlled-collapse.md) tests
+the proposed extra truncation mechanism; its two runtime arms have identical physical traces.
+
+## Non-solid colliders in continuous collision (`src/dynamics/ccd/mod.rs`): kept
+
+The moving-side query excludes sensors and disabled colliders at the same site as upstream
+#1101's disabled-collider filter. Non-solid attachments must not clamp the body's solid motion.
+Only the query exclusion ships: body thickness and its invalidation are unchanged. Sweep radius
+is read by the CCD speed test and contact recycling, not sleeping.
+
+Kept as an upstream bug fix inside the private sweep. Guard: `src/tests/avian_swept_ccd.rs`,
+which checks that a fast body passes its non-solid attachment's impact plane while its solid
+collider stops at the wall. The draft `upstream/avian-ccd-sensors-swept-and-counted.md` separates
+this shipping query from its compile-checked-only thickness proposal. That proposal uses removal
+observers and a persistent refresh queue: frame-expiring `RemovedComponents` messages can be lost
+between fixed steps. No shipped game path inserts or removes Sensor.
+
+The [continuing lane report](../../.agents/scratch/swept-ccd-decisions-and-price.md) owns the
+source census and repeated release measurements. Retire the disabled-collider half with a
+published release carrying upstream's own disabled-collider filter. Retire the sensor half when
+its draft is adopted in a published release.
 
 ## Moved-collider bounds prune (`src/collider_tree/update.rs`, `src/collider_tree/diagnostics.rs`): kept
 
@@ -342,6 +370,19 @@ Kept: the loop is inside an upstream system. 61 fork lines (MEASURED).
 
 Guards: `src/tests/avian_body_size_metrics.rs`: once-per-body recomputation and the named no-collider
 and disabled absences. Its missing-center witness now exercises the game's First-stage gate.
+
+## Collider-frame sweep radius (`src/dynamics/rigid_body/body_size_metrics.rs`): kept
+
+The COM and collider translation are body-local; the shape's distance query takes a collider-local
+point. Inverse rotation supplies that frame before the query, keeping the CCD and recycling bound
+conservative for rotated shapes with an off-origin bounding centre.
+
+Kept as an upstream bug fix inside the metric computation: 3 added + 1 removed = 4 fork lines
+(MEASURED). Together with batching and diagnostics the metrics file is 46 + 19 = 65 lines.
+Guard: `src/tests/avian_body_size_metrics.rs`,
+`a_rotated_off_origin_collider_bounds_its_distance_from_the_body_com`, which requires every
+transformed fixture corner to fit inside the bound. Independent published-crate draft:
+`upstream/avian-body-size-metrics-collider-frame.md`.
 
 ## Standalone key write-back: dropped
 

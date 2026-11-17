@@ -593,10 +593,10 @@ struct CcdImpact {
 /// at the first impact, leaving the next frame's collision detection to resolve the contact.
 #[cfg(any(feature = "parry-f32", feature = "parry-f64"))]
 fn solve_continuous(
-    // OVERMATCH PATCH: upstream #1101; a disabled collider takes no part in a sweep.
+    // OVERMATCH PATCH: extend upstream #1101; only enabled solid colliders take part in sweeps.
     colliders: Query<
         (&Collider, &Position, &Rotation, Option<&CollisionLayers>),
-        Without<ColliderDisabled>,
+        (Without<ColliderDisabled>, Without<Sensor>),
     >,
     ccd_query: Query<CcdBodyQuery>,
     mut bodies: ResMut<SolverBodies>,
@@ -735,6 +735,7 @@ fn solve_continuous(
             let Ok((collider1, &collider_pos1, &collider_rot1, layers1)) =
                 colliders.get(collider_entity)
             else {
+                // Non-solid colliders are excluded; a collider missing its pose cannot be swept.
                 continue;
             };
 
@@ -742,6 +743,14 @@ fn solve_continuous(
 
             // No swept CCD for trimeshes, heightfields, polylines, or voxels.
             if !crate::collision::collider::shape_supports_sweeps(shape1) {
+                continue;
+            }
+
+            // OVERMATCH PATCH: a thin child must not force thicker children to sweep.
+            // The body-wide bound includes offset rotation about the body's center of mass
+            // and preserves upstream eligibility for a single-collider body.
+            let min_extent = shape1.ccd_thickness();
+            if max_motion <= ccd.threshold * min_extent.f32() {
                 continue;
             }
 
@@ -764,15 +773,16 @@ fn solve_continuous(
             );
             let query_aabb = obvhs::aabb::Aabb::from(swept_aabb);
 
-            let fast_shape = CcdFastShape {
+            // OVERMATCH PATCH: mass properties are needed only by a filtered TOI candidate.
+            let fast_shape = core::cell::LazyCell::new(|| CcdFastShape {
                 shape: shape1,
                 swept_aabb: parry::bounding_volume::Aabb::new(
                     swept_aabb.min.real(),
                     swept_aabb.max.real(),
                 ),
                 local_centroid: shape1.mass_properties(1.0).local_com,
-                min_extent: shape1.ccd_thickness(),
-            };
+                min_extent,
+            });
 
             // Sweep the collider against the relevant trees.
             for tree in trees_to_query.into_iter().flatten() {
