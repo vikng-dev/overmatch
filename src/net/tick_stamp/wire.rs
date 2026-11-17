@@ -11,7 +11,12 @@ impl TickStamp {
         frame_start_s: f64,
         departure_offset_s: f32,
     ) -> Result<Self, InvalidStamp> {
-        if !frame_start_s.is_finite()
+        // Resolution: reserve arithmetic headroom for interval, lag and target sums. A quarter
+        // of Duration's range admits every practical monotonic epoch without f64 overflow.
+        let limit = std::time::Duration::MAX.as_secs_f64() / 4.0;
+        if frame_start_s > limit
+            || f64::from(departure_offset_s) > limit
+            || !frame_start_s.is_finite()
             || frame_start_s < 0.0
             || !departure_offset_s.is_finite()
             || departure_offset_s < 0.0
@@ -48,7 +53,8 @@ pub(in crate::net) fn replication() -> RuleFns<TickStamp> {
                 .expect("the monotonic departure clock produces finite nonnegative stamps");
             // Replicon 0.45.5 collects/serializes changes before send_messages builds and queues
             // packets. Remaining collection, framing, transport, delivery and completion wait
-            // still enter x; work before this callback does not.
+            // and frame-to-callback work all enter frame-start lateness. Departure separately
+            // diagnoses server work; it does not split the presentation budget.
             bevy_replicon::postcard_utils::to_extend_mut(&departing, message)?;
             Ok(())
         },
@@ -96,7 +102,7 @@ pub(in crate::net) struct InvalidStamp;
 impl std::fmt::Display for InvalidStamp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
-            "server tick frame start and departure offset must be finite nonnegative seconds",
+            "server tick frame start and departure offset must be finite nonnegative seconds within a quarter of Duration's range",
         )
     }
 }

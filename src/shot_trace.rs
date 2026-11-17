@@ -4,7 +4,8 @@
 //! compositions. `send` records transport admission, not delivery acknowledgement. Every row but
 //! `meta` carries `us`, the wall clock in microseconds since the Unix epoch when it was written: the
 //! one clock a server and its clients on the same machine share, so cross-process intervals are read
-//! from it, never from the ticks, whose local timelines can differ. See
+//! from it. Client `t` is the server-domain view tick, null while waiting for a stamp pair;
+//! authority `t` is its simulation tick. Local counters must be named separately. See
 //! [`scripts/shot/analyze.py`](../../scripts/shot/analyze.py) for field-level checks.
 
 use bevy::prelude::*;
@@ -24,12 +25,20 @@ pub(crate) struct ShotTrace {
     /// The composition role, carried for the Startup `meta` row (Startup runs before any recorder
     /// call site, so the row stays first in the file).
     role: &'static str,
+    view_tick: Option<u32>,
 }
 
 impl ShotTrace {
     /// Append one shot-scoped row: the kind, the observing tick, the [`ShotId`] triple, and the
     /// kind's own fields (a `json!({...})` object, merged in).
-    pub(crate) fn row(&mut self, kind: &'static str, tick: u32, shot: ShotId, extra: Value) {
+    pub(crate) fn row(
+        &mut self,
+        kind: &'static str,
+        tick: impl Into<Option<u32>>,
+        shot: ShotId,
+        extra: Value,
+    ) {
+        let tick = self.observing_tick(tick.into());
         let mut row = json!({
             "k": kind,
             "t": tick,
@@ -43,17 +52,36 @@ impl ShotTrace {
     }
 
     /// Append a non-shot-scoped row such as one authority tick's transport accounting.
-    pub(crate) fn global_row(&mut self, kind: &'static str, tick: u32, extra: Value) {
+    pub(crate) fn global_row(
+        &mut self,
+        kind: &'static str,
+        tick: impl Into<Option<u32>>,
+        extra: Value,
+    ) {
+        let tick = self.observing_tick(tick.into());
         let mut row = json!({ "k": kind, "t": tick, "us": wall_us() });
         merge_extra(&mut row, extra);
         self.sink.write(&row);
     }
 
+    pub(crate) fn observe_view_tick(&mut self, tick: Option<u32>) {
+        self.view_tick = tick;
+    }
+
+    fn observing_tick(&self, authority_tick: Option<u32>) -> Option<u32> {
+        match self.role {
+            "client" => self.view_tick,
+            "server" => authority_tick,
+            _ => unreachable!("trace installation names one network role"),
+        }
+    }
+
     #[cfg(test)]
-    pub(crate) fn for_test(path: &std::path::Path) -> Self {
+    pub(crate) fn for_test(path: &std::path::Path, view_tick: Option<u32>) -> Self {
         Self {
             sink: JsonlSink::create(path).expect("test shot trace opens"),
             role: "client",
+            view_tick,
         }
     }
 }
@@ -95,7 +123,7 @@ fn merge_extra(row: &mut Value, extra: Value) {
 pub(crate) fn record(
     trace: &mut Option<ResMut<ShotTrace>>,
     kind: &'static str,
-    tick: u32,
+    tick: impl Into<Option<u32>>,
     shot: ShotId,
     extra: impl FnOnce() -> Value,
 ) {
@@ -108,7 +136,7 @@ pub(crate) fn record(
 pub(crate) fn record_global(
     trace: &mut Option<ResMut<ShotTrace>>,
     kind: &'static str,
-    tick: u32,
+    tick: impl Into<Option<u32>>,
     extra: impl FnOnce() -> Value,
 ) {
     if let Some(trace) = trace {
@@ -130,7 +158,11 @@ fn install(app: &mut App, role: &'static str) -> bool {
         "shot_trace: recording {role} shot-lifecycle rows to {}",
         resolved.display()
     );
-    app.insert_resource(ShotTrace { sink, role });
+    app.insert_resource(ShotTrace {
+        sink,
+        role,
+        view_tick: None,
+    });
     // The `meta` row is written from Startup so `tick_hz` reads the app's ACTUAL `Time<Fixed>`
     // timestep (not a hardcoded 64), exactly as `crate::trace`/`crate::cost` do.
     app.add_systems(Startup, write_meta);

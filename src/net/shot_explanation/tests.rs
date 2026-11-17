@@ -264,7 +264,8 @@ fn an_armed_client_logs_each_draw_arrival_and_release_once() {
         let mut app = App::new();
         app.init_resource::<Time<Virtual>>()
             .init_resource::<LocalTimeline>()
-            .insert_resource(ShotTrace::for_test(&path))
+            .init_resource::<crate::net::view_clock::ViewClock>()
+            .insert_resource(ShotTrace::for_test(&path, None))
             .insert_resource(vocabulary.clone());
         install_client(&mut app);
         app.world_mut().trigger(draw(&already));

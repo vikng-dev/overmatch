@@ -3,10 +3,10 @@
 //! authority's result marked.
 //!
 //! Every view reads the replicated [`BattleState`] and [`Scoreboard`] (one entity) and the
-//! client's shared presentation tick ([`InterpolationTimeline`]); it
+//! client's shared presentation tick ([`ViewClock`]); it
 //! never advances a phase, breaks a tie or chooses a winner. The board orders standings by the
 //! server's own [`rank`]. Before the first snapshot, or while the shared presentation clock is
-//! synchronizing, there is no timed Battle view to show: both views hide.
+//! waiting for completed stamped ticks, there is no timed Battle view to show: both views hide.
 //!
 //! No player name rides the wire yet, so a row names its combatant by its replicated
 //! [`CombatantId`]. Rendered strings stay within the bundled font's coverage
@@ -22,13 +22,12 @@ use bevy::prelude::*;
 
 use super::battle::{BattleOutcome, BattlePhase, BattleState};
 use super::score::{Scoreboard, Standing, rank};
+use super::view_clock::ViewClock;
 use crate::CombatantId;
 use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::hud::ModalExtent;
 use crate::overlay::{self, Overlays};
 use crate::ui_font::{MODAL_CARD_BG, TEXT, UiFonts, set_text};
-use lightyear::interpolation::timeline::InterpolationTimeline;
-use lightyear::prelude::NetworkTimeline;
 
 /// Held to show the scoreboard during combat.
 const BOARD_KEY: KeyCode = KeyCode::Tab;
@@ -444,7 +443,7 @@ fn rewind(scroll: &mut Mut<ScrollPosition>, table: &mut Mut<BoardViewport>) {
 )]
 fn update_battle_hud(
     battles: Query<(&BattleState, &Scoreboard)>,
-    clock: Option<Res<InterpolationTimeline>>,
+    clock: Option<Res<ViewClock>>,
     time: Res<Time<Fixed>>,
     keys: Res<ButtonInput<KeyCode>>,
     overlays: Res<Overlays>,
@@ -467,13 +466,12 @@ fn update_battle_hud(
     let clock = clock.expect(
         "a replicated Battle arrives only where the shared presentation clock is installed",
     );
-    if !clock.is_synced() {
-        // The first snapshot, or a reconnect, can precede a usable presentation-time estimate.
-        // Do not invent a deadline offset while its timeline is still synchronizing.
+    let Some(cursor) = clock.now() else {
+        // The first snapshot can precede a completed stamp pair. No deadline epoch exists yet.
         hide_views(&mut roots, &mut nodes);
         return;
-    }
-    let now = clock.tick().0;
+    };
+    let now = cursor.tick().0;
     let Some(view) = View::of(battle.phase, now, time.timestep()) else {
         // A stale empty-server snapshot can arrive before combat; loading owns that interval.
         hide_views(&mut roots, &mut nodes);
@@ -559,7 +557,6 @@ mod tests {
     use crate::net::battle::LateJoin;
     use crate::net::score::Respawn;
     use crate::overlay::Overlay;
-    use lightyear::prelude::TimelineSync;
 
     /// Fixture data: viewport sizes/scales, thirty tied standings in combat with Tab held, and
     /// vitals, seat and drive readouts. Uses shipped spawners, fonts, Bevy layout and this module's
@@ -573,7 +570,7 @@ mod tests {
         })))
         .add_plugins(crate::ui_font::plugin)
         .insert_resource(UiScale(scale))
-        .init_resource::<InterpolationTimeline>()
+        .init_resource::<ViewClock>()
         .init_resource::<Overlays>()
         .add_systems(Update, systems())
         .add_systems(
@@ -598,9 +595,7 @@ mod tests {
         app.cleanup();
         app.update();
         let world = app.world_mut();
-        world
-            .resource_mut::<InterpolationTimeline>()
-            .set_synced(true);
+        world.resource_mut::<ViewClock>().set_synced(true);
         world.resource_mut::<Overlays>().declare_in_match(true);
         world.spawn((
             BattleState::combat_fixture(),
@@ -1192,7 +1187,7 @@ mod tests {
         assert_eq!(app.world().get::<BoardViewport>(viewport).unwrap().first, 0);
     }
 
-    /// A replicated deadline is not meaningful against an unsynchronized cursor. Players must
+    /// A replicated deadline is not meaningful before the view epoch exists. Players must
     /// see neither a fabricated countdown nor an early results board while the clock settles.
     #[test]
     fn the_view_waits_for_its_shared_presentation_clock() {
@@ -1211,14 +1206,12 @@ mod tests {
             ))
             .id();
         app.world_mut()
-            .resource_mut::<InterpolationTimeline>()
+            .resource_mut::<ViewClock>()
             .set_synced(false);
         app.update();
         assert_eq!(clock_line(&mut app), None);
         assert!(!shown(&mut app, MatchUi::Scoreboard));
-        app.world_mut()
-            .resource_mut::<InterpolationTimeline>()
-            .set_synced(true);
+        app.world_mut().resource_mut::<ViewClock>().set_synced(true);
         app.update();
         assert_eq!(clock_line(&mut app).as_deref(), Some("RESULTS 0:50"));
         assert!(shown(&mut app, MatchUi::Scoreboard));
@@ -1246,13 +1239,11 @@ mod tests {
         };
         page_on(&mut app);
         app.world_mut()
-            .resource_mut::<InterpolationTimeline>()
+            .resource_mut::<ViewClock>()
             .set_synced(false);
         app.update();
         assert!(rewound(&mut app));
-        app.world_mut()
-            .resource_mut::<InterpolationTimeline>()
-            .set_synced(true);
+        app.world_mut().resource_mut::<ViewClock>().set_synced(true);
         page_on(&mut app);
         app.world_mut().entity_mut(replica).despawn();
         app.update();
@@ -1266,16 +1257,14 @@ mod tests {
             body: Handle::default(),
         })
         .insert_resource(Time::<Fixed>::from_duration(fixed))
-        .init_resource::<InterpolationTimeline>()
+        .init_resource::<ViewClock>()
         .init_resource::<crate::ShotClock>()
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<Overlays>();
         app.world_mut()
             .resource_mut::<Overlays>()
             .declare_in_match(true);
-        app.world_mut()
-            .resource_mut::<InterpolationTimeline>()
-            .set_synced(true);
+        app.world_mut().resource_mut::<ViewClock>().set_synced(true);
         mount_bare(&mut app);
         app.update();
         lay_out_board(&mut app, 400.0, 400.0, 400.0);
@@ -1356,11 +1345,9 @@ mod tests {
 
         // Fixture input time leads presentation time. The match display must follow the latter.
         app.world_mut().resource_mut::<crate::ShotClock>().0 = crate::sim_tick::SimTick::new(400);
-        app.world_mut()
-            .resource_mut::<InterpolationTimeline>()
-            .set_now(lightyear::core::time::TickInstant::from(
-                lightyear::core::tick::Tick(40),
-            ));
+        app.world_mut().resource_mut::<ViewClock>().set_now(
+            lightyear::core::time::TickInstant::from(lightyear::core::tick::Tick(40)),
+        );
         set_phase(
             &mut app,
             BattlePhase::Combat {

@@ -325,10 +325,11 @@ def stats_row(clients: int, period_s: float, arrival: dict | None = ARRIVAL) -> 
 
 # Fixture: one client_jitter object (src/net/frontier.rs), its view clock completing every tick of a
 # 64 Hz second.
-JITTER = {"period_s": 1.0, "starved": {"events": 1, "ms": 2.5, "longest_ms": 2.5},
-          "min_delay_ms": {"applied": 60.0, "target": 55.0}, "rtt_ms": 9.0,
-          "view_clock": {"delta_star_ms": -1400.0, "today_stamp_lag_ms": -1390.0, "target_minus_today_ms": -10.0,
-                         "target_above_latest_x_ms": 20.0,
+JITTER = {"period_s": 1.0, "holds": {"events": 1, "ms": 2.5, "longest_ms": 2.5},
+          "ticks": {"received": 64, "frontier": 64}, "arrival_ms": None, "headroom_ticks": None,
+          "view_clock": {"usual_work_ms": 3.0, "delta_star_ms": -1400.0, "stamp_lag_ms": -1390.0, "target_minus_applied_ms": -10.0,
+                         "target_above_latest_x_ms": 20.0, "applied_delta_ms": -1390.0,
+                         "applied_above_latest_x_ms": 60.0, "cuts": 0,
                          "stamp_interval_ms": fixture_histogram([327, 310, 2], 15.6, 18.2, 40.0),
                          "completion": {"completed_ticks": 64, "sampled_ticks": 64, "late_ticks": 0,
                                         "worst_lag_frames": 0, "worst_lag_ms": 0.0, "evicted_incomplete": 0,
@@ -462,11 +463,11 @@ class MeasuredRun(unittest.TestCase):
         cost = self.fixture.stdout.split("View clock")[0]
         data_rows = [line.split() for line in cost.splitlines() if re.match(r"\s*\d+\s", line)]
         self.assertEqual([row[0] for row in data_rows], [str(i) for i in range(1, harness.WINDOWS + 1)])
-        # Each client reports 2.5 ms starved per 1 s line, so a window sums its own seconds' lines,
+        # Each client reports 2.5 ms held per 1 s line, so a window sums its own seconds' lines,
         # read on the client machine's clock.
         window_s = float(option(SETTINGS, "--window-s"))
-        starved = harness.COLUMNS.index("starved_ms")
-        self.assertEqual({float(row[starved]) for row in data_rows}, {2.5 * window_s})
+        held = harness.COLUMNS.index("held_ms")
+        self.assertEqual({float(row[held]) for row in data_rows}, {2.5 * window_s})
         clients = int(option(SETTINGS, "--clients"))
         for column, field in (("stale_decl", "stale_declarations"), ("stale_arr", "stale_arrivals")):
             self.assertEqual({int(row[harness.COLUMNS.index(column)]) for row in data_rows},
@@ -780,11 +781,19 @@ class Reading(unittest.TestCase):
             with self.subTest(name), self.assertRaisesRegex(harness.Refused, "^fixture `gap_ms`"):
                 harness.histogram(harness.Fields({"gap_ms": value}, "fixture"), "gap_ms")
 
+    def test_missing_view_epoch_or_retained_sample_is_a_named_absence(self):
+        # Null must survive parsing and aggregation; zero would claim an observed delay.
+        row = JITTER | {"view_clock": JITTER["view_clock"] | {"applied_above_latest_x_ms": None}}
+        line = harness.jitter("[ 1.000] client_jitter " + json.dumps(row), 1)[0]
+        self.assertIsNone(line.applied_above_latest_x_ms)
+        cells = harness.client_cells(1, 0, [line], 0.0, TIMING)
+        self.assertIsNone(cells[13])
+
     def test_a_view_window_histogram_is_taken_once_per_view_window(self):
         # Each line's histogram holds the view window before it; lines a second apart overlap, so
         # summing them would count each interval up to a view window's worth of times.
         hist = harness.Histogram(10, 15.6, 18.0, 20.0, BIN_MS, (5, 5) + (0,) * 15)
-        line = harness.Jitter(0.0, 1.0, 0.0, 60.0, hist, None, None, (0,) * len(harness.COMPLETION), 0.0)
+        line = harness.Jitter(at=0.0, period_s=1.0, held_ms=0.0, applied_above_latest_x_ms=60.0, intervals=hist, target_minus_applied_ms=None, target_above_x_ms=None, completion=(0,) * len(harness.COMPLETION), worst_lag_ms=0.0, cuts=0)
         # Fixture: ten lines per view window over three view windows.
         lines = [dataclasses.replace(line, at=k * TIMING.view_window_s / 10) for k in range(1, 31)]
         self.assertEqual(len(harness.tiles(lines, 0.0, TIMING.view_window_s)), 3)
@@ -794,7 +803,7 @@ class Reading(unittest.TestCase):
         for width in (1.5, TIMING.view_window_s):
             hist = harness.Histogram(1, 0.0, 0.0, 0.0, BIN_MS, (1,) + (0,) * 16)
             lines = [harness.Jitter(float(k), 1.0, 0.0, 60.0, dataclasses.replace(hist), None, None,
-                                   (0,) * len(harness.COMPLETION), 0.0)
+                                   (0,) * len(harness.COMPLETION), 0.0, 0)
                      for k in range(1, math.ceil(3 * width) + 2)]
             taken = harness.tiles(lines, 0.25, width)
             stamps = {id(line.intervals): line.at for line in lines}

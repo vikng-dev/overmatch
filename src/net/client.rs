@@ -11,12 +11,12 @@ use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 
+use super::view_clock::ViewClock;
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::ecs::query::QuerySingleError;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::client::*;
 use lightyear::prelude::{Controlled as NetControlled, *};
 use serde_json::json;
@@ -500,11 +500,9 @@ pub fn run() -> AppExit {
     }
 
     // Register the shared protocol before creating the client link. The step lightyear publishes as
-    // `TickDuration`; `net::interp_delay` derives its gap term from the same binding.
-    let tick_duration = Duration::from_secs_f64(1.0 / 64.0);
-    // LocalTimeline uses lightyear's default InputTimelineConfig: no input delay and default
-    // SyncConfig. Its objective leads the remote estimate by RTT/2 + 4*jitter + 3 ticks
-    // (DERIVED from lightyear_sync's input objective). Arrival-owned input never waits on it.
+    // `TickDuration`, also the simulation-time unit for the view clock's pacing bound.
+    let tick_duration = crate::net::server::TICK;
+    // Transport labels free-run; arrival input and presentation never follow their estimate.
     app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(super::plugin);
     app.add_plugins(physics::physics_plugins());
@@ -551,17 +549,8 @@ pub fn run() -> AppExit {
                 .in_set(lightyear::link::LinkReceiveSystems::ApplyConditioner),
         );
     }
-    // Mounts the deriving system; the returned config is the entity's starting value, rewritten
-    // every frame.
-    let interpolation = super::interp_delay::install(&mut app, tick_duration);
-    let interpolation = super::sync_margin::install(&mut app, interpolation);
-    // Read-only timeline-resync instrument and the per-second `client_jitter` line.
+    super::view_clock::install(&mut app);
     super::frontier::install(&mut app);
-    super::frontier::install_jitter_line(&mut app);
-    // Every replica — the own hull included — rides the interpolation buffer behind the server
-    // estimate, so it is also the dominant own-input latency term. `net::interp_delay` owns the
-    // sizing law and rewrites `min_delay` every frame.
-    app.insert_resource(interpolation);
     // The connection state machine: gate the FIRST connect on the tank assets, then auto-retry a
     // failed/dropped connection on a short backoff. See [`drive_connection`] for the full states.
     app.init_resource::<ConnectRetry>()
@@ -629,37 +618,22 @@ pub fn run() -> AppExit {
 }
 
 /// The game's netcode and damage-model presentation: the common replica consumer schedule,
-/// shared by the client and socket-free resync replay. Requires the protocol, physics, sim,
-/// frontier resources; link setup and input authorship stay with the
-/// composition root. Keeping the mount shared makes a new consumer part of the replay too.
+/// shared by the client and socket-free stream-presence proof. Requires protocol, physics and sim;
+/// link setup, the view clock and input authorship stay with the composition root. Keeping the mount shared makes a new consumer part of the replay too.
 pub(super) fn install_replica_consumers(app: &mut App) {
     app.add_observer(diagnostics::log_connected)
         .add_observer(reset_shot_receive_state)
-        .add_observer(reset_link_state)
         .add_observer(retire_link_shells)
         .add_plugins(control_claim_plugin)
         .add_systems(
             Update,
             (
-                rig::attach_replicated_rig(),
-                receive_fire_events,
-                receive_damage_confirms,
+                rig::attach_replicated_rig().run_if(|view: Res<ViewClock>| view.now().is_some()),
                 diagnostics::nan_tripwire,
                 open_gameplay_gate,
             ),
         );
-    // `receive_fire_events` owns render-rate drain; `apply_pending_recoil_kicks` owns fixed-clock
-    // TankSim writes. Each documents why its clock cannot change.
-    app.init_resource::<PendingRecoilKicks>();
-    // Client-only shot dedup, deferred fire resolution, private-receipt dedup, and sanctioned
-    // outcomes. The ballistics march reads `SanctionedShots` optionally everywhere else.
-    app.init_resource::<SeenShots>();
-    app.init_resource::<HeldFireEvents>();
-    app.init_resource::<PendingFireEvents>();
-    app.init_resource::<SeenDamage>();
-    app.init_resource::<SanctionedShots>();
-    // Expiry is sim-time coarse, so a real tick is the right cadence.
-    app.add_systems(FixedUpdate, age_sanctioned_shots);
+    install_fire_ingress(app);
     // The pen cam's explanations addressed to this player, and whether each impact is drawn.
     super::shot_explanation::install_client(app);
     // Select the authority world before consuming its common construction stream.
@@ -678,6 +652,30 @@ pub(super) fn install_replica_consumers(app: &mut App) {
     );
     // Log the arrived role unconditionally: captures must identify the own hull's clock.
     app.add_systems(Update, log_local_tank_role);
+}
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct FireIngress;
+
+/// The game's damage model: expire facts already retained over view progress, then admit this
+/// frame's arrivals. New facts cannot inherit time before their receipt, including across a cut.
+/// Ordered ingress also gives the shared shot trace one declared append order. Path presentation
+/// consumes the resulting buffer in PostUpdate.
+pub(super) fn install_fire_ingress(app: &mut App) {
+    app.init_resource::<PendingRecoilKicks>()
+        .init_resource::<SeenShots>()
+        .init_resource::<HeldFireEvents>()
+        .init_resource::<PendingFireEvents>()
+        .init_resource::<SeenDamage>()
+        .init_resource::<SanctionedShots>()
+        .init_resource::<crate::ballistics::PathClock>()
+        .add_systems(Update, age_sanctioned_shots.before(FireIngress))
+        .add_systems(
+            Update,
+            (receive_fire_events, receive_damage_confirms)
+                .chain()
+                .in_set(FireIngress),
+        );
 }
 
 /// State for the connect/reconnect driver ([`drive_connection`]). Lives across every mode (the
@@ -1253,7 +1251,7 @@ fn claim_complete_tank(
 }
 
 /// Name the replication role the server gave this client's own tank, the first frame that role is
-/// observable: the interpolated server stream, RTT/2 + the interpolation delay behind. Latches on
+/// observable: the interpolated server stream on the view clock. Latches on
 /// the first resolved role, so a respawn does not re-log a decision that cannot change mid-session.
 fn log_local_tank_role(
     tank: Query<Entity, (With<GameControlled>, With<NetTank>, With<Interpolated>)>,
@@ -1298,8 +1296,9 @@ pub(super) struct SeenShots {
 }
 
 impl SeenShots {
-    // DERIVED: 30 combatants x two weapons x ceil(750 RPM x `MAX_COSMETIC_CATCH_UP_TICKS` / 64 Hz)
-    // is 1,200 ids. The next power of two covers every duplicate the catch-up gate can accept.
+    // Resolution: memory for 30 combatants x 2 weapons x ceil(750/60 rounds/s x
+    // 100/64 s catch-up) = 1,200 ids (DERIVED sizing example, not a vehicle law).
+    // The next power of two covers that horizon; overflow retires the oldest id.
     const CAP: usize = 2_048;
     /// Record `shot`; return whether it was not already present.
     fn mark_new(&mut self, shot: ShotId) -> bool {
@@ -1370,14 +1369,14 @@ enum FireRefusal {
 fn refuse_fire(
     shot: ShotId,
     refusal: FireRefusal,
-    now: Tick,
+    now: impl Into<Option<Tick>>,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
     warn!(?shot, ?refusal, "client: refused an authority fire fact");
     crate::shot_trace::record(
         shot_trace,
         "drop",
-        now.0,
+        now.into().map(|t| t.0),
         shot,
         || json!({ "s": "fire", "res": "refused", "why": format!("{refusal:?}") }),
     );
@@ -1392,19 +1391,29 @@ struct PendingFire {
 }
 
 /// Bounded, expiring fire visuals awaiting a unique live shooter root.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub(super) struct PendingFireEvents {
+    ttl_ticks: i32,
     order: std::collections::VecDeque<ShotId>,
     by_shot: bevy::platform::collections::HashMap<ShotId, PendingFire>,
 }
 
+impl FromWorld for PendingFireEvents {
+    fn from_world(world: &mut World) -> Self {
+        world.init_resource::<super::timing::Timing>();
+        let horizon = world.resource::<super::timing::Timing>().view_pending_s;
+        Self {
+            ttl_ticks: (horizon / crate::sim_tick::sim_timestep().as_secs_f64()).ceil() as i32,
+            order: default(),
+            by_shot: default(),
+        }
+    }
+}
+
 impl PendingFireEvents {
-    // DERIVED: 256 is larger than the 60-fire synchronized 30-tank volley and stays below the
-    // 2,048-entry ShotId dedup horizon, so a pending id cannot outlive its duplicate guard.
+    // Resolution: 256 exceeds a 30-combatant x 2-weapon volley (60 fires, DERIVED),
+    // below the 2,048-id dedup allocation. Overflow visibly omits the oldest cosmetic.
     const CAP: usize = 256;
-    // DERIVED: 16 ticks is the server automatic-visual repair TTL; a later fire would be stale
-    // presentation debt rather than a useful tracer.
-    const TTL_TICKS: i32 = 16;
 
     /// Insert one unresolved fire. The return value is an older event evicted for bounded memory.
     fn insert(&mut self, fire: ReceivedFire, received_tick: Tick) -> Option<PendingFire> {
@@ -1469,15 +1478,6 @@ impl SeenDamage {
     }
 }
 
-/// Reset server-clocked state on link end: an earlier new-server tick must not be rejected by
-/// `sync_margin::ArrivalDelay`.
-fn reset_link_state(
-    _ended: On<Remove<Connected>>,
-    mut arrival: ResMut<super::sync_margin::ArrivalDelay>,
-) {
-    arrival.reset_for_new_link();
-}
-
 /// The game's damage model: this composition has one server link, and its cosmetic paths
 /// cannot receive a terminal after that link ends. Retire those shells with the clock's scope.
 fn retire_link_shells(
@@ -1509,7 +1509,8 @@ fn reset_shot_receive_state(
     *recoil = default();
     *shots = default();
     held.0.clear();
-    *fires = default();
+    fires.order.clear();
+    fires.by_shot.clear();
     *damage = default();
     *sanctioned = default();
 }
@@ -1547,11 +1548,8 @@ pub(super) struct FireLedgers<'w> {
 pub(super) fn receive_fire_events(
     inbox: FireInbox,
     shooters: FireShooters,
-    timeline: Res<LocalTimeline>,
-    // The release clock: the fractional interpolation cursor every held announcement compares its
-    // fire tick against. Synced-only — a pre-sync client has no interpolated motion to fuse with,
-    // so its events present at arrival.
-    cursor: Option<Res<InterpolationTimeline>>,
+    // Waiting for the first completed stamp pair holds announcements without presenting them.
+    cursor: Res<ViewClock>,
     ledgers: FireLedgers,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut commands: Commands,
@@ -1569,13 +1567,15 @@ pub(super) fn receive_fire_events(
         mut sanctioned,
         mut path_clock,
     } = ledgers;
-    let now = timeline.tick();
+    // Waiting for a completed stamp pair is a named absence, also null in trace rows.
+    let now = cursor.now().map(|now| now.tick());
     let cursor = cursor
-        .filter(|timeline| timeline.is_synced())
-        .map(|timeline| (timeline.tick(), f64::from(timeline.overstep().to_f32())));
-    let (tick, fraction) = cursor.unwrap_or((now, 0.0));
-    path_clock.tick = tick.0;
-    path_clock.fraction = fraction;
+        .now()
+        .map(|now| (now.tick(), f64::from(now.overstep().to_f32())));
+    if let Some((tick, fraction)) = cursor {
+        path_clock.tick = tick.0;
+        path_clock.fraction = fraction;
+    }
     for mut receiver in &mut batch_receivers {
         for batch in receiver.receive() {
             for fact in batch.facts {
@@ -1601,6 +1601,9 @@ pub(super) fn receive_fire_events(
             consume_flight_outcome(outcome, now, &mut sanctioned, &mut shot_trace);
         }
     }
+    let Some(now) = now else {
+        return;
+    }; // No epoch yet: only receipt and holding can run.
     release_due_fire_events(
         now,
         cursor,
@@ -1629,7 +1632,7 @@ fn cursor_itick(cursor: Option<(Tick, f64)>) -> Option<f64> {
 
 fn consume_fire_visual_fact(
     fact: FireVisualFact,
-    now: Tick,
+    now: Option<Tick>,
     cursor: Option<(Tick, f64)>,
     seen: &mut SeenShots,
     held: &mut HeldFireEvents,
@@ -1650,7 +1653,7 @@ fn consume_fire_visual_fact(
 /// happens at release ([`release_due_fire_events`], same drain), never here.
 fn consume_fire_event(
     event: &FireEvent,
-    now: Tick,
+    now: Option<Tick>,
     cursor: Option<(Tick, f64)>,
     seen: &mut SeenShots,
     held: &mut HeldFireEvents,
@@ -1658,10 +1661,10 @@ fn consume_fire_event(
 ) {
     let shot = event.shot_id();
     let fresh = seen.mark_new(shot);
-    crate::shot_trace::record(shot_trace, "fire_rx", now.0, shot, || {
+    crate::shot_trace::record(shot_trace, "fire_rx", now.map(|t| t.0), shot, || {
         json!({
             "dup": !fresh,
-            "cu": fire_catch_up_ticks(event.fire_tick, now),
+            "cu": now.and_then(|now| fire_catch_up_ticks(event.fire_tick, now)),
             "itick": cursor_itick(cursor),
         })
     });
@@ -1672,13 +1675,13 @@ fn consume_fire_event(
         Ok(fire) => fire,
         Err(refusal) => return refuse_fire(shot, refusal, now, shot_trace),
     };
-    if fire_catch_up_ticks(event.fire_tick, now).is_none() {
+    if cursor.is_some_and(|(tick, _)| fire_catch_up_ticks(event.fire_tick, tick).is_none()) {
         // Older than the cosmetic catch-up bound (a late reliable resend, a stalled client): a
         // legitimate absence, the shell's flight already over. Nothing presents.
         crate::shot_trace::record(
             shot_trace,
             "drop",
-            now.0,
+            now.map(|t| t.0),
             shot,
             || json!({ "s": "fire", "res": "stale_fire" }),
         );
@@ -1688,7 +1691,7 @@ fn consume_fire_event(
         crate::shot_trace::record(
             shot_trace,
             "drop",
-            now.0,
+            now.map(|t| t.0),
             evicted.shot_id(),
             || json!({ "s": "fire", "res": "held_capacity" }),
         );
@@ -1698,7 +1701,7 @@ fn consume_fire_event(
 /// The game's damage model validates an outside path once, at network ingress.
 fn consume_flight_outcome(
     outcome: FlightOutcome,
-    now: Tick,
+    now: Option<Tick>,
     sanctioned: &mut SanctionedShots,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
@@ -1714,7 +1717,7 @@ fn consume_flight_outcome(
     crate::shot_trace::record(
         shot_trace,
         "path_rx",
-        now.0,
+        now.map(|t| t.0),
         shot,
         || json!({ "seq": sequence, "result": format!("{result:?}") }),
     );
@@ -1767,7 +1770,7 @@ enum FireBinding {
     Bound(Entity, Box<crate::rounds::Round>),
     /// Replication has not caught up: no live root carries the combatant, two do, or the root's
     /// rig (every muzzle at once, `rig::attach_replicated_rig`) has not attached. Deferred to
-    /// [`PendingFireEvents`], which expires it after [`PendingFireEvents::TTL_TICKS`].
+    /// [`PendingFireEvents`], whose expiry is measured in view time.
     Deferred,
     /// The assembled rig cannot fire this fact.
     Refused(FireRefusal),
@@ -1807,7 +1810,7 @@ impl FireShooters<'_, '_> {
 }
 
 /// Release at cursor crossing, deferring unresolved shooters to [`PendingFireEvents`]
-/// and its replica-race TTL. No pre-sync cursor means release all at arrival.
+/// and its replica-race TTL. No cursor yet means hold.
 #[expect(
     clippy::too_many_arguments,
     reason = "one release boundary owns cursor crossing and shooter resolution"
@@ -1824,7 +1827,7 @@ fn release_due_fire_events(
 ) {
     let due = match cursor {
         Some((tick, overstep)) => held.0.release(tick, overstep),
-        None => held.0.release_all(),
+        None => Vec::new(),
     };
     for (_, fire) in due {
         match shooters.resolve(&fire.event) {
@@ -1863,13 +1866,16 @@ fn resolve_pending_fire_events(
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
 ) {
+    if cursor.is_none() {
+        return;
+    } // No presentation epoch yet; keep unresolved facts held.
     let pending_count = pending_fires.len();
     for _ in 0..pending_count {
         let pending = pending_fires.pop_front().expect(
             "the captured pending count guarantees one queued fire per pass; deferred fires requeue",
         );
         let shot = pending.fire.shot_id();
-        if pending_fire_expired(pending.received_tick, now) {
+        if now - pending.received_tick > pending_fires.ttl_ticks {
             crate::shot_trace::record(
                 shot_trace,
                 "drop",
@@ -1894,10 +1900,6 @@ fn resolve_pending_fire_events(
             FireBinding::Refused(refusal) => refuse_fire(shot, refusal, now, shot_trace),
         }
     }
-}
-
-fn pending_fire_expired(received_tick: Tick, now: Tick) -> bool {
-    now - received_tick > PendingFireEvents::TTL_TICKS
 }
 
 /// One released shot's wire/state facts — everything presentation needs except its age, which is
@@ -1939,8 +1941,7 @@ fn present_released_shot(
     Some(catch_up_ticks)
 }
 
-/// The trigger body the seam and the pre-sync arrival fallback share: one `FireShell` plus one
-/// queued barrel kick per released shot. Age policy lives at the call sites — this only writes it.
+/// The game's damage-model presentation: one shell and one barrel kick per released server fact.
 fn present_shot_at_age(
     catch_up_ticks: u32,
     shot: ReleasedShot,
@@ -1993,17 +1994,10 @@ fn spawn_reconstructed_fire(
         },
         shot: event.shot_id(),
     };
-    let catch_up_ticks = match cursor {
-        // CURSOR clock: the seam measures the shot's age on the same clock that released it.
-        Some(cursor) => {
-            present_released_shot(event.fire_tick, cursor, facts, pending_recoil, commands)
-        }
-        // Pre-sync arrival presentation has no cursor; age against the local timeline.
-        None => fire_catch_up_ticks(event.fire_tick, now).inspect(|&catch_up_ticks| {
-            present_shot_at_age(catch_up_ticks, facts, pending_recoil, commands);
-        }),
-    };
-    let Some(catch_up_ticks) = catch_up_ticks else {
+    let cursor = cursor.expect("held fire releases only after the view clock has a cursor");
+    let Some(catch_up_ticks) =
+        present_released_shot(event.fire_tick, cursor, facts, pending_recoil, commands)
+    else {
         crate::shot_trace::record(
             shot_trace,
             "drop",
@@ -2018,7 +2012,7 @@ fn spawn_reconstructed_fire(
         "present",
         now.0,
         event.shot_id(),
-        || json!({ "itick": cursor_itick(cursor), "cu": catch_up_ticks }),
+        || json!({ "itick": cursor_itick(Some(cursor)), "cu": catch_up_ticks }),
     );
 }
 
@@ -2029,12 +2023,12 @@ fn spawn_reconstructed_fire(
 /// This runs in `Update` for the same receiver-clear scheduling invariant as [`receive_fire_events`].
 pub(super) fn receive_damage_confirms(
     mut receivers: Query<&mut MessageReceiver<DamageConfirm>>,
-    timeline: Res<LocalTimeline>,
+    view: Res<ViewClock>,
     mut seen: ResMut<SeenDamage>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut commands: Commands,
 ) {
-    let received_tick = timeline.tick();
+    let received_tick = view.now().map(|now| now.tick());
     for mut receiver in &mut receivers {
         for damage in receiver.receive() {
             consume_damage_confirm(
@@ -2054,7 +2048,7 @@ pub(super) fn receive_damage_confirms(
 /// depend on a replica that may have despawned between damage and receipt.
 fn consume_damage_confirm(
     damage: &DamageConfirm,
-    received_tick: Tick,
+    received_tick: Option<Tick>,
     seen: &mut SeenDamage,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
@@ -2065,37 +2059,60 @@ fn consume_damage_confirm(
         fire_tick: damage.receipt.fire_tick,
     };
     let fresh = seen.mark_new(damage.receipt);
-    crate::shot_trace::record(shot_trace, "dmg_rx", received_tick.0, shot, || {
-        json!({
-            "own": true,
-            "dup": !fresh,
-            "dt": damage.damage_tick.0,
-        })
-    });
+    crate::shot_trace::record(
+        shot_trace,
+        "dmg_rx",
+        received_tick.map(|t| t.0),
+        shot,
+        || {
+            json!({
+                "own": true,
+                "dup": !fresh,
+                "dt": damage.damage_tick.0,
+            })
+        },
+    );
     if fresh {
         commands.trigger(super::hit_feel::LocalHitConfirmed {
             receipt: damage.receipt,
-            received_tick: received_tick.0,
+            received_tick: received_tick.map(|t| t.0),
             damage_tick: damage.damage_tick.0,
         });
     }
 }
 
-/// The game's damage model: sole ager of the client-only sanctioned-path buffer, which the
-/// ballistics march only reads. Fixed-clock expiry matches its cosmetic shells' sim-time lifetime.
-pub(super) fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time: Res<Time>) {
-    sanctioned.age(time.delta_secs());
+/// The game's damage model: path retention advances only with presentation. A stalled cursor
+/// cannot expire a fact before its cosmetic shell has had the chance to consume it.
+fn age_sanctioned_shots(
+    mut sanctioned: ResMut<SanctionedShots>,
+    view: Res<ViewClock>,
+    tick: Res<lightyear::core::tick::TickDuration>,
+    mut previous: Local<(u64, Option<lightyear::core::time::TickInstant>)>,
+) {
+    if previous.0 != view.epoch {
+        *previous = (view.epoch, None);
+    }
+    let Some(now) = view.now() else {
+        previous.1 = None; // No server presentation epoch before samples or between connections.
+        return;
+    };
+    if let Some(before) = previous.1.replace(now) {
+        assert!(
+            now >= before,
+            "the connected view cursor never moves backward; a waiting epoch resets path aging"
+        );
+        sanctioned.age((now - before).to_f32() * tick.0.as_secs_f32());
+    }
 }
 
-/// The game's damage model: local/arrival age for ingress validity and pre-sync presentation
-/// (`spawn_reconstructed_fire`). Cursor releases use `present_released_shot`
-/// instead. `None` skips tracer and recoil; `Some(0)` spawns at the muzzle without rewinding.
+/// The game's damage model: whole-tick age bound for late server facts at the view cursor.
+/// `None` refuses an expired cosmetic; `Some(0)` admits a fact still ahead of presentation.
 ///
 /// Lightyear's monotonic u32 `Tick` difference saturates to i32, so outside-input extremes stay
 /// bounded; network publication refuses timeline exhaustion rather than privately wrapping.
-/// Ahead-of-local fire ticks (clock skew or malicious input) yield zero; elapsed ticks through
+/// Ahead-of-cursor fire ticks yield zero; elapsed ticks through
 /// [`MAX_COSMETIC_CATCH_UP_TICKS`] fast-forward (normal case DERIVED approximately 10); older
-/// ticks refuse without a catch-up loop. The framework local timeline supplies this presentation clock.
+/// ticks refuse without a catch-up loop.
 fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
     let elapsed = now - fire;
     if elapsed < 0 {
@@ -2468,7 +2485,7 @@ mod tests {
 
     fn feed_test_damage_copies(
         copies: Res<TestDamageCopies>,
-        timeline: Res<LocalTimeline>,
+        view: Res<ViewClock>,
         mut seen: ResMut<SeenDamage>,
         mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
         mut commands: Commands,
@@ -2476,7 +2493,7 @@ mod tests {
         for damage in &copies.0 {
             consume_damage_confirm(
                 damage,
-                timeline.tick(),
+                view.now().map(|now| now.tick()),
                 &mut seen,
                 &mut shot_trace,
                 &mut commands,
@@ -2670,23 +2687,6 @@ mod tests {
         assert!(app.world().resource::<SeenShots>().set.is_empty());
     }
 
-    /// A link ending — a drop, a leave, a despawn — empties the state keyed to that server's tick
-    /// clock, so the next server's earlier ticks are accepted.
-    #[test]
-    fn a_link_ending_resets_its_clock_keyed_state() {
-        use super::super::sync_margin::ArrivalDelay;
-        let mut app = App::new();
-        app.insert_resource(ArrivalDelay::test_with_newest_remote(Tick(5_000)))
-            .add_observer(reset_link_state);
-        let link = app
-            .world_mut()
-            .spawn((RemoteId(PeerId::Netcode(99)), Connected))
-            .id();
-        assert_ne!(app.world().resource::<ArrivalDelay>().newest_remote(), None);
-        app.world_mut().entity_mut(link).remove::<Connected>();
-        assert_eq!(app.world().resource::<ArrivalDelay>().newest_remote(), None);
-    }
-
     /// The game's damage model: a disconnected server cannot finish a cosmetic path.
     /// A new connection must never inherit a round frozen on the previous server's cursor.
     #[test]
@@ -2726,12 +2726,12 @@ mod tests {
                 receipt,
                 damage_tick: Tick(12),
             };
-            let mut timeline = LocalTimeline::default();
-            timeline.apply_delta(13);
+            let mut view = ViewClock::default();
+            view.set_now(Tick(13).into());
             let mut app = App::new();
-            app.insert_resource(timeline);
+            app.insert_resource(view);
             app.init_resource::<SeenDamage>();
-            app.insert_resource(crate::shot_trace::ShotTrace::for_test(&path));
+            app.insert_resource(crate::shot_trace::ShotTrace::for_test(&path, Some(13)));
             app.insert_resource(TestDamageCopies(vec![damage.clone(), damage]));
             app.init_resource::<MarkerPulses>();
             super::super::hit_feel::mount_test_marker_boundary(&mut app);
@@ -2809,7 +2809,7 @@ mod tests {
         let mut world = World::new();
         let unmapped = Entity::from_raw_u32(999).expect("non-placeholder entity");
         let event = fire_event(unmapped, 7, 42);
-        let mut pending = PendingFireEvents::default();
+        let mut pending = PendingFireEvents::from_world(&mut World::new());
         let fire = ReceivedFire::parse(&event).expect("the fixture bore is a unit direction");
         assert!(pending.insert(fire, Tick(42)).is_none());
         assert_eq!(pending.len(), 1, "unresolved fire is retained");
@@ -2853,7 +2853,7 @@ mod tests {
     }
 
     /// Consume one arriving fire through the production gate, then run the release pass at the
-    /// given cursor (`None` = the pre-sync fallback: release everything).
+    /// given cursor (`None` = waiting for the first completed stamp pair).
     fn consume_and_release(
         world: &mut World,
         event: FireEvent,
@@ -2869,7 +2869,7 @@ mod tests {
                       mut pending: ResMut<PendingFireEvents>,
                       mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
-                    consume_fire_event(&event, now, cursor, &mut seen, &mut held, &mut trace);
+                    consume_fire_event(&event, Some(now), cursor, &mut seen, &mut held, &mut trace);
                     release_due_fire_events(
                         now,
                         cursor,
@@ -2921,13 +2921,140 @@ mod tests {
         app
     }
 
+    /// The game's damage model: an arrival before the view epoch must wait for its first
+    /// crossing. A local-clock fallback would present the shell and kick before its hull exists.
+    #[test]
+    fn no_view_epoch_holds_fire_until_the_first_cursor_crossing() {
+        let mut app = fire_receive_app();
+        let world = app.world_mut();
+        let root = spawn_shooter(world, 7);
+        let event = fire_event(root, 7, 42); // Fixture identity and release tick.
+        consume_and_release(world, event, Tick(100), None);
+        release_at(world, Tick(101), None);
+        assert!(world.resource::<ReconstructedFireShells>().0.is_empty());
+        release_at(world, Tick(42), Some((Tick(42), 0.0)));
+        assert_eq!(world.resource::<ReconstructedFireShells>().0.len(), 1);
+        assert_eq!(world.resource::<PendingRecoilKicks>().queued(), [(root, 0)]);
+    }
+
+    /// The game's damage model: a public path must remain available while the view cursor
+    /// holds, even if many local fixed ticks elapse. Moving retention back to a local clock
+    /// loses server facts before their presentation crossing.
+    #[test]
+    fn public_path_retention_ages_only_when_the_view_advances() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ViewClock>()
+            .init_resource::<SanctionedShots>()
+            .insert_resource(lightyear::core::tick::TickDuration(
+                super::super::server::TICK,
+            ))
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::from_secs(1),
+            ))
+            .add_systems(Update, age_sanctioned_shots);
+        let shot = crate::ShotId {
+            combatant: CombatantId(7),
+            weapon: 0,
+            fire_tick: 100,
+        }; // Fixture identity.
+        app.world_mut()
+            .resource_mut::<ViewClock>()
+            .set_now(Tick(100).into());
+        app.world_mut()
+            .resource_mut::<SanctionedShots>()
+            .insert(crate::ballistics::path_fixture(shot, 102));
+        for _ in 0..(SanctionedShots::MAX_AGE_SECS.ceil() as u32 + 2) {
+            app.update();
+        }
+        assert!(app.world().resource::<SanctionedShots>().has_shot(shot));
+        let expired = 100
+            + (SanctionedShots::MAX_AGE_SECS / super::super::server::TICK.as_secs_f32()).ceil()
+                as u32
+            + 1;
+        app.world_mut()
+            .resource_mut::<ViewClock>()
+            .set_now(Tick(expired).into());
+        app.update();
+        assert!(!app.world().resource::<SanctionedShots>().has_shot(shot));
+    }
+
+    /// The game's damage model: a cut retires old facts before fresh network arrivals enter.
+    /// The shipped ingress installer owns this ordering; aging after ingress drops a newly
+    /// received path immediately whenever the cut exceeds its retention horizon.
+    #[test]
+    fn a_view_cut_cannot_expire_a_path_that_arrives_on_that_frame() {
+        use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings};
+        #[derive(Resource)]
+        struct Arrival(Option<FlightOutcome>);
+        fn inject(mut arrival: ResMut<Arrival>, mut paths: ResMut<SanctionedShots>) {
+            if let Some(path) = arrival.0.take() {
+                let mut trace = None;
+                consume_flight_outcome(path, None, &mut paths, &mut trace);
+            }
+        }
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ViewClock>()
+            .init_resource::<LocalTimeline>()
+            .insert_resource(lightyear::core::tick::TickDuration(
+                super::super::server::TICK,
+            ))
+            .insert_resource(Arrival(None));
+        install_fire_ingress(&mut app);
+        app.add_systems(
+            Update,
+            inject.in_set(FireIngress).before(receive_fire_events),
+        );
+        app.edit_schedule(Update, |schedule| {
+            schedule.set_build_settings(ScheduleBuildSettings {
+                ambiguity_detection: LogLevel::Error,
+                ..ScheduleBuildSettings::new()
+            });
+        });
+        let old = ShotId {
+            combatant: CombatantId(7),
+            weapon: 0,
+            fire_tick: 100,
+        }; // Fixture identity.
+        app.world_mut()
+            .resource_mut::<ViewClock>()
+            .set_now(Tick(100).into());
+        app.world_mut()
+            .resource_mut::<SanctionedShots>()
+            .insert(crate::ballistics::path_fixture(old, 102));
+        app.update();
+        let after = 100
+            + (SanctionedShots::MAX_AGE_SECS / super::super::server::TICK.as_secs_f32()).ceil()
+                as u32
+            + 1;
+        let fresh = ShotId {
+            fire_tick: after,
+            ..old
+        };
+        app.world_mut()
+            .resource_mut::<ViewClock>()
+            .set_now(Tick(after).into());
+        app.world_mut().resource_mut::<Arrival>().0 =
+            Some(crate::ballistics::path_fixture(fresh, after + 2));
+        app.update();
+        let paths = app.world().resource::<SanctionedShots>();
+        assert!(
+            !paths.has_shot(old),
+            "the old path spent the view-time retention horizon"
+        );
+        assert!(
+            paths.has_shot(fresh),
+            "the new receipt has spent no view time yet"
+        );
+    }
+
     /// The game's damage-model presentation: the owning client must consume every received
     /// server path, whether its announcement precedes or follows the replicated belt change.
     /// An already
     /// received fire can still be held for the cursor when the belt arrives.
     #[test]
     fn belt_arrival_cannot_discard_an_announced_round_or_its_path() {
-        use super::super::sync_margin::ArrivalDelay;
         use crate::ballistics::{PathClock, PenetrationMarks, Projectile, Shot};
         use crate::tank::{WeaponGate, WeaponGateState, WeaponLoad, WeaponLoads};
         use lightyear::core::time::TickInstant;
@@ -2942,15 +3069,14 @@ mod tests {
                     .insert_resource(lightyear::core::tick::TickDuration(
                         crate::net::test_harness::TICK,
                     ))
-                    .insert_resource(Time::<Fixed>::from_duration(crate::net::test_harness::TICK))
-                    .insert_resource(ArrivalDelay::test_with_newest_remote(Tick(100)));
+                    .insert_resource(Time::<Fixed>::from_duration(crate::net::test_harness::TICK));
                 let mut local = LocalTimeline::default();
                 local.apply_delta(116);
                 app.insert_resource(local);
                 app.insert_resource(crate::ShotClock(crate::sim_tick::SimTick::new(116)));
-                let mut cursor = InterpolationTimeline::default();
+                let mut cursor = ViewClock::default();
                 cursor.set_now(TickInstant::from(Tick(90)));
-                lightyear::prelude::TimelineSync::set_synced(&mut cursor, true);
+
                 app.insert_resource(cursor);
                 let world = app.world_mut();
                 let root = spawn_shooter(world, 7);
@@ -3014,7 +3140,7 @@ mod tests {
                 if path_first {
                     consume_flight_outcome(
                         path.clone(),
-                        Tick(116),
+                        Some(Tick(116)),
                         &mut world.resource_mut::<SanctionedShots>(),
                         &mut trace,
                     );
@@ -3024,7 +3150,7 @@ mod tests {
                 }
                 world.get_mut::<WeaponGate>(root).unwrap().weapons[0].belt_remaining -= 1;
                 world
-                    .resource_mut::<InterpolationTimeline>()
+                    .resource_mut::<ViewClock>()
                     .set_now(TickInstant::from(Tick(105)));
                 if announcement_first {
                     release_at(world, Tick(116), Some((Tick(105), 0.0)));
@@ -3044,7 +3170,7 @@ mod tests {
                 if !path_first {
                     consume_flight_outcome(
                         path,
-                        Tick(116),
+                        Some(Tick(116)),
                         &mut world.resource_mut::<SanctionedShots>(),
                         &mut trace,
                     );
@@ -3085,7 +3211,7 @@ mod tests {
         let event = fire_event(unmapped, 7, 42);
         let shot = event.shot_id();
 
-        consume_and_release(world, event.clone(), Tick(42), None);
+        consume_and_release(world, event.clone(), Tick(42), Some((Tick(42), 0.0)));
         let root = spawn_shooter(world, 7);
         world
             .run_system_once(
@@ -3096,7 +3222,7 @@ mod tests {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     resolve_pending_fire_events(
                         Tick(42),
-                        None,
+                        Some((Tick(42), 0.0)),
                         &shooters,
                         &mut recoil,
                         &mut pending,
@@ -3106,7 +3232,7 @@ mod tests {
                 },
             )
             .expect("pending fire resolves through the production repair path");
-        consume_and_release(world, event, Tick(42), None);
+        consume_and_release(world, event, Tick(42), Some((Tick(42), 0.0)));
 
         assert_eq!(
             world.resource::<PendingFireEvents>().len(),
@@ -3289,7 +3415,7 @@ mod tests {
         second.mechanism = crate::spec::FireMechanism::Single;
         second.weapon = 1;
         second.round = 1;
-        consume_and_release(world, second, Tick(42), None);
+        consume_and_release(world, second, Tick(42), Some((Tick(42), 0.0)));
         assert_eq!(
             world.resource::<Bound>().0,
             [(
@@ -3310,7 +3436,7 @@ mod tests {
         let mut unknown = fire_event(root, 7, 43);
         unknown.weapon = 1;
         unknown.round = 2;
-        consume_and_release(world, unknown, Tick(43), None);
+        consume_and_release(world, unknown, Tick(43), Some((Tick(43), 0.0)));
         assert_eq!(
             world.resource::<Bound>().0.len(),
             1,
@@ -3337,11 +3463,21 @@ mod tests {
             let mut event = fire_event(root, 7, 42 + index as u32);
             event.origin.x = poison;
             assert_eq!(ReceivedFire::parse(&event).err(), Some(FireRefusal::Origin));
-            consume_and_release(world, event, Tick(42 + index as u32), None);
+            consume_and_release(
+                world,
+                event,
+                Tick(42 + index as u32),
+                Some((Tick(42 + index as u32), 0.0)),
+            );
             let mut event = fire_event(root, 7, 52 + index as u32);
             event.birth.x = poison;
             assert_eq!(ReceivedFire::parse(&event).err(), Some(FireRefusal::Birth));
-            consume_and_release(world, event, Tick(52 + index as u32), None);
+            consume_and_release(
+                world,
+                event,
+                Tick(52 + index as u32),
+                Some((Tick(52 + index as u32), 0.0)),
+            );
         }
         assert!(world.resource::<ReconstructedFireShells>().0.is_empty());
         assert_eq!(world.resource::<PendingFireEvents>().len(), 0);
@@ -3349,7 +3485,7 @@ mod tests {
             world
                 .resource_mut::<HeldFireEvents>()
                 .0
-                .release_all()
+                .release(Tick(u32::MAX - 1), 0.0)
                 .is_empty()
         );
     }
@@ -3366,7 +3502,7 @@ mod tests {
         let root = world.spawn((NetTank, CombatantId(7))).id();
         let event = fire_event(root, 7, 42);
         let shot = event.shot_id();
-        consume_and_release(world, event, Tick(42), None);
+        consume_and_release(world, event, Tick(42), Some((Tick(42), 0.0)));
         assert_eq!(
             world.resource::<PendingFireEvents>().len(),
             1,
@@ -3383,7 +3519,7 @@ mod tests {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     resolve_pending_fire_events(
                         Tick(43),
-                        None,
+                        Some((Tick(43), 0.0)),
                         &shooters,
                         &mut recoil,
                         &mut pending,
@@ -3401,7 +3537,7 @@ mod tests {
 
         let mut malformed = fire_event(root, 7, 44);
         malformed.direction = Vec3::ZERO;
-        consume_and_release(world, malformed, Tick(44), None);
+        consume_and_release(world, malformed, Tick(44), Some((Tick(44), 0.0)));
         assert_eq!(world.resource::<PendingFireEvents>().len(), 0);
         assert_eq!(
             world.resource::<ReconstructedFireShells>().0.len(),
@@ -3457,8 +3593,8 @@ mod tests {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     consume_fire_visual_fact(
                         FireVisualFact::Fire(here.clone()),
-                        Tick(42),
-                        None,
+                        Some(Tick(42)),
+                        Some((Tick(43), 0.0)),
                         &mut seen,
                         &mut held,
                         &mut sanctioned,
@@ -3466,8 +3602,8 @@ mod tests {
                     );
                     consume_fire_visual_fact(
                         FireVisualFact::Fire(elsewhere.clone()),
-                        Tick(42),
-                        None,
+                        Some(Tick(42)),
+                        Some((Tick(43), 0.0)),
                         &mut seen,
                         &mut held,
                         &mut sanctioned,
@@ -3475,8 +3611,8 @@ mod tests {
                     );
                     consume_fire_visual_fact(
                         FireVisualFact::Outcome(crate::ballistics::path_fixture(shot, 43)),
-                        Tick(43),
-                        None,
+                        Some(Tick(43)),
+                        Some((Tick(43), 0.0)),
                         &mut seen,
                         &mut held,
                         &mut sanctioned,
@@ -3484,7 +3620,7 @@ mod tests {
                     );
                     release_due_fire_events(
                         Tick(43),
-                        None,
+                        Some((Tick(43), 0.0)),
                         &shooters,
                         &mut recoil,
                         &mut held,

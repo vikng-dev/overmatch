@@ -42,7 +42,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// at, and a whole copy only to a client without one or behind the retained history; the hull
 /// marks replicate whole. The owner's ahead-running aim integrates the authority's servo law
 /// (`tank::servo`), so a change to that law changes this revision too.
-pub const PROTOCOL_REV: u32 = 104;
+pub const PROTOCOL_REV: u32 = 105;
 
 /// The compatibility record's wire term: the pinned wire manifest, [`PROTOCOL_REV`] and the crate
 /// version.
@@ -622,17 +622,23 @@ pub(super) fn install_shot_clock(app: &mut App) {
     app.add_systems(FixedUpdate, publish_shot_clock.before(GameplaySet));
 }
 
-/// Republish the same network tick for every gameplay consumer before the gameplay pass.
-/// Offline compositions advance their own wrapping tick; network compositions require an
-/// advancing transport timeline and refuse its exhaustion visibly at this boundary.
+/// The game's damage model: network shot labels follow the local transport timeline.
+/// Authority countdowns are published separately while its server state is running;
+/// the view-clock installer publishes client countdowns every render frame.
 pub(super) fn publish_shot_clock(
     mut shot_clock: ResMut<crate::ShotClock>,
-    mut weapon_clock: ResMut<crate::WeaponClock>,
     timeline: Res<LocalTimeline>,
 ) {
     let tick = network_gameplay_tick(timeline.tick()).unwrap_or_else(super::harness::refuse_start);
     shot_clock.0 = tick;
-    weapon_clock.0 = tick;
+}
+
+/// Authority countdowns share the shot tick; the running server state chooses this role.
+fn publish_authority_weapon_clock(
+    timeline: Res<LocalTimeline>,
+    mut weapon: ResMut<crate::WeaponClock>,
+) {
+    weapon.0 = network_gameplay_tick(timeline.tick()).unwrap_or_else(super::harness::refuse_start);
 }
 
 /// Publish angles in `FixedPostUpdate`, after `drive_servos` (`FixedUpdate`, after `GameplaySet`).
@@ -719,8 +725,8 @@ fn publish_launched_turret_pose(
 /// (the replica hulls are, [`super::rig::attach_replicated_rig`]), avian's broad phase never pairs
 /// two static bodies, so no contact constraint exists on the client. The client's physics step
 /// relies on that: the authority owns motion and contacts, and the client owns no constraint
-/// state. The presentation boundary (`super::resync`) retains already-presented poses through
-/// unknown interpolation history. Avian's bookkeeping defect for a raw body-query gap remains
+/// state. The monotonic view clock never revisits discarded interpolation history.
+/// Avian's bookkeeping defect for a raw body-query gap remains
 /// pinned independently by `src/tests/avian_body_query_gap.rs`; its mechanism is recorded in
 /// `upstream/avian-body-query-gap-stale-constraints.md`.
 ///
@@ -852,7 +858,7 @@ const WIRE_SURFACE_HASH: u64 = 0xb35d6c7c3c7bbe9e;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x58e2be8e2950233e;
+const WIRE_TYPES_HASH: u64 = 0x1c863b9a5768591f;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing; replicon's
@@ -868,6 +874,12 @@ const WIRE_DEP_REPLICON: &str = "0.45.5";
 pub(crate) fn plugin(app: &mut App) {
     super::tick_stamp::install(app);
     install_shot_clock(app);
+    app.add_systems(
+        FixedUpdate,
+        publish_authority_weapon_clock
+            .before(GameplaySet)
+            .run_if(in_state(bevy_replicon::prelude::ServerState::Running)),
+    );
     app.init_resource::<crate::ballistics::PathClock>();
     app.component::<NetTank>().replicate();
     app.component::<NetBot>().replicate();
@@ -894,7 +906,6 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<super::debris_stress::DebrisPose>()
         .replicate_with(super::debris_stress::pose_replication())
         .add_interpolation_with(super::debris_stress::debris_pose_lerp);
-    super::resync::retain_stream::<super::debris_stress::DebrisPose>(app);
     // The construction ledger (one world entity): appended entries ride as diffs, a late joiner takes the
     // list once.
     app.component::<super::construction::Ledger>()
@@ -994,24 +1005,20 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<Position>()
         .replicate_with(super::wire_quant::position_fns())
         .add_linear_interpolation();
-    super::resync::retain_stream::<Position>(app);
     app.component::<Rotation>()
         .replicate_with(super::wire_quant::rotation_fns())
         .add_linear_interpolation();
-    super::resync::retain_stream::<Rotation>(app);
     app.component::<LinearVelocity>()
         .replicate_with(super::wire_quant::linear_velocity_fns());
     // `track_drive_lerp` keeps the remote belt view on the hull's cursor clock.
     app.component::<TrackDrive>()
         .replicate_with(super::wire_quant::track_drive_fns())
         .add_interpolation_with(track_drive_lerp);
-    super::resync::retain_stream::<TrackDrive>(app);
     // The shaped drive signal: owner-only (`disclosure::CombatDisclosure`), read by the owner's
     // drive HUD on the belt state's clock.
     app.component::<DriveSignal>()
         .replicate()
         .add_interpolation_with(drive_signal_lerp);
-    super::resync::retain_stream::<DriveSignal>(app);
     // The declared transmission's correlated state: one atomic snapshot, owner-only
     // (`disclosure::CombatDisclosure`). Every other client hears the crank through `EngineRpm`,
     // applied on arrival like the transmission it is read off.
@@ -1091,8 +1098,8 @@ mod tests {
     }
 
     /// The client's physics world holds no contact constraint, including a launched turret
-    /// resting on a hull. This test stages a raw body-query gap independently of the stream
-    /// retention boundary, so the no-contact invariant cannot depend on resync handling.
+    /// resting on a hull. A raw body-query gap must preserve that contract independently
+    /// of the presentation clock.
     /// A non-static turret creates a constraint and fails before Avian's body-query-gap defect.
     #[test]
     fn a_launched_turret_on_a_replica_hull_holds_no_contact_constraint() {
@@ -2224,6 +2231,104 @@ mod tests {
         assert_eq!(app.world().resource::<crate::ShotClock>().0.raw(), 44);
     }
 
+    /// The game's damage model: the HUD's weapon countdown follows presented server time,
+    /// while transport labels remain independent. A hold or waiting epoch cannot mature it.
+    #[test]
+    fn client_weapon_publication_follows_the_view_and_holds_without_an_epoch() {
+        use super::super::{
+            tick_stamp::{ReceivedStamps, TickStamp},
+            view_clock::ViewClock,
+        };
+        use bevy::time::TimeUpdateStrategy;
+        use bevy_replicon::client::server_mutate_ticks::MutateTickReceived;
+        use bevy_replicon::prelude::{ReplicationStorage, RepliconTick};
+        use lightyear::interpolation::timeline::InterpolationTimeline;
+        use lightyear::prelude::ReplicationCheckpointMap;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ReplicationStorage>()
+            .init_resource::<ReplicationCheckpointMap>()
+            .init_resource::<InterpolationTimeline>()
+            .insert_resource(lightyear::core::tick::TickDuration(
+                super::super::server::TICK,
+            ))
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                super::super::server::TICK,
+            ))
+            .add_message::<MutateTickReceived>();
+        install_shot_clock(&mut app);
+        super::super::view_clock::install(&mut app);
+        app.insert_resource(timeline_at(400)); // Fixture: deliberately leading transport labels.
+        app.world_mut().resource_mut::<Time<Virtual>>().pause();
+        app.update();
+        assert!(app.world().resource::<ViewClock>().now().is_none());
+        let waiting = app.world().resource::<crate::WeaponClock>().0;
+        app.update();
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0, waiting);
+
+        // Fixture: completed authority stamps span several render frames of available view time.
+        for (tick, start) in [
+            (40, 0.0),
+            (44, 4.0 * super::super::server::TICK.as_secs_f64()),
+        ] {
+            let checkpoint = RepliconTick::new(tick);
+            app.world_mut()
+                .resource_mut::<ReplicationCheckpointMap>()
+                .record(checkpoint, Tick(tick));
+            app.world_mut()
+                .resource_mut::<ReplicationStorage>()
+                .global
+                .get_or_default::<ReceivedStamps>()
+                .queue
+                .push_back((checkpoint, TickStamp::new(start, 0.0).unwrap()));
+            app.world_mut()
+                .write_message(MutateTickReceived { tick: checkpoint });
+        }
+        app.update();
+        let before = app.world().resource::<crate::WeaponClock>().0;
+        let view_before = app.world().resource::<ViewClock>().now().unwrap();
+        // DERIVED fixture bound: traverse the four-tick stamp span, plus its delay and hold.
+        for _ in 0..12 {
+            app.update();
+            let view = app.world().resource::<ViewClock>().now().unwrap();
+            assert_eq!(
+                app.world().resource::<crate::WeaponClock>().0.raw(),
+                view.tick().0
+            );
+        }
+        let view = app.world().resource::<ViewClock>().now().unwrap();
+        let published = app.world().resource::<crate::WeaponClock>().0;
+        assert!(
+            view > view_before,
+            "the installed driver must progress on render frames"
+        );
+        assert_ne!(
+            published, before,
+            "the installed publisher must follow view progress"
+        );
+        assert_eq!(
+            app.world().resource::<Time<Fixed>>().elapsed(),
+            std::time::Duration::ZERO,
+            "publication must advance without fixed gameplay"
+        );
+        assert!(app.world().resource::<ViewClock>().held);
+
+        app.world_mut().resource_mut::<Time<Virtual>>().unpause();
+        app.world_mut()
+            .resource_mut::<LocalTimeline>()
+            .apply_delta(100);
+        app.update();
+        assert_eq!(app.world().resource::<ViewClock>().now(), Some(view));
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0, published);
+        assert!(app.world().resource::<Time<Fixed>>().elapsed() > std::time::Duration::ZERO);
+        assert_eq!(app.world().resource::<crate::ShotClock>().0.raw(), 500);
+        app.insert_resource(ViewClock::default());
+        app.update();
+        assert!(app.world().resource::<ViewClock>().now().is_none());
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0, published);
+    }
+
     /// The game's damage model: shot identity, deadline gates and replica catch-up all read
     /// the transport timeline. Joining processes cannot invent a private epoch at its end.
     #[test]
@@ -2235,7 +2340,7 @@ mod tests {
         world.init_resource::<crate::ShotClock>();
         world.init_resource::<crate::WeaponClock>();
         let mut schedule = Schedule::default();
-        schedule.add_systems(publish_shot_clock);
+        schedule.add_systems((publish_shot_clock, publish_authority_weapon_clock).chain());
         for _ in 0..3 {
             schedule.run(&mut world);
             let transport = world.resource::<LocalTimeline>().tick();

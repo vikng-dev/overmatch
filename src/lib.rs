@@ -594,9 +594,9 @@ pub(crate) struct ClientReplica;
 #[derive(Resource, Default)]
 pub(crate) struct ShotClock(pub sim_tick::SimTick);
 
-/// Current simulation tick used by the tick-correlated weapon gate. Network compositions publish
-/// `LocalTimeline` into it before gameplay; non-network compositions
-/// advance it once after each playing fixed tick, wrapping freely. Deadline ordering belongs
+/// Current tick for weapon deadlines: authority transport time on servers, view time on clients.
+/// The client publishes every render frame before fixed gameplay; no stamp pair means no progress.
+/// Non-network compositions advance once after each playing fixed tick, wrapping freely. Deadline ordering belongs
 /// to [`sim_tick::SimTick`], never the numeric order of this clock's counter.
 #[derive(Resource, Default)]
 pub(crate) struct WeaponClock(pub sim_tick::SimTick);

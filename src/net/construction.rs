@@ -15,12 +15,12 @@
 //! ([`WorldShed`]) and held until that world is selected ([`HeldSheds`]); a late joiner takes
 //! none, since decoration is presentation only.
 
+use super::view_clock::ViewClock;
 use crate::debris::PresentationClock;
 use crate::debris::crumble::Shed;
 use bevy::ecs::error::Result;
 use bevy::prelude::*;
 use bevy_replicon::prelude::{DiffIndex, Diffable, EntityCommandsDiffExt};
-use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::link::prelude::Endpoint;
 use lightyear::prelude::server::Server;
 use lightyear::prelude::*;
@@ -266,10 +266,10 @@ fn admit_shed(
 }
 
 fn publish_presentation_clock(
-    cursor: Option<Res<InterpolationTimeline>>,
+    cursor: Option<Res<ViewClock>>,
     mut clock: ResMut<PresentationClock>,
 ) {
-    *clock = match cursor.filter(|timeline| timeline.is_synced()) {
+    *clock = match cursor.and_then(|clock| clock.now()) {
         Some(timeline) => PresentationClock::At {
             tick: timeline.tick().0,
             overstep: f64::from(timeline.overstep().to_f32()),

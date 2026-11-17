@@ -1,4 +1,7 @@
+// The game's damage-model feedback and UI presentation. Required fields; no defaults.
 (
+    cue_retain_per_60hz_frame: (0.86, Taste("damage flash and confirmation marker: intensity retained per 1/60-second frame")),
+    cue_zero_eps: (0.02, Taste("damage flash and confirmation marker: intensity cutoff for hiding the cue")),
     overlay_font_px: (48.0, Taste("full-screen overlay banner size")),
     overlay_text_srgb: ((1.0, 1.0, 1.0), Taste("full-screen overlay text contrast")),
     text_srgb: ((0.85, 0.95, 1.0), Taste("live UI text colour")),

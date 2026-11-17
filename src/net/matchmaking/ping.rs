@@ -8,7 +8,7 @@
 //! `TcpStream::connect_timeout` returns when it completes. It is also how the hosting risk test
 //! measured the beacons (`.agents/scratch/hosting-2026-10/risk-test.md`).
 //!
-//! **The summary reads like `net::sync_margin::ArrivalStats`:** the median is the nearest-rank
+//! **The summary reads like `net::timing::histogram`:** the median is the nearest-rank
 //! Q50 (index `ceil(0.5·n) − 1`, the estimator's own index law), and the spread is Qp − min,
 //! which over a handful of samples is max − min (Qp with p = 1 − 1/3840 is the largest sample at
 //! any n < 3840).

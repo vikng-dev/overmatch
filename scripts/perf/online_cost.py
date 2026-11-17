@@ -108,7 +108,28 @@ def stats_object(line: str) -> dict | None:
 
 
 def jitter_object(line: str) -> dict | None:
-    return record_object(line, JITTER_RECORD, "client_jitter")
+    value = record_object(line, JITTER_RECORD, "client_jitter")
+    if value is None:
+        return None
+    def shape(obj, keys, path):
+        if not isinstance(obj, dict):
+            raise MalformedRecord(f"a client_jitter record: `{path}` must be an object")
+        for key in keys:
+            if key not in obj:
+                raise MalformedRecord(f"a client_jitter record: no `{path + '.' if path else ''}{key}`")
+        unknown = set(obj) - set(keys)
+        if unknown:
+            raise MalformedRecord(f"a client_jitter record: unknown fields in `{path or 'record'}`: {sorted(unknown)}")
+    shape(value, ("view_clock", "period_s", "ticks", "arrival_ms", "headroom_ticks", "holds"), "")
+    shape(value["ticks"], ("received", "frontier"), "ticks")
+    shape(value["holds"], ("events", "ms", "longest_ms"), "holds")
+    shape(value["view_clock"], ("usual_work_ms", "delta_star_ms", "stamp_lag_ms", "applied_delta_ms",
+          "applied_above_latest_x_ms", "target_minus_applied_ms", "target_above_latest_x_ms",
+          "cuts", "stamp_interval_ms", "completion", "pending_ticks"), "view_clock")
+    shape(value["view_clock"]["completion"], ("completed_ticks", "sampled_ticks", "late_ticks",
+          "worst_lag_frames", "worst_lag_ms", "evicted_incomplete", "completed_without_stamp",
+          "unmapped_stamps", "receipt_overflow"), "view_clock.completion")
+    return value
 
 
 def parse_stats_line(line: str) -> dict[str, float] | None:
