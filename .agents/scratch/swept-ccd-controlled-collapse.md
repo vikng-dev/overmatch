@@ -2,7 +2,12 @@
 
 Subject: Overmatch's environment destruction model, game state only.
 
-## Decision
+Follow-up: the [same-binary live rehearsal](swept-ccd-live-collapse.md) closes the live causal
+question: the arms do not measurably separate beyond CCD time. The unresolved attribution below
+describes this controlled experiment's evidence at the time; its landing-blocker conclusion is
+superseded by that live comparison.
+
+## Decision at this stage
 
 **Stop at diagnosis, the (c) path; the cause and its size remain unknown.** Neither (a)'s causal
 claim nor (b)'s engine fix is supported. In the controlled six-house scene the gate removes sweep

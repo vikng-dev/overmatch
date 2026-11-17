@@ -2,11 +2,13 @@
 
 Subject: Overmatch's environment destruction model, game state only.
 
-Follow-up: the [controlled six-house experiment](swept-ccd-controlled-collapse.md) repeats each
-runtime arm exactly but finds identical physical outcomes across arms. It does not reproduce the
-extra truncation hypothesis or close this live-run causal question.
+Follow-ups: the [controlled six-house experiment](swept-ccd-controlled-collapse.md) finds
+identical physical outcomes across runtime arms. The later
+[same-binary live rehearsal](swept-ccd-live-collapse.md) closes the causal question: no measurable
+collapse-tail separation beyond CCD time. The unresolved attribution and landing blocker below
+describe the earlier evidence; that conclusion is superseded by the live comparison.
 
-## Decision and limit
+## Decision and limit at this stage
 
 The expensive tail is an awake debris contact graph: narrow phase, constraint preparation and
 solving continue after CCD has become cheap. The original pricing records associate their longer
