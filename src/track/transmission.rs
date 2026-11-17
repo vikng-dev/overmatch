@@ -754,7 +754,8 @@ pub struct TransmissionState {
     pub steer_step: u8,
     /// Which ladder is engaged (reverse uses the R ladder).
     pub reverse: bool,
-    /// Park lever: set at rest and by a released low-speed stop. It holds both ways during
+    /// Park lever: set at rest and while braking released motion against the gear outside a
+    /// neutral pivot, or by a released sub-idle stop along it. It holds both ways during
     /// reversal pause/cut and without intent; launch carries only the rollback shortfall.
     /// A breached lever retains its dynamic brake capacity.
     pub park: bool,
@@ -1475,6 +1476,10 @@ pub(crate) fn brake_capacity_for_regime(
     }
 }
 
+fn requests_other_ladder(command: f32, reverse: bool) -> bool {
+    command.abs() >= DEAD && (command < 0.0) != reverse
+}
+
 /// A moving reversal refreshes the stopped countdown. Release cancels the countdown;
 /// only a complete at-rest hold permits one paid direction cut.
 fn swap_ladder_direction(
@@ -1484,8 +1489,7 @@ fn swap_ladder_direction(
     command: f32,
     brake: bool,
 ) {
-    let opposite = command.abs() >= DEAD && (command < 0.0) != st.reverse;
-    if !opposite || brake {
+    if !requests_other_ladder(command, st.reverse) || brake {
         st.reversal_hold_ticks = 0;
         return;
     }
@@ -1562,7 +1566,7 @@ fn driver(
         (1..=ladder.len() as u8).contains(&st.gear),
         "a direction swap selects first gear on its admitted ladder"
     );
-    let opposing = command * dir < -DEAD;
+    let opposing = requests_other_ladder(command, st.reverse);
     let against_motion = command.abs() >= DEAD
         && input
             .speeds
@@ -1597,7 +1601,6 @@ fn driver(
             shifting || unchosen,
             propulsive,
             dir * mean * ratio,
-            brake,
         );
     } else {
         // Without task work the clutch springs In after the already-paid mechanical cut.
@@ -1640,8 +1643,9 @@ fn update_steer_detent(st: &mut TransmissionState, steer: f32) {
     };
 }
 
-/// At rest the lever is on. Drive lets it carry only rollback; steering releases it for
-/// a neutral turn. A released tank below first gear's idle speed stops and parks.
+/// With no throttle request, the Driver brakes motion against the engaged gear to rest, within
+/// brake capacity, unless in a neutral pivot, whose mean hold is its only stop.
+/// See `transmission-design.md`, "Released-motion policy".
 fn update_park_latch(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1651,18 +1655,21 @@ fn update_park_latch(
 ) {
     let speed = inp.speeds[0].abs().max(inp.speeds[1].abs());
     let requested = command.abs() >= DEAD;
-    let steering = inp.steer.abs() >= DEAD;
     let first = if st.reverse {
         tp.gears_rev[0]
     } else {
         tp.gears_fwd[0]
     };
     let stop_speed = tp.engine.idle_rpm * RPM_TO_RAD * tp.sprocket_radius / first;
-    if !brake && !requested && steering {
+    let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
+    let along_gear = mean * if st.reverse { -1.0 } else { 1.0 };
+    if !brake && !requested && neutral_pivot(inp, mean) {
         st.park = false;
-    } else if speed < PARK_ENGAGE_SPEED || (!requested && !steering && speed < stop_speed) {
+    } else if speed < PARK_ENGAGE_SPEED
+        || (!requested && (along_gear < 0.0 || (inp.steer.abs() < DEAD && speed < stop_speed)))
+    {
         st.park = true;
-    } else if requested && command * (inp.speeds[0] + inp.speeds[1]) > 0.0 {
+    } else if requested && command * mean > 0.0 {
         st.park = false;
     }
 }
@@ -1681,6 +1688,8 @@ fn neutral_pivot(inp: &TransmissionInput, mean: f32) -> bool {
 
 /// The Driver holding it `open` (a shift window, or no gear chosen yet), a two-sided parked
 /// hold and neutral turns open the clutch; otherwise it engages as [`engagement`] states.
+/// With no propulsive pedal, only motion along the engaged ladder can couple.
+/// See `transmission-design.md`, "Released-motion policy".
 fn update_clutch_state(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1688,12 +1697,14 @@ fn update_clutch_state(
     open: bool,
     propulsive: f32,
     shaft_omega: f32,
-    brake: bool,
 ) {
     let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
     st.clutch = if open
-        || (st.park && (brake || propulsive < DEAD))
-        || (propulsive < DEAD && (mean.abs() < PARK_ENGAGE_SPEED || neutral_pivot(inp, mean)))
+        || (propulsive < DEAD
+            && (st.park
+                || shaft_omega <= 0.0
+                || mean.abs() < PARK_ENGAGE_SPEED
+                || neutral_pivot(inp, mean)))
     {
         ClutchState::Out
     } else {
