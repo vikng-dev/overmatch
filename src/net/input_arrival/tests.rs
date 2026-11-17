@@ -71,7 +71,7 @@ fn observe_command(
     mut observations: ResMut<Observations>,
 ) {
     for command in &tanks {
-        observations.held.push(command.triggers[1]);
+        observations.held.push(command.fire_secondary);
         observations.selects += usize::from(command.select_round.is_some());
     }
 }
@@ -284,7 +284,7 @@ impl Pair {
             .world_mut()
             .resource_mut::<FrameInput>()
             .command
-            .triggers[1] = true;
+            .fire_secondary = true;
         self.steps(6);
     }
 }
@@ -315,11 +315,7 @@ fn stalled_frame_plus_click_applies_exactly_one_shot() {
         .insert_resource(TimeUpdateStrategy::ManualDuration(TICK));
     pair.steps(40);
     assert_eq!(pair.shots(), 1);
-    assert_eq!(pair.state().applied, 1);
-    println!(
-        "MEASURED click-to-answer ms: {:?}",
-        pair.state().latencies_ms
-    );
+    assert_eq!(pair.state().answer.resolved, 1);
 }
 
 /// Resending unanswered ids survives opaque upstream datagram loss without replaying a shot.
@@ -336,7 +332,7 @@ fn thirty_percent_uplink_loss_applies_one_click_exactly_once() {
     pair.steps(100);
     assert!(pair.server.world().get::<Loss>(pair.up).unwrap().dropped > 0);
     assert_eq!(pair.shots(), 1);
-    assert_eq!(pair.state().applied, 1);
+    assert_eq!(pair.state().answer.resolved, 1);
 }
 
 /// A recovery copy cannot surprise the player with a start from before an upstream outage.
@@ -368,9 +364,9 @@ fn uplink_recovery_applies_a_fresh_click() {
     assert_eq!(
         pair.shots(),
         1,
-        "answer {:?}, applied {}, refused {}",
+        "answer {:?}, resolved {}, refused {}",
         pair.state().answer,
-        pair.state().applied,
+        pair.state().answer.resolved,
         pair.state().refused
     );
     assert_eq!(pair.state().refused, 0);
@@ -391,7 +387,7 @@ fn downlink_blackout_never_refuses_an_applied_click() {
     pair.blackout(false, false);
     pair.steps(20);
     assert_eq!(pair.shots(), 1);
-    assert_eq!(pair.state().applied, 1);
+    assert_eq!(pair.state().answer.resolved, 1);
     assert_eq!(pair.state().refused, 0);
     assert!(!pair.state().warning);
 }
@@ -414,7 +410,7 @@ fn held_trigger_stops_by_stale_threshold_and_resumes_without_a_physical_press() 
         .threshold(TICK.as_secs_f64(), &Timing::shipped());
     pair.blackout(true, true);
     let mut stop_ticks = 0;
-    while pair.server_input().answer.triggers[1] {
+    while pair.server_input().answer.fire_secondary {
         pair.step();
         stop_ticks += 1;
         assert!(
@@ -423,14 +419,14 @@ fn held_trigger_stops_by_stale_threshold_and_resumes_without_a_physical_press() 
         );
     }
     pair.steps(pair.over_ceiling());
-    assert!(!pair.server_input().answer.triggers[1]);
+    assert!(!pair.server_input().answer.fire_secondary);
     let stopped = pair.shots();
     pair.steps(4);
     assert_eq!(pair.shots(), stopped);
     pair.blackout(true, false);
     pair.steps(20);
     assert!(pair.shots() > stopped);
-    assert!(pair.server_input().answer.triggers[1]);
+    assert!(pair.server_input().answer.fire_secondary);
 }
 
 /// A lost withdrawal is never reconstructed as another press on recovery.
@@ -444,13 +440,13 @@ fn a_release_lost_in_blackout_stays_released_after_recovery() {
         .world_mut()
         .resource_mut::<FrameInput>()
         .command
-        .triggers[1] = false;
+        .fire_secondary = false;
     pair.steps(pair.over_ceiling());
     let stopped = pair.shots();
     pair.blackout(true, false);
     pair.steps(20);
     assert_eq!(pair.shots(), stopped);
-    assert!(!pair.server_input().answer.triggers[1]);
+    assert!(!pair.server_input().answer.fire_secondary);
 }
 
 /// A sub-frame tap occupies one trigger command slot, followed by its withdrawal next tick.
@@ -505,7 +501,7 @@ fn a_two_hundred_ms_server_stall_does_not_declare_a_live_client_stale() {
             .unwrap()
             .stale()
     );
-    assert!(pair.server_input().answer.triggers[1]);
+    assert!(pair.server_input().answer.fire_secondary);
     pair.server
         .insert_resource(TimeUpdateStrategy::ManualDuration(TICK));
 }
@@ -563,7 +559,7 @@ fn three_round_select_steps_under_loss_apply_exactly_three_steps() {
         ),
         (usize::from(before) + 3) % count
     );
-    assert_eq!(pair.state().applied, 3);
+    assert_eq!(pair.state().answer.resolved, 3);
 }
 
 /// Malformed outside input leaves the last validated levels intact and records a typed refusal.
@@ -594,7 +590,7 @@ fn malformed_message_is_refused_with_levels_unchanged() {
         .last_send_s = Some(f64::MAX);
     pair.steps(3);
     assert_eq!(
-        pair.server_input().refusal,
+        pair.server_input().last_refusal,
         Some(InputError::Levels(CommandError::Throttle))
     );
     assert_eq!(pair.server_input().levels.command(), before);
@@ -628,7 +624,7 @@ fn refusals_never_acknowledge_past_an_accepted_edge_waiting_for_its_slot() {
                     InputEdge::Fire,
                     InputEdge::Fire,
                     InputEdge::Repair,
-                    InputEdge::TriggerUp(1),
+                    InputEdge::TriggerUp,
                 ],
                 fresh_from: 4,
             },
@@ -680,15 +676,14 @@ fn measure_click_to_answer_over_real_udp() {
     pair.click();
     for _ in 0..100 {
         pair.step();
-        if pair.state().applied == 1 {
+        if pair.state().answer.resolved == 1 {
             break;
         }
     }
-    assert_eq!(pair.state().applied, 1);
+    assert_eq!(pair.state().answer.resolved, 1);
     println!(
-        "MEASURED real-UDP click-to-answer wall_ms={:.3}; manual frame_ms={:?}",
-        pressed.elapsed().as_secs_f64() * 1e3,
-        pair.state().latencies_ms
+        "MEASURED real-UDP click-to-answer wall_ms={:.3}",
+        pressed.elapsed().as_secs_f64() * 1e3
     );
 }
 
@@ -742,11 +737,7 @@ fn the_bounded_pending_window_reserves_withdrawals_and_reports_full_presses() {
     }
     assert!(!state.issue(InputEdge::Repair, 0.0));
     assert_eq!(state.refused, 1);
-    for edge in [
-        InputEdge::TriggerUp(0),
-        InputEdge::TriggerUp(1),
-        InputEdge::Swap(CrewSwap::Cancel),
-    ] {
+    for edge in [InputEdge::TriggerUp, InputEdge::Swap(CrewSwap::Cancel)] {
         assert!(state.issue(edge, 0.0));
         assert!(
             state.issue(edge, 0.0),
@@ -774,6 +765,7 @@ fn wrapped_ids_keep_each_refusal_and_each_application_exact() {
     client.issue(InputEdge::Repair, 0.0);
     client.issue(InputEdge::Fire, 0.0);
     let _lost = client.message(default(), 0.0);
+    let _also_lost = client.message(default(), 0.5);
     let resent = client.message(default(), 1.0);
     server.accept(resent, true).unwrap();
     server.command(false, false);
@@ -788,12 +780,12 @@ fn wrapped_ids_keep_each_refusal_and_each_application_exact() {
         .unwrap();
     assert!(server.command(false, false).fire_primary);
     client.receive(server.answer, 2.0).unwrap();
-    assert_eq!(client.applied, 1);
+    assert_eq!(client.answer.resolved, client.issued);
 }
 
 /// Each malformed shape is rejected before it can replace previously checked levels.
 #[test]
-fn malformed_shapes_and_routes_have_typed_refusals_before_any_mutation() {
+fn malformed_shapes_have_typed_refusals_before_any_mutation() {
     let mut server = ArrivalInput::default();
     let base = TankInput {
         seq: 1,
@@ -820,16 +812,9 @@ fn malformed_shapes_and_routes_have_typed_refusals_before_any_mutation() {
         (
             TankInput {
                 fresh_from: 1,
-                ..base.clone()
-            },
-            InputError::FreshIndex(1),
-        ),
-        (
-            TankInput {
-                edges: vec![InputEdge::TriggerDown(2)],
                 ..base
             },
-            InputError::TriggerRoute(2),
+            InputError::FreshIndex(1),
         ),
     ] {
         assert_eq!(server.accept(input, false), Err(error));
@@ -860,7 +845,7 @@ fn measure_maximum_bounded_payload_sizes() {
         seq: u16::MAX,
         resolved: u16::MAX,
         refused_mask: u16::MAX,
-        triggers: [true; 2],
+        fire_secondary: true,
     };
     println!(
         "MEASURED maximum postcard payload bytes: TankInput={}, InputAnswer={}",
@@ -886,7 +871,7 @@ fn malformed_answers_leave_pending_fates_undecided() {
             Err(InputError::AnswerBeyondIssued(resolved))
         );
         assert_eq!(client.pending.len(), 1);
-        assert_eq!(client.applied, 0);
+        assert_eq!(client.answer.resolved, 0);
     }
     client
         .receive(
@@ -897,7 +882,7 @@ fn malformed_answers_leave_pending_fates_undecided() {
             1.0,
         )
         .unwrap();
-    assert_eq!(client.applied, 1);
+    assert_eq!(client.answer.resolved, client.issued);
 }
 
 /// A refused trigger tap gets feedback; a held button uses the single re-press rule silently.
@@ -905,10 +890,10 @@ fn malformed_answers_leave_pending_fates_undecided() {
 fn trigger_refusal_cues_only_after_the_physical_button_is_released() {
     for held in [false, true] {
         let mut client = ClientInput {
-            buttons: [false, held],
+            button: held,
             ..default()
         };
-        client.issue(InputEdge::TriggerDown(1), 0.0);
+        client.issue(InputEdge::TriggerDown, 0.0);
         client
             .receive(
                 InputAnswer {
@@ -1002,4 +987,162 @@ fn the_bridge_applies_only_the_controlling_links_command_and_holds_disconnected_
         world.get::<TankCommand>(roots[1].0).unwrap().throttle,
         roots[1].2
     );
+}
+
+/// Fire-control players rely on one recovery press surviving a lost or superseded first copy.
+/// A second edge forces another UDP send before the server drains the newest message.
+#[test]
+fn a_recovery_press_survives_one_lost_or_superseded_copy() {
+    let _guard = lock_real_udp_test();
+    for lost in [false, true] {
+        let mut pair = Pair::new();
+        for _ in 0..pair.over_ceiling() {
+            pair.server.update();
+        }
+        pair.client
+            .insert_resource(TimeUpdateStrategy::ManualDuration(TICK / 4));
+        pair.click();
+        pair.client.update();
+        let first = pair.state().seq;
+        if lost {
+            pair.blackout(true, true);
+            std::thread::sleep(Duration::from_millis(2));
+            pair.server.update();
+            assert!(pair.server.world().get::<Loss>(pair.up).unwrap().dropped > 0);
+            pair.blackout(true, false);
+        }
+        pair.client
+            .world_mut()
+            .resource_mut::<FrameInput>()
+            .command
+            .select_round = Some(RoundSelect {
+            weapon: 0,
+            step: crate::command::RoundStep::Next,
+        });
+        pair.client.update();
+        let second = pair.state().seq;
+        assert_eq!(
+            second,
+            first.wrapping_add(1),
+            "the edge bypasses the tick send gate"
+        );
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(1));
+            pair.server.update();
+            if pair.server_input().answer.seq == second {
+                break;
+            }
+        }
+        assert_eq!(pair.server_input().answer.seq, second);
+        assert_eq!(pair.server_input().answer.resolved, 2);
+        assert_eq!(pair.server_input().answer.refused_mask, 0);
+        assert_eq!(pair.shots(), 1);
+        assert_eq!(pair.server.world().resource::<Observations>().selects, 1);
+    }
+}
+
+/// Malformed outside input cannot sustain fire or drive forever: players rely on the same
+/// stale release and lost-input brake as silence, while authenticated keepalives still arrive.
+#[test]
+fn repeated_malformed_input_goes_stale_then_lost_and_valid_input_clears_the_log_cause() {
+    let _guard = lock_real_udp_test();
+    let mut pair = Pair::new();
+    pair.automatic_route();
+    pair.client
+        .world_mut()
+        .resource_mut::<FrameInput>()
+        .command
+        .throttle = 1.0;
+    pair.steps(4);
+    // The peer's normal cumulative sender carries malformed levels and a real release edge.
+    // Every copy must be refused, including the withdrawal, without sustaining the live link.
+    pair.client.world_mut().resource_mut::<FrameInput>().command = TankCommand {
+        throttle: f32::NAN,
+        ..default()
+    };
+    let frames = (super::super::server::connection_timeout().as_secs_f64() / TICK.as_secs_f64())
+        .ceil() as usize
+        + 4;
+    for frame in 0..frames {
+        pair.step();
+        if frame == pair.over_ceiling() {
+            assert!(
+                pair.server
+                    .world()
+                    .get::<InputGap>(pair.up)
+                    .unwrap()
+                    .stale()
+            );
+            assert!(!pair.server_input().answer.fire_secondary);
+            assert_eq!(
+                pair.server
+                    .world()
+                    .get::<TankCommand>(pair.tank)
+                    .unwrap()
+                    .throttle,
+                1.0
+            );
+        }
+    }
+    assert!(pair.server.world().get::<Connected>(pair.up).is_some());
+    assert!(
+        pair.server
+            .world()
+            .get::<ParsedTankCommand>(pair.tank)
+            .unwrap()
+            .held()
+    );
+    assert_eq!(
+        pair.server_input().last_refusal,
+        Some(InputError::Levels(CommandError::Throttle))
+    );
+    pair.client
+        .world_mut()
+        .resource_mut::<FrameInput>()
+        .command
+        .throttle = 0.0;
+    pair.steps(6);
+    assert_eq!(pair.server_input().last_refusal, None);
+}
+
+/// Measurement clients rely on the combat-release writer putting script tick zero's click on
+/// the real input channel. Advancing only its bookkeeping would silently omit the first shot.
+#[test]
+fn combat_release_sends_the_first_scripted_click_over_udp() {
+    use super::super::harness::{Drive, Script, SimulateInput, buffer_input};
+    let _guard = lock_real_udp_test();
+    let mut pair = Pair::new();
+    pair.client
+        .insert_resource(SimulateInput::new(&Script {
+            // Fixture: two ticks contain exactly the first primary click.
+            drive: Drive::Fire {
+                primary: true,
+                secondary: false,
+            },
+            fire_tick: 0,
+            fire_interval: 2,
+            ticks: Some(2),
+            ..default()
+        }))
+        .add_systems(FixedPreUpdate, buffer_input);
+    pair.client
+        .world_mut()
+        .spawn(lightyear::prelude::Controlled);
+    let battle = pair
+        .client
+        .world_mut()
+        .spawn(super::super::battle::BattleState::default())
+        .id();
+    pair.steps(4);
+    assert_eq!(pair.shots(), 0);
+    assert!(pair.state().pending.is_empty());
+    *pair
+        .client
+        .world_mut()
+        .get_mut::<super::super::battle::BattleState>(battle)
+        .unwrap() = super::super::battle::BattleState::combat_fixture();
+    pair.steps(20);
+    assert_eq!(pair.shots(), 1);
+    assert_eq!(pair.state().answer.resolved, 1);
+    assert_eq!(pair.state().answer.refused_mask, 0);
 }

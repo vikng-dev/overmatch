@@ -78,12 +78,12 @@ fn trigger_click(
     bindings: Res<Bindings>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    assets: Res<AssetServer>,
+    clips: Res<crate::sfx::SfxClips>,
     mut commands: Commands,
 ) {
     if bindings.fire_secondary.just_pressed(&keys, &mouse) {
         commands.spawn((
-            AudioPlayer::new(crate::sfx::trigger_clip(&assets)),
+            AudioPlayer::new(clips.click.clone()),
             PlaybackSettings::DESPAWN.with_volume(Volume::Linear(crate::sfx::click_volume())),
         ));
     }
@@ -92,7 +92,7 @@ fn update(
     state: Res<ClientInput>,
     time: Res<Time<Real>>,
     timing: Res<Timing>,
-    assets: Res<AssetServer>,
+    clips: Res<crate::sfx::SfxClips>,
     mut feedback: ResMut<Feedback>,
     mut marks: Query<
         (&mut Visibility, Has<LinkWarning>),
@@ -103,7 +103,7 @@ fn update(
     if state.refused > feedback.seen {
         feedback.until = time.elapsed_secs_f64() + timing.refused_cue_s;
         commands.spawn((
-            AudioPlayer::new(crate::sfx::trigger_clip(&assets)),
+            AudioPlayer::new(clips.click.clone()),
             PlaybackSettings::DESPAWN
                 .with_speed(timing.refused_pitch)
                 .with_volume(Volume::Linear(crate::sfx::click_volume())),

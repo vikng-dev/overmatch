@@ -49,9 +49,10 @@ Nor is the fix to lower the bar. That bar's job is deciding whether solver noise
 re-simulating; a bar low enough to see 0.14 m/s is a bar that sees contact noise, and this repo has
 the storm captures to show what that costs.
 
-### And on the shipping build the comparator would not even be asked
+### On that historical build the comparator would not even be asked
 
-Worse, and independent of magnitude. lightyear places the client's input timeline at
+Historical evidence for the retired prediction configuration (the client now uses arrival-owned
+input with no configured input delay): lightyear placed its input timeline at
 `remote + rtt/2 + (jitter·jitter_multiple + tick·jitter_margin) + 1 + error_margin − input_delay`.
 At loopback both `rtt` and `jitter` are zero, so every measured term vanishes and only the constants
 survive: `jitter_margin` 1.0 + the fixed 1 + `error_margin` 1.0 − `SHIPPING_INPUT_DELAY_TICKS` 3 =

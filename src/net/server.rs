@@ -2582,7 +2582,7 @@ mod tests {
                     throttle: 1.0,
                     steer: -0.5,
                     fire_primary: true,
-                    triggers: [false, true],
+                    fire_secondary: true,
                     aim: Some(AimIntent::World(Vec3::new(10.0, 0.0, -40.0))),
                     range: 400.0,
                     repair: true,
@@ -2620,7 +2620,7 @@ mod tests {
         assert!(!parsed.held());
         assert!(parsed.aim().is_some());
         assert_eq!(parsed.throttle, 1.0);
-        assert!(parsed.fire_primary && parsed.triggers[1] && parsed.repair);
+        assert!(parsed.fire_primary && parsed.fire_secondary && parsed.repair);
     }
 
     /// The shipped mode's respawn wait on the server's tick.

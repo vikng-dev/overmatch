@@ -34,9 +34,6 @@ pub(crate) fn listener_ear_gap() -> f32 {
 pub(crate) fn click_volume() -> f32 {
     mix().click_volume.0
 }
-pub(crate) fn trigger_clip(assets: &AssetServer) -> Handle<AudioSource> {
-    assets.load(CLICK_CLIP)
-}
 
 /// The trigger click, non-spatial (it happens at the player's own hand). The one fixed clip path in
 /// this layer: it is player UI feedback for a device edge, not a sound any vehicle makes.
@@ -67,8 +64,8 @@ pub fn plugin(app: &mut App) {
 /// fixed path; every other entry arrives from a tank's spec-derived components. `AssetServer::load`
 /// already dedupes by path — this map is what lets a play site reach a handle without one.
 #[derive(Resource)]
-struct SfxClips {
-    click: Handle<AudioSource>,
+pub(crate) struct SfxClips {
+    pub(crate) click: Handle<AudioSource>,
     tank: HashMap<String, Handle<AudioSource>>,
 }
 

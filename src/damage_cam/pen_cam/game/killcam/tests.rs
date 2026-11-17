@@ -880,7 +880,7 @@ fn the_death_flow_owns_the_device() {
             (first_notch, 1.0),
             "{replay:?}: the first frame drives in both keys' directions"
         );
-        assert!(alive.fire_primary && alive.triggers[1], "{replay:?}");
+        assert!(alive.fire_primary && alive.fire_secondary, "{replay:?}");
         assert!(alive.aim.is_some(), "{replay:?}: aimed");
         assert_eq!(
             mode(&app),
@@ -928,7 +928,7 @@ fn the_death_flow_owns_the_device() {
             (first_notch, 1.0),
             "{replay:?}: the new life's first frame drives at fresh notches"
         );
-        assert!(alive.triggers[1], "{replay:?}");
+        assert!(alive.fire_secondary, "{replay:?}");
         // The first frame's `1` picked the seat the second frame's `2` swaps with.
         hold_all(&mut app, 1, |_| {});
         assert_eq!(command(&app).crew_swap, swap, "{replay:?}: swapped");

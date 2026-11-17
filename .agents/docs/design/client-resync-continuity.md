@@ -49,10 +49,9 @@ clients and the replay mount the same ordered attachment configuration.
 
 Per-consumer optional-pose skips were rejected: every consumer would have to remember the same
 transport detail. Gating only remote firing would leave every other pose reader exposed.
-`shooting::fire` again requires a posed tank; its resync-specific skip and skip test are gone.
-That shared system enumerates remote muzzles but skips roots without owner-private weapon state;
-it still serves authority/offline firing and the client's own fire bookkeeping. Remote rounds
-present from server facts, not remote client firing. Collider history remains authority-only
+`shooting::fire` requires a posed tank and runs only on authority/offline compositions. Every
+client round presents from server facts. The owner's private weapon gate still matures for the
+status panel, which relies on the same complete-root contract. Collider history remains authority-only
 because clients never run the simulation walk, independently of resync handling.
 
 ## Supplied capture evidence and separate findings

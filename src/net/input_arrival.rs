@@ -10,7 +10,7 @@ use lightyear::prelude::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::input_gap::{Arrival, InputGap};
+use super::input_gap::InputGap;
 use super::timing::Timing;
 use crate::command::{
     AimIntent, CommandError, CrewSwap, ParsedTankCommand, RoundSelect, TankCommand,
@@ -19,9 +19,9 @@ use crate::state::GameplaySet;
 
 /// Resolution: one answer-mask bit per pending edge bounds both datagrams and per-link work.
 pub(super) const PENDING: usize = u16::BITS as usize;
-/// Resolution: one withdrawal slot per trigger route and one for crew-swap cancellation.
+/// Resolution: one withdrawal slot for secondary fire and one for crew-swap cancellation.
 /// Starts cannot consume these slots while answers are missing.
-const WITHDRAWAL_RESERVE: usize = 2 + 1;
+const WITHDRAWAL_RESERVE: usize = 1 + 1;
 
 /// Absolute device levels, parsed once at the receiving edge.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -54,12 +54,12 @@ impl InputLevels {
     }
 }
 
-/// Trigger addresses name the two binding routes; weapon data selects its route.
+/// Primary clicks and secondary trigger transitions follow the device bindings.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) enum InputEdge {
     Fire,
-    TriggerDown(u8),
-    TriggerUp(u8),
+    TriggerDown,
+    TriggerUp,
     Select(RoundSelect),
     Fuze(u8),
     Swap(CrewSwap),
@@ -70,7 +70,7 @@ impl InputEdge {
     fn slot(self) -> usize {
         match self {
             Self::Fire => 0,
-            Self::TriggerDown(_) | Self::TriggerUp(_) => 1,
+            Self::TriggerDown | Self::TriggerUp => 1,
             Self::Select(_) => 2,
             Self::Fuze(_) => 3,
             Self::Swap(_) => 4,
@@ -87,21 +87,13 @@ impl InputEdge {
         )
     }
     fn withdrawal(self) -> bool {
-        matches!(self, Self::TriggerUp(_) | Self::Swap(CrewSwap::Cancel))
+        matches!(self, Self::TriggerUp | Self::Swap(CrewSwap::Cancel))
     }
-    fn validate(self) -> Result<(), InputError> {
-        match self {
-            Self::TriggerDown(route) | Self::TriggerUp(route) if route >= 2 => {
-                Err(InputError::TriggerRoute(route))
-            }
-            _ => Ok(()),
-        }
-    }
-    fn write(self, command: &mut TankCommand, triggers: &mut [bool; 2]) {
+    fn write(self, command: &mut TankCommand, secondary: &mut bool) {
         match self {
             Self::Fire => command.fire_primary = true,
-            Self::TriggerDown(route) => triggers[usize::from(route)] = true,
-            Self::TriggerUp(route) => triggers[usize::from(route)] = false,
+            Self::TriggerDown => *secondary = true,
+            Self::TriggerUp => *secondary = false,
             Self::Select(value) => command.select_round = Some(value),
             Self::Fuze(value) => command.toggle_fuze = Some(value),
             Self::Swap(value) => command.crew_swap = Some(value),
@@ -118,6 +110,7 @@ pub(super) struct TankInput {
     pub levels: InputLevels,
     pub first_id: u16,
     pub edges: Vec<InputEdge>,
+    /// Edges from this index were first sent in this message or the previous one.
     pub fresh_from: u8,
 }
 
@@ -127,7 +120,7 @@ pub(super) struct InputAnswer {
     pub seq: u16,
     pub resolved: u16,
     pub refused_mask: u16,
-    pub triggers: [bool; 2],
+    pub fire_secondary: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,7 +128,6 @@ pub(super) enum InputError {
     TooManyEdges(usize),
     SkippedId { first: u16, next: u16 },
     FreshIndex(u8),
-    TriggerRoute(u8),
     Levels(CommandError),
     AnswerBeyondIssued(u16),
     RegressedAnswer(u16),
@@ -164,7 +156,7 @@ pub(super) struct ArrivalInput {
     queue: VecDeque<Decided>,
     tank: Option<Entity>,
     staged: ParsedTankCommand,
-    refusal: Option<InputError>,
+    last_refusal: Option<InputError>,
 }
 impl ArrivalInput {
     fn accept(&mut self, input: TankInput, recovery: bool) -> Result<(), InputError> {
@@ -180,9 +172,6 @@ impl ArrivalInput {
                 first: input.first_id,
                 next,
             });
-        }
-        for &edge in &input.edges {
-            edge.validate()?;
         }
         let levels = input.levels.parse().map_err(InputError::Levels)?;
         // Validate the whole packet before mutating levels, fate, or the echo.
@@ -228,13 +217,15 @@ impl ArrivalInput {
             if !front.refused {
                 occupied[front.edge.slot()] = true;
                 previous = Some(front.edge);
-                front.edge.write(&mut command, &mut self.answer.triggers);
+                front
+                    .edge
+                    .write(&mut command, &mut self.answer.fire_secondary);
             }
         }
         if stale || lost {
-            self.answer.triggers = [false; 2];
+            self.answer.fire_secondary = false;
         }
-        command.triggers = self.answer.triggers;
+        command.fire_secondary = self.answer.fire_secondary;
         if lost {
             ParsedTankCommand::hold()
         } else {
@@ -254,7 +245,7 @@ pub(super) struct FrameInput {
 struct PendingEdge {
     id: u16,
     edge: InputEdge,
-    first_sent: bool,
+    copies: u8,
     pressed_s: f64,
 }
 
@@ -266,11 +257,9 @@ pub(super) struct ClientInput {
     answer: InputAnswer,
     sent: VecDeque<(u16, f64)>,
     last_send_s: Option<f64>,
-    buttons: [bool; 2],
+    button: bool,
     pub warning: bool,
     pub refused: u64,
-    pub applied: u64,
-    pub latencies_ms: VecDeque<f64>,
 }
 impl ClientInput {
     fn enqueue(&mut self, edge: InputEdge, now: f64) -> bool {
@@ -283,16 +272,8 @@ impl ClientInput {
                 .iter()
                 .rev()
                 .find_map(|pending| match (edge, pending.edge) {
-                    (InputEdge::TriggerUp(route), InputEdge::TriggerUp(other))
-                        if route == other =>
-                    {
-                        Some(true)
-                    }
-                    (InputEdge::TriggerUp(route), InputEdge::TriggerDown(other))
-                        if route == other =>
-                    {
-                        Some(false)
-                    }
+                    (InputEdge::TriggerUp, InputEdge::TriggerUp) => Some(true),
+                    (InputEdge::TriggerUp, InputEdge::TriggerDown) => Some(false),
                     (InputEdge::Swap(CrewSwap::Cancel), InputEdge::Swap(swap)) => {
                         Some(matches!(swap, CrewSwap::Cancel))
                     }
@@ -314,7 +295,7 @@ impl ClientInput {
         self.pending.push_back(PendingEdge {
             id: self.issued,
             edge,
-            first_sent: true,
+            copies: 0,
             pressed_s: now,
         });
         true
@@ -346,13 +327,8 @@ impl ClientInput {
                 .pop_front()
                 .expect("the inspected pending edge exists");
             let refused = answer.refused_mask & (1 << answer.resolved.wrapping_sub(edge.id)) != 0;
-            if refused {
-                if !matches!(edge.edge, InputEdge::TriggerDown(route) if self.buttons[usize::from(route)])
-                {
-                    self.refused += 1;
-                }
-            } else {
-                self.applied += 1;
+            if refused && !matches!(edge.edge, InputEdge::TriggerDown if self.button) {
+                self.refused += 1;
             }
             let latency = (now - edge.pressed_s) * 1e3;
             info!(
@@ -361,10 +337,6 @@ impl ClientInput {
                 latency_ms = latency,
                 "input answer: MEASURED click-to-answer"
             );
-            if self.latencies_ms.len() == PENDING {
-                self.latencies_ms.pop_front();
-            }
-            self.latencies_ms.push_back(latency);
         }
         self.answer = answer;
         while self
@@ -376,23 +348,23 @@ impl ClientInput {
         }
         Ok(())
     }
-    fn triggers(&self) -> [bool; 2] {
-        let mut triggers = self.answer.triggers;
+    fn secondary_held(&self) -> bool {
+        let mut held = self.answer.fire_secondary;
         for edge in &self.pending {
             match edge.edge {
-                InputEdge::TriggerDown(route) => triggers[usize::from(route)] = true,
-                InputEdge::TriggerUp(route) => triggers[usize::from(route)] = false,
+                InputEdge::TriggerDown => held = true,
+                InputEdge::TriggerUp => held = false,
                 _ => {}
             }
         }
-        triggers
+        held
     }
     fn message(&mut self, levels: InputLevels, now: f64) -> TankInput {
         self.seq = self.seq.wrapping_add(1);
         let fresh_from = self
             .pending
             .iter()
-            .position(|edge| edge.first_sent)
+            .position(|edge| edge.copies < 2)
             .unwrap_or(self.pending.len()) as u8;
         let message = TankInput {
             seq: self.seq,
@@ -405,7 +377,7 @@ impl ClientInput {
             fresh_from,
         };
         for edge in &mut self.pending {
-            edge.first_sent = false;
+            edge.copies = (edge.copies + 1).min(2);
         }
         // Resolution: the first unechoed send must survive a blackout. Later sends may be
         // omitted from this display-only ring; an echo beyond them also retires its prefix.
@@ -475,21 +447,29 @@ fn receive_inputs(
         .par_iter_mut()
         .for_each(|(link, mut gap, mut input, receiver)| {
             let message = receiver.and_then(|mut receiver| receiver.receive().last());
-            let arrival = gap.receive(
-                message.is_some(),
-                time.elapsed_secs_f64(),
-                time.delta_secs_f64(),
-                fixed.timestep().as_secs_f64(),
-                &timing,
-            );
-            if let Some(message) = message
-                && let Err(cause) = input.accept(message, arrival == Some(Arrival::Stale))
-            {
-                input.refusal = Some(cause.clone());
-                warn!(?link, %cause, "input refused: malformed TankInput; levels unchanged");
-            }
+            let now = time.elapsed_secs_f64();
+            let tick = fixed.timestep().as_secs_f64();
+            gap.expire(now, &timing);
+            let recovery = gap.silence_s() > gap.threshold(tick, &timing);
+            let arrived = match message {
+                Some(message) => match input.accept(message, recovery) {
+                    Ok(()) => {
+                        input.last_refusal = None;
+                        true
+                    }
+                    Err(cause) => {
+                        if input.last_refusal.as_ref() != Some(&cause) {
+                            warn!(?link, %cause, "input refused: malformed TankInput; levels unchanged");
+                            input.last_refusal = Some(cause);
+                        }
+                        false
+                    }
+                },
+                None => false,
+            };
+            gap.receive(arrived, now, time.delta_secs_f64(), tick, &timing);
             if gap.stale() {
-                input.answer.triggers = [false; 2];
+                input.answer.fire_secondary = false;
             }
         });
 }
@@ -502,7 +482,7 @@ fn prepare_commands(
             .iter()
             .find_map(|(tank, owner)| (owner.owner == link).then_some(tank));
         if input.tank != tank {
-            input.answer.triggers = [false; 2];
+            input.answer.fire_secondary = false;
             input.tank = tank;
         }
         input.staged = input.command(
@@ -562,67 +542,61 @@ pub(super) fn send_inputs(
     }
     let now = time.elapsed_secs_f64();
     let command = frame.command;
-    let mut edges = Vec::new();
     if command.fire_primary {
-        edges.push(InputEdge::Fire);
+        state.issue(InputEdge::Fire, now);
     }
     if let Some(value) = command.select_round {
-        edges.push(InputEdge::Select(value));
+        state.issue(InputEdge::Select(value), now);
     }
     if let Some(value) = command.toggle_fuze {
-        edges.push(InputEdge::Fuze(value));
+        state.issue(InputEdge::Fuze(value), now);
     }
     if let Some(value) = command.crew_swap {
-        edges.push(InputEdge::Swap(value));
+        state.issue(InputEdge::Swap(value), now);
     }
     if command.repair {
-        edges.push(InputEdge::Repair);
+        state.issue(InputEdge::Repair, now);
     }
     if command.respawn {
-        edges.push(InputEdge::Respawn);
-    }
-    for edge in edges {
-        state.issue(edge, now);
+        state.issue(InputEdge::Respawn, now);
     }
     if frame.secondary_cycle {
-        let (first, last) = if command.triggers[1] {
-            (InputEdge::TriggerUp(1), InputEdge::TriggerDown(1))
+        let (first, last) = if command.fire_secondary {
+            (InputEdge::TriggerUp, InputEdge::TriggerDown)
         } else {
-            (InputEdge::TriggerDown(1), InputEdge::TriggerUp(1))
+            (InputEdge::TriggerDown, InputEdge::TriggerUp)
         };
         if state.issue(first, now) {
             state.issue(last, now);
         }
         frame.secondary_cycle = false;
     }
-    let held = state.triggers();
-    for (route, (&wanted, &held)) in command.triggers.iter().zip(&held).enumerate() {
-        if wanted != held {
-            let issued = state.enqueue(
-                if wanted {
-                    InputEdge::TriggerDown(route as u8)
-                } else {
-                    InputEdge::TriggerUp(route as u8)
-                },
-                now,
-            );
-            if !issued && wanted && !state.buttons[route] {
-                state.refused += 1;
-            }
-            assert!(
-                wanted || issued,
-                "the pending window reserves every trigger withdrawal"
-            );
+    let wanted = command.fire_secondary;
+    if wanted != state.secondary_held() {
+        let issued = state.enqueue(
+            if wanted {
+                InputEdge::TriggerDown
+            } else {
+                InputEdge::TriggerUp
+            },
+            now,
+        );
+        if !issued && wanted && !state.button {
+            state.refused += 1;
         }
+        assert!(
+            wanted || issued,
+            "the pending window reserves the trigger withdrawal"
+        );
     }
-    state.buttons = command.triggers;
+    state.button = wanted;
     frame.command.clear_edges();
     state.warning = state.pending.len() >= PENDING - WITHDRAWAL_RESERVE
         || state
             .sent
             .front()
             .is_some_and(|&(_, at)| now - at > timing.link_warning_s);
-    if state.pending.iter().any(|edge| edge.first_sent)
+    if state.pending.iter().any(|edge| edge.copies == 0)
         || state
             .last_send_s
             .is_none_or(|last| now - last >= fixed.timestep().as_secs_f64())

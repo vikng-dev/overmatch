@@ -591,7 +591,7 @@ pub(crate) fn buffer_input(
     let t = sim.ticks;
     sim.write(t, &mut state.command);
     sim.stop(t, velocity.map(|v| v.length()), &mut state.command);
-    if (state.command.fire_primary || state.command.triggers[1])
+    if (state.command.fire_primary || state.command.fire_secondary)
         && let ScriptClock::Released {
             first_fire_logged, ..
         } = &mut sim.clock
@@ -623,7 +623,7 @@ impl SimulateInput {
         command.aim = Some(self.aim_at(t));
         command.range = self.range;
         let firing = self.fire_until.is_none_or(|until| t < until);
-        (command.fire_primary, command.triggers[1]) = match self.drive {
+        (command.fire_primary, command.fire_secondary) = match self.drive {
             Drive::Fire { primary, secondary } => (
                 primary && firing && self.clicking_primary(t),
                 secondary && firing && Self::holding_secondary(t),
@@ -1020,7 +1020,7 @@ mod tests {
                 }
             );
             assert_eq!(command.steer, 0.0);
-            assert!(!command.fire_primary && !command.triggers[1]);
+            assert!(!command.fire_primary && !command.fire_secondary);
         }
         for ticks in [0, u32::MAX] {
             assert!(
@@ -1042,7 +1042,7 @@ mod tests {
             let mut command = crate::command::TankCommand::default();
             sim.write(tick, &mut command);
             sim.stop(tick, speed, &mut command);
-            assert!(!command.fire_primary && !command.triggers[1]);
+            assert!(!command.fire_primary && !command.fire_secondary);
             command.throttle
         };
         let run = super::RUN_LEAD;
@@ -1173,10 +1173,10 @@ mod tests {
         ).unwrap()); // Fixture tick counts; both triggers would otherwise stay held.
         let mut command = crate::command::TankCommand::default();
         sim.write(249, &mut command);
-        assert!(command.fire_primary && command.triggers[1]);
+        assert!(command.fire_primary && command.fire_secondary);
         for t in 250..sim.total {
             sim.write(t, &mut command);
-            assert!(!command.fire_primary && !command.triggers[1]);
+            assert!(!command.fire_primary && !command.fire_secondary);
             assert!(command.aim.is_some(), "the observation tail keeps its aim");
         }
         let tick = Duration::from_secs_f64(1.0 / 64.0); // Fixture timestep.
@@ -1288,6 +1288,64 @@ mod tests {
         );
     }
 
+    /// Measurement runners rely on combat and the operator barrier preserving script tick zero,
+    /// including its first click; input release has no dependency on timeline synchronization.
+    #[test]
+    fn combat_and_the_workload_barrier_preserve_the_first_scripted_click() {
+        use super::super::battle::{BattlePhase, BattleState, LateJoin};
+        use super::super::input_arrival::{ClientInput, FrameInput};
+        use crate::sim_tick::SimTick;
+        use bevy::prelude::*;
+        let mut app = App::new();
+        app.insert_resource(SimulateInput::new(
+            &Script::parse("(drive: Fire(primary: true), fire_tick: 0, ticks: 2)").unwrap(),
+        ))
+        .init_resource::<Time<Real>>()
+        .init_resource::<lightyear::prelude::LocalTimeline>()
+        .init_resource::<ClientInput>()
+        .init_resource::<FrameInput>()
+        .add_systems(FixedPreUpdate, super::buffer_input);
+        app.world_mut().spawn(lightyear::prelude::Controlled);
+        let battle = app.world_mut().spawn(BattleState::default()).id();
+        for _ in 0..3 {
+            app.world_mut().run_schedule(FixedPreUpdate);
+            assert_eq!(app.world().resource::<SimulateInput>().ticks, 0);
+            assert!(!app.world().resource::<FrameInput>().command.fire_primary);
+        }
+        app.world_mut()
+            .get_mut::<BattleState>(battle)
+            .unwrap()
+            .phase = BattlePhase::Combat {
+            ends_at: SimTick::new(100),
+            late_join: LateJoin::Closed,
+        };
+        // Fixture: an absent runner signal holds; an existing source path releases without mutation.
+        app.world_mut().resource_mut::<SimulateInput>().start =
+            crate::cost::WorkloadStart::WaitingForFile(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("src/net/__input_arrival_test_workload_ready_absent"),
+            );
+        app.world_mut().run_schedule(FixedPreUpdate);
+        assert_eq!(app.world().resource::<SimulateInput>().ticks, 0);
+        app.world_mut().resource_mut::<SimulateInput>().start =
+            crate::cost::WorkloadStart::WaitingForFile(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/net/harness.rs"),
+            );
+        app.world_mut().run_schedule(FixedPreUpdate);
+        assert_eq!(app.world().resource::<SimulateInput>().ticks, 1);
+        assert!(
+            !app.world().resource::<FrameInput>().command.fire_primary,
+            "script clicks are drained directly into the cumulative message queue"
+        );
+        assert!(matches!(
+            app.world().resource::<SimulateInput>().clock,
+            super::ScriptClock::Released {
+                first_fire_logged: true,
+                ..
+            }
+        ));
+    }
+
     /// EACH DRIVE PLAYS THE WORKLOAD ITS RUNNERS MEASURE: the arc demands nothing over the lead,
     /// drives and steers inside its window and clicks once at `fire_tick`, by default while it
     /// drives; idle never moves or fires; a fire workload stays put,
@@ -1316,7 +1374,7 @@ mod tests {
         assert_eq!((idle.throttle, idle.fire_primary), (0.0, false));
         let fire = "(drive: Fire(primary: true, secondary: true), fire_tick: 320, \
                     fire_interval: 256, aim: Point((8.0, 1.2, 2.2)))";
-        assert!(!at(fire, 192).triggers[1] && at(fire, 193).triggers[1]);
+        assert!(!at(fire, 192).fire_secondary && at(fire, 193).fire_secondary);
         assert!(at(fire, 320).fire_primary && at(fire, 576).fire_primary);
         assert!(!at(fire, 448).fire_primary);
         assert_eq!(at(fire, 200).throttle, 0.0);

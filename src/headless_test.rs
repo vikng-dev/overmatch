@@ -610,7 +610,7 @@ fn a_server_composition_dresses_no_round_at_all() {
             .get_mut::<TankCommand>(tank)
             .expect("tank carries its command");
         command.fire_primary = true;
-        command.triggers[1] = true;
+        command.fire_secondary = true;
         app.update();
     }
     let samples = app.world().resource::<ServerRoundSamples>();
@@ -2605,7 +2605,7 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
             command.throttle = if (120..480).contains(&tick) { 1.0 } else { 0.0 };
             command.steer = if (300..480).contains(&tick) { 0.7 } else { 0.0 };
             command.fire_primary = tick == 220;
-            command.triggers[1] = (360..420).contains(&tick);
+            command.fire_secondary = (360..420).contains(&tick);
         }
         app.update();
         if tick == 0 {

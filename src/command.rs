@@ -21,8 +21,8 @@ pub struct TankCommand {
     pub steer: f32,
     /// Primary fire edge, latched until one fixed tick consumes it.
     pub fire_primary: bool,
-    /// Held trigger routes, Primary then Secondary. The network authority owns these bits.
-    pub triggers: [bool; 2],
+    /// Held secondary trigger. The network authority owns this level.
+    pub fire_secondary: bool,
     /// Aim intention chased by every servo, in the frame its authoring view is anchored to
     /// ([`AimIntent`]). `None` means no commitment yet.
     pub aim: Option<AimIntent>,
@@ -41,8 +41,6 @@ pub struct TankCommand {
 }
 
 impl TankCommand {
-    /// Clear the complete edge set.
-    ///
     /// Invariant: each simulation tick consumes these fields once.
     pub fn clear_edges(&mut self) {
         self.fire_primary = false;
@@ -748,7 +746,7 @@ fn auto_fire(
     for mut command in &mut tanks {
         // The MG is a held level; the main gun a latched click edge the fire tick consumes, so
         // re-latching every frame simply fires as fast as the reload gate allows.
-        command.triggers[1] = now == 1;
+        command.fire_secondary = now == 1;
         command.fire_primary |= now == 3;
     }
 }
@@ -780,7 +778,7 @@ pub(crate) fn gather_commands(
     // `|=`: a click must survive frames the fixed loop skips, until a tick consumes it.
     command.fire_primary |= bindings.fire_primary.just_pressed(&keys, &mouse);
     command.repair |= bindings.repair.just_pressed(&keys, &mouse);
-    command.triggers[1] = bindings.fire_secondary.pressed(&keys, &mouse);
+    command.fire_secondary = bindings.fire_secondary.pressed(&keys, &mouse);
     // The dial itself (`Ranging`, scroll in the optic) is client-side control state; the
     // command carries its absolute value. `aim` is written by the per-view commit systems.
     command.range = ranging.range;
@@ -971,7 +969,7 @@ mod tests {
         let mut command = TankCommand {
             throttle: 0.5,
             steer: -0.5,
-            triggers: [false, true],
+            fire_secondary: true,
             aim: Some(AimIntent::World(Vec3::X)),
             range: 800.0,
             fire_primary: true,
@@ -987,7 +985,7 @@ mod tests {
         command.clear_edges();
         assert_eq!(command.throttle, 0.5);
         assert_eq!(command.steer, -0.5);
-        assert!(command.triggers[1]);
+        assert!(command.fire_secondary);
         assert_eq!(command.aim, Some(AimIntent::World(Vec3::X)));
         assert_eq!(command.range, 800.0);
         assert!(!command.has_edge(), "all edges cleared");

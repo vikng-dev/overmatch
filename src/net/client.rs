@@ -502,6 +502,9 @@ pub fn run() -> AppExit {
     // Register the shared protocol before creating the client link. The step lightyear publishes as
     // `TickDuration`; `net::interp_delay` derives its gap term from the same binding.
     let tick_duration = Duration::from_secs_f64(1.0 / 64.0);
+    // LocalTimeline uses lightyear's default InputTimelineConfig: no input delay and default
+    // SyncConfig. Its objective leads the remote estimate by RTT/2 + 4*jitter + 3 ticks
+    // (DERIVED from lightyear_sync's input objective). Arrival-owned input never waits on it.
     app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(super::plugin);
     app.add_plugins(physics::physics_plugins());
@@ -1232,7 +1235,7 @@ where
     }
 }
 
-/// Input can precede the body; player-facing ownership cannot. `Rig` and `TankViews` enter
+/// Player-facing ownership waits for the complete body. `Rig` and `TankViews` enter
 /// together in `tank::template::TankTemplate::assemble`, after the body's children are assembled.
 fn control_claim_plugin(app: &mut App) {
     app.add_observer(claim_complete_tank);
@@ -1467,8 +1470,7 @@ impl SeenDamage {
 }
 
 /// Reset server-clocked state on link end: an earlier new-server tick must not be rejected by
-/// `sync_margin::ArrivalDelay`; pending edges must not
-/// replay on the next tank.
+/// `sync_margin::ArrivalDelay`.
 fn reset_link_state(
     _ended: On<Remove<Connected>>,
     mut arrival: ResMut<super::sync_margin::ArrivalDelay>,
@@ -2189,6 +2191,58 @@ pub(super) mod match_exit;
 #[cfg(test)]
 mod tests {
 
+    /// Lightyear ownership can precede the body; the player's camera must survive that join gap.
+    #[test]
+    fn joining_before_body_attachment_keeps_the_camera_alive() {
+        use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<avian3d::collider_tree::ColliderTrees>()
+            .init_resource::<AccumulatedMouseMotion>()
+            .init_resource::<AccumulatedMouseScroll>()
+            .init_resource::<crate::sight::SightMode>()
+            .init_resource::<crate::aim::CommittedAim>()
+            .init_resource::<crate::firecontrol::Ranging>()
+            .add_plugins(crate::camera::plugin)
+            .add_plugins(control_claim_plugin);
+        let own = app.world_mut().spawn((NetControlled, NetTank)).id();
+        app.update();
+        assert!(app.world().get::<GameControlled>(own).is_none());
+        attach_control_fixture(app.world_mut(), own);
+        assert!(app.world().get::<GameControlled>(own).is_some());
+        app.update();
+    }
+
+    fn attach_control_fixture(world: &mut World, root: Entity) {
+        let turret = world.spawn((ChildOf(root), Transform::IDENTITY)).id();
+        // Fixture: any admitted optic; the ownership contract is independent of vehicle data.
+        let views = crate::tests::tank_views(crate::spec::Optics::Unaided(60.0).vertical_fov());
+        world.entity_mut(root).insert((
+            Transform::IDENTITY,
+            views,
+            Rig {
+                hull: root,
+                turret,
+                gunner_yaw: turret,
+                gun: turret,
+                muzzle: turret,
+            },
+        ));
+    }
+
+    /// A body arriving before ownership must remain remote, then claim immediately when owned.
+    /// The servo pump relies on that claim being visible with the complete rig.
+    #[test]
+    fn ownership_after_body_attachment_claims_the_complete_tank() {
+        let mut app = App::new();
+        app.add_plugins(control_claim_plugin);
+        let remote = app.world_mut().spawn(NetTank).id();
+        attach_control_fixture(app.world_mut(), remote);
+        assert!(app.world().get::<GameControlled>(remote).is_none());
+        app.world_mut().entity_mut(remote).insert(NetControlled);
+        assert!(app.world().get::<GameControlled>(remote).is_some());
+    }
+
     /// Loading needs the own bound view and a playable snapshot, in either arrival order.
     /// Another tank's view cannot release it; later tank removal retains the once-ready latch.
     #[test]
@@ -2614,6 +2668,25 @@ mod tests {
 
         assert!(app.world().resource::<SeenDamage>().set.is_empty());
         assert!(app.world().resource::<SeenShots>().set.is_empty());
+    }
+
+    /// A link ending — a drop, a leave, a despawn — empties the state keyed to that server's tick
+    /// clock, so the next server's earlier ticks are accepted.
+    #[test]
+    fn a_link_ending_resets_its_clock_keyed_state() {
+        use super::super::sync_margin::ArrivalDelay;
+        let mut app = App::new();
+        app.insert_resource(ArrivalDelay::test_with_newest_remote(Tick(5_000)))
+            .add_observer(reset_link_state);
+        let link = app
+            .world_mut()
+            .spawn((RemoteId(PeerId::Netcode(99)), Connected))
+            .id();
+        let world = app.world();
+        assert!(world.resource::<ArrivalDelay>().newest_remote().is_some());
+        app.world_mut().entity_mut(link).remove::<Connected>();
+        let world = app.world();
+        assert_eq!(world.resource::<ArrivalDelay>().newest_remote(), None);
     }
 
     /// The game's damage model: a disconnected server cannot finish a cosmetic path.
@@ -3693,6 +3766,58 @@ mod arrival_device_tests {
         assert!(!world.resource::<FrameInput>().command.fire_primary);
     }
 
+    /// Device-feed consumers retain cruise on focus loss, but closing the window must neutralize
+    /// drive and drain clicks. Treating a closed window as unfocused would leave cruise engaged.
+    #[test]
+    fn an_unfocused_window_keeps_cruise_but_a_closed_window_files_idle() {
+        let (mut world, tank) = fixture();
+        world.init_resource::<crate::firecontrol::Ranging>();
+        world.init_resource::<Time<Real>>();
+        let key = world.resource::<crate::command::Bindings>().throttle.pos;
+        let mut keys = world.resource_mut::<ButtonInput<KeyCode>>();
+        keys.press(key);
+        keys.release(key);
+        world
+            .run_system_once(crate::command::gather_commands)
+            .unwrap();
+        let notch = world
+            .resource::<crate::command::DriveInput>()
+            .set_throttle();
+        assert_ne!(
+            notch, 0.0,
+            "fixture: a tap sets cruise through the shipped gather"
+        );
+        let window = world
+            .query_filtered::<Entity, With<PrimaryWindow>>()
+            .single(&world)
+            .unwrap();
+        world.get_mut::<Window>(window).unwrap().focused = false;
+        for closed in [false, true] {
+            if closed {
+                world.despawn(window);
+            }
+            world.resource_mut::<DeviceCommand>().0 = TankCommand {
+                throttle: 1.0,
+                steer: 1.0,
+                fire_primary: true,
+                fire_secondary: true,
+                ..default()
+            };
+            world.get_mut::<TankCommand>(tank).unwrap().fire_primary = true;
+            world.run_system_once(feed_frame_input).unwrap();
+            assert_eq!(
+                world.resource::<FrameInput>().command,
+                TankCommand {
+                    throttle: if closed { 0.0 } else { notch },
+                    ..default()
+                }
+            );
+            assert!(!world.resource::<DeviceCommand>().0.has_edge());
+            assert!(!world.get::<TankCommand>(tank).unwrap().has_edge());
+            assert!(!world.resource::<FrameInput>().secondary_cycle);
+        }
+    }
+
     /// Bevy can expose both transitions in one poll; a final released level must retain the tap.
     #[test]
     fn the_device_feed_retains_a_sub_frame_trigger_tap() {
@@ -3712,6 +3837,6 @@ mod arrival_device_tests {
         }
         world.run_system_once(feed_frame_input).unwrap();
         assert!(world.resource::<FrameInput>().secondary_cycle);
-        assert!(!world.resource::<FrameInput>().command.triggers[1]);
+        assert!(!world.resource::<FrameInput>().command.fire_secondary);
     }
 }

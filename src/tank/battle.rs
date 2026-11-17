@@ -605,7 +605,7 @@ fn drive(
         if t < 0.0 {
             command.throttle = 0.0;
             command.steer = 0.0;
-            command.triggers[1] = false;
+            command.fire_secondary = false;
             continue;
         }
         if script
@@ -631,7 +631,7 @@ fn drive(
         {
             run.burst += 1;
         }
-        command.triggers[1] = script
+        command.fire_secondary = script
             .bursts
             .get(run.burst)
             .is_some_and(|burst| burst.from <= t);

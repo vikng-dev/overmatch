@@ -20,13 +20,6 @@ enum State {
     },
 }
 
-#[derive(Debug, PartialEq)]
-pub(super) enum Arrival {
-    First,
-    Live,
-    Stale,
-}
-
 #[derive(Component, Default)]
 pub(super) struct InputGap {
     state: State,
@@ -48,6 +41,7 @@ impl InputGap {
         matches!(self.state, State::Active { stale: true, .. })
     }
 
+    /// Per-link counters cover the interval since the preceding stats emission.
     fn take_line(&mut self, tick_s: f64, timing: &Timing) -> Value {
         let mut gaps: Vec<_> = self.gaps.iter().map(|&(_, gap)| gap).collect();
         json!({"state": match self.state {
@@ -68,16 +62,8 @@ impl InputGap {
         })
     }
 
-    /// Classify against the old threshold before admitting the arrival's gap; a connection's
-    /// first arrival is neither a gap nor a recovery.
-    pub(super) fn receive(
-        &mut self,
-        arrived: bool,
-        now_s: f64,
-        frame_s: f64,
-        tick_s: f64,
-        timing: &Timing,
-    ) -> Option<Arrival> {
+    /// Retire observations before validation without changing the link's arrival state.
+    pub(super) fn expire(&mut self, now_s: f64, timing: &Timing) {
         let oldest = now_s - timing.uplink_window_s;
         while self
             .gaps
@@ -87,6 +73,19 @@ impl InputGap {
             self.gaps.pop_front();
         }
         self.maximum.expire(oldest);
+    }
+
+    /// Classify against the old threshold before admitting the arrival's gap; a connection's
+    /// first arrival is neither a gap nor a recovery.
+    pub(super) fn receive(
+        &mut self,
+        arrived: bool,
+        now_s: f64,
+        frame_s: f64,
+        tick_s: f64,
+        timing: &Timing,
+    ) {
+        self.expire(now_s, timing);
         let threshold = self.threshold(tick_s, timing);
         match &mut self.state {
             State::AwaitingFirstArrival => {
@@ -95,24 +94,17 @@ impl InputGap {
                         silence_s: 0.0,
                         stale: false,
                     };
-                    Some(Arrival::First)
-                } else {
-                    None
                 }
             }
             State::Active { silence_s, stale } => {
                 if arrived {
-                    let classification = if *silence_s > threshold {
+                    if *silence_s > threshold {
                         self.stale_arrivals += 1;
-                        Arrival::Stale
-                    } else {
-                        Arrival::Live
-                    };
+                    }
                     self.gaps.push_back((now_s, *silence_s));
                     self.maximum.push(now_s, silence_s.min(timing.stale_ceil_s));
                     *silence_s = 0.0;
                     *stale = false;
-                    Some(classification)
                 } else {
                     *silence_s += frame_s.min(tick_s);
                     let next_stale = *silence_s > threshold;
@@ -120,7 +112,6 @@ impl InputGap {
                         self.declarations += 1;
                     }
                     *stale = next_stale;
-                    None
                 }
             }
         }
@@ -152,10 +143,7 @@ mod tests {
 
     fn active(timing: &Timing, tick: f64) -> InputGap {
         let mut gap = InputGap::default();
-        assert_eq!(
-            gap.receive(true, 0.0, tick, tick, timing),
-            Some(Arrival::First)
-        );
+        gap.receive(true, 0.0, tick, tick, timing);
         gap
     }
 
@@ -175,10 +163,8 @@ mod tests {
         );
         assert_eq!(gap.silence_s(), 0.0);
         assert_eq!(gap.declarations, 0);
-        assert_eq!(
-            gap.receive(true, timing.stale_ceil_s * 11.0, tick, tick, &timing),
-            Some(Arrival::First)
-        );
+        gap.receive(true, timing.stale_ceil_s * 11.0, tick, tick, &timing);
+        assert_eq!(gap.take_line(tick, &timing)["state"], "live");
         assert!(gap.gaps.is_empty());
         assert_eq!(gap.threshold(tick, &timing), timing.stale_floor_s);
     }
@@ -222,10 +208,8 @@ mod tests {
         }
         assert_eq!(gap.declarations, 1);
         let now = frames as f64 * tick;
-        assert_eq!(
-            gap.receive(true, now, tick, tick, &timing),
-            Some(Arrival::Stale)
-        );
+        gap.receive(true, now, tick, tick, &timing);
+        assert_eq!(gap.stale_arrivals, 1);
         assert_eq!(gap.silence_s(), 0.0);
         assert!(gap.gaps.back().unwrap().1 >= timing.stale_ceil_s);
         assert_eq!(gap.threshold(tick, &timing), timing.stale_ceil_s);
@@ -270,16 +254,11 @@ mod tests {
         for frame in 1..=3 {
             gap.receive(false, f64::from(frame) * tick, tick, tick, &timing);
         }
-        assert_eq!(
-            gap.receive(true, 4.0 * tick, tick, tick, &timing),
-            Some(Arrival::Stale)
-        );
+        gap.receive(true, 4.0 * tick, tick, tick, &timing);
+        assert_eq!(gap.stale_arrivals, 1);
         assert_eq!(gap.threshold(tick, &timing), 4.0 * tick);
         // A subsequent live arrival cannot add another would-be refusal.
-        assert_eq!(
-            gap.receive(true, 5.0 * tick, tick, tick, &timing),
-            Some(Arrival::Live)
-        );
+        gap.receive(true, 5.0 * tick, tick, tick, &timing);
         assert_eq!(gap.take_line(tick, &timing)["stale_arrivals"], 1);
         assert_eq!(gap.take_line(tick, &timing)["stale_arrivals"], 0);
     }

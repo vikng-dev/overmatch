@@ -165,7 +165,8 @@ const ROOT_HAS_SIM: &str = "a weapon's root carries the TankSim built in its con
 ///   rate-change rule; the belt refills only when the work completes.
 ///
 /// Per-tank, not controlled-only: a tank keeps loading whether you're in it or it's a network
-/// peer's.
+/// peer's. Client maturation feeds `crew_ui::update_status_panel`'s READY/reload countdown,
+/// belt count and swap countdown; it grants no local firing authority.
 fn tick_weapon_gate(
     clock: Res<crate::WeaponClock>,
     tanks: Query<Option<&TankVolumes>, With<Tank>>,
@@ -261,12 +262,12 @@ fn fire(
         let (command, tank_volumes, position, rotation, combatant) =
             tanks.get(root.0).expect(WEAPON_ROOT_IS_A_TANK);
         // Input routing only — edge vs level is baked into the command fields themselves
-        // (`fire_primary` is a one-tick click latch, `triggers` is authority-held state; see
+        // (`fire_primary` is a one-tick click latch, `fire_secondary` is authority-held state; see
         // `TankCommand`), so a `Single` on Primary consumes the edge and an `Automatic` on
         // Secondary reads the level, per the mode's contract.
         let triggered = match weapon.trigger {
-            Trigger::Primary => command.fire_primary || command.triggers[0],
-            Trigger::Secondary => command.triggers[1],
+            Trigger::Primary => command.fire_primary,
+            Trigger::Secondary => command.fire_secondary,
         };
         let tank_gate = gates.get(root.0).expect(
             "an authority or locally controlled weapon root has its spawn-complete private gate",
@@ -913,7 +914,7 @@ mod tests {
             .spawn((
                 Tank,
                 TankCommand {
-                    triggers: [false, true],
+                    fire_secondary: true,
                     ..default()
                 },
                 Position::default(),
@@ -1025,31 +1026,25 @@ mod tests {
         world
     }
 
-    /// The game's damage model: every firing root has a pose supplied by its composition. The
-    /// authority constructs it at spawn; the client retains its presented stream pose at the
-    /// interpolation boundary. A missing pose here is a bug on either role, never a silent skip.
+    /// The game's damage model: authority firing relies on its spawn-complete composition pose;
+    /// losing either pose component is a bug before a shot can be evaluated.
     #[test]
     fn fire_requires_its_compositions_pose() {
-        for replica in [false, true] {
-            for rotation_gap in [false, true] {
-                let mut world = test_world();
-                if replica {
-                    world.insert_resource(crate::ClientReplica);
-                }
-                let root = spawn_main_gun_rig(&mut world);
-                if rotation_gap {
-                    world.entity_mut(root).remove::<Rotation>();
-                } else {
-                    world.entity_mut(root).remove::<Position>();
-                }
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    world.run_system_once(fire).unwrap();
-                }));
-                assert!(
-                    result.is_err(),
-                    "a missing firing pose is a composition bug"
-                );
+        for rotation_gap in [false, true] {
+            let mut world = test_world();
+            let root = spawn_main_gun_rig(&mut world);
+            if rotation_gap {
+                world.entity_mut(root).remove::<Rotation>();
+            } else {
+                world.entity_mut(root).remove::<Position>();
             }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                world.run_system_once(fire).unwrap();
+            }));
+            assert!(
+                result.is_err(),
+                "a missing firing pose is a composition bug"
+            );
         }
     }
 
@@ -1057,27 +1052,30 @@ mod tests {
     /// weapon state. An authority/controlled root missing it must fail before silently holding fire.
     #[test]
     fn missing_private_weapon_state_is_only_a_remote_client_absence() {
-        for (replica, controlled) in [(false, false), (true, false), (true, true)] {
-            for ticking in [false, true] {
-                let mut world = test_world();
-                let root = spawn_main_gun_rig(&mut world);
-                if replica {
-                    world.insert_resource(crate::ClientReplica);
-                }
-                if controlled {
-                    world.entity_mut(root).insert(crate::tank::Controlled);
-                }
-                world.entity_mut(root).remove::<(WeaponGate, WeaponLoads)>();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if ticking {
-                        world.run_system_once(tick_weapon_gate).unwrap();
-                    } else {
-                        world.run_system_once(fire).unwrap();
-                    }
-                }));
-                assert_eq!(result.is_ok(), ticking && replica && !controlled);
-                assert_eq!(weapon_state(&mut world, root).rounds_fired, 0);
+        for (replica, controlled, ticking) in [
+            (false, false, false),
+            (false, false, true),
+            (true, false, true),
+            (true, true, true),
+        ] {
+            let mut world = test_world();
+            let root = spawn_main_gun_rig(&mut world);
+            if replica {
+                world.insert_resource(crate::ClientReplica);
             }
+            if controlled {
+                world.entity_mut(root).insert(crate::tank::Controlled);
+            }
+            world.entity_mut(root).remove::<(WeaponGate, WeaponLoads)>();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if ticking {
+                    world.run_system_once(tick_weapon_gate).unwrap();
+                } else {
+                    world.run_system_once(fire).unwrap();
+                }
+            }));
+            assert_eq!(result.is_ok(), ticking && replica && !controlled);
+            assert_eq!(weapon_state(&mut world, root).rounds_fired, 0);
         }
     }
 

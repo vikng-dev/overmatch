@@ -262,16 +262,10 @@ fn toggle_death_screen(
 /// edge onto the `Controlled` tank's `TankCommand`; the next frame's `command::DeviceCommand` takes
 /// it, `net::client::feed_frame_input` files it into that frame's message, and the server validates it against the
 /// tank's own death before honoring it. Scoped `With<TankKnockedOut>` so the key does nothing while
-/// alive (there is no overlay up then either). `just_pressed` is one press = one edge; `consume_edges`
-/// (and, under starvation, the input bridge's `clear_edges`) drops it after one tick, so a held key
-/// can't spam respawns.
+/// alive (there is no overlay up then either). `just_pressed` produces one edge; the frame feed
+/// drains the device latch and the authority consumes each admitted id once.
 ///
-/// Runs in [`PlayerInputSet`] (see the registration comment): while the cursor is released — menu
-/// open, window unfocused — this system doesn't run at all, so a respawn edge can never be latched
-/// into a command `feed_frame_input` is zeroing on the wire. R with the menu up does nothing and the
-/// overlay stays on `press R`. The `overlay::input_blocked` re-check below closes the ONE remaining
-/// gap the cursor gate can't: the frame a menu opens in the SAME tick R is pressed, before the cursor
-/// owner has released the cursor — refusing the latch there is what prevents a phantom `RESPAWNING…`.
+/// Runs in [`PlayerInputSet`]; the inline overlay guard also covers same-frame menu opening.
 ///
 /// Inert while the knockout is younger than the kill cam's input dead-zone
 /// ([`KillCamGate::settling`]), so a key held through the hit does not respawn, and while the
