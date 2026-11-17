@@ -34,7 +34,8 @@ pub struct Turret;
 
 /// The turret's rigid-body data, built with its tank kind's template from the sheet's `turret`
 /// block and the tank's geometry, so the launch reads it from the entity rather than from the
-/// asset. Template admission proves the remaining hull's inertia positive at every servo angle.
+/// asset. The template checks it against the full-vehicle body and allowed assembly poses
+/// before spawning.
 #[derive(Component, Clone, Copy)]
 pub struct TurretBody {
     /// Mass (kg).

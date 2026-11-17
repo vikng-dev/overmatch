@@ -1377,7 +1377,7 @@ impl NodeRole {
 }
 
 impl TankSpec {
-    /// The hull body's angular inertia: a uniform box of `inertia_extents` carrying `mass`.
+    /// The full-vehicle body's angular inertia: a uniform box of `inertia_extents` carrying `mass`.
     pub(crate) fn hull_angular_inertia(&self) -> avian3d::prelude::AngularInertia {
         let (x, y, z) = self.inertia_extents;
         avian3d::prelude::AngularInertia::from_shape(&Cuboid::new(x, y, z), self.mass)
@@ -1883,6 +1883,15 @@ impl TankSpec {
         }
         if self.mass <= turret.mass.0 {
             return Err("mass must exceed turret.mass to leave a hull after detachment; increase mass or correct turret.mass".into());
+        }
+        let moments = self.hull_angular_inertia().principal;
+        if !moments.is_finite() || moments.cmple(Vec3::ZERO).any() {
+            return Err(
+                "mass/inertia_extents yield non-finite or non-positive full-vehicle moments; \
+                        author mass and box dimensions whose derived cuboid moments are finite \
+                        and positive on every axis"
+                    .into(),
+            );
         }
         let moments = turret.angular_inertia().principal;
         if !moments.is_finite() || moments.cmple(Vec3::ZERO).any() {
@@ -3122,6 +3131,29 @@ TankSpec(
                 let err = spec.validate().unwrap_err().to_string();
                 assert!(err.starts_with(field), "{field} {value}: {err}");
             }
+        }
+    }
+
+    /// Spawn and the game's damage model need every full-vehicle moment, not just the minimum.
+    /// Fixture: one squared extent overflows while the moment about that axis stays finite;
+    /// tiny positive extents instead underflow every moment. Both must fail at sheet admission.
+    #[test]
+    fn validate_refuses_unrepresentable_derived_full_vehicle_moments() {
+        for extents in [
+            (f32::MAX, 1.0, 1.0),
+            (1.0, f32::MAX, 1.0),
+            (1.0, 1.0, f32::MAX),
+            (f32::MIN_POSITIVE, f32::MIN_POSITIVE, f32::MIN_POSITIVE),
+        ] {
+            let mut spec = fixture();
+            spec.inertia_extents = extents;
+            let error = spec.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("mass/inertia_extents")
+                    && error.contains("full-vehicle moments")
+                    && error.contains("every axis"),
+                "{error}"
+            );
         }
     }
 

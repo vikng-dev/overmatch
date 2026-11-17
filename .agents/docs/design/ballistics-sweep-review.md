@@ -219,8 +219,8 @@ field-frame control panics instead of depositing dose along an invented directio
   angular increment (StandIns in `assets/damage/cookoff.ron`); the assembly does keep the hull
   motion at its mass centre and the hull's spin, so velocity is continuous up to that increment.
   The mass split conserves carried momentum: the hull loses the detached assembly's mass and
-  inertia, its mass centre shifts, and both bodies keep their mass-centre velocities. The authored
-  launch increment adds momentum without a reaction on the hull.
+  inertia, its mass centre shifts, and each body inherits the old rigid velocity field at its own
+  mass centre. The authored launch increment adds momentum without a reaction on the hull.
   `Ammo` identifies only a volume with HP and ownership. Per-weapon stowage counts
   exist but do not assign contents to ammunition volumes; the reserve is currently infinite.
   Round filler energies exist, but neither propellant energy nor confinement, attachment failure

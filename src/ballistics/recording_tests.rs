@@ -127,9 +127,24 @@ fn tank(
             crate::tank::TankServos::for_count(0),
         ))
         .id();
+    // Fixture detachable assembly: 1 t, centred on the root, 1000 kg m² per axis. No collider:
+    // the recording fixture's declared volumes alone define what its rounds encounter.
+    let turret = app
+        .world_mut()
+        .spawn((
+            crate::tank::Turret,
+            crate::tank::TurretBody {
+                mass: 1000.0,
+                angular_inertia: AngularInertia::new(Vec3::splat(1000.0)),
+                centre_of_mass: Vec3::ZERO,
+            },
+            Transform::IDENTITY,
+            ChildOf(root),
+        ))
+        .id();
     app.world_mut().entity_mut(root).insert(Rig {
         hull: root,
-        turret: root,
+        turret,
         gunner_yaw: root,
         gun: root,
         muzzle: root,
