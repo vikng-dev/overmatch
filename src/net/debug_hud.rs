@@ -8,9 +8,9 @@
 //! leaving), shows only over a connected link, and only while the player's `DEBUG PANEL` setting
 //! (`settings::DebugPanel`, on by default during the beta) is on. There is no toggle key.
 //!
-//! Jitter is the full receipt spread buffered by `net::interp_delay`, from the same estimator.
-//! The placeholder remains until `ArrivalStats::warmed`, latched like the delay law. The value
-//! uses the authored warning/alarm bands in excess authority tick budgets.
+//! Jitter is the completed-tick lateness spread measured by `net::view_clock`.
+//! The placeholder remains until completed stamped ticks exist. Warning/alarm bands are
+//! authored in excess authority tick budgets.
 //!
 //! RTT comes from lightyear's `Link::stats` on the connected client entity; FPS/frame time from
 //! `FrameTimeDiagnosticsPlugin`, which is NOT in `DefaultPlugins` and is therefore registered by
@@ -42,7 +42,7 @@ use crate::ui_font::{
     NET_WARN, NET_WARN_EXCESS_TICKS as WARN_EXCESS_TICKS, PANEL_BG, TEXT, TEXT_DIM, UiFonts,
 };
 
-use super::sync_margin::ArrivalDelay;
+use super::view_clock::ViewClock;
 
 /// One advancing tick's arrival, stamped with the frame that read it.
 struct Gap {
@@ -324,22 +324,18 @@ fn update_debug_hud(
     settings: Res<Settings>,
     diagnostics: Res<DiagnosticsStore>,
     tick: Res<TickDuration>,
-    estimator: Res<ArrivalDelay>,
+    view_clock: Res<ViewClock>,
     tick_gaps: Res<ServerTickGaps>,
     // The client connection entity (`client::run`) carries `Link` + `Connected`; one on a client.
     links: Query<&Link, With<Connected>>,
     mut values: Query<(&mut Text, &mut TextColor, &Metric)>,
-    // Mirrors `interp_delay`'s arming latch: placeholder until the estimator distribution is
-    // valid, then live for the link even if the digest later regresses.
-    mut armed: Local<Option<u64>>,
 ) {
     // Wall time keeps a long client frame from being hidden by virtual-time clamping.
     *since_refresh += time.delta();
     if *since_refresh < REFRESH_INTERVAL {
         return;
     }
-    // A hidden card is not written; its refresh stays due, so it shows current values. The arming
-    // latch waits with it: `warmed` never falls within a link, so a late latch arms the same.
+    // A hidden card stays due so the next visible refresh uses current readings.
     if !card_shown(settings.debug_panel, !links.is_empty()) {
         return;
     }
@@ -356,13 +352,9 @@ fn update_debug_hud(
             || "--".to_string(),
             |rtt| format!("{:.0} ms", rtt.as_secs_f64() * 1000.0),
         );
-    // The delay law's instability term, from the SAME estimator `interp_delay` reads; `None`
-    // (placeholder) until the law would itself be armed.
-    if *armed != Some(estimator.link()) && estimator.stats.warmed() {
-        *armed = Some(estimator.link());
-    }
-    let jitter = (*armed == Some(estimator.link()))
-        .then(|| jitter_readout(estimator.stats.spread(), tick.0));
+    let jitter = view_clock
+        .lateness_spread()
+        .map(|spread| jitter_readout(Duration::from_secs_f64(spread), tick.0));
     let server_tick = tick_gaps
         .cadence(time.elapsed())
         .map(|cadence| server_tick_readout(cadence, tick.0));

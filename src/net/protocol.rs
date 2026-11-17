@@ -622,17 +622,25 @@ pub(super) fn install_shot_clock(app: &mut App) {
     app.add_systems(FixedUpdate, publish_shot_clock.before(GameplaySet));
 }
 
-/// Republish the same network tick for every gameplay consumer before the gameplay pass.
+/// The game's damage model: authority shot identities use its transport tick. Client weapon
+/// countdowns use the view cursor; no completed stamp pair means no countdown progress.
 /// Offline compositions advance their own wrapping tick; network compositions require an
 /// advancing transport timeline and refuse its exhaustion visibly at this boundary.
 pub(super) fn publish_shot_clock(
     mut shot_clock: ResMut<crate::ShotClock>,
     mut weapon_clock: ResMut<crate::WeaponClock>,
     timeline: Res<LocalTimeline>,
+    view: Option<Res<super::view_clock::ViewClock>>,
 ) {
     let tick = network_gameplay_tick(timeline.tick()).unwrap_or_else(super::harness::refuse_start);
     shot_clock.0 = tick;
-    weapon_clock.0 = tick;
+    if let Some(view) = view {
+        if let Some(now) = view.now() {
+            weapon_clock.0 = crate::sim_tick::SimTick::new(now.tick().0);
+        }
+    } else {
+        weapon_clock.0 = tick;
+    }
 }
 
 /// Publish angles in `FixedPostUpdate`, after `drive_servos` (`FixedUpdate`, after `GameplaySet`).
@@ -719,8 +727,8 @@ fn publish_launched_turret_pose(
 /// (the replica hulls are, [`super::rig::attach_replicated_rig`]), avian's broad phase never pairs
 /// two static bodies, so no contact constraint exists on the client. The client's physics step
 /// relies on that: the authority owns motion and contacts, and the client owns no constraint
-/// state. The presentation boundary (`super::resync`) retains already-presented poses through
-/// unknown interpolation history. Avian's bookkeeping defect for a raw body-query gap remains
+/// state. The monotonic view clock never revisits discarded interpolation history.
+/// Avian's bookkeeping defect for a raw body-query gap remains
 /// pinned independently by `src/tests/avian_body_query_gap.rs`; its mechanism is recorded in
 /// `upstream/avian-body-query-gap-stale-constraints.md`.
 ///
@@ -894,7 +902,6 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<super::debris_stress::DebrisPose>()
         .replicate_with(super::debris_stress::pose_replication())
         .add_interpolation_with(super::debris_stress::debris_pose_lerp);
-    super::resync::retain_stream::<super::debris_stress::DebrisPose>(app);
     // The construction ledger (one world entity): appended entries ride as diffs, a late joiner takes the
     // list once.
     app.component::<super::construction::Ledger>()
@@ -994,24 +1001,20 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<Position>()
         .replicate_with(super::wire_quant::position_fns())
         .add_linear_interpolation();
-    super::resync::retain_stream::<Position>(app);
     app.component::<Rotation>()
         .replicate_with(super::wire_quant::rotation_fns())
         .add_linear_interpolation();
-    super::resync::retain_stream::<Rotation>(app);
     app.component::<LinearVelocity>()
         .replicate_with(super::wire_quant::linear_velocity_fns());
     // `track_drive_lerp` keeps the remote belt view on the hull's cursor clock.
     app.component::<TrackDrive>()
         .replicate_with(super::wire_quant::track_drive_fns())
         .add_interpolation_with(track_drive_lerp);
-    super::resync::retain_stream::<TrackDrive>(app);
     // The shaped drive signal: owner-only (`disclosure::CombatDisclosure`), read by the owner's
     // drive HUD on the belt state's clock.
     app.component::<DriveSignal>()
         .replicate()
         .add_interpolation_with(drive_signal_lerp);
-    super::resync::retain_stream::<DriveSignal>(app);
     // The declared transmission's correlated state: one atomic snapshot, owner-only
     // (`disclosure::CombatDisclosure`). Every other client hears the crank through `EngineRpm`,
     // applied on arrival like the transmission it is read off.
@@ -1091,8 +1094,8 @@ mod tests {
     }
 
     /// The client's physics world holds no contact constraint, including a launched turret
-    /// resting on a hull. This test stages a raw body-query gap independently of the stream
-    /// retention boundary, so the no-contact invariant cannot depend on resync handling.
+    /// resting on a hull. A raw body-query gap must preserve that contract independently
+    /// of the presentation clock.
     /// A non-static turret creates a constraint and fails before Avian's body-query-gap defect.
     #[test]
     fn a_launched_turret_on_a_replica_hull_holds_no_contact_constraint() {
@@ -2222,6 +2225,31 @@ mod tests {
             app.world_mut().run_schedule(FixedUpdate);
         }
         assert_eq!(app.world().resource::<crate::ShotClock>().0.raw(), 44);
+    }
+
+    /// The game's damage model: the HUD's weapon countdown follows presented server time,
+    /// while transport labels remain independent. A hold or waiting epoch cannot mature it.
+    #[test]
+    fn client_weapon_publication_follows_the_view_and_holds_without_an_epoch() {
+        let mut app = App::new();
+        install_shot_clock(&mut app);
+        app.insert_resource(timeline_at(400)); // Fixture: deliberately leading transport labels.
+        let mut view = super::super::view_clock::ViewClock::default();
+        view.set_now(Tick(40).into());
+        app.insert_resource(view);
+        app.world_mut().run_schedule(FixedUpdate);
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), 40);
+        app.world_mut()
+            .resource_mut::<LocalTimeline>()
+            .apply_delta(100);
+        app.world_mut().run_schedule(FixedUpdate);
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), 40);
+        app.world_mut()
+            .resource_mut::<super::super::view_clock::ViewClock>()
+            .set_synced(false);
+        app.world_mut().run_schedule(FixedUpdate);
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), 40);
+        assert_eq!(app.world().resource::<crate::ShotClock>().0.raw(), 500);
     }
 
     /// The game's damage model: shot identity, deadline gates and replica catch-up all read

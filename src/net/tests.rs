@@ -3,5 +3,5 @@
 //! `src/net/` because each names lightyear, and only the netcode layer may (`net_boundary`).
 
 mod net_boundary;
-mod net_interp_delay;
-mod net_sync_margin;
+
+mod stream_presence;

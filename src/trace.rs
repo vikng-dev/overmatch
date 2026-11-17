@@ -35,10 +35,8 @@ pub(crate) use state_hash::{CanonicalTankStateDigest, canonical_tank_state_diges
 
 use bevy::ecs::system::SystemParam;
 use lightyear::core::confirmed_history::ConfirmedHistory;
-use lightyear::interpolation::timeline::InterpolationConfig;
 use lightyear::prelude::{
-    Client, ControlledBy, InterpolationTimeline, LocalTimeline, NetworkTimeline, PingManager,
-    ReplicationCheckpointMap,
+    Client, ControlledBy, LocalTimeline, PingManager, ReplicationCheckpointMap,
 };
 
 /// A recorder's outside-input I/O failure, retaining the operation and output path.
@@ -272,12 +270,8 @@ fn record_frame(
         Option<&ConfirmedHistory<Position>>,
         Option<&ConfirmedHistory<LinearVelocity>>,
     )>,
-    // The clock every hull (own included) actually renders on and the delay in force (both
-    // app-global resources), plus the client link's two statistics the `min_delay` law consumes.
-    // Absent in the single-player and server compositions, so those rows simply omit the fields.
-    (timeline, interp, pings): (
-        Option<Res<InterpolationTimeline>>,
-        Option<Res<InterpolationConfig>>,
+    (view, pings): (
+        Option<Res<crate::net::view_clock::ViewClock>>,
         Query<&PingManager, With<Client>>,
     ),
 ) {
@@ -290,15 +284,14 @@ fn record_frame(
     // One connection state for every tank row this frame, the way `tick`/`conf` already repeat.
     // `itick` carries the overstep because headroom (`conft − itick`) is a sub-tick quantity —
     // the whole point of the measurement is how little of it is left.
-    let link = timeline
-        .zip(interp)
+    let link = view
+        .and_then(|clock| clock.now())
         .zip(pings.iter().next())
-        .map(|((timeline, config), pings)| {
+        .map(|(cursor, pings)| {
             (
-                f64::from(timeline.tick().0) + f64::from(timeline.overstep().to_f32()),
+                f64::from(cursor.tick().0) + f64::from(cursor.overstep().to_f32()),
                 millis(pings.rtt()),
                 millis(pings.jitter()),
-                millis(config.min_delay),
             )
         });
     for (entity, global, controlled) in &roots {
@@ -335,13 +328,11 @@ fn record_frame(
                         .map_or(Value::Null, |t| Value::from(u64::from(t.0))),
                 );
             }
-            // The interpolation clock and the inputs to the delay that placed it. Headroom is
-            // `conft − itick`; `mind` makes a capture self-documenting about which law produced it.
-            if let Some((itick, rtt, jitter, min_delay)) = link {
+            // Headroom is `conft − itick`; RTT and ping jitter are diagnostic only.
+            if let Some((itick, rtt, jitter)) = link {
                 obj.insert("itick".into(), Value::from(itick));
                 obj.insert("rtt".into(), Value::from(rtt));
                 obj.insert("jit".into(), Value::from(jitter));
-                obj.insert("mind".into(), Value::from(min_delay));
             }
             // The LATEST confirmed (server-authoritative) Position/LinearVelocity this root has
             // received, plus the tick it belongs to. `ConfirmedHistory::newest_present` is the

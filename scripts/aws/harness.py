@@ -830,13 +830,14 @@ class Jitter:
     included (src/net/view_clock.rs)."""
     at: float  # the client machine's kernel time, at the end of the line's period
     period_s: float
-    starved_ms: float  # of the period's frames, those whose presented cursor had passed the newest tick
-    delay_ms: float  # today's applied minimum interpolation delay
+    held_ms: float  # of the period's frames, those whose target exhausted the completed tick buffer
+    delay_ms: float  # applied delta above the latest completed tick's absence bound
     intervals: Histogram | None  # stamp intervals in the view window before the line; None: under two stamps
-    target_minus_today_ms: float | None  # None: no target yet, or no stamps bracket the cursor
+    target_minus_applied_ms: float | None  # None: no completed stamp pair yet
     target_above_x_ms: float | None
     completion: tuple[int, ...]  # COMPLETION
     worst_lag_ms: float
+    cuts: int
 
 
 def jitter(text: str, client: int) -> list[Jitter]:
@@ -855,11 +856,11 @@ def jitter(text: str, client: int) -> list[Jitter]:
             continue
         row = Fields(found, f"client {client}: a client_jitter record")
         view = row.at("view_clock")
-        out.append(Jitter(float(stamp.group(1)), row.num("period_s"), row.num("starved.ms"),
-                          row.num("min_delay_ms.applied"), histogram(view, "stamp_interval_ms"),
-                          view.maybe_num("target_minus_today_ms"), view.maybe_num("target_above_latest_x_ms"),
+        out.append(Jitter(float(stamp.group(1)), row.num("period_s"), row.num("holds.ms"),
+                          view.num("applied_above_latest_x_ms"), histogram(view, "stamp_interval_ms"),
+                          view.maybe_num("target_minus_applied_ms"), view.maybe_num("target_above_latest_x_ms"),
                           tuple(view.count(f"completion.{name}") for name in COMPLETION),
-                          view.num("completion.worst_lag_ms")))
+                          view.num("completion.worst_lag_ms"), view.count("cuts")))
     return out
 
 
@@ -935,7 +936,7 @@ def interval(series: list[Sample], start: float, end: float) -> Interval:
 
 COLUMNS = ["win", "at_s", "tanks", "proj", "p50_ms", "p95_ms", "p99_ms", "max_ms", "overrun", "drop_ms",
            "srv_cpu%", "srv_mb", "srv_busy%", "steal%", "send_p95_us", "link_kB/s", "link_max_kB/s",
-           "stale_decl", "stale_arr", "starved_ms", "cli_busy%", "cli_cpu%", "cli_cpu_max%", "cli_mb"]
+           "stale_decl", "stale_arr", "held_ms", "cli_busy%", "cli_cpu%", "cli_cpu_max%", "cli_mb"]
 
 
 def window_cells(index: int, window: Window, combat_open: float, server: Interval, client: Interval,
@@ -948,7 +949,7 @@ def window_cells(index: int, window: Window, combat_open: float, server: Interva
             statistics.median(row.link_kb_per_s), max(row.link_kb_per_s),
             sum(link.arrival.declarations for link in row.inputs),
             sum(link.arrival.stale_arrivals for link in row.inputs),
-            max(sum(line.starved_ms for line in own) for own in lines), client.busy_pct(), statistics.median(cpu),
+            max(sum(line.held_ms for line in own) for own in lines), client.busy_pct(), statistics.median(cpu),
             max(cpu), statistics.median(client.rss_mb(u) for u in units)]
 
 
@@ -957,7 +958,7 @@ def median(values: list[float]) -> float | None:
 
 
 CLIENT_COLUMNS = ["cli", "win", "lines", "int_n", "int_p50", "int_p95", "int_max", "int_2T+", "tgt_n",
-                  "tgt-now_p50", "tgt-now_min", "tgt-now_max", "tgt-x_p50", "delay_ms", "done", "late",
+                  "tgt-applied_p50", "tgt-applied_min", "tgt-applied_max", "tgt-x_p50", "delta-x_ms", "cuts", "done", "late",
                   "late_max_ms", "evicted", "no_stamp", "unmapped", "overflow"]
 
 
@@ -977,14 +978,14 @@ def tiles(lines: list[Jitter], start: float, view_window_s: float) -> list[Histo
 def client_cells(client: int, index: int, lines: list[Jitter], start: float,
                  timing: NetTiming) -> list[float | None]:
     taken = tiles(lines, start, timing.view_window_s)
-    target = [line.target_minus_today_ms for line in lines if line.target_minus_today_ms is not None]
+    target = [line.target_minus_applied_ms for line in lines if line.target_minus_applied_ms is not None]
     totals = [sum(column) for column in zip(*(line.completion for line in lines))]
     return [client, index, len(lines), sum(h.n for h in taken), median([h.p50_ms for h in taken]),
             median([h.p95_ms for h in taken]), max((h.max_ms for h in taken), default=None),
             sum(sum(h.bins[2:]) for h in taken),  # bins 2 and up: two ticks or more
             len(target), median(target), min(target, default=None), max(target, default=None),
             median([line.target_above_x_ms for line in lines if line.target_above_x_ms is not None]),
-            statistics.median(line.delay_ms for line in lines), totals[0], totals[1],
+            statistics.median(line.delay_ms for line in lines), sum(line.cuts for line in lines), totals[0], totals[1],
             max(line.worst_lag_ms for line in lines), *totals[2:]]
 
 
@@ -1078,7 +1079,7 @@ def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], 
         "*_ms; srv_cpu% of one core; link_* the per-link payload kB/s the server queued, IP/UDP headers "
         "excluded; stale_decl and stale_arr sum each connected link's stale declarations and stale arrivals "
         "since the preceding stats line), the clients' client_jitter lines "
-        "(starved_ms: the most any client's presented cursor ran past its newest tick), and the 1 Hz samplers "
+        "(held_ms: the largest per-client sum of frames held at the newest completed tick), and the 1 Hz samplers "
         "(*_busy% and steal% of the whole machine; cli_cpu% of one core per client; *_mb resident). "
         "median/min/max rows are DERIVED across the windows. at_s: window start, s after combat opened.",
         "",
@@ -1090,11 +1091,12 @@ def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], 
         "window apart, whose histograms count each interval inside the window at most once: int_n their count, "
         "int_max the largest, int_2T+ those of two ticks or more (a tick that never completed, or a long server "
         "frame); int_p50 and int_p95 the median of those histograms' nearest-rank p50 and p95 (DERIVED). "
-        "tgt-now_*: the would-be delay target minus today's cursor lag, both on the stamp map so the clock "
-        "offset cancels (negative: the target presents newer state than today), DERIVED by the client at each of "
+        "tgt-applied_*: the delay target minus the paced delta, with the clock "
+        "offset cancelled (negative: the paced delta is above target), DERIVED by the client at each of "
         "the tgt_n lines that had one; median, min and max over them. tgt-x_p50: the target above the newest "
-        "sampled tick's lateness (DERIVED), median over the lines. delay_ms: today's applied minimum interpolation "
-        "delay, MEASURED, median over the lines. done, late, evicted, no_stamp, unmapped, overflow: whole-tick "
+        "sampled tick's lateness (DERIVED), median over the lines. delta-x_ms: applied delta above the newest completed tick's lateness, "
+        "MEASURED, median over the lines. cuts: typed continuity jumps summed over the lines. "
+        "done, late, evicted, no_stamp, unmapped, overflow: whole-tick "
         "completion counts summed over the lines, MEASURED: ticks completed; completed in a later frame than "
         "their stamp arrived (late_max_ms the longest such wait); stamps whose tick never completed within the "
         "receipt horizon; completions without a retained stamp; stamps without a checkpoint mapping; stamps a "

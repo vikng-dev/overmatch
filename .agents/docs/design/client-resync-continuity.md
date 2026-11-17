@@ -1,5 +1,7 @@
 # Client presentation through an interpolation resync
 
+Timing status: the stamp-driven view clock supersedes the interpolation sizing and resync controllers described here. Current implementation and proofs: [view clock slice 2](../../scratch/view-clock-slice-2.md). The historical measurements below are observations of the retired controller.
+
 Subject: the game's netcode, client presentation and damage model; game state only.
 
 ## Cause verified in dependency source

@@ -102,6 +102,23 @@ fn run_one_admitted_tick(world: &mut World) {
     *world.resource_mut::<Time>() = world.resource::<Time<Virtual>>().as_generic();
 }
 
+/// Install the server's one-tick-per-send boundary. Headless clock proofs drive this same
+/// schedule with controlled Real samples; the runner owns waiting and cap admission in play.
+pub(super) fn install_tick_schedule(app: &mut App) {
+    app.init_resource::<UnadmittedWall>()
+        .init_resource::<DiscardedWall>();
+    app.remove_systems_in_set(
+        RunFixedMainLoop,
+        run_fixed_main_schedule,
+        ScheduleCleanupPolicy::RemoveSystemsOnly,
+    )
+    .expect("TimePlugin registers Bevy's fixed loop");
+    app.add_systems(
+        RunFixedMainLoop,
+        run_one_admitted_tick.in_set(RunFixedMainLoopSystems::FixedMainLoop),
+    );
+}
+
 struct TickRunner<C>(C);
 
 impl<C: Clock> Plugin for TickRunner<C> {
@@ -125,16 +142,7 @@ impl<C: Clock> Plugin for TickRunner<C> {
                 app.cleanup();
             }
 
-            app.remove_systems_in_set(
-                RunFixedMainLoop,
-                run_fixed_main_schedule,
-                ScheduleCleanupPolicy::RemoveSystemsOnly,
-            )
-            .expect("TimePlugin registers Bevy's fixed loop");
-            app.add_systems(
-                RunFixedMainLoop,
-                run_one_admitted_tick.in_set(RunFixedMainLoopSystems::FixedMainLoop),
-            );
+            install_tick_schedule(&mut app);
 
             // Real's first sample has zero delta. Prime it without running a tickless frame.
             app.world_mut()

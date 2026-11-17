@@ -9,6 +9,9 @@ use crate::provenance::{Sourced, from_shipped_str};
 #[derive(Resource, Clone, Debug)]
 pub(super) struct Timing {
     pub view_window_s: f64,
+    pub view_rate: f64,
+    pub view_cut_s: f64,
+    pub view_pending_s: f64,
     pub uplink_window_s: f64,
     pub stale_floor_s: f64,
     pub stale_ceil_s: f64,
@@ -30,6 +33,9 @@ impl Timing {
         #[serde(deny_unknown_fields)]
         struct Authored {
             view_window_s: Sourced<f64>,
+            view_rate: Sourced<f64>,
+            view_cut_s: Sourced<f64>,
+            view_pending_s: Sourced<f64>,
             uplink_window_s: Sourced<f64>,
             stale_floor_s: Sourced<f64>,
             stale_ceil_s: Sourced<f64>,
@@ -45,6 +51,9 @@ impl Timing {
         .unwrap_or_else(|err| panic!("{err}; fix the required timing fields and provenance"));
         let timing = Self {
             view_window_s: authored.view_window_s.0,
+            view_rate: authored.view_rate.0,
+            view_cut_s: authored.view_cut_s.0,
+            view_pending_s: authored.view_pending_s.0,
             uplink_window_s: authored.uplink_window_s.0,
             stale_floor_s: authored.stale_floor_s.0,
             stale_ceil_s: authored.stale_ceil_s.0,
@@ -55,6 +64,9 @@ impl Timing {
         };
         for (field, value) in [
             ("view_window_s", timing.view_window_s),
+            ("view_rate", timing.view_rate),
+            ("view_cut_s", timing.view_cut_s),
+            ("view_pending_s", timing.view_pending_s),
             ("uplink_window_s", timing.uplink_window_s),
             ("stale_floor_s", timing.stale_floor_s),
             ("stale_ceil_s", timing.stale_ceil_s),
@@ -67,6 +79,11 @@ impl Timing {
                 "assets/net_timing.ron: {field} must be finite and positive; fix the timing data"
             );
         }
+        assert!(
+            timing.view_pending_s / crate::sim_tick::sim_timestep().as_secs_f64()
+                <= f64::from(i32::MAX),
+            "assets/net_timing.ron: view_pending_s must fit the signed tick horizon; shorten cosmetic rig waiting"
+        );
         assert!(
             timing.stale_floor_s <= timing.stale_ceil_s,
             "assets/net_timing.ron: stale_floor_s must not exceed stale_ceil_s; fix the timing data"

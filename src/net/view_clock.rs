@@ -1,4 +1,5 @@
-//! Received tick/time map and completion-frame absence bound; nothing drives a timeline yet.
+//! One presentation cursor from completed ticks: frame start maps ticks to time; departure
+//! measures downlink absence. No RTT or estimated server clock participates.
 //! `x = previous frame Real - departure` retains the unknown epoch offset. Stamp-map lags
 //! share that offset, so their differences are comparable to local durations.
 
@@ -8,17 +9,32 @@ use bevy::prelude::*;
 use bevy_replicon::client::server_mutate_ticks::MutateTickReceived;
 use bevy_replicon::prelude::RepliconTick;
 use bevy_replicon::shared::replication::storage::ReplicationStorage;
-use lightyear::core::time::TickInstant;
+use lightyear::core::time::{Overstep, TickInstant};
+use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::{Connected, ReplicationCheckpointMap, ReplicationSystems, Tick};
+use lightyear::prelude::{NetworkTimeline, SyncSystems, TimelineSync, TimelineSystems};
 use serde_json::{Value, json};
 
 use super::tick_stamp::{RECEIPT_CAP, ReceivedStamps, TickStamp};
 use super::timing::{Timing, WindowMax, histogram};
 
 pub(super) fn install(app: &mut App) {
-    app.init_resource::<ViewClock>()
+    // The public sync set contains only the local and interpolation controllers (0.31.0).
+    // Neither controls arrival-owned input or the application-owned presentation cursor.
+    app.configure_sets(PostUpdate, SyncSystems::Sync.run_if(|| false));
+    app.init_resource::<Timing>()
+        .init_resource::<ViewClock>()
         .add_observer(reset)
-        .add_systems(PreUpdate, receive.after(ReplicationSystems::Receive));
+        .add_observer(disconnect)
+        .add_message::<ViewCut>()
+        .add_message::<super::matchmaking::ServerGone>()
+        .add_systems(
+            PreUpdate,
+            (receive, drive)
+                .chain()
+                .after(ReplicationSystems::Receive)
+                .after(TimelineSystems::Advance),
+        );
 }
 
 fn reset(
@@ -30,8 +46,20 @@ fn reset(
     *storage.global.get_or_default::<ReceivedStamps>() = ReceivedStamps::default();
 }
 
+/// A discontinuity caused by link backlog, expressed in authoritative ticks.
+#[derive(Message, Debug, Clone, Copy)]
+pub(super) struct ViewCut {
+    pub from: TickInstant,
+    pub to: TickInstant,
+}
+
+fn disconnect(_ended: On<Remove<Connected>>, mut clock: ResMut<ViewClock>) {
+    *clock = ViewClock::default();
+}
+
 struct Sample {
     stamp_s: f64,
+    work_s: f64,
     x_s: f64,
 }
 struct Arrival {
@@ -55,7 +83,14 @@ struct CompletionLine {
 }
 
 #[derive(Resource, Default)]
-pub(super) struct ViewClock {
+pub(crate) struct ViewClock {
+    cursor: Option<TickInstant>,
+    delta_s: Option<f64>,
+    stamps: BTreeMap<Tick, f64>,
+    pub held: bool,
+    pub received: u64,
+    cuts: u64,
+    reported_cuts: u64,
     frame: u64,
     samples: BTreeMap<Tick, Sample>,
     expiry: VecDeque<(f64, Tick)>,
@@ -63,6 +98,7 @@ pub(super) struct ViewClock {
     pending: HashMap<RepliconTick, Arrival>,
     receipt_order: VecDeque<RepliconTick>,
     completion: CompletionLine,
+    refusal: Option<StampOrderRefusal>,
 }
 
 impl ViewClock {
@@ -110,19 +146,39 @@ impl ViewClock {
                 .worst_lag_ms
                 .max((now_s - arrival.seen_s) * 1e3);
         }
+        let before = self.received;
         self.sample(arrival.tick, arrival.stamp, now_s, previous_s);
-        self.completion.sampled_ticks += 1;
+        self.completion.sampled_ticks += self.received - before;
     }
 
     fn sample(&mut self, tick: Tick, stamp: TickStamp, now_s: f64, previous_s: f64) {
+        let start = stamp.frame_start_s();
+        if self
+            .stamps
+            .range(..tick)
+            .next_back()
+            .is_some_and(|(_, before)| *before > start)
+            || self
+                .stamps
+                .range((std::ops::Bound::Excluded(tick), std::ops::Bound::Unbounded))
+                .next()
+                .is_some_and(|(_, after)| *after < start)
+        {
+            self.refusal = Some(StampOrderRefusal { tick });
+            return;
+        }
+
         if let std::collections::btree_map::Entry::Vacant(entry) = self.samples.entry(tick) {
             let x_s = stamp.absence_bound_s(previous_s);
+            self.stamps.insert(tick, stamp.frame_start_s());
             entry.insert(Sample {
                 stamp_s: stamp.frame_start_s(),
+                work_s: stamp.departure_s() - stamp.frame_start_s(),
                 x_s,
             });
             self.expiry.push_back((now_s, tick));
             self.maximum.push(now_s, x_s);
+            self.received += 1;
         }
     }
 
@@ -156,22 +212,136 @@ impl ViewClock {
         intervals.sort_by(f64::total_cmp);
         // Nearest-rank median, matching the measured distribution in the log.
         let median = intervals[(intervals.len() - 1) / 2];
-        self.maximum.get().map(|x| median + x)
+        self.maximum
+            .get()
+            .zip(self.usual_work_s())
+            .map(|(x, work)| median + work + x)
     }
 
-    /// Startup or starvation may leave the cursor without retained bracketing stamps.
-    fn stamp_at(&self, cursor: TickInstant) -> Option<f64> {
-        let (&low_tick, low) = self.samples.range(..=cursor.tick()).next_back()?;
-        let (&high_tick, high) = self
+    /// S uses frame start while x subtracts departure: their ordinary separation must be paid.
+    /// A median admits normal computation without retaining an isolated compute stall for W.
+    fn usual_work_s(&self) -> Option<f64> {
+        let mut work: Vec<_> = self.samples.values().map(|sample| sample.work_s).collect();
+        if work.is_empty() {
+            return None; // No ordinary work sample remains after an outage exhausts W.
+        }
+        work.sort_by(f64::total_cmp);
+        Some(work[(work.len() - 1) / 2])
+    }
+
+    /// Waiting is a game state: no completed stamp pair means no presentation epoch yet.
+    #[cfg(test)]
+    pub fn set_now(&mut self, now: TickInstant) {
+        self.cursor = Some(now);
+    }
+    #[cfg(test)]
+    pub fn set_synced(&mut self, synced: bool) {
+        self.cursor = synced.then(|| self.cursor.unwrap_or_default());
+    }
+
+    pub fn now(&self) -> Option<TickInstant> {
+        self.cursor
+    }
+
+    pub fn newest(&self) -> Option<Tick> {
+        self.stamps.last_key_value().map(|(&tick, _)| tick)
+    }
+
+    pub fn lateness_spread(&self) -> Option<f64> {
+        let low = self
             .samples
+            .values()
+            .map(|sample| sample.x_s)
+            .min_by(f64::total_cmp)?;
+        self.maximum.get().map(|high| high - low)
+    }
+
+    fn stamp_at(&self, cursor: TickInstant) -> Option<f64> {
+        let (&low_tick, &low) = self.stamps.range(..=cursor.tick()).next_back()?;
+        if cursor == TickInstant::from(low_tick) {
+            return Some(low);
+        }
+        let (&high_tick, &high) = self
+            .stamps
             .range((
-                std::ops::Bound::Excluded(cursor.tick()),
+                std::ops::Bound::Excluded(low_tick),
                 std::ops::Bound::Unbounded,
             ))
             .next()?;
         let fraction = f64::from((cursor - TickInstant::from(low_tick)).to_f32())
             / f64::from(high_tick - low_tick);
-        Some(low.stamp_s + fraction * (high.stamp_s - low.stamp_s))
+        Some(low + fraction * (high - low))
+    }
+
+    /// Clamp the inverse to received facts. Equal frame stamps choose the latest tick; no time
+    /// exists between those samples. Missing stamps are bridged, never extrapolated.
+    fn inverse(&self, time_s: f64) -> Option<TickInstant> {
+        let mut before: Option<(Tick, f64)> = None;
+        for (&tick, &stamp) in &self.stamps {
+            if stamp > time_s {
+                return Some(match before {
+                    None => tick.into(),
+                    Some((low_tick, low)) => instant(
+                        f64::from(low_tick.0)
+                            + (time_s - low) / (stamp - low) * f64::from(tick - low_tick),
+                    ),
+                });
+            }
+            before = Some((tick, stamp));
+        }
+        before.map(|(tick, _)| tick.into())
+    }
+
+    fn advance(
+        &mut self,
+        now_s: f64,
+        dt_s: f64,
+        tick_s: f64,
+        timing: &Timing,
+        admission_s: f64,
+    ) -> Option<ViewCut> {
+        self.held = false;
+        let target = self.target(&mut self.intervals()).or(self.delta_s)?;
+        let delta = self.delta_s.get_or_insert(target);
+        *delta += (target - *delta).clamp(-timing.view_rate * dt_s, timing.view_rate * dt_s);
+        let desired_s = now_s - *delta;
+        let target_cursor = self.inverse(desired_s)?;
+        let newest = self.newest().expect("a target requires completed stamps");
+        let previous = self.cursor.unwrap_or(target_cursor);
+        let backlog_s = f64::from((target_cursor - previous).to_f32()) * tick_s;
+        let cut = (backlog_s > timing.view_cut_s.max(admission_s)).then_some(ViewCut {
+            from: previous,
+            to: target_cursor,
+        });
+        // The rate is simulation seconds per real second. A wall-time stall can create a long
+        // map segment, but its admitted simulation backlog is bounded by the server's cap.
+        let next = if cut.is_some() {
+            target_cursor
+        } else {
+            target_cursor.min(instant(
+                number(previous) + (1.0 + timing.view_rate) * dt_s / tick_s,
+            ))
+        }
+        .max(previous)
+        .min(TickInstant::from(newest));
+        // Resolution: the public cursor quantizes fractions to U0F16. Sub-quantum rounding
+        // cannot stop a representable cursor advance and is not a hold.
+        let quantum_s = tick_s / (f64::from(u16::MAX) + 1.0);
+        self.held =
+            desired_s > self.stamps[&newest] + quantum_s && next == TickInstant::from(newest);
+        self.cursor = Some(next);
+        self.cuts += u64::from(cut.is_some());
+        // Keep the cursor's predecessor and future map points through holds. Past points retire
+        // only after both the statistics window and the cursor have passed them.
+        let anchor = self
+            .stamps
+            .range(..=next.tick())
+            .next_back()
+            .map(|(&tick, _)| tick);
+        self.stamps.retain(|tick, _| {
+            Some(*tick) == anchor || *tick >= next.tick() || self.samples.contains_key(tick)
+        });
+        cut
     }
 
     pub fn take_line(&mut self, now_s: f64, tick_s: f64, cursor: TickInstant) -> Value {
@@ -180,14 +350,70 @@ impl ViewClock {
         let today_lag = self.stamp_at(cursor).map(|stamp| now_s - stamp);
         let latest_x = self.samples.last_key_value().map(|(_, sample)| sample.x_s);
         json!({
+            "usual_work_ms": self.usual_work_s().map(|s| s * 1e3),
             "delta_star_ms": target.map(|s| s * 1e3),
-            "today_stamp_lag_ms": today_lag.map(|s| s * 1e3),
-            "target_minus_today_ms": target.zip(today_lag).map(|(target, today)| (target - today) * 1e3),
+            "stamp_lag_ms": today_lag.map(|s| s * 1e3),
+            "applied_delta_ms": self.delta_s.map(|s| s * 1e3),
+            "applied_above_latest_x_ms": self.delta_s.zip(latest_x).map(|(delta, x)| (delta - x) * 1e3),
+            "cuts": self.cuts - std::mem::replace(&mut self.reported_cuts, self.cuts),
+            "target_minus_applied_ms": target.zip(self.delta_s).map(|(target, applied)| (target - applied) * 1e3),
             "target_above_latest_x_ms": target.zip(latest_x).map(|(target, x)| (target - x) * 1e3),
             "stamp_interval_ms": histogram(&mut intervals, tick_s),
             "completion": std::mem::take(&mut self.completion),
             "pending_ticks": self.pending.len(),
         })
+    }
+}
+
+fn number(cursor: TickInstant) -> f64 {
+    f64::from(cursor.tick().0) + f64::from(cursor.overstep().to_f32())
+}
+fn instant(tick: f64) -> TickInstant {
+    TickInstant::from_tick_and_overstep(
+        Tick(tick.floor() as u32),
+        Overstep::from_f32(tick.fract() as f32),
+    )
+}
+
+fn drive(
+    real: Res<Time<Real>>,
+    virtual_time: Res<Time<Virtual>>,
+    tick: Res<lightyear::core::tick::TickDuration>,
+    timing: Res<Timing>,
+    mut clock: ResMut<ViewClock>,
+    timeline: Option<ResMut<InterpolationTimeline>>,
+    mut cuts: MessageWriter<ViewCut>,
+) {
+    if let Some(cut) = clock.advance(
+        real.elapsed_secs_f64(),
+        real.delta_secs_f64(),
+        tick.0.as_secs_f64(),
+        &timing,
+        virtual_time.max_delta().as_secs_f64(),
+    ) {
+        warn!(
+            "net: view cut {:?} -> {:?}: link backlog exceeded continuity budget",
+            cut.from, cut.to
+        );
+        cuts.write(cut);
+    }
+    if let Some(mut timeline) = timeline {
+        timeline.set_now(clock.now().unwrap_or_default());
+        timeline.set_synced(clock.now().is_some());
+    }
+}
+
+#[derive(Debug)]
+struct StampOrderRefusal {
+    tick: Tick,
+}
+impl std::fmt::Display for StampOrderRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "server tick {:?} has a frame-start stamp outside its authoritative neighbours; refusing the stream",
+            self.tick
+        )
     }
 }
 
@@ -197,6 +423,7 @@ fn receive(
     checkpoints: Res<ReplicationCheckpointMap>,
     mut storage: ResMut<ReplicationStorage>,
     mut completed: MessageReader<MutateTickReceived>,
+    mut gone: MessageWriter<super::matchmaking::ServerGone>,
     mut clock: ResMut<ViewClock>,
 ) {
     let now = real.elapsed_secs_f64();
@@ -221,6 +448,10 @@ fn receive(
     for event in completed.read() {
         clock.complete(event.tick, now, now - real.delta_secs_f64());
     }
+    if let Some(refusal) = clock.refusal.take() {
+        warn!("client: {refusal}");
+        gone.write(super::matchmaking::ServerGone(refusal.to_string()));
+    }
 }
 
 #[cfg(test)]
@@ -243,6 +474,9 @@ mod tests {
             let mut app = App::new();
             app.add_plugins(MinimalPlugins)
                 .init_resource::<Timing>()
+                .insert_resource(lightyear::core::tick::TickDuration(
+                    super::super::server::TICK,
+                ))
                 .init_resource::<ReplicationStorage>()
                 .init_resource::<ReplicationCheckpointMap>()
                 .add_message::<MutateTickReceived>()
@@ -401,4 +635,203 @@ mod tests {
         assert!(clock.pending.len() <= RECEIPT_CAP);
         assert!(clock.receipt_order.len() <= RECEIPT_CAP);
     }
+    /// Event and hull consumers rely on monotonic, bounded pacing even when the target rises or
+    /// expires. The game's cosmetic path cache must survive a delay rise past its catch-up horizon.
+    #[test]
+    fn paced_delay_changes_keep_the_cursor_and_an_old_public_path_forward() {
+        use crate::ballistics::path::Replica;
+        let timing = Timing::shipped();
+        let tick_s = super::super::server::TICK.as_secs_f64();
+        let cap_s = Time::<Virtual>::default().max_delta().as_secs_f64();
+        let mut clock = ViewClock::default();
+        let mut path = Replica::born(0, Vec3::ZERO, Vec3::Z * 800.0); // Fixture velocity.
+        let mut previous = 0.0;
+        let mut position = 0.0;
+        let mut previous_delta: Option<f64> = None;
+        let change_at = crate::ballistics::MAX_COSMETIC_CATCH_UP_TICKS * 2;
+        for tick in 1..change_at + 800 {
+            let s = f64::from(tick) * tick_s;
+            // Fixture: independently arriving completed samples, then an increased link bound.
+            let x = if tick > change_at { 0.100 } else { 0.040 };
+            clock.sample(Tick(tick), stamp(s), s + x + tick_s, s + x);
+            clock.expire(s + x + tick_s, timing.view_window_s);
+            let cut = clock.advance(s + x + tick_s, tick_s, tick_s, &timing, cap_s);
+            assert!(cut.is_none(), "a bounded delay change is paced, not cut");
+            if let Some(now) = clock.now() {
+                let at = number(now);
+                assert!(at >= previous, "presentation never rewinds");
+                let quantization = 2.0 / f64::from(u16::MAX); // DERIVED: both endpoint oversteps round.
+                assert!(
+                    at - previous <= (1.0 + timing.view_rate) + quantization || previous == 0.0
+                );
+                let (p, _, _) = path
+                    .sample(at, tick_s as f32, 0.0)
+                    .expect("a forward view cursor retains an old public path");
+                assert!(p.z >= position);
+                position = p.z;
+                previous = at;
+            }
+            if let (Some(before), Some(after)) = (previous_delta, clock.delta_s) {
+                assert!(
+                    (after - before).abs() <= timing.view_rate * tick_s + 1e-9,
+                    "delta slew cannot exceed its authored real-time budget"
+                );
+            }
+            previous_delta = clock.delta_s;
+        }
+    }
+
+    /// A link outage beyond continuity is a typed cut; a fresh stamp cannot reinterpret the
+    /// unknown epoch as a duration. Both clock-origin choices must produce the same cursor.
+    #[test]
+    fn a_link_outage_cuts_once_and_clock_origins_cancel() {
+        let timing = Timing::shipped();
+        let tick_s = super::super::server::TICK.as_secs_f64();
+        let admission_s = Time::<Virtual>::default().max_delta().as_secs_f64();
+        let mut cuts = Vec::new();
+        for offset in [-10_000.0, 20_000.0] {
+            // Fixture: either process may have the older epoch.
+            let mut clock = ViewClock::default();
+            for tick in 1..=4 {
+                let s = f64::from(tick) * tick_s;
+                clock.sample(Tick(tick), stamp(s), s + offset + 0.040, s + offset + 0.030);
+                clock.advance(s + offset + 0.040, tick_s, tick_s, &timing, admission_s);
+            }
+            let before = clock.now().unwrap();
+            // Fixture: no completed updates during an outage longer than both W and the cut gate.
+            let gap_s = timing.view_window_s + timing.view_cut_s.max(admission_s) * 4.0;
+            clock.expire(gap_s + offset, timing.view_window_s);
+            clock.advance(gap_s + offset, gap_s, tick_s, &timing, admission_s);
+            assert!(clock.held);
+            assert!(clock.now().unwrap() >= before);
+            assert_eq!(clock.now().unwrap(), TickInstant::from(Tick(4)));
+            for tick in 1000..1004 {
+                let s = f64::from(tick) * tick_s;
+                clock.sample(Tick(tick), stamp(s), s + offset + 0.040, s + offset + 0.030);
+            }
+            let s = 1003.0 * tick_s;
+            let cut = clock
+                .advance(s + offset + 0.040, tick_s, tick_s, &timing, admission_s)
+                .expect("a link backlog past the continuity budget emits a cut");
+            assert_eq!(cut.from, TickInstant::from(Tick(4)));
+            assert!(cut.to > cut.from);
+            cuts.push(cut.to);
+            assert!(
+                clock
+                    .advance(s + offset + 0.040, 0.0, tick_s, &timing, admission_s)
+                    .is_none(),
+                "an applied cut is not emitted twice"
+            );
+        }
+        assert_eq!(
+            cuts[0], cuts[1],
+            "the unknown clock offset cancels from the cursor"
+        );
+    }
+
+    /// A peer's individually finite stamps can still contradict the tick order. Refuse that
+    /// stream before division/interpolation; loss and reordering of a consistent stream are legal.
+    #[test]
+    fn out_of_order_receipts_are_valid_but_reversed_time_is_refused() {
+        let mut clock = ViewClock::default();
+        for tick in [1, 3, 2] {
+            clock.sample(Tick(tick), stamp(f64::from(tick)), 4.0, 3.0);
+        }
+        assert!(clock.refusal.is_none());
+        assert_eq!(clock.inverse(2.5), Some(instant(2.5)));
+        clock.sample(Tick(4), stamp(0.0), 5.0, 4.0);
+        assert!(matches!(
+            clock.refusal,
+            Some(StampOrderRefusal { tick: Tick(4) })
+        ));
+        assert_eq!(clock.newest(), Some(Tick(3)));
+    }
+    /// A replacement authority may start at an earlier tick. The shipped installer must clear
+    /// both the view epoch on disconnect and queued old receipts on connect, without an arming latch.
+    #[test]
+    fn connection_boundaries_clear_the_cursor_and_old_tick_receipts() {
+        use lightyear::prelude::{PeerId, RemoteId};
+        let mut app = App::new();
+        app.init_resource::<ReplicationStorage>();
+        install(&mut app);
+        app.world_mut()
+            .resource_mut::<ViewClock>()
+            .set_now(Tick(5000).into());
+        app.world_mut()
+            .resource_mut::<ReplicationStorage>()
+            .global
+            .get_or_default::<ReceivedStamps>()
+            .queue
+            .push_back((RepliconTick::new(1), stamp(1.0)));
+        let link = app
+            .world_mut()
+            .spawn((RemoteId(PeerId::Netcode(99)), Connected))
+            .id();
+        assert!(app.world().resource::<ViewClock>().now().is_none());
+        assert!(
+            app.world()
+                .resource::<ReplicationStorage>()
+                .global
+                .get::<ReceivedStamps>()
+                .unwrap()
+                .queue
+                .is_empty()
+        );
+        app.world_mut()
+            .resource_mut::<ViewClock>()
+            .set_now(Tick(5000).into());
+        app.world_mut().entity_mut(link).remove::<Connected>();
+        let clock = app.world().resource::<ViewClock>();
+        assert!(clock.now().is_none());
+        assert!(clock.stamps.is_empty() && clock.pending.is_empty() && clock.samples.is_empty());
+        assert_eq!(clock.received, 0);
+    }
+    /// The game's presentation needs the next frame-start keyframe before crossing its tick.
+    /// Subtracting departure from x without paying ordinary computation starves that reader by
+    /// exactly the compute duration, despite a perfectly steady link.
+    #[test]
+    fn frame_start_presentation_pays_usual_compute_but_not_an_isolated_work_stall() {
+        let timing = Timing::shipped();
+        let tick = super::super::server::TICK.as_secs_f64();
+        // Fixture: binary fractions make the missing compute term an exact counterexample.
+        let (work, down, frame) = (tick / 4.0, tick / 4.0, tick / 8.0);
+        let mut clock = ViewClock::default();
+        for k in 1..=8 {
+            let start = f64::from(k) * tick;
+            clock.sample(
+                Tick(k),
+                TickStamp::new(start, work as f32).unwrap(),
+                start + work + down,
+                start + work + down - frame,
+            );
+        }
+        let target = clock.target(&mut clock.intervals()).unwrap();
+        assert!((target - (tick + work + down - frame)).abs() < f64::EPSILON);
+        let last_missing_read = 8.0 * tick + tick + work + down - frame;
+        clock.advance(
+            last_missing_read,
+            frame,
+            tick,
+            &timing,
+            Time::<Virtual>::default().max_delta().as_secs_f64(),
+        );
+        assert!(
+            !clock.held,
+            "a steady link must cover the last read before the next keyframe completes"
+        );
+        // Fixture: one server computation lasts a second; departure still bounds the same link.
+        clock.sample(
+            Tick(9),
+            TickStamp::new(9.0 * tick, 1.0).unwrap(),
+            9.0 * tick + 1.0 + down,
+            9.0 * tick + 1.0 + down - frame,
+        );
+        assert!(
+            (clock.target(&mut clock.intervals()).unwrap() - target).abs() < f64::EPSILON,
+            "an isolated compute stall is not remembered as downlink lateness"
+        );
+    }
 }
+
+#[cfg(test)]
+mod udp;

@@ -1,5 +1,7 @@
 # Server-stream motion during missing snapshots
 
+Timing status: the stamp-driven view clock supersedes the interpolation sizing and resync controllers described here. Current implementation and proofs: [view clock slice 2](../../scratch/view-clock-slice-2.md). The historical measurements below are observations of the retired controller.
+
 Subject: the game's netcode and damage model, game state only.
 
 Hull presentation uses only the server stream. When the interpolation cursor passes its newest
