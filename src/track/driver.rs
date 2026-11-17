@@ -314,12 +314,6 @@ impl DriverSense {
         }
     }
 
-    /// The number of driven samples in a complete sensing window.
-    #[cfg(all(test, feature = "bitprobe"))]
-    pub(crate) fn window_ticks(&self) -> usize {
-        self.window
-    }
-
     /// One driving tick. `velocity` is the hull's velocity now (m/s, world), `heading` its unit
     /// forward axis, `belts` both belts' mean speed now (m/s, forward positive) and `mass` the
     /// hull's mass (kg). A contact's traction counts as push only along the
