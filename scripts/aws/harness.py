@@ -99,9 +99,12 @@ WINDOWS = 8
 # Resolution: after the last client's slot, so its tank's spawn and the joins sit outside every window.
 WARMUP_S = 30
 # Resolution: launch to listening or ready, ten times the ~30 s this boot takes on c7a (MEASURED by
-# this harness). A boot whose network never comes up (seen once: cloud-init's network stage with no
-# route) fails here instead of waiting out the cap.
+# this harness).
 BOOT_TIMEOUT_S = 300
+# Resolution: launch to the first SSH answer, six times the ~19 s it takes (MEASURED). Past it the
+# machine booted without a network: Ubuntu 26.04's cloud-init then retries the metadata token for
+# minutes (seen on 2 of the first 6 launches; canonical/cloud-init issue 6697 reports the same on 24.04).
+REACH_TIMEOUT_S = 120
 # Resolution: start to input slot, per client; a client exits at 20 s without one, so this only
 # bounds a client that is still starting.
 SLOT_TIMEOUT_S = 60
@@ -490,6 +493,9 @@ def wait_booted(machines: list[Machine]) -> None:
     while waiting:
         for machine in list(waiting):
             done = machine.run("state")
+            if done.returncode != 0 and machine.role not in last and time.time() > machine.launched_at + REACH_TIMEOUT_S:
+                raise Refused(f"{machine.role} machine never answered SSH {REACH_TIMEOUT_S} s after launch: most "
+                              "likely it booted without a network (see REACH_TIMEOUT_S); run again")
             if done.returncode != 0:  # sshd or the key is not up yet: the boot is still under way
                 continue
             state = boot_state(done.stdout)

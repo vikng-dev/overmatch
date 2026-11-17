@@ -144,6 +144,9 @@ instance = next(i for i in state["instances"] if i.get("PublicIpAddress") == hos
 role = {t["Key"]: t["Value"] for t in instance["Tags"]}["Role"]
 with open(os.environ["SSH_CALLS"], "a") as log:
     log.write(json.dumps({"role": role, "words": words}) + "\n")
+if os.environ.get("UNREACHABLE") == role:
+    sys.stderr.write("ssh: connect to host port 22: Operation timed out\n")
+    sys.exit(255)
 clients, window = int(os.environ["FIXTURE_CLIENTS"]), float(os.environ["FIXTURE_WINDOW_S"])
 cmd, args = words[0], words[1:]
 if cmd == "state":
@@ -339,13 +342,16 @@ class MeasuredRun(unittest.TestCase):
 
 class Failures(unittest.TestCase):
     def test_a_failed_boot_names_its_cause_and_still_tears_down(self):
-        fixture = Fixture(self.addCleanup, BOOT_FAIL="verify")
-        self.assertEqual(fixture.main("run", *SETTINGS), 1)
-        self.assertIn("checksum mismatch", fixture.stderr)
-        world = fixture.world()
-        self.assertEqual([i for i in world["instances"] if i["State"]["Name"] != "terminated"], [])
-        self.assertEqual((world["groups"], world["volumes"]), ([], []))
-        self.assertIn("security groups 0", fixture.stderr)
+        for env, cause in [({"BOOT_FAIL": "verify"}, "checksum mismatch"),
+                           ({"UNREACHABLE": "client"}, "never answered SSH")]:
+            with self.subTest(cause), mock.patch.object(harness, "REACH_TIMEOUT_S", 0):
+                fixture = Fixture(self.addCleanup, **env)
+                self.assertEqual(fixture.main("run", *SETTINGS), 1)
+                self.assertIn(cause, fixture.stderr)
+                world = fixture.world()
+                self.assertEqual([i for i in world["instances"] if i["State"]["Name"] != "terminated"], [])
+                self.assertEqual((world["groups"], world["volumes"]), ([], []))
+                self.assertIn("security groups 0", fixture.stderr)
 
     def test_refusals_come_before_anything_is_created(self):
         def setting(name, value):
