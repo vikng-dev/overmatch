@@ -1,105 +1,46 @@
-//! The game's damage-model presentation for the own tank: intent edges present on the local tick, legality reconciles
-//! forward.
+//! Own weapon-view cadence and authoritative fire reconstruction for the game's damage model.
 //!
-//! Under unpredicted drive the owner leaves the prediction set (`net::server`), so its `WeaponGate`
-//! is plain replicated state written into the live component on arrival, while `shooting::fire` and
-//! `shooting::tick_weapon_gate` keep mutating that same component locally. Three consequences, all
-//! from that one collision:
+//! [`OwnFirePresentation`] seeds the view gate from the owner's replicated `WeaponGate`, then
+//! restores what the local cadence left over each arriving snapshot. `shooting::fire` and
+//! `shooting::tick_weapon_gate` therefore use the parsed `FireCycle` on the authored-input clock.
+//! [`AuthoredIntent`] retains tick-keyed consumables before authority attestation can clear them;
+//! a skipped tick carries its click edge forward, never its held level.
 //!
-//! - the local trigger produces no flash until an arriving snapshot says ready — intent waiting on
-//!   a round trip;
-//! - a snapshot produced BEFORE the local fire carries the pre-fire gate and re-arms readiness, so
-//!   the cosmetic round rate becomes the tick rate;
-//! - `net::protocol`'s attestation runs client-side too, so a starved input buffer zeroes the
-//!   player's own trigger for a tick he is authoring.
+//! Replicated belt deltas and ready-to-armed edges confirm local consumptions. A component change
+//! tick inside the arrival bracket proves a replication write, even when the arriving value equals
+//! the view gate. Replicon's default mutable write deserializes through `&mut *component`
+//! (bevy_replicon 0.45.5, `shared/replication/registry/receive_fns.rs::default_write`).
+//! Unconfirmed local reloads may refresh from the last arrived gate; that changes only the view.
 //!
-//! # THE GATE IS A LEGALITY REPORT, NEVER PERMISSION TO DRAW
+//! Every released round requires its announced `ShotId` and original fire data. Belt counts do
+//! not identify a shot or its path and never author a trajectory. Own and remote announcements
+//! share `net::client`'s cursor release and the keyed seam here. A lost automatic announcement
+//! omits its cosmetic round under ADR-0021; later announcements remain eligible for reconstruction.
 //!
-//! [`OwnFirePresentation`] carries the gate the local cadence left last tick and restores it over
-//! every arriving snapshot. Presentation readiness is therefore local at every tick after the seed:
-//! an arriving deadline cannot delay a flash, and an arriving `ready` cannot produce one. The
-//! cadence is not re-derived here — `tick_weapon_gate` and `fire` run on the restored gate, so the
-//! presented interval IS the sim's own parsed `FireCycle` span, not a copy of it.
-//!
-//! What the snapshot is used for is the ledger: its `belt_remaining` deltas count the rounds the
-//! server actually fired, against the rounds this client presented. Divergence is one-directional
-//! by construction (`net::protocol`'s attestation and `damage::requirement_met` can only make the
-//! server fire FEWER rounds than the owner presented), and the correction is forward only — an
-//! absorbed count, never a retraction. The opposite direction is reported, never acted on.
-//!
-//! # INTENT COMES FROM WHAT THIS CLIENT AUTHORED, KEYED BY TICK
-//!
-//! [`AuthoredIntent`] is the client's own copy of the consumables it filed, recorded at the one
-//! place input provenance is created (`net::client::stamp_input_tick`) and keyed by the tick the
-//! command was authored FOR. The presentation reads that copy instead of the attested command, so
-//! `TankCommand::fail_consumables_closed` — an authority rule about values lightyear substituted —
-//! can no longer zero the owner's own flash. It is redundancy, not hold-last: a tick this client
-//! never authored yields no round, exactly as on the server.
-//!
-//! The one latch is the edge: a click authored for a tick the sim stepped over is presented by the
-//! next presentation tick, the shipped fix Valve names in `basecombatweapon_shared.cpp` ("hold onto
-//! the edge trigger" — an edge consumed by the wrong frame is gone forever). The LEVEL is never
-//! carried forward: only the entry authored for the current tick states the trigger is held now.
-//!
-//! # TWO SELF-HEALS: THE ANNOUNCEMENT IS LOSSY, THE STATE IS THE TRUTH
-//!
-//! Under fused own fire the round's ONE presentation is the server's echoed announcement — a
-//! droppable message — while the gate/belt state stream is the durable record. Two holes, one
-//! ledger:
-//!
-//! - **A lost announcement** (the belt-delta fallback): consumption the state PROVES
-//!   ([`fold_arrivals`]) with no announcement presenting within [`announce_wait_ticks`] is
-//!   presented from this client's own spec and muzzle ([`recover_unannounced_rounds`]); a late
-//!   echo for an already-recovered round is swallowed ([`OwnFirePresentation::try_swallow_owed`]).
-//! - **A refused round** (the heal): a local consumption the server state stays SILENT about
-//!   through [`refusal_wait_ticks`] was never fired there (a late/lost input the attestation
-//!   zeroed); the presented reload restores from the last state that actually arrived
-//!   ([`heal_refused_presentations`]) instead of running a reload for a round that never left.
-//!
-//! ARRIVALS ARE PROVEN BY THE COMPONENT'S CHANGE TICK, NEVER BY VALUE: the fused happy path arms
-//! both sides with identical arithmetic, so the arriving gate frequently EQUALS the presented one
-//! and a value diff is blind to it — while a refusal produces no server change, no send, and no
-//! write at all. Replication applies through an unconditional deref write (`bevy_replicon`
-//! `default_write`; equality-skip is opt-in and not used), so a change tick moved across the
-//! replication window is an arrival and unmoved is silence.
-//!
-//! # SCOPE
-//!
-//! Client-side, own tank, `Interpolated`.
-//!
-//! Design note: `.agents/scratch/burst-state-fire-stack-map-2026-08-14.md`; the loss-proofing
-//! holes: `.agents/scratch/adaptive-cursor-frontier-2026-08-15.md` §3.
+//! Scope: the controlled `Interpolated` root. Design and capture evidence:
+//! `.agents/docs/design/fire-presentation.md`.
 
 use core::time::Duration;
 use std::collections::VecDeque;
 
-use avian3d::prelude::{Collider, CollisionLayers};
 use bevy::ecs::change_detection::Tick as ChangeTick;
 use bevy::ecs::query::QuerySingleError;
 use bevy::prelude::*;
 use lightyear::core::tick::{Tick, TickDuration};
-use lightyear::interpolation::timeline::SyncedInterpolationTimeline;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{
-    Interpolated, LocalTimeline, LocalTimelineSync, NetworkTimeline, PingManager,
-};
+use lightyear::prelude::{Interpolated, LocalTimeline, LocalTimelineSync, PingManager};
 
 use super::protocol::{InputBridge, NetTank};
 use super::sync_margin::ArrivalDelay;
 use crate::ballistics::{FireShell, FireShellOrigin, MAX_COSMETIC_CATCH_UP_TICKS, ShotSource};
 use crate::command::TankCommand;
 use crate::state::GameplaySet;
-use crate::tank::{
-    Controlled, Muzzle, TankRoot, Weapon, WeaponGate, WeaponGateState, WeaponIndex, WeaponLoads,
-};
+use crate::tank::{Controlled, WeaponGate, WeaponGateState, WeaponLoads};
 
-/// Authored ticks retained before the oldest is dropped. A memory bound only: consumption is by
-/// exact tick, so an evicted entry is one no presentation tick can still reach.
+/// Resolution: cap tick-keyed authored history to bound memory.
 const AUTHORED_TICKS: usize = 128;
 
-/// Per-slot queue bound (reveals / pending consumptions / owed swallows). A memory bound only:
-/// the deepest lawful queue is the in-flight window (≤ [`refusal_wait_ticks`]) over the fastest
-/// cyclic period (6 ticks at 750 rpm) — a handful of entries at the 250 ms RTT ceiling.
+/// Resolution: cap pending reload-view history to bound memory, retaining its newest causes.
 const QUEUE_CAP: usize = 32;
 
 /// Install the own-fire presentation ledger. [`record_own_intent`] is mounted separately, by
@@ -108,7 +49,6 @@ pub(super) fn plugin(app: &mut App) {
     app.init_resource::<AuthoredIntent>();
     app.init_resource::<OwnFireDiag>();
     app.add_systems(Update, arm_own_fire_presentation);
-    app.add_observer(count_presented_round);
     // The change-tick arrival bracket: between the post-loop stamp and the next frame's pre-loop
     // fold, the only `WeaponGate` writers are the replication apply (`PreUpdate`) and the heal
     // (which restores an already-folded value), so a moved change tick at the fold IS an arrival.
@@ -119,10 +59,7 @@ pub(super) fn plugin(app: &mut App) {
             stamp_gate_write_mark.in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
         ),
     );
-    app.add_systems(
-        Update,
-        (recover_unannounced_rounds, heal_refused_presentations),
-    );
+    app.add_systems(Update, heal_refused_presentations);
     // Before every `GameplaySet` consumer, after the attested command the bridge writes: the
     // presentation overwrites the owner's consumables, and the gate the cadence left is restored
     // over whatever arrived since. Before the Battle's hold, so a held tank presents no round.
@@ -137,18 +74,6 @@ pub(super) fn plugin(app: &mut App) {
     app.add_systems(FixedUpdate, record_presentation_gate.after(GameplaySet));
 }
 
-/// One server consumption no presentation accounts for yet: stamped with the newest remote tick
-/// whose arrival revealed it — the base of the announcement wait — and the round it fired.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Reveal {
-    revealed_tick: u32,
-    remaining: u32,
-    /// The slot's `loaded` index as of the fold before the consumption arrived: the round the
-    /// consumption fired, whatever the slot has loaded since (the next-load rule,
-    /// [`crate::tank::WeaponLoad`]).
-    loaded: u8,
-}
-
 /// One weapon slot's presentation ledger.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct SlotLedger {
@@ -157,30 +82,15 @@ struct SlotLedger {
     /// The last state that provably ARRIVED (a replication write) — the base of the next
     /// consumption fold and the refusal heal's restore source. Never the presented copy.
     last_arrived: WeaponGateState,
-    /// Rounds presented locally since the ledger was seeded.
-    presented: u32,
-    /// Rounds the arriving state accounts for ([`Self::confirm`]).
-    confirmed: u32,
-    /// `belt_remaining` of the last arriving snapshot — the base of the next delta.
+    /// Belt count of the last arriving snapshot, the base of the next consumption delta.
     seen_belt: u32,
-    /// Σ`remaining` == `max(0, confirmed − presented)`, reconciled on every move
-    /// ([`Self::reconcile_reveals`]) — the announcements still owed a presentation.
-    reveals: VecDeque<Reveal>,
-    /// Local cadence consumptions awaiting server proof, by the fixed tick that consumed. FIFO;
-    /// order ambiguity against server consumption is bounded by the cyclic period.
+    /// Local cadence consumptions awaiting server counts, keyed by their fixed tick. FIFO settles
+    /// counts for the reload view; these entries never identify authority shots.
     pending_local: VecDeque<u32>,
-    /// Reveal ticks already presented by the fallback: a late echo with `fire_tick` at or before
-    /// one of these is the same round arriving twice and must not present again. `fire_tick`
-    /// after every entry is a future round and never matches, so a stale entry cannot swallow one.
-    owed_swallows: VecDeque<u32>,
-    /// The slot's replicated `loaded` index as of the arm, then as of the last fold. A
-    /// consumption's reveal takes this value before the fold refreshes it, so a load that
-    /// arrives beside the consumption cannot rename the round it fired.
-    arrived_loaded: u8,
 }
 
 impl SlotLedger {
-    /// Seed from the arriving gate. The ONE tick the server's copy decides anything.
+    /// Cadence and consumption accounting start from the same arrived state.
     fn seeded(arriving: WeaponGateState) -> Self {
         Self {
             presented_gate: arriving,
@@ -202,72 +112,19 @@ impl SlotLedger {
         let arm_edge =
             u32::from(self.last_arrived.ready_tick().is_none() && arriving.ready_tick().is_some());
         let fired = belt_fired.max(arm_edge);
-        self.confirmed = self.confirmed.saturating_add(fired);
         self.seen_belt = arriving.belt_remaining;
         self.last_arrived = arriving;
-        // Server consumption proves the oldest awaiting local rounds.
+        // Settle local reload-view counts oldest-first, without assigning shot identities.
         for _ in 0..fired {
             self.pending_local.pop_front();
         }
         fired
     }
-
-    /// Keep Σ`reveals.remaining` == `max(0, confirmed − presented)`. Growth stamps the tick whose
-    /// arrival revealed the excess; shrinkage (a presentation caught up) consumes oldest-first —
-    /// the same FIFO the fallback presents in.
-    fn reconcile_reveals(&mut self, revealed_tick: Option<u32>) {
-        let target = self.confirmed.saturating_sub(self.presented);
-        let mut queued: u32 = self.reveals.iter().map(|reveal| reveal.remaining).sum();
-        while queued > target {
-            let front = self
-                .reveals
-                .front_mut()
-                .expect("queued > 0 implies a front");
-            let cut = front.remaining.min(queued - target);
-            front.remaining -= cut;
-            queued -= cut;
-            if front.remaining == 0 {
-                self.reveals.pop_front();
-            }
-        }
-        if target > queued
-            && let Some(revealed_tick) = revealed_tick
-        {
-            self.reveals.push_back(Reveal {
-                revealed_tick,
-                remaining: target - queued,
-                loaded: self.arrived_loaded,
-            });
-            if self.reveals.len() > QUEUE_CAP {
-                self.reveals.pop_front();
-            }
-        }
-    }
-
-    /// Consume one owed swallow matching this echo, oldest-first (signed tick order).
-    fn swallow_owed(&mut self, fire_tick: u32) -> bool {
-        let Some(index) = self
-            .owed_swallows
-            .iter()
-            .position(|owed| Tick(fire_tick) - Tick(*owed) <= 0)
-        else {
-            return false;
-        };
-        self.owed_swallows.remove(index);
-        true
-    }
-
-    /// Rounds presented that no arriving snapshot accounts for. Includes the rounds still in flight
-    /// down the link, so it settles on a burst's phantom count only once the last snapshot lands.
-    #[cfg(test)]
-    fn absorbed(&self) -> u32 {
-        self.presented.saturating_sub(self.confirmed)
-    }
 }
 
 /// The owner's fire-presentation ledger: one entry per weapon slot, in `WeaponGate` order.
 #[derive(Component, Debug)]
-pub(super) struct OwnFirePresentation {
+struct OwnFirePresentation {
     slots: Vec<SlotLedger>,
     /// The gate component's change tick at the end of the last fixed-loop pass — the arrival
     /// bracket's reference point (module doc).
@@ -281,20 +138,11 @@ impl OwnFirePresentation {
             gate_write_mark: None,
         }
     }
-
-    /// Swallow a late own echo the fallback already presented for (`net::client`'s release path).
-    pub(super) fn try_swallow_owed(&mut self, weapon: usize, fire_tick: u32) -> bool {
-        self.slots
-            .get_mut(weapon)
-            .is_some_and(|slot| slot.swallow_owed(fire_tick))
-    }
 }
 
-/// Counts included in missing-announcement and refused-presentation diagnostics.
+/// Counts of local reload-view refreshes without server confirmation.
 #[derive(Resource, Default, Debug)]
-pub(super) struct OwnFireDiag {
-    /// Fallback bangs presented for state-proven consumptions with no announcement.
-    recovered: u64,
+struct OwnFireDiag {
     /// Presented reloads restored after the server stayed silent past the refusal deadline.
     healed: u64,
 }
@@ -311,23 +159,13 @@ pub(super) struct ReleasedShot {
     pub(super) tracer: bool,
     pub(super) mechanism: crate::spec::FireMechanism,
     pub(super) shooter: ShotSource,
-    pub(super) shot: Option<crate::ShotId>,
+    pub(super) shot: crate::ShotId,
 }
 
-/// THE SHOT-PRESENTATION SEAM: one complete released shot presents through this call — the
-/// `FireShell` it triggers carries the muzzle flash and report dressing (`vfx::muzzle`), the
-/// tracer/shell spawn (`ballistics`), and the ledger count ([`count_presented_round`]); the barrel
-/// kick queues beside it. Every cursor release path — the fused own echo, remote fire
-/// announcements, and the belt-delta fallback — funnels here.
-///
-/// CURSOR CLOCK (the per-channel clock map): a released shot's age is `cursor − released_tick`,
-/// fractional ticks on the same clock that released it — ≈ 0..1 at a crossing release, so the
-/// shell spawns at the muzzle and the flash clears `ballistics::STALE_FIRE_TICKS`. The local
-/// timeline's lead+delay must never age a cursor-released shot: it spawns the tracer a whole fuse
-/// downrange and stale-gates the flash.
-///
-/// `None` = the age exceeds [`MAX_COSMETIC_CATCH_UP_TICKS`] (the absurdity bar `ballistics`
-/// enforces on every `FireShell`): nothing presents and the caller's ledger stays untouched.
+/// The game's damage-model presentation: one announced round, muzzle dressing and recoil kick.
+/// Age is measured on the releasing cursor, not the leading local timeline, so a crossing release
+/// starts at the muzzle. `None` names a release beyond [`MAX_COSMETIC_CATCH_UP_TICKS`]; the caller
+/// records its omission.
 pub(super) fn present_released_shot(
     released_tick: Tick,
     (cursor_tick, overstep): (Tick, f64),
@@ -367,7 +205,7 @@ pub(super) fn present_shot_at_age(
             shot.mechanism,
             shot.tracer,
             Some(shot.shooter),
-            shot.shot,
+            Some(shot.shot),
         )
     });
     recoil.push(shot.shooter.tank, shot.shooter.weapon);
@@ -440,12 +278,8 @@ fn arm_own_fire_presentation(
         let slots = gate
             .weapons
             .iter()
-            .zip(&loads.weapons)
-            .map(|(arriving, load)| {
-                let mut entry = SlotLedger::seeded(*arriving);
-                entry.arrived_loaded = load.loaded;
-                entry
-            })
+            .copied()
+            .map(SlotLedger::seeded)
             .collect();
         commands
             .entity(entity)
@@ -467,18 +301,21 @@ fn stamp_gate_write_mark(mut roots: Query<(Ref<WeaponGate>, &mut OwnFirePresenta
 /// the signal [`heal_refused_presentations`] measures — never a fold.
 fn fold_arrivals(
     arrival: Option<Res<ArrivalDelay>>,
+    timeline: Res<LocalTimeline>,
+    mut trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut roots: Query<(
         Entity,
         Ref<WeaponGate>,
         Ref<WeaponLoads>,
         &mut OwnFirePresentation,
+        Option<&crate::CombatantId>,
     )>,
 ) {
     let revealed_tick = arrival
         .as_ref()
         .and_then(|estimator| estimator.newest_remote())
         .map(|tick| tick.0);
-    for (entity, gate, loads, mut ledger) in &mut roots {
+    for (entity, gate, loads, mut ledger, combatant) in &mut roots {
         if let Err(fault) = check_weapon_record(&gate, &loads, ledger.slots.len()) {
             if ledger.gate_write_mark != Some(gate.last_changed()) || loads.is_changed() {
                 warn!("net: {entity} refused malformed own-fire state: {fault}");
@@ -490,20 +327,28 @@ fn fold_arrivals(
             // An unset mark (fresh arm) folds against the seed: zero rounds, unless a replication
             // write landed between the arm and this fold, which confirms as any other.
             ledger.gate_write_mark = Some(gate.last_changed());
-            for (entry, &arriving) in ledger.slots.iter_mut().zip(&gate.weapons) {
+            for (weapon, (entry, &arriving)) in
+                ledger.slots.iter_mut().zip(&gate.weapons).enumerate()
+            {
                 if arriving == entry.last_arrived {
                     continue;
                 }
-                if entry.confirm(arriving) > 0 {
-                    entry.reconcile_reveals(revealed_tick);
+                let fired = entry.confirm(arriving);
+                if fired > 0 {
+                    crate::shot_trace::record_global(
+                        &mut trace,
+                        "belt_rx",
+                        timeline.tick().0,
+                        || {
+                            serde_json::json!({
+                                "c": combatant.map(|id| id.0), "w": weapon,
+                                "rt": revealed_tick, "fired": fired,
+                                "belt": arriving.belt_remaining,
+                            })
+                        },
+                    );
                 }
             }
-        }
-        // The load as of this frame's arrivals, refreshed AFTER the fold: a consumption and its
-        // slot's next load can arrive in one snapshot, and the reveal must name the round fired,
-        // not the one loaded behind it.
-        for (entry, load) in ledger.slots.iter_mut().zip(&loads.weapons) {
-            entry.arrived_loaded = load.loaded;
         }
     }
 }
@@ -572,176 +417,15 @@ fn record_presentation_gate(
     }
 }
 
-/// The announcement wait W1, in cursor ticks past a reveal: the burst-tail coverage `Q_p − Q_50`
-/// — the announcement may ride the tail while the revealing snapshot rode the bulk — plus one
-/// send interval. The seam presents exactly once whichever of the announcement and the fallback
-/// lands first, so the wait is a heal deadline, not a correctness gate.
-fn announce_wait_ticks(coverage: Duration, tick: Duration) -> u32 {
-    (coverage.as_secs_f64() / tick.as_secs_f64()).ceil() as u32 + 1
-}
-
-/// The refusal deadline W2, in remote ticks past a local consumption: one full RTT (the
-/// loss-repair round trip — the input rides redundant per-packet history, so one lost packet
-/// re-delivers within it) + the downlink spread `Q_p − min` (the confirming snapshot may itself
-/// ride the burst tail) + one send interval. Silence past this is refusal, not flight.
+/// Reload-view refresh window in remote ticks: one RTT for redundant inputs, plus downlink
+/// spread and a send interval. This sizes a view refresh, never proves announcement loss or refusal;
+/// a later authority consumption and its announcement are still accepted.
 fn refusal_wait_ticks(rtt: Duration, spread: Duration, tick: Duration) -> u32 {
     ((rtt.as_secs_f64() + spread.as_secs_f64()) / tick.as_secs_f64()).ceil() as u32 + 1
 }
 
-/// Hole 1, the belt-delta fallback: present a state-proven consumption whose announcement never
-/// crossed the cursor within [`announce_wait_ticks`], from this client's own spec and muzzle.
-///
-/// The bang is synthesized at the muzzle's render pose: the tick-truth pose doctrine
-/// (`shooting::rig_world_pose`) binds shells the server also computes, and this shell is a
-/// client-side repair of a round the server already fired. `shot: None` — the round's `ShotId`
-/// died with its announcement, so the shell flies uncorrected (no sanctioned bounces), which is
-/// the honest remainder. One round per slot per frame; the triggered observer settles the reveal
-/// at flush, so the next round presents next frame.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one recovery boundary owns the wait, the pose, and the counters"
-)]
-fn recover_unannounced_rounds(
-    tick: Res<TickDuration>,
-    arrival: Option<Res<ArrivalDelay>>,
-    // Skips the whole system until the cursor syncs: an unsynced cursor defines no wait.
-    cursor: SyncedInterpolationTimeline,
-    mut roots: Query<(Entity, &mut OwnFirePresentation)>,
-    muzzles: Query<(&Weapon, &WeaponIndex, &TankRoot, &GlobalTransform), With<Muzzle>>,
-    proxies: Query<(Entity, &Collider, &CollisionLayers, &GlobalTransform)>,
-    parents: Query<&ChildOf>,
-    mut recoil: ResMut<super::client::PendingRecoilKicks>,
-    mut diag: ResMut<OwnFireDiag>,
-    mut commands: Commands,
-) {
-    let Some(arrival) = arrival else {
-        return;
-    };
-    let wait = announce_wait_ticks(arrival.stats.coverage(), tick.0);
-    // CURSOR clock, both halves: the wait is measured in cursor ticks past the reveal, and the
-    // recovered round's age is the seam's `cursor − revealed_tick` — a fallback bang lands at the
-    // same lag its lost announcement would have presented at.
-    let cursor = (cursor.tick(), f64::from(cursor.overstep().to_f32()));
-    for (root, mut ledger) in &mut roots {
-        for (slot, entry) in ledger.slots.iter_mut().enumerate() {
-            let Some(&Reveal {
-                revealed_tick,
-                loaded,
-                ..
-            }) = entry.reveals.front()
-            else {
-                continue;
-            };
-            if (cursor.0 - Tick(revealed_tick)) < wait as i32 {
-                continue;
-            }
-            // The ledger arms on the replicated gate; the rig and its muzzles attach from the wire
-            // pose (`net::rig`), possibly frames later. Until then the reveal waits.
-            let Some((weapon, muzzle)) = muzzles.iter().find_map(|(weapon, index, tank, pose)| {
-                (index.0 == slot && tank.0 == root).then_some((weapon, pose))
-            }) else {
-                continue;
-            };
-            let direction = Dir3::new(muzzle.rotation() * Vec3::NEG_Z)
-                .expect("a muzzle's world pose is a finite unit rotation of its rig");
-            // The fired round's index died with its announcement; the reveal's `loaded` is the
-            // round the consumption fired, as the server's `WeaponLoads` named it. The handshake
-            // binds both peers to one construction, so an index past this weapon's list is a
-            // malformed peer fact: logged, and the cosmetic repair presents the default round
-            // rather than jam the slot.
-            let round = if usize::from(loaded) < weapon.rounds.len() {
-                loaded
-            } else {
-                warn!(
-                    "net: {root} weapon {slot} revealed loaded round {loaded}, past its {} \
-                     rounds; refused, presenting the default round",
-                    weapon.rounds.len()
-                );
-                0
-            };
-            let fired = weapon
-                .rounds
-                .get(usize::from(round))
-                .expect("the tank load gate refuses an empty stowage: every weapon has round 0");
-            // The game's damage model: the original shot pose died with its announcement.
-            // Recover from the current rig, but keep physical birth at the first open point of
-            // its source envelope, as firing does; a muzzle beyond a wall cannot skip that bore.
-            // Both envelope and muzzle read this same propagated presentation pose.
-            let shapes: Vec<_> = proxies
-                .iter()
-                .filter(|(entity, _, layers, _)| {
-                    layers.memberships.has_all(crate::Layer::Vehicle)
-                        && (*entity == root
-                            || parents
-                                .iter_ancestors(*entity)
-                                .any(|ancestor| ancestor == root))
-                })
-                .map(|(_, shape, _, pose)| (pose.translation(), pose.rotation(), shape))
-                .collect();
-            let birth = crate::shooting::outside_source(
-                muzzle.translation(),
-                direction,
-                -weapon.bore_length,
-                &shapes,
-            );
-            let facts = ReleasedShot {
-                birth,
-                origin: muzzle.translation(),
-                direction,
-                round: fired.round,
-                // The round's belt phase died with the announcement; a recovered round
-                // presents traced — the visible arm of the self-heal.
-                tracer: true,
-                mechanism: weapon.fire_cycle.mechanism(),
-                shooter: ShotSource {
-                    tank: root,
-                    weapon: slot,
-                    round,
-                },
-                // The round's ShotId died with its announcement, so the shell flies
-                // uncorrected (no sanctioned bounces) — the honest remainder.
-                shot: None,
-            };
-            if present_released_shot(
-                Tick(revealed_tick),
-                cursor,
-                facts,
-                &mut recoil,
-                &mut commands,
-            )
-            .is_none()
-            {
-                // Over-horizon reveal (a multi-second stall with a round in flight): present at
-                // the horizon rather than jamming the slot — a rejected front reveal would retry
-                // forever and block every round behind it. The flash observers stale-gate the
-                // bang; the ledger settles through the same observer as any presentation.
-                present_shot_at_age(
-                    MAX_COSMETIC_CATCH_UP_TICKS,
-                    facts,
-                    &mut recoil,
-                    &mut commands,
-                );
-            }
-            entry.owed_swallows.push_back(revealed_tick);
-            if entry.owed_swallows.len() > QUEUE_CAP {
-                entry.owed_swallows.pop_front();
-            }
-            diag.recovered += 1;
-            info!(
-                "net: {root} weapon {slot} round revealed by state at tick {revealed_tick} had \
-                 no announcement within {wait} cursor ticks — presenting from the belt delta \
-                 (recovered {})",
-                diag.recovered,
-            );
-        }
-    }
-}
-
-/// Hole 2, the refusal heal: a local consumption the server state stays silent about through
-/// [`refusal_wait_ticks`] was never fired there (the attestation zeroed a late/lost input). The
-/// presented reload restores from the last state that actually arrived — the belt round returns
-/// and readiness re-derives on the local cadence — instead of running a reload for a round that
-/// never left. Fused own fire presented nothing for it, and no echo will come.
+/// Refresh an unconfirmed local reload from the last arrived gate after the link-sized window.
+/// This presents no round and cannot suppress a later authority announcement or confirmation.
 fn heal_refused_presentations(
     tick: Res<TickDuration>,
     arrival: Option<Res<ArrivalDelay>>,
@@ -782,33 +466,11 @@ fn heal_refused_presentations(
             diag.healed += 1;
             warn!(
                 "net: {entity} weapon {slot} round consumed locally at tick {consumed_tick} was \
-                 never consumed by the server (state silent through tick {}, wait {wait}t) — \
-                 presented reload healed from the last arrived gate (healed {})",
+                 not confirmed by state through tick {} (wait {wait}t) — \
+                 reload view refreshed from the last arrived gate (healed {})",
                 newest_remote.0, diag.healed,
             );
         }
-    }
-}
-
-/// Count one presented round against its slot. Two filters: a sandbox free-fly shot has no
-/// shooter, and the query admits only the armed own root (a reconstructed opponent shot is
-/// somebody else's).
-///
-/// Under fused own fire the own round's one presentation IS the reconstructed echo, so the count
-/// admits `Local` and `Reconstructed` shots alike — the ledger query still restricts them to the
-/// armed own root.
-fn count_presented_round(fire: On<FireShell>, mut ledgers: Query<&mut OwnFirePresentation>) {
-    let Some(source) = fire.shooter else {
-        return;
-    };
-    let Ok(mut ledger) = ledgers.get_mut(source.tank) else {
-        return;
-    };
-    if let Some(entry) = ledger.slots.get_mut(source.weapon) {
-        entry.presented = entry.presented.saturating_add(1);
-        // A presentation catching up settles the oldest owed reveal — the announcement (or the
-        // fallback's own synthesized round) accounts for it.
-        entry.reconcile_reveals(None);
     }
 }
 
@@ -940,11 +602,10 @@ fn present_own_intent(
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
-    use lightyear::interpolation::timeline::InterpolationTimeline;
 
     use super::*;
 
-    /// The Tiger's coax cadence: 750 rpm over the 64 Hz fixed tick is `ceil(0.08 / 0.015625)`.
+    /// Fixture cadence and belt: 750 rpm on a 64 Hz clock gives `ceil(0.08 / 0.015625)` ticks.
     const PERIOD_TICKS: u32 = 6;
     const PERIOD: crate::sim_tick::TickSpan = crate::sim_tick::TickSpan::of(PERIOD_TICKS);
     const BELT: u32 = 150;
@@ -984,12 +645,11 @@ mod tests {
         (world, root)
     }
 
-    /// In the game's damage model, a malformed peer record cannot confirm a consumption or
-    /// rename its round. The next-load rule relies on retaining the last complete arrival.
+    /// The game's damage model: a malformed peer record cannot confirm a consumption.
+    /// The reload view relies on retaining the last complete arrival.
     #[test]
     fn a_missing_load_refuses_the_whole_arrival_without_inventing_round_zero() {
         let (mut world, root) = world_with_ledger(ready(BELT));
-        world.get_mut::<OwnFirePresentation>(root).unwrap().slots[0].arrived_loaded = 1; // Fixture round index.
         let before = world
             .get::<OwnFirePresentation>(root)
             .unwrap()
@@ -1084,18 +744,17 @@ mod tests {
         );
     }
 
-    /// A belt refill raises `belt_remaining`; it accounts for no rounds and never runs the counter
-    /// backward.
+    /// The reload view must not count a refill as a server consumption.
     #[test]
     fn a_belt_refill_accounts_for_no_rounds() {
         let mut ledger = SlotLedger::seeded(ready(3));
-        ledger.presented = 3;
-        ledger.confirm(ready(0));
-        assert_eq!(ledger.confirmed, 3);
-        ledger.confirm(ready(BELT));
-        assert_eq!(ledger.confirmed, 3, "the swap accounts for nothing");
-        ledger.confirm(ready(BELT - 2));
-        assert_eq!(ledger.confirmed, 5, "the next belt counts from its refill");
+        assert_eq!(ledger.confirm(ready(0)), 3);
+        assert_eq!(ledger.confirm(ready(BELT)), 0, "a refill is no consumption");
+        assert_eq!(
+            ledger.confirm(ready(BELT - 2)),
+            2,
+            "the next belt counts from its refill"
+        );
     }
 
     /// THE EDGE LATCH, and the property its mutation check breaks: a click authored for a tick the
@@ -1269,67 +928,6 @@ mod tests {
         );
     }
 
-    /// LEDGER COUNTING: on the armed own root a `Reconstructed` round (the fused echo — the own
-    /// round's one presentation) and a `Local` round (an unkeyed shot) both count.
-    #[test]
-    fn local_and_reconstructed_own_rounds_both_count() {
-        let fire = |origin| FireShell {
-            effects: crate::rounds::FlightEffects::fixture_traced(),
-            muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
-            birth: Vec3::ZERO,
-            origin: Vec3::ZERO,
-            direction: Dir3::NEG_Z,
-            speed: 755.0,
-            caliber: 0.0079,
-            mass: 0.0118,
-            drag_k: crate::ballistics::fixture_drag_k(0.0079, 0.0118),
-            nose_factor: 0.5,
-            penetrator_caliber: 0.0079,
-            penetrator_mass: 0.0118,
-            wound: 10.0,
-            burst: None,
-            fuze_mode: 0,
-            contact: crate::rounds::ContactPreset::fixture(),
-            mechanism: crate::spec::FireMechanism::Automatic,
-            shooter: None,
-            tracer: true,
-            shot_origin: origin,
-            catch_up_ticks: 0,
-            shot: None,
-        };
-        let presented = |origin| {
-            let mut app = App::new();
-            app.add_observer(count_presented_round);
-            let root = app
-                .world_mut()
-                .spawn(OwnFirePresentation::with_slots(vec![SlotLedger::default()]))
-                .id();
-            let mut event = fire(origin);
-            event.shooter = Some(crate::ballistics::ShotSource {
-                tank: root,
-                weapon: 0,
-                round: 0,
-            });
-            app.world_mut().trigger(event);
-            app.world()
-                .get::<OwnFirePresentation>(root)
-                .expect("armed ledger")
-                .slots[0]
-                .presented
-        };
-
-        assert_eq!(
-            presented(FireShellOrigin::Reconstructed),
-            1,
-            "the echo is the own round's one presentation and must count",
-        );
-        assert_eq!(
-            presented(FireShellOrigin::Local),
-            1,
-            "an unkeyed local round counts too",
-        );
-    }
-
     /// In the game's damage model, a partial disclosed load list has no valid seed for the
     /// own presentation. Refusing it prevents an invented round choice on the first consumption.
     #[test]
@@ -1409,95 +1007,16 @@ mod tests {
             .expect("armed ledger");
         assert_eq!(ledger.slots.len(), 2, "one entry per weapon slot");
         assert_eq!(ledger.slots[0].seen_belt, BELT - 7);
-        assert_eq!(ledger.slots[0].absorbed(), 0);
-        assert_eq!(
-            (
-                ledger.slots[0].arrived_loaded,
-                ledger.slots[1].arrived_loaded
-            ),
-            (1, 0),
-            "the load that arrived with the gate names a reveal before the first fold"
+        assert!(
+            ledger
+                .slots
+                .iter()
+                .all(|slot| slot.pending_local.is_empty())
         );
     }
 
-    /// THE REVEAL NAMES THE ROUND ITS CONSUMPTION FIRED. The ledger carries the replica's load as
-    /// of the fold BEFORE a consumption arrives, so a consumption and its slot's next load landing
-    /// in one snapshot reveal the round that was in the breech, not the one loaded behind it, and
-    /// the next consumption reveals that new load. Refreshing the load before the fold (or never
-    /// after the arm) reds the first assert; dropping the refresh reds the second.
-    #[test]
-    fn a_reveal_names_the_load_as_of_the_fold_before_its_consumption() {
-        let (mut world, root) = world_with_ledger(ready(BELT));
-        world.insert_resource(ArrivalDelay::test_with_newest_remote(Tick(700)));
-        world.entity_mut(root).insert(crate::tank::WeaponLoads {
-            weapons: vec![crate::tank::WeaponLoad {
-                loaded: 0,
-                selected: 1,
-                fuze_modes: Vec::new(),
-            }],
-        });
-        // The first fold reads the arrived load and confirms nothing.
-        world.run_system_once(fold_arrivals).expect("fold runs");
-        assert_eq!(
-            world
-                .get::<OwnFirePresentation>(root)
-                .expect("ledger")
-                .slots[0]
-                .confirmed,
-            0
-        );
-
-        // One snapshot carries a consumption (a belt draw) and the reload that put the selected
-        // round in the breech behind it.
-        {
-            let mut root_ref = world.entity_mut(root);
-            root_ref.get_mut::<WeaponGate>().expect("gate").weapons[0] = ready(BELT - 1);
-            root_ref
-                .get_mut::<crate::tank::WeaponLoads>()
-                .expect("loads")
-                .weapons[0]
-                .loaded = 1;
-        }
-        world.run_system_once(fold_arrivals).expect("fold runs");
-        {
-            let slot = &world
-                .get::<OwnFirePresentation>(root)
-                .expect("ledger")
-                .slots[0];
-            assert_eq!(slot.confirmed, 1);
-            assert_eq!(
-                slot.reveals
-                    .front()
-                    .expect("the consumption is revealed")
-                    .loaded,
-                0,
-                "the round fired is the one loaded before this fold, not the one loaded behind it",
-            );
-        }
-
-        // The next consumption fires the round that reload put in the breech.
-        world.get_mut::<WeaponGate>(root).expect("gate").weapons[0] = ready(BELT - 2);
-        world.run_system_once(fold_arrivals).expect("fold runs");
-        let slot = &world
-            .get::<OwnFirePresentation>(root)
-            .expect("ledger")
-            .slots[0];
-        assert_eq!(slot.confirmed, 2);
-        assert_eq!(
-            slot.reveals
-                .back()
-                .expect("the second consumption is revealed")
-                .loaded,
-            1,
-            "a later consumption names the load the previous fold arrived with",
-        );
-    }
-
-    /// CONSUMPTION IS `max(belt delta, arm edge)`, NEVER THEIR SUM. A `Single` draws no belt —
-    /// dropping the arm-edge term (the old belt-only law) reds the first assert, and every cannon
-    /// consumption becomes invisible to the fallback. Summing the signals reds the last assert —
-    /// every automatic round would double-confirm. `Some → Some` (cyclic) and `Some → None`
-    /// (retirement) are bookkeeping, not consumption; counting either reds the middle asserts.
+    /// The reload view confirms each consumption once: beltless weapons use the arm edge,
+    /// automatic weapons move both signals, and cyclic/retirement transitions consume nothing.
     #[test]
     fn consumption_is_the_belt_delta_or_the_arm_edge_never_their_sum() {
         let mut slot = SlotLedger::seeded(ready(BELT));
@@ -1518,39 +1037,6 @@ mod tests {
             1,
             "an Automatic's round moves both signals at once — max, not sum",
         );
-        assert_eq!(slot.confirmed, 2);
-    }
-
-    /// Σ`reveals.remaining` == `max(0, confirmed − presented)` through every move. Dropping the
-    /// settle on a presentation (the reconcile in `count_presented_round`) leaves a reveal queued
-    /// after its echo arrived and the fallback presents the round twice — the second half reds.
-    /// Dropping the stamp on growth loses the wait's base — the first half reds.
-    #[test]
-    fn reveals_carry_exactly_the_unpresented_confirmations() {
-        let queued = |slot: &SlotLedger| -> u32 { slot.reveals.iter().map(|r| r.remaining).sum() };
-        let mut slot = SlotLedger::seeded(ready(BELT));
-        // The load as of the fold before this consumption: the round the reveal names, whatever
-        // the slot loads afterwards.
-        slot.arrived_loaded = 1;
-        slot.confirm(ready(BELT - 2));
-        slot.reconcile_reveals(Some(700));
-        assert_eq!(queued(&slot), 2, "two confirmed, none presented");
-        let front = slot.reveals.front().expect("stamped");
-        assert_eq!((front.revealed_tick, front.loaded), (700, 1));
-        // An echo catches up: the oldest owed reveal settles.
-        slot.presented += 1;
-        slot.reconcile_reveals(None);
-        assert_eq!(queued(&slot), 1);
-        // Presentation overtakes (a recovered round presents before its confirm): queue empties
-        // and stays empty — the fallback owes nothing.
-        slot.presented += 2;
-        slot.reconcile_reveals(None);
-        assert!(slot.reveals.is_empty());
-        // Later excess stamps the tick of the arrival that revealed IT, not the old one.
-        slot.confirm(ready(BELT - 4));
-        slot.reconcile_reveals(Some(800));
-        assert_eq!(queued(&slot), 1);
-        assert_eq!(slot.reveals.front().expect("stamped").revealed_tick, 800);
     }
 
     /// THE CHANGE-TICK BRACKET, both directions. Silence (a local write, then no replication
@@ -1579,8 +1065,9 @@ mod tests {
         {
             let ledger = world.get::<OwnFirePresentation>(root).expect("ledger");
             assert_eq!(
-                ledger.slots[0].confirmed, 0,
-                "a local write is not an arrival — silence is the refusal signal",
+                ledger.slots[0].last_arrived,
+                ready(BELT),
+                "a local write is not an arrival",
             );
             assert_eq!(
                 ledger.slots[0].pending_local.len(),
@@ -1595,8 +1082,9 @@ mod tests {
         world.run_system_once(fold_arrivals).expect("fold runs");
         let ledger = world.get::<OwnFirePresentation>(root).expect("ledger");
         assert_eq!(
-            ledger.slots[0].confirmed, 1,
-            "an equal-value replication write IS an arrival — the arm edge confirms",
+            ledger.slots[0].last_arrived,
+            armed(FIRE_TICK, BELT),
+            "an equal-value replication write updates the arrival record",
         );
         assert!(
             ledger.slots[0].pending_local.is_empty(),
@@ -1604,36 +1092,19 @@ mod tests {
         );
     }
 
-    /// THE WAIT LAWS, from the measured link. W1 rides the burst-tail coverage (the announcement
-    /// may ride the tail while the revealing snapshot rode the bulk) + one interval; W2 rides a
-    /// full loss-repair RTT + the whole spread + one interval. Dropping any term reds a case.
+    /// Fixture RTT and spread size the reload-view window, including its one-send floor.
     #[test]
-    fn the_waits_derive_from_the_measured_link() {
+    fn the_reload_refresh_window_uses_the_measured_link() {
         const TICK: Duration = Duration::from_nanos(1_000_000_000 / 64);
-        assert_eq!(announce_wait_ticks(Duration::ZERO, TICK), 1, "the floor");
-        // The measured 60 ms burst tail: ceil(60/15.625) + 1.
-        assert_eq!(announce_wait_ticks(Duration::from_millis(60), TICK), 5);
         assert_eq!(refusal_wait_ticks(Duration::ZERO, Duration::ZERO, TICK), 1);
-        // rtt 100 ms over the burst link: ceil(160/15.625) + 1.
+        // Fixture: ceil((100 ms RTT + 60 ms spread) / 15.625 ms tick) + one send interval.
         assert_eq!(
             refusal_wait_ticks(Duration::from_millis(100), Duration::from_millis(60), TICK),
             12,
         );
     }
 
-    /// AN OWED SWALLOW MATCHES ONLY THE ROUND IT COVERED: `fire_tick` at or before the recorded
-    /// reveal, exactly once — a future round never matches, so a stale entry cannot eat a fresh
-    /// echo. Inverting the comparison or dropping the removal reds a half.
-    #[test]
-    fn a_late_echo_swallow_matches_once_and_never_a_future_round() {
-        let mut slot = SlotLedger::seeded(ready(BELT));
-        slot.owed_swallows.push_back(100);
-        assert!(!slot.swallow_owed(101), "a future round never matches");
-        assert!(slot.swallow_owed(99), "the covered round swallows");
-        assert!(!slot.swallow_owed(99), "exactly once");
-    }
-
-    /// What the recovery/heal worlds share: TickDuration, timelines, the estimator digest, and
+    /// Reload-view fixture: TickDuration, timelines, the estimator digest, and
     /// the armed ledger root.
     fn heal_world(newest_remote: u32) -> (World, Entity) {
         let (mut world, root) = world_with_ledger(ready(BELT));
@@ -1645,15 +1116,11 @@ mod tests {
         (world, root)
     }
 
-    /// HOLE 2, THE LATE-FIRE REFUSAL: the presented reload heals once the server state stays
-    /// silent past the deadline — the gate restores from the last ARRIVED state (ready, full
-    /// belt), the pending consumption retires, and the counter reports it. Dropping the deadline
-    /// check heals a round still in flight (reds the young half); dropping the restore leaves
-    /// the player running a reload for a round that never left (reds the gate assert). The heal
-    /// presents NOTHING — no `FireShell`, no recoil kick: routing it through the presentation
-    /// seam reds the empty captures.
+    /// The game's damage model: an unconfirmed local consumption refreshes only its reload view
+    /// after the link window. It cannot author a round or recoil, and an in-flight input inside
+    /// the window must retain its view state.
     #[test]
-    fn a_refused_round_heals_the_presented_reload_from_the_arrived_gate() {
+    fn an_unconfirmed_consumption_refreshes_only_the_reload_view() {
         const FIRE_TICK: u32 = 100;
         let (mut world, root) = heal_world(300);
         world.spawn(PingManager::default());
@@ -1712,202 +1179,11 @@ mod tests {
         assert_eq!(world.resource::<OwnFireDiag>().healed, 0);
     }
 
-    /// One presented `FireShell`'s identifying fields, captured off the observer channel: source,
-    /// catch-up, whether it is unkeyed, and the mass that names its round.
     #[derive(Resource, Default)]
-    struct CapturedShells(Vec<(Option<crate::ballistics::ShotSource>, u32, bool, f32)>);
+    struct CapturedShells(Vec<(Option<crate::ballistics::ShotSource>, u32)>);
 
     fn capture_shell(fire: On<FireShell>, mut captured: ResMut<CapturedShells>) {
-        captured.0.push((
-            fire.shooter,
-            fire.catch_up_ticks,
-            fire.shot.is_none(),
-            fire.mass,
-        ));
-    }
-
-    fn recovery_app(cursor_tick: u32) -> (App, Entity) {
-        use lightyear::core::time::TickInstant;
-        let mut app = App::new();
-        app.insert_resource(lightyear::core::tick::TickDuration(
-            core::time::Duration::from_nanos(1_000_000_000 / 64),
-        ));
-        let mut local = LocalTimeline::default();
-        local.apply_delta(110);
-        app.insert_resource(local);
-        app.insert_resource(ArrivalDelay::default());
-        app.init_resource::<OwnFireDiag>();
-        app.init_resource::<super::super::client::PendingRecoilKicks>();
-        app.init_resource::<CapturedShells>();
-        app.add_observer(capture_shell);
-        app.add_observer(count_presented_round);
-        let mut timeline = InterpolationTimeline::default();
-        timeline.set_now(TickInstant::from(Tick(cursor_tick)));
-        lightyear::prelude::TimelineSync::set_synced(&mut timeline, true);
-        app.insert_resource(timeline);
-        // The armed root: one state-proven consumption revealed at tick 100, never announced,
-        // which fired the slot's second round. The root carries no `WeaponLoads` and the slot's
-        // present load is unknowable here: only the reveal names the round.
-        let mut slot = SlotLedger::seeded(ready(BELT));
-        slot.confirmed = 1;
-        slot.reveals.push_back(Reveal {
-            revealed_tick: 100,
-            remaining: 1,
-            loaded: 1,
-        });
-        let root = app
-            .world_mut()
-            .spawn(OwnFirePresentation::with_slots(vec![slot]))
-            .id();
-        app.world_mut().spawn((
-            Muzzle,
-            WeaponIndex(0),
-            TankRoot(root),
-            GlobalTransform::from(Transform::from_xyz(1.0, 2.0, 3.0)),
-            Weapon {
-                bore_length: 0.4,
-                name: "test gun".into(),
-                rounds: ["88mm_AP", "88mm_APCR"]
-                    .map(|key| crate::tank::WeaponRound::resolve(key).expect("a shipped round"))
-                    .to_vec(),
-                fire_cycle: crate::spec::FireCycle::Single {
-                    reload: crate::sim_tick::TickSpan::from_secs(6.0).expect("fixture reload"),
-                },
-                recoil: None,
-                barrel: None,
-                fire: vec![],
-                load: vec![],
-                trigger: crate::spec::Trigger::Primary,
-                report_clips: vec![],
-            },
-        ));
-        (app, root)
-    }
-
-    /// The game's damage model: a recovered shot must start at the source envelope's first open
-    /// point so a wall along the remaining bore is still met. Fixture boxes, bore and pose are
-    /// arbitrary; another root's larger proxy must not move this source's birth.
-    #[test]
-    fn recovered_shot_birth_is_the_first_open_point_of_its_source_envelope() {
-        #[derive(Resource, Default)]
-        struct Births(Vec<(Vec3, Vec3)>);
-        let (mut app, root) = recovery_app(105);
-        app.init_resource::<Births>().add_observer(
-            |fire: On<FireShell>, mut births: ResMut<Births>| {
-                births.0.push((fire.birth, fire.origin))
-            },
-        );
-        let world = app.world_mut();
-        let muzzle = world
-            .query_filtered::<Entity, With<Muzzle>>()
-            .single(world)
-            .unwrap();
-        world.get_mut::<Weapon>(muzzle).unwrap().bore_length = 2.0;
-        // Fixture envelope: the bore starts at z=5, leaves its source at z=4, and the muzzle
-        // stands at z=3. The physical birth must precede the visual muzzle along -Z.
-        world.spawn((
-            ChildOf(root),
-            Collider::cuboid(2.0, 2.0, 1.0),
-            CollisionLayers::new([crate::Layer::Vehicle], avian3d::prelude::LayerMask::ALL),
-            GlobalTransform::from(Transform::from_xyz(1.0, 2.0, 4.5)),
-        ));
-        let other = world.spawn_empty().id();
-        world.spawn((
-            ChildOf(other),
-            Collider::cuboid(20.0, 20.0, 20.0),
-            CollisionLayers::new([crate::Layer::Vehicle], avian3d::prelude::LayerMask::ALL),
-            GlobalTransform::from(Transform::from_xyz(1.0, 2.0, 4.5)),
-        ));
-        world.run_system_once(recover_unannounced_rounds).unwrap();
-        let births = &world.resource::<Births>().0;
-        assert_eq!(births.len(), 1);
-        let (birth, origin) = births[0];
-        assert_eq!(
-            origin,
-            Vec3::new(1.0, 2.0, 3.0),
-            "the visual muzzle stays at the barrel tip"
-        );
-        let expected = Vec3::new(1.0, 2.0, 4.0) - Vec3::Z * crate::ballistics::MARCH_EPS;
-        assert!(
-            birth.distance(expected) < 1.0e-5,
-            "physical birth {birth:?}, expected {expected:?}"
-        );
-    }
-
-    /// HOLE 1, THE DROPPED ANNOUNCEMENT: once the cursor passes the reveal by the derived wait,
-    /// the bang presents from the belt delta — this client's own spec at its own muzzle, keyed to
-    /// the armed root so the ledger settles (presented +1, the reveal retires) and the recoil
-    /// kick queues. Dropping the wait check presents rounds whose announcements are still in
-    /// flight (reds the young half); dropping the trigger, the settle, or the kick reds its own
-    /// assert.
-    #[test]
-    fn a_dropped_announcement_presents_from_the_belt_delta_within_the_wait() {
-        // Cursor 5 ticks past the reveal — beyond the cold-estimator wait of 1.
-        let (mut app, root) = recovery_app(105);
-        app.world_mut()
-            .run_system_once(recover_unannounced_rounds)
-            .expect("recovery runs");
-        {
-            let world = app.world();
-            let captured = world.resource::<CapturedShells>();
-            let &[(shooter, catch_up, unkeyed, mass)] = captured.0.as_slice() else {
-                panic!(
-                    "exactly one recovered bang presents, got {}",
-                    captured.0.len()
-                );
-            };
-            let source = shooter.expect("the bang is keyed to the armed root");
-            assert_eq!((source.tank, source.weapon), (root, 0));
-            let [default_mass, fired_mass] = ["88mm_AP", "88mm_APCR"].map(|key| {
-                crate::tank::WeaponRound::resolve(key)
-                    .expect("a shipped round")
-                    .round
-                    .body
-                    .mass
-            });
-            assert_ne!(
-                default_mass, fired_mass,
-                "the fixture's two rounds must differ"
-            );
-            assert_eq!(
-                mass, fired_mass,
-                "the bang presents the round the reveal names, not the slot's default",
-            );
-            assert_eq!(
-                catch_up, 5,
-                "catch-up spans reveal (100) to the CURSOR (105) — the cursor clock, never the \
-                 local present (110, which a wrong-clock mutant would read as 10)",
-            );
-            assert!(unkeyed, "the round's ShotId died with its announcement");
-            let ledger = world.get::<OwnFirePresentation>(root).expect("ledger");
-            assert_eq!(
-                ledger.slots[0].presented, 1,
-                "the observer counted the bang"
-            );
-            assert!(ledger.slots[0].reveals.is_empty(), "the reveal settled");
-            assert_eq!(
-                ledger.slots[0].owed_swallows.front(),
-                Some(&100),
-                "a late echo for this round is now owed a swallow",
-            );
-            assert_eq!(
-                world
-                    .resource::<super::super::client::PendingRecoilKicks>()
-                    .queued(),
-                &[(root, 0)],
-                "the fallback recoils through the same seam as an echoed round",
-            );
-        }
-
-        // Inside the wait the announcement may still cross the cursor: nothing presents.
-        let (mut app, _) = recovery_app(100);
-        app.world_mut()
-            .run_system_once(recover_unannounced_rounds)
-            .expect("recovery runs");
-        assert!(
-            app.world().resource::<CapturedShells>().0.is_empty(),
-            "no bang inside the announcement wait",
-        );
+        captured.0.push((fire.shooter, fire.catch_up_ticks));
     }
 
     /// A shot released at the cursor presents exactly once — one `FireShell`, one recoil
@@ -1947,7 +1223,11 @@ mod tests {
                 weapon: 0,
                 round: 0,
             },
-            shot: None,
+            shot: crate::ShotId {
+                combatant: crate::CombatantId(7),
+                weapon: 0,
+                fire_tick: 100,
+            },
         };
         let catch_up = app
             .world_mut()
@@ -1977,7 +1257,7 @@ mod tests {
         );
         let world = app.world();
         let captured = world.resource::<CapturedShells>();
-        let &[(source, presented_catch_up, _, _)] = captured.0.as_slice() else {
+        let &[(source, presented_catch_up)] = captured.0.as_slice() else {
             panic!("exactly one bang presents, got {}", captured.0.len());
         };
         let source = source.expect("the bang carries its shooter");

@@ -1450,8 +1450,6 @@ fn log_local_tank_role(
 pub(super) struct PendingRecoilKicks(Vec<(Entity, usize)>);
 
 impl PendingRecoilKicks {
-    /// Enqueue one kick cause. `net::fire_presentation`'s recovered rounds share this seam so a
-    /// fallback bang recoils exactly like an echoed one.
     pub(super) fn push(&mut self, shooter: Entity, weapon: usize) {
         self.0.push((shooter, weapon));
     }
@@ -1726,12 +1724,7 @@ pub(super) fn receive_fire_events(
     // so its events present at arrival.
     cursor: Option<Res<InterpolationTimeline>>,
     ledgers: FireLedgers,
-    // Own ledgers swallow already-recovered echoes.
-    // Tuple grouping keeps the system within clippy's argument limit.
-    (mut shot_trace, mut own_ledgers): (
-        Option<ResMut<crate::shot_trace::ShotTrace>>,
-        Query<&mut super::fire_presentation::OwnFirePresentation>,
-    ),
+    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut commands: Commands,
 ) {
     let FireInbox {
@@ -1786,7 +1779,6 @@ pub(super) fn receive_fire_events(
         &mut pending,
         &mut held,
         &mut pending_fires,
-        &mut own_ledgers,
         &mut shot_trace,
         &mut commands,
     );
@@ -1796,7 +1788,6 @@ pub(super) fn receive_fire_events(
         &shooters,
         &mut pending,
         &mut pending_fires,
-        &mut own_ledgers,
         &mut shot_trace,
         &mut commands,
     );
@@ -1999,7 +1990,6 @@ fn release_due_fire_events(
     pending_recoil: &mut PendingRecoilKicks,
     held: &mut HeldFireEvents,
     pending_fires: &mut PendingFireEvents,
-    own_ledgers: &mut Query<&mut super::fire_presentation::OwnFirePresentation>,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
 ) {
@@ -2016,7 +2006,6 @@ fn release_due_fire_events(
                 now,
                 cursor,
                 pending_recoil,
-                own_ledgers,
                 shot_trace,
                 commands,
             ),
@@ -2036,17 +2025,12 @@ fn release_due_fire_events(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one repair boundary owns expiry and shooter re-resolution"
-)]
 fn resolve_pending_fire_events(
     now: Tick,
     cursor: Option<(Tick, f64)>,
     shooters: &FireShooters,
     pending_recoil: &mut PendingRecoilKicks,
     pending_fires: &mut PendingFireEvents,
-    own_ledgers: &mut Query<&mut super::fire_presentation::OwnFirePresentation>,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
 ) {
@@ -2074,7 +2058,6 @@ fn resolve_pending_fire_events(
                 now,
                 cursor,
                 pending_recoil,
-                own_ledgers,
                 shot_trace,
                 commands,
             ),
@@ -2090,7 +2073,7 @@ fn pending_fire_expired(received_tick: Tick, now: Tick) -> bool {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "one presentation boundary owns the owed swallow and the release record"
+    reason = "one presentation boundary owns reconstruction and its release record"
 )]
 fn spawn_reconstructed_fire(
     fire: &ReceivedFire,
@@ -2099,26 +2082,10 @@ fn spawn_reconstructed_fire(
     now: Tick,
     cursor: Option<(Tick, f64)>,
     pending_recoil: &mut PendingRecoilKicks,
-    own_ledgers: &mut Query<&mut super::fire_presentation::OwnFirePresentation>,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
 ) {
     let event = &fire.event;
-    // An own echo arriving so late the belt-delta fallback already presented its round: one
-    // consumption, one bang — swallow the duplicate (matched by weapon slot and signed fire-tick
-    // order against the recorded reveal, so a future round can never match).
-    if let Ok(mut ledger) = own_ledgers.get_mut(shooter)
-        && ledger.try_swallow_owed(event.weapon as usize, event.fire_tick.0)
-    {
-        crate::shot_trace::record(
-            shot_trace,
-            "drop",
-            now.0,
-            event.shot_id(),
-            || json!({ "s": "fire", "res": "owed_swallow" }),
-        );
-        return;
-    }
     let facts = super::fire_presentation::ReleasedShot {
         birth: event.birth,
         origin: event.origin,
@@ -2131,7 +2098,7 @@ fn spawn_reconstructed_fire(
             weapon: event.weapon as usize,
             round: event.round,
         },
-        shot: Some(event.shot_id()),
+        shot: event.shot_id(),
     };
     let catch_up_ticks = match cursor {
         // CURSOR clock: the seam measures the shot's age on the same clock that released it.
@@ -2153,6 +2120,13 @@ fn spawn_reconstructed_fire(
         }),
     };
     let Some(catch_up_ticks) = catch_up_ticks else {
+        crate::shot_trace::record(
+            shot_trace,
+            "drop",
+            now.0,
+            event.shot_id(),
+            || json!({ "s": "fire", "res": "stale_release" }),
+        );
         return;
     };
     crate::shot_trace::record(
@@ -2254,7 +2228,7 @@ fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
 ///
 /// `FixedUpdate`, before `GameplaySet`, with `apply_recoil`'s Playing gate: kicks spring in the
 /// same tick. Render-rate TankSim writes would vary across 0/1/2-tick frames.
-/// Queued causes already resolved an assembled rig (or a recovered own shot); missing muzzle/root
+/// Queued causes already resolved an assembled rig; missing muzzle/root
 /// means despawn between enqueue and tick (knocked out/removed or link ended), so skip.
 /// `kick_recoil` owns legitimate recoil-less weapons such as a coax.
 fn apply_pending_recoil_kicks(
@@ -3375,9 +3349,6 @@ mod tests {
                       mut seen: ResMut<SeenShots>,
                       mut held: ResMut<HeldFireEvents>,
                       mut pending: ResMut<PendingFireEvents>,
-                      mut own_ledgers: Query<
-                    &mut crate::net::fire_presentation::OwnFirePresentation,
-                >,
                       mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     consume_fire_event(&event, now, cursor, &mut seen, &mut held, &mut trace);
@@ -3388,7 +3359,6 @@ mod tests {
                         &mut recoil,
                         &mut held,
                         &mut pending,
-                        &mut own_ledgers,
                         &mut trace,
                         &mut commands,
                     );
@@ -3405,9 +3375,6 @@ mod tests {
                       mut recoil: ResMut<PendingRecoilKicks>,
                       mut held: ResMut<HeldFireEvents>,
                       mut pending: ResMut<PendingFireEvents>,
-                      mut own_ledgers: Query<
-                    &mut crate::net::fire_presentation::OwnFirePresentation,
-                >,
                       mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     release_due_fire_events(
@@ -3417,7 +3384,6 @@ mod tests {
                         &mut recoil,
                         &mut held,
                         &mut pending,
-                        &mut own_ledgers,
                         &mut trace,
                         &mut commands,
                     );
@@ -3437,6 +3403,167 @@ mod tests {
         app
     }
 
+    /// The game's damage-model presentation: the owning client must consume every received
+    /// server path, whether its announcement precedes or follows the replicated belt change.
+    /// The shipped own-fire plugin runs before the receive/release seam here: even an already
+    /// received fire can still be held for the cursor when the belt arrives.
+    #[test]
+    fn belt_arrival_cannot_discard_an_announced_round_or_its_path() {
+        use super::super::sync_margin::ArrivalDelay;
+        use crate::ballistics::{PathClock, PenetrationMarks, Projectile, Shot};
+        use crate::tank::{WeaponGate, WeaponGateState, WeaponLoad, WeaponLoads};
+        use lightyear::core::time::TickInstant;
+
+        // Fixture clocks and counts: one consumption at server tick 100, observed at local 116.
+        for announcement_first in [false, true] {
+            for path_first in [false, true] {
+                let mut app = fire_receive_app();
+                app.add_plugins((
+                    MinimalPlugins,
+                    super::super::fire_presentation::plugin,
+                    crate::ballistics::sim_plugin,
+                ));
+                app.insert_resource(crate::ClientReplica)
+                    .init_resource::<SanctionedShots>()
+                    .insert_resource(lightyear::core::tick::TickDuration(
+                        crate::net::test_harness::TICK,
+                    ))
+                    .insert_resource(Time::<Fixed>::from_duration(crate::net::test_harness::TICK))
+                    .insert_resource(ArrivalDelay::test_with_newest_remote(Tick(100)));
+                let mut local = LocalTimeline::default();
+                local.apply_delta(116);
+                app.insert_resource(local);
+                app.insert_resource(crate::ShotClock(crate::sim_tick::SimTick::new(116)));
+                let mut cursor = InterpolationTimeline::default();
+                cursor.set_now(TickInstant::from(Tick(90)));
+                lightyear::prelude::TimelineSync::set_synced(&mut cursor, true);
+                app.insert_resource(cursor);
+                let world = app.world_mut();
+                let root = spawn_shooter(world, 7);
+                world.entity_mut(root).insert((
+                    GameControlled,
+                    Interpolated,
+                    WeaponGate {
+                        weapons: vec![
+                            WeaponGateState {
+                                timing: crate::tank::WeaponTiming::Ready,
+                                belt_remaining: 17,
+                            };
+                            2
+                        ],
+                    },
+                    WeaponLoads {
+                        weapons: vec![
+                            WeaponLoad {
+                                loaded: 0,
+                                selected: 0,
+                                fuze_modes: Vec::new(),
+                            };
+                            2
+                        ],
+                    },
+                ));
+                let muzzles: Vec<_> = world
+                    .query_filtered::<Entity, With<Muzzle>>()
+                    .iter(world)
+                    .collect();
+                for muzzle in muzzles {
+                    world.entity_mut(muzzle).insert(GlobalTransform::IDENTITY);
+                }
+                // Arm from a complete snapshot and close the initial arrival bracket.
+                world.run_schedule(Update);
+                world.run_schedule(RunFixedMainLoop);
+                let event = fire_event(root, 7, 100);
+                let shot = event.shot_id();
+                let round = world
+                    .query::<(&Weapon, &WeaponIndex, &TankRoot)>()
+                    .iter(world)
+                    .find(|(_, index, tank)| index.0 == 0 && tank.0 == root)
+                    .unwrap()
+                    .0
+                    .rounds[0]
+                    .round;
+                let mut path = crate::ballistics::path_fixture(shot, 102);
+                path.body = round.penetrator;
+                path.drag_k = round.drag_k;
+                // Fixture sanctioned bounce leaves the original bore, making playback observable.
+                path.resume = Vec3::X * 20.0;
+                path.impact = Some(crate::ballistics::path::PathImpact::Bounce {
+                    at: path.resume,
+                    normal: Vec3::Z,
+                    direction: Vec3::X,
+                    ordinal: 0,
+                    feedback: crate::substances::SurfaceFeedback::fixture(),
+                });
+                let mut trace = None;
+                if path_first {
+                    consume_flight_outcome(
+                        path.clone(),
+                        Tick(116),
+                        &mut world.resource_mut::<SanctionedShots>(),
+                        &mut trace,
+                    );
+                }
+                if announcement_first {
+                    consume_and_release(world, event.clone(), Tick(116), Some((Tick(90), 0.0)));
+                }
+                world.get_mut::<WeaponGate>(root).unwrap().weapons[0].belt_remaining -= 1;
+                world.run_schedule(RunFixedMainLoop);
+                world
+                    .resource_mut::<InterpolationTimeline>()
+                    .set_now(TickInstant::from(Tick(105)));
+                world.run_schedule(Update);
+                if announcement_first {
+                    release_at(world, Tick(116), Some((Tick(105), 0.0)));
+                } else {
+                    assert_eq!(
+                        world
+                            .query_filtered::<Entity, With<Projectile>>()
+                            .iter(world)
+                            .count(),
+                        0,
+                        "a belt count cannot author an unidentified trajectory"
+                    );
+                    consume_and_release(world, event.clone(), Tick(116), Some((Tick(105), 0.0)));
+                }
+                // Bounded redundant copies must remain deduplicated after the belt observation.
+                consume_and_release(world, event, Tick(116), Some((Tick(105), 0.0)));
+                if !path_first {
+                    consume_flight_outcome(
+                        path,
+                        Tick(116),
+                        &mut world.resource_mut::<SanctionedShots>(),
+                        &mut trace,
+                    );
+                }
+                *world.resource_mut::<PathClock>() = PathClock {
+                    tick: 105,
+                    fraction: 0.0,
+                };
+                world.run_schedule(PostUpdate);
+                let shells: Vec<_> = world.query_filtered::<(Option<&Shot>, &Transform, &PenetrationMarks),
+                    With<Projectile>>().iter(world).collect();
+                assert_eq!(shells.len(), 1, "one announced round, one presentation");
+                let (identity, pose, marks) = shells[0];
+                assert_eq!(
+                    identity.map(|identity| identity.0),
+                    Some(shot),
+                    "the owning client must retain the announcement's path identity"
+                );
+                assert!(
+                    pose.translation.x >= 20.0,
+                    "the server path replaces the original bore"
+                );
+                assert_eq!(marks.ricochets.len(), 1, "the sanctioned bounce plays once");
+                assert_eq!(
+                    world.resource::<PendingRecoilKicks>().queued(),
+                    &[(root, 0)],
+                    "one authority round gives one recoil presentation"
+                );
+            }
+        }
+    }
+
     #[test]
     fn pending_fire_duplicate_is_suppressed_by_shot_id() {
         let mut app = fire_receive_app();
@@ -3452,9 +3579,6 @@ mod tests {
                 |shooters: FireShooters,
                  mut recoil: ResMut<PendingRecoilKicks>,
                  mut pending: ResMut<PendingFireEvents>,
-                 mut own_ledgers: Query<
-                    &mut crate::net::fire_presentation::OwnFirePresentation,
-                >,
                  mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     resolve_pending_fire_events(
@@ -3463,7 +3587,6 @@ mod tests {
                         &shooters,
                         &mut recoil,
                         &mut pending,
-                        &mut own_ledgers,
                         &mut trace,
                         &mut commands,
                     );
@@ -3743,9 +3866,6 @@ mod tests {
                 |shooters: FireShooters,
                  mut recoil: ResMut<PendingRecoilKicks>,
                  mut pending: ResMut<PendingFireEvents>,
-                 mut own_ledgers: Query<
-                    &mut crate::net::fire_presentation::OwnFirePresentation,
-                >,
                  mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     resolve_pending_fire_events(
@@ -3754,7 +3874,6 @@ mod tests {
                         &shooters,
                         &mut recoil,
                         &mut pending,
-                        &mut own_ledgers,
                         &mut trace,
                         &mut commands,
                     );
@@ -3848,9 +3967,6 @@ mod tests {
                       mut held: ResMut<HeldFireEvents>,
                       mut pending: ResMut<PendingFireEvents>,
                       mut sanctioned: ResMut<SanctionedShots>,
-                      mut own_ledgers: Query<
-                    &mut crate::net::fire_presentation::OwnFirePresentation,
-                >,
                       mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     consume_fire_visual_fact(
@@ -3887,7 +4003,6 @@ mod tests {
                         &mut recoil,
                         &mut held,
                         &mut pending,
-                        &mut own_ledgers,
                         &mut trace,
                         &mut commands,
                     );
