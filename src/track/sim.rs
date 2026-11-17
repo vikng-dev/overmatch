@@ -3156,7 +3156,10 @@ mod tests {
                     point.1 = torque;
                 }
             }
-            spec.mass *= pressure / baseline_pressure;
+            // Fixture: vary density at fixed geometry, preserving hull/assembly mass shares.
+            let mass_scale = pressure / baseline_pressure;
+            spec.mass *= mass_scale;
+            spec.turret.mass.0 *= mass_scale;
             let mass = spec.mass;
             let app = construct(spec);
             let gear = app.world().resource::<TrackGear>();

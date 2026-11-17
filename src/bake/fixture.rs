@@ -152,9 +152,8 @@ pub(super) fn write(id: &str, nodes: &[Node], spec: &str) -> Asset {
     Asset { directory, glb }
 }
 
-/// The spec sheet of a vehicle whose only declared structure is what a test needs: the domain
-/// values are the smallest ones `TankSpec::validate` accepts, so nothing here is a vehicle datum
-/// anybody could mistake for balance. `volumes` are component nodes, `armour` main-armour nodes:
+/// The spec sheet of a vehicle whose only declared structure is what a test needs; its numbers
+/// are fixture data. `volumes` are component nodes, `armour` main-armour nodes:
 /// both are keys of the sheet's one `volumes` map.
 pub(super) fn spec(
     colliders: &[&str],
@@ -213,8 +212,10 @@ pub(super) fn spec_with(
         "#![enable(implicit_some)]
 TankSpec(
     display_name: \"Fixture\",
-    mass: 1.0,
-    inertia_extents: (1.0, 1.0, 1.0),
+    // Fixture: a 1 kg hull remains after the 1 kg assembly detaches.
+    mass: 2.0,
+    // Fixture: contains the synthetic solids deliberately spread apart for role checks.
+    inertia_extents: (20.0, 40.0, 20.0),
     turret: (node: \"Hull\", mass: (1.0, Fixture(\"fixture assembly mass\")), inertia_extents: ((1.0, 1.0, 1.0), Fixture(\"fixture assembly box\"))),
     gunner_yaw: None,
     track: (
