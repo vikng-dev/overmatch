@@ -19,10 +19,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from online_cost import (  # noqa: E402
-    MalformedStats,
+    MalformedRecord,
     after_marker,
     aggregate,
     bots_spawned,
+    jitter_object,
     net_row,
     parse_stats_line,
     stress_cells,
@@ -65,8 +66,20 @@ class ParseStatsLine(unittest.TestCase):
         # A skipped period would leave a server window, and the AWS harness's table, that looks
         # whole with a period missing.
         for broken in ("server_stats {not json", STATS[:-20], "stdout F " + STATS[:40]):
-            with self.subTest(broken), self.assertRaises(MalformedStats):
+            with self.subTest(broken), self.assertRaises(MalformedRecord):
                 parse_stats_line(broken)
+
+
+class JitterObject(unittest.TestCase):
+    def test_the_client_record_is_read_through_a_journal_prefix_and_a_broken_one_is_refused(self):
+        # The AWS harness reads each client's starvation and view clock from this record alone; a
+        # record dropped instead of refused would leave a window that looks covered.
+        line = ('[  101.000000] host overmatch[9]: INFO overmatch::net::frontier: client_jitter '
+                '{"period_s":1.0,"view_clock":{"stamp_interval_ms":null}} trailing')
+        self.assertEqual(jitter_object(line), {"period_s": 1.0, "view_clock": {"stamp_interval_ms": None}})
+        self.assertIsNone(jitter_object("INFO overmatch::net::frontier: net: FRONTIER interpolation resync #2"))
+        with self.assertRaises(MalformedRecord):
+            jitter_object(line[:-40])
 
 
 class AfterMarker(unittest.TestCase):

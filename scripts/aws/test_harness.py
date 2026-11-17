@@ -1,6 +1,7 @@
-"""Offline checks of the AWS harness's cost guard, isolation, teardown and table: the real harness and
+"""Offline checks of the AWS harness's cost guard, isolation, teardown and tables: the real harness and
 machine.sh, with `aws`, `ssh`, `ssh-keygen` and `curl` replaced by fixtures on PATH."""
 import contextlib
+import dataclasses
 import importlib.util
 import io
 import json
@@ -156,6 +157,7 @@ if netless_role == role and instance.get("Reboots", 0) < int(netless_boots):
     sys.stderr.write("ssh: connect to host port 22: Operation timed out\n")
     sys.exit(255)
 clients, window = int(os.environ["FIXTURE_CLIENTS"]), float(os.environ["FIXTURE_WINDOW_S"])
+rows = json.loads(Path(os.environ["ROWS"]).read_text())
 cmd, args = words[0], words[1:]
 if cmd == "state" and os.environ.get("STATE_FAILS") == role:
     sys.stderr.write("Failed to open the journal: Input/output error\n")
@@ -184,15 +186,9 @@ elif cmd == "journal" and args[0] == "overmatch-server":
     print("[   24.000000] fixture overmatch-server[7]: server: starting, listening on 0.0.0.0:5888")
     print("[   30.000000] fixture overmatch-server[7]: server: client connected: 10.0.0.2:40000 (link 9v1)")
     print("[   30.500000] fixture overmatch-server[7]: server: Battle 1 Combat { ends_at: SimTick(1) } at tick 1952")
-    links = [f"{k}v1" for k in range(clients)]
     at = window
     while at < 1500:
-        row = {"period_s": window, "clients": clients, "tanks": 30, "projectiles": 3, "overruns": 2,
-               "tick_us": {"p50": 7000.0, "p95": 9000.0, "p99": 11000.0, "max": 20000.0, "total": 1.0},
-               "wall": {"discarded_ms": 0.0}, "cpu_pct": 80.0, "rss_mb": 220.0, "send_us": {"p95": 500.0},
-               "send_clients": [{"link": l, "bytes": 1, "bytes_per_s": 180000.0, "max_packets": 3} for l in links],
-               "inputs": [{"link": l, "counts": {"tick_exact": 630, "held": 10}} for l in links]}
-        record = json.dumps(row)
+        record = json.dumps(rows["server"])
         if os.environ.get("MALFORMED_STATS") and at > 4 * window:
             record = record[:40]
         print(f"[{at:12.6f}] fixture overmatch-server[7]: server_stats {record}")
@@ -202,7 +198,7 @@ elif cmd == "journal":
     # NO_JITTER: a release that prints no client_jitter record.
     for t in range(102, 102 if os.environ.get("NO_JITTER") else 1500):
         print(f"[{t:12.6f}] fixture overmatch[9]: INFO overmatch::net::frontier: client_jitter "
-              + json.dumps({"period_s": 1.0, "starved": {"events": 1, "ms": 2.5, "longest_ms": 2.5}}))
+              + json.dumps(rows["jitter"]))
 '''
 
 FAKE_KEYGEN = r'''#!/usr/bin/env python3
@@ -214,10 +210,17 @@ key.with_name(key.name + ".pub").write_text("ssh-ed25519 AAAAfixture overmatch-h
 '''
 
 FAKE_CURL = r'''#!/usr/bin/env python3
-import re, sys
+import os, re, sys
+from pathlib import Path
 url = sys.argv[-1]
 if "checkip" in url:
     print("192.0.2.99")
+    sys.exit(0)
+if url.startswith("https://raw.githubusercontent.com/") and url.endswith("/assets/net_timing.ron"):
+    if os.environ.get("NO_NET_TIMING"):  # a tag from before the timing records
+        sys.stderr.write("curl: (22) The requested URL returned error: 404\n")
+        sys.exit(22)
+    print(Path(os.environ["NET_TIMING"]).read_text(), end="")
     sys.exit(0)
 tag, name = re.search(r"/download/([^/]+)/([^/]+)$", url).groups()
 if tag == "v9.9.9":
@@ -269,8 +272,50 @@ MACHINE_COMMANDS = ("install", "shutdown", "chown", "dpkg-query", "apt-get", "cu
 MACHINE_PATHS = {"/var/lib/om-harness": "state", "/opt/overmatch": "opt", "/usr/local/bin/om-harness": "om-harness",
                  "/home/ubuntu": "home", "/etc/systemd/system": "units", "/proc/uptime": "uptime"}
 
-SETTINGS = ["--tag", "v0.7.0-alpha.18", "--server-type", "c7a.large", "--client-type", "c7a.large",
-            "--bots", "26", "--clients", "4", "--window-s", "10"]
+SETTINGS = ["--tag", "v0.7.0-alpha.19", "--server-type", "c7a.large", "--client-type", "c7a.large",
+            "--bots", "26", "--clients", "4", "--window-s", "30"]
+# The timing tastes' owner, which the fake release serves at every tag.
+OWNER = harness.ROOT / harness.NET_TIMING
+TIMING = harness.net_timing(OWNER.read_text(), str(OWNER))
+# Fixture: the 64 Hz tick's width, the bins' width in both records.
+BIN_MS = 15.625
+
+
+def fixture_histogram(bins: list[int], p50: float, p95: float, top: float) -> dict:
+    """A timing record's histogram in the shape src/net/timing.rs prints: 16 tick bins and an
+    open-ended one."""
+    padded = bins + [0] * (17 - len(bins))
+    return {"n": sum(padded), "min": 0.0, "p50": p50, "p95": p95, "max": top, "bin_ms": BIN_MS, "bins": padded}
+
+
+# Fixture: a live link with a few long gaps, its S at the clamp of the longest.
+ARRIVAL = {"state": "live", "silence_ms": 0.0, "stale_threshold_ms": 250.0, "stale_declarations": 1,
+           "stale_arrivals": 1, "gap_ms": fixture_histogram([600, 30, 5, 0, 0, 0, 2, 3] + [0] * 8 + [1], 0.0, 15.625, 260.0)}
+
+
+def stats_row(clients: int, period_s: float, arrival: dict | None = ARRIVAL) -> dict:
+    """A server_stats object in src/net/server_stats.rs's shape; arrival None: a release without the
+    input-gap census."""
+    links = [f"{k}v1" for k in range(clients)]
+    return {"period_s": period_s, "clients": clients, "tanks": 30, "projectiles": 3, "overruns": 2,
+            "tick_us": {"p50": 7000.0, "p95": 9000.0, "p99": 11000.0, "max": 20000.0, "total": 1.0},
+            "wall": {"discarded_ms": 0.0}, "cpu_pct": 80.0, "rss_mb": 220.0, "send_us": {"p95": 500.0},
+            "send_clients": [{"link": l, "bytes": 1, "bytes_per_s": 180000.0, "max_packets": 3} for l in links],
+            "inputs": [{"link": l, "counts": {"tick_exact": 630, "held": 10}} | ({"arrival": arrival} if arrival else {})
+                       for l in links]}
+
+
+# Fixture: one client_jitter object (src/net/frontier.rs), its view clock completing every tick of a
+# 64 Hz second.
+JITTER = {"period_s": 1.0, "starved": {"events": 1, "ms": 2.5, "longest_ms": 2.5},
+          "min_delay_ms": {"applied": 60.0, "target": 55.0}, "rtt_ms": 9.0,
+          "view_clock": {"delta_star_ms": -1400.0, "today_stamp_lag_ms": -1390.0, "target_minus_today_ms": -10.0,
+                         "target_above_latest_x_ms": 20.0,
+                         "stamp_interval_ms": fixture_histogram([327, 310, 2], 15.6, 18.2, 40.0),
+                         "completion": {"completed_ticks": 64, "sampled_ticks": 64, "late_ticks": 0,
+                                        "worst_lag_frames": 0, "worst_lag_ms": 0.0, "evicted_incomplete": 0,
+                                        "completed_without_stamp": 0, "unmapped_stamps": 0, "receipt_overflow": 0},
+                         "pending_ticks": 1}}
 FOREIGN = {"InstanceId": "i-0f0f0f0f0f0f0f0f0", "InstanceType": "c7a.medium", "State": {"Name": "running"},
            "Tags": [{"Key": "Name", "Value": "om-worker"}], "CpuOptions": {"CoreCount": 1, "ThreadsPerCore": 1}}
 WRITES = {"create-security-group", "authorize-security-group-ingress", "run-instances", "reboot-instances",
@@ -279,9 +324,11 @@ LEAKS = re.compile(r"\b(?:i|sg|vol|eni|ami|subnet|vpc)-[0-9a-f]{8,}|192\.0\.2\.\
 
 
 class Fixture:
-    """One temporary world: fake commands on PATH, a fake EC2 state, and a run's captured output."""
+    """One temporary world: fake commands on PATH, a fake EC2 state, the lines the fake machines
+    print, and a run's captured output."""
 
-    def __init__(self, cleanup, seed: dict | None = None, **env: str):
+    def __init__(self, cleanup, seed: dict | None = None, server: dict | None = None, client: dict = JITTER,
+                 **env: str):
         temp = tempfile.TemporaryDirectory()
         cleanup(temp.cleanup)
         self.root = Path(temp.name)
@@ -293,10 +340,14 @@ class Fixture:
         self.ec2 = self.root / "ec2.json"
         world = {"n": 0, "instances": [], "volumes": [], "interfaces": [], "key_pairs": [], "groups": []}
         self.ec2.write_text(json.dumps(world | (seed or {})))
+        clients, window_s = int(option(SETTINGS, "--clients")), float(option(SETTINGS, "--window-s"))
+        rows = self.root / "rows.json"
+        rows.write_text(json.dumps({"server": server or stats_row(clients, window_s), "jitter": client}))
         (self.root / "tmp").mkdir()
         self.env = {"PATH": f"{binary}:{os.environ['PATH']}", "FAKE_EC2": str(self.ec2), "TMPDIR": str(self.root / "tmp"),
                     "CALLS": str(self.root / "calls.jsonl"), "SSH_CALLS": str(self.root / "ssh.jsonl"),
-                    "FIXTURE_CLIENTS": "4", "FIXTURE_WINDOW_S": "10", "CLOUDFLARE_GLOBAL_KEY": "fixture"} | env
+                    "ROWS": str(rows), "NET_TIMING": str(OWNER), "FIXTURE_CLIENTS": str(clients),
+                    "FIXTURE_WINDOW_S": str(window_s), "CLOUDFLARE_GLOBAL_KEY": "fixture"} | env
 
     def main(self, *argv: str) -> int:
         out, err = io.StringIO(), io.StringIO()
@@ -318,6 +369,9 @@ class Fixture:
 
     def world(self) -> dict:
         return json.loads(self.ec2.read_text())
+
+    def results(self) -> dict:
+        return json.loads(next((self.root / "tmp").glob("overmatch-aws-harness/*/results.json")).read_text())
 
 
 class MachineScript:
@@ -386,7 +440,8 @@ class MeasuredRun(unittest.TestCase):
 
     def test_a_run_prints_its_windows_and_leaves_nothing_but_what_it_found(self):
         self.assertEqual(self.status, 0, self.fixture.stderr)
-        data_rows = [line.split() for line in self.fixture.stdout.splitlines() if re.match(r"\s*\d+\s", line)]
+        cost = self.fixture.stdout.split("View clock")[0]
+        data_rows = [line.split() for line in cost.splitlines() if re.match(r"\s*\d+\s", line)]
         self.assertEqual([row[0] for row in data_rows], [str(i) for i in range(1, harness.WINDOWS + 1)])
         # Each client reports 2.5 ms starved per 1 s line, so a window sums its own seconds' lines,
         # read on the client machine's clock.
@@ -399,6 +454,37 @@ class MeasuredRun(unittest.TestCase):
         self.assertEqual([i["InstanceId"] for i in world["instances"] if i["State"]["Name"] != "terminated"],
                          [FOREIGN["InstanceId"]])
         self.assertEqual((world["groups"], world["volumes"], world["interfaces"]), ([], [], []))
+
+    def test_each_client_and_window_counts_its_own_view_clock_lines_once(self):
+        # Completion counts are per-line deltas, so a window's count is the sum of its own lines; the
+        # stamp-interval histograms each hold the view window before their line, so the window counts
+        # one histogram per disjoint view window that fits in it, never one per 1 s line.
+        view = self.fixture.results()["view_clock"]
+        column = {name: i for i, name in enumerate(view["columns"])}
+        clients, window_s = int(option(SETTINGS, "--clients")), float(option(SETTINGS, "--window-s"))
+        self.assertEqual(sorted((row[0], row[1]) for row in view["rows"]),
+                         [(k, i) for k in range(1, clients + 1) for i in range(1, harness.WINDOWS + 1)])
+        per_line = JITTER["view_clock"]
+        fits = math.floor(window_s / TIMING.view_window_s)
+        for row in view["rows"]:
+            lines = row[column["lines"]]
+            self.assertEqual(row[column["done"]], per_line["completion"]["completed_ticks"] * lines)
+            tiles, rest = divmod(row[column["int_n"]], per_line["stamp_interval_ms"]["n"])
+            self.assertEqual(rest, 0)
+            self.assertIn(tiles, range(max(fits - 1, 1), fits + 1))
+            self.assertEqual(row[column["tgt_n"]], lines)
+
+    def test_each_server_link_and_window_reads_that_windows_own_census(self):
+        # The stale counts are the window's own line's (since the previous line), never summed
+        # across lines; every connected link has a row in every window.
+        gaps = self.fixture.results()["input_gaps"]
+        column = {name: i for i, name in enumerate(gaps["columns"])}
+        self.assertEqual(len(gaps["rows"]), int(option(SETTINGS, "--clients")) * harness.WINDOWS)
+        for row in gaps["rows"]:
+            self.assertEqual(row[column["stale_arr"]], ARRIVAL["stale_arrivals"])
+            self.assertEqual(row[column["S_ms"]], ARRIVAL["stale_threshold_ms"])
+            self.assertEqual(row[column["gap_n"]], ARRIVAL["gap_ms"]["n"])
+            self.assertLessEqual(row[column["gaps>=ceil"]], row[column["gaps>=floor"]])
 
     def test_every_launch_carries_its_cost_guard(self):
         # A machine the operator loses must still delete itself: terminate on its own power-off, a
@@ -455,14 +541,21 @@ class MeasuredRun(unittest.TestCase):
 
 class Failures(unittest.TestCase):
     def test_a_failure_names_its_cause_and_still_tears_down(self):
-        cases = [({"BOOT_FAIL": "verify"}, "checksum mismatch"),
-                 ({"NETLESS": "client:2"}, "two boots without a network"),
-                 ({"STATE_FAILS": "server"}, "`state` failed: Failed to open the journal"),
-                 ({"MALFORMED_STATS": "1"}, "a server_stats record does not parse"),
-                 ({"NO_JITTER": "1"}, "client 1's client_jitter records cover 0 s")]
-        for env, cause in cases:
+        clients, window_s = int(option(SETTINGS, "--clients")), float(option(SETTINGS, "--window-s"))
+        no_view_clock = {key: value for key, value in JITTER.items() if key != "view_clock"}
+        unbinned = ARRIVAL | {"gap_ms": ARRIVAL["gap_ms"] | {"n": ARRIVAL["gap_ms"]["n"] + 1}}
+        cases = [({"env": {"BOOT_FAIL": "verify"}}, "checksum mismatch"),
+                 ({"env": {"NETLESS": "client:2"}}, "two boots without a network"),
+                 ({"env": {"STATE_FAILS": "server"}}, "`state` failed: Failed to open the journal"),
+                 ({"env": {"MALFORMED_STATS": "1"}}, "a server_stats record does not parse"),
+                 ({"env": {"NO_JITTER": "1"}}, "client 1's client_jitter lines cover 0 s"),
+                 ({"client": no_view_clock}, "client 1: a client_jitter record: no `view_clock`"),
+                 ({"server": stats_row(clients, window_s, arrival=None)}, "no `arrival.state`"),
+                 ({"server": stats_row(clients, window_s, arrival=unbinned)}, "do not hold its")]
+        for case, cause in cases:
             with self.subTest(cause), mock.patch.object(harness, "REACH_TIMEOUT_S", 0):
-                fixture = Fixture(self.addCleanup, **env)
+                fixture = Fixture(self.addCleanup, server=case.get("server"), client=case.get("client", JITTER),
+                                  **case.get("env", {}))
                 self.assertEqual(fixture.main("run", *SETTINGS), 1)
                 self.assertIn(cause, fixture.stderr)
                 world = fixture.world()
@@ -491,9 +584,19 @@ class Failures(unittest.TestCase):
         overlong = math.floor((harness.combat_s() - harness.WARMUP_S) / (harness.WINDOWS + 1)) + 1
         leftover = {"groups": [{"GroupId": "sg-0e0e0e0e0e0e0e0e0", "IpPermissions": [],
                                 "Tags": [{"Key": k, "Value": v} for k, v in harness.TAGS.items()]}]}
+        # Fixture: a release whose uplink window outlasts the run's window by a second.
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        longer = Path(temp.name) / "net_timing.ron"
+        longer.write_text(re.sub(r"(uplink_window_s:\s*\()[^,]+",
+                                 rf"\g<1>{int(option(SETTINGS, '--window-s')) + 1}.0", OWNER.read_text()))
         cases = [
             ("expired sign-in", SETTINGS, {"SCENARIO": "expired"}, None, 1, "sign-in"),
             ("unpublished tag", setting("--tag", "v9.9.9"), {}, None, 1, "is the tag published"),
+            ("a tag before the timing records", SETTINGS, {"NO_NET_TIMING": "1"}, None, 1,
+             "does the release carry the tick stamp"),
+            ("timing windows past the run's window", SETTINGS, {"NET_TIMING": str(longer)}, None, 1,
+             "shorter than the release's"),
             ("over the quota", setting("--server-type", "c7a.xlarge"), {}, None, 1, "vCPUs"),
             ("burstable type", setting("--client-type", "t3.small"), {}, None, 1, "burstable"),
             ("an earlier run's leftovers", SETTINGS, {}, leftover, 1, "earlier run"),
@@ -538,7 +641,8 @@ class MachineCommands(unittest.TestCase):
                                     int(values["--bots"]), int(values["--clients"]), int(values["--window-s"]))
         archives = {role: (f"https://example.invalid/{role}.tar.gz", f"{'a' * 64}  {role}.tar.gz")
                     for role in ("server", "client")}
-        plan = harness.Plan("ami-0123456789abcdef0", "/dev/sda1", "vpc", "subnet", "zone", "192.0.2.99/32", archives)
+        plan = harness.Plan("ami-0123456789abcdef0", "/dev/sda1", "vpc", "subnet", "zone", "192.0.2.99/32", archives,
+                            TIMING)
         cls.machine = MachineScript(cls.addClassCleanup, harness.user_data("server", settings, plan, "ssh-ed25519 AAAAfixture"))
         booted = cls.machine.boot()
         assert booted.returncode == 0, booted.stderr
@@ -560,7 +664,7 @@ class MachineCommands(unittest.TestCase):
 class Reading(unittest.TestCase):
     def test_a_window_counts_only_inside_combat_after_the_warmup_with_every_client(self):
         def line(at, clients=4):
-            return at, {"period_s": 10.0, "clients": clients, "send_clients": [{}] * clients}
+            return at, harness.Fields(stats_row(clients, 10.0), "fixture")
 
         # Seven 10 s lines against a limit of three: the fourth line that counts (ending at 150) is
         # past the limit, neither chosen nor skipped.
@@ -570,6 +674,29 @@ class Reading(unittest.TestCase):
             chosen, skipped = harness.pick_windows(log, clients=4, measure_from=95.0)
         self.assertEqual([(w.start, w.end) for w in chosen], [(110.0, 120.0), (120.0, 130.0), (130.0, 140.0)])
         self.assertEqual(skipped, {"before the warmup ended": 1, "not 4 clients connected": 1, "after combat": 1})
+
+    def test_a_gap_counts_above_a_bound_only_from_a_bin_wholly_at_or_above_it(self):
+        # The floor and ceiling columns are read against the release's own bounds; a bin that
+        # straddles a bound holds gaps on both sides, so counting it would report gaps above the
+        # floor that may all lie below it, and an open-ended last bin across it leaves the count unknown.
+        columns = [harness.SERVER_COLUMNS.index(name) for name in ("gaps>=floor", "gaps>=ceil")]
+        bins = len(ARRIVAL["gap_ms"]["bins"])
+        for i in range(bins):
+            gaps = harness.Histogram(1, 0.0, 0.0, 0.0, BIN_MS, tuple(int(j == i) for j in range(bins)))
+            row = harness.server_cells("0v1", 1, harness.Arrival("live", gaps, 100.0, 0, 0), TIMING)
+            for column, bound_s in zip(columns, (TIMING.stale_floor_s, TIMING.stale_ceil_s)):
+                lowest_edge_ms = (bins - 1) * BIN_MS
+                expected = None if lowest_edge_ms < bound_s * 1e3 else int(i * BIN_MS >= bound_s * 1e3)
+                self.assertEqual(row[column], expected, (i, bound_s))
+
+    def test_a_view_window_histogram_is_taken_once_per_view_window(self):
+        # Each line's histogram holds the view window before it; lines a second apart overlap, so
+        # summing them would count each interval up to a view window's worth of times.
+        hist = harness.Histogram(10, 15.6, 18.0, 20.0, BIN_MS, (5, 5) + (0,) * 15)
+        line = harness.Jitter(0.0, 1.0, 0.0, 60.0, hist, None, None, (0,) * len(harness.COMPLETION), 0.0)
+        # Fixture: ten lines per view window over three view windows.
+        lines = [dataclasses.replace(line, at=k * TIMING.view_window_s / 10) for k in range(1, 31)]
+        self.assertEqual(len(harness.tiles(lines, 0.0, TIMING.view_window_s)), 3)
 
     def test_sampled_cpu_is_percent_of_one_core_and_busy_is_of_the_whole_machine(self):
         # 2.5 CPU-seconds over 10 s is a quarter core; 300 of 400 jiffies not idle is 75 % busy.

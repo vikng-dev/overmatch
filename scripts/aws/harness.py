@@ -4,15 +4,17 @@
 # dependencies = []
 # ///
 """One measured Overmatch dedicated server on AWS EC2 in Singapore, loaded by a bot battle and real
-headless clients from a second machine; one table; teardown with proof.
+headless clients from a second machine; one cost table and two timing tables; teardown with proof.
 
-    scripts/aws/harness.py run --tag v0.7.0-alpha.18 --server-type c7a.large \\
+    scripts/aws/harness.py run --tag v0.7.0-alpha.19 --server-type c7a.large \\
         --client-type c7a.large --bots 26 --clients 4 --window-s 60
     scripts/aws/harness.py teardown
 
-RUN, in order (progress on stderr, the table on stdout):
+RUN, in order (progress on stderr, the tables on stdout):
   1. Preflight, creating nothing: the settings; the AWS sign-in; the release's two `.sha256` files by
-     explicit tag (a bad tag stops here; pre-releases have no `latest`); Canonical's Ubuntu 26.04
+     explicit tag (a bad tag stops here; pre-releases have no `latest`); the release's timing tastes,
+     `assets/net_timing.ron` at that tag, and a window no shorter than its view and uplink windows
+     (a release before the tick stamp stops here); Canonical's Ubuntu 26.04
      amd64 image from its public SSM parameter, checked to be the public AWS-listed image of that
      name (the release needs glibc 2.43, so Amazon Linux 2023 cannot run it); both machine types
      (x86_64, not burstable) and their vCPUs, beside every instance already running, against the
@@ -31,7 +33,15 @@ RUN, in order (progress on stderr, the table on stdout):
      own. A window counts once it starts WARMUP_S after the last slot, ends inside the first combat,
      and has every client connected at its close. A 1 Hz sampler on each machine adds machine busy
      and steal, and each client's CPU and resident memory, read over the same window.
-  7. The table, then teardown (always, a failure included), then the proof.
+  7. The tables, then teardown (always, a failure included), then the proof.
+
+THE TIMING TABLES read the two measured records of net timing slice 0, which print without a lever
+of their own: each client's view clock (src/net/view_clock.rs), inside its once-a-second
+`client_jitter` line, and each server link's input-gap census (src/net/input_gap.rs), inside the
+window's `server_stats` line. Each table's legend says what every column counts and over what span.
+Each counted window's `server_stats` line and every `client_jitter` line is parsed once into what the
+tables read; a field that is absent or of another kind is refused with its path, and a window its
+client lines cover too little of is refused (COVERAGE).
 
 THE RECIPE. "The same battle" is the same recipe, never the same outcome: release tag, bot count,
 client count, client script (`machine.sh` CLIENT_SCRIPT) and both machine types. Contact solve order
@@ -81,11 +91,14 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "perf"))
-from online_cost import ANSI, MalformedStats, fmt, stats_object  # noqa: E402
+from online_cost import ANSI, MalformedRecord, fmt, jitter_object, stats_object  # noqa: E402
 
 PROFILE = "overmatch"
 REGION = "ap-southeast-1"
 RELEASES = "https://github.com/vikng-dev/overmatch/releases/download"
+SOURCES = "https://raw.githubusercontent.com/vikng-dev/overmatch"
+# The timing tastes' one owner (src/net/timing.rs `Timing::shipped`), compiled into the release.
+NET_TIMING = "assets/net_timing.ron"
 TRIPLE = "x86_64-unknown-linux-gnu"
 # The server's UDP port: src/net/server.rs PORT, fixed, no lever.
 PORT = 5888
@@ -137,8 +150,6 @@ SCRUB = (
 )
 JOURNAL_LINE = re.compile(r"^\[\s*(\d+\.\d+)\]\s")
 BATTLE = re.compile(r"server: Battle (\d+) (\w+)")
-# The client's once-a-second stream record, `client_jitter {json}` (src/net/frontier.rs).
-JITTER_RECORD = re.compile(r"\bclient_jitter (?=\{)")
 SETTINGS_MARK = "# @settings\n"
 
 
@@ -272,6 +283,27 @@ def cap_min(s: Settings) -> int:
     return math.ceil(span / 60)
 
 
+@dataclass(frozen=True)
+class NetTiming:
+    """The release's timing tastes, as its `Timing` reads them: seconds."""
+    view_window_s: float
+    uplink_window_s: float
+    stale_floor_s: float
+    stale_ceil_s: float
+
+
+def net_timing(text: str, where: str) -> NetTiming:
+    """Each field's number from `<field>: (<number>, <label>)`; the release itself refuses to start on
+    a nonpositive or reversed one."""
+    values = {}
+    for name in NetTiming.__dataclass_fields__:
+        found = re.search(rf"\b{name}:\s*\(\s*(\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*,", text)
+        if not found:
+            raise Refused(f"{where} has no {name}")
+        values[name] = float(found.group(1))
+    return NetTiming(**values)
+
+
 # ------------------------------------------------------------------------------------ preflight
 
 
@@ -284,6 +316,7 @@ class Plan:
     zone: str
     operator_cidr: str
     archives: dict[str, tuple[str, str]]  # role: (url, checksum line)
+    timing: NetTiming
 
 
 def archive(tag: str, role: str) -> tuple[str, str]:
@@ -302,6 +335,13 @@ def preflight(s: Settings) -> Plan:
     if WARMUP_S + (WINDOWS + 1) * s.window_s > combat_s():
         raise Refused(f"{WINDOWS} windows of {s.window_s} s do not fit one {combat_s():.0f} s combat")
     archives = {role: archive(s.tag, role) for role in ("server", "client")}
+    where = f"{NET_TIMING} at {s.tag}"
+    timing = net_timing(fetch(f"{SOURCES}/{s.tag}/{NET_TIMING}", f"{where}: does the release carry the "
+                              "tick stamp and input-gap records?"), where)
+    longest = max(timing.view_window_s, timing.uplink_window_s)
+    if s.window_s < longest:
+        raise Refused(f"a {s.window_s} s window is shorter than the release's {longest:g} s timing windows "
+                      f"({where}): its timing histograms would reach before the window")
 
     image_id = aws("ssm", "get-parameter", "--name", AMI_PARAMETER)["Parameter"]["Value"]
     images = aws("ec2", "describe-images", "--owners", "amazon", "--image-ids", image_id)["Images"]
@@ -354,7 +394,7 @@ def preflight(s: Settings) -> Plan:
         operator = ipaddress.IPv4Address(address)
     except ValueError as error:
         raise Refused("the operator's public address is not one IPv4 address") from error
-    return Plan(image["ImageId"], image["RootDeviceName"], vpc, subnet, zone, f"{operator}/32", archives)
+    return Plan(image["ImageId"], image["RootDeviceName"], vpc, subnet, zone, f"{operator}/32", archives, timing)
 
 
 # ------------------------------------------------------------------------------------- machines
@@ -583,16 +623,132 @@ def start_clients(client: Machine, server: Machine, clients: int) -> None:
 # -------------------------------------------------------------------------------------- reading
 
 
+class Fields:
+    """A record's JSON object, read once at its edge: a field that is absent or of another kind is
+    refused with its dotted path, never met later as a KeyError."""
+
+    def __init__(self, value: dict, where: str):
+        self.value, self.where = value, where
+
+    def get(self, path: str, *kinds: type):
+        value = self.value
+        for key in path.split("."):
+            if not isinstance(value, dict) or key not in value:
+                raise Refused(f"{self.where}: no `{path}`")
+            value = value[key]
+        if isinstance(value, bool) or not isinstance(value, kinds):
+            raise Refused(f"{self.where}: `{path}` is {json.dumps(value)[:60]}, not "
+                          f"{' or '.join(kind.__name__ for kind in kinds)}")
+        return value
+
+    def num(self, path: str) -> float:
+        return float(self.get(path, int, float))
+
+    def maybe_num(self, path: str) -> float | None:
+        value = self.get(path, int, float, type(None))
+        return None if value is None else float(value)
+
+    def count(self, path: str) -> int:
+        return self.get(path, int)
+
+    def at(self, path: str) -> Fields:
+        return Fields(self.get(path, dict), f"{self.where} `{path}`")
+
+    def each(self, path: str) -> list[Fields]:
+        items = self.get(path, list)
+        if not all(isinstance(item, dict) for item in items):
+            raise Refused(f"{self.where}: `{path}` holds a value that is not an object")
+        return [Fields(item, f"{self.where} `{path}[{i}]`") for i, item in enumerate(items)]
+
+
+@dataclass(frozen=True)
+class Histogram:
+    """A timing record's samples (src/net/timing.rs `histogram`): nearest-rank p50, p95 and max,
+    and counts in tick-wide bins, the last open-ended."""
+    n: int
+    p50_ms: float
+    p95_ms: float
+    max_ms: float
+    bin_ms: float
+    bins: tuple[int, ...]
+
+    def first_from(self, bound_ms: float) -> int | None:
+        """The first bin wholly at or above bound_ms; None when the open-ended last bin straddles it."""
+        first = math.ceil(bound_ms / self.bin_ms)
+        return first if first < len(self.bins) else None
+
+
+def histogram(fields: Fields, path: str) -> Histogram | None:
+    """None: the record held no sample (null). Refused unless its bins hold exactly its n samples."""
+    if fields.get(path, dict, type(None)) is None:
+        return None
+    h = fields.at(path)
+    n, bins = h.count("n"), h.get("bins", list)
+    if not all(isinstance(b, int) and not isinstance(b, bool) for b in bins) or sum(bins) != n:
+        raise Refused(f"{h.where}: its bins {bins} do not hold its {n} samples")
+    return Histogram(n, h.num("p50"), h.num("p95"), h.num("max"), h.num("bin_ms"), tuple(bins))
+
+
+@dataclass(frozen=True)
+class Arrival:
+    """One connected link's input-gap record at a stats line (src/net/input_gap.rs)."""
+    state: str  # live, stale or awaiting_first_arrival
+    gaps: Histogram | None  # over the uplink window before the line; None: no arrival in it
+    threshold_ms: float  # the would-be stale threshold S at the line
+    stale_arrivals: int  # this and declarations: since the previous line
+    declarations: int
+
+
+@dataclass(frozen=True)
+class Inputs:
+    link: str
+    held: int
+    tick_exact: int
+    arrival: Arrival | None  # None: the link was not connected at the line
+
+
+def inputs(row: Fields) -> Inputs:
+    state = row.get("arrival.state", str)
+    arrival = None if state == "not_connected_at_emission" else Arrival(
+        state, histogram(row, "arrival.gap_ms"), row.num("arrival.stale_threshold_ms"),
+        row.count("arrival.stale_arrivals"), row.count("arrival.stale_declarations"))
+    return Inputs(row.get("link", str), row.count("counts.held"), row.count("counts.tick_exact"), arrival)
+
+
+@dataclass(frozen=True)
+class Stats:
+    """What the tables read of a counted window's `server_stats` line (src/net/server_stats.rs). A
+    field such a line leaves null (no tick, no send, no platform reading) is refused."""
+    tanks: int
+    projectiles: int
+    tick_ms: tuple[float, float, float, float]  # p50, p95, p99, max
+    overruns: int
+    discarded_ms: float
+    cpu_pct: float
+    rss_mb: float
+    send_p95_us: float
+    link_kb_per_s: tuple[float, ...]
+    inputs: tuple[Inputs, ...]
+
+
+def stats(row: Fields) -> Stats:
+    return Stats(row.count("tanks"), row.count("projectiles"),
+                 tuple(row.num(f"tick_us.{p}") / 1e3 for p in ("p50", "p95", "p99", "max")),
+                 row.count("overruns"), row.num("wall.discarded_ms"), row.num("cpu_pct"), row.num("rss_mb"),
+                 row.num("send_us.p95"), tuple(link.num("bytes_per_s") / 1e3 for link in row.each("send_clients")),
+                 tuple(map(inputs, row.each("inputs"))))
+
+
 @dataclass
 class ServerLog:
     combat_open: float | None
     combat_end: float | None
-    stats: list[tuple[float, dict]]  # (kernel time of the line, its object)
+    stats: list[tuple[float, Fields]]  # (kernel time of the line, its object)
 
 
 def server_log(text: str) -> ServerLog:
     combat_open = combat_end = None
-    stats = []
+    lines = []
     for line in text.splitlines():
         stamp = JOURNAL_LINE.match(line)
         if not stamp:
@@ -606,70 +762,92 @@ def server_log(text: str) -> ServerLog:
             combat_end = at
         try:
             row = stats_object(clean)
-        except MalformedStats as error:
+        except MalformedRecord as error:
             raise Refused(f"the server journal: {error}") from error
         if row is not None:
-            stats.append((at, row))
-    return ServerLog(combat_open, combat_end, stats)
+            lines.append((at, Fields(row, f"the server journal: the server_stats record at {at:.1f} s")))
+    return ServerLog(combat_open, combat_end, lines)
 
 
 @dataclass
 class Window:
     start: float  # server kernel time
     end: float
-    row: dict
+    row: Stats
 
 
 def pick_windows(log: ServerLog, clients: int, measure_from: float) -> tuple[list[Window], dict[str, int]]:
     """The first WINDOWS stats lines that count, and why each earlier or later one did not."""
     chosen, skipped = [], {}
     for at, row in log.stats:
-        start = at - row["period_s"]
+        start = at - row.num("period_s")
         reason = None
         if start < measure_from:
             reason = "before the warmup ended"
         elif log.combat_end is not None and at > log.combat_end:
             reason = "after combat"
-        elif row["clients"] != clients or len(row["send_clients"]) != clients:
+        elif row.count("clients") != clients or len(row.get("send_clients", list)) != clients:
             reason = f"not {clients} clients connected"
         if reason:
             skipped[reason] = skipped.get(reason, 0) + 1
         elif len(chosen) < WINDOWS:
-            chosen.append(Window(start, at, row))
+            chosen.append(Window(start, at, stats(row)))
     return chosen, skipped
 
 
-@dataclass
+# The `view_clock.completion` counts, each since the previous line (src/net/view_clock.rs).
+COMPLETION = ("completed_ticks", "late_ticks", "evicted_incomplete", "completed_without_stamp", "unmapped_stamps",
+              "receipt_overflow")
+
+
+@dataclass(frozen=True)
 class Jitter:
-    at: float  # the client machine's kernel time, at the end of the record's period
+    """What the tables read of one `client_jitter` line (src/net/frontier.rs), its `view_clock`
+    included (src/net/view_clock.rs)."""
+    at: float  # the client machine's kernel time, at the end of the line's period
     period_s: float
     starved_ms: float  # of the period's frames, those whose presented cursor had passed the newest tick
+    delay_ms: float  # today's applied minimum interpolation delay
+    intervals: Histogram | None  # stamp intervals in the view window before the line; None: under two stamps
+    target_minus_today_ms: float | None  # None: no target yet, or no stamps bracket the cursor
+    target_above_x_ms: float | None
+    completion: tuple[int, ...]  # COMPLETION
+    worst_lag_ms: float
 
 
 def jitter(text: str, client: int) -> list[Jitter]:
-    """Client k's `client_jitter` records; one that does not parse is refused, never skipped."""
+    """Client k's `client_jitter` lines; one that does not parse or lacks a field is refused, never
+    skipped."""
     out = []
     for line in text.splitlines():
-        stamp, record = JOURNAL_LINE.match(line), JITTER_RECORD.search(line)
-        if stamp and record:
-            try:
-                row, _ = json.JSONDecoder().raw_decode(line, record.end())
-                out.append(Jitter(float(stamp.group(1)), float(row["period_s"]), float(row["starved"]["ms"])))
-            except (ValueError, KeyError, TypeError) as error:
-                raise Refused(f"client {client}: a client_jitter record does not parse "
-                              f"({type(error).__name__}: {error}): {line.strip()[:160]}") from error
+        stamp = JOURNAL_LINE.match(line)
+        if not stamp:
+            continue
+        try:
+            found = jitter_object(line)
+        except MalformedRecord as error:
+            raise Refused(f"client {client}: {error}") from error
+        if found is None:
+            continue
+        row = Fields(found, f"client {client}: a client_jitter record")
+        view = row.at("view_clock")
+        out.append(Jitter(float(stamp.group(1)), row.num("period_s"), row.num("starved.ms"),
+                          row.num("min_delay_ms.applied"), histogram(view, "stamp_interval_ms"),
+                          view.maybe_num("target_minus_today_ms"), view.maybe_num("target_above_latest_x_ms"),
+                          tuple(view.count(f"completion.{name}") for name in COMPLETION),
+                          view.num("completion.worst_lag_ms")))
     return out
 
 
-def starved_ms(records: list[Jitter], start: float, end: float, client: int) -> float:
-    """Client k's starved time over one window of its machine's clock, from records that cover
-    COVERAGE of it; less coverage is refused, so a release without the record reads as no reading."""
+def client_lines(records: list[Jitter], start: float, end: float, client: int) -> list[Jitter]:
+    """Client k's lines over one window of its machine's clock, covering COVERAGE of it; less
+    coverage is refused, so a release without the line reads as no reading."""
     inside = [r for r in records if start < r.at <= end]
     covered = sum(r.period_s for r in inside)
     if covered < COVERAGE * (end - start):
-        raise Refused(f"client {client}'s client_jitter records cover {covered:.0f} s of a {end - start:.0f} s "
-                      "window: no starvation reading (does this release print client_jitter?)")
-    return sum(r.starved_ms for r in inside)
+        raise Refused(f"client {client}'s client_jitter lines cover {covered:.0f} s of a {end - start:.0f} s "
+                      "window: no client reading (does this release print client_jitter?)")
+    return inside
 
 
 @dataclass
@@ -737,27 +915,86 @@ COLUMNS = ["win", "at_s", "tanks", "proj", "p50_ms", "p95_ms", "p99_ms", "max_ms
 
 
 def window_cells(index: int, window: Window, combat_open: float, server: Interval, client: Interval,
-                 to_client: float, starving: list[list[Jitter]]) -> list[float]:
+                 lines: list[list[Jitter]]) -> list[float | None]:
     row = window.row
-    tick = row["tick_us"]
-    links = [link["bytes_per_s"] / 1e3 for link in row["send_clients"]]
-    counts = [entry["counts"] for entry in row["inputs"]]
-    inputs = sum(c["held"] + c["tick_exact"] for c in counts)
-    units = [f"om-client-{k}" for k in range(1, len(starving) + 1)]
+    reads = sum(link.held + link.tick_exact for link in row.inputs)
+    units = [f"om-client-{k}" for k in range(1, len(lines) + 1)]
     cpu = [client.cpu_pct(u) for u in units]
-    start, end = window.start + to_client, window.end + to_client
-    worst_starved = max(starved_ms(records, start, end, k) for k, records in enumerate(starving, 1))
-    return [index, window.start - combat_open, row["tanks"], row["projectiles"], tick["p50"] / 1e3,
-            tick["p95"] / 1e3, tick["p99"] / 1e3, tick["max"] / 1e3, row["overruns"], row["wall"]["discarded_ms"],
-            row["cpu_pct"], row["rss_mb"], server.busy_pct(), server.steal_pct(), row["send_us"]["p95"],
-            statistics.median(links), max(links), 100.0 * sum(c["held"] for c in counts) / inputs if inputs else 0.0,
-            worst_starved, client.busy_pct(), statistics.median(cpu), max(cpu),
-            statistics.median(client.rss_mb(u) for u in units)]
+    return [index, window.start - combat_open, row.tanks, row.projectiles, *row.tick_ms, row.overruns,
+            row.discarded_ms, row.cpu_pct, row.rss_mb, server.busy_pct(), server.steal_pct(), row.send_p95_us,
+            statistics.median(row.link_kb_per_s), max(row.link_kb_per_s),
+            100.0 * sum(link.held for link in row.inputs) / reads if reads else None,  # None: no input read
+            max(sum(line.starved_ms for line in own) for own in lines), client.busy_pct(), statistics.median(cpu),
+            max(cpu), statistics.median(client.rss_mb(u) for u in units)]
 
 
-def table(header: list[str], rows: list[list[str]]) -> str:
-    widths = [max(len(cell) for cell in column) for column in zip(header, *rows)]
-    return "\n".join("  ".join(c.rjust(w) for c, w in zip(line, widths)) for line in [header, *rows])
+def median(values: list[float]) -> float | None:
+    return statistics.median(values) if values else None  # None: no sample
+
+
+CLIENT_COLUMNS = ["cli", "win", "lines", "int_n", "int_p50", "int_p95", "int_max", "int_2T+", "tgt_n",
+                  "tgt-now_p50", "tgt-now_min", "tgt-now_max", "tgt-x_p50", "delay_ms", "done", "late",
+                  "late_max_ms", "evicted", "no_stamp", "unmapped", "overflow"]
+
+
+def tiles(lines: list[Jitter], start: float, view_window_s: float) -> list[Histogram]:
+    """The stamp-interval histograms of lines at least a view window apart, the first a view window
+    after the window's start. Each holds the intervals of the view window before its line, so
+    together they count each interval inside the window at most once."""
+    out, edge = [], start + view_window_s
+    for line in lines:
+        if line.at >= edge:
+            edge = line.at + view_window_s
+            if line.intervals:
+                out.append(line.intervals)
+    return out
+
+
+def client_cells(client: int, index: int, lines: list[Jitter], start: float,
+                 timing: NetTiming) -> list[float | None]:
+    held = tiles(lines, start, timing.view_window_s)
+    target = [line.target_minus_today_ms for line in lines if line.target_minus_today_ms is not None]
+    totals = [sum(column) for column in zip(*(line.completion for line in lines))]
+    return [client, index, len(lines), sum(h.n for h in held), median([h.p50_ms for h in held]),
+            median([h.p95_ms for h in held]), max((h.max_ms for h in held), default=None),
+            sum(sum(h.bins[2:]) for h in held),  # bins 2 and up: two ticks or more
+            len(target), median(target), min(target, default=None), max(target, default=None),
+            median([line.target_above_x_ms for line in lines if line.target_above_x_ms is not None]),
+            statistics.median(line.delay_ms for line in lines), totals[0], totals[1],
+            max(line.worst_lag_ms for line in lines), *totals[2:]]
+
+
+SERVER_COLUMNS = ["link", "win", "state", "gap_n", "gap_p50", "gap_p95", "gap_max", "gaps>=floor", "gaps>=ceil",
+                  "S_ms", "stale_arr", "stale_decl"]
+
+
+def server_cells(link: str, index: int, arrival: Arrival, timing: NetTiming) -> list[float | str | None]:
+    gaps = arrival.gaps
+    if gaps is None:
+        census = [0, None, None, None, 0, 0]
+    else:
+        firsts = [gaps.first_from(bound_s * 1e3) for bound_s in (timing.stale_floor_s, timing.stale_ceil_s)]
+        census = [gaps.n, gaps.p50_ms, gaps.p95_ms, gaps.max_ms,
+                  *(None if first is None else sum(gaps.bins[first:]) for first in firsts)]
+    return [link, index, arrival.state, *census, arrival.threshold_ms, arrival.stale_arrivals, arrival.declarations]
+
+
+def cell(value: float | str | None) -> str:
+    return "-" if value is None else value if isinstance(value, str) else fmt(value)
+
+
+def table(header: list[str], rows: list[list], labels: int) -> tuple[str, dict]:
+    """The rows, then their median, min and max (DERIVED) over every row's number in each column
+    after the first `labels`: the printed table and its `results.json` entry."""
+    spread = {}
+    for name, pick in (("median", statistics.median), ("min", min), ("max", max)):
+        numbers = [[v for v in column if isinstance(v, (int, float))] for column in list(zip(*rows))[labels:]]
+        spread[name] = [pick(column) if column else None for column in numbers]
+    printed = [[cell(v) for v in row] for row in rows]
+    printed += [[name] + [""] * (labels - 1) + [cell(v) for v in values] for name, values in spread.items()]
+    widths = [max(len(c) for c in column) for column in zip(header, *printed)]
+    text = "\n".join("  ".join(c.rjust(w) for c, w in zip(line, widths)) for line in [header, *printed])
+    return text, {"columns": header, "rows": rows, "spread": spread}
 
 
 def cold_start(machine: Machine) -> str:
@@ -771,25 +1008,41 @@ def cold_start(machine: Machine) -> str:
 
 def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], log: ServerLog,
            windows: list[Window], server_samples: list[Sample], client_samples: list[Sample],
-           client_journals: list[str]) -> tuple[str, dict]:
+           client_journals: list[str], timing: NetTiming) -> tuple[str, dict]:
     """The printed report, scrubbed, and its numbers for `results.json`."""
     # Server kernel time to client kernel time, through the operator's clock.
     to_client = server.boot_at - client.boot_at
-    starving = [jitter(journal, k) for k, journal in enumerate(client_journals, 1)]
-    rows = [window_cells(i, w, log.combat_open, interval(server_samples, w.start, w.end),
-                         interval(client_samples, w.start + to_client, w.end + to_client), to_client, starving)
-            for i, w in enumerate(windows, 1)]
-    spread = {name: [statistics.median(col), min(col), max(col)] for name, col in zip(COLUMNS[2:], zip(*(r[2:] for r in rows)))}
+    records = [jitter(journal, k) for k, journal in enumerate(client_journals, 1)]
+    spans = [(i, w, w.start + to_client, w.end + to_client) for i, w in enumerate(windows, 1)]
+    # Per window, each client's lines in it.
+    inside = [[client_lines(own, start, end, k) for k, own in enumerate(records, 1)] for _, _, start, end in spans]
+    main, main_json = table(COLUMNS, [window_cells(i, w, log.combat_open, interval(server_samples, w.start, w.end),
+                                                   interval(client_samples, start, end), inside[i - 1])
+                                      for i, w, start, end in spans], 2)
+    views, views_json = table(CLIENT_COLUMNS, [client_cells(k, i, inside[i - 1][k - 1], start, timing)
+                                               for k in range(1, s.clients + 1) for i, _, start, _ in spans], 2)
+    # Each connected link at each line, links in first-seen order.
+    arrivals = {(link.link, i): link.arrival for i, w in enumerate(windows, 1) for link in w.row.inputs if link.arrival}
+    links = list(dict.fromkeys(link for link, _ in arrivals))
+    gaps, gaps_json = table(SERVER_COLUMNS, [server_cells(link, i, arrivals[link, i], timing) for link in links
+                                             for i in range(1, len(windows) + 1) if (link, i) in arrivals], 3)
+    # Every gap histogram has the same tick-wide bins.
+    sample = next((a.gaps for a in arrivals.values() if a.gaps), None)
+    edges = ", ".join("none recorded" if sample is None else
+                      f"from {first * sample.bin_ms:g} ms" if (first := sample.first_from(b * 1e3)) is not None else
+                      f"unknown: the open-ended bin from {(len(sample.bins) - 1) * sample.bin_ms:g} ms straddles it"
+                      for b in (timing.stale_floor_s, timing.stale_ceil_s))
     lines = [
         f"recipe: release {s.tag}; server {s.server_type} ({host['cpus']} CPUs, {host['model']}); "
         f"client machine {s.client_type}; {s.bots} bots + {s.clients} clients; "
         f"{len(windows)} windows of {s.window_s} s from {WARMUP_S} s after the last slot",
+        f"net timing ({NET_TIMING} at {s.tag}): view window {timing.view_window_s:g} s, uplink window "
+        f"{timing.uplink_window_s:g} s, stale floor {timing.stale_floor_s * 1e3:g} ms, ceiling "
+        f"{timing.stale_ceil_s * 1e3:g} ms",
         cold_start(server),
         cold_start(client),
         "",
-        table(COLUMNS, [[fmt(v) for v in r] for r in rows]
-              + [[label, ""] + [fmt(spread[name][i]) for name in COLUMNS[2:]]
-                 for i, label in enumerate(("median", "min", "max"))]),
+        main,
         "",
         "Window cells are MEASURED: one server_stats line each (tick percentiles over the window's own ticks, "
         "*_ms; srv_cpu% of one core; link_* the per-link payload kB/s the server queued, IP/UDP headers "
@@ -797,8 +1050,39 @@ def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], 
         "(starved_ms: the most any client's presented cursor ran past its newest tick), and the 1 Hz samplers "
         "(*_busy% and steal% of the whole machine; cli_cpu% of one core per client; *_mb resident). "
         "median/min/max rows are DERIVED across the windows. at_s: window start, s after combat opened.",
+        "",
+        "View clock, per client and window (src/net/view_clock.rs, in the client_jitter lines):",
+        views,
+        "",
+        f"lines: the window's client_jitter lines. int_*: intervals between the server frame-start stamps of "
+        f"consecutively completed stamped ticks, MEASURED, from lines at least the {timing.view_window_s:g} s view "
+        f"window apart, whose histograms count each interval inside the window at most once: int_n their count, "
+        f"int_max the largest, int_2T+ those of two ticks or more (a tick that never completed, or a long server "
+        f"frame); int_p50 and int_p95 the median of those histograms' nearest-rank p50 and p95 (DERIVED). "
+        f"tgt-now_*: the would-be delay target minus today's cursor lag, both on the stamp map so the clock "
+        f"offset cancels (negative: the target presents newer state than today), DERIVED by the client at each of "
+        f"the tgt_n lines that had one; median, min and max over them. tgt-x_p50: the target above the newest "
+        f"sampled tick's lateness (DERIVED), median over the lines. delay_ms: today's applied minimum interpolation "
+        f"delay, MEASURED, median over the lines. done, late, evicted, no_stamp, unmapped, overflow: whole-tick "
+        f"completion counts summed over the lines, MEASURED: ticks completed; completed in a later frame than "
+        f"their stamp arrived (late_max_ms the longest such wait); stamps whose tick never completed within the "
+        f"receipt horizon; completions without a retained stamp; stamps without a checkpoint mapping; stamps a "
+        f"full receipt queue dropped. median/min/max rows: DERIVED over every client and window.",
+        "",
+        "Input gaps, per server link and window (src/net/input_gap.rs, the server_stats line's inputs[].arrival):",
+        gaps,
+        "",
+        f"gap_*: input arrival gaps (the silence before each arrival, at most one tick charged per empty server "
+        f"receive), MEASURED over the {timing.uplink_window_s:g} s uplink window before the window's line only: "
+        f"gap_n their count, p50, p95, max nearest rank; gaps>=floor and gaps>=ceil those in the tick-wide bins "
+        f"wholly at or above the floor and the ceiling ({edges}). "
+        f"S_ms: the would-be stale threshold, clamp(largest gap + one tick, floor, ceiling), DERIVED by the server "
+        f"at the line. stale_arr: arrivals after a silence above S; stale_decl: silences that crossed S; both "
+        f"MEASURED over the whole window. state: the link's at the line. median/min/max rows: DERIVED over every "
+        f"link and window.",
     ]
-    results = {"settings": s.__dict__, "host": host, "columns": COLUMNS, "rows": rows, "spread": spread,
+    results = {"settings": s.__dict__, "host": host, "net_timing": timing.__dict__, "windows": main_json,
+               "view_clock": views_json, "input_gaps": gaps_json,
                "cold_start": {m.role: {"launch_to_kernel_s": m.boot_at - m.launched_at, "error_s": m.boot_error,
                                        "phases_s": m.phases, "rebooted": m.rebooted} for m in (server, client)}}
     return scrub("\n".join(lines)), results
@@ -853,7 +1137,7 @@ def measure(s: Settings, plan: Plan, run_id: str, state: Path) -> None:
     write_private(state / "server.samples", server_samples)
     write_private(state / "client.samples", client_samples)
     text, results = report(s, server, client, host, log, windows, samples(server_samples), samples(client_samples),
-                           client_journals)
+                           client_journals, plan.timing)
     print(text, flush=True)
     write_private(state / "report.txt", text + "\n")
     write_private(state / "results.json", json.dumps(results, indent=1))
