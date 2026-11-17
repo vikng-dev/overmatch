@@ -5,13 +5,13 @@ use super::drive::{DriveAxes, DriveIntent};
 use super::driver::Sensed;
 use super::forces;
 use super::transmission::{
-    ClutchState, DriveConstruction, DriveSupply, NeutralMean, TransmissionAuthoring,
+    ClutchState, Coupling, DriveConstruction, DriveSupply, Output, TransmissionAuthoring,
     TransmissionInput, TransmissionParams, TransmissionReport, TransmissionState,
     drag_throttle_release, motoring_drag_base_share, price_driver_force,
 };
 
 /// Fixture: a lighter three-speed construction using the seed's declared running-gear geometry.
-/// Its engine has a tail past the governor, lower power/weight and a different recirculation path.
+/// Its engine has a tail past the governor, lower power/weight and a distinct gear ladder.
 pub(crate) fn compact_spec() -> crate::spec::TankSpec {
     let mut spec = super::rig_geom::tiger_spec();
     spec.mass = 18_000.0;
@@ -36,10 +36,18 @@ pub(crate) fn compact_spec() -> crate::spec::TankSpec {
     tr.gearbox.shift_secs = crate::provenance::Sourced(0.2); // Fixture interruption.
     tr.steering.radii = vec![(3.0, 8.0), (7.2, 19.2), (15.0, 40.0)];
     tr.steering.reverse_radii = vec![(6.0, 16.0)];
-    tr.steering.capacity = 80_000.0;
-    tr.steering.recirculation = 0.65;
-    tr.brake_force = 50_000.0;
-    tr.brake_static_factor = 1.4;
+    tr.steering.capacity = Some(80_000.0);
+    tr.rated_slope_deg = crate::provenance::Labelled {
+        value: 30.0,
+        label: crate::provenance::Provenance::Fixture("compact rated climbing slope".into()),
+    };
+    tr.mean_hold = Some(crate::provenance::Provenance::StandIn(
+        "compact gearbox-brake torque and reduction missing; rated-grade rule supplies mean capacity".into(),
+    ));
+    tr.brake_static_factor = crate::provenance::Labelled {
+        value: 1.4,
+        label: crate::provenance::Provenance::Fixture("compact static breakaway multiplier".into()),
+    };
     spec
 }
 
@@ -120,9 +128,15 @@ pub(crate) fn lab_authoring() -> TransmissionAuthoring<'static> {
         ],
         reverse_steer_radii_m: &[(3.0, 8.9)],
         steer_capacity_n: 240_000.0,
-        neutral_mean: NeutralMean::Free,
-        recirculation: 0.9,
+        couplings: &[
+            Coupling::Clutch(Output::Mean),
+            Coupling::Steering,
+            Coupling::Stop(Output::Left),
+            Coupling::Stop(Output::Right),
+        ],
+        steering_radius_rounding_share: 0.01, // Fixture: table rounding allowance.
         brake_capacity_n: 120_000.0,
+        mean_hold_capacity_n: None,
         brake_static_factor: 1.6,
         drag_fraction: 0.25,
         // Fixture: six kg m² resolves this curve's idle catch (DERIVED minimum about five).
@@ -149,6 +163,8 @@ pub(crate) const TIGER_BELT_INERTIA: f32 = 4_750.0;
 /// adapter. Exposed as the authoring struct so validator tests can mutate one field and
 /// re-validate.
 pub(crate) fn tiger_authoring() -> TransmissionAuthoring<'static> {
+    let spec = super::rig_geom::tiger_spec();
+    let brakes = &spec.track.powertrain.transmission;
     TransmissionAuthoring {
         idle_rpm: 600.0,
         governed_rpm: 2500.0,
@@ -177,10 +193,21 @@ pub(crate) fn tiger_authoring() -> TransmissionAuthoring<'static> {
         ],
         reverse_steer_radii_m: &[(3.44, 10.2), (5.28, 15.6), (7.62, 22.5), (11.30, 33.4)],
         steer_capacity_n: 250_000.0,
-        neutral_mean: NeutralMean::Held,
-        recirculation: 0.9,
-        brake_capacity_n: 96_000.0,
-        brake_static_factor: 1.5,
+        couplings: &[
+            Coupling::Clutch(Output::Mean),
+            Coupling::Steering,
+            Coupling::Stop(Output::Left),
+            Coupling::Stop(Output::Right),
+            Coupling::Stop(Output::Mean),
+        ],
+        steering_radius_rounding_share: 0.01, // Fixture: table rounding allowance.
+        brake_capacity_n: brakes
+            .brake_capacity_n(spec.mass)
+            .expect("the fixture's rated grade is admitted"),
+        mean_hold_capacity_n: brakes
+            .mean_hold_capacity_n(spec.mass)
+            .expect("the fixture's mean brake is admitted"),
+        brake_static_factor: brakes.brake_static_factor.value,
         drag_fraction: 0.25,
         engine_inertia_kgm2: 4.0,
         clutch_capacity_nm: 2400.0,
@@ -215,16 +242,42 @@ pub(crate) fn compact_drivetrain() -> (FixtureConstruction, TransmissionParams) 
         .track
         .powertrain
         .transmission
-        .params(0.3, 1.0, fp.inertia)
+        .params(0.3, 1.0, fp.inertia, spec.mass)
         .expect("inline Fixture drivetrain must be admitted");
     (fp, tp)
 }
 
-pub(crate) fn class_drivetrains() -> [(FixtureConstruction, TransmissionParams); 3] {
+/// Fixture: side clutches and brakes, with gear-independent radii and no geared steering member.
+pub(crate) fn side_clutch_drivetrain() -> (FixtureConstruction, TransmissionParams) {
+    let mut a = lab_authoring();
+    a.couplings = &[
+        Coupling::Clutch(Output::Left),
+        Coupling::Clutch(Output::Right),
+        Coupling::Stop(Output::Left),
+        Coupling::Stop(Output::Right),
+    ];
+    a.steer_radii_m = &[(3.0, 9.0); 5];
+    a.reverse_steer_radii_m = &[(3.0, 9.0)];
+    a.steer_capacity_n = 0.0;
+    let mut spec = super::rig_geom::tiger_spec();
+    let brakes = &mut spec.track.powertrain.transmission;
+    brakes.rated_slope_deg.value = 28.0; // Fixture: this construction's own climb rating.
+    a.brake_capacity_n = brakes
+        .brake_capacity_n(2.0 * lab_fp().grip.side_weight / super::derive::G)
+        .expect("the fixture's rated grade is admitted");
+    (
+        lab_fp(),
+        TransmissionParams::from_authoring(&a)
+            .expect("Fixture side-clutch construction is admitted"),
+    )
+}
+
+pub(crate) fn class_drivetrains() -> [(FixtureConstruction, TransmissionParams); 4] {
     [
         (lab_fp(), lab_tp()),
         (grade_fixture_fp(), tiger_tp()),
         compact_drivetrain(),
+        side_clutch_drivetrain(),
     ]
 }
 
@@ -265,7 +318,7 @@ pub(crate) fn fresh(tp: &TransmissionParams) -> TransmissionState {
 pub(crate) fn grade_fixture_fp() -> FixtureConstruction {
     let mut fp = lab_fp();
     fp.inertia = TIGER_BELT_INERTIA;
-    fp.grip.side_weight = 57_000.0 * super::derive::G / 2.0;
+    fp.grip.side_weight = super::rig_geom::tiger_spec().mass * super::derive::G / 2.0;
     fp
 }
 

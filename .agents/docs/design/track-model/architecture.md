@@ -686,7 +686,7 @@ the price moves none of the 37 drives (MEASURED, tick for tick, against the law 
 six full-pedal heap starts travel 1966 m with no step down either way.
 
 Admission refuses a ladder whose highest launch gear turns its crank past the limit inside the
-parking tolerance (`PARK_ENGAGE_SPEED`): clause 1 launches from out at any speed inside it, and
+parking tolerance (`park_engage_speed`): clause 1 launches from out at any speed inside it, and
 needs a launch gear that lands there.
 
 At 0.3 pedal from 10° first creeps under both (0.23 m/s at 10°, 0.03 m/s at 12°): no gear pulls

@@ -600,7 +600,8 @@ fn record_tick(
                 .collect();
             // Canonical transmission order; null on non-owned replicas (owner-only wire state).
             let trn = transmission.map_or(Value::Null, |transmission| {
-                let mut trn = Vec::with_capacity(8);
+                let mut trn =
+                    Vec::with_capacity(transmission_state_projection(&transmission.0).len());
                 for field in transmission_state_projection(&transmission.0) {
                     match field {
                         TransmissionProjectionValue::U8(value) => trn.push(Value::from(value)),

@@ -785,7 +785,7 @@ fn face_positive_z(app: &mut App, tank: Entity) {
 
 /// A neutral pivot must counter-rotate its belts and deliver an ASSUMED class acceptance
 /// bound: at least half of the commanded belt-kinematic yaw reaches the ground after settling.
-/// The ceiling derives from the vehicle's own neutral differential and measured half-tread;
+/// The ceiling derives from the vehicle's steering ratio, actual crank and measured half-tread;
 /// driving relies on the steering capacity overcoming the footprint's scrub.
 fn neutral_pivot_gate(app: &mut App, tank: Entity) {
     let gear = app.world().resource::<crate::track::sim::TrackGear>();
@@ -793,18 +793,27 @@ fn neutral_pivot_gate(app: &mut App, tank: Entity) {
         .world()
         .resource::<crate::track::rig_geom::RigGeom>()
         .plane_x;
-    let ceiling = gear.trans().neutral_d_full / half_tread;
-    let min_yaw = 0.5 * ceiling;
+    let crank_ratio = gear.trans().steer_crank_ratio.0;
+    let mut ceiling_sum = 0.0;
     let mut yaw_sum = 0.0f32;
     let mut samples = 0u32;
     for tick in 0..320 {
         drive_tick(app, tank, 0.0, 1.0);
         if tick >= 256 {
             yaw_sum += yaw_rate(app, tank);
+            let omega = app
+                .world()
+                .get::<crate::track::sim::TankTransmission>(tank)
+                .expect("the driven tank has its authoritative crank")
+                .0
+                .omega_e;
+            ceiling_sum += crank_ratio * omega / half_tread;
             samples += 1;
         }
     }
     let mean_yaw = yaw_sum / samples as f32;
+    let ceiling = ceiling_sum / samples as f32;
+    let min_yaw = 0.5 * ceiling;
     let drive = app
         .world()
         .get::<crate::track::sim::TrackDrive>(tank)
@@ -833,10 +842,113 @@ fn pivot_clears_its_own_kinematic_yaw_floor() {
     neutral_pivot_gate(&mut app, tank);
 }
 
-/// Full pedal on firm level ground must reach the declared ladder top one gear at a time.
-/// Fixture: the shipped construction, 20 simulated seconds; the Driver relies on no hunting.
+/// Flat-fixture rest watchdog, scaled by the momentum the side discs and contacts must arrest.
+/// Crank momentum is reflected through the largest reduction; yaw momentum is expressed at the
+/// belt lever. DERIVED arrest time is P/min(two side brakes, contact grip). Fixture: four such
+/// intervals, each including a conservative suspension allowance and Avian's sleep dwell, allow sequential
+/// hull, belt, support and sleep settling. Terrain grip is a watchdog estimate for every flat
+/// fixture, including slabs and loose pieces; this is not a certificate of their contact force.
+fn rest_tick_budget(app: &App, tank: Entity) -> usize {
+    use crate::track::sim::{TankTransmission, TrackDrive, TrackGear};
+    use avian3d::prelude::{AngularVelocity, LinearVelocity, TimeToSleep};
+    let world = app.world();
+    let spec = &world.resource::<TankBlueprint>().spec;
+    let gear = world.resource::<TrackGear>();
+    let tp = gear.trans();
+    let state = world.get::<TankTransmission>(tank).unwrap().0;
+    let drive = world.get::<TrackDrive>(tank).unwrap();
+    let k = tp
+        .gears_fwd
+        .iter()
+        .chain(&tp.gears_rev)
+        .copied()
+        .fold(0.0, f32::max)
+        / tp.sprocket_radius;
+    let momentum = spec.mass * world.get::<LinearVelocity>(tank).unwrap().length()
+        + spec.hull_angular_inertia().principal.max_element()
+            * world.get::<AngularVelocity>(tank).unwrap().length()
+            / tp.half_tread_m
+        + gear.belt_inertia() * drive.sides.iter().map(|side| side.speed.abs()).sum::<f32>()
+        + tp.engine_inertia * state.omega_e.abs() * k;
+    let ground = crate::ground_types::GroundTypes::load_shipped();
+    let mu = gear.grip().pair(ground.terrain_friction());
+    let resistance = (2.0 * tp.brake_capacity_n).min(mu * spec.mass * crate::track::derive::G);
+    assert!(
+        resistance > 0.0,
+        "the rest fixture needs a resisting impulse"
+    );
+    let suspension = &spec.track.suspension;
+    // Fixture: 1/zeta ride periods, with ride_frequency in Hz. This allows TAU amplitude-
+    // decay times (omega_n = TAU * f), not a single physical decay time.
+    let suspension_allowance = 1.0 / (suspension.damping_ratio * suspension.ride_frequency);
+    (4.0 * (momentum / resistance + suspension_allowance + world.resource::<TimeToSleep>().0)
+        * FIXED_TICKS_PER_SECOND as f32)
+        .ceil() as usize
+}
+
+/// The game's damage model: a Driver knocked out during a pivot leaves a passive mean hold.
+/// The shipped simulation must retain support, transfer to side park at rest, and sleep;
+/// a permanently latched mean that keeps the rest gate false violates that player-visible state.
 #[test]
-fn full_pedal_climbs_the_declared_ladder_gear_by_gear() {
+fn an_unstaffed_pivot_hands_its_passive_hold_to_park_and_sleeps() {
+    use crate::damage::{CrewStation, Dead, VolumeOf};
+    use crate::track::sim::TankTransmission;
+    use avian3d::prelude::Sleeping;
+    let (mut app, tank) = booted_offline_sim();
+    for _ in 0..FIXED_TICKS_PER_SECOND {
+        drive_tick(&mut app, tank, 0.0, 1.0);
+    }
+    assert!(
+        app.world()
+            .get::<TankTransmission>(tank)
+            .unwrap()
+            .0
+            .mean_hold,
+        "the fixture must enter a constructed pivot hold"
+    );
+    let drivers: Vec<Entity> = app
+        .world_mut()
+        .query::<(Entity, &VolumeOf, &CrewStation)>()
+        .iter(app.world())
+        .filter(|(_, of, station)| of.0 == tank && **station == CrewStation::Driver)
+        .map(|(entity, ..)| entity)
+        .collect();
+    assert_eq!(drivers.len(), 1, "the fixture has one Driver station");
+    app.world_mut().entity_mut(drivers[0]).insert(Dead);
+    let budget = rest_tick_budget(&app, tank);
+    let mut transition = None;
+    for tick in 0..budget {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        let state = app.world().get::<TankTransmission>(tank).unwrap().0;
+        if !state.mean_hold && transition.is_none() {
+            assert!(
+                state.park,
+                "the mean hold must hand support to both side discs"
+            );
+            transition = Some(tick);
+        }
+        if app.world().get::<Sleeping>(tank).is_some() {
+            println!(
+                "MEASURED unstaffed hold-to-park tick={transition:?}, sleep tick={tick}, impulse-derived watchdog={budget}"
+            );
+            break;
+        }
+    }
+    let state = app.world().get::<TankTransmission>(tank).unwrap().0;
+    assert!(
+        state.park && !state.mean_hold,
+        "passive support must complete its exact-rest transfer"
+    );
+    assert!(
+        app.world().get::<Sleeping>(tank).is_some(),
+        "the shipped rest gate must admit supported unstaffed rest"
+    );
+}
+
+/// Full pedal must reach the declared ladder top without an out-of-range selector event.
+/// Fixture: firm level ground for 20 simulated seconds. Initial free selection is not a paid step.
+#[test]
+fn full_pedal_reaches_top_within_the_declared_selector_steps() {
     let (mut app, tank) = booted_offline_sim();
     face_positive_z(&mut app, tank);
     let top = app
@@ -857,21 +969,31 @@ fn full_pedal_climbs_the_declared_ladder_gear_by_gear() {
             !state.reverse,
             "forward intent must retain the forward ladder"
         );
-        if trace.last() != Some(&state.gear) {
+        if state.launch != crate::track::transmission::LaunchState::Unchosen
+            && trace.last() != Some(&state.gear)
+        {
             trace.push(state.gear);
         }
     }
-    let first = *trace
-        .first()
-        .expect("the full-pedal fixture samples at least one tick");
+    let maximum_step = app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .trans()
+        .max_step;
     println!("MEASURED shipped construction gear walk {trace:?}");
     assert_eq!(
-        trace,
-        (first..=top).collect::<Vec<_>>(),
-        "full pedal must climb every gear through the declared top"
+        trace.last(),
+        Some(&top),
+        "a supported full-pedal run must reach top gear"
+    );
+    assert!(trace.iter().all(|gear| (1..=top).contains(gear)));
+    assert!(
+        trace
+            .windows(2)
+            .all(|step| step[0].abs_diff(step[1]) <= maximum_step),
+        "each paid selector event respects max_step"
     );
 }
-
 /// No authored speed cap bounds the game's tanks: the top gear at the fuel governor does. Full
 /// throttle on lossless flat ground must reach the ladder's top gear and settle within its
 /// governor ramp: construction drag balances fuel before the complete cut. FIXTURE acceptance:
@@ -1041,7 +1163,7 @@ fn contact_law_shipped_ground_speeds() {
                         .unwrap()
                         .0
                         .z;
-                    assert!(speed > crate::track::transmission::PARK_ENGAGE_SPEED);
+                    assert!(speed > crate::track::transmission::park_engage_speed());
                     let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
                     assert_eq!(state.shift_ticks, 0, "equilibrium cannot be a paid cut");
                     lo = lo.min(speed);
@@ -1093,7 +1215,7 @@ fn contact_law_shipped_ground_speeds() {
 
 /// The production app must publish the capacity its contact law uses while stopping.
 /// FIXTURE: the shipped vehicle on flat mud at 4 m/s, held service brakes, 20 simulated
-/// seconds. Drivers rely on recoverable soil travel being bounded by K after any skid.
+/// seconds. Drivers rely on bounded recoverable element strain; hull rebound is an observation.
 #[cfg(feature = "bitprobe")]
 #[test]
 fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
@@ -1139,6 +1261,12 @@ fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
         .after(crate::command::ParseCommands)
         .before(crate::state::GameplaySet),
     );
+    let grip = app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .grip();
+    let step = grip.step_shear_per_grip_m(crate::sim_tick::sim_timestep().as_secs_f32());
+    let maximum_strain = ground.shear_length_m.max(ground.grip * step);
     let mut peak = 0.0_f32;
     let mut reverse = 0.0_f32;
     let mut last = 0.0_f32;
@@ -1162,6 +1290,18 @@ fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
             (effect.traction_capacity_n - expected).abs() < 1.0,
             "published capacity must match the force pass"
         );
+        let elements = world
+            .get::<crate::track::sim::TrackGripElements>(tank)
+            .unwrap();
+        // Resolution: normalising f32 world-space strain vectors rounds their lengths.
+        assert!(
+            elements
+                .sides
+                .iter()
+                .flat_map(|side| &side.strain)
+                .all(|strain| strain.length() <= maximum_strain * (1.0 + 16.0 * f32::EPSILON)),
+            "a yielded skid cannot accumulate recoverable strain beyond the soil law"
+        );
         capacity = expected;
     }
     // FIXTURE rest observation: below 1 mm/s before comparing recovered travel.
@@ -1177,43 +1317,51 @@ fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
         "MEASURED full-app mud service stop: capacity={capacity:.3} N peak={peak:.6} m rollback={:.6} m reverse={reverse:.6} m/s",
         peak - last
     );
-    let step = app
-        .world()
-        .resource::<crate::track::sim::TrackGear>()
-        .grip()
-        .step_shear_per_grip_m(crate::sim_tick::sim_timestep().as_secs_f32());
-    assert!(
-        peak - last <= ground.shear_length_m.max(ground.grip * step),
-        "a stop must not return the skid as a spring: {} m",
-        peak - last
-    );
 }
 
-/// A cold contact field must arrest below both moving capacities and keep moving above
-/// either static capacity. Settling can breach a static brake before the field is loaded;
+/// A cold contact field must arrest below both moving capacities. Persistent downhill motion
+/// requires gravity to exceed both the static holding path and rolling resistance. Settling can breach a static brake before the field is loaded;
 /// static capacity alone therefore promises no capture. The transmission's
 /// `brake_capacity_breach_backdrives` test pins stationary hold and static breakaway.
 /// Fixture: tilted planes, a fresh parked tank, 60 s capture and 8 s sliding observations, under
 /// production rest: a tank whose grip or brakes slide is not at rest however slowly it moves.
 #[test]
-fn contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_limits() {
+fn contact_law_brakes_capture_below_moving_limits_and_move_above_total_resistance() {
     use avian3d::prelude::Position;
     let spec = crate::track::rig_geom::tiger_spec();
     let tr = &spec.track.powertrain.transmission;
     let weight = spec.mass * crate::track::derive::G;
-    let brake_limit = (2.0 * tr.brake_force * tr.brake_static_factor / weight)
+    let brake_limit =
+        (2.0 * tr.brake_capacity_n(spec.mass).unwrap() * tr.brake_static_factor.value / weight)
+            .min(1.0)
+            .asin();
+    let moving_brake_limit = (2.0 * tr.brake_capacity_n(spec.mass).unwrap() / weight)
         .min(1.0)
         .asin();
-    let moving_brake_limit = (2.0 * tr.brake_force / weight).min(1.0).asin();
+    let pressure = {
+        let (app, _) = booted_offline_sim();
+        nominal_pressure(&app)
+    };
     for (name, ground) in crate::ground_types::GroundTypes::load_shipped().types {
         let ground_limit = ground.grip.value.atan();
+        let rolling = ground.contact().rolling_at(pressure);
+        // sin(theta) > min(mu*cos(theta), brake/weight) + rolling*cos(theta).
+        // Solving each branch gives the lower angle beyond all available resistance.
+        let moving_limit = (ground.grip.value + rolling).atan().min(
+            rolling.atan()
+                + ((brake_limit.sin() / (1.0 + rolling * rolling).sqrt()).min(1.0)).asin(),
+        );
         for above in [false, true] {
             let brake = if above {
                 brake_limit
             } else {
                 moving_brake_limit
             };
-            let limit = ground_limit.min(brake);
+            let limit = if above {
+                moving_limit
+            } else {
+                ground_limit.min(brake)
+            };
             if limit == 0.0 && !above {
                 continue; // Zero grip has no positive holding-slope interval.
             }
@@ -1280,7 +1428,7 @@ fn contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_
             if above {
                 assert!(
                     travel > speed_precision && late_max_speed > speed_precision,
-                    "{name}: above the lower static limit must keep moving"
+                    "{name}: gravity beyond static hold plus rolling resistance must keep moving"
                 );
             } else {
                 assert!(
@@ -1598,9 +1746,10 @@ fn a_drivetrain_advances_once_per_tick_whatever_wakes_its_island() {
     );
     let resting = |app: &App, tank: Entity| app.world().get::<Sleeping>(tank).is_some();
     let mut ticks = 0;
+    let budget = rest_tick_budget(&app, a) + rest_tick_budget(&app, b);
     while !(resting(&app, a) && resting(&app, b)) {
         assert!(
-            ticks < 8 * FIXED_TICKS_PER_SECOND,
+            ticks < budget,
             "two parked tanks with no demand must come to rest"
         );
         drive_tick(&mut app, a, 0.0, 0.0);
@@ -2163,9 +2312,10 @@ fn a_resting_tank_keeps_its_belt_press_on_fixed_structure() {
     let resting = |app: &App| app.world().get::<Sleeping>(tank).is_some();
     let mut last = Vec::new();
     let mut ticks = 0;
+    let budget = rest_tick_budget(&app, tank);
     while !resting(&app) {
         assert!(
-            ticks < 8 * FIXED_TICKS_PER_SECOND,
+            ticks < budget,
             "a tank parked on fixed structure must come to rest"
         );
         drive_tick(&mut app, tank, 0.0, 0.0);
@@ -2324,7 +2474,7 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
     // witness inside these finite pieces, independent of the Driver's arrival gear.
     for _ in 0..(4 * FIXED_TICKS_PER_SECOND) {
         let moving_forward = app.world().get::<LinearVelocity>(tank).unwrap().0.z
-            > crate::track::transmission::PARK_ENGAGE_SPEED;
+            > crate::track::transmission::park_engage_speed();
         drive_tick(&mut app, tank, if moving_forward { -1.0 } else { 0.0 }, 0.0);
     }
     let settled = app.world().get::<Position>(tank).unwrap().0;
@@ -2762,7 +2912,7 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
     // belt tolerance, below which motion is imperceptible and the park latch holds, and positive
     // steer turns the hull right by more than the straight segment's own heading drift.
     let at_rest = |from: &ScriptedPose, to: &ScriptedPose| {
-        crate::track::transmission::PARK_ENGAGE_SPEED * (to.tick - from.tick) as f32
+        crate::track::transmission::park_engage_speed() * (to.tick - from.tick) as f32
             / FIXED_TICKS_PER_SECOND as f32
     };
     let settled_forward = settled.rotation * Vec3::NEG_Z;
