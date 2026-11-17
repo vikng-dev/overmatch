@@ -2661,7 +2661,8 @@ fn fixed_intent_has_no_order_flips_after_one_transition_across_constructions() {
                                             }
                                             previous = Some(signature);
                                             let prior_reverse = st.reverse;
-                                            speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
+                                            speeds =
+                                                substep_tick(&fp, &tp, &mut st, &inp).next_speeds;
                                             direction_cuts +=
                                                 usize::from(st.reverse != prior_reverse);
                                             assert!(
@@ -2736,7 +2737,7 @@ fn pivot_release_hands_static_load_to_side_stops_from_exact_rest() {
                         if brake {
                             inp.intent = DriveIntent::Brake;
                         }
-                        let report = step(&fp, &tp, &mut st, &inp);
+                        let report = substep_tick(&fp, &tp, &mut st, &inp);
                         speeds = report.next_speeds;
                         assert_eq!(
                             speeds[0] + speeds[1],
@@ -2792,11 +2793,17 @@ fn no_fuel_or_external_work_cannot_raise_total_kinetic_energy() {
                     // The game's damage model: no served combustion or Driver catch, construction drag remains.
                     inp.supply.task_rate = 1.0;
                     inp.supply.engine_in_action = false;
-                    speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
+                    speeds = substep_tick(&fp, &tp, &mut st, &inp).next_speeds;
                     let after = energy(st.omega_e, speeds);
-                    // Resolution: cast of the f64 block solution into replicated f32 speeds.
+                    // Resolution: each of N substeps rounds speeds to f32. Squared speed
+                    // contributes at most gamma(2N) relative error, with epsilon used as a
+                    // conservative unit roundoff; the zero-energy corner is exact.
+                    let rounding = 2.0
+                        * f64::from(avian3d::prelude::SubstepCount::default().0)
+                        * f64::from(f32::EPSILON);
+                    let allowance = rounding / (1.0 - rounding);
                     assert!(
-                        after <= before * (1.0 + 8.0 * f64::from(f32::EPSILON)) + 1e-8,
+                        after <= before * (1.0 + allowance),
                         "passive energy grew {before} -> {after}"
                     );
                 }
@@ -2846,7 +2853,7 @@ fn locked_rows_reproduce_authored_radii_within_the_rounding_bound() {
                         ..fresh(&tp)
                     };
                     let inp = input(dir, steer, [mean + c * omega, mean - c * omega], [0.0; 2]);
-                    let rep = step(&fp, &tp, &mut st, &inp);
+                    let rep = substep_tick(&fp, &tp, &mut st, &inp);
                     assert!(rep.locked, "unloaded synchronous clutch must hold");
                     let [left, right] = rep.next_speeds;
                     let radius_over_half_tread = ((left + right) / (left - right)).abs();
@@ -2977,7 +2984,7 @@ fn parked_static_load_survives_pivot_and_service_handover() {
                 if !pivot {
                     inp.intent = DriveIntent::Brake;
                 }
-                let report = step(&fp, &tp, &mut state, &inp);
+                let report = substep_tick(&fp, &tp, &mut state, &inp);
                 assert_eq!(report.next_speeds[0] + report.next_speeds[1], 0.0);
                 if !pivot {
                     assert_eq!(report.next_speeds, [0.0; 2]);

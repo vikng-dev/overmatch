@@ -279,6 +279,77 @@ fn flat() -> HeightGrid {
 }
 
 impl Bed {
+    /// The ignored cost observation brackets the production drivetrain systems only.
+    #[cfg(all(feature = "bitprobe", feature = "dev_ui"))]
+    fn measure_drive_cost(mut self, label: &str, run: usize, throttle: f32, steer: f32) {
+        crate::track::sim::cost_probe::install(&mut self.app);
+        // Fixture: ten seconds at the fixture's requested input, after its normal settling/run-up.
+        let ticks = 10 * TICKS;
+        let mut costs = Vec::with_capacity(ticks);
+        let mut work = Vec::with_capacity(ticks);
+        let mut mechanical = [0usize; 5];
+        let mut contact_points = Vec::with_capacity(ticks);
+        for _ in 0..ticks {
+            self.tick(throttle, steer);
+            costs.push(
+                std::mem::take(
+                    &mut self
+                        .app
+                        .world_mut()
+                        .resource_mut::<crate::track::sim::cost_probe::Meter>()
+                        .ns,
+                ) as f64
+                    / 1000.0,
+            );
+            work.push(
+                self.app
+                    .world()
+                    .get::<crate::track::sim::TrackGripEffect>(self.tank)
+                    .unwrap()
+                    .transmission_probe
+                    .assignments_tried,
+            );
+            let probe = self
+                .app
+                .world()
+                .get::<crate::track::sim::TrackGripEffect>(self.tank)
+                .unwrap()
+                .transmission_probe;
+            mechanical[0] += probe.mechanical_advances;
+            mechanical[1] += probe.mechanical_rows;
+            mechanical[2] += probe.mechanical_assignments;
+            mechanical[3] = mechanical[3].max(probe.max_substep_rows);
+            mechanical[4] = mechanical[4].max(probe.max_substep_assignments);
+            let graph = self
+                .app
+                .world()
+                .resource::<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>();
+            // Sleeping bodies have no solver index and no active contact rows.
+            let count = self
+                .app
+                .world()
+                .get::<avian3d::dynamics::solver::solver_body::SolverBodyIndex>(self.tank)
+                .map_or(0, |index| {
+                    graph
+                        .colors
+                        .iter()
+                        .flat_map(|color| &color.contact_constraints)
+                        .filter(|constraint| {
+                            constraint.body_index1 == *index || constraint.body_index2 == *index
+                        })
+                        .map(|constraint| constraint.points.len())
+                        .sum::<usize>()
+                });
+            contact_points.push(count);
+        }
+
+        costs.sort_by(f64::total_cmp);
+        println!(
+            "DRIVECOST {}",
+            json!({"label":label, "run":run, "ticks":ticks, "mean_us":costs.iter().sum::<f64>() / ticks as f64, "median_us":costs[ticks / 2], "assignments_mean_tick":work.iter().sum::<usize>() as f64 / ticks as f64, "assignments_max_tick":work.iter().max().unwrap(), "mechanical_advances":mechanical[0], "rows_mean_substep":mechanical[1] as f64 / mechanical[0] as f64, "assignments_mean_substep":mechanical[2] as f64 / mechanical[0] as f64, "rows_max_substep":mechanical[3], "assignments_max_substep":mechanical[4], "active_tank_contact_points_mean_tick":contact_points.iter().sum::<usize>() as f64 / ticks as f64, "active_tank_contact_points_max_tick":contact_points.iter().max().unwrap()})
+        );
+    }
+
     fn new(grid: HeightGrid) -> Self {
         let mut app = booted_driving_grid(grid);
         app.init_resource::<crate::cost::stages::Stages>();
@@ -774,6 +845,21 @@ impl Bed {
             .iter()
             .map(|(k, v)| (k.clone(), v.as_f64().expect("a count is a number")))
             .collect()
+    }
+}
+
+/// Cost is an observation on the existing headless fixtures, never an acceptance condition.
+#[cfg(all(feature = "bitprobe", feature = "dev_ui"))]
+#[test]
+#[ignore = "the drivetrain relocation cost reading, run on demand"]
+fn drive_relocate_cost_probe() {
+    for run in 1..=3 {
+        let (bed, _) = rubble_climb::park_arrival(
+            Some((rubble_climb::Heap::Yard, rubble_climb::APPROACH_M)),
+            "yard",
+        );
+        bed.measure_drive_cost("parked-yard", run, 0.0, 0.0);
+        turn_probe::measure_drive_cost(run);
     }
 }
 
@@ -2961,18 +3047,27 @@ fn the_drivetrains_books_close_over_standing_matter() {
         let probe = (bed.app.world().get::<TrackGripEffect>(tank))
             .expect("a driving tank")
             .transmission_probe;
-        // What the belts paid the support (W): the reaction each landed against, less the bill.
-        let paid: f32 = (0..2)
+        // Support work (J) is integrated sprocket work less belt kinetic gain and the
+        // previously billed hard reaction's work over the same time-centred belt travel.
+        let work = probe.belt_work;
+        let paid: f64 = (0..2)
             .map(|i| {
-                let (from, to) = (probe.speeds[i], probe.next_speeds[i]);
-                (probe.forces[i] - belt * (to - from) / DT - read[i]) * (from + to) / 2.0
+                let (from, to) = (
+                    f64::from(work.start_speeds[i]),
+                    f64::from(probe.next_speeds[i]),
+                );
+                work.sprocket_work_j[i]
+                    - 0.5 * f64::from(belt) * (to * to - from * from)
+                    - f64::from(read[i]) * work.travel_m[i]
             })
             .sum();
         read = bed
             .hard_reactions()
             .map(|hard| hard.map_or(0.0, |hard| hard.belt));
-        let charge = (read[0] * probe.next_speeds[0] + read[1] * probe.next_speeds[1]) * DT;
-        let excess = energy(bed) - held - (gravity + support - paid + rows) * DT - charge + bill;
+        // The narrow-phase hook precedes substeps and reads the canonical tick-start belts.
+        let charge = (read[0] * work.start_speeds[0] + read[1] * work.start_speeds[1]) * DT;
+        let excess =
+            energy(bed) - held - (gravity + support + rows) * DT + paid as f32 - charge + bill;
         bill = charge;
         most = most.max(excess);
         carried |= straddle.carried();

@@ -1232,7 +1232,7 @@ fn park_summary(ticks: &[ParkTick]) -> Value {
 /// The tank on `heap`, driven at full throttle from the given approach in m until its hull origin
 /// passes the heap's middle, then braked to a stop; or on flat ground for `None`. Returns the bed
 /// and the arrival's record.
-fn park_arrival(heap: Option<(Heap, f32)>, label: &str) -> (Bed, Value) {
+pub(super) fn park_arrival(heap: Option<(Heap, f32)>, label: &str) -> (Bed, Value) {
     match heap {
         None => {
             let mut bed = house_bed();

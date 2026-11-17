@@ -93,7 +93,45 @@ pub(crate) fn step(
     state: &mut TransmissionState,
     input: &TransmissionInput,
 ) -> TransmissionReport {
-    super::transmission::step(&construction(fp), tp, state, input)
+    let fp = construction(fp);
+    let orders = super::transmission::prepare_orders(&fp, tp, state, input);
+    let mut mechanical = super::transmission::DriveState {
+        transmission: *state,
+        speeds: input.speeds,
+        phases: [0.0; 2],
+    };
+    let report = super::transmission::advance(&fp, tp, &mut mechanical, &orders, input.dt);
+    *state = mechanical.transmission;
+    report
+}
+
+/// One Driver decision and the physics clock's substep call sequence, for tick-level invariants.
+pub(crate) fn substep_tick(
+    fp: &FixtureConstruction,
+    tp: &TransmissionParams,
+    state: &mut TransmissionState,
+    input: &TransmissionInput,
+) -> TransmissionReport {
+    let fp = construction(fp);
+    let mut tick = super::transmission::DriveTick::new(
+        &fp,
+        tp,
+        super::transmission::DriveState {
+            transmission: *state,
+            speeds: input.speeds,
+            phases: [0.0; 2],
+        },
+        input,
+    );
+    let count = avian3d::prelude::SubstepCount::default().0;
+    let h = std::time::Duration::from_secs_f32(input.dt)
+        .div_f64(f64::from(count))
+        .as_secs_f32();
+    for _ in 0..count {
+        tick.advance(&fp, tp, h);
+    }
+    *state = tick.state.transmission;
+    tick.report(count)
 }
 
 /// Fixture: a second torque curve and ladder, independent of the shipped vehicle.

@@ -1,5 +1,5 @@
 //! The joint drivetrain integrates both belts and the crank from construction data.
-//! `step` runs the Driver's orders, then solves crank, clutch, steering and stops together.
+//! `prepare_orders` runs the Driver once per tick; `advance` solves its orders per substep.
 //! `TransmissionState` is its mechanical state. The Driver's
 //! gear choice and the ledger it reads are [`super::driver`]; the pulls it judges gears by,
 //! [`viable_pull`], [`landing_pull`] and [`candidate_pull`], are the drivetrain's and live here.
@@ -15,6 +15,11 @@ use bevy::ecs::error::BevyError;
 
 use super::drive::DriveIntent;
 use super::forces::GripParams;
+
+mod advance;
+#[cfg(test)]
+pub(crate) use advance::prepare_orders;
+pub(crate) use advance::{DriveState, DriveTick, Orders};
 
 #[cfg(feature = "bitprobe")]
 use crate::bitprobe::TransmissionProbe;
@@ -620,7 +625,8 @@ impl TransmissionParams {
     /// force capacities overflow/underflow. Refuse those coupled outputs before publication.
     fn check_derived(&self, belt_inertia: f32) -> Result<(), BevyError> {
         // Resolution: dt*max|dT/domega|/J <= 1 keeps a falling torque branch from reversing
-        // a crank-speed perturbation in one explicit tick. Fuel cut makes each span quadratic;
+        // a crank-speed perturbation in one explicit interval. Certifying one whole tick
+        // admits every subdivision without tying construction to a particular substep count. Fuel cut makes each span quadratic;
         // its derivative is linear, so the largest magnitude occurs at a span endpoint.
         let slope = self
             .torque_spans()
@@ -1050,7 +1056,7 @@ impl DriveSupply {
 
 /// Shaped drive axes, requested intent, pre-tick belt speeds and ground reactions.
 /// The mixed side commands are probe telemetry only.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct TransmissionInput {
     /// The game's damage model: what the crew, engine and transmission each supply this tick.
     pub supply: DriveSupply,
@@ -1079,6 +1085,8 @@ pub struct TransmissionReport {
     pub next_speeds: [f32; 2],
     /// Assignment trials in the mechanical solve (candidate pricing reports its own work).
     pub assignments_tried: usize,
+    /// Mechanical rows evaluated; candidate pricing is counted separately.
+    pub rows: usize,
     /// Each side's capacity-limited brake supplied the exact stop force: a held constraint.
     pub held: [bool; 2],
     /// A holding brake (a side's stop brake or the held mean path) met a stop beyond its
@@ -1095,11 +1103,12 @@ pub struct TransmissionReport {
     /// The clutch sent drive to the belts this tick: torque along the engaged ladder. A crank
     /// spooling to its launch rpm, an open clutch and overrun send none.
     pub driving: bool,
-    /// The clutch held the crank to the belts at the tick's end, so the engaged gear set the
-    /// drive. A slipping clutch sends its capacity, or the crank's stored speed, whatever the gear.
+    /// The clutch held the crank to the belts throughout the reported interval. A tick report
+    /// requires every substep locked before the Driver counts it as that gear's held sample.
     pub locked: bool,
     /// Combustion power capacity at the pre-tick operating point (W).
     pub power_available: f32,
+    /// The last mechanical interval; its named work counters cover the enclosing tick.
     #[cfg(feature = "bitprobe")]
     pub(crate) bitprobe: TransmissionProbe,
 }
@@ -1820,6 +1829,7 @@ fn advance_rows(
         TransmissionReport {
             next_speeds,
             assignments_tried: solved.assignments_tried,
+            rows: rows.len(),
             held,
             brakes_slide,
             forces: forces.map(|f| f as f32),
@@ -1865,6 +1875,7 @@ fn swap_ladder_direction(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 struct Controls {
     input: TransmissionInput,
     command: f32,
@@ -2157,26 +2168,33 @@ fn advance_shift_window(st: &mut TransmissionState) -> bool {
     shifting
 }
 
-/// Advance the crank and both belts through the same construction-driven row assembly.
-/// The tick adapter supplies orders and sampled loads; all mechanical speeds land here.
-pub(crate) fn step(
+/// Advance one owner's mechanical state under tick-constant orders and affine sampled loads.
+/// The same operation serves live substeps, resting trials and the sandbox.
+pub(crate) fn advance(
     fp: &DriveConstruction,
     tp: &TransmissionParams,
-    st: &mut TransmissionState,
-    inp: &TransmissionInput,
+    state: &mut DriveState,
+    orders: &Orders,
+    h: f32,
 ) -> TransmissionReport {
     assert!(
-        inp.dt.is_finite() && inp.dt > 0.0,
-        "a mechanical step has a positive finite duration"
+        h.is_finite() && h > 0.0,
+        "a mechanical substep has a positive finite duration"
     );
+    let mut controls = orders.controls;
+    let reference = controls.input;
+    controls.input.dt = h;
+    controls.input.speeds = state.speeds;
+    // R(v) = R(v_ref) + slope * (v - v_ref); the sampled law stays fixed for this tick.
+    controls.input.reactions = [0, 1].map(|i| {
+        reference.reactions[i]
+            + reference.reaction_slopes[i] * (state.speeds[i] - reference.speeds[i])
+    });
+    let inp = &controls.input;
+    let st = &mut state.transmission;
     let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
     #[cfg(feature = "bitprobe")]
     let mut probe = input_probe(st, inp, mean, (inp.speeds[0] - inp.speeds[1]) * 0.5);
-    #[cfg(feature = "bitprobe")]
-    super::block::take_assignment_work();
-    let controls = driver(fp, tp, st, inp);
-    #[cfg(feature = "bitprobe")]
-    let candidate_assignment_work = super::block::take_assignment_work();
     let ratio = tp.ratio(st.reverse, st.gear);
     let k = ratio / tp.sprocket_radius;
     let omega_pre = st.omega_e;
@@ -2209,7 +2227,12 @@ pub(crate) fn step(
             st.clutch,
             &mut probe,
         );
-        probe.assignments_tried = candidate_assignment_work + report.assignments_tried;
+        probe.assignments_tried = report.assignments_tried;
+        probe.mechanical_assignments = report.assignments_tried;
+        probe.mechanical_rows = report.rows;
+        probe.mechanical_advances = 1;
+        probe.max_substep_assignments = report.assignments_tried;
+        probe.max_substep_rows = report.rows;
         probe.direction = controls.dir;
         probe.shaft_speed = controls.dir * mean;
         probe.gear_reduction = ratio;
@@ -2243,6 +2266,10 @@ pub(crate) fn step(
     }
     #[cfg(not(feature = "bitprobe"))]
     let _ = (omega_pre, clutch_torque, steer_force);
+    for (phase, speed) in state.phases.iter_mut().zip(state.speeds) {
+        *phase += f64::from(speed * h);
+    }
+    state.speeds = report.next_speeds;
     report
 }
 

@@ -39,6 +39,7 @@ fn assert_tank_state_at_add(
     tanks: Query<(
         Has<TankCommand>,
         Has<crate::track::sim::TrackDrive>,
+        Has<crate::track::sim::DrivetrainStep>,
         Option<&crate::track::sim::TrackGripElements>,
         (
             Has<avian3d::prelude::TranslationInterpolation>,
@@ -46,12 +47,12 @@ fn assert_tank_state_at_add(
         ),
     )>,
 ) {
-    let (command, drive, elements, eased) = tanks
+    let (command, drive, orders, elements, eased) = tanks
         .get(add.entity)
         .expect("a newly added Tank must still exist during its observer");
     assert!(
-        command && drive,
-        "TankCommand and TrackDrive must exist in the same insertion that adds Tank",
+        command && drive && orders,
+        "TankCommand, TrackDrive and local DrivetrainStep storage must exist in the same insertion that adds Tank",
     );
     // The offline physics eases only the bodies that opt in (`crate::offline_physics`): a scenario
     // tank is born an `eased_dynamic_body`, or the drawn hull steps at the fixed rate.
@@ -1665,11 +1666,10 @@ fn a_tank_repaired_at_rest_catches_its_idle_and_its_powered_traverse() {
     }
 }
 
-/// A drivetrain advances exactly once per tick whatever wakes its island: a resting tank's step
-/// commits only if the tank still rests once the tick's wakes have applied, so a tank its island
-/// neighbour's drive demand wakes runs its full pass from the state the tick began with
-/// (`track::sim::settle_rest`). Witness: an in-flight shift's countdown, which every drivetrain
-/// step lowers by one tick (`transmission::advance_shift_window`). Fixture: the scenario's two
+/// Driver decisions consume one tick whatever wakes the island. A resting trial is replaced
+/// when a same-tick wake opens a sampled pass, and both paths publish only at PostSubstep.
+/// Witness: an in-flight shift countdown, which every Driver decision
+/// lowers by one tick (`transmission::advance_shift_window`). Fixture: the scenario's two
 /// tanks parked side by side on flat ground, their hulls half Avian's contact tolerance apart so a
 /// touching solver contact joins their islands; an 8-tick shift countdown, so the two ticks read
 /// 6 left from a single step a tick and 5 from a double step; the 8 s rest watchdog.
