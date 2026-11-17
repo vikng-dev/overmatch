@@ -96,6 +96,8 @@ struct CompletionLine {
 #[derive(Resource, Default)]
 pub(crate) struct ViewClock {
     cursor: Option<TickInstant>,
+    /// The cursor's rate minus the nominal one simulation second per Real second.
+    rate: f64,
     delta_s: Option<f64>,
     stamps: BTreeMap<Tick, f64>,
     pub held: bool,
@@ -316,6 +318,28 @@ impl ViewClock {
         before.map(|(tick, _)| tick.into())
     }
 
+    /// Critically damped tracking of the inverse-map target about the nominal rate, exact over
+    /// any frame length; the target is taken to move at the nominal rate through the frame.
+    /// Ordinary progress stays within 0 to (1+v) simulation seconds per Real second.
+    fn pace(
+        &mut self,
+        previous: TickInstant,
+        target: TickInstant,
+        dt_s: f64,
+        tick_s: f64,
+        v: f64,
+    ) -> TickInstant {
+        let omega = bandwidth(v, tick_s);
+        // How far the cursor would lead the frame-end target, advancing at the nominal rate.
+        let lead_s = (number(previous) - number(target)) * tick_s + dt_s;
+        let decay = (-omega * dt_s).exp();
+        let pull = self.rate + omega * lead_s;
+        let lead_after_s = (lead_s + pull * dt_s) * decay;
+        self.rate = ((self.rate - omega * pull * dt_s) * decay).clamp(-1.0, v);
+        let advance_s = (lead_after_s - lead_s + dt_s).clamp(0.0, (1.0 + v) * dt_s);
+        instant(number(previous) + advance_s / tick_s)
+    }
+
     fn advance(
         &mut self,
         now_s: f64,
@@ -332,27 +356,34 @@ impl ViewClock {
         let target_cursor = self.inverse(desired_s)?;
         let newest = self.newest().expect("a target requires completed stamps");
         let previous = self.cursor.unwrap_or(target_cursor);
+        // A wall-time stall can create a long map segment, but its admitted simulation backlog
+        // is bounded by the server's cap.
         let backlog_s = f64::from((target_cursor - previous).to_f32()) * tick_s;
         let cut = (backlog_s > timing.view_cut_s.max(admission_s)).then_some(ViewCut {
             from: previous,
             to: target_cursor,
         });
-        // The rate is simulation seconds per real second. A wall-time stall can create a long
-        // map segment, but its admitted simulation backlog is bounded by the server's cap.
-        let next = if cut.is_some() {
+        let next = if cut.is_some() || self.cursor.is_none() {
+            self.rate = 0.0;
             target_cursor
         } else {
-            target_cursor.min(instant(
-                number(previous) + (1.0 + timing.view_rate) * dt_s / tick_s,
-            ))
-        }
-        .max(previous)
-        .min(TickInstant::from(newest));
+            self.pace(previous, target_cursor, dt_s, tick_s, timing.view_rate)
+        };
+        let last = TickInstant::from(newest);
+        let next = if next > last {
+            self.rate = -1.0; // A hold stops the cursor; release accelerates from rest.
+            last
+        } else {
+            next
+        };
+        assert!(
+            next >= previous,
+            "pace never runs backward and newest never retires below the cursor"
+        );
         // Resolution: the public cursor quantizes fractions to U0F16. Sub-quantum rounding
         // cannot stop a representable cursor advance and is not a hold.
         let quantum_s = tick_s / (f64::from(u16::MAX) + 1.0);
-        self.held =
-            desired_s > self.stamps[&newest] + quantum_s && next == TickInstant::from(newest);
+        self.held = desired_s > self.stamps[&newest] + quantum_s && next == last;
         self.cursor = Some(next);
         self.cuts += u64::from(cut.is_some());
         // Keep the cursor's predecessor and future map points through holds. Past points retire
@@ -387,6 +418,16 @@ impl ViewClock {
             "pending_ticks": self.pending.len(),
         })
     }
+}
+
+/// The pacing loop's natural frequency, per Real second, from the slew limit v and tick T.
+/// Resolution: critical damping absorbs a phase step without overshoot, which would spend the
+/// buffer the delay target sized. The rate response to target phase has L1 norm 2 omega / e,
+/// so omega = e v / T is the widest band for which production phase noise within one authority
+/// tick peak to peak moves the rate by at most v; larger phase steps (released backlogs)
+/// saturate at v.
+fn bandwidth(v: f64, tick_s: f64) -> f64 {
+    std::f64::consts::E * v / tick_s
 }
 
 fn number(cursor: TickInstant) -> f64 {
@@ -1011,5 +1052,7 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod pacing;
 #[cfg(test)]
 mod udp;

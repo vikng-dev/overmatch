@@ -15,12 +15,26 @@ lost ticks. There is **no outlier exclusion, clipping or percentile**: every adm
 be the maximum until its local receipt age exceeds W. W is required `view_window_s` data.
 
 Applied delay slews toward the target at at most v seconds per Real second. Inverting the
-frame-start map gives a target cursor clamped to received endpoints. Ordinary cursor progress
-is forward-only and capped at `(1+v)` simulation seconds per Real second. Equal frame stamps
-choose the latest tick. A buffer exhaustion holds its newest completed tick; it extrapolates
-nothing. Target backlog measured in simulation ticks above `max(view_cut_s, admission_s)` cuts
-forward once, warns and counts the discontinuity. Server time admission and this continuity
-floor read the same required `admission_s` field; no client virtual-time default chooses it.
+frame-start map gives a target cursor clamped to received endpoints; equal frame stamps choose
+the latest tick. The cursor does not follow that target segment by segment, which would replay
+each tick's production interval as playback speed. It advances at the nominal one simulation
+second per Real second, steered by a critically damped phase loop of natural frequency
+`omega = e v / T`. The loop's rate response to target phase has L1 norm `2 omega / e`, so
+production phase noise within one tick peak to peak moves the rate by at most v, and a slewing
+delay changes the rate by at most `v^2 / T` per second instead of stepping it. Ordinary progress
+is forward-only and capped at `(1+v)` simulation seconds per Real second; a released backlog
+closes at that cap. A sustained server slowdown `delta` leaves the loop `2 |delta| / omega` ahead
+of its target. A buffer exhaustion holds its newest completed tick and stops the cursor, which
+accelerates from rest on release; it extrapolates nothing. Target backlog measured in
+simulation ticks above `max(view_cut_s, admission_s)` cuts forward once, warns and counts the
+discontinuity. Server time admission and this continuity floor read the same required
+`admission_s` field; no client virtual-time default chooses it.
+
+The target covers lateness, not production phase. A smooth cursor needs the production phase
+above its mean at the tick that sets the lateness maximum, and the nearest-rank median of
+alternating production intervals is the short one about half the time; on a link without
+lateness slack such production holds. The measurements and the open estimator question are in
+[the pacing report](../../scratch/view-rate-396.md).
 
 The retained maximum makes server-work spikes and network spikes equally expensive. A spike can
 produce a hold, a forward cut, then slow playback while delay grows and fast playback after the
@@ -37,4 +51,5 @@ A future projection proposal must supply a complete motion, impulse and angular-
 Before a completed stamp pair there is no view epoch: presentation samplers wait, announcements
 hold and trace ticks are null. Disconnect resets the epoch; connect clears old receipts. Client
 local transport counts remain independent, named separately in diagnostic rows. Current API
-checks, fixtures and validation are recorded in [the lane report](../../scratch/view-clock-slice-2.md).
+checks, fixtures and validation are recorded in [the lane report](../../scratch/view-clock-slice-2.md)
+and, for pacing, [the pacing report](../../scratch/view-rate-396.md).
