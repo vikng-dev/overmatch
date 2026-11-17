@@ -24,3 +24,34 @@ describe("production allocation admission", () => {
 		expect(config(env).vcpuPerServer).toBe(vcpu);
 	});
 });
+
+describe("operator settings admission", () => {
+	it("downstream consumers reuse the startup parse of numeric, URL, header and regex settings", async () => {
+		const { config } = await import("../src/config");
+		const { edgegapFor, Edgegap } = await import("../src/edgegap");
+		const { providerName } = await import("../src/provider");
+		const reads = new Map<string, number>();
+		const settings = new Proxy({ ...env }, { get(target, key, receiver) {
+			if (typeof key === "string") reads.set(key, (reads.get(key) ?? 0) + 1);
+			return Reflect.get(target, key, receiver);
+		} });
+		const cfg = config(settings);
+		const afterStartup = new Map(reads);
+		expect(config(settings)).toBe(cfg);
+		expect(providerName(settings)).toBe("edgegap");
+		expect(edgegapFor(settings, cfg.providerTimeoutMs)).toBeInstanceOf(Edgegap);
+		expect(reads).toEqual(afterStartup);
+	});
+
+	it.each(["JOIN_ATTEMPTS", "USD_PER_VCPU_MINUTE", "CAPACITY", "HEARTBEAT_INTERVAL_S", "HEARTBEAT_DEADLINE_S", "START_DEADLINE_S", "STATUS_POLL_S", "RESERVATION_TTL_S", "TICKET_TTL_S", "EMPTY_EXIT_S", "SERVER_STATS_S", "SERVER_LOG_RETENTION_DAYS", "ENDED_RETENTION_S", "LOCATIONS_CACHE_S", "PROVIDER_TIMEOUT_S"])("%s refuses malformed numbers with a named typed error", async (setting) => {
+		const { config, ConfigurationError } = await import("../src/config");
+		try {
+			config({ ...env, [setting]: "fixture-invalid" });
+			throw new Error("invalid operator number was accepted");
+		} catch (err) {
+			expect(err).toBeInstanceOf(ConfigurationError);
+			expect(err).toMatchObject({ setting });
+			expect((err as Error).message).not.toContain("fixture-invalid");
+		}
+	});
+});

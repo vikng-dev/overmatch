@@ -11,7 +11,8 @@ at their native I/O, JSON, response-schema or persisted-cache edge; catch only t
 for refusal, a safe cause log, durable retry or unknown-outcome reconciliation. An unexpected
 exception propagates and fails the invocation. Native response-stream errors have no stable
 platform subtype: their small, I/O-only broad catch states that reason beside it. The batch runner
-collects all task failures and rethrows them; HTTP and scheduled entry points have no swallowing catch.
+collects all task failures and rethrows them. HTTP entry handles only typed request, configuration
+and platform refusals; scheduled entry handles only typed configuration refusal. Bugs still reject.
 
 This **supersedes the earlier instruction and Security P3-9 disposition to restore main's broad
 deploy catch**. It is a small production change for **Edgegap**, which remains the selected provider:
@@ -37,63 +38,112 @@ must not redirect deletion. The orphan test admits one live host, then seeds orp
 state and asserts cleanup/preservation by identity. It also passes with `maxServers` temporarily
 set to one; the tracked configuration was restored immediately after that check.
 
+### Worker input-edge closure
+
+Decision: parse the selected provider and all consumed operator settings in `config(env)` before
+routing or scheduled work. Cache the checked `Config` by immutable Worker environment; Registry
+construction and Fleet's provider path use the same parser in their own isolates. Consumers retain
+URLs, headers, numbers, the network object and the checked provider variant rather than parsing
+raw settings at use sites. A `ConfigurationError` names only the setting and its required form,
+never its value; HTTP logs it and returns 503, cron logs it and refuses that run. The cache reuse
+is tested for numeric/URL/header/enum settings and separately for EC2 network JSON.
+
+Keyless EC2 startup remains valid: absent keys/network are explicit nullable configuration state;
+operations needing them retain their typed `credentials`/`config` refusal before admission or an
+AWS exchange. Missing Access configuration still disables admin with 403. Unselected provider
+settings are unused, so EC2 does not require Edgegap's vars or key. No gameplay, placement, retry,
+launch policy or timing choice changed. Foreground RPC classification adds no new deadline.
+Malformed optional request fields now refuse instead of pretending to be absent; an omitted end
+reason still means the protocol's ordinary exit, and an omitted webhook id remains a hint without
+an adoptable deployment id. Request ids and operator regexes must consume the entire input,
+including a terminal newline. Provider deployment ids must be well-formed Unicode before URL
+encoding. Incoming request streams and provider response streams each isolate their native I/O
+catch because their platform errors have no stable subtype.
+
+All four findings in `lenses-provider-4.md` are closed, including both pre-existing ones. The
+Edgegap `deploy`/`beacons` intermediates are removed (DERIVED: two lines saved). The durable Fleet
+release test scopes a transient storage fault around execution of the real prototype method and
+restores it after that call; RPC does not expose instance-owned method overrides. It matches no SQL
+text. The other pre-existing testing P3s at the original `evidence.spec.ts:240` and
+`ec2.spec.ts:235,511` remain by instruction.
+
+The sweep also closed raw HTTP Registry RPC transport failures, history's broad D1 catch, native
+Access JWK import refusals and invalid forwarded client addresses. D1 outages use the documented
+infrastructure allowlist; missing tables/constraints still reject. Access keeps jose's JWT/JWKS
+parser and cache; native key-import failures are classified only around its untrusted-key resolver,
+and small RSA keys refuse before jose's verifier can throw an untyped error.
+
+### Complete input-edge table
+
+Scope: every consumed HTTP field/header, parsed operator setting, external fetch, D1 operation,
+Durable Object RPC and local Durable Object storage operation in `backend/src/`. Generated boot
+code is an embedded view of the separately tested machine script, not another Worker entry point.
+Names below are functions rather than unstable source line numbers. Cloudflare constructs the
+incoming `Request` (including URL/header syntax); Worker-owned SQL rows and RPC return shapes
+are internal schema/interface invariants, not untrusted provider JSON.
+
+| Input / every call site | Parse once / checked type | Typed, visible refusal or named absence |
+|---|---|---|
+| Incoming URL, method and route; `/v1/locations?version=` (the only consumed query parameter) | `route`: one `URL`, route regexes; `validVersion` checks the whole version | Bad version: `RequestError(fields)`, logged 400; unknown route/method: 404. Origin is the canonical `URL.origin`; the existing EC2 HTTPS gate returns 400. Other query parameters are unused. |
+| Body stream at join, ticket status, heartbeat, end, webhook and AWS proof | `body`: native text read once, JSON parsed once to `unknown`; already consumed/locked bodies are internal bugs | Transport: `RequestError(bodyRead)`; syntax: `RequestError(json)`; both logged 400, no payload logged. Internal bugs propagate. |
+| Join `version`, `locations`, `pings` | `parseJoin` produces `JoinRequest`; bounded location list, finite nonnegative ping map; absent estimates mean no estimate | `RequestError(fields)`, logged 400; unknown catalog locations: existing 400. |
+| Ticket-status `ticket` | String plus `versionOf` checked versioned id | Malformed/absent/unknown ticket: 404; no credential in URL/log. |
+| Heartbeat/end server-id path; webhook server-id path and nonce | `pathSegment` decodes once, `versionOf` checks id; route regex checks nonce | `URIError` becomes logged `RequestError(pathEncoding)`/400; malformed/unknown id: 410 for reports, 404 for webhook; wrong nonce: 404. |
+| Heartbeat `players`, `capacity`, `state` | `parseHeartbeat` produces `HeartbeatRequest` with integer counts and state union | `RequestError(fields)`, logged 400. |
+| End `reason`, `crash` | Object and optional text checked before `Registry.end`; reason bounded as before | Wrong object/field types: logged 400; omitted reason: protocol exit; omitted crash: ordinary non-crash report. |
+| Webhook `request_id` | Optional whole-string provider-id syntax to `string | null` | Invalid supplied id/object: logged 400; omitted id: existing status hint, no adoption from a missing id. |
+| AWS proof `version`, `imageId` | Whole-string version plus optional AMI syntax before `dryRun` | Invalid fields: logged 400; Access: 403; unsupported provider tool: 404 before Access/body; provider refusal: logged 503. |
+| `authorization` on heartbeat/end | `bearer` parses once to report secret; empty means missing/non-Bearer credential | Registry authenticates once against its stored hash: 401 for bad secret, 410 for unknown/ended server. |
+| `cf-connecting-ip` on join | `clientIp` checks IPv4 octets or native IPv6 URL syntax; keeps admitted text | `RequestError(clientIp)`, logged 400 before provider work; absent header: explicit local/test request state. |
+| `cf-access-jwt-assertion` on admin/proof | `accessDenied`: jose `jwtVerify`, signature, issuer, audience and required expiry; verified claims are not used as unchecked data | Missing/invalid/expired token: 403; parsed JOSE errors logged by code only. JWKS outages/malformed keys are typed and visibly refuse. |
+| `PROVIDER`; `LOCATION_HINT` | `config`: installed factory key to provider variant; platform location-hint enum (including both APAC subregions) | Named `ConfigurationError`, logged 503 / logged scheduled refusal. Empty location hint deliberately requests platform placement. |
+| `EDGEGAP_API`; `EDGEGAP_TOKEN` | Selected-provider `Config`: checked HTTP(S) `URL` without credentials; authorization `Headers` constructed once | Malformed URL/header or absent token: named `ConfigurationError`, logged 503 / scheduled refusal, value never logged. |
+| `JOIN_ATTEMPTS`; `USD_PER_VCPU_MINUTE` | Selected Edgegap config: finite numbers with existing minima | Named `ConfigurationError`, logged 503 / scheduled refusal. |
+| `WORKER_ENV`; `AWS_HOST_CONFIG` | Selected EC2 config: whole-string deployment identity; JSON parsed once to checked `Network` (group id, nonempty unique subnet ids, exact keys) | Malformed supplied value: named `ConfigurationError`, logged 503 / scheduled refusal. Missing network is explicit keyless config; launch/proof refuses before reservation/exchange. |
+| `AWS_ACCESS_KEY_ID`; `AWS_SECRET_ACCESS_KEY` | EC2 config retains optional key strings, validating the access-key header representation once; signing consumes these checked settings | Missing keys: explicit keyless state and typed `ProviderError(credentials)` on an operation needing them. Invalid access-key header: named `ConfigurationError`, logged 503 / scheduled refusal. |
+| `ACCESS_TEAM_DOMAIN`; `ACCESS_AUD` | `config`: checked issuer URL and derived cert URL; audience is an opaque string, not JSON/regex | Malformed supplied URL: named `ConfigurationError`, logged 503 / scheduled refusal; missing team/audience: disabled admin, 403. |
+| `CAPACITY`, `HEARTBEAT_INTERVAL_S`, `HEARTBEAT_DEADLINE_S`, `START_DEADLINE_S`, `STATUS_POLL_S`, `RESERVATION_TTL_S`, `TICKET_TTL_S`, `EMPTY_EXIT_S`, `SERVER_STATS_S`, `SERVER_LOG_RETENTION_DAYS`, `ENDED_RETENTION_S`, `LOCATIONS_CACHE_S`, `PROVIDER_TIMEOUT_S` | `config` produces finite numbers with existing minima and unit conversion; converted overflow also refused | Named `ConfigurationError`, logged 503 / scheduled refusal. No raw value appears in diagnostics. |
+| `EDGEGAP_APP`; `EDGEGAP_PORT_NAME`; remaining binding/token reads | App/port are required nonempty strings in the admitted provider variant; `DB`, `REGISTRY`, `FLEET` are platform handles; evidence uses token only for literal replacement, not regex construction | Missing/wrong-type strings: named ConfigurationError, logged 503 / scheduled refusal. Binding/SQL invariants remain bugs; transport handled as below. No other env value is parsed as URL/number/JSON/regex. |
+| All Edgegap fetches: deploy, status, stop, logs, find-by-tag, paginated deployment/location inventory, beacons | `request` -> `providerFetch`; body read/UTF-8 bounded by `providerText`; `outsideJson` then operation schema to provider types | `ProviderError` for native network/stream/decode/syntax/schema/status/deadline failure; visible HTTP refusal, safe cause log and existing durable reconciliation/retry. No malformed inventory proves absence. |
+| All EC2 fetches: RunInstances (including proof), DescribeInstances, TerminateInstances | `query` -> `providerFetch`/bounded text -> `parseXml`; `Xml.one/optional` cardinality and operation field checks | `ProviderError`: classified code/state/unknown result; DryRunAccepted only confirms proof; eventual absence stays unknown until its deadline. Existing logs/refusals/reconciliation retained. Launch time is checked timestamp or named `unreadable`. |
+| Release fetches: checksum GET, archive HEAD | `serverRelease`: bounded native fetch/text, exact checksum line and filename to `ServerRelease` | Typed release missing/unavailable/refused, visible 400/404/503 or ticket reason; body cancellation uses the typed stream edge. |
+| Access cert fetch and key import | `providerFetch` for transport; jose parses JWKS once per refresh into cached keys; native import errors classified at resolver, RSA size checked before verify | `ProviderError(accessKeys)` or JOSE error, safe code log and 403; unexpected application exceptions propagate. |
+| D1 admin: versions, totals, recent sessions | Each statement through `d1Call`, schema-owned result types | Documented transient faults/deadlines: `ProviderError`, logged HTTP 503; SQL/schema bugs propagate. Aggregate-without-row is a bug. |
+| D1 history: requested/deployed/ready/crashed/ended writes | `recordEvent` -> `d1Call`; statements bind typed `SessionEvent` | Typed infrastructure failure logged as best-effort history failure; SQL/schema bugs propagate. |
+| D1 evidence: first crash, capture marker/read/update, failure record, retention batch | `recordCrash`, `stopWithEvidence`, `expireServerLogs` -> `d1Call`; bounded sanitized text / schema-owned rows | Typed faults log cause; capture failures still stop, recorded marker prevents repeated capture, later sweep retries retention; SQL bugs propagate. |
+| D1 sweep state: write/upsert and last-sweep read | `save`/`lastSweep` -> `d1Call`, `SweepResult` schema | Typed fault logged; save retried by later sweep; dashboard shows no available snapshot on read outage; no row before first sweep is legitimate absence. Bugs propagate. |
+| HTTP Registry RPC: locations, join, ticket, heartbeat, end, webhook, including `getByName` | `platformCall` classifies documented retryable/overloaded flags; Worker-owned typed RPC interfaces | Typed transport refusal logged with HTTP 503. Foreground operation lifetime unchanged. Remote invariant exceptions propagate. |
+| Admin Registry snapshots; sweep `liveDeployments` and `claimExists` RPC, including `getByName` | `outsideRpc`: documented flags/deadlines to `ProviderError`; internal interface types retained | Dashboard logs/shows unavailable snapshot; sweep logs/counts failure and leaves ownership undecided for retry. Remote bugs propagate. |
+| Fleet RPC: reserve, reservations, release, including `getByName` | `fleetCall`/`outsideRpc`; expected remote failures cross RPC as `FleetResult` data, not custom exception properties | Typed transport/storage/provider failure; admission/refusal or logged durable stopping-row retry. SQL/schema bugs propagate. |
+| Fleet local SQL: schema creation, insert, select, delete | Internal schema; storage callbacks classify native reset/overload flags as `FleetResult(storage)`; constructor faults retain platform flags at RPC edge | Logged typed failure, never false release success; caller retains retry state. SQL/schema errors reject. |
+| Registry local SQL and alarm get/set/delete | Internal schema-owned rows/queries; native platform flags retain their meaning at the classified RPC edge; alarm invocation is platform-owned | HTTP/admin/sweep callers visibly refuse typed transport faults. A failed alarm rejects to Cloudflare's logged retry path; invariant errors also reject rather than disappearing. |
+| Persisted provider catalog/release JSON | `cachedCatalog`/`cachedRelease`: outside JSON and shape parser at each cache read | `ProviderError` visible refusal; expired-but-valid catalog may serve stale only with a logged provider failure. App-owned ticket arrays/maps were checked before persistence; corrupt internal rows are bugs. |
+
+`Origin` is not read from a request header: callbacks use the parsed request URL's canonical origin.
+No setting is compiled as an operator-provided regex; regexes check only the identity/network
+settings listed above. Unknown request headers/fields/query parameters are unused. No additional
+Worker fetch/D1/RPC entry was found by source search.
+
 ### Complete catch audit
 
-Line numbers name the final source. Every catch in every source file in the lane's diff was examined;
-other edited source/scripts/tests contain no JavaScript catch. The additional evidence tests were
-updated because they now distinguish documented D1 transport faults from schema bugs.
+Every Worker source catch was re-read, including unchanged files. These owners cover the catches
+without duplicating the input inventory above:
 
-| File:line | What it catches | Typed or propagated |
-|---|---|---|
-| `backend/src/registry.ts:194` | catalog read for locations | ProviderError: visible location refusal; bugs propagate |
-| `backend/src/registry.ts:220` | join catalog read | ProviderError: 503 refusal; bugs propagate |
-| `backend/src/registry.ts:229` | join release verification/cache read | ProviderError: 400/404/503 refusal and safe cause log; bugs propagate |
-| `backend/src/registry.ts:316` | webhook status read | ProviderError: log cause and leave alarm recovery; bugs propagate |
-| `backend/src/registry.ts:397` | alarm task | ProviderError: log durable retry; bugs propagate into the batch rejection |
-| `backend/src/registry.ts:446` | release verifier | Only releaseMissing becomes the negative cache; all other errors propagate |
-| `backend/src/registry.ts:469` | catalog refresh | ProviderError: log cause and serve a parsed stale catalog, or propagate without cache; bugs propagate |
-| `backend/src/registry.ts:578` | deploy | ProviderError: definite refusal or unknown outcome reconciled by tag; bugs propagate |
-| `backend/src/registry.ts:603` | forgotten claim stop | ProviderError: log cause; next sweep can retry the still-listed host; bugs propagate |
-| `backend/src/registry.ts:647` | claim lookup | ProviderError: log cause, retain durable reconciliation; bugs propagate |
-| `backend/src/registry.ts:680` | status poll | ProviderError: log cause, retain durable poll; bugs propagate |
-| `backend/src/registry.ts:831` | deployment stop | ProviderError: log cause, retain durable stopping row; bugs propagate |
-| `backend/src/registry.ts:845` | Fleet release | ProviderError: log cause, retain stopping row and tickets; bugs propagate |
-| `backend/src/fleet.ts:19` | provider inventory | ProviderError becomes logged FleetResult provider failure; bugs propagate |
-| `backend/src/fleet.ts:45` | local SQL storage | Only documented retryable/overloaded flags become logged FleetResult storage failure; SQL/schema bugs propagate |
-| `backend/src/sweep.ts:77` | inventory listing | ProviderError: log cause and record failure for a later sweep; bugs propagate |
-| `backend/src/sweep.ts:101` | host status | ProviderError: log cause and record failure for a later sweep; bugs propagate |
-| `backend/src/sweep.ts:131` | Registry ownership RPC | ProviderError: log cause and record failure for a later sweep; bugs propagate |
-| `backend/src/sweep.ts:147` | host stop | ProviderError: log cause and record failure for a later sweep; bugs propagate |
-| `backend/src/sweep.ts:166` | individual reservation cleanup | ProviderError: log cause and record failure for a later sweep; bugs propagate |
-| `backend/src/sweep.ts:168` | reservation inventory | ProviderError: log cause and record failure for a later sweep; bugs propagate |
-| `backend/src/sweep.ts:193` | sweep-state write | Typed D1/transport/deadline failure logs cause; bugs propagate |
-| `backend/src/sweep.ts:203` | sweep-state read | Typed D1/transport/deadline failure logs cause and shows no snapshot; bugs propagate |
-| `backend/src/ec2.ts:65` | operator network JSON | SyntaxError/schema refusal becomes ProviderError config; bugs propagate |
-| `backend/src/ec2.ts:131` | signed HTTP/XML query | DeadlineError becomes typed unknown outcome; every other exception propagates |
-| `backend/src/ec2.ts:139` | bounded deploy | DeadlineError becomes typed unknown outcome; every other exception propagates |
-| `backend/src/ec2.ts:161` | launch attempt | ProviderError controls bounded retransmission/capacity handling; bugs propagate |
-| `backend/src/ec2.ts:181` | dry-run query | Only typed DryRunAccepted confirms proof; every other exception propagates |
-| `backend/src/ec2.ts:242` | instance status | Typed MissingInstance is unknown until absence deadline, then gone; others propagate |
-| `backend/src/ec2.ts:259` | instance stop | Typed MissingInstance is unknown until absence deadline, then confirmed absent; others propagate |
-| `backend/src/edgegap.ts:63` | bounded exchange and parsed-response handler | Only DeadlineError becomes typed unknown outcome; all other errors propagate |
-| `backend/src/provider.ts:110` | native fetch only, after argument validation | Network TypeError/AbortError/TimeoutError becomes ProviderError unknown; other errors propagate |
-| `backend/src/provider.ts:119` | outside JSON syntax | SyntaxError becomes ProviderError unknown; other errors propagate |
-| `backend/src/provider.ts:141` | bounded RPC | DeadlineError/documented retryable or overloaded flags become ProviderError transport; bugs propagate |
-| `backend/src/provider.ts:165` | D1 operation | Exact documented D1_ERROR infrastructure messages become ProviderError storage; all other errors propagate |
-| `backend/src/provider.ts:208` | fatal UTF-8 decode only | Native decoder TypeError becomes ProviderError; other errors propagate |
-| `backend/src/provider.ts:230` | native network stream read/cancel only | Broad: platform stream errors have no stable subtype; become ProviderError, with the reason stated inline |
-| `backend/src/release.ts:30` | release HTTP/checksum verification | Only DeadlineError becomes releaseUnavailable; every other exception propagates |
-| `backend/src/index.ts:29` | client JSON body | Only SyntaxError becomes the visible malformed-body refusal; bugs propagate |
-| `backend/src/index.ts:151` | launch proof | ProviderError: log safe cause and refuse proof; bugs propagate |
-| `backend/src/admin.ts:28` | Access JWT/JWKS verification | JOSEError/ProviderError: visible Access refusal; bugs propagate |
-| `backend/src/admin.ts:87` | Registry snapshot | ProviderError transport/deadline: log cause and show snapshot unavailable; bugs propagate |
-| `backend/src/evidence.ts:59` | capture/marker write | ProviderError: log cause, persist failure and continue stop; bugs propagate |
-| `backend/src/evidence.ts:69` | failure-record write | ProviderError: log cause and continue stop; bugs propagate |
-| `backend/src/evidence.ts:83` | retention write | ProviderError: log cause; later sweep retries retention; bugs propagate |
-| `backend/src/ids.ts:27` | outside id decoding | Native InvalidCharacterError/UTF-8 TypeError becomes malformed id, visibly refused by routing; bugs propagate |
-| `backend/src/deadline.ts:33` | independent cleanup task | Every rejection collected, then propagated in AggregateError after the batch completes |
-| `backend/src/index.ts:168` (removed HTTP catch) | route/config exceptions | Propagated directly to the platform; no synthetic successful invocation with a 500 response |
-| `backend/src/index.ts:174` (removed scheduled catch) | sweep exceptions | Propagated directly; invariant failures fail the scheduled invocation |
+| Owner / catches | Deliberate outcome |
+|---|---|
+| `config`: text, URL, header, network JSON | Native parse refusal -> named ConfigurationError; unexpected exceptions propagate. |
+| `index`: body stream, JSON, path decoding, IPv6, proof, HTTP entry, scheduled entry | Native request parsing -> RequestError/400; proof catches ProviderError/503; HTTP handles only RequestError, ConfigurationError, ProviderError; cron only ConfigurationError. Bugs propagate. |
+| `provider`: fetch, outside JSON, foreground/bounded RPC, D1, UTF-8, native response read/cancel | Each native edge classifies only its documented failures; stream-only broad catch has no application callback. All other exceptions propagate. |
+| `admin`: JWK resolver, JWT verification, Registry snapshot | Outside key import -> ProviderError; JOSE/ProviderError -> visible Access refusal; snapshot ProviderError -> logged unavailable. Bugs propagate. |
+| `history`: event write | ProviderError logged; bugs propagate. |
+| `fleet`: inventory, storage | ProviderError / documented platform flags -> logged FleetResult; bugs propagate. |
+| `registry`: locations/join catalog, release checks, webhook, alarm task, cache refresh, deploy/adopt/poll/stop/release | Only ProviderError drives visible refusal, logged stale-cache use, or existing durable retry/reconciliation. Release cache admits only releaseMissing as a negative entry. All other errors propagate. |
+| `sweep`: listing, per-host status, Registry ownership, stop, slot cleanup/list, state read/write | Only ProviderError logged/counts a deferred decision; bugs propagate, including AggregateError after concurrent work. |
+| `ec2`: query/deploy deadlines, launch retries, proof, status/stop absence | Only DeadlineError, ProviderError, DryRunAccepted or MissingInstance as appropriate; bugs propagate. |
+| `edgegap`, `release`: bounded exchanges | Only DeadlineError translated; response handlers' bugs propagate. |
+| `evidence`: capture, error record, retention | Only ProviderError logged with explicit stop/retry disposition; bugs propagate. |
+| `ids`: base64url/UTF-8 decoding | Native InvalidCharacterError/TypeError -> malformed id, visibly refused by caller; other errors propagate. |
+| `deadline`: concurrent task collection | Completes independent tasks and propagates every rejection in AggregateError. |
 
 ## Prior review dispositions
 
@@ -170,15 +220,21 @@ attempt to rely on inheritance that Wrangler does not implement.
 
 MEASURED final local results:
 
-- Backend tests: 153 production-path tests and 93 EC2 tests pass in the shipped Worker runtime.
+- Backend tests: 206 production-path tests and 100 EC2 tests pass in the shipped Worker runtime.
 - Backend typecheck and generated boot embedding check pass.
 - `python3 scripts/aws/test_harness.py`: 28 tests pass.
 - `python3 scripts/aws/test_host_setup.py`: 20 tests pass, including key-only revocation and retry.
 - Shellcheck passes for `scripts/aws/machine.sh`, `scripts/aws/host-setup` and `backend/ci-scope.sh`.
 - Local esbuild Worker bundle and `git diff --check` pass. No Wrangler deploy command ran,
-  including dry-run deploy; esbuild writes only ignored `backend/dist/worker.js`.
+  including dry-run deploy; only the local `wrangler types` ran for typecheck. Esbuild writes only
+  ignored `backend/dist/worker.js`.
 - No separate backend lint command is configured. No Rust changed and no cargo ran; the
   pre-commit hook checks only Rust formatting and is skipped for this commit.
+
+Initial focused reproduction: 18 new input-edge cases failed while the existing 20 error tests
+passed. Final regression coverage exercises interrupted streams, malformed encodings, all numeric
+settings, configuration cache reuse, malformed keys, whole-string regexes, optional fields and
+HTTP RPC failures.
 
 Invariant tests deliberately exercise missing D1/Fleet tables and internal adapter exceptions;
 those rejections are asserted and their runtime diagnostics are expected. Recognized transient

@@ -15,6 +15,7 @@ import { signV4 } from "../src/sigv4";
 import { FakeEc2, resourceTags } from "./fake-ec2";
 import { age, call, env, heartbeat, join, registry, ticket } from "./helpers";
 import { RELEASE_CACHE_MS } from "../src/release";
+import worker from "../src/index";
 import { REASONS } from "../src/reasons";
 
 let ec2: FakeEc2;
@@ -91,6 +92,29 @@ describe("EC2 request contract", () => {
 			.rejects.toMatchObject({op: missing === "AWS_HOST_CONFIG" ? "config" : "credentials", outcome: "refused"});
 		expect(ec2.requests).toHaveLength(0);
 		expect(await provider().reservations()).toHaveLength(0);
+	});
+
+	it.each([
+		["WORKER_ENV", "Bad Environment"], ["WORKER_ENV", "fixture\n"], ["AWS_ACCESS_KEY_ID", "fixture\r\nheader"],
+		["AWS_HOST_CONFIG", "{"], ["AWS_HOST_CONFIG", JSON.stringify({ securityGroupId: "sg-00000000000000001\n", subnetIds: ["subnet-00000000000000001"] })], ["AWS_HOST_CONFIG", JSON.stringify({ securityGroupId: "invalid", subnetIds: [] })],
+	])("operator %s is refused before any platform work", async (setting, value) => {
+		const log = vi.spyOn(console, "error");
+		const res = await worker.fetch(new Request("https://worker.example/v1/locations?version=fixture"), { ...env, [setting]: value });
+		expect(res.status).toBe(503);
+		expect(await res.json()).toEqual({ error: expect.stringContaining(`config: ${setting}:`) });
+		expect(log).toHaveBeenCalledWith("configuration refused", expect.stringContaining(`config: ${setting}:`));
+		expect(ec2.requests).toHaveLength(0);
+	});
+
+	it("EC2 consumers reuse admitted network JSON rather than reading operator settings again", () => {
+		const settings = { ...env, get AWS_HOST_CONFIG() {
+			if (read) throw new Error("network JSON read after startup");
+			read = true;
+			return env.AWS_HOST_CONFIG;
+		} };
+		let read = false;
+		config(settings);
+		expect(new Ec2(settings, cfg.providerTimeoutMs).requiresHttps).toBe(true);
 	});
 
 	it("embeds the harness boot exactly once with hosted settings, without packages or SSH", async () => {
@@ -343,11 +367,15 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 
 	it("failed Fleet release retains a stopping row and tickets across eviction, then retries durably", async () => {
 		const t = await join(request());
-		await runInDurableObject(env.FLEET.getByName("ec2"), (_, state) => {
-			const exec = state.storage.sql.exec.bind(state.storage.sql);
-			vi.spyOn(state.storage.sql, "exec").mockImplementation((sql, ...bindings) => {
-				if (sql.startsWith("DELETE FROM slots")) throw Object.assign(new Error("fixture transient storage fault"), { retryable: true });
-				return exec(sql, ...bindings);
+		await runInDurableObject(env.FLEET.getByName("ec2"), (fleet, state) => {
+			const release = fleet.release.bind(fleet);
+			const prototype: typeof fleet = Object.getPrototypeOf(fleet);
+			const releaseFault = vi.spyOn(prototype, "release").mockImplementation((serverId: string) => {
+				const fault = vi.spyOn(state.storage.sql, "exec").mockImplementation(() => {
+					throw Object.assign(new Error("fixture transient storage fault"), { retryable: true });
+				});
+				try { return release(serverId); }
+				finally { fault.mockRestore(); releaseFault.mockRestore(); }
 			});
 		});
 		const log = vi.spyOn(console, "error");

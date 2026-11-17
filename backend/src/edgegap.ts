@@ -12,15 +12,16 @@
 //   GET    /v1/locations?page&limit   paginated (`pagination.has_next`)
 //   GET    /v1/locations/beacons      not paginated (`count`)
 
-import { num, type Env } from "./config";
+import { config, type Env } from "./config";
 import { bounded, DeadlineError } from "./deadline";
 
 import { cancelProviderBody, providerFetch, providerText, outsideJson, isRecord, isLocation, ProviderError, type Provider, type Beacon, type LocationData, type DeployRequest, type DeploymentStatus, type ListedDeployment } from "./provider";
 
 /** The provider the Worker's env names, every call bounded by `timeoutMs`. */
 export function edgegapFor(env: Env, timeoutMs: number): Provider {
-	return new Edgegap(env.EDGEGAP_API, env.EDGEGAP_TOKEN, env.EDGEGAP_APP, env.EDGEGAP_PORT_NAME, timeoutMs,
-		num(env, "JOIN_ATTEMPTS", 1), num(env, "USD_PER_VCPU_MINUTE", 0));
+	const cfg = config(env).provider;
+	if (cfg.name !== "edgegap") throw new Error("Edgegap adapter requires Edgegap configuration");
+	return new Edgegap(cfg.api, cfg.headers, cfg.app, cfg.portName, timeoutMs, cfg.attempts, cfg.usdPerVcpuMinute);
 }
 
 // Resolution: request up to 100 records per exchange to amortize HTTP calls; follow shorter pages.
@@ -36,8 +37,8 @@ export class Edgegap implements Provider {
 	readonly requiresHttps = false;
 	readonly starts;
 	constructor(
-		private readonly api: string,
-		private readonly token: string,
+		private readonly api: URL,
+		private readonly headers: Headers,
 		private readonly app: string,
 		private readonly portName: string,
 		private readonly timeoutMs: number,
@@ -49,12 +50,11 @@ export class Edgegap implements Provider {
 	 *  failure is a ProviderError with status 0: the provider gave no answer. */
 	private async request<T>(op: string, method: string, path: string, body: unknown, handle: (res: Response) => Promise<T>): Promise<T> {
 		const encoded = body === undefined ? undefined : JSON.stringify(body);
-		const auth = this.token.startsWith("token ") ? this.token : `token ${this.token}`;
 		try {
 			return await bounded(this.timeoutMs, async (signal) => {
-				const res = await providerFetch(op, `${this.api}${path}`, {
+				const res = await providerFetch(op, `${this.api.href.replace(/\/$/, "")}${path}`, {
 					method,
-					headers: { authorization: auth, "content-type": "application/json", accept: "application/json" },
+					headers: this.headers,
 					body: encoded,
 					signal,
 				});
@@ -85,11 +85,10 @@ export class Edgegap implements Provider {
 			env_vars: req.env.map((e) => ({ key: e.key, value: e.value, is_hidden: e.hidden })),
 			webhook_url: req.webhookUrl,
 		};
-		const out = await this.request("deploy", "POST", "/v1/deploy", body, (res) => this.json(res, "deploy", (value) => {
-			if (!isRecord(value) || typeof value.request_id !== "string" || !value.request_id) throw malformed("deploy");
+		return this.request("deploy", "POST", "/v1/deploy", body, (res) => this.json(res, "deploy", (value) => {
+			if (!isRecord(value) || typeof value.request_id !== "string" || !value.request_id || !value.request_id.isWellFormed()) throw malformed("deploy");
 			return value.request_id;
 		}));
-		return out;
 	}
 
 	async status(deploymentId: string): Promise<DeploymentStatus> {
@@ -166,10 +165,9 @@ export class Edgegap implements Provider {
 	}
 
 	async beacons(): Promise<Beacon[]> {
-		const out = await this.request("beacons", "GET", "/v1/locations/beacons", undefined, (res) =>
+		return this.request("beacons", "GET", "/v1/locations/beacons", undefined, (res) =>
 			this.json(res, "beacons", parseBeacons),
 		);
-		return out;
 	}
 }
 
@@ -204,7 +202,7 @@ function pagination(value: Record<string, unknown>, op: string): { has_next: boo
 function parseList(value: unknown): { data: { request_id: string; tags: string[] }[]; pagination: { has_next: boolean } } {
 	if (!isRecord(value) || !Array.isArray(value.data)) throw malformed("list");
 	const data = value.data.map((row) => {
-		if (!isRecord(row) || typeof row.request_id !== "string" || !row.request_id || (row.tags !== undefined && !strings(row.tags))) throw malformed("list");
+		if (!isRecord(row) || typeof row.request_id !== "string" || !row.request_id || !row.request_id.isWellFormed() || (row.tags !== undefined && !strings(row.tags))) throw malformed("list");
 		return { request_id: row.request_id, tags: row.tags === undefined ? [] : row.tags as string[] };
 	});
 	return { data, pagination: pagination(value, "list") };

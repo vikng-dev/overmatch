@@ -2,7 +2,7 @@
 // native resolve:ssm: uses the policy's one public parameter without another Worker AWS action.
 import hosting from "../aws-hosting.json";
 import production from "../production-server.json";
-import type { Env } from "./config";
+import { config, type Env, type Network, type ProviderConfig } from "./config";
 import { bounded, DeadlineError } from "./deadline";
 import { parseXml, type Xml } from "./ec2-xml";
 import { host, machineScript } from "./host.generated";
@@ -53,21 +53,6 @@ export function hostedScript(req: DeployRequest): string {
 	return script;
 }
 
-type Network = { securityGroupId: string; subnetIds: string[] };
-function network(raw: string | undefined): Network {
-	try {
-		const n: unknown = JSON.parse(raw ?? "");
-		if (n && typeof n === "object" && "securityGroupId" in n && "subnetIds" in n
-			&& Object.keys(n).length === 2 && typeof n.securityGroupId === "string" && /^sg-[0-9a-f]{17}$/.test(n.securityGroupId)
-			&& Array.isArray(n.subnetIds) && n.subnetIds.length > 0
-			&& n.subnetIds.every((s: unknown) => typeof s === "string" && /^subnet-[0-9a-f]{17}$/.test(s))
-			&& new Set(n.subnetIds).size === n.subnetIds.length) return n as Network;
-	} catch (err) {
-		if (!(err instanceof SyntaxError)) throw err;
-	}
-	throw new ProviderError("config", 0, "refused");
-}
-
 function launchFields(req: DeployRequest, n: Network, subnet: string, script: string, workerEnv: string): Record<string, string> {
 	const params: Record<string, string> = {
 		ImageId: `resolve:ssm:${host.parameter}`, InstanceType: production.instance_type, MinCount: "1", MaxCount: "1",
@@ -98,22 +83,23 @@ export class Ec2 implements Provider {
 	readonly usdPerVcpuMinute = null;
 	readonly requiresHttps = true;
 	readonly verifyRelease = serverRelease;
-	private readonly workerEnv: string;
+	private readonly settings: Extract<ProviderConfig, { name: "ec2" }>;
 	constructor(private readonly env: Env, private readonly timeoutMs: number) {
-		if (typeof env.WORKER_ENV !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(env.WORKER_ENV)) throw new Error("config: WORKER_ENV must name this deployment (lowercase letters, digits, hyphens)");
-		this.workerEnv = env.WORKER_ENV;
+		const settings = config(env).provider;
+		if (settings.name !== "ec2") throw new Error("EC2 adapter requires EC2 configuration");
+		this.settings = settings;
 	}
 	releaseClaim(serverId: string): Promise<void> { return fleetCall("fleetRelease", this.timeoutMs, () => this.env.FLEET.getByName("ec2").release(serverId)); }
 	reservations() { return fleetCall("fleetList", this.timeoutMs, () => this.env.FLEET.getByName("ec2").reservations()); }
 
 	private async query(action: string, params: Record<string, string>, outerSignal?: AbortSignal): Promise<Xml> {
-		if (!this.env.AWS_ACCESS_KEY_ID || !this.env.AWS_SECRET_ACCESS_KEY) throw new ProviderError("credentials", 0, "refused");
+		if (!this.settings.accessKey || !this.settings.secretKey) throw new ProviderError("credentials", 0, "refused");
 		const body = queryString({ Action: action, Version: "2016-11-15", ...params });
 		try {
 			return await bounded(this.timeoutMs, async (signal) => {
 				const headers = await signV4({ method: "POST", url: new URL(API), body,
 					headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
-					accessKey: this.env.AWS_ACCESS_KEY_ID!, secretKey: this.env.AWS_SECRET_ACCESS_KEY!,
+					accessKey: this.settings.accessKey!, secretKey: this.settings.secretKey!,
 					region: host.region, service: "ec2", date: new Date() });
 				const res = await providerFetch(action, API, { method: "POST", headers, body, signal: outerSignal ? AbortSignal.any([signal, outerSignal]) : signal });
 				const xml = parseXml(await providerText(res, 1024 * 1024, action, "unknown"));
@@ -143,14 +129,15 @@ export class Ec2 implements Provider {
 	}
 
 	private async launch(req: DeployRequest, signal: AbortSignal): Promise<string> {
-		if (!this.env.AWS_ACCESS_KEY_ID || !this.env.AWS_SECRET_ACCESS_KEY) throw new ProviderError("credentials", 0, "refused");
-		const n = network(this.env.AWS_HOST_CONFIG);
+		if (!this.settings.accessKey || !this.settings.secretKey) throw new ProviderError("credentials", 0, "refused");
+		const n = this.settings.network;
+		if (!n) throw new ProviderError("config", 0, "refused");
 		const script = hostedScript(req);
 		const serverId = req.env.find((e) => e.key === "OVERMATCH_SERVER_ID")!.value;
 		const admitted = await fleetCall("fleetReserve", this.timeoutMs, () => this.env.FLEET.getByName("ec2").reserve(serverId));
 		if (!admitted) throw new ProviderError("cap", 0, "capacity");
 		for (const subnet of n.subnetIds) {
-			const params = launchFields(req, n, subnet, script, this.workerEnv);
+			const params = launchFields(req, n, subnet, script, this.settings.workerEnv);
 			for (let attempt = 0; attempt < CALL_ATTEMPTS; attempt++) {
 				try {
 					if (signal.aborted) throw new ProviderError("RunInstances", 0, "unknown");
@@ -170,9 +157,10 @@ export class Ec2 implements Provider {
 
 	/** Operator proof of the exact launch shape, using the key held only by the proving Worker. */
 	async dryRun(req: DeployRequest, imageId?: string): Promise<void> {
-		const n = network(this.env.AWS_HOST_CONFIG);
+		const n = this.settings.network;
+		if (!n) throw new ProviderError("config", 0, "refused");
 		for (const subnet of n.subnetIds) {
-			const params = launchFields(req, n, subnet, hostedScript(req), this.workerEnv);
+			const params = launchFields(req, n, subnet, hostedScript(req), this.settings.workerEnv);
 			params.DryRun = "true";
 			if (imageId !== undefined) params.ImageId = imageId;
 			try {
@@ -194,7 +182,7 @@ export class Ec2 implements Provider {
 		let next: string | null = null;
 		for (let page = 0; page < maxPages; page++) {
 			const params: Record<string, string> = { MaxResults: "100" };
-			const tags = Object.entries({ ...host.tags, WorkerEnvironment: this.workerEnv });
+			const tags = Object.entries({ ...host.tags, WorkerEnvironment: this.settings.workerEnv });
 			tags.forEach(([k, v], i) => { params[`Filter.${i + 1}.Name`] = `tag:${k}`; params[`Filter.${i + 1}.Value.1`] = v; });
 			const state = `Filter.${tags.length + 1}`;
 			params[`${state}.Name`] = "instance-state-name";

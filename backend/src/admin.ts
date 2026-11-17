@@ -7,7 +7,7 @@ import { config, type Env } from "./config";
 import { registryFor, type ServerSnapshot } from "./registry";
 import { diag } from "./reasons";
 import { lastSweep } from "./sweep";
-import { outsideRpc, providerFetch, ProviderError, providerFor } from "./provider";
+import { d1Call, outsideRpc, providerFetch, ProviderError, providerFor } from "./provider";
 
 /** Concurrent Registry calls per request; the platform allows six outgoing connections. */
 const FANOUT = 5;
@@ -15,18 +15,33 @@ const FANOUT = 5;
 let jwks: { url: string; set: ReturnType<typeof createRemoteJWKSet> } | null = null;
 
 export async function accessDenied(req: Request, env: Env): Promise<string | null> {
-	const team = env.ACCESS_TEAM_DOMAIN?.replace(/\/+$/, "");
-	if (!team || !env.ACCESS_AUD) return "admin disabled: ACCESS_TEAM_DOMAIN and ACCESS_AUD are not configured";
+	const access = config(env).access;
+	if (!access) return "admin disabled: ACCESS_TEAM_DOMAIN and ACCESS_AUD are not configured";
 	const token = req.headers.get("cf-access-jwt-assertion");
 	if (!token) return "missing Cf-Access-Jwt-Assertion";
-	const url = `${team}/cdn-cgi/access/certs`;
-	if (jwks?.url !== url) jwks = { url, set: createRemoteJWKSet(new URL(url), { [customFetch]: (input, init) => providerFetch("accessKeys", input, init) }) };
+	const url = access.keys.href;
+	if (jwks?.url !== url) jwks = { url, set: createRemoteJWKSet(access.keys, { [customFetch]: (input, init) => providerFetch("accessKeys", input, init) }) };
 	try {
 		// jose checks `exp` only when present; Access always issues it, so its absence is a refusal.
-		await jwtVerify(token, jwks.set, { issuer: team, audience: env.ACCESS_AUD, requiredClaims: ["exp"] });
+		const set = jwks.set;
+		await jwtVerify(token, async (...args) => {
+			let key: CryptoKey;
+			try { key = await set(...args); }
+			catch (err) {
+				// jose imports outside JWK data through WebCrypto; these are its input refusal types.
+				if (err instanceof TypeError || (err instanceof DOMException && ["DataError", "SyntaxError", "InvalidCharacterError", "NotSupportedError", "OperationError"].includes(err.name))) {
+					throw new ProviderError("accessKeys", 502, "unknown");
+				}
+				throw err;
+			}
+			// jose 6.2.12 lib/jws_algorithms.js requires 2048-bit RSA; its verifier throws TypeError below it.
+			if ("modulusLength" in key.algorithm && Number(key.algorithm.modulusLength) < 2048) throw new ProviderError("accessKeys", 502, "unknown");
+			return key;
+		}, { issuer: access.issuer, audience: access.audience, requiredClaims: ["exp"] });
 		return null;
 	} catch (err) {
 		if (!(err instanceof errors.JOSEError) && !(err instanceof ProviderError)) throw err;
+		console.warn("Access refused", err instanceof ProviderError ? diag(err) : err.code);
 		return `invalid Access token: ${err instanceof Error ? err.message : String(err)}`;
 	}
 }
@@ -52,8 +67,8 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 	const monthStart = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), 1);
 
 	const [liveVersions, totals, recent, swept] = await Promise.all([
-		env.DB.prepare("SELECT DISTINCT version FROM sessions WHERE ended_at IS NULL ORDER BY version").all<{ version: string }>(),
-		env.DB.prepare(
+		d1Call("adminVersions", cfg.providerTimeoutMs, () => env.DB.prepare("SELECT DISTINCT version FROM sessions WHERE ended_at IS NULL ORDER BY version").all<{ version: string }>()),
+		d1Call("adminTotals", cfg.providerTimeoutMs, () => env.DB.prepare(
 			`WITH durations AS (
 				SELECT *, CASE WHEN ended_at IS NULL THEN (?1 - requested_at) / 60000.0 ELSE (ended_at - requested_at) / 60000.0 END AS elapsed_minutes
 				FROM sessions
@@ -71,8 +86,8 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 			.first<{
 				month_minutes: number; all_vcpu_minutes: number; month_vcpu_minutes: number;
 				all_unknown: number; month_unknown: number; sessions: number; failures: number;
-			}>(),
-		env.DB.prepare("SELECT * FROM sessions ORDER BY requested_at DESC LIMIT 30").all<SessionRow>(),
+			}>()),
+		d1Call("adminRecent", cfg.providerTimeoutMs, () => env.DB.prepare("SELECT * FROM sessions ORDER BY requested_at DESC LIMIT 30").all<SessionRow>()),
 		lastSweep(env),
 	]);
 

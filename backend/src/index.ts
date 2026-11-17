@@ -2,10 +2,10 @@
 // status codes. No state lives here. The contract is src/types.ts + contract/*.json.
 
 import { accessDenied, adminPage } from "./admin";
-import { config, serverEnvironment, type Env } from "./config";
+import { config, ConfigurationError, serverEnvironment, type Env } from "./config";
 import { newId, randomHex, validVersion, versionOf, tagOf } from "./ids";
 import { diag } from "./reasons";
-import { ProviderError, providerFor, providerName } from "./provider";
+import { ProviderError, providerFor, platformCall, isRecord } from "./provider";
 import { registryFor } from "./registry";
 import { sweep } from "./sweep";
 import type { HeartbeatRequest, JoinRequest } from "./types";
@@ -23,12 +23,35 @@ function error(status: number, message: string): Response {
 	return json({ error: message }, status);
 }
 
+class RequestError extends Error {
+	constructor(readonly kind: "bodyRead" | "json" | "pathEncoding" | "fields" | "clientIp", message: string) {
+		super(message);
+		this.name = "RequestError";
+	}
+}
+
+function invalid(message: string): never { throw new RequestError("fields", message); }
+
 async function body(req: Request): Promise<unknown> {
-	try {
-		return await req.json();
-	} catch (err) {
+	if (req.bodyUsed || req.body?.locked) throw new Error("request body must be read once at the route edge");
+	let raw: string;
+	try { raw = await req.text(); }
+	catch {
+		// Only the native request stream runs here; disconnected streams have no stable error subtype.
+		throw new RequestError("bodyRead", "request body could not be read");
+	}
+	try { return JSON.parse(raw); }
+	catch (err) {
 		if (!(err instanceof SyntaxError)) throw err;
-		return undefined;
+		throw new RequestError("json", "body must be a JSON object");
+	}
+}
+
+function pathSegment(raw: string): string {
+	try { return decodeURIComponent(raw); }
+	catch (err) {
+		if (!(err instanceof URIError)) throw err;
+		throw new RequestError("pathEncoding", "invalid path encoding");
 	}
 }
 
@@ -37,50 +60,62 @@ function bearer(req: Request): string {
 	return h.startsWith("Bearer ") ? h.slice(7).trim() : "";
 }
 
-function parseJoin(b: unknown): JoinRequest | string {
-	if (typeof b !== "object" || b === null) return "body must be a JSON object";
-	const { version, locations, pings } = b as Record<string, unknown>;
-	if (!validVersion(version)) return "version: expected 1-64 chars of [A-Za-z0-9._+-]";
-	if (!Array.isArray(locations) || locations.length === 0 || locations.length > MAX_LOCATIONS) {
-		return `locations: expected 1-${MAX_LOCATIONS} location ids`;
+function clientIp(req: Request): string | null {
+	const raw = req.headers.get("cf-connecting-ip");
+	// Local/test requests may have no Cloudflare client address.
+	if (raw === null) return null;
+	if (/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(raw) && raw.split(".").every((part) => Number(part) <= 255)) return raw;
+	if (raw.includes(":") && /^[0-9a-f:.]+$/i.test(raw)) {
+		try { new URL(`http://[${raw}]/`); return raw; }
+		catch (err) { if (!(err instanceof TypeError)) throw err; }
 	}
-	if (!locations.every((l) => typeof l === "string" && l.length > 0 && l.length <= 128)) return "locations: expected strings";
-	const p = pings ?? {};
-	if (typeof p !== "object" || p === null || Array.isArray(p)) return "pings: expected an object of location id to ms";
+	throw new RequestError("clientIp", "invalid cf-connecting-ip header");
+}
+
+function parseJoin(b: unknown): JoinRequest {
+	if (!isRecord(b)) invalid("body must be a JSON object");
+	const { version, locations, pings } = b;
+	if (!validVersion(version)) invalid("version: expected 1-64 chars of [A-Za-z0-9._+-]");
+	if (!Array.isArray(locations) || locations.length === 0 || locations.length > MAX_LOCATIONS) {
+		invalid(`locations: expected 1-${MAX_LOCATIONS} location ids`);
+	}
+	if (!locations.every((l) => typeof l === "string" && l.length > 0 && l.length <= 128)) invalid("locations: expected strings");
+	const p = pings === undefined ? {} : pings;
+	if (typeof p !== "object" || p === null || Array.isArray(p)) invalid("pings: expected an object of location id to ms");
 	const out: Record<string, number> = {};
 	for (const [k, v] of Object.entries(p)) {
-		if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return `pings.${k}: expected a non-negative number`;
+		if (typeof v !== "number" || !Number.isFinite(v) || v < 0) invalid(`pings.${k}: expected a non-negative number`);
 		out[k] = v;
 	}
 	return { version, locations: [...new Set(locations as string[])], pings: out };
 }
 
-function parseHeartbeat(b: unknown): HeartbeatRequest | string {
-	if (typeof b !== "object" || b === null) return "body must be a JSON object";
-	const { players, capacity, state } = b as Record<string, unknown>;
-	if (!Number.isInteger(players) || (players as number) < 0) return "players: expected a non-negative integer";
-	if (!Number.isInteger(capacity) || (capacity as number) < 1) return "capacity: expected a positive integer";
-	if (state !== "open" && state !== "closed" && state !== "closing") return 'state: expected "open", "closed" or "closing"';
+function parseHeartbeat(b: unknown): HeartbeatRequest {
+	if (!isRecord(b)) invalid("body must be a JSON object");
+	const { players, capacity, state } = b;
+	if (!Number.isInteger(players) || (players as number) < 0) invalid("players: expected a non-negative integer");
+	if (!Number.isInteger(capacity) || (capacity as number) < 1) invalid("capacity: expected a positive integer");
+	if (state !== "open" && state !== "closed" && state !== "closing") invalid('state: expected "open", "closed" or "closing"');
 	return { players: players as number, capacity: capacity as number, state };
 }
 
 async function route(req: Request, env: Env): Promise<Response> {
+	const cfg = config(env);
 	const url = new URL(req.url);
 	const path = url.pathname.replace(/\/+$/, "") || "/";
 	const method = req.method;
 
 	if (path === "/v1/locations" && method === "GET") {
 		const version = url.searchParams.get("version");
-		if (!validVersion(version)) return error(400, "version query parameter required");
-		const r = await registryFor(env, version).locations(version);
+		if (!validVersion(version)) invalid("version query parameter required");
+		const r = await platformCall("locations", async () => registryFor(env, version).locations(version));
 		return r.ok ? json(r.body) : error(503, r.error);
 	}
 
 	if (path === "/v1/join" && method === "POST") {
 		const j = parseJoin(await body(req));
-		if (typeof j === "string") return error(400, j);
-		const ip = req.headers.get("cf-connecting-ip");
-		const r = await registryFor(env, j.version).join(j.version, j.locations, j.pings, ip, url.origin);
+		const ip = clientIp(req);
+		const r = await platformCall("join", async () => registryFor(env, j.version).join(j.version, j.locations, j.pings, ip, url.origin));
 		return r.ok ? json({ ticket: r.ticket }) : error(r.status, r.error);
 	}
 
@@ -90,27 +125,30 @@ async function route(req: Request, env: Env): Promise<Response> {
 		const ticket = typeof b === "object" && b !== null ? (b as { ticket?: unknown }).ticket : undefined;
 		const version = typeof ticket === "string" ? versionOf(ticket) : null;
 		if (typeof ticket !== "string" || !version) return error(404, "unknown ticket");
-		const t = await registryFor(env, version).ticket(ticket);
+		const t = await platformCall("ticket", async () => registryFor(env, version).ticket(ticket));
 		return t ? json(t) : error(404, "unknown ticket");
 	}
 
 	let m = /^\/v1\/servers\/([^/]+)\/(heartbeat|end)$/.exec(path);
 	if (m && method === "POST") {
-		const id = decodeURIComponent(m[1]);
+		const id = pathSegment(m[1]);
 		const version = versionOf(id);
 		if (!version) return error(410, "unknown server");
-		const reg = registryFor(env, version);
 		const b = await body(req);
 		let r;
 		if (m[2] === "heartbeat") {
 			const hb = parseHeartbeat(b);
-			if (typeof hb === "string") return error(400, hb);
-			r = await reg.heartbeat(id, bearer(req), hb);
+			const secret = bearer(req);
+			r = await platformCall("heartbeat", async () => registryFor(env, version).heartbeat(id, secret, hb));
 		} else {
-			const reason = typeof b === "object" && b !== null && typeof (b as { reason?: unknown }).reason === "string" ? (b as { reason: string }).reason : "exit";
-			const crash = typeof b === "object" && b !== null ? (b as { crash?: unknown }).crash : undefined;
-			if (crash !== undefined && typeof crash !== "string") return error(400, "crash: expected text");
-			r = await reg.end(id, bearer(req), reason.slice(0, 200), crash);
+			if (!isRecord(b)) invalid("body must be a JSON object");
+			if (b.reason !== undefined && typeof b.reason !== "string") invalid("reason: expected text");
+			if (b.crash !== undefined && typeof b.crash !== "string") invalid("crash: expected text");
+			// An omitted reason is the protocol's ordinary exit report.
+			const reason = b.reason === undefined ? "exit" : b.reason;
+			const crash = b.crash;
+			const secret = bearer(req);
+			r = await platformCall("end", async () => registryFor(env, version).end(id, secret, reason.slice(0, 200), crash));
 		}
 		if (r.status === 204) return new Response(null, { status: 204 });
 		return error(r.status, r.error ?? (r.status === 410 ? "unknown server" : "error"));
@@ -120,27 +158,29 @@ async function route(req: Request, env: Env): Promise<Response> {
 	// It authorizes nothing but a status re-read for that one server, so a logged URL is no key.
 	m = /^\/v1\/edgegap\/webhook\/([^/]+)\/([0-9a-f]{32})$/.exec(path);
 	if (m && method === "POST") {
-		const id = decodeURIComponent(m[1]);
+		const id = pathSegment(m[1]);
 		const version = versionOf(id);
 		const hook = await body(req);
 		if (!version) return error(404, "unknown webhook");
-		const rid = typeof hook === "object" && hook !== null ? (hook as { request_id?: unknown }).request_id : undefined;
-		const requestId = typeof rid === "string" && /^[A-Za-z0-9-]{1,64}$/.test(rid) ? rid : null;
-		const known = await registryFor(env, version).webhook(id, m[2], requestId);
+		if (!isRecord(hook)) invalid("body must be a JSON object");
+		const rid = hook.request_id;
+		if (rid !== undefined && (typeof rid !== "string" || /^[A-Za-z0-9-]{1,64}$/.exec(rid)?.[0] !== rid)) invalid("request_id: expected 1-64 letters, digits or hyphens");
+		const requestId = rid === undefined ? null : rid;
+		const nonce = m[2];
+		const known = await platformCall("webhook", async () => registryFor(env, version).webhook(id, nonce, requestId));
 		return known ? new Response(null, { status: 204 }) : error(404, "unknown webhook");
 	}
 
 	// Cutover verification uses this Access-protected tool; dryRun creates no machine or fleet slot.
 	if (path === "/admin/aws-proof" && method === "POST") {
-		const cfg = config(env);
 		const provider = providerFor(env, cfg.providerTimeoutMs);
 		if (!provider.dryRun || !provider.verifyRelease) return error(404, "provider has no launch proof");
 		const denied = await accessDenied(req, env);
 		if (denied) return error(403, denied);
 		const b = await body(req);
-		if (!b || typeof b !== "object" || !("version" in b) || !validVersion(b.version)) return error(400, "version required");
+		if (!isRecord(b) || !validVersion(b.version)) invalid("version required");
 		const image = "imageId" in b ? b.imageId : undefined;
-		if (image !== undefined && (typeof image !== "string" || !/^ami-[0-9a-f]{17}$/.test(image))) return error(400, "invalid proof image");
+		if (image !== undefined && (typeof image !== "string" || /^ami-[0-9a-f]{17}$/.exec(image)?.[0] !== image)) invalid("invalid proof image");
 		const id = newId(b.version);
 		try {
 			const [location] = await provider.locations();
@@ -166,12 +206,32 @@ async function route(req: Request, env: Env): Promise<Response> {
 
 export default {
 	async fetch(req: Request, env: Env): Promise<Response> {
-		providerName(env);
-		return route(req, env);
+		try {
+			config(env);
+			return await route(req, env);
+		} catch (err) {
+			if (err instanceof ConfigurationError) {
+				console.error("configuration refused", err.message);
+				return error(503, err.message);
+			}
+			if (err instanceof RequestError) {
+				console.warn("request refused", err.kind);
+				return error(400, err.message);
+			}
+			if (!(err instanceof ProviderError)) throw err;
+			console.warn("platform unavailable", diag(err));
+			return error(503, "service unavailable; retry later");
+		}
 	},
 
 	// The orphan sweep (src/sweep.ts), on the `triggers.crons` schedule in wrangler.jsonc.
 	async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+		try { config(env); }
+		catch (err) {
+			if (!(err instanceof ConfigurationError)) throw err;
+			console.error("configuration refused", err.message);
+			return;
+		}
 		await sweep(env);
 	},
 } satisfies ExportedHandler<Env>;

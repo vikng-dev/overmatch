@@ -1,9 +1,9 @@
-import { bounded } from "./deadline";
+import { d1Call, ProviderError } from "./provider";
 import { diag, REASONS } from "./reasons";
 
 // `recordEvent` is the single writer of D1 `sessions` (migrations/0001_sessions.sql): one row per
 // server lifetime, touched on transitions and reported crashes. Writes are best effort and bounded — a D1 failure or
-// stall is logged and never fails or holds up the registry operation that caused it. A durable
+// stall is logged and never fails or holds up the registry operation that caused it; SQL bugs propagate. A durable
 // outbox, or a second sink such as Analytics Engine, would be added here and nowhere else.
 
 export type Outcome = "ended" | "failed" | "lost";
@@ -17,8 +17,9 @@ export type SessionEvent =
 
 export async function recordEvent(db: D1Database, e: SessionEvent, timeoutMs: number): Promise<void> {
 	try {
-		await bounded(timeoutMs, () => write(db, e));
+		await d1Call("history", timeoutMs, () => write(db, e));
 	} catch (err) {
+		if (!(err instanceof ProviderError)) throw err;
 		console.error("recordEvent failed", e.kind, e.serverId, diag(err));
 	}
 }

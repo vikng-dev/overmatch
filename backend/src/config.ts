@@ -1,8 +1,9 @@
 // Operator tunables are wrangler `vars` entries; production-server.json owns the production CPU
 // allocation (CLAIMED: owner's hosting choice), shared with scripts/ci/edgegap-version.sh.
-// Invalid production allocation refuses startup; missing or malformed vars refuse first use.
+// Invalid production allocation refuses startup; operator settings are checked once per immutable environment.
 
 import productionServer from "../production-server.json";
+import { parseProviderName } from "./provider";
 
 const vcpuPerServer = productionServer.vcpu;
 if (!Number.isFinite(vcpuPerServer) || vcpuPerServer <= 0) {
@@ -44,7 +45,22 @@ export interface Env {
 	ACCESS_AUD: string;
 }
 
+export class ConfigurationError extends Error {
+	constructor(readonly setting: keyof Env, reason: string) {
+		super(`config: ${setting}: ${reason}`);
+		this.name = "ConfigurationError";
+	}
+}
+
+export interface Network { securityGroupId: string; subnetIds: string[] }
+export type ProviderConfig =
+	| { name: "edgegap"; api: URL; headers: Headers; app: string; portName: string; attempts: number; usdPerVcpuMinute: number }
+	| { name: "ec2"; workerEnv: string; accessKey: string | null; secretKey: string | null; network: Network | null };
+
 export interface Config {
+	provider: ProviderConfig;
+	access: { issuer: string; keys: URL; audience: string } | null;
+	locationHint: DurableObjectLocationHint | "";
 	capacity: number;
 	heartbeatIntervalMs: number;
 	heartbeatDeadlineMs: number;
@@ -61,32 +77,124 @@ export interface Config {
 	vcpuPerServer: number;
 }
 
-export function num(env: Env, key: keyof Env, min: number): number {
+function num(env: Env, key: keyof Env, min: number, scale = 1): number {
 	const raw = env[key];
 	const v = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
-	if (!Number.isFinite(v) || v < min) throw new Error(`config: ${String(key)}=${String(raw)} (need a number >= ${min})`);
-	return v;
+	if (!Number.isFinite(v) || v < min || !Number.isFinite(v * scale)) {
+		throw new ConfigurationError(key, `need a finite number >= ${min} with a finite converted value`);
+	}
+	return v * scale;
 }
 
+function optionalText(env: Env, key: keyof Env): string | null {
+	const raw = env[key];
+	if (raw === undefined || raw === "") return null;
+	if (typeof raw !== "string") throw new ConfigurationError(key, "need text");
+	return raw;
+}
+
+function requiredText(env: Env, key: keyof Env): string {
+	const value = optionalText(env, key);
+	if (value === null) throw new ConfigurationError(key, "need nonempty text");
+	return value;
+}
+
+function settingUrl(raw: string, key: keyof Env): URL {
+	if (typeof raw !== "string") throw new ConfigurationError(key, "need an HTTP(S) URL");
+	let url: URL;
+	try { url = new URL(raw); }
+	catch (err) {
+		if (!(err instanceof TypeError)) throw err;
+		throw new ConfigurationError(key, "need an HTTP(S) URL");
+	}
+	if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) {
+		throw new ConfigurationError(key, "need an HTTP(S) URL without credentials");
+	}
+	return url;
+}
+
+function header(value: string, key: keyof Env): Headers {
+	try { return new Headers({ authorization: value }); }
+	catch (err) {
+		if (!(err instanceof TypeError)) throw err;
+		throw new ConfigurationError(key, "need a valid HTTP header value");
+	}
+}
+
+function network(raw: string | undefined): Network | null {
+	// A keyless Worker is deployable; launch refuses a missing network before reserving a slot.
+	if (raw === undefined || raw === "") return null;
+	let n: unknown;
+	try { n = JSON.parse(raw); }
+	catch (err) {
+		if (!(err instanceof SyntaxError)) throw err;
+		throw new ConfigurationError("AWS_HOST_CONFIG", "need a JSON object with securityGroupId and unique subnetIds");
+	}
+	if (n && typeof n === "object" && "securityGroupId" in n && "subnetIds" in n
+		&& Object.keys(n).length === 2 && typeof n.securityGroupId === "string" && /^sg-[0-9a-f]{17}$/.exec(n.securityGroupId)?.[0] === n.securityGroupId
+		&& Array.isArray(n.subnetIds) && n.subnetIds.length > 0
+		&& n.subnetIds.every((s: unknown) => typeof s === "string" && /^subnet-[0-9a-f]{17}$/.exec(s)?.[0] === s)
+		&& new Set(n.subnetIds).size === n.subnetIds.length) return n as Network;
+	throw new ConfigurationError("AWS_HOST_CONFIG", "need a JSON object with securityGroupId and unique subnetIds");
+}
+
+function providerConfig(env: Env): ProviderConfig {
+	const name = parseProviderName(env.PROVIDER);
+	if (name === "edgegap") {
+		const api = settingUrl(env.EDGEGAP_API, "EDGEGAP_API");
+		const token = requiredText(env, "EDGEGAP_TOKEN");
+		const headers = header(token.startsWith("token ") ? token : `token ${token}`, "EDGEGAP_TOKEN");
+		headers.set("content-type", "application/json");
+		headers.set("accept", "application/json");
+		return { name, api, headers, app: requiredText(env, "EDGEGAP_APP"), portName: requiredText(env, "EDGEGAP_PORT_NAME"),
+			attempts: num(env, "JOIN_ATTEMPTS", 1), usdPerVcpuMinute: num(env, "USD_PER_VCPU_MINUTE", 0) };
+	}
+	const workerEnv = env.WORKER_ENV;
+	if (typeof workerEnv !== "string" || /^[a-z][a-z0-9-]{0,62}$/.exec(workerEnv)?.[0] !== workerEnv) {
+		throw new ConfigurationError("WORKER_ENV", "need this deployment's lowercase letters, digits and hyphens");
+	}
+	const accessKey = optionalText(env, "AWS_ACCESS_KEY_ID");
+	if (accessKey !== null) header(accessKey, "AWS_ACCESS_KEY_ID");
+	return { name, workerEnv, accessKey, secretKey: optionalText(env, "AWS_SECRET_ACCESS_KEY"), network: network(env.AWS_HOST_CONFIG) };
+}
+
+const configurations = new WeakMap<Env, Config>();
+
+/** HTTP/scheduled entry parses before work; DO construction does so in its own isolate.
+ * Worker bindings are immutable: all downstream consumers reuse this checked configuration. */
 export function config(env: Env): Config {
+	const cached = configurations.get(env);
+	if (cached) return cached;
+	const provider = providerConfig(env);
+	const team = optionalText(env, "ACCESS_TEAM_DOMAIN")?.replace(/\/+$/, "");
+	const issuer = team ? settingUrl(team, "ACCESS_TEAM_DOMAIN").href.replace(/\/+$/, "") : null;
+	const audience = optionalText(env, "ACCESS_AUD");
+	const access = issuer && audience ? { issuer, keys: new URL(`${issuer}/cdn-cgi/access/certs`), audience } : null;
+	const hint = env.LOCATION_HINT;
+	if (!["", "wnam", "enam", "sam", "weur", "eeur", "apac", "apac-ne", "apac-se", "oc", "afr", "me"].includes(hint)) {
+		throw new ConfigurationError("LOCATION_HINT", "need a Cloudflare Durable Object location hint or an empty string");
+	}
 	const s = 1000;
-	return {
+	const cfg: Config = {
+		provider, access, locationHint: hint as DurableObjectLocationHint | "",
 		capacity: num(env, "CAPACITY", 1),
-		heartbeatIntervalMs: num(env, "HEARTBEAT_INTERVAL_S", 1) * s,
-		heartbeatDeadlineMs: num(env, "HEARTBEAT_DEADLINE_S", 1) * s,
-		startDeadlineMs: num(env, "START_DEADLINE_S", 1) * s,
-		statusPollMs: num(env, "STATUS_POLL_S", 1) * s,
-		reservationTtlMs: num(env, "RESERVATION_TTL_S", 0) * s,
-		ticketTtlMs: num(env, "TICKET_TTL_S", 1) * s,
+		heartbeatIntervalMs: num(env, "HEARTBEAT_INTERVAL_S", 1, s),
+		heartbeatDeadlineMs: num(env, "HEARTBEAT_DEADLINE_S", 1, s),
+		startDeadlineMs: num(env, "START_DEADLINE_S", 1, s),
+		statusPollMs: num(env, "STATUS_POLL_S", 1, s),
+		reservationTtlMs: num(env, "RESERVATION_TTL_S", 0, s),
+		ticketTtlMs: num(env, "TICKET_TTL_S", 1, s),
 		emptyExitS: num(env, "EMPTY_EXIT_S", 0),
 		// Unknown: no operating-frequency or storage budget establishes this 1 ms minimum.
 		serverStatsS: num(env, "SERVER_STATS_S", 0.001),
-		serverLogRetentionMs: num(env, "SERVER_LOG_RETENTION_DAYS", 1) * 24 * 60 * 60 * s,
-		endedRetentionMs: num(env, "ENDED_RETENTION_S", 0) * s,
-		locationsCacheMs: num(env, "LOCATIONS_CACHE_S", 0) * s,
-		providerTimeoutMs: num(env, "PROVIDER_TIMEOUT_S", 0.05) * s,
+		serverLogRetentionMs: num(env, "SERVER_LOG_RETENTION_DAYS", 1, 24 * 60 * 60 * s),
+		endedRetentionMs: num(env, "ENDED_RETENTION_S", 0, s),
+		locationsCacheMs: num(env, "LOCATIONS_CACHE_S", 0, s),
+		providerTimeoutMs: num(env, "PROVIDER_TIMEOUT_S", 0.05, s),
 		vcpuPerServer,
 	};
+	configurations.set(env, cfg);
+	return cfg;
 }
 
 /** The server's hosted environment has one owner for both launch and the operator's dry-run proof. */

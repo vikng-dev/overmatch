@@ -891,7 +891,7 @@ export class Registry extends DurableObject<Env> {
 
 /** The sharding seam: one Registry per game version. Finer sharding is a change here alone. */
 export function registryFor(env: Env, version: string): DurableObjectStub<Registry> {
-	const hint = env.LOCATION_HINT as DurableObjectLocationHint | "";
+	const hint = config(env).locationHint;
 	return env.REGISTRY.getByName(version, hint ? { locationHint: hint } : undefined);
 }
 

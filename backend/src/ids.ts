@@ -5,7 +5,7 @@
 const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 
 export function validVersion(v: unknown): v is string {
-	return typeof v === "string" && VERSION_RE.test(v);
+	return typeof v === "string" && VERSION_RE.exec(v)?.[0] === v;
 }
 
 export function randomHex(bytes: number): string {
@@ -42,7 +42,7 @@ export function idOf(version: string, hex: string): string {
 /** The version an id was minted for, or null if the id is malformed. */
 export function versionOf(id: string): string | null {
 	const m = /^([A-Za-z0-9_-]{1,96})\.[0-9a-f]{32}$/.exec(id);
-	if (!m) return null;
+	if (!m || m[0] !== id) return null;
 	const v = unb64url(m[1]);
 	return validVersion(v) ? v : null;
 }

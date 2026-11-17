@@ -1,4 +1,4 @@
-import type { Env } from "./config";
+import { config, ConfigurationError, type Env } from "./config";
 import { edgegapFor } from "./edgegap";
 import { Ec2 } from "./ec2";
 import { bounded, DeadlineError } from "./deadline";
@@ -135,6 +135,15 @@ export function isBeacon(value: unknown): value is Beacon {
 		&& isLocation(value.location);
 }
 
+/** Classify a foreground RPC without changing the operation's existing lifetime. */
+export async function platformCall<T>(op: string, call: () => Promise<T>): Promise<T> {
+	try { return await call(); }
+	catch (err) {
+		if (isPlatformFault(err)) throw new ProviderError(`${op}:transport`, 0, "unknown");
+		throw err;
+	}
+}
+
 /** Classify platform transport failures, never remote invariant exceptions. */
 export async function outsideRpc<T>(op: string, timeout: number, call: () => Promise<T>): Promise<T> {
 	try { return await bounded(timeout, call); }
@@ -181,17 +190,12 @@ const implementations = {
 	ec2: (env: Env, timeoutMs: number): Provider => new Ec2(env, timeoutMs),
 };
 type ProviderName = keyof typeof implementations;
-const selections = new WeakMap<Env, ProviderName>();
-function knownProvider(name: string): name is ProviderName { return Object.hasOwn(implementations, name); }
-
-/** Parse once per immutable Worker environment, at HTTP, scheduled and Durable Object entry. */
-export function providerName(env: Env): ProviderName {
-	const parsed = selections.get(env);
-	if (parsed) return parsed;
-	if (!knownProvider(env.PROVIDER)) throw new Error("config: PROVIDER must name an installed provider");
-	selections.set(env, env.PROVIDER);
-	return env.PROVIDER;
+export function parseProviderName(name: string): ProviderName {
+	if (!Object.hasOwn(implementations, name)) throw new ConfigurationError("PROVIDER", "must name an installed provider");
+	return name as ProviderName;
 }
+
+export function providerName(env: Env): ProviderName { return config(env).provider.name; }
 
 export function providerFor(env: Env, timeoutMs: number): Provider {
 	return implementations[providerName(env)](env, timeoutMs);
