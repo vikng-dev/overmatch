@@ -25,11 +25,12 @@ THE STATS LINE (src/net/server_stats.rs) is one bare `println!` per period on st
                   "period_s":1.0,"projectiles":3,"rss_mb":61.5,"tanks":3,"tick_hz":64.0,
                   "tick_us":{"max":900,"p50":210,"p95":480},"ticks":64}
 
-`parse_stats_line` is the one place that knows that shape: the token `server_stats`, then one JSON
-object. Its keys are not fixed here: nested objects flatten to dotted keys (`tick_us.p95`), every
-numeric leaf is kept, nulls and strings are dropped. When the format moves, that function is the
-change. A line without the token, or whose object does not parse, is not a stats line and is
-skipped, so a server without the lever yields an empty table, not an error.
+`stats_object` is the one place that knows that shape: the token `server_stats`, then one JSON
+object (`scripts/aws/harness.py` reads it too). `parse_stats_line` flattens it: its keys are not fixed
+here; nested objects flatten to dotted keys (`tick_us.p95`), every numeric leaf is kept, nulls,
+strings and lists are dropped. When the format moves, `stats_object` is the change. A line without
+the token, or whose object does not parse, is not a stats line and is skipped, so a server without
+the lever yields an empty table, not an error.
 
 THE WINDOW. The lines carry no clock, so the runner marks the window by content: at the window's
 start it saves the last stats line the server had printed (the marker), and at its end it saves
@@ -75,11 +76,11 @@ def flatten(value: object, prefix: str = "") -> dict[str, float]:
     return out
 
 
-def parse_stats_line(line: str) -> dict[str, float] | None:
-    """THE format function: the stats of one `server_stats {json}` line, flattened, or None.
+def stats_object(line: str) -> dict | None:
+    """THE format function: the JSON object of one `server_stats {json}` line, or None.
 
-    Expected: the token, then one JSON object, anywhere in the line (a container log may prefix
-    it). Adapt the token or the decoding here, and only here.
+    Expected: the token, then one JSON object, anywhere in the line (a container log or a journal
+    may prefix it). Adapt the token or the decoding here, and only here.
     """
     clean = ANSI.sub("", line)
     at = clean.rfind(STATS_TOKEN)
@@ -89,11 +90,17 @@ def parse_stats_line(line: str) -> dict[str, float] | None:
     if brace < 0:
         return None
     try:
+        # Decoding starts at a brace, so a value is always an object.
         value, _ = json.JSONDecoder().raw_decode(clean[brace:])
     except json.JSONDecodeError:
         return None
-    stats = flatten(value)
-    return stats or None
+    return value
+
+
+def parse_stats_line(line: str) -> dict[str, float] | None:
+    """The stats of one `server_stats {json}` line, flattened, or None."""
+    value = stats_object(line)
+    return (flatten(value) or None) if value is not None else None
 
 
 def after_marker(lines: list[str], marker: str) -> tuple[str, list[str]]:
