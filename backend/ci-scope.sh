@@ -13,7 +13,7 @@ case "$event" in
 	*)
 		if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
 			&& git cat-file -e "$base^{commit}" 2>/dev/null && git cat-file -e "$head^{commit}" 2>/dev/null; then
-			if git diff --quiet "$base" "$head" -- backend .github/workflows/backend.yml; then
+			if git diff --quiet "$base" "$head" -- backend .github/workflows/backend.yml scripts/aws/machine.sh scripts/aws/host_setup.py scripts/aws/host-policy.json scripts/aws/host-image.json src/net/server.rs; then
 				affected=false
 			fi
 		fi

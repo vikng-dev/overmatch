@@ -2,10 +2,12 @@
 // D1). Cloudflare Access sits in front of the route; this module also verifies the Access JWT, and
 // with ACCESS_TEAM_DOMAIN or ACCESS_AUD unset it refuses every request (fail closed).
 
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createRemoteJWKSet, customFetch, errors, jwtVerify } from "jose";
 import { config, type Env } from "./config";
 import { registryFor, type ServerSnapshot } from "./registry";
+import { diag } from "./reasons";
 import { lastSweep } from "./sweep";
+import { d1Call, outsideRpc, providerFetch, ProviderError, providerFor } from "./provider";
 
 /** Concurrent Registry calls per request; the platform allows six outgoing connections. */
 const FANOUT = 5;
@@ -13,17 +15,33 @@ const FANOUT = 5;
 let jwks: { url: string; set: ReturnType<typeof createRemoteJWKSet> } | null = null;
 
 export async function accessDenied(req: Request, env: Env): Promise<string | null> {
-	const team = env.ACCESS_TEAM_DOMAIN?.replace(/\/+$/, "");
-	if (!team || !env.ACCESS_AUD) return "admin disabled: ACCESS_TEAM_DOMAIN and ACCESS_AUD are not configured";
+	const access = config(env).access;
+	if (!access) return "admin disabled: ACCESS_TEAM_DOMAIN and ACCESS_AUD are not configured";
 	const token = req.headers.get("cf-access-jwt-assertion");
 	if (!token) return "missing Cf-Access-Jwt-Assertion";
-	const url = `${team}/cdn-cgi/access/certs`;
-	if (jwks?.url !== url) jwks = { url, set: createRemoteJWKSet(new URL(url)) };
+	const url = access.keys.href;
+	if (jwks?.url !== url) jwks = { url, set: createRemoteJWKSet(access.keys, { [customFetch]: (input, init) => providerFetch("accessKeys", input, init) }) };
 	try {
 		// jose checks `exp` only when present; Access always issues it, so its absence is a refusal.
-		await jwtVerify(token, jwks.set, { issuer: team, audience: env.ACCESS_AUD, requiredClaims: ["exp"] });
+		const set = jwks.set;
+		await jwtVerify(token, async (...args) => {
+			let key: CryptoKey;
+			try { key = await set(...args); }
+			catch (err) {
+				// jose imports outside JWK data through WebCrypto; these are its input refusal types.
+				if (err instanceof TypeError || (err instanceof DOMException && ["DataError", "SyntaxError", "InvalidCharacterError", "NotSupportedError", "OperationError"].includes(err.name))) {
+					throw new ProviderError("accessKeys", 502, "unknown");
+				}
+				throw err;
+			}
+			// jose 6.2.12 lib/jws_algorithms.js requires 2048-bit RSA; its verifier throws TypeError below it.
+			if ("modulusLength" in key.algorithm && Number(key.algorithm.modulusLength) < 2048) throw new ProviderError("accessKeys", 502, "unknown");
+			return key;
+		}, { issuer: access.issuer, audience: access.audience, requiredClaims: ["exp"] });
 		return null;
 	} catch (err) {
+		if (!(err instanceof errors.JOSEError) && !(err instanceof ProviderError)) throw err;
+		console.warn("Access refused", err instanceof ProviderError ? diag(err) : err.code);
 		return `invalid Access token: ${err instanceof Error ? err.message : String(err)}`;
 	}
 }
@@ -43,11 +61,14 @@ interface SessionRow {
 
 export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 	const cfg = config(env);
+	const provider = providerFor(env, cfg.providerTimeoutMs);
+	const rate = provider.usdPerVcpuMinute;
+	const slots = provider.reservations ? (await provider.reservations()).length : null;
 	const monthStart = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), 1);
 
 	const [liveVersions, totals, recent, swept] = await Promise.all([
-		env.DB.prepare("SELECT DISTINCT version FROM sessions WHERE ended_at IS NULL ORDER BY version").all<{ version: string }>(),
-		env.DB.prepare(
+		d1Call("adminVersions", cfg.providerTimeoutMs, () => env.DB.prepare("SELECT DISTINCT version FROM sessions WHERE ended_at IS NULL ORDER BY version").all<{ version: string }>()),
+		d1Call("adminTotals", cfg.providerTimeoutMs, () => env.DB.prepare(
 			`WITH durations AS (
 				SELECT *, CASE WHEN ended_at IS NULL THEN (?1 - requested_at) / 60000.0 ELSE (ended_at - requested_at) / 60000.0 END AS elapsed_minutes
 				FROM sessions
@@ -65,8 +86,8 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 			.first<{
 				month_minutes: number; all_vcpu_minutes: number; month_vcpu_minutes: number;
 				all_unknown: number; month_unknown: number; sessions: number; failures: number;
-			}>(),
-		env.DB.prepare("SELECT * FROM sessions ORDER BY requested_at DESC LIMIT 30").all<SessionRow>(),
+			}>()),
+		d1Call("adminRecent", cfg.providerTimeoutMs, () => env.DB.prepare("SELECT * FROM sessions ORDER BY requested_at DESC LIMIT 30").all<SessionRow>()),
 		lastSweep(env),
 	]);
 
@@ -76,16 +97,19 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 		const batch = versions.slice(i, i + FANOUT);
 		const snaps = await Promise.all(
 			batch.map((v) =>
-				registryFor(env, v)
-					.snapshot()
+				outsideRpc("adminSnapshot", cfg.providerTimeoutMs, () => registryFor(env, v).snapshot())
 					.then((s) => s.filter((x) => x.state !== "ended"))
-					.catch(() => null),
+					.catch((err) => {
+						if (!(err instanceof ProviderError)) throw err;
+						console.warn("admin snapshot unavailable", v, diag(err));
+						return null;
+					}),
 			),
 		);
 		batch.forEach((version, j) => live.push({ version, servers: snaps[j] }));
 	}
 
-	const usd = (vcpuMinutes: number) => (vcpuMinutes * cfg.usdPerVcpuMinute).toFixed(2);
+	const usd = (vcpuMinutes: number) => rate === null ? "unknown" : `$${(vcpuMinutes * rate).toFixed(2)}`;
 	if (!totals) throw new Error("admin totals: an aggregate without GROUP BY must return one row");
 	const excluded = (count: number) => count ? ` (${count} ${count === 1 ? "session" : "sessions"} excluded: vCPU unknown)` : "";
 	const allServers = live.flatMap((l) => l.servers ?? []);
@@ -97,7 +121,7 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 				? [`<tr><td>${esc(version)}</td><td colspan="6">snapshot unavailable</td></tr>`]
 				: servers.map(
 						(s) =>
-							`<tr><td>${esc(version)}</td><td>${esc(s.location)}</td><td>${esc(s.state)}${s.server_state === "closing" ? " (closing)" : ""}</td>` +
+							`<tr><td>${esc(version)}</td><td>${esc(s.location)}</td><td>${esc(s.state)}${provider.starts.retryBootInPlace ? ` (boot ${s.boot_attempt + 1})` : ""}${s.server_state === "closing" ? " (closing)" : ""}</td>` +
 							`<td class="n">${s.players}/${s.capacity}</td><td>${s.address ? esc(`${s.address}:${s.port}`) : "-"}</td>` +
 							`<td class="n">${ago(now, s.created_at)}</td><td class="n">${s.last_seen ? ago(now, s.last_seen) : "-"}</td></tr>`,
 					),
@@ -107,7 +131,7 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 	const recentRows = recent.results
 		.map((r) => {
 			const minutes = ((r.ended_at ?? now) - r.requested_at) / 60000;
-			const cost = r.vcpu === null ? "unknown" : `$${usd(minutes * r.vcpu)}`;
+			const cost = r.vcpu === null ? "unknown" : usd(minutes * r.vcpu);
 			return `<tr><td>${iso(r.requested_at)}</td><td>${esc(r.version)}</td><td>${esc(r.location)}</td>` +
 				`<td>${r.ended_at === null ? "live" : esc(r.outcome ?? "")}</td><td class="n">${r.peak_players}</td>` +
 				`<td class="n">${minutes.toFixed(1)}</td><td class="n">${r.vcpu ?? "unknown (unrecorded)"}</td>` +
@@ -139,10 +163,11 @@ th{color:var(--mute);font-weight:500}.n{text-align:right;font-variant-numeric:ta
 <div><b>${allServers.length}</b><span>live servers</span></div>
 <div><b>${players}</b><span>players</span></div>
 <div><b>${totals.month_minutes.toFixed(0)}</b><span>server-minutes this month</span></div>
-<div><b>$${usd(totals.month_vcpu_minutes)}</b><span>est. compute this month${excluded(totals.month_unknown)}</span></div>
-<div><b>$${usd(totals.all_vcpu_minutes)}</b><span>est. compute all time${excluded(totals.all_unknown)}</span></div>
+<div><b>${usd(totals.month_vcpu_minutes)}</b><span>est. compute this month${excluded(totals.month_unknown)}</span></div>
+<div><b>${usd(totals.all_vcpu_minutes)}</b><span>est. compute all time${excluded(totals.all_unknown)}</span></div>
 <div><b>${totals.failures}/${totals.sessions}</b><span>failed starts / sessions</span></div>
 </div>
+${slots === null ? "" : `<p>Fleet: ${slots} reservations</p>`}
 <h2>Live</h2>
 <div class="wrap"><table><tr><th>version</th><th>location</th><th>state</th><th class="n">players</th><th>address</th><th class="n">age</th><th class="n">last heartbeat</th></tr>
 ${liveRows || '<tr><td colspan="7">none</td></tr>'}</table></div>
@@ -150,7 +175,7 @@ ${liveRows || '<tr><td colspan="7">none</td></tr>'}</table></div>
 <h2>Recent sessions</h2>
 <div class="wrap"><table><tr><th>requested (UTC)</th><th>version</th><th>location</th><th>outcome</th><th class="n">peak</th><th class="n">minutes</th><th class="n">vCPU</th><th class="n">est. compute</th><th>reason</th></tr>
 ${recentRows || '<tr><td colspan="9">none</td></tr>'}</table></div>
-<p style="color:var(--mute)">Cost is DERIVED: each session's minutes from request to end (or now while live) × its recorded vCPU × the current $${cfg.usdPerVcpuMinute}/vCPU-min rate, compute only (egress not included). Sessions with unrecorded vCPU show unknown and are excluded from cost totals. Reconcile against the Edgegap invoice.</p>
+${rate === null ? '<p style="color:var(--mute)">EC2 cost is unknown here; this dashboard has no EC2 billing model.</p>' : `<p style="color:var(--mute)">Cost is DERIVED: each session's minutes from request to end (or now while live) × its recorded vCPU × the current $${rate}/vCPU-min rate, compute only (egress not included). Sessions with unrecorded vCPU show unknown and are excluded from cost totals. Reconcile against the Edgegap invoice.</p>`}
 </body></html>`;
 }
 

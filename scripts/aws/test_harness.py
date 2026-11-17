@@ -2,6 +2,8 @@
 machine.sh, with `aws`, `ssh`, `ssh-keygen` and `curl` replaced by fixtures on PATH."""
 import contextlib
 import dataclasses
+import base64
+import shlex
 import importlib.util
 import io
 import json
@@ -243,6 +245,8 @@ from pathlib import Path
 name, args = Path(sys.argv[0]).name, sys.argv[1:]
 with open(os.environ["MACHINE_CALLS"], "a") as log:
     log.write(json.dumps([name, *args]) + "\n")
+if os.environ.get("MACHINE_FAIL") == name:
+    sys.exit(1)
 if name == "install":
     operands, directory, words = [], False, iter(args)
     for word in words:
@@ -257,10 +261,13 @@ if name == "install":
             Path(path).mkdir(parents=True, exist_ok=True)
     else:
         shutil.copy(*operands)
-elif name == "curl":
+elif name == "curl" and "-o" in args:
     Path(args[args.index("-o") + 1]).write_bytes(b"fixture archive")
 elif name == "sha256sum":
-    sys.stdin.read()
+    line = sys.stdin.read().strip()
+    _, filename = line.split(None, 1)
+    if not Path(filename.lstrip("*")).is_file():
+        sys.exit(1)
 elif name == "dpkg-query":
     sys.exit(1)
 elif name == "journalctl":
@@ -268,13 +275,22 @@ elif name == "journalctl":
         sys.stderr.write("Failed to open the journal: Input/output error\n")
         sys.exit(1)
     print(os.environ.get("JOURNAL", ""), end="")
+elif name == "systemctl" and args[:1] == ["show"]:
+    if os.environ.get("UPDATER_QUERY_FAILS"):
+        sys.exit(1)
+    print("LoadState=" + os.environ.get("UPDATER_LOAD", "masked"))
+    print("ActiveState=" + os.environ.get("UPDATER_STATE", "inactive"))
+elif name == "systemctl" and args[:1] == ["is-enabled"]:
+    print("masked")
+    sys.exit(1)
 elif name == "systemctl" and args[:1] == ["is-active"]:
     print("active")
 '''
 MACHINE_COMMANDS = ("install", "shutdown", "chown", "dpkg-query", "apt-get", "curl", "sha256sum", "tar",
-                    "systemctl", "journalctl")
+                    "systemctl", "journalctl", "useradd")
 # Where each machine path machine.sh names lands under a test's root.
 MACHINE_PATHS = {"/var/lib/om-harness": "state", "/opt/overmatch": "opt", "/usr/local/bin/om-harness": "om-harness",
+                 "/etc/overmatch-report-header": "report-header", "/etc/overmatch-host.env": "host.env",
                  "/home/ubuntu": "home", "/etc/systemd/system": "units", "/proc/uptime": "uptime"}
 
 # The timing tastes' and the battle mode's owners, which the fake release serves at every tag.
@@ -448,6 +464,77 @@ def tags(resource: dict) -> dict[str, str]:
 
 def option(argv: list[str], name: str) -> str:
     return argv[argv.index(name) + 1]
+
+
+class HostedBoot(unittest.TestCase):
+    """The provider and harness share this entrypoint; the hosted role must keep its lifetime guards."""
+
+    def machine(self):
+        archive_name = "overmatch-server-v0.8.0-fixture-x86_64-unknown-linux-gnu.tar.gz"
+        values = {"ROLE": "hosted", "CAP_MIN": 1440, "ARCHIVE_URL": "https://release.example/" + archive_name,
+                  "ARCHIVE_SHA256": "a" * 64 + "  " + archive_name, "HOSTED_API": "https://worker.example",
+                  "HOSTED_SERVER_ID": "fixture-server", "HOSTED_REPORT_SECRET": "fixture-report",
+                  "HOSTED_ENV_B64": base64.b64encode(b'OVERMATCH_SERVER_ID="fixture-server"\n').decode()}
+        script = (HERE / "machine.sh").read_text().replace(harness.SETTINGS_MARK,
+                 "".join(f"{k}={shlex.quote(str(v))}\n" for k, v in values.items()))
+        return MachineScript(self.addCleanup, script)
+
+    def test_hosted_boot_installs_no_package_or_ssh_and_powers_off_on_every_service_exit(self):
+        machine = self.machine()
+        result = machine.boot()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = machine.calls()
+        self.assertFalse(any(c[0] in ("dpkg-query", "apt-get", "chown") for c in calls))
+        self.assertLess(next(i for i, c in enumerate(calls) if c[0] == "shutdown"),
+                        next(i for i, c in enumerate(calls) if c[0] == "curl"))
+        unit = (machine.root / "units/overmatch-server.service").read_text()
+        self.assertIn("ExecStopPost=+/usr/bin/systemctl --no-block poweroff", unit)
+        self.assertIn("EnvironmentFile=", unit)
+        self.assertIn("User=overmatch", unit)
+        self.assertIn("NoNewPrivileges=yes", unit)
+        self.assertIn(["useradd", "--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "overmatch"], calls)
+        self.assertNotIn("sudo", unit)
+        mask = next(i for i, c in enumerate(calls) if c[:3] == ["systemctl", "mask", "--now"])
+        start = calls.index(["systemctl", "start", "overmatch-server"])
+        self.assertLess(mask, start)
+        self.assertTrue({"apt-daily.timer", "apt-daily-upgrade.timer", "unattended-upgrades.service", "snapd.service", "snapd.socket"} <= set(calls[mask]))
+        verify = next(c for c in calls if c[0] == "sha256sum")
+        self.assertEqual(verify[1:], ["--check", "--strict", "--quiet", "-"])
+        self.assertFalse((machine.root / "state/server.tar.gz").exists())
+        self.assertEqual((machine.root / "host.env").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((machine.root / "report-header").stat().st_mode & 0o777, 0o600)
+
+    def test_every_unconfirmed_updater_state_refuses_play_reports_boot_updates_and_powers_off(self):
+        cases = [{'UPDATER_STATE': active} for active in
+                 ('active', 'activating', 'deactivating', 'reloading', '', 'future-state')]
+        cases.append({'UPDATER_QUERY_FAILS': '1'})
+        for values in cases:
+            with self.subTest(values=values):
+                machine = self.machine()
+                machine.env.update(values)
+                self.assertNotEqual(machine.boot().returncode, 0)
+                self.assertNotIn(["systemctl", "start", "overmatch-server"], machine.calls())
+                self.assertIn(["systemctl", "--no-block", "poweroff"], machine.calls())
+                report = next(c for c in machine.calls() if c[0] == 'curl' and '--data' in c)
+                self.assertEqual(json.loads(report[report.index('--data') + 1]), {'reason': 'boot-updates'})
+
+    def test_failed_or_absent_updaters_allow_play(self):
+        for values in ({'UPDATER_STATE': 'failed'}, {'UPDATER_LOAD': 'not-found', 'UPDATER_STATE': 'inactive'}):
+            machine = self.machine()
+            machine.env.update(values)
+            self.assertEqual(machine.boot().returncode, 0)
+
+    def test_failed_checksum_reports_the_step_and_powers_off_without_starting_a_service(self):
+        machine = self.machine()
+        machine.env["MACHINE_FAIL"] = "sha256sum"
+        result = machine.boot()
+        self.assertNotEqual(result.returncode, 0)
+        calls = machine.calls()
+        reports = [c for c in calls if c[0] == "curl" and "--data" in c]
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(json.loads(reports[0][reports[0].index("--data") + 1]), {"reason": "boot-verify"})
+        self.assertIn(["systemctl", "--no-block", "poweroff"], calls)
+        self.assertNotIn(["systemctl", "start", "overmatch-server"], calls)
 
 
 class MeasuredRun(unittest.TestCase):

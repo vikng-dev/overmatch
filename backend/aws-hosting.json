@@ -1,0 +1,14 @@
+{
+  "maxServers": 2,
+  "startAttempts": 2,
+  "lifetimeMinutes": 1440,
+  "provenance": "Owner choices: hosting design decision 3, decision 5 and section 5's independent power-off guard. Sweep margin: Resolution, five minutes allows clock skew and boot time between EC2 launch and the machine's own power-off timer; not a measured termination bound. Location: StandIn regional display centroid, not a machine position; replace with provider location metadata if exposed.",
+  "sweepMarginMinutes": 5,
+  "location": {
+    "city": "Singapore",
+    "country": "Singapore",
+    "continent": "Asia",
+    "latitude": 1.35,
+    "longitude": 103.82
+  }
+}

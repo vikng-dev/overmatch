@@ -145,7 +145,7 @@ describe("the orphan sweep", () => {
 		const other = await leakedAfterEnd(1, "London");
 		edgegap.hangStops.add(hung);
 		const started = Date.now();
-		expect(await sweep(env)).toMatchObject({ stopped: 1, failed: 1, error: "stop: stop HTTP 0" });
+		expect(await sweep(env)).toMatchObject({ stopped: 1, failed: 1, error: "stop: stop HTTP 0 unknown" });
 		expect(Date.now() - started).toBeLessThan(5 * S); // PROVIDER_TIMEOUT_S is 0.5 in vitest.config.ts
 		expect(running(other)).toBe(false);
 		expect(running(hung)).toBe(true);
@@ -158,7 +158,7 @@ describe("the orphan sweep", () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp(0);
 		const down = vi.spyOn(Registry.prototype, "liveDeployments").mockImplementation(() => new Promise<never>(() => {}) as never);
-		expect(await sweep(env)).toMatchObject({ listed: 1, stopped: 0, error: "registry: DeadlineError" });
+		expect(await sweep(env)).toMatchObject({ listed: 1, stopped: 0, failed: 1, error: "registry: registryClaims:transport HTTP 0 unknown" });
 		down.mockRestore();
 		expect(running(s.deploymentId)).toBe(true);
 	});

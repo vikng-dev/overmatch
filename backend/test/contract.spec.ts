@@ -18,6 +18,7 @@ import ticketStatusReq from "../contract/ticket.request.json";
 import startingRes from "../contract/ticket.starting.response.json";
 import { age, call, env, join, launched, registry, webhook } from "./helpers";
 import { runDurableObjectAlarm } from "cloudflare:test";
+import { config } from "../src/config";
 
 function kind(v: unknown): string {
 	return v === null ? "null" : Array.isArray(v) ? "array" : typeof v;
@@ -79,7 +80,7 @@ describe("contract/*.json matches the handlers", () => {
 
 	it("failed ticket", async () => {
 		const t = await join({ version: "0.5.0", locations: ["Paris"], pings: {} });
-		await age("0.5.0", 61_000);
+		await age("0.5.0", config(env).startDeadlineMs + 1);
 		await runDurableObjectAlarm(registry("0.5.0"));
 		conforms(await (await call("POST", "/v1/join/status", { ticket: t })).json(), failedRes);
 	});

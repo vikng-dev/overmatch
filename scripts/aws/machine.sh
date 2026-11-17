@@ -1,6 +1,6 @@
 #!/bin/bash
-# machine.sh — the machine side of scripts/aws/harness.py. Both machines boot with it as their
-# user-data; the operator then runs its commands over SSH as `sudo -n om-harness <command>`.
+# Shared boot for scripts/aws/harness.py and the matchmaking EC2 provider. The harness uses its
+# installed commands over SSH as `sudo -n om-harness <command>`; hosted machines have no SSH key.
 #
 # BOOT (cloud-init runs it as root with no arguments), in order, each step appending
 # `<step> <seconds since kernel start>` to $STATE/phases, a failing one appending `failed <step>`:
@@ -45,24 +45,50 @@ uptime_s() {
 
 mark() { printf '%s %s\n' "$1" "$(uptime_s)" >>"$STATE/phases"; }
 
+boot_failed() {
+  trap - ERR
+  mark "failed $step" || echo 'boot phase recording failed' >&2
+  if [[ "$ROLE" == hosted ]]; then
+    # A failed callback cannot keep a failed machine alive. No journal is uploaded here.
+    curl --silent --show-error --fail --max-time 10 \
+      --header @/etc/overmatch-report-header --header 'Content-Type: application/json' \
+      --data "{\"reason\":\"boot-$step\"}" \
+      "$HOSTED_API/v1/servers/$HOSTED_SERVER_ID/end" >/dev/null 2>&1 || echo 'boot report failed' >&2
+    systemctl --no-block poweroff
+  fi
+  exit 1
+}
+
 boot() {
+  step=guard
+  trap boot_failed ERR
   install -d -m 755 "$STATE"
   mark userdata
-  step=guard
-  trap 'mark "failed $step"' ERR
+  if [[ "$ROLE" == hosted ]]; then
+    # Root-only files; systemd reads the environment before dropping to the service user.
+    umask 077
+    printf 'Authorization: Bearer %s\n' "$HOSTED_REPORT_SECRET" >/etc/overmatch-report-header
+    printf '%s' "$HOSTED_ENV_B64" | base64 --decode >/etc/overmatch-host.env
+  fi
   shutdown -h "+$CAP_MIN"
   mark guard
 
   step=self
-  install -m 755 "$0" /usr/local/bin/om-harness
+  if [[ "$ROLE" == hosted ]]; then
+    install -m 700 "$0" /usr/local/bin/om-harness
+  else
+    install -m 755 "$0" /usr/local/bin/om-harness
+  fi
   mark self
 
-  step=key
-  install -d -m 700 -o ubuntu -g ubuntu /home/ubuntu/.ssh
-  printf '%s\n' "$PUBKEY" >>/home/ubuntu/.ssh/authorized_keys
-  chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
-  chmod 600 /home/ubuntu/.ssh/authorized_keys
-  mark key
+  if [[ "$ROLE" != hosted ]]; then
+    step=key
+    install -d -m 700 -o ubuntu -g ubuntu /home/ubuntu/.ssh
+    printf '%s\n' "$PUBKEY" >>/home/ubuntu/.ssh/authorized_keys
+    chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+    chmod 600 /home/ubuntu/.ssh/authorized_keys
+    mark key
+  fi
 
   if [[ "$ROLE" == client ]]; then
     step=packages
@@ -74,33 +100,75 @@ boot() {
     mark packages
   fi
 
+  if [[ "$ROLE" == hosted ]]; then
+    step=updates
+    # Ubuntu's apt timers can run at startup. Mask before starting play; absent units are harmless.
+    # The image's snap packaging varies, so cover both timer and daemon refresh paths defensively.
+    local updaters=(apt-daily.timer apt-daily.service apt-daily-upgrade.timer
+      apt-daily-upgrade.service unattended-upgrades.service snapd.service snapd.socket
+      snapd.snap-repair.timer snapd.snap-repair.service)
+    systemctl mask --now "${updaters[@]}" || echo 'updater stop reported failure; verifying masks and active state' >&2
+    local updater status load active
+    for updater in "${updaters[@]}"; do
+      # is-enabled returns nonzero for a masked unit, including a mask for an absent package.
+      status="$(systemctl is-enabled "$updater" 2>/dev/null)" || true
+      [[ "$status" == masked ]]
+      # show succeeds for absent units (LoadState=not-found). A query failure enters boot_failed.
+      status="$(systemctl show --property=LoadState --property=ActiveState "$updater")"
+      load='' active=''
+      while IFS='=' read -r key value; do
+        case "$key" in LoadState) load="$value" ;; ActiveState) active="$value" ;; esac
+      done <<<"$status"
+      [[ -n "$load" ]]
+      if [[ "$load" != not-found ]]; then
+        [[ "$active" == inactive || "$active" == failed ]]
+      fi
+    done
+    mark updates
+  fi
+
   step=download
-  local archive="$STATE/${ARCHIVE_URL##*/}"
+  local archive="$STATE/server.tar.gz"
   curl -fsSL --retry 3 -o "$archive" "$ARCHIVE_URL"
   mark downloaded
 
   step=verify
-  (cd "$STATE" && printf '%s\n' "$ARCHIVE_SHA256" | sha256sum --check --strict --quiet -)
+  # The release edge checks the checksum's asset name; verification uses the fixed local name.
+  printf '%s  %s\n' "${ARCHIVE_SHA256%% *}" "$archive" | sha256sum --check --strict --quiet -
   mark verified
 
   step=unpack
   install -d -m 755 "$INSTALL"
   tar -xzf "$archive" --strip-components=1 -C "$INSTALL"
-  rm "$archive"
+  # Delete rule: spell out the path so the delete cannot follow a changed variable.
+  rm /var/lib/om-harness/server.tar.gz
   mark unpacked
 
-  if [[ "$ROLE" == server ]]; then
+  if [[ "$ROLE" == server || "$ROLE" == hosted ]]; then
+    local environment stop_post
+    step=user
+    useradd --system --no-create-home --shell /usr/sbin/nologin overmatch
+    if [[ "$ROLE" == hosted ]]; then
+      environment='EnvironmentFile=/etc/overmatch-host.env'
+      stop_post='ExecStopPost=+/usr/bin/systemctl --no-block poweroff'
+    else
+      environment="Environment=OVERMATCH_BOT=$BOTS OVERMATCH_SERVER_STATS_S=$STATS_S"
+      stop_post=''
+    fi
     step=start
     cat >/etc/systemd/system/overmatch-server.service <<UNIT
 [Unit]
-Description=Overmatch dedicated server (scripts/aws/harness.py)
+Description=Overmatch dedicated server
 
 [Service]
-User=ubuntu
+User=overmatch
+NoNewPrivileges=yes
 WorkingDirectory=$INSTALL
-Environment=OVERMATCH_BOT=$BOTS OVERMATCH_SERVER_STATS_S=$STATS_S NO_COLOR=1
+$environment
+Environment=NO_COLOR=1
 ExecStart=$INSTALL/overmatch-server
 LogRateLimitIntervalSec=0
+$stop_post
 UNIT
     systemctl daemon-reload
     systemctl start overmatch-server
