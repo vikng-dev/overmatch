@@ -1644,7 +1644,8 @@ fn update_steer_detent(st: &mut TransmissionState, steer: f32) {
 }
 
 /// At rest the lever is on. Drive releases it once moving in the requested direction.
-/// Steering releases it for a neutral turn. Released sub-idle motion stops and parks.
+/// Steering releases it for a neutral turn. With no request, sub-idle motion or motion against
+/// the gear brakes to rest and parks. See `transmission-design.md`, "Released-motion policy".
 fn update_park_latch(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1661,9 +1662,12 @@ fn update_park_latch(
         tp.gears_fwd[0]
     };
     let stop_speed = tp.engine.idle_rpm * RPM_TO_RAD * tp.sprocket_radius / first;
+    let along_gear = (inp.speeds[0] + inp.speeds[1]) * if st.reverse { -1.0 } else { 1.0 };
     if !brake && !requested && steering {
         st.park = false;
-    } else if speed < PARK_ENGAGE_SPEED || (!requested && !steering && speed < stop_speed) {
+    } else if speed < PARK_ENGAGE_SPEED
+        || (!requested && !steering && (speed < stop_speed || along_gear < 0.0))
+    {
         st.park = true;
     } else if requested && command * (inp.speeds[0] + inp.speeds[1]) > 0.0 {
         st.park = false;
@@ -1684,8 +1688,8 @@ fn neutral_pivot(inp: &TransmissionInput, mean: f32) -> bool {
 
 /// The Driver holding it `open` (a shift window, or no gear chosen yet), a two-sided parked
 /// hold and neutral turns open the clutch; otherwise it engages as [`engagement`] states.
-/// With no propulsive pedal the Driver couples only motion along the engaged ladder for engine
-/// braking: rolling against it needs brakes and a stopped direction cut, not an idle-catch hold.
+/// With no propulsive pedal, only motion along the engaged ladder can couple.
+/// See `transmission-design.md`, "Released-motion policy".
 fn update_clutch_state(
     st: &mut TransmissionState,
     tp: &TransmissionParams,

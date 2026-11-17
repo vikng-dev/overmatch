@@ -458,9 +458,11 @@ finite, positive, J ≤ 100, capacity ≤ 50 000. Spec pin test updated delibera
    catch as Driver work: it requires control authority and uses the same task rate. Its droop
    width is `assets/driving/engine.ron::idle_catch_droop_rpm`. Neither an empty station nor a
    zero-rate task can sustain idle through this catch.
-2. `update_clutch_state` opens the main clutch during shift windows, while parked, for staffed
-   zero-rate tasks, and at released rest or a neutral pivot. An empty station retains neutral at
-   rest; a moving interruption ends with its window. Otherwise `engagement` decides: under intent,
+2. With served task work, `update_clutch_state` opens the main clutch during shift windows,
+   while parked without propulsive pedal (or under Brake intent), and without propulsive pedal
+   at rest, in a neutral pivot, or moving against the engaged ladder. Without task work the
+   clutch springs In after any paid cut; the catch supplies no fuel. See "Released-motion policy"
+   for braking. Otherwise `engagement` decides: under intent,
    a clutch closing at rest or from Out (after a cut) below
    `TransmissionParams::launch_omega(command)` slips with the crank held there, transmits bounded
    free torque, and keeps slipping until the shaft reaches it. A moving lug already In stays In
@@ -518,16 +520,16 @@ sentinel remains.
 
 New unit pins: `launch_is_clutch_slip_limited` (standing start full W: belt force =
 k₁ × capacity ≈ 242.5 kN lab, measurably NOT the old rev-floor 186.6 kN),
-`stall_guard_holds_crank_under_grade_lug` (full-W lug + coast backslide: ω_e never below
-idle − 100 rpm; forward drive persists through the slipping clutch),
+`stall_guard_holds_crank_under_grade_lug` (full-pedal loaded launch and resisted backward coast
+at fixed input speeds: ω_e never below the authored idle guard; forward drive stays bounded),
 `rev_match_across_upshift_is_continuous` (≤ 250 rpm/tick slew, ≤ 400 rpm gap at window
 end, re-locks to the geared point), `free_rev_parks_in_the_governor_band_beneath_the_steer_target`
 (lab: parks within the rev governor's band beneath the peak-torque target, NOT the cut-out, its
 fuel balancing drag), `coast_drag_reaches_belt_through_coupling` (steady coast force through the
 clutch = the declared drag share exactly — the steady state is coupling-law-invariant),
-`readout_reports_crank_state`. Backslide behavior: forward drive during slides now comes
-through the clutch — capacity-clamped under full W (`F_c = k·2400`), `τ_free`-limited on
-a coast slide; the stage-A backslide unit tests hold unchanged.
+`readout_reports_crank_state`. Under propulsive pedal, drive during rollback passes through the
+capacity-limited clutch. With served task work and no propulsive pedal, rollback against the
+engaged ladder receives no main-engine force; braking follows "Released-motion policy" below.
 
 Deliberately NOT in this stage: grade-aware scheduling / skip shifts (stage C), stall
 death, torque-converter coupling, d-path crank loading (the power gate stands in).
@@ -948,3 +950,31 @@ at the threshold become one entry, and its peak hull deceleration rises from 2.8
 The hold acts on the pivot's own clutch clause (no pedal, steering, under the neutral thresholds),
 not on every open clutch, so a shift window is no pivot. It also stays off on any tick whose park
 lever or service brakes act, Brake intent included, so `brake_force` is never counted twice.
+
+## Released-motion policy
+
+The game's driving model: a staffed Driver with no throttle or steering request does not let the
+vehicle roll against its engaged gear. `update_park_latch` sets the existing park lever at any
+speed when mean belt motion opposes that ladder. The capacity-limited stop law brakes it to rest
+and keeps it parked. Above brake capacity it continues sliding with saturated brakes, just as a
+parked vehicle does; no engine catch enlarges that capacity. Releasing a reversal or a sliding
+pivot has the same outcome as being shoved backward while coasting.
+
+An unparked coast along the gear above first-gear idle remains unbraked by the lever. Released sub-idle
+motion still parks. A steering request releases park, leaving a neutral pivot's construction-selected
+mean hold as its only stop (`Free` supplies none). Releasing steering ends that exception. A held
+opposite-ladder request uses service braking, waits at rest, then pays its direction cut. An
+intentional hill start still uses propulsive pedal and the one-way launch lever.
+
+With served task work and no propulsive pedal, `update_clutch_state` couples only motion along the
+engaged ladder outside rest and neutral pivots. Above that gear's idle speed this permits engine
+braking; below it, the idle catch can supply forward torque. The latter's interaction with a
+reversal request, the along-gear neutral boundary, and free launch-gear selection during rollback
+remain follow-up #392. This policy does not resolve them.
+
+Chosen: set park while moving against the gear with no request, using the existing dynamic brake
+capacity until rest. Rejected: keeping the clutch coupled for an idle-catch hill hold, which makes
+the engine an extra stop outside the brake budget and causes the #373 feedback; leaving rollback
+declutched without braking, which lets a staffed vehicle run away even inside brake capacity;
+and a separate service-brake policy with another latch or speed band, since the park lever already
+carries the required stop and persistent hold.

@@ -878,8 +878,9 @@ fn steady_launch_slip_transmits_the_bounded_free_torque() {
 /// The clutch's floor cannot create energy or reverse propulsive force: the
 /// torque it transmits stays within capacity and never turns backward beyond the crank
 /// arithmetic's roundoff, and once the crank has spooled it drives forward. Fixture: first gear,
-/// a loaded launch from rest (Slip) and an already-coupled climb rolling back at 2 m/s (In),
-/// both under full pedal. The Driver feels the hull ride its belts against the fixture's reactions.
+/// a loaded launch from rest (Slip) and a resisted backward coast at a held 2 m/s (In),
+/// both under full pedal. Belt inputs remain fixed; the negative coast reactions push forward.
+/// The Driver feels the hull ride its belts against the fixture's reactions.
 #[test]
 fn stall_guard_holds_crank_under_grade_lug() {
     let (fp, tp) = (lab_fp(), lab_tp());
@@ -2563,7 +2564,7 @@ fn held_reversal_waits_at_rest_and_pays_exactly_one_cut() {
     }
 }
 
-/// Coasting above first-gear idle must not apply the terrain lever. A lever-on-coast
+/// Coasting along the gear above first-gear idle must not apply the terrain lever. A lever-on-coast
 /// mutant distinguishes the supported run; crank drag has its own coupling witness.
 #[test]
 fn released_motion_coasts_without_brake_force() {
@@ -2581,6 +2582,148 @@ fn released_motion_coasts_without_brake_force() {
     let belts = BeltTick::new(&construction(&fp), &controls.input);
     apply_brake_stop_forces(&mut q, &tp, &belts, &state, &controls);
     assert_eq!(q, [0.0; 2]);
+}
+
+/// With no request, motion against the gear must brake to rest within capacity and slide beyond
+/// it, regardless of how rollback began. Players rely on this after a shove, releasing a reversal,
+/// or releasing a pivot that slid out of neutral. Removing the against-gear park clause leaves
+/// the within-capacity entries running away; an unbounded hold fails the overloaded entries.
+#[test]
+fn released_rollback_stops_and_parks() {
+    for (fp, tp) in class_drivetrains() {
+        for reverse in [false, true] {
+            let dir = if reverse { -1.0 } else { 1.0 };
+            let first = if reverse {
+                tp.gears_rev[0]
+            } else {
+                tp.gears_fwd[0]
+            };
+            let idle_speed = tp.engine.idle_rpm * RPM_TO_RAD * tp.sprocket_radius / first;
+            // Fixture: shove above first-gear idle; overload before releasing either key.
+            let entry = idle_speed.max(PARK_ENGAGE_SPEED) * 2.0;
+            for (route, command, steer) in [
+                ("shoved", 0.0, 0.0),
+                ("reversal released", -dir, 0.0),
+                ("pivot released", 0.0, 1.0),
+            ] {
+                let mut state = TransmissionState {
+                    reverse,
+                    park: false,
+                    clutch: ClutchState::In,
+                    ..fresh(&tp)
+                };
+                let mut speeds = [-dir * entry; 2];
+                if command != 0.0 || steer != 0.0 {
+                    if steer != 0.0 {
+                        speeds = [-dir * 0.95 * driver_actuation().neutral_speed_m_s.value; 2];
+                    }
+                    let overload = dir * 1.5 * tp.brake_capacity_n * tp.brake_static_factor;
+                    // Fixture budget: one second to slide beyond neutral and first-gear idle.
+                    for _ in 0..TICK_HZ as usize {
+                        let mut inp = input(command, steer, speeds, [overload; 2]);
+                        inp.sensed =
+                            driver_input((speeds[0] + speeds[1]) * 0.5, 2.0 * overload, command)
+                                .sensed;
+                        speeds = step(&fp, &tp, &mut state, &inp).next_speeds;
+                        if speeds.iter().all(|v| v.abs() > idle_speed)
+                            && ((speeds[0] + speeds[1]) * 0.5).abs()
+                                > driver_actuation().neutral_speed_m_s.value
+                        {
+                            break;
+                        }
+                    }
+                }
+                assert!(
+                    !state.park && speeds.iter().all(|v| *v * dir < -idle_speed),
+                    "fixture must enter release unparked above first-gear idle"
+                );
+                for within_capacity in [true, false] {
+                    let mut state = state;
+                    let mut speeds = speeds;
+                    let load = dir
+                        * tp.brake_capacity_n
+                        * if within_capacity {
+                            0.5 // Fixture: a changed slope/load inside dynamic brake capacity.
+                        } else {
+                            2.0 * tp.brake_static_factor // Fixture: beyond either brake capacity.
+                        };
+                    let mut stopped_at = None;
+                    // Fixture observation budget: two seconds, including the parked tail.
+                    for tick in 0..TICK_HZ as usize * 2 {
+                        let previous = speeds;
+                        let mut inp = driver_input((speeds[0] + speeds[1]) * 0.5, 2.0 * load, 0.0);
+                        inp.reactions = [load; 2];
+                        let report = step(&fp, &tp, &mut state, &inp);
+                        speeds = report.next_speeds;
+                        assert!(state.park, "no request against gear must set park: {route}");
+                        assert_eq!(state.clutch, ClutchState::Out);
+                        assert!(!report.driving);
+                        assert!(
+                            speeds.iter().all(|v| *v * dir < PARK_ENGAGE_SPEED),
+                            "brakes cannot cross the rest band"
+                        );
+                        let mean = (speeds[0] + speeds[1]) * 0.5;
+                        let old_mean = (previous[0] + previous[1]) * 0.5;
+                        if within_capacity {
+                            assert!(
+                                mean.abs() <= old_mean.abs().max(PARK_ENGAGE_SPEED),
+                                "within-capacity rollback must slow: {route}"
+                            );
+                            if stopped_at.is_some() {
+                                assert_eq!(report.held, [true; 2], "a stopped tank stays held");
+                            } else if report.held == [true; 2] {
+                                stopped_at = Some(tick);
+                            }
+                        } else {
+                            assert!(report.brakes_slide);
+                            assert!(
+                                mean.abs() > old_mean.abs(),
+                                "over-capacity rollback must keep sliding: {route}"
+                            );
+                        }
+                    }
+                    println!(
+                        "MEASURED released rollback gears={} reverse={reverse} route={route} within_capacity={within_capacity} stopped_at={stopped_at:?} final={speeds:?} park={}",
+                        tp.gears_fwd.len(),
+                        state.park
+                    );
+                    if within_capacity {
+                        assert!(
+                            stopped_at.is_some()
+                                && speeds.iter().all(|v| v.abs() < PARK_ENGAGE_SPEED),
+                            "released rollback must reach rest and stay parked: {route}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A neutral pivot's mean hold is its only stop, even when its mean drifts against the gear.
+/// Parking during steering would substitute per-side brakes for the construction's mean hold.
+#[test]
+fn neutral_pivot_keeps_its_mean_hold_as_the_only_stop() {
+    for (fp, tp) in class_drivetrains() {
+        for reverse in [false, true] {
+            for mean_hold in [NeutralMean::Free, NeutralMean::Held] {
+                let tp = TransmissionParams {
+                    neutral_mean: mean_hold,
+                    ..tp.clone()
+                };
+                // Fixture: drift inside neutral, against either engaged ladder.
+                let drift = 0.5
+                    * driver_actuation().neutral_speed_m_s.value
+                    * if reverse { 1.0 } else { -1.0 };
+                let inp = input(0.0, 1.0, [drift; 2], [0.0; 2]);
+                let mut state = fresh(&tp);
+                let controls = driver(&construction(&fp), &tp, &mut state, &inp);
+                assert!(!state.park && !controls.service && !controls.one_way);
+                assert_eq!(state.clutch, ClutchState::Out);
+                assert_eq!(controls.mean_hold, mean_hold == NeutralMean::Held);
+            }
+        }
+    }
 }
 
 /// The one-way lever must carry the launch shortfall without opposing useful motion, and the
@@ -2792,7 +2935,8 @@ fn rev_match_requires_a_window_or_steering_and_authority() {
 
 /// A pending reversal uses brakes, never the old ladder's catch against rollback. The player
 /// relies on the same control regime whether rest was sampled or skipped between ticks.
-/// Removing the no-pedal direction check couples the skipped-rest entry on its second tick.
+/// Removing the no-pedal direction check couples the latched entry on its second tick;
+/// the skipped-rest entry also catches a park-only fix.
 #[test]
 fn pending_reversal_does_not_power_rollback() {
     for (fp, tp) in class_drivetrains() {
