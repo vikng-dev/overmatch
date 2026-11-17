@@ -1,0 +1,5 @@
+{
+  "rootDeviceName": "/dev/sda1",
+  "rootSizeGiB": 8,
+  "provenance": "Measured: Ubuntu 26.04 public amd64 gp3 image, host-setup slice 1. Setup checks the current image still has this root before applying or verifying policy."
+}

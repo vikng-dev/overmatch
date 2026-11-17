@@ -213,6 +213,10 @@ def discover(account: str) -> Standing:
              if b["DeviceName"] == images[0]["RootDeviceName"]]
     if len(roots) != 1 or type(roots[0]["VolumeSize"]) is not int or roots[0]["VolumeSize"] <= 0:
         raise Refused("Ubuntu image has no single positive EBS root size; refuse the image")
+    root_contract = decode((ROOT / "scripts/aws/host-image.json").read_text(), "host-image.json")
+    if (images[0]["RootDeviceName"] != root_contract["rootDeviceName"]
+            or roots[0]["VolumeSize"] != root_contract["rootSizeGiB"]):
+        raise Refused("current Ubuntu root differs from host-image.json; review the image, update its measured root contract and rebuild the Worker")
     standing = Standing(account, [s["SubnetId"] for s in usable], groups[0] if groups else None,
                         images[0], kind, port, vpc, roots[0]["VolumeSize"], template)
     # Bind and validate all local/discovered inputs before the first cloud mutation.
@@ -502,8 +506,9 @@ def verify(standing: Standing) -> None:
           "context and public-parameter resolution; those belong to the provider slice.")
 
 
-def tagged_resources() -> list[tuple[str, list[dict]]]:
-    filters = [f"Name=tag:{k},Values={v}" for k, v in TAGS.items()]
+def tagged_resources(*, project_only: bool = False) -> list[tuple[str, list[dict]]]:
+    tags = {"Project": TAGS["Project"]} if project_only else TAGS
+    filters = [f"Name=tag:{k},Values={v}" for k, v in tags.items()]
     reservations = aws("ec2", "describe-instances", "--filters", *filters)["Reservations"]
     active = [i for r in reservations for i in r["Instances"] if i["State"]["Name"] != "terminated"]
     result = [("instances", active)]
@@ -511,6 +516,32 @@ def tagged_resources() -> list[tuple[str, list[dict]]]:
                       ("describe-security-groups", "SecurityGroups"), ("describe-key-pairs", "KeyPairs")]:
         result.append((field, aws("ec2", op, "--filters", *filters)[field]))
     return result
+
+
+def remove_credentials(target: str, user_exists: bool) -> None:
+    if user_exists:
+        for key in keys():
+            aws("iam", "delete-access-key", "--user-name", USER, "--access-key-id", key["AccessKeyId"])
+    # Listing names first makes interrupted secret removal restartable.
+    names = secret_names(target)
+    for name in SECRETS:
+        if name in names:
+            result = command(["wrangler", "secret", "delete", name, *worker_args(target)],
+                             data="y\n", cwd=ROOT / "backend")
+            if result.returncode:
+                raise Refused(f"Worker secret {name} deletion not confirmed; retry the same removal command")
+
+
+def revoke_key(target: str) -> None:
+    require_wrangler()
+    user = user_state()
+    resources = tagged_resources(project_only=True)
+    if any(items for name, items in resources if name != "SecurityGroups"):
+        raise Refused("tagged project resources remain across environments; stop and drain before revoke-key")
+    remove_credentials(target, user is not None)
+    if (user is not None and keys()) or set(SECRETS) & secret_names(target):
+        raise Refused("key revocation proof failed; retry revoke-key with the same environment")
+    print("Revocation proof: no host keys or selected Worker hosting secrets; standing user, policy and security group retained")
 
 
 def teardown(target: str) -> None:
@@ -522,17 +553,7 @@ def teardown(target: str) -> None:
     groups = next(items for name, items in resources if name == "SecurityGroups")
     if any(g["GroupName"] != USER for g in groups):
         raise Refused("unexpected tagged security group; reconcile ownership before teardown")
-    if user:
-        for key in keys():
-            aws("iam", "delete-access-key", "--user-name", USER, "--access-key-id", key["AccessKeyId"])
-    # `secret delete` refuses on an absent secret. Listing names first makes teardown restartable.
-    names = secret_names(target)
-    for name in SECRETS:
-        if name in names:
-            result = command(["wrangler", "secret", "delete", name, *worker_args(target)],
-                             data="y\n", cwd=ROOT / "backend")
-            if result.returncode:
-                raise Refused(f"Worker secret {name} deletion not confirmed; retry teardown")
+    remove_credentials(target, user is not None)
     if user:
         if POLICY in aws("iam", "list-user-policies", "--user-name", USER)["PolicyNames"]:
             aws("iam", "delete-user-policy", "--user-name", USER, "--policy-name", POLICY)
@@ -550,9 +571,9 @@ def teardown(target: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("plan", "apply", "verify", "issue-key", "rotate-key", "teardown"):
+    for name in ("plan", "apply", "verify", "issue-key", "rotate-key", "revoke-key", "teardown"):
         sub = commands.add_parser(name)
-        if name in ("issue-key", "rotate-key", "teardown"):
+        if name in ("issue-key", "rotate-key", "revoke-key", "teardown"):
             sub.add_argument("--env", required=True, choices=("production", "aws-proving"))
     args = parser.parse_args(argv)
     try:
@@ -570,6 +591,8 @@ def main(argv: list[str] | None = None) -> int:
             verify(discover(account))
         elif args.command in ("issue-key", "rotate-key"):
             provision_key(discover(account), args.env, rotate=args.command == "rotate-key")
+        elif args.command == "revoke-key":
+            revoke_key(args.env)
         else:
             teardown(args.env)
         return 0

@@ -1,16 +1,18 @@
 // The orphan sweep. Every minute (`triggers.crons` in wrangler.jsonc, `scheduled` in index.ts) the
-// Worker lists every Edgegap deployment and stops each one tagged `om-<hex>` (`tagOf` in
-// registry.ts) that no live claim owns. A failed stop needs no bookkeeping: the deployment is still
-// listed a minute later and judged again, until Edgegap no longer lists it.
+// Worker lists provider deployments and stops each one tagged `om-<hex>` (`tagOf` in
+// ids.ts) that no live claim owns. A failed stop needs no bookkeeping: the deployment is still
+// listed a minute later and judged again, until the provider no longer lists it.
 //
-// Ownership is decided by the Registry alone, never by D1 history. A tag carries the random half of
+// Below the independent age cap, ownership is decided by the Registry, never by D1 history. A tag carries the random half of
 // a server id; the deployment's status names its app version, which is the Registry's name and the
 // id's other half (`idOf`). The Registry writes a claim's row before its deploy call, so a
 // deployment of a valid version that no live row of that Registry owns (`liveDeployments`) is
 // stopped at once. Decisions are per deployment: with several `om-` tags, one live claim keeps it.
-// A deployment whose status names no valid version cannot be routed and is never stopped here: it is
-// logged and counted `unattributed`, and left to Edgegap's max_duration. A status read or a Registry
-// that does not answer stops nothing it would have decided.
+// An Edgegap deployment without a valid version is counted `unattributed` and left to its
+// max_duration. EC2 listings are scoped by project, purpose and Worker environment; an expired host is stopped
+// before reading its claim, and a host without a valid version
+// or claim is stopped too. A status read or Registry that does not answer stops nothing it would
+// have decided.
 //
 // Bounds per sweep: SWEEP_MAX_PAGES listing pages (a hard bound far above the fleet; hitting it is
 // logged), SWEEP_MAX_CHECKS status reads and SWEEP_MAX_STOPS stops, CONCURRENCY calls in flight,
@@ -18,10 +20,10 @@
 // (`rotated`), so candidates that keep failing cannot hold the budget from the rest.
 
 import { config, type Env } from "./config";
-import { bounded, settleAll } from "./deadline";
-import { edgegapFor, type DeploymentStatus } from "./edgegap";
+import { settleAll } from "./deadline";
+import { ProviderError, d1Call, outsideRpc, providerFor, type DeploymentStatus, type ListedDeployment } from "./provider";
 import { expireServerLogs, stopWithEvidence } from "./evidence";
-import { idOf, validVersion } from "./ids";
+import { idOf, validVersion, versionOf, tagOf, claimHex } from "./ids";
 import { diag } from "./reasons";
 import { registryFor } from "./registry";
 
@@ -35,13 +37,12 @@ export const SWEEP_MAX_STOPS = 25;
 const SWEEP_PERIOD_MS = 60_000;
 /** Below the platform's six simultaneous outbound connections per invocation. */
 const CONCURRENCY = 5;
-const TAG = /^om-([0-9a-f]{32})$/;
 
 export interface SweepResult {
 	at: number;
-	/** Deployments carrying an `om-` tag. */
+	/** Edgegap deployments carrying an `om-` tag; EC2 machines in this Worker environment. */
 	listed: number;
-	/** Tagged deployments whose status named no valid version: never stopped here. */
+	/** Tagged deployments whose status named no valid version. EC2 still stops them by ownership tags. */
 	unattributed: number;
 	stopped: number;
 	failed: number;
@@ -54,22 +55,24 @@ type Claim = { serverId: string; deploymentId: string };
 export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	const cfg = config(env);
 	const timeout = cfg.providerTimeoutMs;
-	const provider = edgegapFor(env, timeout);
+	const provider = providerFor(env, timeout);
 	await expireServerLogs(env, now - cfg.serverLogRetentionMs, timeout);
 	const turn = Math.floor(now / SWEEP_PERIOD_MS);
 	const result: SweepResult = { at: now, listed: 0, unattributed: 0, stopped: 0, failed: 0, error: null };
 	const fail = (what: string, err: unknown) => {
+		if (!(err instanceof ProviderError)) throw err;
+		result.failed++;
 		result.error = `${what}: ${diag(err)}`;
 		console.error("sweep", result.error);
 	};
 
-	const tagged: { id: string; hexes: string[] }[] = [];
+	const tagged: (ListedDeployment & { hexes: string[] })[] = [];
 	try {
 		const out = await provider.deployments(SWEEP_MAX_PAGES);
 		if (out.truncated) console.warn("sweep: listing truncated at", SWEEP_MAX_PAGES, "pages");
 		for (const d of out.items) {
-			const hexes = d.tags.map((t) => TAG.exec(t)?.[1]).filter((h): h is string => !!h);
-			if (hexes.length) tagged.push({ id: d.id, hexes });
+			const hexes = d.tags.map((t) => claimHex(t)).filter((h): h is string => !!h);
+			if (hexes.length || provider.inventory.scoped) tagged.push({ ...d, hexes });
 		}
 	} catch (err) {
 		fail("list", err);
@@ -83,6 +86,15 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	const claims = new Map<string, Claim[]>();
 	await settleAll(
 		checks.slice(0, SWEEP_MAX_CHECKS).map((d) => async () => {
+			if (provider.inventory.maxAgeMs !== null) {
+				if (d.launchedAt === undefined) throw new Error("lifetime-capped provider must return capped inventory");
+				if (d.launchedAt === "unreadable") {
+					fail(`host ${d.id} launch time unreadable; checking ownership`, new ProviderError("launchTime", 0, "unknown"));
+				} else if (d.launchedAt + provider.inventory.maxAgeMs <= now) {
+					stop.push({ id: d.id, serverId: "expired", why: "host exceeded independent lifetime guard" });
+					return;
+				}
+			}
 			let st: DeploymentStatus;
 			try {
 				st = await provider.status(d.id);
@@ -94,7 +106,12 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 			const version = st.version;
 			if (!validVersion(version)) {
 				result.unattributed++;
-				console.warn("sweep: no version in status, left to max_duration", d.id);
+				if (provider.inventory.scoped) stop.push({ id: d.id, serverId: "unattributed", why: "host has no valid version tag" });
+				else console.warn("sweep: no version in status, left to max_duration", d.id);
+				return;
+			}
+			if (provider.inventory.scoped && !d.hexes.length) {
+				stop.push({ id: d.id, serverId: "unattributed", why: "host has no claim tag" });
 				return;
 			}
 			claims.set(version, [...(claims.get(version) ?? []), ...d.hexes.map((hex) => ({ serverId: idOf(version, hex), deploymentId: d.id }))]);
@@ -105,7 +122,7 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	await settleAll(
 		[...claims].map(([version, list]) => async () => {
 			try {
-				const live = new Set<string>(await bounded(timeout, async () => registryFor(env, version).liveDeployments(list)));
+				const live = new Set<string>(await outsideRpc("registryClaims", timeout, async () => registryFor(env, version).liveDeployments(list)));
 				for (const claim of list) {
 					if (!live.has(claim.deploymentId) && !stop.some((s) => s.id === claim.deploymentId)) {
 						stop.push({ id: claim.deploymentId, serverId: claim.serverId, why: "no live claim" });
@@ -128,13 +145,28 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 					result.stopped++;
 					console.warn("sweep stopped", id, why);
 				} catch (err) {
-					result.failed++;
 					fail("stop", err);
 				}
 			}),
 		CONCURRENCY,
 	);
 
+	if (provider.reservations) {
+		try {
+			for (const slot of await provider.reservations()) {
+				try {
+					// A bounded deploy may still be answering; eventual visibility needs the start window.
+					if (slot.created_at + cfg.startDeadlineMs + 3 * timeout > now) continue;
+					const version = versionOf(slot.server_id);
+					if (!version) throw new Error("fleet slot must carry a versioned server id");
+					if (await outsideRpc("registryClaim", timeout, () => registryFor(env, version).claimExists(slot.server_id))) continue;
+					const id = await provider.findByTag(tagOf(slot.server_id));
+					if (id) await provider.stop(id);
+					await provider.releaseClaim!(slot.server_id);
+				} catch (err) { fail("slot", err); }
+			}
+		} catch (err) { fail("slots", err); }
+	}
 	await save(env, result, timeout);
 	return result;
 }
@@ -149,7 +181,7 @@ export function rotated<T extends { id: string }>(items: T[], turn: number): T[]
 
 async function save(env: Env, r: SweepResult, timeout: number): Promise<void> {
 	try {
-		await bounded(timeout, () =>
+		await d1Call("sweepSave", timeout, () =>
 			env.DB.prepare(
 				`INSERT INTO sweep (id, at, listed, unattributed, stopped, failed, error) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
 				 ON CONFLICT (id) DO UPDATE SET at = excluded.at, listed = excluded.listed, unattributed = excluded.unattributed,
@@ -159,6 +191,7 @@ async function save(env: Env, r: SweepResult, timeout: number): Promise<void> {
 				.run(),
 		);
 	} catch (err) {
+		if (!(err instanceof ProviderError)) throw err;
 		console.error("sweep state write failed", diag(err));
 	}
 }
@@ -166,8 +199,9 @@ async function save(env: Env, r: SweepResult, timeout: number): Promise<void> {
 /** The last sweep's result, for /admin; null before the first sweep or if D1 does not answer. */
 export async function lastSweep(env: Env): Promise<SweepResult | null> {
 	try {
-		return await env.DB.prepare("SELECT at, listed, unattributed, stopped, failed, error FROM sweep WHERE id = 1").first<SweepResult>();
+		return await d1Call("sweepRead", config(env).providerTimeoutMs, () => env.DB.prepare("SELECT at, listed, unattributed, stopped, failed, error FROM sweep WHERE id = 1").first<SweepResult>());
 	} catch (err) {
+		if (!(err instanceof ProviderError)) throw err;
 		console.error("sweep state read failed", diag(err));
 		return null;
 	}

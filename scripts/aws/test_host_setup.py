@@ -41,6 +41,7 @@ if os.environ.get('HISTORY'):
 if os.environ.get('FAIL_OP') == op: fail('AccessDenied')
 if os.environ.get('MALFORMED_OP') == op: out({'AccountName':None})
 a = str(10**11)
+root = json.loads((Path(os.environ['REPO'])/'scripts/aws/host-image.json').read_text())
 if op == 'get-caller-identity': out({'Account':a})
 if op == 'get-account-information': out({'AccountName': 'Other' if os.environ.get('WRONG_ACCOUNT') else 'Overmatch'})
 if op == 'describe-instance-types': out({'InstanceTypes':[{'VCpuInfo':{'DefaultVCpus':json.loads((Path(os.environ['REPO'])/'backend/production-server.json').read_text())['vcpu']}}]})
@@ -48,7 +49,7 @@ if op == 'describe-vpcs': out({'Vpcs':[{'VpcId':ident('vpc')}]})
 if op == 'describe-subnets': out({'Subnets':[{'SubnetId':'subnet-'+format(n,'017x'),'State':'available','AvailabilityZone':'ap-southeast-1'+z} for n,z in enumerate('abc',1)]})
 if op == 'describe-instance-type-offerings': out({'InstanceTypeOfferings':[{'InstanceType':opt('--filters').split('Values=')[1],'Location':'ap-southeast-1'+z} for z in os.environ.get('OFFER_ZONES','bc')]})
 if op == 'get-parameter': out({'Parameter':{'Value':ident('ami'),'ARN':'arn:aws:ssm:ap-southeast-1::parameter'+opt('--name')}})
-if op == 'describe-images': out({'Images':[{'ImageId':ident('ami'),'OwnerId':str(10**11+1),'Public':True,'State':'available','Architecture':'x86_64','Name':'ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-1','RootDeviceName':'/dev/fixture','BlockDeviceMappings':[{'DeviceName':'/dev/fixture','Ebs':{'VolumeSize':8,'VolumeType':'gp3'}}]}]})
+if op == 'describe-images': out({'Images':[{'ImageId':ident('ami'),'OwnerId':str(10**11+1),'Public':True,'State':'available','Architecture':'x86_64','Name':'ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-1','RootDeviceName':root['rootDeviceName'],'BlockDeviceMappings':[{'DeviceName':root['rootDeviceName'],'Ebs':{'VolumeSize':int(os.environ.get('IMAGE_ROOT_SIZE',str(root['rootSizeGiB']))),'VolumeType':'gp3'}}]}]})
 if op == 'describe-security-groups':
  if 'Name=group-name,Values=default' in rest: out({'SecurityGroups':[{'GroupId':ident('sg'),'VpcId':ident('vpc')}]})
  out({'SecurityGroups':s['groups']})
@@ -198,7 +199,7 @@ class Setup(unittest.TestCase):
         # The review command and typos must never cross the AWS/Worker boundary.
         f = Fixture(self)
         self.assertEqual(f.run('plan').returncode, 0)
-        for args in [[], ['setup'], ['apply', '--region', 'elsewhere'], ['apply', 'extra'], ['issue-key'], ['rotate-key'], ['teardown'], ['issue-key', '--env', 'typo']]:
+        for args in [[], ['setup'], ['apply', '--region', 'elsewhere'], ['apply', 'extra'], ['issue-key'], ['rotate-key'], ['revoke-key'], ['teardown'], ['issue-key', '--env', 'typo']]:
             self.assertEqual(f.run(*args).returncode, 2)
         self.assertEqual(f.state['calls'], [])
         self.assertEqual(f.state['worker_calls'], [])
@@ -371,16 +372,23 @@ class Setup(unittest.TestCase):
         all_zones = Fixture(self)
         self.assertEqual(all_zones.run('apply', OFFER_ZONES='abc').returncode, 0, all_zones.output)
 
+    def test_a_changed_image_root_is_refused_before_mutation_instead_of_drifting_from_the_provider(self):
+        f = Fixture(self)
+        result = f.run('apply', IMAGE_ROOT_SIZE=str(json.loads((ROOT / 'scripts/aws/host-image.json').read_text())['rootSizeGiB'] + 1))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('host-image.json', result.stderr)
+        self.assertFalse(any(op.startswith(('create-', 'put-', 'authorize-', 'revoke-')) for op in f.ops()))
+
     def test_invalid_policy_templates_refuse_before_the_first_mutation(self):
         # The operator must not get partial standing resources from a local template fault.
         for template in ['{', '{"Statement":[{"Resource":"@TYPO@"}]}', '{"Statement":null}']:
             f = Fixture(self)
-            for rel in ['backend/production-server.json', 'src/net/server.rs']:
+            for rel in ['backend/production-server.json', 'src/net/server.rs', 'scripts/aws/host-image.json']:
                 dest = f.root / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text((ROOT / rel).read_text())
             policy = f.root / 'scripts/aws/host-policy.json'
-            policy.parent.mkdir(parents=True)
+            policy.parent.mkdir(parents=True, exist_ok=True)
             policy.write_text(template)
             with mock.patch.object(setup, 'ROOT', f.root), mock.patch.dict(os.environ, f.env), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(setup.main(['apply']), 1)
@@ -391,6 +399,35 @@ class Setup(unittest.TestCase):
         f = Fixture(self)
         self.assertIn('disable cli_history', f.run('apply', HISTORY='1').stderr)
         self.assertNotIn('create-user', f.ops())
+
+    def test_revoke_key_keeps_standing_parts_and_unrelated_secrets_and_is_restartable(self):
+        f = self.issued()
+        policy, groups = f.state['policy'], f.state['groups']
+        f.state['secrets'].append('UNRELATED')
+        f.save()
+        self.assertEqual(f.run('revoke-key', '--env', 'aws-proving').returncode, 0, f.output)
+        self.assertEqual((f.state['keys'], f.state['secrets']), ([], ['UNRELATED']))
+        self.assertEqual((f.state['user'], f.state['policy'], f.state['groups']), (True, policy, groups))
+        self.assertEqual(f.run('revoke-key', '--env', 'aws-proving').returncode, 0, f.output)
+        self.assertNotIn('delete-user', f.ops())
+        self.assertNotIn('delete-user-policy', f.ops())
+        self.assertNotIn('delete-security-group', f.ops())
+        reads = [c['args'] for c in f.state['calls'] if 'describe-instances' in c['args']]
+        self.assertTrue(all('Name=tag:Purpose,Values=host' not in c for c in reads))
+        self.assertTrue(all('Name=tag:WorkerEnvironment,Values=aws-proving' not in c for c in reads))
+
+    def test_revoke_key_refuses_live_project_resources_and_failed_revocation_preserves_worker_secrets(self):
+        f = self.issued()
+        f.state['instances'] = [{'State': {'Name': 'running'}}]
+        f.save()
+        self.assertEqual(f.run('revoke-key', '--env', 'aws-proving').returncode, 1)
+        self.assertEqual(f.state['keys'], [1])
+        f.state['instances'] = []
+        f.save()
+        self.assertEqual(f.run('revoke-key', '--env', 'aws-proving', FAIL_OLD_REVOKE='1').returncode, 1)
+        self.assertEqual(f.state['keys'], [1])
+        self.assertEqual(set(f.state['secrets']), set(setup.SECRETS))
+        self.assertEqual(f.run('revoke-key', '--env', 'aws-proving').returncode, 0, f.output)
 
     def test_teardown_is_restartable_and_refuses_to_orphan_running_hosts(self):
         f = self.issued()

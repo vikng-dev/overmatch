@@ -5,7 +5,7 @@
 const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 
 export function validVersion(v: unknown): v is string {
-	return typeof v === "string" && VERSION_RE.test(v);
+	return typeof v === "string" && VERSION_RE.exec(v)?.[0] === v;
 }
 
 export function randomHex(bytes: number): string {
@@ -24,7 +24,8 @@ function unb64url(s: string): string | null {
 	try {
 		const bin = atob(s.replaceAll("-", "+").replaceAll("_", "/"));
 		return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
-	} catch {
+	} catch (err) {
+		if (!(err instanceof TypeError) && !(err instanceof DOMException && err.name === "InvalidCharacterError")) throw err;
 		return null;
 	}
 }
@@ -41,7 +42,7 @@ export function idOf(version: string, hex: string): string {
 /** The version an id was minted for, or null if the id is malformed. */
 export function versionOf(id: string): string | null {
 	const m = /^([A-Za-z0-9_-]{1,96})\.[0-9a-f]{32}$/.exec(id);
-	if (!m) return null;
+	if (!m || m[0] !== id) return null;
 	const v = unb64url(m[1]);
 	return validVersion(v) ? v : null;
 }
@@ -56,4 +57,15 @@ export function timingSafeEqual(a: string, b: string): boolean {
 	let diff = 0;
 	for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
 	return diff === 0;
+}
+
+/** The Edgegap tag that identifies a claim's deployment: the random half of the server id (32 hex,
+ *  35 characters with the prefix; Edgegap allows 40). */
+export function tagOf(serverId: string): string {
+	return `om-${serverId.slice(serverId.indexOf(".") + 1)}`;
+}
+
+/** The random server-id half carried by a well-formed claim tag, otherwise null. */
+export function claimHex(tag: string): string | null {
+	return /^om-([0-9a-f]{32})$/.exec(tag)?.[1] ?? null;
 }
