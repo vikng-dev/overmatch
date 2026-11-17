@@ -1,19 +1,19 @@
-//! Received server-time record for the future presentation clock. Nothing here drives a timeline.
-//! `x = previous frame Real - stamp` retains the unknown epoch offset; only differences of lags
-//! are comparable to local durations. Tick labels resolve through Lightyear's checkpoint map.
+//! Received tick/time map and completion-frame absence bound; nothing drives a timeline yet.
+//! `x = previous frame Real - departure` retains the unknown epoch offset. Stamp-map lags
+//! share that offset, so their differences are comparable to local durations.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bevy::prelude::*;
-use bevy_replicon::client::confirm_history::EntityReplicated;
+use bevy_replicon::client::server_mutate_ticks::MutateTickReceived;
+use bevy_replicon::prelude::RepliconTick;
 use bevy_replicon::shared::replication::storage::ReplicationStorage;
 use lightyear::core::time::TickInstant;
-use lightyear::prelude::ReplicationCheckpointMap;
-use lightyear::prelude::{Connected, ReplicationSystems, Tick};
+use lightyear::prelude::{Connected, ReplicationCheckpointMap, ReplicationSystems, Tick};
 use serde_json::{Value, json};
 
-use super::tick_stamp::ReceivedStamps;
-use super::timing::{Timing, histogram};
+use super::tick_stamp::{RECEIPT_CAP, ReceivedStamps, TickStamp};
+use super::timing::{Timing, WindowMax, histogram};
 
 pub(super) fn install(app: &mut App) {
     app.init_resource::<ViewClock>()
@@ -27,144 +27,139 @@ fn reset(
     mut storage: ResMut<ReplicationStorage>,
 ) {
     *clock = ViewClock::default();
-    storage.global.get_or_default::<ReceivedStamps>().0.clear();
+    *storage.global.get_or_default::<ReceivedStamps>() = ReceivedStamps::default();
 }
 
 struct Sample {
     stamp_s: f64,
     x_s: f64,
+}
+struct Arrival {
+    tick: Tick,
+    stamp: TickStamp,
+    frame: u64,
     seen_s: f64,
 }
 
-#[derive(Default)]
-struct Application {
-    opened_s: f64,
-    stamp: Option<(u64, f64)>,
-    entities: HashMap<Entity, (u64, f64)>,
-    late: bool,
-}
-
 #[derive(Default, serde::Serialize)]
-struct AtomicLine {
-    stamped_ticks: u64,
-    entity_keyframes: u64,
+struct CompletionLine {
+    completed_ticks: u64,
+    sampled_ticks: u64,
     late_ticks: u64,
     worst_lag_frames: u64,
     worst_lag_ms: f64,
-    expired_without_stamp: u64,
+    evicted_incomplete: u64,
+    completed_without_stamp: u64,
     unmapped_stamps: u64,
+    receipt_overflow: u64,
 }
 
 #[derive(Resource, Default)]
 pub(super) struct ViewClock {
     frame: u64,
     samples: BTreeMap<Tick, Sample>,
-    applications: BTreeMap<u32, Application>,
-    atomic: AtomicLine,
+    expiry: VecDeque<(f64, Tick)>,
+    maximum: WindowMax,
+    pending: HashMap<RepliconTick, Arrival>,
+    receipt_order: VecDeque<RepliconTick>,
+    completion: CompletionLine,
 }
 
 impl ViewClock {
-    fn sample(&mut self, tick: Tick, stamp_s: f64, now_s: f64, previous_s: f64) {
-        self.samples.entry(tick).or_insert(Sample {
-            stamp_s,
-            x_s: previous_s - stamp_s,
-            seen_s: now_s,
-        });
+    fn arrive(&mut self, checkpoint: RepliconTick, tick: Tick, stamp: TickStamp, now_s: f64) {
+        if self.samples.contains_key(&tick) || self.pending.contains_key(&checkpoint) {
+            return; // A retransmitted stamp is not a new first arrival.
+        }
+        // Resolution: bound unresolved receipts by the upstream completion tracker's capacity,
+        // independently of W. A lost mutate message never produces a completion event.
+        if self.receipt_order.len() == RECEIPT_CAP {
+            let oldest = self
+                .receipt_order
+                .pop_front()
+                .expect("receipt queue is at capacity");
+            if self.pending.remove(&oldest).is_some() {
+                self.completion.evicted_incomplete += 1;
+            }
+        }
+        self.receipt_order.push_back(checkpoint);
+        self.pending.insert(
+            checkpoint,
+            Arrival {
+                tick,
+                stamp,
+                frame: self.frame,
+                seen_s: now_s,
+            },
+        );
     }
 
-    /// Duplicate entity receipts never count as a first keyframe. Compare after the complete
-    /// receive pass, so the order of the stamp entity and other entities inside it cannot matter.
-    fn apply(&mut self, checkpoint: u32, entity: Option<Entity>, now_s: f64) {
-        let application = self
-            .applications
-            .entry(checkpoint)
-            .or_insert_with(|| Application {
-                opened_s: now_s,
-                ..default()
-            });
-        let first = if let Some(entity) = entity {
-            match application.entities.entry(entity) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert((self.frame, now_s));
-                    self.atomic.entity_keyframes += 1;
-                    Some((self.frame, now_s))
-                }
-                std::collections::hash_map::Entry::Occupied(_) => return,
-            }
-        } else if application.stamp.is_none() {
-            application.stamp = Some((self.frame, now_s));
-            self.atomic.stamped_ticks += 1;
-            None
-        } else {
-            return; // A retransmitted stamp is not a new first arrival.
+    fn complete(&mut self, checkpoint: RepliconTick, now_s: f64, previous_s: f64) {
+        self.completion.completed_ticks += 1;
+        let Some(arrival) = self.pending.remove(&checkpoint) else {
+            // Initial reliable state, receipt overflow or a skipped stale stamp can leave no
+            // retained stamp for a completed mutate tick. Do not invent a time sample.
+            self.completion.completed_without_stamp += 1;
+            return;
         };
-        if let Some((stamp_frame, stamp_seen_s)) = application.stamp {
-            // Entity arrivals before the stamp cannot be late. When the stamp arrives, the
-            // maximum first-entity frame suffices; later entities are compared independently.
-            let latest = first.or_else(|| {
-                application
-                    .entities
-                    .values()
-                    .copied()
-                    .max_by_key(|&(frame, _)| frame)
+        let lag = self.frame - arrival.frame;
+        if lag > 0 {
+            self.completion.late_ticks += 1;
+            self.completion.worst_lag_frames = self.completion.worst_lag_frames.max(lag);
+            self.completion.worst_lag_ms = self
+                .completion
+                .worst_lag_ms
+                .max((now_s - arrival.seen_s) * 1e3);
+        }
+        self.sample(arrival.tick, arrival.stamp, now_s, previous_s);
+        self.completion.sampled_ticks += 1;
+    }
+
+    fn sample(&mut self, tick: Tick, stamp: TickStamp, now_s: f64, previous_s: f64) {
+        if let std::collections::btree_map::Entry::Vacant(entry) = self.samples.entry(tick) {
+            let x_s = stamp.absence_bound_s(previous_s);
+            entry.insert(Sample {
+                stamp_s: stamp.frame_start_s(),
+                x_s,
             });
-            if let Some((entity_frame, entity_seen_s)) = latest
-                && entity_frame > stamp_frame
-            {
-                if !application.late {
-                    self.atomic.late_ticks += 1;
-                    application.late = true;
-                }
-                self.atomic.worst_lag_frames =
-                    self.atomic.worst_lag_frames.max(entity_frame - stamp_frame);
-                self.atomic.worst_lag_ms = self
-                    .atomic
-                    .worst_lag_ms
-                    .max((entity_seen_s - stamp_seen_s) * 1e3);
-            }
+            self.expiry.push_back((now_s, tick));
+            self.maximum.push(now_s, x_s);
         }
     }
 
     fn expire(&mut self, now_s: f64, window_s: f64) {
-        self.samples
-            .retain(|_, sample| now_s - sample.seen_s <= window_s);
-        self.applications.retain(|_, application| {
-            let keep = now_s - application.opened_s <= window_s;
-            if !keep && application.stamp.is_none() {
-                self.atomic.expired_without_stamp += 1;
-            }
-            keep
-        });
+        let oldest = now_s - window_s;
+        while self
+            .expiry
+            .front()
+            .is_some_and(|&(seen_s, _)| seen_s < oldest)
+        {
+            let (_, tick) = self.expiry.pop_front().expect("front expiry exists");
+            self.samples.remove(&tick);
+        }
+        self.maximum.expire(oldest);
     }
 
-    /// Neighbouring received stamps in authoritative tick order. A lost tick leaves its whole
-    /// production gap in the distribution; neither nominal intervals nor missing stamps are invented.
+    /// Adjacent received stamps in authoritative tick order include the whole production gap
+    /// over a lost tick; neither nominal intervals nor missing stamps are invented.
     fn intervals(&self) -> Vec<f64> {
-        let mut intervals = Vec::new();
-        let mut previous: Option<&Sample> = None;
-        for sample in self.samples.values() {
-            if let Some(before) = previous {
-                intervals.push(sample.stamp_s - before.stamp_s);
-            }
-            previous = Some(sample);
-        }
-        intervals
+        self.samples
+            .values()
+            .zip(self.samples.values().skip(1))
+            .map(|(before, after)| after.stamp_s - before.stamp_s)
+            .collect()
     }
 
     fn target(&self, intervals: &mut [f64]) -> Option<f64> {
         if intervals.is_empty() {
-            return None; // Fewer than two received ticks: the production interval is unknown.
+            return None; // Fewer than two completed stamped ticks: production interval unknown.
         }
         intervals.sort_by(f64::total_cmp);
         // Nearest-rank median, matching the measured distribution in the log.
         let median = intervals[(intervals.len() - 1) / 2];
-        self.samples
-            .values()
-            .map(|sample| sample.x_s)
-            .max_by(f64::total_cmp)
-            .map(|x| median + x)
+        self.maximum.get().map(|x| median + x)
     }
 
+    /// Startup or starvation may leave the cursor without retained bracketing stamps.
     fn stamp_at(&self, cursor: TickInstant) -> Option<f64> {
         let (&low_tick, low) = self.samples.range(..=cursor.tick()).next_back()?;
         let (&high_tick, high) = self
@@ -184,15 +179,15 @@ impl ViewClock {
         let target = self.target(&mut intervals);
         let today_lag = self.stamp_at(cursor).map(|stamp| now_s - stamp);
         let latest_x = self.samples.last_key_value().map(|(_, sample)| sample.x_s);
-        let atomic = std::mem::take(&mut self.atomic);
+        let completion = std::mem::take(&mut self.completion);
         json!({
             "delta_star_ms": target.map(|s| s * 1e3),
             "today_stamp_lag_ms": today_lag.map(|s| s * 1e3),
             "target_minus_today_ms": target.zip(today_lag).map(|(target, today)| (target - today) * 1e3),
             "target_above_latest_x_ms": target.zip(latest_x).map(|(target, x)| (target - x) * 1e3),
             "stamp_interval_ms": histogram(&mut intervals, tick_s),
-            "atomic": atomic,
-            "unmatched_ticks": self.applications.values().filter(|application| application.stamp.is_none()).count(),
+            "completion": completion,
+            "pending_ticks": self.pending.len(),
         })
     }
 }
@@ -202,24 +197,27 @@ fn receive(
     timing: Res<Timing>,
     checkpoints: Res<ReplicationCheckpointMap>,
     mut storage: ResMut<ReplicationStorage>,
-    mut entities: MessageReader<EntityReplicated>,
+    mut completed: MessageReader<MutateTickReceived>,
     mut clock: ResMut<ViewClock>,
 ) {
     let now = real.elapsed_secs_f64();
     clock.frame += 1;
     clock.expire(now, timing.view_window_s);
-    let received = &mut storage.global.get_or_default::<ReceivedStamps>().0;
-    for (checkpoint, stamp) in received.drain(..) {
-        clock.apply(checkpoint.get(), None, now);
+    let received = storage.global.get_or_default::<ReceivedStamps>();
+    clock.completion.receipt_overflow += std::mem::take(&mut received.overflow);
+    for (checkpoint, stamp) in received.queue.drain(..) {
         if let Some(tick) = checkpoints.get(checkpoint) {
-            clock.sample(tick, stamp.0, now, now - real.delta_secs_f64());
+            clock.arrive(checkpoint, tick, stamp, now);
         } else {
-            // Lightyear retains a bounded checkpoint map; a large drain can evict a mapping.
-            clock.atomic.unmapped_stamps += 1;
+            // Lightyear's bounded map can evict a mapping during an unusually large receive drain.
+            clock.completion.unmapped_stamps += 1;
         }
     }
-    for event in entities.read() {
-        clock.apply(event.tick.get(), Some(event.entity), now);
+    // Use every completion message, not just last_confirmed_checkpoint, which mirrors only the
+    // newest completed tick. Replicon's contains() assumes old ticks complete after 64 ticks;
+    // these events instead require every message of that particular tick to have been applied.
+    for event in completed.read() {
+        clock.complete(event.tick, now, now - real.delta_secs_f64());
     }
 }
 
@@ -227,12 +225,17 @@ fn receive(
 mod tests {
     use super::*;
 
-    /// The view target must not charge a client's stalled drain frame to the network.
+    fn stamp(start: f64) -> TickStamp {
+        TickStamp::new(start, 0.0).unwrap()
+    }
+
+    /// The scheduled consumer must wait for ALL mutate messages, even across summary boundaries.
+    /// Client stalls cannot enter x: its time bound is the frame preceding completion.
     #[test]
-    fn x_uses_the_previous_frame_so_a_client_stall_adds_nothing() {
-        use super::super::tick_stamp::TickStamp;
+    fn completion_frame_samples_x_and_reports_split_ticks() {
         use bevy::time::TimeUpdateStrategy;
-        // Fixture: same last healthy frame, different drain-frame durations.
+        use std::time::Duration;
+        // Fixture: identical first two frames, different completion-frame duration.
         let mut readings = Vec::new();
         for frame_s in [0.0625, 1.0] {
             let mut app = App::new();
@@ -240,15 +243,14 @@ mod tests {
                 .init_resource::<Timing>()
                 .init_resource::<ReplicationStorage>()
                 .init_resource::<ReplicationCheckpointMap>()
-                .add_message::<EntityReplicated>()
-                .insert_resource(TimeUpdateStrategy::ManualDuration(
-                    std::time::Duration::from_secs_f64(0.0625),
-                ));
+                .add_message::<MutateTickReceived>()
+                .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+                    0.0625,
+                )));
             install(&mut app);
             app.update();
             app.update();
-            let previous = app.world().resource::<Time<Real>>().elapsed_secs_f64();
-            let checkpoint = bevy_replicon::prelude::RepliconTick::new(1);
+            let checkpoint = RepliconTick::new(1);
             app.world_mut()
                 .resource_mut::<ReplicationCheckpointMap>()
                 .record(checkpoint, Tick(1));
@@ -256,42 +258,43 @@ mod tests {
                 .resource_mut::<ReplicationStorage>()
                 .global
                 .get_or_default::<ReceivedStamps>()
-                .0
-                .push((checkpoint, TickStamp(0.0)));
-            app.insert_resource(TimeUpdateStrategy::ManualDuration(
-                std::time::Duration::from_secs_f64(frame_s),
-            ));
+                .queue
+                .push_back((checkpoint, stamp(0.0)));
+            app.update();
+            let previous = app.world().resource::<Time<Real>>().elapsed_secs_f64();
+            let mut clock = app.world_mut().resource_mut::<ViewClock>();
+            assert!(clock.samples.is_empty());
+            clock.take_line(
+                previous,
+                super::super::server::TICK.as_secs_f64(),
+                Tick(1).into(),
+            );
+            app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+                frame_s,
+            )));
+            app.world_mut()
+                .write_message(MutateTickReceived { tick: checkpoint });
             app.update();
             let clock = app.world().resource::<ViewClock>();
             assert_eq!(clock.samples[&Tick(1)].x_s, previous);
+            assert_eq!(clock.completion.late_ticks, 1);
+            assert_eq!(clock.completion.worst_lag_frames, 1);
+            assert!((clock.completion.worst_lag_ms - frame_s * 1e3).abs() < 1e-9);
             readings.push(clock.samples[&Tick(1)].x_s);
         }
         assert_eq!(readings[0], readings[1]);
     }
 
-    /// A stall before the next server frame moves the stamp map rather than the network bound.
-    #[test]
-    fn a_server_stall_moves_stamps_without_raising_x() {
-        // Fixture: equal downlink wait, regular intervals surrounding one server pause.
-        let mut clock = ViewClock::default();
-        for (tick, stamp) in [(1, 1.0), (2, 1.125), (3, 2.125), (4, 2.25), (5, 2.375)] {
-            clock.sample(Tick(tick), stamp, stamp + 0.125, stamp + 0.0625);
-        }
-        assert!(clock.samples.values().all(|sample| sample.x_s == 0.0625));
-        assert_eq!(clock.target(&mut clock.intervals()), Some(0.125 + 0.0625));
-    }
-
-    /// D3 measures the received stream's intervals; removing missing-tick pairs silently changes
-    /// its median under loss and leaves the future view clock without that observation.
+    /// D3 measures received production intervals, including missing ticks rather than a nominal T.
     #[test]
     fn stamp_intervals_include_the_gap_over_a_lost_tick() {
         let tick_s = super::super::server::TICK.as_secs_f64();
         let mut clock = ViewClock::default();
-        // Fixture: the middle stamp is lost, with an unchanged absence bound on the other two.
-        clock.sample(Tick(1), 0.0, 0.5, 0.25);
+        // Fixture: the middle stamp is lost; epoch offset is unchanged.
+        clock.sample(Tick(1), stamp(0.0), 0.5, 0.25);
         clock.sample(
             Tick(3),
-            2.0 * tick_s,
+            stamp(2.0 * tick_s),
             0.5 + 2.0 * tick_s,
             0.25 + 2.0 * tick_s,
         );
@@ -302,54 +305,61 @@ mod tests {
         );
     }
 
-    /// D3 uses the window's worst absence bound and median production interval, with no RTT.
+    /// D3 forgets expired lateness without discarding the unknown clock offset.
     #[test]
     fn target_forgets_expired_lateness_and_preserves_the_clock_offset() {
         let timing = Timing::shipped();
         let mut clock = ViewClock::default();
-        // Fixture: exact binary fractions, a late oldest tick, and a constant epoch offset.
-        for (tick, stamp, x) in [(1, 1.0, 8.0), (2, 1.125, 4.0), (3, 1.25, 4.0)] {
-            clock.sample(Tick(tick), stamp, f64::from(tick), stamp + x);
+        // Fixture: observations at fractions of the authored window, with a late oldest tick.
+        for (tick, start, x, seen) in [
+            (1, 1.0, 8.0, 0.0),
+            (2, 1.125, 4.0, 0.5),
+            (3, 1.25, 4.0, 0.75),
+        ] {
+            clock.sample(
+                Tick(tick),
+                stamp(start),
+                seen * timing.view_window_s,
+                start + x,
+            );
         }
         assert_eq!(clock.target(&mut clock.intervals()), Some(8.125));
-        clock.expire(1.0 + timing.view_window_s + 0.5, timing.view_window_s);
+        clock.expire(1.25 * timing.view_window_s, timing.view_window_s);
         assert_eq!(clock.target(&mut clock.intervals()), Some(4.125));
     }
 
-    /// A split replication update under-reads D2. Count each late tick once, ignore duplicates,
-    /// retain open ticks across summary boundaries, and do not mistake a lost stamp for atomicity.
+    /// A lost mutation never completes merely because newer ticks complete or the mask ages out.
     #[test]
-    fn atomic_check_observes_every_entity_first_arrival_across_lines() {
+    fn lost_tick_stays_unsampled_and_pending_memory_is_bounded() {
+        use bevy_replicon::client::server_mutate_ticks::ServerMutateTicks;
         let mut clock = ViewClock::default();
-        // Fixture: three entity identities and frames, one split tick and one stamp arriving last.
-        let (a, b, c) = (
-            Entity::from_bits(1),
-            Entity::from_bits(2),
-            Entity::from_bits(3),
+        let mut tracker = ServerMutateTicks::default();
+        // Fixture: the first of two messages arrives; the second is permanently lost.
+        let lost = RepliconTick::new(1);
+        clock.arrive(lost, Tick(1), stamp(1.0), 1.0);
+        assert!(!tracker.confirm(lost, 2));
+        for tick in 2..=(RECEIPT_CAP as u32 + 2) {
+            let checkpoint = RepliconTick::new(tick);
+            clock.arrive(
+                checkpoint,
+                Tick(tick),
+                stamp(f64::from(tick)),
+                f64::from(tick),
+            );
+            if tracker.confirm(checkpoint, 1) {
+                clock.complete(checkpoint, f64::from(tick), f64::from(tick));
+            }
+        }
+        assert!(
+            tracker.contains(lost),
+            "upstream mask treats aged-out ticks as applied"
         );
-        clock.apply(1, Some(a), 1.0);
-        clock.apply(1, None, 1.0);
-        clock.frame += 1;
-        clock.apply(1, Some(a), 1.1);
-        clock.apply(1, Some(b), 1.1);
-        assert_eq!(clock.atomic.late_ticks, 1);
-        assert_eq!(clock.atomic.worst_lag_frames, 1);
-        clock.take_line(
-            1.1,
-            super::super::server::TICK.as_secs_f64(),
-            TickInstant::from(Tick(1)),
+        assert!(
+            !clock.samples.contains_key(&Tick(1)),
+            "only an actual completion may sample x"
         );
-        clock.frame += 1;
-        clock.apply(1, Some(c), 1.2);
-        assert_eq!(clock.atomic.late_ticks, 0);
-        assert_eq!(clock.atomic.worst_lag_frames, 2);
-        clock.apply(2, Some(a), 1.2);
-        clock.frame += 1;
-        clock.apply(2, None, 1.3);
-        assert_eq!(clock.atomic.late_ticks, 0);
-        clock.apply(3, Some(a), 1.3);
-        let timing = Timing::shipped();
-        clock.expire(2.0 + timing.view_window_s, timing.view_window_s);
-        assert_eq!(clock.atomic.expired_without_stamp, 1);
+        assert_eq!(clock.completion.evicted_incomplete, 1);
+        assert!(clock.pending.len() <= RECEIPT_CAP);
+        assert!(clock.receipt_order.len() <= RECEIPT_CAP);
     }
 }

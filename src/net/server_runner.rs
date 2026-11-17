@@ -111,6 +111,10 @@ impl<C: Clock> Plugin for TickRunner<C> {
         })
         .init_resource::<UnadmittedWall>()
         .init_resource::<DiscardedWall>();
+        let departure_clock = self.0.clone();
+        app.insert_resource(super::tick_stamp::DepartureClock::new(move || {
+            departure_clock.now()
+        }));
         let clock = self.0.clone();
         app.set_runner(move |mut app| {
             if app.plugins_state() != PluginsState::Cleaned {
@@ -299,11 +303,12 @@ mod tests {
         }
     }
 
-    /// D1's tick label and frame time must survive both server stalls and catch-up frames.
-    /// The stamp's consumer is the checkpoint sent after this same runner's single tick.
+    /// Frame start describes production pace; departure excludes this frame's own work from x.
+    /// The injected clock advances INSIDE FixedUpdate, while Bevy's Time<Real> stays constant.
     #[test]
-    fn each_labelled_tick_carries_its_monotonic_frame_start_stamp() {
-        use super::super::tick_stamp::{self, TickStamp};
+    fn each_labelled_tick_separates_frame_start_from_departure_even_in_a_long_frame() {
+        use super::super::tick_stamp::TickStamp;
+        use bevy_replicon::prelude::ServerSystems;
         use lightyear::prelude::LocalTimeline;
         let tick = super::super::server::TICK;
         let clock = TestClock {
@@ -311,33 +316,66 @@ mod tests {
             sleeps: default(),
             oversleep: Duration::ZERO,
         };
-        // Fixture: a server stall, then enough small frames to spend its admitted debt.
-        let (mut app, _) = probe(clock, [vec![tick * 8], vec![tick / 16; 16]].concat());
-        tick_stamp::install_server(&mut app);
-        app.world_mut().spawn(TickStamp(0.0));
+        // Fixture: one long frame amidst ordinary frames; the send-to-prior-client-frame bound
+        // is fixed independently of the stamp produced by the system under test.
+        let (mut app, _) = probe(clock.clone(), vec![Duration::ZERO; 8]);
+        // Mount the shared protocol: every server composition must install publication.
+        app.add_plugins((AssetPlugin::default(), crate::offline_physics()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .init_asset::<bevy::world_serialization::WorldAsset>()
+            .add_plugins(super::super::protocol::plugin);
+        app.world_mut().spawn(TickStamp::new(0.0, 0.0).unwrap());
+        let work_clock = clock;
+        let work_for = move |label: u32| if label == 2 { tick * 64 } else { tick / 16 };
+        app.add_systems(FixedUpdate, move |timeline: Res<LocalTimeline>| {
+            *work_clock.now.lock().unwrap() += work_for(timeline.tick().0);
+        });
         let readings = Arc::new(Mutex::new(Vec::new()));
         let captured = readings.clone();
         app.add_systems(
             PostUpdate,
-            move |real: Res<Time<Real>>,
-                  timeline: Res<LocalTimeline>,
-                  stamps: Query<&TickStamp>| {
-                let stamp = stamps
-                    .single()
-                    .expect("the runner fixture has one global stamp");
-                captured
-                    .lock()
-                    .unwrap()
-                    .push((timeline.tick(), stamp.0, real.elapsed_secs_f64()));
-            },
+            (move |real: Res<Time<Real>>,
+                   timeline: Res<LocalTimeline>,
+                   stamps: Query<&TickStamp>| {
+                let stamp = *stamps.single().expect("fixture has one global stamp");
+                let work = work_for(timeline.tick().0).as_secs_f64();
+                let previous_client_frame = real.elapsed_secs_f64() + work + 0.0625;
+                captured.lock().unwrap().push((
+                    timeline.tick(),
+                    stamp,
+                    real.elapsed_secs_f64(),
+                    work,
+                    stamp.absence_bound_s(previous_client_frame),
+                ));
+            })
+            .after(ServerSystems::Send),
         );
         assert_eq!(app.run(), bevy::app::AppExit::Success);
         let readings = readings.lock().unwrap();
-        for (index, &(tick, stamp, frame_start)) in readings.iter().enumerate() {
-            assert_eq!(tick.0 as usize, index + 1);
-            assert_eq!(stamp, frame_start);
+        for (index, &(label, stamp, start, work, x)) in readings.iter().enumerate() {
+            assert_eq!(label.0 as usize, index + 1);
+            assert_eq!(stamp.frame_start_s(), start);
+            // Resolution: relative f32 epsilon bounds the offset rounding; f64 epsilon covers
+            // adding it to the epoch. The independently constructed bound is unchanged by work.
+            let allowance = f64::from(f32::EPSILON) * work + f64::EPSILON * start;
+            assert!((stamp.departure_s() - start - work).abs() <= allowance);
+            assert!(
+                (x - 0.0625).abs() <= allowance,
+                "long server work must add nothing beyond offset rounding: {x}"
+            );
         }
-        assert!(readings.windows(2).all(|pair| pair[1].1 >= pair[0].1));
+        assert!(
+            readings
+                .windows(2)
+                .all(|pair| pair[1].1.frame_start_s() >= pair[0].1.frame_start_s())
+        );
+        println!(
+            "MEASURED injected-clock proof: {} ticks; longest frame work {} ms; x {} ms",
+            readings.len(),
+            readings.iter().map(|r| r.3).fold(0.0_f64, f64::max) * 1e3,
+            readings[1].4 * 1e3
+        );
     }
 
     /// A batch's own cost is new wall time, admitted once the batch is spent; re-capping it while

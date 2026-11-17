@@ -27,7 +27,7 @@
 //!
 //! - `view_clock`: the observation-only stamp record (`net::view_clock`): raw signed `delta_star_ms`,
 //!   today's signed cursor lag on the stamp map and their offset-cancelling difference; a stamp
-//!   interval histogram over the view window, and first-entity-application lag counts per line.
+//!   interval histogram over the view window, and whole-tick completion lag after stamp arrival.
 //!
 //! Distributions are nearest-rank `min`, `p50`, `p95`, `max`, each a measured sample, and null
 //! when the period holds none; `estimate_error_ticks` is `min` and `max`.

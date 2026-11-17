@@ -218,7 +218,7 @@ fn spawn_scoreboard(mut commands: Commands, battle: BattleState) {
     commands.spawn((
         Name::new("Scoreboard"),
         Scoreboard::default(),
-        super::tick_stamp::TickStamp(0.0),
+        super::tick_stamp::TickStamp::new(0.0, 0.0).expect("zero is a valid initial stamp"),
         battle,
         Replicate::to_clients(NetworkTarget::All),
     ));

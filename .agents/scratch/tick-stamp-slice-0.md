@@ -1,6 +1,8 @@
 # Tick-stamp lane: slice 0 observation
 
-Subject: Overmatch's netcode timing only. This slice measures; no input handling or presentation reads the new records.
+Subject: Overmatch's netcode timing only. References to the game's damage-model tests concern game state only. This slice measures; no input handling or presentation reads the new records.
+
+The sections through the first Validation record round 1 (`6d3b567e`). The round-2 section below supersedes their implementation and completion-check descriptions; their proof numbers remain historical observations.
 
 ## Implementation and wire
 
@@ -70,3 +72,212 @@ The pre-existing `net-22` remote-angle timeline finding in the lens backlog rema
 - `scripts/serial-cargo test --lib --features dev_ui,bitprobe -- net:: tests::doc_citations`: **MEASURED 454 passed, 7 existing ignored, zero failed**. This includes protocol re-pin tripwires, real-loopback tests and the stamp/clock/gap invariants.
 - `scripts/serial-cargo build --locked --features dev_ui,bitprobe --bin overmatch --bin overmatch-server`: passed. The linker reports the existing large `__eh_frame` compact-unwind warning; clippy is clean.
 - Local proof: passed as described above. No push or merge was performed.
+
+
+## Round 2: current implementation and finding dispositions
+
+Both independent review files were recovered in full from the pre-restart session transcript;
+the original temporary files had not survived. Their findings match the checked source. No
+review finding was rejected.
+
+**WIRE CHANGE: `PROTOCOL_REV` 99 → 100.** `TickStamp` is now the checked pair
+`{ frame_start_s: f64, departure_offset_s: f32 }`, serialized in that order. Both fields and
+their sum must be finite and nonnegative; the decoder refuses invalid peer values before timing
+arithmetic. MEASURED postcard payload: **12 fixed bytes**, **4 more** than round 1. The ordered
+registration surface is unchanged, so `WIRE_SURFACE_HASH` remains `0xfba98390117f50c7`;
+the affected definitions/codec pin is now `WIRE_TYPES_HASH = 0xbe9e48fdef318ef5`.
+
+DERIVED sparse scoreboard mutation cost under the same compact-entity assumptions as round 1:
+**15–19 bytes/client/tick** before shared framing and packet-boundary effects; when the scoreboard
+already has a row, **13 added bytes**, plus any row-length-prefix growth. The added four payload
+bytes cost **256 bytes/client/second at 64 Hz**, before packet effects. The `f32` offset avoids a
+fixed integer-duration ceiling while limiting rounding to half an offset ULP. A fixed `u16` or
+`u32` microsecond count would impose a maximum frame duration. This is the pre-replication send
+boundary, not a socket timestamp: serialization and transport work after that read remain in the
+observed absence bound.
+
+| Item | Disposition |
+|---|---|
+| P1: frame start versus departure | Done. `publish` runs in `PostUpdate`, before `ServerSystems::Send`, using a fresh monotonic `Instant` from the runner's clock seam. The map retains frame start; x subtracts frame start plus departure offset. `Time<Real>` supplies the frame origin, never departure. |
+| P2.4: completion | Done. Delete all per-entity atomicity state and consume every `MutateTickReceived` after replication receive. Match it to the first retained stamp arrival; sample x with the preceding completion-frame Real sample. Summaries count later-frame completions and their maximum frame/ms lag. |
+| P2.2: provenance | Done. Each of the four numbers has its own `(value, Taste("…"))` label, loaded through `Sourced` and `from_shipped_str`; missing/blank/Fixture provenance is refused by the shipped reader. |
+| P2.3: first arrival | Done. `AwaitingFirstArrival` accrues neither silence nor gaps. First arrival returns `First`; active arrivals return `Live` or `Stale` against S before inserting their gap. This remains measurement only. |
+| P3.5 and testing lens | Done. The runner mounts the shipped protocol with its physics dependencies, advances the injected clock inside `FixedUpdate`, and asserts departure and x against independent fixture work. A frame-start-only mutant fails. The completion-frame test distinguishes short/long client frames and a later-frame completion across a summary boundary. Input assertions derive declarations and recovery S from the authored floor/ceiling; a separate fixture witnesses classify-before-admit. |
+| P3.6: Ledger history | Done. The dependency is named in the stamp codec module and at its protocol registration: Ledger's `replicate_diff` enables Replicon's global history decoding. It is retained deliberately. |
+| P3.7: compositions | Done. The decoder itself caps `ReceivedStamps`, including protocol-only apps without a view consumer. The shared protocol installs publication; the dedicated-server-only duplicate is deleted. The runner proof exercises that installation. |
+| P3.8: per-frame scans | Done. Raw windows expire by front-pop; a monotonic maximum deque replaces full-window max scans. Each deque entry is pushed/popped at most once. Sorting is confined to summary emission. |
+| P3.9: one number, one job | Done. `view_window_s` owns the observation window only. Pending completion receipts have an independent Resolution cap derived from the upstream tracker horizon. |
+| P3.10: disconnected counts | Done. Last-period input counts survive disconnect and emit with `arrival.state = not_connected_at_emission`. The disconnected link's arrival history/declaration counter is not retained; that absence is explicit rather than a fabricated live row. |
+| P3.11: smaller items | Done. Revision/registration comments name the stamp. `Timing` initializes only at the shared composition root. Stamp construction/decoding is checked. Floor-sensitive tests use authored parameters. |
+| Parallel-work lens | Done. On emission, independent per-link histogram sorting and declaration resets use Bevy's parallel query and thread-local result buffers. Only collecting keyed rows and emitting the shared line is serial. |
+| Error-handling lens | Done. Name lazy creation of typed input receivers and missing cursor brackets during startup/starvation beside their absence paths. |
+| Brevity lens | Done. Adjacent stamp intervals use the requested zipped adjacent-pair iterator, preserving the comment about authoritative order and missing ticks. |
+
+Completion correlation is expected O(1) per tick: one keyed pending record and fixed-size counter
+updates, with no entity traversal. Ordered sample-map insertion/removal remains O(log n).
+The decoder queue and pending receipt order each retain at most **DERIVED 64 entries**, matching
+`u64::BITS` in Replicon's tracker; overflow, uncompleted eviction, unmapped stamps and completions
+without retained stamps are separate visible counters. Pending receipts survive summary resets.
+
+The pre-existing `net-22` remote-servo presentation finding is unchanged. Altering that behaviour
+would violate this lane's timing-observation scope; it remains with the later presentation slice.
+
+## Verified upstream contracts and qualifications
+
+Sources are the locally pinned registry crates: `bevy_time-0.20.1`, `bevy_replicon-0.45.5` and
+`lightyear_replication-0.31.0`.
+
+- Bevy `src/real.rs:101–113` updates Real only at the frame clock sample; `last_update` exposes
+  that Instant. The dedicated runner sets `ManualInstant` before `app.update`.
+- Replicon `src/server.rs:185–201` chains preparation, collection and message send inside
+  `ServerSystems::Send`. Lightyear `src/server.rs:52` writes authoritative tick userdata before
+  that same set. Game publication orders before that boundary (`src/net/tick_stamp.rs:71–90`).
+- Replicon `src/client.rs:314–315` holds mutations until their required reliable update has
+  applied. `apply_mutate_message` processes mutations and then confirms the message
+  (`:498–549`); entity changes flush before that return (`:995–1001`).
+- Replicon emits `MutateTickReceived` only when the applied-message count equals that tick's
+  advertised total (`src/client.rs:859–868`; `src/client/server_mutate_ticks.rs:179–204`).
+  This means all mutate messages for that checkpoint were processed successfully, subject to
+  Replicon's normal skips of obsolete/unknown entities. It does not mean the view has rendered
+  the tick or that every older tick completed.
+- If a mutate message is lost, that tick emits no completion event. Later ticks can complete
+  independently. Recovery within the tracker horizon may finish the old tick; after it ages out,
+  `confirm` returns false (`server_mutate_ticks.rs:112–143`). The separate `contains` API treats
+  aged-out ticks as applied (`:56–70`), which is deliberately not used as completion evidence.
+- Lightyear mirrors the latest completed checkpoint, not a gap-free prefix and not all events
+  in a receive batch (`src/client.rs:80–105`; `src/checkpoint.rs:202–215`). Reading every Replicon
+  event preserves intermediate and out-of-order completions.
+- Ledger's diff rule sets `needs_history` (`bevy_replicon/src/shared/replication/registry/rule_fns.rs:192`),
+  ORed globally in `registry.rs:118`. Without it, `client.rs:942` skips stale entity decoding.
+  With it, `component_fns.rs:153–160` routes stale stamps to consume, whose default invokes the
+  custom decoder (`rule_fns.rs:255–264`).
+
+The design correction is sound for **x**. Its absolute “delay target unchanged” wording is still
+broader than the implemented law: frame-start intervals feed the median, and the target adds that
+median (`src/net/view_clock.rs:144–159`). Changed production pace can therefore change the target
+through the median without adding server work to x. The long-frame proof asserts the latter.
+The U3 correction also matches the code: capped charges never over-count silence, but can delay a
+stale declaration and classify an outage overlapping a server stall leniently.
+
+## Round-2 local proof beside round 1
+
+The same existing GPU-less Idle script completed **MEASURED 1,024 ticks**, exit status zero.
+Both processes used `OVERMATCH_UNATTENDED=1` and the runner's `OVERMATCH_WINDOW=headless` mode.
+The client conditioner was unchanged: `SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 SPIKE_JITTER_SEED=1`.
+DERIVED conditioner delay is 80 ms added to client receives, with per-packet integer jitter in
+[-10, 10) ms; this is not a symmetric two-way-delay experiment. Server summaries used the same
+one-second emission lever. No cost tracing or new lever was added.
+
+Final complete summaries, after the observation windows filled:
+
+| Classification / reading | Round 1 | Round 2 |
+|---|---:|---:|
+| MEASURED ping RTT readout, ms | 88.8 | 90.3 |
+| MEASURED existing applied minimum delay, ms | 81.1 | 82.7 |
+| DERIVED raw signed target, ms | -2853.441125 | -1437.574708 |
+| DERIVED cursor lag on stamp map, ms | -2837.067147 | -1424.851957 |
+| DERIVED target minus cursor lag, offset cancels, ms | -16.373978 | -12.722751 |
+| DERIVED target above latest x, offset cancels, ms | 36.008958 | 22.562958 |
+| MEASURED interval count | 639 | 639 |
+| MEASURED interval min / p50 / p95 / max, ms | 12.509917 / 15.606250 / 18.174417 / 19.112625 | 12.595125 / 15.577083 / 18.277958 / 19.083208 |
+| MEASURED first two interval bins; all higher bins zero | 327 / 312 | 347 / 292 |
+| DERIVED final S, ms | 100.0 | 100.0 |
+| MEASURED final input-gap count | 641 | 638 |
+| MEASURED gap min / p50 / p95 / max, ms | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 15.023750 |
+| MEASURED stale declarations across logged periods | 1 | 0 |
+| MEASURED client / server summary counts | 15 / 19 | 15 / 18 |
+
+Raw signed targets contain different process epoch offsets and cannot be compared as physical
+delays. The offset-cancelling differences are observations; neither run pins a desired delay.
+
+Round 2 observed **MEASURED 1,002 completed stamped ticks**, with **zero** later-frame completions
+and **zero frames / zero ms** worst completion lag. Completions without stamps, pending evictions,
+receipt overflow and unmapped stamps were all **MEASURED zero**. Round 1's zero late ticks was a
+per-entity receipt observation over 1,001 stamps/1,953 first entity receipts; it was not a
+whole-tick completion measurement and is not equivalent evidence. The idle workload does not
+establish behaviour of large split sends. The scheduled completion/loss tests cover those states.
+
+Startup remains included. Peak received-stamp interval was **MEASURED 204.394417 ms**, beside
+round 1's **204.217167 ms**; peak target-minus-today was **DERIVED 61.310554 ms**, beside
+**194.368534 ms**. The first connected server row was explicitly `awaiting_first_arrival`, with
+no gap, no silence, no declaration and S at the floor; no startup gap was admitted.
+
+No server-frame-stall lever exists in the scripted harness (the burst lever delays receives).
+The allowed unit-level alternative uses the existing injected runner clock. MEASURED from that
+run: **8 ticks**, ordinary work **0.9765625 ms**, one frame with **1,000 ms** injected work, and
+**x = 62.5 ms** in every frame. DERIVED ordinary work is T/16; the fixed absence fixture is
+independent of the published stamp. Replacing departure with frame start would instead produce
+**DERIVED x = 1,062.5 ms** on the long frame and fail. The completion-frame test separately proves
+that extending the client completion frame leaves its previous-frame bound unchanged.
+
+Raw artifacts: `/tmp/overmatch-tick-stamp-r2-proof/{client.log,server.log,rows.json,idle.ron}`;
+restored orchestration: `/tmp/tick-stamp-proof.py`; long-frame output:
+`/tmp/tick-stamp-r2-long-frame.log`.
+
+## Round-2 validation and whole-suite failures
+
+- `cargo fmt --all --check`: passed.
+- CI clippy, locked workspace/all-targets with `dev_ui,bitprobe` and `-D warnings`: passed after
+  removing a redundant clone in the runner test; no lint allowance added.
+- Final `net::` plus `tests::doc_citations`: **MEASURED 457 passed, 0 failed, 7 ignored**.
+- Explicit long-frame runner test with `--nocapture`: **MEASURED 1 passed**.
+- Both proof binaries built under `dev` with `dev_ui,bitprobe`; the linker emitted the existing
+  large `__eh_frame` compact-unwind warning. Conditioned proof: exit status zero.
+- Whole library suite, once, detached: **MEASURED 2,842 passed, 23 failed, 50 ignored**, elapsed
+  **304.93 seconds**. No full-suite rerun. The only subsequent Rust change moves a test clock
+  instead of redundantly cloning it; final targeted tests and clippy cover that change.
+
+The brief's failure count was off by one: there are **MEASURED 22 bake failures plus one
+rolling-fade failure**, not 23 bake plus one. The exact names match the existing
+`.agents/scratch/red-fix-a2cef3d1.md` report: set difference in both directions is empty.
+Every failure is the same fixture mass validation refusal documented there. `src/bake.rs` and
+`src/track/sim.rs` are unchanged from `6d3b567e` and its base `a2cef3d1`; none is from this lane.
+
+The bake failures, all under `bake::tests`:
+
+```text
+a_collider_whose_substance_states_no_friction_is_refused_at_load
+a_component_of_several_substances_is_refused
+a_coordinate_outside_the_certified_range_is_refused
+a_node_that_cannot_play_its_declared_role_is_refused
+a_primitive_the_sim_cannot_read_is_refused
+a_scaled_node_the_sim_composes_through_is_refused
+a_shell_that_passes_through_itself_is_refused
+a_station_can_carry_its_declared_solids_on_children
+a_volume_wearing_an_unworn_substance_is_refused
+a_zero_area_face_is_refused
+an_unreadable_sheet_or_an_unresolved_reference_is_refused
+armour_is_what_the_sheet_declares_not_what_a_material_implies
+assembly_root_does_not_follow_optics
+certification_separates_assembly_from_the_gunner_chain
+crew_and_witness_substance_come_together_or_not_at_all
+every_shipped_asset_passes_the_consumer_contract
+open_inverted_and_doubled_shells_are_refused
+shipped_file_readers_refuse_fixture_provenance
+the_asset_door_refuses_a_file_below_the_crew_floor
+the_canon_file_carries_the_reference_list_and_the_registry_keys
+the_registry_the_door_supplies_is_the_one_the_contract_reads
+the_report_is_deterministic_and_carries_every_field
+```
+
+The remaining failure is `track::sim::tests::a_pressure_heavy_construction_stalls_in_the_rolling_fade`.
+
+Full output: `/tmp/tick-stamp-r2-full.log`; final targeted/clippy output:
+`/tmp/tick-stamp-r2-final-targeted.log`, `/tmp/tick-stamp-r2-final-clippy.log`.
+Read-only self-review of the diff under the six lenses found no further timing finding;
+the orchestrator's independent reviews remain its merge gate. No push or merge was performed.
+
+## What the next slices need
+
+Slice 1 replaces native tick-addressed inputs with the decided arrival/edge protocol. It keeps
+connection reset, awaiting-first-arrival and the pre-validation receive seam; uses the returned
+arrival classification before admitting that gap; answers click fate on the server; and removes
+the native input-buffer/lookahead census with that path. It must exercise a continuously sending
+client across a server stall and preserve the declared leniency for an overlapping outage.
+
+Slice 2 consumes completed stamped ticks, preserving the two distinct server times and signed
+clock offset. It drives the shared cursor through public `NetworkTimeline::set_now`, removes the
+old controllers, retains cursor brackets across holds, and names startup/no-cursor state. A tick
+without completion evidence is not a usable frontier. The bounded receipt/checkpoint horizons
+must be accounted for explicitly in a longer outage. Pacing/cut tastes and their provenance still
+belong to that slice; today's target comparisons remain observations.

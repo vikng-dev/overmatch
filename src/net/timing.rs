@@ -2,9 +2,11 @@
 
 use bevy::prelude::*;
 use serde_json::{Value, json};
+use std::collections::VecDeque;
 
-#[derive(Resource, Clone, Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+use crate::provenance::{Sourced, from_shipped_str};
+
+#[derive(Resource, Clone, Debug)]
 pub(super) struct Timing {
     pub view_window_s: f64,
     pub uplink_window_s: f64,
@@ -20,8 +22,25 @@ impl FromWorld for Timing {
 
 impl Timing {
     pub fn shipped() -> Self {
-        let timing: Self = ron::from_str(include_str!("../../assets/net_timing.ron"))
-            .expect("assets/net_timing.ron: fix the required timing fields and RON syntax");
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Authored {
+            view_window_s: Sourced<f64>,
+            uplink_window_s: Sourced<f64>,
+            stale_floor_s: Sourced<f64>,
+            stale_ceil_s: Sourced<f64>,
+        }
+        let authored: Authored = from_shipped_str(
+            "assets/net_timing.ron",
+            include_str!("../../assets/net_timing.ron"),
+        )
+        .unwrap_or_else(|err| panic!("{err}; fix the required timing fields and provenance"));
+        let timing = Self {
+            view_window_s: authored.view_window_s.0,
+            uplink_window_s: authored.uplink_window_s.0,
+            stale_floor_s: authored.stale_floor_s.0,
+            stale_ceil_s: authored.stale_ceil_s.0,
+        };
         for (field, value) in [
             ("view_window_s", timing.view_window_s),
             ("uplink_window_s", timing.uplink_window_s),
@@ -38,6 +57,30 @@ impl Timing {
             "assets/net_timing.ron: stale_floor_s must not exceed stale_ceil_s; fix the timing data"
         );
         timing
+    }
+}
+
+/// Monotonic maxima avoid scanning retained observations every frame. Times are insertion times,
+/// in nondecreasing local Real order; each entry is pushed and popped at most once.
+#[derive(Default)]
+pub(super) struct WindowMax(VecDeque<(f64, f64)>);
+
+impl WindowMax {
+    pub fn push(&mut self, now_s: f64, value: f64) {
+        while self.0.back().is_some_and(|&(_, older)| older <= value) {
+            self.0.pop_back();
+        }
+        self.0.push_back((now_s, value));
+    }
+
+    pub fn expire(&mut self, oldest_s: f64) {
+        while self.0.front().is_some_and(|&(seen_s, _)| seen_s < oldest_s) {
+            self.0.pop_front();
+        }
+    }
+
+    pub fn get(&self) -> Option<f64> {
+        self.0.front().map(|&(_, value)| value)
     }
 }
 
