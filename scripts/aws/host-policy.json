@@ -1,0 +1,99 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:@REGION@::image/*",
+      "Condition": {
+        "StringLike": {
+          "ec2:Owner": "@IMAGE_OWNER@"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "@NETWORK_ARNS@"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:@REGION@:*:instance/*",
+      "Condition": {
+        "StringLike": {
+          "ec2:InstanceType": "@INSTANCE_TYPE@",
+          "ec2:InstanceMarketType": "on-demand",
+          "ec2:Tenancy": "default",
+          "ec2:MetadataHttpTokens": "required",
+          "aws:RequestTag/Project": "@PROJECT@",
+          "aws:RequestTag/Purpose": "@PURPOSE@"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:@REGION@:*:volume/*",
+      "Condition": {
+        "StringLike": {
+          "aws:RequestTag/Project": "@PROJECT@",
+          "aws:RequestTag/Purpose": "@PURPOSE@",
+          "ec2:VolumeType": "gp3"
+        },
+        "NumericLessThanEquals": {
+          "ec2:VolumeSize": "@ROOT_SIZE@",
+          "ec2:VolumeIops": 3000,
+          "ec2:VolumeThroughput": 125
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:@REGION@:*:network-interface/*",
+      "Condition": {
+        "StringLike": {
+          "aws:RequestTag/Project": "@PROJECT@",
+          "aws:RequestTag/Purpose": "@PURPOSE@"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "*",
+      "Condition": {
+        "StringLike": {
+          "ec2:CreateAction": "RunInstances"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "arn:aws:ec2:@REGION@:@ACCOUNT@:instance/*",
+      "Condition": {
+        "StringLike": {
+          "aws:ResourceTag/Project": "@PROJECT@",
+          "aws:ResourceTag/Purpose": "@PURPOSE@"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "ec2:DescribeInstances",
+      "Resource": "*",
+      "Condition": {
+        "StringLike": {
+          "ec2:Region": "@REGION@"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "ssm:GetParameters",
+      "Resource": "arn:aws:ssm:@REGION@::parameter@PARAMETER@"
+    }
+  ]
+}
