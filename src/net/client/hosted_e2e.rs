@@ -6,9 +6,9 @@
 //!     cargo test --locked --lib hosted_e2e -- --ignored --nocapture
 //! ```
 //!
-//! Each client is [`run`](super::run)'s matchmaking composition without the window or the
-//! presentation layer: the Join menu's state, Worker link and match-link systems
-//! (`install_matchmaking_link`), the connection driver, the screen derivation and the sim. The join is the menu's own (`matchmaking::try_join`: the selection set, then the
+//! Each client mounts [`run`](super::run)'s matchmaking link, connection driver, screen flow,
+//! replica consumers and sim on the GPU-less plugin floor, including the real tank view loader
+//! and scene spawner. The join is the menu's own (`matchmaking::try_join`: the selection set, then the
 //! Join button's handler), selecting only [`LOCATION`]. Client B joins [`B_JOIN_DELAY`] after A, so
 //! the Worker places B on the server A's join claimed, whether it is still starting or ready. Once
 //! both are in the match and each sees both tanks, both disconnect cleanly, which starts the
@@ -111,38 +111,15 @@ fn client_app(api: &str, log: bool) -> App {
     app.init_resource::<ConnectRetry>()
         .add_systems(Update, drive_connection);
     install_matchmaking_link(&mut app, api);
-    app.add_systems(
-        Update,
-        derive_flow
-            .after(drive_connection)
-            .before(crate::overlay::OverlaySet::Declare),
-    );
+    install_screen_flow(&mut app);
     app.insert_resource(ClientLinkTemplate {
         client_id: std::hash::RandomState::new().build_hasher().finish(),
         conditioner: None,
         seeded: None,
     });
     app.add_systems(Startup, load_tank_assets);
-    // `run`'s receive wiring, verbatim; no input writer, so the own tank's command stays idle.
-    app.add_observer(diagnostics::log_connected)
-        .add_observer(reset_shot_receive_state)
-        .add_plugins(control_claim_plugin)
-        .add_systems(
-            Update,
-            (
-                rig::attach_replicated_rig(),
-                diagnostics::nan_tripwire,
-                open_gameplay_gate,
-                log_local_tank_role,
-            ),
-        );
-    install_fire_ingress(&mut app);
-    app.add_systems(
-        FixedUpdate,
-        apply_pending_recoil_kicks
-            .before(GameplaySet)
-            .run_if(in_state(AppState::Playing)),
-    );
+    // No input writer: the own tank's command stays idle.
+    install_replica_consumers(&mut app);
 
     app.init_resource::<Probe>()
         .add_observer(record_connected)
@@ -170,6 +147,85 @@ fn tanks(app: &mut App) -> usize {
         .query_filtered::<(), With<NetTank>>()
         .iter(world)
         .count()
+}
+
+/// A ticket must take its player into the match; every hosted join relies on the shipped
+/// connection, replica and screen wiring presenting the own tank without a renderer.
+#[test]
+fn ticketed_players_reach_the_match_over_real_udp() {
+    use crate::net::{battle_mode::BattleMode, server, test_harness};
+    use lightyear::prelude::server::{ServerPlugins, ServerUdpIo, Start};
+
+    let _udp = test_harness::lock_real_udp_test();
+    let _boot = crate::headless_test::BOOT_LEASE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = test_harness::free_port();
+    let mut server_app = App::new();
+    server_app
+        .add_plugins(crate::server_plugin_floor().disable::<bevy::log::LogPlugin>())
+        .add_plugins(ServerPlugins {
+            tick_duration: server::TICK,
+        })
+        .add_plugins((crate::net::plugin, physics::physics_plugins(), SimPlugin))
+        .add_observer(server::attach_replication_sender)
+        .add_systems(Startup, crate::tank::load_tank_sim_assets)
+        .add_systems(Update, open_gameplay_gate);
+    crate::net::disclosure::install_server(&mut server_app);
+    server::install_battle(&mut server_app, BattleMode::shipped(), server::TICK);
+    server::install_client_spawns(&mut server_app);
+    let endpoint = server_app
+        .world_mut()
+        .spawn((
+            server::netcode_server(None, default()),
+            LocalAddr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port)),
+            ServerUdpIo,
+        ))
+        .id();
+    server_app.world_mut().trigger(Start { entity: endpoint });
+    test_harness::finish(&mut server_app);
+    // Only the Worker is outside this witness: deliver its ready ticket to the real consumer.
+    let mut clients = [
+        client_app("http://127.0.0.1:9", false),
+        client_app("http://127.0.0.1:9", false),
+    ];
+    for client in &mut clients {
+        matchmaking::ready_fixture(
+            client.world_mut(),
+            ReadyMatch {
+                addr: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
+                key: [0; 32],
+            },
+        );
+    }
+    // DERIVED backstop: one async boot allowance per app, then the connection retry budget.
+    // This bounds a missing gate, not the emergent time at which a player joins.
+    let deadline = crate::headless_test::BOOT_DEADLINE * 3
+        + Duration::from_secs_f64(client_policy().reconnect_give_up_s.0);
+    let started = Instant::now();
+    loop {
+        server_app.update();
+        for client in &mut clients {
+            client.update();
+        }
+        if clients.iter_mut().all(in_match) {
+            break;
+        }
+        assert!(
+            started.elapsed() < deadline,
+            "ticketed players never reached the match: {:?}",
+            clients.each_ref().map(|client| (
+                *client.world().resource::<State<Flow>>().get(),
+                client.world().resource::<ConnectRetry>().connected_once,
+                client.world().resource::<ConnectRetry>().tank_seen,
+            )),
+        );
+        thread::sleep(FRAME);
+    }
+    let players = clients.len();
+    for client in &mut clients {
+        assert_eq!(tanks(client), players, "each match shows both players");
+    }
 }
 
 /// What the two client threads share: how many are in the match, and whether either gave up.

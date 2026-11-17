@@ -589,16 +589,8 @@ pub fn run() -> AppExit {
     // Connect screens share `NetClientPlugin`'s window gate; headless automation observes
     // `drive_connection` logs instead.
     if !headless {
-        app.add_plugins(connect_screen_plugin)
-            // The screen is derived after this frame's connection state and before any owner
-            // declares an overlay from it.
-            .add_systems(
-                Update,
-                (latch_tank_seen, derive_flow)
-                    .chain()
-                    .after(drive_connection)
-                    .before(crate::overlay::OverlaySet::Declare),
-            );
+        app.add_plugins(connect_screen_plugin);
+        install_screen_flow(&mut app);
     }
 
     install_replica_consumers(&mut app);
@@ -615,6 +607,18 @@ pub fn run() -> AppExit {
     // omit `feed_frame_input`, so overlay idling cannot fight `harness::buffer_input`.
 
     app.run()
+}
+
+/// Latch the presented tank before deriving this frame's screen, after connection state and
+/// before any owner declares an overlay from it. Requires `flow::plugin` and `ConnectRetry`.
+fn install_screen_flow(app: &mut App) {
+    app.add_systems(
+        Update,
+        (latch_tank_seen, derive_flow)
+            .chain()
+            .after(drive_connection)
+            .before(crate::overlay::OverlaySet::Declare),
+    );
 }
 
 /// The game's netcode and damage-model presentation: the common replica consumer schedule,
