@@ -1640,8 +1640,9 @@ fn update_steer_detent(st: &mut TransmissionState, steer: f32) {
     };
 }
 
-/// At rest the lever is on. Drive lets it carry only rollback; steering releases it for
-/// a neutral turn. A released tank below first gear's idle speed stops and parks.
+/// At rest the lever is on. Drive on the engaged ladder releases it once moving in that
+/// direction; rollback during a direction request cannot release it before the ladder swaps.
+/// Steering releases it for a neutral turn. Released sub-idle motion stops and parks.
 fn update_park_latch(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -1662,7 +1663,10 @@ fn update_park_latch(
         st.park = false;
     } else if speed < PARK_ENGAGE_SPEED || (!requested && !steering && speed < stop_speed) {
         st.park = true;
-    } else if requested && command * (inp.speeds[0] + inp.speeds[1]) > 0.0 {
+    } else if requested
+        && (command < 0.0) == st.reverse
+        && command * (inp.speeds[0] + inp.speeds[1]) > 0.0
+    {
         st.park = false;
     }
 }

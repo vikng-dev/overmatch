@@ -2809,6 +2809,85 @@ fn reversal_beyond_brake_capacity_refuses_the_direction_cut() {
     assert!(state.reversal_hold_ticks > 0);
 }
 
+/// A reversal request cannot turn an over-capacity slide into an engine-powered stop on
+/// alternate ticks. The Driver must keep braking until rest permits the direction cut.
+#[test]
+fn an_over_capacity_slide_does_not_cycle_through_rest() {
+    for (fp, tp) in class_drivetrains() {
+        for reverse in [false, true] {
+            // Fixture: load beyond both brake capacities, initially moving with the engaged ladder.
+            let dir = if reverse { -1.0 } else { 1.0 };
+            let load = tp.brake_capacity_n * tp.brake_static_factor * 1.5;
+            let mut state = TransmissionState {
+                reverse,
+                park: false,
+                ..fresh(&tp)
+            };
+            let mut speed = dir * 2.0;
+            let mut sliding = false;
+            let mut min_speed = 0.0_f32;
+            for tick in 0..64 * 5 {
+                let mut inp = input(-dir, 0.0, [speed; 2], [dir * load; 2]);
+                inp.sensed = driver_input(speed, dir * 2.0 * load, -dir).sensed;
+                let report = step(&fp, &tp, &mut state, &inp);
+                let next = report.next_speeds[0];
+                if sliding {
+                    assert!(
+                        next * dir < 0.0,
+                        "over-capacity slide returned to rest at tick {tick}"
+                    );
+                    assert_eq!(
+                        state.reverse, reverse,
+                        "sliding cannot complete a direction cut"
+                    );
+                }
+                sliding |= next * dir < -PARK_ENGAGE_SPEED;
+                min_speed = min_speed.min(next * dir);
+                speed = next;
+            }
+            assert!(sliding, "fixture must exceed the available brake hold");
+            println!(
+                "MEASURED over-capacity reversal: reverse={reverse} final={speed} min_along_ladder={min_speed} park={} clutch={:?}",
+                state.park, state.clutch
+            );
+        }
+    }
+}
+
+/// The direction-cut pause must retain a within-capacity park on every tick. Releasing it on
+/// the requested direction alone would let the old ladder's idle catch power the held vehicle.
+#[test]
+fn a_direction_request_holds_rest_until_its_ladder_is_engaged() {
+    for (fp, tp) in class_drivetrains() {
+        for reverse in [false, true] {
+            let dir = if reverse { -1.0 } else { 1.0 };
+            // Fixture: grade inside moving and static capacities, with a full opposite request.
+            let load = dir * tp.brake_capacity_n * 0.5;
+            let mut state = TransmissionState {
+                reverse,
+                ..fresh(&tp)
+            };
+            let mut speeds = [0.0; 2];
+            // The owner's reversal pause and paid shift window must both be exercised.
+            let pause = (driver_actuation().reversal_hold_s.value * TICK_HZ).ceil() as u8;
+            state.reversal_hold_ticks = pause;
+            let ticks = usize::from(pause) + usize::from(tp.shift_ticks.get());
+            for _ in 0..ticks {
+                let mut inp = input(-dir, 0.0, speeds, [load; 2]);
+                inp.sensed = driver_input(0.0, load * 2.0, -dir).sensed;
+                let report = step(&fp, &tp, &mut state, &inp);
+                speeds = report.next_speeds;
+                assert_eq!(
+                    speeds, [0.0; 2],
+                    "a held direction cut cannot move the vehicle"
+                );
+                assert!(state.park);
+            }
+            assert_ne!(state.reverse, reverse, "rest must permit the requested cut");
+        }
+    }
+}
+
 /// The game's driving and damage model: a staffed Driver retains the park lever when
 /// either powertrain HP pool is emptied. Players can stop a coast and hold at rest.
 #[test]
