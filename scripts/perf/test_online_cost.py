@@ -61,11 +61,13 @@ class ParseStatsLine(unittest.TestCase):
         # table rather than kill the runner mid-night.
         self.assertIsNone(parse_stats_line("INFO server: client connected: 1.2.3.4"))
         self.assertIsNone(parse_stats_line("server: stats line every 1.0 s on stdout (OVERMATCH_SERVER_STATS_S)"))
+        self.assertIsNone(parse_stats_line("INFO overmatch::net::server_stats: freeze bound armed"))
 
     def test_a_record_that_does_not_parse_is_refused_not_skipped(self):
         # A skipped period would leave a server window, and the AWS harness's table, that looks
-        # whole with a period missing.
-        for broken in ("server_stats {not json", STATS[:-20], "stdout F " + STATS[:40]):
+        # whole with a period missing; a line cut before its object is such a period too.
+        for broken in ("server_stats {not json", STATS[:-20], "stdout F " + STATS[:40], "stdout F server_stats ",
+                       "server_stats", "server_stats [1]"):
             with self.subTest(broken), self.assertRaises(MalformedRecord):
                 parse_stats_line(broken)
 
@@ -78,8 +80,9 @@ class JitterObject(unittest.TestCase):
                 '{"period_s":1.0,"view_clock":{"stamp_interval_ms":null}} trailing')
         self.assertEqual(jitter_object(line), {"period_s": 1.0, "view_clock": {"stamp_interval_ms": None}})
         self.assertIsNone(jitter_object("INFO overmatch::net::frontier: net: FRONTIER interpolation resync #2"))
-        with self.assertRaises(MalformedRecord):
-            jitter_object(line[:-40])
+        for broken in (line[:-40], line[:line.index("{")]):
+            with self.subTest(broken), self.assertRaises(MalformedRecord):
+                jitter_object(broken)
 
 
 class AfterMarker(unittest.TestCase):

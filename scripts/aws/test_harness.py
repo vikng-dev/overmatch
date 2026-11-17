@@ -216,11 +216,15 @@ url = sys.argv[-1]
 if "checkip" in url:
     print("192.0.2.99")
     sys.exit(0)
-if url.startswith("https://raw.githubusercontent.com/") and url.endswith("/assets/net_timing.ron"):
-    if os.environ.get("NO_NET_TIMING"):  # a tag from before the timing records
+# Each repository file read at a tag, served from the file its variable names; NO_<variable>: a tag
+# without it.
+RAW = {"assets/net_timing.ron": "NET_TIMING", "assets/modes/battle.ron": "BATTLE_MODE"}
+if url.startswith("https://raw.githubusercontent.com/"):
+    served = next(name for path, name in RAW.items() if url.endswith("/" + path))
+    if os.environ.get("NO_" + served):
         sys.stderr.write("curl: (22) The requested URL returned error: 404\n")
         sys.exit(22)
-    print(Path(os.environ["NET_TIMING"]).read_text(), end="")
+    print(Path(os.environ[served]).read_text(), end="")
     sys.exit(0)
 tag, name = re.search(r"/download/([^/]+)/([^/]+)$", url).groups()
 if tag == "v9.9.9":
@@ -272,13 +276,26 @@ MACHINE_COMMANDS = ("install", "shutdown", "chown", "dpkg-query", "apt-get", "cu
 MACHINE_PATHS = {"/var/lib/om-harness": "state", "/opt/overmatch": "opt", "/usr/local/bin/om-harness": "om-harness",
                  "/home/ubuntu": "home", "/etc/systemd/system": "units", "/proc/uptime": "uptime"}
 
-SETTINGS = ["--tag", "v0.7.0-alpha.19", "--server-type", "c7a.large", "--client-type", "c7a.large",
-            "--bots", "26", "--clients", "4", "--window-s", "30"]
-# The timing tastes' owner, which the fake release serves at every tag.
-OWNER = harness.ROOT / harness.NET_TIMING
+# The timing tastes' and the battle mode's owners, which the fake release serves at every tag.
+OWNER, MODE = harness.ROOT / harness.NET_TIMING, harness.ROOT / harness.BATTLE_MODE
 TIMING = harness.net_timing(OWNER.read_text(), str(OWNER))
+COMBAT_S = harness.combat_s(MODE.read_text(), str(MODE))
+# Fixture: three of the release's longest timing windows, so each holds at least two disjoint
+# view-window histograms, or the longest window its first combat admits.
+WINDOW_S = min(3 * math.ceil(max(TIMING.view_window_s, TIMING.uplink_window_s)),
+               int((COMBAT_S - harness.WARMUP_S) // (harness.WINDOWS + 1)))
+SETTINGS = ["--tag", "v0.7.0-alpha.19", "--server-type", "c7a.large", "--client-type", "c7a.large",
+            "--bots", "26", "--clients", "4", "--window-s", str(WINDOW_S)]
 # Fixture: the 64 Hz tick's width, the bins' width in both records.
 BIN_MS = 15.625
+
+
+def wholly_at_or_above(bins: list[int] | tuple[int, ...], bound_s: float) -> int | None:
+    """The samples in bins whose lower edge is at or above the bound; None when the bound lies inside
+    the open-ended last bin, which holds samples on both sides of it."""
+    if (len(bins) - 1) * BIN_MS < bound_s * 1e3:
+        return None
+    return sum(count for i, count in enumerate(bins) if i * BIN_MS >= bound_s * 1e3)
 
 
 def fixture_histogram(bins: list[int], p50: float, p95: float, top: float) -> dict:
@@ -346,7 +363,8 @@ class Fixture:
         (self.root / "tmp").mkdir()
         self.env = {"PATH": f"{binary}:{os.environ['PATH']}", "FAKE_EC2": str(self.ec2), "TMPDIR": str(self.root / "tmp"),
                     "CALLS": str(self.root / "calls.jsonl"), "SSH_CALLS": str(self.root / "ssh.jsonl"),
-                    "ROWS": str(rows), "NET_TIMING": str(OWNER), "FIXTURE_CLIENTS": str(clients),
+                    "ROWS": str(rows), "NET_TIMING": str(OWNER), "BATTLE_MODE": str(MODE),
+                    "FIXTURE_CLIENTS": str(clients),
                     "FIXTURE_WINDOW_S": str(window_s), "CLOUDFLARE_GLOBAL_KEY": "fixture"} | env
 
     def main(self, *argv: str) -> int:
@@ -475,16 +493,18 @@ class MeasuredRun(unittest.TestCase):
             self.assertEqual(row[column["tgt_n"]], lines)
 
     def test_each_server_link_and_window_reads_that_windows_own_census(self):
-        # The stale counts are the window's own line's (since the previous line), never summed
-        # across lines; every connected link has a row in every window.
+        # The stale counts and the gaps against the release's bounds are the window's own line's,
+        # never summed across lines; every connected link has a row in every window.
         gaps = self.fixture.results()["input_gaps"]
         column = {name: i for i, name in enumerate(gaps["columns"])}
         self.assertEqual(len(gaps["rows"]), int(option(SETTINGS, "--clients")) * harness.WINDOWS)
+        bins = ARRIVAL["gap_ms"]["bins"]
         for row in gaps["rows"]:
             self.assertEqual(row[column["stale_arr"]], ARRIVAL["stale_arrivals"])
             self.assertEqual(row[column["S_ms"]], ARRIVAL["stale_threshold_ms"])
             self.assertEqual(row[column["gap_n"]], ARRIVAL["gap_ms"]["n"])
-            self.assertLessEqual(row[column["gaps>=ceil"]], row[column["gaps>=floor"]])
+            self.assertEqual(row[column["gaps>=floor"]], wholly_at_or_above(bins, TIMING.stale_floor_s))
+            self.assertEqual(row[column["gaps>=ceil"]], wholly_at_or_above(bins, TIMING.stale_ceil_s))
 
     def test_every_launch_carries_its_cost_guard(self):
         # A machine the operator loses must still delete itself: terminate on its own power-off, a
@@ -544,6 +564,9 @@ class Failures(unittest.TestCase):
         clients, window_s = int(option(SETTINGS, "--clients")), float(option(SETTINGS, "--window-s"))
         no_view_clock = {key: value for key, value in JITTER.items() if key != "view_clock"}
         unbinned = ARRIVAL | {"gap_ms": ARRIVAL["gap_ms"] | {"n": ARRIVAL["gap_ms"]["n"] + 1}}
+        row = stats_row(clients, window_s)
+        # A link without its census entry, or with two, would leave the gaps table short or doubled.
+        census = "`inputs` holds connected entries for"
         cases = [({"env": {"BOOT_FAIL": "verify"}}, "checksum mismatch"),
                  ({"env": {"NETLESS": "client:2"}}, "two boots without a network"),
                  ({"env": {"STATE_FAILS": "server"}}, "`state` failed: Failed to open the journal"),
@@ -551,7 +574,9 @@ class Failures(unittest.TestCase):
                  ({"env": {"NO_JITTER": "1"}}, "client 1's client_jitter lines cover 0 s"),
                  ({"client": no_view_clock}, "client 1: a client_jitter record: no `view_clock`"),
                  ({"server": stats_row(clients, window_s, arrival=None)}, "no `arrival.state`"),
-                 ({"server": stats_row(clients, window_s, arrival=unbinned)}, "do not hold its")]
+                 ({"server": stats_row(clients, window_s, arrival=unbinned)}, "are not n > 0 samples"),
+                 ({"server": row | {"inputs": []}}, census),
+                 ({"server": row | {"inputs": row["inputs"] + row["inputs"][:1]}}, census)]
         for case, cause in cases:
             with self.subTest(cause), mock.patch.object(harness, "REACH_TIMEOUT_S", 0):
                 fixture = Fixture(self.addCleanup, server=case.get("server"), client=case.get("client", JITTER),
@@ -579,17 +604,18 @@ class Failures(unittest.TestCase):
             argv[argv.index(name) + 1] = value
             return argv
 
-        # The shortest window that no longer fits: the combat's length from the mode data it owns,
-        # against the warmup and the windows the harness waits for after it.
-        overlong = math.floor((harness.combat_s() - harness.WARMUP_S) / (harness.WINDOWS + 1)) + 1
         leftover = {"groups": [{"GroupId": "sg-0e0e0e0e0e0e0e0e0", "IpPermissions": [],
                                 "Tags": [{"Key": k, "Value": v} for k, v in harness.TAGS.items()]}]}
-        # Fixture: a release whose uplink window outlasts the run's window by a second.
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
+        # Fixture: a release whose uplink window outlasts the run's window by a second.
         longer = Path(temp.name) / "net_timing.ron"
-        longer.write_text(re.sub(r"(uplink_window_s:\s*\()[^,]+",
-                                 rf"\g<1>{int(option(SETTINGS, '--window-s')) + 1}.0", OWNER.read_text()))
+        longer.write_text(re.sub(r"(uplink_window_s:\s*\()[^,]+", rf"\g<1>{WINDOW_S + 1}.0", OWNER.read_text()))
+        # Fixture: a release whose first combat is a second shorter than the warmup and the windows the
+        # harness waits for after it; the local mode data still admits them, so the tag's copy is read.
+        shorter = Path(temp.name) / "battle.ron"
+        need_s = harness.WARMUP_S + (harness.WINDOWS + 1) * WINDOW_S
+        shorter.write_text(re.sub(r"(\bcombat_s:\s*)[0-9.]+", rf"\g<1>{need_s - 1}.0", MODE.read_text()))
         cases = [
             ("expired sign-in", SETTINGS, {"SCENARIO": "expired"}, None, 1, "sign-in"),
             ("unpublished tag", setting("--tag", "v9.9.9"), {}, None, 1, "is the tag published"),
@@ -597,10 +623,12 @@ class Failures(unittest.TestCase):
              "does the release carry the tick stamp"),
             ("timing windows past the run's window", SETTINGS, {"NET_TIMING": str(longer)}, None, 1,
              "shorter than the release's"),
+            ("a tag without the battle mode", SETTINGS, {"NO_BATTLE_MODE": "1"}, None, 1,
+             "does the tag carry the battle mode"),
+            ("windows past the tag's combat", SETTINGS, {"BATTLE_MODE": str(shorter)}, None, 1, "do not fit"),
             ("over the quota", setting("--server-type", "c7a.xlarge"), {}, None, 1, "vCPUs"),
             ("burstable type", setting("--client-type", "t3.small"), {}, None, 1, "burstable"),
             ("an earlier run's leftovers", SETTINGS, {}, leftover, 1, "earlier run"),
-            ("windows past combat", setting("--window-s", str(overlong)), {}, None, 1, "do not fit"),
             ("no client to open combat", setting("--clients", "0"), {}, None, 2, "at least 1"),
         ]
         for name, argv, env, seed, status, cause in cases:
@@ -642,7 +670,7 @@ class MachineCommands(unittest.TestCase):
         archives = {role: (f"https://example.invalid/{role}.tar.gz", f"{'a' * 64}  {role}.tar.gz")
                     for role in ("server", "client")}
         plan = harness.Plan("ami-0123456789abcdef0", "/dev/sda1", "vpc", "subnet", "zone", "192.0.2.99/32", archives,
-                            TIMING)
+                            TIMING, COMBAT_S)
         cls.machine = MachineScript(cls.addClassCleanup, harness.user_data("server", settings, plan, "ssh-ed25519 AAAAfixture"))
         booted = cls.machine.boot()
         assert booted.returncode == 0, booted.stderr
@@ -681,13 +709,25 @@ class Reading(unittest.TestCase):
         # floor that may all lie below it, and an open-ended last bin across it leaves the count unknown.
         columns = [harness.SERVER_COLUMNS.index(name) for name in ("gaps>=floor", "gaps>=ceil")]
         bins = len(ARRIVAL["gap_ms"]["bins"])
-        open_from_ms = (bins - 1) * BIN_MS
         for i in range(bins):
-            gaps = harness.Histogram(1, 0.0, 0.0, 0.0, BIN_MS, tuple(int(j == i) for j in range(bins)))
+            one = tuple(int(j == i) for j in range(bins))
+            gaps = harness.Histogram(1, 0.0, 0.0, 0.0, BIN_MS, one)
             row = harness.server_cells("0v1", 1, harness.Arrival("live", gaps, 100.0, 0, 0), TIMING)
             for column, bound_s in zip(columns, (TIMING.stale_floor_s, TIMING.stale_ceil_s)):
-                expected = None if open_from_ms < bound_s * 1e3 else int(i * BIN_MS >= bound_s * 1e3)
-                self.assertEqual(row[column], expected, (i, bound_s))
+                self.assertEqual(row[column], wholly_at_or_above(one, bound_s), (i, bound_s))
+
+    def test_a_histogram_that_cannot_be_read_against_a_bound_is_refused_where_it_is_parsed(self):
+        # The bound columns divide by the bin width and sum counts from a bin on; a zero width would
+        # fail later as a harness bug, and a negative count or a sum other than n would report gaps
+        # the record does not hold, so each is refused at the record, naming it.
+        good = ARRIVAL["gap_ms"]
+        broken = {"no bin width": good | {"bin_ms": 0.0}, "an endless bin width": good | {"bin_ms": math.inf},
+                  "a negative count": good | {"bins": [good["bins"][0] + good["bins"][1] + 1, -1] + good["bins"][2:]},
+                  "bins short of n": good | {"n": good["n"] + 1}, "no sample": good | {"n": 0, "bins": [0] * 17}}
+        self.assertIsNotNone(harness.histogram(harness.Fields({"gap_ms": good}, "fixture"), "gap_ms"))
+        for name, value in broken.items():
+            with self.subTest(name), self.assertRaisesRegex(harness.Refused, "^fixture `gap_ms`"):
+                harness.histogram(harness.Fields({"gap_ms": value}, "fixture"), "gap_ms")
 
     def test_a_view_window_histogram_is_taken_once_per_view_window(self):
         # Each line's histogram holds the view window before it; lines a second apart overlap, so

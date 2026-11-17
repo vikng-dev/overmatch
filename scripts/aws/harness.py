@@ -12,9 +12,10 @@ headless clients from a second machine; one cost table and two timing tables; te
 
 RUN, in order (progress on stderr, the tables on stdout):
   1. Preflight, creating nothing: the settings; the AWS sign-in; the release's two `.sha256` files by
-     explicit tag (a bad tag stops here; pre-releases have no `latest`); the release's timing tastes,
-     `assets/net_timing.ron` at that tag, and a window no shorter than its view and uplink windows
-     (a release before the tick stamp stops here); Canonical's Ubuntu 26.04
+     explicit tag (a bad tag stops here; pre-releases have no `latest`); at that tag, its timing
+     tastes (`assets/net_timing.ron`; a release before the tick stamp stops here) and its battle mode
+     (`assets/modes/battle.ron`), for a window no shorter than the view and uplink windows and
+     windows that fit the first combat; Canonical's Ubuntu 26.04
      amd64 image from its public SSM parameter, checked to be the public AWS-listed image of that
      name (the release needs glibc 2.43, so Amazon Linux 2023 cannot run it); both machine types
      (x86_64, not burstable) and their vCPUs, beside every instance already running, against the
@@ -99,6 +100,8 @@ RELEASES = "https://github.com/vikng-dev/overmatch/releases/download"
 SOURCES = "https://raw.githubusercontent.com/vikng-dev/overmatch"
 # The timing tastes' one owner (src/net/timing.rs `Timing::shipped`), compiled into the release.
 NET_TIMING = "assets/net_timing.ron"
+# The battle mode's one owner (src/net/battle_mode.rs), compiled into the release: its combat length.
+BATTLE_MODE = "assets/modes/battle.ron"
 TRIPLE = "x86_64-unknown-linux-gnu"
 # The server's UDP port: src/net/server.rs PORT, fixed, no lever.
 PORT = 5888
@@ -268,12 +271,11 @@ def count(least: int):
     return parse
 
 
-def combat_s() -> float:
-    """The first combat's length, from the mode data the release ships."""
-    path = ROOT / "assets" / "modes" / "battle.ron"
-    found = re.search(r"\bcombat_s:\s*([0-9.]+)", path.read_text())
+def combat_s(text: str, where: str) -> float:
+    """The first combat's length, `combat_s: <seconds>` in the battle mode's data."""
+    found = re.search(r"\bcombat_s:\s*(\d+(?:\.\d+)?)", text)
     if not found:
-        raise Refused(f"{path}: no combat_s")
+        raise Refused(f"{where} has no combat_s")
     return float(found.group(1))
 
 
@@ -317,6 +319,7 @@ class Plan:
     operator_cidr: str
     archives: dict[str, tuple[str, str]]  # role: (url, checksum line)
     timing: NetTiming
+    combat_s: float
 
 
 def archive(tag: str, role: str) -> tuple[str, str]:
@@ -330,18 +333,26 @@ def archive(tag: str, role: str) -> tuple[str, str]:
     return f"{RELEASES}/{tag}/{name}", f"{found.group(1)}  {name}"
 
 
+def tagged_source(tag: str, path: str, absent: str) -> tuple[str, str]:
+    """A repository file at the release's own tag, and its name for messages; `absent` asks why the
+    tag might lack it."""
+    where = f"{path} at {tag}"
+    return fetch(f"{SOURCES}/{tag}/{path}", f"{where}: {absent}"), where
+
+
 def preflight(s: Settings) -> Plan:
     aws("sts", "get-caller-identity")
-    if WARMUP_S + (WINDOWS + 1) * s.window_s > combat_s():
-        raise Refused(f"{WINDOWS} windows of {s.window_s} s do not fit one {combat_s():.0f} s combat")
     archives = {role: archive(s.tag, role) for role in ("server", "client")}
-    where = f"{NET_TIMING} at {s.tag}"
-    timing = net_timing(fetch(f"{SOURCES}/{s.tag}/{NET_TIMING}", f"{where}: does the release carry the "
-                              "tick stamp and input-gap records?"), where)
+    timing = net_timing(*tagged_source(s.tag, NET_TIMING, "does the release carry the tick stamp and "
+                                       "input-gap records?"))
+    combat = combat_s(*tagged_source(s.tag, BATTLE_MODE, "does the tag carry the battle mode?"))
     longest = max(timing.view_window_s, timing.uplink_window_s)
     if s.window_s < longest:
         raise Refused(f"a {s.window_s} s window is shorter than the release's {longest:g} s timing windows "
-                      f"({where}): its timing histograms would reach before the window")
+                      f"({NET_TIMING} at {s.tag}): its timing histograms would reach before the window")
+    if WARMUP_S + (WINDOWS + 1) * s.window_s > combat:
+        raise Refused(f"{WINDOWS} windows of {s.window_s} s do not fit one {combat:.0f} s combat "
+                      f"({BATTLE_MODE} at {s.tag})")
 
     image_id = aws("ssm", "get-parameter", "--name", AMI_PARAMETER)["Parameter"]["Value"]
     images = aws("ec2", "describe-images", "--owners", "amazon", "--image-ids", image_id)["Images"]
@@ -394,7 +405,8 @@ def preflight(s: Settings) -> Plan:
         operator = ipaddress.IPv4Address(address)
     except ValueError as error:
         raise Refused("the operator's public address is not one IPv4 address") from error
-    return Plan(image["ImageId"], image["RootDeviceName"], vpc, subnet, zone, f"{operator}/32", archives, timing)
+    return Plan(image["ImageId"], image["RootDeviceName"], vpc, subnet, zone, f"{operator}/32", archives, timing,
+                combat)
 
 
 # ------------------------------------------------------------------------------------- machines
@@ -642,11 +654,13 @@ class Fields:
         return value
 
     def num(self, path: str) -> float:
-        return float(self.get(path, int, float))
+        value = float(self.get(path, int, float))
+        if not math.isfinite(value):  # Python's JSON reads NaN and Infinity; the release prints neither
+            raise Refused(f"{self.where}: `{path}` is {value}, not a finite number")
+        return value
 
     def maybe_num(self, path: str) -> float | None:
-        value = self.get(path, int, float, type(None))
-        return None if value is None else float(value)
+        return None if self.get(path, int, float, type(None)) is None else self.num(path)
 
     def count(self, path: str) -> int:
         return self.get(path, int)
@@ -679,14 +693,17 @@ class Histogram:
 
 
 def histogram(fields: Fields, path: str) -> Histogram | None:
-    """None: the record held no sample (null). Refused unless its bins hold exactly its n samples."""
+    """None: the record held no sample (null, as src/net/timing.rs prints an empty one). Refused
+    unless it is n > 0 samples in nonnegative counts over bins of positive width."""
     if fields.get(path, dict, type(None)) is None:
         return None
     h = fields.at(path)
-    n, bins = h.count("n"), h.get("bins", list)
-    if not all(isinstance(b, int) and not isinstance(b, bool) for b in bins) or sum(bins) != n:
-        raise Refused(f"{h.where}: its bins {bins} do not hold its {n} samples")
-    return Histogram(n, h.num("p50"), h.num("p95"), h.num("max"), h.num("bin_ms"), tuple(bins))
+    n, bin_ms, bins = h.count("n"), h.num("bin_ms"), h.get("bins", list)
+    counts = all(isinstance(b, int) and not isinstance(b, bool) and b >= 0 for b in bins)
+    if not (n > 0 and bin_ms > 0 and counts and sum(bins) == n):
+        raise Refused(f"{h.where}: n {n}, bin_ms {bin_ms:g} and bins {bins} are not n > 0 samples counted "
+                      "in bins of positive width")
+    return Histogram(n, h.num("p50"), h.num("p95"), h.num("max"), bin_ms, tuple(bins))
 
 
 @dataclass(frozen=True)
@@ -732,11 +749,19 @@ class Stats:
 
 
 def stats(row: Fields) -> Stats:
+    """Refused unless `inputs` holds one connected entry for each connected `send_clients` link, as
+    the server builds both from one census: a missing one would drop its link from the gaps table."""
+    sent = row.each("send_clients")
+    census = tuple(map(inputs, row.each("inputs")))
+    links = sorted(link.get("link", str) for link in sent)
+    connected = sorted(entry.link for entry in census if entry.arrival)
+    if len(set(links)) != len(links) or connected != links:
+        raise Refused(f"{row.where}: `inputs` holds connected entries for {connected}, not one for each "
+                      f"`send_clients` link {links}")
     return Stats(row.count("tanks"), row.count("projectiles"),
                  tuple(row.num(f"tick_us.{p}") / 1e3 for p in ("p50", "p95", "p99", "max")),
                  row.count("overruns"), row.num("wall.discarded_ms"), row.num("cpu_pct"), row.num("rss_mb"),
-                 row.num("send_us.p95"), tuple(link.num("bytes_per_s") / 1e3 for link in row.each("send_clients")),
-                 tuple(map(inputs, row.each("inputs"))))
+                 row.num("send_us.p95"), tuple(link.num("bytes_per_s") / 1e3 for link in sent), census)
 
 
 @dataclass
@@ -1024,7 +1049,6 @@ def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], 
     to_client = server.boot_at - client.boot_at
     records = [jitter(journal, k) for k, journal in enumerate(client_journals, 1)]
     spans = [(i, w, w.start + to_client, w.end + to_client) for i, w in enumerate(windows, 1)]
-    # Per window, each client's lines in it.
     inside = [[client_lines(own, start, end, k) for k, own in enumerate(records, 1)] for _, _, start, end in spans]
     main, main_json = table(COLUMNS, [window_cells(i, w, log.combat_open, interval(server_samples, w.start, w.end),
                                                    interval(client_samples, start, end), inside[i - 1])
@@ -1127,7 +1151,7 @@ def measure(s: Settings, plan: Plan, run_id: str, state: Path) -> None:
         log = server_log(server.ssh("journal", "overmatch-server"))
         if log.combat_open is None:
             raise Refused("combat did not open although every client holds its slot")
-        deadline = deadline or server.boot_at + log.combat_open + combat_s() + s.window_s
+        deadline = deadline or server.boot_at + log.combat_open + plan.combat_s + s.window_s
         windows, skipped = pick_windows(log, s.clients, max(measure_from, log.combat_open) + WARMUP_S)
         if len(windows) == WINDOWS:
             break

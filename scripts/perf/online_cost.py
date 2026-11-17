@@ -30,10 +30,10 @@ object (`scripts/aws/harness.py` reads it too). Its twin `jitter_object` is the 
 the client's once-a-second `client_jitter {json}` record (src/net/frontier.rs), which only the AWS
 harness reads. `parse_stats_line` flattens a stats object: its keys are not fixed here; nested
 objects flatten to dotted keys (`tick_us.p95`), every numeric leaf is kept, nulls, strings and lists
-are dropped. When a format moves, its `*_object` is the change. A line without the record is
-skipped, so a server without the lever yields an empty table, not an error; a record whose object
-does not parse is refused (`MalformedRecord`), since a dropped period would leave a window that
-looks whole.
+are dropped. When a format moves, its `*_object` is the change. A line without the record's marker
+is skipped, so a server without the lever yields an empty table, not an error; a marker whose object
+is missing or does not parse is refused (`MalformedRecord`), since a dropped period would leave a
+window that looks whole.
 
 THE WINDOW. The lines carry no clock, so the runner marks the window by content: at the window's
 start it saves the last stats line the server had printed (the marker), and at its end it saves
@@ -57,10 +57,11 @@ import sys
 from pathlib import Path
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-# src/net/server_stats.rs PREFIX, a space, then the object.
-STATS_RECORD = re.compile(r"\bserver_stats (?=\{)")
+# src/net/server_stats.rs PREFIX, a space, then the object. The marker alone makes a record, so a
+# line cut before its object is refused, not skipped; a module path (`server_stats:`) is no marker.
+STATS_RECORD = re.compile(r"\bserver_stats(?:\s+|$)")
 # src/net/frontier.rs `record_jitter`: `client_jitter `, then the object, inside an `info!` line.
-JITTER_RECORD = re.compile(r"\bclient_jitter (?=\{)")
+JITTER_RECORD = re.compile(r"\bclient_jitter(?:\s+|$)")
 # One spawn line per bot (`server: spawned circling bot 3 tank …`), or one line naming a count
 # (`spawned 10 bots`). `\bspawned` never matches inside `respawned`.
 BOT_SPAWN = re.compile(r"\bspawned\b.*\bbots?\b", re.IGNORECASE)
@@ -83,21 +84,22 @@ def flatten(value: object, prefix: str = "") -> dict[str, float]:
 
 
 class MalformedRecord(ValueError):
-    """A `server_stats {` or `client_jitter {` record whose object does not parse."""
+    """A `server_stats` or `client_jitter` record whose object is missing or does not parse."""
 
 
 def record_object(line: str, record: re.Pattern, kind: str) -> dict | None:
     """The object of the line's `<kind> {json}` record, which a journal or container log may
-    prefix: None for a line without one, MalformedRecord for one that does not parse."""
+    prefix: None for a line without the marker, MalformedRecord for a marker without one object."""
     clean = ANSI.sub("", line)
     found = record.search(clean)
     if found is None:
         return None
     try:
-        # Decoding starts at the brace, so the value is an object.
         value, _ = json.JSONDecoder().raw_decode(clean, found.end())
     except json.JSONDecodeError as error:
         raise MalformedRecord(f"a {kind} record does not parse ({error.msg}): {clean.strip()[:160]}") from error
+    if not isinstance(value, dict):
+        raise MalformedRecord(f"a {kind} record holds no object: {clean.strip()[:160]}")
     return value
 
 
