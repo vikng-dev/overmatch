@@ -7,8 +7,7 @@
 use std::time::Duration;
 
 use avian3d::prelude::{
-    AngularInertia, CollisionLayers, LayerMask, LinearVelocity, Mass, NoAutoAngularInertia,
-    NoAutoMass, RigidBody,
+    AngularInertia, CollisionLayers, LayerMask, LinearVelocity, Mass, NoAutoMass, RigidBody,
 };
 use bevy::ecs::message::Messages;
 use bevy::time::TimeUpdateStrategy;
@@ -113,23 +112,51 @@ fn tank(
     velocity: Vec3,
     volumes: &[Volume],
 ) -> (Entity, Vec<Entity>) {
+    // Fixture full-vehicle body.
+    let (mass, centre, inertia) = (
+        50_000.0,
+        Vec3::ZERO,
+        AngularInertia::new(Vec3::splat(1.0e5)),
+    );
     let root = app
         .world_mut()
         .spawn((
             Transform::from_translation(at).with_rotation(Quat::from_rotation_y(yaw)),
             RigidBody::Kinematic,
             LinearVelocity(velocity),
-            Mass(50_000.0),
-            AngularInertia::new(Vec3::splat(1.0e5)),
-            NoAutoMass,
-            NoAutoAngularInertia,
+            crate::tank::explicit_mass(mass, centre, inertia),
             // A servo-less rig still carries its root's one (empty) integrator.
             crate::tank::TankServos::for_count(0),
         ))
         .id();
+    // Fixture detachable assembly: 1 t, centred on the root, 1000 kg m² per axis. No collider:
+    // the recording fixture's declared volumes alone define what its rounds encounter.
+    let assembly = crate::tank::TurretBody {
+        mass: 1000.0,
+        angular_inertia: AngularInertia::new(Vec3::splat(1000.0)),
+        centre_of_mass: Vec3::ZERO,
+    };
+    let hull = crate::tank::HullBody::new(
+        "recording-fixture.tank.ron",
+        mass,
+        centre,
+        inertia,
+        assembly,
+        Transform::IDENTITY,
+    );
+    app.world_mut().entity_mut(root).insert(hull);
+    let turret = app
+        .world_mut()
+        .spawn((
+            crate::tank::Turret,
+            assembly,
+            Transform::IDENTITY,
+            ChildOf(root),
+        ))
+        .id();
     app.world_mut().entity_mut(root).insert(Rig {
         hull: root,
-        turret: root,
+        turret,
         gunner_yaw: root,
         gun: root,
         muzzle: root,

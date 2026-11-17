@@ -1269,12 +1269,15 @@ pub struct LinkAngleSpec {
 pub struct TankSpec {
     /// The name a player reads for this vehicle: the kill feed's, the pen cam's.
     pub display_name: String,
-    /// Total mass (kg) — authored balance data; the collision proxy contributes none (ADR-0011).
+    /// Full-vehicle mass (kg) with the assembly at its rest pose; the hull body is derived from it.
+    /// Authored balance data; the collision proxy contributes none (ADR-0011).
     pub mass: f32,
-    /// Hull box full dimensions (x, y, z metres) approximating the angular-inertia distribution.
+    /// Full-vehicle inertia box dimensions (x, y, z metres) with the assembly at its rest pose;
+    /// the hull body's inertia is derived from this distribution.
     pub inertia_extents: (f32, f32, f32),
-    /// The turret as a free body once a cook-off blows it off: its own mass and inertia box, which
-    /// the hull's `mass` / `inertia_extents` do not describe.
+    /// The game's damage model: the detachable assembly's own mass and inertia box. `mass` and
+    /// `inertia_extents` describe the full vehicle with this assembly at rest; subtracting it
+    /// derives the hull body.
     pub turret: TurretSpec,
     /// Gunner yaw servo, independently of the detachable assembly. None is for unarmed tooling
     /// sheets with no Gunner view; playable rigs must name a declared Yaw servo.
@@ -1377,7 +1380,7 @@ impl NodeRole {
 }
 
 impl TankSpec {
-    /// The hull body's angular inertia: a uniform box of `inertia_extents` carrying `mass`.
+    /// The full-vehicle body's angular inertia: a uniform box of `inertia_extents` carrying `mass`.
     pub(crate) fn hull_angular_inertia(&self) -> avian3d::prelude::AngularInertia {
         let (x, y, z) = self.inertia_extents;
         avian3d::prelude::AngularInertia::from_shape(&Cuboid::new(x, y, z), self.mass)
@@ -1880,6 +1883,18 @@ impl TankSpec {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!("{what} must be finite and > 0 (got {value})").into());
             }
+        }
+        if self.mass <= turret.mass.0 {
+            return Err("mass must exceed turret.mass to leave a hull after detachment; increase mass or correct turret.mass".into());
+        }
+        let moments = self.hull_angular_inertia().principal;
+        if !moments.is_finite() || moments.cmple(Vec3::ZERO).any() {
+            return Err(
+                "mass/inertia_extents yield non-finite or non-positive full-vehicle moments; \
+                        author mass and box dimensions whose derived cuboid moments are finite \
+                        and positive on every axis"
+                    .into(),
+            );
         }
         let moments = turret.angular_inertia().principal;
         if !moments.is_finite() || moments.cmple(Vec3::ZERO).any() {
@@ -3119,6 +3134,46 @@ TankSpec(
                 let err = spec.validate().unwrap_err().to_string();
                 assert!(err.starts_with(field), "{field} {value}: {err}");
             }
+        }
+    }
+
+    /// Spawn and the game's damage model require finite positive full-vehicle moments.
+    /// Fixture: one squared extent overflows while the moment about that axis stays finite;
+    /// tiny positive extents instead underflow every moment. Both must fail at sheet admission.
+    #[test]
+    fn validate_refuses_unrepresentable_derived_full_vehicle_moments() {
+        for extents in [
+            (f32::MAX, 1.0, 1.0),
+            (1.0, f32::MAX, 1.0),
+            (1.0, 1.0, f32::MAX),
+            (f32::MIN_POSITIVE, f32::MIN_POSITIVE, f32::MIN_POSITIVE),
+        ] {
+            let mut spec = fixture();
+            spec.inertia_extents = extents;
+            let error = spec.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("mass/inertia_extents")
+                    && error.contains("full-vehicle moments")
+                    && error.contains("every axis"),
+                "{error}"
+            );
+        }
+    }
+
+    /// The game's damage model: the authority needs a positive remaining hull mass at cook-off.
+    /// Refuse both equality and an assembly heavier than its vehicle before any spawn.
+    #[test]
+    fn validate_refuses_a_vehicle_no_heavier_than_its_detachable_assembly() {
+        for ratio in [1.0, 0.5] {
+            // Fixture mass ratios.
+            let mut spec = fixture();
+            spec.mass = spec.turret.mass.0 * ratio;
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains("mass must exceed turret.mass"), "{err}");
+            assert!(
+                err.contains("increase mass or correct turret.mass"),
+                "{err}"
+            );
         }
     }
 

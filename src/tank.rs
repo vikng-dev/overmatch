@@ -23,7 +23,6 @@ mod view;
 pub(crate) use integrity::authored_attachment;
 #[cfg(test)]
 pub use model::WeaponState;
-pub(crate) use model::controlled_one;
 pub(crate) use model::rig_world_pose;
 #[allow(
     unused_imports,
@@ -34,6 +33,7 @@ pub use model::{
     TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate, WeaponGateState,
     WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound, WeaponTiming,
 };
+pub(crate) use model::{HullBody, controlled_one, explicit_mass};
 pub use scenario::{client_plugin, sp_spawn_plugin};
 pub(crate) use servo::{RemoteServos, ServoRest, selected, servo_aim_frame};
 pub use servo::{

@@ -218,14 +218,19 @@ field-frame control panics instead of depositing dose along an invented directio
 - **B4, P1, unresolved:** `launch_turrets_on_cookoff` still prescribes the release's linear and
   angular increment (StandIns in `assets/damage/cookoff.ron`); the assembly does keep the hull
   motion at its mass centre and the hull's spin, so velocity is continuous up to that increment.
-  Momentum is not: the hull keeps the whole vehicle's mass, mass centre and inertia.
+  In the game's damage model, the hull's fixed mass, centre and inertia are derived once as the
+  full vehicle minus the assembly at rest. Each body inherits the vehicle's spin and the velocity
+  of its own mass centre as a material point. Mass is conserved exactly; momentum is conserved
+  exactly at the assembly's rest pose, plus the authored launch impulse without a hull reaction.
+  At other poses momentum differs by the mounted model's own resolution: its full-vehicle body
+  does not follow the turret, which no player can perceive. Detachment is the one place these
+  mounted and separate-body models meet.
   `Ammo` identifies only a volume with HP and ownership. Per-weapon stowage counts
   exist but do not assign contents to ammunition volumes; the reserve is currently infinite.
   Round filler energies exist, but neither propellant energy nor confinement, attachment failure
   work, a release force path or per-volume energetic contents are supplied. `TurretSpec` supplies
-  mass and inertia extents only. The launch now supplies the inherited motion; a conserving
-  release still needs the hull's mass, mass centre and inertia after detachment. These facts must
-  be supplied before deriving a release;
+  mass and inertia extents; geometry supplies a stand-in assembly centre. A derived release still
+  needs the energetic and attachment facts above;
   relabelling the current kick as an energy coefficient would leave the finding intact.
 - **B6, P1, unresolved:** the ground contact still functions the fuze with unbounded resistance
   and stops the round immediately. The old `stops_unresolved` catch-all is already gone. The
