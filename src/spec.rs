@@ -961,8 +961,7 @@ pub struct PowertrainSpec {
     pub transmission: TransmissionSpec,
 }
 
-/// The declared drivetrain block: a fixed-radius geared regenerative box (the L600 family, the
-/// one law `track::transmission` runs). Authoring rule (tiger-transmission-data.md): per-gear
+/// The declared drivetrain block: engine, gears and a list of drive/stop couplings. Authoring rule (tiger-transmission-data.md): per-gear
 /// SPEEDS are the anchors; total reductions derive at build time against the spec's own
 /// sprocket radius, so the ladder survives the open 19-vs-20-tooth sprocket discrepancy.
 #[derive(Deserialize, Clone)]
@@ -971,10 +970,11 @@ pub struct TransmissionSpec {
     pub engine: EngineSpec,
     pub gearbox: GearboxSpec,
     pub steering: SteeringSpec,
+    pub couplings: Vec<crate::track::transmission::Coupling>,
     /// Per-side service/parking brake capacity at the sprocket (N).
-    pub brake_force: f32,
+    pub(crate) brake_force: crate::provenance::Labelled<f32>,
     /// Static breakaway multiplier for an at-rest parking lever.
-    pub brake_static_factor: f32,
+    pub(crate) brake_static_factor: crate::provenance::Labelled<f32>,
 }
 
 impl TransmissionSpec {
@@ -990,6 +990,7 @@ impl TransmissionSpec {
             engine,
             gearbox,
             steering,
+            couplings,
             brake_force,
             brake_static_factor,
         } = self;
@@ -1007,10 +1008,10 @@ impl TransmissionSpec {
             steer_radii_m: &steering.radii,
             reverse_steer_radii_m: &steering.reverse_radii,
             steer_capacity_n: steering.capacity,
-            neutral_mean: steering.neutral_mean.0,
-            recirculation: steering.recirculation,
-            brake_capacity_n: *brake_force,
-            brake_static_factor: *brake_static_factor,
+            couplings,
+            steering_radius_rounding_share: steering.radius_rounding_share.0,
+            brake_capacity_n: brake_force.value,
+            brake_static_factor: brake_static_factor.value,
             drag_fraction: engine.drag_fraction,
             engine_inertia_kgm2: engine.inertia_kgm2,
             clutch_capacity_nm: engine.clutch_capacity_nm,
@@ -1086,8 +1087,8 @@ pub struct GearboxSpec {
     pub(crate) shift_secs: Sourced<f32>,
 }
 
-/// The steering member: per-gear fixed radii (the L600's two detents), its force capacity, and the
-/// regenerative power path.
+/// Steering construction: two crank ratios derived from the first radius pair, checked against
+/// both ladders within the authored table rounding bound, with a per-output force rating.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SteeringSpec {
@@ -1099,13 +1100,8 @@ pub struct SteeringSpec {
     /// differentially, so the belt-difference axis `F_s` carries up to 2× this (each side
     /// sees `F_s/2`, bounded by this datum — the gearing/grip-scale per-track cap).
     pub capacity: f32,
-    /// Inner→outer recirculation efficiency η.
-    pub recirculation: f32,
-    /// Whether the mean track speed is held in a neutral turn (`track::transmission::NeutralMean`).
-    pub(crate) neutral_mean: Sourced<crate::track::transmission::NeutralMean>,
-    // Neutral differential speed derives from first-gear construction:
-    // `neutral_d_full = κ_tight(F1) × v1_governed`. An authored share would replace
-    // the radii/speed relationship with an unprovenanced feel scalar.
+    /// Relative rounding bound on the radius check, never a steering law coefficient.
+    pub(crate) radius_rounding_share: Sourced<f32>,
 }
 
 /// The ride model: three numbers, everything else derives. Spring rate `k = m·(2πf)²`,
@@ -2323,6 +2319,7 @@ TankSpec(
         idler: (spin_inertia_kgm2: ((left: 4.0, right: 4.0), Fixture("fixture idlers")), radius: (left: 0.4, right: 0.4), nodes: (left: "Idler_L", right: "Idler_R")),
         powertrain: (
             transmission: (
+                couplings: [Clutch(Mean), Steering, Stop(Left), Stop(Right)],
                 engine: (
                     idle_rpm: 600.0,
                     governed_rpm: 2000.0,
@@ -2345,14 +2342,13 @@ TankSpec(
 
                 ),
                 steering: (
-                    radii: [(4.0, 12.0), (6.0, 18.0), (9.0, 27.0), (14.0, 42.0)],
-                    reverse_radii: [(4.0, 12.0), (6.0, 18.0)],
+                    radii: [(4.0, 12.0), (6.4, 19.2), (9.6, 28.8), (14.4, 43.2)],
+                    reverse_radii: [(4.0, 12.0), (6.4, 19.2)],
                     capacity: 100_000.0,
-                    recirculation: 0.9,
-                    neutral_mean: (Free, Fixture("fixture steering family")),
+                    radius_rounding_share: (0.01, Fixture("relative radius-table rounding bound: one percent")),
                 ),
-                brake_force: 50_000.0,
-                brake_static_factor: 1.5,
+                brake_force: (50_000.0, Fixture("missing brake torque rating; settled by measured sprocket braking force")),
+                brake_static_factor: (1.5, Fixture("missing static to dynamic brake ratio; settled by measured breakaway and sliding torque")),
             ),
         ),
         suspension: (
@@ -3353,11 +3349,13 @@ TankSpec(
             ("steering capacity", |tr| {
                 tr.steering.capacity = f32::INFINITY
             }),
-            ("brake_force", |tr| tr.brake_force = f32::INFINITY),
+            ("brake_force", |tr| tr.brake_force.value = f32::INFINITY),
             ("brake_static_factor", |tr| {
-                tr.brake_static_factor = f32::NAN
+                tr.brake_static_factor.value = f32::NAN
             }),
-            ("brake_static_factor", |tr| tr.brake_static_factor = 0.99),
+            ("brake_static_factor", |tr| {
+                tr.brake_static_factor.value = 0.99
+            }),
             ("launch_gears", |tr| gearbox(tr).launch_gears = Sourced(0)),
             ("max_step", |tr| gearbox(tr).max_step = Sourced(0)),
             ("ladder shape", |tr| {
@@ -3379,7 +3377,11 @@ TankSpec(
         }
         // A block missing one of its tables is refused at parse, by name: every table is
         // required data, so no law runs on an absent one.
-        let missing = FIXTURE_RON.replace("brake_static_factor: 1.5,", "");
+        let missing = FIXTURE_RON
+            .lines()
+            .filter(|line| !line.contains("brake_static_factor:"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_ne!(
             missing, FIXTURE_RON,
             "the fixture authors brake_static_factor"

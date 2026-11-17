@@ -241,7 +241,7 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
     }
     let blt = hbl.finish();
 
-    // Owner-only transmission replicas may be absent; present state writes all eight fields.
+    // Owner-only transmission replicas may be absent; present state writes all projected fields.
     let mut htr = Fnv64::new();
     for field in transmission
         .map(|transmission| transmission_state_projection(&transmission.0))
@@ -556,6 +556,8 @@ mod tests {
             omega_e: 250.0,
             clutch: crate::track::transmission::ClutchState::Out,
             reversal_hold_ticks: 11,
+            mean_hold: true,
+            launch: crate::track::transmission::LaunchState::Locked,
         })
     }
 
@@ -920,14 +922,14 @@ mod tests {
         assert_ne!(baseline, hash(&gate), "work anchor");
     }
 
-    /// Every field in the authoritative 8-field inventory affects the exact transmission stream.
+    /// Every field in the authoritative field inventory affects the exact transmission stream.
     #[test]
     fn transmission_inventory_fields_all_affect_hash() {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
         let base = sample_transmission();
         let base_hash = hash_sample((p, q, lv, av), &drive, &grip, &base, &sim).trn;
-        let mut variants = [base; 8];
+        let mut variants = [base; 10];
         variants[0].0.gear = variants[0].0.gear.wrapping_add(1);
         variants[1].0.shift_ticks = variants[1].0.shift_ticks.wrapping_add(1);
         variants[2].0.steer_step = variants[2].0.steer_step.wrapping_add(1);
@@ -936,6 +938,9 @@ mod tests {
         variants[5].0.omega_e = f32::from_bits(variants[5].0.omega_e.to_bits() ^ 1);
         variants[6].0.clutch = crate::track::transmission::ClutchState::Slip;
         variants[7].0.reversal_hold_ticks = variants[7].0.reversal_hold_ticks.wrapping_add(1);
+
+        variants[8].0.mean_hold = !variants[8].0.mean_hold;
+        variants[9].0.launch = crate::track::transmission::LaunchState::TakingUp;
 
         for (index, variant) in variants.iter().enumerate() {
             let hash = hash_sample((p, q, lv, av), &drive, &grip, variant, &sim).trn;
@@ -977,8 +982,8 @@ mod tests {
         assert_eq!(
             base,
             CanonicalTankStateDigest {
-                simulation: 16_384_693_635_036_610_984,
-                rollback: 4_922_620_954_746_276_986,
+                simulation: 11_609_060_252_553_426_457,
+                rollback: 8_566_930_976_692_078_083,
                 position: 5_276_285_167_157_175_194,
                 rotation: 5_407_327_877_548_523_030,
                 linear_velocity: 8_825_002_124_784_658_797,
@@ -988,7 +993,7 @@ mod tests {
                 weapon_gate: 18_442_197_694_147_503_009,
                 recoil: 12_037_784_973_900_930_602,
                 belts: 16_317_528_332_690_472_771,
-                transmission: 7_604_051_283_656_621_841,
+                transmission: 16_826_025_868_273_765_622,
                 elements: 6_815_987_066_798_852_301,
                 rounds_fired: 17_086_694_953_553_481_862,
             }

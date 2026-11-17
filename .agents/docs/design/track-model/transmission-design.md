@@ -12,6 +12,9 @@
 > `TankTransmission` replicates on the one timeline. The declaration model and the atomic-snapshot
 > contract stand.
 
+Current mechanics are described in [Bounded drivetrain rows](#bounded-drivetrain-rows). The staged
+sections retain their historical observations; their former selectors and work gate are absent.
+
 ## As built at REV-14/15
 
 REV 14 landed the declared transmission behind one joint two-output seam. Its complete
@@ -152,7 +155,7 @@ path-dependent transmission state inventoried below.
 
 ### Authoritative transmission-state inventory
 
-The current `TransmissionState` has **8 fields DERIVED by exhaustive struct inventory**, all
+The current `TransmissionState` has **10 fields DERIVED by exhaustive struct inventory**, all
 `REPLICATE-EXACT`; `DERIVE` and `LOCAL-VIEW` each contain **0 fields DERIVED**. `TankTransmission`
 replicates as one atomic server-authoritative component. Clients render the server stream and do
 not simulate it (ADR-0037). The exhaustive projection owns the hash and trace order.
@@ -163,8 +166,9 @@ not simulate it (ADR-0037). The exhaustive projection owns the hash and trace or
 - `reverse`: the engaged direction ladder.
 - `park`: the persistent parking lever.
 - `omega_e`: crank speed, with raw float bits; constructed at idle from data at spawn.
-- `clutch`: `Out`, `Slip` or `In`; Slip holds the crank at the launch rpm until the shaft catches
-  it.
+- `clutch`: `Out`, `Slip` or `In`, the solved row outcome.
+- `mean_hold`: the passive mean-stop latch retained through side-stop handover.
+- `launch`: unchosen ratio, take-up of a selected ratio, or locked; take-up retains its launch floor until the first solved lock.
 - `reversal_hold_ticks`: progress through the stopped reversal pause.
 
 All state is constructed synchronously from data at spawn. Mean/difference speeds, perceived
@@ -185,8 +189,8 @@ B_{\max}=T_{\rm brake,sprocket}/r_s
 The Tiger’s declared \(r_s=0.3931\) m means 250 kN would equal **98.3 kN·m DERIVED** brake torque. That is only a comparison value, not valid provenance; ship values must come from an actual vehicle brake/output-torque source.
 
 Do not attenuate ground reaction with `(1-h)R`. Always apply `-R`, and turn the ADR-0026 hold
-into a capacity-limited STOP force. In `transmission::stop_rows`, the stops solve jointly with
-the neutral steering tie. An isolated side stop reduces to:
+into a capacity-limited STOP force. In `transmission::advance_rows`, stops, clutch, steering and the ceiling solve together over
+the crank and both belts. An isolated side stop reduces to:
 
 \[
 B_i=\operatorname{clamp}\!\left(R_i-Q_i-\frac{v_iI}{\Delta t},\;-h B_{\max},\;+h B_{\max}\right)
@@ -900,112 +904,70 @@ non-engage tick is unchanged.
 | Detent race | engage on the committing tick resets confirmation (`detent_engage_on_the_committing_tick_resets_confirmation`) |
 | Deficit split | shallow defers through the post-upshift dwell (`confirmed_deficit_defers_through_post_upshift_dwell`); deep overrides it (`steep_grade_after_upshift_corrects_before_lug`) |
 
-## Neutral mean hold (2026-11-11)
+## Bounded drivetrain rows
 
-The game's tank driving physics, game state only. The steering member forces only the belt speed
-difference `d`. In a neutral pivot the main clutch is open and the park lever released, so nothing
-acted on the mean `m`: symmetric brakes and rolling resistance cancel on `m` while the belts
-counter-rotate, so any grade along the hull drove `m` past `neutral_speed_m_s`. The law then flipped
-into the geared regime, whose clutch closed onto a crank spun up for steering and pushed `m` to
-about 1.25 m/s, then back into neutral: one track stalled and the pivot became a drive.
+The game's tank driving model solves crank speed and both belt speeds together in `advance_rows`.
+The engine remains an explicit torque law; the sampled ground's affine slope augments each belt's
+inertia. Construction lists drive and stop couplings. A mean clutch connects the crank to the
+belt mean; two side clutches can connect it separately to each belt, with no steering member.
+The same assembler consumes both constructions.
 
-Whether the mean is held is construction data, `steering.neutral_mean: Free | Held`. Families that
-force only the difference with nothing on the mean path (Merritt-Brown's balance shaft, cross-drive
-in neutral) are `Free`. The Tiger is `Held`, DERIVED from its period drill (Tigerfibel pp. 40–41,
-D 656/30 p. 58; the button-is-holding-brake reading is an inference). Held, `stop_rows` adds a
-bounded mean row, with equal half weights and twice the per-side brake capacity: static only
-when the mean starts exactly at rest, dynamic when already moving or after breakaway in the same
-solve. It is passive and not charged to the engine. The neutral steering tie is a row in that same
-block, so unequal belt mobilities cannot cost a held pivot its commanded difference while both
-rows remain within capacity. The tie also lets the two parked side stops share unequal loads up
-to the steering member's transfer capacity; redundant row impulses need not be unique. Solving
-steering before the stops instead missed a slope pivot's difference target and broke one brake
-out of a parked 25° pivot despite capacity remaining on the other side (MEASURED, `pivot_probe`,
-2026-11-11).
+A steering member constrains `(vL-vR)/2 = sign(steer) c omega_e`. Straight selects `c=0`, the locked
+differential. The tight and wide ratios derive from first-gear construction; the other forward and
+reverse radii check that relationship at load. `radius_rounding_share` states the admitted relative
+rounding error in the table. It changes no force law. A locked mean clutch gives `R=b/(c k)`; an
+unloaded open mean path gives a pivot whose rate follows the real crank. There is no separate
+neutral speed target or geared/neutral selector. Steering's reaction acts on the crank, so its work
+uses the same inertia and fuel as propulsion. The recirculation efficiency and separate work gate
+are absent; ideal couplings conserve or dissipate energy through their impulses.
 
-Rejected: the steering member's per-output capacity, because the member carries only the difference
-and the grade load is common mode; an ideal, unbounded hold, a claim no source makes; a holding-brake
-torque times the engaged gear ratio, because the Tiger's figure is Unknown and the owner asked not to
-model the brake, its torque or its gear. The reuse of `brake_force` is a stand-in: the Tiger's
-Haltebremse acts in the gearbox, not on the per-side Argus discs, but the game folds the parking hold
-into one brake datum and the hold reads it.
+The Driver orders clutch bounds from intent. A paid shift opens it. With a staffed station and
+no propulsive pedal it can only return belt work to the crank; the idle catch therefore cannot drive against a reversal or
+start a released tank creeping. A propulsive pedal permits both impulse directions, with a launch
+floor until the first solved lock. Before the sensing ledger has a reading, initial take-up waits
+for a chosen gear. This initial state is independent of belt speed. An explicit launch phase distinguishes this
+free choice from take-up of an already selected paid shift; closing a cut retains its chosen
+ratio. Lock and slip are outcomes,
+recorded in `ClutchState`, rather than switches that choose a physical path. Without an operator,
+the passive spring clutch stays closed both ways with no fuel or idle catch; belt rollback may
+motor the crank backward. A backward crank cannot combust, so the Driver cannot buy a gear cut
+against a price that assumes forward combustion. This changes no clutch or launch-lever order.
 
-MEASURED with `turn_probe::pivot_probe` (full lever from rest, one full turn, shipped Tiger, base
-ground), `Free` against `Held`. Belt speeds are each side's mean; "regime changes" counts main-clutch
-transitions during the turn.
+The existing crank guards narrow friction bounds, never add an impulse to the crank alone.
+Steering has first claim on its crank-side construction rating; the clutch receives the remaining
+budget above the freely reachable floor and below the ceiling. Two closed side clutches share that
+budget; opening one leaves the remaining path the available budget. This conservative reservation
+keeps the sum of all coupling reactions within the guard without an iterative predictor or an
+energy clamp. The ceiling brake is a unilateral mean-speed row at the selected gear's crank limit,
+with the service-brake rating. It is intent-enabled rather than switched by a sampled crank speed.
 
-| ground | belts free (m/s) | belts held (m/s) | mean held (m/s) | yaw held (rad/s) | drift free → held (m) | regime changes free → held |
-|---|---|---|---|---|---|---|
-| level | +0.287 / −0.287 | +0.287 / −0.287 | 0.000 | −0.129 | 0.00 → 0.00 | 0 → 0 |
-| 5° | +0.32 / −0.17 | +0.287 / −0.287 | 0.000 | −0.128 | 17.8 → 1.7 | 1156–1278 → 0 |
-| 10° | +0.35 / −0.08 | +0.287 / −0.287 | 0.000 | −0.125 | 22.9 → 3.4 | 2175–2220 → 0 |
-| 15° | +0.20…0.42 / −0.16…+0.10 | +0.287 / −0.287 | 0.000 | −0.120 | 25–27 (0.8 turn) → 5.4 | 2049–2214 → 0 |
-| 25° | runaway to −5.3 | +0.287 / −0.287 | 0.000 | −0.100 | 42–61 (0.7–1.0 turn) → 10.5 | 431–936 → 0 |
-| 35° | runaway | runaway | to −4.8 | — | 90–113 → 74–110 | 102–1016 → 85–317 |
+Static capacity requires exact starting rest. A moving stop uses dynamic capacity, and one that
+exhausts static capacity re-solves at dynamic bounds in the same block call. A stop latch survives
+speed changes; only intent can release it. Requested motion along the ladder orders a one-way
+launch lever; Brake intent or a request against the ladder orders service braking. Reversal waits
+for exactly resting belts before its stopped countdown and paid direction cut.
 
-Each slope row spans the three starting headings (up, down, across), which agree within 0.1 m once
-the turn completes. The held drift runs down the fall line: the sliding footprint yields to the
-grade while `m` stays at zero. The 35° row exceeds the DERIVED static capacity (2 × 96 kN × 1.5 =
-288 kN against 57 t × g × sin 35° = 321 kN facing the fall line, saturating at about 31°). Breached,
-the dynamic 192 kN holds only about 20°, so the tank runs downhill and the law leaves the neutral
-regime; the parked tank's lever has the same capacity and would slide there too (DERIVED).
+A constructed mean stop can latch on a steer-only request below the authored pivot entry speed or
+on rollback. It remains latched if the load makes it slide. A `Free` construction has no such stop
+and can roll under engine braking without a speed-window regime change. Releasing steer retains
+the mean stop until both belts start a tick exactly at rest. The straight steering tie first
+arrests the differential motion; park then takes the common load. The two stop paths never double
+count the brake rating. The mean-stop rating remains a StandIn for its missing construction datum:
+twice the per-side brake rating. A layout with a mean stop must supply the steering tie needed to
+arrest differential motion during handover.
 
-Geared rows that stay geared are bit-identical. One geared row moved: `flat g3 lifted tight`, a
-lifted-throttle steer that falls under 0.5 m/s, now stops on the hold. Its nine neutral/geared flips
-at the threshold become one entry, and its peak hull deceleration rises from 2.8 to 3.5 m/s²
-(MEASURED).
+The retained `park` bit is the Driver's latch, not proof that a brake is stuck. A breach keeps its
+dynamic capacity. Released rollback and the released sub-idle stop can latch park; a motion or
+steering request releases it. `dead`, `park_engage_speed` and `neutral_speed_m_s` are tastes in
+`assets/driving/actuation.ron`; only the last admits a passive pivot latch. None chooses static
+friction, clutch engagement or completion of a direction swap. Brake force and static factor on the
+tank sheet are Unknown: a measured brake rating and breakaway/sliding comparison would settle them.
 
-The hold acts on the pivot's own clutch clause (no pedal, steering, under the neutral thresholds),
-not on every open clutch, so a shift window is no pivot. It also stays off on any tick whose park
-lever or service brakes act, Brake intent included, so `brake_force` is never counted twice.
+Crank energy alone may rise without fuel when a belt back-drives it. The passive invariant is on
+total crank-plus-belt kinetic energy in the absence of combustion and external work. A free crank
+cannot gain energy without combustion. The production assembly tests these relationships, locked
+radius geometry, fixed-intent orders, stop handover and the two-side-clutch construction. Probes
+record feel and collision outcomes as observations in the slice report, never as stored targets.
 
-## Released-motion policy
-
-The game's driving model: with no throttle request, the Driver brakes motion against the engaged
-gear to rest, within brake capacity, unless the vehicle is in a neutral pivot, whose mean hold is
-its only stop. This requires staffed controls; steering requires served task work.
-
-`update_park_latch` sets the existing lever for rollback outside a neutral pivot, at any speed.
-At rest it retains the two-sided hold, except during the pivot. Brake capacity is dynamic while
-moving and static at rest. A load between those capacities holds an undisturbed parked vehicle
-but cannot arrest a moving one; beyond static capacity even rest breaks away. No engine catch
-enlarges those limits. A neutral pivot clears park and leaves its construction-selected mean
-hold as its only stop (`Free` supplies none). Held steering outside neutral has no exemption.
-
-Along-gear motion retains its existing released sub-idle stop when not steering. Above that
-threshold an unparked coast remains unbraked by the lever. That clause is not redundant with
-rollback parking; neither is the at-rest latch that holds an opposite request through its pause.
-A held opposite-ladder request uses service braking, waits at rest, then pays its direction cut.
-An intentional hill start still uses propulsive pedal and the one-way launch lever.
-
-With served task work and no propulsive pedal, `update_clutch_state` couples only motion along the
-engaged ladder outside park, mean rest and neutral pivots. The mean-rest check stays: after
-steering release, counter-rotating belts can have a resting mean without either belt being at
-rest or park set. Brake intent already removes propulsive pedal, so its duplicate clutch
-predicate and argument are removed. Above that gear's idle speed this permits engine braking; below it, the idle catch can supply
-forward torque. Its interaction with a reversal request, the along-gear neutral boundary, and
-free launch-gear selection during rollback remain follow-up #392.
-
-The HUD's `P` reads the retained park bit (`src/drive_hud.rs`, `standard_drive_row`), so it now
-shows while the Driver is braking rollback at speed. That bit still depends on history under
-the same powered rollback physics: pressing throttle after released braking retains park,
-whereas holding throttle through a failed climb leaves it off; service braking dominates both.
-Deriving `P` from perceptible braking state remains open. The clutch alone cannot distinguish
-it: an unstaffed vehicle can have its clutch In while retaining its two-sided park brake, and
-launch/service braking can use Slip or In. The HUD does not receive the authoritative brake
-regime, so a correct derivation needs more than a local display predicate.
-
-Chosen: the existing park lever supplies dynamic braking and persistent rest outside the neutral
-pivot. Rejected: keeping the clutch coupled for an idle-catch hill hold, which makes the engine
-an extra stop outside the brake budget and causes the #373 feedback; leaving rollback declutched
-without braking, which lets a staffed vehicle run away even inside brake capacity; exempting all
-steering rather than the neutral pivot; and another latch, timer or speed band to hide a regime
-boundary.
-
-A `Free` mean brings bounded but sustained on/off braking at `neutral_speed_m_s`: inside neutral
-it has no mean stop; outside, rollback sets the lever again. MEASURED across the class fixtures
-at half dynamic brake load: crossings persist in the final two seconds of a five-second run,
-in both ladders and from entries inside and outside neutral. It does not settle in that
-observation. This belongs to #392's neutral-boundary class. The trace and construction ranges
-live in `.agents/scratch/belt-tick/report.md`, "Round-4 held-steer reproduction and state
-enumeration"; they are observations, not numeric obligations. No band, timer or latch is added.
+This slice lands once per fixed tick. Moving the same integrator to substeps, belt-ground rows,
+contact warm starts and parallel contact groups remain separate work.

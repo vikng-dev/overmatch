@@ -37,9 +37,9 @@ use bevy::prelude::*;
 
 use super::stop_contacts::HardReaction;
 use super::transmission::{
-    ClutchState, DriveConstruction, PARK_ENGAGE_SPEED, TransmissionInput, TransmissionParams,
+    ClutchState, DriveConstruction, LaunchState, TransmissionInput, TransmissionParams,
     TransmissionReport, TransmissionState, candidate_pull, coupled_mass, force_margin,
-    landing_pull, steer_ratio, viable_pull,
+    landing_pull, park_engage_speed, steer_ratio, viable_pull,
 };
 
 /// Resolution: the fewest driven ticks a reading spans, since one gives a mean but no sample
@@ -349,13 +349,13 @@ impl DriverSense {
             }
             let grip = open.grip + hard.iter().flatten().map(|hard| hard.grip).sum::<f32>();
             let gain = (velocity - open.velocity).dot(open.heading);
-            let at_rest = |velocity: Vec3| velocity.dot(open.heading).abs() < PARK_ENGAGE_SPEED;
+            let at_rest = |velocity: Vec3| velocity.dot(open.heading).abs() < park_engage_speed();
             let stalled = open.pull.filter(|&dir| {
                 open.driving
                     && at_rest(open.velocity)
                     && at_rest(velocity)
                     && dir * gain <= 0.0
-                    && (belts.abs() < PARK_ENGAGE_SPEED || dir * (belts - open.belts) <= 0.0)
+                    && (belts.abs() < park_engage_speed() || dir * (belts - open.belts) <= 0.0)
             });
             if !at_rest(velocity) {
                 self.stall = None; // The hull moves: no push has failed to move it.
@@ -441,7 +441,7 @@ impl DriverSense {
                 stalled: self.stall.is_some_and(|stall| {
                     self.run
                         .is_some_and(|(_, _, rested, _)| rested >= self.window)
-                        && (belts.abs() < PARK_ENGAGE_SPEED || stall.dir * belt_gain <= 0.0)
+                        && (belts.abs() < park_engage_speed() || stall.dir * belt_gain <= 0.0)
                 }),
                 pulled: self
                     .run
@@ -481,11 +481,11 @@ impl DriverSense {
 /// One Driver decision on what it felt, at the requested pedal `command`, inside the transmission's
 /// step.
 ///
-/// Speed `v` (m/s) and resistance `R` (N) read along the engaged ladder, `v` floored at rest. A
-/// gear carries the load `L`: `R` less the rolling the contacts delivered, at a stall no less than
+/// Speed `v` (m/s) and resistance `R` (N) read along the engaged ladder; rollback retains its
+/// negative speed. A gear carries the load `L`: `R` less the rolling the contacts delivered, at a stall no less than
 /// the stall's bound ([`Stall::bound`]), plus the contacts' whole rolling ([`Sensed::rolling`]) and
-/// the gear's detent share of the belt push difference, `s·κ·ΔR`
-/// (`transmission::BeltTick::tied_mean`). A gear *holds* what it pulls on the pedal's own fuel,
+/// the locked gear's detent share of the belt push difference, `s·κ·ΔR`, from the crank tie.
+/// A gear *holds* what it pulls on the pedal's own fuel,
 /// capped by the contacts' grip budget ([`Sensed::grip`]).
 ///
 /// `L` is a mean over driven ticks, known to their sample standard error `u`
@@ -498,8 +498,8 @@ impl DriverSense {
 /// or at `v` for a launch. No clause admits a gear whose crank is forecast to land past the
 /// engine's crank limit. Reach is `max_step` either way, within the ladder.
 ///
-/// 1. Clutch out at hull rest: the highest viable launch gear, else the launch gear that holds
-///    most; at a stall the launch gear that holds most. Free.
+/// 1. Clutch ordered open: free choice among safe gears, restricted to the launch range at
+///    rest or rollback; highest viable, otherwise strongest, including a stall's strongest.
 /// 2. The hull stalls now ([`Sensed::stalled`]), its load only bounded from below:
 ///    the gear in reach that holds most. The engaged gear short: the highest viable gear in reach,
 ///    else the one that holds most.
@@ -529,7 +529,7 @@ pub(super) fn choose(
         (&tp.gears_fwd, 1.0)
     };
     let top = ladder.len() as u8;
-    let speed = (dir * sensed.speed).max(0.0);
+    let speed = dir * sensed.speed;
     let stall = sensed.stall.filter(|stall| stall.dir == dir);
     // A stalled hull meets at least the push that failed to move it.
     let at_least = |felt: f32| stall.map_or(felt, |stall| felt.max(stall.bound));
@@ -561,23 +561,30 @@ pub(super) fn choose(
             .filter_map(|gear| Some((gear, holds(gear)?)))
             .max_by(|a, b| a.1.total_cmp(&b.1))
     };
-    if st.clutch == ClutchState::Out && speed < PARK_ENGAGE_SPEED {
-        let launches = 1..=tp.launch_gears.min(top);
-        let at_rest = |gear: u8| lands(gear, speed);
-        let strongest_launch = || {
-            strongest(launches.clone(), &at_rest)
-                .expect("admission keeps a launch gear inside the crank limit at parking speeds")
-                .0
-        };
-        st.gear = if stall.is_some() {
-            strongest_launch()
+    if st.launch == LaunchState::Unchosen {
+        // A rolling open clutch may select any safe gear for free. Only a start or rollback
+        // uses the construction's launch range; the signed shaft price is retained in both.
+        let top_free = if speed <= 0.0 {
+            tp.launch_gears.min(top)
         } else {
-            launches
+            top
+        };
+        let gears = 1..=top_free;
+        let chosen = if stall.is_some() {
+            None
+        } else {
+            gears
                 .clone()
                 .rev()
                 .find(|&gear| viable(gear, lands(gear, speed)))
-                .unwrap_or_else(strongest_launch)
-        };
+        }
+        .or_else(|| strongest(gears, &|gear| lands(gear, speed)).map(|(gear, _)| gear));
+        if let Some(gear) = chosen {
+            st.gear = gear;
+            st.launch = LaunchState::TakingUp;
+        }
+        // No safe landing is a real overrun state: retain the gear; the clutch guard and
+        // ceiling brake own protection until a ratio can be selected.
         return;
     }
     // A hull the cut brings to rest is held there by the park latch, so no cut lands below rest.
@@ -619,7 +626,7 @@ pub(super) fn choose(
     } else if sensed.observed
         && st.steer_step == 0
         && st.clutch == ClutchState::In
-        && landing >= PARK_ENGAGE_SPEED
+        && landing >= park_engage_speed()
         && st.gear < top
     {
         let margin = force_margin(tp);
@@ -648,6 +655,7 @@ pub(super) fn choose(
     if let Some(gear) = chosen {
         st.gear = gear;
         st.shift_ticks = tp.shift_ticks.get();
+        st.launch = LaunchState::TakingUp;
     }
 }
 
@@ -837,7 +845,7 @@ mod tests {
     /// A stall's bound is what the hull meets besides the rolling its contacts delivered: the
     /// Driver adds the contacts' whole rolling to it, so a bound that kept the delivered share
     /// would count it twice. Fixture: a hull creeping at half the rest tolerance
-    /// ([`PARK_ENGAGE_SPEED`]) under 30 kN while its contacts deliver 2 kN of rolling.
+    /// ([`park_engage_speed()`]) under 30 kN while its contacts deliver 2 kN of rolling.
     #[test]
     fn a_stall_bound_is_net_of_delivered_rolling() {
         let mut sense = DriverSense::for_cut(CUT);
@@ -848,7 +856,7 @@ mod tests {
         };
         let mut reading = None;
         for _ in 0..3 {
-            let creep = FORWARD * 0.5 * PARK_ENGAGE_SPEED;
+            let creep = FORWARD * 0.5 * park_engage_speed();
             reading = sense.tick(creep, FORWARD, 0.0, MASS, contacts, DT);
             sense.drove(&pulling());
         }
@@ -1084,6 +1092,7 @@ mod tests {
         let state = TransmissionState {
             gear: top,
             clutch: ClutchState::In,
+            launch: LaunchState::Locked,
             omega_e: rpm * RPM_TO_RAD,
             ..fresh(tp)
         };
@@ -1203,6 +1212,7 @@ mod tests {
         let mut st = TransmissionState {
             gear,
             clutch: ClutchState::In,
+            launch: LaunchState::Locked,
             omega_e: rpm * RPM_TO_RAD,
             ..fresh(&tp)
         };
@@ -1228,6 +1238,7 @@ mod tests {
         let mut st = TransmissionState {
             gear: 2,
             clutch: ClutchState::Slip,
+            launch: LaunchState::TakingUp,
             ..fresh(&tp)
         };
         choose(&mut st, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
@@ -1263,6 +1274,7 @@ mod tests {
             let mut state = TransmissionState {
                 gear: 3,
                 clutch: ClutchState::Slip,
+                launch: LaunchState::TakingUp,
                 ..fresh(&tp)
             };
             let inp = stalled(driver_input(0.0, resistance, 1.0));
@@ -1277,6 +1289,7 @@ mod tests {
             let mut state = TransmissionState {
                 gear: 4,
                 clutch: ClutchState::In,
+                launch: LaunchState::Locked,
                 steer_step: detent,
                 omega_e: (tp.engine.governed_rpm - 50.0) * RPM_TO_RAD, // Fixture: fuel beats drag.
                 ..fresh(&tp)
@@ -1297,10 +1310,11 @@ mod tests {
     #[test]
     fn the_top_of_the_longest_admitted_ladder_chooses_nothing_above_it() {
         let speeds: Vec<f32> = (1..=u8::MAX).map(|gear| f32::from(gear) * 0.5).collect();
-        let radii = vec![(10.0, 30.0); speeds.len()];
+        let radii: Vec<_> = speeds.iter().map(|v| (20.0 * v, 60.0 * v)).collect();
         let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
             forward_speeds_kmh: &speeds,
             steer_radii_m: &radii,
+            reverse_steer_radii_m: &[(56.0, 168.0), (86.0, 258.0), (124.0, 372.0), (184.0, 552.0)],
             ..tiger_authoring()
         })
         .expect("a ladder of u8::MAX gears is admitted");
@@ -1309,6 +1323,7 @@ mod tests {
         let mut state = TransmissionState {
             gear: top,
             clutch: ClutchState::In,
+            launch: LaunchState::Locked,
             omega_e: (tp.engine.governed_rpm - 50.0) * RPM_TO_RAD, // Fixture: fuel beats drag.
             ..fresh(&tp)
         };
@@ -1364,6 +1379,7 @@ mod tests {
                         let engaged = TransmissionState {
                             gear,
                             clutch: ClutchState::In,
+                            launch: LaunchState::Locked,
                             omega_e: rpm * RPM_TO_RAD,
                             ..fresh(&tp)
                         };
@@ -1465,6 +1481,11 @@ mod tests {
                         let mut state = TransmissionState {
                             gear: start,
                             clutch,
+                            launch: if clutch == ClutchState::In {
+                                LaunchState::Locked
+                            } else {
+                                LaunchState::TakingUp
+                            },
                             ..fresh(&tp)
                         };
                         choose(&mut state, &tp, &construction(&fp), &inp, 1.0, felt(&inp));
@@ -1491,6 +1512,7 @@ mod tests {
             let mut state = TransmissionState {
                 gear: tp.launch_gears.min(tp.gears_fwd.len() as u8),
                 clutch: ClutchState::Slip,
+                launch: LaunchState::TakingUp,
                 ..fresh(&tp)
             };
             let mut pushed = [0.0_f32; 2];
@@ -1572,6 +1594,7 @@ mod tests {
             let mut st = TransmissionState {
                 gear: top,
                 clutch: ClutchState::In,
+                launch: LaunchState::Locked,
                 omega_e: governed,
                 ..fresh(&tp)
             };
@@ -1604,7 +1627,7 @@ mod tests {
                 }
             }
             assert!(
-                gears.len() > 1 && speed >= PARK_ENGAGE_SPEED,
+                gears.len() > 1 && speed >= park_engage_speed(),
                 "the climb leaves top gear and moves on: {gears:?} at {speed} m/s"
             );
         }
@@ -1645,6 +1668,7 @@ mod tests {
                 let mut st = TransmissionState {
                     gear: 1,
                     clutch: ClutchState::In,
+                    launch: LaunchState::Locked,
                     omega_e: overrun * RPM_TO_RAD,
                     ..fresh(&tp)
                 };

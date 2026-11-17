@@ -140,16 +140,12 @@ const CLUTCH_ENGINE_FIELDS: &[(&str, &str)] = &[
     ("tau_drag", "f32"),
     ("tau_free", "f32"),
     ("power_available", "f32"),
-    ("i_mean", "f32"),
-    ("f_other", "f32"),
-    ("tau_star", "f32"),
-    ("tau_clamped", "f32"),
-    ("omega_coupled", "f32"),
     ("tau_c", "f32"),
     ("engaged", "bool"),
+    ("locked", "bool"),
     ("shifting", "bool"),
-    ("f_c_pre_scale", "f32"),
-    ("f_s_pre_scale", "f32"),
+    ("clutch_force_n", "f32"),
+    ("steering_force_n", "f32"),
     ("lambda", "f32"),
     ("j_left", "f32"),
     ("j_right", "f32"),
@@ -158,16 +154,11 @@ const CLUTCH_ENGINE_FIELDS: &[(&str, &str)] = &[
     ("power_positive", "f32"),
     ("power_negative", "f32"),
     ("power_net", "f32"),
-    ("power_scale", "f32"),
     ("omega_integrated", "f32"),
     ("force_left", "f32"),
     ("force_right", "f32"),
     ("next_speed_left", "f32"),
     ("next_speed_right", "f32"),
-    ("reanchor_attempted", "bool"),
-    ("reanchor_locked", "f32"),
-    ("reanchor_tau_impl", "f32"),
-    ("reanchor_feasible", "bool"),
     ("omega_end", "f32"),
     ("priced_force_n", "f32"),
     ("delivered_force_n", "f32"),
@@ -182,6 +173,8 @@ const TRANSMISSION_STATE_FIELDS: &[(&str, &str)] = &[
     ("omega_e", "f32"),
     ("clutch", "u32"),
     ("reversal_hold_ticks", "u32"),
+    ("mean_hold", "bool"),
+    ("launch", "u32"),
 ];
 
 const POSE_FIELDS: &[(&str, &str)] = &[
@@ -294,16 +287,12 @@ pub(crate) struct TransmissionProbe {
     pub tau_drag: f32,
     pub tau_free: f32,
     pub power_available: f32,
-    pub i_mean: f32,
-    pub f_other: f32,
-    pub tau_star: f32,
-    pub tau_clamped: f32,
-    pub omega_coupled: f32,
     pub tau_c: f32,
     pub engaged: bool,
+    pub locked: bool,
     pub shifting: bool,
-    pub f_c_pre_scale: f32,
-    pub f_s_pre_scale: f32,
+    pub clutch_force_n: f32,
+    pub steering_force_n: f32,
     pub lambda: f32,
     pub j: [f32; 2],
     pub power_left: f32,
@@ -311,14 +300,9 @@ pub(crate) struct TransmissionProbe {
     pub power_positive: f32,
     pub power_negative: f32,
     pub power_net: f32,
-    pub power_scale: f32,
     pub omega_integrated: f32,
     pub forces: [f32; 2],
     pub next_speeds: [f32; 2],
-    pub reanchor_attempted: bool,
-    pub reanchor_locked: f32,
-    pub reanchor_tau_impl: f32,
-    pub reanchor_feasible: bool,
     pub omega_end: f32,
 }
 
@@ -805,20 +789,16 @@ fn clutch_engine_payload(probe: TransmissionProbe) -> Vec<u32> {
         probe.tau_drag,
         probe.tau_free,
         probe.power_available,
-        probe.i_mean,
-        probe.f_other,
-        probe.tau_star,
-        probe.tau_clamped,
-        probe.omega_coupled,
         probe.tau_c,
     ] {
         f32_word(&mut output, value);
     }
     bool_word(&mut output, probe.engaged);
+    bool_word(&mut output, probe.locked);
     bool_word(&mut output, probe.shifting);
     for value in [
-        probe.f_c_pre_scale,
-        probe.f_s_pre_scale,
+        probe.clutch_force_n,
+        probe.steering_force_n,
         probe.lambda,
         probe.j[0],
         probe.j[1],
@@ -827,7 +807,6 @@ fn clutch_engine_payload(probe: TransmissionProbe) -> Vec<u32> {
         probe.power_positive,
         probe.power_negative,
         probe.power_net,
-        probe.power_scale,
         probe.omega_integrated,
         probe.forces[0],
         probe.forces[1],
@@ -836,10 +815,6 @@ fn clutch_engine_payload(probe: TransmissionProbe) -> Vec<u32> {
     ] {
         f32_word(&mut output, value);
     }
-    bool_word(&mut output, probe.reanchor_attempted);
-    f32_word(&mut output, probe.reanchor_locked);
-    f32_word(&mut output, probe.reanchor_tau_impl);
-    bool_word(&mut output, probe.reanchor_feasible);
     f32_word(&mut output, probe.omega_end);
     f32_word(&mut output, probe.priced_force_n);
     f32_word(&mut output, probe.delivered_force_n);

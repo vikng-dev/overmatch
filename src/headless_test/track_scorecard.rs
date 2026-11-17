@@ -795,7 +795,7 @@ fn slope_hold(card: &mut Card) {
     let spec = shipped_spec();
     let tr = &spec.track.powertrain.transmission;
     let g = crate::track::derive::G;
-    let brake_capacity = 2.0 * tr.brake_force * tr.brake_static_factor / spec.mass;
+    let brake_capacity = 2.0 * tr.brake_force.value * tr.brake_static_factor.value / spec.mass;
     let brake_limit = (brake_capacity / g).min(1.0).asin();
     let mut rows = Vec::new();
     let mut pass = true;
@@ -1695,7 +1695,7 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
         let advanced = near - bed.hull().position.z;
         // Brake to a stop, then park.
         for _ in 0..2 * TICKS {
-            let moving = bed.hull().speed() > crate::track::transmission::PARK_ENGAGE_SPEED;
+            let moving = bed.hull().speed() > crate::track::transmission::park_engage_speed();
             bed.tick(if moving { -1.0 } else { 0.0 }, 0.0);
         }
         let mut work = Default::default();
@@ -2106,7 +2106,7 @@ fn belts_moving(bed: &Bed) -> bool {
         .expect("a spawned tank carries its belt state")
         .sides
         .iter()
-        .any(|side| side.speed.abs() >= crate::track::transmission::PARK_ENGAGE_SPEED)
+        .any(|side| side.speed.abs() >= crate::track::transmission::park_engage_speed())
 }
 
 /// Sleep must wait for coasting belts, then persist without a new input. The parked island's
@@ -2235,7 +2235,7 @@ fn a_tank_on_loose_pieces_wakes_for_either_coasting_belt_without_a_command() {
                 .get_mut::<crate::track::sim::TrackDrive>(bed.tank)
                 .unwrap()
                 .sides[side]
-                .speed = direction * 2.0 * crate::track::transmission::PARK_ENGAGE_SPEED;
+                .speed = direction * 2.0 * crate::track::transmission::park_engage_speed();
             assert!(
                 is_asleep(&bed),
                 "changing belt state alone does not wake Avian"
@@ -2255,7 +2255,7 @@ fn a_braked_tank_on_a_slope_rests_where_it_stopped() {
     let spec = shipped_spec();
     let tr = &spec.track.powertrain.transmission;
     let ground = base_ground();
-    let brake_limit = (2.0 * tr.brake_force * tr.brake_static_factor
+    let brake_limit = (2.0 * tr.brake_force.value * tr.brake_static_factor.value
         / (spec.mass * crate::track::derive::G))
         .min(1.0)
         .asin();

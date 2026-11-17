@@ -229,6 +229,7 @@ TankSpec(
         idler: (spin_inertia_kgm2: ((left: 1.0, right: 1.0), Fixture(\"fixture idlers\")), radius: (left: 0.4, right: 0.4), nodes: (left: \"Idler_L\", right: \"Idler_R\")),
         powertrain: (
             transmission: (
+                couplings: [Clutch(Mean), Steering, Stop(Left), Stop(Right)],
                 engine: (
                     idle_rpm: 600.0,
                     governed_rpm: 2000.0,
@@ -250,14 +251,13 @@ TankSpec(
 
                 ),
                 steering: (
-                    radii: [(4.0, 12.0), (6.0, 18.0)],
+                    radii: [(4.0, 12.0), (6.4, 19.2)],
                     reverse_radii: [(4.0, 12.0)],
                     capacity: 1.0,
-                    recirculation: 0.9,
-                    neutral_mean: (Free, Fixture(\"fixture steering family\")),
+                    radius_rounding_share: (0.01, Fixture(\"relative radius-table rounding bound: one percent\")),
                 ),
-                brake_force: 1.0,
-                brake_static_factor: 1.5,
+                brake_force: (1.0, Fixture(\"missing brake torque rating; settled by measured sprocket braking force\")),
+                brake_static_factor: (1.5, Fixture(\"missing static to dynamic brake ratio; settled by measured breakaway and sliding torque\")),
             ),
         ),
         suspension: (

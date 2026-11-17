@@ -152,6 +152,7 @@ fn record(bed: &Bed, z_c: f32, series: &mut Series, bins: Option<&mut [[f32; 4];
     series.push("detent", f32::from(state.steer_step));
     series.push("shift", f32::from(state.shift_ticks));
     series.push("park", f32::from(u8::from(state.park)));
+    series.push("mean_hold", f32::from(u8::from(state.mean_hold)));
     series.push(
         "clutch",
         match state.clutch {
@@ -430,7 +431,7 @@ fn run(case: &Case, hold_s: usize) {
             "grip": ground.grip,
             "rolling": ground.rolling_resistance,
             "radii": trans.steer_radii_m,
-            "neutral_d_full": trans.neutral_d_full,
+            "tight_speed_at_governor": trans.steering_speed_at_governor(),
             "wide_on": crate::track::drive::drive_feel().wide_on.0,
             "tight_on": crate::track::drive::drive_feel().tight_on.0,
             "rise_per_second": crate::track::drive::drive_feel().rise_per_second.0,

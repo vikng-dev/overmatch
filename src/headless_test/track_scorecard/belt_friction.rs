@@ -363,7 +363,7 @@ fn write_series(tag: &str, label: &str, ticks: &[Reading]) {
     std::fs::create_dir_all(&dir).expect("the target directory exists or can be made");
     let mut csv = String::from(
         "tick,clutch,gear,shift,hull,yaw,belt_l,belt_r,deliv_l,deliv_r,charged_l,charged_r,\
-         grip_l,grip_r,sprocket_l,sprocket_r,clutch_n,tie_n,tie_l,power_scale,react_in_l,\
+         grip_l,grip_r,sprocket_l,sprocket_r,clutch_n,tie_n,tie_l,react_in_l,\
          react_in_r\n",
     );
     for (i, t) in ticks.iter().enumerate() {
@@ -371,7 +371,7 @@ fn write_series(tag: &str, label: &str, ticks: &[Reading]) {
         let d = &t.drive;
         csv += &format!(
             "{i},{:?},{},{},{:.4},{:.4},{:.4},{:.4},{:.0},{:.0},{:.0},{:.0},{:.0},{:.0},{:.0},{:.0},\
-             {:.0},{:.0},{:.3},{:.3},{:.0},{:.0}\n",
+             {:.0},{:.0},{:.3},{:.0},{:.0}\n",
             t.clutch,
             t.gear,
             t.shift,
@@ -387,10 +387,9 @@ fn write_series(tag: &str, label: &str, ticks: &[Reading]) {
             r.grip,
             d.forces[0],
             d.forces[1],
-            d.f_c_pre_scale,
+            d.clutch_force_n,
             d.lambda,
             d.j[0],
-            d.power_scale,
             d.reactions[0],
             d.reactions[1],
         );

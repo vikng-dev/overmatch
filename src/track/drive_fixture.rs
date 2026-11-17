@@ -5,13 +5,13 @@ use super::drive::{DriveAxes, DriveIntent};
 use super::driver::Sensed;
 use super::forces;
 use super::transmission::{
-    ClutchState, DriveConstruction, DriveSupply, NeutralMean, TransmissionAuthoring,
+    ClutchState, Coupling, DriveConstruction, DriveSupply, Output, TransmissionAuthoring,
     TransmissionInput, TransmissionParams, TransmissionReport, TransmissionState,
     drag_throttle_release, motoring_drag_base_share, price_driver_force,
 };
 
 /// Fixture: a lighter three-speed construction using the seed's declared running-gear geometry.
-/// Its engine has a tail past the governor, lower power/weight and a different recirculation path.
+/// Its engine has a tail past the governor, lower power/weight and a distinct gear ladder.
 pub(crate) fn compact_spec() -> crate::spec::TankSpec {
     let mut spec = super::rig_geom::tiger_spec();
     spec.mass = 18_000.0;
@@ -37,9 +37,8 @@ pub(crate) fn compact_spec() -> crate::spec::TankSpec {
     tr.steering.radii = vec![(3.0, 8.0), (7.2, 19.2), (15.0, 40.0)];
     tr.steering.reverse_radii = vec![(6.0, 16.0)];
     tr.steering.capacity = 80_000.0;
-    tr.steering.recirculation = 0.65;
-    tr.brake_force = 50_000.0;
-    tr.brake_static_factor = 1.4;
+    tr.brake_force.value = 50_000.0;
+    tr.brake_static_factor.value = 1.4;
     spec
 }
 
@@ -120,8 +119,13 @@ pub(crate) fn lab_authoring() -> TransmissionAuthoring<'static> {
         ],
         reverse_steer_radii_m: &[(3.0, 8.9)],
         steer_capacity_n: 240_000.0,
-        neutral_mean: NeutralMean::Free,
-        recirculation: 0.9,
+        couplings: &[
+            Coupling::Clutch(Output::Mean),
+            Coupling::Steering,
+            Coupling::Stop(Output::Left),
+            Coupling::Stop(Output::Right),
+        ],
+        steering_radius_rounding_share: 0.01, // Fixture: table rounding allowance.
         brake_capacity_n: 120_000.0,
         brake_static_factor: 1.6,
         drag_fraction: 0.25,
@@ -177,8 +181,14 @@ pub(crate) fn tiger_authoring() -> TransmissionAuthoring<'static> {
         ],
         reverse_steer_radii_m: &[(3.44, 10.2), (5.28, 15.6), (7.62, 22.5), (11.30, 33.4)],
         steer_capacity_n: 250_000.0,
-        neutral_mean: NeutralMean::Held,
-        recirculation: 0.9,
+        couplings: &[
+            Coupling::Clutch(Output::Mean),
+            Coupling::Steering,
+            Coupling::Stop(Output::Left),
+            Coupling::Stop(Output::Right),
+            Coupling::Stop(Output::Mean),
+        ],
+        steering_radius_rounding_share: 0.01, // Fixture: table rounding allowance.
         brake_capacity_n: 96_000.0,
         brake_static_factor: 1.5,
         drag_fraction: 0.25,
