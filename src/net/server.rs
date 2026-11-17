@@ -176,7 +176,7 @@ pub fn run() {
 }
 
 /// The production join-to-spawn boundary: queue each new link once before placing pending tanks.
-fn install_client_spawns(app: &mut App) {
+pub(super) fn install_client_spawns(app: &mut App) {
     app.init_resource::<PlayerSpawns>().add_systems(
         Update,
         (
