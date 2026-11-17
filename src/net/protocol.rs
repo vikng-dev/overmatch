@@ -33,6 +33,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 // Replicon registration order is wire compatibility. Both netcode endpoints use [`protocol_id`] as
 // their netcode `protocol_id`; ADR-0018 and the manifest-pinning tests own the compatibility guard.
 
+/// Each tick carries its frame-start time and departure offset on the global scoreboard.
 /// Every wire change bumps this revision and re-pins the affected manifest hashes (ADR-0018).
 /// The game's environment destruction model carries shared causes and chunk-addressed groups;
 /// replacement and departure derive from the admitted graph on each peer; a crumble's light
@@ -41,7 +42,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// at, and a whole copy only to a client without one or behind the retained history; the hull
 /// marks replicate whole. The owner's ahead-running aim integrates the authority's servo law
 /// (`tank::servo`), so a change to that law changes this revision too.
-pub const PROTOCOL_REV: u32 = 98;
+pub const PROTOCOL_REV: u32 = 102;
 
 /// The compatibility record's wire term: the pinned wire manifest, [`PROTOCOL_REV`] and the crate
 /// version.
@@ -802,6 +803,7 @@ const WIRE_SURFACE: &[&str] = &[
     "Ledger",
     "Piece",
     "Scoreboard",
+    "TickStamp",
     "BattleState",
     "WorldGeneration",
     // Message channels (`Name|Mode|Direction`), followed by their message types.
@@ -833,7 +835,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x71ba39380c57d0bd;
+const WIRE_SURFACE_HASH: u64 = 0xfba98390117f50c7;
 
 // Wire coverage: `plugin_registrations_match_wire_surface` binds registration order and channel
 // semantics to `WIRE_SURFACE`; `wire_surface_is_pinned` binds that list to the handshake. Neither
@@ -848,7 +850,7 @@ const WIRE_SURFACE_HASH: u64 = 0x71ba39380c57d0bd;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x9ba4e95b1c4ccbfc;
+const WIRE_TYPES_HASH: u64 = 0xe5fae1a0db6bbdee;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol; replicon's
@@ -862,6 +864,7 @@ const WIRE_DEP_REPLICON: &str = "0.45.5";
 
 /// Register the exact shared wire surface represented by [`WIRE_SURFACE`].
 pub(crate) fn plugin(app: &mut App) {
+    super::tick_stamp::install(app);
     install_shot_clock(app);
     app.init_resource::<crate::ballistics::PathClock>();
     app.component::<NetTank>().replicate();
@@ -901,6 +904,9 @@ pub(crate) fn plugin(app: &mut App) {
     // The match score (one world entity): sent whole when a knockout changes it, a late joiner
     // takes it once.
     app.component::<super::score::Scoreboard>().replicate();
+    // Per-tick frame start and departure; history-decoding contract: tick_stamp::wire.
+    app.component::<super::tick_stamp::TickStamp>()
+        .replicate_with(super::tick_stamp::replication());
     app.component::<super::battle::BattleState>().replicate();
     app.component::<crate::world::WorldGeneration>().replicate();
 
@@ -1788,6 +1794,7 @@ mod tests {
         ("src/construction/breakage.rs", "Hole"),
         ("src/construction/breakage.rs", "Piece"),
         ("src/net/score.rs", "Scoreboard"),
+        ("src/net/tick_stamp.rs", "TickStamp"),
         ("src/net/battle.rs", "BattleState"),
         ("src/world.rs", "WorldGeneration"),
         ("src/net/battle.rs", "BattlePhase"),
@@ -1989,6 +1996,7 @@ mod tests {
     /// into [`WIRE_TYPES_HASH`] after the type definitions. Codec tests live outside this fold.
     const WIRE_CODEC_SOURCES: &[&str] = &[
         "src/net/wire_quant.rs",
+        "src/net/tick_stamp/wire.rs",
         "src/net/admission/denial.rs",
         "src/net/debris_stress/pose.rs",
     ];

@@ -1,0 +1,6 @@
+(
+    view_window_s: (10.0, Taste("view buffering memory: retain downlink lateness for this many seconds")),
+    uplink_window_s: (10.0, Taste("link tolerance memory: retain input arrival gaps for this many seconds")),
+    stale_floor_s: (0.100, Taste("minimum input silence tolerance in seconds")),
+    stale_ceil_s: (0.250, Taste("maximum input silence tolerance in seconds")),
+)

@@ -26,7 +26,11 @@
 //!   the ready messages Lightyear's receive gate `accepted` or dropped (`lookahead_rejected` past
 //!   its future bound, `past_rejected` past its past bound), and `min_message_lookahead` and
 //!   `max_message_lookahead` (`end_tick - server_tick`) observed before the gate. Offsets are
-//!   signed ticks; null means no matching tick/message in this period. Counts reset per row;
+//!   signed ticks; null means no matching tick/message in this period. Counts reset per row.
+//!   `arrival` is `net::input_gap`'s always-collected record: silence, the window's raw arrival-gap
+//!   histogram, would-be stale threshold and declarations since the preceding line. Disconnected
+//!   links keep their final period counts with `not_connected_at_emission` instead of an arrival
+//!   record; a newly connected link has a row even before its first input;
 //! - `wall`: the runner's `discarded_ms` (wall time past the admission cap dropped this period)
 //!   and `discarding_batches` (admitted batches that dropped any), and `drift_ms`, how far
 //!   simulated time trails wall time since startup (`server_runner::WallLedger`);
@@ -274,6 +278,7 @@ fn count_input_lookahead(
 
 /// Arm the stats line when the lever is set.
 pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
+    super::input_gap::install(app);
     let period = period_from(env_text(LEVER)?.as_deref())?;
     super::ram::install(app, period.is_some())?;
     let Some(period) = period else {
@@ -941,7 +946,7 @@ struct Census<'w, 's> {
 
 /// After Last: once the period has passed, print its line and open the next one.
 fn emit_line(
-    mut stats: ResMut<ServerStats>,
+    (mut stats, mut arrivals): (ResMut<ServerStats>, super::input_gap::Census),
     fixed: Res<Time<Fixed>>,
     mut census: Census,
     debris: DebrisCensus,
@@ -983,10 +988,24 @@ fn emit_line(
         let (bytes, max_packets) = send_by_client.get(&link).map_or((0, 0), |sent| (sent.bytes, sent.max_packets));
         json!({"link": link.to_string(), "bytes": bytes, "bytes_per_s": bytes as f64 / elapsed.as_secs_f64(), "max_packets": max_packets})
     }).collect();
-    let inputs: Vec<_> = std::mem::take(&mut stats.input_by_client)
-        .into_iter()
-        .map(|(link, counts)| json!({"link": link.to_string(), "counts": counts}))
+    let mut input_counts = std::mem::take(&mut stats.input_by_client);
+    let mut arrival_rows = arrivals.take_lines(fixed.timestep().as_secs_f64());
+    let mut inputs: Vec<_> = census
+        .clients
+        .iter()
+        .map(|link| {
+            // A new connection can have no tank or messages yet; its zero census is still a row.
+            let counts = input_counts.remove(&link).unwrap_or_default();
+            let arrival = arrival_rows
+                .remove(&link)
+                .expect("every connected link has an InputGap summary prepared in parallel");
+            json!({"link": link.to_string(), "counts": counts, "arrival": arrival})
+        })
         .collect();
+    inputs.extend(input_counts.into_iter().map(|(link, counts)| {
+        json!({"link": link.to_string(), "counts": counts,
+            "arrival": {"state": "not_connected_at_emission"}})
+    }));
     let workload = load.map(|mut load| {
         let mut value = load.json(&record, &census.constructions, &census.loose, now, elapsed);
         value["pieces"] = pieces.clone();

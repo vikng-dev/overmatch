@@ -111,6 +111,10 @@ impl<C: Clock> Plugin for TickRunner<C> {
         })
         .init_resource::<UnadmittedWall>()
         .init_resource::<DiscardedWall>();
+        let departure_clock = self.0.clone();
+        app.insert_resource(super::tick_stamp::DepartureClock::new(move || {
+            departure_clock.now()
+        }));
         let clock = self.0.clone();
         app.set_runner(move |mut app| {
             if app.plugins_state() != PluginsState::Cleaned {
@@ -297,6 +301,105 @@ mod tests {
             assert!(frame.elapsed >= tick * (index as u32 + 1));
             assert!(frame.elapsed < tick * (index as u32 + 2));
         }
+    }
+
+    /// Frame start describes production pace; departure excludes this frame's own work from x.
+    /// The injected clock advances in FixedUpdate and pre-send PostUpdate while Real stays fixed.
+    #[test]
+    fn each_labelled_tick_separates_frame_start_from_departure_even_in_a_long_frame() {
+        use super::super::tick_stamp::TickStamp;
+        use bevy_replicon::prelude::ServerSystems;
+        use lightyear::prelude::LocalTimeline;
+        let tick = super::super::server::TICK;
+        let clock = TestClock {
+            now: Arc::new(Mutex::new(Instant::now())),
+            sleeps: default(),
+            oversleep: Duration::ZERO,
+        };
+        // Fixture: one long frame amidst ordinary frames; the send-to-prior-client-frame bound
+        // is fixed independently of the stamp produced by the system under test.
+        let (mut app, _) = probe(clock.clone(), vec![Duration::ZERO; 8]);
+        // The shipped protocol installs the codec and server-gated publication together.
+        app.add_plugins((AssetPlugin::default(), crate::offline_physics()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .init_asset::<bevy::world_serialization::WorldAsset>()
+            .add_plugins(super::super::protocol::plugin);
+        app.world_mut()
+            .resource_mut::<NextState<bevy_replicon::prelude::ServerState>>()
+            .set(bevy_replicon::prelude::ServerState::Running);
+        use bevy_replicon::shared::replication::registry::{
+            ReplicationRegistry, test_fns::TestFnsEntityExt,
+        };
+        let (_, fns_id) =
+            app.world_mut()
+                .resource_scope(|world, mut registry: Mut<ReplicationRegistry>| {
+                    registry.register_rule_fns(world, super::super::tick_stamp::replication())
+                });
+        let carrier = app
+            .world_mut()
+            .spawn(TickStamp::new(0.0, 0.0).unwrap())
+            .id();
+        let fixed_clock = clock.clone();
+        app.add_systems(FixedUpdate, move || {
+            // Fixture: ordinary fixed work precedes publication.
+            *fixed_clock.now.lock().unwrap() += tick / 16;
+        });
+        let work_for = move |label: u32| if label == 2 { tick * 64 } else { tick / 32 };
+        let readings = Arc::new(Mutex::new(Vec::new()));
+        let captured = readings.clone();
+        app.add_systems(
+            PostUpdate,
+            (move |timeline: Res<LocalTimeline>| {
+                // This work follows publication but precedes every replication send system.
+                *clock.now.lock().unwrap() += work_for(timeline.tick().0);
+            })
+            .after(super::super::tick_stamp::publish)
+            .before(ServerSystems::Send),
+        );
+        app.add_systems(
+            PostUpdate,
+            (move |world: &mut World| {
+                let label = world.resource::<LocalTimeline>().tick();
+                let start = world.resource::<Time<Real>>().elapsed_secs_f64();
+                let bytes = world
+                    .entity_mut(carrier)
+                    .serialize(fns_id, bevy_replicon::prelude::RepliconTick::new(label.0));
+                let (frame_start_s, departure_offset_s): (f64, f32) =
+                    postcard::from_bytes(&bytes).unwrap();
+                let stamp = TickStamp::new(frame_start_s, departure_offset_s).unwrap();
+                let work = (tick / 16 + work_for(label.0)).as_secs_f64();
+                // Fixture: an independent send-to-prior-client-frame absence bound.
+                let previous_client_frame = start + work + 0.0625;
+                captured.lock().unwrap().push((
+                    label,
+                    stamp,
+                    start,
+                    work,
+                    stamp.absence_bound_s(previous_client_frame),
+                ));
+            })
+            .in_set(ServerSystems::Send),
+        );
+        assert_eq!(app.run(), bevy::app::AppExit::Success);
+        let readings = readings.lock().unwrap();
+        for (index, &(label, stamp, start, work, x)) in readings.iter().enumerate() {
+            assert_eq!(label.0 as usize, index + 1);
+            assert_eq!(stamp.frame_start_s(), start);
+            // Resolution: relative f32 epsilon bounds the offset rounding; f64 epsilon covers
+            // adding it to the epoch. The independently constructed bound is unchanged by work.
+            let allowance = f64::from(f32::EPSILON) * work + f64::EPSILON * start;
+            assert!((stamp.departure_s() - start - work).abs() <= allowance);
+            assert!(
+                (x - 0.0625).abs() <= allowance,
+                "long server work must add nothing beyond offset rounding: {x}"
+            );
+        }
+        assert!(
+            readings
+                .windows(2)
+                .all(|pair| pair[1].1.frame_start_s() >= pair[0].1.frame_start_s())
+        );
     }
 
     /// A batch's own cost is new wall time, admitted once the batch is spent; re-capping it while
