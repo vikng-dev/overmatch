@@ -104,14 +104,24 @@ fn readout_reports_crank_state() {
 fn brake_hold_stops_a_rolling_tank_and_parks_it() {
     let (fp, tp) = (lab_fp(), lab_tp());
     // FIXTURE: 6 m/s in gear 4, a 5 kN-per-side downhill pull.
+    let initial_speed = 6.0;
+    let load = 5_000.0;
+    let fixture = input(0.0, 0.0, [initial_speed; 2], [-load; 2]);
+    // DERIVED: per-side momentum divided by net brake impulse per tick, rounded up;
+    // one further tick lets the Driver latch park after the belt lands at rest.
+    let stop_deadline = (fp.inertia * initial_speed / ((tp.brake_capacity_n - load) * fixture.dt))
+        .ceil() as usize
+        + 1;
+    // DERIVED: one stopping window followed by an equally long parked window.
+    let trace_budget = 2 * stop_deadline;
     let run = |brake: bool| {
         let mut st = TransmissionState {
             gear: 4,
             ..fresh(&tp)
         };
-        let mut speeds = [6.0f32, 6.0];
+        let mut speeds = fixture.speeds;
         let mut trace = Vec::new();
-        for _ in 0..320 {
+        for _ in 0..trace_budget {
             let inp = TransmissionInput {
                 supply: DriveSupply::WHOLE,
                 intent: if brake {
@@ -119,7 +129,8 @@ fn brake_hold_stops_a_rolling_tank_and_parks_it() {
                 } else {
                     DriveIntent::Axes(DriveAxes::default())
                 },
-                ..input(0.0, 0.0, speeds, [-5_000.0, -5_000.0])
+                speeds,
+                ..fixture
             };
             speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
             trace.push((speeds, st.park));
@@ -131,8 +142,10 @@ fn brake_hold_stops_a_rolling_tank_and_parks_it() {
         .iter()
         .position(|(speeds, park)| *park && speeds.iter().all(|v| v.abs() < PARK_ENGAGE_SPEED))
         .expect("the brake hold must bring the tank to a parked rest");
-    // DERIVED bound: (2 × 120 kN − 10 kN) over 16 t arrests 6 m/s in about 27 ticks.
-    assert!(stopped < 64, "the brake hold took {stopped} ticks to park");
+    assert!(
+        stopped < stop_deadline,
+        "the brake hold took {stopped} ticks to park; derived deadline {stop_deadline}"
+    );
     for (tick, (speeds, park)) in held.iter().enumerate().skip(stopped) {
         assert!(
             *park && speeds.iter().all(|v| v.abs() < PARK_ENGAGE_SPEED),
@@ -524,7 +537,9 @@ fn parking_brake_settles_creep() {
 fn parking_brake_stays_saturated_past_breach() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let mut st = fresh(&tp);
-    let r_breach = 1.7 * tp.brake_capacity_n;
+    // Fixture: exceed static capacity by a positive tenth of the dynamic rating.
+    let breach_margin = 0.1 * tp.brake_capacity_n;
+    let r_breach = tp.brake_static_factor * tp.brake_capacity_n + breach_margin;
     let mut speeds = [0.0f32; 2];
     let mut last = TransmissionReport::default();
     for _ in 0..30 {
@@ -2499,7 +2514,7 @@ fn released_motion_coasts_without_brake_force() {
     };
     let controls = driver(&construction(&fp), &tp, &mut state, &inp);
     let belts = BeltTick::new(&construction(&fp), &controls.input);
-    let solved = stop_rows([0.0; 2], &tp, &belts, &state, &controls, 1.0);
+    let solved = stop_rows([0.0; 2], &tp, &belts, &state, &controls, None, 1.0);
     assert_eq!(solved.forces, [0.0; 2]);
 }
 
@@ -2561,13 +2576,31 @@ fn released_rollback_stops_and_parks() {
                                         command != dir || motion != command
                                     };
                                     let belts = BeltTick::new(&construction(&fp), &inp);
+                                    let neutral_tie =
+                                        neutral_turn(&controls.input, mean).then(|| {
+                                            steering_tie(
+                                                &tp,
+                                                &state,
+                                                &controls.input,
+                                                mean,
+                                                branch(mean),
+                                            )
+                                        });
                                     // Fixture: zero source capacity isolates the Driver's stop orders
                                     // from the neutral steering row's motor force.
                                     let BeltStep {
                                         next: landed_speeds,
                                         forces: force,
                                         ..
-                                    } = stop_rows([0.0; 2], &tp, &belts, &state, &controls, 0.0);
+                                    } = stop_rows(
+                                        [0.0; 2],
+                                        &tp,
+                                        &belts,
+                                        &state,
+                                        &controls,
+                                        neutral_tie,
+                                        0.0,
+                                    );
                                     for i in 0..2 {
                                         // DERIVED: no other sprocket force in this isolated brake solve;
                                         // both input belts are outside rest, so capacity is dynamic.

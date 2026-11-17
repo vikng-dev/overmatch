@@ -346,3 +346,46 @@ fn independent_rows_with_different_scales_both_stop_their_speeds() {
         assert!((outcome.impulse - expected).abs() <= 1e-10 * expected.abs());
     }
 }
+
+/// The drivetrain's row units must not change a resisting impulse's sign or preserve static
+/// capacity after breakaway. An absolute row-slip tolerance can accept either defect here.
+#[test]
+fn row_scaling_preserves_resisting_sign_and_static_breakaway() {
+    // Fixture: a small negative free speed exceeds both static and dynamic stopping capacity.
+    // Row scales change units only; impulse bounds transform inversely to the coefficients.
+    let input = speed(0.0, 1.0, -4e-6);
+    let static_capacity = 3e-6;
+    let dynamic_capacity = 1e-6;
+    for scale in [1.0, 1e-6, 1e6] {
+        for static_element in [false, true] {
+            let mut constraint = row(&[scale], static_capacity / scale);
+            if static_element {
+                constraint.dynamic = Some(Bounds {
+                    lower: -dynamic_capacity / scale,
+                    upper: dynamic_capacity / scale,
+                });
+            }
+            let solution = solve(&[input], &[constraint]);
+            let outcome = &solution.rows[0];
+            assert_eq!(
+                outcome.state,
+                State::Upper,
+                "the resisting impulse opposes negative slip in every row unit"
+            );
+            assert_eq!(
+                outcome.dynamic, static_element,
+                "insufficient static capacity breaks away in the same call at every row scale"
+            );
+            let capacity = if static_element {
+                dynamic_capacity
+            } else {
+                static_capacity
+            };
+            assert_eq!(outcome.impulse, capacity / scale);
+            // DERIVED: free momentum plus the positive saturated resistance, over inertia.
+            let expected = (input.free_impulse + capacity) / input.inertia;
+            // Resolution: separate row-unit conversion and speed accumulation round in f64.
+            assert!((solution.speeds[0] - expected).abs() <= 16.0 * f64::EPSILON * expected.abs());
+        }
+    }
+}

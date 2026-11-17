@@ -1816,8 +1816,8 @@ fn branch(x: f32) -> f32 {
 /// The steering member's tie this tick on the |m| branch `side`: per-belt weights `j` and the
 /// value `j·v` it lands the belts on. The neutral servo lands the half-difference on
 /// construction's `neutral_d_full` share of the steer; a geared detent lands `d − e·m` at zero
-/// with `e = s·κ·side` (straight: `e = 0`, the locked differential). The clutch solve and the
-/// steering solve read this one tie.
+/// with `e = s·κ·side` (straight: `e = 0`, the locked differential). The clutch predictor,
+/// geared steering predictor and neutral block row read this one tie.
 fn steering_tie(
     tp: &TransmissionParams,
     st: &TransmissionState,
@@ -1977,6 +1977,7 @@ fn stop_rows(
     belts: &BeltTick,
     st: &TransmissionState,
     controls: &Controls,
+    neutral_tie: Option<([f32; 2], f32)>,
     steering_scale: f32,
 ) -> BeltStep {
     use super::block::{Bounds, Row, Speed, State, solve};
@@ -2044,19 +2045,17 @@ fn stop_rows(
         });
     }
     let stop_count = rows.len();
-    let mean = (belts.speeds[0] + belts.speeds[1]) * 0.5;
-    let neutral = neutral_turn(&controls.input, mean);
-    if neutral {
-        // The half-difference weights put half the row impulse on each output, hence twice
-        // the per-output rating. The source work budget scales this capacity, not its target.
-        let capacity = 2.0
-            * f64::from(controls.input.supply.transmission_condition)
+    if let Some((tie, target)) = neutral_tie {
+        // Each output's weighted row impulse stays within its rating. The source work budget
+        // scales this capacity, not its target.
+        let capacity = f64::from(controls.input.supply.transmission_condition)
             * f64::from(tp.steer_capacity_n)
             * f64::from(steering_scale)
-            * dt;
+            * dt
+            / f64::from(tie[0].abs().max(tie[1].abs()));
         rows.push(Row {
-            jacobian: vec![0.5, -0.5],
-            target: f64::from(controls.input.steer * tp.neutral_d_full),
+            jacobian: tie.map(f64::from).to_vec(),
+            target: f64::from(target),
             bounds: Bounds {
                 lower: -capacity,
                 upper: capacity,
@@ -2073,6 +2072,7 @@ fn stop_rows(
         }
         if i < stop_count {
             if !controls.mean_hold {
+                // Side stop i constrains speed i: side rows are built in speed order above.
                 // Redundant stops can sit at a bound with zero slip; the surface still holds.
                 held[i] = result.speeds[i] == 0.0;
             }
@@ -2093,7 +2093,7 @@ fn stop_rows(
         forces: q,
         held,
         brakes_slide: slides,
-        neutral_force: if neutral {
+        neutral_force: if neutral_tie.is_some() {
             (result.rows[stop_count].impulse / dt) as f32
         } else {
             0.0
@@ -2361,21 +2361,22 @@ pub(crate) fn step(
         f_c_pre_scale * 0.5 + lambda_pre_scale * j[0],
         f_c_pre_scale * 0.5 + lambda_pre_scale * j[1],
     ];
+    let neutral_tie = neutral_turn(inp, m).then_some((tie, target));
     let land = |scale| {
         let mut q = motor.map(|force| force * scale);
         apply_ceiling_brakes(&mut q, tp, &belts, st, &controls, crank);
-        stop_rows(q, tp, &belts, st, &controls, scale)
+        stop_rows(q, tp, &belts, st, &controls, neutral_tie, scale)
     };
-    let neutral = neutral_turn(inp, m);
     let work = engine_work(
         tp,
         crank,
         |scale| {
             let mut forces = motor.map(|force| force * scale);
-            let next = if neutral {
+            let next = if let Some((tie, _)) = neutral_tie {
                 let solved = land(scale);
-                forces[0] += solved.neutral_force * 0.5;
-                forces[1] -= solved.neutral_force * 0.5;
+                for (force, weight) in forces.iter_mut().zip(tie) {
+                    *force += solved.neutral_force * weight;
+                }
                 solved.next
             } else {
                 [belts.land(0, forces[0]), belts.land(1, forces[1])]
@@ -2387,7 +2388,7 @@ pub(crate) fn step(
     );
     let power_scale = work.scale;
     #[cfg(feature = "bitprobe")]
-    let f_s_pre_scale = if neutral {
+    let f_s_pre_scale = if neutral_tie.is_some() {
         land(1.0).neutral_force
     } else {
         0.0

@@ -1,5 +1,6 @@
 //! Bounded linear rows over independent inertias. `solve` accepts free impulses, returning speeds
-//! and row impulses in the caller's units. Rows sharing a speed solve together; this local dependency requires assignment trials to be serial.
+//! and row impulses in the caller's units. Rows sharing a speed solve together; this local
+//! dependency requires assignment trials to be serial.
 //!
 //! With fixed bounds the dual objective is `p·(A u - target) + p·W p/2`, where
 //! `u = speed + free_impulse/inertia` and `W = A M^-1 A^T`. Its box optimality conditions
@@ -32,6 +33,21 @@ pub(crate) struct Row {
     pub target: f64,
     pub bounds: Bounds,
     pub dynamic: Option<Bounds>,
+}
+
+impl Row {
+    fn slip_tolerance(&self, velocity: &[f64]) -> f64 {
+        // Resolution: coefficient magnitudes scale the unit-speed roundoff floor into row
+        // units. Target and evaluation magnitudes cover cancellation without a rest-speed band.
+        RESOLUTION
+            * (self.target.abs()
+                + self
+                    .jacobian
+                    .iter()
+                    .zip(velocity)
+                    .map(|(a, v)| a.abs() * (1.0 + v.abs()))
+                    .sum::<f64>())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,14 +133,10 @@ pub(crate) fn solve(speeds: &[Speed], rows: &[Row]) -> Solution {
             bounds: &bounds,
             free: &free,
         };
-        let mut accepted = None;
-        for distance in 0..=rows.len() {
-            accepted = search.neighbours(&seed, &mut Vec::with_capacity(rows.len()), distance);
-            if accepted.is_some() {
-                break;
-            }
-        }
-        let mut result = accepted
+        let mut result = (0..=rows.len())
+            .find_map(|distance| {
+                search.neighbours(&seed, &mut Vec::with_capacity(rows.len()), distance)
+            })
             .expect("a finite convex box problem has an optimum with independent interior rows");
         let mut broke = false;
         for (i, row) in rows.iter().enumerate() {
@@ -132,7 +144,7 @@ pub(crate) fn solve(speeds: &[Speed], rows: &[Row]) -> Solution {
                 && let Some(sliding) = row.dynamic
                 && result.rows[i].state != State::Stuck
                 && (dot(&row.jacobian, &result.speeds) - row.target).abs()
-                    > RESOLUTION * (1.0 + row.target.abs())
+                    > row.slip_tolerance(&result.speeds)
             {
                 bounds[i] = sliding;
                 dynamic[i] = true;
@@ -249,17 +261,9 @@ impl Search<'_> {
         for (i, row) in self.rows.iter().enumerate() {
             let p = impulses[i];
             let bound = self.bounds[i];
-            let allowance = RESOLUTION * (1.0 + bound.lower.abs().max(bound.upper.abs()));
+            let allowance = RESOLUTION * bound.lower.abs().max(bound.upper.abs());
             let slip = dot(&row.jacobian, &velocity) - row.target;
-            let tolerance = RESOLUTION
-                * (1.0
-                    + row.target.abs()
-                    + row
-                        .jacobian
-                        .iter()
-                        .zip(&velocity)
-                        .map(|(a, v)| (a * v).abs())
-                        .sum::<f64>());
+            let tolerance = row.slip_tolerance(&velocity);
             if p < bound.lower - allowance
                 || p > bound.upper + allowance
                 || match states[i] {

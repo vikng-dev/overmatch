@@ -25,6 +25,10 @@ their existing work estimate, crank law, Driver choices, contact path and wire r
 The affine sampled-ground slope remains in effective belt inertia. Stop surfaces report held
 from exact landed rest, including redundant rows at a bound with zero slip.
 
+The mean hold still borrows the brake rating: the code labels this StandIn until the sheet
+supplies the hold's own figure. The per-bisection block solve inside the work-limit search also
+remains; slice 2 deletes it with the work limit. Neither is changed here.
+
 A parked differential can transfer unequal loads between the two stops up to steering capacity.
 The speeds are unique; redundant brake/tie impulses need not be unique or split exactly evenly.
 The production test requires the pair to hold a load that exceeds one side's capacity but fits
@@ -54,6 +58,24 @@ the pair, and requires motion when the available steering transfer cannot carry 
 
 The rank, held-pivot and parked-load regression tests were each run before their fixes and each
 failed on the reported defect. No authored value was tuned to recover an observation.
+
+## Closing review
+
+The neutral block row reads `steering_tie`'s weights and target, converting to f64 at the block
+boundary and deriving impulse bounds from the per-output rating and those weights. The block
+and work search share one optional neutral tie and its regime decision. The side-stop held
+readout states its invariant: side row i constrains speed i, in construction order.
+
+Slip allowances scale with each row's coefficients, target and evaluation magnitudes; impulse
+allowances scale with its bounds. Their labelled Resolution covers f64 roundoff. The scaled
+fixture independently derives saturated resistance and landing speed, checking both sign and
+same-call static breakaway under changes of row units. Assignment search uses `find_map` with
+the optimum invariant's `expect`; the module doc is wrapped.
+
+The rolling brake fixture derives its stopping deadline from per-side inertia, input speed,
+net braking capacity after downhill load and step, plus one tick for the park latch. Its trace
+spans that deadline and an equally long parked window (DERIVED). The breach fixture's load is
+its static factor times brake capacity plus a positive Fixture margin.
 
 ## Drive-phase investigation
 
@@ -117,7 +139,7 @@ asleep ticks in the final observation window. The rammed case is interpreted abo
 
 ## Validation and current observations
 
-MEASURED pivot observations: one complete sweep at `4ae55756` and one at the final source,
+MEASURED pivot observations: one complete sweep at `4ae55756` and one at `107e8b6f`,
 each covering all 16 cases. The closing window is the runner's final three seconds of its
 64-second hold; travel is planar net displacement over the hold or its five-second release.
 Every closing window has belt speeds +0.287957 / −0.287957 m/s (rounded); the after mean is exactly
@@ -143,16 +165,25 @@ not stored expectations. In the table, arrows are original base → final source
 | slope35 downhill | 0.001086 → 0.001824 | 366.278435 → 366.234695 | 0.036974 → 0.038547 |
 | slope35 across | -0.000075 → -0.000095 | 367.363888 → 367.362083 | 0.000718 → 0.000782 |
 
-The longitudinal 25° release changes materially. MEASURED at the first zero-steer tick in the
-uphill case: the reaction magnitudes total about 287.0 kN; both belts land at +0.106561 m/s
-and park remains latched with the clutch Out. DERIVED from the shipped construction: the pair's
-dynamic capacity is 192 kN, versus 288 kN static. The preceding mean hold starts at exact zero
-mean and can use static capacity; the replacing side stops start on counter-rotating belts and
-must use dynamic capacity. The original speed-band selector could capture these moving belts
-with static capacity. Under the row table, steering transfers differential load but cannot add
-common-mode brake capacity. Thus the remaining release slide follows the exact-rest rule,
-not an unequal-ground tie defect. No speed band or Driver change was added to recover the old
-reading. The 35° cases' large hull travel also remains an observation of contact/grade limits.
+The longitudinal 25° release regresses to about 4 m from about 0.045 m (MEASURED, table above).
+Steering releases at the authored rise rate, so the mean hold lasts through the release ramp.
+DERIVED: the authored rise of 4/s and the probe's 1/64 s step decrement steer by 0.0625 per tick;
+the last held command is 0.0625, above the Driver's 0.05 axis threshold. Multiplying that command
+by the rig's 0.287957221 m/s full target gives belts at about ±0.018 m/s when the side stops take
+over, rather than the full-pivot ±0.29 m/s (both DERIVED).
+
+MEASURED at the first zero-steer tick in the uphill case: the reaction magnitudes total about
+287.0 kN; both belts land at +0.106561 m/s and park remains latched with the clutch Out.
+DERIVED from the shipped construction: the pair's dynamic capacity is 192 kN, versus 288 kN
+static. The preceding mean hold starts at exact zero mean and can use static capacity. Any
+nonzero starting side speed requires dynamic capacity; the side stops cannot carry the load,
+and the belts never start a tick at rest again. Steering can transfer differential load but
+cannot add common-mode brake capacity. The old speed-band selector could capture the moving
+belts with static capacity.
+
+Slice 2 owns this regression as a Driver handover rule: make-before-break between the mean hold
+and side stops. It is not fixed here; no Driver decision or speed band changes. The 35° cases'
+large hull travel also remains an observation of contact/grade limits.
 
 MEASURED current rubble-park observations: all cases once, with rammed repeated a second time;
 the two current rammed results are identical. Window counts are over 1280 ticks. These arrivals
@@ -173,7 +204,7 @@ engaged-clutch left-belt alternation 0.104372494 m/s and total delivered-frictio
 255.921600 kN; open-clutch values 0.266415715 m/s and 324.168060 kN. The original paired readings
 are retained above for comparison; no contact change was made.
 
-Passed final checks:
+Passed checks at `107e8b6f` (before the closing review):
 
 - `cargo fmt --all --check`.
 - `scripts/serial-cargo clippy --locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`.
@@ -188,3 +219,22 @@ Passed final checks:
 All compiles use `scripts/serial-cargo` with `--features dev_ui,bitprobe`; probes use
 `OVERMATCH_UNATTENDED=1` and their existing headless runner. Logs use `/tmp/drive-rows-r2-*.log`;
 the tables here are the durable observations. No contact, Avian, wire or Driver code changed.
+
+## Closing validation
+
+MEASURED: restoring the absolute sign tolerance makes the new scaled-row test choose `Lower`
+instead of the resisting `Upper`; restoring only the absolute breakaway tolerance makes it
+retain static capacity. Both mutants failed their intended assertions. The final source
+passes that test within `track::`.
+
+Passed on the closing source, with `OVERMATCH_UNATTENDED=1`:
+
+- `cargo fmt --all --check`.
+- `scripts/serial-cargo clippy --locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`.
+- `scripts/serial-cargo test --lib --features dev_ui,bitprobe track::`: 379 passed (MEASURED).
+- `scripts/serial-cargo test --lib --features dev_ui,bitprobe tests::doc_citations`: 3 passed (MEASURED).
+- `scripts/serial-cargo test --lib --features dev_ui,bitprobe`: one run, **2855 passed, 0 failed,
+  50 ignored**, 405.60 s (MEASURED).
+
+Logs: `/tmp/drive-rows-closing-*.log`. No Driver decision changed. The release regression,
+hold-rating stand-in and per-bisection block solve remain as described above.
