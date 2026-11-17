@@ -129,6 +129,8 @@ SCRUB = (
 )
 JOURNAL_LINE = re.compile(r"^\[\s*(\d+\.\d+)\]\s")
 BATTLE = re.compile(r"server: Battle (\d+) (\w+)")
+# The client's once-a-second stream reading, then one JSON object (src/net/frontier.rs).
+JITTER_TOKEN = "client_jitter "
 SETTINGS_MARK = "# @settings\n"
 
 
@@ -605,6 +607,18 @@ def pick_windows(log: ServerLog, clients: int, measure_from: float) -> tuple[lis
     return chosen, skipped
 
 
+def starved(text: str) -> list[tuple[float, float]]:
+    """(kernel time, ms) per `client_jitter` line of one client's journal: its frames whose presented
+    cursor had passed the newest tick received."""
+    out = []
+    for line in text.splitlines():
+        stamp, at = JOURNAL_LINE.match(line), line.find(JITTER_TOKEN)
+        if stamp and at >= 0:
+            row, _ = json.JSONDecoder().raw_decode(line, at + len(JITTER_TOKEN))
+            out.append((float(stamp.group(1)), row["starved"]["ms"]))
+    return out
+
+
 @dataclass
 class Sample:
     at: float  # the machine's kernel time
@@ -666,23 +680,26 @@ def interval(series: list[Sample], start: float, end: float) -> Interval:
 
 COLUMNS = ["win", "at_s", "tanks", "proj", "p50_ms", "p95_ms", "p99_ms", "max_ms", "overrun", "drop_ms",
            "srv_cpu%", "srv_mb", "srv_busy%", "steal%", "send_p95_us", "link_kB/s", "link_max_kB/s",
-           "held%", "cli_busy%", "cli_cpu%", "cli_cpu_max%", "cli_mb"]
+           "held%", "starved_ms", "cli_busy%", "cli_cpu%", "cli_cpu_max%", "cli_mb"]
 
 
 def window_cells(index: int, window: Window, combat_open: float, server: Interval, client: Interval,
-                 clients: int) -> list[float]:
+                 to_client: float, starving: list[list[tuple[float, float]]]) -> list[float]:
     row = window.row
     tick = row["tick_us"]
     links = [link["bytes_per_s"] / 1e3 for link in row["send_clients"]]
     counts = [entry["counts"] for entry in row["inputs"]]
     inputs = sum(c["held"] + c["tick_exact"] for c in counts)
-    units = [f"om-client-{k}" for k in range(1, clients + 1)]
+    units = [f"om-client-{k}" for k in range(1, len(starving) + 1)]
     cpu = [client.cpu_pct(u) for u in units]
+    start, end = window.start + to_client, window.end + to_client
+    worst_starved = max(sum(ms for at, ms in lines if start < at <= end) for lines in starving)
     return [index, window.start - combat_open, row["tanks"], row["projectiles"], tick["p50"] / 1e3,
             tick["p95"] / 1e3, tick["p99"] / 1e3, tick["max"] / 1e3, row["overruns"], row["wall"]["discarded_ms"],
             row["cpu_pct"], row["rss_mb"], server.busy_pct(), server.steal_pct(), row["send_us"]["p95"],
             statistics.median(links), max(links), 100.0 * sum(c["held"] for c in counts) / inputs if inputs else 0.0,
-            client.busy_pct(), statistics.median(cpu), max(cpu), statistics.median(client.rss_mb(u) for u in units)]
+            worst_starved, client.busy_pct(), statistics.median(cpu), max(cpu),
+            statistics.median(client.rss_mb(u) for u in units)]
 
 
 def table(header: list[str], rows: list[list[str]]) -> str:
@@ -698,12 +715,14 @@ def cold_start(machine: Machine) -> str:
 
 
 def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], log: ServerLog,
-           windows: list[Window], server_samples: list[Sample], client_samples: list[Sample]) -> tuple[str, dict]:
+           windows: list[Window], server_samples: list[Sample], client_samples: list[Sample],
+           client_journals: list[str]) -> tuple[str, dict]:
     """The printed report, scrubbed, and its numbers for `results.json`."""
     # Server kernel time to client kernel time, through the operator's clock.
     to_client = server.boot_at - client.boot_at
+    starving = [starved(journal) for journal in client_journals]
     rows = [window_cells(i, w, log.combat_open, interval(server_samples, w.start, w.end),
-                         interval(client_samples, w.start + to_client, w.end + to_client), s.clients)
+                         interval(client_samples, w.start + to_client, w.end + to_client), to_client, starving)
             for i, w in enumerate(windows, 1)]
     spread = {name: [statistics.median(col), min(col), max(col)] for name, col in zip(COLUMNS[2:], zip(*(r[2:] for r in rows)))}
     lines = [
@@ -719,7 +738,8 @@ def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], 
         "",
         "Window cells are MEASURED: one server_stats line each (tick percentiles over the window's own ticks, "
         "*_ms; srv_cpu% of one core; link_* the per-link payload kB/s the server queued, IP/UDP headers "
-        "excluded; held% of input reads with no input for their tick), and the 1 Hz samplers "
+        "excluded; held% of input reads with no input for their tick), the clients' client_jitter lines "
+        "(starved_ms: the most any client's presented cursor ran past its newest tick), and the 1 Hz samplers "
         "(*_busy% and steal% of the whole machine; cli_cpu% of one core per client; *_mb resident). "
         "median/min/max rows are DERIVED across the windows. at_s: window start, s after combat opened.",
     ]
@@ -737,6 +757,7 @@ def measure(s: Settings, plan: Plan, run_id: str, state: Path) -> None:
                     "-f", str(state / "key")], check=True, capture_output=True)
     (state / "key.pub").chmod(0o600)
     public_key = (state / "key.pub").read_text().strip()
+    write_private(state / "known_hosts", "")  # ssh appends the machines' addresses here
     groups = create_groups(run_id, plan)
     server = launch("server", s.server_type, s, plan, groups, run_id, state, public_key)
     client = launch("client", s.client_type, s, plan, groups, run_id, state, public_key)
@@ -769,14 +790,15 @@ def measure(s: Settings, plan: Plan, run_id: str, state: Path) -> None:
         say(f"windows: {len(windows)} of {WINDOWS}")
         time.sleep(min(30, s.window_s / 2))
 
-    server_journal = server.ssh("journal", "overmatch-server")
-    write_private(state / "server.journal", server_journal)
-    for k in range(1, s.clients + 1):
-        write_private(state / f"client-{k}.journal", client.ssh("journal", f"om-client-{k}"))
+    write_private(state / "server.journal", server.ssh("journal", "overmatch-server"))
+    client_journals = [client.ssh("journal", f"om-client-{k}") for k in range(1, s.clients + 1)]
+    for k, journal in enumerate(client_journals, 1):
+        write_private(state / f"client-{k}.journal", journal)
     server_samples, client_samples = server.ssh("samples"), client.ssh("samples")
     write_private(state / "server.samples", server_samples)
     write_private(state / "client.samples", client_samples)
-    text, results = report(s, server, client, host, log, windows, samples(server_samples), samples(client_samples))
+    text, results = report(s, server, client, host, log, windows, samples(server_samples), samples(client_samples),
+                           client_journals)
     print(text, flush=True)
     write_private(state / "report.txt", text + "\n")
     write_private(state / "results.json", json.dumps(results, indent=1))

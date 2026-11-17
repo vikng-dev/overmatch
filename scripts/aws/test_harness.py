@@ -182,6 +182,9 @@ elif cmd == "journal" and args[0] == "overmatch-server":
         at += window
 elif cmd == "journal":
     print("[  101.000000] fixture overmatch[9]: client: controlled entity 4v2 — input slot")
+    for t in range(102, 1500):
+        print(f"[{t:12.6f}] fixture overmatch[9]: INFO overmatch::net::frontier: client_jitter "
+              + json.dumps({"period_s": 1.0, "starved": {"events": 1, "ms": 2.5, "longest_ms": 2.5}}))
 '''
 
 FAKE_KEYGEN = r'''#!/usr/bin/env python3
@@ -277,6 +280,11 @@ class MeasuredRun(unittest.TestCase):
         self.assertEqual(self.status, 0, self.fixture.stderr)
         data_rows = [line.split() for line in self.fixture.stdout.splitlines() if re.match(r"\s*\d+\s", line)]
         self.assertEqual([row[0] for row in data_rows], [str(i) for i in range(1, harness.WINDOWS + 1)])
+        # Each client reports 2.5 ms starved per 1 s line, so a window sums its own seconds' lines,
+        # read on the client machine's clock.
+        window_s = float(option(SETTINGS, "--window-s"))
+        starved = harness.COLUMNS.index("starved_ms")
+        self.assertEqual({float(row[starved]) for row in data_rows}, {2.5 * window_s})
         self.assertIn("proof, region-wide, tagged Purpose=harness: instances 0, volumes 0, network interfaces 0, "
                       "security groups 0, key pairs 0", self.fixture.stderr)
         world = self.fixture.world()
