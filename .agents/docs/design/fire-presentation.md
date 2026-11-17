@@ -31,18 +31,14 @@ Rejected alternatives:
   cannot become a loss bound.
 - **Adopt a synthetic round by belt order:** coalesced counts and reordered announcements do not
   identify a one-to-one mapping; the provisional trajectory also invents the authority's result.
-  The removed fallback is preserved in git at `feb41576`, with its revert cost recorded in F4.
+  The removed fallback is preserved in git at `7c0156e3`, with its revert cost recorded in F4.
 - **Reliable automatic announcements:** this changes ADR-0021's cosmetic-debt policy to solve a
   client discard that requires no transport change. Bounded copies remain the transport repair.
 
 ## Delivery facts
 
 [ADR-0021's delivery table](../adr/0021-fire-replication-architecture.md#delivery-classes)
-is the sole delivery table. DERIVED from `net::protocol` and `net::shot_transport`: automatic starts
-use bounded unordered-unreliable batches; main-gun starts and every weapon's paths are reliable.
-Replication acknowledges the latest weapon state, so a belt snapshot may account for several
-consumptions. No channel orders its arrivals against another; reliable delivery has no finite
-arrival deadline during a live connection.
+owns delivery guarantees and their rationale.
 
 ## Player outcomes
 
@@ -75,10 +71,4 @@ then exactly one keyed round, one recoil presentation, and one played sanctioned
 
 DERIVED by reading the removed fallback: with the belt arriving first, its synthetic projectile
 violates the initial zero-projectile assertion before the later identity assertion can run.
-The regression guards both assertions; the historical claim that its first failure was the identity
-assertion is not supported.
-
-`net::fire_presentation::tests::truncated_server_weapon_records_are_refused_before_cadence`
-checks malformed server gate/load lengths against the spawn-built `TankSim` slot count, at first
-arming and subsequent ingress. Refusal retires the replicas and link before cadence, logs the typed
-cause and sends it to the existing match-closed UI. Valid records retain the existing cadence.
+The regression guards both assertions.

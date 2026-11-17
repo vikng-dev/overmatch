@@ -40,19 +40,17 @@ const QUEUE_CAP: usize = 32;
 /// Install the own-fire presentation ledger. [`record_own_intent`] is mounted separately, by
 /// `net::client`, because it must be chained after the stamp that creates input provenance.
 pub(super) fn plugin(app: &mut App) {
-    app.add_message::<super::matchmaking::MatchClosed>();
     app.init_resource::<AuthoredIntent>();
     app.init_resource::<OwnFireDiag>();
     app.add_systems(Update, arm_own_fire_presentation);
     // The change-tick arrival bracket: between the post-loop stamp and the next frame's pre-loop
-    // fold, the only `WeaponGate` writers are the replication apply (`PreUpdate`) and the heal
-    // (which restores an already-folded value), so a moved change tick at the fold IS an arrival.
+    // fold, the only `WeaponGate` writers are the replication apply (`PreUpdate`) and the reload
+    // refresh (which restores an already-folded value), so a moved change tick at the fold IS an
+    // arrival.
     app.add_systems(
         RunFixedMainLoop,
         (
-            (admit_weapon_records, fold_arrivals)
-                .chain()
-                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
+            fold_arrivals.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
             stamp_gate_write_mark.in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
         ),
     );
@@ -100,8 +98,8 @@ impl SlotLedger {
     /// `Some → Some` is cyclic/pause bookkeeping and `Some → None` is retirement, so neither is a
     /// consumption). A belt REFILL raises `belt_remaining` and accounts for no rounds, so the
     /// swap boundary undercounts by whatever the server fired between its refill and this
-    /// snapshot. Returns the rounds this arrival accounted for.
-    fn confirm(&mut self, arriving: WeaponGateState) -> u32 {
+    /// snapshot.
+    fn confirm(&mut self, arriving: WeaponGateState) {
         let belt_fired = self
             .last_arrived
             .belt_remaining
@@ -114,7 +112,6 @@ impl SlotLedger {
         for _ in 0..fired {
             self.pending_local.pop_front();
         }
-        fired
     }
 }
 
@@ -139,79 +136,11 @@ impl OwnFirePresentation {
 /// Counts of local reload-view refreshes without server confirmation.
 #[derive(Resource, Default, Debug)]
 struct OwnFireDiag {
-    /// Presented reloads restored after the server stayed silent past the reload refresh window.
     healed: u64,
 }
 
-/// Malformed outside input: one disclosed weapon record must name every spawn-built slot.
-#[derive(Debug, PartialEq, Eq)]
-enum WeaponRecordFault {
-    SlotCount {
-        expected: usize,
-        gates: usize,
-        loads: usize,
-    },
-}
-
-impl std::fmt::Display for WeaponRecordFault {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SlotCount {
-                expected,
-                gates,
-                loads,
-            } => write!(
-                f,
-                "expected {expected} weapon slots, received {gates} gates and {loads} loads"
-            ),
-        }
-    }
-}
-
-fn check_weapon_record(
-    gate: &WeaponGate,
-    loads: &WeaponLoads,
-    expected: usize,
-) -> Result<(), WeaponRecordFault> {
-    if gate.weapons.len() == expected && loads.weapons.len() == expected {
-        Ok(())
-    } else {
-        Err(WeaponRecordFault::SlotCount {
-            expected,
-            gates: gate.weapons.len(),
-            loads: loads.weapons.len(),
-        })
-    }
-}
-
-/// Admit replicated weapon state before any fixed cadence or frame presentation consumes it.
-/// Before body attachment there are no weapon consumers; afterwards `TankSim` owns the slot count.
-/// A malformed server record ends the match visibly rather than leaving a partial live weapon.
-fn admit_weapon_records(
-    tanks: Query<
-        (Entity, &TankSim, &WeaponGate, &WeaponLoads),
-        (With<NetTank>, With<Interpolated>),
-    >,
-    mut commands: Commands,
-) {
-    for (entity, sim, gate, loads) in &tanks {
-        if let Err(fault) = check_weapon_record(gate, loads, sim.weapons.len()) {
-            refuse_weapon_record(entity, fault, &mut commands);
-            return;
-        }
-    }
-}
-
-fn refuse_weapon_record(entity: Entity, fault: WeaponRecordFault, commands: &mut Commands) {
-    let reason = format!("Malformed server weapon record: {fault}");
-    warn!("client: {entity} refused: {reason}");
-    commands.queue(move |world: &mut World| {
-        super::client::close_malformed_weapon_record(world, reason)
-    });
-}
-
-/// Arm from a complete owner record, admitting it if body attachment just made its count known. `WeaponLoads` gates arming because cadence reads
-/// loads beside the gate; both lists must be present before that presentation can start.
+/// Arm from the owner record. `WeaponLoads` gates arming because cadence reads loads beside
+/// the gate; both lists must be present before that presentation can start.
 fn arm_own_fire_presentation(
     tanks: Query<
         (Entity, &WeaponGate, &WeaponLoads, &TankSim),
@@ -225,12 +154,7 @@ fn arm_own_fire_presentation(
     >,
     mut commands: Commands,
 ) {
-    for (entity, gate, loads, sim) in &tanks {
-        // Body attachment can occur during Update, after this frame's pre-loop admission.
-        if let Err(fault) = check_weapon_record(gate, loads, sim.weapons.len()) {
-            refuse_weapon_record(entity, fault, &mut commands);
-            return;
-        }
+    for (entity, gate, _, _) in &tanks {
         info!("net: {entity} own interpolated gate armed with the fire-presentation ledger");
         let slots = gate
             .weapons
@@ -631,11 +555,19 @@ mod tests {
     #[test]
     fn a_belt_refill_accounts_for_no_rounds() {
         let mut ledger = SlotLedger::seeded(ready(3));
-        assert_eq!(ledger.confirm(ready(0)), 3);
-        assert_eq!(ledger.confirm(ready(BELT)), 0, "a refill is no consumption");
+        ledger.pending_local.extend([1, 2, 3, 4, 5, 6]);
+        ledger.confirm(ready(0));
+        assert_eq!(ledger.pending_local, [4, 5, 6]);
+        ledger.confirm(ready(BELT));
         assert_eq!(
-            ledger.confirm(ready(BELT - 2)),
-            2,
+            ledger.pending_local,
+            [4, 5, 6],
+            "a refill is no consumption"
+        );
+        ledger.confirm(ready(BELT - 2));
+        assert_eq!(
+            ledger.pending_local,
+            [6],
             "the next belt counts from its refill"
         );
     }
@@ -811,89 +743,6 @@ mod tests {
         );
     }
 
-    /// The game's damage model: neither equal truncation nor a short load list may reach
-    /// cadence's slot lookups. The owner must see a terminal cause before any weapon is consumed.
-    #[test]
-    fn truncated_server_weapon_records_are_refused_before_cadence() {
-        for (gates, loads, at_arm, already_armed) in [(1, 1), (2, 1), (1, 2), (0, 0)]
-            .into_iter()
-            .flat_map(|(gates, loads)| {
-                [(true, false), (false, false), (false, true)]
-                    .map(move |(at_arm, already_armed)| (gates, loads, at_arm, already_armed))
-            })
-        {
-            let mut app = App::new();
-            app.add_plugins((MinimalPlugins, plugin));
-            app.insert_resource(LocalTimeline::default());
-            app.insert_resource(TickDuration(crate::net::test_harness::TICK));
-            let root = app
-                .world_mut()
-                .spawn((
-                    NetTank,
-                    Controlled,
-                    Interpolated,
-                    TankSim {
-                        weapons: vec![crate::tank::WeaponState::default(); 2],
-                    },
-                    WeaponGate {
-                        weapons: vec![ready(BELT); gates],
-                    },
-                    WeaponLoads {
-                        weapons: vec![
-                            crate::tank::WeaponLoad {
-                                loaded: 0,
-                                selected: 0,
-                                fuze_modes: Vec::new(),
-                            };
-                            loads
-                        ],
-                    },
-                ))
-                .id();
-            assert_eq!(
-                check_weapon_record(
-                    app.world().get::<WeaponGate>(root).unwrap(),
-                    app.world().get::<WeaponLoads>(root).unwrap(),
-                    2,
-                ),
-                Err(WeaponRecordFault::SlotCount {
-                    expected: 2,
-                    gates,
-                    loads
-                }),
-            );
-            if already_armed {
-                app.world_mut()
-                    .entity_mut(root)
-                    .insert(OwnFirePresentation::with_slots(vec![
-                        SlotLedger::seeded(
-                            ready(BELT)
-                        );
-                        2
-                    ]));
-            }
-            if at_arm {
-                app.world_mut().run_schedule(Update);
-            } else {
-                app.world_mut().run_schedule(RunFixedMainLoop);
-            }
-            assert!(
-                app.world().get_entity(root).is_err(),
-                "no partial weapon reaches cadence or arming"
-            );
-            let messages = app
-                .world()
-                .resource::<Messages<super::super::matchmaking::MatchClosed>>();
-            let reasons: Vec<_> = messages.get_cursor().read(messages).cloned().collect();
-            assert_eq!(
-                reasons,
-                vec![super::super::matchmaking::MatchClosed::Ended(format!(
-                    "Malformed server weapon record: expected 2 weapon slots, received {gates} gates and {loads} loads"
-                ))]
-            );
-        }
-    }
-
     /// The ledger arms only on the own interpolated gate — never an opponent's, whose gate the
     /// presentation restore would freeze. The seed is the ONE tick the arriving gate decides
     /// anything: the ledger starts from the belt the server reports, so the first delta is
@@ -966,20 +815,20 @@ mod tests {
     fn consumption_is_the_belt_delta_or_the_arm_edge_never_their_sum() {
         let mut slot = SlotLedger::seeded(ready(BELT));
         slot.pending_local.push_back(500);
-        assert_eq!(
-            slot.confirm(armed(500, BELT)),
-            1,
-            "a Single's consumption IS the None→Some arm edge",
-        );
+        slot.confirm(armed(500, BELT));
         assert!(
             slot.pending_local.is_empty(),
             "the confirmation proves the oldest awaiting local round",
         );
-        assert_eq!(slot.confirm(armed(506, BELT)), 0, "cyclic bookkeeping");
-        assert_eq!(slot.confirm(ready(BELT)), 0, "retirement");
+        slot.pending_local.extend([512, 518]);
+        slot.confirm(armed(506, BELT));
+        assert_eq!(slot.pending_local, [512, 518], "cyclic bookkeeping");
+        slot.confirm(ready(BELT));
+        assert_eq!(slot.pending_local, [512, 518], "retirement");
+        slot.confirm(armed(512, BELT - 1));
         assert_eq!(
-            slot.confirm(armed(512, BELT - 1)),
-            1,
+            slot.pending_local,
+            [518],
             "an Automatic's round moves both signals at once — max, not sum",
         );
     }

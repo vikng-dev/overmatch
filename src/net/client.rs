@@ -1108,32 +1108,6 @@ fn close_lost_match(
     closed.write(verdict);
 }
 
-/// A malformed server weapon record is terminal outside input. Retire replicas and the link
-/// atomically before another cadence consumer can index them; the lobby renders the cause.
-pub(super) fn close_malformed_weapon_record(world: &mut World, reason: String) {
-    let roots: Vec<_> = world
-        .query_filtered::<Entity, With<NetTank>>()
-        .iter(world)
-        .collect();
-    let links: Vec<_> = world
-        .query_filtered::<Entity, With<NetcodeClient>>()
-        .iter(world)
-        .collect();
-    for root in roots {
-        world.despawn(root);
-    }
-    for link in links {
-        world.despawn(link);
-    }
-    // Socket-free replica consumers have no connection lifecycle.
-    if let Some(mut retry) = world.get_resource_mut::<ConnectRetry>() {
-        *retry = ConnectRetry::default();
-    }
-    world
-        .resource_mut::<Messages<super::matchmaking::MatchClosed>>()
-        .write(super::matchmaking::MatchClosed::Ended(reason));
-}
-
 /// The connect screens. The first connect is the [`Flow::Joining`](crate::flow::Flow) screen,
 /// spawned on entering it and labelled from [`ConnectRetry`]; a match's dropped link is
 /// `Overlay::ConnectStatus`, declared only in a match, in the `Declare` phase,

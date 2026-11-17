@@ -1,8 +1,8 @@
 # Shot replication separates trajectory presentation from authoritative consequence
 
-> **Status: stands; the prediction phrasing is superseded by
-> [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15): the client's own firing
-> response is a view overlay (fire intent, own recoil response), not a predicted sim.
+> **Status: stands, with own-fire presentation governed by
+> [[0037-one-authoritative-timeline-and-view-overlays]]**: fire intent and own recoil response
+> are view overlays.
 
 Subject: the game's fire presentation and damage model; game state only. The authority resolves
 every projectile contact, penetration, ricochet and HP dose. Own fire presents from its server
@@ -41,10 +41,11 @@ ticks. Under saturation, a fact can expire before its first opportunity or after
 the persisted producer cursor prevents the same producers from always winning, and a smaller repair
 may use residual budget after a larger fresh fact is refused. Batches use a serialized worst-case
 upper-bound cap of 1,100 bytes and a four-batch per-tick admission budget. All four values are
-**DERIVED STARTING DEFAULTS**, not measured product limits. The cap sits below Lightyear 0.28's
-**DERIVED 1,156-byte** unfragmented-message ceiling. The sizer includes the **DERIVED four-byte**
-maximum message ID and Bevy's **MEASURED nine-byte** encoding of a Lightyear recipient-mapped
-entity; `Entity::PLACEHOLDER` is not a valid worst case.
+**DERIVED STARTING DEFAULTS**, not measured product limits. `shot_transport.rs` derives Lightyear
+0.31.0's **DERIVED 1,162-byte** unfragmented-message ceiling from its 1,200-byte default MTU minus
+13 header bytes, 23 fragment-metadata bytes and a 2-byte payload-length prefix. The sizer includes
+the **DERIVED four-byte** maximum message type ID and **DERIVED ten-byte** postcard encoding of
+a recipient-mapped entity with bit 63 set; `Entity::PLACEHOLDER` is not a valid worst case.
 
 At 64 Hz, the four-batch admission ceiling is a **DERIVED 281,600 application bytes/s per public
 recipient** before Lightyear packing. This is a shot-visual work bound, not an observed link rate or a
