@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from online_cost import (  # noqa: E402
+    MalformedStats,
     after_marker,
     aggregate,
     bots_spawned,
@@ -59,7 +60,13 @@ class ParseStatsLine(unittest.TestCase):
         # table rather than kill the runner mid-night.
         self.assertIsNone(parse_stats_line("INFO server: client connected: 1.2.3.4"))
         self.assertIsNone(parse_stats_line("server: stats line every 1.0 s on stdout (OVERMATCH_SERVER_STATS_S)"))
-        self.assertIsNone(parse_stats_line("server_stats {not json"))
+
+    def test_a_record_that_does_not_parse_is_refused_not_skipped(self):
+        # A skipped period would leave a server window, and the AWS harness's table, that looks
+        # whole with a period missing.
+        for broken in ("server_stats {not json", STATS[:-20], "stdout F " + STATS[:40]):
+            with self.subTest(broken), self.assertRaises(MalformedStats):
+                parse_stats_line(broken)
 
 
 class AfterMarker(unittest.TestCase):

@@ -4,9 +4,11 @@ import contextlib
 import importlib.util
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -155,6 +157,9 @@ if netless_role == role and instance.get("Reboots", 0) < int(netless_boots):
     sys.exit(255)
 clients, window = int(os.environ["FIXTURE_CLIENTS"]), float(os.environ["FIXTURE_WINDOW_S"])
 cmd, args = words[0], words[1:]
+if cmd == "state" and os.environ.get("STATE_FAILS") == role:
+    sys.stderr.write("Failed to open the journal: Input/output error\n")
+    sys.exit(1)
 if cmd == "state":
     lines = ["userdata 10.0", "guard 10.1", "self 10.2", "key 10.3", "packages 20.0", "downloaded 22.0"]
     if role == "server" and os.environ.get("BOOT_FAIL") == "verify":
@@ -187,11 +192,15 @@ elif cmd == "journal" and args[0] == "overmatch-server":
                "wall": {"discarded_ms": 0.0}, "cpu_pct": 80.0, "rss_mb": 220.0, "send_us": {"p95": 500.0},
                "send_clients": [{"link": l, "bytes": 1, "bytes_per_s": 180000.0, "max_packets": 3} for l in links],
                "inputs": [{"link": l, "counts": {"tick_exact": 630, "held": 10}} for l in links]}
-        print(f"[{at:12.6f}] fixture overmatch-server[7]: server_stats {json.dumps(row)}")
+        record = json.dumps(row)
+        if os.environ.get("MALFORMED_STATS") and at > 4 * window:
+            record = record[:40]
+        print(f"[{at:12.6f}] fixture overmatch-server[7]: server_stats {record}")
         at += window
 elif cmd == "journal":
     print("[  101.000000] fixture overmatch[9]: client: controlled entity 4v2 — input slot")
-    for t in range(102, 1500):
+    # NO_JITTER: a release that prints no client_jitter record.
+    for t in range(102, 102 if os.environ.get("NO_JITTER") else 1500):
         print(f"[{t:12.6f}] fixture overmatch[9]: INFO overmatch::net::frontier: client_jitter "
               + json.dumps({"period_s": 1.0, "starved": {"events": 1, "ms": 2.5, "longest_ms": 2.5}}))
 '''
@@ -217,6 +226,48 @@ if tag == "v9.9.9":
 archive = name.removesuffix(".sha256")
 print(f"{'a' * 64}  {archive if archive.endswith('.tar.gz') else archive + '.tar.gz'}")
 '''
+
+# The commands machine.sh calls, for running its own entrypoint here: every call logged in order;
+# `install` and `curl` do their filesystem part; `journalctl` prints JOURNAL, or fails on JOURNAL_FAILS.
+FAKE_MACHINE_COMMAND = r'''#!/usr/bin/env python3
+import json, os, shutil, sys
+from pathlib import Path
+name, args = Path(sys.argv[0]).name, sys.argv[1:]
+with open(os.environ["MACHINE_CALLS"], "a") as log:
+    log.write(json.dumps([name, *args]) + "\n")
+if name == "install":
+    operands, directory, words = [], False, iter(args)
+    for word in words:
+        if word == "-d":
+            directory = True
+        elif word in ("-m", "-o", "-g"):
+            next(words)
+        else:
+            operands.append(word)
+    if directory:
+        for path in operands:
+            Path(path).mkdir(parents=True, exist_ok=True)
+    else:
+        shutil.copy(*operands)
+elif name == "curl":
+    Path(args[args.index("-o") + 1]).write_bytes(b"fixture archive")
+elif name == "sha256sum":
+    sys.stdin.read()
+elif name == "dpkg-query":
+    sys.exit(1)
+elif name == "journalctl":
+    if os.environ.get("JOURNAL_FAILS"):
+        sys.stderr.write("Failed to open the journal: Input/output error\n")
+        sys.exit(1)
+    print(os.environ.get("JOURNAL", ""), end="")
+elif name == "systemctl" and args[:1] == ["is-active"]:
+    print("active")
+'''
+MACHINE_COMMANDS = ("install", "shutdown", "chown", "dpkg-query", "apt-get", "curl", "sha256sum", "tar",
+                    "systemctl", "journalctl")
+# Where each machine path machine.sh names lands under a test's root.
+MACHINE_PATHS = {"/var/lib/om-harness": "state", "/opt/overmatch": "opt", "/usr/local/bin/om-harness": "om-harness",
+                 "/home/ubuntu": "home", "/etc/systemd/system": "units", "/proc/uptime": "uptime"}
 
 SETTINGS = ["--tag", "v0.7.0-alpha.18", "--server-type", "c7a.large", "--client-type", "c7a.large",
             "--bots", "26", "--clients", "4", "--window-s", "10"]
@@ -269,6 +320,54 @@ class Fixture:
         return json.loads(self.ec2.read_text())
 
 
+class MachineScript:
+    """A generated machine.sh run through its own entrypoint: its machine paths moved under a
+    temporary root, the commands it calls replaced by logging fakes, its control flow untouched."""
+
+    def __init__(self, cleanup, user_data: str):
+        temp = tempfile.TemporaryDirectory()
+        cleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        binary = self.root / "bin"
+        binary.mkdir()
+        for name in MACHINE_COMMANDS:
+            (binary / name).write_text(FAKE_MACHINE_COMMAND)
+            (binary / name).chmod(0o755)
+        (self.root / "units").mkdir()
+        (self.root / "uptime").write_text("12.50 3.00\n")
+        for path, under in MACHINE_PATHS.items():
+            user_data = user_data.replace(path, str(self.root / under))
+        self.boot_script = self.root / "user-data"
+        self.boot_script.write_text(user_data)
+        self.installed = self.root / MACHINE_PATHS["/usr/local/bin/om-harness"]
+        self.env = {"PATH": f"{binary}:{os.environ['PATH']}", "MACHINE_CALLS": str(self.root / "calls.jsonl")}
+
+    def boot(self) -> subprocess.CompletedProcess:
+        """cloud-init's call: the user-data as root, no arguments."""
+        return subprocess.run(["bash", str(self.boot_script)], env=self.env, capture_output=True, text=True, timeout=60)
+
+    def command(self, *argv: str, **env: str) -> subprocess.CompletedProcess:
+        """The operator's call over SSH: the installed copy with a command."""
+        return subprocess.run(["bash", str(self.installed), *argv], env=self.env | env, capture_output=True,
+                              text=True, timeout=60)
+
+    def calls(self) -> list[list[str]]:
+        return [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
+
+    def phases(self) -> list[str]:
+        return [line.split()[0] for line in (self.root / "state" / "phases").read_text().splitlines()]
+
+
+def leftovers() -> dict:
+    """An earlier run's machine and group, beside a foreign machine and group."""
+    harness_tags = [{"Key": k, "Value": v} for k, v in harness.TAGS.items()] + [{"Key": "Run", "Value": "earlier"}]
+    return {
+        "instances": [FOREIGN, {**FOREIGN, "InstanceId": "i-0d0d0d0d0d0d0d0d0", "Tags": harness_tags, "Groups": ["sg-0d0d0d0d0d0d0d0d0"]}],
+        "groups": [{"GroupId": "sg-0d0d0d0d0d0d0d0d0", "Tags": harness_tags, "IpPermissions": []},
+                   {"GroupId": "sg-0c0c0c0c0c0c0c0c0", "Tags": [{"Key": "Name", "Value": "om-worker"}], "IpPermissions": []}],
+    }
+
+
 def tags(resource: dict) -> dict[str, str]:
     return {t["Key"]: t["Value"] for t in resource.get("Tags", [])}
 
@@ -303,7 +402,8 @@ class MeasuredRun(unittest.TestCase):
 
     def test_every_launch_carries_its_cost_guard(self):
         # A machine the operator loses must still delete itself: terminate on its own power-off, a
-        # power-off scheduled at a cap that outlives the measurement, a root volume that dies with it.
+        # power-off its own boot schedules before it fetches anything, at a cap that outlives the
+        # measurement, and a root volume that dies with it.
         launches = [c["argv"][8:] for c in self.fixture.calls() if c["argv"][7] == "run-instances"]
         self.assertEqual(len(launches), 2)
         window_s = int(option(SETTINGS, "--window-s"))
@@ -315,10 +415,17 @@ class MeasuredRun(unittest.TestCase):
                 self.assertLessEqual(harness.TAGS.items(), tags(spec).items(), spec["ResourceType"])
             self.assertEqual({s["ResourceType"] for s in json.loads(option(argv, "--tag-specifications"))},
                              {"instance", "volume", "network-interface"})
-            data = Path(option(argv, "--user-data").removeprefix("file://")).read_text()
-            cap = int(re.search(r"^CAP_MIN=(\d+)$", data, re.M).group(1))
+            machine = MachineScript(self.addCleanup, Path(option(argv, "--user-data").removeprefix("file://")).read_text())
+            booted = machine.boot()
+            self.assertEqual(booted.returncode, 0, booted.stderr)
+            self.assertEqual(machine.phases()[-1], "ready")
+            calls = machine.calls()
+            guard = next(i for i, call in enumerate(calls) if call[0] == "shutdown")
+            fetch = next(i for i, call in enumerate(calls) if call[0] == "curl")
+            self.assertLess(guard, fetch)
+            self.assertEqual(calls[guard][1], "-h")
+            cap = int(calls[guard][2].removeprefix("+"))
             self.assertGreater(cap * 60, harness.WARMUP_S + harness.WINDOWS * window_s)
-            self.assertLess(data.index('shutdown -h "+$CAP_MIN"'), data.index('curl -fsSL'))
 
     def test_the_game_port_is_open_only_to_the_client_group_and_ssh_only_to_the_operator(self):
         groups = {}
@@ -347,9 +454,13 @@ class MeasuredRun(unittest.TestCase):
 
 
 class Failures(unittest.TestCase):
-    def test_a_failed_boot_names_its_cause_and_still_tears_down(self):
-        for env, cause in [({"BOOT_FAIL": "verify"}, "checksum mismatch"),
-                           ({"NETLESS": "client:2"}, "two boots without a network")]:
+    def test_a_failure_names_its_cause_and_still_tears_down(self):
+        cases = [({"BOOT_FAIL": "verify"}, "checksum mismatch"),
+                 ({"NETLESS": "client:2"}, "two boots without a network"),
+                 ({"STATE_FAILS": "server"}, "`state` failed: Failed to open the journal"),
+                 ({"MALFORMED_STATS": "1"}, "a server_stats record does not parse"),
+                 ({"NO_JITTER": "1"}, "client 1's client_jitter records cover 0 s")]
+        for env, cause in cases:
             with self.subTest(cause), mock.patch.object(harness, "REACH_TIMEOUT_S", 0):
                 fixture = Fixture(self.addCleanup, **env)
                 self.assertEqual(fixture.main("run", *SETTINGS), 1)
@@ -375,6 +486,9 @@ class Failures(unittest.TestCase):
             argv[argv.index(name) + 1] = value
             return argv
 
+        # The shortest window that no longer fits: the combat's length from the mode data it owns,
+        # against the warmup and the windows the harness waits for after it.
+        overlong = math.floor((harness.combat_s() - harness.WARMUP_S) / (harness.WINDOWS + 1)) + 1
         leftover = {"groups": [{"GroupId": "sg-0e0e0e0e0e0e0e0e0", "IpPermissions": [],
                                 "Tags": [{"Key": k, "Value": v} for k, v in harness.TAGS.items()]}]}
         cases = [
@@ -383,7 +497,7 @@ class Failures(unittest.TestCase):
             ("over the quota", setting("--server-type", "c7a.xlarge"), {}, None, 1, "vCPUs"),
             ("burstable type", setting("--client-type", "t3.small"), {}, None, 1, "burstable"),
             ("an earlier run's leftovers", SETTINGS, {}, leftover, 1, "earlier run"),
-            ("windows past combat", setting("--window-s", "120"), {}, None, 1, "do not fit"),
+            ("windows past combat", setting("--window-s", str(overlong)), {}, None, 1, "do not fit"),
             ("no client to open combat", setting("--clients", "0"), {}, None, 2, "at least 1"),
         ]
         for name, argv, env, seed, status, cause in cases:
@@ -395,18 +509,52 @@ class Failures(unittest.TestCase):
                 self.assertIsNone(LEAKS.search(fixture.stdout + fixture.stderr))
 
     def test_teardown_removes_every_harness_resource_and_nothing_else(self):
-        harness_tags = [{"Key": k, "Value": v} for k, v in harness.TAGS.items()] + [{"Key": "Run", "Value": "earlier"}]
-        seed = {
-            "instances": [FOREIGN, {**FOREIGN, "InstanceId": "i-0d0d0d0d0d0d0d0d0", "Tags": harness_tags, "Groups": ["sg-0d0d0d0d0d0d0d0d0"]}],
-            "groups": [{"GroupId": "sg-0d0d0d0d0d0d0d0d0", "Tags": harness_tags, "IpPermissions": []},
-                       {"GroupId": "sg-0c0c0c0c0c0c0c0c0", "Tags": [{"Key": "Name", "Value": "om-worker"}], "IpPermissions": []}],
-        }
-        fixture = Fixture(self.addCleanup, seed=seed)
+        fixture = Fixture(self.addCleanup, seed=leftovers())
         self.assertEqual(fixture.main("teardown"), 0, fixture.stderr)
         world = fixture.world()
         self.assertEqual({i["InstanceId"]: i["State"]["Name"] for i in world["instances"]},
                          {FOREIGN["InstanceId"]: "running", "i-0d0d0d0d0d0d0d0d0": "terminated"})
         self.assertEqual([g["GroupId"] for g in world["groups"]], ["sg-0c0c0c0c0c0c0c0c0"])
+
+    def test_a_run_log_that_cannot_be_written_never_stops_teardown(self):
+        # Teardown reports its progress through the log; a full disk there must still leave no group
+        # behind and still print the proof.
+        fixture = Fixture(self.addCleanup, seed=leftovers())
+        with mock.patch.object(harness, "LOG", [fixture.root]):  # a directory refuses the write, as a full disk does
+            self.assertEqual(fixture.main("teardown"), 0, fixture.stderr)
+        self.assertIn("run log not written from here on", fixture.stderr)
+        self.assertEqual([g["GroupId"] for g in fixture.world()["groups"]], ["sg-0c0c0c0c0c0c0c0c0"])
+        self.assertIn("proof, region-wide, tagged Purpose=harness: instances 0", fixture.stderr)
+
+
+class MachineCommands(unittest.TestCase):
+    """The installed machine.sh's `state` on a booted server: the harness's wait reads its listening
+    line, and treats any failure other than ssh's own as a refusal."""
+
+    @classmethod
+    def setUpClass(cls):
+        values = dict(zip(SETTINGS[::2], SETTINGS[1::2]))
+        settings = harness.Settings(values["--tag"], values["--server-type"], values["--client-type"],
+                                    int(values["--bots"]), int(values["--clients"]), int(values["--window-s"]))
+        archives = {role: (f"https://example.invalid/{role}.tar.gz", f"{'a' * 64}  {role}.tar.gz")
+                    for role in ("server", "client")}
+        plan = harness.Plan("ami-0123456789abcdef0", "/dev/sda1", "vpc", "subnet", "zone", "192.0.2.99/32", archives)
+        cls.machine = MachineScript(cls.addClassCleanup, harness.user_data("server", settings, plan, "ssh-ed25519 AAAAfixture"))
+        booted = cls.machine.boot()
+        assert booted.returncode == 0, booted.stderr
+
+    def test_the_listening_line_is_read_and_a_journal_without_it_is_no_line(self):
+        found = self.machine.command("state", JOURNAL="[   24.000000] fixture overmatch-server[7]: server: "
+                                                      "starting, listening on 0.0.0.0:5888\n")
+        self.assertIn("listening 24.000000", found.stdout.splitlines())
+        absent = self.machine.command("state", JOURNAL="[    3.000000] fixture overmatch-server[7]: loading\n")
+        self.assertEqual(absent.returncode, 0, absent.stderr)
+        self.assertFalse([line for line in absent.stdout.splitlines() if line.startswith("listening")])
+
+    def test_a_journal_that_cannot_be_read_fails_state_with_its_error(self):
+        failed = self.machine.command("state", JOURNAL_FAILS="1")
+        self.assertNotIn(failed.returncode, (0, harness.SSH_FAILED))
+        self.assertIn("Failed to open the journal", failed.stderr)
 
 
 class Reading(unittest.TestCase):
@@ -414,12 +562,14 @@ class Reading(unittest.TestCase):
         def line(at, clients=4):
             return at, {"period_s": 10.0, "clients": clients, "send_clients": [{}] * clients}
 
-        stats = [line(100), line(110, clients=3)] + [line(120 + 10 * i) for i in range(harness.WINDOWS + 2)]
+        # Seven 10 s lines against a limit of three: the fourth line that counts (ending at 150) is
+        # past the limit, neither chosen nor skipped.
+        stats = [line(100), line(110, clients=3), line(120), line(130), line(140), line(150), line(170)]
         log = harness.ServerLog(combat_open=50.0, combat_end=165.0, stats=stats)
-        chosen, skipped = harness.pick_windows(log, clients=4, measure_from=95.0)
-        self.assertEqual([(w.start, w.end) for w in chosen], [(110.0, 120.0), (120.0, 130.0), (130.0, 140.0),
-                                                             (140.0, 150.0), (150.0, 160.0)])
-        self.assertEqual(skipped, {"before the warmup ended": 1, "not 4 clients connected": 1, "after combat": 5})
+        with mock.patch.object(harness, "WINDOWS", 3):
+            chosen, skipped = harness.pick_windows(log, clients=4, measure_from=95.0)
+        self.assertEqual([(w.start, w.end) for w in chosen], [(110.0, 120.0), (120.0, 130.0), (130.0, 140.0)])
+        self.assertEqual(skipped, {"before the warmup ended": 1, "not 4 clients connected": 1, "after combat": 1})
 
     def test_sampled_cpu_is_percent_of_one_core_and_busy_is_of_the_whole_machine(self):
         # 2.5 CPU-seconds over 10 s is a quarter core; 300 of 400 jiffies not idle is 75 % busy.

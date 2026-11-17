@@ -81,7 +81,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "perf"))
-from online_cost import ANSI, fmt, stats_object  # noqa: E402
+from online_cost import ANSI, MalformedStats, fmt, stats_object  # noqa: E402
 
 PROFILE = "overmatch"
 REGION = "ap-southeast-1"
@@ -137,8 +137,8 @@ SCRUB = (
 )
 JOURNAL_LINE = re.compile(r"^\[\s*(\d+\.\d+)\]\s")
 BATTLE = re.compile(r"server: Battle (\d+) (\w+)")
-# The client's once-a-second stream reading, then one JSON object (src/net/frontier.rs).
-JITTER_TOKEN = "client_jitter "
+# The client's once-a-second stream record, `client_jitter {json}` (src/net/frontier.rs).
+JITTER_RECORD = re.compile(r"\bclient_jitter (?=\{)")
 SETTINGS_MARK = "# @settings\n"
 
 
@@ -158,11 +158,17 @@ LOG: list[Path] = []
 
 
 def say(message: str) -> None:
+    """One progress line on stderr and in the run's log. A log write that fails (a full disk) is
+    reported on stderr and ends the log, so logging never stops a teardown."""
     line = scrub(message)
     print(line, file=sys.stderr, flush=True)
-    for path in LOG:
-        with path.open("a") as log:
-            log.write(line + "\n")
+    for path in list(LOG):
+        try:
+            with path.open("a") as log:
+                log.write(line + "\n")
+        except OSError as error:
+            LOG.remove(path)
+            print(f"run log not written from here on: {error.strerror or error}", file=sys.stderr, flush=True)
 
 
 def write_private(path: Path, text: str) -> None:
@@ -278,15 +284,13 @@ class Plan:
     zone: str
     operator_cidr: str
     archives: dict[str, tuple[str, str]]  # role: (url, checksum line)
-    vcpus: dict[str, int]
 
 
 def archive(tag: str, role: str) -> tuple[str, str]:
     """The role's archive URL and its `sha256sum` line, read from the release (release.yml names)."""
     name = f"overmatch-server-{tag}-{TRIPLE}.tar.gz" if role == "server" else f"overmatch-{tag}-{TRIPLE}.tar.gz"
     checksum = f"{name}.sha256" if role == "server" else f"overmatch-{tag}-{TRIPLE}.sha256"
-    text = fetch(f"{RELEASES}/{tag}/{checksum}", f"{checksum} from release {tag}: is the tag published?")
-    line = text.strip()
+    line = fetch(f"{RELEASES}/{tag}/{checksum}", f"{checksum} from release {tag}: is the tag published?").strip()
     found = re.fullmatch(r"([0-9a-f]{64}) [ *](\S+)", line)
     if not found or found.group(2) != name:
         raise Refused(f"release {tag}: {checksum} is not one sha256sum line for {name}")
@@ -350,10 +354,14 @@ def preflight(s: Settings) -> Plan:
         operator = ipaddress.IPv4Address(address)
     except ValueError as error:
         raise Refused("the operator's public address is not one IPv4 address") from error
-    return Plan(image["ImageId"], image["RootDeviceName"], vpc, subnet, zone, f"{operator}/32", archives, vcpus)
+    return Plan(image["ImageId"], image["RootDeviceName"], vpc, subnet, zone, f"{operator}/32", archives)
 
 
 # ------------------------------------------------------------------------------------- machines
+
+
+# ssh's status for its own failure (no connection, no key yet); any other is the remote command's.
+SSH_FAILED = 255
 
 
 @dataclass
@@ -500,7 +508,8 @@ def wait_booted(machines: list[Machine]) -> None:
     while waiting:
         for machine in list(waiting):
             done = machine.run("state")
-            if done.returncode != 0 and machine.role not in last and time.time() > reach_by[machine.role]:
+            unreachable = done.returncode == SSH_FAILED
+            if unreachable and machine.role not in last and time.time() > reach_by[machine.role]:
                 if machine.rebooted:
                     raise Refused(f"{machine.role} machine never answered SSH, after its launch or after a reboot: "
                                   "two boots without a network (see REACH_TIMEOUT_S); run again")
@@ -508,8 +517,10 @@ def wait_booted(machines: list[Machine]) -> None:
                 machine.rebooted, reach_by[machine.role] = True, time.time() + REACH_TIMEOUT_S
                 say(f"{machine.role}: no SSH {REACH_TIMEOUT_S} s after launch, a boot without a network; rebooted it")
                 continue
-            if done.returncode != 0:  # sshd or the key is not up yet: the boot is still under way
+            if unreachable:  # sshd or the key is not up yet: the boot is still under way
                 continue
+            if done.returncode != 0:
+                raise Refused(f"{machine.role} machine: `state` failed: {done.stderr.strip()[-300:]}")
             state = boot_state(done.stdout)
             machine.phases = state.phases
             if state.failed:
@@ -593,7 +604,10 @@ def server_log(text: str) -> ServerLog:
             combat_open = at
         elif battle and battle.group(2) == "Results" and combat_open is not None and combat_end is None:
             combat_end = at
-        row = stats_object(clean)
+        try:
+            row = stats_object(clean)
+        except MalformedStats as error:
+            raise Refused(f"the server journal: {error}") from error
         if row is not None:
             stats.append((at, row))
     return ServerLog(combat_open, combat_end, stats)
@@ -625,16 +639,37 @@ def pick_windows(log: ServerLog, clients: int, measure_from: float) -> tuple[lis
     return chosen, skipped
 
 
-def starved(text: str) -> list[tuple[float, float]]:
-    """(kernel time, ms) per `client_jitter` line of one client's journal: its frames whose presented
-    cursor had passed the newest tick received."""
+@dataclass
+class Jitter:
+    at: float  # the client machine's kernel time, at the end of the record's period
+    period_s: float
+    starved_ms: float  # of the period's frames, those whose presented cursor had passed the newest tick
+
+
+def jitter(text: str, client: int) -> list[Jitter]:
+    """Client k's `client_jitter` records; one that does not parse is refused, never skipped."""
     out = []
     for line in text.splitlines():
-        stamp, at = JOURNAL_LINE.match(line), line.find(JITTER_TOKEN)
-        if stamp and at >= 0:
-            row, _ = json.JSONDecoder().raw_decode(line, at + len(JITTER_TOKEN))
-            out.append((float(stamp.group(1)), row["starved"]["ms"]))
+        stamp, record = JOURNAL_LINE.match(line), JITTER_RECORD.search(line)
+        if stamp and record:
+            try:
+                row, _ = json.JSONDecoder().raw_decode(line, record.end())
+                out.append(Jitter(float(stamp.group(1)), float(row["period_s"]), float(row["starved"]["ms"])))
+            except (ValueError, KeyError, TypeError) as error:
+                raise Refused(f"client {client}: a client_jitter record does not parse "
+                              f"({type(error).__name__}: {error}): {line.strip()[:160]}") from error
     return out
+
+
+def starved_ms(records: list[Jitter], start: float, end: float, client: int) -> float:
+    """Client k's starved time over one window of its machine's clock, from records that cover
+    COVERAGE of it; less coverage is refused, so a release without the record reads as no reading."""
+    inside = [r for r in records if start < r.at <= end]
+    covered = sum(r.period_s for r in inside)
+    if covered < COVERAGE * (end - start):
+        raise Refused(f"client {client}'s client_jitter records cover {covered:.0f} s of a {end - start:.0f} s "
+                      "window: no starvation reading (does this release print client_jitter?)")
+    return sum(r.starved_ms for r in inside)
 
 
 @dataclass
@@ -702,7 +737,7 @@ COLUMNS = ["win", "at_s", "tanks", "proj", "p50_ms", "p95_ms", "p99_ms", "max_ms
 
 
 def window_cells(index: int, window: Window, combat_open: float, server: Interval, client: Interval,
-                 to_client: float, starving: list[list[tuple[float, float]]]) -> list[float]:
+                 to_client: float, starving: list[list[Jitter]]) -> list[float]:
     row = window.row
     tick = row["tick_us"]
     links = [link["bytes_per_s"] / 1e3 for link in row["send_clients"]]
@@ -711,7 +746,7 @@ def window_cells(index: int, window: Window, combat_open: float, server: Interva
     units = [f"om-client-{k}" for k in range(1, len(starving) + 1)]
     cpu = [client.cpu_pct(u) for u in units]
     start, end = window.start + to_client, window.end + to_client
-    worst_starved = max(sum(ms for at, ms in lines if start < at <= end) for lines in starving)
+    worst_starved = max(starved_ms(records, start, end, k) for k, records in enumerate(starving, 1))
     return [index, window.start - combat_open, row["tanks"], row["projectiles"], tick["p50"] / 1e3,
             tick["p95"] / 1e3, tick["p99"] / 1e3, tick["max"] / 1e3, row["overruns"], row["wall"]["discarded_ms"],
             row["cpu_pct"], row["rss_mb"], server.busy_pct(), server.steal_pct(), row["send_us"]["p95"],
@@ -740,7 +775,7 @@ def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], 
     """The printed report, scrubbed, and its numbers for `results.json`."""
     # Server kernel time to client kernel time, through the operator's clock.
     to_client = server.boot_at - client.boot_at
-    starving = [starved(journal) for journal in client_journals]
+    starving = [jitter(journal, k) for k, journal in enumerate(client_journals, 1)]
     rows = [window_cells(i, w, log.combat_open, interval(server_samples, w.start, w.end),
                          interval(client_samples, w.start + to_client, w.end + to_client), to_client, starving)
             for i, w in enumerate(windows, 1)]

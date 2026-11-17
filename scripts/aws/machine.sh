@@ -107,10 +107,13 @@ UNIT
   mark ready
 }
 
-# The kernel time of the first journal line of <unit> holding <text>, or nothing.
+# The kernel time of the first journal line of <unit> holding <text>; nothing when the query
+# succeeds and no line holds it. A failed query fails the caller, its error on stderr.
 first_line_s() {
-  journalctl -u "$1" -o short-monotonic --no-pager -q 2>/dev/null |
-    grep -m1 -F -- "$2" | sed -E 's/^\[ *([0-9.]+)\].*/\1/' || true
+  local journal line
+  journal="$(journalctl -u "$1" -o short-monotonic --no-pager -q)" || return
+  line="$(grep -m1 -F -- "$2" <<<"$journal")" || [[ $? == 1 ]] || return
+  [[ -z "$line" ]] || sed -E 's/^\[ *([0-9.]+)\].*/\1/' <<<"$line"
 }
 
 cmd_state() {
