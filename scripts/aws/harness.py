@@ -952,12 +952,12 @@ def tiles(lines: list[Jitter], start: float, view_window_s: float) -> list[Histo
 
 def client_cells(client: int, index: int, lines: list[Jitter], start: float,
                  timing: NetTiming) -> list[float | None]:
-    held = tiles(lines, start, timing.view_window_s)
+    taken = tiles(lines, start, timing.view_window_s)
     target = [line.target_minus_today_ms for line in lines if line.target_minus_today_ms is not None]
     totals = [sum(column) for column in zip(*(line.completion for line in lines))]
-    return [client, index, len(lines), sum(h.n for h in held), median([h.p50_ms for h in held]),
-            median([h.p95_ms for h in held]), max((h.max_ms for h in held), default=None),
-            sum(sum(h.bins[2:]) for h in held),  # bins 2 and up: two ticks or more
+    return [client, index, len(lines), sum(h.n for h in taken), median([h.p50_ms for h in taken]),
+            median([h.p95_ms for h in taken]), max((h.max_ms for h in taken), default=None),
+            sum(sum(h.bins[2:]) for h in taken),  # bins 2 and up: two ticks or more
             len(target), median(target), min(target, default=None), max(target, default=None),
             median([line.target_above_x_ms for line in lines if line.target_above_x_ms is not None]),
             statistics.median(line.delay_ms for line in lines), totals[0], totals[1],
@@ -977,6 +977,16 @@ def server_cells(link: str, index: int, arrival: Arrival, timing: NetTiming) -> 
         census = [gaps.n, gaps.p50_ms, gaps.p95_ms, gaps.max_ms,
                   *(None if first is None else sum(gaps.bins[first:]) for first in firsts)]
     return [link, index, arrival.state, *census, arrival.threshold_ms, arrival.stale_arrivals, arrival.declarations]
+
+
+def bin_edge(sample: Histogram | None, bound_s: float) -> str:
+    """Where the bins counted against bound_s begin, for the legend."""
+    if sample is None:
+        return "none recorded"
+    first = sample.first_from(bound_s * 1e3)
+    if first is None:
+        return f"unknown: the open-ended bin from {(len(sample.bins) - 1) * sample.bin_ms:g} ms straddles it"
+    return f"from {first * sample.bin_ms:g} ms"
 
 
 def cell(value: float | str | None) -> str:
@@ -1028,10 +1038,7 @@ def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], 
                                              for i in range(1, len(windows) + 1) if (link, i) in arrivals], 3)
     # Every gap histogram has the same tick-wide bins.
     sample = next((a.gaps for a in arrivals.values() if a.gaps), None)
-    edges = ", ".join("none recorded" if sample is None else
-                      f"from {first * sample.bin_ms:g} ms" if (first := sample.first_from(b * 1e3)) is not None else
-                      f"unknown: the open-ended bin from {(len(sample.bins) - 1) * sample.bin_ms:g} ms straddles it"
-                      for b in (timing.stale_floor_s, timing.stale_ceil_s))
+    edges = ", ".join(bin_edge(sample, bound_s) for bound_s in (timing.stale_floor_s, timing.stale_ceil_s))
     lines = [
         f"recipe: release {s.tag}; server {s.server_type} ({host['cpus']} CPUs, {host['model']}); "
         f"client machine {s.client_type}; {s.bots} bots + {s.clients} clients; "
@@ -1054,32 +1061,32 @@ def report(s: Settings, server: Machine, client: Machine, host: dict[str, str], 
         "View clock, per client and window (src/net/view_clock.rs, in the client_jitter lines):",
         views,
         "",
-        f"lines: the window's client_jitter lines. int_*: intervals between the server frame-start stamps of "
+        "lines: the window's client_jitter lines. int_*: intervals between the server frame-start stamps of "
         f"consecutively completed stamped ticks, MEASURED, from lines at least the {timing.view_window_s:g} s view "
-        f"window apart, whose histograms count each interval inside the window at most once: int_n their count, "
-        f"int_max the largest, int_2T+ those of two ticks or more (a tick that never completed, or a long server "
-        f"frame); int_p50 and int_p95 the median of those histograms' nearest-rank p50 and p95 (DERIVED). "
-        f"tgt-now_*: the would-be delay target minus today's cursor lag, both on the stamp map so the clock "
-        f"offset cancels (negative: the target presents newer state than today), DERIVED by the client at each of "
-        f"the tgt_n lines that had one; median, min and max over them. tgt-x_p50: the target above the newest "
-        f"sampled tick's lateness (DERIVED), median over the lines. delay_ms: today's applied minimum interpolation "
-        f"delay, MEASURED, median over the lines. done, late, evicted, no_stamp, unmapped, overflow: whole-tick "
-        f"completion counts summed over the lines, MEASURED: ticks completed; completed in a later frame than "
-        f"their stamp arrived (late_max_ms the longest such wait); stamps whose tick never completed within the "
-        f"receipt horizon; completions without a retained stamp; stamps without a checkpoint mapping; stamps a "
-        f"full receipt queue dropped. median/min/max rows: DERIVED over every client and window.",
+        "window apart, whose histograms count each interval inside the window at most once: int_n their count, "
+        "int_max the largest, int_2T+ those of two ticks or more (a tick that never completed, or a long server "
+        "frame); int_p50 and int_p95 the median of those histograms' nearest-rank p50 and p95 (DERIVED). "
+        "tgt-now_*: the would-be delay target minus today's cursor lag, both on the stamp map so the clock "
+        "offset cancels (negative: the target presents newer state than today), DERIVED by the client at each of "
+        "the tgt_n lines that had one; median, min and max over them. tgt-x_p50: the target above the newest "
+        "sampled tick's lateness (DERIVED), median over the lines. delay_ms: today's applied minimum interpolation "
+        "delay, MEASURED, median over the lines. done, late, evicted, no_stamp, unmapped, overflow: whole-tick "
+        "completion counts summed over the lines, MEASURED: ticks completed; completed in a later frame than "
+        "their stamp arrived (late_max_ms the longest such wait); stamps whose tick never completed within the "
+        "receipt horizon; completions without a retained stamp; stamps without a checkpoint mapping; stamps a "
+        "full receipt queue dropped. median/min/max rows: DERIVED over every client and window.",
         "",
         "Input gaps, per server link and window (src/net/input_gap.rs, the server_stats line's inputs[].arrival):",
         gaps,
         "",
-        f"gap_*: input arrival gaps (the silence before each arrival, at most one tick charged per empty server "
+        "gap_*: input arrival gaps (the silence before each arrival, at most one tick charged per empty server "
         f"receive), MEASURED over the {timing.uplink_window_s:g} s uplink window before the window's line only: "
-        f"gap_n their count, p50, p95, max nearest rank; gaps>=floor and gaps>=ceil those in the tick-wide bins "
+        "gap_n their count, p50, p95, max nearest rank; gaps>=floor and gaps>=ceil those in the tick-wide bins "
         f"wholly at or above the floor and the ceiling ({edges}). "
-        f"S_ms: the would-be stale threshold, clamp(largest gap + one tick, floor, ceiling), DERIVED by the server "
-        f"at the line. stale_arr: arrivals after a silence above S; stale_decl: silences that crossed S; both "
-        f"MEASURED over the whole window. state: the link's at the line. median/min/max rows: DERIVED over every "
-        f"link and window.",
+        "S_ms: the would-be stale threshold, clamp(largest gap + one tick, floor, ceiling), DERIVED by the server "
+        "at the line. stale_arr: arrivals after a silence above S; stale_decl: silences that crossed S; both "
+        "MEASURED over the whole window. state: the link's at the line. median/min/max rows: DERIVED over every "
+        "link and window.",
     ]
     results = {"settings": s.__dict__, "host": host, "net_timing": timing.__dict__, "windows": main_json,
                "view_clock": views_json, "input_gaps": gaps_json,
