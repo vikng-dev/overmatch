@@ -67,6 +67,7 @@ For replacement and removal, explicitly name the deployment holding the credenti
 
 ```sh
 scripts/aws/host-setup rotate-key --env aws-proving
+scripts/aws/host-setup revoke-key --env aws-proving
 scripts/aws/host-setup teardown --env aws-proving
 ```
 
@@ -84,6 +85,12 @@ lost create response reconciled through key metadata. Failure of that cleanup is
 refusal. Separate Worker writes can leave a mismatched pair after an unconfirmed handoff: rerun
 `issue-key` if no key remains, or `rotate-key` if the old key remains, using the same target. Do not
 enable the provider until the handoff succeeds. No secret can be recovered from IAM metadata.
+
+`revoke-key --env TARGET` refuses while any `Project=overmatch` instances, volumes, interfaces or
+key pairs remain, across purposes and Worker environments. After draining every keyed Worker, it
+revokes all host-user keys and removes only that Worker's three hosting secrets, then proves their
+absence. It retains the standing user, inline policy and security group for the next slice.
+Interrupted removal is restartable; unrelated Worker secrets survive. No new key is created.
 
 `teardown` refuses while tagged instances, volumes, interfaces or key pairs remain; it never
 terminates a match implicitly. It revokes keys first, deletes the selected Worker's hosting secrets,
@@ -123,8 +130,9 @@ send gp3, `VolumeSize` equal to the current image root size, `Iops=3000`, `Throu
 MEASURED on this lane: the public Ubuntu 26.04 amd64 image reports an **8 GiB gp3 root** through
 `DescribeImages.BlockDeviceMappings`, matched to `RootDeviceName`. DERIVED: the policy's per-volume
 size cap is that reported root size, the minimum root needed to boot this image. It is discovered
-again on apply/verify, not a second authored disk size. The provider slice must confirm its
-audio-free release fits that disk. The policy requires gp3 and caps every volume at that size,
+again on apply/verify and checked against `host-image.json`, the measured root mapping used by the
+provider. A changed root refuses setup until that contract and the Worker are rebuilt. The live
+provider proof must confirm its audio-free release fits that disk. The policy requires gp3 and caps every volume at that size,
 **3000 IOPS and 125 MiB/s**, the documented gp3 included baselines. No `IfExists` weakens these
 requirements: absent IAM context keys fail closed. Explicit launch fields avoid relying on EC2
 populating context from omitted defaults; only the provider-key dry-run can prove that context.

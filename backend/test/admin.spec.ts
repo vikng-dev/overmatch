@@ -1,7 +1,8 @@
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import productionServer from "../production-server.json";
 import { accessDenied, adminPage } from "../src/admin";
+import worker from "../src/index";
 import { bringUp, call, env, join } from "./helpers";
 
 const TEAM = "https://team.access.test"; // vitest.config.ts ACCESS_TEAM_DOMAIN
@@ -24,6 +25,10 @@ beforeEach(async () => {
 });
 
 describe("GET /admin", () => {
+	it("an unsupported provider proof is an unknown route before any Access check", async () => {
+		expect((await call("POST", "/admin/aws-proof", { version: "0.5.0" })).status).toBe(404);
+		expect(edgegap.calls).toHaveLength(0);
+	});
 	it("refuses a request without an Access token", async () => {
 		const res = await call("GET", "/admin");
 		expect(res.status).toBe(403);
@@ -52,8 +57,31 @@ describe("GET /admin", () => {
 
 	it("is closed when Access is not configured", async () => {
 		const req = new Request("https://x.test/admin", { headers: { "cf-access-jwt-assertion": await token() } });
-		expect(await accessDenied(req, { ...env, ACCESS_AUD: "" })).toMatch(/not configured/);
-		expect(await accessDenied(req, { ...env, ACCESS_TEAM_DOMAIN: "" })).toMatch(/not configured/);
+		expect(await accessDenied(req, { ...env, ACCESS_AUD: undefined })).toMatch(/not configured/);
+		expect(await accessDenied(req, { ...env, ACCESS_TEAM_DOMAIN: undefined })).toMatch(/not configured/);
+	});
+
+	it.each(["not-json", JSON.stringify({ keys: [{ kty: "RSA", kid: "k1", alg: "RS256", n: "bad", e: "AQAB" }] })])("an unreadable Access key response is a visible refusal: %s", async (raw) => {
+		vi.mocked(fetch).mockResolvedValueOnce(new Response(raw));
+		// A distinct fixture issuer gives this response its own remote-key cache.
+		const settings = { ...env, ACCESS_TEAM_DOMAIN: "https://broken-keys.access.test" };
+		const res = await worker.fetch(new Request("https://x.test/admin", { headers: { "cf-access-jwt-assertion": await token() } }), settings);
+		expect(res.status).toBe(403);
+		expect(await res.text()).toContain("invalid Access token:");
+	});
+
+	it("an authenticated admin sees a logged D1 outage, while SQL bugs propagate", async () => {
+		let failure = new Error("D1_ERROR: Network connection lost.");
+		const settings = { ...env, DB: { prepare: () => { throw failure; } } as unknown as D1Database };
+		const req = () => new Request("https://x.test/admin", { headers: { "cf-access-jwt-assertion": jwt } });
+		const jwt = await token();
+		const log = vi.spyOn(console, "warn");
+		const res = await worker.fetch(req(), settings);
+		expect(res.status).toBe(503);
+		expect(await res.json()).toEqual({ error: "service unavailable; retry later" });
+		expect(log).toHaveBeenCalledWith("platform unavailable", expect.stringContaining("adminVersions:storage"));
+		failure = new Error("D1_ERROR: no such table: sessions");
+		await expect(worker.fetch(req(), settings)).rejects.toBe(failure);
 	});
 
 	it("shows live servers, players, history and derived cost", async () => {

@@ -3,10 +3,10 @@
 //
 // Invariants a change here must keep:
 // - Find-or-create is check-then-act with no `await` between the read and the `starting` insert.
-//   Storage input gates do not cover outbound fetch, so that row — written before the Edgegap call —
+//   Storage input gates do not cover outbound fetch, so that row — written before the provider call —
 //   is the only thing that stops two joins starting two servers. Concurrent joins see it and attach.
-// - A server is joinable ("ready") only when Edgegap has reported its address AND it has sent a
-//   heartbeat: Edgegap says the container runs, the heartbeat says the game serves.
+// - A server is joinable ("ready") only when the provider has reported its address AND it has sent a
+//   heartbeat: the provider says the process runs, the heartbeat says the game serves.
 // - Lifecycle state survives eviction in SQLite; only active stop join handles are volatile.
 //   After any `await`, rows are re-read before use; transitions are guarded by `WHERE state = …`.
 // - The alarm is idempotent (delivery is at-least-once) and is always set to the earliest deadline;
@@ -18,22 +18,23 @@
 //   its fate is unknown: its tickets stay with it, and the alarm looks the deployment up by the
 //   claim's tag (`tagOf`). Found, it is adopted (or stopped, past the deadline); a lookup past the
 //   start deadline that finds nothing is the only proof of absence that frees the tickets.
-// - A deployment is forgotten only once Edgegap confirms it stopped. Ending a server moves its row to
-//   `stopping`; the alarm retries the stop until it succeeds (or Edgegap reports the deployment
+// - A deployment is forgotten only once the provider confirms it stopped. Ending a server moves its row to
+//   `stopping`; the alarm retries the stop until it succeeds (or the provider reports the deployment
 //   gone), and only then is the row `ended` and its history closed.
 // - A deployment carries its claim's tag (`tagOf`) from the deploy request on, and the claim's row
 //   is written here before that request. The orphan sweep (src/sweep.ts) relies on it: a tagged
 //   deployment of this version that no live row owns (`liveDeployments`) is stopped.
-// - Secrets: the netcode key leaves this object only in a ticket answer for that server; the report
-//   secret is stored only as its SHA-256 and never leaves.
+// - Secrets leave only in that server's boot environment and its ready ticket (netcode key only).
+//   Only the report secret's SHA-256 is stored here.
 
 import { DurableObject } from "cloudflare:workers";
-import { config, type Config, type Env } from "./config";
-import { definiteRejection, edgegapFor, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./edgegap";
+import { config, serverEnvironment, type Config, type Env } from "./config";
+import { outsideJson, isRecord, isLocation, isBeacon, definiteRejection, providerFor, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./provider";
+import { RELEASE_CACHE_MS, type ServerRelease } from "./release";
 import { settleAll } from "./deadline";
 import { recordCrash, stopWithEvidence } from "./evidence";
 import { recordEvent, type Outcome, type SessionEvent } from "./history";
-import { timingSafeEqual, newId, randomHex, sha256Hex, versionOf } from "./ids";
+import { timingSafeEqual, newId, randomHex, sha256Hex, versionOf, tagOf } from "./ids";
 import { groupLocations, locationId } from "./locations";
 import { diag, REASONS, serverReason } from "./reasons";
 import type { HeartbeatRequest, LocationsResponse, TicketResponse } from "./types";
@@ -41,6 +42,7 @@ import type { HeartbeatRequest, LocationsResponse, TicketResponse } from "./type
 type ServerState = "starting" | "ready" | "stopping" | "ended";
 
 type ServerRow = {
+	boot_attempt: number;
 	id: string;
 	/** NULL: the claim predates allocation recording. */
 	vcpu: number | null;
@@ -86,6 +88,7 @@ type TicketRow = {
 
 /** A live server as the admin dashboard sees it: no key, no secret. */
 export type ServerSnapshot = {
+	boot_attempt: number;
 	id: string;
 	location: string;
 	deployment_id: string | null;
@@ -135,7 +138,8 @@ CREATE TABLE IF NOT EXISTS servers (
 	peak_players INTEGER NOT NULL DEFAULT 0,
 	deploy TEXT NOT NULL DEFAULT 'calling',
 	stop_at INTEGER,
-	webhook_nonce TEXT NOT NULL
+	webhook_nonce TEXT NOT NULL,
+	boot_attempt INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS tickets (
 	id TEXT PRIMARY KEY,
@@ -163,14 +167,18 @@ export class Registry extends DurableObject<Env> {
 	private readonly cfg: Config;
 	private readonly provider: Provider;
 	// Volatile join handles serialize active attempts; durable rows/markers still own retries after eviction.
+	private readonly releases = new Map<string, Promise<ServerRelease>>();
 	private readonly stops = new Map<string, Promise<void>>();
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		this.sql = ctx.storage.sql;
 		this.cfg = config(env);
-		this.provider = edgegapFor(env, this.cfg.providerTimeoutMs);
+		this.provider = providerFor(env, this.cfg.providerTimeoutMs);
 		this.sql.exec(SCHEMA);
+		if (!this.sql.exec<{ name: string }>("PRAGMA table_info(servers)").toArray().some((c) => c.name === "boot_attempt")) {
+			this.sql.exec("ALTER TABLE servers ADD COLUMN boot_attempt INTEGER NOT NULL DEFAULT 0");
+		}
 		if (!this.sql.exec<{ name: string }>("PRAGMA table_info(servers)").toArray().some((c) => c.name === "vcpu")) {
 			// Existing claims have no recorded allocation; never infer one from today's config.
 			this.sql.exec("ALTER TABLE servers ADD COLUMN vcpu REAL CHECK (vcpu > 0)");
@@ -184,6 +192,7 @@ export class Registry extends DurableObject<Env> {
 		try {
 			cat = await this.catalog();
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			return { ok: false, error: `location list unavailable: ${String(err)}` };
 		}
 		const matches = new Map<string, number>();
@@ -202,15 +211,29 @@ export class Registry extends DurableObject<Env> {
 		clientIp: string | null,
 		origin: string,
 	): Promise<JoinResult> {
+		if (this.provider.requiresHttps && new URL(origin).protocol !== "https:") {
+			return { ok: false, status: 400, error: "insecureOrigin: hosted reports require an HTTPS API origin" };
+		}
 		let known: Set<string>;
 		try {
 			known = new Set((await this.catalog()).locations.map(locationId));
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			return { ok: false, status: 503, error: `location list unavailable: ${String(err)}` };
 		}
 		const unknown = locations.filter((l) => !known.has(l));
 		if (unknown.length) return { ok: false, status: 400, error: `unknown locations: ${unknown.join(", ")}` };
 
+		if (this.provider.verifyRelease) {
+			try { await this.release(version); }
+			catch (err) {
+				if (!(err instanceof ProviderError)) throw err;
+				console.warn("release refused", diag(err));
+				if (err.op === "releaseBuildMetadataUnsupported") return { ok: false, status: 400, error: REASONS.releaseVersionUnsupported };
+				return { ok: false, status: err.outcome === "releaseMissing" ? 404 : 503,
+					error: err.outcome === "releaseMissing" ? REASONS.releaseMissing : REASONS.releaseUnavailable };
+			}
+		}
 		const ticket = newId(version);
 		this.sql.exec(
 			"INSERT INTO tickets (id, locations, pings, client_ip, origin, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -233,7 +256,7 @@ export class Registry extends DurableObject<Env> {
 		const s = t.server_id ? this.server(t.server_id) : null;
 		if (!s) return { state: "starting" };
 		if (s.state === "ready") return { state: "ready", address: s.address!, port: s.port!, key: s.netcode_key };
-		if (s.state === "stopping" && !this.fateKnown(s)) return { state: "starting" };
+		if (s.state === "stopping" && (!this.fateKnown(s) || (this.provider.starts.retryBootInPlace && !t.failed_reason && s.ready_at === null))) return { state: "starting" };
 		if (s.state === "stopping" || s.state === "ended") return { state: "failed", reason: publicReason(s.reason) };
 		return { state: "starting" };
 	}
@@ -245,6 +268,10 @@ export class Registry extends DurableObject<Env> {
 		if (!s || !live(s)) return { status: 410 };
 		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
 		const now = Date.now();
+		if (this.expired(s, now)) {
+			await this.finish(serverId, "ended", REASONS.lifetimeExpired);
+			return { status: 410 };
+		}
 		const written = this.sql.exec(
 			`UPDATE servers SET players = ?, capacity = ?, server_state = ?, last_seen = ?, peak_players = MAX(peak_players, ?)
 			 WHERE id = ? AND state IN ('starting', 'ready')`,
@@ -268,7 +295,9 @@ export class Registry extends DurableObject<Env> {
 		const s = this.server(serverId);
 		if (!s || (crash === undefined && !live(s))) return { status: 410 };
 		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
-		await this.finish(serverId, crash === undefined ? "ended" : "failed", crash === undefined ? serverReason(reason) : REASONS.serverCrashed, undefined, crash);
+		const bootFailed = this.provider.starts.retryBootInPlace && s.state === "starting" && /^boot-(guard|self|updates|user|download|verify|unpack|start)$/.test(reason);
+		await this.finish(serverId, crash !== undefined || bootFailed ? "failed" : "ended",
+			crash !== undefined ? REASONS.serverCrashed : bootFailed ? REASONS.startFailed : serverReason(reason), undefined, crash);
 		return { status: 204 };
 	}
 
@@ -285,6 +314,7 @@ export class Registry extends DurableObject<Env> {
 			try {
 				st = await this.provider.status(requestId);
 			} catch (err) {
+				if (!(err instanceof ProviderError)) throw err;
 				console.warn("webhook status read failed", serverId, diag(err));
 				return true;
 			}
@@ -300,7 +330,7 @@ export class Registry extends DurableObject<Env> {
 	snapshot(): ServerSnapshot[] {
 		return this.sql
 			.exec<ServerSnapshot>(
-				`SELECT id, location, deployment_id, state, outcome, reason, players, capacity, server_state, address, port,
+				`SELECT boot_attempt, id, location, deployment_id, state, outcome, reason, players, capacity, server_state, address, port,
 				        created_at, ready_at, last_seen, ended_at, peak_players
 				 FROM servers ORDER BY created_at`,
 			)
@@ -321,6 +351,11 @@ export class Registry extends DurableObject<Env> {
 			.map((c) => c.deploymentId);
 	}
 
+	claimExists(serverId: string): boolean {
+		const s = this.server(serverId);
+		return !!s && s.state !== "ended";
+	}
+
 	// ---- alarm --------------------------------------------------------------------------------
 
 	async alarm(): Promise<void> {
@@ -328,6 +363,9 @@ export class Registry extends DurableObject<Env> {
 		const retry: string[] = [];
 		const work: (() => Promise<unknown>)[] = [];
 
+		for (const r of this.sql.exec<ServerRow>("SELECT * FROM servers WHERE state IN ('starting', 'ready')").toArray()) {
+			if (this.expired(r, now)) this.beginStop(r.id, "ended", REASONS.lifetimeExpired, undefined, now);
+		}
 		for (const r of this.sql.exec<ServerRow>("SELECT * FROM servers WHERE state = 'starting'").toArray()) {
 			if (r.created_at + this.cfg.startDeadlineMs <= now) {
 				retry.push(...(this.beginStop(r.id, "failed", REASONS.startTimeout, "starting", now) ?? []));
@@ -354,12 +392,22 @@ export class Registry extends DurableObject<Env> {
 		await this.reschedule();
 
 		// A slow capture holds a slot; replacements wait for the complete outbound batch.
-		await settleAll(work, OUTBOUND_CONCURRENCY);
+		await settleAll(work.map((task) => async () => {
+			try { await task(); }
+			catch (err) {
+				if (!(err instanceof ProviderError)) throw err;
+				console.error("alarm outside failure; durable markers retain retry", diag(err));
+			}
+		}), OUTBOUND_CONCURRENCY);
 		await this.replace(retry);
 		await this.reschedule();
 	}
 
 	// ---- internals ----------------------------------------------------------------------------
+
+	private expired(s: ServerRow, now: number): boolean {
+		return this.provider.inventory.maxAgeMs !== null && s.created_at + this.provider.inventory.maxAgeMs <= now;
+	}
 
 	private server(id: string): ServerRow | undefined {
 		return this.sql.exec<ServerRow>("SELECT * FROM servers WHERE id = ?", id).toArray()[0];
@@ -369,9 +417,46 @@ export class Registry extends DurableObject<Env> {
 		return secret.length > 0 && timingSafeEqual(await sha256Hex(secret), s.secret_hash);
 	}
 
+	private async release(version: string): Promise<ServerRelease> {
+		const active = this.releases.get(version);
+		if (active) return active;
+		const attempt = this.loadRelease(version);
+		this.releases.set(version, attempt);
+		try { return await attempt; }
+		finally { this.releases.delete(version); }
+	}
+
+	private async loadRelease(version: string): Promise<ServerRelease> {
+		const k = `release:${version}`;
+		const row = this.sql.exec<{ body: string; fetched_at: number }>("SELECT body, fetched_at FROM catalog WHERE k = ?", k).toArray()[0];
+		if (row) {
+			const cached = outsideJson(row.body, "releaseCache");
+			let release: ServerRelease | null = null;
+			if (cached !== null) {
+				if (!isRecord(cached) || typeof cached.url !== "string" || typeof cached.checksum !== "string") throw new ProviderError("releaseCache", 0, "unknown");
+				release = { url: cached.url, checksum: cached.checksum };
+			}
+			if (row.fetched_at + RELEASE_CACHE_MS > Date.now()) {
+				if (release) return release;
+				throw new ProviderError("release", 404, "releaseMissing");
+			}
+		}
+		let release: ServerRelease | null;
+		try { release = await this.provider.verifyRelease!(version, this.cfg.providerTimeoutMs); }
+		catch (err) {
+			if (!(err instanceof ProviderError) || err.outcome !== "releaseMissing") throw err;
+			release = null;
+		}
+		this.sql.exec("INSERT INTO catalog VALUES (?, ?, ?) ON CONFLICT(k) DO UPDATE SET body = excluded.body, fetched_at = excluded.fetched_at",
+			k, JSON.stringify(release), Date.now());
+		if (!release) throw new ProviderError("release", 404, "releaseMissing");
+		return release;
+	}
+
 	private async catalog(): Promise<Catalog> {
 		const row = this.sql.exec<{ body: string; fetched_at: number }>("SELECT body, fetched_at FROM catalog WHERE k = 'edgegap'").toArray()[0];
-		if (row && row.fetched_at + this.cfg.locationsCacheMs > Date.now()) return JSON.parse(row.body) as Catalog;
+		const cached = row ? cachedCatalog(row.body) : null;
+		if (row && cached && row.fetched_at + this.cfg.locationsCacheMs > Date.now()) return cached;
 		try {
 			const [locations, beacons] = await Promise.all([this.provider.locations(), this.provider.beacons()]);
 			const cat: Catalog = { locations, beacons };
@@ -382,9 +467,10 @@ export class Registry extends DurableObject<Env> {
 			);
 			return cat;
 		} catch (err) {
-			if (row) {
+			if (!(err instanceof ProviderError)) throw err;
+			if (cached) {
 				console.warn("location refresh failed, serving the stale list", diag(err));
-				return JSON.parse(row.body) as Catalog;
+				return cached;
 			}
 			throw err;
 		}
@@ -437,12 +523,12 @@ export class Registry extends DurableObject<Env> {
 		const candidates = this.sql
 			.exec<ServerRow>("SELECT * FROM servers WHERE state IN ('starting', 'ready') AND (server_state IS NULL OR server_state = 'open')")
 			.toArray()
-			.filter((s) => wanted.includes(s.location) && !excluded.has(s.location))
+			.filter((s) => !this.expired(s, now) && wanted.includes(s.location) && !excluded.has(s.location))
 			.map((s) => ({ s, load: this.load(s, now) }))
 			.filter(({ s, load }) => load < s.capacity)
 			.sort((a, b) => ping(a.s.location) - ping(b.s.location) || b.load - a.load || a.s.created_at - b.s.created_at);
 		if (candidates.length) {
-			this.sql.exec("UPDATE tickets SET server_id = ?, attached_at = ? WHERE id = ?", candidates[0].s.id, now, ticketId);
+			this.sql.exec("UPDATE tickets SET server_id = ?, attached_at = ?, attempts = MAX(attempts, ?) WHERE id = ?", candidates[0].s.id, now, this.provider.starts.retryBootInPlace ? candidates[0].s.boot_attempt : t.attempts, ticketId);
 			return;
 		}
 
@@ -459,8 +545,8 @@ export class Registry extends DurableObject<Env> {
 		const netcodeKey = randomHex(32);
 		const webhookNonce = randomHex(16);
 		this.sql.exec(
-			`INSERT INTO servers (id, location, state, capacity, netcode_key, secret_hash, created_at, next_poll_at, deploy, webhook_nonce, vcpu)
-			 VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, 'calling', ?, ?)`,
+			`INSERT INTO servers (id, location, state, capacity, netcode_key, secret_hash, created_at, next_poll_at, deploy, webhook_nonce, vcpu, boot_attempt)
+			 VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, 'calling', ?, ?, ?)`,
 			serverId,
 			where,
 			this.cfg.capacity,
@@ -470,6 +556,7 @@ export class Registry extends DurableObject<Env> {
 			now + this.cfg.statusPollMs,
 			webhookNonce,
 			this.cfg.vcpuPerServer,
+			t.attempts,
 		);
 		this.sql.exec("UPDATE tickets SET server_id = ?, attached_at = ? WHERE id = ?", serverId, now, ticketId);
 		// The claim's deadline is durable before any outbound await (D1, Edgegap): a stalled call or an
@@ -481,22 +568,15 @@ export class Registry extends DurableObject<Env> {
 		try {
 			deploymentId = await this.provider.deploy({
 				version,
+				release: this.provider.verifyRelease ? await this.release(version) : undefined,
 				city: where,
 				tag: tagOf(serverId),
 				clientIp: t.client_ip,
 				webhookUrl: `${t.origin}/v1/edgegap/webhook/${encodeURIComponent(serverId)}/${webhookNonce}`,
-				env: [
-					{ key: "OVERMATCH_SERVER_ID", value: serverId, hidden: false },
-					{ key: "OVERMATCH_API", value: t.origin, hidden: false },
-					{ key: "OVERMATCH_NETCODE_KEY", value: netcodeKey, hidden: true },
-					{ key: "OVERMATCH_REPORT_SECRET", value: reportSecret, hidden: true },
-					{ key: "OVERMATCH_CAPACITY", value: String(this.cfg.capacity), hidden: false },
-					{ key: "OVERMATCH_HEARTBEAT_INTERVAL_S", value: String(this.cfg.heartbeatIntervalMs / 1000), hidden: false },
-					{ key: "OVERMATCH_EMPTY_EXIT_S", value: String(this.cfg.emptyExitS), hidden: false },
-					{ key: "OVERMATCH_SERVER_STATS_S", value: String(this.cfg.serverStatsS), hidden: false },
-				],
+				env: serverEnvironment(this.cfg, serverId, t.origin, netcodeKey, reportSecret),
 			});
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			console.warn("deploy failed", serverId, diag(err));
 			if (!definiteRejection(err)) {
 				// A deployment may exist: keep the claim and its tickets; the alarm reconciles by tag.
@@ -520,7 +600,10 @@ export class Registry extends DurableObject<Env> {
 		if (!row) {
 			// The claim was forgotten (retention) before its deploy answered: one stop is all that is left.
 			await stopWithEvidence(this.env, this.provider, serverId, deploymentId, this.cfg.providerTimeoutMs)
-				.catch((err) => console.error("stop of forgotten claim failed", serverId, diag(err)));
+				.catch((err) => {
+					if (!(err instanceof ProviderError)) throw err;
+					console.error("stop of forgotten claim failed", serverId, diag(err));
+				});
 			return;
 		}
 		if (row.state === "ended" && !row.deployment_id) {
@@ -545,7 +628,7 @@ export class Registry extends DurableObject<Env> {
 		const s = this.server(serverId);
 		if (s?.state === "stopping") {
 			// The id makes the claim's fate known: its deferred tickets may now be placed elsewhere.
-			const retry = this.releaseTickets(s, s.reason ?? REASONS.startFailed);
+			const retry = this.provider.starts.retryBootInPlace ? [] : this.releaseTickets(s, s.reason ?? REASONS.startFailed);
 			await this.tryStop(serverId);
 			await this.replace(retry);
 		} else if (s?.state === "starting" && poll) {
@@ -562,6 +645,7 @@ export class Registry extends DurableObject<Env> {
 		try {
 			found = await this.provider.findByTag(tagOf(serverId));
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			console.warn("deployment lookup failed", serverId, diag(err));
 			return;
 		}
@@ -592,8 +676,9 @@ export class Registry extends DurableObject<Env> {
 		if (!before?.deployment_id || !live(before)) return;
 		let st: DeploymentStatus;
 		try {
-			st = await this.provider.status(before.deployment_id);
+			st = await this.provider.status(before.deployment_id, before.created_at + this.cfg.startDeadlineMs);
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			console.warn("status poll failed", serverId, diag(err));
 			return;
 		}
@@ -629,7 +714,7 @@ export class Registry extends DurableObject<Env> {
 	}
 
 	/** End a live server: move it to `stopping`, give the tickets of a server that never became ready
-	 *  another placement (bounded by JOIN_ATTEMPTS), and try the stop. The row stays until the stop
+	 *  another placement (bounded by the provider start budget), and try the stop. The row stays until the stop
 	 *  is confirmed (`tryStop`); replacements wait behind this capture/stop attempt. */
 	private async finish(serverId: string, outcome: Outcome, reason: string, from?: "starting" | "ready", crash?: string): Promise<void> {
 		const retry = this.beginStop(serverId, outcome, reason, from);
@@ -639,7 +724,7 @@ export class Registry extends DurableObject<Env> {
 				// A heartbeat expiry or clean end can win the stop transition while a panic is reporting.
 				// Preserve its cause even if the stop/history already completed; old end calls still get 410.
 				this.sql.exec("UPDATE servers SET outcome = 'failed', reason = ? WHERE id = ?", REASONS.serverCrashed, serverId);
-				// Persist before provider requests; failure returns 500 after stop/ticket cleanup.
+				// Persist before provider requests; failure rejects the invocation after stop/ticket cleanup.
 				await recordCrash(this.env, serverId, crash, this.cfg.providerTimeoutMs);
 				await this.record({ kind: "crashed", serverId });
 			}
@@ -664,13 +749,17 @@ export class Registry extends DurableObject<Env> {
 			s.state,
 		).rowsWritten;
 		if (!moved) return null;
+		if (reason === REASONS.lifetimeExpired) {
+			this.sql.exec("UPDATE tickets SET server_id = NULL, attached_at = NULL, failed_reason = ? WHERE server_id = ?", reason, serverId);
+			return [];
+		}
 		// Tickets of a claim whose deployment may exist stay with it until its fate is known (`adopt`,
 		// `reconcile`): placing them now could start a second server for the same players.
-		return s.state === "starting" && this.fateKnown(s) ? this.releaseTickets(s, reason) : [];
+		return !this.provider.starts.retryBootInPlace && s.state === "starting" && this.fateKnown(s) ? this.releaseTickets(s, reason) : [];
 	}
 
 	/** Detach the waiting tickets of a server that never became ready: each gets another placement
-	 *  (bounded by JOIN_ATTEMPTS, away from this location) or fails with `reason`. Returns the ids to
+	 *  (bounded by the provider start budget; boot retries preserve location) or fails with `reason`. Returns the ids to
 	 *  place again. */
 	private releaseTickets(s: ServerRow, reason: string): string[] {
 		if (s.ready_at !== null) return [];
@@ -678,10 +767,12 @@ export class Registry extends DurableObject<Env> {
 		const retry: string[] = [];
 		for (const t of orphans) {
 			const excluded = new Set<string>(JSON.parse(t.excluded));
-			excluded.add(s.location);
-			const attempts = t.attempts + 1;
+			const bootRetry = this.provider.starts.retryBootInPlace &&
+				(reason === REASONS.startTimeout || reason === REASONS.startFailed);
+			if (!bootRetry) excluded.add(s.location);
+			const attempts = (this.provider.starts.retryBootInPlace ? Math.max(t.attempts, s.boot_attempt) : t.attempts) + 1;
 			const left = (JSON.parse(t.locations) as string[]).some((l) => !excluded.has(l));
-			if (attempts >= this.cfg.joinAttempts || !left) {
+			if (attempts >= this.provider.starts.attempts || !left) {
 				this.sql.exec("UPDATE tickets SET attempts = ?, failed_reason = ? WHERE id = ?", attempts, reason, t.id);
 			} else {
 				this.sql.exec(
@@ -699,7 +790,8 @@ export class Registry extends DurableObject<Env> {
 	private async replace(ticketIds: string[]): Promise<void> {
 		for (const id of ticketIds) {
 			const version = versionOf(id);
-			if (version) await this.place(version, id);
+			if (!version) throw new Error("replacement tickets must carry the version encoded by newId");
+			await this.place(version, id);
 		}
 	}
 
@@ -707,7 +799,7 @@ export class Registry extends DurableObject<Env> {
 		return recordEvent(this.env.DB, e, this.cfg.providerTimeoutMs);
 	}
 
-	/** One stop attempt for a `stopping` row. Success (or Edgegap no longer knowing the deployment)
+	/** One stop attempt for a `stopping` row. Confirmed termination or accepted absence
 	 *  ends the row and closes its history; failure leaves it `stopping` with the next attempt time.
 	 *  A row whose deploy call is still in flight waits for the id. */
 	private async tryStop(serverId: string): Promise<void> {
@@ -735,8 +827,9 @@ export class Registry extends DurableObject<Env> {
 	private async stopDeployment(serverId: string, deploymentId: string): Promise<void> {
 		this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", Date.now() + this.cfg.statusPollMs, serverId);
 		try {
-			await stopWithEvidence(this.env, this.provider, serverId, deploymentId, this.cfg.providerTimeoutMs);
+			await stopWithEvidence(this.env, this.provider, serverId, deploymentId, this.cfg.providerTimeoutMs, this.server(serverId)!.created_at + this.cfg.startDeadlineMs);
 		} catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
 			console.error("stop failed, will retry", serverId, diag(err));
 			return;
 		}
@@ -746,6 +839,14 @@ export class Registry extends DurableObject<Env> {
 	private async markEnded(serverId: string): Promise<void> {
 		const s = this.server(serverId);
 		if (s?.state !== "stopping") return;
+		// Schedule before RPC: release failure must survive eviction even when no deployment was created.
+		this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", Date.now() + this.cfg.statusPollMs, serverId);
+		try { await this.provider.releaseClaim?.(serverId); }
+		catch (err) {
+			if (!(err instanceof ProviderError)) throw err;
+			console.error("Fleet release failed; stopping row retains retry", diag(err));
+			return;
+		}
 		const now = Date.now();
 		if (!this.sql.exec("UPDATE servers SET state = 'ended', ended_at = ? WHERE id = ? AND state = 'stopping'", now, serverId).rowsWritten) return;
 		const retry = this.releaseTickets(s, s.reason ?? REASONS.startFailed);
@@ -770,14 +871,15 @@ export class Registry extends DurableObject<Env> {
 		const r = this.sql
 			.exec<{ t: number | null }>(
 				`SELECT MIN(t) AS t FROM (
-					SELECT MIN(created_at + ?, COALESCE(next_poll_at, 0)) AS t FROM servers WHERE state = 'starting'
-					UNION ALL SELECT last_seen + ? FROM servers WHERE state = 'ready'
+					SELECT MIN(created_at + ?1, COALESCE(next_poll_at, 0), COALESCE(created_at + ?3, created_at + ?1)) AS t FROM servers WHERE state = 'starting'
+					UNION ALL SELECT MIN(last_seen + ?2, COALESCE(created_at + ?3, last_seen + ?2)) FROM servers WHERE state = 'ready'
 					UNION ALL SELECT COALESCE(stop_at, 0) FROM servers WHERE state = 'stopping'
-					UNION ALL SELECT ended_at + ? FROM servers WHERE state = 'ended'
-					UNION ALL SELECT created_at + ? FROM tickets
+					UNION ALL SELECT ended_at + ?4 FROM servers WHERE state = 'ended'
+					UNION ALL SELECT created_at + ?5 FROM tickets
 				)`,
 				c.startDeadlineMs,
 				c.heartbeatDeadlineMs,
+				this.provider.inventory.maxAgeMs,
 				c.endedRetentionMs,
 				c.ticketTtlMs,
 			)
@@ -789,7 +891,7 @@ export class Registry extends DurableObject<Env> {
 
 /** The sharding seam: one Registry per game version. Finer sharding is a change here alone. */
 export function registryFor(env: Env, version: string): DurableObjectStub<Registry> {
-	const hint = env.LOCATION_HINT as DurableObjectLocationHint | "";
+	const hint = config(env).locationHint;
 	return env.REGISTRY.getByName(version, hint ? { locationHint: hint } : undefined);
 }
 
@@ -799,11 +901,10 @@ function publicReason(stored: string | null): string {
 	return (Object.values(REASONS) as string[]).includes(stored ?? "") ? stored! : REASONS.serverEnded;
 }
 
-/** A refused deploy (4xx) is the provider's "no"; 422 is its no-capacity answer (MEASURED in the
- *  risk test). Anything else is the provider not answering. */
+/** EC2 classifies by error code; Edgegap 422 means no capacity (MEASURED in the risk test). */
 function deployFailure(err: unknown): string {
-	if (err instanceof ProviderError && err.status === 422) return REASONS.noCapacity;
-	if (err instanceof ProviderError && err.status >= 400 && err.status < 500) return REASONS.startRefused;
+	if (err instanceof ProviderError && (err.outcome === "capacity" || err.status === 422)) return REASONS.noCapacity;
+	if (err instanceof ProviderError && (err.outcome === "refused" || (err.status >= 400 && err.status < 500))) return REASONS.startRefused;
 	return REASONS.providerUnavailable;
 }
 
@@ -814,8 +915,9 @@ function live(s: ServerRow): boolean {
 	return s.state === "starting" || s.state === "ready";
 }
 
-/** The Edgegap tag that identifies a claim's deployment: the random half of the server id (32 hex,
- *  35 characters with the prefix; Edgegap allows 40). */
-export function tagOf(serverId: string): string {
-	return `om-${serverId.slice(serverId.indexOf(".") + 1)}`;
+function cachedCatalog(raw: string): Catalog {
+	const value = outsideJson(raw, "catalogCache");
+	if (!isRecord(value) || !Array.isArray(value.locations) || !value.locations.every(isLocation)
+		|| !Array.isArray(value.beacons) || !value.beacons.every(isBeacon)) throw new ProviderError("catalogCache", 0, "unknown");
+	return { locations: value.locations, beacons: value.beacons };
 }
