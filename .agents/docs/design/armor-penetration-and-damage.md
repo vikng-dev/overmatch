@@ -1583,8 +1583,9 @@ coasting to rest (authority and owner replica alike), reversal and travel-stop m
 absorption. No expected rate is
 copied from a run.
 
-Non-owner replicas present `ServoAngles` sampled at the view cursor their hull is drawn at
-(`net::rig::present_streamed_aim`); a presented angle is not a second drive's target, carries no
+Every attached remote aim rig presents `ServoAngles` sampled at the view cursor its hull is drawn
+at (`net::rig::present_streamed_aim`); a knocked-out tank's launched turret instead follows its
+replicated `LaunchedTurretPose`, applied on arrival. A presented angle is not a second drive's target, carries no
 local momentum, and `drive_servos` never steps it. The presenter excludes the controlled tank,
 whose ahead-running aim still integrates through `drive_servos` (under review in #187). That own-client path reads stale replicated `EngineRpm`: `publish_engine_rpm`
 only writes dynamic bodies, while client replicas are static. Its available power can therefore

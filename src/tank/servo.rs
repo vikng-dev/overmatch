@@ -228,8 +228,8 @@ pub struct ServoRest(pub Quat);
 pub struct ServoIndex(pub usize);
 
 /// Client-local presentation state, permanent on replicas. A replica this client does not drive
-/// holds its stream's angles at the view cursor (`net::rig`); the controlled tank integrates its
-/// own ahead-running aim. [`TankServos`] remains authoritative.
+/// holds its stream's angles at the view cursor (`net::rig`) and no fixed step moves them; the
+/// controlled tank integrates its own ahead-running aim. [`TankServos`] remains authoritative.
 #[derive(Component, Clone, PartialEq, Debug, Default)]
 pub(crate) struct RemoteServos(pub Vec<ServoState>);
 
@@ -423,9 +423,7 @@ pub(crate) fn drive_servos(
                 authority.map(|authority| &mut authority.into_inner().states),
             );
             if streamed {
-                // A replica this client does not drive holds its stream's angles at the view
-                // cursor (`net::rig`); no fixed step moves it.
-                return;
+                return; // Stream-posed: see `RemoteServos`.
             }
             // The game's damage model: requirements scale operator work; an engine in action
             // supplies whole power (`module_quality`). One reading serves every slot.
@@ -800,6 +798,26 @@ mod tests {
             .advance_by(Duration::from_secs_f32(1.0 / 64.0));
         world.run_system_once(drive_servos).unwrap();
         world.get::<TankServos>(root).unwrap().states[0]
+    }
+
+    /// A continuous mount's angle is its unwrapped travel: turning through ±π it keeps counting,
+    /// never folding back to −π. The stream publishes this angle and the cursor blends it linearly
+    /// (`net::protocol::servo_angles_lerp`); a folded angle would make that blend swing the mount
+    /// the long way round on every crossing.
+    #[test]
+    fn a_continuous_mount_counts_its_travel_through_a_half_turn() {
+        use std::f32::consts::PI;
+        let (mut world, root, servo, _) = powered_world(1.0);
+        // Fixture: a mount just short of +π, turning toward it.
+        world.get_mut::<TankServos>(root).unwrap().states[0] =
+            ServoState::test_new(PI - 0.05, PI - 0.05, 0.5);
+        let mut last = PI - 0.05;
+        for _ in 0..64 {
+            let current = tick_powered(&mut world, root, servo).current;
+            assert!(current >= last, "{current} folded back from {last}");
+            last = current;
+        }
+        assert!(last > PI + 0.05, "the fixture turn crossed +π: {last}");
     }
 
     /// The game's damage model: authority reads the engine HP share every tick. An engine out

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Turret-on-the-cursor capture: one dedicated server and two hidden-window clients over real UDP,
-each receiving through the seeded 80 ms / 10 ms receive conditioner (`net::harness`).
+each receiving through the seeded receive conditioner (`CONDITIONER`).
 
-`fire`: the subject traverses its turret at its full powered rate toward a point behind it and
-fires its main gun mid-traverse; per shot it reports the angle between the drawn barrel and the
-server's bore at the fire tick, and between the drawn barrel and the tracer's first drawn segment,
-on the shooter's own client (its own turret) and on the observer's (a remote turret, #330).
+`fire`: the subject sweeps its turret round at a scenario-set rate and fires its main gun each
+time the gun reads ready; per shot it reports the angle between the drawn barrel and the server's
+bore at the fire tick, and between the drawn barrel and the tracer's first drawn segment, on the
+shooter's own client (its own turret) and on the observer's (a remote turret, #330).
 
 `pivot`: the subject turns in place while its turret holds a world point; from the observer's
 per-frame drawn bore it reports the bore bearing's oscillation and steps (#132), beside the
@@ -29,17 +29,36 @@ import time
 
 TICK_HZ = 64
 
-# Fixture workloads. `fire`: the aim point sits 0.5 degrees right of dead astern and 7 degrees up
-# (DERIVED from the point), so the turret traverses right, away from the observer at -8 m x, for
-# a half turn; a click every 196 ticks outlasts the main gun's 192-tick reload, the first a second
-# in, once the turret runs at full rate and the input path has settled. `pivot`: a world point
-# 400 m along -z from the subject's spawn, held while the hull turns at the steer.
-FIRE = "(drive: Fire(primary: true), aim: Point((7.0, 100.0, 800.0)), range_m: 800.0, " \
-       "fire_tick: 64, fire_interval: 196, fire_until: {until}, ticks: {ticks})"
+# Workload data. `fire`: the aim sweeps a point round the subject from dead ahead to the right
+# (Taste: 0.08 rad/s, 4.6 deg/s, under the powered traverse of the tank in play, so the turret
+# follows the sweep and each shot leaves mid-traverse at the rate the scenario sets). A click
+# waits for the gun to read ready (`fire_interval: 1`), the first a second in. The observer
+# stands at 270 degrees of the subject's hull (DERIVED: 8 m along -x, identity rotation,
+# `scripts/harness/flat-patch.ron`); clicks end OBSERVER_CLEAR_DEG of sweep before its bearing
+# (Taste: twice the ~20 degree half-width of a tank 8 m off), so no round is fired at it.
+# `pivot`: a world point 400 m along -z from the subject's spawn, held while the hull turns.
+SWEEP = {"radius_m": 800.0, "rate_rad_s": 0.08}
+OBSERVER_DEG = 270.0
+OBSERVER_CLEAR_DEG = 40.0
+FIRST_CLICK = 64
+# Taste: ticks with no clicks after the fire window, to observe the last shot's delivery.
+TAIL = 160
+FIRE = "(drive: Fire(primary: true), aim: Sweep(radius_m: {radius_m}, rate_rad_s: {rate_rad_s}), " \
+       "range_m: 800.0, fire_tick: {first}, fire_interval: 1, fire_until: {until}, ticks: {ticks})"
+# Taste: the comparison's coverage, in shots mid-traverse, whatever the tank's reload.
+SHOTS = 10
 # Resolution: a shot leaves mid-traverse when the server's bore turned faster than this.
 TRAVERSING_DEG_S = 1.0
 PIVOT = "(drive: Pivot(steer: {steer}), aim: World((688.0, 12.0, -920.0)), ticks: {ticks})"
 OBSERVE = "(drive: Idle, aim: Point((0.0, 0.0, -800.0)), ticks: {ticks})"
+# The seeded receive conditioner every client runs through (`net::harness`).
+CONDITIONER = {"SPIKE_LATENCY_MS": "80", "SPIKE_JITTER_MS": "10"}
+
+
+def fire_until(ticks):
+    """The fire window's end: the observation tail, or the sweep's clearance of the observer."""
+    clear = math.radians(OBSERVER_DEG - OBSERVER_CLEAR_DEG) / SWEEP["rate_rad_s"] * TICK_HZ
+    return min(ticks - TAIL, math.floor(clear))
 
 
 def jsonl(path):
@@ -105,8 +124,8 @@ def server_bores(server_ticks):
 
 def analyze_fire(out):
     fires = [r for r in jsonl(out / "server-shots.server.jsonl") if r["k"] == "fire"]
-    if len(fires) < 10:
-        raise RuntimeError(f"{len(fires)} server fires, fewer than the 10 the capture needs")
+    if not fires:
+        raise RuntimeError("the server recorded no fire")
     tanks = server_bores(jsonl(out / "server-ticks.server.jsonl"))
     first = fires[0]
     # The shooter's server root: the one whose bore before the fire tick is the fired bore.
@@ -148,8 +167,10 @@ def analyze_fire(out):
         shot["traversing"] = rate is not None and abs(rate) > TRAVERSING_DEG_S
         shots.append(shot)
     traversing = [s for s in shots if s["traversing"]]
-    if len(traversing) < 10:
-        raise RuntimeError(f"{len(traversing)} shots left mid-traverse, fewer than 10")
+    if len(traversing) < SHOTS:
+        raise RuntimeError(
+            f"{len(traversing)} shots left mid-traverse, fewer than {SHOTS}: this tank's reload "
+            "fits fewer in the sweep's window before the observer; slow the sweep to widen it")
     summary = {"shots": shots, "mid_traverse_shots": len(traversing)}
     for view in per_view:
         seen = [s[view] for s in traversing if s[view] is not None]
@@ -168,16 +189,20 @@ def fire_text(summary):
              "drawing the shooter. gun-fire: drawn barrel vs the server's bore at the fire tick;",
              "gun-tracer: drawn barrel vs the tracer's first drawn segment; lead: drawn yaw minus",
              "the server's yaw at the frame's view cursor; cur-ft: that cursor minus the fire tick.",
+             "n/a: the server's trace holds no value there; missing: the view drew no tracer.",
              "",
              f"{'tick':>5} {'deg/s':>6} | {'own gun-fire':>12} {'gun-tracer':>10} {'lead':>6} "
              f"{'cur-ft':>6} | {'remote gun-fire':>15} {'gun-tracer':>10} {'lead':>6} {'cur-ft':>6}"]
+    def cell(value, width, digits):
+        return f"{'n/a':>{width}}" if value is None else f"{value:>{width}.{digits}f}"
+
     for s in m["shots"]:
-        row = f"{s['fire_tick']:>5} {s['traverse_deg_s'] or 0.0:>6.2f} |"
+        row = f"{s['fire_tick']:>5} {cell(s['traverse_deg_s'], 6, 2)} |"
         for view, width in (("subject", 12), ("observer", 15)):
             v = s[view]
             row += " missing |" if v is None else (
                 f" {v['gun_vs_server_fire_deg']:>{width}.3f} {v['gun_vs_tracer_deg']:>10.3f}"
-                f" {v['gun_yaw_minus_cursor_yaw_deg'] or 0.0:>6.3f}"
+                f" {cell(v['gun_yaw_minus_cursor_yaw_deg'], 6, 3)}"
                 f" {v['cursor_minus_fire_ticks']:>6.2f} |")
         lines.append(row.rstrip(" |") + ("" if s["traversing"] else "   (at rest)"))
     lines.append("")
@@ -187,9 +212,11 @@ def fire_text(summary):
         st = m[f"{view}_mid_traverse"]
         for field in ("gun_vs_server_fire_deg", "gun_vs_tracer_deg",
                       "gun_yaw_minus_cursor_yaw_deg", "tracer_start_from_drawn_muzzle_m"):
-            f = st[field]
-            lines.append(f"{name:>6} {field}: min {f['min']:.3f} mean {f['mean']:.3f} "
-                         f"max {f['max']:.3f}")
+            f = st.get(field)
+            lines.append(f"{name:>6} {field}: " + (
+                f"unavailable of {m['mid_traverse_shots']} shots" if f is None else
+                f"min {f['min']:.3f} mean {f['mean']:.3f} max {f['max']:.3f}, "
+                f"n {f['n']} of {m['mid_traverse_shots']} shots"))
     return "\n".join(lines) + "\n"
 
 
@@ -327,15 +354,14 @@ def run(args, root, env):
     for stale in out.glob("*.jsonl"):
         stale.unlink()
     if args.scenario == "fire":
-        subject = FIRE.format(until=args.ticks - 160, ticks=args.ticks)
+        subject = FIRE.format(**SWEEP, first=FIRST_CLICK, until=fire_until(args.ticks),
+                              ticks=args.ticks)
     else:
         subject = PIVOT.format(steer=args.steer, ticks=args.ticks)
     (out / "subject.ron").write_text(subject + "\n")
     (out / "observer.ron").write_text(OBSERVE.format(ticks=args.ticks) + "\n")
     ready = out / "workload.ready"
     ready.unlink(missing_ok=True)
-    # Seeded receive jitter, one stream per process (`net::harness`).
-    net = dict(SPIKE_LATENCY_MS="80", SPIKE_JITTER_MS="10")
     children = []
     logs = {name: (out / f"{name}.log").open("w") for name in ("server", "observer", "subject")}
 
@@ -349,7 +375,7 @@ def run(args, root, env):
     def client(name, seed):
         child = subprocess.Popen(
             [str(root / "target/debug/overmatch")], cwd=root,
-            env=dict(env, **net, SPIKE_JITTER_SEED=str(seed), OVERMATCH_WINDOW="hidden",
+            env=dict(env, **CONDITIONER, SPIKE_JITTER_SEED=str(seed), OVERMATCH_WINDOW="hidden",
                      OVERMATCH_HARNESS=str(out / f"{name}.ron"), SPIKE_WORKLOAD_READY=str(ready),
                      SPIKE_TRACE=str(out / f"{name}-ticks"),
                      SPIKE_SHOT_TRACE=str(out / f"{name}-shots")),
@@ -399,7 +425,8 @@ def summarize(args, out):
     measured = analyze_fire(out) if args.scenario == "fire" else analyze_pivot(out)
     summary = {"scenario": args.scenario, "seed": args.seed,
                "subject_script": (out / "subject.ron").read_text().strip(),
-               "conditioner": "SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10, seeded", "window": "hidden",
+               "conditioner": " ".join(f"{k}={v}" for k, v in CONDITIONER.items()) + ", seeded",
+               "window": "hidden",
                "MEASURED": measured, "captures": str(out)}
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     text = fire_text(summary) if args.scenario == "fire" else pivot_text(summary)
@@ -407,20 +434,30 @@ def summarize(args, out):
     print(text, flush=True)
 
 
+def positive(text):
+    ticks = int(text)
+    if ticks <= 0:
+        raise argparse.ArgumentTypeError(f"{text} is not a positive tick count")
+    return ticks
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenario", choices=("fire", "pivot"))
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--ticks", type=int, default=None)
+    parser.add_argument("--ticks", type=positive, default=None)
     # Fixture steer demand for `pivot`: full, the fastest turn in place (MEASURED 5.8 deg/s).
     parser.add_argument("--steer", type=float, default=1.0)
     parser.add_argument("--analyze-only", action="store_true")
     parser.add_argument("--holding-lock", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    # Fixture lengths: `fire` spans the half-turn traverse at the idle-powered rate (MEASURED about
-    # 31 s) and two shots at rest; `pivot` the 4 s lead and about 20 s of turn.
-    args.ticks = args.ticks or (2400 if args.scenario == "fire" else 1600)
+    # Fixture lengths: `fire` spans the sweep's window to the observer and the tail; `pivot` the
+    # 4 s lead and about 20 s of turn.
+    if args.ticks is None:
+        args.ticks = 3400 if args.scenario == "fire" else 1600
+    if args.scenario == "fire" and fire_until(args.ticks) <= FIRST_CLICK:
+        parser.error(f"--ticks {args.ticks} leaves no fire window after tick {FIRST_CLICK}")
     root = Path(__file__).resolve().parents[2]
     if args.analyze_only:
         summarize(args, args.out.resolve())

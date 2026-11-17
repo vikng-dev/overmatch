@@ -2,8 +2,9 @@
 //!
 //! ADR-0014 exception: a replicated root receives simulation only after it has a wire pose;
 //! children derive from root simulation. Every replica — the own hull included — rides the
-//! interpolated server stream on a `Static` body; every replica this client does not drive also
-//! draws its turret and gun from that stream, at the same view cursor.
+//! interpolated server stream on a `Static` body; every attached remote aim rig also draws its
+//! turret and gun from that stream, at the same view cursor. In the game's damage-model
+//! presentation, a knocked-out tank's launched turret keeps its own replicated pose instead.
 
 use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::ecs::schedule::ScheduleConfigs;
@@ -74,7 +75,7 @@ fn attach_visible_rigs(
     }
 }
 
-/// Pose every replica this client does not drive from its aim stream: this frame's
+/// Pose every attached remote aim rig from its aim stream: this frame's
 /// [`ServoAngles`], which Lightyear's interpolation sampled at the view cursor its hull pose was
 /// sampled at, before the servo view draws them. The controlled tank's aim is its own input's
 /// (`aim::drive_aim_servos`).

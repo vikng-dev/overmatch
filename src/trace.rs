@@ -35,6 +35,7 @@ use state_hash::hash_tank_state;
 pub(crate) use state_hash::{CanonicalTankStateDigest, canonical_tank_state_digest};
 
 use bevy::ecs::system::SystemParam;
+use bevy::utils::Parallel;
 use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prelude::{
     Client, ControlledBy, LocalTimeline, PingManager, ReplicationCheckpointMap,
@@ -401,10 +402,11 @@ fn record_tick(
         ),
         With<Tank>,
     >,
-    // The rig chain for each row's tick-truth bore (`rig_world_pose`).
+    // The rig chain for each row's skeleton bore (`rig_world_pose`).
     rig_chain: (Query<&ChildOf>, Query<&Transform>),
     collisions: Collisions,
-    mut tick_counter: Local<u64>,
+    // Each tank's row is prepared on the compute pool; the writer commits them in entity order.
+    (mut tick_counter, mut rows): (Local<u64>, Local<Parallel<Vec<(Entity, Value)>>>),
     // The local fixed clock and the view clock a client row is stamped from.
     (timeline, view): (
         Option<Res<LocalTimeline>>,
@@ -418,9 +420,9 @@ fn record_tick(
     // below. Empty result on a client / single-player, which is correct (they pair on `Controlled`).
     owners: Query<(), With<ControlledBy>>,
 ) {
-    // The composition role, copied before the mutable `trace` borrow the write loop needs. It selects
-    // which marker means "the player's own tank" for the world-independent pairing key `own`.
-    let role = trace.role;
+    // The composition role selects which marker means "the player's own tank" for the
+    // world-independent pairing key `own`.
+    let (role, sim_fields) = (trace.role, trace.sim_fields);
     let local_tick = timeline.as_deref().map_or_else(
         || next_local_tick(&mut tick_counter),
         |timeline| u64::from(timeline.tick().0),
@@ -453,189 +455,198 @@ fn record_tick(
         }
     }
 
-    for (
-        entity,
-        position,
-        rotation,
-        linvel,
-        angvel,
-        (drive, signal),
-        grip,
-        elements,
-        transmission,
-        (weapon_gate, weapon_loads),
-        servos,
-        remote_servos,
-        track_contacts,
-        sim,
-        (controlled, rig),
-    ) in &roots
-    {
-        // Trace schema v2 (phase B): the per-wheel suspension topology is gone. `gnd` counts
-        // contacting SIDES (0–2), `loads` is per-side ELASTIC load sums (the stable baseline
-        // channel — the damped actual load, which scales grip, rides as `loads_act`),
-        // `thr`/`str` are the shaped command, `belt`/`bph` the per-side belt speed and phase.
-        let grounded = track_contacts
-            .0
-            .iter()
-            .filter(|side| !side.is_empty())
-            .count();
-        // Round to ~0.1 N: solver-noise digits past that are neither meaningful nor worth
-        // the row width.
-        let side_sum = |f: fn(&crate::track::forces::BeltContact) -> f32| -> Vec<Value> {
-            track_contacts
-                .0
-                .iter()
-                .map(|side| {
-                    let sum: f32 = side.iter().map(f).sum();
-                    num((sum * 10.0).round() / 10.0)
-                })
-                .collect()
-        };
-        let loads = side_sum(|c| c.load_elastic);
-        let loads_act = side_sum(|c| c.load);
-
-        // Contact pairs whose rigid body is this tank root, and the deepest penetration among them
-        // — the collision-stress signal the jitter correlates with.
-        let (hull_contacts, penetration) = contacts.get(&entity).copied().unwrap_or((0, 0.0));
-
-        // The cross-world pairing key. Client / SP: the game `Controlled` marker (own predicted tank).
-        // Server: `ControlledBy` (the authoritative copy of that same player tank). Kept per-role so a
-        // 2-player world stays correct — on the client only OUR avatar carries `Controlled`, while the
-        // server marks every player tank `ControlledBy` its own link. Single-player has no server
-        // role, so `own` falls through to `Controlled` there too.
-        let own = if role == "server" {
-            owners.get(entity).is_ok()
-        } else {
-            controlled
-        };
-        // Every tank a client traces is a replica on a static body (`net::rig`). Angular velocity
-        // is not on the wire, so that body holds Avian's zero, not the authority's spin: null.
-        let replica = role == "client";
-        let angular = if replica { Value::Null } else { vec3(angvel.0) };
-
-        // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
-        // and carried state already in hand, except the view-only tracer phase documented on
-        // `TankStateHash`; costs a few dozen FNV rounds and runs only when tracing is armed.
-        // The servos are the root's one integrator: `RemoteServos` on a client replica, the
-        // authoritative `TankServos` on the server and single-player.
-        let servo_states = selected(
-            remote_servos.map(|servos| servos.0.as_slice()),
-            servos.map(|servos| servos.states.as_slice()),
-        );
-        let hash = hash_tank_state(&TankState {
-            position: position.0,
-            rotation: rotation.0,
-            linvel: linvel.0,
-            angvel: angvel.0,
-            drive,
-            signal,
+    roots.par_iter().for_each(
+        |(
+            entity,
+            position,
+            rotation,
+            linvel,
+            angvel,
+            (drive, signal),
             grip,
             elements,
             transmission,
-            weapon_gate,
-            loads: weapon_loads,
-            servos: servo_states,
+            (weapon_gate, weapon_loads),
+            servos,
+            remote_servos,
+            track_contacts,
             sim,
-        });
-        // Remote clients intentionally receive no exact element field. Null makes that disclosure
-        // boundary explicit so the analyzer omits private-state and combined equality for the pair.
-        let disclosed_element_hash = own.then_some(hash.elm);
+            (controlled, rig),
+        )| {
+            // `gnd` counts contacting SIDES (0–2), `loads` is per-side ELASTIC load sums (the stable
+            // baseline channel — the damped actual load, which scales grip, rides as `loads_act`),
+            // `thr`/`str` are the shaped command, `belt`/`bph` the per-side belt speed and phase.
+            let grounded = track_contacts
+                .0
+                .iter()
+                .filter(|side| !side.is_empty())
+                .count();
+            // Round to ~0.1 N: solver-noise digits past that are neither meaningful nor worth
+            // the row width.
+            let side_sum = |f: fn(&crate::track::forces::BeltContact) -> f32| -> Vec<Value> {
+                track_contacts
+                    .0
+                    .iter()
+                    .map(|side| {
+                        let sum: f32 = side.iter().map(f).sum();
+                        num((sum * 10.0).round() / 10.0)
+                    })
+                    .collect()
+            };
+            let loads = side_sum(|c| c.load_elastic);
+            let loads_act = side_sum(|c| c.load);
 
-        // `mut` for the `simf` verbose dump below.
-        let mut row = json!({
-            "k": "tick",
-            "tick": tick_no,
-            "local_tick": local_tick,
-            "e": entity.to_bits(),
-            "p": vec3(position.0),
-            "q": quat(rotation.0),
-            "lv": vec3(linvel.0),
-            "av": angular,
-            "gnd": grounded,
-            "loads": Value::Array(loads),
-            "loads_act": Value::Array(loads_act),
-            // Null on a replica of a tank this client does not own: owner-only on the wire.
-            "thr": signal.map_or(Value::Null, |signal| num(signal.throttle)),
-            "str": signal.map_or(Value::Null, |signal| num(signal.steer)),
-            "belt": [num(drive.sides[0].speed), num(drive.sides[1].speed)],
-            // Full f64 — the phase IS f64 sim state; narrowing here would hide sub-f32-ULP
-            // divergence from the offline join.
-            "bph": [Value::from(drive.sides[0].phase), Value::from(drive.sides[1].phase)],
-            "hc": hull_contacts,
-            "pen": num(penetration),
-            "ctl": controlled,
-            // Cross-world tank identity for the hash join (world-independent — never the entity id).
-            "own": own,
-            // The per-tick authority-simulation hash: `h` combined, then the per-component
-            // breakdown so a difference localizes to pose vs velocity vs carried sim.
-            "h": hash.combined,
-            "hpos": hash.pos,
-            "hrot": hash.rot,
-            "hlv": hash.lv,
-            "hav": (!replica).then_some(hash.av),
-            "hsim": hash.sim,
-            // The carried-state decode: which field family a `hsim` mismatch lives in. These
-            // streams are exactly what `hsim` folds.
-            "hdrv": hash.drv,
-            "hsrv": hash.srv,
-            "hrld": hash.rld,
-            "hrec": hash.rec,
-            "hblt": hash.blt,
-            "htrn": hash.trn,
-            "helm": disclosed_element_hash,
-        });
-        // The tick-truth main bore, composed as `shooting::fire` composes it. Omitted before a
-        // replica's rig attaches, and once a launched assembly has taken the muzzle off the root.
-        let (parents, locals) = &rig_chain;
-        if let Some((muzzle, turn)) = rig.and_then(|rig| {
-            rig_world_pose(rig.muzzle, entity, position.0, rotation.0, parents, locals)
-        }) {
-            row.as_object_mut()
-                .expect("json! built an object")
-                .insert("bore".into(), bore(muzzle, turn * Vec3::NEG_Z));
-        }
-        // Raw carried-state values (`SPIKE_TRACE_SIM_FIELDS`): the magnitudes behind the sub-hash
-        // booleans. `thr`/`str` (TrackDrive) are already row fields above.
-        if trace.sim_fields {
-            // Fixed field order per deterministic slot: current, previous, angular velocity.
-            let srv: Vec<Value> = servo_states
-                .iter()
-                .map(|s| Value::Array(s.hash_fields().iter().map(|&f| num(f)).collect()))
-                .collect();
-            let wpn: Vec<Value> = sim
-                .weapons
-                .iter()
-                .enumerate()
-                .map(|(slot, w)| {
-                    let gate = weapon_gate.and_then(|gate| gate.weapons.get(slot));
-                    Value::Array(vec![
-                        gate.and_then(|gate| gate.ready_tick())
-                            .map_or(Value::Null, |tick| Value::from(tick.raw())),
-                        gate.and_then(|gate| gate.paused_at_tick())
-                            .map_or(Value::Null, |tick| Value::from(tick.raw())),
-                        num(w.recoil_offset),
-                        num(w.recoil_velocity),
-                        gate.map_or(Value::Null, |gate| Value::from(gate.belt_remaining)),
-                    ])
-                })
-                .collect();
-            // Canonical transmission order; null on non-owned replicas (owner-only wire state).
-            let trn = transmission.map_or(Value::Null, |transmission| {
-                let mut trn = Vec::with_capacity(8);
-                for field in transmission_state_projection(&transmission.0) {
-                    match field {
-                        TransmissionProjectionValue::U8(value) => trn.push(Value::from(value)),
-                        TransmissionProjectionValue::Bool(value) => trn.push(Value::from(value)),
-                        TransmissionProjectionValue::F32(value) => trn.push(num(value)),
-                    }
-                }
-                Value::Array(trn)
+            // Contact pairs whose rigid body is this tank root, and the deepest penetration among them
+            // — the collision-stress signal the jitter correlates with.
+            let (hull_contacts, penetration) = contacts.get(&entity).copied().unwrap_or((0, 0.0));
+
+            // The cross-world pairing key. Client / SP: the game `Controlled` marker (own predicted tank).
+            // Server: `ControlledBy` (the authoritative copy of that same player tank). Kept per-role so a
+            // 2-player world stays correct — on the client only OUR avatar carries `Controlled`, while the
+            // server marks every player tank `ControlledBy` its own link. Single-player has no server
+            // role, so `own` falls through to `Controlled` there too.
+            let own = if role == "server" {
+                owners.get(entity).is_ok()
+            } else {
+                controlled
+            };
+            // Every tank a client traces is a replica on a static body (`net::rig`). Angular velocity
+            // is not on the wire, so that body holds Avian's zero, not the authority's spin: null.
+            let replica = role == "client";
+            let angular = if replica { Value::Null } else { vec3(angvel.0) };
+
+            // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
+            // and carried state already in hand, except the view-only tracer phase documented on
+            // `TankStateHash`; costs a few dozen FNV rounds and runs only when tracing is armed.
+            // The servos are the root's one integrator: `RemoteServos` on a client replica, the
+            // authoritative `TankServos` on the server and single-player.
+            let servo_states = selected(
+                remote_servos.map(|servos| servos.0.as_slice()),
+                servos.map(|servos| servos.states.as_slice()),
+            );
+            let hash = hash_tank_state(&TankState {
+                position: position.0,
+                rotation: rotation.0,
+                linvel: linvel.0,
+                angvel: angvel.0,
+                drive,
+                signal,
+                grip,
+                elements,
+                transmission,
+                weapon_gate,
+                loads: weapon_loads,
+                servos: servo_states,
+                sim,
             });
-            row.as_object_mut()
-                .expect("json! built an object")
-                .insert("simf".into(), json!({"srv": srv, "wpn": wpn, "trn": trn}));
-        }
+            // Remote clients intentionally receive no exact element field. Null makes that disclosure
+            // boundary explicit so the analyzer omits private-state and combined equality for the pair.
+            let disclosed_element_hash = own.then_some(hash.elm);
+
+            // `mut` for the `simf` verbose dump below.
+            let mut row = json!({
+                "k": "tick",
+                "tick": tick_no,
+                "local_tick": local_tick,
+                "e": entity.to_bits(),
+                "p": vec3(position.0),
+                "q": quat(rotation.0),
+                "lv": vec3(linvel.0),
+                "av": angular,
+                "gnd": grounded,
+                "loads": Value::Array(loads),
+                "loads_act": Value::Array(loads_act),
+                // Null on a replica of a tank this client does not own: owner-only on the wire.
+                "thr": signal.map_or(Value::Null, |signal| num(signal.throttle)),
+                "str": signal.map_or(Value::Null, |signal| num(signal.steer)),
+                "belt": [num(drive.sides[0].speed), num(drive.sides[1].speed)],
+                // Full f64 — the phase IS f64 sim state; narrowing here would hide sub-f32-ULP
+                // divergence from the offline join.
+                "bph": [Value::from(drive.sides[0].phase), Value::from(drive.sides[1].phase)],
+                "hc": hull_contacts,
+                "pen": num(penetration),
+                "ctl": controlled,
+                // Cross-world tank identity for the hash join (world-independent — never the entity id).
+                "own": own,
+                // The per-tick authority-simulation hash: `h` combined, then the per-component
+                // breakdown so a difference localizes to pose vs velocity vs carried sim.
+                "h": hash.combined,
+                "hpos": hash.pos,
+                "hrot": hash.rot,
+                "hlv": hash.lv,
+                "hav": (!replica).then_some(hash.av),
+                "hsim": hash.sim,
+                // The carried-state decode: which field family a `hsim` mismatch lives in. These
+                // streams are exactly what `hsim` folds.
+                "hdrv": hash.drv,
+                "hsrv": hash.srv,
+                "hrld": hash.rld,
+                "hrec": hash.rec,
+                "hblt": hash.blt,
+                "htrn": hash.trn,
+                "helm": disclosed_element_hash,
+            });
+            // The main bore of this tick's skeleton, composed as `shooting::fire` composes it: the
+            // authority's on the server; on a client, the presentation state its fixed step copied
+            // into the sim nodes (`restore_servo_truth`), not authority truth. Omitted before a
+            // replica's rig attaches, and once a launched assembly has taken the muzzle off the root.
+            let (parents, locals) = &rig_chain;
+            if let Some((muzzle, turn)) = rig.and_then(|rig| {
+                rig_world_pose(rig.muzzle, entity, position.0, rotation.0, parents, locals)
+            }) {
+                row.as_object_mut()
+                    .expect("json! built an object")
+                    .insert("bore".into(), bore(muzzle, turn * Vec3::NEG_Z));
+            }
+            // Raw carried-state values (`SPIKE_TRACE_SIM_FIELDS`): the magnitudes behind the sub-hash
+            // booleans. `thr`/`str` (TrackDrive) are already row fields above.
+            if sim_fields {
+                // Fixed field order per deterministic slot: current, previous, angular velocity.
+                let srv: Vec<Value> = servo_states
+                    .iter()
+                    .map(|s| Value::Array(s.hash_fields().iter().map(|&f| num(f)).collect()))
+                    .collect();
+                let wpn: Vec<Value> = sim
+                    .weapons
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, w)| {
+                        let gate = weapon_gate.and_then(|gate| gate.weapons.get(slot));
+                        Value::Array(vec![
+                            gate.and_then(|gate| gate.ready_tick())
+                                .map_or(Value::Null, |tick| Value::from(tick.raw())),
+                            gate.and_then(|gate| gate.paused_at_tick())
+                                .map_or(Value::Null, |tick| Value::from(tick.raw())),
+                            num(w.recoil_offset),
+                            num(w.recoil_velocity),
+                            gate.map_or(Value::Null, |gate| Value::from(gate.belt_remaining)),
+                        ])
+                    })
+                    .collect();
+                // Canonical transmission order; null on non-owned replicas (owner-only wire state).
+                let trn = transmission.map_or(Value::Null, |transmission| {
+                    let mut trn = Vec::with_capacity(8);
+                    for field in transmission_state_projection(&transmission.0) {
+                        match field {
+                            TransmissionProjectionValue::U8(value) => trn.push(Value::from(value)),
+                            TransmissionProjectionValue::Bool(value) => {
+                                trn.push(Value::from(value))
+                            }
+                            TransmissionProjectionValue::F32(value) => trn.push(num(value)),
+                        }
+                    }
+                    Value::Array(trn)
+                });
+                row.as_object_mut()
+                    .expect("json! built an object")
+                    .insert("simf".into(), json!({"srv": srv, "wpn": wpn, "trn": trn}));
+            }
+            rows.scope(|rows| rows.push((entity, row)));
+        },
+    );
+    let mut prepared: Vec<_> = rows.iter_mut().flat_map(|rows| rows.drain(..)).collect();
+    prepared.sort_unstable_by_key(|&(entity, _)| entity);
+    for (_, row) in prepared {
         trace.write(&row);
     }
 }
@@ -685,8 +696,8 @@ impl DrawnBores<'_, '_> {
 pub(crate) fn bore(muzzle: Vec3, direction: Vec3) -> Value {
     Value::Array(
         [muzzle.to_array(), direction.to_array()]
-            .concat()
             .into_iter()
+            .flatten()
             .map(num)
             .collect(),
     )

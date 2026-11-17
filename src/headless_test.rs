@@ -18,7 +18,7 @@ use crate::tank::{Controlled, PendingTankAssets, TANK_GLB_PATH, Tank};
 /// Resolution: backstop for async asset/state polling after synchronous Startup admission,
 /// never a performance budget. A missing gate fails with its asset diagnosis rather than
 /// waiting until the CI timeout. Bounded construction preparation is synchronous work.
-const BOOT_DEADLINE: Duration = Duration::from_secs(60);
+pub(crate) const BOOT_DEADLINE: Duration = Duration::from_secs(60);
 
 /// The simulation clock configured by the netcode composition. Fixtures advance it by one exact
 /// fixed loop per [`App::update`], so every bound and elapsed-time report is stated in ticks.
