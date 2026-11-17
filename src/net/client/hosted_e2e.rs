@@ -124,8 +124,6 @@ fn client_app(api: &str, log: bool) -> App {
     app.init_resource::<Probe>()
         .add_observer(record_connected)
         .add_systems(Update, (record_ready, record_unreachable));
-    // `App::run` finishes the plugins; a hand-driven `update` loop must (lightyear and avian
-    // register resources their systems require in `Plugin::finish`).
     crate::net::test_harness::finish(&mut app);
     app
 }
@@ -203,12 +201,17 @@ fn ticketed_players_reach_the_match_over_real_udp() {
     let deadline = crate::headless_test::BOOT_DEADLINE * 3
         + Duration::from_secs_f64(client_policy().reconnect_give_up_s.0);
     let started = Instant::now();
+    let players = clients.len();
     loop {
         server_app.update();
         for client in &mut clients {
             client.update();
         }
-        if clients.iter_mut().all(in_match) {
+        // A peer's tank may arrive after the own one: the match is joined once both are seen.
+        if clients
+            .iter_mut()
+            .all(|client| in_match(client) && tanks(client) == players)
+        {
             break;
         }
         assert!(
@@ -221,10 +224,6 @@ fn ticketed_players_reach_the_match_over_real_udp() {
             )),
         );
         thread::sleep(FRAME);
-    }
-    let players = clients.len();
-    for client in &mut clients {
-        assert_eq!(tanks(client), players, "each match shows both players");
     }
 }
 
