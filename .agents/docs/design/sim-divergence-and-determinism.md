@@ -174,7 +174,7 @@ contact-free ticks, so it was never evidence of a replay-determinism failure in 
      Determinism eliminates the **divergence** error class (same inputs, different results); it
      cannot touch the **misprediction** class (unknown remote inputs). Those are separate budgets.
 5. **Keep the divergence budget honest with the tools built this session:** a harness script's
-   `drive: Straight` + `aim: Sweep` with `OVERMATCH_WINDOW=hidden` reproduce the workload classes; `nan_tripwire`
+   `drive: Straight` + `aim: Sweep(…)` with `OVERMATCH_WINDOW=hidden` reproduce the workload classes; `nan_tripwire`
    names corruption; per-component thresholds are the tuning surface (velocity loose, position/
    rotation tight — discrete/gameplay-binary state must never be threshold-banded).
 

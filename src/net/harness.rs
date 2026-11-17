@@ -81,11 +81,11 @@ pub(crate) struct Script {
     /// Default 800. A close armour target wants a small one, so the rounds shoot flat into the
     /// plate.
     pub(crate) range_m: f32,
-    /// The tick of the one primary click of [`Drive::Arc`] and [`Drive::Straight`], and the first
-    /// click of a [`Drive::Fire`] primary. Default 300, inside either course's drive.
+    /// The tick of the one primary click of [`Drive::Arc`] and [`Drive::Straight`], and the
+    /// earliest click of a [`Drive::Fire`] primary. Default 300, inside either course's drive.
     pub(crate) fire_tick: u32,
-    /// Ticks between a [`Drive::Fire`] primary's clicks; zero clicks none. Default 256 (DERIVED:
-    /// four seconds at the fixed 64 Hz).
+    /// The fewest ticks between a [`Drive::Fire`] primary's clicks; zero clicks none. Default 256
+    /// (DERIVED: four seconds at the fixed 64 Hz).
     pub(crate) fire_interval: u32,
     /// Exclusive end of a Fire workload's triggers; later ticks keep aiming with no demand.
     /// Shot runners use this quiet part of the capture to observe delivery and cursor playback.
@@ -124,7 +124,7 @@ impl Default for Script {
 }
 
 /// What the scripted tank does. One enum, so two workloads cannot both be asked for.
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum Drive {
     /// The default, exercising the real sim: 4 s idle (the rig binds, the hull comes to rest on
@@ -146,9 +146,15 @@ pub(crate) enum Drive {
     /// Never drive, never fire: the tank sits on whatever contact it settled onto (with
     /// `spawn_pose`, a chosen patch of ground), with no drive input perturbing it.
     Idle,
+    /// The same lead, then a neutral turn to the script's end: no throttle, `steer` in `-1..=1`
+    /// and nonzero. Never fires. A remote hull turning under a turret that holds a [`Aim::World`]
+    /// bearing is the capture `scripts/shot/run-turret-cursor.py` records.
+    Pivot { steer: f32 },
     /// Stationary fire, so the only difference from [`Drive::Idle`] is the fire itself: hold the
-    /// secondary trigger from a ~3 s warmup to the end, and click the primary every
-    /// `fire_interval` from `fire_tick`. At least one of the two; the aim is a point.
+    /// secondary trigger from a ~3 s warmup to the end, and click the primary from `fire_tick`,
+    /// at least `fire_interval` apart, each time the own tank's primary reads ready, as a player
+    /// waits for READY: a click waits until the previous one's answer has shown the weapon
+    /// unready and its load has finished. At least one of the two triggers.
     Fire {
         #[serde(default)]
         primary: bool,
@@ -164,9 +170,13 @@ pub(crate) enum Aim {
     /// Chase this point, finite. Default `(200, 0, -800)`: downrange into open ground (the common
     /// spray case); at a stationary target's hull the rounds strike armour instead.
     Point((f32, f32, f32)),
-    /// Sweep around the tank at ~1.3 rad/s, recommitted every tick, as a player scanning with the
-    /// mouse does. Not with [`Drive::Fire`].
-    Sweep,
+    /// Sweep a hull-level point `radius_m` out around the tank at `rate_rad_s`, from dead ahead
+    /// and positive to the right, recommitted every tick, as a player scanning with the mouse
+    /// does. The radius is positive and inside the derived `AIM_LIMIT` envelope; the rate is
+    /// nonzero and at most half a turn per tick.
+    Sweep { radius_m: f32, rate_rad_s: f32 },
+    /// Chase this world point, finite: the turret holds its bearing while the hull turns.
+    World((f32, f32, f32)),
 }
 
 impl Default for Aim {
@@ -309,22 +319,44 @@ impl Script {
                 problem: "a Fire workload needs an end before ticks with at least one trigger demand",
             });
         }
+        if let Drive::Pivot { steer } = self.drive
+            && !(steer != 0.0 && (-1.0..=1.0).contains(&steer))
+        {
+            return Err(ScriptError::Invalid {
+                field: "drive.steer",
+                problem: "a nonzero steer demand within -1..=1",
+            });
+        }
         match self.aim {
-            Aim::Point(point)
-                if crate::command::ParsedAimIntent::try_from(AimIntent::HullLocal(Vec3::from(
-                    point,
-                )))
-                .is_err() =>
+            Aim::Point(_) | Aim::World(_)
+                if crate::command::ParsedAimIntent::try_from(self.aim.at(0)).is_err() =>
             {
                 return Err(ScriptError::Invalid {
                     field: "aim",
                     problem: "use a finite point inside the derived AIM_LIMIT envelope",
                 });
             }
-            Aim::Sweep if matches!(self.drive, Drive::Fire { .. }) => {
+            // A swept point's largest component is its radius, met dead ahead, so a radius inside
+            // the command's `AIM_LIMIT` box keeps every point of the sweep inside it.
+            Aim::Sweep { radius_m, .. }
+                if !(radius_m > 0.0 && radius_m <= *crate::aim::AIM_LIMIT) =>
+            {
                 return Err(ScriptError::Invalid {
-                    field: "aim",
-                    problem: "a Fire workload needs a point",
+                    field: "aim.radius_m",
+                    problem: "use a positive radius within the derived AIM_LIMIT",
+                });
+            }
+            // At most half a turn per tick: a faster sweep aliases into a slower one turning the
+            // other way. Within it the swept angle stays finite for every admitted tick
+            // (|angle| <= π × u32::MAX), so no admitted sweep commands a non-finite aim.
+            Aim::Sweep { rate_rad_s, .. }
+                if !(rate_rad_s != 0.0
+                    && rate_rad_s.abs()
+                        <= std::f32::consts::PI / super::server::TICK.as_secs_f32()) =>
+            {
+                return Err(ScriptError::Invalid {
+                    field: "aim.rate_rad_s",
+                    problem: "use a nonzero rate of at most half a turn per tick",
                 });
             }
             _ => {}
@@ -371,6 +403,11 @@ pub(crate) struct SimulateInput {
     fire_tick: u32,
     fire_interval: u32,
     fire_until: Option<u32>,
+    /// [`Drive::Fire`]'s primary: the earliest tick of its next click, and whether the weapon has
+    /// read unready since the previous one. The tick is wider than a script tick, so no admitted
+    /// `fire_interval` wraps it.
+    primary_next: u64,
+    primary_cleared: bool,
     /// [`Drive::Park`] has seen its hull stopped, and demands nothing from then on.
     parked: bool,
     clock: ScriptClock,
@@ -427,7 +464,7 @@ impl SimulateInput {
             Drive::Arc => (script.arc_ticks, script.arc_steer),
             Drive::Straight => (script.straight_ticks, 0.0),
             Drive::Ram { throttle_ticks } | Drive::Park { throttle_ticks } => (throttle_ticks, 0.0),
-            Drive::Idle | Drive::Fire { .. } => (0, 0.0),
+            Drive::Idle | Drive::Fire { .. } | Drive::Pivot { .. } => (0, 0.0),
         };
         Self {
             ticks: 0,
@@ -440,6 +477,8 @@ impl SimulateInput {
             fire_tick: script.fire_tick,
             fire_interval: script.fire_interval,
             fire_until: script.fire_until,
+            primary_next: u64::from(script.fire_tick),
+            primary_cleared: true,
             parked: false,
             start: crate::cost::WorkloadStart::from_env(),
             clock: ScriptClock::AwaitingSlot {
@@ -494,23 +533,37 @@ impl SimulateInput {
         t > FIRE_WARMUP
     }
 
-    /// Whether the scripted primary trigger is clicked on tick `t`: every `fire_interval` ticks
-    /// from `fire_tick`, never when the interval is zero.
-    fn clicking_primary(&self, t: u32) -> bool {
-        self.fire_interval != 0
-            && t >= self.fire_tick
-            && (t - self.fire_tick).is_multiple_of(self.fire_interval)
+    /// Whether the scripted [`Drive::Fire`] primary clicks on tick `t`, given whether the own
+    /// tank's primary reads `ready`; a click starts the next spacing and waits for an unready
+    /// reading. Never when the interval is zero.
+    fn click_primary(&mut self, t: u32, ready: bool) -> bool {
+        self.primary_cleared |= !ready;
+        let click = self.fire_interval != 0
+            && u64::from(t) >= self.primary_next
+            && self.primary_cleared
+            && ready;
+        if click {
+            self.primary_next = u64::from(t) + u64::from(self.fire_interval);
+            self.primary_cleared = false;
+        }
+        click
     }
+}
 
+impl Aim {
     /// The point every servo chases on tick `t`.
-    fn aim_at(&self, t: u32) -> AimIntent {
-        AimIntent::HullLocal(match self.aim {
-            Aim::Point(point) => Vec3::from(point),
-            Aim::Sweep => {
-                let theta = 0.02 * t as f32;
-                Vec3::new(800.0 * theta.sin(), 0.0, -800.0 * theta.cos())
+    fn at(self, t: u32) -> AimIntent {
+        match self {
+            Aim::Point(point) => AimIntent::HullLocal(Vec3::from(point)),
+            Aim::Sweep {
+                radius_m,
+                rate_rad_s,
+            } => {
+                let theta = rate_rad_s * t as f32 * super::server::TICK.as_secs_f32();
+                AimIntent::HullLocal(radius_m * Vec3::new(theta.sin(), 0.0, -theta.cos()))
             }
-        })
+            Aim::World(point) => AimIntent::World(Vec3::from(point)),
+        }
     }
 }
 
@@ -536,17 +589,24 @@ pub(crate) fn buffer_input(
         ResMut<super::input_arrival::FrameInput>,
         ResMut<super::input_arrival::ClientInput>,
     ),
-    slots: Query<
-        (
-            Option<&avian3d::prelude::LinearVelocity>,
-            Option<&crate::CombatantId>,
-        ),
-        With<lightyear::prelude::Controlled>,
-    >,
+    // The input slot's tank, and the gate slots of its weapons.
+    (mut slots, weapon_slots): (
+        Query<
+            (
+                Option<&avian3d::prelude::LinearVelocity>,
+                Option<&crate::CombatantId>,
+                // Absent until the slot's tank is assembled.
+                Option<&mut TankCommand>,
+                Option<(&crate::tank::Rig, &crate::tank::WeaponGate)>,
+            ),
+            With<lightyear::prelude::Controlled>,
+        >,
+        Query<&crate::tank::WeaponIndex>,
+    ),
     mut trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
     use bevy::ecs::query::QuerySingleError;
-    let (velocity, combatant) = match slots.single() {
+    let (velocity, combatant, own, primary) = match slots.single_mut() {
         Ok(slot) => slot,
         // Before tank replication (or between lives), there is no local input slot.
         Err(QuerySingleError::NoEntities(_)) => return,
@@ -589,8 +649,24 @@ pub(crate) fn buffer_input(
         return;
     }
     let t = sim.ticks;
-    sim.write(t, &mut state.command);
+    // The primary is the rig's main bore. An unassembled tank has no ready weapon.
+    let ready = primary.is_some_and(|(rig, gate)| {
+        let slot = weapon_slots
+            .get(rig.muzzle)
+            .expect("a rig's main bore is a weapon slot");
+        gate.weapons
+            .get(slot.0)
+            .expect("weapon and gate slots are built together at spawn")
+            .is_ready()
+    });
+    sim.write(t, ready, &mut state.command);
     sim.stop(t, velocity.map(|v| v.length()), &mut state.command);
+    // The script lays its own turret as a player's aim commit and range dial do: the own tank's
+    // command carries the intent its ahead-running servos chase (`aim::drive_aim_servos`).
+    if let Some(mut own) = own {
+        own.aim = state.command.aim;
+        own.range = state.command.range;
+    }
     if (state.command.fire_primary || state.command.fire_secondary)
         && let ScriptClock::Released {
             first_fire_logged, ..
@@ -615,22 +691,28 @@ pub(crate) fn buffer_input(
 }
 
 impl SimulateInput {
-    /// Tick `t`'s scripted drive, aim and triggers into `command`.
-    fn write(&self, t: u32, command: &mut TankCommand) {
+    /// Tick `t`'s scripted drive, aim and triggers into `command`; `primary_ready` is whether the
+    /// own tank's primary reads ready.
+    fn write(&mut self, t: u32, primary_ready: bool, command: &mut TankCommand) {
         let driving = (RUN_LEAD..RUN_LEAD + self.throttle_ticks).contains(&t);
-        command.throttle = if driving { 1.0 } else { 0.0 };
-        command.steer = if driving { self.steer } else { 0.0 };
-        command.aim = Some(self.aim_at(t));
+        (command.throttle, command.steer) = match self.drive {
+            Drive::Pivot { steer } if t >= RUN_LEAD => (0.0, steer),
+            _ if driving => (1.0, self.steer),
+            _ => (0.0, 0.0),
+        };
+        command.aim = Some(self.aim.at(t));
         command.range = self.range;
         let firing = self.fire_until.is_none_or(|until| t < until);
         (command.fire_primary, command.fire_secondary) = match self.drive {
             Drive::Fire { primary, secondary } => (
-                primary && firing && self.clicking_primary(t),
+                primary && firing && self.click_primary(t, primary_ready),
                 secondary && firing && Self::holding_secondary(t),
             ),
             Drive::Arc | Drive::Straight => (t == self.fire_tick, false),
             // A recoil impulse would disturb the resting contact under study.
-            Drive::Idle | Drive::Ram { .. } | Drive::Park { .. } => (false, false),
+            Drive::Idle | Drive::Ram { .. } | Drive::Park { .. } | Drive::Pivot { .. } => {
+                (false, false)
+            }
         };
     }
 
@@ -1007,10 +1089,10 @@ mod tests {
         let script =
             super::Script::parse("(ticks: 1000, drive: Ram(throttle_ticks: 400), fire_tick: 200)")
                 .unwrap();
-        let sim = super::SimulateInput::new(&script);
+        let mut sim = super::SimulateInput::new(&script);
         let mut command = crate::command::TankCommand::default();
         for tick in 0..1000 {
-            sim.write(tick, &mut command);
+            sim.write(tick, true, &mut command);
             assert_eq!(
                 command.throttle,
                 if (super::RUN_LEAD..super::RUN_LEAD + 400).contains(&tick) {
@@ -1043,7 +1125,7 @@ mod tests {
         );
         let mut at = |tick, speed| {
             let mut command = crate::command::TankCommand::default();
-            sim.write(tick, &mut command);
+            sim.write(tick, true, &mut command);
             sim.stop(tick, speed, &mut command);
             assert!(!command.fire_primary && !command.fire_secondary);
             command.throttle
@@ -1065,8 +1147,8 @@ mod tests {
     use bevy::math::{Vec2, Vec3};
 
     use super::{
-        Aim, BurstSpec, Drive, Script, ScriptTimeout, SeededRecvConditioner, SimulateInput,
-        SpawnPose, WATCHDOG_SLACK, parse_env_flag,
+        Aim, BurstSpec, Drive, RUN_LEAD, Script, ScriptTimeout, SeededRecvConditioner,
+        SimulateInput, SpawnPose, WATCHDOG_SLACK, parse_env_flag,
     };
     use crate::command::{AimIntent, TankCommand};
 
@@ -1101,10 +1183,19 @@ mod tests {
                 ..Script::default()
             }
         );
-        let sweep = Script::parse("(drive: Idle, aim: Sweep, ticks: 256)").expect("valid");
+        let sweep =
+            Script::parse("(drive: Idle, aim: Sweep(radius_m: 800, rate_rad_s: 1.28), ticks: 256)")
+                .expect("valid");
         assert_eq!(
             (sweep.drive, sweep.aim, sweep.ticks),
-            (Drive::Idle, Aim::Sweep, Some(256))
+            (
+                Drive::Idle,
+                Aim::Sweep {
+                    radius_m: 800.0,
+                    rate_rad_s: 1.28
+                },
+                Some(256)
+            )
         );
     }
 
@@ -1128,17 +1219,34 @@ mod tests {
     }
 
     /// A SCRIPT THAT CANNOT MEAN WHAT IT SAYS FAILS THE BOOT, NAMING ITS FIELD (ADR-0011): a typo,
-    /// a fire workload with no trigger or a sweeping aim, a non-finite aim, a range that is not
-    /// positive, a degenerate spawn rotation. Each was a silent default or an ignored variable
-    /// under the levers the script replaced.
+    /// a fire workload with no trigger, a non-finite aim, a sweep with no radius or no rate or
+    /// either past its bound, a range that is not positive, a degenerate spawn rotation.
     #[test]
     fn a_script_outside_its_domain_is_refused_naming_the_field() {
         for (text, field) in [
             ("(tick: 5)", "tick"),
             ("(drive: Fire())", "drive"),
-            ("(drive: Fire(secondary: true), aim: Sweep)", "aim"),
+            (
+                "(aim: Sweep(radius_m: -800, rate_rad_s: 1))",
+                "aim.radius_m",
+            ),
+            (
+                "(aim: Sweep(radius_m: 1e30, rate_rad_s: 1))",
+                "aim.radius_m",
+            ),
+            (
+                "(aim: Sweep(radius_m: 800, rate_rad_s: 1e30))",
+                "aim.rate_rad_s",
+            ),
+            (
+                "(aim: Sweep(radius_m: 800, rate_rad_s: 0))",
+                "aim.rate_rad_s",
+            ),
             ("(aim: Point((1.0, 1e39, 0.0)))", "aim"),
             ("(aim: Point((1.0, 1e30, 0.0)))", "aim"),
+            ("(aim: World((1.0, 1e30, 0.0)))", "aim"),
+            ("(drive: Pivot(steer: 0.0))", "drive.steer"),
+            ("(drive: Pivot(steer: 1.5))", "drive.steer"),
             ("(range_m: 0.0)", "range_m"),
             (
                 "(spawn_pose: (at: (0.0, 0.0), rot: (0.0, 0.0, 0.0, 0.0)))",
@@ -1167,6 +1275,28 @@ mod tests {
         }
     }
 
+    /// A pivot turns the hull in place: the turret-cursor capture reads a turning hull under a
+    /// world-held turret, which any throttle or trigger would turn into an arc or a recoil. The
+    /// world aim keeps its frame, so the authority holds the place rather than a hull bearing.
+    #[test]
+    fn a_pivot_turns_in_place_under_a_world_aim() {
+        // Fixture steer and world point.
+        let mut sim = SimulateInput::new(
+            &Script::parse("(drive: Pivot(steer: -0.5), aim: World((10.0, 2.0, -900.0)))").unwrap(),
+        );
+        let mut command = crate::command::TankCommand::default();
+        for t in 0..sim.total {
+            sim.write(t, true, &mut command);
+            let steer = if t >= RUN_LEAD { -0.5 } else { 0.0 };
+            assert_eq!((command.throttle, command.steer), (0.0, steer));
+            assert!(!command.fire_primary && !command.fire_secondary);
+            assert_eq!(
+                command.aim,
+                Some(AimIntent::World(Vec3::new(10.0, 2.0, -900.0)))
+            );
+        }
+    }
+
     /// The game's damage model: shot captures must observe the final server echoes after the
     /// trigger is released, without extending the script or its watchdog.
     #[test]
@@ -1175,10 +1305,10 @@ mod tests {
             "(drive: Fire(primary: true, secondary: true), fire_tick: 0, fire_interval: 1, fire_until: 250, ticks: 300)"
         ).unwrap()); // Fixture tick counts; both triggers would otherwise stay held.
         let mut command = crate::command::TankCommand::default();
-        sim.write(249, &mut command);
+        sim.write(249, true, &mut command);
         assert!(command.fire_primary && command.fire_secondary);
         for t in 250..sim.total {
-            sim.write(t, &mut command);
+            sim.write(t, true, &mut command);
             assert!(!command.fire_primary && !command.fire_secondary);
             assert!(command.aim.is_some(), "the observation tail keeps its aim");
         }
@@ -1291,6 +1421,47 @@ mod tests {
         );
     }
 
+    /// A scripted client lays its own turret as a player does: the script's aim and range reach
+    /// the own tank's command, which its ahead-running servos chase (`aim::drive_aim_servos`).
+    /// Without it the own turret rests while the authority traverses, and every capture of the own
+    /// turret (`scripts/shot/run-turret-cursor.py`) measures the harness, not the game.
+    #[test]
+    fn a_scripted_client_lays_its_own_tank_like_a_player() {
+        use super::super::battle::{BattlePhase, BattleState, LateJoin};
+        use super::super::input_arrival::{ClientInput, FrameInput};
+        use crate::sim_tick::SimTick;
+        use bevy::prelude::*;
+        let mut app = App::new();
+        // Fixture aim and range.
+        app.insert_resource(SimulateInput::new(
+            &Script::parse("(drive: Idle, aim: World((5.0, 1.0, -300.0)), range_m: 300.0)")
+                .unwrap(),
+        ))
+        .init_resource::<Time<Real>>()
+        .init_resource::<lightyear::prelude::LocalTimeline>()
+        .init_resource::<ClientInput>()
+        .init_resource::<FrameInput>()
+        .add_systems(FixedPreUpdate, super::buffer_input);
+        app.world_mut().resource_mut::<SimulateInput>().start = crate::cost::WorkloadStart::Ready;
+        let own = app
+            .world_mut()
+            .spawn((lightyear::prelude::Controlled, TankCommand::default()))
+            .id();
+        app.world_mut().spawn(BattleState {
+            phase: BattlePhase::Combat {
+                ends_at: SimTick::new(100),
+                late_join: LateJoin::Closed,
+            },
+            ..default()
+        });
+        app.world_mut().run_schedule(FixedPreUpdate);
+        let command = app.world().get::<TankCommand>(own).unwrap();
+        assert_eq!(
+            (command.aim, command.range),
+            (Some(AimIntent::World(Vec3::new(5.0, 1.0, -300.0))), 300.0)
+        );
+    }
+
     /// Measurement runners rely on combat and the operator barrier preserving script tick zero,
     /// including its first click; input release has no dependency on timeline synchronization.
     #[test]
@@ -1308,7 +1479,21 @@ mod tests {
         .init_resource::<ClientInput>()
         .init_resource::<FrameInput>()
         .add_systems(FixedPreUpdate, super::buffer_input);
-        app.world_mut().spawn(lightyear::prelude::Controlled);
+        // A one-weapon fixture tank whose primary is ready.
+        let bore = app.world_mut().spawn(crate::tank::WeaponIndex(0)).id();
+        app.world_mut().spawn((
+            lightyear::prelude::Controlled,
+            crate::tank::Rig {
+                hull: bore,
+                turret: bore,
+                gunner_yaw: bore,
+                gun: bore,
+                muzzle: bore,
+            },
+            crate::tank::WeaponGate {
+                weapons: vec![crate::tank::WeaponGateState::default()],
+            },
+        ));
         let battle = app.world_mut().spawn(BattleState::default()).id();
         for _ in 0..3 {
             app.world_mut().run_schedule(FixedPreUpdate);
@@ -1352,15 +1537,15 @@ mod tests {
     /// EACH DRIVE PLAYS THE WORKLOAD ITS RUNNERS MEASURE: the arc demands nothing over the lead,
     /// drives and steers inside its window and clicks once at `fire_tick`, by default while it
     /// drives; idle never moves or fires; a fire workload stays put,
-    /// holds the secondary only past its warmup and clicks the primary every interval from
-    /// `fire_tick`; the straight course never steers. The cost and pen cam runners
-    /// read their deltas against these exact windows.
+    /// holds the secondary only past its warmup and clicks a ready primary from `fire_tick`
+    /// ([`a_fire_primary_clicks_once_per_readiness`]); the straight course never steers. The cost
+    /// and pen cam runners read their deltas against these exact windows.
     #[test]
     fn each_drive_plays_its_workload() {
         let at = |text: &str, t: u32| {
-            let sim = SimulateInput::new(&Script::parse(text).expect("valid"));
+            let mut sim = SimulateInput::new(&Script::parse(text).expect("valid"));
             let mut command = TankCommand::default();
-            sim.write(t, &mut command);
+            sim.write(t, true, &mut command);
             command
         };
         let (run, course) = (super::RUN_LEAD, Script::default());
@@ -1378,14 +1563,64 @@ mod tests {
         let fire = "(drive: Fire(primary: true, secondary: true), fire_tick: 320, \
                     fire_interval: 256, aim: Point((8.0, 1.2, 2.2)))";
         assert!(!at(fire, 192).fire_secondary && at(fire, 193).fire_secondary);
-        assert!(at(fire, 320).fire_primary && at(fire, 576).fire_primary);
-        assert!(!at(fire, 448).fire_primary);
+        assert!(!at(fire, 319).fire_primary && at(fire, 320).fire_primary);
         assert_eq!(at(fire, 200).throttle, 0.0);
         assert_eq!(
             at(fire, 200).aim,
             Some(AimIntent::HullLocal(Vec3::new(8.0, 1.2, 2.2)))
         );
         assert_eq!(at("(drive: Straight)", 1000).steer, 0.0);
+    }
+
+    /// A FIRE PRIMARY CLICKS AS A PLAYER WAITING FOR READY DOES: from `fire_tick`, at least
+    /// `fire_interval` apart, only on a ready weapon, and once per readiness, since the gate still
+    /// reads ready until a click's answer arrives and a second click then would be wasted; the
+    /// spacing's deadline never wraps, whatever the admitted interval. Shot runners rely on every
+    /// click becoming a shot whatever the tank's reload (`scripts/shot/run-turret-cursor.py`).
+    /// Fixture reloads either side of the interval, and a fixture answer delay.
+    #[test]
+    fn a_fire_primary_clicks_once_per_readiness() {
+        let clicks = |interval: u32, reload: u32| {
+            let mut sim = SimulateInput::new(
+                &Script::parse(&format!(
+                    "(drive: Fire(primary: true), fire_tick: 100, fire_interval: {interval}, \
+                     ticks: 1000)"
+                ))
+                .unwrap(),
+            );
+            let (answer, mut last, mut clicks) = (10, None::<u32>, Vec::new());
+            let mut command = TankCommand::default();
+            for t in 0..sim.total {
+                // The gate reads ready until a click's answer arrives, then loads for `reload`.
+                let ready = last.is_none_or(|click| t < click + answer || t >= click + reload);
+                sim.write(t, ready, &mut command);
+                if command.fire_primary {
+                    clicks.push(t);
+                    last = Some(t);
+                }
+            }
+            clicks
+        };
+        assert_eq!(clicks(256, 192), [100, 356, 612, 868]);
+        assert_eq!(clicks(1, 300), [100, 400, 700]);
+        // The widest admitted spacing after a click at the last ticks a script reaches: the next
+        // deadline lies past every tick and never wraps back into the script.
+        let mut sim = SimulateInput::new(
+            &Script::parse(&format!(
+                "(drive: Fire(primary: true), fire_tick: 0, fire_interval: {0}, ticks: {0})",
+                u32::MAX
+            ))
+            .unwrap(),
+        );
+        let mut command = TankCommand::default();
+        for (t, ready, click) in [
+            (u32::MAX - 3, true, true),
+            (u32::MAX - 2, false, false),
+            (u32::MAX - 1, true, false),
+        ] {
+            sim.write(t, ready, &mut command);
+            assert_eq!(command.fire_primary, click, "tick {t}");
+        }
     }
 
     /// THE WORKED SCRIPT THE MODULE DOC NAMES IS A VALID SCRIPT: it is the grammar's one example

@@ -35,7 +35,7 @@ def fail(code):
  p.write_text(json.dumps(s)); print('An error occurred ('+code+') when calling operation', file=sys.stderr); sys.exit(254)
 logged = list(args)
 if '--access-key-id' in logged: logged[logged.index('--access-key-id')+1] = '<key-id>'
-s['calls'].append({'args':logged,'inherited_credential':any(k in os.environ for k in ['AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','CLOUDFLARE_GLOBAL_KEY','CLOUDFLARE_API_TOKEN','CLOUDFLARE_API_KEY','CF_API_TOKEN'])})
+s['calls'].append({'args':logged,'env':{k:v for k,v in os.environ.items() if k.startswith(('AWS_','CLOUDFLARE_','CF_','WRANGLER_'))}})
 if os.environ.get('HISTORY'):
  print("FileExistsError: [Errno 17] File exists: '/dev/null'",file=sys.stderr);sys.exit(1)
 if os.environ.get('FAIL_OP') == op: fail('AccessDenied')
@@ -49,9 +49,11 @@ if op == 'describe-vpcs': out({'Vpcs':[{'VpcId':ident('vpc')}]})
 if op == 'describe-subnets': out({'Subnets':[{'SubnetId':'subnet-'+format(n,'017x'),'State':'available','AvailabilityZone':'ap-southeast-1'+z} for n,z in enumerate('abc',1)]})
 if op == 'describe-instance-type-offerings': out({'InstanceTypeOfferings':[{'InstanceType':opt('--filters').split('Values=')[1],'Location':'ap-southeast-1'+z} for z in os.environ.get('OFFER_ZONES','bc')]})
 if op == 'get-parameter': out({'Parameter':{'Value':ident('ami'),'ARN':'arn:aws:ssm:ap-southeast-1::parameter'+opt('--name')}})
-if op == 'describe-images': out({'Images':[{'ImageId':ident('ami'),'OwnerId':str(10**11+1),'Public':True,'State':'available','Architecture':'x86_64','Name':'ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-1','RootDeviceName':root['rootDeviceName'],'BlockDeviceMappings':[{'DeviceName':root['rootDeviceName'],'Ebs':{'VolumeSize':int(os.environ.get('IMAGE_ROOT_SIZE',str(root['rootSizeGiB']))),'VolumeType':'gp3'}}]}]})
+if op == 'describe-images':
+ image = {'ImageId':ident('ami'),'OwnerId':str(10**11+1),'Public':True,'State':'available','Architecture':'x86_64','Name':'ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-1','RootDeviceName':root['rootDeviceName'],'BlockDeviceMappings':[{'DeviceName':root['rootDeviceName'],'Ebs':{'VolumeSize':int(os.environ.get('IMAGE_ROOT_SIZE',str(root['rootSizeGiB']))),'VolumeType':'gp3'}}]}
+ if 'image_owner_alias' in s: image['ImageOwnerAlias'] = s['image_owner_alias']
+ out({'Images':[image]})
 if op == 'describe-security-groups':
- if 'Name=group-name,Values=default' in rest: out({'SecurityGroups':[{'GroupId':ident('sg'),'VpcId':ident('vpc')}]})
  out({'SecurityGroups':s['groups']})
 if op == 'create-security-group':
  s['groups'] = [{'GroupId':ident('sg'),'GroupName':opt('--group-name'),'Tags':json.loads(opt('--tag-specifications'))[0]['Tags'] if '--tag-specifications' in rest else [],'IpPermissions':[],'IpPermissionsEgress':[{'IpProtocol':'-1','IpRanges':[{'CidrIp':'0.0.0.0/0'}]}]}]; out({'GroupId':ident('sg')})
@@ -96,9 +98,6 @@ if op in ['simulate-custom-policy','simulate-principal-policy']:
  matching=[st for st in policy['Statement'] if matches(st)]
  allow=any(st['Effect']=='Allow' for st in matching) and not any(st['Effect']=='Deny' for st in matching)
  out({'EvaluationResults':[{'EvalDecision':json.loads(os.environ['DECISION']) if 'DECISION' in os.environ and not allow else ('allowed' if allow else 'implicitDeny')}]})
-if op == 'run-instances':
- if '--dry-run' not in rest: fail('UnsafeTest')
- fail('DryRunOperation')
 if op == 'describe-instances':out({'Reservations':[{'Instances':s.get('instances',[])}]})
 if op in ['describe-volumes','describe-network-interfaces','describe-key-pairs']:
  out({{'describe-volumes':'Volumes','describe-network-interfaces':'NetworkInterfaces','describe-key-pairs':'KeyPairs'}[op]:[]})
@@ -109,15 +108,22 @@ FAKE_WRANGLER = r'''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
 p=Path(os.environ['WORLD']);s=json.loads(p.read_text());args=sys.argv[1:]
+s['worker_calls'].append({'args':args,'cwd':os.getcwd(),'env':{k:v for k,v in os.environ.items() if k.startswith(('AWS_','CLOUDFLARE_','CF_','WRANGLER_'))}})
+p.write_text(json.dumps(s))
 if args==['--version']:
  if os.environ.get('WRANGLER_LOG')=='log':print(json.loads((Path(os.environ['REPO'])/'backend/package.json').read_text())['devDependencies']['wrangler'])
  sys.exit(0)
-s['worker_calls'].append({'args':args,'cwd':os.getcwd()})
+required=os.environ.get('REQUIRE_WRANGLER_AUTH')
+if os.environ.get('REJECT_LOGIN') or (required and not os.environ.get(required)):
+ print('Authentication error',file=sys.stderr)
+ for k,v in os.environ.items():
+  if k.startswith(('CLOUDFLARE_','CF_')):print(v);print(v,file=sys.stderr)
+ sys.exit(1)
 if args[:2]==['secret','list']:
  if os.environ.get('WRANGLER_LOG')=='log':print(json.dumps([{'name':n} for n in s['secrets']]))
 elif args[:2]==['secret','delete']:
  s['secrets'].remove(args[2]);print('deleted')
-else:
+elif args[:2]==['secret','put']:
  value=sys.stdin.read().strip()
  if os.environ.get('WRANGLER_WRITE_LOGS')!='false':(p.parent/'wrangler-debug.log').write_text(value)
  # A CLI which echoes even on failure must not expose the pipe to the operator.
@@ -129,6 +135,7 @@ else:
   config=json.loads(value);good=set(config)=={'subnetIds','securityGroupId'} and len(config['subnetIds'])==2
  s['handoffs'].append({'name':args[2],'correct':good,'keys':list(s['keys'])})
  if args[2] not in s['secrets']:s['secrets'].append(args[2])
+else:sys.exit('Unhandled fake Wrangler operation')
 p.write_text(json.dumps(s))
 if os.environ.get('FAIL_SECRET')==args[2] if len(args)>2 else False:sys.exit(1)
 '''
@@ -148,13 +155,12 @@ class Fixture:
             path = self.root / name
             path.write_text(text)
             path.chmod(0o700)
-        self.env = os.environ | {'PATH': str(self.root) + os.pathsep + os.environ['PATH'],
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith(('AWS_', 'CLOUDFLARE_', 'CF_', 'WRANGLER_'))} | {
+                                 'PATH': str(self.root) + os.pathsep + os.environ['PATH'],
                                  'WORLD': str(self.world_path), 'REPO': str(ROOT),
                                  'AWS_ACCESS_KEY_ID': 'parent-must-not-be-used',
-                                 'AWS_SECRET_ACCESS_KEY': 'parent-must-not-be-used',
-                                 'CLOUDFLARE_API_TOKEN': 'parent-must-not-be-used',
-                                 'CLOUDFLARE_API_KEY': 'parent-must-not-be-used',
-                                 'CF_API_TOKEN': 'parent-must-not-be-used'}
+                                 'AWS_SECRET_ACCESS_KEY': 'parent-must-not-be-used'}
         self.output = ''
 
     def save(self):
@@ -186,12 +192,16 @@ class Setup(unittest.TestCase):
         # Guards pinned Logger behaviour: error-level suppression must never masquerade as a version mismatch.
         binary = ROOT / 'backend/node_modules/.bin/wrangler'
         self.assertTrue(binary.exists(), 'install backend dependencies with the documented npm ci command')
-        result = setup.command([str(binary), '--version'])
+        clean = {k: v for k, v in os.environ.items()
+                 if not k.startswith(('AWS_', 'CLOUDFLARE_', 'CF_', 'WRANGLER_'))}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            env = setup.wrangler_environment()
+        result = setup.command([str(binary), '--version'], env=env)
         self.assertEqual(result.returncode, 0)
         expected = json.loads((ROOT / 'backend/package.json').read_text())['devDependencies']['wrangler']
         self.assertEqual(result.stdout.strip(), expected)
         script = "const {unstable_readConfig:read}=require('wrangler');console.log(JSON.stringify(['','aws-proving'].map(env=>read({config:'wrangler.jsonc',env},{hideWarnings:true}).name)))"
-        config = setup.command(['node', '-e', script], cwd=ROOT / 'backend')
+        config = setup.command(['node', '-e', script], cwd=ROOT / 'backend', env=env)
         self.assertEqual(config.returncode, 0)
         self.assertEqual(json.loads(config.stdout), ['overmatch-backend', 'overmatch-backend-aws-proving'])
 
@@ -203,6 +213,103 @@ class Setup(unittest.TestCase):
             self.assertEqual(f.run(*args).returncode, 2)
         self.assertEqual(f.state['calls'], [])
         self.assertEqual(f.state['worker_calls'], [])
+
+    def test_wrangler_auth_reaches_every_call_without_crossing_into_aws(self):
+        # Operators need the same auth boundary for issuing, rotating and both removal routes.
+        for auth in [{'CLOUDFLARE_API_TOKEN': 'fixture-cf-token'},
+                     {'CLOUDFLARE_API_KEY': 'fixture-cf-key', 'CLOUDFLARE_EMAIL': 'fixture@example.invalid'}]:
+            with self.subTest(names=list(auth)):
+                f = Fixture(self)
+                f.env.update(auth | {
+                    'CLOUDFLARE_GLOBAL_KEY': 'fixture-unsupported-key',
+                    'CLOUDFLARE_ACCOUNT_ID': 'fixture-account-override',
+                    'CLOUDFLARE_BASE_URL': 'https://invalid.example',
+                    'CLOUDFLARE_UNRELATED': 'true',
+                    'CF_API_TOKEN': 'fixture-deprecated-token',
+                    'CF_API_KEY': 'fixture-deprecated-key', 'CF_EMAIL': 'deprecated@example.invalid',
+                    'WRANGLER_WRITE_LOGS': 'true', 'WRANGLER_SEND_METRICS': 'true',
+                    'WRANGLER_LOG': 'debug', 'WRANGLER_LOG_SANITIZE': 'false',
+                    'AWS_SESSION_TOKEN': 'fixture-aws-session', 'AWS_PROFILE': 'wrong-profile',
+                    'REQUIRE_WRANGLER_AUTH': next(iter(auth))})
+                for args in [('apply',), ('issue-key', '--env', 'aws-proving'),
+                             ('rotate-key', '--env', 'aws-proving'), ('revoke-key', '--env', 'aws-proving'),
+                             ('issue-key', '--env', 'aws-proving'), ('teardown', '--env', 'aws-proving')]:
+                    self.assertEqual(f.run(*args).returncode, 0, f.output)
+                for call in f.state['calls']:
+                    self.assertFalse(any(k.startswith(('CLOUDFLARE_', 'CF_', 'WRANGLER_')) for k in call['env']))
+                    self.assertEqual(call['env'], {'AWS_PAGER': '', 'AWS_CLI_AUTO_PROMPT': 'off',
+                                                  'AWS_CLI_HISTORY_FILE': '/dev/null/host-setup-history-disabled'})
+                for call in f.state['worker_calls']:
+                    self.assertEqual(call['env'], auth | {
+                        'WRANGLER_WRITE_LOGS': 'false', 'WRANGLER_LOG_SANITIZE': 'true',
+                        'WRANGLER_LOG': 'log', 'WRANGLER_SEND_METRICS': 'false'})
+                    self.assertEqual(Path(call['cwd']), ROOT / 'backend')
+                for value in auth.values():
+                    self.assertNotIn(value, f.output)
+
+    def test_no_cloudflare_environment_preserves_saved_login(self):
+        f = self.issued()
+        self.assertTrue(f.state['worker_calls'])
+        for call in f.state['worker_calls']:
+            self.assertFalse(any(k.startswith(('AWS_', 'CLOUDFLARE_', 'CF_')) for k in call['env']))
+
+    def test_incomplete_or_ambiguous_auth_names_the_variable_and_fix_before_handoff(self):
+        f = self.ready()
+        base = f.env.copy()
+        for auth, missing in [({'CLOUDFLARE_EMAIL': 'fixture@example.invalid'}, 'CLOUDFLARE_API_KEY'),
+                              ({'CLOUDFLARE_API_KEY': 'fixture-key'}, 'CLOUDFLARE_EMAIL'),
+                              ({'CLOUDFLARE_GLOBAL_KEY': 'fixture-key', 'CLOUDFLARE_EMAIL': 'fixture@example.invalid'}, 'CLOUDFLARE_API_KEY'),
+                              ({'CLOUDFLARE_API_TOKEN': ''}, 'CLOUDFLARE_API_TOKEN'),
+                              ({'CLOUDFLARE_API_TOKEN': 'fixture-token', 'CLOUDFLARE_API_KEY': 'fixture-key',
+                                'CLOUDFLARE_EMAIL': 'fixture@example.invalid'}, 'CLOUDFLARE_API_TOKEN')]:
+            with self.subTest(names=list(auth)):
+                f.env = base | auth
+                result = f.run('issue-key', '--env', 'aws-proving')
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(missing, result.stderr)
+                self.assertRegex(result.stderr, 'export|unset')
+                self.assertNotIn('create-access-key', f.ops())
+                self.assertEqual(f.state['handoffs'], [])
+
+    def test_rejected_login_names_the_selected_credential_and_fix_without_echoing_it(self):
+        f = self.ready()
+        base = f.env.copy()
+        for auth, fix in [({'CLOUDFLARE_API_TOKEN': 'fixture-rejected-token'}, 'CLOUDFLARE_API_TOKEN'),
+                          ({'CLOUDFLARE_API_KEY': 'fixture-rejected-key', 'CLOUDFLARE_EMAIL': 'fixture@example.invalid'},
+                           'CLOUDFLARE_API_KEY and CLOUDFLARE_EMAIL'), ({}, 'wrangler login')]:
+            f.env = base | auth
+            for operation in ['issue-key', 'rotate-key', 'revoke-key', 'teardown']:
+                with self.subTest(auth=list(auth), operation=operation):
+                    result = f.run(operation, '--env', 'aws-proving', REJECT_LOGIN='1')
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn(fix, result.stderr)
+                    self.assertIn('account', result.stderr)
+                    self.assertNotIn('Traceback', result.stderr)
+                    for value in auth.values():
+                        self.assertNotIn(value, f.output)
+                    self.assertEqual(f.state['keys'], [])
+                    self.assertEqual(f.state['handoffs'], [])
+                    self.assertTrue(f.state['user'])
+        self.assertNotIn('create-access-key', f.ops())
+
+    def test_captured_wrangler_output_redacts_auth_and_pipe_even_on_failure(self):
+        # Captured diagnostics must stay safe even if a failing CLI echoes its inputs.
+        for auth in [{'CLOUDFLARE_API_TOKEN': 'fixture-echoed-token'},
+                     {'CLOUDFLARE_API_KEY': 'fixture-echoed-key', 'CLOUDFLARE_EMAIL': 'echoed@example.invalid'}]:
+            for args, controls, data in [(['secret', 'list'], {'REJECT_LOGIN': '1'}, None),
+                                         (['secret', 'put', 'AWS_SECRET_ACCESS_KEY'],
+                                          {'FAIL_SECRET': 'AWS_SECRET_ACCESS_KEY'}, 'fixture-piped-secret\n')]:
+                with self.subTest(auth=list(auth), args=args):
+                    f = Fixture(self)
+                    with mock.patch.dict(os.environ, f.env | auth | controls, clear=True):
+                        result = setup.command([str(f.root / 'wrangler'), *args],
+                                               env=setup.wrangler_environment(), data=data,
+                                               secret=data is not None)
+                    self.assertNotEqual(result.returncode, 0)
+                    for output in [result.stdout, result.stderr]:
+                        self.assertIn('<REDACTED>', output)
+                        for value in [*auth.values(), 'fixture-piped-secret']:
+                            self.assertNotIn(value, output)
 
     def test_apply_is_restartable_and_never_creates_a_key_or_calls_wrangler(self):
         f = Fixture(self)
@@ -223,8 +330,9 @@ class Setup(unittest.TestCase):
         self.assertEqual(f.state['handoffs'], [])
         for call in f.state['calls']:
             self.assertEqual(call['args'][:4], ['--profile', 'overmatch', '--region', 'ap-southeast-1'])
-            self.assertFalse(call['inherited_credential'])
-        self.assertTrue(all(Path(c['cwd']) == ROOT / 'backend' for c in f.state['worker_calls']))
+            self.assertFalse(any(k.startswith(('CLOUDFLARE_', 'CF_', 'WRANGLER_')) for k in call['env']))
+            self.assertNotIn('AWS_ACCESS_KEY_ID', call['env'])
+            self.assertNotIn('AWS_SECRET_ACCESS_KEY', call['env'])
 
     def test_drift_is_closed_and_ingress_tracks_the_server_owner(self):
         f = Fixture(self)
@@ -355,22 +463,46 @@ class Setup(unittest.TestCase):
         self.assertEqual(f.state['keys'], [1])
         self.assertTrue(all(h['correct'] for h in f.state['handoffs']))
         self.assertEqual({h['name'] for h in f.state['handoffs']}, set(setup.SECRETS))
-        puts = [c for c in f.state['worker_calls'] if c['args'][1] == 'put']
+        puts = [c for c in f.state['worker_calls'] if c['args'][:2] == ['secret', 'put']]
         self.assertTrue(all(c['args'][-2:] == ['--env', ''] for c in puts))
 
     def test_offering_subnets_are_all_handed_to_the_provider(self):
         f = self.issued()
         policy = f.state['policy']
-        network = policy['Statement'][1]['Resource']
+        network = [r for st in policy['Statement']
+                   if st['Effect'] == 'Allow' and st['Action'] == 'ec2:RunInstances'
+                   for r in (st['Resource'] if isinstance(st['Resource'], list) else [st['Resource']])
+                   if ':subnet/' in r]
         self.assertTrue(any(r.endswith('subnet/subnet-' + format(2,'017x')) for r in network))
         self.assertTrue(any(r.endswith('subnet/subnet-' + format(3,'017x')) for r in network))
         self.assertFalse(any(r.endswith('subnet/subnet-' + format(1,'017x')) for r in network))
-        self.assertTrue(all(c['args'][-2:] == ['--env', 'aws-proving'] for c in f.state['worker_calls']))
+        self.assertTrue(all(c['args'][-2:] == ['--env', 'aws-proving']
+                            for c in f.state['worker_calls'] if c['args'] != ['--version']))
         empty = Fixture(self)
         self.assertEqual(empty.run('apply', OFFER_ZONES='').returncode, 1)
         self.assertNotIn('create-user', empty.ops())
         all_zones = Fixture(self)
         self.assertEqual(all_zones.run('apply', OFFER_ZONES='abc').returncode, 0, all_zones.output)
+
+    def test_image_owner_alias_or_id_matches_ec2_launch_context(self):
+        # The provider needs policy and simulator context to match EC2's alias-first owner value.
+        for image_fields, expected in [({'image_owner_alias': 'amazon'}, 'amazon'),
+                                       ({}, str(10**11 + 1))]:
+            with self.subTest(image_fields):
+                f = Fixture(self, **image_fields)
+                self.assertEqual(f.run('apply').returncode, 0, f.output)
+                image_statement = next(st for st in f.state['policy']['Statement']
+                                       if '::image/' in st['Resource'])
+                self.assertEqual(image_statement['Condition']['StringLike']['ec2:Owner'], expected)
+                owners = []
+                for call in f.state['calls']:
+                    args = call['args']
+                    if args[7] != 'simulate-custom-policy' or '::image/' not in args[args.index('--resource-arns') + 1]:
+                        continue
+                    context = json.loads(args[args.index('--context-entries') + 1])
+                    owners.append(next(c['ContextKeyValues'][0] for c in context if c['ContextKeyName'] == 'ec2:Owner'))
+                self.assertIn(expected, owners)  # Allowed launch.
+                self.assertTrue(any(owner != expected for owner in owners))  # Foreign-image refusal.
 
     def test_a_changed_image_root_is_refused_before_mutation_instead_of_drifting_from_the_provider(self):
         f = Fixture(self)

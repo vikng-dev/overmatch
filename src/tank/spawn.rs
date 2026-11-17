@@ -193,8 +193,7 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
             root_bundle,
         ))
         .observe(bind_tank_view);
-    // Interpolated replicas chase the replicated public angles without manufacturing the
-    // owner-private component.
+    // A replica's client servo state; the authority's `TankServos` is never manufactured here.
     root_commands.insert(RemoteServos::for_count(template.spec().servos.len()));
     template.assemble(commands, root);
     spawn_replica_track_colliders(commands, root, template.track_colliders());
@@ -308,6 +307,60 @@ mod proxy_tests {
                 "tank {tank} names entities outside its hierarchy: {strays:?}"
             );
         }
+    }
+
+    /// The game's netcode: a replica's body attaches around the authority state its join-in-progress
+    /// snapshot carried. The crank and the owner's drivetrain, weapon gate and grip field survive
+    /// attachment as they arrived, and the root gains the client's servo
+    /// integrator, never the authority's. A late joiner relies on it to see the tank in play, not
+    /// a fresh one rebuilt from the spec. Fixture: the shipped tank's spawn state, moved off it.
+    #[test]
+    fn a_replica_attaches_around_its_join_in_progress_snapshot() {
+        use crate::sim_tick::SimTick;
+        use crate::tank::{TankServos, WeaponGate, WeaponTiming};
+        use crate::track::sim::{EngineRpm, TankTransmission, TrackGripElements};
+        use avian3d::prelude::{Position, RigidBody, Rotation};
+        let (_, template) = shipped_construction();
+        let mut world = World::new();
+        let mut commands = world.commands();
+        let authority = spawn_headless_tank(
+            &mut commands,
+            &template,
+            (RigidBody::Dynamic, Transform::IDENTITY),
+        );
+        world.flush();
+        let mut transmission = *world.get::<TankTransmission>(authority).unwrap();
+        transmission.0.gear += 1;
+        let mut gate = world.get::<WeaponGate>(authority).unwrap().clone();
+        for state in &mut gate.weapons {
+            state.timing = WeaponTiming::Interval {
+                ready_tick: SimTick::new(4321),
+            };
+        }
+        let mut grip = world.get::<TrackGripElements>(authority).unwrap().clone();
+        grip.sides[0].strain[0] = Vec3::X;
+        let snapshot = (EngineRpm(1234), transmission, gate, grip);
+        let replica = world
+            .spawn((Position::default(), Rotation::default(), snapshot.clone()))
+            .id();
+        let mut commands = world.commands();
+        attach_replicated_tank_body(
+            &mut commands,
+            replica,
+            &template,
+            TankPresentation::new(None, Handle::default()),
+            (RigidBody::Static, Transform::IDENTITY),
+        );
+        world.flush();
+        let attached = world.entity(replica);
+        assert_eq!(attached.get::<EngineRpm>(), Some(&snapshot.0));
+        assert_eq!(attached.get::<TankTransmission>(), Some(&snapshot.1));
+        assert_eq!(attached.get::<WeaponGate>(), Some(&snapshot.2));
+        assert_eq!(attached.get::<TrackGripElements>(), Some(&snapshot.3));
+        assert!(
+            attached.contains::<RemoteServos>() && !attached.contains::<TankServos>(),
+            "a replica integrates RemoteServos only"
+        );
     }
 
     /// Replica tanks retain every queried collider layer while only authority bodies receive soft

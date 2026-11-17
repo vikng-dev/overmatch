@@ -1,0 +1,29 @@
+turret-cursor early-click diagnosis: the 06c2ffab click schedule (script-tick cadence, no
+readiness), fire_tick 8, fire_interval 196, 640 ticks; SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10,
+seeded; window hidden. Subject client frame rows (local fixed tick per frame, frame time t) and
+the server's fire rows. MEASURED unless marked.
+
+seed 41: released at client tick 61 (frame_s 1.049)
+  frame t 1.0377  local 44 -> 60  16 steps   (the frame before release)
+  frame t 1.0487  local 60 -> 61   1 step    (release)
+  frame t 1.1327  local 61 -> 66   5 steps
+  click 1, script tick   8 = local  69, frame t 1.1683, a one-step frame
+  click 2, script tick 204 = local 265, frame t 4.2305: 195.98 ticks after click 1 (DERIVED, x64)
+  server fires 434, 630, 826: gaps 196, 196. Every click fired.
+
+seed 42: released at client tick 42 (frame_s 0.980)
+  frame t 0.9798  local 41 -> 57  16 steps   (release; script ticks 0-14 in one frame)
+  frame t 1.0690  local 57 -> 62   5 steps
+  click 1, script tick   8 = local  50, inside the release frame's batch
+  click 2, script tick 204 = local 246, frame t 3.9308: 188.86 ticks after click 1 (DERIVED, x64)
+  click 3, script tick 400 = local 442, frame t 6.9978
+  input answers: ids 1-3 all refused=false, 132.7 / 97.3 / 104.1 ms click-to-answer
+  server fires 404, 788: gap 384 = 2 x 192. Click 2 never fired.
+
+Reading: the client's first frames after connection catch up with a 16-step and a 5-step batch.
+When combat release lands on the 16-step frame (seed 42), the script's first 15 ticks pass in no
+wall time, so a click 196 script ticks after one inside the batch reaches the server about 189
+ticks after it, inside the main gun's 192-tick reload; the server's ready check skips a trigger
+on an unready weapon. When release lands a frame after it (seed 41), clicks are 196 ticks apart
+in wall time and all fire. The review's diagnosis holds: a harness artefact, with every click
+accepted by input arrival. The runner now clicks on the gun's readiness instead.

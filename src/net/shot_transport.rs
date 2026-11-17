@@ -480,6 +480,7 @@ fn queue_fire(
     crate::shot_trace::record(&mut shot_trace, "fire", clock.0.raw(), shot, || {
         json!({
             "o": [event.origin.x, event.origin.y, event.origin.z],
+            "d": [event.direction.x, event.direction.y, event.direction.z],
             "tr": event.tracer,
             "cal": fire.caliber,
             "smoke": fire.effects.smoke.is_some(),

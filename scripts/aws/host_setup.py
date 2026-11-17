@@ -22,6 +22,7 @@ POLICY = "overmatch-host"
 TAGS = {"Project": "overmatch", "Purpose": "host"}
 PARAMETER = "/aws/service/canonical/ubuntu/server/26.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
 SECRETS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_HOST_CONFIG")
+CLOUDFLARE_AUTH = ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_KEY", "CLOUDFLARE_EMAIL")
 
 
 class Refused(Exception):
@@ -35,27 +36,74 @@ class AwsError(Refused):
 
 
 def environment() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith(("AWS_", "WRANGLER_", "CLOUDFLARE_", "CF_"))}
+
+
+def aws_environment() -> dict[str, str]:
     # Credential sources belong to the named profile, never the parent shell.
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("AWS_", "WRANGLER_", "CLOUDFLARE_", "CF_"))}
     # If profile cli_history is enabled, AWS fails before sending any API request: its history
     # directory cannot be created below the null device. Never let it persist a create-key response.
-    return env | {"AWS_PAGER": "", "AWS_CLI_AUTO_PROMPT": "off",
-                  "AWS_CLI_HISTORY_FILE": "/dev/null/host-setup-history-disabled",
-                  "WRANGLER_WRITE_LOGS": "false", "WRANGLER_LOG_SANITIZE": "true",
-                  "WRANGLER_LOG": "log", "WRANGLER_SEND_METRICS": "false", "CI": "true"}
+    return environment() | {"AWS_PAGER": "", "AWS_CLI_AUTO_PROMPT": "off",
+                            "AWS_CLI_HISTORY_FILE": "/dev/null/host-setup-history-disabled"}
 
 
-def command(argv: list[str], *, data: str | None = None, cwd: Path = ROOT) -> subprocess.CompletedProcess:
+def wrangler_environment() -> dict[str, str]:
+    # Wrangler's native names only; backend/wrangler.jsonc owns account selection.
+    auth = {name: os.environ[name] for name in CLOUDFLARE_AUTH if name in os.environ}
+    for name, value in auth.items():
+        if not value.strip():
+            raise Refused(f"{name} is empty; export a non-empty value or unset all Cloudflare variables for saved Wrangler login")
+    if "CLOUDFLARE_API_TOKEN" in auth:
+        if "CLOUDFLARE_API_KEY" in auth or "CLOUDFLARE_EMAIL" in auth:
+            raise Refused("ambiguous Wrangler authentication; export CLOUDFLARE_API_TOKEN alone or unset it "
+                          "and export CLOUDFLARE_API_KEY and CLOUDFLARE_EMAIL")
+    elif auth or any(k.startswith(("CLOUDFLARE_", "CF_")) for k in os.environ):
+        for name in ("CLOUDFLARE_API_KEY", "CLOUDFLARE_EMAIL"):
+            if name not in auth:
+                raise Refused(f"missing {name}; export CLOUDFLARE_API_KEY and CLOUDFLARE_EMAIL "
+                              "using Wrangler's native names (CLOUDFLARE_GLOBAL_KEY is not mapped), "
+                              "or export CLOUDFLARE_API_TOKEN alone")
+    return environment() | auth | {
+        "WRANGLER_WRITE_LOGS": "false", "WRANGLER_LOG_SANITIZE": "true",
+        "WRANGLER_LOG": "log", "WRANGLER_SEND_METRICS": "false", "CI": "true"}
+
+
+def command(argv: list[str], *, env: dict[str, str], data: str | None = None,
+            secret: bool = False, cwd: Path = ROOT) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(argv, input=data, cwd=cwd, env=environment(),
-                              capture_output=True, text=True, timeout=180)
+        result = subprocess.run(argv, input=data, cwd=cwd, env=env,
+                                capture_output=True, text=True, timeout=180)
     except FileNotFoundError as error:
         raise Refused(f"missing CLI: {Path(argv[0]).name}; install it and retry") from error
     except subprocess.TimeoutExpired as error:
         raise Refused(f"{Path(argv[0]).name} did not finish within the CLI timeout; retry") from error
     except OSError as error:
         raise Refused(f"cannot execute {Path(argv[0]).name}; check its installation") from error
+    # Even a child that echoes auth or a secret on its stdin cannot return those values in diagnostics.
+    hidden = {os.environ[name] for name in (*CLOUDFLARE_AUTH, "CLOUDFLARE_GLOBAL_KEY",
+                                          "CF_API_TOKEN", "CF_API_KEY", "CF_EMAIL")
+              if os.environ.get(name)}
+    if secret and data and data.rstrip("\n"):
+        hidden.add(data.rstrip("\n"))
+    for value in sorted(hidden, key=len, reverse=True):
+        result.stdout = result.stdout.replace(value, "<REDACTED>")
+        result.stderr = result.stderr.replace(value, "<REDACTED>")
+    return result
+
+
+def wrangler(*args: str, data: str | None = None, secret: bool = False) -> subprocess.CompletedProcess:
+    env = wrangler_environment()
+    result = command(["wrangler", *args], env=env, data=data, secret=secret, cwd=ROOT / "backend")
+    if result.returncode:
+        if "CLOUDFLARE_API_TOKEN" in env:
+            fix = "check CLOUDFLARE_API_TOKEN; export a valid token with access to the configured account"
+        elif "CLOUDFLARE_API_KEY" in env:
+            fix = "check CLOUDFLARE_API_KEY and CLOUDFLARE_EMAIL; export the configured account's valid key/email pair"
+        else:
+            fix = "run wrangler login with access to the configured account, or export CLOUDFLARE_API_TOKEN"
+        raise Refused(f"Wrangler {' '.join(args[:2])} failed; {fix}; check the existing backend deployment and retry")
+    return result
 
 
 def aws_argv(*args: str) -> list[str]:
@@ -80,7 +128,7 @@ def decode(text: str, source: str) -> dict:
 
 
 def aws(*args: str) -> dict:
-    result = command(aws_argv(*args))
+    result = command(aws_argv(*args), env=aws_environment())
     if result.returncode:
         if aws_code(result) == "CliHistoryEnabled":
             raise Refused("AWS CLI history is enabled; disable cli_history in the overmatch profile before retrying")
@@ -146,13 +194,22 @@ class Standing:
     root_size: int
     template: dict
 
+    @property
+    def image_owner(self) -> str:
+        # MEASURED from the decoded launch refusal: EC2 evaluates ec2:Owner as the owner
+        # alias when present, otherwise the owner id. This admits any public image published
+        # under that alias in the region. The key holder already chooses user data, so the
+        # image is not the boundary: IAM constrains region, type, on-demand, tags, the one
+        # security group and per-volume shape; the Worker constrains resource count.
+        return self.image.get("ImageOwnerAlias") or self.image["OwnerId"]
+
     def policy(self, group: str) -> dict:
         prefix = f"arn:aws:ec2:{REGION}:{self.account}:"
         policy = bind_template(self.template, {
             "@ACCOUNT@": self.account, "@REGION@": REGION,
             "@NETWORK_ARNS@": [prefix + "security-group/" + group,
                                  *[prefix + "subnet/" + subnet for subnet in self.subnets]],
-            "@IMAGE_OWNER@": self.image["OwnerId"], "@INSTANCE_TYPE@": self.kind,
+            "@IMAGE_OWNER@": self.image_owner, "@INSTANCE_TYPE@": self.kind,
             "@ROOT_SIZE@": self.root_size, "@PROJECT@": TAGS["Project"],
             "@PURPOSE@": TAGS["Purpose"], "@PARAMETER@": PARAMETER})
         # IAM's user-inline-policy interface limit excludes whitespace.
@@ -265,10 +322,7 @@ def worker_args(target: str) -> list[str]:
 
 def put_secret(name: str, value: str, target: str) -> None:
     # stdout/stderr are captured even on failure: Wrangler diagnostics must never echo credentials.
-    result = command(["wrangler", "secret", "put", name, *worker_args(target)],
-                     data=value + "\n", cwd=ROOT / "backend")
-    if result.returncode:
-        raise Refused(f"Worker secret {name} was not confirmed; check Wrangler login and retry")
+    wrangler("secret", "put", name, *worker_args(target), data=value + "\n", secret=True)
 
 
 def keys() -> list[dict]:
@@ -296,7 +350,7 @@ def install_key(target: str, *, rotate: bool) -> None:
         # Only the forwarder reads this pipe, and only Wrangler's stdin receives each field.
         try:
             producer = subprocess.Popen(aws_argv("iam", "create-access-key", "--user-name", USER),
-                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=environment())
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=aws_environment())
         except OSError as error:
             raise Refused("cannot start AWS key creation; check the AWS CLI") from error
         try:
@@ -343,15 +397,13 @@ def require_wrangler() -> None:
     if not shutil.which("wrangler"):
         raise Refused("missing CLI: wrangler; add backend/node_modules/.bin to PATH after installing backend dependencies")
     expected = decode((ROOT / "backend/package.json").read_text(), "backend/package.json")["devDependencies"]["wrangler"]
-    version = command(["wrangler", "--version"])
-    if version.returncode or re.search(r"(?<![0-9.])" + re.escape(expected) + r"(?![0-9.])", version.stdout) is None:
+    version = wrangler("--version")
+    if re.search(r"(?<![0-9.])" + re.escape(expected) + r"(?![0-9.])", version.stdout) is None:
         raise Refused("Wrangler version does not match backend/package.json; use the backend's installed CLI")
 
 
 def secret_names(target: str) -> set[str]:
-    result = command(["wrangler", "secret", "list", *worker_args(target)], cwd=ROOT / "backend")
-    if result.returncode:
-        raise Refused("cannot list Worker secret names; check Wrangler login and the existing backend deployment")
+    result = wrangler("secret", "list", *worker_args(target))
     try:
         names = json.loads(result.stdout)
     except ValueError as error:
@@ -408,7 +460,7 @@ def simulate(standing: Standing, group: str, principal: dict | None) -> None:
     resources = [f"arn:aws:ec2:{REGION}::image/{standing.image['ImageId']}",
                  prefix + "subnet/" + standing.subnets[0], prefix + "security-group/" + group,
                  *[prefix + name + "/" + name for name in ("instance", "volume", "network-interface")]]
-    context = {"ec2:Region": REGION, "ec2:Owner": standing.image["OwnerId"],
+    context = {"ec2:Region": REGION, "ec2:Owner": standing.image_owner,
                "ec2:InstanceType": standing.kind, "ec2:InstanceMarketType": "on-demand",
                "aws:RequestTag/Project": TAGS["Project"], "aws:RequestTag/Purpose": TAGS["Purpose"],
                "aws:ResourceTag/Project": TAGS["Project"], "aws:ResourceTag/Purpose": TAGS["Purpose"],
@@ -453,7 +505,8 @@ def simulate(standing: Standing, group: str, principal: dict | None) -> None:
                   {"aws:RequestTag/" + key: None})
     check("different instance type", "ec2:RunInstances", resources[3], False, {"ec2:InstanceType": other_kind})
     check("Spot launch", "ec2:RunInstances", resources[3], False, {"ec2:InstanceMarketType": "spot"})
-    check("foreign image", "ec2:RunInstances", resources[0], False, {"ec2:Owner": "amazon"})
+    other_owner = "aws-marketplace" if standing.image_owner != "aws-marketplace" else "amazon"
+    check("foreign image", "ec2:RunInstances", resources[0], False, {"ec2:Owner": other_owner})
     check("different security group", "ec2:RunInstances", prefix + "security-group/foreign", False)
     check("tagged host termination", "ec2:TerminateInstances", resources[3], True)
     for key in TAGS:
@@ -526,10 +579,7 @@ def remove_credentials(target: str, user_exists: bool) -> None:
     names = secret_names(target)
     for name in SECRETS:
         if name in names:
-            result = command(["wrangler", "secret", "delete", name, *worker_args(target)],
-                             data="y\n", cwd=ROOT / "backend")
-            if result.returncode:
-                raise Refused(f"Worker secret {name} deletion not confirmed; retry the same removal command")
+            wrangler("secret", "delete", name, *worker_args(target), data="y\n")
 
 
 def revoke_key(target: str) -> None:

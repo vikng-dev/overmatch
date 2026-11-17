@@ -4,6 +4,23 @@ Subject: hosting for Overmatch, a multiplayer tank video game. Building lane `la
 bay-3. This revision made no deployment, key handoff, AWS request, quota request or external comment.
 Only local checks and public primary-source reads ran. Production still selects Edgegap.
 
+## Live proof, first attempt
+
+MEASURED from the refused launch's CloudTrail record and decoded authorization message: the
+Worker's real `RunInstances` failed with `UnauthorizedOperation` on the image resource, with
+"no identity-based policy allows". EC2's image context held `ec2:Owner = amazon`,
+`ec2:Public = true`, `ec2:ImageType = machine` and `ec2:RootDeviceType = ebs`.
+`DescribeImages` for the SSM-resolved Canonical Ubuntu image reported `ImageOwnerAlias: amazon`
+and a numeric `OwnerId`. The policy used that numeric id for `ec2:Owner`; the simulation supplied
+the same numeric context and treated `amazon` as a foreign owner. DERIVED: that owner condition
+cannot match the observed EC2 context. The other launch resources were not reached; their
+authorization remains unproven, not proven wrong.
+
+The refused request carried `blockDeviceMapping`, `clientToken`, `disableApiStop`,
+`disableApiTermination`, `instanceInitiatedShutdownBehavior`, `instanceMarketOptions`,
+`instanceType`, `instancesSet`, `metadataOptions`, `monitoring`, `networkInterfaceSet`,
+`tagSpecificationSet`, `tenancy` and `userData`.
+
 ## Error-rule closure
 
 Decision: use one rule across every Worker catch in the lane's diff. Parse outside failures once
@@ -197,10 +214,11 @@ spend ceiling. The root contract and launch constraints remain owned by setup/po
 
 ## IAM and deployment identity
 
-**Policy unchanged; `host-setup apply` does not need to be re-run for these fixes.** The actual
-policy template has no `aws:TagKeys` allowlist and permits extra creation tags. Its RequestTag
-conditions require Project/Purpose; CreateTags is restricted to RunInstances. Existing simulation
-cases still test that contract, and `test_host_setup.py` passes. No AWS permission was added.
+**The image-owner correction changes the rendered policy; standing IAM needs reconciliation
+before repeating the live proof.** The policy template has no `aws:TagKeys` allowlist and permits
+extra creation tags. Its RequestTag conditions require Project/Purpose; CreateTags is restricted
+to RunInstances. Existing simulation cases still test that contract, and `test_host_setup.py`
+passes. No AWS action was added.
 
 `WORKER_ENV` is an immutable operator identity, distinct for every Worker. Never reuse it for a
 second live deployment. Drain before changing it: older machines without this tag, or with the
@@ -353,9 +371,15 @@ name metered resources rather than account-specific prices. Region is always `ap
    cost; its account plan/usage remains the operator's responsibility. Use the HTTPS proving origin.
 
 2. **Issue the key only after the deployed Worker and Access checks.** From repo root, with pinned
-   Wrangler on PATH:
+   Wrangler on PATH and the native authentication exports described in
+   [`host-setup.md`](../../scripts/aws/host-setup.md). For the operator shell that already exports
+   `CLOUDFLARE_GLOBAL_KEY` and `CLOUDFLARE_EMAIL`, prepare Wrangler's key name without printing it:
 
    ```sh
+   set +x
+   unset CLOUDFLARE_API_TOKEN
+   export CLOUDFLARE_API_KEY="${CLOUDFLARE_GLOBAL_KEY:?export the account key first}"
+   export CLOUDFLARE_EMAIL
    export PATH="$PWD/backend/node_modules/.bin:$PATH"
    scripts/aws/host-setup issue-key --env aws-proving
    scripts/aws/host-setup verify
@@ -482,7 +506,7 @@ name metered resources rather than account-specific prices. Region is always `ap
 
 ## Remaining live limits
 
-Real IAM launch context/native SSM resolution, Worker-to-EC2 signing/fetch, GitHub release redirects,
+Successful full-request IAM authorization/native SSM resolution, GitHub release redirects,
 filesystem fit, Ubuntu image unit inventory and actual systemd privilege/power-off behavior,
 Access hostname/audience configuration, real end-to-end play and both shutdown attribution and
 forced-silent recovery remain unmeasured here. The independent age rule is covered offline; no
