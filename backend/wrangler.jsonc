@@ -5,6 +5,8 @@
 	"account_id": "cabe621e38d3e02cea53d2010fb542e0",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-10-01",
+	// The provider slice supplies this environment's bindings before its first deployment.
+	"env": { "aws-proving": { "name": "overmatch-backend-aws-proving" } },
 	// Custom logs only. Invocation logs record every request URL and are off: no URL here carries a
 	// credential, and this keeps it that way should one ever slip in.
 	"observability": { "enabled": true, "logs": { "invocation_logs": false } },
