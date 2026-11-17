@@ -80,7 +80,13 @@ pub fn sim_plugin(app: &mut App) {
     )
     .add_systems(
         Update,
-        servo::interpolate_servos.run_if(in_state(AppState::Playing)),
+        servo::interpolate_servos
+            .in_set(ServoView)
+            .run_if(in_state(AppState::Playing)),
     )
     .add_plugins(view_attach_plugin);
 }
+
+/// Ordering owner for the servo view write: a frame's servo states are set before it draws them.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ServoView;

@@ -124,7 +124,7 @@ impl Default for Script {
 }
 
 /// What the scripted tank does. One enum, so two workloads cannot both be asked for.
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum Drive {
     /// The default, exercising the real sim: 4 s idle (the rig binds, the hull comes to rest on
@@ -146,6 +146,10 @@ pub(crate) enum Drive {
     /// Never drive, never fire: the tank sits on whatever contact it settled onto (with
     /// `spawn_pose`, a chosen patch of ground), with no drive input perturbing it.
     Idle,
+    /// The same lead, then a neutral turn to the script's end: no throttle, `steer` in `-1..=1`
+    /// and nonzero. Never fires. A remote hull turning under a turret that holds a [`Aim::World`]
+    /// bearing is the capture `scripts/shot/run-turret-cursor.py` records.
+    Pivot { steer: f32 },
     /// Stationary fire, so the only difference from [`Drive::Idle`] is the fire itself: hold the
     /// secondary trigger from a ~3 s warmup to the end, and click the primary every
     /// `fire_interval` from `fire_tick`. At least one of the two; the aim is a point.
@@ -167,6 +171,8 @@ pub(crate) enum Aim {
     /// Sweep around the tank at ~1.3 rad/s, recommitted every tick, as a player scanning with the
     /// mouse does. Not with [`Drive::Fire`].
     Sweep,
+    /// Chase this world point, finite: the turret holds its bearing while the hull turns.
+    World((f32, f32, f32)),
 }
 
 impl Default for Aim {
@@ -309,12 +315,17 @@ impl Script {
                 problem: "a Fire workload needs an end before ticks with at least one trigger demand",
             });
         }
+        if let Drive::Pivot { steer } = self.drive
+            && !(steer != 0.0 && (-1.0..=1.0).contains(&steer))
+        {
+            return Err(ScriptError::Invalid {
+                field: "drive.steer",
+                problem: "a nonzero steer demand within -1..=1",
+            });
+        }
         match self.aim {
-            Aim::Point(point)
-                if crate::command::ParsedAimIntent::try_from(AimIntent::HullLocal(Vec3::from(
-                    point,
-                )))
-                .is_err() =>
+            Aim::Point(_) | Aim::World(_)
+                if crate::command::ParsedAimIntent::try_from(self.aim.at(0)).is_err() =>
             {
                 return Err(ScriptError::Invalid {
                     field: "aim",
@@ -427,7 +438,7 @@ impl SimulateInput {
             Drive::Arc => (script.arc_ticks, script.arc_steer),
             Drive::Straight => (script.straight_ticks, 0.0),
             Drive::Ram { throttle_ticks } | Drive::Park { throttle_ticks } => (throttle_ticks, 0.0),
-            Drive::Idle | Drive::Fire { .. } => (0, 0.0),
+            Drive::Idle | Drive::Fire { .. } | Drive::Pivot { .. } => (0, 0.0),
         };
         Self {
             ticks: 0,
@@ -501,16 +512,19 @@ impl SimulateInput {
             && t >= self.fire_tick
             && (t - self.fire_tick).is_multiple_of(self.fire_interval)
     }
+}
 
+impl Aim {
     /// The point every servo chases on tick `t`.
-    fn aim_at(&self, t: u32) -> AimIntent {
-        AimIntent::HullLocal(match self.aim {
-            Aim::Point(point) => Vec3::from(point),
+    fn at(self, t: u32) -> AimIntent {
+        match self {
+            Aim::Point(point) => AimIntent::HullLocal(Vec3::from(point)),
             Aim::Sweep => {
                 let theta = 0.02 * t as f32;
-                Vec3::new(800.0 * theta.sin(), 0.0, -800.0 * theta.cos())
+                AimIntent::HullLocal(Vec3::new(800.0 * theta.sin(), 0.0, -800.0 * theta.cos()))
             }
-        })
+            Aim::World(point) => AimIntent::World(Vec3::from(point)),
+        }
     }
 }
 
@@ -536,17 +550,19 @@ pub(crate) fn buffer_input(
         ResMut<super::input_arrival::FrameInput>,
         ResMut<super::input_arrival::ClientInput>,
     ),
-    slots: Query<
+    mut slots: Query<
         (
             Option<&avian3d::prelude::LinearVelocity>,
             Option<&crate::CombatantId>,
+            // Absent until the slot's tank is assembled.
+            Option<&mut TankCommand>,
         ),
         With<lightyear::prelude::Controlled>,
     >,
     mut trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
     use bevy::ecs::query::QuerySingleError;
-    let (velocity, combatant) = match slots.single() {
+    let (velocity, combatant, own) = match slots.single_mut() {
         Ok(slot) => slot,
         // Before tank replication (or between lives), there is no local input slot.
         Err(QuerySingleError::NoEntities(_)) => return,
@@ -591,6 +607,12 @@ pub(crate) fn buffer_input(
     let t = sim.ticks;
     sim.write(t, &mut state.command);
     sim.stop(t, velocity.map(|v| v.length()), &mut state.command);
+    // The script lays its own turret as a player's aim commit and range dial do: the own tank's
+    // command carries the intent its ahead-running servos chase (`aim::drive_aim_servos`).
+    if let Some(mut own) = own {
+        own.aim = state.command.aim;
+        own.range = state.command.range;
+    }
     if (state.command.fire_primary || state.command.fire_secondary)
         && let ScriptClock::Released {
             first_fire_logged, ..
@@ -618,9 +640,12 @@ impl SimulateInput {
     /// Tick `t`'s scripted drive, aim and triggers into `command`.
     fn write(&self, t: u32, command: &mut TankCommand) {
         let driving = (RUN_LEAD..RUN_LEAD + self.throttle_ticks).contains(&t);
-        command.throttle = if driving { 1.0 } else { 0.0 };
-        command.steer = if driving { self.steer } else { 0.0 };
-        command.aim = Some(self.aim_at(t));
+        (command.throttle, command.steer) = match self.drive {
+            Drive::Pivot { steer } if t >= RUN_LEAD => (0.0, steer),
+            _ if driving => (1.0, self.steer),
+            _ => (0.0, 0.0),
+        };
+        command.aim = Some(self.aim.at(t));
         command.range = self.range;
         let firing = self.fire_until.is_none_or(|until| t < until);
         (command.fire_primary, command.fire_secondary) = match self.drive {
@@ -630,7 +655,9 @@ impl SimulateInput {
             ),
             Drive::Arc | Drive::Straight => (t == self.fire_tick, false),
             // A recoil impulse would disturb the resting contact under study.
-            Drive::Idle | Drive::Ram { .. } | Drive::Park { .. } => (false, false),
+            Drive::Idle | Drive::Ram { .. } | Drive::Park { .. } | Drive::Pivot { .. } => {
+                (false, false)
+            }
         };
     }
 
@@ -1062,8 +1089,8 @@ mod tests {
     use bevy::math::{Vec2, Vec3};
 
     use super::{
-        Aim, BurstSpec, Drive, Script, ScriptTimeout, SeededRecvConditioner, SimulateInput,
-        SpawnPose, WATCHDOG_SLACK, parse_env_flag,
+        Aim, BurstSpec, Drive, RUN_LEAD, Script, ScriptTimeout, SeededRecvConditioner,
+        SimulateInput, SpawnPose, WATCHDOG_SLACK, parse_env_flag,
     };
     use crate::command::{AimIntent, TankCommand};
 
@@ -1136,6 +1163,9 @@ mod tests {
             ("(drive: Fire(secondary: true), aim: Sweep)", "aim"),
             ("(aim: Point((1.0, 1e39, 0.0)))", "aim"),
             ("(aim: Point((1.0, 1e30, 0.0)))", "aim"),
+            ("(aim: World((1.0, 1e30, 0.0)))", "aim"),
+            ("(drive: Pivot(steer: 0.0))", "drive.steer"),
+            ("(drive: Pivot(steer: 1.5))", "drive.steer"),
             ("(range_m: 0.0)", "range_m"),
             (
                 "(spawn_pose: (at: (0.0, 0.0), rot: (0.0, 0.0, 0.0, 0.0)))",
@@ -1161,6 +1191,28 @@ mod tests {
             let pose = Script::parse(&text).unwrap().spawn_pose.unwrap();
             assert!(pose.rot.is_normalized());
             assert!((pose.rot * Vec3::NEG_Z).distance(Vec3::NEG_X) < 1e-5);
+        }
+    }
+
+    /// A pivot turns the hull in place: the turret-cursor capture reads a turning hull under a
+    /// world-held turret, which any throttle or trigger would turn into an arc or a recoil. The
+    /// world aim keeps its frame, so the authority holds the place rather than a hull bearing.
+    #[test]
+    fn a_pivot_turns_in_place_under_a_world_aim() {
+        // Fixture steer and world point.
+        let sim = SimulateInput::new(
+            &Script::parse("(drive: Pivot(steer: -0.5), aim: World((10.0, 2.0, -900.0)))").unwrap(),
+        );
+        let mut command = crate::command::TankCommand::default();
+        for t in 0..sim.total {
+            sim.write(t, &mut command);
+            let steer = if t >= RUN_LEAD { -0.5 } else { 0.0 };
+            assert_eq!((command.throttle, command.steer), (0.0, steer));
+            assert!(!command.fire_primary && !command.fire_secondary);
+            assert_eq!(
+                command.aim,
+                Some(AimIntent::World(Vec3::new(10.0, 2.0, -900.0)))
+            );
         }
     }
 
@@ -1285,6 +1337,47 @@ mod tests {
         assert_eq!(
             sim.timeout(deadline + tick, tick),
             Some(ScriptTimeout::Completion)
+        );
+    }
+
+    /// A scripted client lays its own turret as a player does: the script's aim and range reach
+    /// the own tank's command, which its ahead-running servos chase (`aim::drive_aim_servos`).
+    /// Without it the own turret rests while the authority traverses, and every capture of the own
+    /// turret (`scripts/shot/run-turret-cursor.py`) measures the harness, not the game.
+    #[test]
+    fn a_scripted_client_lays_its_own_tank_like_a_player() {
+        use super::super::battle::{BattlePhase, BattleState, LateJoin};
+        use super::super::input_arrival::{ClientInput, FrameInput};
+        use crate::sim_tick::SimTick;
+        use bevy::prelude::*;
+        let mut app = App::new();
+        // Fixture aim and range.
+        app.insert_resource(SimulateInput::new(
+            &Script::parse("(drive: Idle, aim: World((5.0, 1.0, -300.0)), range_m: 300.0)")
+                .unwrap(),
+        ))
+        .init_resource::<Time<Real>>()
+        .init_resource::<lightyear::prelude::LocalTimeline>()
+        .init_resource::<ClientInput>()
+        .init_resource::<FrameInput>()
+        .add_systems(FixedPreUpdate, super::buffer_input);
+        app.world_mut().resource_mut::<SimulateInput>().start = crate::cost::WorkloadStart::Ready;
+        let own = app
+            .world_mut()
+            .spawn((lightyear::prelude::Controlled, TankCommand::default()))
+            .id();
+        app.world_mut().spawn(BattleState {
+            phase: BattlePhase::Combat {
+                ends_at: SimTick::new(100),
+                late_join: LateJoin::Closed,
+            },
+            ..default()
+        });
+        app.world_mut().run_schedule(FixedPreUpdate);
+        let command = app.world().get::<TankCommand>(own).unwrap();
+        assert_eq!(
+            (command.aim, command.range),
+            (Some(AimIntent::World(Vec3::new(5.0, 1.0, -300.0))), 300.0)
         );
     }
 

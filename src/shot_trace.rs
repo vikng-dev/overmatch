@@ -185,7 +185,59 @@ fn write_meta(mut trace: ResMut<ShotTrace>, fixed: Res<Time<Fixed>>) {
 
 /// The game's damage model: client fire/path arrival, cursor playback and trail consumption.
 pub fn client_plugin(app: &mut App) {
-    install(app, "client");
+    if install(app, "client") {
+        app.add_systems(
+            PostUpdate,
+            record_drawn_shots.after(bevy::transform::TransformSystems::Propagate),
+        );
+    }
+}
+
+/// Resolution: a shell's first three drawn stations hold its first segment and the next; the
+/// turret-cursor capture (`scripts/shot/run-turret-cursor.py`) reads the first.
+const DRAWN_STATIONS: usize = 3;
+
+/// The game's damage-model presentation, game state only: each of a reconstructed shell's first
+/// [`DRAWN_STATIONS`] drawn stations (`p`, its `ShellPath`) beside its shooter's drawn bore
+/// (`bore`, `trace::DrawnBores`) in the frame that drew it, at the path cursor (`itick`). `bore` is
+/// null once the shooter's root has left.
+fn record_drawn_shots(
+    mut trace: ResMut<ShotTrace>,
+    shells: Query<
+        (&crate::ballistics::Shot, &crate::ballistics::ShellPath),
+        Changed<crate::ballistics::ShellPath>,
+    >,
+    shooters: Query<(&crate::CombatantId, &crate::tank::Rig)>,
+    bores: crate::trace::DrawnBores,
+    clock: Res<crate::ballistics::PathClock>,
+) {
+    for (shot, path) in &shells {
+        if path.points.is_empty() || path.points.len() > DRAWN_STATIONS {
+            continue;
+        }
+        let bore = shooters
+            .iter()
+            .find(|(combatant, _)| **combatant == shot.0.combatant)
+            .map_or(Value::Null, |(_, rig)| {
+                let (muzzle, direction) = bores.of(rig);
+                crate::trace::bore(muzzle, direction)
+            });
+        let points: Vec<Value> = path
+            .points
+            .iter()
+            .map(|point| json!([point.x, point.y, point.z]))
+            .collect();
+        trace.row(
+            "drawn",
+            None::<u32>,
+            shot.0,
+            json!({
+                "p": points,
+                "bore": bore,
+                "itick": f64::from(clock.tick) + clock.fraction,
+            }),
+        );
+    }
 }
 
 /// MP server: the authority's emissions (fire, ricochet, terminal, and damage confirmation).

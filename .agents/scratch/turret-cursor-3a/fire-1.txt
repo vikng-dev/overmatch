@@ -1,0 +1,30 @@
+turret-cursor fire capture, seed 1: (drive: Fire(primary: true), aim: Point((7.0, 100.0, 800.0)), range_m: 800.0, fire_tick: 64, fire_interval: 196, fire_until: 2240, ticks: 2400)
+SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10, seeded; window hidden; MEASURED, degrees
+own = the shooter's client drawing its own turret; remote = the observer's client
+drawing the shooter. gun-fire: drawn barrel vs the server's bore at the fire tick;
+gun-tracer: drawn barrel vs the tracer's first drawn segment; lead: drawn yaw minus
+the server's yaw at the frame's view cursor; cur-ft: that cursor minus the fire tick.
+
+ tick  deg/s | own gun-fire gun-tracer   lead cur-ft | remote gun-fire gun-tracer   lead cur-ft
+  474   5.74 |        3.633      3.639  2.960   0.08 |           0.147      0.155 -0.002   0.24
+  670   5.77 |        3.057      3.057  2.974   0.34 |           0.108      0.109  0.001   0.21
+  866   5.76 |        3.021      2.967  2.959   0.00 |           0.129      0.133  0.001   0.38
+ 1061   5.75 |        2.944      2.944  2.842   0.47 |           0.169      0.177 -0.000   0.51
+ 1258   5.75 |        2.206      2.206  2.114   0.24 |           0.159      0.167  0.001   0.38
+ 1454   5.75 |        2.246      2.247  2.126   0.49 |           0.127      0.133  0.001   0.22
+ 1650   5.75 |        2.178      2.181  2.102   0.03 |           0.140      0.147  0.001   0.28
+ 1846   5.75 |        2.232      2.233  2.114   0.43 |           0.094      0.096  0.000   0.04
+ 2042   5.75 |        2.193      2.194  2.106   0.14 |           0.093      0.090  0.002   0.02
+ 2238   5.75 |        2.192      2.192  2.114   0.07 |           0.095      0.096  0.001   0.06
+ 2433   0.00 |        0.005      0.016 -0.001   0.12 |           0.006      0.017 -0.001   0.14   (at rest)
+ 2629   0.00 |        0.014      0.025  0.002   0.34 |           0.007      0.018  0.002   0.19   (at rest)
+
+mid-traverse shots: 10, traverse 5.75 deg/s mean
+   own gun_vs_server_fire_deg: min 2.178 mean 2.590 max 3.633
+   own gun_vs_tracer_deg: min 2.181 mean 2.586 max 3.639
+   own gun_yaw_minus_cursor_yaw_deg: min 2.102 mean 2.441 max 2.974
+   own tracer_start_from_drawn_muzzle_m: min 3.912 mean 3.916 max 3.920
+remote gun_vs_server_fire_deg: min 0.093 mean 0.126 max 0.169
+remote gun_vs_tracer_deg: min 0.090 mean 0.130 max 0.177
+remote gun_yaw_minus_cursor_yaw_deg: min -0.002 mean 0.001 max 0.002
+remote tracer_start_from_drawn_muzzle_m: min 3.911 mean 3.914 max 3.916

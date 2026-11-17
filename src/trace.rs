@@ -18,7 +18,8 @@ use bevy::prelude::*;
 use serde_json::{Value, json};
 
 use crate::tank::{
-    Controlled, RemoteServos, Tank, TankServos, TankSim, WeaponGate, WeaponLoads, selected,
+    Controlled, RemoteServos, Rig, Tank, TankServos, TankSim, ViewNode, WeaponGate, WeaponLoads,
+    rig_world_pose, selected,
 };
 use crate::track::sim::{
     DriveSignal, TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripElements,
@@ -257,7 +258,8 @@ fn record_frame(
     mut trace: ResMut<TraceWriter>,
     real: Res<Time<Real>>,
     fixed: Res<Time<Fixed>>,
-    roots: Query<(Entity, &GlobalTransform, Has<Controlled>), With<Tank>>,
+    roots: Query<(Entity, &GlobalTransform, Has<Controlled>, Option<&Rig>), With<Tank>>,
+    bores: DrawnBores,
     // The optional world-camera pose permits camera-space analysis; headless rows omit it.
     camera: Query<&GlobalTransform, With<PlayerView>>,
     net: NetFrameCtx,
@@ -298,7 +300,7 @@ fn record_frame(
                 millis(pings.jitter()),
             )
         });
-    for (entity, global, controlled) in &roots {
+    for (entity, global, controlled, rig) in &roots {
         let (_, rotation, translation) = global.to_scale_rotation_translation();
         let mut row = json!({
             "k": "frame",
@@ -312,6 +314,11 @@ fn record_frame(
         let obj = row.as_object_mut().expect("json! built an object");
         if controlled {
             obj.insert("ctl".into(), Value::Bool(true));
+        }
+        // The drawn main bore; omitted before a replica's rig attaches.
+        if let Some(rig) = rig {
+            let (muzzle, direction) = bores.of(rig);
+            obj.insert("bore".into(), bore(muzzle, direction));
         }
         // The camera's world pose this frame — same for every tank row. Omitted (not null) when no
         // camera exists (headless client), so the analyzer's camera-space section stays opt-in.
@@ -390,14 +397,19 @@ fn record_tick(
             Option<&RemoteServos>,
             &TrackContacts,
             &TankSim,
-            Has<Controlled>,
+            (Has<Controlled>, Option<&Rig>),
         ),
         With<Tank>,
     >,
+    // The rig chain for each row's tick-truth bore (`rig_world_pose`).
+    rig_chain: (Query<&ChildOf>, Query<&Transform>),
     collisions: Collisions,
     mut tick_counter: Local<u64>,
-    timeline: Option<Res<LocalTimeline>>,
-    view: Option<Res<crate::net::view_clock::ViewClock>>,
+    // The local fixed clock and the view clock a client row is stamped from.
+    (timeline, view): (
+        Option<Res<LocalTimeline>>,
+        Option<Res<crate::net::view_clock::ViewClock>>,
+    ),
     // The server's ownership marker (`spawn_player_tank` inserts `ControlledBy` on every player
     // tank; the ownerless test bot has none). It is the SERVER-side half of the cross-world identity
     // the hash join pairs on: the client's own predicted tank carries the game `Controlled` marker
@@ -456,7 +468,7 @@ fn record_tick(
         remote_servos,
         track_contacts,
         sim,
-        controlled,
+        (controlled, rig),
     ) in &roots
     {
         // Trace schema v2 (phase B): the per-wheel suspension topology is gone. `gnd` counts
@@ -573,6 +585,16 @@ fn record_tick(
             "htrn": hash.trn,
             "helm": disclosed_element_hash,
         });
+        // The tick-truth main bore, composed as `shooting::fire` composes it. Omitted before a
+        // replica's rig attaches, and once a launched assembly has taken the muzzle off the root.
+        let (parents, locals) = &rig_chain;
+        if let Some((muzzle, turn)) = rig.and_then(|rig| {
+            rig_world_pose(rig.muzzle, entity, position.0, rotation.0, parents, locals)
+        }) {
+            row.as_object_mut()
+                .expect("json! built an object")
+                .insert("bore".into(), bore(muzzle, turn * Vec3::NEG_Z));
+        }
         // Raw carried-state values (`SPIKE_TRACE_SIM_FIELDS`): the magnitudes behind the sub-hash
         // booleans. `thr`/`str` (TrackDrive) are already row fields above.
         if trace.sim_fields {
@@ -632,6 +654,42 @@ fn next_local_tick(counter: &mut Local<u64>) -> u64 {
 struct NetFrameCtx<'w> {
     timeline: Option<Res<'w, LocalTimeline>>,
     checkpoints: Option<Res<'w, ReplicationCheckpointMap>>,
+}
+
+/// A rig's main bore as the frame draws it: its muzzle's view node, or the sim node before the
+/// view binds (`ViewNode::resolve`). Read after transform propagation.
+#[derive(SystemParam)]
+pub(crate) struct DrawnBores<'w, 's> {
+    views: Query<'w, 's, Option<&'static ViewNode>>,
+    globals: Query<'w, 's, &'static GlobalTransform>,
+}
+
+impl DrawnBores<'_, '_> {
+    /// The drawn muzzle's world position and bore direction (its −Z, as `shooting::fire` fires).
+    pub(crate) fn of(&self, rig: &Rig) -> (Vec3, Vec3) {
+        let view = ViewNode::resolve(
+            self.views
+                .get(rig.muzzle)
+                .expect("a rig's muzzle is a live entity"),
+            rig.muzzle,
+        );
+        let drawn = self
+            .globals
+            .get(view)
+            .expect("a drawn muzzle carries its propagated transform");
+        (drawn.translation(), drawn.rotation() * Vec3::NEG_Z)
+    }
+}
+
+/// `[x, y, z, dx, dy, dz]`: a muzzle position and its bore direction, one row field.
+pub(crate) fn bore(muzzle: Vec3, direction: Vec3) -> Value {
+    Value::Array(
+        [muzzle.to_array(), direction.to_array()]
+            .concat()
+            .into_iter()
+            .map(num)
+            .collect(),
+    )
 }
 
 #[cfg(test)]

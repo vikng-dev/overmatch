@@ -21,10 +21,7 @@ use crate::damage::{CrewStation, Crewman, Dead, LaunchedTurret, PendingSwap, Tan
 use crate::damage_cam::wire::ShotExplanation;
 use crate::fingerprint::{fingerprint_field, fnv1a_64};
 use crate::state::GameplaySet;
-use crate::tank::{
-    Controlled as GameControlled, Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, WeaponGate,
-    WeaponLoads,
-};
+use crate::tank::{Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, WeaponGate, WeaponLoads};
 use crate::track::sim::{
     DriveSignal, EngineRpm, TankTransmission, TrackDrive, TrackDriveSide, wrapped_phase_delta,
 };
@@ -114,7 +111,8 @@ pub struct NetTank;
 #[derive(Component, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct NetBot;
 
-/// Authoritative parent-local Gunner yaw/pitch targets for remote local rigs.
+/// Authoritative parent-local Gunner yaw/pitch, presented at the view cursor on every replica the
+/// client does not drive (`net::rig`).
 #[derive(Component, Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(try_from = "ServoAnglesWire")]
 pub struct ServoAngles {
@@ -671,28 +669,6 @@ fn publish_servo_angles(
     }
 }
 
-/// Feed non-owner remote aim handles; the owner's command remains the local input writer's.
-fn apply_servo_angles(
-    tanks: Query<(&ServoAngles, &Rig), (With<Remote>, Without<GameControlled>)>,
-    mut servos: Query<&mut ServoCommand>,
-    launched: Query<(), With<LaunchedTurret>>,
-) {
-    for (angles, rig) in &tanks {
-        // The game's damage model: launched construction follows its authoritative body pose.
-        if launched.contains(rig.turret) {
-            continue;
-        }
-        servos
-            .get_mut(rig.gunner_yaw)
-            .expect("complete spawn gives every attached Gunner yaw servo its command")
-            .target = angles.gunner_yaw;
-        servos
-            .get_mut(rig.gun)
-            .expect("complete spawn gives every attached Gunner pitch servo its command")
-            .target = angles.gunner_pitch;
-    }
-}
-
 /// The game's damage model: publish the launched turret's solver pose in `FixedPostUpdate`,
 /// after `launch_turrets_on_cookoff` and physics. `Rig.turret` joins the root to its free body;
 /// before launch, no `LaunchedTurret` matches and the datum stays `None`. `Without<Remote>`
@@ -710,7 +686,7 @@ fn publish_launched_turret_pose(
 
 /// Client side, remote tanks: realize the authoritative launched-turret pose the client does NOT
 /// simulate (`launch_turrets_on_cookoff` is gated off on the replica). `With<Remote>` = replica-only
-/// in shared code, exactly like [`apply_servo_angles`]. Two phases keyed off whether the client's
+/// in shared code. Two phases keyed off whether the client's
 /// `Rig.turret` has been detached yet (`LaunchedTurret` presence — the one-time guard):
 ///   - Not yet detached: strip the servo attachment (`ChildOf` + the three servo components) and
 ///     re-spawn the turret as a free `Static` body seeded AT the authoritative pose. `Position`/
@@ -776,6 +752,16 @@ pub(crate) fn track_drive_lerp(start: TrackDrive, end: TrackDrive, t: f32) -> Tr
             side(start.sides[0], end.sides[0]),
             side(start.sides[1], end.sides[1]),
         ],
+    }
+}
+
+/// Cursor-time aim: each angle along the shorter arc between its keyframes, the servo view's own
+/// blend (`tank::interpolate_servos`), so a continuous mount never turns the long way round.
+pub(crate) fn servo_angles_lerp(start: ServoAngles, end: ServoAngles, t: f32) -> ServoAngles {
+    let arc = |a: f32, b: f32| a + crate::tank::shortest_angle(b - a) * t;
+    ServoAngles {
+        gunner_yaw: arc(start.gunner_yaw, end.gunner_yaw),
+        gunner_pitch: arc(start.gunner_pitch, end.gunner_pitch),
     }
 }
 
@@ -887,9 +873,10 @@ pub(crate) fn plugin(app: &mut App) {
     // Immutable spawn identity: which of its combatant's lives a root is, so a record of a shot
     // against an earlier life is never read against this one.
     app.component::<CombatantLife>().replicate();
-    // Plain replication, no interpolation: non-owners consume the resolved angle through the servo
-    // mechanism (see the type).
-    app.component::<ServoAngles>().replicate();
+    // Sampled on the hull's cursor, so a remote turret, gun and hull are one picture (`net::rig`).
+    app.component::<ServoAngles>()
+        .replicate()
+        .add_interpolation_with(servo_angles_lerp);
     // Owner-private atomic combat snapshot; public life state is `NetTankStatus`.
     app.component::<NetCrew>().replicate();
     // Minimal public tank-life state. It gives observers death/cookoff presentation without
@@ -1038,10 +1025,7 @@ pub(crate) fn plugin(app: &mut App) {
         )
             .in_set(crate::state::SimPhase::Publish),
     );
-    app.add_systems(
-        FixedUpdate,
-        (apply_servo_angles, apply_launched_turret_pose).in_set(GameplaySet),
-    );
+    app.add_systems(FixedUpdate, apply_launched_turret_pose.in_set(GameplaySet));
     // Client: realize owner-private crew details. Public knockout state is applied separately.
     app.add_systems(FixedUpdate, apply_net_crew.in_set(GameplaySet));
     // Realized once a frame, after replication has received the status and before the device is
@@ -1421,55 +1405,6 @@ mod tests {
             assert_eq!((angles.gunner_yaw, angles.gunner_pitch), (yaw, pitch));
             assert_eq!(postcard::to_allocvec(&angles).unwrap(), bytes);
         }
-    }
-
-    /// The public `ServoAngles` drive every remote tank's servo targets, but the owner's belong to
-    /// `aim::drive_aim_servos` alone. The OWN tank is `Remote` like every replicated tank, so only
-    /// the owner marker keeps this pump off it — mutate `Without<GameControlled>` away and the
-    /// replicated angle overwrites the local intent here.
-    #[test]
-    fn public_servo_angles_skip_the_tank_that_holds_the_input_slot() {
-        fn spawn_tank(world: &mut World, owned: bool) -> (Entity, Entity) {
-            let turret = world.spawn_empty().id();
-            let yaw = world.spawn(ServoCommand::default()).id();
-            let gun = world.spawn(ServoCommand::default()).id();
-            let hull = world.spawn_empty().id();
-            let muzzle = world.spawn_empty().id();
-            let mut root = world.spawn((
-                Remote,
-                ServoAngles {
-                    gunner_yaw: 0.75,
-                    gunner_pitch: -0.2,
-                },
-                Rig {
-                    hull,
-                    turret,
-                    gunner_yaw: yaw,
-                    gun,
-                    muzzle,
-                },
-            ));
-            if owned {
-                root.insert((
-                    GameControlled,
-                    crate::tests::tank_views(crate::camera::COMMANDER_FOV_BEFORE_BIND),
-                ));
-            }
-            (yaw, gun)
-        }
-        let mut world = World::new();
-        let (remote_turret, remote_gun) = spawn_tank(&mut world, false);
-        let (own_turret, own_gun) = spawn_tank(&mut world, true);
-
-        world.run_system_once(apply_servo_angles).unwrap();
-
-        assert_eq!(
-            world.get::<ServoCommand>(remote_turret).unwrap().target,
-            0.75
-        );
-        assert_eq!(world.get::<ServoCommand>(remote_gun).unwrap().target, -0.2);
-        assert_eq!(world.get::<ServoCommand>(own_turret).unwrap().target, 0.0);
-        assert_eq!(world.get::<ServoCommand>(own_gun).unwrap().target, 0.0);
     }
 
     #[test]

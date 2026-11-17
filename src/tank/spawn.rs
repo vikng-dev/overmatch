@@ -193,8 +193,7 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
             root_bundle,
         ))
         .observe(bind_tank_view);
-    // Interpolated replicas chase the replicated public angles without manufacturing the
-    // owner-private component.
+    // A replica's client servo state; the authority's `TankServos` is never manufactured here.
     root_commands.insert(RemoteServos::for_count(template.spec().servos.len()));
     template.assemble(commands, root);
     spawn_replica_track_colliders(commands, root, template.track_colliders());

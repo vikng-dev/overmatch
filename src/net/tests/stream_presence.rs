@@ -10,6 +10,7 @@ mod tests {
     use lightyear::prelude::client::{ClientPlugins, Remote};
     use lightyear::prelude::{Interpolated, NetworkTimeline, Tick};
 
+    use crate::net::protocol::ServoAngles;
     use crate::net::test_harness::{TICK, finish, net_physics_app};
 
     fn cursor(app: &mut App, tick: u32) {
@@ -212,6 +213,8 @@ mod tests {
                         Rotation::default(),
                         history(Position(at)),
                         history(Rotation::default()),
+                        ServoAngles::default(),
+                        history(ServoAngles::default()),
                         crate::track::sim::TrackDrive::default(),
                         history(crate::track::sim::TrackDrive::default()),
                     ))
@@ -284,6 +287,85 @@ mod tests {
         assert!(
             app.world().resource::<FixedFrames>().0 > fixed_before,
             "the independent fixed-gameplay probe must run even while view time holds"
+        );
+    }
+
+    /// The game's netcode: a replica's turret is drawn on its hull's cursor, so hull, turret and
+    /// gun are one picture. A remote tank turning while its turret holds a world bearing keeps that
+    /// bearing in every presented frame; a turret applied on arrival, or on any clock but the
+    /// hull's, leads or trails the hull by the presentation delay and swings the bearing.
+    #[test]
+    fn a_replica_turret_is_drawn_on_its_hull_cursor() {
+        use crate::tank::{RemoteServos, Rig, ServoIndex};
+
+        // Fixture motion: the hull yaws RATE per tick, the turret counter-rotates as fast.
+        const RATE: f32 = 0.01;
+        const BEARING: f32 = 0.4;
+        const FIRST: u32 = 100;
+        const LAST: u32 = 130;
+        let _lease = crate::headless_test::BOOT_LEASE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut app = client_gameplay_app();
+        let turn = |tick: u32| RATE * (tick - FIRST) as f32;
+        let mut hull = ConfirmedHistory::default();
+        let mut aim = ConfirmedHistory::default();
+        for tick in FIRST..=LAST {
+            hull.insert_present_explicit(Tick(tick), Rotation(Quat::from_rotation_y(turn(tick))));
+            aim.insert_present_explicit(
+                Tick(tick),
+                ServoAngles {
+                    gunner_yaw: BEARING - turn(tick),
+                    gunner_pitch: 0.0,
+                },
+            );
+        }
+        let at = Position(Vec3::new(0.0, 2.0, 0.0));
+        let root = app
+            .world_mut()
+            .spawn((
+                Remote,
+                Interpolated,
+                crate::net::protocol::NetTank,
+                crate::track::sim::EngineRpm(0),
+                at,
+                history(at),
+                Rotation::default(),
+                hull,
+                ServoAngles::default(),
+                aim,
+                crate::track::sim::TrackDrive::default(),
+                history(crate::track::sim::TrackDrive::default()),
+            ))
+            .id();
+        let mut turns = Vec::new();
+        for tick in FIRST - 11..=LAST {
+            complete_tick(&mut app, tick);
+            app.update();
+            let world = app.world_mut();
+            let Some(rig) = world.get::<Rig>(root) else {
+                continue; // Not attached until its first pose is visible.
+            };
+            let slot = world
+                .get::<ServoIndex>(rig.gunner_yaw)
+                .expect("an attached rig indexes its aim servo")
+                .0;
+            let yaw = world.get::<RemoteServos>(root).unwrap().0[slot].current();
+            let (hull_yaw, ..) = world
+                .get::<Rotation>(root)
+                .unwrap()
+                .0
+                .to_euler(EulerRot::YXZ);
+            assert!(
+                (hull_yaw + yaw - BEARING).abs() < 1e-4,
+                "the turret's world bearing left the stream's: hull {hull_yaw}, turret {yaw}"
+            );
+            turns.push(hull_yaw);
+        }
+        let swept = turns.last().unwrap() - turns.first().unwrap();
+        assert!(
+            swept > 10.0 * RATE,
+            "the cursor must sweep the turn for the bearing to be tested: {swept} rad"
         );
     }
 }
