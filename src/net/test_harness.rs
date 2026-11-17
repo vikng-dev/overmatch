@@ -55,8 +55,9 @@ fn base_app_with(physics: bevy::app::PluginGroupBuilder) -> App {
     app
 }
 
-/// Drive plugin finish/cleanup by hand — a bare `update()` loop skips it, and avian registers its
-/// diagnostics resources (which the spatial-query systems require) in `Plugin::finish`.
+/// Drive plugin finish/cleanup by hand — a bare `update()` loop skips it, and lightyear and avian
+/// register resources their systems require in `Plugin::finish` (avian's diagnostics, which the
+/// spatial-query systems need).
 pub(super) fn finish(app: &mut App) {
     while app.plugins_state() == bevy::app::PluginsState::Adding {
         std::thread::sleep(Duration::from_millis(1));

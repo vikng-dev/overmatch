@@ -4,6 +4,23 @@ Subject: hosting for Overmatch, a multiplayer tank video game. Building lane `la
 bay-3. This revision made no deployment, key handoff, AWS request, quota request or external comment.
 Only local checks and public primary-source reads ran. Production still selects Edgegap.
 
+## Live proof, first attempt
+
+MEASURED from the refused launch's CloudTrail record and decoded authorization message: the
+Worker's real `RunInstances` failed with `UnauthorizedOperation` on the image resource, with
+"no identity-based policy allows". EC2's image context held `ec2:Owner = amazon`,
+`ec2:Public = true`, `ec2:ImageType = machine` and `ec2:RootDeviceType = ebs`.
+`DescribeImages` for the SSM-resolved Canonical Ubuntu image reported `ImageOwnerAlias: amazon`
+and a numeric `OwnerId`. The policy used that numeric id for `ec2:Owner`; the simulation supplied
+the same numeric context and treated `amazon` as a foreign owner. DERIVED: that owner condition
+cannot match the observed EC2 context. The other launch resources were not reached; their
+authorization remains unproven, not proven wrong.
+
+The refused request carried `blockDeviceMapping`, `clientToken`, `disableApiStop`,
+`disableApiTermination`, `instanceInitiatedShutdownBehavior`, `instanceMarketOptions`,
+`instanceType`, `instancesSet`, `metadataOptions`, `monitoring`, `networkInterfaceSet`,
+`tagSpecificationSet`, `tenancy` and `userData`.
+
 ## Error-rule closure
 
 Decision: use one rule across every Worker catch in the lane's diff. Parse outside failures once
@@ -197,10 +214,11 @@ spend ceiling. The root contract and launch constraints remain owned by setup/po
 
 ## IAM and deployment identity
 
-**Policy unchanged; `host-setup apply` does not need to be re-run for these fixes.** The actual
-policy template has no `aws:TagKeys` allowlist and permits extra creation tags. Its RequestTag
-conditions require Project/Purpose; CreateTags is restricted to RunInstances. Existing simulation
-cases still test that contract, and `test_host_setup.py` passes. No AWS permission was added.
+**The image-owner correction changes the rendered policy; standing IAM needs reconciliation
+before repeating the live proof.** The policy template has no `aws:TagKeys` allowlist and permits
+extra creation tags. Its RequestTag conditions require Project/Purpose; CreateTags is restricted
+to RunInstances. Existing simulation cases still test that contract, and `test_host_setup.py`
+passes. No AWS action was added.
 
 `WORKER_ENV` is an immutable operator identity, distinct for every Worker. Never reuse it for a
 second live deployment. Drain before changing it: older machines without this tag, or with the
@@ -488,9 +506,33 @@ name metered resources rather than account-specific prices. Region is always `ap
 
 ## Remaining live limits
 
-Real IAM launch context/native SSM resolution, Worker-to-EC2 signing/fetch, GitHub release redirects,
+Successful full-request IAM authorization/native SSM resolution, GitHub release redirects,
 filesystem fit, Ubuntu image unit inventory and actual systemd privilege/power-off behavior,
 Access hostname/audience configuration, real end-to-end play and both shutdown attribution and
 forced-silent recovery remain unmeasured here. The independent age rule is covered offline; no
 24-hour live soak was run. No account price/quota claim or spend ceiling is made. The current key
 can still be abused outside the Worker's cap; revocation does not itself clean retained resources.
+
+## Live proof, second attempt (2026-11-17 UTC, alpha.20, proving Worker)
+
+MEASURED, one launch, after the image-owner fix was applied with `host-setup apply`:
+
+- Step 2: `issue-key --env aws-proving` installed the pair; `verify` passed.
+- Step 4: the first join launched one machine at the first boot attempt. The Worker recorded ready
+  31 s after the request (start deadline 240 s). Both clients received tickets for the same server,
+  connected, replicated both tanks and received 64 ticks/s with 0 holds and 0 cuts for 90 s, in two
+  runs against the same machine. Peak players recorded: 2.
+- The test itself failed both runs with `in match: 0, tanks seen: 2`: its client app never mounts
+  `latch_tank_seen`, so it cannot reach `Flow::InMatch` against any server. That is a defect of the
+  test's hand-copied client wiring, not of hosting; the test's assertion of normal hosted play is
+  therefore still open.
+- Step 6: the server reported `empty for 300 s`; the Worker ended the session and the machine was
+  terminated by the API (`Client.UserInitiatedShutdown`). The on-machine power-off guard was not
+  witnessed. The report arrived 8.7 min after the last client process exited, against an expected
+  5 min plus the link timeout: unexplained, and the machine's journal was not captured (no
+  `server_logs` row), so it cannot be settled from this run.
+- Step 7: instances, volumes and interfaces counted 0; `revoke-key --env aws-proving` and `verify`
+  passed; the host user holds 0 keys. The keyless proving Worker's scheduled sweep now records
+  `list: credentials … refused` on every run, which is its correct answer without a key.
+- Not done: step 3's `/admin/aws-proof` dry runs and the `/admin` Fleet-empty reading (both need the
+  owner's Access login); a forced silent boot (step 5).

@@ -84,12 +84,7 @@ fn client_app() -> App {
         .add_systems(Update, drive_connection);
     // A closed local port: the lobby's location fetch fails at once, which no exit depends on.
     install_matchmaking_link(&mut app, "http://127.0.0.1:9");
-    app.add_systems(
-        Update,
-        derive_flow
-            .after(drive_connection)
-            .before(crate::overlay::OverlaySet::Declare),
-    );
+    install_screen_flow(&mut app);
     app.insert_resource(ClientLinkTemplate {
         client_id: 7,
         conditioner: None,
