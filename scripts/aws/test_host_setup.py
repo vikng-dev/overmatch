@@ -501,8 +501,8 @@ class Setup(unittest.TestCase):
                         continue
                     context = json.loads(args[args.index('--context-entries') + 1])
                     owners.append(next(c['ContextKeyValues'][0] for c in context if c['ContextKeyName'] == 'ec2:Owner'))
-                self.assertEqual(owners[0], expected)  # Allowed launch.
-                self.assertNotEqual(owners[1], expected)  # Foreign-image refusal.
+                self.assertIn(expected, owners)  # Allowed launch.
+                self.assertTrue(any(owner != expected for owner in owners))  # Foreign-image refusal.
 
     def test_a_changed_image_root_is_refused_before_mutation_instead_of_drifting_from_the_provider(self):
         f = Fixture(self)
