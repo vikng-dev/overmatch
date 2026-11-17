@@ -52,8 +52,7 @@ use std::sync::OnceLock;
 use bevy::prelude::*;
 use lightyear::core::time::Instant;
 use lightyear::link::RecvPayload;
-use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{Link, LocalTimeline, LocalTimelineSync};
+use lightyear::prelude::{Link, LocalTimeline};
 use serde::Deserialize;
 
 use super::battle::BattleState;
@@ -396,7 +395,7 @@ const RUN_LEAD: u32 = 256;
 enum ScriptClock {
     /// No input slot yet: not connected, or the own tank not replicated.
     AwaitingSlot { deadline: Duration },
-    /// The slot is held; wait for synchronized combat and any runner-owned start signal.
+    /// The slot is held; wait for combat and any runner-owned start signal.
     AwaitingRelease { deadline: Duration },
     Released {
         at: Duration,
@@ -457,7 +456,7 @@ impl SimulateInput {
         }
     }
 
-    /// Combat tick zero: the first input the synchronized timeline files.
+    /// Combat tick zero: the first frame request queued after release.
     fn release(&mut self, now: Duration) -> bool {
         match self.clock {
             ScriptClock::AwaitingSlot { .. } => {
@@ -526,26 +525,28 @@ fn release_stamp(client_tick: u32, now: Duration, time: &Time<Real>) -> String {
     )
 }
 
-/// Headless simulate mode: write the scripted `TankCommand` into the lightyear `ActionState` slot
-/// each tick. Whole-state snapshot per tick, no devices.
+/// Queue each scripted click before the frame send; absolute levels come from the newest tick.
+/// The same writer serves headless and windowed scripted runs.
 pub(crate) fn buffer_input(
     mut sim: ResMut<SimulateInput>,
     time: Res<Time<Real>>,
     timeline: Res<LocalTimeline>,
-    sync: Res<LocalTimelineSync>,
     battles: Query<&BattleState>,
-    mut slots: Query<
+    (mut state, mut input): (
+        ResMut<super::input_arrival::FrameInput>,
+        ResMut<super::input_arrival::ClientInput>,
+    ),
+    slots: Query<
         (
-            &mut ActionState<TankCommand>,
             Option<&avian3d::prelude::LinearVelocity>,
             Option<&crate::CombatantId>,
         ),
-        With<InputMarker<TankCommand>>,
+        With<lightyear::prelude::Controlled>,
     >,
     mut trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
     use bevy::ecs::query::QuerySingleError;
-    let (mut state, velocity, combatant) = match slots.single_mut() {
+    let (velocity, combatant) = match slots.single() {
         Ok(slot) => slot,
         // Before tank replication (or between lives), there is no local input slot.
         Err(QuerySingleError::NoEntities(_)) => return,
@@ -559,7 +560,7 @@ pub(crate) fn buffer_input(
         Ok(battle) => battle,
         // The tank and Battle snapshots may arrive separately. Wait for the release fact.
         Err(QuerySingleError::NoEntities(_)) => {
-            state.0 = TankCommand::default();
+            state.command = TankCommand::default();
             return;
         }
         Err(QuerySingleError::MultipleEntities(_)) => {
@@ -567,11 +568,9 @@ pub(crate) fn buffer_input(
         }
     };
     // The same predicate as `battle::hold_commands`; no local countdown releases a command.
-    // Lightyear files a slot's command only from a synchronized timeline (`buffer_action_state`
-    // reads `SyncedLocalTimeline`), so a tick spent before sync would never reach the wire:
-    // combat tick zero waits for both.
-    if !battle.is_combat() || !sync.is_synced() || !sim.start.ready() {
-        state.0 = TankCommand::default();
+    // Combat and the operator barrier own release; input has no timeline-ready gate.
+    if !battle.is_combat() || !sim.start.ready() {
+        state.command = TankCommand::default();
         return;
     }
     if sim.release(now) {
@@ -590,9 +589,9 @@ pub(crate) fn buffer_input(
         return;
     }
     let t = sim.ticks;
-    sim.write(t, &mut state.0);
-    sim.stop(t, velocity.map(|v| v.length()), &mut state.0);
-    if (state.0.fire_primary || state.0.fire_secondary)
+    sim.write(t, &mut state.command);
+    sim.stop(t, velocity.map(|v| v.length()), &mut state.command);
+    if (state.command.fire_primary || state.command.triggers[1])
         && let ScriptClock::Released {
             first_fire_logged, ..
         } = &mut sim.clock
@@ -604,6 +603,13 @@ pub(crate) fn buffer_input(
             timeline.tick().0,
             now.as_secs_f64()
         );
+    }
+    if state.command.fire_primary {
+        input.issue(
+            super::input_arrival::InputEdge::Fire,
+            time.elapsed_secs_f64(),
+        );
+        state.command.fire_primary = false;
     }
     sim.ticks += 1;
 }
@@ -617,7 +623,7 @@ impl SimulateInput {
         command.aim = Some(self.aim_at(t));
         command.range = self.range;
         let firing = self.fire_until.is_none_or(|until| t < until);
-        (command.fire_primary, command.fire_secondary) = match self.drive {
+        (command.fire_primary, command.triggers[1]) = match self.drive {
             Drive::Fire { primary, secondary } => (
                 primary && firing && self.clicking_primary(t),
                 secondary && firing && Self::holding_secondary(t),
@@ -1014,7 +1020,7 @@ mod tests {
                 }
             );
             assert_eq!(command.steer, 0.0);
-            assert!(!command.fire_primary && !command.fire_secondary);
+            assert!(!command.fire_primary && !command.triggers[1]);
         }
         for ticks in [0, u32::MAX] {
             assert!(
@@ -1036,7 +1042,7 @@ mod tests {
             let mut command = crate::command::TankCommand::default();
             sim.write(tick, &mut command);
             sim.stop(tick, speed, &mut command);
-            assert!(!command.fire_primary && !command.fire_secondary);
+            assert!(!command.fire_primary && !command.triggers[1]);
             command.throttle
         };
         let run = super::RUN_LEAD;
@@ -1158,97 +1164,6 @@ mod tests {
         }
     }
 
-    /// Measurement scripts rely on combat tick zero reaching the wire: a held input slot must
-    /// consume neither the script nor its first click, and neither may an unsynchronized
-    /// timeline, whose ticks lightyear never files (a late joiner's first snapshot is already
-    /// combat). Fixture ticks are arbitrary.
-    #[test]
-    fn held_ticks_advance_nothing_and_release_writes_tick_zero() {
-        use super::super::battle::{BattlePhase, BattleState, LateJoin};
-        use crate::sim_tick::SimTick;
-        use bevy::prelude::*;
-        use lightyear::prelude::LocalTimelineSync;
-        use lightyear::prelude::input::native::{ActionState, InputMarker};
-
-        let mut app = App::new();
-        app.insert_resource(SimulateInput::new(
-            &Script::parse("(drive: Fire(primary: true), fire_tick: 0, ticks: 2)").unwrap(),
-        ))
-        .insert_resource(Time::<Real>::default())
-        .insert_resource(Time::<Fixed>::from_hz(64.0))
-        .insert_resource(lightyear::prelude::LocalTimeline::default())
-        .init_resource::<LocalTimelineSync>()
-        .add_systems(FixedPreUpdate, super::buffer_input);
-        let slot = app
-            .world_mut()
-            .spawn((
-                ActionState::<TankCommand>::default(),
-                InputMarker::<TankCommand>::default(),
-            ))
-            .id();
-        app.world_mut().run_schedule(FixedPreUpdate);
-        assert_eq!(app.world().resource::<SimulateInput>().ticks, 0);
-        let battle = app.world_mut().spawn(BattleState::default()).id();
-        for _ in 0..3 {
-            app.world_mut().run_schedule(FixedPreUpdate);
-            assert_eq!(app.world().resource::<SimulateInput>().ticks, 0);
-            assert!(
-                !app.world()
-                    .get::<ActionState<TankCommand>>(slot)
-                    .unwrap()
-                    .0
-                    .fire_primary
-            );
-        }
-        app.world_mut()
-            .get_mut::<BattleState>(battle)
-            .unwrap()
-            .phase = BattlePhase::Combat {
-            ends_at: SimTick::new(100),
-            late_join: LateJoin::Closed,
-        };
-        app.world_mut().run_schedule(FixedPreUpdate);
-        assert_eq!(
-            app.world().resource::<SimulateInput>().ticks,
-            0,
-            "combat on an unsynchronized timeline files nothing"
-        );
-        app.world_mut()
-            .resource_mut::<LocalTimelineSync>()
-            .set_synced(true);
-        let ready =
-            std::env::temp_dir().join(format!("overmatch-script-ready-{}", std::process::id()));
-        assert!(!ready.exists(), "fixture start file must be absent");
-        app.world_mut().resource_mut::<SimulateInput>().start =
-            crate::cost::WorkloadStart::WaitingForFile(ready.clone());
-        app.world_mut().run_schedule(FixedPreUpdate);
-        assert_eq!(
-            app.world().resource::<SimulateInput>().ticks,
-            0,
-            "the tool barrier must preserve tick zero after combat and sync are ready"
-        );
-        std::fs::write(&ready, "").unwrap();
-        app.world_mut().run_schedule(FixedPreUpdate);
-        std::fs::remove_file(&ready).unwrap();
-        assert_eq!(app.world().resource::<SimulateInput>().ticks, 1);
-        assert!(
-            app.world()
-                .get::<ActionState<TankCommand>>(slot)
-                .unwrap()
-                .0
-                .fire_primary
-        );
-        app.world_mut().run_schedule(FixedPreUpdate);
-        assert_eq!(app.world().resource::<SimulateInput>().ticks, 2);
-        assert!(
-            !app.world()
-                .get::<ActionState<TankCommand>>(slot)
-                .unwrap()
-                .0
-                .fire_primary
-        );
-    }
-
     /// The game's damage model: shot captures must observe the final server echoes after the
     /// trigger is released, without extending the script or its watchdog.
     #[test]
@@ -1258,10 +1173,10 @@ mod tests {
         ).unwrap()); // Fixture tick counts; both triggers would otherwise stay held.
         let mut command = crate::command::TankCommand::default();
         sim.write(249, &mut command);
-        assert!(command.fire_primary && command.fire_secondary);
+        assert!(command.fire_primary && command.triggers[1]);
         for t in 250..sim.total {
             sim.write(t, &mut command);
-            assert!(!command.fire_primary && !command.fire_secondary);
+            assert!(!command.fire_primary && !command.triggers[1]);
             assert!(command.aim.is_some(), "the observation tail keeps its aim");
         }
         let tick = Duration::from_secs_f64(1.0 / 64.0); // Fixture timestep.
@@ -1401,7 +1316,7 @@ mod tests {
         assert_eq!((idle.throttle, idle.fire_primary), (0.0, false));
         let fire = "(drive: Fire(primary: true, secondary: true), fire_tick: 320, \
                     fire_interval: 256, aim: Point((8.0, 1.2, 2.2)))";
-        assert!(!at(fire, 192).fire_secondary && at(fire, 193).fire_secondary);
+        assert!(!at(fire, 192).triggers[1] && at(fire, 193).triggers[1]);
         assert!(at(fire, 320).fire_primary && at(fire, 576).fire_primary);
         assert!(!at(fire, 448).fire_primary);
         assert_eq!(at(fire, 200).throttle, 0.0);

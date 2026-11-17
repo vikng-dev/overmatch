@@ -4,15 +4,11 @@ use std::collections::{HashMap, VecDeque};
 
 use bevy::prelude::*;
 use bevy::utils::Parallel;
-use lightyear::input::input_message::InputMessage;
-use lightyear::prelude::input::native::NativeStateSequence;
-use lightyear::prelude::input::server::InputSystems;
+use lightyear::prelude::Connected;
 use lightyear::prelude::server::ClientOf;
-use lightyear::prelude::{Connected, MessageReceiver, MessageSystems};
 use serde_json::{Value, json};
 
 use super::timing::{Timing, WindowMax, histogram};
-use crate::command::TankCommand;
 
 #[derive(Default)]
 enum State {
@@ -25,7 +21,7 @@ enum State {
 }
 
 #[derive(Debug, PartialEq)]
-enum Arrival {
+pub(super) enum Arrival {
     First,
     Live,
     Stale,
@@ -41,11 +37,15 @@ pub(super) struct InputGap {
 }
 
 impl InputGap {
-    fn silence_s(&self) -> f64 {
+    pub(super) fn silence_s(&self) -> f64 {
         match self.state {
             State::AwaitingFirstArrival => 0.0,
             State::Active { silence_s, .. } => silence_s,
         }
+    }
+
+    pub(super) fn stale(&self) -> bool {
+        matches!(self.state, State::Active { stale: true, .. })
     }
 
     fn take_line(&mut self, tick_s: f64, timing: &Timing) -> Value {
@@ -62,7 +62,7 @@ impl InputGap {
             "stale_arrivals": std::mem::take(&mut self.stale_arrivals)})
     }
 
-    fn threshold(&self, tick_s: f64, timing: &Timing) -> f64 {
+    pub(super) fn threshold(&self, tick_s: f64, timing: &Timing) -> f64 {
         self.maximum.get().map_or(timing.stale_floor_s, |gap| {
             (gap + tick_s).clamp(timing.stale_floor_s, timing.stale_ceil_s)
         })
@@ -70,7 +70,7 @@ impl InputGap {
 
     /// Classify against the old threshold before admitting the arrival's gap; a connection's
     /// first arrival is neither a gap nor a recovery.
-    fn receive(
+    pub(super) fn receive(
         &mut self,
         arrived: bool,
         now_s: f64,
@@ -109,7 +109,7 @@ impl InputGap {
                         Arrival::Live
                     };
                     self.gaps.push_back((now_s, *silence_s));
-                    self.maximum.push(now_s, *silence_s);
+                    self.maximum.push(now_s, silence_s.min(timing.stale_ceil_s));
                     *silence_s = 0.0;
                     *stale = false;
                     Some(classification)
@@ -144,43 +144,6 @@ impl Census<'_, '_> {
         });
         rows.iter_mut().flat_map(|rows| rows.drain(..)).collect()
     }
-}
-
-pub(super) fn install(app: &mut App) {
-    app.add_observer(connect).add_systems(
-        PreUpdate,
-        receive
-            .after(MessageSystems::Receive)
-            .before(InputSystems::ValidateInputs),
-    );
-}
-
-fn connect(event: On<Add<Connected>>, mut commands: Commands) {
-    commands.entity(event.entity).insert(InputGap::default());
-}
-
-fn receive(
-    real: Res<Time<Real>>,
-    fixed: Res<Time<Fixed>>,
-    timing: Res<Timing>,
-    mut links: Query<
-        (
-            &mut InputGap,
-            Option<&MessageReceiver<InputMessage<NativeStateSequence<TankCommand>>>>,
-        ),
-        (With<ClientOf>, With<Connected>),
-    >,
-) {
-    links.par_iter_mut().for_each(|(mut gap, receiver)| {
-        // Lightyear creates typed receivers lazily on the first input payload.
-        gap.receive(
-            receiver.is_some_and(MessageReceiver::has_messages),
-            real.elapsed_secs_f64(),
-            real.delta_secs_f64(),
-            fixed.timestep().as_secs_f64(),
-            &timing,
-        );
-    });
 }
 
 #[cfg(test)]

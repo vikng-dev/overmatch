@@ -1,6 +1,5 @@
 //! Serializable tank commands and device-to-command translation.
 
-use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::ecs::lifecycle::Remove;
 use bevy::math::Affine3A;
 use bevy::prelude::*;
@@ -22,8 +21,8 @@ pub struct TankCommand {
     pub steer: f32,
     /// Primary fire edge, latched until one fixed tick consumes it.
     pub fire_primary: bool,
-    /// Secondary fire level. It is a consumable and must be attested for the current tick.
-    pub fire_secondary: bool,
+    /// Held trigger routes, Primary then Secondary. The network authority owns these bits.
+    pub triggers: [bool; 2],
     /// Aim intention chased by every servo, in the frame its authoring view is anchored to
     /// ([`AimIntent`]). `None` means no commitment yet.
     pub aim: Option<AimIntent>,
@@ -39,17 +38,12 @@ pub struct TankCommand {
     pub respawn: bool,
     /// The game's damage model: start or cancel module repair, consumed once.
     pub repair: bool,
-    /// Tick this command was authored for.
-    ///
-    /// Invariant: the authority commits consumables only when this equals the input tick; levels
-    /// and absolute intent may be held through an unattested gap.
-    pub for_tick: u32,
 }
 
 impl TankCommand {
     /// Clear the complete edge set.
     ///
-    /// Invariant: both normal consumption and unattested failure use this method.
+    /// Invariant: each simulation tick consumes these fields once.
     pub fn clear_edges(&mut self) {
         self.fire_primary = false;
         self.crew_swap = None;
@@ -57,15 +51,6 @@ impl TankCommand {
         self.toggle_fuze = None;
         self.respawn = false;
         self.repair = false;
-    }
-
-    /// Fail closed for every consumable: edges plus sustained secondary fire.
-    ///
-    /// Invariant: do not fold `fire_secondary` into [`clear_edges`](Self::clear_edges), which runs
-    /// after every fixed tick.
-    pub fn fail_consumables_closed(&mut self) {
-        self.clear_edges();
-        self.fire_secondary = false;
     }
 
     /// Whether any edge field is currently latched — the read counterpart to [`clear_edges`], so
@@ -163,6 +148,18 @@ impl ParsedTankCommand {
             ..default()
         }
     }
+    /// Replace only actions on a parsed level snapshot. The receiving edge owns validation;
+    /// applying an id later cannot re-interpret its absolute levels or parsed aim.
+    pub(crate) fn with_actions(mut self, actions: TankCommand) -> Self {
+        self.command = TankCommand {
+            throttle: self.command.throttle,
+            steer: self.command.steer,
+            aim: self.command.aim,
+            range: self.command.range,
+            ..actions
+        };
+        self
+    }
     pub(crate) fn held(self) -> bool {
         self.held
     }
@@ -171,12 +168,6 @@ impl ParsedTankCommand {
     }
     pub(crate) fn aim(self) -> Option<ParsedAimIntent> {
         self.aim
-    }
-    pub(crate) fn attest(mut self, tick: u32) -> Self {
-        if self.command.for_tick != tick {
-            self.command.fail_consumables_closed();
-        }
-        self
     }
 }
 
@@ -201,7 +192,7 @@ impl ParsedAimIntent {
 }
 
 /// Every tank's raw command, parsed before gameplay. A tank whose input arrives over a link is
-/// parsed again by the net layer's input bridge, which orders after [`ParseCommands`], attests the
+/// parsed once by the net layer's input bridge, which orders after [`ParseCommands`], checks the
 /// snapshot and replaces this parse. Its raw `TankCommand` holds only values this parse accepts:
 /// on the server, the bridge's previous parsed value (edges cleared, or zeroed on release); on the
 /// network client's own tank, the frame's device writers over it, the same writers an offline run
@@ -312,13 +303,6 @@ impl RoundStep {
     }
 }
 
-// `TankCommand` has no `Entity` fields (`aim`/`range` are plain data, `crew_swap` addresses seats
-// by `CrewStation` and `select_round` weapons by slot, not entity id) — lightyear's native input plugin requires `MapEntities` on the
-// input type regardless, so this is a no-op, matching the examples' pattern for entity-less inputs.
-impl MapEntities for TankCommand {
-    fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {}
-}
-
 /// The player's device→action map — pure data, no UI. A rebinding screen later just edits this
 /// resource; nothing else in the game knows which physical key means "forward".
 #[derive(Resource)]
@@ -374,21 +358,12 @@ pub(crate) struct TankDeviceSet;
 /// [`DeviceCommand`] is neutral from the frame the fact arrives in. One latched inside a tick (the
 /// offline sim, whose input is [`TankCommand`] itself) is claimed by the next tick, so the frame's
 /// later ticks read the neutral command; the latching tick read its command before the fact
-/// existed. On the network client the input bridge rewrites [`TankCommand`] before any sim reader,
-/// so the tick claim changes nothing there.
+/// existed. The frame snapshot preserves the device claim independently of later fixed ticks.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct DeviceClaim;
 
-/// The controlled tank's command as the device said it this frame: taken once per frame after
-/// [`TankDeviceSet`] and the frame's [`DeviceClaim`], so it is neutral while the death flow owns
-/// the device, and default when no tank is controlled. The network client's feed files it on every
-/// tick of the frame and clears its edges after the first, so the wire carries the device's command
-/// and each edge once. [`TankCommand`] is the sim's input: on the network client the input bridge
-/// overwrites it every tick with lightyear's restored input, which never reaches the wire.
-///
-/// Invariant: the edges it takes are the device's alone, because [`consume_edges`] clears every
-/// edge the bridge restored by the end of its tick; the levels are re-authored every frame (the
-/// gather, and the aim commit per `aim::CommittedAim`).
+/// The controlled tank's frame snapshot, taken after its device writers and death-flow claim.
+/// Network sending drains its edges once per frame; offline ticks consume the raw command.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Debug)]
 pub(crate) struct DeviceCommand(pub(crate) TankCommand);
 
@@ -563,6 +538,17 @@ pub enum ButtonBinding {
 }
 
 impl ButtonBinding {
+    pub(crate) fn just_released(
+        self,
+        keys: &ButtonInput<KeyCode>,
+        mouse: &ButtonInput<MouseButton>,
+    ) -> bool {
+        match self {
+            Self::Key(key) => keys.just_released(key),
+            Self::Mouse(button) => mouse.just_released(button),
+        }
+    }
+
     pub(crate) fn pressed(
         &self,
         keys: &ButtonInput<KeyCode>,
@@ -762,7 +748,7 @@ fn auto_fire(
     for mut command in &mut tanks {
         // The MG is a held level; the main gun a latched click edge the fire tick consumes, so
         // re-latching every frame simply fires as fast as the reload gate allows.
-        command.fire_secondary = now == 1;
+        command.triggers[1] = now == 1;
         command.fire_primary |= now == 3;
     }
 }
@@ -794,7 +780,7 @@ pub(crate) fn gather_commands(
     // `|=`: a click must survive frames the fixed loop skips, until a tick consumes it.
     command.fire_primary |= bindings.fire_primary.just_pressed(&keys, &mouse);
     command.repair |= bindings.repair.just_pressed(&keys, &mouse);
-    command.fire_secondary = bindings.fire_secondary.pressed(&keys, &mouse);
+    command.triggers[1] = bindings.fire_secondary.pressed(&keys, &mouse);
     // The dial itself (`Ranging`, scroll in the optic) is client-side control state; the
     // command carries its absolute value. `aim` is written by the per-view commit systems.
     command.range = ranging.range;
@@ -956,11 +942,7 @@ mod tests {
     /// one method but not the other fails this: `has_edge` would still report the field `clear_edges`
     /// left latched.
     ///
-    /// `clear_edges` touches ONLY the edge fields — the levels and absolutes ride through untouched
-    /// (the property `consume_edges` and the net input bridge both depend on). It leaves
-    /// `fire_secondary` alone: that is a CONSUMABLE but not an EDGE, and folding it in here would
-    /// kill sustained fire (`consume_edges` runs every tick). Only
-    /// [`TankCommand::fail_consumables_closed`] clears both sets, and only on an unattested tick.
+    /// Held trigger state and absolute levels survive edge consumption.
     #[test]
     fn clear_edges_resets_every_edge_has_edge_reports() {
         // Each latched-edge variant in isolation: has_edge true, then clear_edges makes it false.
@@ -989,7 +971,7 @@ mod tests {
         let mut command = TankCommand {
             throttle: 0.5,
             steer: -0.5,
-            fire_secondary: true,
+            triggers: [false, true],
             aim: Some(AimIntent::World(Vec3::X)),
             range: 800.0,
             fire_primary: true,
@@ -1001,12 +983,11 @@ mod tests {
             toggle_fuze: Some(0),
             respawn: true,
             repair: true,
-            for_tick: 0,
         };
         command.clear_edges();
         assert_eq!(command.throttle, 0.5);
         assert_eq!(command.steer, -0.5);
-        assert!(command.fire_secondary);
+        assert!(command.triggers[1]);
         assert_eq!(command.aim, Some(AimIntent::World(Vec3::X)));
         assert_eq!(command.range, 800.0);
         assert!(!command.has_edge(), "all edges cleared");

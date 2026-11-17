@@ -3,4 +3,7 @@
     uplink_window_s: (10.0, Taste("link tolerance memory: retain input arrival gaps for this many seconds")),
     stale_floor_s: (0.100, Taste("minimum input silence tolerance in seconds")),
     stale_ceil_s: (0.250, Taste("maximum input silence tolerance in seconds")),
+    link_warning_s: (0.500, Taste("HUD link warning: seconds without an echoed input")),
+    refused_cue_s: (0.150, Taste("input refusal feedback: reticle mark duration in seconds")),
+    refused_pitch: (0.5, Taste("input refusal feedback: dry click playback speed distinguishes refusal from press")),
 )

@@ -22,15 +22,27 @@ use crate::tank::{
 };
 use crate::track::sim::apply_explicit_impulse;
 
-/// Feel multiplier on the hull recoil impulse (1.0 = physical momentum). On a 57 t hull true momentum
-/// is a gentle rock; this is the one deliberate exaggeration over physical, so the firing kick reads.
-const RECOIL_FEEL: f32 = 2.5;
+pub(crate) const SHOOTING_RON: &str = include_str!("../assets/shooting.ron");
+
+fn recoil_scale() -> f32 {
+    static SCALE: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
+        let scale: crate::provenance::Sourced<f32> =
+            crate::provenance::from_shipped_str("assets/shooting.ron", SHOOTING_RON)
+                .unwrap_or_else(|error| panic!("{error}; fix the required recoil taste"));
+        assert!(
+            scale.0.is_finite() && scale.0 > 0.0,
+            "assets/shooting.ron: recoil momentum scale must be finite and positive; fix the taste"
+        );
+        scale.0
+    });
+    *SCALE
+}
 
 /// THE single expression of the recoil reaction a fired round puts on its hull: the shell's
 /// momentum, opposite the bore. Applied at the muzzle point by [`fire`] (the derive-the-consequence
 /// doctrine, ADR-0016; the same rule [`kick_recoil`] states for the barrel).
 pub(crate) fn recoil_impulse(bore: Dir3, mass: f32, speed: f32) -> Vec3 {
-    bore * (-mass * speed * RECOIL_FEEL)
+    bore * (-mass * speed * recoil_scale())
 }
 
 /// Procedural barrel recoil CONFIG: the damped-spring tuning, the recoil stop + the barrel's rest
@@ -79,15 +91,15 @@ pub(crate) fn kick_recoil(sim: &mut TankSim, slot: usize, weapon: &Weapon) {
 /// belt arithmetic (see [`crate::spec::FireCycle::Automatic`]'s `tracer_every` — only the
 /// `Automatic` arm of [`fire`] calls this; a `Single`'s round always traces): every
 /// `tracer_every`-th round traces, counting the belt from the first round (index 0). `1` = every
-/// round; `5` = rounds 0, 5, 10, … (one-in-five); `0` = a tracerless belt, never. Both the server
-/// and the predicted client call this with a counter they each walk from 0, so they agree on every
-/// round's tracer-ness.
+/// round; `5` = rounds 0, 5, 10, … (one-in-five); `0` = a tracerless belt, never. The authority
+/// publishes the resulting tracer fact with the shot.
 pub(crate) fn tracer_round(rounds_fired: u32, tracer_every: u32) -> bool {
     // The `!= 0` guard both encodes the "never" belt and short-circuits before `is_multiple_of(0)`.
     tracer_every != 0 && rounds_fired.is_multiple_of(tracer_every)
 }
 
 pub fn plugin(app: &mut App) {
+    recoil_scale();
     // The gun is sim: readiness and firing run on the fixed clock, driven by each tank's
     // `TankCommand` — `fire` consumes the click edge, so it must precede edge clearing, and so does
     // the authority's round selection, which follows `fire` so a shot in its tick fires the round
@@ -108,7 +120,7 @@ pub fn plugin(app: &mut App) {
             (
                 (
                     tick_weapon_gate,
-                    fire,
+                    fire.run_if(not(resource_exists::<crate::ClientReplica>)),
                     apply_round_selection.run_if(not(resource_exists::<crate::ClientReplica>)),
                 )
                     .chain()
@@ -237,12 +249,6 @@ fn fire(
     proxies: Query<(Entity, &Collider, &CollisionLayers)>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
-    // Present only on a net client, where own fire is FUSED: a keyed round's one presentation is
-    // the server's echoed fact, released at the interpolation cursor by `net::client`, so the local
-    // tick must draw no shell and no barrel kick. Absent everywhere else (server / SP / sandbox),
-    // where this system presents locally.
-    replica: Option<Res<crate::ClientReplica>>,
-    controlled: Query<(), With<crate::tank::Controlled>>,
     // Present in a composed network app, where `net::protocol` republishes the `LocalTimeline`
     // before `GameplaySet`, so an attributed local FireShell is born with the identity that changes
     // its ballistic hold/keyframe behaviour; and in single-player, whose clock
@@ -255,22 +261,13 @@ fn fire(
         let (command, tank_volumes, position, rotation, combatant) =
             tanks.get(root.0).expect(WEAPON_ROOT_IS_A_TANK);
         // Input routing only — edge vs level is baked into the command fields themselves
-        // (`fire_primary` is a one-tick click latch, `fire_secondary` a held level; see
+        // (`fire_primary` is a one-tick click latch, `triggers` is authority-held state; see
         // `TankCommand`), so a `Single` on Primary consumes the edge and an `Automatic` on
         // Secondary reads the level, per the mode's contract.
         let triggered = match weapon.trigger {
-            Trigger::Primary => command.fire_primary,
-            Trigger::Secondary => command.fire_secondary,
+            Trigger::Primary => command.fire_primary || command.triggers[0],
+            Trigger::Secondary => command.triggers[1],
         };
-        // A client fires no other player's tank: its `WeaponGate` and `WeaponLoads` are
-        // owner-private (`net::disclosure::CombatDisclosure`) and never reach this client.
-        if replica.is_some()
-            && !controlled.contains(root.0)
-            && !gates.contains(root.0)
-            && !loads.contains(root.0)
-        {
-            continue;
-        }
         let tank_gate = gates.get(root.0).expect(
             "an authority or locally controlled weapon root has its spawn-complete private gate",
         );
@@ -350,7 +347,7 @@ fn fire(
         let shot = shot_clock.as_ref().map(|clock| {
             let combatant = combatant.expect(
                 "network tank fired without spawn-complete CombatantId; immutable sim state \
-                 must arrive with the predicted root",
+                 must be constructed with the authority root",
             );
             crate::ShotId {
                 combatant: *combatant,
@@ -359,12 +356,8 @@ fn fire(
                 fire_tick: clock.0.raw(),
             }
         });
-        // Fused own fire suppresses exactly the rounds the server will echo: a keyed shot's shell,
-        // flash, and barrel kick present from that echo at the cursor; an unkeyed shot has no echo
-        // and presents locally.
-        let fused_echo = replica.is_some() && shot.is_some();
         // Hand off to ballistics: fire the chambered round down the bore at its muzzle speed.
-        if !fused_echo {
+        {
             let shapes: Vec<_> = proxies
                 .iter()
                 .filter(|(_, _, layers)| layers.memberships.has_all(crate::Layer::Vehicle))
@@ -397,8 +390,7 @@ fn fire(
         // Kick the barrel back (root-resident recoil state); apply_recoil springs it home. The
         // shared `kick_recoil` owns the whole decision (barrel + recoil spec present, slot valid), so
         // this path and the opponent-view path (`net::client`) can't diverge on how a shot recoils.
-        // Under fused own fire the kick arrives with the echo, through that same opponent-view path.
-        if !fused_echo {
+        {
             kick_recoil(
                 &mut sims.get_mut(root.0).expect(ROOT_HAS_SIM),
                 slot.0,
@@ -921,7 +913,7 @@ mod tests {
             .spawn((
                 Tank,
                 TankCommand {
-                    fire_secondary: true,
+                    triggers: [false, true],
                     ..default()
                 },
                 Position::default(),
@@ -1083,7 +1075,7 @@ mod tests {
                         world.run_system_once(fire).unwrap();
                     }
                 }));
-                assert_eq!(result.is_ok(), replica && !controlled);
+                assert_eq!(result.is_ok(), ticking && replica && !controlled);
                 assert_eq!(weapon_state(&mut world, root).rounds_fired, 0);
             }
         }
@@ -1657,8 +1649,7 @@ mod tests {
 
     /// The belt cadence is exact: `tracer_every == 1` traces every round; `5` traces exactly rounds
     /// 0, 5, 10, … (one-in-five, counting the belt from the first round); `0` is a tracerless belt
-    /// that never traces. This is the arithmetic the server and the predicted client both walk, so
-    /// they can only agree if it is this deterministic.
+    /// that never traces. The authority publishes this fact for client presentation.
     #[test]
     fn tracer_cadence_is_every_nth() {
         // 1 = always.
@@ -1733,71 +1724,22 @@ mod tests {
         world.run_system_once(fire).unwrap();
     }
 
-    /// Give the rig's weapon a barrel and a recoil spec, so `kick_recoil` has a kick to apply and
-    /// its suppression is observable in `recoil_velocity`.
-    fn arm_barrel_recoil(world: &mut World, barrel: Entity) {
-        let mut weapons = world.query_filtered::<&mut Weapon, With<Muzzle>>();
-        let mut weapon = weapons.single_mut(world).expect("one rig weapon");
-        weapon.recoil = Some(crate::spec::RecoilSpec {
-            kick: 1.5,
-            stiffness: 10.0,
-            damping: 1.0,
-            max_length: crate::provenance::Sourced(0.5),
-        });
-        weapon.barrel = Some(barrel);
-    }
-
-    /// FUSED OWN FIRE (a net client's keyed round): NO local shell and NO local barrel kick — its
-    /// one presentation is the server echo, released at the cursor by `net::client` — while every
-    /// sim mutation (the belt walk here) runs unchanged. On the authority (no `ClientReplica`) the
-    /// same tick presents locally, kick included.
+    /// The game's damage model: a replica's device cannot spend rounds or author a shot bundle.
+    /// Mount the shipped gun plugin so deleting its authority gate fails this proof.
     #[test]
-    fn fused_own_fire_draws_no_local_shell_and_no_local_kick() {
-        use crate::ballistics::FireShell;
-
+    fn a_replica_never_fires_from_local_device_commands() {
         #[derive(Resource, Default)]
-        struct FireShellCount(usize);
-        fn count_fire_shells(_: On<FireShell>, mut c: ResMut<FireShellCount>) {
-            c.0 += 1;
-        }
-
-        let mut world = test_world();
-        world.insert_resource(crate::ShotClock(crate::sim_tick::SimTick::new(81)));
-        world.init_resource::<FireShellCount>();
-        world.add_observer(count_fire_shells);
-        let (root, _) = spawn_mg_rig(&mut world, Vec::new());
-        arm_barrel_recoil(&mut world, root);
-
-        world.insert_resource(crate::ClientReplica);
-        world.run_system_once(fire).unwrap();
-        assert_eq!(
-            world.resource::<FireShellCount>().0,
-            0,
-            "fused: a keyed round triggers no local FireShell",
+        struct Fired(usize);
+        let mut app = pause_test_app();
+        app.insert_resource(crate::ClientReplica)
+            .init_resource::<Fired>();
+        app.add_observer(
+            |_: On<crate::ballistics::FireShell>, mut fired: ResMut<Fired>| fired.0 += 1,
         );
-        assert_eq!(
-            weapon_state(&mut world, root).recoil_velocity,
-            0.0,
-            "fused: no local barrel kick — it arrives with the echo",
-        );
-        assert_eq!(
-            gate_state(&world, root).belt_remaining,
-            1,
-            "fused: the belt walk is sim truth and still runs",
-        );
-
-        world.remove_resource::<crate::ClientReplica>();
-        advance(&mut world, 7);
-        world.run_system_once(fire).unwrap();
-        assert_eq!(
-            world.resource::<FireShellCount>().0,
-            1,
-            "the authority presents its own shell locally",
-        );
-        assert!(
-            weapon_state(&mut world, root).recoil_velocity > 0.0,
-            "the authority applies the local barrel kick",
-        );
+        let (root, _) = spawn_mg_rig(app.world_mut(), Vec::new());
+        app.world_mut().run_schedule(FixedUpdate);
+        assert_eq!(app.world().resource::<Fired>().0, 0);
+        assert_eq!(weapon_state(app.world_mut(), root).rounds_fired, 0);
     }
 
     /// THE NEXT-LOAD RULE (`WeaponLoad`), on the production gun schedule as the authority: a shot
@@ -1864,83 +1806,6 @@ mod tests {
             "the shot fires the loaded round, bound from the weapon's list",
         );
         assert_eq!(load_state(app.world(), root), load(0, 0));
-    }
-
-    /// THE SELECTION IS SERVER-CONFIRMED: on a client (`ClientReplica`) the gun schedule never
-    /// applies a select edge, so an unconfirmed selection fires the round the authority loaded, and
-    /// only the replicated `WeaponLoads` changes it. Observed through unkeyed rounds, which present
-    /// locally. A client that latched its own selection would fire a round the authority never
-    /// loaded, a shell the authority's echo contradicts.
-    #[test]
-    fn a_client_fires_the_authority_s_loaded_round_until_its_selection_is_confirmed() {
-        let mut app = pause_test_app();
-        app.insert_resource(crate::ClientReplica);
-        app.init_resource::<FiredRounds>();
-        app.add_observer(record_fired_round);
-        let root = spawn_main_gun_rig(app.world_mut());
-        let fired = |app: &App| {
-            app.world()
-                .resource::<FiredRounds>()
-                .0
-                .iter()
-                .map(|&(round, _)| round)
-                .collect::<Vec<_>>()
-        };
-
-        // A selection inside a reload, the window in which the authority would load it.
-        gun_tick(&mut app, root, true, None);
-        gun_tick(&mut app, root, false, Some(RoundStep::Next));
-        assert_eq!(
-            load_state(app.world(), root),
-            WeaponLoad::default(),
-            "a client never writes the round choice",
-        );
-        idle_until_the_reload_completes_next(&mut app, root);
-        gun_tick(&mut app, root, true, None);
-        assert_eq!(
-            fired(&app),
-            [0, 0],
-            "the unconfirmed selection is not fired"
-        );
-
-        // The authority's confirmation arrives as replicated state.
-        app.world_mut()
-            .get_mut::<WeaponLoads>(root)
-            .expect("loads on root")
-            .weapons[0] = WeaponLoad {
-            loaded: 1,
-            selected: 1,
-            fuze_modes: Vec::new(),
-        };
-        idle_until_the_reload_completes_next(&mut app, root);
-        gun_tick(&mut app, root, true, None);
-        assert_eq!(fired(&app), [0, 0, 1], "the confirmed round fires");
-    }
-
-    /// An UNKEYED round (no `ShotClock` → no `ShotId` → no echo will ever arrive) presents locally
-    /// even on a net client — suppression covers exactly the rounds the server will echo.
-    #[test]
-    fn a_client_still_presents_an_unkeyed_round_locally() {
-        use crate::ballistics::FireShell;
-
-        #[derive(Resource, Default)]
-        struct FireShellCount(usize);
-        fn count_fire_shells(_: On<FireShell>, mut c: ResMut<FireShellCount>) {
-            c.0 += 1;
-        }
-
-        let mut world = test_world();
-        world.init_resource::<FireShellCount>();
-        world.add_observer(count_fire_shells);
-        spawn_mg_rig(&mut world, Vec::new());
-
-        world.insert_resource(crate::ClientReplica);
-        world.run_system_once(fire).unwrap();
-        assert_eq!(
-            world.resource::<FireShellCount>().0,
-            1,
-            "an echo-less round must not lose its only presentation",
-        );
     }
 
     /// Invariant: a recoiling barrel never travels past its recoil stop, however fast it is kicked,

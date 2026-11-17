@@ -16,7 +16,6 @@ use super::*;
 use crate::CombatantLife;
 use crate::damage_cam::delivery::tests::{SHOOTER, STRUCK, recorded, report, vocabulary};
 use crate::damage_cam::wire::{Audience, TankLife};
-use crate::net::client::install_input_buffer_guard;
 use crate::net::protocol::protocol_id;
 use crate::net::server::attach_replication_sender;
 use crate::net::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
@@ -78,7 +77,6 @@ fn build_client(port: u16, combatant: CombatantId, vocabulary: ShotVocabulary) -
     app.add_plugins(ClientPlugins {
         tick_duration: TICK,
     });
-    install_input_buffer_guard(&mut app);
     super::super::protocol::plugin(&mut app);
     install_client(&mut app);
     app.insert_resource(vocabulary);

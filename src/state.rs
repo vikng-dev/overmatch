@@ -69,7 +69,7 @@ pub(crate) fn primary_window<T>(result: Result<T, QuerySingleError>) -> Option<T
 /// device-reading system idles, so no freed cursor or key drives the tank.
 ///
 /// Returns `true` when there is NO primary window: the headless scripted harness has no cursor and
-/// drives the tank by writing `ActionState` directly (`net::harness::buffer_input`), and it never
+/// drives the frame input directly (`net::harness::buffer_input`), and it never
 /// mounts these device systems anyway (`NetClientPlugin` is skipped unless windowed) — so the gate
 /// must never be the thing that stops a windowless run.
 pub fn cursor_locked(cursor: Query<&CursorOptions, With<PrimaryWindow>>) -> bool {

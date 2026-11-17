@@ -7,8 +7,6 @@ use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::ecs::schedule::ScheduleConfigs;
 use bevy::ecs::system::{ScheduleSystem, SystemParam};
 use bevy::prelude::*;
-use lightyear::prelude::input::native::{ActionState, NativeStateSequence};
-use lightyear::prelude::input::server::{InputValidationAppExt, authorize_controlled_targets};
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
@@ -45,6 +43,11 @@ const PORT: u16 = 5888;
 
 // Resolution: the authority evaluates gameplay at 64 Hz, shared with Lightyear's timeline.
 pub(super) const TICK: Duration = Duration::from_nanos(15_625_000);
+
+/// Hosting timeout has one owner: the pinned transport configuration.
+pub(super) fn connection_timeout() -> Duration {
+    Duration::from_secs(NetcodeConfig::default().client_timeout_secs as u64)
+}
 
 pub fn run() {
     bot_policy();
@@ -104,8 +107,6 @@ pub fn run() {
     super::shot_explanation::install_server(&mut app);
     // Every strike's hull mark, recorded on the struck root and replicated whole.
     crate::hull_marks::plugin(&mut app);
-    // Authority must reject input targets not controlled by their sending client.
-    app.add_input_validator(authorize_controlled_targets::<NativeStateSequence<TankCommand>>);
     // Lightyear visibility hooks require `ReplicationSender` on each remote link.
     app.add_observer(attach_replication_sender);
 
@@ -1141,7 +1142,6 @@ fn spawn_player_tank(
                 Transform::default(),
                 // Authority body role and colliders enter the same command flush.
                 RigidBody::Dynamic,
-                ActionState::<TankCommand>::default(),
                 Position(spawn_pos),
                 // Explicit wire pose prevents Avian's required-component placeholder entering history.
                 Rotation(spawn_rot),
@@ -2582,7 +2582,7 @@ mod tests {
                     throttle: 1.0,
                     steer: -0.5,
                     fire_primary: true,
-                    fire_secondary: true,
+                    triggers: [false, true],
                     aim: Some(AimIntent::World(Vec3::new(10.0, 0.0, -40.0))),
                     range: 400.0,
                     repair: true,
@@ -2597,7 +2597,7 @@ mod tests {
         super::super::battle::install_hold(&mut app);
         app.init_resource::<crate::ShotClock>().add_systems(
             FixedUpdate,
-            author.in_set(super::super::protocol::InputBridge),
+            author.in_set(super::super::input_arrival::InputBridge),
         );
         let board = app
             .world_mut()
@@ -2620,7 +2620,7 @@ mod tests {
         assert!(!parsed.held());
         assert!(parsed.aim().is_some());
         assert_eq!(parsed.throttle, 1.0);
-        assert!(parsed.fire_primary && parsed.fire_secondary && parsed.repair);
+        assert!(parsed.fire_primary && parsed.triggers[1] && parsed.repair);
     }
 
     /// The shipped mode's respawn wait on the server's tick.
