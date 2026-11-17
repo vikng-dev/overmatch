@@ -300,7 +300,8 @@ class Setup(unittest.TestCase):
                     f = Fixture(self)
                     with mock.patch.dict(os.environ, f.env | auth | controls, clear=True):
                         result = setup.command([str(f.root / 'wrangler'), *args],
-                                               env=setup.wrangler_environment(), data=data)
+                                               env=setup.wrangler_environment(), data=data,
+                                               secret=data is not None)
                     self.assertNotEqual(result.returncode, 0)
                     for output in [result.stdout, result.stderr]:
                         self.assertIn('<REDACTED>', output)
