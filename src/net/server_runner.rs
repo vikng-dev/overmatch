@@ -67,11 +67,11 @@ impl WallLedger<'_> {
 }
 
 /// Bevy's `run_fixed_main_schedule`, spending one admitted tick per frame so each is sent. A new
-/// batch is admitted only once the last is spent, under the same cap Bevy's virtual clock applies
-/// to one frame. `Time<Real>` stays wall time, because networking counts its deltas.
+/// batch is admitted only once the last is spent, under the required timing data's admission cap.
+/// `Time<Real>` stays wall time, because networking counts its deltas.
 fn run_one_admitted_tick(world: &mut World) {
     let elapsed = world.resource::<Time<Real>>().delta();
-    let cap = world.resource::<Time<Virtual>>().max_delta();
+    let cap = Duration::from_secs_f64(world.resource::<super::timing::Timing>().admission_s);
     let mut unadmitted = world.resource_mut::<UnadmittedWall>();
     unadmitted.0 += elapsed;
     let pending = unadmitted.0;
@@ -105,7 +105,8 @@ fn run_one_admitted_tick(world: &mut World) {
 /// Install the server's one-tick-per-send boundary. Headless clock proofs drive this same
 /// schedule with controlled Real samples; the runner owns waiting and cap admission in play.
 pub(super) fn install_tick_schedule(app: &mut App) {
-    app.init_resource::<UnadmittedWall>()
+    app.init_resource::<super::timing::Timing>()
+        .init_resource::<UnadmittedWall>()
         .init_resource::<DiscardedWall>();
     app.remove_systems_in_set(
         RunFixedMainLoop,
@@ -311,7 +312,8 @@ mod tests {
         }
     }
 
-    /// Frame start describes production pace; departure excludes this frame's own work from x.
+    /// Frame start describes production pace; departure diagnoses this frame's own work.
+    /// Frame-start lateness includes that work exactly once.
     /// The injected clock advances in FixedUpdate and pre-send PostUpdate while Real stays fixed.
     #[test]
     fn each_labelled_tick_separates_frame_start_from_departure_even_in_a_long_frame() {
@@ -395,12 +397,12 @@ mod tests {
             assert_eq!(label.0 as usize, index + 1);
             assert_eq!(stamp.frame_start_s(), start);
             // Resolution: relative f32 epsilon bounds the offset rounding; f64 epsilon covers
-            // adding it to the epoch. The independently constructed bound is unchanged by work.
+            // adding it to the epoch. Frame-start lateness adds work to the independent link bound.
             let allowance = f64::from(f32::EPSILON) * work + f64::EPSILON * start;
             assert!((stamp.departure_s() - start - work).abs() <= allowance);
             assert!(
-                (x - 0.0625).abs() <= allowance,
-                "long server work must add nothing beyond offset rounding: {x}"
+                (x - work - 0.0625).abs() <= allowance,
+                "frame-start lateness must cover server work and the link bound: {x}"
             );
         }
         assert!(
@@ -420,7 +422,7 @@ mod tests {
             sleeps: default(),
             oversleep: Duration::ZERO,
         };
-        let admitted = Time::<Virtual>::default().max_delta();
+        let admitted = Duration::from_secs_f64(super::super::timing::Timing::shipped().admission_s);
         let batch = (admitted.as_nanos() / tick.as_nanos()) as u32;
         // Fixture: a stall of exactly the cap, then one catch-up frame costing two ticks.
         let later = 2;
@@ -445,7 +447,7 @@ mod tests {
             sleeps: default(),
             oversleep: Duration::ZERO,
         };
-        let admitted = Time::<Virtual>::default().max_delta();
+        let admitted = Duration::from_secs_f64(super::super::timing::Timing::shipped().admission_s);
         let batch = (admitted.as_nanos() / tick.as_nanos()) as usize;
         // Fixture: every frame costs two ticks, for several batches.
         let (mut app, frames) = probe(clock, vec![tick * 2; batch * 4]);
@@ -623,16 +625,12 @@ mod tests {
             sleeps: default(),
             oversleep: Duration::ZERO,
         };
-        let admitted = Time::<Virtual>::default().max_delta();
+        let admitted = Duration::from_secs_f64(super::super::timing::Timing::shipped().admission_s);
         let cap_ticks = (admitted.as_nanos() / tick.as_nanos()) as usize;
         // Fixture: a wall stall four times the admission bound, then costless frames.
         let mut work = vec![admitted * 4];
         work.resize(cap_ticks + 3, Duration::ZERO);
         let (mut app, frames) = probe(clock.clone(), work);
-        assert_eq!(
-            app.world().resource::<Time<Virtual>>().max_delta(),
-            admitted
-        );
         assert_eq!(app.run(), bevy::app::AppExit::Success);
         let frames = frames.0.lock().unwrap();
         assert!(frames.iter().all(|frame| frame.ticks == 1), "{frames:?}");

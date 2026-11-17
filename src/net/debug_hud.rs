@@ -354,7 +354,7 @@ fn update_debug_hud(
         );
     let jitter = view_clock
         .lateness_spread()
-        .map(|spread| jitter_readout(Duration::from_secs_f64(spread), tick.0));
+        .map(|spread| jitter_readout(spread, tick.0));
     let server_tick = tick_gaps
         .cadence(time.elapsed())
         .map(|cadence| server_tick_readout(cadence, tick.0));

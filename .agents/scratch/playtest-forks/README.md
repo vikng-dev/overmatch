@@ -774,3 +774,47 @@ restore the scaled-engine tests from git. The stall threshold above is the open 
 `src/track/transmission.rs` (`DriveSupply`), `src/tank/servo.rs`, `src/spec.rs` (load
 floors), `src/crew_ui.rs` (`module_status`); design §6 "Reduced module performance", §7c and
 the #348 entry in the #228 history; tracker #348.
+
+
+## F21 — Server work and link lateness share one view budget
+
+**Status:** open · owner default chosen for timing slice 2 review
+
+Subject: the game's netcode and damage-model presentation; game state only.
+
+**Default.** `median(frame-start interval) + max_W(previous completion-frame Real - frame start)`.
+Every completed tick pays the same lateness treatment whether its delay arose during server work
+or transport. There is no outlier trimming. Required timing data owns the retention window,
+delay/pacing rate and continuity threshold. A late work sample remains eligible until W expires;
+a continuity cut does not clear it.
+
+**Preserved alternative — median compute, stall shows as a hold.** Measure lateness from
+serialization departure, add median frame-to-departure work separately, retain the same W, rate
+and cut rule. This covers ordinary work but allows above-median work to exhaust the buffer on a
+clean link. No alternative implementation, switch or fixture arm is kept in code; git preserves
+commit `da5cf764` and its headless readings.
+
+**Why it's a playtest call.** The default covers variable server load after settling but remembers
+an isolated work stall as extra delay, acquired with slower playback and released with faster
+playback. The alternative keeps normal latency low but makes loaded-server holds visible. Watch
+whether the recovered motion and extra delay remain readable after a stall, and whether pacing
+after a link spike feels worse than the hold that preceded it. Compare server-work and link
+spikes through the same player-facing scene.
+
+**Observations.** The slice-2 report records the current 200 ms server-work and 500 ms link-spike
+headless readings beside round 1. These are observations for feel, never pinned expected values.
+Current default, MEASURED headless with Fixture 12 ms ordinary work: the 200 ms work stall held 179.6875 ms; delay rose from
+70.3125 to 250 ms and remained above baseline for 10.8984375 s, through 11.1484375 s after onset. A 500 ms link blackout held
+484.375 ms, cut forward 31.3999939 ticks, then showed 2.4140625 s of slow and 2.421875 s of fast
+playback, with extra delay for 12.421875 s, through 12.9140625 s after onset. These durations include the Fixture's read phases.
+Round 1 (MEASURED under median compute, Fixture 3 ms ordinary work): a 200 ms server silence held 176.5625 ms in total,
+then bounded catch-up; delay moved one 7.8125 ms read phase rather than retaining the stall.
+
+**Revert cost.** Low: change the target's lateness origin and restore the separate diagnostic
+median as a term, then re-run the loaded-server proof and protocol compatibility checks. The
+loaded-server zero-hold obligation would need an owner decision because that alternative cannot
+satisfy it. Both stamp facts remain on the wire, so the flip needs no new field.
+
+**Lives in.** `src/net/view_clock.rs`, `src/net/view_clock/udp.rs`, `assets/net_timing.ron`;
+[the motion contract](../../docs/design/net-motion-contract.md) and
+[the slice report](../view-clock-slice-2.md).

@@ -126,6 +126,35 @@ mod tests {
         assert_eq!(app.world().get::<DriveSignal>(entity), Some(&value));
     }
 
+    #[derive(Resource, Default)]
+    struct FixedFrames(u64);
+
+    // Fixture: completed authority ticks on a clean link; the production receiver and driver
+    // still choose the cursor. The isolated interpolation tests above own their sampler input.
+    fn complete_tick(app: &mut App, tick: u32) {
+        use bevy_replicon::shared::replication::storage::ReplicationStorage;
+        use bevy_replicon::{
+            client::server_mutate_ticks::MutateTickReceived, prelude::RepliconTick,
+        };
+        use lightyear::prelude::ReplicationCheckpointMap;
+        let checkpoint = RepliconTick::new(tick);
+        app.world_mut()
+            .resource_mut::<ReplicationCheckpointMap>()
+            .record(checkpoint, Tick(tick));
+        app.world_mut()
+            .resource_mut::<ReplicationStorage>()
+            .global
+            .get_or_default::<crate::net::tick_stamp::ReceivedStamps>()
+            .queue
+            .push_back((
+                checkpoint,
+                crate::net::tick_stamp::TickStamp::new(f64::from(tick) * TICK.as_secs_f64(), 0.0)
+                    .unwrap(),
+            ));
+        app.world_mut()
+            .write_message(MutateTickReceived { tick: checkpoint });
+    }
+
     fn client_gameplay_app() -> App {
         let mut app = crate::headless_test::headless_shell();
         app.insert_resource(crate::terrain_grid::ForceFlatWorld)
@@ -144,7 +173,10 @@ mod tests {
                 crate::SimPlugin,
             ));
 
+        crate::net::view_clock::install(&mut app);
         crate::net::client::install_replica_consumers(&mut app);
+        app.init_resource::<FixedFrames>()
+            .add_systems(FixedUpdate, |mut frames: ResMut<FixedFrames>| frames.0 += 1);
         finish(&mut app);
         crate::headless_test::start_fixed_clock(&mut app);
         app.world_mut()
@@ -186,7 +218,8 @@ mod tests {
                     .id()
             })
             .collect();
-        cursor(&mut app, 90);
+        complete_tick(&mut app, 89);
+        complete_tick(&mut app, 90);
         app.update();
         for &root in &roots {
             assert!(
@@ -194,8 +227,11 @@ mod tests {
                 "a replica must not assemble before its first pose becomes visible"
             );
         }
+        for tick in 91..=100 {
+            complete_tick(&mut app, tick);
+            app.update();
+        }
         for _ in 0..3 {
-            cursor(&mut app, 100);
             app.update();
         }
         for &root in &roots {
@@ -220,10 +256,20 @@ mod tests {
                 > roots.len()
         );
         let clock = world.resource::<crate::WeaponClock>().0.raw();
+        let fixed_before = world.resource::<FixedFrames>().0;
         for tick in [100, 100, 100, 101, 102] {
-            cursor(&mut app, tick);
+            if tick > 100 {
+                complete_tick(&mut app, tick);
+            }
             app.update();
             let world = app.world_mut();
+            if tick == 100 {
+                assert_eq!(
+                    world.resource::<crate::WeaponClock>().0.raw(),
+                    clock,
+                    "view-owned countdowns cannot mature during a presentation hold"
+                );
+            }
             for &root in &roots {
                 assert!(world.get::<Position>(root).is_some());
                 assert!(world.get::<Rotation>(root).is_some());
@@ -236,8 +282,8 @@ mod tests {
             }
         }
         assert!(
-            app.world().resource::<crate::WeaponClock>().0.raw() > clock,
-            "the fixed gameplay loop, including shooting, must actually run"
+            app.world().resource::<FixedFrames>().0 > fixed_before,
+            "the independent fixed-gameplay probe must run even while view time holds"
         );
     }
 }

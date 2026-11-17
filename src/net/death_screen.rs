@@ -82,11 +82,9 @@ impl OwnRespawn<'_, '_> {
         }
     }
 
-    /// Whole seconds, rounded up, until the own knocked-out life's respawn opens on the client's
-    /// view cursor. The authority still decides admission when the request arrives.
-    /// `None` when the key may be pressed: the opening is past, or no opening for
-    /// this life has arrived yet (no scoreboard, or one not yet updated for this knockout), when
-    /// the server decides the request.
+    /// Whole seconds, rounded up, until this life's respawn opens on the view cursor.
+    /// `None`: the opening passed or has not arrived (no scoreboard or no update for this life).
+    /// The authority decides admission when a request arrives.
     fn seconds_left(&self) -> Option<u32> {
         let (&combatant, &life) = match self.own.single() {
             Ok(own) => own,

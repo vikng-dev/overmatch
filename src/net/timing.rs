@@ -8,6 +8,7 @@ use crate::provenance::{Sourced, from_shipped_str};
 
 #[derive(Resource, Clone, Debug)]
 pub(super) struct Timing {
+    pub admission_s: f64,
     pub view_window_s: f64,
     pub view_rate: f64,
     pub view_cut_s: f64,
@@ -32,6 +33,7 @@ impl Timing {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Authored {
+            admission_s: Sourced<f64>,
             view_window_s: Sourced<f64>,
             view_rate: Sourced<f64>,
             view_cut_s: Sourced<f64>,
@@ -50,6 +52,7 @@ impl Timing {
         )
         .unwrap_or_else(|err| panic!("{err}; fix the required timing fields and provenance"));
         let timing = Self {
+            admission_s: authored.admission_s.0,
             view_window_s: authored.view_window_s.0,
             view_rate: authored.view_rate.0,
             view_cut_s: authored.view_cut_s.0,
@@ -63,6 +66,7 @@ impl Timing {
             refused_pitch: authored.refused_pitch.0,
         };
         for (field, value) in [
+            ("admission_s", timing.admission_s),
             ("view_window_s", timing.view_window_s),
             ("view_rate", timing.view_rate),
             ("view_cut_s", timing.view_cut_s),
@@ -79,6 +83,11 @@ impl Timing {
                 "assets/net_timing.ron: {field} must be finite and positive; fix the timing data"
             );
         }
+        assert!(
+            std::time::Duration::try_from_secs_f64(timing.admission_s).is_ok()
+                && timing.admission_s >= super::server::TICK.as_secs_f64(),
+            "assets/net_timing.ron: admission_s must fit Duration and admit at least one authority tick"
+        );
         assert!(
             timing.view_pending_s / crate::sim_tick::sim_timestep().as_secs_f64()
                 <= f64::from(i32::MAX),

@@ -181,12 +181,12 @@ fn note_outcome_drawn(drawn: On<AuthorityOutcomeDrawn>, mut store: ResMut<ShotEx
 /// The instant an explanation's impact can present: its authority outcome drawn (`xdraw`).
 fn trace_outcome_drawn(
     drawn: On<AuthorityOutcomeDrawn>,
-    timeline: Res<LocalTimeline>,
+    view: Res<super::view_clock::ViewClock>,
     mut trace: ResMut<ShotTrace>,
 ) {
     trace.row(
         "xdraw",
-        timeline.tick().0,
+        view.now().map(|now| now.tick().0),
         drawn.shot,
         json!({ "o": drawn.ordinal }),
     );
@@ -199,13 +199,13 @@ fn trace_outcome_drawn(
 fn trace_presence(
     store: Res<ShotExplanations>,
     time: Res<Time<Virtual>>,
-    timeline: Res<LocalTimeline>,
+    view: Res<super::view_clock::ViewClock>,
     mut trace: ResMut<ShotTrace>,
     mut seen: Local<BTreeSet<ExplanationKey>>,
     mut pending: Local<BTreeSet<ExplanationKey>>,
 ) {
     let now = time.elapsed_secs_f64();
-    let tick = timeline.tick().0;
+    let tick = view.now().map(|now| now.tick().0);
     for (key, stored) in store.iter() {
         let kind = if seen.insert(*key) {
             if stored.presence == ImpactPresence::Pending {

@@ -284,6 +284,10 @@ fn record_frame(
     // One connection state for every tank row this frame, the way `tick`/`conf` already repeat.
     // `itick` carries the overstep because headroom (`conft − itick`) is a sub-tick quantity —
     // the whole point of the measurement is how little of it is left.
+    let view_tick = view
+        .as_ref()
+        .and_then(|clock| clock.now())
+        .map(|now| now.tick().0);
     let link = view
         .and_then(|clock| clock.now())
         .zip(pings.iter().next())
@@ -316,11 +320,14 @@ fn record_frame(
             obj.insert("camq".into(), quat(cam_rot));
         }
         {
-            // Net resources are optional so this shared system remains valid in single-player.
             if let (Some(timeline), Some(checkpoints)) =
                 (net.timeline.as_deref(), net.checkpoints.as_deref())
             {
-                obj.insert("tick".into(), Value::from(u64::from(timeline.tick().0)));
+                obj.insert("local_tick".into(), Value::from(timeline.tick().0));
+                obj.insert(
+                    "tick".into(),
+                    serde_json::to_value(view_tick).expect("optional integer serializes"),
+                );
                 obj.insert(
                     "conf".into(),
                     checkpoints
@@ -328,7 +335,7 @@ fn record_frame(
                         .map_or(Value::Null, |t| Value::from(u64::from(t.0))),
                 );
             }
-            // Headroom is `conft − itick`; RTT and ping jitter are diagnostic only.
+            // RTT and ping jitter are diagnostic only.
             if let Some((itick, rtt, jitter)) = link {
                 obj.insert("itick".into(), Value::from(itick));
                 obj.insert("rtt".into(), Value::from(rtt));
@@ -359,12 +366,12 @@ fn record_frame(
     }
 }
 
-/// Per fixed tick, per tank root: sim truth (`Position`/`Rotation`/velocities are the rolled-back,
-/// replayed authority values) plus the derived contact state (grounded track sides, per-side belt
-/// loads, collision pairs). Runs in `FixedLast`, after the physics step and avian's contact update,
-/// so `Collisions` is current for this tick.
+/// Per fixed gameplay tick, per tank root: current pose and velocities plus contact state
+/// (grounded track sides, per-side belt loads, collision pairs). Runs in `FixedLast`, after
+/// physics and contact updates. Client poses are presented server state, never predictions.
 ///
-/// Network compositions use `LocalTimeline`; others use a local monotonic counter.
+/// Client `tick` is the server-domain view tick (null before a stamp pair); `local_tick`
+/// separately counts fixed gameplay. Servers use authority ticks; offline runs count locally.
 fn record_tick(
     mut trace: ResMut<TraceWriter>,
     roots: Query<
@@ -390,6 +397,7 @@ fn record_tick(
     collisions: Collisions,
     mut tick_counter: Local<u64>,
     timeline: Option<Res<LocalTimeline>>,
+    view: Option<Res<crate::net::view_clock::ViewClock>>,
     // The server's ownership marker (`spawn_player_tank` inserts `ControlledBy` on every player
     // tank; the ownerless test bot has none). It is the SERVER-side half of the cross-world identity
     // the hash join pairs on: the client's own predicted tank carries the game `Controlled` marker
@@ -401,12 +409,17 @@ fn record_tick(
     // The composition role, copied before the mutable `trace` borrow the write loop needs. It selects
     // which marker means "the player's own tank" for the world-independent pairing key `own`.
     let role = trace.role;
-    // One tick number for every tank this call. MP: the predicted/authoritative tick, so client and
-    // server rows align. Single-player (no `LocalTimeline`): a monotonic local counter, incremented
-    // once per tick here — enough for the analysis script to order rows.
-    let tick_no = match timeline.as_deref() {
-        Some(timeline) => u64::from(timeline.tick().0),
-        None => next_local_tick(&mut tick_counter),
+    let local_tick = timeline.as_deref().map_or_else(
+        || next_local_tick(&mut tick_counter),
+        |timeline| u64::from(timeline.tick().0),
+    );
+    let tick_no = match role {
+        "client" => view
+            .as_ref()
+            .expect("the client trace composition mounts ViewClock")
+            .now()
+            .map(|now| u64::from(now.tick().0)),
+        _ => Some(local_tick),
     };
 
     // `hc`/`pen` include only touching, overlapping Avian pairs. A non-overlapping AABB makes a
@@ -521,6 +534,7 @@ fn record_tick(
         let mut row = json!({
             "k": "tick",
             "tick": tick_no,
+            "local_tick": local_tick,
             "e": entity.to_bits(),
             "p": vec3(position.0),
             "q": quat(rotation.0),

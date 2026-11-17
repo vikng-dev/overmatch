@@ -40,7 +40,7 @@ struct HitConfirm(f32);
 pub(super) struct LocalHitConfirmed {
     pub receipt: DamageReceipt,
     /// Client tick at the wire receive boundary.
-    pub received_tick: u32,
+    pub received_tick: Option<u32>,
     /// Authority tick at which this shot first damaged an HP pool.
     pub damage_tick: u32,
 }
@@ -315,7 +315,7 @@ mod tests {
 
         app.world_mut().trigger(LocalHitConfirmed {
             receipt,
-            received_tick: 77,
+            received_tick: Some(77),
             damage_tick: 77,
         });
         app.world_mut().flush();

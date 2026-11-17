@@ -1218,7 +1218,7 @@ mod tests {
             .insert_resource(Time::<Real>::default())
             .insert_resource(Time::<Fixed>::from_hz(64.0))
             .init_resource::<lightyear::prelude::LocalTimeline>()
-            .insert_resource(crate::shot_trace::ShotTrace::for_test(&path))
+            .insert_resource(crate::shot_trace::ShotTrace::for_test(&path, None))
             .add_systems(Update, super::simulate_watchdog);
         app.update();
         app.update();

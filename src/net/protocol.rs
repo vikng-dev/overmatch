@@ -42,7 +42,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// at, and a whole copy only to a client without one or behind the retained history; the hull
 /// marks replicate whole. The owner's ahead-running aim integrates the authority's servo law
 /// (`tank::servo`), so a change to that law changes this revision too.
-pub const PROTOCOL_REV: u32 = 104;
+pub const PROTOCOL_REV: u32 = 105;
 
 /// The compatibility record's wire term: the pinned wire manifest, [`PROTOCOL_REV`] and the crate
 /// version.
@@ -622,25 +622,23 @@ pub(super) fn install_shot_clock(app: &mut App) {
     app.add_systems(FixedUpdate, publish_shot_clock.before(GameplaySet));
 }
 
-/// The game's damage model: authority shot identities use its transport tick. Client weapon
-/// countdowns use the view cursor; no completed stamp pair means no countdown progress.
-/// Offline compositions advance their own wrapping tick; network compositions require an
-/// advancing transport timeline and refuse its exhaustion visibly at this boundary.
+/// The game's damage model: network shot labels follow the local transport timeline.
+/// Authority countdowns are published separately while its server state is running;
+/// the view-clock installer publishes client countdowns every render frame.
 pub(super) fn publish_shot_clock(
     mut shot_clock: ResMut<crate::ShotClock>,
-    mut weapon_clock: ResMut<crate::WeaponClock>,
     timeline: Res<LocalTimeline>,
-    view: Option<Res<super::view_clock::ViewClock>>,
 ) {
     let tick = network_gameplay_tick(timeline.tick()).unwrap_or_else(super::harness::refuse_start);
     shot_clock.0 = tick;
-    if let Some(view) = view {
-        if let Some(now) = view.now() {
-            weapon_clock.0 = crate::sim_tick::SimTick::new(now.tick().0);
-        }
-    } else {
-        weapon_clock.0 = tick;
-    }
+}
+
+/// Authority countdowns share the shot tick; the running server state chooses this role.
+fn publish_authority_weapon_clock(
+    timeline: Res<LocalTimeline>,
+    mut weapon: ResMut<crate::WeaponClock>,
+) {
+    weapon.0 = network_gameplay_tick(timeline.tick()).unwrap_or_else(super::harness::refuse_start);
 }
 
 /// Publish angles in `FixedPostUpdate`, after `drive_servos` (`FixedUpdate`, after `GameplaySet`).
@@ -860,7 +858,7 @@ const WIRE_SURFACE_HASH: u64 = 0xb35d6c7c3c7bbe9e;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x58e2be8e2950233e;
+const WIRE_TYPES_HASH: u64 = 0x1c863b9a5768591f;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing; replicon's
@@ -876,6 +874,12 @@ const WIRE_DEP_REPLICON: &str = "0.45.5";
 pub(crate) fn plugin(app: &mut App) {
     super::tick_stamp::install(app);
     install_shot_clock(app);
+    app.add_systems(
+        FixedUpdate,
+        publish_authority_weapon_clock
+            .before(GameplaySet)
+            .run_if(in_state(bevy_replicon::prelude::ServerState::Running)),
+    );
     app.init_resource::<crate::ballistics::PathClock>();
     app.component::<NetTank>().replicate();
     app.component::<NetBot>().replicate();
@@ -2237,18 +2241,25 @@ mod tests {
         let mut view = super::super::view_clock::ViewClock::default();
         view.set_now(Tick(40).into());
         app.insert_resource(view);
-        app.world_mut().run_schedule(FixedUpdate);
-        assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), 40);
+        app.add_systems(PreUpdate, super::super::view_clock::publish_weapon_clock);
+        app.world_mut().run_schedule(PreUpdate);
+        // A render frame can move the view without any fixed gameplay tick.
+        app.world_mut()
+            .resource_mut::<super::super::view_clock::ViewClock>()
+            .set_now(Tick(41).into());
+        app.world_mut().run_schedule(PreUpdate);
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), 41);
         app.world_mut()
             .resource_mut::<LocalTimeline>()
             .apply_delta(100);
         app.world_mut().run_schedule(FixedUpdate);
-        assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), 40);
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), 41);
         app.world_mut()
             .resource_mut::<super::super::view_clock::ViewClock>()
             .set_synced(false);
+        app.world_mut().run_schedule(PreUpdate);
         app.world_mut().run_schedule(FixedUpdate);
-        assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), 40);
+        assert_eq!(app.world().resource::<crate::WeaponClock>().0.raw(), 41);
         assert_eq!(app.world().resource::<crate::ShotClock>().0.raw(), 500);
     }
 
@@ -2263,7 +2274,7 @@ mod tests {
         world.init_resource::<crate::ShotClock>();
         world.init_resource::<crate::WeaponClock>();
         let mut schedule = Schedule::default();
-        schedule.add_systems(publish_shot_clock);
+        schedule.add_systems((publish_shot_clock, publish_authority_weapon_clock).chain());
         for _ in 0..3 {
             schedule.run(&mut world);
             let transport = world.resource::<LocalTimeline>().tick();

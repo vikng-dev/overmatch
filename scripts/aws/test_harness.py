@@ -781,11 +781,19 @@ class Reading(unittest.TestCase):
             with self.subTest(name), self.assertRaisesRegex(harness.Refused, "^fixture `gap_ms`"):
                 harness.histogram(harness.Fields({"gap_ms": value}, "fixture"), "gap_ms")
 
+    def test_missing_view_epoch_or_retained_sample_is_a_named_absence(self):
+        # Null must survive parsing and aggregation; zero would claim an observed delay.
+        row = JITTER | {"view_clock": JITTER["view_clock"] | {"applied_above_latest_x_ms": None}}
+        line = harness.jitter("[ 1.000] client_jitter " + json.dumps(row), 1)[0]
+        self.assertIsNone(line.applied_above_latest_x_ms)
+        cells = harness.client_cells(1, 0, [line], 0.0, TIMING)
+        self.assertIsNone(cells[13])
+
     def test_a_view_window_histogram_is_taken_once_per_view_window(self):
         # Each line's histogram holds the view window before it; lines a second apart overlap, so
         # summing them would count each interval up to a view window's worth of times.
         hist = harness.Histogram(10, 15.6, 18.0, 20.0, BIN_MS, (5, 5) + (0,) * 15)
-        line = harness.Jitter(0.0, 1.0, 0.0, 60.0, hist, None, None, (0,) * len(harness.COMPLETION), 0.0, 0)
+        line = harness.Jitter(at=0.0, period_s=1.0, held_ms=0.0, applied_above_latest_x_ms=60.0, intervals=hist, target_minus_applied_ms=None, target_above_x_ms=None, completion=(0,) * len(harness.COMPLETION), worst_lag_ms=0.0, cuts=0)
         # Fixture: ten lines per view window over three view windows.
         lines = [dataclasses.replace(line, at=k * TIMING.view_window_s / 10) for k in range(1, 31)]
         self.assertEqual(len(harness.tiles(lines, 0.0, TIMING.view_window_s)), 3)

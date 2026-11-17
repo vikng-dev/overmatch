@@ -68,6 +68,25 @@ class JoinIntegrityTests(unittest.TestCase):
         self.assertEqual(result["paths"], {"delivered": 1, "completed": 1})
 
 
+    def test_view_ticks_are_compared_in_server_domain_and_waiting_is_absent(self) -> None:
+        # The game's damage model: confirm rows describe only game state. Local count is bait.
+        server = [row("fire", 100, 1, 100), row("dmg", 104, 1, 100)]
+        client = [row("dmg_rx", None, 1, 100, own=True, dt=104, local_tick=9000),
+                  row("dmg_rx", 102, 1, 100, own=True, dt=104, local_tick=9001),
+                  {"k": "capture_end", "t": 103, "local_tick": 9002}]
+        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
+        self.assertEqual(result["dmg_lead"], [-2])
+        self.assertEqual(result["client_trace_end_gap_ticks"], 1)
+
+    def test_loader_names_waiting_client_epoch_without_inventing_tick_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "client.jsonl"
+            path.write_text(json.dumps({"k": "meta", "role": "client", "tick_hz": 64}) + "\n"
+                            + json.dumps(row("dmg_rx", None, 1, 100, own=True, dt=104)) + "\n")
+            _, rows = load(path)
+            self.assertIsNone(rows[0]["t"])
+
+
 class StrictVerificationTests(unittest.TestCase):
     def test_own_damage_confirm_duplicate_receive_rows_reaches_one_marker(self) -> None:
         server = [

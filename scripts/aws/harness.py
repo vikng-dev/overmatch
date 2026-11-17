@@ -831,7 +831,7 @@ class Jitter:
     at: float  # the client machine's kernel time, at the end of the line's period
     period_s: float
     held_ms: float  # of the period's frames, those whose target exhausted the completed tick buffer
-    delay_ms: float  # applied delta above the latest completed tick's absence bound
+    applied_above_latest_x_ms: float | None  # None: no view epoch or no retained lateness sample
     intervals: Histogram | None  # stamp intervals in the view window before the line; None: under two stamps
     target_minus_applied_ms: float | None  # None: no completed stamp pair yet
     target_above_x_ms: float | None
@@ -857,7 +857,7 @@ def jitter(text: str, client: int) -> list[Jitter]:
         row = Fields(found, f"client {client}: a client_jitter record")
         view = row.at("view_clock")
         out.append(Jitter(float(stamp.group(1)), row.num("period_s"), row.num("holds.ms"),
-                          view.num("applied_above_latest_x_ms"), histogram(view, "stamp_interval_ms"),
+                          view.maybe_num("applied_above_latest_x_ms"), histogram(view, "stamp_interval_ms"),
                           view.maybe_num("target_minus_applied_ms"), view.maybe_num("target_above_latest_x_ms"),
                           tuple(view.count(f"completion.{name}") for name in COMPLETION),
                           view.num("completion.worst_lag_ms"), view.count("cuts")))
@@ -985,7 +985,7 @@ def client_cells(client: int, index: int, lines: list[Jitter], start: float,
             sum(sum(h.bins[2:]) for h in taken),  # bins 2 and up: two ticks or more
             len(target), median(target), min(target, default=None), max(target, default=None),
             median([line.target_above_x_ms for line in lines if line.target_above_x_ms is not None]),
-            statistics.median(line.delay_ms for line in lines), sum(line.cuts for line in lines), totals[0], totals[1],
+            median([line.applied_above_latest_x_ms for line in lines if line.applied_above_latest_x_ms is not None]), sum(line.cuts for line in lines), totals[0], totals[1],
             max(line.worst_lag_ms for line in lines), *totals[2:]]
 
 

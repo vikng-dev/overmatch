@@ -19,7 +19,8 @@ from enum import StrEnum
 from pathlib import Path
 
 # Resolution: allow half a second at the shipped 64 Hz for independently exiting clients and
-# the runner's server shutdown. Delivery and playback checks never exclude shots in this overlap.
+# the runner's server shutdown, including buffered view time. This is a view-coverage check;
+# delivery and playback checks never exclude shots in this overlap.
 TRACE_END_MAX_SKEW_TICKS = 32
 
 
@@ -81,6 +82,8 @@ def load(path: Path) -> tuple[dict, list[dict]]:
                 if row["impact"] == PathImpact.BOUNCE:
                     required += ("ordinal",)
             for field in required:
+                if field == "t" and field in row and row[field] is None and meta.get("role") == "client":
+                    continue  # Waiting for a completed stamp pair: no server-domain view tick yet.
                 if type(row.get(field)) is not int or row[field] < 0:
                     raise TraceInputError(
                         f"{path}:{number}: {kind}.{field} must be a nonnegative integer; "
@@ -110,9 +113,8 @@ def shot_key(row: dict) -> tuple[int, int, int]:
 
 
 def tick_diff(now: int, then: int) -> int:
-    """Lightyear-style signed wrapping tick difference (`Tick - Tick -> i32`)."""
-    delta = (int(now) - int(then)) & 0xFFFF_FFFF
-    return delta if delta <= 0x7FFF_FFFF else delta - 0x1_0000_0000
+    """Lightyear 0.31 monotonic tick difference, saturating to the signed i32 range."""
+    return max(-(1 << 31), min((1 << 31) - 1, int(now) - int(then)))
 
 
 def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> dict:
@@ -185,11 +187,11 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
     fired = {k for k, kinds in server.items() if kinds.get("fire")}
     own_identity = {k for k in fired if k[0] == c_own}
 
-    last_client_tick = max((r["t"] for r in crows if "t" in r), default=None)
-    last_server_tick = max((r["t"] for r in srows if "t" in r), default=None)
+    last_client_tick = max((r["t"] for r in crows if r.get("t") is not None), default=None)
+    last_server_tick = max((r["t"] for r in srows if r.get("t") is not None), default=None)
     client_trace_end_gap = (
         tick_diff(last_server_tick, last_client_tick)
-        if last_server_tick is not None and last_client_tick is not None else 0
+        if last_server_tick is not None and last_client_tick is not None else None
     )
     unaddressed_ticks = {
         r["t"] for r in srows
@@ -216,14 +218,15 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
         if client[k].get("fire_rx") and not client[k].get("spawn") and not client[k].get("end")
     ]
 
-    # --- fire catch-up: (P − S) + one-way latency, per observed FireEvent -----------------
-    # Receive age is the local timeline minus the authoritative fire tick, for every shooter.
-    fire_cu = [r["cu"] for r in crows if r["k"] == "fire_rx" and not r.get("dup") and "cu" in r]
+    # Receive age is view tick minus authority fire tick; no epoch means no age yet.
+    fire_cu = [r["cu"] for r in crows if r["k"] == "fire_rx" and not r.get("dup") and r.get("cu") is not None]
 
+    # The game's damage model, game state only: positive means presentation was already past
+    # the damage tick at receipt; negative means confirmation arrived ahead of that view crossing.
     dmg_lead = [
         tick_diff(r["t"], r["dt"])
         for r in crows
-        if r["k"] == "dmg_rx" and r.get("own") and not r.get("dup")
+        if r["k"] == "dmg_rx" and r.get("own") and not r.get("dup") and r.get("t") is not None
     ]
 
     # --- copies per emitted fact -----------------------------------------------------------
@@ -379,8 +382,8 @@ def verification_failures(summary: dict) -> list[str]:
         if count:
             failures.append(f"{name}={count}")
 
-    gap = int(summary["client_trace_end_gap_ticks"])
-    if gap > TRACE_END_MAX_SKEW_TICKS:
+    gap = summary["client_trace_end_gap_ticks"]
+    if gap is not None and gap > TRACE_END_MAX_SKEW_TICKS:
         add("client_trace_ended_early_by_ticks", gap)
     add("lost_shots", summary["lost"])
     add("duplicate_shots", summary["multi_spawn"])
@@ -424,7 +427,7 @@ def reconstruct(key: tuple[int, int, int], s: dict, c: dict) -> list[str]:
     for kind, rows in c.items():
         for r in rows:
             events.append((r["t"], "C", kind, r))
-    events.sort(key=lambda e: (e[0], e[1] != "S"))
+    events.sort(key=lambda e: (e[0] is not None, e[0] or 0, e[1] != "S"))
     out = [f"    shot combatant={key[0]} weapon={key[1]} fire_tick={key[2]}"]
     for stream in ("fire", "path", "dmg"):
         emissions = s.get("path_tx" if stream == "path" else stream, [])
@@ -446,7 +449,7 @@ def reconstruct(key: tuple[int, int, int], s: dict, c: dict) -> list[str]:
             k: v for k, v in r.items() if k not in ("k", "t", "c", "w", "ft")
         }
         detail = "  ".join(f"{k}={v}" for k, v in extra.items())
-        out.append(f"      t={t:<8} [{role}] {kind:<8} {detail}")
+        out.append(f"      t={str(t) if t is not None else 'waiting':<8} [{role}] {kind:<8} {detail}")
     return out
 
 

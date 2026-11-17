@@ -32,8 +32,8 @@ impl<T> Default for CursorQueue<T> {
 }
 
 impl<T> CursorQueue<T> {
-    /// Resolution: bound held-announcement memory below the shot-dedup horizon; ordinary
-    /// synchronized volleys fit. Overflow visibly omits the oldest cosmetic fact.
+    /// Resolution: 256 exceeds a 30-combatant x 2-weapon volley (60 fires, DERIVED),
+    /// below the 2,048-id dedup allocation. Eviction visibly omits the oldest cosmetic.
     const CAP: usize = 256;
 
     /// Hold one announcement. Returns the oldest entry evicted when the bound is hit.

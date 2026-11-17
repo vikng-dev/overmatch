@@ -92,7 +92,7 @@ fn client_app(api: &str, log: bool) -> App {
         bevy::image::CompressedImageFormats::ASTC_LDR,
     ));
 
-    let tick_duration = Duration::from_secs_f64(1.0 / 64.0);
+    let tick_duration = crate::net::server::TICK;
     app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(crate::net::plugin);
     app.add_plugins(physics::physics_plugins());

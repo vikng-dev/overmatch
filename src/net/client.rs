@@ -501,7 +501,7 @@ pub fn run() -> AppExit {
 
     // Register the shared protocol before creating the client link. The step lightyear publishes as
     // `TickDuration`, also the simulation-time unit for the view clock's pacing bound.
-    let tick_duration = Duration::from_secs_f64(1.0 / 64.0);
+    let tick_duration = crate::net::server::TICK;
     // Transport labels free-run; arrival input and presentation never follow their estimate.
     app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(super::plugin);
@@ -628,7 +628,7 @@ pub(super) fn install_replica_consumers(app: &mut App) {
         .add_systems(
             Update,
             (
-                rig::attach_replicated_rig(),
+                rig::attach_replicated_rig().run_if(|view: Res<ViewClock>| view.now().is_some()),
                 diagnostics::nan_tripwire,
                 open_gameplay_gate,
             ),
@@ -1296,7 +1296,9 @@ pub(super) struct SeenShots {
 }
 
 impl SeenShots {
-    // Resolution: bound duplicate-ledger memory above a synchronized automatic-fire horizon.
+    // Resolution: memory for 30 combatants x 2 weapons x ceil(750/60 rounds/s x
+    // 100/64 s catch-up) = 1,200 ids (DERIVED sizing example, not a vehicle law).
+    // The next power of two covers that horizon; overflow retires the oldest id.
     const CAP: usize = 2_048;
     /// Record `shot`; return whether it was not already present.
     fn mark_new(&mut self, shot: ShotId) -> bool {
@@ -1367,14 +1369,14 @@ enum FireRefusal {
 fn refuse_fire(
     shot: ShotId,
     refusal: FireRefusal,
-    now: Tick,
+    now: impl Into<Option<Tick>>,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
     warn!(?shot, ?refusal, "client: refused an authority fire fact");
     crate::shot_trace::record(
         shot_trace,
         "drop",
-        now.0,
+        now.into().map(|t| t.0),
         shot,
         || json!({ "s": "fire", "res": "refused", "why": format!("{refusal:?}") }),
     );
@@ -1409,7 +1411,8 @@ impl FromWorld for PendingFireEvents {
 }
 
 impl PendingFireEvents {
-    // Resolution: bound unresolved-rig storage below the shot-dedup horizon; normal volleys fit.
+    // Resolution: 256 exceeds a 30-combatant x 2-weapon volley (60 fires, DERIVED),
+    // below the 2,048-id dedup allocation. Overflow visibly omits the oldest cosmetic.
     const CAP: usize = 256;
 
     /// Insert one unresolved fire. The return value is an older event evicted for bounded memory.
@@ -1546,7 +1549,7 @@ pub(super) fn receive_fire_events(
     inbox: FireInbox,
     shooters: FireShooters,
     // Waiting for the first completed stamp pair holds announcements without presenting them.
-    cursor: Option<Res<ViewClock>>,
+    cursor: Res<ViewClock>,
     ledgers: FireLedgers,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut commands: Commands,
@@ -1564,13 +1567,10 @@ pub(super) fn receive_fire_events(
         mut sanctioned,
         mut path_clock,
     } = ledgers;
-    // No completed stamps means no presentation epoch; zero labels diagnostics only.
-    let now = cursor
-        .as_ref()
-        .and_then(|clock| clock.now())
-        .map_or(Tick(0), |now| now.tick());
+    // Waiting for a completed stamp pair is a named absence, also null in trace rows.
+    let now = cursor.now().map(|now| now.tick());
     let cursor = cursor
-        .and_then(|clock| clock.now())
+        .now()
         .map(|now| (now.tick(), f64::from(now.overstep().to_f32())));
     if let Some((tick, fraction)) = cursor {
         path_clock.tick = tick.0;
@@ -1601,6 +1601,9 @@ pub(super) fn receive_fire_events(
             consume_flight_outcome(outcome, now, &mut sanctioned, &mut shot_trace);
         }
     }
+    let Some(now) = now else {
+        return;
+    }; // No epoch yet: only receipt and holding can run.
     release_due_fire_events(
         now,
         cursor,
@@ -1629,7 +1632,7 @@ fn cursor_itick(cursor: Option<(Tick, f64)>) -> Option<f64> {
 
 fn consume_fire_visual_fact(
     fact: FireVisualFact,
-    now: Tick,
+    now: Option<Tick>,
     cursor: Option<(Tick, f64)>,
     seen: &mut SeenShots,
     held: &mut HeldFireEvents,
@@ -1650,7 +1653,7 @@ fn consume_fire_visual_fact(
 /// happens at release ([`release_due_fire_events`], same drain), never here.
 fn consume_fire_event(
     event: &FireEvent,
-    now: Tick,
+    now: Option<Tick>,
     cursor: Option<(Tick, f64)>,
     seen: &mut SeenShots,
     held: &mut HeldFireEvents,
@@ -1658,10 +1661,10 @@ fn consume_fire_event(
 ) {
     let shot = event.shot_id();
     let fresh = seen.mark_new(shot);
-    crate::shot_trace::record(shot_trace, "fire_rx", now.0, shot, || {
+    crate::shot_trace::record(shot_trace, "fire_rx", now.map(|t| t.0), shot, || {
         json!({
             "dup": !fresh,
-            "cu": fire_catch_up_ticks(event.fire_tick, now),
+            "cu": now.and_then(|now| fire_catch_up_ticks(event.fire_tick, now)),
             "itick": cursor_itick(cursor),
         })
     });
@@ -1678,7 +1681,7 @@ fn consume_fire_event(
         crate::shot_trace::record(
             shot_trace,
             "drop",
-            now.0,
+            now.map(|t| t.0),
             shot,
             || json!({ "s": "fire", "res": "stale_fire" }),
         );
@@ -1688,7 +1691,7 @@ fn consume_fire_event(
         crate::shot_trace::record(
             shot_trace,
             "drop",
-            now.0,
+            now.map(|t| t.0),
             evicted.shot_id(),
             || json!({ "s": "fire", "res": "held_capacity" }),
         );
@@ -1698,7 +1701,7 @@ fn consume_fire_event(
 /// The game's damage model validates an outside path once, at network ingress.
 fn consume_flight_outcome(
     outcome: FlightOutcome,
-    now: Tick,
+    now: Option<Tick>,
     sanctioned: &mut SanctionedShots,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
@@ -1714,7 +1717,7 @@ fn consume_flight_outcome(
     crate::shot_trace::record(
         shot_trace,
         "path_rx",
-        now.0,
+        now.map(|t| t.0),
         shot,
         || json!({ "seq": sequence, "result": format!("{result:?}") }),
     );
@@ -1992,9 +1995,9 @@ fn spawn_reconstructed_fire(
         shot: event.shot_id(),
     };
     let cursor = cursor.expect("held fire releases only after the view clock has a cursor");
-    let catch_up_ticks =
-        present_released_shot(event.fire_tick, cursor, facts, pending_recoil, commands);
-    let Some(catch_up_ticks) = catch_up_ticks else {
+    let Some(catch_up_ticks) =
+        present_released_shot(event.fire_tick, cursor, facts, pending_recoil, commands)
+    else {
         crate::shot_trace::record(
             shot_trace,
             "drop",
@@ -2020,12 +2023,12 @@ fn spawn_reconstructed_fire(
 /// This runs in `Update` for the same receiver-clear scheduling invariant as [`receive_fire_events`].
 pub(super) fn receive_damage_confirms(
     mut receivers: Query<&mut MessageReceiver<DamageConfirm>>,
-    timeline: Res<LocalTimeline>,
+    view: Res<ViewClock>,
     mut seen: ResMut<SeenDamage>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut commands: Commands,
 ) {
-    let received_tick = timeline.tick();
+    let received_tick = view.now().map(|now| now.tick());
     for mut receiver in &mut receivers {
         for damage in receiver.receive() {
             consume_damage_confirm(
@@ -2045,7 +2048,7 @@ pub(super) fn receive_damage_confirms(
 /// depend on a replica that may have despawned between damage and receipt.
 fn consume_damage_confirm(
     damage: &DamageConfirm,
-    received_tick: Tick,
+    received_tick: Option<Tick>,
     seen: &mut SeenDamage,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
@@ -2056,17 +2059,23 @@ fn consume_damage_confirm(
         fire_tick: damage.receipt.fire_tick,
     };
     let fresh = seen.mark_new(damage.receipt);
-    crate::shot_trace::record(shot_trace, "dmg_rx", received_tick.0, shot, || {
-        json!({
-            "own": true,
-            "dup": !fresh,
-            "dt": damage.damage_tick.0,
-        })
-    });
+    crate::shot_trace::record(
+        shot_trace,
+        "dmg_rx",
+        received_tick.map(|t| t.0),
+        shot,
+        || {
+            json!({
+                "own": true,
+                "dup": !fresh,
+                "dt": damage.damage_tick.0,
+            })
+        },
+    );
     if fresh {
         commands.trigger(super::hit_feel::LocalHitConfirmed {
             receipt: damage.receipt,
-            received_tick: received_tick.0,
+            received_tick: received_tick.map(|t| t.0),
             damage_tick: damage.damage_tick.0,
         });
     }
@@ -2076,19 +2085,23 @@ fn consume_damage_confirm(
 /// cannot expire a fact before its cosmetic shell has had the chance to consume it.
 fn age_sanctioned_shots(
     mut sanctioned: ResMut<SanctionedShots>,
-    view: Option<Res<ViewClock>>,
+    view: Res<ViewClock>,
     tick: Res<lightyear::core::tick::TickDuration>,
-    mut previous: Local<Option<lightyear::core::time::TickInstant>>,
+    mut previous: Local<(u64, Option<lightyear::core::time::TickInstant>)>,
 ) {
-    let Some(now) = view.and_then(|clock| clock.now()) else {
-        *previous = None; // No server presentation epoch before samples or between connections.
+    if previous.0 != view.epoch {
+        *previous = (view.epoch, None);
+    }
+    let Some(now) = view.now() else {
+        previous.1 = None; // No server presentation epoch before samples or between connections.
         return;
     };
-    if let Some(before) = previous.replace(now) {
-        // A reconnect starts a new epoch; connection cleanup already clears the path buffer.
-        if now >= before {
-            sanctioned.age((now - before).to_f32() * tick.0.as_secs_f32());
-        }
+    if let Some(before) = previous.1.replace(now) {
+        assert!(
+            now >= before,
+            "the connected view cursor never moves backward; a waiting epoch resets path aging"
+        );
+        sanctioned.age((now - before).to_f32() * tick.0.as_secs_f32());
     }
 }
 
@@ -2472,7 +2485,7 @@ mod tests {
 
     fn feed_test_damage_copies(
         copies: Res<TestDamageCopies>,
-        timeline: Res<LocalTimeline>,
+        view: Res<ViewClock>,
         mut seen: ResMut<SeenDamage>,
         mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
         mut commands: Commands,
@@ -2480,7 +2493,7 @@ mod tests {
         for damage in &copies.0 {
             consume_damage_confirm(
                 damage,
-                timeline.tick(),
+                view.now().map(|now| now.tick()),
                 &mut seen,
                 &mut shot_trace,
                 &mut commands,
@@ -2713,12 +2726,12 @@ mod tests {
                 receipt,
                 damage_tick: Tick(12),
             };
-            let mut timeline = LocalTimeline::default();
-            timeline.apply_delta(13);
+            let mut view = ViewClock::default();
+            view.set_now(Tick(13).into());
             let mut app = App::new();
-            app.insert_resource(timeline);
+            app.insert_resource(view);
             app.init_resource::<SeenDamage>();
-            app.insert_resource(crate::shot_trace::ShotTrace::for_test(&path));
+            app.insert_resource(crate::shot_trace::ShotTrace::for_test(&path, Some(13)));
             app.insert_resource(TestDamageCopies(vec![damage.clone(), damage]));
             app.init_resource::<MarkerPulses>();
             super::super::hit_feel::mount_test_marker_boundary(&mut app);
@@ -2856,7 +2869,7 @@ mod tests {
                       mut pending: ResMut<PendingFireEvents>,
                       mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
-                    consume_fire_event(&event, now, cursor, &mut seen, &mut held, &mut trace);
+                    consume_fire_event(&event, Some(now), cursor, &mut seen, &mut held, &mut trace);
                     release_due_fire_events(
                         now,
                         cursor,
@@ -2977,7 +2990,7 @@ mod tests {
         fn inject(mut arrival: ResMut<Arrival>, mut paths: ResMut<SanctionedShots>) {
             if let Some(path) = arrival.0.take() {
                 let mut trace = None;
-                consume_flight_outcome(path, Tick(0), &mut paths, &mut trace);
+                consume_flight_outcome(path, None, &mut paths, &mut trace);
             }
         }
         let mut app = App::new();
@@ -3127,7 +3140,7 @@ mod tests {
                 if path_first {
                     consume_flight_outcome(
                         path.clone(),
-                        Tick(116),
+                        Some(Tick(116)),
                         &mut world.resource_mut::<SanctionedShots>(),
                         &mut trace,
                     );
@@ -3157,7 +3170,7 @@ mod tests {
                 if !path_first {
                     consume_flight_outcome(
                         path,
-                        Tick(116),
+                        Some(Tick(116)),
                         &mut world.resource_mut::<SanctionedShots>(),
                         &mut trace,
                     );
@@ -3580,7 +3593,7 @@ mod tests {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     consume_fire_visual_fact(
                         FireVisualFact::Fire(here.clone()),
-                        Tick(42),
+                        Some(Tick(42)),
                         Some((Tick(43), 0.0)),
                         &mut seen,
                         &mut held,
@@ -3589,7 +3602,7 @@ mod tests {
                     );
                     consume_fire_visual_fact(
                         FireVisualFact::Fire(elsewhere.clone()),
-                        Tick(42),
+                        Some(Tick(42)),
                         Some((Tick(43), 0.0)),
                         &mut seen,
                         &mut held,
@@ -3598,7 +3611,7 @@ mod tests {
                     );
                     consume_fire_visual_fact(
                         FireVisualFact::Outcome(crate::ballistics::path_fixture(shot, 43)),
-                        Tick(43),
+                        Some(Tick(43)),
                         Some((Tick(43), 0.0)),
                         &mut seen,
                         &mut held,

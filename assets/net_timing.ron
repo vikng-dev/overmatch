@@ -1,5 +1,6 @@
 (
-    view_window_s: (10.0, Taste("view buffering memory: retain downlink lateness for this many seconds")),
+    admission_s: (0.250, Taste("server time admission: maximum simulation debt admitted from one wall-time batch; also the view continuity floor")),
+    view_window_s: (10.0, Taste("view buffering memory: retain frame-start-to-arrival lateness for this many seconds")),
     view_rate: (0.2, Taste("view pacing: maximum fractional real-time correction, for smooth catch-up")),
     view_pending_s: (0.250, Taste("shot presentation: wait this many view seconds for a released fact's shooter rig before omitting its cosmetic")),
     view_cut_s: (0.250, Taste("view continuity: simulation backlog above this duration cuts; floored by the server admission cap")),

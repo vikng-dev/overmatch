@@ -1,119 +1,167 @@
-# View clock: timing slice 2
+# View clock: timing slice 2 review closure
 
-Subject: Overmatch's multiplayer tank game timing and damage-model presentation; game state only. Crew are HP pools at stations. No vehicle law, input-fate rule, turret overlay or automatic-fire transport changed.
+Subject: Overmatch's multiplayer tank game timing and damage-model presentation; game state only.
+Crew are HP pools at stations. The lane is `lane/view-clock`; the reviewed implementation is
+`da5cf764`. `main` merged first, without conflicts, at `8bf2a6e7`.
 
-## Cursor and facts
+## Current clock law
 
-`net::view_clock` owns the only presentation cursor. After replication receive and `TimelineSystems::Advance` in PreUpdate, it consumes actual `MutateTickReceived` completions, correlates their preserved stamps through the checkpoint map, and writes `InterpolationTimeline::set_now`. Lightyear's interpolation and delayed despawn sample that resource; game readers use `ViewClock::now()`.
+Frame start maps completed authority ticks to time. For each whole-tick completion,
+`x = previous completion-frame Real - frame start`; the unknown process-epoch offset stays in
+x and cancels when the cursor inverts the same stamped map. The target is
+**`median(received frame-start interval) + max_W(x)`**. Server work and delivery lateness have
+one treatment: **no outlier exclusion**, retention by local receipt time for required
+`view_window_s`, with eviction only when age exceeds W (`src/net/view_clock.rs:203`, `:208`, `:248`). Applied delay slews at v seconds per
+Real second. The cursor inverts the map, stays forward-only within a connection, clamps to
+completed received endpoints, and normally advances at most `(1+v)` simulation seconds per
+Real second. Backlog in simulation ticks above `max(view_cut_s, admission_s)` cuts forward,
+warns and counts; a cut does not clear the lateness window (`src/net/view_clock.rs:336`). No completed stamp pair is the
+waiting state: samplers and rig attachment wait, fire facts hold, and trace ticks are null.
 
-Frame start supplies the piecewise linear map S. Departure supplies `x = previous completion-frame Real - departure`. Both signed epochs are preserved. Missing stamps are bridged; a stamp without whole-tick completion cannot advance the frontier. Receipt overflow, unmapped stamps, incomplete eviction and completion lag remain counted. The bounded receipt horizon remains DERIVED from Replicon's `u64::BITS` tracker (64); statistics expire after W. The map retains the cursor's predecessor and future points until they are crossed.
+The complete contract lives in [net-motion-contract.md](../docs/design/net-motion-contract.md).
+Required `assets/net_timing.ron` owns W, v, continuity, pending-rig lifetime and the shared server
+admission cap. No code default or alternative controller remains.
 
-The target is **`median(frame-start interval) + median(frame-to-departure work) + max_W(x)`**. The extra median is a necessary correction to D3, explained below. Delta slews at v seconds per Real second. Its inverse target is clamped to completed received ticks; the cursor never goes backward within a connection and advances at most `(1+v)` simulation seconds per Real second. A positive target backlog above `max(G, admission cap)` emits a typed `ViewCut`, warns and counts it. Backlog uses simulation ticks, not the wall-time length of a stalled map segment. Both shipped server and client use Bevy's default admission cap; no override exists in this tree. The production runner's one-tick-per-send schedule is shared with the headless proof, without changing its admission law.
+**Departure still travels.** The twelve-byte stamp retains f64 frame start and f32 departure
+offset. `Sample::work_s` and `usual_work_s` read departure for `client_jitter.view_clock.usual_work_ms`,
+a diagnostic only; `scripts/perf/online_cost.py` and the offline harness parse that record. It has
+no contribution to the target. The codec's representability checks change compatibility, so
+`PROTOCOL_REV` is **105**, with the codec/type hash re-pinned by the protocol test.
 
-The required tastes live in `assets/net_timing.ron`: existing W = 10 s, v = 0.2, G = 0.250 s. The old pending-rig cosmetic lifetime moves from a code constant to its own required `view_pending_s = 0.250` Taste (DERIVED equivalence to the previous 16 ticks at the shipped timestep). Its job is independent of G. No code default, latch, alternative controller or operator switch remains. A missing completed stamp pair is `None`, the waiting game state. Disconnect clears the epoch; connect also clears old decoded receipts.
+## Findings checked against source
 
-The smallest pinned API seam is `SyncSystems::Sync.run_if(|| false)`. In Lightyear 0.31.0 with this crate's enabled features that set contains the local and interpolation controllers. The game overrides interpolation advance before any presentation reader. No vendor edit or upstream patch/draft was needed.
+Every listed finding was confirmed. None was rejected. Net-22/#187 remains the owner's explicit
+slice-3 deferral: this review changes clock publication, not arrival-owned turret behavior.
 
-The migrated readers are construction/decor presentation, battle HUD, the respawn countdown, public paths and fire release/admission, deferred fire expiry, public-path retention, trace cursor fields and debug jitter. The HUD weapon gate now matures from the **view tick**, published before GameplaySet; it grants no firing authority. Transport/local shot labels remain for authority identity and diagnostics. Damage confirmations and other arrival-owned state remain for slice 3.
-
-The shipped client, hosted test client and shot-loss fixture mount `install_fire_ingress`: age previously retained facts on view progress, admit this frame's facts, then present in PostUpdate. A fresh fact cannot inherit the duration of a cut. The focused schedule test mounts this production installer and denies ambiguities; aging after ingress would drop the fresh path immediately.
-
-## Proofs and observations
-
-All compiling commands used `scripts/serial-cargo`, `dev_ui,bitprobe` and `OVERMATCH_UNATTENDED=1`. The combat runner supplied its own headless window mode. UDP scenarios use actual loopback sockets and the production protocol, clock installer and server tick-admission schedule; only time and opaque datagram delivery are controlled.
-
-| Proof | Result and meaning |
+| Finding | Disposition and owner |
 |---|---|
-| 80 ms RTT / 10 ms jitter, settled real UDP | MEASURED zero holds/minute and zero cuts over a minute after a fixture settling period of 2W. The impairment is two 40 ms legs, integer downlink jitter in [-10,10) ms, a 128 Hz read cadence, and 3 ms ordinary compute. DERIVED continuous example: 15.625 + 3 + 50 = **68.625 ms**. Final MEASURED applied delay: **62.5 ms**, 6.125 ms below that example; the previous-frame absence bound can save a read phase. The independent conservative allowance is one client frame plus one server drain interval = 23.4375 ms. An earlier passing run read 70.3125 ms; neither observation is a pin or tuning target. |
-| Repeating 60 ms burst | MEASURED zero settled holds and cuts over 2W. The opaque UDP receive blackout repeats every fixture 33 server ticks (DERIVED 515.625 ms), covering the existing burst lever's case. |
-| 200 ms server stall | MEASURED 137.5 ms held during silence plus 39.0625 ms during receipt recovery = **176.5625 ms total**, no extrapolation and zero cuts. Subsequent delta changed by one 7.8125 ms read phase, not by the stall. |
-| 1 s server stall | MEASURED 929.6875 + 39.0625 = **968.75 ms held**, no extrapolation and zero cuts. Subsequent delta change was zero. Recovery spends only the server's admitted cap; discarded wall time is not replayed. |
-| Ordinary compute / isolated work stall | An independently derived steady-link counterexample catches omission of the ordinary compute term. A one-second compute outlier leaves the target unchanged; the existing injected-runner/codec proof still distinguishes frame start from serialization departure. |
-| Continuity and outage | Cursor and an old public-path cache stay forward through delay rise/expiry; delta respects v. A backlog beyond G cuts once. Different clock origins produce the same cursor. An outage outlasting W retains a usable hold endpoint. |
-| Completion and peer input | Existing split-tick, client-stall, lost-tick, batched-codec, bounded-receipt and malformed-stamp proofs stay live. Reordered consistent stamps are accepted; reversed time is a typed stream refusal routed to the existing visible match-close path. A lossy link does not panic the client. |
-| Retention and startup | No cursor holds fire until its first crossing; path retention pauses with a held view. The final ingress test proves a cut expires an old path while preserving a path received that frame. Connection boundaries clear the clock and old receipts. |
-| Combat-start runner | **3/3 passed**, actual shipped binaries. Each completed 256 script ticks, exited zero and emitted exactly one authority shot after release. Input tick zero fired on client release. |
+| Review P2-1, above-median server work | Fixed in `net/view_clock.rs`: frame-start lateness replaces departure lateness plus median work. `view_clock/udp.rs` exercises a Fixture compute distribution on a clean fixed-propagation link. The provisional choice is [F21](playtest-forks/README.md#f21--server-work-and-link-lateness-share-one-view-budget). |
+| Review P2-2, permissive UDP allowance | Fixed in `view_clock/udp.rs`: derive the actual +9 ms jitter peak, round delivery up to render reads, subtract the preceding read, add the authority interval. Allow exactly one extra read phase, only upward. Mutant results are recorded below. |
+| Review P2-3, mixed trace domains | Fixed in `shot_trace.rs`, `net/client.rs`, `trace.rs`, and `scripts/shot/analyze.py`. All client lifecycle rows use one server-domain view tick captured after clock drive. `trace.rs` carries any local counter separately as `local_tick`. Waiting is null. `dmg_lead = view tick at receipt - authority damage tick`: positive means the view passed the consequence, negative means confirmation arrived before its view crossing. This concerns game state only. |
+| Review P2-4, stale prose | Fixed ADR-0037, the quality-standard table, glossary tick-index entry, `WeaponClock` docs, and both continuity/motion design documents. They describe the current owner and proofs rather than retaining contradictory present-tense rules below a status banner. |
+| Error-handling P2, finite hostile epoch | Fixed in `tick_stamp/wire.rs` and `view_clock.rs`: admission reserves Duration arithmetic headroom; sample admission checks the lateness spread and carries a checked Duration to the debug HUD. Typed refusal follows `ServerGone` to the visible lobby cause. The wire test includes individually finite `1e30` fields; the match-close proof uses that hostile epoch. |
+| Testing P2, substituted gameplay composition | Fixed `tests/stream_presence.rs`: mount the production view-clock installer and drive completed stamps. A separate fixed-gameplay counter proves gameplay runs while the view and weapon clock hold. |
+| Testing P2, render-cadence coupling | Fixed `view_clock/udp.rs`: server deadlines read `server::TICK` instead of updating every other render frame. |
+| Review P3, unread ViewCut message | Deleted the message registration/write. A private cut value has actual readers: the driver logs it and the tests inspect it; stats count cuts. |
+| Review P3, hidden admission-cap coupling | Fixed `net/timing.rs`, `server_runner.rs`, `view_clock.rs`, `assets/net_timing.ron`: one required `admission_s`, read directly by server admission and client continuity. |
+| Review P3, reader test accommodations | Fixed required `Res<ViewClock>` in fire receipt/path aging/confirmation; required `InterpolationTimeline` in drive; fixtures supply their contracts. No invented Tick(0) or timeline-default write before a stamp pair. Shared offline/network motion tracing keeps optional network resources, with an explicit client-role invariant. |
+| Review P3, role and fixed-only publication | Fixed `protocol.rs` and the clock installer: running server state selects authority weapon publication; the client installer publishes view-owned weapon time each PreUpdate before fixed readers, including render frames without fixed steps. No role is inferred from ViewClock presence. |
+| Review P3, aging silently accepts backward time | Fixed `client.rs`: connect/disconnect advances an epoch generation. Local aging resets for that generation, and backward motion inside an epoch asserts the named invariant. |
+| Review P3, lost cap derivations | Restored Resolution sizing examples beside SeenShots, CursorQueue and PendingFireEvents caps, without treating an example fire rate as a vehicle law. |
+| Review P3, fragile one-second stall proof | Replaced zero-cut output pin with a capped-stall observation; the runner's own admission test proves exact cap spending and discarded wall time. |
+| Review P3, spike playback unproven | Added a headless real-UDP downlink-blackout scenario through hold, recovery and full window expiry, asserting only clock invariants and reporting off-rate playback. |
+| Review P3, drift unproven | Added Fixture +/-50 ppm oscillators. Independent bound: window bias is at most abs(epsilon) W; neither process needs a shared local tick epoch. |
+| Review P3, HUD clock scope | `shooting::tick_weapon_gate` names slice 3's remaining work: admit the arrival-owned gate snapshot on the same cursor that matures it. |
+| Review P3, harness delay/null | Renamed the parsed field to `applied_above_latest_x_ms`, optional with a named absence (no epoch or retained sample); table aggregation omits absent observations rather than inventing zero. |
+| Base-truths P3, transport timestep | Fixed `client.rs` and `client/hosted_e2e.rs`: both read `net::server::TICK`. |
+| Brevity P3, respawn docs | Condensed to one authority-admission caveat; retained view units, rounding and absence cases. |
+| Brevity P3, reconstruction temporary | Matched `present_released_shot` directly; retained the complete stale omission record. |
+| Brevity P3, frame-trace duplication | Removed the repeated headroom formula and optional-resource explanation; retained the shared-composition contract and diagnostic-only RTT/jitter statement. |
 
-The deliberate empty-buffer behavior is **hold the newest completed tick, extrapolate nothing; resume from facts, catching up at at most 1+v**. A delay sized for network lateness cannot supply ticks the server has not produced. The player sees the hull/public-path stream stop, then bounded fast-forward over admitted simulation debt. A one-second stall also discards excess wall time; it does not create a one-second simulation catch-up debt. Input feedback and the existing own-turret overlay retain their separate, explicitly deferred scope.
+## Playback observations
 
-Combat observations (game state only; none are future expectations):
+All durations here are MEASURED fixture observations, not output pins or tuning targets.
+Fixtures use actual loopback UDP, the production protocol, view-clock installer and one-tick-per-send
+server schedule. Time and opaque datagram delivery are controlled. Variable-work samples are
+labelled **Fixture**, a reproducible synthetic load distribution, not a measured server profile.
 
-| Run | Authority release | First authority shot | Client release / first input | Authority shots | Script ticks / exit |
-|---|---:|---:|---:|---:|---|
-| 1 | 210 | 217 | 11 / 11 | 1 | 256 / 0 |
-| 2 | 105 | 110 | 22 / 22 | 1 | 256 / 0 |
-| 3 | 110 | 114 | 23 / 23 | 1 | 256 / 0 |
+Round 1 reference (median compute, Fixture 3 ms ordinary work): the 200 ms server silence held **176.5625 ms total**
+(137.5 ms silence plus 39.0625 ms recovery), zero cuts, then bounded catch-up. Delay changed one
+**7.8125 ms** read phase instead of retaining the stall. The one-second silence held **968.75 ms**,
+zero cuts; the server admitted only its cap and discarded the excess. Those captures described
+absence of server updates, not a proof that arbitrary above-median computation was covered.
 
-## Deletions and surviving coverage
+Current MEASURED real-UDP observations (the corrected client-epoch blackout, Fixture 12 ms
+ordinary work, 128 Hz reads):
 
-DERIVED from the lane-base diff; these are gross removed lines, not a quality metric.
+| Scenario | Holds / cuts | Delay and pacing observation |
+|---|---|---|
+| Settled 80 ms RTT / integer jitter | 0 holds/minute, 0 cuts | Applied 70.3125 ms; DERIVED band 70.3125–78.125 ms. |
+| Clean link, variable work distribution | 0 holds/minute, 0 cuts | Fixture work samples 1.5, 2, 3.6, 8, 14.3 ms; fixed propagation, no link jitter. |
+| Single 200 ms server work stall | 179.6875 ms held; 0 cuts | Applied delay 70.3125 → 250 ms; above baseline for **10.8984375 s**, from 0.2578125 through 11.1484375 s after stall start. Nonzero slow playback occupied 0.4453125 s; fast playback 1.34375 s. |
+| Single 1 s capped server work stall | 976.5625 ms held; 0 cuts observed | Applied delay peaked at 1046.875 ms and stayed above baseline for **14.8828125 s**, through 15.9296875 s after stall start. Nonzero slow playback 4.2734375 s, fast playback 5.484375 s. Zero cuts is an observation, not an assertion. |
+| Single 500 ms downlink blackout | 484.375 ms held; 1 forward cut | Cut at 0.5 s advanced 31.3999939 ticks. Delay 70.3125 → 554.6875 ms; above baseline for **12.421875 s**, through 12.9140625 s after blackout start. Slow playback 2.4140625 s and fast playback 2.421875 s. |
 
-| Entire file deleted | Lines | Retired items |
-|---|---:|---|
-| `src/net/interp_delay.rs` | 481 | AppliedDelay, RTT anchor compensation, min-delay derivation/pacing, warm-up latch and tests |
-| `src/net/sync_margin.rs` | 657 | ArrivalDelay/ArrivalStats, quantile/ring/spike-window warm-up, Gaussian margins and tests |
-| `src/net/resync.rs` | 435 | Presented markers, unknown-history removal/restoration observers, bookkeeping and rewind-only tests |
-| `src/net/tests/net_interp_delay.rs` | 76 | Retired delay-controller tripwires |
-| `src/net/tests/net_sync_margin.rs` | 118 | Retired sync-margin/default-controller tripwires |
-| Total whole files | **1767** | |
+Slow/fast means observed nonzero rate below 0.99 or above 1.01 respectively; those bands only
+classify fixture output and do not govern playback. A normal step remains bounded by `1+v`.
+The server-stall effect now lives in the same window as network lateness: the 200 ms stall
+adds about 180 ms to applied delay and costs a retained-window interval plus paced recovery,
+beside round 1's short hold-and-catch-up reading. This is F21's owner feel question.
 
-`frontier.rs` removes 249 old lines and adds 61: FrontierDiag, PreSyncCursor, handshake/resync counters, snaps, remote estimate/error fields, RTT/min-delay fields and `ticks.estimate` are gone. Other deletions include `CursorQueue::release_all`, pre-sync local-clock fire presentation, ArrivalDelay teardown, trace `mind`, and the pending-rig TTL mirror. Whole-diff gross removed lines: 2394.
+The socket fixture lets loopback enqueue before advancing its independent manual time; real OS
+scheduling is excluded from the controlled clean-link case. The first unpaced fixture run
+observed one extra read slip after settling (one 7.8125 ms hold). The fixture was corrected at
+that transport seam, without adding a production margin or relaxing its zero-hold requirement.
 
-Deleted tests were audited for second responsibilities. First visibility, explicit removal, despawn and assembled-replica complete poses survive in `tests/stream_presence.rs` (243 lines). The old flying-path monotonicity responsibility moves to the new clock/path test. Client-stall exclusion, duplicate/batched stamps, expiry and completion boundaries remain covered by their live stamp/clock tests; burst coverage now runs over UDP. Frontier distributions, arrival batching and runs across log boundaries retain their tests. The restoration-command race test went with the only code that queued those restoration commands. Clock teardown has its own installer test. The shot-loss fixture now supplies stamped ticks and mounts the same clock/ingress as production; its existing exactly-once and disclosure assertions stay intact.
+Mutant check, MEASURED: subtracting serialization departure (omitting compute from the target)
+produced **58.3124999 ms**, rejected by the exact **70.3125–78.125 ms** band. The test reaches the
+delay assertion before the hold assertion, so this directly proves the allowance rejects it.
+Subtracting the fixture's actual 9 ms jitter contribution produced **61.3125 ms** and failed
+the same delay assertion. Both mutants were removed, and the restored chosen law passed the final
+net run. Logs: `/tmp/view-clock-mutant-no-compute.log`, `/tmp/view-clock-mutant-no-jitter.log`. The constant-work UDP fixture's
+DERIVED target band is **70.3125–78.125 ms** at the current authority/render rates: peak jitter is
+9 ms; ceil((12 + 40 + 9)/7.8125) = 8 reads; target = 15.625 + 8*7.8125 - 7.8125 = 70.3125 ms;
+one possible socket read slip adds exactly 7.8125 ms. No symmetric or extra authority-tick
+allowance is admitted. The Fixture work is now 12 ms so its omission exceeds one read quantum;
+the original 3 ms fixture could hide a work omission inside the allowed read slip. This is
+mutation-sensitive fixture design, not a changed production parameter.
 
-Backlog net-15 is closed by deleting its repair and preventing backward presentation. Net-22 (arrival-owned turret angles) remains explicitly for slice 3, as this task requires; no turret behavior was changed.
+## Additional findings
 
-## Stats contract
+Lightyear 0.31.0's `update_interpolation_history`, `apply_interpolation`, and delayed-despawn
+reader (registered in `InterpolationSystems::Prepare`) read `InterpolationTimeline` directly,
+without testing `is_synced`. Therefore readiness needs a
+run condition on `InterpolationSystems::All`, not merely `set_synced(false)`. Rig attachment
+also waits for a view epoch so init-snapshot poses cannot assemble a visible tank before that
+first presentation pair. This is the explicit startup behavior missing from the reviewed code.
 
-The client prints `client_jitter {json}` with exactly:
+Client trace producers beyond the two named receipt rows also used transport labels (cosmetic
+spawn/trail, explanation and capture-end rows). The writer owns the client tick domain, so all
+of them now get the same view tick without maintaining separate producer rules. Wall-microsecond
+fields still own cross-process elapsed-time measurements.
 
-- `period_s`; `ticks.{received,frontier}` count completed stamped ticks and frontier advancement;
-- `arrival_ms` and `headroom_ticks` nearest-rank distributions;
-- `holds.{events,ms,longest_ms}`, with an ongoing run carried across periods;
-- `view_clock.{delta_star_ms,applied_delta_ms,stamp_lag_ms,usual_work_ms,target_minus_applied_ms,target_above_latest_x_ms,applied_above_latest_x_ms,cuts,stamp_interval_ms,completion,pending_ticks}`.
+Pinned API facts were checked in the local registry sources: Bevy 0.20.1 time/schedule APIs,
+Lightyear 0.31.0 timeline setters, sync-set membership, sampler readiness and interpolation sets.
+No web search, AWS service call, external write, agent spawn or push was used.
 
-Raw deltas and stamp lag carry the unknown epoch offset. Their differences cancel it. `usual_work_ms` is the median within-tick duration, nullable without a retained sample. `cuts` and completion counts cover the emitted period. Holds ignore sub-U0F16 rounding noise only; the cursor itself is always clamped to the received frontier.
+The jitter plot's tick-to-wall description now names the view domain, and the shot analyzer's
+`tick_diff` matches the verified Lightyear 0.31.0 saturating i32 difference rather than the
+retired wrapping rule. Missing trace-end domains remain absent, not an invented zero gap.
 
-The AWS table replaces starvation/min-delay columns with held time, paced delta above the latest x, target minus paced delta, and cuts. Both readers and fixtures use one shape, refusing retired/unknown fields rather than supporting old records. The server's `server_stats` shape is unchanged: input rows still carry `{link,arrival:{state,silence_ms,gap_ms,stale_threshold_ms,stale_declarations,stale_arrivals}}`. There was no remaining server-side downlink field or message at this lane's base to delete. Archive smoke's live greps do not reference a removed timing line; no shell edit was necessary.
+## Validation
 
-One actual client record from the final UDP run:
-
-```text
-client_jitter {"arrival_ms":{"max":23.4,"min":0.0,"p50":23.4,"p95":23.4},"headroom_ticks":{"max":1.5,"min":0.0,"p50":1.0,"p95":1.5},"holds":{"events":0,"longest_ms":0.0,"ms":0.0},"period_s":1.0,"ticks":{"frontier":63,"received":63},"view_clock":{"applied_above_latest_x_ms":26.437500026077032,"applied_delta_ms":62.5,"completion":{"completed_ticks":63,"completed_without_stamp":0,"evicted_incomplete":0,"late_ticks":0,"receipt_overflow":0,"sampled_ticks":63,"unmapped_stamps":0,"worst_lag_frames":0,"worst_lag_ms":0.0},"cuts":0,"delta_star_ms":62.5,"pending_ticks":0,"stamp_interval_ms":{"bin_ms":15.625,"bins":[0,639,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"max":15.625,"min":15.625,"n":639,"p50":15.625,"p95":15.625},"stamp_lag_ms":62.5,"target_above_latest_x_ms":26.437500026077032,"target_minus_applied_ms":0.0,"usual_work_ms":3.000000026077032}}
-```
-
-<details>
-<summary>Actual local idle server_stats record (MEASURED observation, no output pin)</summary>
-
-```text
-server_stats {"belt_contacts_us":{"max":11.1,"p50":2.9,"p95":9.9,"p99":11.1,"total":203.2},"blast_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"budget_us":15625.0,"child_collider_writeback_us":{"max":153.7,"p50":33.5,"p95":50.1,"p99":153.7,"total":1854.0},"clients":0,"collector_us":{"max":920.4,"p50":14.8,"p95":44.2,"p99":920.4,"total":1888.8},"collider_rehome_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"collider_spawn_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"completion_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"construction":{"cracked_joints":0,"departed_chunks":0,"separated_joints":0},"contact_census_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"contacts_us":{"max":30.1,"p50":6.9,"p95":26.0,"p99":30.1,"total":541.1},"cpu_pct":61.9,"crumble_us":{"max":9.0,"p50":3.0,"p95":8.0,"p99":9.0,"total":173.3},"debris":{"awake":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"frozen":0,"live":0,"rested":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"rested_unreached":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"sleeping":0},"entities":6062,"field_reach_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"field_walk_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"frame_us":{"max":14274.3,"p50":1521.6,"p95":3569.5,"p99":14274.3,"total":104424.5},"frames":53,"husk_strikes":0,"inputs":[],"intake_us":{"max":10.9,"p50":2.2,"p95":9.6,"p99":10.9,"total":178.3},"line_pass_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"moved_bounds_us":{"max":85.2,"p50":0.0,"p95":0.0,"p99":85.2,"total":85.2},"nr_throttled":null,"one_thread_estimate_us":{"max":1325.8,"p50":385.9,"p95":1131.5,"p99":1325.8,"total":28010.1},"overruns":0,"period_s":1.006863834,"phases_cpu_us":{"bot_brain_us":{"max":88.0,"p50":26.0,"p95":74.0,"p99":88.0,"total":1443.0},"collider_poses_us":{"max":610.0,"p50":139.0,"p95":350.0,"p99":610.0,"total":8688.0},"construction_ecs_us":{"max":198.0,"p50":89.0,"p95":176.0,"p99":198.0,"total":4847.0},"damage_consequences_us":{"max":163.0,"p50":68.0,"p95":137.0,"p99":163.0,"total":4351.0},"driving_us":{"max":224.0,"p50":83.0,"p95":204.0,"p99":224.0,"total":4924.0},"fixed_commands_us":{"max":125.0,"p50":41.0,"p95":97.0,"p99":125.0,"total":2430.0},"fixed_first_us":{"max":50.0,"p50":16.0,"p95":48.0,"p99":50.0,"total":1079.0},"fixed_gameplay_us":{"max":91.0,"p50":32.0,"p95":89.0,"p99":91.0,"total":2233.0},"fixed_last_us":{"max":13.0,"p50":4.0,"p95":11.0,"p99":13.0,"total":256.0},"fixed_pre_us":{"max":9.0,"p50":2.0,"p95":6.0,"p99":9.0,"total":142.0},"fixed_tail_us":{"max":50.0,"p50":11.0,"p95":35.0,"p99":50.0,"total":698.0},"fixed_update_us":{"max":557.0,"p50":27.0,"p95":76.0,"p99":557.0,"total":2244.0},"physics_mass_us":{"max":2874.0,"p50":122.0,"p95":282.0,"p99":2874.0,"total":9251.0},"physics_prepare_us":{"max":711.0,"p50":204.0,"p95":699.0,"p99":711.0,"total":12907.0},"physics_step_us":{"max":9990.0,"p50":279.0,"p95":742.0,"p99":9990.0,"total":27576.0},"post_physics_us":{"max":44.0,"p50":10.0,"p95":27.0,"p99":44.0,"total":629.0},"projectile_march_us":{"max":82.0,"p50":20.0,"p95":57.0,"p99":82.0,"total":1373.0},"publication_ecs_us":{"max":142.0,"p50":56.0,"p95":109.0,"p99":142.0,"total":3129.0},"recorded_consequences_us":{"max":47.0,"p50":19.0,"p95":37.0,"p99":47.0,"total":1129.0},"servos_us":{"max":55.0,"p50":15.0,"p95":39.0,"p99":55.0,"total":893.0},"sweep_ecs_us":{"max":1104.0,"p50":92.0,"p95":216.0,"p99":1104.0,"total":6200.0}},"phases_us":{"bot_brain_us":{"max":30.1,"p50":5.6,"p95":18.9,"p99":30.1,"total":382.5},"collider_poses_us":{"max":378.5,"p50":77.5,"p95":192.8,"p99":378.5,"total":5181.9},"construction_ecs_us":{"max":163.6,"p50":65.3,"p95":145.7,"p99":163.6,"total":3721.2},"damage_consequences_us":{"max":119.9,"p50":49.8,"p95":99.0,"p99":119.9,"total":3156.2},"driving_us":{"max":113.8,"p50":42.8,"p95":95.4,"p99":113.8,"total":2545.4},"fixed_commands_us":{"max":57.5,"p50":20.7,"p95":44.1,"p99":57.5,"total":1312.4},"fixed_first_us":{"max":43.8,"p50":13.0,"p95":38.5,"p99":43.8,"total":937.1},"fixed_gameplay_us":{"max":52.4,"p50":21.2,"p95":50.1,"p99":52.4,"total":1257.0},"fixed_last_us":{"max":13.3,"p50":4.1,"p95":10.3,"p99":13.3,"total":241.3},"fixed_pre_us":{"max":7.1,"p50":1.6,"p95":5.1,"p99":7.1,"total":118.5},"fixed_tail_us":{"max":17.9,"p50":5.6,"p95":16.5,"p99":17.9,"total":364.8},"fixed_update_us":{"max":537.1,"p50":19.8,"p95":48.0,"p99":537.1,"total":1671.4},"physics_mass_us":{"max":2841.6,"p50":83.7,"p95":192.7,"p99":2841.6,"total":7204.7},"physics_prepare_us":{"max":519.8,"p50":132.5,"p95":512.0,"p99":519.8,"total":9008.8},"physics_step_us":{"max":3063.7,"p50":189.3,"p95":587.1,"p99":3063.7,"total":15878.7},"post_physics_us":{"max":18.0,"p50":5.9,"p95":16.7,"p99":18.0,"total":368.9},"projectile_march_us":{"max":60.4,"p50":14.1,"p95":39.5,"p99":60.4,"total":937.7},"publication_ecs_us":{"max":72.2,"p50":32.0,"p95":61.3,"p99":72.2,"total":1700.9},"recorded_consequences_us":{"max":34.2,"p50":11.0,"p95":25.3,"p99":34.2,"total":696.6},"servos_us":{"max":21.5,"p50":5.7,"p95":15.5,"p99":21.5,"total":377.7},"sweep_ecs_us":{"max":1072.6,"p50":54.8,"p95":129.5,"p99":1072.6,"total":4049.8}},"physics_us":{"max":1807.8,"p50":161.1,"p95":521.0,"p99":1807.8,"total":12919.6},"piece_body_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"piece_retire_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"post_update_us":{"max":1160.8,"p50":208.3,"p95":349.7,"p99":1160.8,"total":11606.6},"projectiles":0,"publish_us":{"max":3.0,"p50":1.1,"p95":2.3,"p99":3.0,"total":67.1},"quota_used_pct":{"Err":{"absence":"not_linux"}},"refit_commit_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"refit_us":{"max":799.0,"p50":5.4,"p95":10.9,"p99":799.0,"total":1094.0},"rehome_deferred_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"rss_mb":454.8,"send_bytes":0,"send_census_us":{"max":7.9,"p50":0.5,"p95":2.3,"p99":7.9,"total":45.6},"send_clients":[],"send_us":{"max":193.2,"p50":85.8,"p95":184.1,"p99":193.2,"total":4971.0},"send_us_per_client_s":null,"sleep_us":{"max":24.8,"p50":3.6,"p95":23.0,"p99":24.8,"total":327.5},"stages_cpu_us":{"belt_contacts_us":{"max":17.0,"p50":4.0,"p95":11.0,"p99":17.0,"total":254.0},"blast_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"child_collider_writeback_us":{"max":154.0,"p50":36.0,"p95":55.0,"p99":154.0,"total":2014.0},"collider_rehome_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"collider_spawn_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"completion_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"contact_census_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"contacts_us":{"max":30.0,"p50":8.0,"p95":26.0,"p99":30.0,"total":558.0},"crumble_us":{"max":14.0,"p50":4.0,"p95":10.0,"p99":14.0,"total":252.0},"field_reach_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"field_walk_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"intake_us":{"max":22.0,"p50":4.0,"p95":15.0,"p99":22.0,"total":313.0},"line_pass_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"moved_bounds_us":{"max":303.0,"p50":0.0,"p95":0.0,"p99":303.0,"total":303.0},"piece_body_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"piece_retire_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"publish_us":{"max":9.0,"p50":2.0,"p95":6.0,"p99":9.0,"total":123.0},"refit_commit_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"refit_us":{"max":5553.0,"p50":9.0,"p95":23.0,"p99":5553.0,"total":6087.0},"rehome_deferred_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"structure_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"sweep_census_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"sweep_us":{"max":85.0,"p50":22.0,"p95":64.0,"p99":85.0,"total":1482.0}},"structure_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"sweep_census_us":{"max":0.0,"p50":0.0,"p95":0.0,"p99":0.0,"total":0.0},"sweep_us":{"max":67.4,"p50":15.7,"p95":51.0,"p99":67.4,"total":1059.0},"tanks":0,"throttled_usec":null,"tick_cpu_us":{"max":21825.0,"p50":1502.0,"p95":3429.0,"p99":21825.0,"total":107808.0},"tick_hz":52.6,"tick_us":{"max":9372.3,"p50":955.7,"p95":2280.3,"p99":9372.3,"total":66368.8},"ticks":53,"wall":{"discarded_ms":99.5,"discarding_batches":1,"drift_ms":101.9}}
-```
-
-</details>
-
-## Design claims corrected or narrowed
-
-1. **D3 omitted ordinary compute after the departure correction.** Since S maps frame starts and x subtracts departure, their usual separation must be paid. Without it, a perfectly regular link exhausts its buffer one compute interval too early. The target adds the measured median frame-to-departure duration; no authored margin or server-clock estimate was added. The original read-only design should be corrected by its owner.
-2. **A3's infinite margins do not fully disable the controller.** The interpolation handshake can still snap; the local objective also incorporates error_margin, making infinity unsafe there. The public sync-set run condition makes both controllers inert, including handshake, with no fork patch.
-3. **The stock 80 ms lever is not the example's symmetric 80 ms RTT.** It places 80 ms on client receives. The proof explicitly uses two 40 ms legs; its expected 68.625 ms includes the example's 3 ms compute, and its previous-frame/drain sampling allowance is stated.
-4. **"Only network lateness" is narrower than the actual timestamp seam.** Departure is the stamp serialization callback, not a socket timestamp. Later server serialization/framing, receiver scheduling and whole-tick completion wait can still enter x. In-frame work before that callback is excluded from x; ordinary work is separately measured as above.
-5. **A discarded stall can still include fast-forward.** The runner admits up to its cap and discards only the excess. The admitted debt is replayed; the discarded portion is not. G's floor and pacing use simulation time, not the long wall-time segment of S.
-6. **A server-stats rewrite and a slice-2 wire bump were not needed on this base.** Slice 1 already removed the server-side old timing census. No serialized definition/codec/registration changed here. All protocol tests passed with revision **104** and unchanged hash pins. Client-local resources and log records are not wire types.
-7. **Zero holds is a settled bounded-link proof, not a promise through server silence.** Both requested stalls do exhaust the buffer. Their deliberate hold is observed directly; a larger permanent delay is not synthesized to hide it.
-
-## Validation and scope
+All compiling commands use `scripts/serial-cargo`, `--features dev_ui,bitprobe`, and
+`OVERMATCH_UNATTENDED=1`. The runner owns its window mode. The final Rust gates all passed after the last source edit. The three combat runs preceded only
+two comment corrections; executable behavior was unchanged.
 
 | Check | MEASURED result |
 |---|---|
-| Final format / whitespace | Passed |
-| Final CI clippy, locked workspace/all targets, warnings denied | Passed after the final ingress fix |
-| Final net + doc citations | **423 passed**, 7 ignored, zero failures: 420 net tests and 3 citation tests |
-| Full library suite, once | **2831 passed**, 50 ignored, zero failures, 342.26 s. This preceded the final ingress-order fix; the final net run includes its new production-installer test, and all three shipped-binary runs followed it. The full suite was not repeated. |
-| Server without audio | Passed: `scripts/serial-cargo check --no-default-features --bin overmatch-server --features dev_ui,bitprobe`, repeated after the ingress fix. It emits the two existing dead-code warnings for audio-only data fields; the CI feature-set clippy is clean. |
-| Python | AWS harness 24 passed; online-cost 16 passed. All AWS boundaries were offline fakes. |
-| Shell | `shellcheck scripts/ci/archive-smoke.sh` passed; no shell was edited. Its greps remain valid. |
-| Development binaries / combat runner | Build passed; final runner 3/3 passed. macOS emits the existing large exception-unwind linker warning. |
+| `cargo fmt --all --check` | Passed |
+| CI clippy, locked workspace/all targets, warnings denied | Passed |
+| Audio-free server check, `--no-default-features --bin overmatch-server` | Passed; the two existing audio-only data dead-code warnings remain |
+| Final `net::`, including protocol pins and the production trace installer proof | **423 passed**, 7 ignored, zero failures |
+| `tests::doc_citations` | **3 passed**, zero failures |
+| AWS harness / online-cost Python | **25 / 16 passed**, all AWS boundaries are offline fakes |
+| Shot analysis / pen-cam latency / runner Python | **30 / 9 / 5 passed** |
+| Shell / jitter analyzer | `shellcheck scripts/aws/host-setup` passed for the merged wrapper; no lane shell edit. Jitter-analyzer syntax passed. |
+| Full library suite after the last source edit | **2,835 passed**, 50 ignored, zero failures, **387.36 s** |
+| Shipped-binary combat-start runner | **3/3 passed**; each client completed 256 script ticks, exited zero, and produced exactly one authority shot after release |
 
-Raw artifacts are local: `/tmp/view-clock-ingress-net-final.log`, `/tmp/view-clock-full-lib.log`, `/tmp/view-clock-final-checks.json`, `/tmp/view-clock-combat-{1,2,3}/`, `/tmp/view-clock-server-stats-line.txt`. The single full-suite record is in `/tmp/view-clock-checks.json`. No AWS service call, web search, external repository write, push or merge occurred. No visual capture or hosted performance claim is made. Self-review used all six lenses; the orchestrator's independent landing reviews remain its responsibility.
+Artifacts: `/tmp/view-clock-post-prose-checks.json` holds the final Rust gates;
+`/tmp/view-clock-review-final-checks.json` holds the Python and combat results, and a preliminary
+full suite that also passed before the two comment corrections (2,835 passed, 366.20 s).
+The named per-check logs are alongside them,
+and `/tmp/view-clock-review-combat-{1,2,3}/`. The previous lane's 2,831-pass suite preceded its
+last source edit and is historical evidence only. The six lenses were self-checked over this
+review's changes; the orchestrator's independent landing reviews remain its responsibility.
 
-Slice 3 needs own and remote turret presentation on this cursor (net-22/#187), the reticle and gun marker decision/capture, then remaining arrival-owned status/marker/snapshot presentation. Weapon countdown maturation, public paths, respawn time and event release already have the view clock; do not reintroduce a local tick fallback. Preserve both stamp facts, whole-tick completion, the ordinary-compute correction, the rule that retained facts age before new receipts enter and no-cursor waiting. Slice 4's reliable automatic-fire start/stop transport is untouched. Whether #132's visible staircase is resolved still requires the owner's capture/eye, not these headless assertions.
+Combat observations (game state only; Fixture scripted run, not a latency requirement):
+
+| Run | Authority release / first shot | Client local release / first input | Authority shots | Completion / exit |
+|---|---|---|---|---|
+| 1 | 100 / 119 | 22 / 22 | 1 | 256 / 0 |
+| 2 | 98 / 117 | 22 / 22 | 1 | 256 / 0 |
+| 3 | 99 / 118 | 22 / 22 | 1 | 256 / 0 |
+
+The client-local columns are harness scheduling observations; they are never subtracted from
+server-domain authority or view ticks. Lifecycle JSONL rows themselves carry the view tick.
