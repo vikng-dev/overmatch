@@ -932,7 +932,7 @@ impl CertifiedAsset {
     pub(crate) fn fixture(spec: TankSpec, geometry: TankGeometry) -> Self {
         let transmission = spec
             .track
-            .nominal_transmission_params(&spec.roadwheels)
+            .nominal_transmission_params(&spec.roadwheels, spec.mass)
             .expect("a fixture sheet's transmission is admitted");
         Self {
             spec,

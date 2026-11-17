@@ -403,7 +403,7 @@ pub(super) fn place(
         .resource::<crate::track::sim::TrackGear>()
         .trans();
     transmission.0.gear = gear;
-    transmission.0.park = speed.abs() < crate::track::transmission::PARK_ENGAGE_SPEED;
+    transmission.0.park = speed.abs() < crate::track::transmission::park_engage_speed();
     transmission.0.omega_e = (speed * params.gears_fwd[(gear - 1) as usize]
         / params.sprocket_radius)
         .max(params.engine.idle_rpm * crate::track::transmission::RPM_TO_RAD);
@@ -633,7 +633,7 @@ fn sensed_resistance_and_landing_gaps_on_the_course() {
                 assert!(
                     p.next_speeds
                         .iter()
-                        .all(|v| *v >= -crate::track::transmission::PARK_ENGAGE_SPEED),
+                        .all(|v| *v >= -crate::track::transmission::park_engage_speed()),
                     "a supported launch must not roll against intent: tick={tick} speeds={:?} next={:?} forces={:?}",
                     p.speeds,
                     p.next_speeds,
@@ -785,8 +785,8 @@ fn a_gear_its_pedal_cannot_hold_steps_down_before_the_catch_carries_it() {
             gears.push((tick, gear));
         }
         // Every gear change opens the clutch, so a run never spans two gears. The clutch holding
-        // the crank to the belts is the report's `locked`, which the probe reads as the re-anchor.
-        run = if p.tau_idle > 0.0 && p.reanchor_feasible {
+        // the crank to the belts is the report's `locked` outcome.
+        run = if p.tau_idle > 0.0 && p.locked {
             run + 1
         } else {
             0
@@ -929,7 +929,8 @@ fn a_rearward_shot_uphill_reads_as_falling_resistance() {
 /// Construction's drag anchor predicts a terminal speed where its rising torque balances
 /// gravity minus rolling resistance below the crank guard. A weaker-drag mutant must miss that
 /// equilibrium; a crank guard alone is not a belt-speed bound in taller gears.
-/// Fixture: fresh 10-degree plane per entry, 5 m/s in launch and upper-middle gears; 40 seconds in the launch gear and 20 in the upper-middle gear.
+/// Fixture: fresh 10-degree plane per entry, at most 5 m/s and within the gear's governor;
+/// 40 seconds in the launch gear and 20 in the upper-middle gear.
 #[test]
 fn empty_driver_station_coast_and_rollback() {
     use crate::damage::{CrewStation, Dead, VolumeOf};
@@ -970,7 +971,9 @@ fn empty_driver_station_coast_and_rollback() {
                 .contact()
                 .rolling_at(nominal_pressure(&app));
             let equilibrium = coast_equilibrium(tp, gear, weight, angle, rolling);
-            place(&mut app, tank, position, rotation, 5.0, gear);
+            let k = tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius;
+            let entry = 5.0_f32.min(tp.engine.governed_rpm * RPM_TO_RAD / k);
+            place(&mut app, tank, position, rotation, entry, gear);
             app.world_mut()
                 .get_mut::<TankTransmission>(tank)
                 .unwrap()
@@ -992,8 +995,8 @@ fn empty_driver_station_coast_and_rollback() {
                     .set_held(0);
                 app.world_mut().entity_mut(driver).insert(Dead);
             }
-            let mut min_speed = 5.0_f32;
-            let mut max_speed = 5.0_f32;
+            let mut min_speed = entry;
+            let mut max_speed = entry;
             let mut final_lo = f32::INFINITY;
             let mut final_hi = f32::NEG_INFINITY;
             let mut final_drag = 0.0;
@@ -1003,15 +1006,20 @@ fn empty_driver_station_coast_and_rollback() {
                 drive_tick(&mut app, tank, 0.0, 0.0);
                 let sample = probe(&app, tank);
                 let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
-                assert_eq!(
+                assert_ne!(
                     state.clutch,
-                    ClutchState::In,
-                    "no Driver can open the clutch"
+                    ClutchState::Out,
+                    "no Driver can order the clutch open"
                 );
+
                 assert_eq!(state.gear, gear);
                 assert!(!sample.shifting && !state.park);
                 assert_eq!([sample.tau_induced, sample.tau_idle], [0.0; 2]);
-                assert!(state.omega_e.abs() <= guard + 0.001);
+                assert!(
+                    state.omega_e.abs() <= guard + 0.001,
+                    "a crank starting inside its guard stays inside: {} vs {guard}",
+                    state.omega_e
+                );
                 assert!(
                     app.world()
                         .get::<TrackContacts>(tank)
@@ -1039,7 +1047,7 @@ fn empty_driver_station_coast_and_rollback() {
             assert_eq!(
                 state.omega_e.signum(),
                 if degrees > 0.0 { -1.0 } else { 1.0 },
-                "uphill coast must roll back through the crank"
+                "the passive spring clutch can be back-driven on either ladder side"
             );
             let drag = final_drag / FIXED_TICKS_PER_SECOND as f32;
             assert!(
@@ -1048,7 +1056,7 @@ fn empty_driver_station_coast_and_rollback() {
                 } else {
                     drag < 0.0
                 },
-                "steady motoring drag must oppose travel"
+                "passive motoring drag opposes travel"
             );
             // None is outside the inverse's unclamped class; drag and guard checks still apply.
             if let Some(expected) = equilibrium {
@@ -1177,7 +1185,7 @@ fn shipped_notches_launch_and_sustain_ordered_speed() {
                 assert!(
                     p.next_speeds
                         .iter()
-                        .all(|v| *v >= -crate::track::transmission::PARK_ENGAGE_SPEED),
+                        .all(|v| *v >= -crate::track::transmission::park_engage_speed()),
                     "grade={degrees} pedal={pedal} tick={tick} speeds={:?} next={:?} forces={:?}",
                     p.speeds,
                     p.next_speeds,
@@ -1207,13 +1215,13 @@ fn shipped_notches_launch_and_sustain_ordered_speed() {
             );
             if capable || degrees == 0.0 {
                 assert!(
-                    speed > crate::track::transmission::PARK_ENGAGE_SPEED && speed > last,
+                    speed > crate::track::transmission::park_engage_speed() && speed > last,
                     "each capable notch must launch and increasing pedal must sustain increasing speed"
                 );
                 last = speed;
             } else {
                 assert!(
-                    speed.abs() < crate::track::transmission::PARK_ENGAGE_SPEED,
+                    speed.abs() < crate::track::transmission::park_engage_speed(),
                     "an incapable notch must remain parked"
                 );
             }

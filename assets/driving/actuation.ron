@@ -1,5 +1,6 @@
 (
     reversal_hold_s: (0.5, Taste("stop-to-reverse pause: release during this stopped window keeps park held")),
-    neutral_throttle: (0.1, StandIn("missing physical neutral-turn selector: near-zero throttle regime entry share")),
-    neutral_speed_m_s: (0.5, StandIn("missing physical neutral-turn selector: low-speed regime entry in m/s")),
+    dead: (0.05, Taste("Driver axis perception: requested motion and steering dead band")),
+    park_engage_speed: (0.05, Taste("Driver perception of hull rest for sensing; never a friction or coupling selector, m/s")),
+    neutral_speed_m_s: (0.5, Taste("turn feel: maximum along-gear speed for admitting a passive pivot hold, m/s")),
 )

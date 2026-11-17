@@ -1,10 +1,11 @@
-//! Bounded linear rows over independent inertias. `solve` accepts free impulses, returning speeds
-//! and row impulses in the caller's units. Rows sharing a speed solve together; this local
-//! dependency requires assignment trials to be serial.
+//! Bounded linear rows over independent inertias. `solve_limited` accepts free impulses, returning speeds
+//! and row impulses in the caller's units. Rows sharing a speed or an impulse limit solve
+//! together; this local dependency requires assignment trials to be serial.
 //!
 //! With fixed bounds the dual objective is `p·(A u - target) + p·W p/2`, where
-//! `u = speed + free_impulse/inertia` and `W = A M^-1 A^T`. Its box optimality conditions
-//! give unique speeds even when impulses are nonunique. Static bounds may only shrink to dynamic
+//! `u = speed + free_impulse/inertia` and `W = A M^-1 A^T`. Optional limits bound linear
+//! combinations of impulses. Convex optimality gives unique speeds even when impulses are
+//! nonunique. Static bounds may only shrink to dynamic
 //! bounds within a call. The drivetrain design owns the mechanism narrative.
 
 /// Resolution: relative roundoff allowance for rank, impulse bounds and row signs in f64.
@@ -36,7 +37,7 @@ pub(crate) struct Row {
 }
 
 impl Row {
-    fn slip_tolerance(&self, velocity: &[f64]) -> f64 {
+    pub(super) fn slip_tolerance(&self, velocity: &[f64]) -> f64 {
         // Resolution: coefficient magnitudes scale the unit-speed roundoff floor into row
         // units. Target and evaluation magnitudes cover cancellation without a rest-speed band.
         RESOLUTION
@@ -52,7 +53,8 @@ impl Row {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum State {
-    Stuck,
+    /// An interior box impulse; aggregate multipliers may leave physical slip nonzero.
+    Interior,
     Lower,
     Upper,
 }
@@ -60,7 +62,6 @@ pub(crate) enum State {
 #[derive(Debug)]
 pub(crate) struct RowResult {
     pub impulse: f64,
-    pub state: State,
     /// The row exhausted static capacity during this call, or began sliding.
     pub dynamic: bool,
 }
@@ -69,13 +70,58 @@ pub(crate) struct RowResult {
 pub(crate) struct Solution {
     pub speeds: Vec<f64>,
     pub rows: Vec<RowResult>,
+    /// Deterministic work across every static-to-dynamic stage.
+    pub assignments_tried: usize,
+    assignment: Vec<State>,
+}
+
+#[cfg(feature = "bitprobe")]
+thread_local! {
+    static ASSIGNMENT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Per-worker diagnostic work; a mechanical tick drains it around its candidate and final solves.
+#[cfg(feature = "bitprobe")]
+pub(super) fn take_assignment_work() -> usize {
+    ASSIGNMENT_WORK.with(|work| work.replace(0))
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(a, b)| a * b).sum()
 }
 
-pub(crate) fn solve(speeds: &[Speed], rows: &[Row]) -> Solution {
+/// A bound on a linear combination of row impulses. Bounds must admit zero, as must every
+/// row when combinations are supplied, so the feasible polytope is nonempty in every regime.
+#[derive(Clone, Debug)]
+pub(crate) struct ImpulseLimit {
+    pub coefficients: Vec<f64>,
+    pub bounds: Bounds,
+}
+
+#[cfg(test)]
+fn solve(speeds: &[Speed], rows: &[Row]) -> Solution {
+    solve_limited(speeds, rows, &[])
+}
+
+/// Enumerate box faces and active combination faces. The bordered KKT system includes the
+/// combination's multiplier: interior impulses need not have zero physical slip at that face.
+/// A compact nonempty polytope has an optimum; choose an extreme point of its minimizer face
+/// and an independent normal-cone basis to obtain a nonsingular assignment.
+pub(crate) fn solve_limited(speeds: &[Speed], rows: &[Row], limits: &[ImpulseLimit]) -> Solution {
+    for limit in limits {
+        assert!(
+            limit.coefficients.len() == rows.len()
+                && limit.coefficients.iter().all(|c| c.is_finite())
+                && limit.bounds.lower.is_finite()
+                && limit.bounds.upper.is_finite()
+                && limit.bounds.lower <= 0.0
+                && limit.bounds.upper >= 0.0
+                && rows.iter().all(|r| r.bounds.lower <= 0.0
+                    && r.bounds.upper >= 0.0
+                    && r.dynamic.is_none_or(|b| b.lower <= 0.0 && b.upper >= 0.0)),
+            "combination limits and their rows must be finite and admit zero in every regime"
+        );
+    }
     assert!(
         speeds.iter().all(|s| s.value.is_finite()
             && s.inertia.is_finite()
@@ -125,24 +171,33 @@ pub(crate) fn solve(speeds: &[Speed], rows: &[Row]) -> Solution {
             row.bounds
         });
     }
-    let mut seed = vec![State::Stuck; rows.len()];
+    let mut seed = vec![State::Interior; rows.len() + limits.len()];
+    for (i, bound) in bounds.iter().enumerate() {
+        if bound.lower == bound.upper {
+            seed[i] = State::Lower;
+        }
+    }
+    let mut assignments_tried = 0;
     loop {
         let search = Search {
+            assignments_tried: std::cell::Cell::new(0),
             speeds,
             rows,
             bounds: &bounds,
+            limits,
             free: &free,
         };
-        let mut result = (0..=rows.len())
+        let mut result = (0..=seed.len())
             .find_map(|distance| {
                 search.neighbours(&seed, &mut Vec::with_capacity(rows.len()), distance)
             })
-            .expect("a finite convex box problem has an optimum with independent interior rows");
+            .expect("the loaded metric must leave an optimal independent KKT basis above the rank threshold; admission certifies only unloaded conditioning");
+        assignments_tried += search.assignments_tried.get();
+        result.assignments_tried = assignments_tried;
         let mut broke = false;
         for (i, row) in rows.iter().enumerate() {
             if !dynamic[i]
                 && let Some(sliding) = row.dynamic
-                && result.rows[i].state != State::Stuck
                 && (dot(&row.jacobian, &result.speeds) - row.target).abs()
                     > row.slip_tolerance(&result.speeds)
             {
@@ -153,17 +208,21 @@ pub(crate) fn solve(speeds: &[Speed], rows: &[Row]) -> Solution {
             result.rows[i].dynamic = dynamic[i];
         }
         if !broke {
+            #[cfg(feature = "bitprobe")]
+            ASSIGNMENT_WORK.with(|work| work.set(work.get() + assignments_tried));
             return result;
         }
-        seed = result.rows.iter().map(|r| r.state).collect();
+        seed = result.assignment;
     }
 }
 
 struct Search<'a> {
+    assignments_tried: std::cell::Cell<usize>,
     speeds: &'a [Speed],
     rows: &'a [Row],
     bounds: &'a [Bounds],
     free: &'a [f64],
+    limits: &'a [ImpulseLimit],
 }
 
 impl Search<'_> {
@@ -182,11 +241,19 @@ impl Search<'_> {
                 None
             };
         }
-        for state in [seed[i], State::Stuck, State::Lower, State::Upper]
+        for state in [seed[i], State::Interior, State::Lower, State::Upper]
             .into_iter()
             .enumerate()
             .filter_map(|(at, state)| (at == 0 || state != seed[i]).then_some(state))
         {
+            // A singleton impulse is a fixed coordinate, never an interior stationarity
+            // equation. Its physical row can have arbitrary slip (an open coupling).
+            if i < self.bounds.len()
+                && self.bounds[i].lower == self.bounds[i].upper
+                && state != State::Lower
+            {
+                continue;
+            }
             let changed = usize::from(state != seed[i]);
             if changed <= distance && distance - changed < seed.len() - i {
                 states.push(state);
@@ -203,92 +270,178 @@ impl Search<'_> {
     }
 
     fn trial(&self, states: &[State]) -> Option<Solution> {
-        let stuck: Vec<_> = states
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| (*s == State::Stuck).then_some(i))
+        self.assignments_tried.set(self.assignments_tried.get() + 1);
+        let n = self.rows.len();
+        let interior: Vec<_> = (0..n).filter(|&i| states[i] == State::Interior).collect();
+        let active: Vec<_> = (0..self.limits.len())
+            .filter(|&i| states[n + i] != State::Interior)
             .collect();
-        let mut impulses: Vec<_> = states
-            .iter()
-            .zip(self.bounds)
-            .map(|(state, bound)| match state {
-                State::Stuck => 0.0,
-                State::Lower => bound.lower,
-                State::Upper => bound.upper,
+        let mut impulses: Vec<_> = (0..n)
+            .map(|i| match states[i] {
+                State::Interior => 0.0,
+                State::Lower => self.bounds[i].lower,
+                State::Upper => self.bounds[i].upper,
             })
             .collect();
-        let mut velocity = self.free.to_vec();
-        for (row, p) in self.rows.iter().zip(&impulses) {
-            for ((v, a), s) in velocity.iter_mut().zip(&row.jacobian).zip(self.speeds) {
-                *v += a * p / s.inertia;
-            }
-        }
-        let mut matrix: Vec<Vec<f64>> = stuck
-            .iter()
-            .map(|&i| {
-                let mut line: Vec<_> = stuck
-                    .iter()
-                    .map(|&j| {
-                        self.rows[i]
-                            .jacobian
+        let velocity_for = |impulses: &[f64]| -> Vec<f64> {
+            self.speeds
+                .iter()
+                .enumerate()
+                .map(|(j, speed)| {
+                    self.free[j]
+                        + self
+                            .rows
                             .iter()
-                            .zip(&self.rows[j].jacobian)
-                            .zip(self.speeds)
-                            .map(|((a, b), s)| a * b / s.inertia)
-                            .sum()
-                    })
-                    .collect();
-                line.push(self.rows[i].target - dot(&self.rows[i].jacobian, &velocity));
-                line
-            })
-            .collect();
+                            .zip(impulses)
+                            .map(|(r, p)| r.jacobian[j] * p / speed.inertia)
+                            .sum::<f64>()
+                })
+                .collect()
+        };
+        let fixed = velocity_for(&impulses);
+        let nf = interior.len();
+        let size = nf + active.len();
+        let mut matrix = vec![vec![0.0; size + 1]; size];
+        for (i, &ri) in interior.iter().enumerate() {
+            for (j, &rj) in interior.iter().enumerate() {
+                matrix[i][j] = self.rows[ri]
+                    .jacobian
+                    .iter()
+                    .zip(&self.rows[rj].jacobian)
+                    .zip(self.speeds)
+                    .map(|((a, b), s)| a * b / s.inertia)
+                    .sum();
+            }
+            matrix[i][size] = self.rows[ri].target - dot(&self.rows[ri].jacobian, &fixed);
+        }
+        for (j, &li) in active.iter().enumerate() {
+            let limit = &self.limits[li];
+            for (i, &ri) in interior.iter().enumerate() {
+                matrix[i][nf + j] = limit.coefficients[ri];
+                matrix[nf + j][i] = limit.coefficients[ri];
+            }
+            matrix[nf + j][size] = match states[n + li] {
+                State::Lower => limit.bounds.lower,
+                State::Upper => limit.bounds.upper,
+                State::Interior => unreachable!("only active faces enter the bordered system"),
+            } - dot(&limit.coefficients, &impulses);
+        }
         assert!(
             matrix.iter().flatten().all(|v| v.is_finite()),
             "admitted row coefficients and inertias produce a finite effective-mass system"
         );
-        // A dependent stuck set has no unique impulse; a vertex assignment represents it instead.
-        let solved = eliminate(&mut matrix)?;
-        for (&row, p) in stuck.iter().zip(solved) {
-            impulses[row] = p;
-            for ((v, a), s) in velocity
-                .iter_mut()
-                .zip(&self.rows[row].jacobian)
-                .zip(self.speeds)
-            {
-                *v += a * p / s.inertia;
-            }
+        let answer = eliminate_bordered(&mut matrix, nf)?;
+        assert!(
+            answer.iter().all(|v| v.is_finite()),
+            "an independent finite bordered system produces finite impulses and multipliers"
+        );
+        for (&i, &p) in interior.iter().zip(&answer) {
+            impulses[i] = p;
         }
-        for (i, row) in self.rows.iter().enumerate() {
-            let p = impulses[i];
+        let mut velocity = velocity_for(&impulses);
+        let multipliers = &answer[nf..];
+        let mut snapped = Vec::new();
+        for i in 0..n {
             let bound = self.bounds[i];
             let allowance = RESOLUTION * bound.lower.abs().max(bound.upper.abs());
-            let slip = dot(&row.jacobian, &velocity) - row.target;
-            let tolerance = row.slip_tolerance(&velocity);
-            if p < bound.lower - allowance
-                || p > bound.upper + allowance
+            let correction: f64 = active
+                .iter()
+                .zip(multipliers)
+                .map(|(&j, mu)| self.limits[j].coefficients[i] * mu)
+                .sum();
+            let slip = dot(&self.rows[i].jacobian, &velocity) - self.rows[i].target;
+            let gradient = slip + correction;
+            let tolerance = self.rows[i].slip_tolerance(&velocity) + RESOLUTION * correction.abs();
+            if impulses[i] < bound.lower - allowance
+                || impulses[i] > bound.upper + allowance
                 || match states[i] {
-                    State::Stuck => slip.abs() > tolerance,
-                    State::Lower => bound.lower != bound.upper && slip < -tolerance,
-                    State::Upper => bound.lower != bound.upper && slip > tolerance,
+                    State::Interior => gradient.abs() > tolerance,
+                    State::Lower => bound.lower != bound.upper && gradient < -tolerance,
+                    State::Upper => bound.lower != bound.upper && gradient > tolerance,
                 }
             {
                 return None;
-            } // This assignment violates the box optimality conditions.
-            impulses[i] = p.clamp(bound.lower, bound.upper);
+            }
+            impulses[i] = impulses[i].clamp(bound.lower, bound.upper);
+            if states[i] == State::Interior && correction == 0.0 {
+                snapped.push(i);
+            }
         }
-        snap(&mut velocity, self.rows, &stuck);
+        for (j, limit) in self.limits.iter().enumerate() {
+            let value = dot(&limit.coefficients, &impulses);
+            let tolerance = RESOLUTION
+                * (limit.bounds.lower.abs().max(limit.bounds.upper.abs())
+                    + limit
+                        .coefficients
+                        .iter()
+                        .zip(&impulses)
+                        .map(|(c, p)| (c * p).abs())
+                        .sum::<f64>());
+            if value < limit.bounds.lower - tolerance || value > limit.bounds.upper + tolerance {
+                return None;
+            }
+            if let Some(at) = active.iter().position(|&i| i == j) {
+                let mu = multipliers[at];
+                // Dividing a row residual allowance by this normal's coefficient gives
+                // multiplier units. Rescaling an aggregate must not change its sign test.
+                let allowance = interior
+                    .iter()
+                    .filter(|&&i| limit.coefficients[i] != 0.0)
+                    .map(|&i| self.rows[i].slip_tolerance(&velocity) / limit.coefficients[i].abs())
+                    .reduce(f64::min)
+                    .expect("an independent active normal has a free coefficient");
+                if limit.bounds.lower != limit.bounds.upper
+                    && match states[n + j] {
+                        State::Lower => mu > allowance,
+                        State::Upper => mu < -allowance,
+                        State::Interior => unreachable!("an active limit has a face"),
+                    }
+                {
+                    return None;
+                }
+            }
+        }
+        // Only zero-multiplier physical equalities can be snapped. Aggregate-constrained
+        // interior rows may slide; their KKT equality includes the limit's shadow price.
+        let mut independent = Vec::new();
+        for i in snapped {
+            independent.push(i);
+            let mut gram: Vec<Vec<f64>> = independent
+                .iter()
+                .map(|&a| {
+                    let mut line: Vec<_> = independent
+                        .iter()
+                        .map(|&b| {
+                            self.rows[a]
+                                .jacobian
+                                .iter()
+                                .zip(&self.rows[b].jacobian)
+                                .zip(self.speeds)
+                                .map(|((a, b), s)| a * b / s.inertia)
+                                .sum()
+                        })
+                        .collect();
+                    line.push(0.0);
+                    line
+                })
+                .collect();
+            if eliminate_bordered(&mut gram, independent.len()).is_none() {
+                independent.pop();
+            }
+        }
+        snap(&mut velocity, self.rows, &independent);
         assert!(
             velocity.iter().chain(&impulses).all(|v| v.is_finite()),
             "an accepted finite independent block produces finite speeds and impulses"
         );
         Some(Solution {
+            assignments_tried: 0,
+            assignment: states.to_vec(),
             speeds: velocity,
             rows: impulses
                 .into_iter()
-                .zip(states)
-                .map(|(impulse, &state)| RowResult {
+                .map(|impulse| RowResult {
                     impulse,
-                    state,
                     dynamic: false,
                 })
                 .collect(),
@@ -296,25 +449,46 @@ impl Search<'_> {
     }
 }
 
-/// Gaussian elimination with row pivoting. `None` means a dependent stuck set, not a failed solve.
-fn eliminate(matrix: &mut [Vec<f64>]) -> Option<Vec<f64>> {
+/// Symmetric equilibration preserves row-unit invariance in the indefinite KKT system.
+/// Free impulses use their inertial norms; multipliers use their constraint's norm in those
+/// coordinates. A zero-inertia objective coordinate must be fixed by an active combination.
+fn eliminate_bordered(matrix: &mut [Vec<f64>], interior: usize) -> Option<Vec<f64>> {
     let n = matrix.len();
-    // Normalize each row by its inertial norm on both axes: a change of row units then
-    // leaves the rank test unchanged. The normalized Gram matrix has unit diagonal.
-    let norms: Vec<_> = (0..n).map(|i| matrix[i][i].sqrt()).collect();
-    if norms.contains(&0.0) {
-        return None; // A zero row cannot be part of an independent stuck set.
+    let mut norms = vec![0.0; n];
+    for i in 0..interior {
+        norms[i] = matrix[i][i].sqrt();
+        if norms[i] == 0.0 {
+            norms[i] = matrix[interior..]
+                .iter()
+                .map(|line| line[i].abs())
+                .fold(0.0, f64::max);
+        }
+        if norms[i] == 0.0 {
+            return None;
+        }
     }
+    for i in interior..n {
+        norms[i] = matrix[i][..interior]
+            .iter()
+            .zip(&norms[..interior])
+            .fold(0.0_f64, |norm, (c, scale)| norm.hypot(c / scale));
+        if norms[i] == 0.0 {
+            return None;
+        }
+    }
+    assert!(
+        norms.iter().all(|norm| norm.is_finite()),
+        "finite independent rows have representable inertial and combination norms"
+    );
     for (i, line) in matrix.iter_mut().enumerate() {
         for j in 0..n {
-            line[j] /= norms[i] * norms[j];
+            line[j] = line[j] / norms[i] / norms[j];
         }
         line[n] /= norms[i];
     }
     for col in 0..n {
-        let pivot = (col..n)
-            .max_by(|&a, &b| matrix[a][col].abs().total_cmp(&matrix[b][col].abs()))
-            .expect("an unfinished square system has a pivot candidate");
+        let pivot =
+            (col..n).max_by(|&a, &b| matrix[a][col].abs().total_cmp(&matrix[b][col].abs()))?;
         if matrix[pivot][col].abs() <= RESOLUTION {
             return None;
         }
@@ -322,8 +496,8 @@ fn eliminate(matrix: &mut [Vec<f64>]) -> Option<Vec<f64>> {
         for row in col + 1..n {
             let factor = matrix[row][col] / matrix[col][col];
             let (before, after) = matrix.split_at_mut(row);
-            for (value, pivot) in after[0][col..=n].iter_mut().zip(&before[col][col..=n]) {
-                *value -= factor * pivot;
+            for (v, p) in after[0][col..=n].iter_mut().zip(&before[col][col..=n]) {
+                *v -= factor * p;
             }
         }
     }
@@ -335,6 +509,62 @@ fn eliminate(matrix: &mut [Vec<f64>]) -> Option<Vec<f64>> {
         *value /= norm;
     }
     Some(answer)
+}
+
+/// A three-speed construction's limit bounds impulse on one of those speeds. Its normal is
+/// already a column of the row matrix, so it cannot resolve a dependent impulse basis. Direct
+/// minors identify physical independence without squaring small angles into Gram cancellation.
+pub(super) fn conditioning_resolvable(
+    inertias: &[f64; 3],
+    rows: &[[f64; 3]],
+    limited_coordinate: usize,
+) -> bool {
+    for mask in 1usize..(1 << rows.len()) {
+        let free: Vec<_> = (0..rows.len()).filter(|i| mask & (1 << i) != 0).collect();
+        let nf = free.len();
+        let independent = match free.as_slice() {
+            [a] => rows[*a].iter().any(|x| *x != 0.0),
+            [a, b] => (0..3).any(|i| {
+                (i + 1..3).any(|j| rows[*a][i] * rows[*b][j] != rows[*a][j] * rows[*b][i])
+            }),
+            [a, b, c] => {
+                let (a, b, c) = (rows[*a], rows[*b], rows[*c]);
+                a[0] * (b[1] * c[2] - b[2] * c[1])
+                    + a[1] * (b[2] * c[0] - b[0] * c[2])
+                    + a[2] * (b[0] * c[1] - b[1] * c[0])
+                    != 0.0
+            }
+            _ => false, // More rows than speeds are dependent.
+        };
+        if !independent {
+            continue;
+        }
+        for active in [false, true] {
+            if active && free.iter().all(|&i| rows[i][limited_coordinate] == 0.0) {
+                continue;
+            }
+            let size = nf + usize::from(active);
+            let mut matrix = vec![vec![0.0; size + 1]; size];
+            for (i, &a) in free.iter().enumerate() {
+                for (j, &b) in free.iter().enumerate() {
+                    matrix[i][j] = rows[a]
+                        .iter()
+                        .zip(&rows[b])
+                        .zip(inertias)
+                        .map(|((x, y), m)| x * y / m)
+                        .sum();
+                }
+                if active {
+                    matrix[i][nf] = rows[a][limited_coordinate];
+                    matrix[nf][i] = rows[a][limited_coordinate];
+                }
+            }
+            if eliminate_bordered(&mut matrix, nf).is_none() {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Eliminate speed coordinates, then substitute exact targets. In particular a coordinate stop
