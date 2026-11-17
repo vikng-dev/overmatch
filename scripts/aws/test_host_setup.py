@@ -49,7 +49,10 @@ if op == 'describe-vpcs': out({'Vpcs':[{'VpcId':ident('vpc')}]})
 if op == 'describe-subnets': out({'Subnets':[{'SubnetId':'subnet-'+format(n,'017x'),'State':'available','AvailabilityZone':'ap-southeast-1'+z} for n,z in enumerate('abc',1)]})
 if op == 'describe-instance-type-offerings': out({'InstanceTypeOfferings':[{'InstanceType':opt('--filters').split('Values=')[1],'Location':'ap-southeast-1'+z} for z in os.environ.get('OFFER_ZONES','bc')]})
 if op == 'get-parameter': out({'Parameter':{'Value':ident('ami'),'ARN':'arn:aws:ssm:ap-southeast-1::parameter'+opt('--name')}})
-if op == 'describe-images': out({'Images':[{'ImageId':ident('ami'),'OwnerId':str(10**11+1),'Public':True,'State':'available','Architecture':'x86_64','Name':'ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-1','RootDeviceName':root['rootDeviceName'],'BlockDeviceMappings':[{'DeviceName':root['rootDeviceName'],'Ebs':{'VolumeSize':int(os.environ.get('IMAGE_ROOT_SIZE',str(root['rootSizeGiB']))),'VolumeType':'gp3'}}]}]})
+if op == 'describe-images':
+ image = {'ImageId':ident('ami'),'OwnerId':str(10**11+1),'Public':True,'State':'available','Architecture':'x86_64','Name':'ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-1','RootDeviceName':root['rootDeviceName'],'BlockDeviceMappings':[{'DeviceName':root['rootDeviceName'],'Ebs':{'VolumeSize':int(os.environ.get('IMAGE_ROOT_SIZE',str(root['rootSizeGiB']))),'VolumeType':'gp3'}}]}
+ if 'image_owner_alias' in s: image['ImageOwnerAlias'] = s['image_owner_alias']
+ out({'Images':[image]})
 if op == 'describe-security-groups':
  out({'SecurityGroups':s['groups']})
 if op == 'create-security-group':
@@ -480,6 +483,26 @@ class Setup(unittest.TestCase):
         self.assertNotIn('create-user', empty.ops())
         all_zones = Fixture(self)
         self.assertEqual(all_zones.run('apply', OFFER_ZONES='abc').returncode, 0, all_zones.output)
+
+    def test_image_owner_alias_or_id_matches_ec2_launch_context(self):
+        # The provider needs policy and simulator context to match EC2's alias-first owner value.
+        for image_fields, expected in [({'image_owner_alias': 'amazon'}, 'amazon'),
+                                       ({}, str(10**11 + 1))]:
+            with self.subTest(image_fields):
+                f = Fixture(self, **image_fields)
+                self.assertEqual(f.run('apply').returncode, 0, f.output)
+                image_statement = next(st for st in f.state['policy']['Statement']
+                                       if '::image/' in st['Resource'])
+                self.assertEqual(image_statement['Condition']['StringLike']['ec2:Owner'], expected)
+                owners = []
+                for call in f.state['calls']:
+                    args = call['args']
+                    if args[7] != 'simulate-custom-policy' or '::image/' not in args[args.index('--resource-arns') + 1]:
+                        continue
+                    context = json.loads(args[args.index('--context-entries') + 1])
+                    owners.append(next(c['ContextKeyValues'][0] for c in context if c['ContextKeyName'] == 'ec2:Owner'))
+                self.assertEqual(owners[0], expected)  # Allowed launch.
+                self.assertNotEqual(owners[1], expected)  # Foreign-image refusal.
 
     def test_a_changed_image_root_is_refused_before_mutation_instead_of_drifting_from_the_provider(self):
         f = Fixture(self)

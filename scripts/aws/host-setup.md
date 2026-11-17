@@ -147,9 +147,10 @@ requirements: absent IAM context keys fail closed. Explicit launch fields avoid 
 populating context from omitted defaults; only the provider-key dry-run can prove that context.
 
 The five allowed actions are `ec2:RunInstances`, `ec2:CreateTags`, `ec2:TerminateInstances`,
-`ec2:DescribeInstances` and `ssm:GetParameters`. Launch permits Canonical-owned images; choosing the
-current image belongs to the provider. SSM read is restricted to the public Canonical path owned
-by `PARAMETER` in `host_setup.py`. Public parameter ARNs have an empty account field, documented by
+`ec2:DescribeInstances` and `ssm:GetParameters`. The launch owner condition is defined by
+`Standing.image_owner` in `host_setup.py`; choosing the current image belongs to the provider.
+SSM read is restricted to the public Canonical path owned by `PARAMETER` in `host_setup.py`.
+Public parameter ARNs have an empty account field, documented by
 AWS and confirmed by the lane's read; execution of EC2's parameter resolution under the provider
 key is still unproven. Native `resolve:ssm:` launch requires `ssm:GetParameters`.
 
