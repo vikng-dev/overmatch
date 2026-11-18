@@ -26,10 +26,10 @@ const MAGIC: &str = "overmatch-compat";
 /// [`USER_DATA_BYTES`].
 const MAX_RECORD_BYTES: usize = u8::MAX as usize;
 
-/// Resolution: bound untrusted version text parsing and refusal-screen work to 32 bytes.
+/// Resolution: bound untrusted version text parsing and refusal-screen work.
 const MAX_VERSION_BYTES: usize = 32;
 
-/// Resolution: bound each untrusted content key's parsing and refusal-screen work to 16 bytes.
+/// Resolution: bound each untrusted content key's parsing and refusal-screen work.
 const MAX_KEY_BYTES: usize = 16;
 
 /// A build's handshake identity, in the order a difference is acted on.

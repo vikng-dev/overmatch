@@ -245,8 +245,8 @@ describe("stopped match servers leave evidence for the operator", () => {
 	it("cancels an oversized log stream at the byte limit and still stops the deployment", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp();
-		// Fixture chunks expose any read beyond the first over-limit chunk, without allocating a huge body.
-		const chunkBytes = 64 * 1024 + 1;
+		// Fixture: four chunks reach the cap exactly; only the fifth may cancel the stream.
+		const chunkBytes = SERVER_LOG_BODY_MAX_BYTES / 4;
 		let bytesRead = 0;
 		let cancelled = false;
 		edgegap.logResponse = () => new Response(new ReadableStream<Uint8Array>({

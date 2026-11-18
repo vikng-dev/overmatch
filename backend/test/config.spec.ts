@@ -92,6 +92,18 @@ describe("operator settings admission", () => {
 		expect(() => config({ ...env, [setting]: "1e100" })).toThrow(expect.objectContaining({ constructor: ConfigurationError, setting, message: expect.stringContaining("reduce this setting in wrangler vars") }));
 	});
 
+	it("alarm durations fit the Date range through the fixed 2100 clock horizon", async () => {
+		const { config, ConfigurationError } = await import("../src/config");
+		// DERIVED: ECMAScript TimeClip limit less the last supported clock epoch.
+		const maxSeconds = (8.64e15 - Date.UTC(2100, 0, 1)) / 1000;
+		for (const now of [Date.UTC(2026, 0, 1), Date.UTC(2099, 11, 31)]) {
+			vi.spyOn(Date, "now").mockReturnValue(now);
+			expect(config({ ...env, HEARTBEAT_DEADLINE_S: String(maxSeconds) }).heartbeatDeadlineMs).toBe(maxSeconds * 1000);
+			expect(() => config({ ...env, HEARTBEAT_DEADLINE_S: String(maxSeconds + 1) })).toThrow(expect.objectContaining({ constructor: ConfigurationError, setting: "HEARTBEAT_DEADLINE_S", message: expect.stringContaining(`<= ${maxSeconds} seconds`) }));
+		}
+		vi.restoreAllMocks();
+	});
+
 	it("the HTTP deadline fits setTimeout's signed 32-bit millisecond domain", async () => {
 		const { config, ConfigurationError } = await import("../src/config");
 		expect(config({ ...env, PROVIDER_TIMEOUT_S: String((2 ** 31 - 1) / 1000) }).providerTimeoutMs).toBe(2 ** 31 - 1);

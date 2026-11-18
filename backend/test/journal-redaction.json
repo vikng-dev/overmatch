@@ -78,5 +78,17 @@
   {
     "raw": "{\"token\":\"ab\\\"value-after-escaped-quote\"}",
     "expected": "{\"token\":[credential]}"
+  },
+  {
+    "raw": "[42.5] ip-10-23-4-156 overmatch-server: listening",
+    "expected": "[42.5] [ip] overmatch-server: listening"
+  },
+  {
+    "raw": "IP-192-0-2-99 ip-0-0-0-0 ip-255-255-255-255",
+    "expected": "[ip] [ip] [ip]"
+  },
+  {
+    "raw": "ip-forward ip-10-23-4 ip-10-23-4-156-7 my-ip-10-23-4-156 İp-192-0-2-99",
+    "expected": "ip-forward ip-10-23-4 ip-10-23-4-156-7 my-ip-10-23-4-156 İp-192-0-2-99"
   }
 ]

@@ -110,9 +110,17 @@ wait "$SECOND_PID"
 SECOND_PID=""
 wait "$FIRST_PID"
 FIRST_PID=""
-kill "$SERVER_PID" 2>/dev/null || true
-wait "$SERVER_PID" 2>/dev/null || true
+# Only a SIGTERM requested here is a successful server shutdown. A crash after the final
+# shot must not be hidden by otherwise complete traces.
+shutdown_sent=0
+kill -TERM "$SERVER_PID" 2>/dev/null && shutdown_sent=1
+server_status=0
+wait "$SERVER_PID" 2>/dev/null || server_status=$?
 SERVER_PID=""
+if [[ "$shutdown_sent" != 1 || "$server_status" != 143 ]]; then
+  echo "server exited unexpectedly (status=$server_status, shutdown_sent=$shutdown_sent); see $OUT/server.log" >&2
+  exit "$((server_status == 0 ? 1 : server_status))"
+fi
 
 uv run scripts/shot/pencam_latency.py --server "$OUT/server.server.jsonl" \
   --client "$OUT/a.client.jsonl" --client "$OUT/b.client.jsonl" \

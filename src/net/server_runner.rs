@@ -604,6 +604,11 @@ mod tests {
         let mut work = vec![tick * 5];
         work.resize(8, Duration::ZERO);
         let (mut app, frames) = probe(clock.clone(), work);
+        // Fixture admission includes the entire overrun, independent of shipped pacing policy.
+        app.insert_resource(super::super::timing::Timing {
+            admission_s: (tick * 5).as_secs_f64(),
+            ..super::super::timing::Timing::shipped()
+        });
         assert_eq!(app.run(), bevy::app::AppExit::Success);
         let frames = frames.0.lock().unwrap();
         for (index, frame) in frames.iter().enumerate() {

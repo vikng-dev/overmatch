@@ -158,6 +158,9 @@ class Trace:
                 except (json.JSONDecodeError, UnicodeDecodeError) as e:
                     torn = (self.lines, str(e))
                     continue
+                except (ValueError, RecursionError) as e:
+                    raise TraceError(f"{self.path}:{self.lines}: record exceeds JSON decoder limits; "
+                                     "recapture with bounded numeric fields and nesting") from e
                 span = self.admit(record)
                 if span is not None:
                     yield self.lines, span

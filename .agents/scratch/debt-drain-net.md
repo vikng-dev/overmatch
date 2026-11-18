@@ -5,7 +5,7 @@ Subject: the multiplayer tank video game. Damage-model entries describe game sta
 Lane: lane/debt-drain-net. Baseline: bacb594976a6267a55589291f23af03d48648d69.
 Issue #349 was read with every comment; cN below is its chronological comment number in that snapshot, linked to its stable URL. Repeated notes are combined by symbol. Explicit severities are preserved; unlabeled notes use the six-lens definitions. The brief supplies the last-night additions.
 
-The lane stops after eleven implementation groups and this report. Every larger repair stays a separate lane; no wire type changed and protocol remains 106. No recorded finding names an item under src/headless_test/; c28's duplicated finish loops name other directories, and headless_test.rs:185 already provides the helper.
+The original drain covers eleven implementation groups; the fix round below closes its review findings. Every larger repair stays a separate lane; no wire type changed and protocol remains 106. No recorded finding names an item under src/headless_test/; c28's duplicated finish loops name other directories, and headless_test.rs:185 already provides the helper.
 
 | Source | File and finding | Lens | Severity | Disposition and evidence |
 |---|---|---|---|---|
@@ -38,7 +38,7 @@ The lane stops after eleven implementation groups and this report. Every larger 
 | [c32] | `src/net/fire_presentation.rs::refresh_unconfirmed_reloads (missing gate slot)` | error-handling | P2 | Stale: the file and refresh function are removed; no missing-slot refresh branch remains. |
 | [c32] | `src/net/protocol.rs / src/shooting.rs::WeaponGate::tick_weapon_gate (two writers)` | code-branching | P2 | Needs its own lane: shooting.rs:122 still schedules client gate maturation, while protocol.rs:1017 replicates WeaponGate.<br>Separate the authority snapshot from derived readiness presentation; that is a state-ownership decision, with possible wire consequences. |
 | [c31] | `scripts/shot/analyze.py::load (complete row schema)` | error-handling | P2 | Needs its own lane: load:73 still lets dmg_rx without own evade lead accounting; transport.visual_selected is converted later in aggregation.<br>Admit every consumed field once by row kind, as c31 requires; the schema and rejection table exceed fifty lines. |
-| [c34] | `backend/src/config.ts (unrepresentable durations)` | error-handling | P2 | Fixed (2dfa2898): admit durations within safe timestamp milliseconds and the HTTP timer delay domain; ConfigurationError names the setting and wrangler repair. |
+| [c34] | `backend/src/config.ts (unrepresentable durations)` | error-handling | P2 | Fixed (2dfa2898): admit alarm durations within the fixed TimeClip/2100 horizon and HTTP durations within the timer delay domain; ConfigurationError names the setting and wrangler repair. |
 | [c34] | `src/net/death_screen.rs::the_respawn_prompt_and_key_follow_the_authority_opening` | testing | P2 | Fixed (923d6231): use explicit immediate/delayed fixture openings through tick wrap, independent of shipped respawn balance. |
 | backlog dev-15 | `scripts/perf/pencam_cost.py::parse_marks_has (glass-on)` | error-handling | P2 | Fixed (0126cbfb): recognize every glass opening mark and refuse a contaminated paired off run; remove the closed backlog row. |
 | [c1] [c2] | `src/net/rig.rs::present_aim (net-22 / own turret)` | code-branching | P3 | Needs its own lane: rig.rs still excludes the controlled turret from streamed remote aim, and the issue explicitly reserves net-22 for #187.<br>An owner decision about own-input aim presentation belongs to that lane; this drain does not settle it. |
@@ -80,7 +80,7 @@ The lane stops after eleven implementation groups and this report. Every larger 
 | [c34] | `backend/test/config.spec.ts (try/catch ceremony)` | brevity | P3 | Fixed (2dfa2898): throwing matchers keep constructor, setting and redaction assertions; DERIVED nineteen ceremony lines saved. |
 | [c34] | `backend/src/config.ts:3 (repeated admission prose)` | brevity | P3 | Fixed (2dfa2898): keep the config function's immutable-environment contract at its owner; DERIVED one repeated line removed. |
 | [c34] | `backend/test/contract.spec.ts (raw stats-period string)` | testing | P3 | Fixed (f842a80d): compare forwarded numeric seconds with config(env).serverStatsS. |
-| [c34] | `backend/test/evidence.spec.ts (byte-cap chunk divisibility)` | testing | P3 | Fixed (f842a80d): use an uneven fixture chunk and derive the first over-limit chunk count. |
+| [c34] | `backend/test/evidence.spec.ts (byte-cap chunk divisibility)` | testing | P3 | Fixed (f842a80d): derive fixture chunks from the byte cap so a read reaches it exactly, then require cancellation on the next chunk. |
 | [c34] | `backend/test/ec2.spec.ts (reconciliation retry budget)` | testing | P3 | Fixed (f842a80d): lose every launch response, then require alarm adoption with no further launch; start-attempt fixtures already read hosting.startAttempts. |
 | [c34] | `backend/test/join.spec.ts (capacity-coupled scenarios)` | testing | P3 | Needs its own lane: the initial concurrent-join scenario still assumes that its fixture cohort fits configured capacity, even though the overflow witness now reads cfg.capacity.<br>Use isolated immutable Worker fixture settings for workload premises across the join scenarios; this exceeds fifty changed lines. |
 | [c34] | `backend/test/lifecycle.spec.ts (deadline/retention/attempt premises)` | testing | P3 | Needs its own lane: absolute ages now read cfg, but the replacement scenario at lifecycle.spec.ts:182 still assumes JOIN_ATTEMPTS permits a second placement; zero retention also changes intermediate-row premises.<br>Give the lifecycle scenarios explicit immutable fixture policy instead of assuming permitted operator settings relate this way; this is a larger fixture migration. |
@@ -99,7 +99,7 @@ The trace source comparison preserves the pair predicate, deepest-contact expres
 
 The minimum-outage experiment is fully restored. MEASURED locally: the minimum duration derived from the current token default failed the same-link retention assertion, while the original fixture passed the complete match-exit target. A phase-driven fixture needs to identify the retry/transport boundary before replacing that workload premise.
 
-Checks (MEASURED locally):
+Initial drain checks (MEASURED locally):
 
 - Every implementation commit: cargo fmt --all --check, locked workspace/all-target CI Clippy with dev_ui,bitprobe, and the relevant tests passed.
 - Rust targets passed: trace:: (10), net::battle:: (4), net::death_screen:: (5), net::client::match_exit:: (4), net::compatibility:: (7), net::server_runner:: (7), net::hit_feel:: (4).
@@ -108,6 +108,34 @@ Checks (MEASURED locally):
 - Each backend group passed npm run typecheck, npm test (287 Worker tests, 126 EC2 tests and the embedded-shell-comment tests), and node backend/scripts/embed-host.mjs --check.
 - The server-only profile retains existing dead-code warnings for engine sound/report fields and steering_speed_at_governor; macOS test linking warns about the unwind section size. CI Clippy is clean.
 - Final diff read against all six lenses. The independent orchestrator lens review and CI full suite remain their existing landing/CI steps.
+
+
+Fix round: merged `main` as `476822e9`, including its client fixture repairs and documentation. Wire remains 106. The independent review and six lens verdicts supplied these follow-ups:
+
+| Source | Finding | Disposition |
+|---|---|---|
+| Review P3-1 | Evidence byte-cap boundary | Fixed: fixture chunks derive from `SERVER_LOG_BODY_MAX_BYTES`, reach the cap exactly, and require the next chunk before cancellation. A `>=` mutant now fails. |
+| Review P3-2 | Alarm duration admission | Fixed: a constant bound subtracts the fixed 2100-01-01 clock horizon from ECMAScript TimeClip's limit. Refusals name seconds or days as authored; the boundary witness also advances the clock without moving admission. |
+| Review P3-3 | Trace contact allocations | Fixed: `Local<TickContacts>` retains pair IDs, `Parallel` result buffers and the body map. Pair evaluation uses the existing compute pool; drained result vectors retain their capacity. |
+| Review P3-4 | Compatibility cap comments | Fixed: retain each `Resolution` reason without repeating the literal byte count. |
+| Error-handling P2 | Pen-cam runner drops server exit | Fixed: only the runner's requested SIGTERM is accepted. Other exits refuse analysis and name the status; nonzero statuses propagate, while an unexpected successful exit becomes failure. Fake-process cases cover both. |
+| Error-handling P2 | Trace decoder limits | Fixed: translate numeric and nesting decoder-limit failures into `TraceError`, naming file, row and recapture repair. An explicit fixture digit limit proves refusal at both an interior row and the final row. |
+| Base-truths P3 | JSONL flush interval | Fixed: `JSONL_FLUSH_INTERVAL` names the `Resolution` tradeoff between synchronous I/O and a recent diagnostic tail. |
+| Testing P3 | Runner sleep assertion assumes authored cap | Fixed: install a fixture admission cap that includes the fixture's whole overrun; authored pacing changes cannot invalidate the scenario. |
+| Brevity P3 | Repeated harness field parsing | Fixed: one guarded parse and quiet-tail assertion covers pen-cam peers and the MG shooter; the peer-window equality assertion remains. DERIVED: four duplicate lines removed. |
+| Live hosted evidence | Journal hostname reveals private address | Fixed: both sanitisers use the same bounded ASCII hostname pattern and `[ip]` replacement. Shared fixtures cover private-address hostnames, uppercase and octet extremes, preserve `ip-forward` and longer/non-address words, and guard JavaScript/Python case-fold parity. Regenerated the embed. |
+
+The game's damage-model cue styling in `src/net/hit_feel.rs::spawn_cue_ui` remains **needs its own lane**, the owner's one exception among these review/lens findings; its original disposition above remains. All other fix-round findings are fixed. The original inventory's larger deferred repairs retain their dispositions.
+
+DERIVED trace comparison: the pair predicate, deepest-contact expression, body incidence, count and maximum are unchanged. Shared effects reduce only after evaluation; counts and nonnegative maxima commute, and no floating-point sum moved. The new state is reusable diagnostic scratch, never simulation state. Engine APIs were checked in local Bevy 0.20.1 and the Avian 0.8.0 fork sources. Hosted dispatch cost remains unmeasured, with no speedup claimed.
+
+Fix-round validation (MEASURED locally):
+
+- Full library suite, detached on the final Rust source: **2,862 passed, 0 failed, 51 ignored, 0 measured, 0 filtered out**, 395.91 s. The first shell-detached launch ended without an exit result; the completed run used an independent process session.
+- Per-file `rustfmt --edition 2024`, `cargo fmt --all --check`, CI's locked workspace/all-target Clippy with `dev_ui,bitprobe`, and `scripts/serial-cargo check --no-default-features --bin overmatch-server` passed.
+- Backend typecheck, 291 Worker tests, 126 EC2 tests and two shell-embedding tests passed on the final embed. `node backend/scripts/embed-host.mjs --check` passed. Python targets passed: trace profiler 12, pen-cam cost 24, shot runners 5, AWS harness 40. Shell syntax checks passed for the pen-cam runner and machine script.
+- Cap-size timing gates passed for both sanitisers. At 1 MiB the machine sanitiser plus fake I/O took 253.3 ms against the 4,000 ms bound; the Worker gate passed that same bound. Additional runs of the exact Worker function under Node took 65.2 ms for repeated failed hostname prefixes and 60.1 ms for dense synthetic hostnames at 1,048,575 bytes. These are local observations, not hosted cost claims.
+- The six lenses were read against the fix-round diff; no further finding remains beyond the authorized styling exception. The orchestrator's independent review remains its landing step.
 
 No hosted measurement, account operation, deployment, push, issue edit or issue comment was performed.
 

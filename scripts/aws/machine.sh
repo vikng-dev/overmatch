@@ -257,6 +257,7 @@ def ipv6(match):
     candidate = token[len(prefix):]
     return prefix + "[ip]" if re.fullmatch(r"[0-9a-f:.]+(?:%[a-z0-9]+)?", candidate, re.I) and re.search(r"[0-9a-f]", candidate, re.I) and ("::" in candidate or candidate.count(":") >= 3) else token
 text = re.sub(r"[a-z0-9_:.%]+", ipv6, text, flags=re.I)
+text = re.sub(r"(?<![a-z0-9_-])ip-(?:[0-9]{1,3}-){3}[0-9]{1,3}(?![a-z0-9_-])", "[ip]", text, flags=re.I | re.ASCII)
 text = re.sub(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}", "[ip]", text)
 encoded = text.encode("utf-8")
 truncated = truncated or len(encoded) > cap

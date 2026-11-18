@@ -13,9 +13,10 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use avian3d::collision::contact_types::ContactId;
 use avian3d::prelude::{AngularVelocity, Collisions, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
-use bevy::tasks::{ComputeTaskPool, ParallelSlice};
+use bevy::tasks::ComputeTaskPool;
 use serde_json::{Value, json};
 
 use crate::tank::{
@@ -66,6 +67,9 @@ impl std::fmt::Display for SinkError {
 }
 impl std::error::Error for SinkError {}
 
+/// Resolution: batch flushes to limit synchronous I/O while retaining a recent crash tail.
+const JSONL_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Shared JSONL sink. Non-finite floats serialize as `null`, preserving valid JSON. An armed
 /// recorder must produce its stream: an I/O failure ends the run visibly, never a partial success.
 pub(crate) struct JsonlSink {
@@ -90,7 +94,7 @@ impl JsonlSink {
         writeln!(self.writer, "{row}")
             .map_err(|error| SinkError::Write(self.path.clone(), error))
             .unwrap_or_else(crate::refuse_start);
-        if self.last_flush.elapsed() >= Duration::from_secs(1) {
+        if self.last_flush.elapsed() >= JSONL_FLUSH_INTERVAL {
             self.flush().unwrap_or_else(crate::refuse_start);
             self.last_flush = Instant::now();
         }
@@ -375,6 +379,57 @@ fn record_frame(
     }
 }
 
+/// Reusable pair work and per-thread results; no contact references survive the fixed tick.
+#[derive(Default)]
+struct TickContacts {
+    pairs: Vec<ContactId>,
+    summaries: Parallel<Vec<([Option<Entity>; 2], f32)>>,
+    by_body: std::collections::HashMap<Entity, (u32, f32)>,
+}
+
+impl TickContacts {
+    fn update(&mut self, collisions: &Collisions) {
+        self.pairs.clear();
+        self.pairs
+            .extend(collisions.iter().map(|pair| pair.contact_id));
+        let pool = ComputeTaskPool::get();
+        let chunk_size = self.pairs.len().div_ceil(pool.thread_num()).max(1);
+        let summaries = &self.summaries;
+        pool.scope(|scope| {
+            for ids in self.pairs.chunks(chunk_size) {
+                scope.spawn(async move {
+                    summaries.scope(|rows| {
+                        for &id in ids {
+                            let (_, pair) = collisions
+                                .graph()
+                                .get_by_id(id)
+                                .expect("pair IDs came from this immutable contact graph");
+                            // Only touching, overlapping pairs contribute; negative separations
+                            // clamp to zero penetration rather than retaining stale AABB contacts.
+                            if pair.is_touching() && !pair.aabbs_disjoint() {
+                                let deepest = pair
+                                    .find_deepest_contact()
+                                    .map_or(0.0, |point| point.penetration)
+                                    .max(0.0);
+                                rows.push(([pair.body1, pair.body2], deepest));
+                            }
+                        }
+                    });
+                });
+            }
+        });
+        self.by_body.clear();
+        // Counts and maxima commute; reduce shared body incidence after pair evaluation.
+        for (bodies, deepest) in self.summaries.iter_mut().flat_map(|rows| rows.drain(..)) {
+            for body in bodies.into_iter().flatten() {
+                let entry = self.by_body.entry(body).or_insert((0, 0.0));
+                entry.0 += 1;
+                entry.1 = entry.1.max(deepest);
+            }
+        }
+    }
+}
+
 /// Per fixed gameplay tick, per tank root: current pose and velocities plus contact state
 /// (grounded track sides, per-side belt loads, collision pairs). Runs in `FixedLast`, after
 /// physics and contact updates. Client poses are presented server state, never predictions.
@@ -405,7 +460,7 @@ fn record_tick(
     >,
     // The rig chain for each row's skeleton bore (`rig_world_pose`).
     rig_chain: (Query<&ChildOf>, Query<&Transform>),
-    collisions: Collisions,
+    (collisions, mut contacts): (Collisions, Local<TickContacts>),
     // Each tank's row is prepared on the compute pool; the writer commits them in entity order.
     (mut tick_counter, mut rows): (Local<u64>, Local<Parallel<Vec<(Entity, Value)>>>),
     // The local fixed clock and the view clock a client row is stamped from.
@@ -430,32 +485,7 @@ fn record_tick(
         _ => Some(local_tick),
     };
 
-    // `hc`/`pen` include only touching, overlapping Avian pairs. A non-overlapping AABB makes a
-    // contact record stale for this diagnostic; negative separations clamp to zero penetration.
-    let mut contacts: std::collections::HashMap<Entity, (u32, f32)> =
-        std::collections::HashMap::new();
-    let pairs: Vec<_> = collisions.iter().collect();
-    let summaries = pairs.par_splat_map(ComputeTaskPool::get(), None, |_, pairs| {
-        pairs
-            .iter()
-            .filter(|pair| pair.is_touching() && !pair.aabbs_disjoint())
-            .map(|pair| {
-                let deepest = pair
-                    .find_deepest_contact()
-                    .map_or(0.0, |point| point.penetration)
-                    .max(0.0);
-                ([pair.body1, pair.body2], deepest)
-            })
-            .collect::<Vec<_>>()
-    });
-    // Counts and maxima commute; shared body incidence is reduced only after pair evaluation.
-    for (bodies, deepest) in summaries.into_iter().flatten() {
-        for body in bodies.into_iter().flatten() {
-            let entry = contacts.entry(body).or_insert((0, 0.0));
-            entry.0 += 1;
-            entry.1 = entry.1.max(deepest);
-        }
-    }
+    contacts.update(&collisions);
 
     roots.par_iter().for_each(
         |(
@@ -499,7 +529,8 @@ fn record_tick(
 
             // Contact pairs whose rigid body is this tank root, and the deepest penetration among them
             // — the collision-stress signal the jitter correlates with.
-            let (hull_contacts, penetration) = contacts.get(&entity).copied().unwrap_or((0, 0.0));
+            let (hull_contacts, penetration) =
+                contacts.by_body.get(&entity).copied().unwrap_or((0, 0.0));
 
             let own = if role == "server" {
                 owners.get(entity).is_ok()

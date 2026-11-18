@@ -95,11 +95,15 @@ function num(env: Env, key: keyof Env, min: number, scale = 1): number {
 	return v * scale;
 }
 
-// Alarm timestamps and SQLite deadlines must retain millisecond precision when added to now.
+// Resolution: reserve clock epochs through 2100 so duration admission is stable across reloads.
+// DERIVED: ECMAScript TimeClip's 8.64e15 ms limit minus that fixed clock horizon; SQLite
+// deadlines also retain integer-millisecond precision within this range.
+const MAX_ALARM_DURATION_MS = 8.64e15 - Date.UTC(2100, 0, 1);
+
 // The provider's shorter bound is the signed 32-bit delay accepted by setTimeout.
-function milliseconds(env: Env, key: keyof Env, min: number, scale: number, max = Number.MAX_SAFE_INTEGER - Date.now()): number {
+function milliseconds(env: Env, key: keyof Env, min: number, scale: number, max = MAX_ALARM_DURATION_MS): number {
 	const value = num(env, key, min, scale);
-	if (value > max) throw new ConfigurationError(key, `converted duration must be <= ${max} ms; reduce this setting in wrangler vars`);
+	if (value > max) throw new ConfigurationError(key, `duration must be <= ${max / scale} ${key.endsWith("_DAYS") ? "days" : "seconds"}; reduce this setting in wrangler vars`);
 	return value;
 }
 

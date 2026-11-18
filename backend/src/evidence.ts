@@ -31,6 +31,7 @@ export function sanitizedTail(raw: string, providerToken: string): { log: string
 			return /^[0-9a-f:.]+(?:%[a-z0-9]+)?$/i.test(candidate) && /[0-9a-f]/i.test(candidate)
 				&& (candidate.includes("::") || (candidate.match(/:/g)?.length ?? 0) >= 3) ? prefix + "[ip]" : token;
 		})
+		.replace(/(?<![a-z0-9_-])ip-(?:[0-9]{1,3}-){3}[0-9]{1,3}(?![a-z0-9_-])/gi, "[ip]")
 		.replace(/(?:[0-9]{1,3}\.){3}[0-9]{1,3}/g, "[ip]");
 	const bytes = new TextEncoder().encode(clean);
 	let start = Math.max(0, bytes.length - SERVER_LOG_MAX_BYTES);

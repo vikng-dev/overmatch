@@ -86,6 +86,20 @@ class TraceProfileTest(unittest.TestCase):
         trace = Trace(self.file("t.json", "[\n" + record("B", "system: name=a", 1) + "\n]"))
         self.assertIs(type(next(iter(trace))[1].ts), float)
 
+    def test_decoder_digit_limit_is_refused_at_the_row_even_at_the_tail(self) -> None:
+        """Operator input exceeding the decoder limit is refused, never treated as a torn tail."""
+        previous = sys.get_int_max_str_digits()
+        self.addCleanup(sys.set_int_max_str_digits, previous)
+        # Fixture: exercise a decoder limit even when the operator has disabled it globally.
+        digits = sys.int_info.str_digits_check_threshold
+        sys.set_int_max_str_digits(digits)
+        row = '{"ph":"B","ts":' + "1" * (digits + 1) + ',"tid":1,"name":"a"}'
+        for ending in ("", "\n]"):
+            with self.subTest(ending=ending):
+                trace = Trace(self.file("t.json", "[\n" + row + ending))
+                with self.assertRaisesRegex(TraceError, r"t\.json:2: .*decoder.*recapture"):
+                    list(trace)
+
     def test_utf8_torn_at_the_tail_is_reported_but_not_inside_the_trace(self) -> None:
         """A SIGKILL may split a UTF-8 codepoint; an interior encoding fault cannot be skipped."""
         path = Path(self.dir.name) / "t.json"
