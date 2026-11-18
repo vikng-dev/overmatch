@@ -1,45 +1,21 @@
 #!/bin/bash
-# Shared boot for scripts/aws/harness.py and the matchmaking EC2 provider. The harness uses its
-# installed commands over SSH as `sudo -n om-harness <command>`; hosted machines have no SSH key.
-#
-# BOOT (cloud-init runs it as root with no arguments), in order, each step appending
-# `<step> <seconds since kernel start>` to $STATE/phases, a failing one appending `failed <step>`:
-#   guard     schedule this machine's own power-off at CAP_MIN minutes. The harness launches every
-#             machine with shutdown behaviour `terminate`, so the power-off deletes the machine and
-#             its volume whatever happens to the operator.
-#   self      install this file as /usr/local/bin/om-harness, settings included.
-#   key       the operator's per-run public key for `ubuntu`, the results channel. After `self`, so
-#             a machine the operator can reach always answers `state`.
-#   packages  (client only) libasound2t64: the unchanged client links libasound.so.2;
-#             the dedicated server is built without audio and needs no package install.
-#   downloaded, verified, unpacked
-#             the release archive by explicit tag, checked against the checksum line the operator
-#             read from the release's own `.sha256`, unpacked into /opt/overmatch.
-#   started   (server) the server under systemd, unit `overmatch-server`.
-#   ready     the machine has nothing left to do at boot.
-#
-# COMMANDS (operator, over SSH):
-#   state                 the phases file; the server also its unit state and listening line.
-#   host                  CPU count and model.
-#   uptime-echo           one CLOCK_BOOTTIME reading per stdin line: the operator's clock offset.
-#   start-client <k> <server ip:port> <ticks>
-#                         client k as transient unit `om-client-<k>`, playing CLIENT_SCRIPT.
-#   client-state <k>      its unit state and the kernel time of its first `input slot` line.
-#   sample <unit>...      start the 1 Hz sampler (unit `om-sampler`) of those units and the host.
-#   samples               the sampler's lines.
-#   journal <unit>        that unit's journal, kernel-time stamped.
 # @settings
 set -Eeuo pipefail
 
+# Boot/command invariants: .agents/scratch/aws-journal-slice-4.md
 STATE=/var/lib/om-harness
 INSTALL=/opt/overmatch
-# Resolution: 1 MiB bounds the journal pipe, upload and durable archive; keep the newest bytes.
+# Resolution: storage/pipe byte cap; at most cap + 1 newline-sized records need reading.
 JOURNAL_MAX_BYTES=1048576
-# Resolution: kill the whole capture process group at 12 s, leaving shutdown independent of I/O.
+# Resolution: whole process-group kill, nested curl deadlines, and reply/exit scheduling margin.
 JOURNAL_CAPTURE_S=12
+JOURNAL_CONNECT_S=3
+JOURNAL_UPLOAD_S=8
+JOURNAL_GRACE_MARGIN_S=10
+# Resolution: conservative capture + upload + margin, shared by the Worker grace and service stop.
+JOURNAL_STOP_S=$((JOURNAL_CAPTURE_S + JOURNAL_UPLOAD_S + JOURNAL_GRACE_MARGIN_S))
+JOURNAL_MAX_LINES=$((JOURNAL_MAX_BYTES + 1))
 
-# The scripted client's session (src/net/harness.rs `Script`): hull parked, never firing, turret
-# sweeping (~1.3 rad/s) so every tick carries a changing aim, the way a scanning player's does.
 CLIENT_SCRIPT='(drive: Idle, aim: Sweep(radius_m: 800, rate_rad_s: 1.28), ticks: %s)'
 
 uptime_s() {
@@ -54,11 +30,11 @@ boot_failed() {
   trap - ERR
   mark "failed $step" || echo 'boot phase recording failed' >&2
   if [[ "$ROLE" == hosted ]]; then
-    # A failure before unit creation has no unit journal. Once it exists, stop it synchronously
-    # so its privileged stop hook finishes before the fallback power-off request.
+    local journal=false
+    [[ ! -f /etc/systemd/system/overmatch-server.service ]] || journal=true
     curl --silent --show-error --fail --max-time 10 \
       --header @/etc/overmatch-report-header --header 'Content-Type: application/json' \
-      --data "{\"reason\":\"boot-$step\"}" \
+      --data "{\"reason\":\"boot-$step\",\"journalAvailable\":$journal}" \
       "$HOSTED_API/v1/servers/$HOSTED_SERVER_ID/end" >/dev/null 2>&1 || echo 'boot report failed' >&2
     if [[ -f /etc/systemd/system/overmatch-server.service ]]; then
       systemctl stop overmatch-server || echo 'failed unit stop reported failure' >&2
@@ -74,7 +50,6 @@ boot() {
   install -d -m 755 "$STATE"
   mark userdata
   if [[ "$ROLE" == hosted ]]; then
-    # Root-only files; systemd reads the environment before dropping to the service user.
     umask 077
     printf 'Authorization: Bearer %s\n' "$HOSTED_REPORT_SECRET" >/etc/overmatch-report-header
     printf '%s' "$HOSTED_ENV_B64" | base64 --decode >/etc/overmatch-host.env
@@ -111,18 +86,14 @@ boot() {
 
   if [[ "$ROLE" == hosted ]]; then
     step=updates
-    # Ubuntu's apt timers can run at startup. Mask before starting play; absent units are harmless.
-    # The image's snap packaging varies, so cover both timer and daemon refresh paths defensively.
     local updaters=(apt-daily.timer apt-daily.service apt-daily-upgrade.timer
       apt-daily-upgrade.service unattended-upgrades.service snapd.service snapd.socket
       snapd.snap-repair.timer snapd.snap-repair.service)
     systemctl mask --now "${updaters[@]}" || echo 'updater stop reported failure; verifying masks and active state' >&2
     local updater status load active
     for updater in "${updaters[@]}"; do
-      # is-enabled returns nonzero for a masked unit, including a mask for an absent package.
       status="$(systemctl is-enabled "$updater" 2>/dev/null)" || true
       [[ "$status" == masked ]]
-      # show succeeds for absent units (LoadState=not-found). A query failure enters boot_failed.
       status="$(systemctl show --property=LoadState --property=ActiveState "$updater")"
       load='' active=''
       while IFS='=' read -r key value; do
@@ -142,14 +113,12 @@ boot() {
   mark downloaded
 
   step=verify
-  # The release edge checks the checksum's asset name; verification uses the fixed local name.
   printf '%s  %s\n' "${ARCHIVE_SHA256%% *}" "$archive" | sha256sum --check --strict --quiet -
   mark verified
 
   step=unpack
   install -d -m 755 "$INSTALL"
   tar -xzf "$archive" --strip-components=1 -C "$INSTALL"
-  # Delete rule: spell out the path so the delete cannot follow a changed variable.
   rm /var/lib/om-harness/server.tar.gz
   mark unpacked
 
@@ -159,9 +128,8 @@ boot() {
     useradd --system --no-create-home --shell /usr/sbin/nologin overmatch
     if [[ "$ROLE" == hosted ]]; then
       environment='EnvironmentFile=/etc/overmatch-host.env'
-      stop_post='ExecStopPost=+/usr/local/bin/om-harness hosted-stop
-# Resolution: 30 s bounds service shutdown, including the 12 s capture and process teardown.
-TimeoutStopSec=30s'
+      stop_post="ExecStopPost=+/usr/local/bin/om-harness hosted-stop
+TimeoutStopSec=${JOURNAL_STOP_S}s"
     else
       environment="Environment=OVERMATCH_BOT=$BOTS OVERMATCH_SERVER_STATS_S=$STATS_S"
       stop_post=''
@@ -190,9 +158,6 @@ UNIT
   mark ready
 }
 
-# One privileged post-stop command owns capture then power-off. An asynchronous power-off in an
-# earlier ExecStopPost could cancel the upload. The outer timeout kills journalctl/redaction/curl
-# together; neither a failed upload nor a stuck journal reader can hold the machine alive.
 cmd_hosted_stop() {
   if ! timeout --signal=KILL "$JOURNAL_CAPTURE_S" /usr/local/bin/om-harness push-journal; then
     echo 'journal push failed; powering off' >&2
@@ -202,47 +167,52 @@ cmd_hosted_stop() {
 
 cmd_push_journal() {
   umask 077
-  # tail bounds memory before Python sees input; the extra byte witnesses truncation. Raw journal
-  # bytes stay in the pipe. Only redacted output reaches the root-only files on /run's tmpfs.
-  journalctl -b -u overmatch-server -o short-monotonic --no-pager -q |
+  journalctl -b -n "$JOURNAL_MAX_LINES" -u overmatch-server -o short-monotonic --no-pager -q |
     tail -c "$((JOURNAL_MAX_BYTES + 1))" |
     python3 -c '
-import pathlib, re, sys
+import base64, pathlib, re, sys
 cap = int(sys.argv[1])
 raw = sys.stdin.buffer.read()
 truncated = len(raw) > cap
-# A cut line may have lost its credential label. Discard it before pattern matching.
 if truncated:
     raw = raw.split(b"\n", 1)[1] if b"\n" in raw else b""
 text = raw.decode("utf-8", errors="ignore")
 credential = pathlib.Path("/etc/overmatch-report-header").read_text().strip().removeprefix("Authorization: Bearer ")
-text = text.replace(credential, "[credential]")
-text = "\n".join("[credential line redacted]" if re.search(
-    r"ticket|OVERMATCH_|secret|token|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment",
-    line, re.I) else line for line in text.split("\n"))
+forms = [credential, base64.b64encode(credential.encode()).decode()]
+if re.fullmatch(r"[0-9a-f]{64}", credential, re.I):
+    hexes = [credential.lower(), credential.upper()]
+    forms = [p + h for h in hexes for p in ("0x", "0X")] + forms + hexes
+    forms += [base64.b64encode(h.encode()).decode() for h in hexes]
+    forms += [base64.b64encode(bytes.fromhex(credential)).decode()]
+for form in forms:
+    text = text.replace(form, "[credential]")
+text = re.sub(r"(\bOVERMATCH_[A-Z_]+[ \t]*=)[^\n]*", r"\1[credential]", text, flags=re.I)
+text = re.sub(r"(\b(?:ticket|secret|token|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment)\b[\x22\x27]?[ \t]*[:=][ \t]*(?:Bearer[ \t]+)?)(?:\[[^\[\]\n]*\]|\{[^{}\n]*\}|\x22[^\x22\n]*\x22|\x27[^\x27\n]*\x27|[^\s,;]+)", r"\1[credential]", text, flags=re.I)
 text = re.sub(r"https?://\S+", "[url]", text, flags=re.I)
-text = re.sub(r"\b[0-9a-f]{64,}\b", "[credential]", text, flags=re.I)
-text = re.sub(r"\b[A-Za-z0-9_-]+\.[0-9a-f]{32}\b", "[ticket]", text, flags=re.I)
+text = re.sub(r"(?<![0-9a-f])(?:0x)?[0-9a-f]{64,}(?![0-9a-f])", "[credential]", text, flags=re.I)
+text = re.sub(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]+\.[0-9a-f]{32}\b", "[ticket]", text, flags=re.I)
+# NetcodeConfig Debug exposes byte arrays; no server path emits its key as base64.
+text = re.sub(r"\[(?:[ \t]*[0-9]{1,3}[ \t]*,){31}[ \t]*[0-9]{1,3}[ \t]*\]", "[credential]", text)
 def ipv6(match):
-    candidate = match[0]
-    return "[ip]" if re.search(r"[0-9a-f]", candidate, re.I) and ("::" in candidate or candidate.count(":") >= 3) else candidate
-text = re.sub(r"(?<![\w:])[0-9a-f]*:[0-9a-f:.]+(?:%[a-z0-9]+)?(?![\w:])", ipv6, text, flags=re.I)
-text = re.sub(r"(?:\d{1,3}\.){3}\d{1,3}", "[ip]", text)
+    token = match[0]
+    colon = token.find(":")
+    if colon < 0: return token
+    prefix = token[:colon + 1] if colon > 0 and re.search(r"[g-z_]", token[:colon], re.I) else ""
+    candidate = token[len(prefix):]
+    return prefix + "[ip]" if re.fullmatch(r"[0-9a-f:.]+(?:%[a-z0-9]+)?", candidate, re.I) and re.search(r"[0-9a-f]", candidate, re.I) and ("::" in candidate or candidate.count(":") >= 3) else token
+text = re.sub(r"[a-z0-9_:.%]+", ipv6, text, flags=re.I)
+text = re.sub(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}", "[ip]", text)
 encoded = text.encode("utf-8")
 truncated = truncated or len(encoded) > cap
 pathlib.Path("/run/overmatch-journal").write_bytes(encoded[-cap:].decode("utf-8", errors="ignore").encode("utf-8"))
 pathlib.Path("/run/overmatch-journal-header").write_text("X-Journal-Truncated: " + str(int(truncated)) + "\n")
 ' "$JOURNAL_MAX_BYTES"
-  # Resolution: one attempt, 3 s connection / 8 s total, inside the 12 s whole-capture budget.
-  # Outside failures lose this archive visibly; they never retry or postpone power-off.
-  curl --silent --show-error --fail --connect-timeout 3 --max-time 8 \
+  curl --silent --show-error --fail --connect-timeout "$JOURNAL_CONNECT_S" --max-time "$JOURNAL_UPLOAD_S" \
     --header @/etc/overmatch-report-header --header @/run/overmatch-journal-header \
     --header 'Content-Type: text/plain; charset=utf-8' --data-binary @/run/overmatch-journal \
     "$HOSTED_API/v1/servers/$HOSTED_SERVER_ID/journal" >/dev/null 2>&1
 }
 
-# The kernel time of the first journal line of <unit> holding <text>; nothing when the query
-# succeeds and no line holds it. A failed query fails the caller, its error on stderr.
 first_line_s() {
   local journal line
   journal="$(journalctl -u "$1" -o short-monotonic --no-pager -q)" || return
@@ -284,8 +254,6 @@ cmd_client_state() {
   [[ -z "$at" ]] || echo "slot $at"
 }
 
-# One line per second: `<boot s> <unit>=<cpu usec>,<rss kB> ... cpu <the /proc/stat cpu fields>`.
-# Builtins only inside the loop, so the sampler's own cost stays out of what it samples.
 cmd_sample_loop() {
   local units=("$@") pids=() unit line key value cpu rss stat
   for unit in "${units[@]}"; do pids+=("$(systemctl show -p MainPID --value "$unit")"); done

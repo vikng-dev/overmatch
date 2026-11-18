@@ -31,7 +31,7 @@ Design and decisions: `.agents/scratch/hosting-2026-10/` (`decisions.md`, `state
 | `POST /v1/join/status` | client | the ticket, in the body `{ticket}` | `{state: starting\|ready\|failed, address?, port?, key?, reason?}`; poll until not `starting` |
 | `POST /v1/servers/{id}/heartbeat` | game server | `Authorization: Bearer <OVERMATCH_REPORT_SECRET>` | 204; **410 = unknown server, exit now**; 401 bad secret |
 | `POST /v1/servers/{id}/end` | game server | same | 204 (optional body `crash` is archived before the Worker stops the deployment); 410 unknown |
-| `POST /v1/servers/{id}/journal` | machine stop hook | same | UTF-8 text, `X-Journal-Truncated: 0` or `1`; 204 stored, 409 already captured, 410 unavailable/expired, 401 bad secret, 413 oversized, 400 invalid or credential-bearing |
+| `POST /v1/servers/{id}/journal` | machine stop hook | same | UTF-8 text, `X-Journal-Truncated: 0` or `1`; 204 stored, 409 already captured, 410 unavailable/expired, 401 bad secret, 413 oversized, 400 invalid; own credentials replaced with a warning |
 | `POST /v1/edgegap/webhook/{id}/{nonce}` | Edgegap | the per-server nonce in the path | 204, or 404 for a wrong nonce; triggers only a status re-read for that server (a body `request_id` is adopted if its status shows the server's tag) |
 | `GET /admin` | Yan | Cloudflare Access | HTML dashboard |
 
@@ -107,14 +107,17 @@ even when the provider listing fails. Session history has its own lifetime.
 **EC2 push.** The privileged unit stop hook sends one redacted journal tail before power-off.
 The capture has a 12 s process-group kill deadline, an 8 s upload deadline and a 1 MiB byte cap
 (Resolution: bound shutdown latency and archive storage). A failed attempt is logged locally and
-never retried. `/end` leaves a durable 30 s termination grace so the process can receive its reply,
-exit and run the hook; the alarm still terminates it afterwards if needed. The Worker authenticates
-before reading bytes, bounds streamed bytes before decoding, rejects its own report credential in
-raw text, and sanitises again before storage. The first archive wins; later pushes get 409.
+never retried. `/end` leaves a durable termination grace (derived from the machine bounds) so the
+process can receive its reply, exit and run the hook; the alarm still terminates it afterwards if needed. The Worker authenticates
+before reading journal bytes, bounds streamed journal/end bytes before decoding, replaces its own
+report credential with a row-only warning, and sanitises again before storage. The first archive
+wins; later pushes get 409.
 Admission closes 120 s after the first stop transition, or the last plausible heartbeat/start
 expiry if no end was reported (Resolution: allow shutdown jitter without admitting old credentials).
 The hook also runs on start failure and during the lifetime power-off; a boot failure before the
-unit exists has no unit journal. Hard machine loss or an unavailable Worker can still lose a tail.
+unit exists reports `journalAvailable: false` and gets no termination grace. When the push window
+closes without an archive, a NULL/error row makes that absence visible. Hard machine loss or an
+unavailable Worker can still lose a tail.
 The archive and crash retention are the existing `SERVER_LOG_RETENTION_DAYS` policy.
 See [slice 4's report](../.agents/scratch/aws-journal-slice-4.md) for the redaction contract and live proof.
 

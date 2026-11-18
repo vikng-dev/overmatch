@@ -32,7 +32,7 @@ import { config, serverEnvironment, type Config, type Env } from "./config";
 import { outsideJson, isRecord, isLocation, isBeacon, definiteRejection, providerFor, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./provider";
 import { RELEASE_CACHE_MS, type ServerRelease } from "./release";
 import { settleAll } from "./deadline";
-import { JOURNAL_WINDOW_MS, recordJournal, recordCrash, stopWithEvidence } from "./evidence";
+import { JOURNAL_WINDOW_MS, recordJournal, recordCrash, stopWithEvidence, recordMissingJournal, redactOwnCredential, evidenceResult, type EvidenceResult } from "./evidence";
 import { recordEvent, type Outcome, type SessionEvent } from "./history";
 import { timingSafeEqual, newId, randomHex, sha256Hex, versionOf, tagOf } from "./ids";
 import { groupLocations, locationId } from "./locations";
@@ -58,6 +58,7 @@ type ServerRow = {
 	port: number | null;
 	netcode_key: string;
 	secret_hash: string;
+	/** NULL: legacy/no stop yet; positive: admission deadline; zero: closed and archive checked. */
 	journal_deadline: number | null;
 	created_at: number;
 	ready_at: number | null;
@@ -109,7 +110,7 @@ export type ServerSnapshot = {
 }
 
 export type JoinResult = { ok: true; ticket: string } | { ok: false; status: number; error: string };
-export type JournalResult = { status: 204 } | { status: 400 | 401 | 409 | 410; error: string };
+export type JournalResult = { status: 204 } | { status: 401 | 409 | 410; error: string };
 
 export type ServerCallResult = { status: 204 | 400 | 401 | 410; error?: string };
 
@@ -297,13 +298,19 @@ export class Registry extends DurableObject<Env> {
 		return { status: 204 };
 	}
 
-	async end(serverId: string, secret: string, reason: string, crash?: string): Promise<ServerCallResult> {
+	async end(serverId: string, secret: string, reason: string, crash?: string, journalAvailable?: boolean): Promise<EvidenceResult<ServerCallResult>> {
+		return evidenceResult(serverId, () => this.endReport(serverId, secret, reason, crash, journalAvailable));
+	}
+
+	private async endReport(serverId: string, secret: string, reason: string, crash?: string, journalAvailable?: boolean): Promise<ServerCallResult> {
 		const s = this.server(serverId);
 		if (!s || (crash === undefined && !live(s))) return { status: 410 };
 		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
 		const bootFailed = this.provider.starts.retryBootInPlace && s.state === "starting" && /^boot-(guard|self|updates|user|download|verify|unpack|start)$/.test(reason);
+		const grace = this.provider.logs.kind === "push" && journalAvailable !== false ? this.provider.logs.exitGraceMs : 0;
+		const redactedCrash = crash === undefined ? undefined : redactOwnCredential(crash, secret).text;
 		await this.finish(serverId, crash !== undefined || bootFailed ? "failed" : "ended",
-			crash !== undefined ? REASONS.serverCrashed : bootFailed ? REASONS.startFailed : serverReason(reason), undefined, crash, this.provider.logs.kind === "push" ? this.provider.logs.exitGraceMs : 0);
+			crash !== undefined ? REASONS.serverCrashed : bootFailed ? REASONS.startFailed : serverReason(reason), undefined, redactedCrash, grace);
 		return { status: 204 };
 	}
 
@@ -321,16 +328,17 @@ export class Registry extends DurableObject<Env> {
 		return { status: 204 };
 	}
 
-	async journal(serverId: string, secret: string, raw: string, truncated: boolean): Promise<JournalResult> {
-		const admitted = await this.journalAdmission(serverId, secret);
-		if (admitted.status !== 204) return admitted;
-		// The supplied credential was just authenticated against the stored hash. Refuse rather than
-		// trusting either machine redaction or the generic sanitizer to recognize its representation.
-		if (raw.includes(secret)) return { status: 400, error: "journal contains report credential" };
-		const s = this.server(serverId);
-		if (!s?.deployment_id) return { status: 410, error: "unknown deployment" };
-		return await recordJournal(this.env, serverId, s.deployment_id, raw, truncated, this.cfg.providerTimeoutMs)
-			? { status: 204 } : { status: 409, error: "journal already captured" };
+	async journal(serverId: string, secret: string, raw: string, truncated: boolean): Promise<EvidenceResult<JournalResult>> {
+		return evidenceResult(serverId, async () => {
+			const admitted = await this.journalAdmission(serverId, secret);
+			if (admitted.status !== 204) return admitted;
+			const s = this.server(serverId);
+			if (!s?.deployment_id) return { status: 410, error: "unknown deployment" };
+			const own = redactOwnCredential(raw, secret);
+			if (own.replaced) console.warn("journal credential replaced", serverId);
+			return await recordJournal(this.env, serverId, s.deployment_id, redactOwnCredential(own.text, s.netcode_key).text, truncated, this.cfg.providerTimeoutMs)
+				? { status: 204 } : { status: 409, error: "journal already captured" };
+		});
 	}
 
 	/** An Edgegap webhook is a hint only (unsigned, never retried): re-read the status and act on
@@ -419,8 +427,22 @@ export class Registry extends DurableObject<Env> {
 			work.push(() => this.tryStop(id));
 		}
 
+		if (this.provider.logs.kind === "push") {
+			for (const row of this.sql.exec<ServerRow>("SELECT * FROM servers WHERE journal_deadline > 0 AND journal_deadline <= ?", now).toArray()) {
+				work.push(async () => {
+					const current = this.server(row.id);
+					if (!current) throw new Error("archive deadline row must survive until its check completes");
+					// An unknown deploy may still acquire an id; reconciliation owns proving absence.
+					if (!current.deployment_id && current.deploy !== "refused") return;
+					if (current.deployment_id) await recordMissingJournal(this.env, row.id, current.deployment_id, this.cfg.providerTimeoutMs);
+					// Zero closes admission permanently and marks the archive check complete.
+					this.sql.exec("UPDATE servers SET journal_deadline = 0 WHERE id = ?", row.id);
+				});
+			}
+		}
+
 		this.sql.exec("DELETE FROM tickets WHERE created_at <= ?", now - this.cfg.ticketTtlMs);
-		this.sql.exec("DELETE FROM servers WHERE state = 'ended' AND ended_at <= ?", now - this.cfg.endedRetentionMs);
+		this.sql.exec("DELETE FROM servers WHERE state = 'ended' AND ended_at <= ? AND (journal_deadline IS NULL OR journal_deadline = 0)", now - this.cfg.endedRetentionMs);
 		await this.reschedule();
 
 		// A slow capture holds a slot; replacements wait for the complete outbound batch.
@@ -781,7 +803,7 @@ export class Registry extends DurableObject<Env> {
 			outcome,
 			reason,
 			now,
-			now + JOURNAL_WINDOW_MS,
+			this.provider.logs.kind === "push" ? now + JOURNAL_WINDOW_MS : 0,
 			serverId,
 			s.state,
 		).rowsWritten;
@@ -911,7 +933,7 @@ export class Registry extends DurableObject<Env> {
 					SELECT MIN(created_at + ?1, COALESCE(next_poll_at, 0), COALESCE(created_at + ?3, created_at + ?1)) AS t FROM servers WHERE state = 'starting'
 					UNION ALL SELECT MIN(last_seen + ?2, COALESCE(created_at + ?3, last_seen + ?2)) FROM servers WHERE state = 'ready'
 					UNION ALL SELECT COALESCE(stop_at, 0) FROM servers WHERE state = 'stopping'
-					UNION ALL SELECT ended_at + ?4 FROM servers WHERE state = 'ended'
+					UNION ALL SELECT ended_at + ?4 FROM servers WHERE state = 'ended' AND (journal_deadline IS NULL OR journal_deadline = 0)
 					UNION ALL SELECT created_at + ?5 FROM tickets
 				)`,
 				c.startDeadlineMs,
@@ -921,8 +943,13 @@ export class Registry extends DurableObject<Env> {
 				c.ticketTtlMs,
 			)
 			.one().t;
-		if (r === null) await this.ctx.storage.deleteAlarm();
-		else await this.ctx.storage.setAlarm(r);
+		// DO SQLite admits at most five compound SELECT terms; archive deadlines use their own read.
+		const journal = this.sql.exec<{ t: number | null }>(
+			"SELECT MIN(MAX(journal_deadline, ?)) AS t FROM servers WHERE journal_deadline > 0", Date.now() + c.statusPollMs,
+		).one().t;
+		const next = r === null ? journal : journal === null ? r : Math.min(r, journal);
+		if (next === null) await this.ctx.storage.deleteAlarm();
+		else await this.ctx.storage.setAlarm(next);
 	}
 }
 

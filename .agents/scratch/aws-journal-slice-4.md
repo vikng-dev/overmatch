@@ -7,116 +7,190 @@ unexplained; this change supplies the missing archive for a subsequent run.
 
 ## Built contract
 
-`Provider.logs` selects exactly one capture capability: Edgegap pulls before stopping; EC2 accepts
-a machine push. There is no provider-name branch in capture or admission. EC2's `/end` replies
-without terminating immediately: its durable stop alarm waits 30 s (Resolution: let the process
-receive the reply, exit, and finish the bounded capture). The sweep still considers the stopping
-row owned. That grace survives eviction, does not extend on duplicate end reports, and ends even
-if no push arrives. Other stop causes retain their provider termination path.
+`Provider.logs` selects one capability: Edgegap pulls before stop; EC2 accepts a machine push.
+No capture/admission branch names a provider. The embed evaluates the machine-owned stop-bound
+sum, so the Worker does not carry a second grace formula. One privileged
+`ExecStopPost=+/usr/local/bin/om-harness hosted-stop` captures then requests
+`systemctl --no-block poweroff`. An earlier asynchronous power-off hook would race capture,
+so this unit has exactly one post-stop command. `After=network-online.target` gives shutdown
+ordering against that target; actual network/DNS availability remains a live claim.
 
-One privileged `ExecStopPost=+/usr/local/bin/om-harness hosted-stop` captures, then requests
-`systemctl --no-block poweroff`. There is no earlier asynchronous power-off command to race it.
-It runs for clean exit, process failure, failed service start and the lifetime shutdown. A boot
-failure after unit creation synchronously requests its stop before the boot trap's fallback
-power-off; a boot failure before the unit exists has no unit journal. `After=network-online.target`
-keeps shutdown ordering against the network target. The machine still has no SSH or instance role.
+The machine reports `journalAvailable` on boot failures by testing whether it created the unit
+file. False means immediate Worker termination and ticket replacement: there is no journal to
+wait for. True gives the same grace as an ordinary server end. The server's normal/panic report
+omits that field; its running process is itself proof that the unit was created. Older machine
+callbacks that omit the fact conservatively retain grace. Timing never infers unit creation.
+After unit creation the boot trap synchronously stops the service before its fallback power-off.
 
-Resolution bounds: whole capture 12 s, enforced by coreutils `timeout --signal=KILL` against the
-capture process group; curl connects within 3 s and finishes within 8 s; `TimeoutStopSec=30s`
-bounds process/service stop. The shorter capture budget leaves teardown time inside the service
-budget. One attempt covers journal read, redaction and upload; any failure loses that archive,
-prints a fixed local diagnostic and continues to power-off. No retry, queued delivery or new
-operator switch exists. An OS power failure, broken network or unavailable Worker can lose a tail.
+Resolution bounds have one owner, the `JOURNAL_*` assignments in `machine.sh`, exported by
+`embed-host.mjs` into `host.journal`:
 
-This macOS host has no `systemd.service` man page (`man -w systemd.service` reports none).
-**Claims to prove live:** systemd runs post-stop commands for failed starts as well as normal
-termination; multiple `ExecStopPost=` commands execute in declaration order (a failed unprefixed
-command skips later commands); `TimeoutStopSec` applies separately to stop commands and bounds
-waiting for the process, and also governs post-stop execution. This implementation uses one
-post-stop command, so it does not rely on a second command surviving a first command's failure.
-The `+` command prefix restores the privileged execution needed to read the journal and power off.
-Network shutdown ordering and Ubuntu's Python/coreutils availability also remain live claims.
-Reference for the operator's version check: `man systemd.service`, `man systemd.exec`,
-`man systemd.unit`, `man timeout` on the proving machine's image.
+| Bound | Job and derivation |
+|---|---|
+| 1 MiB | Resolution: bound pipe/redaction memory, upload admission and D1 archive storage. |
+| 1,048,577 records | DERIVED: byte cap + one witness; even a record consisting of a newline costs one byte. `journalctl -b -n` bounds records before the byte-tail pipe, without excluding any record needed by the newest byte tail. Individual records can still be large; the outer kill bounds that case. |
+| 12 s | Resolution: GNU `timeout --signal=KILL` kills the entire capture/redaction/upload process group. |
+| 3 s / 8 s | Resolution: connection / total curl deadlines nested inside the whole-capture kill. One attempt, no retry. |
+| 10 s | Resolution: margin for receipt of the end reply, process exit and shutdown/alarm scheduling. |
+| 30 s | DERIVED Resolution: capture bound + upload allowance + margin = 12 + 8 + 10. The whole-capture bound already contains upload; the extra upload allowance deliberately makes this conservative. The Worker grace and unit `TimeoutStopSec` both read this derivation from the machine owner. |
+| 120 s | Resolution: admit a late shutdown push through scheduling/network jitter, without accepting old credentials indefinitely. |
 
-## Admission and security
+A failed or stuck capture prints a fixed local diagnostic then still requests power-off. The
+service stop timeout bounds service/process teardown as well. Worker `stop_at` is durable,
+survives eviction, never moves on repeated `/end` (ordinary or late panic), rejects heartbeats
+with 410 while stopping, and terminates through its alarm even without a push. The sweep
+continues to regard the stopping deployment as owned. Other stop causes retain their immediate
+provider termination path. Hard machine loss or unavailable networking can lose a tail.
 
-The route is `POST /v1/servers/{id}/journal`, with the existing
-`Authorization: Bearer <OVERMATCH_REPORT_SECRET>` header from `/etc/overmatch-report-header`.
-The server's heartbeat/end requests and the boot failure callback already use this credential.
-No second credential, key in a URL, AWS permission or public crash endpoint is added. Registry
-stores only its SHA-256; the authenticated supplied credential lets it check the raw journal for
-that exact value without persisting it.
+## Admission, storage and failure outcomes
 
-Registry admission runs before HTTP reads the body and again on submission. Unknown row: 410;
-wrong/missing credential: 401; a provider without push, or an unrecorded deployment: 410. The
-window closes 120 s after the **first** stopping transition (Resolution: shutdown scheduling and
-network jitter); stop retries cannot move it. Without a stop transition, admission closes 120 s
-after startup expiry or the latest heartbeat expiry, allowing an unreported spontaneous crash.
-The nullable `journal_deadline` column is added to Registry's own SQLite schema on construction;
-pre-existing rows use their last plausible heartbeat/start expiry. No D1 migration is required.
+`POST /v1/servers/{id}/journal` uses the existing report bearer from the root-only header file.
+No second credential, AWS permission, credential-bearing URL or public crash endpoint exists.
+The Registry keeps only its SHA-256. It authenticates before HTTP reads bytes and again after
+submission crosses RPC. Unknown row/deployment or a pull-only provider gets 410; wrong/missing
+credential gets 401. Each valid push includes `X-Journal-Truncated: 0` or `1` and UTF-8 text.
 
-A declared Content-Length over 1 MiB refuses before reading; a missing or dishonest length still
-hits the streamed byte counter before decoding/concatenating an over-limit chunk. Invalid length
-and oversized body: 413; invalid UTF-8/metadata or raw own credential: 400. Each refusal is typed
-and logs a fixed reason/status, never payload, authorization or URL. Native body read failure is
-also a typed 400. Stream cancellation does not block the refusal. The chunk delivered by the
-platform has already been allocated; the Worker bounds its own accumulated data, not that chunk.
-A valid request requires `X-Journal-Truncated: 0` or `1` and plain UTF-8 text.
+Both `/journal` and `/end` enforce the machine-owned byte cap on the stream, before decoding or
+concatenating an excessive chunk. For `/end` that cap includes the JSON envelope and escapes,
+not just decoded crash text. Content-Length can refuse early, never bypass the counter. Invalid
+length/oversize gets typed 413; invalid UTF-8, metadata, JSON or field shapes gets typed 400;
+native body read failure gets typed 400. Cancellation does not await an untrusted producer.
+The platform may already have allocated an incoming chunk; retained accumulated bytes are bounded.
+Edgegap's pull already uses `providerText` to cap its raw response at 16 MiB before JSON parsing
+and archive sanitisation (`SERVER_LOG_BODY_MAX_BYTES` owns that limit).
 
-The first valid push inserts `server_logs`; any second/concurrent push gets 409. Refusal rather
-than success distinguishes a duplicate from a newly saved archive and prevents replacing the
-first account of an exit. A rejected credential-bearing body consumes no archive slot. The row
-uses the recorded `deployment_id` (EC2 instance id), preserving the existing primary/unique keys
-and README join with `server_crashes`. Existing archive retention applies. Unexpected SQL/schema
-failures propagate; only recognized infrastructure failures take the existing typed 503 path.
+An authenticated own report credential is replaced in every occurrence: exact text, lower/upper
+hex, either `0x` prefix case, base64 of the ASCII credential (both hex cases), and base64 of its
+32 decoded bytes. The Worker warns with only the server row id, never the value, and saves the
+archive. Its journal edge also removes these representations of the known netcode key. `/end`
+removes own-report encodings before recording crash evidence. A machine never retries its push,
+so refusal on credential presence would throw away diagnostics without extending protection:
+the credential is unusable after its window closes anyway.
 
-## Redaction contract and source inspection
+The first archive wins using D1's unique server id; concurrent/later pushes get 409. Replacement
+and sanitisation happen before D1. A server process holding the report secret can forge a first
+archive and end its own match; this is the accepted threat model, not evidence authenticity.
+No claim of a trustworthy journal against a compromised server process is made.
 
-Raw journal bytes remain in a pipe. `tail` retains at most the byte cap plus one truncation witness;
-if it cuts a line, the redactor discards that incomplete first line so a lost label cannot expose a
-partial credential. Only redacted bytes and the truncation header reach root-only files on `/run`
-(tmpfs); curl reads those files and the existing root-only authentication header. The installed
-hosted script is root-only. The sanitized UTF-8 tail is capped again after redaction, since masking
-short addresses can expand the output. The Worker rejects a raw occurrence of the authenticated
-server credential, then applies its archive sanitizer before any durable log write.
+The first stopping transition fixes `journal_deadline`; retries cannot extend it. Without a stop
+transition, admission uses startup/last-heartbeat expiry plus the window. When the window closes,
+the alarm inserts a `server_logs` row with `log NULL` and
+`error = 'journal push window closed without an archive'`, unless a push already exists. Successful
+archives are never overwritten. The check survives Registry eviction and D1 downtime: a failed
+write keeps a durable deadline and retries on the production poll interval, independently of
+machine termination/Fleet release. Unknown deployment fate stays pending until reconciliation
+provides an id or proves refusal. A zero deadline means permanently closed and checked; retention
+cannot delete a row whose archive check is pending. Legacy NULL deadlines retain the pre-stop
+admission derivation. No additional database schema migration is required.
 
-Both archive redactors remove these forms (case insensitive except the exact credential):
+Expected D1 failures at both journal storage and crash recording cross Durable Object RPC as
+`EvidenceResult` data, through the same `evidenceResult`/`evidenceCall` boundary, following
+`FleetResult`/`fleetCall`. Diagnostics contain only local classifications and server ids; HTTP
+returns typed 503. Crash-write failure still completes stop/ticket cleanup first. Bugs such as
+missing tables still reject across RPC. Tests inject D1 network failures inside real DO methods,
+then exercise the real HTTP caller; they also prove SQL bugs are not converted into downtime.
 
-- The machine's exact report credential, even unlabelled; the Worker refuses that exact value.
-- Whole lines containing `ticket`, `OVERMATCH_`, `secret`, `token`, `password`, `authorization`,
-  `private[_ -]?key`, `netcode[_ -]?key`, `env_vars` or `environment`. This covers labelled byte-array
-  key dumps, tickets, command-line/environment dumps and authorization headers.
-- HTTP(S) URLs through the next whitespace, including the callback origin/path.
-- Contiguous hex credentials of at least 64 digits, including the generated netcode key.
-- Versioned id/ticket forms `[A-Za-z0-9_-]+\.[0-9a-f]{32}` (also masks matching server ids).
-- IPv4 tokens, IPv6 tokens including mapped IPv4, compressed/loopback and zone-id forms.
+## Redaction and linear-time audit
 
-Worker sanitization also removes its configured provider token. These patterns are a diagnostic
-redaction contract, not a parser for every conceivable encoding of a secret. The exact own-secret
-refusal protects against missing generic recognition; arbitrary base64/escaped unlabeled dumps
-are not claimed covered. Both suites exercise every listed form and preserve paths/timestamps/stats.
+Raw journal bytes stay in the bounded pipe. `tail` keeps cap + one truncation witness; a cut
+first line is discarded because its field label may have been lost. Only redacted bytes and
+metadata reach root-only `/run` tmpfs files. Redaction can expand short addresses, so both sides
+cap the resulting UTF-8 tail again without splitting a code point. Hosted script/header/env
+files remain root-only; systemd reads the environment before dropping to the service user.
 
-Inspected `src/net/hosting.rs` and `src/net/server.rs`, plus `server_host::log_startup` and the
-vendored netcode startup path. Startup logs the server id, Worker API origin, capacity,
-heartbeat/empty-exit durations, listening bind/port, and host CPU/task-pool/cgroup facts. It prints
-no netcode key, report credential, player ticket or environment dump. `Secret<T>::Debug` prints
-`<redacted>`; configuration errors name the variable/shape without its value. The callback origin
-is public configuration, not a credential; URLs and addresses are removed from the archive.
-No secret-at-start finding required a Rust change. Arbitrary panic text and peer-address logs are
-why redaction still belongs at the archive edges.
+Redact values, never whole diagnostic lines. An `OVERMATCH_` name without `=` stays intact;
+with `=`, the rest of that line's value is masked. Credential fields preserve the field and
+surrounding prose while masking quoted, bracketed, object or unquoted values. The real
+`fatal: OVERMATCH_CAPACITY: expected an integer from 1 to 256` and netcode's
+`server ignored connection request. server address not in connect token whitelist`, including
+its `token_addresses`/`server_addr` fields with masked addresses, survive both sanitisers.
+A `token=...` field keeps everything except its value.
+
+Source inspection: `src/net/hosting.rs` keeps key/report configuration behind
+`Secret<T>::Debug` (`<redacted>`), and `ConfigError::Display` prints name and expected shape only.
+Startup in hosting/server/server_host prints ids, origin, capacity, timing, bind and host facts,
+never credentials. Vendored `lightyear_netcode-0.31.0-admission/src/server_plugin.rs` exposes the
+key as `[u8; 32]` through `NetcodeConfig::Debug`; `auth.rs` also has a byte-array Debug field.
+Therefore both sanitisers mask a bare 32-entry decimal byte array in addition to labelled key
+values. No server log/config path base64-encodes that key: no speculative generic base64 pattern
+is added, as stated beside the byte-array pattern in both implementations. Known own-credential
+base64 encodings are removed explicitly at the authenticated Worker edge and for the machine's
+report secret. Arbitrary unlabeled encodings or arbitrary panic text are not claimed exhaustively
+parseable. No Rust source change was needed.
+
+Audit of **every pattern** in the Worker and embedded Python sanitiser (n = bounded input bytes):
+
+| Pattern family | Why it is linear |
+|---|---|
+| Exact provider/own credential replacement | A fixed number of literal searches; generated credentials have fixed length. The hex-shape check is fully anchored and fixed-width. |
+| `OVERMATCH_...=` | Fixed prefix at a word boundary; the name/spacing run cannot contain another eligible start. Its value is a newline-delimited single pass. |
+| Credential labels/values | Finite fixed-length labels. Space runs cannot contain another label start. Value alternatives have distinct delimiters; bracket/object interiors exclude both opening and closing delimiters, preventing repeated suffix scans on unfinished nested dumps. Quoted values either consume through their next quote or fail once on an unfinished run. Unquoted values consume through whitespace/comma/semicolon. A fixed number of scans per span. |
+| HTTP(S) URL | Fixed `http` start and a maximal non-space value; success consumes the complete run. No failing unbounded suffix after it. |
+| Hex, including `0x` and adjacent non-hex letters | Negative hex lookbehind permits one attempt per maximal hex run, including `k` + hex. Optional `0x` is bounded, the final negative hex lookahead accepts the run end. It cannot retry at every hex digit. |
+| Ticket/id | `(?<![A-Za-z0-9_-])` permits one start per maximal id run. The run excludes the literal dot; the hex suffix is fixed-width. In particular `a-a-a-...` no longer supplies a start at every word boundary. The same corrected pattern is used on both sides. |
+| Decimal byte array | Literal `[` start, a fixed 32 entries and bounded digit widths. Commas partition entries; whitespace cannot contain another array start. Each span is scanned at most a fixed number of times, even on incomplete input. |
+| IPv6 token scan | `[a-z0-9_:.%]+` always consumes a maximal token, with no failing suffix. A constant number of token-local passes identifies an optional non-hex label (`peer:`), validates the address alphabet, and counts colons. The anchored address/zone classes are separated by `%`, so cannot retry starts within the token. Rust paths and timestamps stay intact. |
+| IPv4 | Four fixed-width digit groups and literal dots: constant work per start, including near misses. |
+
+UTF-8 encode/tail/decode and first-line discard are linear too. Edgegap's larger bounded pull
+uses the same audited Worker code. The byte-cap adversarial gate on both sides uses
+`a-` repeated to exactly 1 MiB. Its **Resolution** budget is DERIVED as
+`cap / (256 KiB/s) = 4 s`: deliberately slow throughput to tolerate CI/startup scheduling while
+rejecting the former multi-minute quadratic scan. Worker clocks advance at I/O, so its test yields
+before and after CPU work; the Python test times the actual installed `push-journal` command.
+
+## Machine script invariants moved out of user data
+
+`machine.sh` is shared by `harness.py` and the EC2 provider. With no arguments cloud-init runs
+boot as root, in order: guard (schedule shutdown at CAP_MIN), self (install this same file), key
+(harness only, after self so reachable hosts answer state), packages (client only, libasound2t64),
+hosted updater masks, download, checksum verification, unpack, server user/unit/start, ready.
+Every completed step appends kernel-start seconds to `$STATE/phases`; the failure trap records
+its current step. The checksum's asset name was checked at the release edge; the machine verifies
+the fixed local archive path. Hosted machines have no SSH key or package installation. Updater
+masks cover apt timers/services and snap refresh paths: absent units are harmless, failed masks
+are followed by explicit masked/inactive-state checks, and failed state queries refuse boot.
+
+Harness SSH commands are `sudo -n om-harness <command>`: `state`, `host`, `uptime-echo`,
+`start-client <k> <server ip:port> <ticks>`, `client-state <k>`, `sample <unit>...`, `samples`,
+and `journal <unit>`. `uptime-echo` emits a CLOCK_BOOTTIME reading per input line.
+`client-state` reports the first input-slot kernel time; a successful query without a matching
+line returns no time, while query failure propagates. The sampler's builtins read cgroup/proc
+facts, avoiding external sampler work inside its loop. Its records are
+`<boot s> <unit>=<cpu usec>,<rss kB> ... cpu <proc/stat fields>`. The scripted client parks its
+hull and sweeps aim so each input changes, according to CLIENT_SCRIPT; it does not fire.
+
+The worst-realistic user-data test renders the real launch function with a maximum-length
+version, DNS origin and port, generated-size keys and full-precision accepted timing settings.
+It fails with actual byte count and a concrete shrink instruction at the EC2 16 KiB limit, and
+also refuses less than 1 KiB headroom. Script narrative comments live here to keep that margin.
 
 ## Offline evidence
 
-MEASURED local results: `npm ci --prefix backend --ignore-scripts --no-audit --no-fund` passed;
-backend typecheck passed; full backend tests passed (247 production-path, 114 EC2). The host-setup
-suite passed (26 tests); the harness suite passed (34 tests, including real capture deadlines).
-Shellcheck on `machine.sh`, embedding `--check`, `cargo fmt --all --check` and `git diff --check`
-passed. Expected invariant-failure fixtures log exceptions and assert their rejection; there were
-no unhandled test-run errors. No Rust changed and no compilation or deployment ran. The Python machine fixture runs
-the generated script's real command entrypoints with OS/network commands replaced on PATH. On
-macOS a Python timeout shim enforces a real process-group kill deadline; production uses GNU
-coreutils timeout. These tests do not claim to emulate systemd's lifecycle manager.
+MEASURED: backend typecheck passed; full backend tests passed (252 production-path, 123 EC2),
+`python3 scripts/aws/test_host_setup.py` passed (26 tests), and the harness passed (37 tests).
+Shellcheck, `node backend/scripts/embed-host.mjs --check`, `cargo fmt --all --check` and
+`git diff --check` passed. No Rust changed, so no Rust compilation was needed. Expected SQL/schema
+and adapter invariant fixtures reject loudly; these are asserted failures, not unhandled test errors.
+
+MEASURED at the 1,048,576-byte cap: the production TypeScript sanitiser function transpiled and
+run in Node took 43.3 ms on the ticket adversary (hex run 4.1 ms, colon run 10.5 ms, unfinished
+array run 1.0 ms). The installed machine command, including fixture process/I/O work, took 260.7 ms.
+These are local observations, not hosted CPU measurements; both regression gates use the DERIVED
+4,000 ms Resolution bound above. MEASURED real `hostedScript` output for the stress fixture:
+13,323 UTF-8 bytes, leaving 3,061 bytes against EC2's 16,384-byte limit; `machine.sh` is 11,294 bytes.
+Only counts/timings were printed, never launch bytes or credentials.
+
+The hook tests run the actual installed
+entrypoints and real GNU `timeout`, with journal/network/system commands replaced by local
+fixtures. Both `timeout` and `gtimeout` are searched on PATH and checked for GNU coreutils.
+Neither available is a hard failure naming `brew install coreutils` / `apt install coreutils`;
+there is no hosting convention allowing a silent skip (unrelated Blender fixtures have their own
+specific availability skips). The Python timeout replacement is deleted. Hung journal/upload
+fixtures create descendants in the real capture process group; tests prove bounded completion,
+no live descendants and a subsequent power-off request. All curl/service/deadline assertions read
+the production owners and check nesting. The dead start-failure fixture assignment is removed.
+These tests exercise the shell composition, not systemd's lifecycle manager.
 
 ## Live proof for the orchestrator (not run)
 
@@ -219,3 +293,45 @@ are operator work outside this lane. Existing archive/crash migrations must alre
    deploy the ordinary proving build again. Do not leave a timer, runtime switch or crash endpoint
    in the shipped code. Drain before ending the operator session. Standing key handling remains
    the orchestrator's existing authorization, not a permission added by this slice.
+
+7. Prove every remaining lifecycle case on separately launched proving matches, restoring the
+   ordinary script between variants. Keep the single privileged hook intact; add only temporary
+   proof commands/diagnostics, regenerate the embed, and remove them after the evidence is saved:
+
+   - **Failed service start:** temporarily point `ExecStart` at a nonexistent absolute executable.
+     Prove root's post-stop hook attempts upload, the boot callback reports unit-created true,
+     and the fallback power-off follows the synchronous stop. Separately fail before unit creation
+     (for example a deliberately wrong fixture checksum); prove no grace/Fleet delay and a visible
+     missing archive outcome when its window closes.
+   - **API shutdown:** separately authorize and invoke AWS API stop/termination for one ready match.
+     Do not infer hook execution from Worker stop success: the sanitized archive must contain a
+     temporary root-hook identity marker and the final server lines. Expect an API-initiated reason
+     in this case, not the clean-end self-shutdown reason.
+   - **Lifetime guard:** make CAP_MIN short only in a proof build, let shutdown trigger without
+     `/end`, and prove the privileged hook archives before power-off. Check its archive timestamp
+     and unit journal, not just instance disappearance.
+   - **Capture deadline:** replace only proof `push-journal` work with a command whose descendants
+     block. Temporarily record GNU timeout's exit status as a fixed numeric diagnostic in the
+     outer hook (preserving the unconditional following power-off). Prove status 137, no live
+     descendants, and power-off despite that status. A missing archive must acquire the Worker's
+     NULL/error row after the admission window closes.
+   - **Network/DNS during shutdown:** for the API/lifetime variants, require an actual successful
+     HTTPS push to the Worker during shutdown; this proves both DNS and network stayed usable
+     for the hook. A local curl-attempt line alone does not prove either.
+   - **Journal flush:** emit a unique final nonsecret process line immediately before exit in a
+     proof build; require it in each available archive. The unit manager's own final stopped line
+     can follow capture. Record any missing final process line as an open flush/order failure.
+   - **Root privilege:** for clean exit, SIGKILL, failed start, API shutdown and lifetime guard,
+     capture a temporary numeric effective uid diagnostic from inside the hook; require uid 0
+     together with successful archive reading. The unit-file `+` string alone is not evidence.
+   - **Shutdown/billing:** for clean end, timestamp hook power-off, archive receipt, instance
+     `shutting-down` and fallback alarm attempts. Require `Client.InstanceInitiatedShutdown` before
+     the derived grace expires; API termination winning is inconclusive for this property. Verify
+     the provider's billing boundary at `shutting-down` from billing/usage evidence, separately
+     from instance disappearance; offline elapsed-time tests do not prove billing.
+   - **Real user data:** measure only UTF-8 byte length of the actual rendered launch bytes before
+     submission (never print the script/settings). Require <=16 KiB and record the count/headroom;
+     fixture headroom is not proof of an operator's actual settings.
+
+   Finish with ordinary proving bytes redeployed, no temporary uid/timeout markers, no timer,
+   crash endpoint or retained experiment flag, and the zero-runtime-resource checks in step 5.
