@@ -42,6 +42,21 @@ const BRAKE_GEAR: u8 = 3;
 const BIN_M: f32 = 0.5;
 const BINS: usize = 12;
 
+#[cfg(all(feature = "bitprobe", feature = "dev_ui"))]
+pub(super) fn measure_drive_cost(run: usize) {
+    for case in [
+        flat_case(Some(2), 1.0, "cost g2 tight"),
+        flat_case(Some(4), 1.0 / 3.0, "cost g4 wide"),
+        flat_case(None, 1.0, "cost neutral pivot"),
+    ] {
+        let mut bed = settled(&case.ground);
+        if let Some(gear) = case.gear {
+            run_up_to(&mut bed, gear, |_| {});
+        }
+        bed.measure_drive_cost(&case.label, run, case.throttle, case.steer);
+    }
+}
+
 #[derive(Clone)]
 enum Ground {
     /// The card's grid at the shipped cell spacing, level.

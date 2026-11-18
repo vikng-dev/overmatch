@@ -2536,13 +2536,13 @@ clippy passed. No capture or pricing run.
 #### Drivetrain review doubles: work, complete paths and unmanned controls (#228)
 
 Subject: the game's damage model, game state only. The two sweep-dmg-2 reviews were checked
-against the production adapter and `transmission::step`. Fixture pools, operating points and
+against the production adapter and the mechanical integrator (`transmission::advance`). Fixture pools, operating points and
 hull inertias below are test data, never asset pass conditions. All fixes are in
 `damage: conserve drivetrain work and preserve unmanned controls (#228)`.
 
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
-| Codex | P1: stopped engine powers a pivot from zero combustion | verified red through `step` and a hull free in translation and yaw; pre-tick work missed acceleration | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
+| Codex | P1: stopped engine powers a pivot from zero combustion | verified red through the integrator and a hull free in translation and yaw; pre-tick work missed acceleration | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
 | Codex | P2: independent Backup views splice incompatible paths | verified red with the review's Driver/Engine and Commander/Transmission paths: neither complete, yet full supply | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
 | Codex | P2: coast comparison passes if unmanned always brakes | verified by that mutant; the test now also compares a serving driver's full brake | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |
 | Codex | P2: reduced module rounds to RATE 100% in f32 | verified red at 19,999,999 of 20,000,000 pool units; integer units now clamp a reduced row below whole | `damage: conserve drivetrain work and preserve unmanned controls (#228)` |

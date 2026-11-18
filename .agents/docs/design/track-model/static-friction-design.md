@@ -116,13 +116,8 @@ C = Σ μ·load_i. The stored elastic resultant q updates by the **elasto-plasti
 
 ### Belt-hold (closes the governor leak)
 
-h = H(|target|/vs)·H(|belt|/vs) (smoothstep, the existing 0.4 m/s scale):
-`ḃ = (engine − (1−h)·R)/I` — at zero command + zero belt speed the locked drivetrain bears
-the ground reaction instead of being back-driven; during motion h→0, today's dynamics
-unchanged. Legitimate force balance: the belt's 1-D coordinate is fully known to the belt
-integrator, which is `transmission::step` — it builds the hold from `forces::hold_blend` as the
-brake-engagement envelope. A future neutral/clutch or brake-damage mechanic weakens this term
-explicitly.
+The current integrator, `transmission::advance`, holds a parked belt with capacity-limited
+stop rows (`passive_rows`); it does not suppress ground reaction with a speed blend.
 
 ### Constants (declared, with provenance)
 
