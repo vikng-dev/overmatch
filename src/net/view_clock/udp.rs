@@ -73,9 +73,12 @@ struct Pair {
     server_ticks: usize,
 }
 impl Pair {
-    fn new(burst: bool) -> Self {
+    /// Both apps run on `timing`: the client paces with it and the server caps debt with it.
+    fn new(burst: bool, timing: Timing) -> Self {
         let (mut server, mut client) = super::super::client::match_exit::in_match();
         super::super::server_runner::install_tick_schedule(&mut server);
+        server.insert_resource(timing.clone());
+        client.insert_resource(timing);
         install(&mut client);
         super::super::frontier::install(&mut client);
         client.insert_resource(TimeUpdateStrategy::ManualDuration(FRAME));
@@ -199,8 +202,8 @@ impl Pair {
 #[test]
 fn bounded_eighty_ten_udp_has_no_settled_holds() {
     let _udp = super::super::test_harness::lock_real_udp_test();
-    let timing = Timing::shipped();
-    let mut pair = Pair::new(false);
+    let timing = Timing::view_fixture();
+    let mut pair = Pair::new(false, timing.clone());
     pair.run(timing.view_window_s * 2.0);
     let result = pair.run(60.0); // Fixture: a minute of settled presentation.
     let clock = pair.client.world().resource::<ViewClock>();
@@ -249,8 +252,8 @@ fn bounded_eighty_ten_udp_has_no_settled_holds() {
 #[test]
 fn sixty_ms_udp_bursts_are_covered_after_the_window_settles() {
     let _udp = super::super::test_harness::lock_real_udp_test();
-    let timing = Timing::shipped();
-    let mut pair = Pair::new(true);
+    let timing = Timing::view_fixture();
+    let mut pair = Pair::new(true, timing.clone());
     pair.run(timing.view_window_s * 2.0);
     let result = pair.run(timing.view_window_s * 2.0);
     assert_eq!(
@@ -266,7 +269,8 @@ fn sixty_ms_udp_bursts_are_covered_after_the_window_settles() {
 #[test]
 fn loaded_server_compute_distribution_has_no_settled_holds() {
     let _udp = super::super::test_harness::lock_real_udp_test();
-    let mut pair = Pair::new(false);
+    let timing = Timing::view_fixture();
+    let mut pair = Pair::new(false, timing.clone());
     // Fixture: deterministic load distribution, milliseconds, all inside the authority budget.
     pair.compute_samples = vec![0.0015, 0.002, 0.0036, 0.008, 0.0143];
     for mut delay in pair
@@ -277,7 +281,7 @@ fn loaded_server_compute_distribution_has_no_settled_holds() {
     {
         delay.jitter_s = 0.0; // Fixture: clean link with fixed propagation.
     }
-    pair.run(Timing::shipped().view_window_s * 2.0);
+    pair.run(timing.view_window_s * 2.0);
     let result = pair.run(60.0); // Fixture: one settled minute.
     assert_eq!(
         result.0, 0,
@@ -287,15 +291,17 @@ fn loaded_server_compute_distribution_has_no_settled_holds() {
     println!("MEASURED loaded-server clean UDP: {result:?}");
 }
 
-/// Stalls are observations of feel, not pinned output obligations. The invariants are monotonic
-/// presentation, no extrapolation and bounded ordinary steps; cuts are deliberate discontinuities.
+/// Stalls are observations of feel, not pinned output obligations: they record how the shipped
+/// timing plays (playtest fork F21), so they read `assets/net_timing.ron`. The invariants are
+/// monotonic presentation, no extrapolation and bounded ordinary steps; cuts are deliberate
+/// discontinuities.
 #[test]
-fn server_stall_and_delay_spike_playback_observations() {
+fn shipped_timing_stall_and_delay_spike_playback_observations() {
     let _udp = super::super::test_harness::lock_real_udp_test();
     let timing = Timing::shipped();
     // Fixture: short server work, capped server work, and a link-only blackout.
     for (server_stall, pause) in [(true, 0.200_f64), (true, 1.0), (false, 0.500)] {
-        let mut pair = Pair::new(false);
+        let mut pair = Pair::new(false, timing.clone());
         pair.run(timing.view_window_s * 2.0);
         let baseline = pair.client.world().resource::<ViewClock>().delta_s.unwrap();
         let start = pair.at_s;
@@ -304,10 +310,10 @@ fn server_stall_and_delay_spike_playback_observations() {
             .world()
             .resource::<Time<Real>>()
             .elapsed_secs_f64();
-        // Fixture: a 200 ms server computation, or a 500 ms downlink blackout.
         let mut last = pair.client.world().resource::<ViewClock>().now().unwrap();
         let mut holds = 0.0;
         let mut peak_delta = baseline;
+        let mut peak_backlog = 0.0_f64;
         let mut last_above = 0.0;
         let mut first_above = None;
         let mut above_s = 0.0;
@@ -387,6 +393,15 @@ fn server_stall_and_delay_spike_playback_observations() {
                 holds += FRAME.as_secs_f64();
             }
             let delta = clock.delta_s.unwrap();
+            let real_s = pair
+                .client
+                .world()
+                .resource::<Time<Real>>()
+                .elapsed_secs_f64();
+            let target = clock.inverse(real_s - delta).unwrap();
+            // The cut gate's backlog: this frame's target over the previous cursor.
+            peak_backlog = peak_backlog
+                .max((target - number(last)) * super::super::server::TICK.as_secs_f64());
             peak_delta = peak_delta.max(delta);
             if delta > baseline + 1e-6 {
                 last_above = pair.at_s - start;
@@ -396,7 +411,7 @@ fn server_stall_and_delay_spike_playback_observations() {
             last = now;
         }
         println!(
-            "MEASURED {}ms {}: held_ms={} cuts={cut_times:?} baseline_ms={} peak_ms={} delta_above_baseline_from_s={first_above:?} until_s={} duration_s={above_s} slow_s={slow_s} fast_s={fast_s}",
+            "MEASURED {}ms {}: held_ms={} cuts={cut_times:?} peak_backlog_ms={} baseline_ms={} peak_ms={} delta_above_baseline_from_s={first_above:?} until_s={} duration_s={above_s} slow_s={slow_s} fast_s={fast_s}",
             pause * 1e3,
             if server_stall {
                 "compute stall"
@@ -404,6 +419,7 @@ fn server_stall_and_delay_spike_playback_observations() {
                 "downlink spike"
             },
             holds * 1e3,
+            peak_backlog * 1e3,
             baseline * 1e3,
             peak_delta * 1e3,
             last_above

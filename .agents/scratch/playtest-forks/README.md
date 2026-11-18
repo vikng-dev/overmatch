@@ -805,8 +805,9 @@ spikes through the same player-facing scene.
 headless readings beside round 1. These are observations for feel, never pinned expected values.
 Current default, MEASURED headless with Fixture 12 ms ordinary work: the 200 ms work stall held 179.6875 ms; delay rose from
 70.3125 to 250 ms and remained above baseline for 10.8984375 s, through 11.1484375 s after onset. A 500 ms link blackout held
-484.375 ms, cut forward 31.3999939 ticks, then showed 2.4140625 s of slow and 2.421875 s of fast
-playback, with extra delay for 12.421875 s, through 12.9140625 s after onset. These durations include the Fixture's read phases.
+484.375 ms, cut forward 31.3999939 ticks, then showed 2.7109375 s of slow and 2.71875 s of fast
+playback under the stream-rate pacing law, with extra delay for 12.421875 s, through 12.9140625 s after onset. These durations include the Fixture's read phases;
+[the pacing report](../view-rate-396.md) re-measures the stalls.
 Round 1 (MEASURED under median compute, Fixture 3 ms ordinary work): a 200 ms server silence held 176.5625 ms in total,
 then bounded catch-up; delay moved one 7.8125 ms read phase rather than retaining the stall.
 

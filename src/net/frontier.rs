@@ -1,5 +1,6 @@
 //! Per-second presentation diagnostics from completed stamps and the application-owned cursor.
-//! `holds` counts runs with no received tick beyond the target, never extrapolation. The
+//! `holds` counts runs of frames whose rate-limited request passed the newest completed tick
+//! (`ViewClock::held`), whether or not the target had reached it; nothing extrapolates. The
 //! offset-bearing raw deltas stay inside `view_clock`; only their differences are durations.
 
 use super::view_clock::ViewClock;

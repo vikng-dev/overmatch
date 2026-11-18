@@ -93,11 +93,28 @@ struct CompletionLine {
     receipt_overflow: u64,
 }
 
+/// The stream's rate, learned only from the stamp map at the target point.
+#[derive(Clone, Copy)]
+struct StreamRate {
+    /// Simulation seconds per stamp second.
+    rate: f64,
+    /// The target point it was last read at: a stamp time and the map's tick there.
+    point_s: f64,
+    point: f64,
+}
+
 #[derive(Resource, Default)]
 pub(crate) struct ViewClock {
-    cursor: Option<TickInstant>,
+    /// The presentation cursor in ticks, unquantized, so the pacing loop never feeds back the
+    /// published cursor's rounding.
+    cursor: Option<f64>,
+    /// The cursor's rate, simulation seconds per Real second.
+    rate: f64,
     delta_s: Option<f64>,
+    stream: Option<StreamRate>,
     stamps: BTreeMap<Tick, f64>,
+    /// The frame's rate-limited request passed the newest completed tick by more than a cursor
+    /// quantum.
     pub held: bool,
     pub received: u64,
     cuts: u64,
@@ -142,7 +159,7 @@ impl ViewClock {
         );
     }
 
-    fn complete(&mut self, checkpoint: RepliconTick, now_s: f64, previous_s: f64) {
+    fn complete(&mut self, checkpoint: RepliconTick, now_s: f64, previous_s: f64, tick_s: f64) {
         self.completion.completed_ticks += 1;
         let Some(arrival) = self.pending.remove(&checkpoint) else {
             // Initial reliable state, receipt overflow or a skipped stale stamp can leave no
@@ -160,24 +177,32 @@ impl ViewClock {
                 .max((now_s - arrival.seen_s) * 1e3);
         }
         let before = self.received;
-        self.sample(arrival.tick, arrival.stamp, now_s, previous_s);
+        self.sample(arrival.tick, arrival.stamp, now_s, previous_s, tick_s);
         self.completion.sampled_ticks += self.received - before;
     }
 
-    fn sample(&mut self, tick: Tick, stamp: TickStamp, now_s: f64, previous_s: f64) {
+    fn sample(&mut self, tick: Tick, stamp: TickStamp, now_s: f64, previous_s: f64, tick_s: f64) {
         let start = stamp.frame_start_s();
-        if self
+        let before = self.stamps.range(..tick).next_back().map(|(_, &s)| s);
+        let after = self
             .stamps
-            .range(..tick)
-            .next_back()
-            .is_some_and(|(_, before)| *before > start)
-            || self
-                .stamps
-                .range((std::ops::Bound::Excluded(tick), std::ops::Bound::Unbounded))
-                .next()
-                .is_some_and(|(_, after)| *after < start)
-        {
+            .range((std::ops::Bound::Excluded(tick), std::ops::Bound::Unbounded))
+            .next()
+            .map(|(_, &s)| s);
+        if before.is_some_and(|before| before > start) || after.is_some_and(|after| after < start) {
             self.refusal = Some(StreamRefusal::Order { tick });
+            return;
+        }
+        // Tick numbers are u32, so a span of the map holds at most u32::MAX ticks: a positive
+        // interval at least u32::MAX T / f64::MAX long keeps every slope between stamps finite.
+        // Equal stamps carry no time and bound no slope.
+        let untimed = |interval_s: f64| {
+            interval_s > 0.0 && (f64::from(u32::MAX) * tick_s / interval_s).is_infinite()
+        };
+        if before.is_some_and(|before| untimed(start - before))
+            || after.is_some_and(|after| untimed(after - start))
+        {
+            self.refusal = Some(StreamRefusal::Interval { tick });
             return;
         }
 
@@ -261,15 +286,16 @@ impl ViewClock {
     /// Waiting is a game state: no completed stamp pair means no presentation epoch yet.
     #[cfg(test)]
     pub fn set_now(&mut self, now: TickInstant) {
-        self.cursor = Some(now);
+        self.cursor = Some(number(now));
     }
     #[cfg(test)]
     pub fn set_synced(&mut self, synced: bool) {
         self.cursor = synced.then(|| self.cursor.unwrap_or_default());
     }
 
+    /// The published cursor, rounded to U0F16; rounding is monotone and never passes a tick.
     pub fn now(&self) -> Option<TickInstant> {
-        self.cursor
+        self.cursor.map(instant)
     }
 
     pub fn newest(&self) -> Option<Tick> {
@@ -297,23 +323,80 @@ impl ViewClock {
         Some(low + fraction * (high - low))
     }
 
-    /// Clamp the inverse to received facts. Equal frame stamps choose the latest tick; no time
-    /// exists between those samples. Missing stamps are bridged, never extrapolated.
-    fn inverse(&self, time_s: f64) -> Option<TickInstant> {
+    /// The map's tick at `time_s`, clamped to received facts. Equal frame stamps choose the
+    /// latest tick; no time exists between those samples. Missing stamps are bridged, never
+    /// extrapolated.
+    fn inverse(&self, time_s: f64) -> Option<f64> {
         let mut before: Option<(Tick, f64)> = None;
         for (&tick, &stamp) in &self.stamps {
             if stamp > time_s {
                 return Some(match before {
-                    None => tick.into(),
-                    Some((low_tick, low)) => instant(
+                    None => f64::from(tick.0),
+                    Some((low_tick, low)) => {
                         f64::from(low_tick.0)
-                            + (time_s - low) / (stamp - low) * f64::from(tick - low_tick),
-                    ),
+                            + (time_s - low) / (stamp - low) * f64::from(tick - low_tick)
+                    }
                 });
             }
             before = Some((tick, stamp));
         }
-        before.map(|(tick, _)| tick.into())
+        before.map(|(tick, _)| f64::from(tick.0))
+    }
+
+    /// Critically damped tracking of the target about the stream's rate, exact over any frame
+    /// length; the target is taken to move at the stream's rate through the frame. Returns the
+    /// requested cursor in ticks, advanced by 0 to (1+v) simulation seconds per Real second.
+    fn pace(
+        &mut self,
+        previous: f64,
+        target: f64,
+        dt_s: f64,
+        tick_s: f64,
+        stream: f64,
+        v: f64,
+    ) -> f64 {
+        let omega = bandwidth(v, tick_s);
+        // How far the cursor would lead the frame-end target, advancing at the stream's rate.
+        let lead_s = (previous - target) * tick_s + stream * dt_s;
+        let decay = (-omega * dt_s).exp();
+        let deviation = self.rate - stream;
+        let pull = deviation + omega * lead_s;
+        let lead_after_s = (lead_s + pull * dt_s) * decay;
+        self.rate = (stream + (deviation - omega * pull * dt_s) * decay).clamp(0.0, 1.0 + v);
+        let advance_s = (lead_after_s - lead_s + stream * dt_s).clamp(0.0, (1.0 + v) * dt_s);
+        previous + advance_s / tick_s
+    }
+
+    /// The stream's rate at the target point, from map facts only: each advance of the point
+    /// filters the map's mean slope over it at the pacing bandwidth, so a hold (no advance)
+    /// freezes it and the release spans the gap with its mean slope. The first cursor frame
+    /// reads the slope across the retained map; equal end stamps read as the cap. Admission
+    /// keeps every slope between stamps finite (`ViewClock::sample`).
+    fn learn(&mut self, point_s: f64, point: f64, tick_s: f64, v: f64) -> f64 {
+        let rate = match self.stream {
+            None => {
+                let ((&first, &first_s), (&newest, &newest_s)) = self
+                    .stamps
+                    .first_key_value()
+                    .zip(self.stamps.last_key_value())
+                    .expect("a cursor's first frame has completed stamps");
+                f64::from(newest - first) * tick_s / (newest_s - first_s)
+            }
+            Some(learned) if point_s > learned.point_s => {
+                let elapsed_s = point_s - learned.point_s;
+                let slope = (point - learned.point) * tick_s / elapsed_s;
+                let gain = 1.0 - (-bandwidth(v, tick_s) * elapsed_s).exp();
+                learned.rate + gain * (slope - learned.rate)
+            }
+            Some(learned) => learned.rate,
+        }
+        .clamp(0.0, 1.0 + v);
+        self.stream = Some(StreamRate {
+            rate,
+            point_s,
+            point,
+        });
+        rate
     }
 
     fn advance(
@@ -324,46 +407,63 @@ impl ViewClock {
         timing: &Timing,
         admission_s: f64,
     ) -> Option<ViewCut> {
-        self.held = false;
+        let released = std::mem::replace(&mut self.held, false);
+        let v = timing.view_rate;
+        // While an outage empties the window, the applied delay holds.
         let target = self.target(&mut self.intervals()).or(self.delta_s)?;
         let delta = self.delta_s.get_or_insert(target);
-        *delta += (target - *delta).clamp(-timing.view_rate * dt_s, timing.view_rate * dt_s);
+        *delta += (target - *delta).clamp(-v * dt_s, v * dt_s);
         let desired_s = now_s - *delta;
-        let target_cursor = self.inverse(desired_s)?;
-        let newest = self.newest().expect("a target requires completed stamps");
-        let previous = self.cursor.unwrap_or(target_cursor);
-        let backlog_s = f64::from((target_cursor - previous).to_f32()) * tick_s;
+        // Retention keeps the newest completed tick, so a map exists once a delay does.
+        let (&first_s, &newest_s) = self
+            .stamps
+            .first_key_value()
+            .zip(self.stamps.last_key_value())
+            .map(|((_, first), (_, newest))| (first, newest))
+            .expect("an applied delay has completed stamps");
+        // A target before the map, as at startup, is the oldest stamp: the stream rate reads no
+        // time the map does not hold.
+        let point_s = desired_s.clamp(first_s, newest_s);
+        let point = self
+            .inverse(point_s)
+            .expect("the clamped point lies on the map");
+        let stream = self.learn(point_s, point, tick_s, v);
+        let newest = f64::from(self.newest().expect("a target requires completed stamps").0);
+        let previous = self.cursor.unwrap_or(point);
+        // A wall-time stall can create a long map segment, but its admitted simulation backlog
+        // is bounded by the server's cap.
+        let backlog_s = (point - previous) * tick_s;
         let cut = (backlog_s > timing.view_cut_s.max(admission_s)).then_some(ViewCut {
-            from: previous,
-            to: target_cursor,
+            from: instant(previous),
+            to: instant(point),
         });
-        // The rate is simulation seconds per real second. A wall-time stall can create a long
-        // map segment, but its admitted simulation backlog is bounded by the server's cap.
-        let next = if cut.is_some() {
-            target_cursor
+        let requested = if cut.is_some() || self.cursor.is_none() {
+            self.rate = stream;
+            point
         } else {
-            target_cursor.min(instant(
-                number(previous) + (1.0 + timing.view_rate) * dt_s / tick_s,
-            ))
-        }
-        .max(previous)
-        .min(TickInstant::from(newest));
-        // Resolution: the public cursor quantizes fractions to U0F16. Sub-quantum rounding
-        // cannot stop a representable cursor advance and is not a hold.
-        let quantum_s = tick_s / (f64::from(u16::MAX) + 1.0);
-        self.held =
-            desired_s > self.stamps[&newest] + quantum_s && next == TickInstant::from(newest);
+            if released {
+                // A hold is a gap in facts, not a change in the stream's speed.
+                self.rate = stream;
+            }
+            self.pace(previous, point, dt_s, tick_s, stream, v)
+        };
+        let next = requested.min(newest);
+        // Resolution: the public cursor quantizes fractions to U0F16. A request within a quantum
+        // of the newest tick publishes the same cursor, so it is not a hold.
+        let quantum = 1.0 / (f64::from(u16::MAX) + 1.0);
+        self.held = requested > newest + quantum;
+        assert!(
+            next >= previous,
+            "the advance is nonnegative and newest never retires below the cursor"
+        );
         self.cursor = Some(next);
         self.cuts += u64::from(cut.is_some());
         // Keep the cursor's predecessor and future map points through holds. Past points retire
         // only after both the statistics window and the cursor have passed them.
-        let anchor = self
-            .stamps
-            .range(..=next.tick())
-            .next_back()
-            .map(|(&tick, _)| tick);
+        let at = instant(next).tick();
+        let anchor = self.stamps.range(..=at).next_back().map(|(&tick, _)| tick);
         self.stamps.retain(|tick, _| {
-            Some(*tick) == anchor || *tick >= next.tick() || self.samples.contains_key(tick)
+            Some(*tick) == anchor || *tick >= at || self.samples.contains_key(tick)
         });
         cut
     }
@@ -389,6 +489,21 @@ impl ViewClock {
     }
 }
 
+/// The pacing bandwidth omega, per Real second, from the slew limit v and tick T: the loop's
+/// natural frequency and the stream rate's filter pole. Resolution: with both at omega the rate's
+/// response to target phase is the kernel omega^2 (3 - 5 x + x^2) e^-x, x = omega t, of zero area
+/// and L1 norm 2 kappa omega, kappa the form constant below. Production phase within p peak to
+/// peak therefore moves the rate by at most kappa omega p, and omega = v / (kappa T) is the widest
+/// band for which a tick of it stays within the slew limit v.
+fn bandwidth(v: f64, tick_s: f64) -> f64 {
+    // The kernel's sign changes at x = (5 -+ sqrt 13) / 2, where its integral is (3 - 2 x) e^-x.
+    let root = 13.0_f64.sqrt();
+    let kappa =
+        (root - 2.0) * (-(5.0 - root) / 2.0).exp() + (root + 2.0) * (-(5.0 + root) / 2.0).exp();
+    v / (kappa * tick_s)
+}
+
+#[cfg(test)]
 fn number(cursor: TickInstant) -> f64 {
     f64::from(cursor.tick().0) + f64::from(cursor.overstep().to_f32())
 }
@@ -442,6 +557,7 @@ fn capture_trace_tick(
 pub(super) enum StreamRefusal {
     Order { tick: Tick },
     Range { tick: Tick },
+    Interval { tick: Tick },
 }
 impl std::fmt::Display for StreamRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -454,6 +570,10 @@ impl std::fmt::Display for StreamRefusal {
                 f,
                 "server tick {tick:?} has an unrepresentable lateness spread; refusing the stream"
             ),
+            Self::Interval { tick } => write!(
+                f,
+                "server tick {tick:?} has a frame-start interval too short to time; refusing the stream"
+            ),
         }
     }
 }
@@ -465,8 +585,13 @@ pub(super) fn publish_weapon_clock(clock: Res<ViewClock>, mut weapon: ResMut<cra
     } // Waiting for a stamp pair cannot mature a countdown.
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system's parameters are its accesses: two clocks, the timing data, the three replication receipt sources, the refusal channel and the view clock, with no subset that hides anything as a group"
+)]
 fn receive(
     real: Res<Time<Real>>,
+    tick_duration: Res<lightyear::core::tick::TickDuration>,
     timing: Res<Timing>,
     checkpoints: Res<ReplicationCheckpointMap>,
     mut storage: ResMut<ReplicationStorage>,
@@ -494,7 +619,12 @@ fn receive(
     // newest completed tick. Replicon's contains() assumes old ticks complete after 64 ticks;
     // these events instead require every message of that particular tick to have been applied.
     for event in completed.read() {
-        clock.complete(event.tick, now, now - real.delta_secs_f64());
+        clock.complete(
+            event.tick,
+            now,
+            now - real.delta_secs_f64(),
+            tick_duration.0.as_secs_f64(),
+        );
     }
     if let Some(refusal) = clock.refusal.take() {
         warn!("client: {refusal}");
@@ -521,7 +651,7 @@ mod tests {
         for frame_s in [0.0625, 1.0] {
             let mut app = App::new();
             app.add_plugins(MinimalPlugins)
-                .init_resource::<Timing>()
+                .insert_resource(Timing::view_fixture())
                 .insert_resource(lightyear::core::tick::TickDuration(
                     super::super::server::TICK,
                 ))
@@ -585,6 +715,7 @@ mod tests {
         ));
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
+            .insert_resource(Timing::view_fixture())
             .init_resource::<ReplicationStorage>()
             .init_resource::<ReplicationCheckpointMap>()
             .init_resource::<InterpolationTimeline>()
@@ -678,7 +809,7 @@ mod tests {
 
         let _udp = super::super::test_harness::lock_real_udp_test();
         let (mut server, mut client) = super::super::client::match_exit::in_match();
-        client.init_resource::<Timing>();
+        client.insert_resource(Timing::view_fixture());
         install(&mut client);
         server
             .world_mut()
@@ -711,12 +842,13 @@ mod tests {
         let tick_s = super::super::server::TICK.as_secs_f64();
         let mut clock = ViewClock::default();
         // Fixture: the middle stamp is lost; epoch offset is unchanged.
-        clock.sample(Tick(1), stamp(0.0), 0.5, 0.25);
+        clock.sample(Tick(1), stamp(0.0), 0.5, 0.25, tick_s);
         clock.sample(
             Tick(3),
             stamp(2.0 * tick_s),
             0.5 + 2.0 * tick_s,
             0.25 + 2.0 * tick_s,
+            tick_s,
         );
         assert_eq!(clock.intervals(), [2.0 * tick_s]);
         assert_eq!(
@@ -728,7 +860,7 @@ mod tests {
     /// D3 forgets expired lateness without discarding the unknown clock offset.
     #[test]
     fn target_forgets_expired_lateness_and_preserves_the_clock_offset() {
-        let timing = Timing::shipped();
+        let timing = Timing::view_fixture();
         let mut clock = ViewClock::default();
         // Fixture: observations at fractions of the authored window, with a late oldest tick.
         for (tick, start, x, seen) in [
@@ -741,6 +873,7 @@ mod tests {
                 stamp(start),
                 seen * timing.view_window_s,
                 start + x,
+                super::super::server::TICK.as_secs_f64(),
             );
         }
         assert_eq!(clock.target(&mut clock.intervals()), Some(8.125));
@@ -767,7 +900,12 @@ mod tests {
                 f64::from(tick),
             );
             if tracker.confirm(checkpoint, 1) {
-                clock.complete(checkpoint, f64::from(tick), f64::from(tick));
+                clock.complete(
+                    checkpoint,
+                    f64::from(tick),
+                    f64::from(tick),
+                    super::super::server::TICK.as_secs_f64(),
+                );
             }
         }
         assert!(
@@ -787,7 +925,7 @@ mod tests {
     #[test]
     fn paced_delay_changes_keep_the_cursor_and_an_old_public_path_forward() {
         use crate::ballistics::path::Replica;
-        let timing = Timing::shipped();
+        let timing = Timing::view_fixture();
         let tick_s = super::super::server::TICK.as_secs_f64();
         let cap_s = timing.admission_s;
         let mut clock = ViewClock::default();
@@ -800,7 +938,7 @@ mod tests {
             let s = f64::from(tick) * tick_s;
             // Fixture: independently arriving completed samples, then an increased link bound.
             let x = if tick > change_at { 0.100 } else { 0.040 };
-            clock.sample(Tick(tick), stamp(s), s + x + tick_s, s + x);
+            clock.sample(Tick(tick), stamp(s), s + x + tick_s, s + x, tick_s);
             clock.expire(s + x + tick_s, timing.view_window_s);
             let cut = clock.advance(s + x + tick_s, tick_s, tick_s, &timing, cap_s);
             assert!(cut.is_none(), "a bounded delay change is paced, not cut");
@@ -832,7 +970,7 @@ mod tests {
     /// unknown epoch as a duration. Both clock-origin choices must produce the same cursor.
     #[test]
     fn a_link_outage_cuts_once_and_clock_origins_cancel() {
-        let timing = Timing::shipped();
+        let timing = Timing::view_fixture();
         let tick_s = super::super::server::TICK.as_secs_f64();
         let admission_s = timing.admission_s;
         let mut cuts = Vec::new();
@@ -841,20 +979,42 @@ mod tests {
             let mut clock = ViewClock::default();
             for tick in 1..=4 {
                 let s = f64::from(tick) * tick_s;
-                clock.sample(Tick(tick), stamp(s), s + offset + 0.040, s + offset + 0.030);
+                clock.sample(
+                    Tick(tick),
+                    stamp(s),
+                    s + offset + 0.040,
+                    s + offset + 0.030,
+                    tick_s,
+                );
                 clock.advance(s + offset + 0.040, tick_s, tick_s, &timing, admission_s);
             }
             let before = clock.now().unwrap();
             // Fixture: no completed updates during an outage longer than both W and the cut gate.
             let gap_s = timing.view_window_s + timing.view_cut_s.max(admission_s) * 4.0;
+            clock.expire(gap_s + offset - tick_s, timing.view_window_s);
+            clock.advance(
+                gap_s + offset - tick_s,
+                gap_s - tick_s,
+                tick_s,
+                &timing,
+                admission_s,
+            );
+            // A frame far longer than the pacing time constant converges onto the clamped target
+            // inside it; every frame after it requests past the newest tick.
             clock.expire(gap_s + offset, timing.view_window_s);
-            clock.advance(gap_s + offset, gap_s, tick_s, &timing, admission_s);
+            clock.advance(gap_s + offset, tick_s, tick_s, &timing, admission_s);
             assert!(clock.held);
             assert!(clock.now().unwrap() >= before);
             assert_eq!(clock.now().unwrap(), TickInstant::from(Tick(4)));
             for tick in 1000..1004 {
                 let s = f64::from(tick) * tick_s;
-                clock.sample(Tick(tick), stamp(s), s + offset + 0.040, s + offset + 0.030);
+                clock.sample(
+                    Tick(tick),
+                    stamp(s),
+                    s + offset + 0.040,
+                    s + offset + 0.030,
+                    tick_s,
+                );
             }
             let s = 1003.0 * tick_s;
             let cut = clock
@@ -880,18 +1040,45 @@ mod tests {
     /// stream before division/interpolation; loss and reordering of a consistent stream are legal.
     #[test]
     fn out_of_order_receipts_are_valid_but_reversed_time_is_refused() {
+        let tick_s = super::super::server::TICK.as_secs_f64();
         let mut clock = ViewClock::default();
         for tick in [1, 3, 2] {
-            clock.sample(Tick(tick), stamp(f64::from(tick)), 4.0, 3.0);
+            clock.sample(Tick(tick), stamp(f64::from(tick)), 4.0, 3.0, tick_s);
         }
         assert!(clock.refusal.is_none());
-        assert_eq!(clock.inverse(2.5), Some(instant(2.5)));
-        clock.sample(Tick(4), stamp(0.0), 5.0, 4.0);
+        assert_eq!(clock.inverse(2.5), Some(2.5));
+        clock.sample(Tick(4), stamp(0.0), 5.0, 4.0, tick_s);
         assert!(matches!(
             clock.refusal,
             Some(StreamRefusal::Order { tick: Tick(4) })
         ));
         assert_eq!(clock.newest(), Some(Tick(3)));
+    }
+
+    /// The stream rate divides ticks by stamp intervals, and the pacing loop relies on it being
+    /// finite. Equal stamps carry no time and are legal; a peer's positive interval too short for
+    /// that division is refused at admission, before any rate reads it.
+    #[test]
+    fn a_stamp_interval_too_short_to_time_is_refused_before_pacing() {
+        let timing = Timing::view_fixture();
+        let tick_s = super::super::server::TICK.as_secs_f64();
+        let mut clock = ViewClock::default();
+        // Fixture: two equal stamps, then the smallest positive one, all individually valid,
+        // each with lateness 0.5 s. Admitted, the third would let the target point advance by
+        // that interval: an infinite slope at a zero gain, a NaN stream rate.
+        for (tick, start) in [(1, 0.0), (2, 0.0), (3, f64::from_bits(1))] {
+            clock.sample(Tick(tick), stamp(start), 1.0, start + 0.5, tick_s);
+        }
+        assert!(matches!(
+            clock.refusal,
+            Some(StreamRefusal::Interval { tick: Tick(3) })
+        ));
+        assert_eq!(clock.newest(), Some(Tick(2)));
+        for now_s in [0.5, 0.5 + tick_s] {
+            clock.advance(now_s, tick_s, tick_s, &timing, timing.admission_s);
+        }
+        let stream = clock.stream.expect("the cursor has a stream rate");
+        assert!(stream.rate.is_finite() && clock.rate.is_finite());
     }
     /// A replacement authority may start at an earlier tick. The shipped installer must clear
     /// both the view epoch on disconnect and queued old receipts on connect, without an arming latch.
@@ -899,7 +1086,8 @@ mod tests {
     fn connection_boundaries_clear_the_cursor_and_old_tick_receipts() {
         use lightyear::prelude::{PeerId, RemoteId};
         let mut app = App::new();
-        app.init_resource::<ReplicationStorage>();
+        app.insert_resource(Timing::view_fixture())
+            .init_resource::<ReplicationStorage>();
         install(&mut app);
         app.world_mut()
             .resource_mut::<ViewClock>()
@@ -937,7 +1125,7 @@ mod tests {
     /// Hull presentation relies on a window-bounded epoch error, not a synchronized local tick.
     #[test]
     fn oscillator_drift_is_bounded_by_the_lateness_window() {
-        let timing = Timing::shipped();
+        let timing = Timing::view_fixture();
         let tick_s = super::super::server::TICK.as_secs_f64();
         // Fixture: +/-50 ppm oscillator error, arbitrary offset and a constant clean-link delay.
         for epsilon in [-50e-6_f64, 50e-6] {
@@ -949,7 +1137,7 @@ mod tests {
                 let x = 20.0 + 0.040 + server * epsilon;
                 let now = server + x + tick_s;
                 clock.expire(now, timing.view_window_s);
-                clock.sample(Tick(tick), stamp(server), now, server + x);
+                clock.sample(Tick(tick), stamp(server), now, server + x, tick_s);
                 clock.advance(
                     now,
                     tick_s * (1.0 + epsilon),
@@ -974,7 +1162,7 @@ mod tests {
     /// Frame-start lateness includes compute, including isolated stalls, without a second term.
     #[test]
     fn frame_start_lateness_covers_both_compute_and_link_work() {
-        let timing = Timing::shipped();
+        let timing = Timing::view_fixture();
         let tick = super::super::server::TICK.as_secs_f64();
         // Fixture: binary fractions make the missing compute term an exact counterexample.
         let (work, down, frame) = (tick / 4.0, tick / 4.0, tick / 8.0);
@@ -986,6 +1174,7 @@ mod tests {
                 TickStamp::new(start, work as f32).unwrap(),
                 start + work + down,
                 start + work + down - frame,
+                tick,
             );
         }
         let target = clock.target(&mut clock.intervals()).unwrap();
@@ -1002,6 +1191,7 @@ mod tests {
             TickStamp::new(9.0 * tick, 1.0).unwrap(),
             9.0 * tick + 1.0 + down,
             9.0 * tick + 1.0 + down - frame,
+            tick,
         );
         assert!(
             (clock.target(&mut clock.intervals()).unwrap() - (tick + 1.0 + down - frame)).abs()
@@ -1011,5 +1201,7 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod pacing;
 #[cfg(test)]
 mod udp;

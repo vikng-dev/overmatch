@@ -69,8 +69,9 @@ pub(in crate::net) fn refusal_kinds() -> Vec<ServerGone> {
         ServerGone::Construction(crate::net::construction::ConstructionRefusal::DuplicateLedgers),
         ServerGone::Debris(crate::net::debris_stress::PoseRefusal::Position),
         ServerGone::TickStamp(crate::net::tick_stamp::StampRefusal::invalid_fixture()),
-        // Fixture tick; the stream order check is also terminal.
+        // Fixture ticks; the stream order and interval checks are also terminal.
         ServerGone::Stream(crate::net::view_clock::StreamRefusal::Order { tick: Tick(4) }),
+        ServerGone::Stream(crate::net::view_clock::StreamRefusal::Interval { tick: Tick(3) }),
     ]
 }
 
