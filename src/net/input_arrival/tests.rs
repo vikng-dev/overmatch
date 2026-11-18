@@ -946,6 +946,8 @@ fn despawning_a_connection_resets_its_pending_edges_and_frame_state() {
 #[test]
 fn the_bridge_applies_only_the_controlling_links_command_and_holds_disconnected_owners() {
     use bevy::ecs::system::RunSystemOnce;
+    // RunSystemOnce bypasses the schedule executor's compute-pool initialization.
+    bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
     let mut world = World::new();
     let mut roots = Vec::new();
     // Fixture absolute levels distinguish the two owners without depending on vehicle data.
