@@ -308,6 +308,7 @@ fn server_stall_and_delay_spike_playback_observations() {
         let mut last = pair.client.world().resource::<ViewClock>().now().unwrap();
         let mut holds = 0.0;
         let mut peak_delta = baseline;
+        let mut peak_backlog = 0.0_f64;
         let mut last_above = 0.0;
         let mut first_above = None;
         let mut above_s = 0.0;
@@ -387,6 +388,15 @@ fn server_stall_and_delay_spike_playback_observations() {
                 holds += FRAME.as_secs_f64();
             }
             let delta = clock.delta_s.unwrap();
+            let real_s = pair
+                .client
+                .world()
+                .resource::<Time<Real>>()
+                .elapsed_secs_f64();
+            let target = clock.inverse(real_s - delta).unwrap();
+            // The cut gate's backlog: this frame's target over the previous cursor.
+            peak_backlog = peak_backlog
+                .max((target - number(last)) * super::super::server::TICK.as_secs_f64());
             peak_delta = peak_delta.max(delta);
             if delta > baseline + 1e-6 {
                 last_above = pair.at_s - start;
@@ -396,7 +406,7 @@ fn server_stall_and_delay_spike_playback_observations() {
             last = now;
         }
         println!(
-            "MEASURED {}ms {}: held_ms={} cuts={cut_times:?} baseline_ms={} peak_ms={} delta_above_baseline_from_s={first_above:?} until_s={} duration_s={above_s} slow_s={slow_s} fast_s={fast_s}",
+            "MEASURED {}ms {}: held_ms={} cuts={cut_times:?} peak_backlog_ms={} baseline_ms={} peak_ms={} delta_above_baseline_from_s={first_above:?} until_s={} duration_s={above_s} slow_s={slow_s} fast_s={fast_s}",
             pause * 1e3,
             if server_stall {
                 "compute stall"
@@ -404,6 +414,7 @@ fn server_stall_and_delay_spike_playback_observations() {
                 "downlink spike"
             },
             holds * 1e3,
+            peak_backlog * 1e3,
             baseline * 1e3,
             peak_delta * 1e3,
             last_above
