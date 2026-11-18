@@ -875,7 +875,8 @@ pub enum ClutchState {
 }
 
 /// A free initial choice is distinct from take-up of an already selected ratio. A paid
-/// shift keeps its selected gear through closing; the first solved lock ends its launch floor.
+/// shift keeps its selected gear through closing. Only a lock under propulsive demand ends
+/// the launch floor; idle settling preserves the free initial choice.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum LaunchState {
     Unchosen,
@@ -1805,7 +1806,7 @@ fn advance_rows(
     } else {
         ClutchState::Slip
     };
-    if locked {
+    if locked && controls.propulsive >= dead() {
         st.launch = LaunchState::Locked;
     }
     st.omega_e = solved.speeds[0] as f32;
@@ -2249,7 +2250,7 @@ pub(crate) fn advance(
         probe.gear_reduction = ratio;
         probe.k = k;
         probe.omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
-        probe.omega_floor = if st.launch != LaunchState::Locked {
+        probe.omega_floor = if st.launch != LaunchState::Locked && controls.propulsive >= dead() {
             tp.launch_omega(controls.propulsive)
         } else {
             idle_floor(tp, inp.supply, omega_pre).unwrap_or(0.0)

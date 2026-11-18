@@ -1,11 +1,13 @@
 # Drivetrain slice 3: Relocate
 
+The first report below records `d38b955b`. The second-fix section records the current lane.
+
 Subject: the game's driving physics, game state only. Where an engine's HP state is involved,
 the subject is the game's damage model: an HP pool emptied means the engine is knocked out.
 Lane `lane/drive-relocate`, bay 2. Fixes follow the independent review and six lens verdicts
 for `63cf3d97`; `main` was merged first, retaining both sides of `src/headless_test.rs`.
 
-## Current schedule and ownership
+## First fix: schedule and ownership
 
 - FixedUpdate samples contact, shapes commands and makes one Driver decision. A server-local,
   spawn-built `DrivetrainStep` owns pending mechanics and the last accepted block assignment.
@@ -63,7 +65,7 @@ which surface-velocity writes leave invariant, so those systems need no mutual o
   repeated rationale and component lookups are removed. The pre-existing second-spec speed
   ripple is an observation; contact, launch and independently derived load checks remain.
 
-No WIRE_TYPE_DEFS definition changes; PROTOCOL_REV remains **106**.
+First fix wire: no WIRE_TYPE_DEFS definition changes; PROTOCOL_REV was **106**.
 
 ## Independent invariants
 
@@ -209,3 +211,150 @@ the final block run passed **15 tests**, with formatting and CI clippy passing a
 Follow-up logs: `/tmp/drive-fix-commit-{fmt,clippy,block}.log`.
 
 The six-lens independent review and merge to main belong to the orchestrator. This lane does not push.
+
+## Second fix: demand, ownership and measurement
+
+Subject: the game's driving physics and damage model, game state only. An engine whose HP pool
+is emptied is knocked out. Parent `8bd41440` merges `main` into the lane before these fixes;
+its driving source is `d38b955b`. The sections above record the first fix, not the current wire
+revision or surface-list implementation.
+
+### Finding dispositions and decisions
+
+- **P2-1:** `advance_rows` latches `Locked` only with propulsive demand. The Driver already
+  refuses zero demand, and `coupling_budget` already gates the launch floor by demand. The
+  trace's `omega_floor` now uses that same gate. The canonical launch field/hash encoding is
+  unchanged. Invariant: before the initial propulsive request, idle settling preserves
+  `Unchosen`; the same request and present load choose the same launch ratio after either
+  settle history. The class test covers every fixture construction, including a mechanically
+  locked interval with its engine knocked out and subsequent repair, and stored crank/belt
+  motion. It failed on the parent (`Locked` versus `Unchosen`) and passes after the fix. It
+  compares the choices with each other, without pinning a gear. Previously driven stops still
+  retain their selected ratio; this correction concerns the free initial choice.
+- **P2-2:** decision: rename the sampled-ground test to
+  `second_spec_drives_against_the_observed_contact_load`. Its independently derived contact-load
+  balance remains. There is no independent premise for the deleted one-percent-of-governed-speed
+  ripple bound, and the measured trajectories do not justify one. The warm-start comparison
+  below found no trajectory defect, so the solver is unchanged.
+- **P2-3 / parallel-work P2:** `BeltConstraints` builds tank-owned lists once in
+  `SolverSystems::PreSubstep`. Avian's pinned `solver/schedule.rs` chains
+  `PrepareContactConstraints -> PreSubstep -> Substep`; `solver/plugin.rs` clears and fills the
+  constraint vectors only during preparation, and its substep passes mutate their elements
+  without changing identities. Serial preparation assigns addresses and writers only; face
+  geometry evaluates in parallel batches and publishes in graph order. The list includes overflow. Each substep borrows only listed
+  constraints, computes on disjoint references in batches sized from actual constraint count
+  and compute-pool workers, and joins before the solve. A belt-on-belt constraint belongs to the
+  lower Entity of its owners, reads both owners after advance, and has one writer. Empty lists
+  return without task dispatch or owner reads. There is no substep contact-graph scan, contact
+  lookup or pose query. The game and sandbox share this path. Tests cover both collider orders,
+  consecutive speeds, shared ownership, overflow, ordinary-surface preservation and empty lists.
+- **P3s:** the resting publication test now has an awake changed-speed positive control and
+  opens its Driver ledger before delivery. The harness park recipe sends an explicit service
+  brake, clears that held level when the stop is observed, and never requests reverse. Its
+  comment and persistent-command witness match that behavior; no backlog row remains. The
+  redundant steering/side-stop fixture compares production `held`, `driving` and brake-slide
+  results across cold and accepted seeds. Both repeated explanations identified by brevity
+  were removed.
+
+The brake level crosses `TankCommand`, `InputLevels`, parsing and action staging into
+`DriveIntent::Brake`. Its codec/staging and command-to-intent witnesses pass. `InputLevels` is
+in `WIRE_TYPE_DEFS`: **PROTOCOL_REV=107**, **WIRE_TYPES_HASH=0x29519dbc6a7b2a71**. `LaunchState`'s
+wire definition did not change. The protocol tests passed after the required manifest re-pin.
+
+### Cost
+
+MEASURED: local Apple M4, edit profile, dev_ui,bitprobe, three runs per fixture, 640 measured ticks
+per run. Same inputs and run-up recipes before/after; the after bracket also includes the new
+once-per-step list preparation. These are local observations, not hosted two-core measurements.
+No dispatch threshold or physical parameter was tuned: Bevy splats the actual listed rows over
+its existing worker pool, including rows in the same graph color.
+
+| Fixture | Parent us/tick, runs 1 / 2 / 3 | Tip us/tick, runs 1 / 2 / 3 |
+|---|---|---|
+| parked-yard | 98.845 / 90.853 / 91.231 | 71.868 / 71.573 / 71.510 |
+| flat cost g2 tight | 146.086 / 140.452 / 141.016 | 122.049 / 121.898 / 121.953 |
+| flat cost g4 wide | 140.479 / 140.625 / 141.056 | 121.161 / 120.633 / 121.525 |
+| flat cost neutral pivot | 138.866 / 139.522 / 140.503 | 120.156 / 119.659 / 120.383 |
+| parked-loose-field | 122.210 / 123.097 / 123.879 | 87.822 / 86.860 / 87.338 |
+
+DERIVED three-run means, parent -> tip: 93.643 -> 71.650, 142.518 -> 121.967,
+140.720 -> 121.106, 139.630 -> 120.066, 123.062 -> 87.340 us/tick in table order.
+Parked and pivot return toward the first report's MEASURED slice-2 63 and 95 us/tick.
+The pivot and both turns have MEASURED zero world constraints throughout the window: no belt
+surface computation is dispatched. Their remaining bracket contains preparation, the six
+owner-local advances, publication and scheduling; slice 2 advanced an owner's substeps within
+one fixed-tick pass. This capture does not separately time those costs. The loose-field Fixture
+keeps 256 independent pieces awake away from the tank: MEASURED 452 world constraints per tick
+and zero tank solver contact points. Those contacts are scanned once per step, never per substep.
+
+Moving-fixture assignment mean/max per substep is unchanged: MEASURED 1.191667/492 tight,
+1.061458/236 wide and 1.011719/27 pivot. Parked-yard is MEASURED 1.003125/7 -> 1.006250/7;
+its arrival can change with the corrected initial launch rule. Its mean/max tank contact points
+are MEASURED 12.11875/115 -> 12.4328125/133. These are observations, not acceptance conditions.
+Raw logs: `/tmp/drive-r2-before-field-cost.log`, `/tmp/drive-r2-parallel-cost.log`.
+The earlier `/tmp/drive-r2-before-cost.log` trial allowed loose pieces to sleep and is not the
+field-of-active-contacts comparison above.
+
+### Launch observations
+
+MEASURED once per completed capture: full throttle for four seconds after a one-second idle
+settle. Both enter demand with F1, park=true, clutch=Slip, launch=Unchosen and crank speed
+61.73857 rad/s. The launch and subsequent ratio choices below are observations, never pins.
+
+| Fixture | Gear changes at zero-based tick | Clutch ticks Out / Slip / In | Hull speed at 4 s, m/s |
+|---|---|---|---:|
+| slab pull | 0:F4, 85:F5, 151:F8 | 40 / 171 / 45 | 4.331298351 |
+| level standing start | 0:F4, 87:F5, 154:F6 | 40 / 122 / 94 | 4.686697483 |
+
+The slab capture repeats the first fix's observation exactly. Geometry evaluation was then
+parallelized before the final cost captures: its immutable inputs, arithmetic and graph-order
+publication are unchanged. Both captures have MEASURED 38
+ticks with `shift_ticks > 0`; the 40 Out ticks include the final substep window of each cut.
+The minimum last-substep crank-minus-launch-floor observation in Slip is MEASURED
+-117.2628555 rad/s in both captures. The crank starts below the requested spool speed: the
+floor limits clutch extraction (`coupling_budget`), rather than injecting energy to reach it.
+This is not a promise that every slipping crank starts above the launch floor.
+
+Raw logs: `/tmp/drive-r2-tip-slab.log`, `/tmp/drive-r2-tip-standing.log`;
+series: `target/belt-friction/r2-tip-{slab-pull,standing-start}.csv`.
+The standing-start measurement used a throwaway extension of the friction probe; that extension
+and its solver-contact-only precondition adjustment are reverted. No experimental arm remains.
+
+### Sampled-ground trajectory
+
+MEASURED final-second `speed_range`, m/s:
+
+| Source | Range |
+|---|---|
+| 47a69f0c, checked out detached in this bay and returned to the lane | [3.1431653, 3.1433117] |
+| parent 8bd41440 (driving source d38b955b) | [3.1431653, 3.1433117] |
+| parent with a throwaway cold seed every substep | [3.1431653, 3.1433117] |
+| new production source, warm and cold paired | [3.1431653, 3.1433117] |
+
+The tip comparison checks all hull-speed, belt-speed and phase bits plus complete transmission
+state after each of MEASURED 3840 sampled-ground ticks; warm and cold trajectories are identical.
+The old bound passes at the old commit and parent, so its deletion was not evidence of a changed
+trajectory. The paired comparison and forced cold-seed edits are reverted; accepted history is
+the sole production solve path. Raw logs: `/tmp/drive-r2-{47,before,cold}-settle.log`,
+`/tmp/drive-r2-tip-settle-paired.log`.
+
+### Final verification
+
+Final Rust source stayed fixed through these checks. Compiles used `scripts/serial-cargo` with
+`dev_ui,bitprobe`, except the requested no-default-feature server check.
+
+- `cargo fmt --all --check`: passed.
+- CI clippy, `--locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`: passed.
+- Targeted tests: MEASURED 36 sim, 1 launch-history, 1 redundant-row, 6 belt-contact, 16 scorecard,
+  21 harness, 28 input-arrival, 16 command and 18 protocol tests passed: DERIVED 143 total,
+  zero failures; the ordinary scorecard run ignored its nine on-demand probes.
+- `check --no-default-features --bin overmatch-server`: passed, with the same three pre-existing
+  dead-code warnings for weapon audio, engine sound fields and steering readout.
+- One completed full library suite on final source: MEASURED **2857 passed, 0 failed, 51 ignored**.
+  An earlier attempt was stopped to parallelize preparation geometry before these final checks;
+  its partial log is `/tmp/drive-r2-interrupted-suite.log`.
+- Cost probes, both completed launch captures and the paired warm/cold trajectory capture passed.
+  All temporary measurement edits were reverted before final verification.
+
+Final logs: `/tmp/drive-r2-final-{fmt,clippy,sim,launch,redundant,surfaces,scorecard,harness,input,command,protocol,server,suite}.log`.
+The lane commits locally; independent six-lens landing review, merge and release belong to the orchestrator.

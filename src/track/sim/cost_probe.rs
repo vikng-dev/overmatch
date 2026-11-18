@@ -45,6 +45,15 @@ pub(crate) fn install(app: &mut App) {
         .add_systems(
             PhysicsSchedule,
             (
+                start.before(prepare_belt_surfaces),
+                end.after(prepare_belt_surfaces)
+                    .before(seed_conveyor_impulses),
+            )
+                .in_set(SolverSystems::PreSubstep),
+        )
+        .add_systems(
+            PhysicsSchedule,
+            (
                 start.before(commit_drivetrains),
                 end.after(publish_engine_rpm),
             )

@@ -3476,3 +3476,88 @@ fn free_belts_gain_force_times_tick_duration_over_inertia() {
         }
     }
 }
+
+/// Initial launch selection belongs to the player's first propulsive demand. The Driver must
+/// see Unchosen after idle settling, including a mechanically locked substep; identical demand
+/// and current load must choose the same ratio after different settle histories.
+/// The game's damage model: one history settles with its engine knocked out, then repairs it.
+#[test]
+fn idle_settling_preserves_the_free_launch_choice() {
+    for (fp, tp) in class_drivetrains() {
+        let mut choices = Vec::new();
+        // Fixture: a resting crank and stored crank/belt motion entering the parked state.
+        for (crank, mut speeds) in [
+            (0.0, [0.0; 2]),
+            (tp.engine.governed_rpm * RPM_TO_RAD, [0.2, -0.1]),
+        ] {
+            let mut state = TransmissionState {
+                omega_e: crank,
+                ..fresh(&tp)
+            };
+            for tick in 0..256 {
+                let mut idle = input(0.0, 0.0, speeds, [0.0; 2]);
+                idle.supply.engine_in_action = crank != 0.0 || tick >= 128;
+                let report = substep_tick(&fp, &tp, &mut state, &idle);
+                speeds = report.next_speeds;
+                assert_eq!(
+                    state.launch,
+                    LaunchState::Unchosen,
+                    "idle mechanical lock cannot select a launch"
+                );
+            }
+            assert!(state.park);
+            assert_eq!(speeds, [0.0; 2]);
+            let demand = felt_at_rest(input(1.0, 0.0, speeds, [0.0; 2]));
+            step(&fp, &tp, &mut state, &demand);
+            assert_eq!(state.launch, LaunchState::TakingUp);
+            choices.push(state.gear);
+        }
+        assert_eq!(
+            choices[0], choices[1],
+            "the same throttle and load must choose the same launch after either settle history"
+        );
+    }
+}
+
+/// The game's driving physics and damage model: an unstaffed parked transmission can receive
+/// stored crank work. The steering tie and two side stops are redundant when both belts hold;
+/// rest admission and the Driver's delivery flag must not depend on which accepted faces seed it.
+#[test]
+fn redundant_stops_keep_held_and_driving_independent_of_the_warm_seed() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let fp = construction(&fp);
+    let mut warm = WarmStart::default();
+    // Fixture: alternate previous loads so the history includes both sides of redundant rows.
+    for load in [-1000.0, 1000.0] {
+        for crank in [0.0, tp.engine.idle_rpm * RPM_TO_RAD] {
+            let mut inp = input(0.0, 0.0, [0.0; 2], [load, -load]);
+            inp.supply.control_authority = false;
+            let make = || DriveState {
+                transmission: TransmissionState {
+                    omega_e: crank,
+                    ..TransmissionState::from_spec(&tp)
+                },
+                speeds: inp.speeds,
+                phases: [0.0; 2],
+            };
+            let mut history = make();
+            let orders = prepare_orders(&fp, &tp, &mut history.transmission, &inp);
+            advance(&fp, &tp, &mut history, &orders, &mut warm, inp.dt);
+            let mut hot = make();
+            let mut cold = make();
+            let hot = advance(&fp, &tp, &mut hot, &orders, &mut warm, inp.dt);
+            let cold = advance(
+                &fp,
+                &tp,
+                &mut cold,
+                &orders,
+                &mut WarmStart::default(),
+                inp.dt,
+            );
+            assert_eq!(hot.held, [true; 2]);
+            assert_eq!(hot.held, cold.held);
+            assert_eq!(hot.driving, cold.driving);
+            assert!(!hot.brakes_slide && !cold.brakes_slide);
+        }
+    }
+}

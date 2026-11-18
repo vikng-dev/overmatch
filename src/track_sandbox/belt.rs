@@ -323,6 +323,11 @@ pub(super) struct PendingDrivetrain(Option<transmission::DriveTick>, transmissio
 pub(super) fn drivetrain_plugin(app: &mut App) {
     use avian3d::prelude::*;
     app.init_resource::<PendingDrivetrain>()
+        .init_resource::<crate::track::stop_contacts::BeltConstraints>()
+        .add_systems(
+            PhysicsSchedule,
+            crate::track::stop_contacts::prepare_belt_surfaces.in_set(SolverSystems::PreSubstep),
+        )
         .add_systems(
             SubstepSchedule,
             (
@@ -362,30 +367,19 @@ fn advance_drivetrain(
 
 fn update_belt_surfaces(
     mut graph: ResMut<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>,
-    contacts: Res<avian3d::prelude::ContactGraph>,
-    faces: Query<(
-        &crate::track::stop_contacts::BeltFace,
-        &avian3d::prelude::ColliderOf,
-    )>,
-    poses: Query<(&avian3d::prelude::Position, &avian3d::prelude::Rotation)>,
+    belts: Res<crate::track::stop_contacts::BeltConstraints>,
     pending: Res<PendingDrivetrain>,
     hull: Query<&crate::track::sim::TrackDrive, With<Hull>>,
 ) {
-    crate::track::stop_contacts::update_surface_velocities(
-        &mut graph,
-        &contacts,
-        &faces,
-        &poses,
-        |body| {
-            let motion = hull
-                .get(body)
-                .expect("every sandbox belt face belongs to its one hull");
-            pending
-                .0
-                .as_ref()
-                .map_or_else(|| motion.sides.map(|s| s.speed), |tick| tick.state.speeds)
-        },
-    );
+    belts.update(&mut graph, |body| {
+        let motion = hull
+            .get(body)
+            .expect("every sandbox belt face belongs to its one hull");
+        pending
+            .0
+            .as_ref()
+            .map_or_else(|| motion.sides.map(|s| s.speed), |tick| tick.state.speeds)
+    });
 }
 
 #[expect(

@@ -289,6 +289,7 @@ impl Bed {
         let mut work = Vec::with_capacity(ticks);
         let mut mechanical = [0usize; 5];
         let mut contact_points = Vec::with_capacity(ticks);
+        let mut world_constraints = Vec::with_capacity(ticks);
         for _ in 0..ticks {
             self.tick(throttle, steer);
             costs.push(
@@ -317,6 +318,13 @@ impl Bed {
                 .app
                 .world()
                 .resource::<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>();
+            world_constraints.push(
+                graph
+                    .colors
+                    .iter()
+                    .map(|c| c.contact_constraints.len())
+                    .sum::<usize>(),
+            );
             // Sleeping bodies have no solver index and no active contact rows.
             let count = self
                 .app
@@ -339,7 +347,7 @@ impl Bed {
         costs.sort_by(f64::total_cmp);
         println!(
             "DRIVECOST {}",
-            json!({"label":label, "run":run, "ticks":ticks, "mean_us":costs.iter().sum::<f64>() / ticks as f64, "median_us":costs[ticks / 2], "assignments_mean_tick":work.iter().sum::<usize>() as f64 / ticks as f64, "assignments_max_tick":work.iter().max().unwrap(), "mechanical_advances":mechanical[0], "rows_mean_substep":mechanical[1] as f64 / mechanical[0] as f64, "assignments_mean_substep":mechanical[2] as f64 / mechanical[0] as f64, "rows_max_substep":mechanical[3], "assignments_max_substep":mechanical[4], "active_tank_contact_points_mean_tick":contact_points.iter().sum::<usize>() as f64 / ticks as f64, "active_tank_contact_points_max_tick":contact_points.iter().max().unwrap()})
+            json!({"world_constraints_mean_tick":world_constraints.iter().sum::<usize>() as f64 / ticks as f64, "label":label, "run":run, "ticks":ticks, "mean_us":costs.iter().sum::<f64>() / ticks as f64, "median_us":costs[ticks / 2], "assignments_mean_tick":work.iter().sum::<usize>() as f64 / ticks as f64, "assignments_max_tick":work.iter().max().unwrap(), "mechanical_advances":mechanical[0], "rows_mean_substep":mechanical[1] as f64 / mechanical[0] as f64, "assignments_mean_substep":mechanical[2] as f64 / mechanical[0] as f64, "rows_max_substep":mechanical[3], "assignments_max_substep":mechanical[4], "active_tank_contact_points_mean_tick":contact_points.iter().sum::<usize>() as f64 / ticks as f64, "active_tank_contact_points_max_tick":contact_points.iter().max().unwrap()})
         );
     }
 
@@ -853,6 +861,21 @@ fn drive_relocate_cost_probe() {
         );
         bed.measure_drive_cost("parked-yard", run, 0.0, 0.0);
         turn_probe::measure_drive_cost(run);
+        // Fixture: independent loose pieces contact the field, away from either belt.
+        let mut bed = Bed::on_ground(Some(base_ground()), flat());
+        bed.place(Vec3::ZERO, Quat::IDENTITY);
+        for x in 0..16 {
+            for z in 0..16 {
+                let piece =
+                    bed.spawn_piece(Vec3::new(20.0 + x as f32, 0.15, z as f32), Vec3::splat(0.3));
+                bed.app
+                    .world_mut()
+                    .entity_mut(piece)
+                    .insert(SleepingDisabled);
+            }
+        }
+        bed.start();
+        bed.measure_drive_cost("parked-loose-field", run, 0.0, 0.0);
     }
 }
 
@@ -3057,7 +3080,6 @@ fn the_drivetrains_books_close_over_standing_matter() {
         read = bed
             .hard_reactions()
             .map(|hard| hard.map_or(0.0, |hard| hard.belt));
-        // Friction is billed at the surface speed of the substep that delivered it.
         let charge = work.conveyor_work_j as f32;
         let excess =
             energy(bed) - held - (gravity + support + rows) * DT + paid as f32 - charge + bill;

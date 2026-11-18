@@ -19,6 +19,8 @@ pub struct TankCommand {
     pub throttle: f32,
     /// Target steer in [-1, 1]: differential yaw, positive to the right.
     pub steer: f32,
+    /// Explicit service-brake hold; the scripted park recipe uses it without reverse demand.
+    pub brake: bool,
     /// Primary fire edge, latched until one fixed tick consumes it.
     pub fire_primary: bool,
     /// Held secondary trigger. The network authority owns this level.
@@ -152,6 +154,7 @@ impl ParsedTankCommand {
         self.command = TankCommand {
             throttle: self.command.throttle,
             steer: self.command.steer,
+            brake: self.command.brake,
             aim: self.command.aim,
             range: self.command.range,
             ..actions
@@ -969,6 +972,7 @@ mod tests {
         let mut command = TankCommand {
             throttle: 0.5,
             steer: -0.5,
+            brake: true,
             fire_secondary: true,
             aim: Some(AimIntent::World(Vec3::X)),
             range: 800.0,
@@ -985,6 +989,7 @@ mod tests {
         command.clear_edges();
         assert_eq!(command.throttle, 0.5);
         assert_eq!(command.steer, -0.5);
+        assert!(command.brake);
         assert!(command.fire_secondary);
         assert_eq!(command.aim, Some(AimIntent::World(Vec3::X)));
         assert_eq!(command.range, 800.0);

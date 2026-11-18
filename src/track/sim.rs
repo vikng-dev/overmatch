@@ -57,6 +57,7 @@ use super::rubble::{
     PieceData, PieceReadData, RubbleBodies, RubbleQuery, apply_pushes, footprint_radius, reactions,
 };
 use super::side::Side;
+use super::stop_contacts::prepare_belt_surfaces;
 use super::terrain::TrackField;
 use super::transmission::{
     self, DriveState, DriveSupply, DriveTick, TransmissionInput, TransmissionParams,
@@ -615,22 +616,27 @@ pub fn sim_plugin(app: &mut App) {
 /// The free step reads only owner-local state. Avian's passes precede/follow it serially;
 /// tanks within the step are independent and run on the compute pool.
 fn drivetrain_physics_plugin(app: &mut App) {
-    app.add_systems(
-        SubstepSchedule,
-        (
-            advance_drivetrains,
-            update_belt_surfaces.ambiguous_with(crate::avian_ext::solver_cost::VisitCounts),
+    app.init_resource::<super::stop_contacts::BeltConstraints>()
+        .add_systems(
+            PhysicsSchedule,
+            prepare_belt_surfaces.in_set(SolverSystems::PreSubstep),
         )
-            .chain()
-            .after(SubstepSolverSystems::WarmStart)
-            .before(SubstepSolverSystems::SolveConstraints),
-    )
-    .add_systems(
-        PhysicsSchedule,
-        (commit_drivetrains, publish_engine_rpm)
-            .chain()
-            .in_set(SolverSystems::PostSubstep),
-    );
+        .add_systems(
+            SubstepSchedule,
+            (
+                advance_drivetrains,
+                update_belt_surfaces.ambiguous_with(crate::avian_ext::solver_cost::VisitCounts),
+            )
+                .chain()
+                .after(SubstepSolverSystems::WarmStart)
+                .before(SubstepSolverSystems::SolveConstraints),
+        )
+        .add_systems(
+            PhysicsSchedule,
+            (commit_drivetrains, publish_engine_rpm)
+                .chain()
+                .in_set(SolverSystems::PostSubstep),
+        );
     #[cfg(feature = "bitprobe")]
     app.add_systems(
         PhysicsSchedule,
@@ -1078,7 +1084,7 @@ pub(crate) fn drive_target(
     let supply = drive_supply(tank, caps, volumes);
     let repairing = supply.control_authority
         && tank.is_some_and(|tank| crate::damage::repair::underway(tank, volumes));
-    let intent = if command.held() || repairing {
+    let intent = if command.held() || command.brake || repairing {
         DriveIntent::Brake
     } else {
         DriveIntent::Axes(DriveAxes {
@@ -1284,40 +1290,27 @@ fn advance_drivetrains(
     });
 }
 
-/// Every contact reads both owners after their advances; writes are disjoint constraints.
-/// The graph resource is Avian's atomic solve boundary. VisitCounts reads only graph lengths,
-/// which surface writes never change; it may run on either side of this system.
+/// The graph is Avian's atomic solve boundary; see VisitCounts for its compatible reader.
 fn update_belt_surfaces(
     mut graph: ResMut<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>,
-    contacts: Res<avian3d::prelude::ContactGraph>,
-    faces: Query<(
-        &super::stop_contacts::BeltFace,
-        &avian3d::prelude::ColliderOf,
-    )>,
-    poses: Query<(&Position, &Rotation)>,
+    belts: Res<super::stop_contacts::BeltConstraints>,
     tanks: Query<(&RigidBody, Option<&DrivetrainStep>, &TrackDrive)>,
 ) {
-    super::stop_contacts::update_surface_velocities(
-        &mut graph,
-        &contacts,
-        &faces,
-        &poses,
-        |body| {
-            let (body, step, drive) = tanks
-                .get(body)
-                .expect("a belt face has its body's belt state");
-            if !body.is_dynamic() {
-                return drive.sides.map(|s| s.speed); // A replica consumes streamed belts, with no local integrator.
+    belts.update(&mut graph, |body| {
+        let (body, step, drive) = tanks
+            .get(body)
+            .expect("a belt face has its body's belt state");
+        if !body.is_dynamic() {
+            return drive.sides.map(|s| s.speed); // A replica consumes streamed belts, with no local integrator.
+        }
+        let step = step.expect("a dynamic belt face has its spawn-built drivetrain");
+        match &step.pending {
+            Some(PendingDrive::Awake(tick) | PendingDrive::Resting { tick, .. }) => {
+                tick.state.speeds
             }
-            let step = step.expect("a dynamic belt face has its spawn-built drivetrain");
-            match &step.pending {
-                Some(PendingDrive::Awake(tick) | PendingDrive::Resting { tick, .. }) => {
-                    tick.state.speeds
-                }
-                None => drive.sides.map(|s| s.speed), // Stopped gameplay or wake after sampling: no prepared tick.
-            }
-        },
-    );
+            None => drive.sides.map(|s| s.speed), // Stopped gameplay or wake after sampling: no prepared tick.
+        }
+    });
 }
 
 /// Prepared friction caches precede warm start, including the first substep of a new tick.
@@ -2280,7 +2273,71 @@ mod tests {
                 !entity.get_ref::<TrackDrive>().unwrap().is_changed(),
                 "unchanged resting belts must not trigger replication"
             );
+            // Fixture: an awake interval starts with belts moving at its construction's governed speed.
+            let speed = tp.governed_speed(false);
+            let tick = DriveTick::new(
+                &construction(&fp),
+                &tp,
+                DriveState {
+                    transmission: TransmissionState::from_spec(&tp),
+                    speeds: [speed; 2],
+                    phases: drive.sides.map(|s| s.phase),
+                },
+                &input(0.0, 0.0, [speed; 2], [0.0; 2]),
+            );
+            app.world_mut()
+                .get_mut::<DrivetrainStep>(root)
+                .unwrap()
+                .pending = Some(PendingDrive::Awake(tick));
+            app.world_mut().entity_mut(root).remove::<Sleeping>();
+            app.world_mut()
+                .get_mut::<super::super::driver::DriverSense>(root)
+                .unwrap()
+                .tick(
+                    Vec3::NEG_Z * speed,
+                    Vec3::NEG_Z,
+                    speed,
+                    2.0 * fp.grip.side_weight / super::super::derive::G,
+                    super::super::driver::Contacts {
+                        soft: [Vec3::ZERO; 2],
+                        grip: 0.0,
+                        rolling: Vec3::ZERO,
+                        rolling_budget: Vec3::ZERO,
+                        hard: [None; 2],
+                    },
+                    h * n as f32,
+                );
+            app.world_mut().clear_trackers();
+            finish_adapter(&mut app);
+            let changed = app.world().entity(root).get_ref::<TrackDrive>().unwrap();
+            assert_ne!(changed.sides.map(|s| s.speed), [0.0; 2]);
+            assert!(
+                changed.is_changed(),
+                "a changed accepted speed must trigger replication"
+            );
         }
+    }
+
+    /// An explicit brake is an action independent of axis demand; the harness park recipe
+    /// relies on the command boundary selecting service brakes even with retained axes.
+    #[test]
+    fn explicit_command_brake_selects_brake_intent() {
+        use bevy::ecs::system::RunSystemOnce;
+        let command = ParsedTankCommand::try_from(crate::command::TankCommand {
+            brake: true,
+            throttle: 1.0,
+            steer: 1.0,
+            ..default()
+        })
+        .unwrap();
+        World::new()
+            .run_system_once(move |volumes: Query<VolumeFacets>| {
+                assert_eq!(
+                    drive_target(&command, None, None, &volumes).intent,
+                    DriveIntent::Brake
+                );
+            })
+            .unwrap();
     }
 
     fn finish_tick(
@@ -3631,7 +3688,7 @@ mod tests {
     /// attitude/ride height on a loaded incline; only longitudinal hull motion is integrated.
     /// Replaces the match's single blueprint before constructing its running gear.
     #[test]
-    fn second_spec_drives_and_settles_through_observation_and_contact() {
+    fn second_spec_drives_against_the_observed_contact_load() {
         use super::super::drive_fixture::{compact_spec, ground};
         use super::super::oracle::{BlockField, TerrainBlock};
         let spec = compact_spec();
