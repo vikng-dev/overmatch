@@ -108,8 +108,7 @@ fn client_app(api: &str, log: bool) -> App {
     crate::net::view_clock::install(&mut app);
     crate::net::frontier::install(&mut app);
 
-    app.init_resource::<ConnectRetry>()
-        .add_systems(Update, drive_connection);
+    install_connection_lifecycle(&mut app);
     install_matchmaking_link(&mut app, api);
     install_screen_flow(&mut app);
     app.insert_resource(ClientLinkTemplate {

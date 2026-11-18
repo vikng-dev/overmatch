@@ -438,8 +438,8 @@ fn capture_trace_tick(
 }
 
 /// Outside server input is refused through the visible match-close path.
-#[derive(Debug)]
-enum StreamRefusal {
+#[derive(Debug, Clone)]
+pub(super) enum StreamRefusal {
     Order { tick: Tick },
     Range { tick: Tick },
 }
@@ -498,7 +498,7 @@ fn receive(
     }
     if let Some(refusal) = clock.refusal.take() {
         warn!("client: {refusal}");
-        gone.write(super::matchmaking::ServerGone(refusal.to_string()));
+        gone.write(super::matchmaking::ServerGone::Stream(refusal));
     }
 }
 

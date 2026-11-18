@@ -744,6 +744,7 @@ mod tests {
 
     use super::*;
     use crate::net::compatibility::Compatibility;
+    use crate::net::matchmaking::{ServerGone, printable};
     use crate::net::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
 
     fn contract(name: &str) -> serde_json::Value {
@@ -1815,8 +1816,14 @@ mod tests {
             if let Some(late) = &mut late {
                 let (reason, label) = crate::net::client::refusal_probe(late);
                 if let Some(reason) = reason {
+                    let ServerGone::Admission(reason) = reason else {
+                        panic!("the late join must receive a typed admission refusal");
+                    };
                     assert_eq!(reason, JoinRefusal::BattleClosed);
-                    assert_eq!(label, reason.message());
+                    assert_eq!(
+                        label,
+                        format!("Couldn't join: {}", printable(&reason.message()))
+                    );
                     assert!(!client_state(late).0, "a refused player never connects");
                     refused = true;
                 }
@@ -1863,12 +1870,12 @@ mod tests {
         for _ in 0..2_000 {
             server.update();
             if !challenged
-                && !server
+                && server
                     .world_mut()
                     .query_filtered::<(), (With<LinkOf>, With<Connecting>)>()
                     .iter(server.world())
-                    .collect::<Vec<_>>()
-                    .is_empty()
+                    .next()
+                    .is_some()
             {
                 admission.set_open(false);
                 challenged = true;
@@ -1878,8 +1885,14 @@ mod tests {
             let (refusal, label) = crate::net::client::refusal_probe(&mut joining);
             if let Some(refusal) = refusal {
                 assert!(challenged, "the initial request passed while open");
+                let ServerGone::Admission(refusal) = refusal else {
+                    panic!("the challenge-crossing peer must receive a typed admission refusal");
+                };
                 assert_eq!(refusal, JoinRefusal::BattleClosed);
-                assert_eq!(label, refusal.message());
+                assert_eq!(
+                    label,
+                    format!("Couldn't join: {}", printable(&refusal.message()))
+                );
                 assert!(!client_state(&mut joining).0);
                 assert_eq!(
                     server
@@ -1966,17 +1979,22 @@ mod tests {
                 );
                 match crate::net::client::refusal_probe(peer) {
                     (Some(refusal), label) => {
+                        let ServerGone::Admission(refusal) = refusal else {
+                            panic!("an incompatible peer must receive a typed admission refusal");
+                        };
                         assert_eq!(refusal, JoinRefusal::Incompatible(cause.clone()));
-                        assert_eq!(label, refusal.message());
+                        assert_eq!(
+                            label,
+                            format!("Couldn't join: {}", printable(&refusal.message()))
+                        );
                     }
                     (None, _) => told = false,
                 }
             }
             if told && client_state(&mut compatible).0 {
                 assert_eq!(admitted, 1);
-                assert_eq!(
-                    crate::net::client::refusal_probe(&mut keyless).0,
-                    None,
+                assert!(
+                    crate::net::client::refusal_probe(&mut keyless).0.is_none(),
                     "a peer without the server's key is told nothing"
                 );
                 assert!(!client_state(&mut keyless).0);

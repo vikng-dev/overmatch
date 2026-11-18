@@ -14,6 +14,23 @@ use serde::Serialize;
 mod wire;
 pub(super) use wire::replication;
 
+/// The decoder's local failure crosses into client lifecycle handling without exposing its codec.
+#[derive(Debug, Clone)]
+pub(super) struct StampRefusal(wire::StampRefusal);
+
+impl std::fmt::Display for StampRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[cfg(test)]
+impl StampRefusal {
+    pub(super) fn invalid_fixture() -> Self {
+        Self(wire::StampRefusal::Invalid(wire::InvalidStamp))
+    }
+}
+
 /// Checked nonnegative, finite seconds on the authority's monotonic Real epoch.
 /// DERIVED payload: f64 frame start + f32 departure offset = twelve fixed postcard bytes.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Serialize)]
@@ -116,7 +133,9 @@ fn refuse_peer_stamp(
     // A valid stream has no refusal. Replicon's decoder cannot write ECS messages directly.
     if let Some(refusal) = storage.global.remove::<wire::StampRefusal>() {
         warn!("client: refusing server tick stamp: {refusal}");
-        gone.write(super::matchmaking::ServerGone(refusal.to_string()));
+        gone.write(super::matchmaking::ServerGone::TickStamp(StampRefusal(
+            refusal,
+        )));
     }
 }
 
@@ -259,6 +278,15 @@ mod tests {
             }
         }
         assert!(observed, "a refused stamp must close the match visibly");
+        assert!(matches!(
+            client
+                .world()
+                .resource::<super::super::client::ClosedConnection>()
+                .cause,
+            Some(super::super::matchmaking::ServerGone::TickStamp(
+                StampRefusal(wire::StampRefusal::Invalid(_))
+            ))
+        ));
         super::super::client::match_exit::advance_past_reconnect_window(&mut client);
         for _ in 0..8 {
             server.update();
@@ -282,7 +310,9 @@ mod tests {
                 .world_mut()
                 .query::<&Text>()
                 .iter(client.world())
-                .any(|text| text.0.contains(&cause)),
+                .any(|text| text
+                    .0
+                    .contains(&super::super::matchmaking::printable(&cause))),
             "the lobby must show the refusal cause"
         );
     }
