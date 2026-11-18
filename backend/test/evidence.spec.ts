@@ -246,7 +246,7 @@ describe("stopped match servers leave evidence for the operator", () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp();
 		// Fixture chunks expose any read beyond the first over-limit chunk, without allocating a huge body.
-		const chunkBytes = 64 * 1024;
+		const chunkBytes = 64 * 1024 + 1;
 		let bytesRead = 0;
 		let cancelled = false;
 		edgegap.logResponse = () => new Response(new ReadableStream<Uint8Array>({
@@ -261,7 +261,7 @@ describe("stopped match servers leave evidence for the operator", () => {
 		}, { highWaterMark: 0 }));
 		await end(s);
 		expect(cancelled).toBe(true);
-		expect(bytesRead).toBe(SERVER_LOG_BODY_MAX_BYTES + chunkBytes);
+		expect(bytesRead).toBe((Math.floor(SERVER_LOG_BODY_MAX_BYTES / chunkBytes) + 1) * chunkBytes);
 		expect(await archive(s.deploymentId)).toMatchObject({ log: null, error: "logs HTTP 413 unknown" });
 		expect(edgegap.deployment().status).toBe("Status.TERMINATED");
 	});
