@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -241,13 +243,35 @@ class TraceProfileTest(unittest.TestCase):
             profile(trace, window, str(out))
         with self.assertRaisesRegex(OutputError, r"out.*embedded null byte.*writable"):
             profile(trace, window, "out\x00.json")
-        # The same operator-facing refusal covers a disconnected or non-UTF-8 terminal.
-        for failure in [BrokenPipeError("fixture: disconnected"),
-                        UnicodeEncodeError("ascii", "µ", 0, 1, "fixture: terminal encoding")]:
-            with self.subTest(summary=failure):
-                with patch("builtins.print", side_effect=failure):
-                    with self.assertRaisesRegex(OutputError, r"out\.json: .*summary.*terminal"):
-                        profile(trace, window, str(Path(self.dir.name) / "out.json"))
+        # A non-UTF-8 terminal gets the same operator-facing refusal.
+        failure = UnicodeEncodeError("ascii", "µ", 0, 1, "fixture: terminal encoding")
+        with patch("builtins.print", side_effect=failure):
+            with self.assertRaisesRegex(OutputError, r"out\.json: .*summary.*terminal"):
+                profile(trace, window, str(Path(self.dir.name) / "out.json"))
+
+    def test_a_closed_stdout_pipe_is_refused_before_shutdown(self) -> None:
+        """The wrapper needs a typed refusal and exit 1 even when a short summary is buffered;
+        shutdown must not retry the failed stream and replace that status with exit 120."""
+        records = []
+        for tick in range(11):
+            ts = 10.0 * tick
+            records += [record("B", "schedule: name=FixedMain", ts),
+                        record("E", "schedule: name=FixedMain", ts + 1)]
+        trace = self.file("t.json", "[\n" + ",\n".join(records) + "\n]")
+        window = self.file("w.json", json.dumps({"w0_us": 0, "w1_us": 200}))
+        out = str(Path(self.dir.name) / "out.json")
+        for buffering in ([], ["-u"]):
+            with self.subTest(buffering=buffering):
+                reader, writer = os.pipe()
+                os.close(reader)
+                with os.fdopen(writer, "wb") as pipe:
+                    result = subprocess.run(
+                        [sys.executable, "-I", "-B", *buffering,
+                         str(Path(__file__).with_name("trace_profile.py")), trace, window, out],
+                        stdout=pipe, stderr=subprocess.PIPE, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertRegex(result.stderr, rf"^trace_profile: {re.escape(out)}: "
+                                 r"cannot write the profile or summary .*Broken pipe.*terminal\n$")
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ from __future__ import annotations
 import bisect
 import json
 import math
+import os
 import re
 import sys
 from array import array
@@ -375,7 +376,12 @@ def profile(trace_path: str, window_path: str, out_path: str) -> int:
             print(f"  {r['mean_us']:8.1f} {r['p95_us']:8.1f} {100*r['share_of_busy']:5.1f}% {r['runs_per_tick']:5.2f} {r['schedule']:<18} {r['kind']:<15} {r['name']}")
         for s in schedules[:15]:
             print(f"  sched {s['mean_us']:8.1f} {s['p95_us']:8.1f} {s['runs_per_tick']:5.2f} {s['name']}")
+        sys.stdout.flush()
     except (OSError, ValueError, RecursionError) as e:
+        if isinstance(e, BrokenPipeError):
+            # Shutdown retries buffered stdout; keep that flush from replacing the refusal.
+            with open(os.devnull, "w") as devnull:
+                os.dup2(devnull.fileno(), sys.stdout.fileno())
         raise OutputError(f"{out_path}: cannot write the profile or summary ({e}); create its "
                           "directory or pass a writable UTF-8 output and terminal") from e
     return 0
