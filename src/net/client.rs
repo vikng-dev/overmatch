@@ -954,11 +954,17 @@ fn spawn_matched_link(
     terminal.connected_once = false;
 }
 
+/// The retry ledger and terminal cause the connect screen reads. A UI fixture with no link calls this
+/// alone; every client composition gets it through `install_connection_lifecycle`.
+pub(super) fn init_connection_state(app: &mut App) {
+    app.init_resource::<ConnectRetry>()
+        .init_resource::<ClosedConnection>();
+}
+
 /// The connection driver and terminal handling shared by every client composition.
 pub(super) fn install_connection_lifecycle(app: &mut App) {
-    app.init_resource::<ConnectRetry>()
-        .init_resource::<ClosedConnection>()
-        .add_message::<super::matchmaking::ServerGone>()
+    init_connection_state(app);
+    app.add_message::<super::matchmaking::ServerGone>()
         .add_message::<super::matchmaking::MatchClosed>()
         // Refusals remove the link before the driver can issue another Connect.
         .add_systems(
