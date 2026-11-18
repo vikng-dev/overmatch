@@ -66,6 +66,7 @@ pub(super) enum MatchClosed {
 pub(super) enum ServerGone {
     Construction(super::construction::ConstructionRefusal),
     Debris(super::debris_stress::PoseRefusal),
+    Servo(super::protocol::ServoAnglesError),
     TickStamp(super::tick_stamp::StampRefusal),
     Stream(super::view_clock::StreamRefusal),
     Admission(super::admission::JoinRefusal),
@@ -79,6 +80,7 @@ impl std::fmt::Display for ServerGone {
         match self {
             Self::Construction(cause) => cause.fmt(f),
             Self::Debris(cause) => cause.fmt(f),
+            Self::Servo(cause) => cause.fmt(f),
             Self::TickStamp(cause) => cause.fmt(f),
             Self::Stream(cause) => cause.fmt(f),
             Self::Admission(cause) => f.write_str(&cause.message()),

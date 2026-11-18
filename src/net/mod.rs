@@ -56,6 +56,7 @@ mod rig_admission;
 /// opening, held by the server and replicated. `pub(crate)` for the ballistics fixture that fires
 /// a real round at it.
 pub(crate) mod score;
+mod servo_wire;
 // `pub(crate)` for its spawn POINTS — see the note on `tank::scenario`.
 pub(crate) mod server;
 /// The dedicated server's host: its task-pool sizing, its startup line and its levers.

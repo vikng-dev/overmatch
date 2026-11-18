@@ -13,6 +13,30 @@ mod tests {
     use crate::net::protocol::ServoAngles;
     use crate::net::test_harness::{TICK, finish, net_physics_app};
 
+    /// Fixture pose in the template's deterministic slot order; every additional laid mount
+    /// moves at its own fixture rate so the proof witnesses every servo node.
+    fn fixture_pose(world: &World, yaw: f32, pitch: f32, ticks: f32) -> ServoAngles {
+        let spec = world.resource::<crate::tank::TankTemplate>().spec();
+        let (yaw_node, pitch_node) = spec.gunner_aim().unwrap();
+        let mut names: Vec<_> = spec.servos.keys().collect();
+        names.sort();
+        ServoAngles(
+            names
+                .iter()
+                .enumerate()
+                .map(|(slot, name)| {
+                    if name.as_str() == yaw_node {
+                        yaw
+                    } else if name.as_str() == pitch_node {
+                        pitch
+                    } else {
+                        0.0002 * (slot + 1) as f32 * ticks
+                    }
+                })
+                .collect(),
+        )
+    }
+
     fn cursor(app: &mut App, tick: u32) {
         app.world_mut()
             .resource_mut::<InterpolationTimeline>()
@@ -200,6 +224,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut app = client_gameplay_app();
+        let rest = fixture_pose(app.world(), 0.0, 0.0, 0.0);
         let roots: Vec<_> = [Vec3::new(0.0, 2.0, 0.0), Vec3::new(20.0, 2.0, 0.0)]
             .into_iter()
             .map(|at| {
@@ -213,8 +238,8 @@ mod tests {
                         Rotation::default(),
                         history(Position(at)),
                         history(Rotation::default()),
-                        ServoAngles::default(),
-                        history(ServoAngles::default()),
+                        rest.clone(),
+                        history(rest.clone()),
                         crate::track::sim::TrackDrive::default(),
                         history(crate::track::sim::TrackDrive::default()),
                     ))
@@ -303,6 +328,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut app = client_gameplay_app();
+        let rest = fixture_pose(app.world(), 0.0, 0.0, 0.0);
         let at = Position(Vec3::new(0.0, 2.0, 0.0));
         let root = app
             .world_mut()
@@ -314,8 +340,8 @@ mod tests {
                 history(at),
                 Rotation::default(),
                 history(Rotation::default()),
-                ServoAngles::default(),
-                history(ServoAngles::default()),
+                rest.clone(),
+                history(rest),
                 crate::track::sim::TrackDrive::default(),
                 history(crate::track::sim::TrackDrive::default()),
             ))
@@ -349,7 +375,7 @@ mod tests {
     /// [`own_and_remote_barrels_are_drawn_where_the_stream_puts_them`]'s.
     #[test]
     fn a_replica_turret_is_sampled_on_its_hull_cursor() {
-        use crate::tank::{RemoteServos, Rig, ServoIndex};
+        use crate::tank::{Rig, ServoIndex, StreamedServoPose};
 
         // Fixture motion: the hull yaws RATE per tick, the turret counter-rotates as fast.
         const RATE: f32 = 0.01;
@@ -360,6 +386,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut app = client_gameplay_app();
+        let rest = fixture_pose(app.world(), 0.0, 0.0, 0.0);
         let turn = |tick: u32| RATE * (tick - FIRST) as f32;
         let mut hull = ConfirmedHistory::default();
         let mut aim = ConfirmedHistory::default();
@@ -367,10 +394,7 @@ mod tests {
             hull.insert_present_explicit(Tick(tick), Rotation(Quat::from_rotation_y(turn(tick))));
             aim.insert_present_explicit(
                 Tick(tick),
-                ServoAngles {
-                    gunner_yaw: BEARING - turn(tick),
-                    gunner_pitch: 0.0,
-                },
+                fixture_pose(app.world(), BEARING - turn(tick), 0.0, 0.0),
             );
         }
         let at = Position(Vec3::new(0.0, 2.0, 0.0));
@@ -385,7 +409,7 @@ mod tests {
                 history(at),
                 Rotation::default(),
                 hull,
-                ServoAngles::default(),
+                rest,
                 aim,
                 crate::track::sim::TrackDrive::default(),
                 history(crate::track::sim::TrackDrive::default()),
@@ -403,7 +427,7 @@ mod tests {
                 .get::<ServoIndex>(rig.gunner_yaw)
                 .expect("an attached rig indexes its aim servo")
                 .0;
-            let yaw = world.get::<RemoteServos>(root).unwrap().0[slot].current();
+            let yaw = world.get::<StreamedServoPose>(root).unwrap().0[slot];
             let (hull_yaw, ..) = world
                 .get::<Rotation>(root)
                 .unwrap()
@@ -433,6 +457,7 @@ mod tests {
     /// Push tick `tick` of [`turning`] into the replica's hull and aim streams and complete it.
     fn deliver(app: &mut App, root: Entity, first: u32, tick: u32) {
         let (hull, yaw, pitch) = turning(first, f64::from(tick));
+        let pose = fixture_pose(app.world(), yaw, pitch, (tick.saturating_sub(first)) as f32);
         let mut entity = app.world_mut().entity_mut(root);
         entity
             .get_mut::<ConfirmedHistory<Rotation>>()
@@ -441,19 +466,13 @@ mod tests {
         entity
             .get_mut::<ConfirmedHistory<ServoAngles>>()
             .expect("the fixture replica carries its aim stream")
-            .insert_present_explicit(
-                Tick(tick),
-                ServoAngles {
-                    gunner_yaw: yaw,
-                    gunner_pitch: pitch,
-                },
-            );
+            .insert_present_explicit(Tick(tick), pose);
         complete_tick(app, tick);
     }
 
-    /// The game's netcode: own and remote barrels are drawn where the stream puts it at the frame's view
+    /// The game's netcode: every own and remote servo node and the muzzle draw at the frame's view
     /// cursor, through the shipped view of the tank (its glb bound by `bind_tank_view`, posed by
-    /// the servo view, propagated). The expected bore composes the sim skeleton at the stream's
+    /// the servo view, propagated). Each expected orientation composes the sim skeleton at the stream's
     /// angles for the cursor the frame drew, with the servo's own pose law, so it never reads
     /// presented state. Frames fall between ticks; the stream turns hull, turret and gun, and
     /// stalls past the view's buffer by half and then 1.5 of its continuity budget, read from the
@@ -461,7 +480,10 @@ mod tests {
     /// draws the previous frame's aim; a view that never reads it draws a frozen turret.
     #[test]
     fn own_and_remote_barrels_are_drawn_where_the_stream_puts_them() {
-        use crate::tank::{PendingTankAssets, Rig, ServoRest, ServoSpec, TankViewReady, ViewNode};
+        use crate::tank::{
+            PendingTankAssets, Rig, ServoIndex, ServoRest, ServoSpec, TankRoot, TankViewReady,
+            ViewNode,
+        };
         use bevy::time::TimeUpdateStrategy;
         use std::time::{Duration, Instant};
 
@@ -475,6 +497,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for controlled in [false, true] {
             let mut app = client_gameplay_app();
+            let rest = fixture_pose(app.world(), 0.0, 0.0, 0.0);
             app.insert_resource(crate::net::timing::Timing::view_fixture());
             let scene = app
                 .world()
@@ -495,7 +518,7 @@ mod tests {
                     history(at),
                     Rotation::default(),
                     ConfirmedHistory::<Rotation>::default(),
-                    ServoAngles::default(),
+                    rest.clone(),
                     ConfirmedHistory::<ServoAngles>::default(),
                     crate::track::sim::TrackDrive::default(),
                     history(crate::track::sim::TrackDrive::default()),
@@ -552,40 +575,52 @@ mod tests {
                 ));
             }
             first = next;
-            let (gunner_yaw, gun, muzzle) = app
-                .world()
-                .get::<Rig>(root)
-                .map(|rig| (rig.gunner_yaw, rig.gun, rig.muzzle))
-                .expect("a bound view belongs to an attached rig");
-            for node in [gunner_yaw, gun, muzzle] {
+            let muzzle = app.world().get::<Rig>(root).unwrap().muzzle;
+            let mut nodes: Vec<_> = app
+                .world_mut()
+                .query::<(Entity, &ServoIndex, &TankRoot)>()
+                .iter(app.world())
+                .filter(|(_, _, owner)| owner.0 == root)
+                .map(|(node, _, _)| node)
+                .collect();
+            assert_eq!(
+                nodes.len(),
+                rest.0.len(),
+                "the fixture proof covers every declared servo slot"
+            );
+            nodes.push(muzzle);
+            for &node in &nodes {
                 assert!(
                     app.world().get::<ViewNode>(node).is_some(),
-                    "the shipped view binds every node of the bore's chain"
+                    "the shipped view binds every servo and the muzzle"
                 );
             }
-            let expected = |world: &World, cursor: f64| {
+            let expected = |world: &World, cursor: f64, node: Entity| {
                 let (hull, yaw, pitch) = turning(first, cursor);
+                let pose = fixture_pose(
+                    world,
+                    yaw,
+                    pitch,
+                    (cursor - f64::from(first)).max(0.0) as f32,
+                );
                 let mut chain = Vec::new();
-                let mut node = muzzle;
-                while node != root {
-                    chain.push(node);
-                    node = world.get::<ChildOf>(node).unwrap().parent();
+                let mut link = node;
+                while link != root {
+                    chain.push(link);
+                    link = world.get::<ChildOf>(link).unwrap().parent();
                 }
                 let mut rotation = Quat::from_rotation_y(hull);
                 for &link in chain.iter().rev() {
-                    rotation *= match [(gunner_yaw, yaw), (gun, pitch)]
-                        .into_iter()
-                        .find(|&(servo, _)| servo == link)
-                    {
-                        Some((_, angle)) => crate::tank::servo_pose(
+                    rotation *= match world.get::<ServoIndex>(link) {
+                        Some(slot) => crate::tank::servo_pose(
                             world.get::<ServoSpec>(link).unwrap().role(),
                             world.get::<ServoRest>(link).unwrap().0,
-                            angle,
+                            pose.0[slot.0],
                         ),
                         None => world.get::<Transform>(link).unwrap().rotation,
                     };
                 }
-                rotation * Vec3::NEG_Z
+                rotation
             };
             // A stall first drains the stream buffered ahead of the cursor, then holds while the backlog
             // grows. On resumption the view cuts a backlog longer than its continuity budget
@@ -615,16 +650,19 @@ mod tests {
                 holds += u32::from(clock.held);
                 cuts += u32::from(last.is_some_and(|last| cursor - last > cut_ticks));
                 last = Some(cursor);
-                let view = world.get::<ViewNode>(muzzle).unwrap().0;
-                let drawn = world.get::<GlobalTransform>(view).unwrap().rotation() * Vec3::NEG_Z;
-                let want = expected(world, cursor);
-                // The chord between unit bores is their angle to first order; f32 `acos` near 1
-                // resolves no better than 3e-4 rad.
-                let off = (drawn - want).length();
-                assert!(
-                    off < TOLERANCE,
-                    "at cursor {cursor:.3} the barrel is drawn {off:.6} rad off the stream's"
-                );
+                for &node in &nodes {
+                    let view = world.get::<ViewNode>(node).unwrap().0;
+                    let drawn = world.get::<GlobalTransform>(view).unwrap().rotation();
+                    let want = expected(world, cursor, node);
+                    // Compare two independent axes so a missing turn about either servo axis is visible.
+                    for axis in [Vec3::X, Vec3::Z] {
+                        let off = (drawn * axis - want * axis).length();
+                        assert!(
+                            off < TOLERANCE,
+                            "at cursor {cursor:.3} servo/view {node:?} is {off:.6} rad off the stream"
+                        );
+                    }
+                }
             };
             let mut play = |app: &mut App, ticks: f64, streaming: bool| {
                 for _ in 0..(ticks / FRAME).ceil() as u32 {

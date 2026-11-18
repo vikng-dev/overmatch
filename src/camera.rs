@@ -509,7 +509,7 @@ pub(crate) fn blended_look(
 /// drift apart): the aim commit lobs the gun up by that angle for the dialed range, so depressing
 /// the view by the same holds the sight picture on the target while the barrel rides above it
 /// (dial range → barrel rises, view stays on target). At `k = 0` the camera is welded to that line
-/// and lags the player's intent at the mount's slew rate (the WT "view follows the gun" feel); at
+/// and trails intent by uplink, server slew and view delay on a client (slew alone offline); at
 /// `k = 1` the camera holds the intent and the bore lags on screen instead.
 ///
 /// Up stays the gun node's own +Y — hull-up carried through the yaw-then-pitch chain rather than

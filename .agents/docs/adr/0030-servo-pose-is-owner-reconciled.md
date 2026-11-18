@@ -1,9 +1,14 @@
 # Servo pose is owner-reconciled authority state
 
+**Amended 2026-11-18 (#187).** The own-turret exception described in the supersession
+notice ended: own and remote tanks present every servo slot from replicated `ServoAngles`
+at the shared view cursor. Only the authority integrates `TankServos`.
+
 > **Status: accepted; shipped in declared `PROTOCOL_REV = 18`. Superseded by
 > [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15): the atomic
 > `TankServos` component and its trace role survive, but owner reconciliation is gone — the
-> own and remote turrets present replicated `ServoAngles` at the shared view cursor.
+> own turret is click-immediate client view state; remotes drive from replicated
+> `ServoAngles`.
 
 The complete turret/gun servo integrator is one root-resident `TankServos` component, replicated by
 the authority, predicted by the owner, and restored from confirmed history at the authority sample's

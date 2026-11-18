@@ -1582,21 +1582,20 @@ target jumps, monotone arrival at fixed supply on the motor and hand arms, an un
 coasting to rest on the authority, reversal and travel-stop momentum absorption. No expected
 rate is copied from a run.
 
-Every attached aim rig, own and remote, presents `ServoAngles` sampled at the view cursor its
-hull is drawn at (`net::rig::present_streamed_aim`); a knocked-out tank's launched turret instead
+Every attached aim rig, own and remote, presents every declared servo slot from `ServoAngles`
+sampled at the view cursor its hull is drawn at (`net::rig::present_streamed_aim`); a knocked-out tank's launched turret instead
 follows its replicated `LaunchedTurretPose`, applied on arrival. A presented angle carries no
 local momentum, and `drive_servos` never steps it. View interpolation blends previous and current
-angles on the authority's view nodes only; a replica's endpoints both hold the sampled angle.
+angles on the authority's view nodes only; a replica draws its sampled angle directly.
 
-`TankServos` and immutable `ServoMechanism` construction stay on the authority. `RemoteServos`
-holds sampled client presentation state. Servo law changes do not change a client integration
+`TankServos` and immutable `ServoMechanism` construction stay on the authority. `StreamedServoPose`
+holds only sampled client angles, seeded from the received stream at attachment. Servo law changes do not change a client integration
 contract: the client receives `ServoAngles` and never integrates the law.
 
 Ratchet dispositions: `load-07` is fixed by required explicit `turret.node` construction,
 independent of optic ancestry; `None` is refused before play because complete rigs require that
 handle. Required `gunner_yaw` selects the Gunner's Yaw servo separately, resolved into `GunnerYaw`
-at spawn; the Gunner view names a declared Pitch servo below it. Sight input and the angle stream
-read that yaw handle. Aim targets and optic working angles use its actual parent/rest frame,
+at spawn; the Gunner view names a declared Pitch servo below it. Sight input reads that yaw handle; the angle stream carries every slot in rig order. Aim targets and optic working angles use its actual parent/rest frame,
 so an upstream yaw is applied once. Assembly membership follows the authored structural hierarchy, whose role
 receives the unit-scale gate. Mass and inertia extents carry `Sourced` provenance, with shipped
 `Fixture` labels refused in every build.

@@ -194,8 +194,9 @@ pub(super) fn install_hold(app: &mut App) {
 /// ([`ParsedTankCommand::hold`]) while the replicated phase is not combat: drive, turret, gun, fire
 /// and every edge by this one rule, and the tank still rests on its suspension. The authority
 /// releases them on combat's first tick, because `server::cycle_battles` advances the phase before
-/// this set. A client holds outgoing commands from its replicated phase; turret and fire
-/// presentation follow the stream. [`MatchCommands`] states the same rule for instruments.
+/// this set. A client's hold feeds the crew panel's drive target and [`MatchCommands`] for
+/// instruments; DeviceCommand was already snapshotted for transport before this fixed step.
+/// Turret and fire presentation follow the stream.
 /// Before the Battle snapshot (a client's first frames) every command is held.
 fn hold_commands(
     battles: Query<&BattleState>,

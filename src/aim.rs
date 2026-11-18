@@ -833,6 +833,9 @@ pub(crate) mod tests {
             let muzzle = world
                 .spawn((Transform::IDENTITY, RangeTable::test_fixed(SUPERELEVATION)))
                 .id();
+            // Complete authority construction and crank come from the production constructor;
+            // the hand-mount assertions below depend only on their explicit fixture rates.
+            let (_, template) = crate::tank::shipped_construction();
             let tank = world
                 .spawn((
                     Tank,
@@ -850,9 +853,10 @@ pub(crate) mod tests {
                         gun,
                         muzzle,
                     },
-                    TankServos::for_count(2),
+                    template.authority_state(),
                 ))
                 .id();
+            world.entity_mut(tank).insert(TankServos::for_count(2));
             world.entity_mut(hull).insert(ChildOf(tank));
             world.entity_mut(turret).insert(ChildOf(hull));
             world.entity_mut(gun).insert(ChildOf(turret));

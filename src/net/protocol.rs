@@ -38,7 +38,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// diffs past its acknowledged cursor (bevy_replicon 0.45.5), each naming the position it lands
 /// at, and a whole copy only to a client without one or behind the retained history; the hull
 /// marks replicate whole.
-pub const PROTOCOL_REV: u32 = 106;
+pub const PROTOCOL_REV: u32 = 107;
 
 /// The compatibility record's wire term: the pinned wire manifest, [`PROTOCOL_REV`] and the crate
 /// version.
@@ -110,32 +110,52 @@ pub struct NetTank;
 #[derive(Component, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct NetBot;
 
-/// Authoritative parent-local Gunner yaw/pitch, presented at the view cursor on every replica
-/// (`net::rig`), regardless of ownership.
-#[derive(Component, Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
+/// Authoritative parent-local angle (radians) for every laid servo, in the rig's slot order.
+/// Every replica presents these angles at its hull's view cursor (`net::rig`).
+#[derive(Component, Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(try_from = "ServoAnglesWire")]
-pub struct ServoAngles {
-    pub gunner_yaw: f32,
-    pub gunner_pitch: f32,
-}
+pub struct ServoAngles(pub Vec<f32>);
 
-/// Untrusted peer angles, admitted before they become servo targets.
+/// Untrusted peer angles, admitted before they enter interpolation history.
 #[derive(Deserialize)]
-struct ServoAnglesWire {
-    gunner_yaw: f32,
-    gunner_pitch: f32,
-}
+pub(super) struct ServoAnglesWire(Vec<f32>);
 
-#[derive(Debug, PartialEq, Eq)]
-enum ServoAnglesError {
-    NonFinite { field: &'static str },
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ServoAnglesError {
+    Encoding(postcard::Error),
+    NonFinite { slot: usize },
+    Count { expected: usize, received: usize },
+    MissingRig,
 }
 
 impl std::fmt::Display for ServoAnglesError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NonFinite { field } => write!(f, "{field}: send a finite angle in radians"),
+            Self::Encoding(error) => write!(f, "Server sent unreadable servo angles: {error}"),
+            Self::NonFinite { slot } => write!(
+                f,
+                "Server servo slot {slot}: send a finite angle in radians"
+            ),
+            Self::Count { expected, received } => write!(
+                f,
+                "Server sent {received} servo angles; the tank rig requires {expected} slots"
+            ),
+            Self::MissingRig => f.write_str("Server sent servo angles before tank rig admission"),
         }
+    }
+}
+
+impl std::error::Error for ServoAnglesError {}
+
+impl ServoAngles {
+    pub(super) fn check_count(&self, expected: usize) -> Result<(), ServoAnglesError> {
+        if self.0.len() != expected {
+            return Err(ServoAnglesError::Count {
+                expected,
+                received: self.0.len(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -143,21 +163,12 @@ impl TryFrom<ServoAnglesWire> for ServoAngles {
     type Error = ServoAnglesError;
 
     fn try_from(wire: ServoAnglesWire) -> Result<Self, Self::Error> {
-        for (field, value) in [
-            ("gunner_yaw", wire.gunner_yaw),
-            ("gunner_pitch", wire.gunner_pitch),
-        ] {
-            if !value.is_finite() {
-                let error = ServoAnglesError::NonFinite { field };
-                // Postcard erases custom serde error text, so name the refusal at admission.
-                warn!("client: refused ServoAngles from peer: {error}");
-                return Err(error);
+        for (slot, angle) in wire.0.iter().enumerate() {
+            if !angle.is_finite() {
+                return Err(ServoAnglesError::NonFinite { slot });
             }
         }
-        Ok(Self {
-            gunner_yaw: wire.gunner_yaw,
-            gunner_pitch: wire.gunner_pitch,
-        })
+        Ok(Self(wire.0))
     }
 }
 
@@ -643,7 +654,6 @@ fn publish_authority_weapon_clock(
 /// authority: the server carries both.
 fn publish_servo_angles(
     mut tanks: Query<(&Rig, &TankServos, &mut ServoAngles), Without<Remote>>,
-    servo_slots: Query<&ServoIndex>,
     launched: Query<(), With<LaunchedTurret>>,
 ) {
     tanks.par_iter_mut().for_each(|(rig, servos, mut angles)| {
@@ -651,20 +661,11 @@ fn publish_servo_angles(
         if launched.contains(rig.turret) {
             return;
         }
-        let angle = |servo| {
-            let slot = servo_slots
-                .get(servo)
-                .expect("complete spawn gives every attached aim servo its index");
-            servos
-                .states
-                .get(slot.0)
-                .expect("complete spawn gives every aim servo a mechanism slot")
-                .current()
-        };
-        angles.set_if_neq(ServoAngles {
-            gunner_yaw: angle(rig.gunner_yaw),
-            gunner_pitch: angle(rig.gun),
-        });
+        let current = servos.states.iter().map(|state| state.current());
+        if angles.0.iter().copied().ne(current.clone()) {
+            angles.0.clear();
+            angles.0.extend(current);
+        }
     });
 }
 
@@ -759,11 +760,19 @@ pub(crate) fn track_drive_lerp(start: TrackDrive, end: TrackDrive, t: f32) -> Tr
 /// limited one inside its stops), so the straight blend follows the way the mount turned and stays
 /// between its stops; a shorter-arc blend would cross a stop between −170° and +170°.
 pub(crate) fn servo_angles_lerp(start: ServoAngles, end: ServoAngles, t: f32) -> ServoAngles {
-    let lerp = |a: f32, b: f32| a + (b - a) * t;
-    ServoAngles {
-        gunner_yaw: lerp(start.gunner_yaw, end.gunner_yaw),
-        gunner_pitch: lerp(start.gunner_pitch, end.gunner_pitch),
-    }
+    assert_eq!(
+        start.0.len(),
+        end.0.len(),
+        "wire admission checks every sample against the rig's slot count before interpolation"
+    );
+    ServoAngles(
+        start
+            .0
+            .into_iter()
+            .zip(end.0)
+            .map(|(a, b)| a + (b - a) * t)
+            .collect(),
+    )
 }
 
 /// The owner's drive HUD reads its shaped signal beside the cursor-time belt state, so it is
@@ -845,7 +854,7 @@ const WIRE_SURFACE_HASH: u64 = 0xb35d6c7c3c7bbe9e;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x4d79ba6d019c1235;
+const WIRE_TYPES_HASH: u64 = 0x3ae1a75b22a96448;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing; replicon's
@@ -860,6 +869,7 @@ const WIRE_DEP_REPLICON: &str = "0.45.5";
 /// Register the exact shared wire surface represented by [`WIRE_SURFACE`].
 pub(crate) fn plugin(app: &mut App) {
     super::tick_stamp::install(app);
+    super::servo_wire::install(app);
     install_shot_clock(app);
     app.add_systems(
         FixedUpdate,
@@ -874,9 +884,9 @@ pub(crate) fn plugin(app: &mut App) {
     // Immutable spawn identity: which of its combatant's lives a root is, so a record of a shot
     // against an earlier life is never read against this one.
     app.component::<CombatantLife>().replicate();
-    // Sampled on the hull's cursor, so a remote turret, gun and hull are one picture (`net::rig`).
+    // Sampled on the hull's cursor, so every servo and hull are one picture (`net::rig`).
     app.component::<ServoAngles>()
-        .replicate()
+        .replicate_with(super::servo_wire::replication())
         .add_interpolation_with(servo_angles_lerp);
     // Owner-private atomic combat snapshot; public life state is `NetTankStatus`.
     app.component::<NetCrew>().replicate();
@@ -1346,7 +1356,7 @@ mod tests {
         );
     }
 
-    /// A remote rig draws the way its mount turned (`net::rig`): the stream carries the servo's
+    /// Every replica rig draws the way its mount turned (`net::rig`): the stream carries the servo's
     /// unwrapped travel (`tank::servo`'s accumulation), so the cursor blend between two samples
     /// stays on that travel. A continuous mount crossing ±π keeps turning the same way; a limited
     /// mount that swung from one side to the other across a stream gap passes through its middle,
@@ -1357,44 +1367,19 @@ mod tests {
         use std::f32::consts::PI;
         // Fixture samples: a continuous yaw just either side of +π, a pitch at rest.
         let crossing = (
-            ServoAngles {
-                gunner_yaw: PI - 0.1,
-                gunner_pitch: 0.05,
-            },
-            ServoAngles {
-                gunner_yaw: PI + 0.1,
-                gunner_pitch: 0.05,
-            },
+            ServoAngles(vec![PI - 0.1, 0.05]),
+            ServoAngles(vec![PI + 0.1, 0.05]),
         );
         // Fixture: a mount limited to ±170°, from one stop to the other.
         let stop = 170f32.to_radians();
-        let swing = (
-            ServoAngles {
-                gunner_yaw: -stop,
-                gunner_pitch: -0.1,
-            },
-            ServoAngles {
-                gunner_yaw: stop,
-                gunner_pitch: 0.2,
-            },
-        );
+        let swing = (ServoAngles(vec![-stop, -0.1]), ServoAngles(vec![stop, 0.2]));
         for (start, end) in [crossing, swing] {
-            let mut last = start;
+            let mut last = start.clone();
             for step in 0..=8 {
-                let at = servo_angles_lerp(start, end, step as f32 / 8.0);
+                let at = servo_angles_lerp(start.clone(), end.clone(), step as f32 / 8.0);
                 for (from, value, to, was) in [
-                    (
-                        start.gunner_yaw,
-                        at.gunner_yaw,
-                        end.gunner_yaw,
-                        last.gunner_yaw,
-                    ),
-                    (
-                        start.gunner_pitch,
-                        at.gunner_pitch,
-                        end.gunner_pitch,
-                        last.gunner_pitch,
-                    ),
+                    (start.0[0], at.0[0], end.0[0], last.0[0]),
+                    (start.0[1], at.0[1], end.0[1], last.0[1]),
                 ] {
                     let (low, high) = (from.min(to), from.max(to));
                     // Resolution: f32 rounding of the blend.
@@ -1412,67 +1397,89 @@ mod tests {
         }
     }
 
-    /// An assembly need not be a servo. The remote angle stream must read the declared aim
-    /// handles, and a launched assembly must stop publishing even when its yaw is a child.
+    /// Every laid slot is published, including slots outside the gunner's chain. A launched
+    /// assembly retains its separate stream in the game's damage model.
     #[test]
-    fn public_angles_address_yaw_independently_of_the_assembly() {
-        // The pool the per-tank publication batches on.
+    fn public_angles_publish_every_slot_in_rig_order() {
         bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
         let mut world = World::new();
         let assembly = world.spawn_empty().id();
-        let yaw = world.spawn(ServoIndex(0)).id();
-        let pitch = world.spawn(ServoIndex(1)).id();
-        // Fixture live bearings; the interface publishes each slot without integrating a law.
         let root = world
             .spawn((
                 Rig {
                     hull: assembly,
                     turret: assembly,
-                    gunner_yaw: yaw,
-                    gun: pitch,
-                    muzzle: pitch,
+                    gunner_yaw: assembly,
+                    gun: assembly,
+                    muzzle: assembly,
                 },
                 TankServos {
-                    states: vec![
-                        crate::tank::ServoState::test_new(0.7, 0.7, 0.0),
-                        crate::tank::ServoState::test_new(-0.2, -0.2, 0.0),
-                    ],
+                    states: [0.7, -0.2, 0.4, -0.1]
+                        .map(|angle| crate::tank::ServoState::test_new(angle, angle, 0.0))
+                        .to_vec(),
                 },
-                ServoAngles::default(),
+                ServoAngles(Vec::new()),
             ))
             .id();
         world.run_system_once(publish_servo_angles).unwrap();
-        let angles = world.get::<ServoAngles>(root).unwrap();
-        assert_eq!((angles.gunner_yaw, angles.gunner_pitch), (0.7, -0.2));
+        assert_eq!(
+            world.get::<ServoAngles>(root).unwrap().0,
+            vec![0.7, -0.2, 0.4, -0.1]
+        );
         world.entity_mut(assembly).insert(LaunchedTurret);
-        world.entity_mut(yaw).remove::<ServoIndex>();
+        world.get_mut::<TankServos>(root).unwrap().states.clear();
         world.run_system_once(publish_servo_angles).unwrap();
-        let angles = world.get::<ServoAngles>(root).unwrap();
-        assert_eq!((angles.gunner_yaw, angles.gunner_pitch), (0.7, -0.2));
+        assert_eq!(
+            world.get::<ServoAngles>(root).unwrap().0,
+            vec![0.7, -0.2, 0.4, -0.1]
+        );
     }
 
-    /// Peer input must never put nonfinite targets into a remote rig. Postcard is the receive
-    /// codec; valid fields retain their wire order and all finite angles remain admitted.
+    fn decode_servo_angles(
+        bytes: &mut &[u8],
+        expected: usize,
+    ) -> Result<ServoAngles, ServoAnglesError> {
+        let wire = bevy_replicon::postcard_utils::from_buf::<ServoAnglesWire, _>(bytes)
+            .map_err(ServoAnglesError::Encoding)?;
+        let angles = ServoAngles::try_from(wire)?;
+        angles.check_count(expected)?;
+        Ok(angles)
+    }
+
+    /// The receive codec refuses malformed counts before interpolation and preserves every
+    /// finite slot without quantisation. Own and remote rigs rely on complete stream poses.
     #[test]
-    fn peer_servo_angles_admit_only_finite_values() {
+    fn peer_servo_angles_admit_only_complete_finite_poses() {
         for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            for (yaw, pitch, field) in [(value, 0.0, "gunner_yaw"), (0.0, value, "gunner_pitch")] {
+            for slot in 0..4 {
+                let mut angles = vec![0.0; 4];
+                angles[slot] = value;
+                let bytes = postcard::to_allocvec(&angles).unwrap();
                 assert_eq!(
-                    ServoAngles::try_from(ServoAnglesWire {
-                        gunner_yaw: yaw,
-                        gunner_pitch: pitch
-                    }),
-                    Err(ServoAnglesError::NonFinite { field }),
+                    decode_servo_angles(&mut bytes.as_slice(), 4),
+                    Err(ServoAnglesError::NonFinite { slot })
                 );
-                let bytes = postcard::to_allocvec(&(yaw, pitch)).unwrap();
-                assert!(postcard::from_bytes::<ServoAngles>(&bytes).is_err());
             }
         }
-        for (yaw, pitch) in [(0.75, -0.2), (f32::MAX, f32::MIN)] {
-            let bytes = postcard::to_allocvec(&(yaw, pitch)).unwrap();
-            let angles: ServoAngles = postcard::from_bytes(&bytes).unwrap();
-            assert_eq!((angles.gunner_yaw, angles.gunner_pitch), (yaw, pitch));
+        for received in [0, 1, 3, 5] {
+            let bytes = postcard::to_allocvec(&vec![0.0f32; received]).unwrap();
+            assert_eq!(
+                decode_servo_angles(&mut bytes.as_slice(), 4),
+                Err(ServoAnglesError::Count {
+                    expected: 4,
+                    received
+                })
+            );
+        }
+        for values in [
+            vec![0.75, -0.2, 0.4, -0.1],
+            vec![f32::MAX, f32::MIN, 0.0, 1.0],
+        ] {
+            let bytes = postcard::to_allocvec(&values).unwrap();
+            let angles = decode_servo_angles(&mut bytes.as_slice(), values.len()).unwrap();
+            assert_eq!(angles.0, values);
             assert_eq!(postcard::to_allocvec(&angles).unwrap(), bytes);
+            assert_eq!(bytes.len(), 1 + 4 * values.len());
         }
     }
 
@@ -1935,6 +1942,7 @@ mod tests {
         "src/net/tick_stamp/wire.rs",
         "src/net/admission/denial.rs",
         "src/net/debris_stress/pose.rs",
+        "src/net/servo_wire.rs",
     ];
 
     /// FNV-1a over every own wire type's normalized definition, then every codec's normalized

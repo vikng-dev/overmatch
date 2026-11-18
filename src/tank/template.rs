@@ -390,11 +390,6 @@ impl TankTemplate {
         &self.spec
     }
 
-    #[cfg(test)]
-    pub(super) fn transmission(&self) -> &TransmissionParams {
-        &self.transmission
-    }
-
     pub(crate) fn track_colliders(&self) -> &TrackColliders {
         &self.track_colliders
     }
@@ -416,9 +411,19 @@ impl TankTemplate {
         )
     }
 
+    /// Spawn-time wire pose, from the same initial mechanism state as `authority_state`.
+    pub(crate) fn initial_servo_angles(&self) -> Vec<f32> {
+        self.authority
+            .servos
+            .states
+            .iter()
+            .map(|state| state.current())
+            .collect()
+    }
+
     /// The authority root's simulation state, inserted with `Tank` before the root can replicate
     /// or simulate. The glb is a view and never initializes replicated state.
-    pub(super) fn authority_state(&self) -> impl Bundle {
+    pub(crate) fn authority_state(&self) -> impl Bundle {
         let state = &self.authority;
         (
             state.grip.clone(),
@@ -568,7 +573,7 @@ impl TankTemplate {
             // clipping.
             Visibility::Inherited,
             // Readiness and belt supply live in `WeaponGate`; servo state lives in the root's
-            // `TankServos` on the authority or `RemoteServos` on a replica.
+            // `TankServos` on the authority or `StreamedServoPose` on a replica.
             body.sim.clone(),
             Rig {
                 hull: members[self.hull],

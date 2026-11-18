@@ -20,8 +20,8 @@ use bevy::tasks::ComputeTaskPool;
 use serde_json::{Value, json};
 
 use crate::tank::{
-    Controlled, RemoteServos, Rig, Tank, TankServos, TankSim, ViewNode, WeaponGate, WeaponLoads,
-    rig_world_pose, selected,
+    Controlled, Rig, StreamedServoPose, Tank, TankServos, TankSim, ViewNode, WeaponGate,
+    WeaponLoads, rig_world_pose, selected,
 };
 use crate::track::sim::{
     DriveSignal, TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripElements,
@@ -31,6 +31,7 @@ use crate::view::PlayerView;
 
 mod state_hash;
 
+pub(crate) use state_hash::ServoHashSource;
 pub(crate) use state_hash::TankState;
 use state_hash::hash_tank_state;
 #[cfg(test)]
@@ -450,7 +451,7 @@ fn record_tick(
             Option<&TankTransmission>,
             (Option<&WeaponGate>, Option<&WeaponLoads>),
             Option<&TankServos>,
-            Option<&RemoteServos>,
+            Option<&StreamedServoPose>,
             &TrackContacts,
             &TankSim,
             (Has<Controlled>, Option<&Rig>),
@@ -544,11 +545,11 @@ fn record_tick(
             // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
             // and carried state already in hand, except the view-only tracer phase documented on
             // `TankStateHash`; costs a few dozen FNV rounds and runs only when tracing is armed.
-            // The root's servo state is sampled `RemoteServos` on a client replica, or
+            // The root's servo state is sampled `StreamedServoPose` on a client replica, or
             // authoritative `TankServos` on the server and single-player.
             let servo_states = selected(
-                remote_servos.map(|servos| servos.0.as_slice()),
-                servos.map(|servos| servos.states.as_slice()),
+                remote_servos.map(|pose| ServoHashSource::Streamed(&pose.0)),
+                servos.map(|servos| ServoHashSource::Authority(&servos.states)),
             );
             let hash = hash_tank_state(&TankState {
                 position: position.0,
@@ -625,11 +626,8 @@ fn record_tick(
             // Raw carried-state values (`SPIKE_TRACE_SIM_FIELDS`): the magnitudes behind the sub-hash
             // booleans. `thr`/`str` (TrackDrive) are already row fields above.
             if sim_fields {
-                // Fixed field order per deterministic slot: current, previous, angular velocity.
-                let srv: Vec<Value> = servo_states
-                    .iter()
-                    .map(|s| Value::Array(s.hash_fields().iter().map(|&f| num(f)).collect()))
-                    .collect();
+                // Authority: current, previous, velocity per slot. Replica: sampled angle per slot.
+                let srv = servo_states.rows();
                 let wpn: Vec<Value> = sim
                     .weapons
                     .iter()

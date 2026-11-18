@@ -1,112 +1,81 @@
-# Own turret on the server stream
+# Own turret on the server stream — review corrections
 
-Subject: the game's turret presentation and netcode; rounds are game objects and the game's damage model is game state only.
+Subject: the game's turret presentation, netcode and damage-model presentation; game state only.
+Continues `0514f045` on `lane/own-turret-on-stream`. The complete independent review was read
+and every finding checked against source. All findings were confirmed; none was silently skipped
+or refuted. This report supersedes the earlier lane report; git retains its baseline measurements.
 
-Own and remote attached turrets now present the same `ServoAngles` at the hull's view cursor.
-The barrel trails the player's aim by delivery plus the view delay; the tracer leaves the
-streamed barrel. Server servo laws, input transport and authored vehicle data are unchanged.
-No timing, capture, screen or audio run was performed.
+## Findings and decisions
 
-## Removed
+| Finding | Disposition | Verified cause and result |
+|---|---|---|
+| P1-1 | Fixed | `ServoAngles` carried only gunner yaw/pitch although aiming lays every declared mount. It now carries every servo angle in the template's deterministic slot order. The receive codec checks finite angles and the data-owned count before interpolation. A typed refusal closes the match and tells the player why. The stream proof checks every servo node and the muzzle on own and remote tanks. Player and bot initial snapshots take their complete pose from the template's initial mechanism state, before any fixed publication tick; the empty wire default is deleted. |
+| P2-2 | Fixed | `drive_servos` queried replicas, returned before integrating them, and rewrote their unchanged poses. Its tank query now requires authority mechanism state, volumes, construction and crank speed directly; the replica arm, `Or`, optional/expect pairs, copied panic and stale crank message are gone. The three tests pinning that dead path are deleted. Hand-servo and aim fixtures now provide complete authority construction/crank state; the aim fixture uses the production state constructor. |
+| P2-3 | Fixed | `RemoteServos` held fake endpoints and velocity. `StreamedServoPose` now holds angles only and attaches from the received `ServoAngles`. `ServoState::presented` is deleted. Replica trace/hash inputs contain sampled angles; authority rows retain actual endpoints and velocity, so their servo hashes describe different state shapes. Impossible replica integrator fixtures are replaced. |
+| P2-4 | Fixed | The view-overstep proof now targets `TankServos`: offline play and the sandbox must interpolate the shortest arc across the wrap seam, rather than take current directly or blend the long way. |
+| P2-5 and P3 cousins | Fixed | ADR-0037's original ruling and historical statements are restored from the lane's main baseline. Its dated `Amended 2026-11-18 (#187)` paragraph records the owner decision and the full uplink + server slew + view-delay trail. ADR-0030's supersession notice and ADR-0038's own-turret evidence row are restored and annotated. |
+| P3-6 | Fixed | The rulebook, motion contract, ADR amendment and camera comment distinguish local third-person camera/intent cursor/aim dot/trigger click from the streamed optic eye/up, blended optic look and streamed ranging graticule. No camera taste is changed. |
+| P3-7 | Fixed | `DeviceCommand` snapshots before the fixed hold. The client hold serves the crew panel's drive target and `MatchCommands`; the battle code and design doc now say that. |
+| P3-8 | Fixed | Sight scheduling, recording and protocol comments now name sampled replica state. The sight margin's convex travel-window rationale and rejected re-pin rationale are restored. The servo-law design narrative names the angles-only pose and all-slot stream. |
+| P3-9 | Left, as directed | **Unknown:** a second tank's narrow optic and faster traverse may bind the margin against delayed lay, causing stop-go intent. DERIVED condition: slew rate × (uplink + view delay) ≥ optic margin; mixed sampled-state/restored-ancestry ages also contribute. Settle with the second tank's admitted optic geometry and traverse data, representative uplink/view-delay evidence, and a dedicated playtest of sustained traverse. No timing or capture run was performed here. |
+| P3-10 | Fixed | The test-only `TankTemplate::transmission` accessor is deleted; the fixture reads the spawned authority's crank value. |
+| P3-11 | Left, as directed | `ServoCommand` remains the live attached-servo marker consumed by view binding and integrity handling; its replica target needs no reader. |
+| Lens ratchet | Fixed | `drive_gunner_aim` no longer retells the retired `toggle_sight` seed-on-entry story or recaps its rule; the commitment and sight-line seeding rationale remain. The serial `drive_aim_servos` finding is outside this lane and untouched. |
 
-- `net::rig::present_aim`'s controlled-tank exclusion; the stream poses both ownership cases.
-- The controlled-replica integration arm in `tank::servo::drive_servos` and its mutable access
-  to `RemoteServos`. Only authoritative `TankServos` integrates; replicas only supply poses.
-- Replica `ServoMechanism` construction in `attach_replicated_tank_body`. Its transmission
-  accessor now exists only for the spawn test that reads it.
-- Replica command consumption in `aim::drive_aim_servos`, now selected by `TankServos`.
-- The harness's copy of outgoing aim/range into the own tank's client servo command.
-- `the_controlled_replica_integrates_its_own_aim`, the owner-replica coast test arm and its
-  run-comparison bookkeeping, `a_replica_view_interpolates_its_remote_state` (local fixed-step
-  smoothing), and `a_scripted_client_lays_its_own_tank_like_a_player`.
-- `missing_remote_slot` and the volume relationship it created only for client integration.
-- The fire harness's `gun_yaw_minus_cursor_yaw_deg` field, its computation and lead columns.
-  The fire/tracer/muzzle-coherence and pivot diagnostics still have users and remain.
+## Wire verdict
 
-No files were deleted. No turret prediction/rollback registration, reconciliation or local-to-stream
-smoother remains to remove: protocol registration already interpolated `ServoAngles`, and the
-client mounts no prediction manager. The stale restoration/trace comments now name servo state.
+Revision **107**. Angles retain the existing unquantised `f32` representation. The tank template
+owns the count and sorted-name slot order; no mount or vehicle name appears in presentation logic.
+The current composition admits one `TankTemplate`; its data-owned slot count reaches the receive
+codec before replication intake. Malformed counts never reach interpolation. The registered codec
+and production lobby refusal are witnessed over real UDP, including no reconnect after refusal.
 
-## Local input and shared presentation
+DERIVED from Postcard's sequence-length varint and four bytes per `f32`: a full servo component is
+`4 × N + ULEB128_length(N)` bytes per tank per tick. The fixture rig declares four slots, so its
+payload is **17 bytes**, formerly **8 bytes**: **+9 bytes per tank per tick**. These are component
+payload bytes, excluding entity/component headers, packet framing and unchanged-component omission.
+The byte count is also asserted by the protocol round-trip test; no bandwidth capture was run.
 
-`camera::OrbitCamera`, `aim::CommittedAim`, device commands, ranging, mouse-authored
-`sight::GunnerIntent`, aim reticles and the trigger click remain local input feedback. The
-optic camera still computes its existing stateless blend of committed intent and the drawn
-sight line: its eye and gun-side bearing now read the streamed gun. The optic margin reads the
-sampled lay; no client servo moves it. The camera/intent state never becomes turret state.
+`WIRE_TYPES_HASH` is re-pinned to **`0x3ae1a75b22a96448`**. The ordered registrations are
+unchanged, so `WIRE_SURFACE_HASH` remains **`0xb35d6c7c3c7bbe9e`**. The first protocol run
+passed its other tests and failed the expected type-hash tripwire before this re-pin.
 
-`aim::update_bore_indicator` and `sight::reticle::update_ranging_reticle` already resolve view
-nodes, so actual-pointing marks now read the streamed gun. The intent reticle still projects
-`CommittedAim`. `client::present_released_shot`, cursor-held fire events and pending recoil
-kicks already serve own and remote shots alike; muzzle, tracer and recoil needed no ownership
-branch removed. Their source remains the server answer.
+Source anchors (current tree): `src/net/protocol.rs:117` owns the vector wire layout;
+`src/net/servo_wire.rs:30` owns receive admission; `src/tank/servo.rs:233` owns the
+angles-only pose; `src/tank/servo.rs:373` owns authority stepping;
+`src/tank/servo.rs:1203` proves the shortest-arc overstep;
+`src/sight.rs:329` reads the sampled pose and `src/sight.rs:544` clamps the optic margin;
+`src/damage_cam/record.rs:253` records either source's real angles.
+P3-11's marker consumers are `src/tank/view.rs:54` and `src/tank/integrity.rs:26`.
+No original finding was refuted.
 
-`RemoteServos` remains the shared replica presentation store; `ServoState::presented` gives
-identical blend endpoints and zero velocity. Authority/offline servo interpolation and its laws
-remain. Replica `ServoCommand` components still identify live view bindings in `bind_tank_view`
-and are removed by detached-assembly integrity handling; they have no client drive consumer.
-General servo state-hash/trace fields still diagnose server state and sampled poses. Aim/sight
-sensitivity and camera-blend data still serve local input feedback. None serves a local turret
-integrator. These are current users; nothing is blocked or deferred.
+The first full suite exposed incomplete hand-servo aim fixtures and an empty server init pose;
+both are corrected above. It also exposed a pre-existing test conditioner ordering gap:
+`lightyear_udp 0.31.0`'s endpoint receives in the whole `LinkSystems::Receive`, while the
+input-arrival conditioner was ordered only after the `ApplyConditioner` subset. Four packet-loss
+proofs reproduced the failure in isolation. The conditioner now follows the whole receive set
+and precedes `ConnectionSystems::Receive`, so it sees the server packets before consumption.
+Production input behavior is unchanged by that test-fixture correction.
 
-## Docs and wire
-
-Updated the rulebook's one-timeline rule, ADR-0037, the motion contract, ADR-0030's supersession
-notice, ADR-0038's consumer table, the battle-cycle and servo-law narratives, the sim-body glossary
-and affected comments. The net debt report's own-turret row is resolved. Historical captures and
-superseded ADR bodies retain their original evidence; `turret-cursor-3a.md`,
-`turret-remeasure-2026-11-18.md` and `input-arrival-review.md` describe their recorded baselines.
-
-No wire type definition or registration changed. `WIRE_TYPE_DEFS`, its hash and `PROTOCOL_REV`
-remain unchanged at revision **106**.
-
-The unrelated release warning has two real users: `TrackGear::bitprobe_startup` under
-`bitprobe`, and the test-only track-scorecard turn probe. `steering_speed_at_governor` is kept
-under `cfg(any(test, feature = "bitprobe"))`.
-
-## Evidence
-
-The production stream/barrel proof now covers own and remote rigs, fractional cursors,
-holds and a forward cut using `Timing::view_fixture()`. The fixed-step proof rejects moving
-either ownership case from a command or stored momentum; the presenter proof covers both and
-the game's launched-assembly exception. Generic authority coast and aiming laws remain tested.
-
-DERIVED from `git show 0a1d9e0b:<path>` and `git diff --numstat`, physical lines before/after:
-
-| File | Before | After | Net |
-|---|---:|---:|---:|
-| `scripts/shot/run-turret-cursor.py` | 485 | 479 | -6 |
-| `src/aim.rs` | 1607 | 1607 | +0 |
-| `src/net/battle.rs` | 398 | 398 | +0 |
-| `src/net/harness.rs` | 1771 | 1722 | -49 |
-| `src/net/protocol.rs` | 2334 | 2333 | -1 |
-| `src/net/rig.rs` | 176 | 166 | -10 |
-| `src/net/tests/stream_presence.rs` | 624 | 653 | +29 |
-| `src/sight.rs` | 1038 | 1036 | -2 |
-| `src/tank/servo.rs` | 1396 | 1313 | -83 |
-| `src/tank/spawn.rs` | 756 | 755 | -1 |
-| `src/tank/template.rs` | 1430 | 1431 | +1 |
-| `src/trace.rs` | 744 | 744 | +0 |
-| `src/track/transmission.rs` | 2290 | 2291 | +1 |
-
-All modified existing files, docs included: **19466 → 19342**, net **-124** lines
-(DERIVED, excluding this new report).
-
-## Checks
+## Verification
 
 MEASURED in this bay, compilation exclusively through `scripts/serial-cargo`:
 
 | Check | Result |
 |---|---|
-| `cargo fmt --all --check`; `git diff --check`; Python runner syntax | Passed |
-| Locked workspace/all-targets Clippy, `dev_ui,bitprobe`, `-D warnings` | Passed |
-| Targeted servo, rig, stream-presence, harness, protocol, aim, sight, spawn, template and transmission tests | All passed; 223 tests across the module filters |
-| Default-feature `check --release --bin overmatch` | Passed, no warnings |
-| `check --no-default-features --bin overmatch-server` | Passed; two existing unused-audio-metadata warnings |
-| Full library suite, `dev_ui,bitprobe`, run once | 2,870 passed, 51 ignored, zero failed |
-| Final fixture/comment cleanup: servo, spawn, rig, sight and stream-presence tests | 64 passed, zero failed; Clippy and both configuration checks repeated successfully |
+| `cargo fmt --all --check`; `git diff --check` | Passed |
+| Locked workspace/all-target Clippy, `dev_ui,bitprobe`, `-D warnings` | Passed, no warnings |
+| Targeted protocol, servo, rig, codec, stream, sight, spawn, template, trace, recording, battle, aim, server, hosted-join and input-arrival filters | 181 passed; one existing hosted instrument ignored |
+| `check --no-default-features --bin overmatch-server` | Passed; two pre-existing unused client audio-metadata warnings |
+| `check --release --bin overmatch` | Passed, no warnings |
+| Final full library suite, `dev_ui,bitprobe` | 2,870 passed; zero failed; 51 ignored |
 
-The full run preceded the final removal of unused test-fixture volume setup and corrections to
-integrator wording; the focused pass above verifies those final edits. Test linking reports the
+The first full run completed with 2,861 passed, eight failed and 51 ignored. The failures exposed
+the incomplete aim fixtures, empty initial wire pose and packet-loss conditioner ordering gap
+recorded above; the focused reruns pass after those corrections. Test linking reports the existing
 macOS `__eh_frame` size warning. The server-only warnings name `Weapon::report_clips` and
-`EngineSound` audio fields, which remain client audio inputs and are outside this cleanup.
+`EngineSound` audio fields; these remain client audio inputs.
+
+No timing, capture or screen access, no GitHub comments, no push. The orchestrator retains
+responsibility for independent six-lens review before merging; this lane does not merge or
+release its bay.
