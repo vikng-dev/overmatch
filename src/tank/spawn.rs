@@ -2,7 +2,7 @@ use bevy::asset::LoadState;
 use bevy::prelude::*;
 
 use super::model::Tank;
-use super::servo::{RemoteServos, ServoMechanism};
+use super::servo::RemoteServos;
 use super::template::TankTemplate;
 use super::view::bind_tank_view;
 use crate::spec::{TankSpec, TankSpecHandle};
@@ -152,7 +152,7 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
 ///
 /// Two instruments are deliberately headless and share this: the bitprobe differential harness and
 /// the §13.6 ray fuzzer (`ballistics::fuzz`). Both need the same template-built body, colliders and
-/// rollback-visible state as an authority tank, and neither wants a `WorldAssetRoot`, an asset
+/// simulation state as an authority tank, and neither wants a `WorldAssetRoot`, an asset
 /// handle, or a view-binding observer. [`TankTemplate::assemble`] remains the one simulation
 /// constructor.
 pub(crate) fn spawn_headless_tank<B: Bundle>(
@@ -186,7 +186,6 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     root_commands
         .insert((
             presentation.root_bundle(),
-            ServoMechanism::new(template.transmission()),
             // Replicated authority state (EngineRpm, the public ServoAngles; the owner's
             // TankTransmission, DriveSignal, WeaponGate, WeaponLoads) arrived in the replication
             // init snapshot. Do not overwrite it with fresh spec-derived values.
@@ -311,8 +310,8 @@ mod proxy_tests {
 
     /// The game's netcode: a replica's body attaches around the authority state its join-in-progress
     /// snapshot carried. The crank and the owner's drivetrain, weapon gate and grip field survive
-    /// attachment as they arrived, and the root gains the client's servo
-    /// integrator, never the authority's. A late joiner relies on it to see the tank in play, not
+    /// attachment as they arrived, and the root gains sampled servo presentation state,
+    /// never an authoritative integrator. A late joiner relies on it to see the tank in play, not
     /// a fresh one rebuilt from the spec. Fixture: the shipped tank's spawn state, moved off it.
     #[test]
     fn a_replica_attaches_around_its_join_in_progress_snapshot() {
@@ -359,7 +358,7 @@ mod proxy_tests {
         assert_eq!(attached.get::<TrackGripElements>(), Some(&snapshot.3));
         assert!(
             attached.contains::<RemoteServos>() && !attached.contains::<TankServos>(),
-            "a replica integrates RemoteServos only"
+            "a replica presents RemoteServos without an authoritative integrator"
         );
     }
 

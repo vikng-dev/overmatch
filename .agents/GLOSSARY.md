@@ -97,7 +97,7 @@ _Avoid_: terrain edge (the boundary may follow an irregular border inside the te
 ## Sim / view
 
 **Sim body** (sim skeleton):
-The tank's simulated entities — servo frames, wheel stations, colliders, armor volumes, carried `TankSim` state — built synchronously at spawn from extracted data (`TankGeometry`), never from the glb scene. This is what the server and predicted client run on; it is rollback-registered and complete the tick the tank spawns (ADR-0014).
+The tank's simulated entities — servo frames, wheel stations, colliders, armor volumes, carried `TankSim` state — built synchronously at spawn from extracted data (`TankGeometry`), never from the glb scene. The authority simulates it; a network client poses its replica from the server stream (ADR-0037). It is complete at spawn (ADR-0014).
 _Avoid_: "the rig" for the sim body (the rig is the *contract*; the sim body is the spawned entities)
 
 **View**:

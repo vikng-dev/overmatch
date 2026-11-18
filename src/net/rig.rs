@@ -2,7 +2,7 @@
 //!
 //! ADR-0014 exception: a replicated root receives simulation only after it has a wire pose;
 //! children derive from root simulation. Every replica — the own hull included — rides the
-//! interpolated server stream on a `Static` body; every attached remote aim rig also draws its
+//! interpolated server stream on a `Static` body; every attached aim rig also draws its
 //! turret and gun from that stream, at the same view cursor. In the game's damage-model
 //! presentation, a knocked-out tank's launched turret keeps its own replicated pose instead.
 
@@ -17,8 +17,8 @@ use lightyear::prelude::*;
 use super::protocol::{NetTank, ServoAngles};
 use crate::damage::LaunchedTurret;
 use crate::tank::{
-    Controlled as GameControlled, PendingTankAssets, RemoteServos, Rig, ServoIndex, ServoState,
-    ServoView, TankTemplate, attach_replicated_tank_body,
+    PendingTankAssets, RemoteServos, Rig, ServoIndex, ServoState, ServoView, TankTemplate,
+    attach_replicated_tank_body,
 };
 use crate::track::sim::EngineRpm;
 
@@ -75,10 +75,9 @@ fn attach_visible_rigs(
     }
 }
 
-/// Pose every attached remote aim rig from its aim stream: this frame's
+/// Pose every attached aim rig from its aim stream: this frame's
 /// [`ServoAngles`], which Lightyear's interpolation sampled at the view cursor its hull pose was
-/// sampled at, before the servo view draws them. The controlled tank's aim is its own input's
-/// (`aim::drive_aim_servos`).
+/// sampled at, before the servo view draws them, regardless of ownership.
 pub(crate) fn present_streamed_aim() -> ScheduleConfigs<ScheduleSystem> {
     present_aim
         .after(InterpolationSystems::All)
@@ -89,10 +88,7 @@ pub(crate) fn present_streamed_aim() -> ScheduleConfigs<ScheduleSystem> {
 }
 
 fn present_aim(
-    mut tanks: Query<
-        (&ServoAngles, &Rig, &mut RemoteServos),
-        (With<Remote>, Without<GameControlled>),
-    >,
+    mut tanks: Query<(&ServoAngles, &Rig, &mut RemoteServos), With<Remote>>,
     slots: Query<&ServoIndex>,
     launched: Query<(), With<LaunchedTurret>>,
 ) {
@@ -123,17 +119,16 @@ mod tests {
 
     use super::*;
 
-    /// The controlled tank's aim belongs to its own input (`aim::drive_aim_servos`): the OWN tank
-    /// is `Remote` like every replica, so only the owner marker keeps the stream off it. A
-    /// launched assembly follows its body pose instead. Every other replica takes the stream.
+    /// Every player's barrel follows the sampled stream regardless of ownership. The game's
+    /// damage model gives a launched assembly its own body pose instead of attached aim.
     #[test]
-    fn the_stream_poses_every_replica_but_the_controlled_and_the_launched() {
-        // Fixture angles and an integrating state the stream must not overwrite.
+    fn the_stream_poses_own_and_remote_replicas_but_not_launched_assemblies() {
+        // Fixture sampled angles and prior motion.
         let angles = ServoAngles {
             gunner_yaw: 0.75,
             gunner_pitch: -0.2,
         };
-        let integrating = ServoState::test_new(0.1, 0.05, 0.3);
+        let prior = ServoState::test_new(0.1, 0.05, 0.3);
         let mut world = World::new();
         let mut spawn = |owned: bool, launched: bool| {
             let turret = world.spawn_empty().id();
@@ -147,14 +142,9 @@ mod tests {
                 gun: world.spawn(ServoIndex(0)).id(),
                 muzzle: world.spawn_empty().id(),
             };
-            let mut root = world.spawn((
-                Remote,
-                angles,
-                rig,
-                RemoteServos(vec![integrating, integrating]),
-            ));
+            let mut root = world.spawn((Remote, angles, rig, RemoteServos(vec![prior, prior])));
             if owned {
-                root.insert(GameControlled);
+                root.insert(crate::tank::Controlled);
             }
             root.id()
         };
@@ -162,15 +152,15 @@ mod tests {
         let own = spawn(true, false);
         let launched = spawn(false, true);
         world.run_system_once(present_aim).unwrap();
-        assert_eq!(
-            world.get::<RemoteServos>(remote).unwrap().0,
-            vec![ServoState::presented(-0.2), ServoState::presented(0.75)],
-        );
-        for root in [own, launched] {
+        for root in [own, remote] {
             assert_eq!(
                 world.get::<RemoteServos>(root).unwrap().0,
-                vec![integrating, integrating]
+                vec![ServoState::presented(-0.2), ServoState::presented(0.75)],
             );
         }
+        assert_eq!(
+            world.get::<RemoteServos>(launched).unwrap().0,
+            vec![prior, prior]
+        );
     }
 }

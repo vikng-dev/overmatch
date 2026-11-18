@@ -390,6 +390,7 @@ impl TankTemplate {
         &self.spec
     }
 
+    #[cfg(test)]
     pub(super) fn transmission(&self) -> &TransmissionParams {
         &self.transmission
     }
@@ -566,8 +567,8 @@ impl TankTemplate {
             // the gun pivot, inside the mantlet) sees no own-tank geometry — no near-plane
             // clipping.
             Visibility::Inherited,
-            // Authoritative readiness and belt supply live in the root's `WeaponGate`, servo
-            // integration in its `TankServos`/`RemoteServos`.
+            // Readiness and belt supply live in `WeaponGate`; servo state lives in the root's
+            // `TankServos` on the authority or `RemoteServos` on a replica.
             body.sim.clone(),
             Rig {
                 hull: members[self.hull],

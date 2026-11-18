@@ -20,16 +20,19 @@ and the prediction-era clauses of [[0014-sim-view-split]], [[0021-fire-replicati
 
 ## Ruling
 
-Every hull — the client's own included — renders from the interpolated server stream, at a
-delay derived from completed frame-start stamps (`net::view_clock`). The client predicts nothing
+Every hull, turret and gun — the client's own included — renders from the interpolated server
+stream, at a delay derived from completed frame-start stamps (`net::view_clock`). The client predicts nothing
 and reconciles nothing: there is one timeline of authoritative state, and everything the player must feel before that stream can show it is a
 **view overlay** — presentation computed beside the stream, never a second simulation corrected
 against the first.
 
-The compensable class is epistemic, not architectural: only what is self-caused, locally
-computable, and finite may present ahead of the stream (fire intent, own recoil response, own
-turret). No engineering effort grows that class; a foreign fact is presentable no earlier than
-its arrival.
+Only input feedback presents ahead of the stream: the client owns the camera, aim point,
+reticle and trigger click. The gun's actual-pointing marker reads its streamed pose. The shot's
+flash, report, recoil and tracer follow the server's answer at the shared view cursor.
+
+Owner decision (2026-11-18, #187): remove the own-turret exception and its client servo
+integration. Own and remote turrets use the same sampled yaw and gun elevation. The barrel
+trails the player's aim by the view delay; the tracer leaves the streamed barrel.
 
 Per-channel clock assignment replaces the architecture binary. Each perceptual channel is
 assigned to {click, arrival, cursor}; continuous state uses the sampled server stream, and
@@ -93,8 +96,8 @@ presentation consumers (recoil microsim, belt view).
 - `hit_feel` at arrival (under review, fork 2), the FRONTIER/INPUT-ARRIVAL instruments,
   the track-view snap detector (its render_error upper bracket is unpinned — the remaining
   discontinuity sources are respawn, terrain revision, and lightyear's freeze-then-step clamp),
-  servo view interpolation and the `RemoteServos` integrator (slice 3/#187), and
-  the wire-quantization guards (`HIT_EPS_HP`).
+  servo view interpolation (`RemoteServos` holds sampled angles without integration), and the
+  wire-quantization guards (`HIT_EPS_HP`).
 - Named tuned-constant debt, complete: the belt phase heal rate, a `Taste` in
   `assets/driving/belt_phase_view.ron` (derived replacement sketched in `recoil_overlay`), and the
   `SNAP_TRANSLATION`/`SNAP_AXIS` pair.
@@ -118,8 +121,8 @@ fork were deleted in demolition pass 2 — along with every mode lever (`OVERMAT
   arrival never writes live sim. The owner-prediction/rollback-restore half dissolves; the
   client reads the gate as a legality report.
 - **0030**: the atomic `TankServos` component and its determinism-trace role survive; owner
-  reconciliation dissolves. The own turret is click-immediate client view state; remotes drive
-  from replicated `ServoAngles`.
+  reconciliation dissolves. Every replica presents replicated `ServoAngles` at the hull's view
+  cursor; only the authority integrates `TankServos`.
 - **0032**: dissolves wholly, mechanism and need.
 
 ## Presentation choices

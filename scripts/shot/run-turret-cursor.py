@@ -152,15 +152,10 @@ def analyze_fire(out):
             muzzle, bore = row["bore"][:3], row["bore"][3:]
             p0, p1 = row["p"][0], row["p"][1]
             segment = [b - a for a, b in zip(p0, p1)]
-            truth = truth_at(bearing, row["itick"])
             shot[view] = {
                 "gun_vs_server_fire_deg": angle_deg(bore, fire["d"]),
                 "gun_vs_tracer_deg": angle_deg(bore, segment),
                 "gun_yaw_minus_fire_yaw_deg": wrap(bearing_deg(bore) - bearing_deg(fire["d"])),
-                # The drawn bore against the server's bore at this frame's cursor: how far the
-                # drawn turret runs ahead of the stream it presents.
-                "gun_yaw_minus_cursor_yaw_deg":
-                    None if truth is None else wrap(bearing_deg(bore) - truth),
                 "cursor_minus_fire_ticks": row["itick"] - fire["t"],
                 "tracer_start_from_drawn_muzzle_m": math.dist(muzzle, p0),
             }
@@ -187,12 +182,12 @@ def fire_text(summary):
              f"{summary['conditioner']}; window {summary['window']}; MEASURED, degrees",
              "own = the shooter's client drawing its own turret; remote = the observer's client",
              "drawing the shooter. gun-fire: drawn barrel vs the server's bore at the fire tick;",
-             "gun-tracer: drawn barrel vs the tracer's first drawn segment; lead: drawn yaw minus",
-             "the server's yaw at the frame's view cursor; cur-ft: that cursor minus the fire tick.",
+             "gun-tracer: drawn barrel vs the tracer's first drawn segment; cur-ft: the view cursor",
+             "minus the fire tick.",
              "n/a: the server's trace holds no value there; missing: the view drew no tracer.",
              "",
-             f"{'tick':>5} {'deg/s':>6} | {'own gun-fire':>12} {'gun-tracer':>10} {'lead':>6} "
-             f"{'cur-ft':>6} | {'remote gun-fire':>15} {'gun-tracer':>10} {'lead':>6} {'cur-ft':>6}"]
+             f"{'tick':>5} {'deg/s':>6} | {'own gun-fire':>12} {'gun-tracer':>10} "
+             f"{'cur-ft':>6} | {'remote gun-fire':>15} {'gun-tracer':>10} {'cur-ft':>6}"]
     def cell(value, width, digits):
         return f"{'n/a':>{width}}" if value is None else f"{value:>{width}.{digits}f}"
 
@@ -202,7 +197,6 @@ def fire_text(summary):
             v = s[view]
             row += " missing |" if v is None else (
                 f" {v['gun_vs_server_fire_deg']:>{width}.3f} {v['gun_vs_tracer_deg']:>10.3f}"
-                f" {cell(v['gun_yaw_minus_cursor_yaw_deg'], 6, 3)}"
                 f" {v['cursor_minus_fire_ticks']:>6.2f} |")
         lines.append(row.rstrip(" |") + ("" if s["traversing"] else "   (at rest)"))
     lines.append("")
@@ -211,7 +205,7 @@ def fire_text(summary):
     for view, name in (("subject", "own"), ("observer", "remote")):
         st = m[f"{view}_mid_traverse"]
         for field in ("gun_vs_server_fire_deg", "gun_vs_tracer_deg",
-                      "gun_yaw_minus_cursor_yaw_deg", "tracer_start_from_drawn_muzzle_m"):
+                      "tracer_start_from_drawn_muzzle_m"):
             f = st.get(field)
             lines.append(f"{name:>6} {field}: " + (
                 f"unavailable of {m['mid_traverse_shots']} shots" if f is None else

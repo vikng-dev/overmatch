@@ -37,8 +37,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// fragments reach players as decoration events. The construction ledger reaches a client as the
 /// diffs past its acknowledged cursor (bevy_replicon 0.45.5), each naming the position it lands
 /// at, and a whole copy only to a client without one or behind the retained history; the hull
-/// marks replicate whole. The owner's ahead-running aim integrates the authority's servo law
-/// (`tank::servo`), so a change to that law changes this revision too.
+/// marks replicate whole.
 pub const PROTOCOL_REV: u32 = 106;
 
 /// The compatibility record's wire term: the pinned wire manifest, [`PROTOCOL_REV`] and the crate
@@ -111,8 +110,8 @@ pub struct NetTank;
 #[derive(Component, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct NetBot;
 
-/// Authoritative parent-local Gunner yaw/pitch, presented at the view cursor on every replica the
-/// client does not drive (`net::rig`).
+/// Authoritative parent-local Gunner yaw/pitch, presented at the view cursor on every replica
+/// (`net::rig`), regardless of ownership.
 #[derive(Component, Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(try_from = "ServoAnglesWire")]
 pub struct ServoAngles {

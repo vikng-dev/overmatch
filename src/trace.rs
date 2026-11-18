@@ -544,7 +544,7 @@ fn record_tick(
             // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
             // and carried state already in hand, except the view-only tracer phase documented on
             // `TankStateHash`; costs a few dozen FNV rounds and runs only when tracing is armed.
-            // The servos are the root's one integrator: `RemoteServos` on a client replica, the
+            // The root's servo state is sampled `RemoteServos` on a client replica, or
             // authoritative `TankServos` on the server and single-player.
             let servo_states = selected(
                 remote_servos.map(|servos| servos.0.as_slice()),

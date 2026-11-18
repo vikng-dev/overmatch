@@ -535,6 +535,7 @@ impl TransmissionParams {
     }
 
     /// Construction readout, not a pivot target: the tight member's belt speed at the governor.
+    #[cfg(any(test, feature = "bitprobe"))]
     pub(crate) fn steering_speed_at_governor(&self) -> f32 {
         self.steer_crank_ratio.0 * self.engine.governed_rpm * RPM_TO_RAD
     }

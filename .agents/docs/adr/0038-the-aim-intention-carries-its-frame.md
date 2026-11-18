@@ -39,7 +39,6 @@ intent by ω × (age of the value):
 
 | consumer | age | error at ω = 10–20 °/s |
 |---|---|---|
-| the client's own turret | ~4 ticks (input delay + the authoring frame), ~63 ms | 0.6–1.3° |
 | the authority that actually fires | rtt/2 + interp delay, ~110–160 ms | 0.7–2.2° |
 
 At 300–500 m that is metres between the target the player is holding the crosshair on and the shell

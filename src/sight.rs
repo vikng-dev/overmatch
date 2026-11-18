@@ -319,7 +319,7 @@ fn resume_commit(committed_point: Option<Vec3>, moved: bool, resolved: Vec3) -> 
 }
 
 /// Read access to a tank's live servo lays: the [`ServoIndex`] slot each servo entity holds, plus
-/// the root's one integrator those slots address.
+/// the root's servo state those slots address.
 #[derive(SystemParam)]
 pub(crate) struct LiveServos<'w, 's> {
     slots: Query<'w, 's, &'static ServoIndex>,
@@ -329,10 +329,10 @@ pub(crate) struct LiveServos<'w, 's> {
 }
 
 impl LiveServos<'_, '_> {
-    /// A `servo` entity's live parent-local lay under `tank`, from the root's one integrator
+    /// A `servo` entity's live parent-local lay under `tank`, from the root's servo state
     /// ([`selected`]): the client-local [`RemoteServos`] on every replica, the own hull included,
     /// or the authoritative [`TankServos`]. The optic clamps intent against the gun's live lay, so
-    /// it must read the integrator that is moving it.
+    /// it reads sampled angles on clients and integrated angles on the authority.
     fn angle(&self, tank: Entity, servo: Entity) -> f32 {
         let slot = self
             .slots
@@ -350,7 +350,7 @@ impl LiveServos<'_, '_> {
         .current();
         assert!(
             angle.is_finite(),
-            "the live servo integrator holds finite angles"
+            "the live servo state holds finite angles"
         );
         angle
     }
@@ -546,11 +546,9 @@ pub(crate) fn drive_gunner_aim(
 
     // Bound 2 — the circular optic margin. Lead as a 2D angular vector from the gun chain's current
     // *sight line* (lay − lob). Yaw uses shortest-angle difference so continuous traverse doesn't
-    // wind up. `drive_servos` steps on the fixed clock, so `current` here is the latest tick's
-    // integrated angle — the clamp chases the sim truth, ≤1 tick behind the render pose the optic
-    // shows. Preserve direction, cap magnitude at the margin; within it the intent is untouched
-    // (see the doc comment — re-pinning would make the target recede with the gun). The
-    // interpolation stays inside the travel window (both endpoints are, and scale ∈ [0, 1]).
+    // wind up. On a client `current` is the sampled view-cursor angle; offline it is the latest
+    // fixed-step angle. Preserve direction and cap magnitude at the margin so intent stays local
+    // while the actual gun follows its own presentation clock.
     let yaw_offset = shortest_angle(intent.yaw - t_current);
     let pitch_offset = intent.pitch - sight_now;
     let reach = yaw_offset.hypot(pitch_offset);

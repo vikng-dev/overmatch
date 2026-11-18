@@ -2,7 +2,10 @@
 
 Subject: the game's netcode and damage model; game state only.
 
-All hulls and public paths share one server-domain view cursor. A completed stamp carries frame
+All hulls, attached turrets, guns and public paths share one server-domain view cursor.
+Own and remote turret yaw and gun elevation present the same sampled `ServoAngles`; neither
+integrates on the client. Camera, aim intent, reticle and trigger click remain client-owned input
+feedback. The actual-pointing marker follows the streamed muzzle. A completed stamp carries frame
 start and serialization departure. Frame start maps authority ticks to monotonic wall time;
 departure diagnoses server work in `usual_work_ms`. Completion requires every mutate message of
 that tick; stale, incomplete or duplicate arrivals do not invent production samples.
