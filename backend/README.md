@@ -15,7 +15,7 @@ Design and decisions: `.agents/scratch/hosting-2026-10/` (`decisions.md`, `state
 | `src/edgegap.ts` | Edgegap adapter (production) |
 | `src/ec2.ts`, `src/fleet.ts` | EC2 adapter and admission across versions (`aws-proving`) |
 | `src/history.ts` | `recordEvent`, the single writer of D1 `sessions` |
-| `src/evidence.ts` | Redacted, bounded server-log archive before every Worker stop; retention |
+| `src/evidence.ts` | Bounded, redacted provider log capture and machine journal archive; retention |
 | `src/sweep.ts` | The per-minute orphan sweep (cron trigger) |
 | `src/admin.ts` | `/admin` dashboard and its Access JWT check |
 | `src/types.ts` | The `/v1` wire types |
@@ -31,6 +31,7 @@ Design and decisions: `.agents/scratch/hosting-2026-10/` (`decisions.md`, `state
 | `POST /v1/join/status` | client | the ticket, in the body `{ticket}` | `{state: starting\|ready\|failed, address?, port?, key?, reason?}`; poll until not `starting` |
 | `POST /v1/servers/{id}/heartbeat` | game server | `Authorization: Bearer <OVERMATCH_REPORT_SECRET>` | 204; **410 = unknown server, exit now**; 401 bad secret |
 | `POST /v1/servers/{id}/end` | game server | same | 204 (optional body `crash` is archived before the Worker stops the deployment); 410 unknown |
+| `POST /v1/servers/{id}/journal` | machine stop hook | same | UTF-8 text, `X-Journal-Truncated: 0` or `1`; 204 stored, 409 already captured, 410 unavailable/expired, 401 bad secret, 413 oversized, 400 invalid or credential-bearing |
 | `POST /v1/edgegap/webhook/{id}/{nonce}` | Edgegap | the per-server nonce in the path | 204, or 404 for a wrong nonce; triggers only a status re-read for that server (a body `request_id` is adopted if its status shows the server's tag) |
 | `GET /admin` | Yan | Cloudflare Access | HTML dashboard |
 
@@ -68,7 +69,7 @@ re-arms before outbound work. That work uses five slots; a first capture/stop ca
 up to five bounds (mark, fetch, result write, failure record, stop), or 50 seconds with the deployed
 timeout (DERIVED). Queued rows wait for slots, and replacements wait for the outbound batch.
 
-Before its first capture for a deployment (including late forgotten claims and attributed sweep
+**Edgegap pull.** Before its first capture for a deployment (including late forgotten claims and attributed sweep
 orphans), the Worker commits a `capture incomplete` row in D1 `server_logs`. Only the invocation
 that inserted it fetches Edgegap's `container-logs` (`logs`, `crash_logs`, `crash_data`), independently
 of session history. Any existing row skips capture on later stops, including a failed or interrupted
@@ -103,7 +104,22 @@ Every mark, fetch and write is bounded by
 deletes successful and failed captures after `SERVER_LOG_RETENTION_DAYS` (operator choice: 14 days),
 even when the provider listing fails. Session history has its own lifetime.
 
-Read one archive by deployment id (replace the example id), from `backend/`:
+**EC2 push.** The privileged unit stop hook sends one redacted journal tail before power-off.
+The capture has a 12 s process-group kill deadline, an 8 s upload deadline and a 1 MiB byte cap
+(Resolution: bound shutdown latency and archive storage). A failed attempt is logged locally and
+never retried. `/end` leaves a durable 30 s termination grace so the process can receive its reply,
+exit and run the hook; the alarm still terminates it afterwards if needed. The Worker authenticates
+before reading bytes, bounds streamed bytes before decoding, rejects its own report credential in
+raw text, and sanitises again before storage. The first archive wins; later pushes get 409.
+Admission closes 120 s after the first stop transition, or the last plausible heartbeat/start
+expiry if no end was reported (Resolution: allow shutdown jitter without admitting old credentials).
+The hook also runs on start failure and during the lifetime power-off; a boot failure before the
+unit exists has no unit journal. Hard machine loss or an unavailable Worker can still lose a tail.
+The archive and crash retention are the existing `SERVER_LOG_RETENTION_DAYS` policy.
+See [slice 4's report](../.agents/scratch/aws-journal-slice-4.md) for the redaction contract and live proof.
+
+Read one archive by deployment id (EC2: instance id, also recorded in `sessions.deployment_id`;
+replace the example id), from `backend/`:
 
 ```sh
 npx wrangler d1 execute overmatch-sessions --remote --json --command "SELECT crash, log, error FROM server_logs LEFT JOIN server_crashes USING (server_id) WHERE deployment_id = 'eb3ad1b3be65';" | jq -r '.[] | .results[] | (.crash // empty), (.log // .error // empty)'
@@ -123,7 +139,7 @@ symbol tables without changing code optimisation. Its cost is a larger binary/im
 the byte increase is unmeasured. Full frame file/line information additionally needs debug info.
 The release profile is unchanged.
 
-This is a snapshot before stop, not continuous log shipping: later lines are absent. Edgegap
+The Edgegap pull is a snapshot before stop: later lines are absent. Edgegap
 deletes logs on deployment stop (`session.sh`'s `cmd_logs` contract). A process exit alone does not
 prove whether Edgegap still serves them; the Worker tries and records a 404 or other failure. A
 deployment that disappears without a following Worker stop, an unattributed orphan, or a capture

@@ -33,6 +33,11 @@ set -Eeuo pipefail
 
 STATE=/var/lib/om-harness
 INSTALL=/opt/overmatch
+# Resolution: 1 MiB bounds the journal pipe, upload and durable archive; keep the newest bytes.
+JOURNAL_MAX_BYTES=1048576
+# Resolution: kill the whole capture process group at 12 s, leaving shutdown independent of I/O.
+JOURNAL_CAPTURE_S=12
+
 # The scripted client's session (src/net/harness.rs `Script`): hull parked, never firing, turret
 # sweeping (~1.3 rad/s) so every tick carries a changing aim, the way a scanning player's does.
 CLIENT_SCRIPT='(drive: Idle, aim: Sweep(radius_m: 800, rate_rad_s: 1.28), ticks: %s)'
@@ -49,11 +54,15 @@ boot_failed() {
   trap - ERR
   mark "failed $step" || echo 'boot phase recording failed' >&2
   if [[ "$ROLE" == hosted ]]; then
-    # A failed callback cannot keep a failed machine alive. No journal is uploaded here.
+    # A failure before unit creation has no unit journal. Once it exists, stop it synchronously
+    # so its privileged stop hook finishes before the fallback power-off request.
     curl --silent --show-error --fail --max-time 10 \
       --header @/etc/overmatch-report-header --header 'Content-Type: application/json' \
       --data "{\"reason\":\"boot-$step\"}" \
       "$HOSTED_API/v1/servers/$HOSTED_SERVER_ID/end" >/dev/null 2>&1 || echo 'boot report failed' >&2
+    if [[ -f /etc/systemd/system/overmatch-server.service ]]; then
+      systemctl stop overmatch-server || echo 'failed unit stop reported failure' >&2
+    fi
     systemctl --no-block poweroff
   fi
   exit 1
@@ -150,7 +159,9 @@ boot() {
     useradd --system --no-create-home --shell /usr/sbin/nologin overmatch
     if [[ "$ROLE" == hosted ]]; then
       environment='EnvironmentFile=/etc/overmatch-host.env'
-      stop_post='ExecStopPost=+/usr/bin/systemctl --no-block poweroff'
+      stop_post='ExecStopPost=+/usr/local/bin/om-harness hosted-stop
+# Resolution: 30 s bounds service shutdown, including the 12 s capture and process teardown.
+TimeoutStopSec=30s'
     else
       environment="Environment=OVERMATCH_BOT=$BOTS OVERMATCH_SERVER_STATS_S=$STATS_S"
       stop_post=''
@@ -159,6 +170,8 @@ boot() {
     cat >/etc/systemd/system/overmatch-server.service <<UNIT
 [Unit]
 Description=Overmatch dedicated server
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 User=overmatch
@@ -175,6 +188,57 @@ UNIT
     mark started
   fi
   mark ready
+}
+
+# One privileged post-stop command owns capture then power-off. An asynchronous power-off in an
+# earlier ExecStopPost could cancel the upload. The outer timeout kills journalctl/redaction/curl
+# together; neither a failed upload nor a stuck journal reader can hold the machine alive.
+cmd_hosted_stop() {
+  if ! timeout --signal=KILL "$JOURNAL_CAPTURE_S" /usr/local/bin/om-harness push-journal; then
+    echo 'journal push failed; powering off' >&2
+  fi
+  systemctl --no-block poweroff
+}
+
+cmd_push_journal() {
+  umask 077
+  # tail bounds memory before Python sees input; the extra byte witnesses truncation. Raw journal
+  # bytes stay in the pipe. Only redacted output reaches the root-only files on /run's tmpfs.
+  journalctl -b -u overmatch-server -o short-monotonic --no-pager -q |
+    tail -c "$((JOURNAL_MAX_BYTES + 1))" |
+    python3 -c '
+import pathlib, re, sys
+cap = int(sys.argv[1])
+raw = sys.stdin.buffer.read()
+truncated = len(raw) > cap
+# A cut line may have lost its credential label. Discard it before pattern matching.
+if truncated:
+    raw = raw.split(b"\n", 1)[1] if b"\n" in raw else b""
+text = raw.decode("utf-8", errors="ignore")
+credential = pathlib.Path("/etc/overmatch-report-header").read_text().strip().removeprefix("Authorization: Bearer ")
+text = text.replace(credential, "[credential]")
+text = "\n".join("[credential line redacted]" if re.search(
+    r"ticket|OVERMATCH_|secret|token|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment",
+    line, re.I) else line for line in text.split("\n"))
+text = re.sub(r"https?://\S+", "[url]", text, flags=re.I)
+text = re.sub(r"\b[0-9a-f]{64,}\b", "[credential]", text, flags=re.I)
+text = re.sub(r"\b[A-Za-z0-9_-]+\.[0-9a-f]{32}\b", "[ticket]", text, flags=re.I)
+def ipv6(match):
+    candidate = match[0]
+    return "[ip]" if re.search(r"[0-9a-f]", candidate, re.I) and ("::" in candidate or candidate.count(":") >= 3) else candidate
+text = re.sub(r"(?<![\w:])[0-9a-f]*:[0-9a-f:.]+(?:%[a-z0-9]+)?(?![\w:])", ipv6, text, flags=re.I)
+text = re.sub(r"(?:\d{1,3}\.){3}\d{1,3}", "[ip]", text)
+encoded = text.encode("utf-8")
+truncated = truncated or len(encoded) > cap
+pathlib.Path("/run/overmatch-journal").write_bytes(encoded[-cap:].decode("utf-8", errors="ignore").encode("utf-8"))
+pathlib.Path("/run/overmatch-journal-header").write_text("X-Journal-Truncated: " + str(int(truncated)) + "\n")
+' "$JOURNAL_MAX_BYTES"
+  # Resolution: one attempt, 3 s connection / 8 s total, inside the 12 s whole-capture budget.
+  # Outside failures lose this archive visibly; they never retry or postpone power-off.
+  curl --silent --show-error --fail --connect-timeout 3 --max-time 8 \
+    --header @/etc/overmatch-report-header --header @/run/overmatch-journal-header \
+    --header 'Content-Type: text/plain; charset=utf-8' --data-binary @/run/overmatch-journal \
+    "$HOSTED_API/v1/servers/$HOSTED_SERVER_ID/journal" >/dev/null 2>&1
 }
 
 # The kernel time of the first journal line of <unit> holding <text>; nothing when the query
@@ -250,6 +314,8 @@ cmd_sample() {
 main() {
   case "${1:-}" in
     "") boot ;;
+    hosted-stop) cmd_hosted_stop ;;
+    push-journal) cmd_push_journal ;;
     state) cmd_state ;;
     host) printf 'cpus %s\nmodel %s\n' "$(nproc)" "$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)" ;;
     uptime-echo) cmd_uptime_echo ;;

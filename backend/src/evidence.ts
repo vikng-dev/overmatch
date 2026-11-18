@@ -13,13 +13,14 @@ export const SERVER_LOG_MAX_BYTES = 1024 * 1024;
  * credentials even without a field label. This sanitises archives, not the container's raw output. */
 function sanitizedTail(raw: string, providerToken: string): { log: string; truncated: boolean } {
 	let clean = raw.split("\n").map((line) =>
-		/secret|token|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment/i.test(line)
+		/ticket|OVERMATCH_|secret|token|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment/i.test(line)
 			? "[credential line redacted]" : line,
 	).join("\n");
 	if (providerToken) clean = clean.replaceAll(providerToken, "[credential]");
 	clean = clean
 		.replace(/https?:\/\/\S+/gi, "[url]")
 		.replace(/\b[0-9a-f]{64,}\b/gi, "[credential]")
+		.replace(/\b[A-Za-z0-9_-]+\.[0-9a-f]{32}\b/gi, "[ticket]")
 		// Whole IPv6 tokens include mapped IPv4 and zone ids; preserve Rust paths and clock timestamps.
 		.replace(/(?<![\w:])[0-9a-f]*:[0-9a-f:.]+(?:%[a-z0-9]+)?(?![\w:])/gi, (candidate) =>
 			/[0-9a-f]/i.test(candidate) && (candidate.includes("::") || (candidate.match(/:/g)?.length ?? 0) >= 3) ? "[ip]" : candidate)
@@ -44,14 +45,14 @@ export async function recordCrash(env: Env, serverId: string, crash: string, tim
  * killed during capture cannot make its stop retries refetch the same body and die again.
  * Handled capture failures still stop in this invocation; an interrupted one needs a later stop. */
 export async function stopWithEvidence(env: Env, provider: Provider, serverId: string, deploymentId: string, timeoutMs: number, absenceAfter?: number): Promise<void> {
-	if (!provider.containerLogs) return provider.stop(deploymentId, absenceAfter);
+	if (provider.logs.kind === "push") return provider.stop(deploymentId, absenceAfter);
 	try {
 		const mark = await d1Call("evidenceStorage", timeoutMs, () => env.DB.prepare(
 			`INSERT INTO server_logs (server_id, deployment_id, captured_at, log, truncated, error)
 			 VALUES (?1, ?2, ?3, NULL, 0, 'capture incomplete') ON CONFLICT (deployment_id) DO NOTHING`,
 		).bind(serverId, deploymentId, Date.now()).run());
 		if (mark.meta.changes > 0) {
-			const tail = sanitizedTail(await provider.containerLogs(deploymentId), env.EDGEGAP_TOKEN);
+			const tail = sanitizedTail(await provider.logs.read(deploymentId), env.EDGEGAP_TOKEN);
 			await d1Call("evidenceStorage", timeoutMs, () => env.DB.prepare(
 				"UPDATE server_logs SET log = ?2, truncated = ?3, error = NULL WHERE deployment_id = ?1",
 			).bind(deploymentId, tail.log, Number(tail.truncated)).run());
@@ -84,4 +85,17 @@ export async function expireServerLogs(env: Env, before: number, timeoutMs: numb
 		if (!(err instanceof ProviderError)) throw err;
 		console.warn("server log retention failed", diag(err));
 	}
+}
+
+// Resolution: allow shutdown/network scheduling jitter without admitting old credentials indefinitely.
+export const JOURNAL_WINDOW_MS = 120_000;
+
+/** A first writer wins across retries and concurrent invocations; the machine never retries a push. */
+export async function recordJournal(env: Env, serverId: string, deploymentId: string, raw: string, truncated: boolean, timeoutMs: number): Promise<boolean> {
+	const tail = sanitizedTail(raw, env.EDGEGAP_TOKEN);
+	const saved = await d1Call("journalStorage", timeoutMs, () => env.DB.prepare(
+		`INSERT INTO server_logs (server_id, deployment_id, captured_at, log, truncated, error)
+		 VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT (server_id) DO NOTHING`,
+	).bind(serverId, deploymentId, Date.now(), tail.log, Number(truncated || tail.truncated)).run());
+	return saved.meta.changes > 0;
 }

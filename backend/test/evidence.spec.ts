@@ -20,6 +20,18 @@ async function end(s: { id: string; secret: string }): Promise<void> {
 }
 
 describe("stopped match servers leave evidence for the operator", () => {
+	it("the operator cannot push into a provider whose stop owns log pull", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = launched();
+		const response = await call("POST", `/v1/servers/${s.id}/journal`, "pushed log", {
+			authorization: `Bearer ${s.secret}`, "x-journal-truncated": "0",
+		});
+		expect(response.status).toBe(410);
+		expect(await archive(s.deploymentId)).toBeNull();
+		await end(s);
+		expect(edgegap.count("GET", `/v1/deployment/${s.deploymentId}/container-logs`)).toBe(1);
+	});
+
 	it("records authenticated panic text before log capture, sanitises it, and calls the session a crash", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp();

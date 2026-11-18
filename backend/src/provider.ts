@@ -47,7 +47,12 @@ export type ListedDeployment = CappedDeployment | { id: string; tags: string[]; 
 
 export type Reservation = { server_id: string; created_at: number };
 
+export type LogCapture =
+	| { kind: "pull"; read(deploymentId: string): Promise<string> }
+	| { kind: "push"; exitGraceMs: number };
+
 export interface Provider {
+	readonly logs: LogCapture;
 	readonly starts: { attempts: number; retryBootInPlace: boolean };
 	readonly inventory: { scoped: boolean; maxAgeMs: number | null };
 	readonly usdPerVcpuMinute: number | null;
@@ -69,7 +74,6 @@ export interface Provider {
 	/** Idempotent after confirmed termination. EC2 NotFound before absenceAfter remains unknown:
 	 *  a newly launched instance can be temporarily invisible in its eventually consistent API. */
 	stop(deploymentId: string, absenceAfter?: number): Promise<void>;
-	containerLogs?(deploymentId: string): Promise<string>;
 	locations(): Promise<LocationData[]>;
 	beacons(): Promise<Beacon[]>;
 }

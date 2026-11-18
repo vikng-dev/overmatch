@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -240,7 +241,7 @@ print(f"{'a' * 64}  {archive if archive.endswith('.tar.gz') else archive + '.tar
 # The commands machine.sh calls, for running its own entrypoint here: every call logged in order;
 # `install` and `curl` do their filesystem part; `journalctl` prints JOURNAL, or fails on JOURNAL_FAILS.
 FAKE_MACHINE_COMMAND = r'''#!/usr/bin/env python3
-import json, os, shutil, sys
+import json, os, shutil, sys, time
 from pathlib import Path
 name, args = Path(sys.argv[0]).name, sys.argv[1:]
 with open(os.environ["MACHINE_CALLS"], "a") as log:
@@ -261,6 +262,11 @@ if name == "install":
             Path(path).mkdir(parents=True, exist_ok=True)
     else:
         shutil.copy(*operands)
+        Path(operands[-1]).chmod(0o700)
+elif name == "curl" and "--data-binary" in args:
+    if os.environ.get("PUSH_HANGS"):
+        time.sleep(60)
+    sys.exit(1 if os.environ.get("PUSH_FAILS") else 0)
 elif name == "curl" and "-o" in args:
     Path(args[args.index("-o") + 1]).write_bytes(b"fixture archive")
 elif name == "sha256sum":
@@ -271,6 +277,11 @@ elif name == "sha256sum":
 elif name == "dpkg-query":
     sys.exit(1)
 elif name == "journalctl":
+    if os.environ.get("JOURNAL_HANGS"):
+        time.sleep(60)
+    if os.environ.get("JOURNAL_FILE"):
+        sys.stdout.buffer.write(Path(os.environ["JOURNAL_FILE"]).read_bytes())
+        sys.exit(0)
     if os.environ.get("JOURNAL_FAILS"):
         sys.stderr.write("Failed to open the journal: Input/output error\n")
         sys.exit(1)
@@ -286,11 +297,24 @@ elif name == "systemctl" and args[:1] == ["is-enabled"]:
 elif name == "systemctl" and args[:1] == ["is-active"]:
     print("active")
 '''
+# macOS has no GNU timeout; this fixture executes the same kill/process-group contract with a
+# real deadline. Linux production runs coreutils timeout, not this shim.
+TIMEOUT_COMMAND = r'''#!/usr/bin/env python3
+import os, signal, subprocess, sys
+child = subprocess.Popen(sys.argv[3:], start_new_session=True)
+try:
+    sys.exit(child.wait(timeout=float(sys.argv[2])))
+except subprocess.TimeoutExpired:
+    os.killpg(child.pid, signal.SIGKILL)
+    child.wait()
+    sys.exit(137)
+'''
 MACHINE_COMMANDS = ("install", "shutdown", "chown", "dpkg-query", "apt-get", "curl", "sha256sum", "tar",
                     "systemctl", "journalctl", "useradd")
 # Where each machine path machine.sh names lands under a test's root.
 MACHINE_PATHS = {"/var/lib/om-harness": "state", "/opt/overmatch": "opt", "/usr/local/bin/om-harness": "om-harness",
                  "/etc/overmatch-report-header": "report-header", "/etc/overmatch-host.env": "host.env",
+                 "/run/overmatch-journal-header": "journal-header", "/run/overmatch-journal": "journal",
                  "/home/ubuntu": "home", "/etc/systemd/system": "units", "/proc/uptime": "uptime"}
 
 # The timing tastes' and the battle mode's owners, which the fake release serves at every tag.
@@ -423,6 +447,8 @@ class MachineScript:
         for name in MACHINE_COMMANDS:
             (binary / name).write_text(FAKE_MACHINE_COMMAND)
             (binary / name).chmod(0o755)
+        (binary / "timeout").write_text(TIMEOUT_COMMAND)
+        (binary / "timeout").chmod(0o755)
         (self.root / "units").mkdir()
         (self.root / "uptime").write_text("12.50 3.00\n")
         for path, under in MACHINE_PATHS.items():
@@ -488,7 +514,10 @@ class HostedBoot(unittest.TestCase):
         self.assertLess(next(i for i, c in enumerate(calls) if c[0] == "shutdown"),
                         next(i for i, c in enumerate(calls) if c[0] == "curl"))
         unit = (machine.root / "units/overmatch-server.service").read_text()
-        self.assertIn("ExecStopPost=+/usr/bin/systemctl --no-block poweroff", unit)
+        self.assertIn("ExecStopPost=+" + str(machine.installed) + " hosted-stop", unit)
+        self.assertEqual(unit.count("ExecStopPost="), 1)
+        self.assertIn("TimeoutStopSec=30s", unit)
+        self.assertIn("After=network-online.target", unit)
         self.assertIn("EnvironmentFile=", unit)
         self.assertIn("User=overmatch", unit)
         self.assertIn("NoNewPrivileges=yes", unit)
@@ -535,6 +564,85 @@ class HostedBoot(unittest.TestCase):
         self.assertEqual(json.loads(reports[0][reports[0].index("--data") + 1]), {"reason": "boot-verify"})
         self.assertIn(["systemctl", "--no-block", "poweroff"], calls)
         self.assertNotIn(["systemctl", "start", "overmatch-server"], calls)
+
+    def test_operator_gets_one_bounded_redacted_push_before_poweroff_even_when_upload_fails(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                machine = self.machine()
+                self.assertEqual(machine.boot().returncode, 0)
+                result = machine.command("hosted-stop", JOURNAL="last diagnostic", PUSH_FAILS="1" if fail else "")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = machine.calls()
+                pushes = [c for c in calls if "--data-binary" in c]
+                self.assertEqual(len(pushes), 1)
+                push = pushes[0]
+                self.assertLess(calls.index(push), calls.index(["systemctl", "--no-block", "poweroff"]))
+                self.assertEqual(push[push.index("--max-time") + 1], "8")
+                self.assertEqual(push[push.index("--connect-timeout") + 1], "3")
+                self.assertNotIn("--retry", push)
+                self.assertIn("@" + str(machine.root / "report-header"), push)
+                self.assertTrue(push[-1].endswith("/v1/servers/fixture-server/journal"))
+                self.assertEqual((machine.root / "journal").read_text(), "last diagnostic")
+
+    def test_machine_lifetime_is_bounded_even_when_journal_or_upload_never_returns(self):
+        for hang in ("JOURNAL_HANGS", "PUSH_HANGS"):
+            with self.subTest(hang=hang):
+                machine = self.machine()
+                self.assertEqual(machine.boot().returncode, 0)
+                bound = int(re.search(r"JOURNAL_CAPTURE_S=(\d+)", machine.installed.read_text())[1])
+                started = time.monotonic()
+                result = machine.command("hosted-stop", **{hang: "1"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertLess(time.monotonic() - started, bound + 3)  # Fixture allowance for process scheduling.
+                self.assertIn("journal push failed", result.stderr)
+                self.assertEqual(machine.calls()[-1], ["systemctl", "--no-block", "poweroff"])
+
+    def test_operator_archive_redacts_each_sensitive_form_and_preserves_diagnostics(self):
+        patterns = ["fixture-report", "a" * 64, "Authorization: Bearer value", "private_key=[1, 2]",
+                    "netcode-key=[3, 4]", "password=value", "token=value", "secret=value",
+                    "env_vars={}", "environment={}", "OVERMATCH_API=value", "ticket=value",
+                    "MC44LjA." + "b" * 32, "https://worker.example/v1/servers/id/end", "http://example/path",
+                    "192.0.2.1", "2001:db8::1", "::1", "::ffff:192.0.2.1", "fe80::1%eth0"]
+        machine = self.machine()
+        self.assertEqual(machine.boot().returncode, 0)
+        diagnostic = "src/net/hosting.rs:720:9 12:45:41.9Z server_stats {}"
+        result = machine.command("hosted-stop", JOURNAL="\n".join(patterns + [diagnostic]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        stored = (machine.root / "journal").read_text()
+        for value in patterns:
+            self.assertNotIn(value, stored)
+        self.assertIn(diagnostic, stored)
+        self.assertEqual((machine.root / "journal").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((machine.root / "journal-header").read_text(), "X-Journal-Truncated: 0\n")
+
+    def test_operator_tail_has_a_byte_cap_and_valid_utf8_even_when_redaction_expands_it(self):
+        machine = self.machine()
+        self.assertEqual(machine.boot().returncode, 0)
+        cap = int(re.search(r"JOURNAL_MAX_BYTES=(\d+)", machine.installed.read_text())[1])
+        journal = machine.root / "fixture-journal"
+        for content in ("old head\n" + "界" * cap + "\nlast diagnostic", "::1\n" * (cap // 4)):
+            journal.write_text(content)
+            result = machine.command("hosted-stop", JOURNAL_FILE=str(journal))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            stored = (machine.root / "journal").read_bytes()
+            self.assertLessEqual(len(stored), cap)
+            self.assertNotIn("\ufffd", stored.decode("utf-8"))
+            self.assertEqual((machine.root / "journal-header").read_text(), "X-Journal-Truncated: 1\n")
+            self.assertNotIn(b"old head", stored)
+
+    def test_failed_unit_start_stops_its_hook_before_boot_fallback_poweroff(self):
+        machine = self.machine()
+        # Refuse start after the unit exists; the real systemd also runs ExecStopPost on failure.
+        machine.env["MACHINE_FAIL"] = "systemctl"
+        # Fail only the start command, leaving updater gates and explicit stop usable.
+        fake = machine.root / "bin/systemctl"
+        fake.write_text(FAKE_MACHINE_COMMAND.replace(
+            'if os.environ.get("MACHINE_FAIL") == name:',
+            'if name == "systemctl" and args[:1] == ["start"]:'))
+        self.assertNotEqual(machine.boot().returncode, 0)
+        calls = machine.calls()
+        self.assertLess(calls.index(["systemctl", "stop", "overmatch-server"]),
+                        calls.index(["systemctl", "--no-block", "poweroff"]))
 
 
 class MeasuredRun(unittest.TestCase):

@@ -32,7 +32,7 @@ import { config, serverEnvironment, type Config, type Env } from "./config";
 import { outsideJson, isRecord, isLocation, isBeacon, definiteRejection, providerFor, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./provider";
 import { RELEASE_CACHE_MS, type ServerRelease } from "./release";
 import { settleAll } from "./deadline";
-import { recordCrash, stopWithEvidence } from "./evidence";
+import { JOURNAL_WINDOW_MS, recordJournal, recordCrash, stopWithEvidence } from "./evidence";
 import { recordEvent, type Outcome, type SessionEvent } from "./history";
 import { timingSafeEqual, newId, randomHex, sha256Hex, versionOf, tagOf } from "./ids";
 import { groupLocations, locationId } from "./locations";
@@ -58,6 +58,7 @@ type ServerRow = {
 	port: number | null;
 	netcode_key: string;
 	secret_hash: string;
+	journal_deadline: number | null;
 	created_at: number;
 	ready_at: number | null;
 	last_seen: number | null;
@@ -108,6 +109,8 @@ export type ServerSnapshot = {
 }
 
 export type JoinResult = { ok: true; ticket: string } | { ok: false; status: number; error: string };
+export type JournalResult = { status: 204 } | { status: 400 | 401 | 409 | 410; error: string };
+
 export type ServerCallResult = { status: 204 | 400 | 401 | 410; error?: string };
 
 interface Catalog {
@@ -182,6 +185,9 @@ export class Registry extends DurableObject<Env> {
 		if (!this.sql.exec<{ name: string }>("PRAGMA table_info(servers)").toArray().some((c) => c.name === "vcpu")) {
 			// Existing claims have no recorded allocation; never infer one from today's config.
 			this.sql.exec("ALTER TABLE servers ADD COLUMN vcpu REAL CHECK (vcpu > 0)");
+		}
+		if (!this.sql.exec<{ name: string }>("PRAGMA table_info(servers)").toArray().some((c) => c.name === "journal_deadline")) {
+			this.sql.exec("ALTER TABLE servers ADD COLUMN journal_deadline INTEGER");
 		}
 	}
 
@@ -297,8 +303,34 @@ export class Registry extends DurableObject<Env> {
 		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
 		const bootFailed = this.provider.starts.retryBootInPlace && s.state === "starting" && /^boot-(guard|self|updates|user|download|verify|unpack|start)$/.test(reason);
 		await this.finish(serverId, crash !== undefined || bootFailed ? "failed" : "ended",
-			crash !== undefined ? REASONS.serverCrashed : bootFailed ? REASONS.startFailed : serverReason(reason), undefined, crash);
+			crash !== undefined ? REASONS.serverCrashed : bootFailed ? REASONS.startFailed : serverReason(reason), undefined, crash, this.provider.logs.kind === "push" ? this.provider.logs.exitGraceMs : 0);
 		return { status: 204 };
+	}
+
+	/** Admission runs before HTTP consumes bytes and again after the body crosses RPC. */
+	async journalAdmission(serverId: string, secret: string): Promise<JournalResult> {
+		const s = this.server(serverId);
+		if (!s) return { status: 410, error: "unknown server" };
+		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
+		const current = this.server(serverId);
+		if (!current || !current.deployment_id || this.provider.logs.kind !== "push") return { status: 410, error: "journal unavailable" };
+		// A spontaneous crash need not have sent /end. A ready row's last heartbeat bounds that case.
+		const deadline = current.journal_deadline ?? ((current.last_seen === null
+			? current.created_at + this.cfg.startDeadlineMs : current.last_seen + this.cfg.heartbeatDeadlineMs) + JOURNAL_WINDOW_MS);
+		if (Date.now() > deadline) return { status: 410, error: "journal window expired" };
+		return { status: 204 };
+	}
+
+	async journal(serverId: string, secret: string, raw: string, truncated: boolean): Promise<JournalResult> {
+		const admitted = await this.journalAdmission(serverId, secret);
+		if (admitted.status !== 204) return admitted;
+		// The supplied credential was just authenticated against the stored hash. Refuse rather than
+		// trusting either machine redaction or the generic sanitizer to recognize its representation.
+		if (raw.includes(secret)) return { status: 400, error: "journal contains report credential" };
+		const s = this.server(serverId);
+		if (!s?.deployment_id) return { status: 410, error: "unknown deployment" };
+		return await recordJournal(this.env, serverId, s.deployment_id, raw, truncated, this.cfg.providerTimeoutMs)
+			? { status: 204 } : { status: 409, error: "journal already captured" };
 	}
 
 	/** An Edgegap webhook is a hint only (unsigned, never retried): re-read the status and act on
@@ -716,9 +748,13 @@ export class Registry extends DurableObject<Env> {
 	/** End a live server: move it to `stopping`, give the tickets of a server that never became ready
 	 *  another placement (bounded by the provider start budget), and try the stop. The row stays until the stop
 	 *  is confirmed (`tryStop`); replacements wait behind this capture/stop attempt. */
-	private async finish(serverId: string, outcome: Outcome, reason: string, from?: "starting" | "ready", crash?: string): Promise<void> {
+	private async finish(serverId: string, outcome: Outcome, reason: string, from?: "starting" | "ready", crash?: string, exitGraceMs = 0): Promise<void> {
 		const retry = this.beginStop(serverId, outcome, reason, from);
 		if (retry === null && crash === undefined) return;
+		if (retry !== null && exitGraceMs > 0) {
+			// Reply to the process before terminating its machine; the alarm retains the fallback.
+			this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", Date.now() + exitGraceMs, serverId);
+		}
 		try {
 			if (crash !== undefined) {
 				// A heartbeat expiry or clean end can win the stop transition while a panic is reporting.
@@ -729,7 +765,7 @@ export class Registry extends DurableObject<Env> {
 				await this.record({ kind: "crashed", serverId });
 			}
 		} finally {
-			await this.tryStop(serverId);
+			if (exitGraceMs === 0) await this.tryStop(serverId);
 			await this.replace(retry ?? []);
 			await this.reschedule();
 		}
@@ -741,10 +777,11 @@ export class Registry extends DurableObject<Env> {
 		const s = this.server(serverId);
 		if (!s || !live(s) || (from && s.state !== from)) return null;
 		const moved = this.sql.exec(
-			"UPDATE servers SET state = 'stopping', outcome = ?, reason = ?, stop_at = ? WHERE id = ? AND state = ?",
+			"UPDATE servers SET state = 'stopping', outcome = ?, reason = ?, stop_at = ?, journal_deadline = ? WHERE id = ? AND state = ?",
 			outcome,
 			reason,
 			now,
+			now + JOURNAL_WINDOW_MS,
 			serverId,
 			s.state,
 		).rowsWritten;
