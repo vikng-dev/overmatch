@@ -1,0 +1,26 @@
+[
+  {
+    "raw": "report_secret=v",
+    "expected": "report_secret=[credential]"
+  },
+  {
+    "raw": "connect_token=v",
+    "expected": "connect_token=[credential]"
+  },
+  {
+    "raw": "tokens=v",
+    "expected": "tokens=[credential]"
+  },
+  {
+    "raw": "OVERMATCH_X: v",
+    "expected": "OVERMATCH_X:[credential]"
+  },
+  {
+    "raw": "Authorization: Basic value-after-basic",
+    "expected": "Authorization: Basic [credential]"
+  },
+  {
+    "raw": "{\"token\":\"ab\\\"value-after-escaped-quote\"}",
+    "expected": "{\"token\":[credential]}"
+  }
+]

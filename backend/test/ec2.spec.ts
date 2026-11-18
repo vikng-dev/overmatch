@@ -13,7 +13,7 @@ import { config, serverEnvironment, SERVER_SETTING_DOMAINS } from "../src/config
 import { sweep } from "../src/sweep";
 import { signV4 } from "../src/sigv4";
 import { FakeEc2, resourceTags } from "./fake-ec2";
-import { age, call, env, heartbeat, join, registry, ticket } from "./helpers";
+import { failD1Once, age, call, env, heartbeat, join, registry, ticket } from "./helpers";
 import { serverRelease, RELEASE_CACHE_MS } from "../src/release";
 import worker from "../src/index";
 import { JOURNAL_WINDOW_MS, SERVER_LOG_MAX_BYTES } from "../src/evidence";
@@ -145,7 +145,7 @@ describe("EC2 request contract", () => {
 		const headroom = 16 * 1024 - bytes;
 		console.warn(`Rendered worst realistic user data: ${bytes} bytes; ${headroom} bytes headroom`);
 		expect(bytes, `${bytes} bytes exceeds EC2 16384-byte limit; shrink machine.sh or settings`).toBeLessThanOrEqual(16 * 1024);
-		expect(headroom, `${bytes} bytes leaves ${headroom} bytes; move script comments to the report or shrink boot code`).toBeGreaterThanOrEqual(1024);
+		expect(headroom, `${bytes} bytes leaves ${headroom} bytes; shrink embedded boot code or settings`).toBeGreaterThanOrEqual(1024);
 	});
 
 	it("matches AWS's published IAM ListUsers SigV4 vector (2015-08-30)", async () => {
@@ -747,17 +747,7 @@ describe("machine journal admission and operator archive", () => {
 		const s = await server();
 		const sink = operation === "journal" ? "server_logs" : "server_crashes";
 		// Inject only at the D1 edge inside the actual DO method, so the fault crosses RPC.
-		await runInDurableObject(registry(V), (instance) => {
-			const db = (instance as unknown as { env: { DB: D1Database } }).env.DB;
-			const prepare = db.prepare.bind(db);
-			const fault = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
-				if (sql.includes(`INSERT INTO ${sink}`)) {
-					fault.mockRestore();
-					throw new Error("D1_ERROR: Network connection lost.");
-				}
-				return prepare(sql);
-			});
-		});
+		await failD1Once(V, `INSERT INTO ${sink}`);
 		const report = () => operation === "journal" ? push(s) : call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, { crash: "panic fixture" }, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
 		const response = await report();
 		expect(response.status).toBe(503);
@@ -785,17 +775,7 @@ describe("machine journal admission and operator archive", () => {
 		const s = await server();
 		await call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, {}, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
 		await age(V, JOURNAL_WINDOW_MS + 1);
-		await runInDurableObject(registry(V), (instance) => {
-			const db = (instance as unknown as { env: { DB: D1Database } }).env.DB;
-			const prepare = db.prepare.bind(db);
-			const fault = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
-				if (sql.includes("journal push window closed")) {
-					fault.mockRestore();
-					throw new Error("D1_ERROR: Network connection lost.");
-				}
-				return prepare(sql);
-			});
-		});
+		await failD1Once(V, "journal push window closed");
 		await runDurableObjectAlarm(registry(V));
 		expect(await archive(s.machine.id)).toBeNull();
 		expect(s.machine.state).toBe("terminated"); // Evidence failure cannot retain a machine/slot.
@@ -803,6 +783,15 @@ describe("machine journal admission and operator archive", () => {
 		await age(V, cfg.statusPollMs + 1);
 		await runDurableObjectAlarm(registry(V));
 		expect(await archive(s.machine.id)).toMatchObject({ log: null, error: "journal push window closed without an archive" });
+	});
+
+	it.each([undefined, null, "true"])("boot reports without a boolean unit fact (%s) are refused before changing state", async (journalAvailable) => {
+		const s = await server();
+		const response = await call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, { reason: "boot-start", journalAvailable }, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({ error: "journalAvailable: expected boolean" });
+		expect(s.machine.state).toBe("running");
+		expect((await registry(V).snapshot())[0].state).toBe("starting");
 	});
 
 	it.each([false, true])("boot unit creation=%s is the fact controlling termination grace", async (journalAvailable) => {

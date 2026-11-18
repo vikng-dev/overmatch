@@ -1,11 +1,13 @@
 import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
+import redactionCases from "./journal-redaction.json";
 import { config } from "../src/config";
 import { edgegapFor, SERVER_LOG_BODY_MAX_BYTES } from "../src/edgegap";
-import { SERVER_LOG_MAX_BYTES, stopWithEvidence, sanitizedTail } from "../src/evidence";
+import { SERVER_LOG_MAX_BYTES, stopWithEvidence, sanitizedTail, recordJournal, recordMissingJournal, evidenceResult } from "../src/evidence";
+import { ProviderError } from "../src/provider";
 import { idOf } from "../src/ids";
 import { sweep } from "../src/sweep";
-import { age, bringUp, call, env, join, launched, registry } from "./helpers";
+import { failD1Once, age, bringUp, call, env, join, launched, registry } from "./helpers";
 
 const V = "0.5.0";
 
@@ -147,17 +149,7 @@ describe("stopped match servers leave evidence for the operator", () => {
 	it("a D1 outage is a typed end refusal after stop and ticket replacement, across real RPC", async () => {
 		await join({ version: V, locations: ["Paris", "Frankfurt"], pings: {} });
 		const s = launched();
-		await runInDurableObject(registry(V), (instance) => {
-			const db = (instance as unknown as { env: { DB: D1Database } }).env.DB;
-			const prepare = db.prepare.bind(db);
-			const fault = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
-				if (sql.includes("INSERT INTO server_crashes")) {
-					fault.mockRestore();
-					throw new Error("D1_ERROR: Network connection lost.");
-				}
-				return prepare(sql);
-			});
-		});
+		await failD1Once(V, "INSERT INTO server_crashes");
 		expect((await call("POST", `/v1/servers/${s.id}/end`, { crash: "panic fixture" }, { authorization: `Bearer ${s.secret}` })).status).toBe(503);
 		expect(edgegap.deployment().status).toBe("Status.TERMINATED");
 		expect(edgegap.deployments.size).toBe(2);
@@ -430,13 +422,37 @@ describe("stopped match servers leave evidence for the operator", () => {
 });
 
 
+describe("archive storage races and failure diagnostics", () => {
+	it.each(["marker", "archive"])("an admitted push preserves its archive when %s commits first", async (first) => {
+		// D1 serializes these writes in one of these two orders after journalAdmission succeeds.
+		// Neither the deadline check nor a real archive may erase the operator's evidence.
+		const marker = () => recordMissingJournal(env, "fixture-server", "fixture-deployment", config(env).providerTimeoutMs);
+		const push = () => recordJournal(env, "fixture-server", "fixture-deployment", "late diagnostic", true, config(env).providerTimeoutMs);
+		if (first === "marker") await marker();
+		expect(await push()).toBe(true);
+		await marker();
+		expect(await archive("fixture-deployment")).toMatchObject({ log: "late diagnostic", truncated: 1, error: null });
+		expect(await recordJournal(env, "fixture-server", "fixture-deployment", "replacement", false, config(env).providerTimeoutMs)).toBe(false);
+		expect(await archive("fixture-deployment")).toMatchObject({ log: "late diagnostic", truncated: 1, error: null });
+	});
+
+	it.each(["journalStorage:storage", "fleet:transport", "history:storage"])("RPC failure cause preserves %s for the caller", async (op) => {
+		expect(await evidenceResult("fixture-server", async () => { throw new ProviderError(op, 0, "unknown"); }))
+			.toEqual({ ok: false, cause: op });
+	});
+});
+
 describe("bounded archive redaction", () => {
-	it("configuration errors and netcode token diagnostics keep the cause for the operator", () => {
+	it.each(redactionCases)("masks the complete value in $raw for stored evidence", ({ raw, expected }) => {
+		expect(sanitizedTail(raw, "").log).toBe(expected);
+	});
+
+	it("configuration names and netcode diagnostics survive value redaction for the operator", () => {
 		// hosting.rs ConfigError::Display and the vendored server.rs whitelist info! shape.
 		const configError = "fatal: OVERMATCH_CAPACITY: expected an integer from 1 to 256";
 		const netcode = "server ignored connection request. server address not in connect token whitelist token_addresses=[192.0.2.1:5888] server_addr=192.0.2.2:5888";
 		const { log } = sanitizedTail([configError, netcode, "Netcode error: InvalidToken(InvalidVersion)", "request token=opaque-value rejected: expired", "OVERMATCH_API=value"].join("\n"), "");
-		expect(log).toContain(configError);
+		expect(log).toContain("fatal: OVERMATCH_CAPACITY:[credential]");
 		expect(log).toContain("Netcode error: InvalidToken(InvalidVersion)");
 		expect(log).toContain("server address not in connect token whitelist token_addresses=[[ip]:5888]");
 		expect(log).toContain("request token=[credential] rejected: expired");

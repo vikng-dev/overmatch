@@ -1,3 +1,4 @@
+import { vi } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
 import type { D1Migration } from "cloudflare:test";
 import { env as providedEnv, exports } from "cloudflare:workers";
@@ -81,4 +82,19 @@ export async function bringUp(n = 0, players = 0): Promise<{ id: string; secret:
 
 export function expectStatus(res: Response, status: number): void {
 	if (res.status !== status) throw new Error(`expected HTTP ${status}, got ${res.status}`);
+}
+
+/** Fail one matching D1 prepare inside the real DO, so the caller exercises the RPC boundary. */
+export async function failD1Once(version: string, fragment: string): Promise<void> {
+	await runInDurableObject(registry(version), (instance) => {
+		const db = (instance as unknown as { env: { DB: D1Database } }).env.DB;
+		const prepare = db.prepare.bind(db);
+		const fault = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+			if (sql.includes(fragment)) {
+				fault.mockRestore();
+				throw new Error("D1_ERROR: Network connection lost.");
+			}
+			return prepare(sql);
+		});
+	});
 }

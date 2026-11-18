@@ -662,12 +662,41 @@ class HostedBoot(unittest.TestCase):
                  str(list(range(32)))]
         self.assertEqual(machine.command("hosted-stop", JOURNAL="\n".join(lines)).returncode, 0)
         text = (machine.root / "journal").read_text()
-        for kept in (lines[0], "server address not in connect token whitelist", "token_addresses=", "rejected: expired",
+        for kept in ("fatal: OVERMATCH_CAPACITY:[credential]", "server address not in connect token whitelist", "token_addresses=", "rejected: expired",
                      "request token=[credential]", "Netcode error: InvalidToken(InvalidVersion)",
                      "config OVERMATCH_API=[credential]", "peer:[ip]"):
             self.assertIn(kept, text)
         for removed in ("opaque-value", "192.0.2.1", "2001:db8::1", "a" * 64, "b" * 64, lines[-1]):
             self.assertNotIn(removed, text)
+
+    def test_reviewed_redaction_values_match_the_worker_byte_for_byte(self):
+        cases = json.loads((harness.ROOT / "backend/test/journal-redaction.json").read_text())
+        machine = self.machine()
+        self.assertEqual(machine.boot().returncode, 0)
+        self.assertEqual(machine.command("push-journal", JOURNAL="\n".join(c["raw"] for c in cases)).returncode, 0)
+        self.assertEqual((machine.root / "journal").read_text(), "\n".join(c["expected"] for c in cases))
+
+    def test_script_tool_failure_is_refused_before_any_account_read(self):
+        settings = harness.Settings("v0.8.0-fixture", "c7a.large", "c7a.large", 1, 1, 60)
+        for error in (FileNotFoundError("fixture missing node"), subprocess.CalledProcessError(1, ["node"])):
+            with self.subTest(error=type(error).__name__), mock.patch.object(harness.subprocess, "run", side_effect=error), mock.patch.object(harness, "aws") as aws:
+                with self.assertRaisesRegex(harness.Refused, "machine.sh"):
+                    harness.preflight(settings)
+                aws.assert_not_called()
+
+    def test_harness_and_worker_ship_identical_stripped_script_bytes(self):
+        generated = (harness.ROOT / "backend/src/host.generated.ts").read_text()
+        embedded = json.loads(re.search(r"^export const machineScript = (.*);$", generated, re.M)[1])
+        settings = harness.Settings("v0.8.0-fixture", "c7a.large", "c7a.large", 1, 1, 60)
+        plan = harness.Plan("fixture", "/dev/sda1", "vpc", "subnet", "zone", "192.0.2.99/32",
+                            {"server": ("fixture-url", "fixture-checksum")}, TIMING, COMBAT_S, harness.machine_script())
+        self.assertEqual(plan.script, embedded)
+        rendered = harness.user_data("server", settings, plan, "fixture-key")
+        self.assertEqual(rendered[rendered.index("set -Eeuo pipefail"):],
+                         embedded[embedded.index("set -Eeuo pipefail"):])
+        self.assertTrue(rendered.startswith("#!/bin/bash\nROLE="))
+        self.assertNotIn("# BOOT", rendered)
+        self.assertIn("# Live report/netcode secrets", rendered)  # Inside Python's quoted source.
 
     def test_byte_cap_adversary_finishes_inside_the_capture_budget(self):
         machine = self.machine()
@@ -970,7 +999,7 @@ class MachineCommands(unittest.TestCase):
         archives = {role: (f"https://example.invalid/{role}.tar.gz", f"{'a' * 64}  {role}.tar.gz")
                     for role in ("server", "client")}
         plan = harness.Plan("ami-0123456789abcdef0", "/dev/sda1", "vpc", "subnet", "zone", "192.0.2.99/32", archives,
-                            TIMING, COMBAT_S)
+                            TIMING, COMBAT_S, harness.machine_script())
         cls.machine = MachineScript(cls.addClassCleanup, harness.user_data("server", settings, plan, "ssh-ed25519 AAAAfixture"))
         booted = cls.machine.boot()
         assert booted.returncode == 0, booted.stderr

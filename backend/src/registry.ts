@@ -37,7 +37,7 @@ import { recordEvent, type Outcome, type SessionEvent } from "./history";
 import { timingSafeEqual, newId, randomHex, sha256Hex, versionOf, tagOf } from "./ids";
 import { groupLocations, locationId } from "./locations";
 import { diag, REASONS, serverReason } from "./reasons";
-import type { HeartbeatRequest, LocationsResponse, TicketResponse } from "./types";
+import type { EndReport, HeartbeatRequest, LocationsResponse, TicketResponse } from "./types";
 
 type ServerState = "starting" | "ready" | "stopping" | "ended";
 
@@ -298,16 +298,17 @@ export class Registry extends DurableObject<Env> {
 		return { status: 204 };
 	}
 
-	async end(serverId: string, secret: string, reason: string, crash?: string, journalAvailable?: boolean): Promise<EvidenceResult<ServerCallResult>> {
-		return evidenceResult(serverId, () => this.endReport(serverId, secret, reason, crash, journalAvailable));
+	async end(serverId: string, secret: string, report: EndReport): Promise<EvidenceResult<ServerCallResult>> {
+		return evidenceResult(serverId, () => this.endReport(serverId, secret, report));
 	}
 
-	private async endReport(serverId: string, secret: string, reason: string, crash?: string, journalAvailable?: boolean): Promise<ServerCallResult> {
+	private async endReport(serverId: string, secret: string, report: EndReport): Promise<ServerCallResult> {
+		const { reason, crash } = report;
 		const s = this.server(serverId);
 		if (!s || (crash === undefined && !live(s))) return { status: 410 };
 		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
 		const bootFailed = this.provider.starts.retryBootInPlace && s.state === "starting" && /^boot-(guard|self|updates|user|download|verify|unpack|start)$/.test(reason);
-		const grace = this.provider.logs.kind === "push" && journalAvailable !== false ? this.provider.logs.exitGraceMs : 0;
+		const grace = this.provider.logs.kind === "push" && (report.source === "process" || report.journalAvailable) ? this.provider.logs.exitGraceMs : 0;
 		const redactedCrash = crash === undefined ? undefined : redactOwnCredential(crash, secret).text;
 		await this.finish(serverId, crash !== undefined || bootFailed ? "failed" : "ended",
 			crash !== undefined ? REASONS.serverCrashed : bootFailed ? REASONS.startFailed : serverReason(reason), undefined, redactedCrash, grace);

@@ -8,7 +8,7 @@ unexplained; this change supplies the missing archive for a subsequent run.
 ## Built contract
 
 `Provider.logs` selects one capability: Edgegap pulls before stop; EC2 accepts a machine push.
-No capture/admission branch names a provider. The embed evaluates the machine-owned stop-bound
+No capture/admission branch names a provider. The embed evaluates the machine-owned grace
 sum, so the Worker does not carry a second grace formula. One privileged
 `ExecStopPost=+/usr/local/bin/om-harness hosted-stop` captures then requests
 `systemctl --no-block poweroff`. An earlier asynchronous power-off hook would race capture,
@@ -18,8 +18,9 @@ ordering against that target; actual network/DNS availability remains a live cla
 The machine reports `journalAvailable` on boot failures by testing whether it created the unit
 file. False means immediate Worker termination and ticket replacement: there is no journal to
 wait for. True gives the same grace as an ordinary server end. The server's normal/panic report
-omits that field; its running process is itself proof that the unit was created. Older machine
-callbacks that omit the fact conservatively retain grace. Timing never infers unit creation.
+omits that field; its running process is itself proof that the unit was created. Boot callbacks
+without a boolean fact get typed 400 before state changes; the parsed RPC type distinguishes
+boot from process reports and names the meaning of process absence. Timing never infers unit creation.
 After unit creation the boot trap synchronously stops the service before its fallback power-off.
 
 Resolution bounds have one owner, the `JOURNAL_*` assignments in `machine.sh`, exported by
@@ -32,7 +33,9 @@ Resolution bounds have one owner, the `JOURNAL_*` assignments in `machine.sh`, e
 | 12 s | Resolution: GNU `timeout --signal=KILL` kills the entire capture/redaction/upload process group. |
 | 3 s / 8 s | Resolution: connection / total curl deadlines nested inside the whole-capture kill. One attempt, no retry. |
 | 10 s | Resolution: margin for receipt of the end reply, process exit and shutdown/alarm scheduling. |
-| 30 s | DERIVED Resolution: capture bound + upload allowance + margin = 12 + 8 + 10. The whole-capture bound already contains upload; the extra upload allowance deliberately makes this conservative. The Worker grace and unit `TimeoutStopSec` both read this derivation from the machine owner. |
+| 22 s | DERIVED Resolution: Worker grace = capture + reply/exit scheduling margin = 12 + 10. Upload is already inside capture. |
+| 5 s | Resolution: local service process teardown and dispatch of the privileged post-stop hook. |
+| 17 s | DERIVED Resolution: unit `TimeoutStopSec` = capture + local teardown/dispatch margin = 12 + 5. |
 | 120 s | Resolution: admit a late shutdown push through scheduling/network jitter, without accepting old credentials indefinitely. |
 
 A failed or stuck capture prints a fixed local diagnostic then still requests power-off. The
@@ -67,7 +70,9 @@ removes own-report encodings before recording crash evidence. A machine never re
 so refusal on credential presence would throw away diagnostics without extending protection:
 the credential is unusable after its window closes anyway.
 
-The first archive wins using D1's unique server id; concurrent/later pushes get 409. Replacement
+The first real archive wins using D1's unique server id; concurrent/later archives get 409.
+An admitted push whose D1 write lands after the alarm replaces its NULL-log marker; tests exercise
+both D1 write orders and refuse replacement of real archives. Replacement
 and sanitisation happen before D1. A server process holding the report secret can forge a first
 archive and end its own match; this is the accepted threat model, not evidence authenticity.
 No claim of a trustworthy journal against a compromised server process is made.
@@ -86,7 +91,8 @@ admission derivation. No additional database schema migration is required.
 Expected D1 failures at both journal storage and crash recording cross Durable Object RPC as
 `EvidenceResult` data, through the same `evidenceResult`/`evidenceCall` boundary, following
 `FleetResult`/`fleetCall`. Diagnostics contain only local classifications and server ids; HTTP
-returns typed 503. Crash-write failure still completes stop/ticket cleanup first. Bugs such as
+returns typed 503. Failure causes carry the local operation name, distinguishing storage, Fleet
+and history failures even when the wrapper covers the whole end operation. Crash-write failure still completes stop/ticket cleanup first. Bugs such as
 missing tables still reject across RPC. Tests inject D1 network failures inside real DO methods,
 then exercise the real HTTP caller; they also prove SQL bugs are not converted into downtime.
 
@@ -98,13 +104,16 @@ metadata reach root-only `/run` tmpfs files. Redaction can expand short addresse
 cap the resulting UTF-8 tail again without splitting a code point. Hosted script/header/env
 files remain root-only; systemd reads the environment before dropping to the service user.
 
-Redact values, never whole diagnostic lines. An `OVERMATCH_` name without `=` stays intact;
-with `=`, the rest of that line's value is masked. Credential fields preserve the field and
-surrounding prose while masking quoted, bracketed, object or unquoted values. The real
-`fatal: OVERMATCH_CAPACITY: expected an integer from 1 to 256` and netcode's
-`server ignored connection request. server address not in connect token whitelist`, including
-its `token_addresses`/`server_addr` fields with masked addresses, survive both sanitisers.
-A `token=...` field keeps everything except its value.
+Redact values, preserving labels and surrounding prose. `OVERMATCH_` assignments accept `=` or
+`:`, masking the rest of the line; this also masks a configuration error's description after the
+colon while keeping its variable name. Credential labels match after underscores (including
+`report_secret`, `connect_token`, `tokens`), accept Basic/Bearer authorization and consume escaped
+quotes without exposing the remaining value. Netcode's whitelist diagnostic keeps its message
+and address-field labels while masking addresses. Multiline values, multiline Debug arrays,
+hex-formatted arrays, comma-separated unquoted values and compound `tcp:peer:` addresses are not
+claimed exhaustively masked; no emitter exists in `src/net` or vendored netcode. Live report/key
+values are caught by their shapes. Both implementations state the multiline limit beside the
+patterns and run the same reviewed raw/expected fixtures.
 
 Source inspection: `src/net/hosting.rs` keeps key/report configuration behind
 `Secret<T>::Debug` (`<redacted>`), and `ConfigError::Display` prints name and expected shape only.
@@ -123,8 +132,8 @@ Audit of **every pattern** in the Worker and embedded Python sanitiser (n = boun
 | Pattern family | Why it is linear |
 |---|---|
 | Exact provider/own credential replacement | A fixed number of literal searches; generated credentials have fixed length. The hex-shape check is fully anchored and fixed-width. |
-| `OVERMATCH_...=` | Fixed prefix at a word boundary; the name/spacing run cannot contain another eligible start. Its value is a newline-delimited single pass. |
-| Credential labels/values | Finite fixed-length labels. Space runs cannot contain another label start. Value alternatives have distinct delimiters; bracket/object interiors exclude both opening and closing delimiters, preventing repeated suffix scans on unfinished nested dumps. Quoted values either consume through their next quote or fail once on an unfinished run. Unquoted values consume through whitespace/comma/semicolon. A fixed number of scans per span. |
+| `OVERMATCH_...[:=]` | Fixed prefix at a word boundary; the name/spacing run cannot contain another eligible start. Its value is a newline-delimited single pass. |
+| Credential labels/values | Finite fixed-length labels. Space runs cannot contain another label start. Value alternatives have distinct delimiters; bracket/object interiors exclude both opening and closing delimiters, preventing repeated suffix scans on unfinished nested dumps. Quoted values consume disjoint escaped-character/non-quote spans through an unescaped quote or fail once on an unfinished run. Unquoted values consume through whitespace/comma/semicolon. A fixed number of scans per span. |
 | HTTP(S) URL | Fixed `http` start and a maximal non-space value; success consumes the complete run. No failing unbounded suffix after it. |
 | Hex, including `0x` and adjacent non-hex letters | Negative hex lookbehind permits one attempt per maximal hex run, including `k` + hex. Optional `0x` is bounded, the final negative hex lookahead accepts the run end. It cannot retry at every hex digit. |
 | Ticket/id | `(?<![A-Za-z0-9_-])` permits one start per maximal id run. The run excludes the literal dot; the hex suffix is fixed-width. In particular `a-a-a-...` no longer supplies a start at every word boundary. The same corrected pattern is used on both sides. |
@@ -139,47 +148,35 @@ uses the same audited Worker code. The byte-cap adversarial gate on both sides u
 rejecting the former multi-minute quadratic scan. Worker clocks advance at I/O, so its test yields
 before and after CPU work; the Python test times the actual installed `push-journal` command.
 
-## Machine script invariants moved out of user data
-
-`machine.sh` is shared by `harness.py` and the EC2 provider. With no arguments cloud-init runs
-boot as root, in order: guard (schedule shutdown at CAP_MIN), self (install this same file), key
-(harness only, after self so reachable hosts answer state), packages (client only, libasound2t64),
-hosted updater masks, download, checksum verification, unpack, server user/unit/start, ready.
-Every completed step appends kernel-start seconds to `$STATE/phases`; the failure trap records
-its current step. The checksum's asset name was checked at the release edge; the machine verifies
-the fixed local archive path. Hosted machines have no SSH key or package installation. Updater
-masks cover apt timers/services and snap refresh paths: absent units are harmless, failed masks
-are followed by explicit masked/inactive-state checks, and failed state queries refuse boot.
-
-Harness SSH commands are `sudo -n om-harness <command>`: `state`, `host`, `uptime-echo`,
-`start-client <k> <server ip:port> <ticks>`, `client-state <k>`, `sample <unit>...`, `samples`,
-and `journal <unit>`. `uptime-echo` emits a CLOCK_BOOTTIME reading per input line.
-`client-state` reports the first input-slot kernel time; a successful query without a matching
-line returns no time, while query failure propagates. The sampler's builtins read cgroup/proc
-facts, avoiding external sampler work inside its loop. Its records are
-`<boot s> <unit>=<cpu usec>,<rss kB> ... cpu <proc/stat fields>`. The scripted client parks its
-hull and sweeps aim so each input changes, according to CLIENT_SCRIPT; it does not fire.
-
-The worst-realistic user-data test renders the real launch function with a maximum-length
-version, DNS origin and port, generated-size keys and full-precision accepted timing settings.
-It fails with actual byte count and a concrete shrink instruction at the EC2 16 KiB limit, and
-also refuses less than 1 KiB headroom. Script narrative comments live here to keep that margin.
-
 ## Offline evidence
 
-MEASURED: backend typecheck passed; full backend tests passed (252 production-path, 123 EC2),
-`python3 scripts/aws/test_host_setup.py` passed (26 tests), and the harness passed (37 tests).
+`machine.sh` owns its boot/command documentation and invariants, including the literal-path
+delete reason. `embed-host.mjs` uses one Node comment-stripper; the harness invokes that same
+owner once in preflight, before account reads, and carries the parsed script in its launch plan.
+Missing Node or unsupported syntax is a visible `Refused` outcome. Shebang and settings marker survive. Comments inside quoted
+source and static heredocs survive; unsupported quoting/substitutions refuse embedding. The
+harness test compares its rendered script bytes with the generated Worker embed, and the Node
+lexer tests cover quoted/heredoc comment lines and typed build refusals. The worst-realistic
+launch test still requires at least 1 KiB headroom below EC2's 16 KiB cap.
+
+MEASURED: backend typecheck passed; full backend tests passed (263 production-path, 126 EC2,
+plus 2 Node comment-stripper tests),
+`python3 scripts/aws/test_host_setup.py` passed (26 tests), and the harness passed (40 tests).
 Shellcheck, `node backend/scripts/embed-host.mjs --check`, `cargo fmt --all --check` and
-`git diff --check` passed. No Rust changed, so no Rust compilation was needed. Expected SQL/schema
+`git diff --check` passed. CI Clippy passed through the machine build queue after merging local `main`. Expected SQL/schema
 and adapter invariant fixtures reject loudly; these are asserted failures, not unhandled test errors.
 
-MEASURED at the 1,048,576-byte cap: the production TypeScript sanitiser function transpiled and
-run in Node took 43.3 ms on the ticket adversary (hex run 4.1 ms, colon run 10.5 ms, unfinished
-array run 1.0 ms). The installed machine command, including fixture process/I/O work, took 260.7 ms.
-These are local observations, not hosted CPU measurements; both regression gates use the DERIVED
-4,000 ms Resolution bound above. MEASURED real `hostedScript` output for the stress fixture:
-13,323 UTF-8 bytes, leaving 3,061 bytes against EC2's 16,384-byte limit; `machine.sh` is 11,294 bytes.
-Only counts/timings were printed, never launch bytes or credentials.
+MEASURED at the 1,048,576-byte cap: the production TypeScript sanitiser bundled and run in
+Node took 27.3 ms on the ticket adversary. The installed machine command, including fixture
+process/I/O work, took 251.1 ms. These are local observations, not hosted CPU measurements;
+both regression gates pass against the DERIVED 4,000 ms Resolution bound above. MEASURED real
+`hostedScript` output for the stress fixture: 13,285 UTF-8 bytes, leaving 3,099 bytes against
+EC2's 16,384-byte limit; documented `machine.sh` is 16,271 bytes. Launch bytes and credentials
+are never printed by these measurements.
+
+The shared `failD1Once(version, SQL fragment)` fixture injects failures inside the actual Registry
+and restores its spy before throwing. Journal, end and recovery tests retain their HTTP/RPC and
+cleanup assertions; SQL bugs still reject.
 
 The hook tests run the actual installed
 entrypoints and real GNU `timeout`, with journal/network/system commands replaced by local

@@ -9,7 +9,7 @@ import { ProviderError, providerFor, platformCall, isRecord } from "./provider";
 import { registryFor, type JournalResult } from "./registry";
 import { SERVER_LOG_MAX_BYTES, evidenceCall } from "./evidence";
 import { sweep } from "./sweep";
-import type { HeartbeatRequest, JoinRequest } from "./types";
+import type { EndReport, HeartbeatRequest, JoinRequest } from "./types";
 
 export { Fleet } from "./fleet";
 export { Registry } from "./registry";
@@ -221,10 +221,13 @@ async function route(req: Request, env: Env): Promise<Response> {
 			const reason = b.reason === undefined ? "exit" : b.reason;
 			const crash = b.crash;
 			const journalAvailable = b.journalAvailable;
-			if (journalAvailable !== undefined && typeof journalAvailable !== "boolean") invalid("journalAvailable: expected boolean");
+			if ((reason.startsWith("boot-") || journalAvailable !== undefined) && typeof journalAvailable !== "boolean") invalid("journalAvailable: expected boolean");
 			if (journalAvailable !== undefined && !reason.startsWith("boot-")) invalid("journalAvailable: only boot failures report unit creation");
 			const secret = bearer(req);
-			r = await evidenceCall("end", async () => registryFor(env, version).end(id, secret, reason.slice(0, 200), crash, journalAvailable));
+			const report: EndReport = typeof journalAvailable === "boolean"
+				? { source: "boot", reason: reason.slice(0, 200), crash, journalAvailable }
+				: { source: "process", reason: reason.slice(0, 200), crash };
+			r = await evidenceCall("end", async () => registryFor(env, version).end(id, secret, report));
 		}
 		if (r.status === 204) return new Response(null, { status: 204 });
 		return error(r.status, r.error ?? (r.status === 410 ? "unknown server" : "error"));

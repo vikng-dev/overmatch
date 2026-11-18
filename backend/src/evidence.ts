@@ -11,9 +11,11 @@ export const SERVER_LOG_MAX_BYTES = host.journal.maxBytes;
 /** Archive redaction and its linear-time audit: .agents/scratch/aws-journal-slice-4.md. */
 export function sanitizedTail(raw: string, providerToken: string): { log: string; truncated: boolean } {
 	let clean = providerToken ? raw.replaceAll(providerToken, "[credential]") : raw;
+	// Multiline values and split Debug arrays are unmasked: src/net and vendored netcode emit
+	// neither; live report/netcode secrets are caught by their hex/array shapes.
 	clean = clean
-		.replace(/(\bOVERMATCH_[A-Z_]+[ \t]*=)[^\n]*/gi, "$1[credential]")
-		.replace(/(\b(?:ticket|secret|token|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment)\b["']?[ \t]*[:=][ \t]*(?:Bearer[ \t]+)?)(?:\[[^\[\]\n]*\]|\{[^{}\n]*\}|"[^"\n]*"|'[^'\n]*'|[^\s,;]+)/gi, "$1[credential]")
+		.replace(/(\bOVERMATCH_[A-Z_]+[ \t]*[:=])[^\n]*/gi, "$1[credential]")
+		.replace(/((?<![A-Za-z0-9])(?:ticket|secret|tokens?|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment)\b["']?[ \t]*[:=][ \t]*(?:(?:Bearer|Basic)[ \t]+)?)(?:\[[^\[\]\n]*\]|\{[^{}\n]*\}|"(?:\\[^\n]|[^"\\\n])*"|'(?:\\[^\n]|[^'\\\n])*'|[^\s,;]+)/gi, "$1[credential]")
 		.replace(/https?:\/\/\S+/gi, "[url]")
 		.replace(/(?<![0-9a-f])(?:0x)?[0-9a-f]{64,}(?![0-9a-f])/gi, "[credential]")
 		.replace(/(?<![A-Za-z0-9_-])[A-Za-z0-9_-]+\.[0-9a-f]{32}\b/gi, "[ticket]")
@@ -95,25 +97,27 @@ export async function expireServerLogs(env: Env, before: number, timeoutMs: numb
 // Resolution: allow shutdown/network scheduling jitter without admitting old credentials indefinitely.
 export const JOURNAL_WINDOW_MS = 120_000;
 
-/** A first writer wins across retries and concurrent invocations; the machine never retries a push. */
+/** The first archive wins; an admitted push can replace the deadline marker after its D1 write races. */
 export async function recordJournal(env: Env, serverId: string, deploymentId: string, raw: string, truncated: boolean, timeoutMs: number): Promise<boolean> {
 	const tail = sanitizedTail(raw, env.EDGEGAP_TOKEN);
 	const saved = await d1Call("journalStorage", timeoutMs, () => env.DB.prepare(
 		`INSERT INTO server_logs (server_id, deployment_id, captured_at, log, truncated, error)
-		 VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT (server_id) DO NOTHING`,
+		 VALUES (?1, ?2, ?3, ?4, ?5, NULL) ON CONFLICT (server_id) DO UPDATE SET
+		 deployment_id = excluded.deployment_id, captured_at = excluded.captured_at, log = excluded.log,
+		 truncated = excluded.truncated, error = NULL WHERE server_logs.log IS NULL`,
 	).bind(serverId, deploymentId, Date.now(), tail.log, Number(truncated || tail.truncated)).run());
 	return saved.meta.changes > 0;
 }
 
-export type EvidenceResult<T> = { ok: true; value: T } | { ok: false; cause: "storage" };
+export type EvidenceResult<T> = { ok: true; value: T } | { ok: false; cause: string };
 
 /** Expected outside failures cross DO RPC as data; invariant exceptions still reject. */
 export async function evidenceResult<T>(serverId: string, call: () => Promise<T>): Promise<EvidenceResult<T>> {
 	try { return { ok: true, value: await call() }; }
 	catch (err) {
 		if (!(err instanceof ProviderError)) throw err;
-		console.warn("evidence storage unavailable", serverId, diag(err));
-		return { ok: false, cause: "storage" };
+		console.warn("evidence unavailable", serverId, diag(err));
+		return { ok: false, cause: err.op };
 	}
 }
 

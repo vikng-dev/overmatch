@@ -74,9 +74,11 @@ export interface HeartbeatRequest {
 	state: "open" | "closed" | "closing";
 }
 
-export interface EndRequest {
-	reason?: string;
-}
+/** Parsed /end: a process report proves unit creation by running; boot must report the fact. */
+export type EndReport = { reason: string; crash?: string } & (
+	| { source: "boot"; journalAvailable: boolean }
+	| { source: "process"; journalAvailable?: never }
+);
 
 export interface ErrorResponse {
 	error: string;
