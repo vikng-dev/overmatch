@@ -4,11 +4,8 @@ Subject: the game's netcode and damage model; game state only.
 
 All hulls, attached turrets, guns and public paths share one server-domain view cursor.
 Every laid servo slot on own and remote tanks presents sampled `ServoAngles`; none integrates
-on the client. The third-person camera, intent cursor, aim dot and trigger click run ahead as
-local input feedback. The gunner optic's eye and up vector ride the streamed gun, its look
-blends local intent with the streamed sight line, and the ranging graticule and actual-pointing
-marker ride the stream. A completed stamp carries frame
-start and serialization departure. Frame start maps authority ticks to monotonic wall time;
+on the client. [AGENTS.md](../../AGENTS.md)'s One-timeline bullet owns the private-view
+principle. A completed stamp carries frame start and serialization departure. Frame start maps authority ticks to monotonic wall time;
 departure diagnoses server work in `usual_work_ms`. Completion requires every mutate message of
 that tick; stale, incomplete or duplicate arrivals do not invent production samples.
 

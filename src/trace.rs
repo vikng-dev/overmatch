@@ -500,7 +500,7 @@ fn record_tick(
             transmission,
             (weapon_gate, weapon_loads),
             servos,
-            remote_servos,
+            streamed_servos,
             track_contacts,
             sim,
             (controlled, rig),
@@ -545,10 +545,8 @@ fn record_tick(
             // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
             // and carried state already in hand, except the view-only tracer phase documented on
             // `TankStateHash`; costs a few dozen FNV rounds and runs only when tracing is armed.
-            // The root's servo state is sampled `StreamedServoPose` on a client replica, or
-            // authoritative `TankServos` on the server and single-player.
             let servo_states = selected(
-                remote_servos.map(|pose| ServoHashSource::Streamed(&pose.0)),
+                streamed_servos.map(|pose| ServoHashSource::Streamed(&pose.0)),
                 servos.map(|servos| ServoHashSource::Authority(&servos.states)),
             );
             let hash = hash_tank_state(&TankState {

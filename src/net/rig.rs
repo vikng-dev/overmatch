@@ -2,8 +2,8 @@
 //!
 //! ADR-0014 exception: a replicated root receives simulation only after it has a wire pose;
 //! children derive from root simulation. Every replica — the own hull included — rides the
-//! interpolated server stream on a `Static` body; every attached aim rig also draws its
-//! turret and gun from that stream, at the same view cursor. In the game's damage-model
+//! interpolated server stream on a `Static` body; every attached aim rig draws every
+//! servo from that stream, at the same view cursor. In the game's damage-model
 //! presentation, a knocked-out tank's launched turret keeps its own replicated pose instead.
 
 use avian3d::prelude::{Position, RigidBody, Rotation};
@@ -40,9 +40,6 @@ fn attach_visible_rigs(
             With<Interpolated>,
             With<Position>,
             With<Rotation>,
-            // The aim stream rides the same init snapshot; an attached rig always has one to
-            // present (`present_streamed_aim`).
-            With<ServoAngles>,
             // The replicated public crank speed must precede body attachment, so the engine sound
             // the body brings is born at the authority's crank, never a reconstructed JIP value.
             // It is the one transmission fact every client receives: `TankTransmission` reaches

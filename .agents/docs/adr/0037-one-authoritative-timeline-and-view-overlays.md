@@ -43,11 +43,7 @@ from `ServoAngles` at the hull's shared view cursor. Only the authority integrat
 mechanisms; `StreamedServoPose` holds the sampled angles on every client tank. This removes
 the own-turret exception and the `RemoteServos` integrator named below. The barrel trails
 intent by uplink + server slew + view delay; the game's tracer leaves the streamed barrel.
-The third-person camera, intent cursor, aim dot and trigger click run ahead as local input
-feedback. The gunner optic's eye and up vector ride the streamed gun; its look direction
-blends local intent with the streamed sight line. The ranging graticule and actual-pointing
-marker also ride the stream. Flash, report, recoil and tracer follow the server's answer.
-The epistemic limit above still holds; this amendment chooses which eligible feedback runs ahead.
+The current private-view principle is owned by [AGENTS.md](../../AGENTS.md)'s One-timeline bullet.
 
 ## Why
 

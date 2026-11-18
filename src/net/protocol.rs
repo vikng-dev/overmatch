@@ -125,6 +125,7 @@ pub(super) enum ServoAnglesError {
     Encoding(postcard::Error),
     NonFinite { slot: usize },
     Count { expected: usize, received: usize },
+    OutOfTravel { slot: usize },
     MissingRig,
 }
 
@@ -140,24 +141,16 @@ impl std::fmt::Display for ServoAnglesError {
                 f,
                 "Server sent {received} servo angles; the tank rig requires {expected} slots"
             ),
+            Self::OutOfTravel { slot } => write!(
+                f,
+                "Server servo slot {slot}: send an angle within the tank data travel limits"
+            ),
             Self::MissingRig => f.write_str("Server sent servo angles before tank rig admission"),
         }
     }
 }
 
 impl std::error::Error for ServoAnglesError {}
-
-impl ServoAngles {
-    pub(super) fn check_count(&self, expected: usize) -> Result<(), ServoAnglesError> {
-        if self.0.len() != expected {
-            return Err(ServoAnglesError::Count {
-                expected,
-                received: self.0.len(),
-            });
-        }
-        Ok(())
-    }
-}
 
 impl TryFrom<ServoAnglesWire> for ServoAngles {
     type Error = ServoAnglesError;
@@ -770,7 +763,10 @@ pub(crate) fn servo_angles_lerp(start: ServoAngles, end: ServoAngles, t: f32) ->
             .0
             .into_iter()
             .zip(end.0)
-            .map(|(a, b)| a + (b - a) * t)
+            // Admission bounds each slot; f64 keeps even finite unwrapped f32 endpoints convex.
+            .map(|(a, b)| {
+                ((1.0 - f64::from(t)) * f64::from(a) + f64::from(t) * f64::from(b)) as f32
+            })
             .collect(),
     )
 }
@@ -854,7 +850,7 @@ const WIRE_SURFACE_HASH: u64 = 0xb35d6c7c3c7bbe9e;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x3ae1a75b22a96448;
+const WIRE_TYPES_HASH: u64 = 0xfdf12b8afdcf2c7e;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing; replicon's
@@ -1433,54 +1429,6 @@ mod tests {
             world.get::<ServoAngles>(root).unwrap().0,
             vec![0.7, -0.2, 0.4, -0.1]
         );
-    }
-
-    fn decode_servo_angles(
-        bytes: &mut &[u8],
-        expected: usize,
-    ) -> Result<ServoAngles, ServoAnglesError> {
-        let wire = bevy_replicon::postcard_utils::from_buf::<ServoAnglesWire, _>(bytes)
-            .map_err(ServoAnglesError::Encoding)?;
-        let angles = ServoAngles::try_from(wire)?;
-        angles.check_count(expected)?;
-        Ok(angles)
-    }
-
-    /// The receive codec refuses malformed counts before interpolation and preserves every
-    /// finite slot without quantisation. Own and remote rigs rely on complete stream poses.
-    #[test]
-    fn peer_servo_angles_admit_only_complete_finite_poses() {
-        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            for slot in 0..4 {
-                let mut angles = vec![0.0; 4];
-                angles[slot] = value;
-                let bytes = postcard::to_allocvec(&angles).unwrap();
-                assert_eq!(
-                    decode_servo_angles(&mut bytes.as_slice(), 4),
-                    Err(ServoAnglesError::NonFinite { slot })
-                );
-            }
-        }
-        for received in [0, 1, 3, 5] {
-            let bytes = postcard::to_allocvec(&vec![0.0f32; received]).unwrap();
-            assert_eq!(
-                decode_servo_angles(&mut bytes.as_slice(), 4),
-                Err(ServoAnglesError::Count {
-                    expected: 4,
-                    received
-                })
-            );
-        }
-        for values in [
-            vec![0.75, -0.2, 0.4, -0.1],
-            vec![f32::MAX, f32::MIN, 0.0, 1.0],
-        ] {
-            let bytes = postcard::to_allocvec(&values).unwrap();
-            let angles = decode_servo_angles(&mut bytes.as_slice(), values.len()).unwrap();
-            assert_eq!(angles.0, values);
-            assert_eq!(postcard::to_allocvec(&angles).unwrap(), bytes);
-            assert_eq!(bytes.len(), 1 + 4 * values.len());
-        }
     }
 
     /// FNV-1a over the ordered [`WIRE_SURFACE`] names, each terminated by a `\n` separator so no two

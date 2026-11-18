@@ -318,21 +318,18 @@ pub(crate) struct LiveServos<'w, 's> {
     slots: Query<'w, 's, &'static ServoIndex>,
     rests: Query<'w, 's, &'static ServoRest>,
     states: Query<'w, 's, &'static TankServos>,
-    remote: Query<'w, 's, &'static StreamedServoPose>,
+    streamed: Query<'w, 's, &'static StreamedServoPose>,
 }
 
 impl LiveServos<'_, '_> {
-    /// A `servo` entity's live parent-local lay under `tank`, from the root's servo state
-    /// ([`selected`]): the client-local [`StreamedServoPose`] on every replica, the own hull included,
-    /// or the authoritative [`TankServos`]. The optic clamps intent against the gun's live lay, so
-    /// it reads sampled angles on clients and integrated angles on the authority.
+    /// The optic clamps intent against this live lay; [`selected`] owns the state source.
     fn angle(&self, tank: Entity, servo: Entity) -> f32 {
         let slot = self
             .slots
             .get(servo)
             .expect("every declared rig servo receives its index at complete spawn");
         let angle = selected(
-            self.remote.get(tank).ok().map(|pose| {
+            self.streamed.get(tank).ok().map(|pose| {
                 *pose
                     .0
                     .get(slot.0)

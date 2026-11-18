@@ -8,39 +8,70 @@ use super::matchmaking::ServerGone;
 use super::protocol::{ServoAngles, ServoAnglesError, ServoAnglesWire};
 use crate::tank::TankTemplate;
 
-/// This composition's admitted tank rig. The template owns the slot count and ordering.
-struct ServoSlots(usize);
+/// This composition's rig in the template's name-sorted slot order.
+struct ServoSlots(Vec<Option<(f32, f32)>>);
+
+impl ServoSlots {
+    fn from_template(template: &TankTemplate) -> Self {
+        let mut entries: Vec<_> = template.spec().servos.iter().collect();
+        entries.sort_unstable_by_key(|(name, _)| *name);
+        Self(
+            entries
+                .into_iter()
+                .map(|(_, spec)| spec.travel_limits())
+                .collect(),
+        )
+    }
+}
 
 pub(super) fn install(app: &mut App) {
+    if !app.is_plugin_added::<bevy_replicon::client::ClientPlugin>() {
+        return;
+    }
     app.init_resource::<ReplicationStorage>()
         .add_message::<ServerGone>()
-        .add_systems(PreUpdate, publish_slots.before(ClientSystems::Receive))
+        .add_systems(
+            PreUpdate,
+            publish_slots
+                .before(ClientSystems::Receive)
+                .run_if(resource_added::<TankTemplate>),
+        )
         .add_systems(PreUpdate, refuse_pose.after(ClientSystems::Receive));
 }
 
-fn publish_slots(template: Option<Res<TankTemplate>>, mut storage: ResMut<ReplicationStorage>) {
-    // Startup without a template has no admitted rig and cannot connect to a match.
-    if let Some(template) = template {
-        storage
-            .global
-            .insert(ServoSlots(template.spec().servos.len()));
+fn publish_slots(template: Res<TankTemplate>, mut storage: ResMut<ReplicationStorage>) {
+    storage.global.insert(ServoSlots::from_template(&template));
+}
+
+/// Limited angles stay inside their authored stops; continuous angles are finite unwrapped f32
+/// travel (`advance_servo` accumulates rather than wrapping at a full turn).
+fn admit(
+    bytes: &mut impl bevy_replicon::bytes::Buf,
+    slots: Option<&ServoSlots>,
+) -> Result<ServoAngles, ServoAnglesError> {
+    let wire = bevy_replicon::postcard_utils::from_buf::<ServoAnglesWire, _>(bytes)
+        .map_err(ServoAnglesError::Encoding)?;
+    let pose = ServoAngles::try_from(wire)?;
+    let slots = slots.ok_or(ServoAnglesError::MissingRig)?;
+    if pose.0.len() != slots.0.len() {
+        return Err(ServoAnglesError::Count {
+            expected: slots.0.len(),
+            received: pose.0.len(),
+        });
     }
+    for (slot, (&angle, limits)) in pose.0.iter().zip(&slots.0).enumerate() {
+        if let Some((min, max)) = limits
+            && !(*min..=*max).contains(&angle)
+        {
+            return Err(ServoAnglesError::OutOfTravel { slot });
+        }
+    }
+    Ok(pose)
 }
 
 pub(super) fn replication() -> RuleFns<ServoAngles> {
     RuleFns::new(default_serialize, |ctx, message| {
-        let pose = bevy_replicon::postcard_utils::from_buf::<ServoAnglesWire, _>(message)
-            .map_err(ServoAnglesError::Encoding)
-            .and_then(ServoAngles::try_from)
-            .and_then(|pose| {
-                let slots = ctx
-                    .storage
-                    .global
-                    .get::<ServoSlots>()
-                    .ok_or(ServoAnglesError::MissingRig)?;
-                pose.check_count(slots.0)?;
-                Ok(pose)
-            });
+        let pose = admit(message, ctx.storage.global.get::<ServoSlots>());
         pose.map_err(|refusal| {
             ctx.storage.global.get_or_init(|| refusal.clone());
             refusal.into()

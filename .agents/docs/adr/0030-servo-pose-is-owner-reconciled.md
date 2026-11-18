@@ -1,8 +1,7 @@
 # Servo pose is owner-reconciled authority state
 
-**Amended 2026-11-18 (#187).** The own-turret exception described in the supersession
-notice ended: own and remote tanks present every servo slot from replicated `ServoAngles`
-at the shared view cursor. Only the authority integrates `TankServos`.
+**Amended 2026-11-18 (#187).** See ADR-0037's amendment for the current servo contract
+and [AGENTS.md](../../AGENTS.md)'s One-timeline bullet for the private-view principle.
 
 > **Status: accepted; shipped in declared `PROTOCOL_REV = 18`. Superseded by
 > [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15): the atomic

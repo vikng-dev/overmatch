@@ -291,16 +291,12 @@ pub(crate) fn servo_aim_frame<F: bevy::ecs::query::QueryFilter>(
     (position + rotation * local.translation, rotation * rest.0)
 }
 
-fn servo_rotation(spec: &ServoSpec, rest: &ServoRest, angle: f32) -> Quat {
-    servo_pose(spec.role, rest.0, angle)
-}
-
 /// A tank root's one servo state source: `StreamedServoPose` on a client replica, `TankServos` on the
 /// authority (the server and single-player). Spawn builds exactly one on every tank root, empty
 /// for a sheet with no servos; `TankServos` never replicates and a client attachment never builds
 /// it, so a root carrying both, or neither, is a broken spawn.
-pub(crate) fn selected<S>(remote: Option<S>, authority: Option<S>) -> S {
-    match (remote, authority) {
+pub(crate) fn selected<S>(streamed: Option<S>, authority: Option<S>) -> S {
+    match (streamed, authority) {
         (Some(states), None) | (None, Some(states)) => states,
         (Some(_), Some(_)) => panic!(
             "a servo root carries one state source: StreamedServoPose on a replica, TankServos on the authority"
@@ -354,12 +350,12 @@ pub(crate) fn restore_servo_truth(
         &TankRoot,
     )>,
     servos: Query<&TankServos>,
-    remote_servos: Query<&StreamedServoPose>,
+    streamed_servos: Query<&StreamedServoPose>,
 ) {
     q.par_iter_mut()
         .for_each(|(mut transform, spec, rest, slot, root)| {
-            let angle = registered_angle(root.0, slot.0, &servos, &remote_servos, None);
-            let rotation = servo_rotation(spec, rest, angle);
+            let angle = registered_angle(root.0, slot.0, &servos, &streamed_servos, None);
+            let rotation = servo_pose(spec.role, rest.0, angle);
             if transform.rotation != rotation {
                 transform.rotation = rotation;
             }
@@ -384,10 +380,11 @@ pub(crate) fn drive_servos(
     mut tanks: Query<(
         Entity,
         &mut TankServos,
-        &TankVolumes,
-        &ServoMechanism,
-        &EngineRpm,
+        Option<&TankVolumes>,
+        Option<&ServoMechanism>,
+        Option<&EngineRpm>,
     )>,
+    streamed: Query<(), With<StreamedServoPose>>,
     facets: Query<VolumeFacets>,
     // This update's servo nodes as (root, slot, node), sorted; kept for its capacity.
     mut owned: Local<Vec<(Entity, usize, Entity)>>,
@@ -413,6 +410,9 @@ pub(crate) fn drive_servos(
             let states = &mut authority.states;
             // The game's damage model: requirements scale operator work; an engine in action
             // supplies whole power (`module_quality`). One reading serves every slot.
+            let volumes = volumes.expect(
+                "authority servo nodes have spawn-built TankVolumes for their requirements",
+            );
             let facts = part_facts(volumes, &facets);
             for &(_, slot, node) in servos {
                 let (_, _, spec, _, command, ..) = nodes
@@ -426,6 +426,11 @@ pub(crate) fn drive_servos(
                 let power = match spec.drive {
                     ServoDrive::Hand { .. } => 0.0,
                     ServoDrive::Powered { .. } => {
+                        let mechanism = mechanism
+                            .expect("a powered authority servo has its spawn-built ServoMechanism");
+                        let rpm = rpm.expect(
+                            "a powered authority servo has its spawn-built EngineRpm crank speed",
+                        );
                         let quality = live_quality(&facts.quality, Part::Engine);
                         // Accessory capacity saturates at the governed budget; fuel cut does not
                         // stop a turning crank. The missing pump map is stated in design
@@ -442,11 +447,13 @@ pub(crate) fn drive_servos(
         .par_iter_mut()
         .for_each(|(_, mut transform, spec, rest, _, slot, root)| {
             // Replica sim nodes were restored before gameplay; only authority state advanced.
-            let Ok((_, authority, ..)) = tanks.get(root.0) else {
+            if streamed.contains(root.0) {
                 return;
-            };
-            let rotation =
-                servo_rotation(spec, rest, slot_state(&authority.states, slot.0).current);
+            }
+            let (_, authority, ..) = tanks.get(root.0).expect(
+                "a servo node without a streamed pose belongs to a spawn-built authority TankServos root",
+            );
+            let rotation = servo_pose(spec.role, rest.0, slot_state(&authority.states, slot.0).current);
             if transform.rotation != rotation {
                 transform.rotation = rotation;
             }
@@ -604,16 +611,16 @@ pub(super) fn interpolate_servos(
     mut views: Query<(&mut Transform, &ViewOf), With<ViewServo>>,
     servos: Query<(&ServoSpec, &ServoRest, &ServoIndex, &TankRoot)>,
     states: Query<&TankServos>,
-    remote_states: Query<&StreamedServoPose>,
+    streamed_states: Query<&StreamedServoPose>,
 ) {
     let alpha = time.overstep_fraction();
     for (mut transform, view_of) in &mut views {
         let (spec, rest, slot, root) = servos.get(view_of.0).expect(
             "ViewServo links a live sim servo; detach removes the view's servo binding in the same flush",
         );
-        let angle = registered_angle(root.0, slot.0, &states, &remote_states, Some(alpha));
+        let angle = registered_angle(root.0, slot.0, &states, &streamed_states, Some(alpha));
         // Guarded write: a settled mount must not re-dirty the view transform every frame.
-        let rotation = servo_rotation(spec, rest, angle);
+        let rotation = servo_pose(spec.role, rest.0, angle);
         if transform.rotation != rotation {
             transform.rotation = rotation;
         }
@@ -764,7 +771,55 @@ mod tests {
         assert_eq!(together, alone);
     }
 
-    fn tick_powered(world: &mut World, root: Entity, servo: Entity) -> ServoState {
+    /// Authority construction faults must stop the simulation rather than freeze a mount unseen.
+    /// Each missing fact is required by the registered powered servo, including its root state.
+    #[test]
+    fn authority_servos_refuse_broken_spawn_state() {
+        for missing in ["TankVolumes", "ServoMechanism", "EngineRpm", "TankServos"] {
+            let (mut world, root, _, _) = powered_world(1.0);
+            match missing {
+                "TankVolumes" => {
+                    world.entity_mut(root).remove::<TankVolumes>();
+                }
+                "ServoMechanism" => {
+                    world.entity_mut(root).remove::<ServoMechanism>();
+                }
+                "EngineRpm" => {
+                    world.entity_mut(root).remove::<EngineRpm>();
+                }
+                "TankServos" => {
+                    world.entity_mut(root).remove::<TankServos>();
+                }
+                _ => unreachable!(),
+            }
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                world.run_system_once(drive_servos).unwrap();
+            }))
+            .expect_err("incomplete authority state must panic");
+            let reason = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap();
+            assert!(reason.contains(missing), "{missing}: {reason}");
+        }
+    }
+
+    /// A hand crank reads operator requirements but has no engine dependency. Offline aiming
+    /// and generic hand-only constructions must move without powered mechanism or crank state.
+    #[test]
+    fn hand_servos_need_no_powered_construction() {
+        let (mut world, root, servo, _) = powered_world(1.0);
+        world
+            .entity_mut(root)
+            .remove::<(ServoMechanism, EngineRpm)>();
+        world
+            .entity_mut(servo)
+            .insert(ServoSpec::test_continuous(ServoRole::Yaw, 90.0));
+        assert!(tick_servo(&mut world, root, servo).current > 0.0);
+    }
+
+    fn tick_servo(world: &mut World, root: Entity, servo: Entity) -> ServoState {
         // Fixture: a moving command maintains enough travel for the steady-speed law.
         let current = world.get::<TankServos>(root).unwrap().states[0].current;
         world.get_mut::<ServoCommand>(servo).unwrap().target = current + 2.9;
@@ -788,7 +843,7 @@ mod tests {
             ServoState::test_new(PI - 0.05, PI - 0.05, 0.5);
         let mut last = PI - 0.05;
         for _ in 0..64 {
-            let current = tick_powered(&mut world, root, servo).current;
+            let current = tick_servo(&mut world, root, servo).current;
             assert!(current >= last, "{current} folded back from {last}");
             last = current;
         }
@@ -801,7 +856,7 @@ mod tests {
     fn an_engine_out_of_action_brakes_to_the_hand_rate() {
         let (mut world, root, servo, engine) = powered_world(1.0);
         for _ in 0..512 {
-            tick_powered(&mut world, root, servo);
+            tick_servo(&mut world, root, servo);
         }
         let mut velocity = world.get::<TankServos>(root).unwrap().states[0].velocity;
         world
@@ -814,7 +869,7 @@ mod tests {
         };
         let (friction, inertia) = bearing_and_inertia(spec);
         for _ in 0..4096 {
-            let state = tick_powered(&mut world, root, servo);
+            let state = tick_servo(&mut world, root, servo);
             // Bearing friction alone is a lower bound on coast-down time; hand work can only
             // reduce that braking, never erase the stored momentum in the game's damage model.
             assert!(state.velocity >= velocity - friction / inertia / 64.0);
@@ -851,7 +906,7 @@ mod tests {
             *power_share = Sourced(power);
             world.get_mut::<EngineRpm>(root).unwrap().0 = rpm;
             for _ in 0..4096 {
-                tick_powered(&mut world, root, servo);
+                tick_servo(&mut world, root, servo);
             }
             let expected = (1000.0 * f32::from(rpm).min(2400.0) * RPM_TO_RAD * in_action * power
                 / 20.0)
@@ -921,7 +976,7 @@ mod tests {
             let (mut world, root, servo, _) = powered_world(1.0);
             let mut spec = world.get_mut::<ServoSpec>(servo).unwrap();
             *spec = with_inertia(spec.clone(), inertia);
-            let state = tick_powered(&mut world, root, servo);
+            let state = tick_servo(&mut world, root, servo);
             let expected = (100.0 - 20.0) / inertia / 64.0;
             assert!((state.velocity - expected).abs() < 1e-6);
             speeds.push(state.velocity);
@@ -987,7 +1042,7 @@ mod tests {
         let mut spec = world.get_mut::<ServoSpec>(servo).unwrap();
         spec.drive = ServoSpec::test_continuous(ServoRole::Yaw, 1.0).drive;
         spec.requires = vec![crate::damage::Group::Single(Part::Gunner)];
-        let state = tick_powered(&mut world, root, servo);
+        let state = tick_servo(&mut world, root, servo);
         assert_eq!(state.current, 0.0);
         assert_eq!(state.velocity, 0.0);
     }
@@ -1215,7 +1270,7 @@ mod tests {
             .id();
         let spec = ServoSpec::test_continuous(ServoRole::Yaw, 1.0);
         let rest = ServoRest(Quat::IDENTITY);
-        let want = servo_rotation(&spec, &rest, 179.5f32.to_radians());
+        let want = servo_pose(spec.role, rest.0, 179.5f32.to_radians());
         let source = world
             .spawn((spec, rest, ServoIndex(0), TankRoot(root)))
             .id();
