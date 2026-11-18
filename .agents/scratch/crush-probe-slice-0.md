@@ -1,152 +1,213 @@
-# Crush probe, slice 0: the game's destruction model
+# Crush probe, slice 0b: the game's destruction model
 
-Game state only: pieces, joints and loads. Baseline `67e33cd7`, fast-forwarded from `main`; experiment branch `lane/crush-probe`. No production change is retained.
+Game state only: chunks, joints, contacts and loads. Branch `lane/crush-probe`, baseline `67e33cd7`; preceding report `1e46a8e7` contains experiment 0a. This commit retains only this report.
 
-**Binary answer: no, the sustained belly-supporting carriers do not suffer new joint failures under their gathered presses. Build slice 1 changed.** The immediate obstruction is the size-floor carrier grouping: its joints have already opened, but its colliders still move as one rigid body. Bring the design's “welds are rests” work ahead of, or into, the press slice; removing the blow gate alone leaves the measured support intact. This experiment does not demonstrate that ground yield or bulk bearing is the next missing truth.
+**Escape gate: PASS. Production decision: FAIL for arm W as tested.** In every repetition the already-beached control stays slow and belly-supported, while applying W releases the same loaded carriers and restores drive. But every collapsed-house pile loses all its loose simulation volume on its first traversal. This reaches the design's explicit absurd end. Do not ship the proposed rest-opening/sub-floor shedding combination unchanged. No law parameter, size floor, ground response or vehicle data was tuned.
 
-## Method and repeatability
+## Method, denominators and scope
 
-All quantities in the observation tables are **MEASURED**, unless a column explicitly says **DERIVED**. A repeated endpoint is intentional: each configured start was executed independently **MEASURED three times**, and its complete per-tick JSON stream was byte-identical across those repetitions. These are execution-repeatability ranges, not confidence intervals or randomized placement coverage.
+The final matrix contains **MEASURED three independent process executions per arm per configured start**, **MEASURED 30 executions**. Each start/arm's complete JSON stream is byte-identical across its repetitions. The ranges below describe execution repeatability, not randomized placement coverage. All table observations are **MEASURED**, including aggregates of measured samples; ratios, degree conversions, elapsed seconds from ticks, geometry-derived sizes and scalar-operation estimates are **DERIVED from those measurements**. A repeated endpoint is intentional. Profile vectors show the common value of each bin's degenerate repetition range.
 
-The disposable instrument lived in `src/headless_test/track_scorecard/rubble_climb.rs`. It mounted on the existing shipped-plugin `Bed`, after Avian `PhysicsSystems::Writeback` and before `LandingSet`, before the actual landing split could retire its contact colliders. Each tick it:
+The headless `Bed` mounts the shipped simulation plugin and authors the same standing ram, collapsed-house placement seeds and yard as experiment 0a. The fixture retains the original golden-ratio seed nudges. The controls' original drive endpoints reproduce 0a. The historical light-pedal heap stalls still do not reproduce: both controls traverse. The standing control does beach, although its trajectory differs from the historical issue trace.
 
-- Enumerated every awake, unfrozen `DebrisPiece`.
-- Oriented the canonical `ContactTransfers::solver_groups()` points toward each loose owner. Dynamic loose pieces receive solver contacts; implicit structural belt contacts are only staged for fixed surfaces (`src/track/rubble.rs:476`, `:494`).
-- Used the shipped landing calculation exactly: `struck = min(effective_mass × closing_speed, max(impulse · normal, 0))` when closing speed exceeds rest speed; the press is `−(impulse − normal × struck) / dt` (`src/debris/crumble.rs:421`). Only presses entered the hypothetical solve; no peak blow force entered it.
-- Called `crumble(structure, state, kernels, owned_chunks, presses, f32::MAX)` for every awake construction owner, including owners with no contacts. `crumble` clones `State` internally (`src/debris/crumble.rs:169`). It recorded new cracks/partings, raw fragments and the result of `merge_fragments` on a separate clone of the retained-edge list. It wrote no model state, ledger entry, split, force or velocity. The existing **DERIVED 16-pass** resolution bound remains (`src/debris/crumble.rs:116`); only the energy cap was lifted.
-- Classified a hypothetical failure as a returned crack or parting. A raw fragment boundary already present before the solve was **not** counted as a new failure. Yard pieces have no construction `Piece`/`Breakage` and no joints (`src/track_sandbox/rubble.rs:66`); they were counted as single chunks with no assessment required.
+- Both arms finish the shipped setup before intervention. **DERIVED 64 ticks/s** is the shipped tick rate. The standing run preserves the complete original **DERIVED 25 s** prefix, then continues for **DERIVED 15 s**. At intervention its demand is still full, speed is **MEASURED 0.02931–0.02931 m/s**, and its hull proxies carry **DERIVED 60.933–60.933%** of fixture weight. W therefore rescues an existing beach rather than merely avoiding a different approach.
+- W starts at drive onset for the heap, free and yard starts. The heap drives last **DERIVED 40 s** at the existing light pedal. Free and yard drives use full demand and **DERIVED 25 s** per pass. Each free execution makes **MEASURED three passes** over the same evolving pile; between passes only the tank is repositioned through `Bed::place`. The pile, transmission and world retain their state. These are repeat traversals, not a model of turning around.
+- At W activation existing retained edges become cracked, closed rests once. New size-floor rests can form only at a previously uncracked bond's first failure. A later opening cannot coarsen that edge again. The disposable implementation kept an edge-history list for instrumentation; a production implementation should delete it.
+- W commits an unscaled press-only strength solve before the normal landing system, after the existing owner laws and physics writeback. It assesses every awake, unfrozen construction carrier not already pending retirement, including empty-contact owners. It preserves individual contact points and their moments. Presses use the shipped blow/press decomposition; they carry no blow peak, energy cap or plastic fragment-mass attenuation. The separate shipped blow pass keeps its energy cap. Both paths use the existing part/rest solver, ownership split and `route`/`Dust`/`Shed` path. The existing **DERIVED 16-pass** bound remains; no screen, filtering or budget is introduced.
+- Existing owner laws remain active. In the rescue they open the belly carriers and prepare their retirement before the added press pass skips those pending splits. The reported result is for the combined W arm, not proof that its new press pass alone causes the escape. A rest judged open stays open in both paths. No tank pose, velocity or force is written by the intervention.
 
-Touches retained the original individual points, so their forces and moments reach the linear load assembly unchanged. For noise reporting only, points were summed per chunk collider/other collider; the patch lever is the force-magnitude-weighted contact centre relative to the carrier origin, expressed in its rotating frame. This centroid is not a complete replacement for a general contact wrench.
+Fixture weight is **MEASURED 559,170 N**. Belly share below is positive net upward hull-proxy reaction divided by that weight, clipped at zero per tick; track support is the belt's sampled support plus soft-run and bump-stop solver reactions. Side plates are excluded. This whole-weight share differs from 0a's conditional share on hypothetical failing loose owners. Final height is the hull datum's world Y over level ground, not belly clearance; its rest datum is **MEASURED −0.013260 m**. Rest belly clearance remains **DERIVED 0.476604 m**, and the unchanged occupied-volume size floor is **DERIVED 0.500 m** from shipped data.
 
-Belly support means positive net upward force delivered to the tank through its hull-proxy contacts with that loose piece. Tracks mean soft-run and bump-stop contacts, excluding side plates. The deciding share is the summed belly support on failing owners divided by summed belly support on all loose owners, integrated over the stated window. It is not divided by the tank's whole weight. Classification follows `Bed::role` (`src/headless_test/track_scorecard.rs:676`).
+Removed volume counts unique matter leaving simulation, excluding buried matter and the surviving standing remnant. Collapsed-house starts contain **MEASURED 8.82118–8.82118 m³** of loose pile volume plus **MEASURED 1.19282–1.19282 m³** of standing non-buried material; the latter survives W. Removal shares use the loose pile as denominator. Counts distinguish chunks made dust, `Shed` groups, and entire existing server carriers retired with all their chunks dusted. Floating-point volume sums differ in their last accumulation places; displayed precision does not imply exact arithmetic conservation.
 
-Fixture weight **MEASURED 559,170 N**; the vehicle's authored mass remains fixture data, not a law parameter. **DERIVED rest belly clearance 0.476604 m**: the shipped `tiger_1.sim.glb` `Hull_Collider` node's lowest local point is `1.042906 − 0.553042 = 0.489864 m`, plus the rig's **MEASURED −0.013260 m** rest datum. This independently agrees with the issue's rounded clearance. The server volume-size floor is **DERIVED from shipped data 0.500 m**, the cube root of occupied volume (`assets/ballistics/physical_laws.ron:9`, `src/debris/crumble.rs:234`). Bounding height is a different quantity.
+## 1. Hull support and restored drive
 
-| Configured start | Fixture request and duration (DERIVED from probe setup) | Forward travel, repetition range (m) | End speed, repetition range (m/s) | Low-speed ticks, repetition range |
-|---|---|---:|---:|---:|
-| `stuck` | Existing `standing-t1-x1.4`, full pedal, 25 s | 15.910–15.910 | 0.02931–0.02931 | 497–497 |
-| `heap-s2` | Collapsed house, seed 2, pedal 0.3, 40 s | 45.240–45.240 | 2.433–2.433 | 51–51 |
-| `heap-s6` | Collapsed house, seed 6, pedal 0.3, 40 s | 24.777–24.777 | 1.436–1.436 | 51–51 |
-| `free` | Collapsed house, full pedal, 25 s | 176.157–176.157 | 10.633–10.633 | 36–36 |
-| `yard` | Existing loose single-chunk yard, full pedal, 25 s | 191.808–191.808 | 10.633–10.633 | 36–36 |
+For `stuck`, means cover the intervention-to-end window. For the other starts they cover the drive, or all free passes. Every final-second belly mean in W is **MEASURED 0–0%**.
 
-The seed recipe was recovered from `2665f22b^:src/headless_test/track_scorecard/creep_stall.rs`: fractional golden-ratio placement nudges, **DERIVED within half a millimetre**, using the original coefficients and seed identities. The two historical light-pedal stalls do not reproduce on this baseline. The standing start also travels farther than the issue's trace, but ends belly-supported and slow with demand still applied. Thus this is the same scenario, not reproduction of the historical trajectory. The **MEASURED low-speed threshold was 0.05 m/s**, including launch ticks; those counts alone are not beaching counts.
+| Start | Arm | Mean belly share (%) | Final hull Y (m) | Final pitch (degrees, DERIVED) | Final forward speed (m/s) | Forward progress (m; stuck after intervention, others last pass) |
+|---|---|---:|---:|---:|---:|---:|
+| stuck | control | 64.03283–64.03283 | 0.163037–0.163037 | 3.052–3.052 | 0.02954–0.02954 | 1.823–1.823 |
+| stuck | W | 0.06816–0.06816 | -0.013281–-0.013281 | 0.503–0.503 | 9.50738–9.50738 | 81.770–81.770 |
+| heap-s2 | control | 0.00405–0.00405 | -0.013394–-0.013394 | 0.346–0.346 | 2.43315–2.43315 | 45.240–45.240 |
+| heap-s2 | W | 0.00074–0.00074 | -0.013253–-0.013253 | 0.325–0.325 | 2.98762–2.98762 | 81.074–81.074 |
+| heap-s6 | control | 0.48343–0.48343 | -0.009605–-0.009605 | 0.111–0.111 | 1.43564–1.43564 | 24.777–24.777 |
+| heap-s6 | W | 0.00000–0.00000 | -0.013248–-0.013248 | 0.324–0.324 | 2.99584–2.99584 | 82.563–82.563 |
+| free | control | 0.00903–0.00903 | -0.013251–-0.013251 | 0.317–0.317 | 10.63279–10.63279 | 184.492–184.492 |
+| free | W | 0.00066–0.00066 | -0.013292–-0.013292 | 0.416–0.416 | 4.38363–4.38363 | 65.476–65.476 |
+| yard | control | 0.09098–0.09098 | -0.013250–-0.013250 | 0.317–0.317 | 10.63278–10.63278 | 191.808–191.808 |
+| yard | W | 0.09098–0.09098 | -0.013250–-0.013250 | 0.317–0.317 | 10.63278–10.63278 | 191.808–191.808 |
 
-## 1. Does belly support lie on pieces whose joints would fail?
+The standing control's final-second belly share is **MEASURED 69.371–69.371%**; W's is **MEASURED 0–0%**, and its final-second track share is **DERIVED 99.998–99.998%**. W advances **MEASURED 81.770–81.770 m** after the stuck moment against control's **MEASURED 1.823–1.823 m** of creep. **MEASURED three of three** W rescues pass the requested drive-on gate; all controls finish slow with demand applied.
 
-Every cell below is a **MEASURED range across the repetitions**. The late window starts at **MEASURED tick 400**, the onset named by the issue's historical trace, and is reported alongside the entire drive to avoid hiding approach failures. It is not a stall detector. The simulation uses **DERIVED 64 ticks/s**.
+The standing support history makes the change in load path visible. These are **DERIVED percentages** of measured fixture weight, averaged over the named simulation intervals; each cell is the repetition range.
 
-| Scenario | Failing share of belly support, entire drive (%) | Failing share, late window (%) | Mean late belly support / fixture weight (%) |
+| Drive interval (s, DERIVED) | Control belly / tracks (%) | W belly / tracks (%) |
+|---|---|---|
+| 0–6.25 | 5.559–5.559 / 95.840–95.840 | 5.559–5.559 / 95.840–95.840 |
+| 6.25–25 | 67.045–67.045 / 32.985–32.985 | 67.045–67.045 / 32.985–32.985 |
+| 25–25.25 | 67.116–67.116 / 32.934–32.934 | 4.090–4.090 / 52.698–52.698 |
+| 25.25–26 | 64.755–64.755 / 35.364–35.364 | 0–0 / 112.933–112.933 |
+| 26–40 | 63.939–63.939 / 36.045–36.045 | 0–0 / 100.087–100.087 |
+
+Track reaction briefly exceeds weight while arresting the fall. The other starts have transient support encounters and zero final-second belly share in both arms; their complete time series are in the raw artifacts.
+
+A first glancing belly contact is not the start of a beach. In the standing case it occurs at **MEASURED tick 109**, **DERIVED 1.703125 s** under the series' zero-based sample labels, while tracks already carry more than **DERIVED 90%**. The literal first-contact-to-first-threshold interval is therefore **DERIVED 0–0 s** in both arms. The meaningful recovery after the beach is:
+
+| Standing recovery reading | Control | W |
+|---|---:|---:|
+| First track support above 90% after intervention (s) | 6.171875–6.171875, transient | 0.187500–0.187500 |
+| First full 1 s track-support mean above 90%, confirmed after intervention (s) | Not reached in the remaining 15 s | 0.984375–0.984375 |
+| First belly contact to that post-beach instantaneous crossing (s) | 29.468750–29.468750, transient | 23.484375–23.484375 |
+| First belly contact to that full-window confirmation (s) | Not reached | 24.281250–24.281250 |
+
+The full-second mean is an analysis window, not a delay or tuning applied to the law. The crossing heaps already have track support above the threshold at their first positive belly sample: their literal intervals are **DERIVED 0–0 s**. W `heap-s6` has no positive belly sample at all. Free control's literal interval is **DERIVED 0.156250–0.156250 s**, W's **DERIVED 0–0 s**; yard is **DERIVED 0–0 s** in either arm. These early crossings do not establish release from a beach. Free endpoints above are after the final repositioned pass, so the retained drivetrain makes them unsuitable for a fresh-start acceleration comparison.
+
+## 2. What happened to the carriers and pile
+
+`stuck` begins this accounting at intervention, with a shared **MEASURED 61–61 bodies** and **MEASURED 13.34947–13.34947 m³** loose volume. Other starts begin at drive onset. Counts are cumulative over the stated window; free counts include its passes, with all W removal on the first.
+
+| Start | Arm | Bodies before → after (each a repetition range) | Chunks dusted | Shed groups | Volume removed (m³) | Initial loose pile removed (%) |
+|---|---|---|---:|---:|---:|---:|
+| stuck | control | 61–61 → 61–61 | 0–0 | 0–0 | 0.00000–0.00000 | 0.000–0.000 |
+| stuck | W | 61–61 → 13–13 | 741–741 | 646–646 | 10.36697–10.36697 | 77.658–77.658 |
+| heap-s2 | control | 15–15 → 32–32 | 0–0 | 0–0 | 0.00000–0.00000 | 0.000–0.000 |
+| heap-s2 | W | 15–15 → 0–0 | 603–603 | 348–348 | 8.82118–8.82118 | 100.000–100.000 |
+| heap-s6 | control | 15–15 → 33–33 | 0–0 | 0–0 | 0.00000–0.00000 | 0.000–0.000 |
+| heap-s6 | W | 15–15 → 0–0 | 603–603 | 350–350 | 8.82118–8.82118 | 100.000–100.000 |
+| free | control | 15–15 → 39–39 | 0–0 | 0–0 | 0.00000–0.00000 | 0.000–0.000 |
+| free | W | 15–15 → 0–0 | 603–603 | 370–370 | 8.82118–8.82118 | 100.000–100.000 |
+| yard | control | 108–108 → 108–108 | 0–0 | 0–0 | 0.00000–0.00000 | 0.000–0.000 |
+| yard | W | 108–108 → 108–108 | 0–0 | 0–0 | 0.00000–0.00000 | 0.000–0.000 |
+
+At the standing intervention the actual loaded carriers have **DERIVED sizes 0.55747–0.60822 m** and **MEASURED heights 0.52926–0.72672 m**. All their source chunks leave as dust/Shed in the intervention tick; they are absent from the post-commit body list, and next tick their belly support is zero. Thus the original rigid-carrier obstruction is removed in simulation, not inferred from a cloned solve. The remaining bodies are not a surviving belly bridge.
+
+Height profiles use **MEASURED eight bins**, each collecting the highest transformed individual chunk-AABB point overlapping its ground rectangle; these are conservative chunk envelopes, not a sampled surface or a pile volume. Empty bins read ground height. For the standing case the rectangle is fixed at the intervention hull position, **DERIVED 7 m longitudinally by 4 m across**, so driving away cannot make the after-profile empty by changing the measurement location. Collapsed profiles cover the original settled pile rectangle, including material across its full width. The bin direction is increasing world Z. Each vector element is the same in all repetitions.
+
+| Region | Before (m; each bin's range has equal endpoints) | Control after (m) | W after (m) |
+|---|---|---|---|
+| stuck | [2.512, 2.512, 2.512, 2.512, 0.511, 0.706, 0.616, 0.250] | [2.352, 0.702, 0.702, 0.583, 0.474, 0.474, 0.810, 0.810] | [0.000, 0.000, 0.000, 0.000, 0.000, 0.050, 0.050, 0.250] |
+| heap-s2 | [3.009, 3.009, 3.009, 3.009, 3.009, 3.009, 3.009, 3.009] | [0.301, 0.300, 0.300, 0.300, 0.300, 0.250, 0.250, 0.250] | [0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000] |
+| heap-s6 | [3.009, 3.009, 3.009, 3.009, 3.009, 3.009, 3.009, 3.009] | [1.667, 1.667, 1.667, 1.667, 1.667, 1.667, 1.667, 1.667] | [0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000] |
+| free | [3.009, 3.009, 3.009, 3.009, 3.009, 3.009, 3.009, 3.009] | [1.670, 1.670, 1.668, 1.668, 1.667, 1.667, 0.449, 0.449] | [0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000] |
+| yard | [0.447, 0.584, 0.660, 0.710, 0.710, 0.686, 0.644, 0.541] | [0.516, 0.516, 0.549, 0.549, 0.544, 0.554, 0.554, 0.505] | [0.516, 0.516, 0.549, 0.549, 0.544, 0.554, 0.554, 0.505] |
+
+The tall envelope bins include material beside the belly within that rectangle; they are not the measured supporting carriers' heights. For the standing start there is no loose pile before the ram, so its original `Site` width is undefined; only the fixed intervention rectangle is used here. Yard volume is **DERIVED from measured body mass divided by its shipped fixture density**, because those single-chunk bodies have no construction ledger or joints. Its two arms are byte-identical.
+
+## 3. Free-running repeated passes
+
+All observations below repeat identically in each execution. The original pile contains **MEASURED 15–15 bodies**, **MEASURED 603–603 chunks** and **MEASURED 8.82118–8.82118 m³** loose volume. Both arms begin with the same **MEASURED 3.009–3.009 m** maximum height envelope.
+
+| Arm | Pass | Removed this pass (m³) | Initial pile removed this pass (%) | Whole server carriers dusted this pass | Shed groups / chunks this pass | Bodies left | Pile maximum height after pass (m) |
+|---|---|---:|---:|---:|---|---:|---:|
+| control | 1 | 0.00000–0.00000 | 0.000–0.000 | 0–0 | 0–0 / 0–0 | 39–39 | 1.668–1.668 |
+| control | 2 | 0.00000–0.00000 | 0.000–0.000 | 0–0 | 0–0 / 0–0 | 39–39 | 1.668–1.668 |
+| control | 3 | 0.00000–0.00000 | 0.000–0.000 | 0–0 | 0–0 / 0–0 | 39–39 | 1.670–1.670 |
+| W | 1 | 8.82118–8.82118 | 100.000–100.000 | 26–26 | 370–370 / 603–603 | 0–0 | 0.000–0.000 |
+| W | 2 | 0.00000–0.00000 | 0.000–0.000 | 0–0 | 0–0 / 0–0 | 0–0 | 0.000–0.000 |
+| W | 3 | 0.00000–0.00000 | 0.000–0.000 | 0–0 | 0–0 / 0–0 | 0–0 | 0.000–0.000 |
+
+**The “essentially gone after one pass” absurd end occurs: all loose pile matter and all loose bodies are gone in W.** The standing remnant is not a surviving rubble bed. The controls lose no volume but do change: they split into more carriers and their height lowers as they move and settle. W's later unchanged passes mean the pile was already deleted, not that a lower bed has stopped yielding. This is a failure of the proposed production behavior despite the escape gate passing.
+
+## 4. Motion and popping
+
+Velocity is measured from the hull body. Acceleration below is **DERIVED as adjacent-tick Δvertical_velocity / dt**, not Avian substep or acceleration inside a contact impulse. Windows include a whole-carrier pop tick and the following **DERIVED 1 s**, including pops away from the tank; they conservatively cover motion coincident with giving way without claiming every pop caused it. Each extrema value is identical across repetitions.
+
+| W start | Vertical velocity extrema (m/s) | Vertical acceleration extrema (m/s², DERIVED) | Largest downward hull excursion in these windows (m) |
+|---|---|---|---:|
+| stuck | -1.1856–-1.1856 to 0.3744–0.3744 | -8.9496–-8.9496 to 6.5322–6.5322 | 0.29314–0.29314 |
+| heap-s2 | -0.0161–-0.0161 to 0.0406–0.0406 | -0.7945–-0.7945 to 1.4685–1.4685 | 0.00373–0.00373 |
+| heap-s6 | -0.0120–-0.0120 to 0.0380–0.0380 | -0.8720–-0.8720 to 1.3635–1.3635 | 0.00249–0.00249 |
+| free | -0.0117–-0.0117 to 0.0230–0.0230 | -1.0253–-1.0253 to 2.2235–2.2235 | 0.00234–0.00234 |
+| yard | N/A: no whole-carrier pop | N/A | N/A |
+
+For the actual standing belly carriers, the shared drop is **MEASURED 0.29314–0.29314 m**, below even the shortest loaded carrier's **MEASURED 0.52926–0.52926 m** height. Its upward rebound peaks at **MEASURED 0.37437–0.37437 m/s**, not an upward launch at removal. No measured hull excursion exceeds the height of a known belly-supporting carrier that gave way. Comparing the same drop to every simultaneous distant pop would falsely attribute it to unrelated carriers as short as **MEASURED 0.23969 m**. The heap and free excursions are smaller than **MEASURED 0.004 m**. No launch or excessive layer drop is demonstrated by the recorded motion. Visual quality and substep peaks remain unestablished.
+
+A whole-carrier pop requires all chunks of an already-existing server body to be routed as dust in one tick, with no kept child. Newly released fragments that were always sub-floor are not counted as pops. The size column is occupied-volume cube root, not vertical height. Controls and yard have **MEASURED 0–0** such pops.
+
+| W start | Whole-carrier pops over run | Carrier size range (m, DERIVED) | Separate ticks with pops | Maximum material removed in one tick (m³) |
+|---|---:|---|---:|---:|
+| stuck | 48–48 | 0.50133–0.73469, identical each repetition | 2–2 | 10.19391–10.19391 |
+| heap-s2 | 31–31 | 0.50030–0.79921, identical each repetition | 19–19 | 1.83539–1.83539 |
+| heap-s6 | 29–29 | 0.50144–0.81854, identical each repetition | 18–18 | 1.83539–1.83539 |
+| free | 26–26 | 0.50217–0.80925, identical each repetition | 17–17 | 1.83539–1.83539 |
+| yard | 0–0 | N/A | 0–0 | 0.00000–0.00000 |
+
+The standing intervention removes **MEASURED 47–47 whole carriers in its first tick**, then **MEASURED 1–1** in the next. Its first-tick volume loss is **DERIVED 76.362–76.362%** of the loose pile. No complete multi-body pile disappears in one tick: the free pile's largest one-tick loss is **DERIVED 20.807–20.807%**, and it disappears across the encounter. Whole welded carriers nevertheless do pop, in large numbers. A graceful hull drop does not excuse that material-loss result.
+
+## 5. Cost in counts
+
+Awake census is after structural commit on each tick, excluding sleeping and frozen pieces. It therefore excludes carriers already removed that tick: entering the standing intervention there are **MEASURED 50–50 awake bodies**, although its first post-commit census is much smaller. The count table spans each complete drive including the shared standing prefix, or all free passes. Scalar operations are **DERIVED algorithmic counts** of part/kernel factors and solves: added press solves, existing landing solves, and `evaluate_owner`'s existing joint-law assessments. They exclude Avian contact solving, sweep casting, intake, spawning and decoration; they are neither instructions nor hosted timings.
+
+| Start | Arm | Awake bodies / tick, min–max | Mean awake bodies (repetition range) | Press assessments / tick, min–max | Joint-solver scalar ops / tick, max (repetition range) | Mean scalar ops / tick (repetition range) |
+|---|---|---:|---:|---:|---:|---:|
+| stuck | control | 0–58 | 48.7383–48.7383 | 0–0 | 6,664,388–6,664,388 | 36501.03–36501.03 |
+| stuck | W | 0–58 | 29.8160–29.8160 | 0–22 | 6,664,388–6,664,388 | 37642.48–37642.48 |
+| heap-s2 | control | 0–32 | 17.5234–17.5234 | 0–0 | 1,858,447–1,858,447 | 5256.29–5256.29 |
+| heap-s2 | W | 0–15 | 0.2715–0.2715 | 0–12 | 5,570,507–5,570,507 | 20672.12–20672.12 |
+| heap-s6 | control | 0–33 | 21.8367–21.8367 | 0–0 | 1,727,977–1,727,977 | 4934.14–4934.14 |
+| heap-s6 | W | 0–15 | 0.2051–0.2051 | 0–14 | 5,760,786–5,760,786 | 16428.50–16428.50 |
+| free | control | 0–39 | 4.7917–4.7917 | 0–0 | 1,456,849–1,456,849 | 2732.95–2732.95 |
+| free | W | 0–12 | 0.0848–0.0848 | 0–12 | 6,857,727–6,857,727 | 9048.85–9048.85 |
+| yard | control | 0–108 | 15.1719–15.1719 | 0–0 | 0–0 | 0.00–0.00 |
+| yard | W | 0–108 | 15.1719–15.1719 | 0–0 | 0–0 | 0.00–0.00 |
+
+After the standing intervention alone, control has **MEASURED 49–53 awake bodies/tick**, averaging **MEASURED 50.56875–50.56875**, while W has **MEASURED 0–3**, averaging **MEASURED 0.109375–0.109375**. Their mean joint-solver work is respectively **DERIVED 1,917.06–1,917.06** and **DERIVED 4,960.93–4,960.93 scalar operations/tick**; W peaks at **DERIVED 1,458,851–1,458,851** there. W's added press pass peaks at **DERIVED 461,547–461,547 operations/tick** in that window. Lower later body counts come from removing the pile, not evidence that a retained rest bed is cheap. On the collapsed piles W increases joint-solver work even while almost eliminating the later awake population. No hosted solve budget is established.
+
+## 6. Verdict stability
+
+Source joint identities survive ownership changes. The probe checks stored closed/open states across ticks and child owners, records rest openings in both the added press and existing law paths, and detects a closed state returning after an observed opening. It also checks that a previously cracked joint is never eligible to form a new weld. The initial baseline-to-W conversion is the declared intervention, not counted as re-welding a W-opened rest.
+
+| W start | Distinct rest openings recorded | Opens then re-welds | Open→closed on adjacent ticks or across later ownership |
 |---|---:|---:|---:|
-| `stuck` | 0.16646–0.16646 | **0–0** | 68.072–68.072 |
-| `heap-s2` | 0.01238–0.01238 | 0.01635–0.01635 | 0.00724–0.00724 |
-| `heap-s6` | 4.30024–4.30024 | 4.31257–4.31257 | 0.61281–0.61281 |
-| `free` | 70.416–70.416 | 0–0 | 0.000133–0.000133 |
-| `yard` | 0–0 | N/A: no belly contacts | 0–0 |
+| stuck | 598–598 | 0–0 | 0–0 |
+| heap-s2 | 296–296 | 0–0 | 0–0 |
+| heap-s6 | 303–303 | 0–0 | 0–0 |
+| free | 313–313 | 0–0 | 0–0 |
+| yard | 0–0 | 0–0 | 0–0 |
 
-The free drive's high conditional belly-failure share is a brief encounter, not persistent beaching: its entire belly impulse is **MEASURED 4,042–4,042 N·s**, against **MEASURED 7,408,710–7,408,710 N·s** for `stuck`. A tiny denominator makes the conditional percentage large. In the standing case's late window, **MEASURED 100–100%** of belly support lies on carriers whose internal joints are already all separated.
+Every reported reversal count is **MEASURED 0–0**. A held rest eventually opening is its legitimate one-way transition, not an oscillating verdict. The experiment does not re-close an open edge to obtain a hypothetical next-tick “hold” answer: doing that would test a different state machine. It therefore establishes committed-state monotonicity, not solver-noise stability of a hypothetical reversible near-threshold contact or a delayed solve budget.
 
-## 2. Hypothetical fragments and retained height
+## Production shape and decision
 
-There are **MEASURED zero new failing belly carriers** in the standing case's late window. For its approach failures and the other drives, the raw strength result and the actual size-floor result differ:
+The deciding truth is now observed: restoring the missing rest semantics can release the belly carriers. This fixture does not require a lower size floor or ground yield to restore drive. Neither alternative was tested, and the escape result cannot establish whether a sound single chunk on hard ground could still beach a tank. The present failure is excessive disappearance after opening, not an unbroken block remaining under the belly. Keep the next investigation at that seam; do not lower numbers merely to obtain a nicer outcome.
 
-| Scenario | Raw fragments per failing belly assessment (MEASURED) | Raw volume size (m, MEASURED) | Raw current-pose vertical span (m, MEASURED) | Bodies after current coarsening (MEASURED) |
-|---|---:|---:|---:|---:|
-| `stuck`, approach | 7–69 | 0.1651–0.5148 | 0.2250–0.7198 | 1–5 |
-| `heap-s2` | 8–8 | 0.2137–0.4041 | 0.1618–0.4401 | 1–1 |
-| `heap-s6` | 10–10 | 0.1781–0.4164 | 0.1376–0.2605 | 1–1 |
-| `free` | 9–9 | 0.1781–0.4164 | 0.3587–2.5521 | 1–1 |
+A production version of the tested arm would change these functions and interfaces:
 
-Only one raw fragment among the standing approach's failing-belly samples reaches the floor: **MEASURED size 0.5148–0.5148 m**, vertical span **MEASURED 0.6770–0.6770 m**, above the rest belly clearance. All raw fragments in the other failing-belly samples are below the floor and rejoin their carrier. A tall thin fragment can have a small volume size; the free drive's tall span is not an error in the size test.
+- `debris::crumble::{landings, touches, crumble, crumble_landings}`: delete the blow-only gate; retain press and blow paths separately, use full carried press with strength-only commitment, preserve contact wrenches, and keep the blow's energy cap and mass scaling confined to blows. The new press work must share the existing ownership-parallel preparation and ordered commit boundary; the disposable exclusive system is not the production scheduling design.
+- `merge_fragments`: weld only at a bond's first failure, writing cracked/closed state. Delete the `retained` argument and its old-edge unconditional union path. A rest opening routes its freed sub-floor fragments through existing `route`; it does not create another weld.
+- `construction::breakage::{Live, evaluate_owner}` and `breakage::sweep_intake::cut_fragments`: delete `rubble_joints`, its construction/clone/child filtering, and pass the first-bond-failure information and mutable state through coarsening. Keep subsequent rest openings monotone. Update event preparation after coarsening so it reports the final joint state.
+- `route`, `server_body`, `Shed`, `PendingSplit::of` and `split_groups` already provide the tested size decision, dust/decor and ownership/body retirement. They need no replacement law. `Assessment::landing`/the part graph already judge cracked, closed joints as push/friction rests; no new lift/tip/slide law was invented.
 
-The sustained standing carriers already partition into **MEASURED 10–18 raw single chunks**, each **MEASURED 0.1717–0.2965 m** in volume size, but current coarsening returns **MEASURED one body per carrier**. At the final tick, the three belly carriers have heights **MEASURED 0.5285, 0.7086 and 0.7266 m**, all above the **DERIVED 0.4766 m** clearance. A press-only slice changes none of those carrier heights.
+**DERIVED rough implementation scope, not a completed production diff:** about **120–180 changed/added Rust lines** across those seams, **50–80 deleted Rust lines** for retained-edge storage/union and gate plumbing, plus about **50–100 lines** of focused state-transition/ledger tests and the moving-group exception's documentation. These estimates exclude a screen, budget, new material representation, bulk bearing and a solution to the measured disappearance failure. The temporary probe and counters are substantially larger and are all removed.
 
-Those are frozen-pose geometric spans. The experiment commits no split, so it cannot measure the settled rubble height after a split, rotation, load redistribution or shedding. Treating independently grounded fragment heights as the height of a real stack would invent an outcome. The measured current-coarsening result, however, establishes that most hypothetical fractures do not lower the carrier at all.
+**No new replicated event variant or wire-schema change is inherently needed.** Existing `Dust` entries and `Shed` messages carry the measured removal. Applied to a still-closed joint, existing `Crack` removes cohesion without opening it; existing `Separate` opens it (`Shape::apply`). They can carry the rest lifecycle from construction spawn. Dust/Shed alone are not sufficient for joints that remain in simulation: emit `Crack` when a first-failure weld closes and `Separate` when it later opens. Current callers prepare separation causes before coarsening, so production must correct that event emission rather than append an undo/re-weld event after `Separate`. The disposable arm updates server live state and removal records but does not implement or validate that joint-ledger correction or a network replica. The artificial mid-run conversion of baseline welds is not represented to a replica: `Crack` cannot undo an already-recorded `Separate`. The no-new-variant production shape assumes the corrected lifecycle starts from construction spawn, not a live migration of an old ledger. No new event type was added to make this probe work.
 
-## 3. Why the belly carriers hold
+**Decision:** retain the PASS on the requested rescue gate, reject W's measured pile behavior, and keep this lane report-only. The data does not support landing the current slice-2 dust policy as a credible lower rubble bed. A smaller-body representation might retain matter at higher solver cost, but its required size, cost and feel remain unknown; ground yield is also untested. Neither is promoted to the missing truth by this experiment.
 
-For `stuck` after the late-window boundary, **MEASURED seven distinct carriers** contribute belly support. Their volume sizes span **MEASURED 0.5021–0.6645 m** and current vertical spans **MEASURED 0.2988–1.6348 m**. Every one has all internal joints already open: this is retained carrier grouping, not a compact sound block proving masonry strength adequate.
+## What remains unestablished
 
-At the final tick, across every repetition:
+- Exact reproduction of the historical #374 trajectory or historical heap stalls; these are the current shipped-plugin scenarios and one confirmed persistent control beach.
+- Which rest-opening causes dominate the pile-wide failure, or how much the existing spin/owner-law path contributes compared with the added press pass. The combined arm is tested; a press-only/rest-only factorial comparison is not.
+- A plausible persistent rubble bed, smaller server bodies, mound/decor collision, ground yield, bulk bearing, or a tuned alternative. None was substituted after seeing W fail its material-preservation check.
+- Visual popping/decoration quality, Avian substep velocity/acceleration peaks, or an exact occupied-surface height raster. The report supplies chunk envelopes and tick-level motion only.
+- Hosted performance, parallel production scheduling, a screening rule, a solve budget, or safe load filtering near a live rest's threshold.
+- Replica/ledger compatibility in an end-to-end session. The existing event vocabulary is sufficient by source inspection; the necessary emission changes were not built or shipped.
 
-| Carrier | Size (m, MEASURED) | Internal joints / already open (MEASURED) | Retained carrier edges (MEASURED) | Belly force / fixture weight (%, MEASURED) |
-|---|---:|---:|---:|---:|
-| A | 0.5910–0.5910 | 29 / 29 | 15–15 | 30.392–30.392 |
-| B | 0.5575–0.5575 | 18 / 18 | 13–13 | 26.051–26.051 |
-| C | 0.6082–0.6082 | 33 / 33 | 15–15 | 5.492–5.492 |
+## Artifacts, restoration and checks
 
-For the entire standing drive, non-failing already-open carriers take **MEASURED 99.511–99.511%** of belly impulse; holding groups with some closed joints take **MEASURED 0.3223–0.3223%**, with the rest on hypothetical failures. Single chunks take **MEASURED 0–0%** there.
+The final streams remain ignored in this bay at `target/crush0b-{arm}-{case}-s{seed}-r{rep}.jsonl`, with corresponding `.log` files. Each arm/start's hash below applies to all repetitions. Temporary development runs are not used as independent evidence for these ranges. Final execution used the same compiled `edit`-profile library test, `crush_zero_b_probe --ignored --nocapture --test-threads=1`, in separate processes with `CRUSH_ARM`, `CRUSH_CASE`, `CRUSH_SEED` and `CRUSH_REP`. Every compilation used `scripts/serial-cargo` with `--features dev_ui,bitprobe`. Headless environment: `OVERMATCH_UNATTENDED=1 OVERMATCH_MUTE=1`.
 
-The yard supplies the single-chunk case: **MEASURED 100–100%** of its belly support is on pieces with no joint. Their world bounding spans are **MEASURED x 0.2930–0.4073 m, y 0.2742–0.4769 m, z 0.2870–0.4579 m**. They do not produce a lasting beach in this control.
+| Start | Arm | Final JSONL SHA-256 |
+|---|---|---|
+| stuck | control | `e884368dcc9f46313e16a919b2d4a626a1a73fa8d5bae63ec322e869daaf56ae` |
+| stuck | W | `b5e63fcddfe6f10be6a5a587838f975757f59ab0d3557761e16555664ab1efc0` |
+| heap-s2 | control | `c8a9eab76828110747052bd8a6eb49246dbdcea85a5427a8296d9684c7fdc90a` |
+| heap-s2 | W | `fc95edf5413a9155f60a92418c095a52db609d94632c076ef67c97b146bce388` |
+| heap-s6 | control | `ca21a41fb0ef40fb2add8ed3c9aafbec0a9d5e96f3b5db4486b9b53d641a6bc4` |
+| heap-s6 | W | `341d1eae02f87cc533fecbf50f2c1f6823164f88bee8a4a948b5ba730012ce22` |
+| free | control | `b70ec3537843a09bbe89c420b53e0b9041f0be1af7d920f12ce2e0dbaf1c5198` |
+| free | W | `200623f038d237cbfca24444b2f0756ebbbcd5cb902497b483d3af5984fa3f9c` |
+| yard | control | `a88be46c4a4d37143dc6a810b5b5f5ab1894c88533f2fc47a015b8fc32289da7` |
+| yard | W | `a88be46c4a4d37143dc6a810b5b5f5ab1894c88533f2fc47a015b8fc32289da7` |
 
-The light-pedal heaps also have holding groups with closed joints. Over the entire drive their shares of belly impulse are **MEASURED 70.964–70.964%** for seed 2 and **MEASURED 88.210–88.210%** for seed 6; their late non-failing size ranges are **MEASURED 0.5092–0.6996 m** and **MEASURED 0.5092–0.7822 m** respectively. “Assessment held” does not prove “compact block squarely loaded”: holding-joint utilization was not recorded, and these drives cross. There is no evidence here for prioritizing ground yield or bulk bearing over the carrier constraint.
-
-## 4. Free-running track control
-
-Every percentage is **MEASURED across the entire drive**, with identical ranges across repetitions.
-
-| Scenario | Failing loaded piece-ticks (%) | Distinct loaded pieces ever failing (%) | Track support impulse on failing owners (%) |
-|---|---:|---:|---:|
-| `free`, bonded-house control | **0.9566–0.9566** | **16.667–16.667** | **3.9228–3.9228** |
-| `yard`, single chunks | 0–0 | 0–0 | 0–0 |
-| `heap-s2` | 1.2357–1.2357 | 18.182–18.182 | 3.2885–3.2885 |
-| `heap-s6` | 0.1634–0.1634 | 33.333–33.333 | 0.4334–0.4334 |
-
-In the bonded control this is **MEASURED 15 failing piece-ticks out of 1,568**, and **MEASURED four distinct owners out of 24**. “Every piece under a free-running tank fails” is refuted for the current topology and assessment. It does not validate a revised law that starts judging the presently excluded carrier edges.
-
-## 5. Cost, in counts
-
-Ranges span all ticks and all repetitions. Calls and joint counts are **MEASURED**. Scalar operations are **DERIVED algorithmic counts** returned by `Crumble::work`, including factor/solve work over all passes, not hardware instructions or timings.
-
-| Scenario | Assessments / tick (MEASURED) | Scalar operations / tick (DERIVED) | Scalar operations / assessed owner touching the tank (DERIVED) | Internal joints in tank-touching owners (MEASURED) |
-|---|---:|---:|---:|---:|
-| `stuck` | 0–58 | 0–20,493,681 | 0–5,542,252 | 9–1,023 |
-| `heap-s2` | 0–32 | 0–9,975,584 | 0–1,552,844 | 7–434 |
-| `heap-s6` | 0–33 | 0–10,453,846 | 0–1,479,771 | 7–434 |
-| `free` | 0–39 | 0–10,721,203 | 0–1,029,633 | 7–370 |
-| `yard` | 0–0 | 0–0 | N/A: no construction law | 0–0 |
-
-The standing late window still averages **MEASURED 52.269–52.269 assessments/tick**, for **DERIVED 113,800–113,800 scalar operations/tick**, predominantly proving nothing can fail in already-open carriers. The much larger maximum belongs to the encounter with larger groups. Counts include awake owners away from the tank and empty-contact assessments, as requested. Per-owner scalar ranges only cover tank-touching owners because other owners' individual records were not retained. Yard's zero solve count is the no-joint case, not zero contact-solver cost.
-
-## 6. Patch variation and verdict flips
-
-No genuinely constant-load bonded carrier was established. The strongest available steady-support observation is explicitly **quasi-steady**: a standing-case belly carrier with linear speed and angular speed each below **MEASURED 0.05 m/s and 0.05 rad/s**, continuously over **MEASURED ticks 1,392–1,465**, or **MEASURED 74 ticks**. Each repetition gives the same results for the strongest continuously present chunk/other-collider press patch:
-
-- Patch magnitude: **MEASURED 61.31–107.54 kN**, median **MEASURED 79.53 kN**.
-- Adjacent-tick force-vector change: **MEASURED 2.106–48.828 kN**.
-- Local lever coordinate spans: **MEASURED x 0.00359 m, y 0.03726 m, z 0.02964 m**; adjacent-tick lever displacement **MEASURED 0.000156–0.004319 m**.
-- Owner verdict flips: **MEASURED 0–0** over the window; every verdict holds.
-
-A stricter low-motion selection, each speed below **MEASURED 0.02** in its respective units, gives **MEASURED 13 consecutive ticks**, patch magnitude **MEASURED 112.02–126.11 kN**, maximum adjacent lever displacement **MEASURED 0.004864 m**, and **MEASURED 0–0 verdict flips**. These selections choose different patches/windows.
-
-The forces fluctuate substantially, but this carrier's joints are all open. A non-flipping verdict here cannot show that a live joint near its threshold needs no filtering. Nor does this isolate solver noise from contact redistribution and slow motion. Filtering requirements remain unestablished; repeat this measurement with load-bearing closed rests after the topology is corrected, before promising a steady press can safely wait in a solve budget.
-
-## Code confirmations and corrections to the design
-
-All references are to the unchanged baseline source.
-
-- **Blow-only gate: confirmed.** Presses accumulate at `src/debris/crumble.rs:427`; groups without blow patches are discarded at `:459`. Cracking additionally stops at the energy cap at `:206`. Press-only touches have zero blow and zero crushed volume at `:94`.
-- **A freed group keeps its bonds/state: confirmed.** `src/construction/breakage.rs:587` clones state and retained edges, then narrows ownership at `:606`; `src/construction/fracture.rs:764` narrows member fates without resetting cracks or separation. **“Nothing judges them again” is false without qualification.** Landing blows still run the assessment (`src/debris/crumble.rs:684`), and changed spin/unfinished owner laws can run again (`src/construction/breakage.rs:1921`, `:1975`). What is absent is loose-owner slow-contact intake: `read_contacts` explicitly rejects moving groups at `src/construction/breakage.rs:904`.
-- **Size-floor welds are not judged as contacts: confirmed.** Coarsening retains parted edges at `src/debris/crumble.rs:273` and `:304`, without closing their separation flags; the landing commit keeps them separated at `:708`. The graph excludes separated joints at `src/construction/fracture/parts.rs:130`. On subsequent coarsening, an old retained edge joins fragments regardless of their sizes (`src/debris/crumble.rs:292`), so these are carrier constraints with no current strength test. `src/construction/breakage.rs:553` is merely the field declaration, not proof by itself. The return at `src/debris/crumble.rs:711` is conditional on the merged result; it is not a blanket “floor-size body cannot fail” rule.
-- **Shipped blow/press dividing speed: confirmed.** `src/debris/crumble.rs:625` reads the owner's `SleepThreshold.linear × PhysicsLengthUnit`. The required component comes through `Piece`/`ReducibleContacts` (`src/construction/breakage.rs:671`, `src/avian_ext/contact_reduction.rs:42`). Vendored defaults are **DERIVED 0.15 m/s** (`vendor/avian3d-0.8.0-overmatch/src/dynamics/rigid_body/sleeping.rs:103`) and **DERIVED length scale 1.0** (`vendor/avian3d-0.8.0-overmatch/src/dynamics/solver/plugin.rs:502`). Loaded construction carriers report **MEASURED 0.150000006–0.150000006 m/s**. Equality is a press: the blow test is strictly greater (`src/debris/crumble.rs:422`).
-- **A further press-seam concern:** the reused blow algorithm attenuates each touch by its current fragment's mass share (`src/debris/crumble.rs:175`, `:188`), including when the input state is already disconnected by carrier edges. That plastic-stop rule is part of this experiment, exactly as requested. A sustained press should be judged at the load it actually carries; the revised implementation must justify or remove this attenuation for presses rather than quietly inherit the blow rule.
-
-## Decision and limits
-
-**Build slice 1 changed:** make retained carrier edges closed, cracked, push/friction-only rests before asking slow presses to part them. Include the monotone opening/shedding path in that same implementation boundary; a press-only gate change is insufficient. Then rerun the loaded-belly and bonded free-running controls on that topology. Do not move straight to ground yield based on the present non-failure result: the measured carriers are artificially rigid after their joints have already opened. Whether corrected rests actually open, how low the pile settles and whether shedding is excessive are still experiments, not established outcomes.
-
-Not established: exact historical stall reproduction; a settled post-fracture height; hosted performance or a solve budget; closed-joint utilization for the crossing heaps; isolated constant-load solver noise; filtering needs near a live threshold; the free-running stop after carrier rests are admitted; ground yield or bulk bearing as a cause. No alternate law or production implementation was tested or retained.
-
-The probe source was removed before validation and commit. Runs used `OVERMATCH_UNATTENDED=1 OVERMATCH_MUTE=1`; no screen, audio, debugger, web damage research, GitHub write or push was used. Initial compilation used `scripts/serial-cargo test --lib --features dev_ui,bitprobe crush_slice_zero_probe -- --ignored --nocapture`; remaining repetitions invoked that exact compiled test executable in separate processes with `CRUSH_CASE`, `CRUSH_SEED`, `CRUSH_REP`, and `--test-threads=1`. The detached matrix completed successfully.
-
-Raw ignored artifacts remain in this bay's `target/crush-{case}-s{seed}-r{rep}.jsonl`; runner/results logs are beside them, with the first run's log at `/tmp/crush-build-run.log`. The complete streams' SHA-256 values below apply to every repetition of each start:
-
-| Start | SHA-256 |
-|---|---|
-| `stuck-s0` | `e888cfccf53951203760eeb43390927055a80daef896dff582f808a3014cd2ea` |
-| `heap-s2` | `3137ec2547006dfef0499c96cd24b81ebea4c88c25c88acccbdcad6acecfd477` |
-| `heap-s6` | `ab9c9823cf3ff21c46c1b6f25b71eff3abe4a908b9e7658df7bce1bb11f35479` |
-| `free-s0` | `7f9e1b2a5230344c8a1842a185daf73cd32b57a968899a53a1814fdb4720bff3` |
-| `yard-s0` | `a57685f1f4f799a4076b2eb2825728f2510d60b21cccbbfd45c2a4d882fb1502` |
-
-Validation on the restored tree: `cargo fmt --all --check` passed; `scripts/serial-cargo clippy --locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings` passed; `scripts/serial-cargo test --lib --features dev_ui,bitprobe debris::crumble` passed (**MEASURED 11 tests**). The probe matrix passed (**MEASURED 15 executions**). `git diff --exit-code -- src` confirms no source change remains.
+All probe Rust edits were restored before validation. `git diff --exit-code -- src` is clean. `cargo fmt --all --check` passed. `scripts/serial-cargo clippy --locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings` passed. `scripts/serial-cargo test --lib --features dev_ui,bitprobe debris::crumble` passed (**MEASURED 11 tests**). No production code, feature switch, probe test or data edit is retained; no debugger, display/audio run, forbidden document read, damage-topic web search, GitHub comment or push was used.
