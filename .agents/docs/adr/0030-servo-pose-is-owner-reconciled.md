@@ -1,5 +1,8 @@
 # Servo pose is owner-reconciled authority state
 
+**Amended 2026-11-18 (#187).** See ADR-0037's amendment for the current servo contract
+and [AGENTS.md](../../AGENTS.md)'s One-timeline bullet for the private-view principle.
+
 > **Status: accepted; shipped in declared `PROTOCOL_REV = 18`. Superseded by
 > [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15): the atomic
 > `TankServos` component and its trace role survive, but owner reconciliation is gone — the

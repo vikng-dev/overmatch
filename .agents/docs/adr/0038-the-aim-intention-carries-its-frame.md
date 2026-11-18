@@ -42,6 +42,11 @@ intent by ω × (age of the value):
 | the client's own turret | ~4 ticks (input delay + the authoring frame), ~63 ms | 0.6–1.3° |
 | the authority that actually fires | rtt/2 + interp delay, ~110–160 ms | 0.7–2.2° |
 
+**Amended 2026-11-18 (#187).** The own-turret row records the earlier client integrator.
+Own and remote tanks now draw all servo slots from the authority stream at the shared view
+cursor (ADR-0037's amendment); the barrel trails intent by uplink + server slew + view delay.
+The table remains evidence for the original frame decision, not a current latency measurement.
+
 At 300–500 m that is metres between the target the player is holding the crosshair on and the shell
 the server echoes back — invisible while parked (ω = 0), absent in single-player (no bridge, no
 delay), and therefore never diagnosed from the feel of it. The bias is DIRECTIONAL: it cancels part

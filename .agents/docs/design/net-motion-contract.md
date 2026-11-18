@@ -2,8 +2,10 @@
 
 Subject: the game's netcode and damage model; game state only.
 
-All hulls and public paths share one server-domain view cursor. A completed stamp carries frame
-start and serialization departure. Frame start maps authority ticks to monotonic wall time;
+All hulls, attached turrets, guns and public paths share one server-domain view cursor.
+Every laid servo slot on own and remote tanks presents sampled `ServoAngles`; none integrates
+on the client. [AGENTS.md](../../AGENTS.md)'s One-timeline bullet owns the private-view
+principle. A completed stamp carries frame start and serialization departure. Frame start maps authority ticks to monotonic wall time;
 departure diagnoses server work in `usual_work_ms`. Completion requires every mutate message of
 that tick; stale, incomplete or duplicate arrivals do not invent production samples.
 

@@ -82,7 +82,7 @@ pub(super) struct TankStateHash {
     pub(super) sim: u64,
     /// `TrackDrive` shaped throttle/steer.
     pub(super) drv: u64,
-    /// Servo current/previous/velocity, every servo in slot order.
+    /// Authority endpoints/velocity or replica sampled angles, every servo in slot order.
     pub(super) srv: u64,
     /// Weapon gate (`ready_tick`, pause tick, then belt count), every weapon in slot order, then
     /// the round choice (`loaded`, `selected`) per slot.
@@ -117,8 +117,27 @@ pub(crate) struct TankState<'a> {
     pub(crate) transmission: Option<&'a TankTransmission>,
     pub(crate) weapon_gate: Option<&'a WeaponGate>,
     pub(crate) loads: Option<&'a WeaponLoads>,
-    pub(crate) servos: &'a [ServoState],
+    pub(crate) servos: ServoHashSource<'a>,
     pub(crate) sim: &'a TankSim,
+}
+
+/// Replicas carry sampled angles; authority carries mechanism endpoints and momentum.
+#[derive(Clone, Copy)]
+pub(crate) enum ServoHashSource<'a> {
+    Authority(&'a [ServoState]),
+    Streamed(&'a [f32]),
+}
+
+impl ServoHashSource<'_> {
+    pub(super) fn rows(self) -> Vec<serde_json::Value> {
+        match self {
+            Self::Authority(states) => states
+                .iter()
+                .map(|state| serde_json::json!(state.hash_fields()))
+                .collect(),
+            Self::Streamed(angles) => angles.iter().map(|angle| super::num(*angle)).collect(),
+        }
+    }
 }
 
 /// Hash a tank root's canonical sim state (see the module-level note on world-independence). Pure and
@@ -174,9 +193,18 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
     let drv = hd.finish();
 
     let mut hsv = Fnv64::new();
-    for servo in servos {
-        for field in servo.hash_fields() {
-            hsv.write_f32(field);
+    match servos {
+        ServoHashSource::Authority(states) => {
+            for state in states {
+                for field in state.hash_fields() {
+                    hsv.write_f32(field);
+                }
+            }
+        }
+        ServoHashSource::Streamed(angles) => {
+            for &angle in angles {
+                hsv.write_f32(angle);
+            }
         }
     }
     let srv = hsv.finish();
@@ -358,7 +386,7 @@ fn hash_sample_with_gate_and_servos(
         transmission: Some(transmission),
         weapon_gate: Some(weapon_gate),
         loads: None,
-        servos: &servos.states,
+        servos: ServoHashSource::Authority(&servos.states),
         sim,
     })
 }
@@ -396,7 +424,7 @@ fn hash_sample_with_loads(
         transmission: Some(transmission),
         weapon_gate: Some(&gate),
         loads: Some(loads),
-        servos: &servos.states,
+        servos: ServoHashSource::Authority(&servos.states),
         sim,
     })
 }
@@ -853,7 +881,7 @@ mod tests {
             transmission: Some(&transmission),
             weapon_gate: Some(&gate),
             loads: None,
-            servos: &servos.states,
+            servos: ServoHashSource::Authority(&servos.states),
             sim: &sim,
         };
         let base = hash_tank_state(&state);
@@ -974,7 +1002,7 @@ mod tests {
             transmission: Some(&transmission),
             weapon_gate: Some(&gate),
             loads: None,
-            servos: &servos.states,
+            servos: ServoHashSource::Authority(&servos.states),
             sim: &sim,
         };
         let base = canonical_tank_state_digest(&state);

@@ -590,13 +590,11 @@ pub(crate) fn buffer_input(
         ResMut<super::input_arrival::ClientInput>,
     ),
     // The input slot's tank, and the gate slots of its weapons.
-    (mut slots, weapon_slots): (
+    (slots, weapon_slots): (
         Query<
             (
                 Option<&avian3d::prelude::LinearVelocity>,
                 Option<&crate::CombatantId>,
-                // Absent until the slot's tank is assembled.
-                Option<&mut TankCommand>,
                 Option<(&crate::tank::Rig, &crate::tank::WeaponGate)>,
             ),
             With<lightyear::prelude::Controlled>,
@@ -606,7 +604,7 @@ pub(crate) fn buffer_input(
     mut trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
     use bevy::ecs::query::QuerySingleError;
-    let (velocity, combatant, own, primary) = match slots.single_mut() {
+    let (velocity, combatant, primary) = match slots.single() {
         Ok(slot) => slot,
         // Before tank replication (or between lives), there is no local input slot.
         Err(QuerySingleError::NoEntities(_)) => return,
@@ -661,12 +659,6 @@ pub(crate) fn buffer_input(
     });
     sim.write(t, ready, &mut state.command);
     sim.stop(t, velocity.map(|v| v.length()), &mut state.command);
-    // The script lays its own turret as a player's aim commit and range dial do: the own tank's
-    // command carries the intent its ahead-running servos chase (`aim::drive_aim_servos`).
-    if let Some(mut own) = own {
-        own.aim = state.command.aim;
-        own.range = state.command.range;
-    }
     if (state.command.fire_primary || state.command.fire_secondary)
         && let ScriptClock::Released {
             first_fire_logged, ..
@@ -1443,47 +1435,6 @@ mod tests {
         assert_eq!(
             sim.timeout(deadline + tick, tick),
             Some(ScriptTimeout::Completion)
-        );
-    }
-
-    /// A scripted client lays its own turret as a player does: the script's aim and range reach
-    /// the own tank's command, which its ahead-running servos chase (`aim::drive_aim_servos`).
-    /// Without it the own turret rests while the authority traverses, and every capture of the own
-    /// turret (`scripts/shot/run-turret-cursor.py`) measures the harness, not the game.
-    #[test]
-    fn a_scripted_client_lays_its_own_tank_like_a_player() {
-        use super::super::battle::{BattlePhase, BattleState, LateJoin};
-        use super::super::input_arrival::{ClientInput, FrameInput};
-        use crate::sim_tick::SimTick;
-        use bevy::prelude::*;
-        let mut app = App::new();
-        // Fixture aim and range.
-        app.insert_resource(SimulateInput::new(
-            &Script::parse("(drive: Idle, aim: World((5.0, 1.0, -300.0)), range_m: 300.0)")
-                .unwrap(),
-        ))
-        .init_resource::<Time<Real>>()
-        .init_resource::<lightyear::prelude::LocalTimeline>()
-        .init_resource::<ClientInput>()
-        .init_resource::<FrameInput>()
-        .add_systems(FixedPreUpdate, super::buffer_input);
-        app.world_mut().resource_mut::<SimulateInput>().start = crate::cost::WorkloadStart::Ready;
-        let own = app
-            .world_mut()
-            .spawn((lightyear::prelude::Controlled, TankCommand::default()))
-            .id();
-        app.world_mut().spawn(BattleState {
-            phase: BattlePhase::Combat {
-                ends_at: SimTick::new(100),
-                late_join: LateJoin::Closed,
-            },
-            ..default()
-        });
-        app.world_mut().run_schedule(FixedPreUpdate);
-        let command = app.world().get::<TankCommand>(own).unwrap();
-        assert_eq!(
-            (command.aim, command.range),
-            (Some(AimIntent::World(Vec3::new(5.0, 1.0, -300.0))), 300.0)
         );
     }
 

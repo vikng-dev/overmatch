@@ -2591,7 +2591,7 @@ fn capture_scripted_determinism_tick(
                 transmission: Some(transmission),
                 weapon_gate: Some(weapon_gate),
                 loads: Some(weapon_loads),
-                servos: &servos.states,
+                servos: crate::trace::ServoHashSource::Authority(&servos.states),
                 sim,
             }),
         ));

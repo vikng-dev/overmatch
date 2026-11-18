@@ -27,7 +27,7 @@ use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::sight::{SightMode, SightToggled, in_third_person};
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
-    Controlled, Hull, Rig, ServoCommand, ServoRole, Tank, TankRoot, ViewNode, rig_world_pose,
+    Controlled, Hull, Rig, ServoCommand, ServoRole, TankRoot, TankServos, ViewNode, rig_world_pose,
 };
 use crate::view::PlayerView;
 
@@ -372,7 +372,7 @@ fn commit_aim(
 /// Convert tagged intent at consumption (ADR-0038): parent-local servo angles and the hull-up
 /// elevation plane require this tick's hull frame, regardless of author or view mode.
 fn drive_aim_servos(
-    tanks: Query<(Entity, &ParsedTankCommand, &Rig, &Position, &Rotation), With<Tank>>,
+    tanks: Query<(Entity, &ParsedTankCommand, &Rig, &Position, &Rotation), With<TankServos>>,
     tables: Query<&RangeTable>,
     mut servos: Query<(
         Entity,
@@ -390,8 +390,7 @@ fn drive_aim_servos(
         let Some(intent) = command.aim() else {
             continue; // no commitment yet — servos hold
         };
-        // Use `rig_world_pose`'s physics state; differently stale GlobalTransforms would
-        // make client/server lay diverge under maneuver.
+        // Use this authority tick's physics pose; GlobalTransforms may still be stale.
         let (hull_position, hull_rotation) =
             rig_world_pose(rig.hull, tank, position.0, rotation.0, &parents, &locals)
                 .expect("an assembled tank rig's hull pose composes from its spawn-time hierarchy");
@@ -652,7 +651,7 @@ pub(crate) mod tests {
     use crate::damage::VolumeOf;
     use crate::firecontrol::{RangeTable, Ranging};
     use crate::sight::drive_gunner_aim;
-    use crate::tank::{ServoIndex, ServoRest, ServoSpec, TankServos, drive_servos};
+    use crate::tank::{ServoIndex, ServoRest, ServoSpec, Tank, TankServos, drive_servos};
 
     /// A successfully projected point may still be beyond a viewport edge. The aim and bore
     /// widgets share this placer, so neither may show an off-screen dot or clamp it to an edge.
@@ -1169,6 +1168,7 @@ pub(crate) mod tests {
                         Position(positions[i]),
                         Rotation(rotations[i]),
                         Transform::IDENTITY,
+                        TankServos::for_count(2),
                     ))
                     .id()
             });

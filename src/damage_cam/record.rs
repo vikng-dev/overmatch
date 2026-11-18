@@ -50,7 +50,7 @@ use crate::ballistics::{
 use crate::damage::{Ammo, CrewStation, FunctionRole, TankKnockedOut, VolumeOf};
 #[cfg(test)]
 use crate::tank::{Muzzle, Weapon, rig_world_pose};
-use crate::tank::{RemoteServos, Rig, ServoIndex, TankRoot, TankServos, selected};
+use crate::tank::{Rig, ServoIndex, StreamedServoPose, TankRoot, TankServos, selected};
 #[cfg(test)]
 use avian3d::prelude::{Position, Rotation};
 #[cfg(test)]
@@ -247,8 +247,8 @@ pub fn muzzle_of(world: &mut World, shooter: Entity, weapon: &str) -> Option<Vec
 }
 
 /// The game's damage model: every registered servo's angle (degrees), from the root's one
-/// integrator, the state the view poses. `None` means the tank despawned before recording; a rig
-/// with no servos has an empty pose. Callers open encounters only for living targets and pose them
+/// state source: integrated authority angles or the replica's sampled pose. `None` means the tank
+/// despawned before recording; a rig with no servos has an empty pose. Callers open encounters only for living targets and pose them
 /// before damage consequences, so every registered slot still has its mounted node.
 pub(crate) fn servo_angles(world: &mut World, tank: Entity) -> Option<BTreeMap<String, f32>> {
     world.get_entity(tank).ok()?; // A tank may despawn while its round still has an open encounter.
@@ -258,19 +258,21 @@ pub(crate) fn servo_angles(world: &mut World, tank: Entity) -> Option<BTreeMap<S
         .filter(|(_, _, root)| root.0 == tank)
         .map(|(name, slot, _)| (name.as_str().to_owned(), slot.0))
         .collect();
-    let states = selected(
-        world.get::<RemoteServos>(tank).map(|servos| &servos.0),
-        world.get::<TankServos>(tank).map(|servos| &servos.states),
+    let angles = selected(
+        world
+            .get::<StreamedServoPose>(tank)
+            .map(|pose| pose.0.clone()),
+        world
+            .get::<TankServos>(tank)
+            .map(|servos| servos.states.iter().map(|state| state.current()).collect()),
     );
     assert_eq!(
         nodes.len(),
-        states.len(),
+        angles.len(),
         "the game's damage model records every state slot of a mounted rig through its registered servo node"
     );
     Some(nodes.into_iter().map(|(name, slot)| {
-        let angle = states.get(slot).expect(
-            "the game's damage model assigns every ServoIndex within its root's servo state at spawn"
-        ).current();
+        let angle = angles.get(slot).expect("the game's damage model assigns every ServoIndex within its root's servo state at spawn");
         (name, angle.to_degrees())
     }).collect())
 }
@@ -1625,8 +1627,8 @@ pub(crate) mod tests {
     }
 
     /// The game's damage model records complete living-target servo poses from the root's one
-    /// integrator, authority or replica, distinguishes a despawn from a servo-less rig, and refuses
-    /// missing state or an invalid registered slot. Presentation relies on every mounted slot
+    /// state source, integrated authority or sampled replica. It distinguishes a despawn from a
+    /// servo-less rig and refuses missing state or an invalid registered slot. Presentation relies on every mounted slot
     /// having its recorded angle.
     #[test]
     fn recording_servos_requires_registered_state_and_names_despawn() {
@@ -1659,9 +1661,7 @@ pub(crate) mod tests {
         world
             .entity_mut(tank)
             .remove::<TankServos>()
-            .insert(RemoteServos(vec![crate::tank::ServoState::test_new(
-                0.5, 0.0, 0.0,
-            )]));
+            .insert(StreamedServoPose(vec![0.5]));
         assert_eq!(
             servo_angles(&mut world, tank).unwrap()["fixture servo"],
             0.5f32.to_degrees()

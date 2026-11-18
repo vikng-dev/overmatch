@@ -22,8 +22,8 @@ use crate::render_policy::{CameraProfile, VisualScope};
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
-    Controlled, RemoteServos, ServoIndex, ServoRest, ServoSpec, Tank, TankServos, TankViews,
-    rig_world_pose, selected, shortest_angle,
+    Controlled, ServoIndex, ServoRest, ServoSpec, StreamedServoPose, Tank, TankServos, TankViews,
+    registered_angle, rig_world_pose, shortest_angle,
 };
 use crate::view::PlayerView;
 
@@ -127,17 +127,10 @@ pub fn plugin(app: &mut App) {
                 .in_set(SightToggled)
                 .in_set(GameplaySet),
         )
-        // Commit the commanded aim from the magnified mouse intent. In `BeforeFixedMainLoop` (with
-        // `gather_commands`), NOT `Update`: the fixed loop runs its sim ticks *before* `Update`, so
-        // an aim written in `Update` is one render frame stale by the time the sim consumes it —
-        // +16.7 ms at 60 Hz of avoidable input latency. This reads only the mouse motion (ready in
-        // `PreUpdate`), the last tick's servo angles, and the tick-truth physics pose for its
-        // mount-origin resolve (`rig_world_pose` from `Position`/`Rotation` — never the camera or a
-        // render-rate `GlobalTransform`), so it moves cleanly out of `Update`. `.after(gather_commands)`
-        // pins the order — both write `TankCommand` (disjoint fields: `gather_commands` the
-        // drive/range fields, this one `aim`) — and puts the aim commit after this frame's fresh
-        // `Ranging` has reached the command. Still in `AimCommit` so `aim::drive_aim_servos` (fixed
-        // clock) reads whatever intention stands at each tick.
+        // Commit optic intent after this frame's gather_commands, before DeviceCommand snapshots
+        // it for transport. Read sampled servo angles and the last restored sim-node ancestry on
+        // a client, fixed-step truth offline. Keep the hull-local commitment independent of the
+        // render camera; AimCommit orders authority/offline servo aiming after that commitment.
         .add_systems(
             RunFixedMainLoop,
             // The one gunner commit — the sole author of `CommittedAim` while the optic is up (the
@@ -319,38 +312,26 @@ fn resume_commit(committed_point: Option<Vec3>, moved: bool, resolved: Vec3) -> 
 }
 
 /// Read access to a tank's live servo lays: the [`ServoIndex`] slot each servo entity holds, plus
-/// the root's one integrator those slots address.
+/// the root's servo state those slots address.
 #[derive(SystemParam)]
 pub(crate) struct LiveServos<'w, 's> {
     slots: Query<'w, 's, &'static ServoIndex>,
     rests: Query<'w, 's, &'static ServoRest>,
     states: Query<'w, 's, &'static TankServos>,
-    remote: Query<'w, 's, &'static RemoteServos>,
+    streamed: Query<'w, 's, &'static StreamedServoPose>,
 }
 
 impl LiveServos<'_, '_> {
-    /// A `servo` entity's live parent-local lay under `tank`, from the root's one integrator
-    /// ([`selected`]): the client-local [`RemoteServos`] on every replica, the own hull included,
-    /// or the authoritative [`TankServos`]. The optic clamps intent against the gun's live lay, so
-    /// it must read the integrator that is moving it.
+    /// The optic clamps intent against this live lay; [`registered_angle`] owns the slot lookup.
     fn angle(&self, tank: Entity, servo: Entity) -> f32 {
         let slot = self
             .slots
             .get(servo)
             .expect("every declared rig servo receives its index at complete spawn");
-        let angle = selected(
-            self.remote.get(tank).ok().map(|remote| &remote.0),
-            self.states
-                .get(tank)
-                .ok()
-                .map(|authority| &authority.states),
-        )
-        .get(slot.0)
-        .expect("the root's complete servo vector covers every declared slot")
-        .current();
+        let angle = registered_angle(tank, slot.0, &self.states, &self.streamed, None);
         assert!(
             angle.is_finite(),
-            "the live servo integrator holds finite angles"
+            "the live servo state holds finite angles"
         );
         angle
     }
@@ -511,9 +492,8 @@ pub(crate) fn drive_gunner_aim(
     // raw point would measure from the hull origin ~2.2 m below and snap the aim by the mount
     // parallax on the first input. When this tank has NO commitment yet (fresh spawn, or a
     // possession change — the entity-keyed `get` reads `None`), seed from the gun's CURRENT lay
-    // instead. This single rule replaces the old seed-on-entry `toggle_sight` did: an active
-    // commander aim is simply continued, only an absent commitment falls back to the lay. Seed from
-    // the sight line (lay − lob), not the raised bore, or the view jumps θ on handover.
+    // instead. Seed from the sight line (lay − lob), not the raised bore, or the view jumps θ on
+    // handover.
     let mut intent = committed_point
         .map(|point| GunnerIntent::from_local_dir(hull_to_aim * (point - mount_local)))
         .unwrap_or(GunnerIntent {
@@ -546,11 +526,11 @@ pub(crate) fn drive_gunner_aim(
 
     // Bound 2 — the circular optic margin. Lead as a 2D angular vector from the gun chain's current
     // *sight line* (lay − lob). Yaw uses shortest-angle difference so continuous traverse doesn't
-    // wind up. `drive_servos` steps on the fixed clock, so `current` here is the latest tick's
-    // integrated angle — the clamp chases the sim truth, ≤1 tick behind the render pose the optic
-    // shows. Preserve direction, cap magnitude at the margin; within it the intent is untouched
-    // (see the doc comment — re-pinning would make the target recede with the gun). The
-    // interpolation stays inside the travel window (both endpoints are, and scale ∈ [0, 1]).
+    // wind up. On a client `current` is the sampled view-cursor angle; offline it is the latest
+    // fixed-step angle. Preserve direction and cap magnitude at the margin so intent stays local
+    // while the actual gun follows its own presentation clock. Within the margin intent is
+    // untouched: re-pinning would make the target recede with the gun. The interpolation stays
+    // inside the travel window because both endpoints do and scale is in [0, 1].
     let yaw_offset = shortest_angle(intent.yaw - t_current);
     let pitch_offset = intent.pitch - sight_now;
     let reach = yaw_offset.hypot(pitch_offset);
@@ -724,11 +704,13 @@ mod tests {
     /// Optic intent follows the replica's live lay. A replica vector missing a declared slot must
     /// fail rather than clamp intent against an angle it does not hold.
     #[test]
-    #[should_panic(expected = "the root's complete servo vector")]
+    #[should_panic(
+        expected = "every registered servo slot belongs to its selected mechanism state"
+    )]
     fn an_incomplete_replica_servo_vector_refuses_the_lay() {
         use bevy::ecs::system::RunSystemOnce;
         let mut app = App::new();
-        let tank = app.world_mut().spawn(RemoteServos(Vec::new())).id();
+        let tank = app.world_mut().spawn(StreamedServoPose(Vec::new())).id();
         let servo = app.world_mut().spawn(ServoIndex(0)).id();
         app.world_mut()
             .run_system_once(move |live: LiveServos| live.angle(tank, servo))

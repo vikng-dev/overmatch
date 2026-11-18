@@ -6,7 +6,7 @@ use super::*;
 use crate::tank::{TankRoot, Weapon, WeaponLoads};
 use bevy::time::TimeUpdateStrategy;
 use core::time::Duration;
-use lightyear::link::{LinkReceiveSystems, LinkSystems};
+use lightyear::link::LinkSystems;
 use lightyear::prelude::client::{ClientPlugins, Connect, NetcodeClient, NetcodeConfig};
 use lightyear::prelude::server::{
     NetcodeConfig as ServerConfig, NetcodeServer, ServerPlugins, ServerUdpIo, Start,
@@ -52,9 +52,11 @@ fn condition(mut links: Query<(&mut Link, &mut Loss)>) {
 fn install_conditioner(app: &mut App) {
     app.add_systems(
         PreUpdate,
+        // lightyear_udp 0.31.0's server endpoint receives in the whole LinkSystems::Receive,
+        // not its BufferToLink subset. Condition after all IO and before netcode drains it.
         condition
-            .in_set(LinkSystems::Receive)
-            .after(LinkReceiveSystems::ApplyConditioner),
+            .after(LinkSystems::Receive)
+            .before(ConnectionSystems::Receive),
     );
 }
 #[derive(Resource, Default)]

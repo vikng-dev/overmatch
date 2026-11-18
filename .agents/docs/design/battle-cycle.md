@@ -93,10 +93,9 @@ uses the same brake hold. The tank stays a dynamic body resting on its suspensio
 
 The authority advances the phase (`cycle_battles`) before the hold in the same tick,
 so combat's first tick releases every command. A client runs the same rule from its
-replicated phase, which holds its own turret and fire presentation. Its phase arrives
-with replication, about one one-way trip after the authority's tick (DERIVED), so the
-own turret's local lead is released that much later; the authority's turret follows
-the player's aim from combat's first tick. Where the hold is mounted (`net::plugin`) and no
+replicated phase for the crew panel's drive target and `MatchCommands` instruments. It does not
+hold outgoing commands: `DeviceCommand` snapshots them before the fixed loop, and the next
+frame authors them afresh. Turret and fire presentation follow the authority stream at the view cursor. Where the hold is mounted (`net::plugin`) and no
 Battle has arrived yet (a client's first frames before its Battle snapshot, a fixture that mounts
 the plugin without one), every command is held. A composition without the plugin (offline) holds
 nothing.

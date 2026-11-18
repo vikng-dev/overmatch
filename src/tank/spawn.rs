@@ -2,7 +2,7 @@ use bevy::asset::LoadState;
 use bevy::prelude::*;
 
 use super::model::Tank;
-use super::servo::{RemoteServos, ServoMechanism};
+use super::servo::StreamedServoPose;
 use super::template::TankTemplate;
 use super::view::bind_tank_view;
 use crate::spec::{TankSpec, TankSpecHandle};
@@ -148,13 +148,8 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     entity
 }
 
-/// Spawn the production simulation body without presentation assets.
-///
-/// Two instruments are deliberately headless and share this: the bitprobe differential harness and
-/// the §13.6 ray fuzzer (`ballistics::fuzz`). Both need the same template-built body, colliders and
-/// rollback-visible state as an authority tank, and neither wants a `WorldAssetRoot`, an asset
-/// handle, or a view-binding observer. [`TankTemplate::assemble`] remains the one simulation
-/// constructor.
+/// Bitprobe and `ballistics::fuzz` (§13.6) need the production authority body, colliders and state
+/// without view assets or binding. `TankTemplate::assemble` is their shared simulation constructor.
 pub(crate) fn spawn_headless_tank<B: Bundle>(
     commands: &mut Commands,
     template: &TankTemplate,
@@ -178,6 +173,7 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     template: &TankTemplate,
     presentation: TankPresentation,
     root_bundle: B,
+    pose: StreamedServoPose,
 ) {
     let mut root_commands = commands.entity(root);
     if let Some(scene) = presentation.scene_root() {
@@ -186,7 +182,6 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     root_commands
         .insert((
             presentation.root_bundle(),
-            ServoMechanism::new(template.transmission()),
             // Replicated authority state (EngineRpm, the public ServoAngles; the owner's
             // TankTransmission, DriveSignal, WeaponGate, WeaponLoads) arrived in the replication
             // init snapshot. Do not overwrite it with fresh spec-derived values.
@@ -194,7 +189,7 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
         ))
         .observe(bind_tank_view);
     // A replica's client servo state; the authority's `TankServos` is never manufactured here.
-    root_commands.insert(RemoteServos::for_count(template.spec().servos.len()));
+    root_commands.insert(pose);
     template.assemble(commands, root);
     spawn_replica_track_colliders(commands, root, template.track_colliders());
 }
@@ -215,7 +210,7 @@ mod proxy_tests {
 
     /// An authority tank and a replica of the shipped fixture, spawned into one world.
     fn authority_and_replica(world: &mut World) -> (Entity, Entity) {
-        use crate::track::sim::{EngineRpm, TankTransmission};
+        use crate::track::sim::EngineRpm;
         use avian3d::prelude::{Position, RigidBody, Rotation};
         let (_, template) = shipped_construction();
         let mut commands = world.commands();
@@ -224,12 +219,18 @@ mod proxy_tests {
             &template,
             (RigidBody::Dynamic, Transform::IDENTITY),
         );
+        world.flush();
+        let crank = *world.get::<EngineRpm>(authority).unwrap();
+        let angles = world
+            .get::<super::super::TankServos>(authority)
+            .unwrap()
+            .states
+            .iter()
+            .map(|state| state.current())
+            .collect();
+        let mut commands = world.commands();
         let replica = commands
-            .spawn((
-                Position::default(),
-                Rotation::default(),
-                EngineRpm::of(&TankTransmission::from_spec(template.transmission())),
-            ))
+            .spawn((Position::default(), Rotation::default(), crank))
             .id();
         attach_replicated_tank_body(
             &mut commands,
@@ -237,6 +238,7 @@ mod proxy_tests {
             &template,
             TankPresentation::new(None, Handle::default()),
             (RigidBody::Static, Transform::IDENTITY),
+            StreamedServoPose(angles),
         );
         world.flush();
         (authority, replica)
@@ -311,8 +313,8 @@ mod proxy_tests {
 
     /// The game's netcode: a replica's body attaches around the authority state its join-in-progress
     /// snapshot carried. The crank and the owner's drivetrain, weapon gate and grip field survive
-    /// attachment as they arrived, and the root gains the client's servo
-    /// integrator, never the authority's. A late joiner relies on it to see the tank in play, not
+    /// attachment as they arrived, and the root gains sampled servo presentation state,
+    /// never an authoritative integrator. A late joiner relies on it to see the tank in play, not
     /// a fresh one rebuilt from the spec. Fixture: the shipped tank's spawn state, moved off it.
     #[test]
     fn a_replica_attaches_around_its_join_in_progress_snapshot() {
@@ -343,6 +345,15 @@ mod proxy_tests {
         let replica = world
             .spawn((Position::default(), Rotation::default(), snapshot.clone()))
             .id();
+        let pose = StreamedServoPose(
+            world
+                .get::<TankServos>(authority)
+                .unwrap()
+                .states
+                .iter()
+                .map(|state| state.current())
+                .collect(),
+        );
         let mut commands = world.commands();
         attach_replicated_tank_body(
             &mut commands,
@@ -350,6 +361,7 @@ mod proxy_tests {
             &template,
             TankPresentation::new(None, Handle::default()),
             (RigidBody::Static, Transform::IDENTITY),
+            pose,
         );
         world.flush();
         let attached = world.entity(replica);
@@ -358,8 +370,8 @@ mod proxy_tests {
         assert_eq!(attached.get::<WeaponGate>(), Some(&snapshot.2));
         assert_eq!(attached.get::<TrackGripElements>(), Some(&snapshot.3));
         assert!(
-            attached.contains::<RemoteServos>() && !attached.contains::<TankServos>(),
-            "a replica integrates RemoteServos only"
+            attached.contains::<StreamedServoPose>() && !attached.contains::<TankServos>(),
+            "a replica presents StreamedServoPose without an authoritative integrator"
         );
     }
 

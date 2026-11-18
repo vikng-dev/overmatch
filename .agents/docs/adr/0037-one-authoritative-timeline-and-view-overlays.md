@@ -38,6 +38,13 @@ extrapolation horizon; the contract lives in
 [`net-motion-contract.md`](../design/net-motion-contract.md). The full
 map lives in the state-of-play doc.
 
+**Amended 2026-11-18 (#187).** Own and remote tanks now present every laid servo slot
+from `ServoAngles` at the hull's shared view cursor. Only the authority integrates servo
+mechanisms; `StreamedServoPose` holds the sampled angles on every client tank. This removes
+the own-turret exception and the `RemoteServos` integrator named below. The barrel trails
+intent by uplink + server slew + view delay; the game's tracer leaves the streamed barrel.
+The current private-view principle is owned by [AGENTS.md](../../AGENTS.md)'s One-timeline bullet.
+
 ## Why
 
 - Prediction existed to hide own-input latency. Measured, the derived margin laws recovered most

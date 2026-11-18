@@ -1579,29 +1579,23 @@ coupling, with the drivetrain implementation unchanged.
 startup from torque and the declared moving inertia, and coast-down bounds from friction. They
 cover a reduced and a knocked-out engine, a stopped crank, above-governor rpm, path transitions,
 target jumps, monotone arrival at fixed supply on the motor and hand arms, an unoperated mount
-coasting to rest (authority and owner replica alike), reversal and travel-stop momentum
-absorption. No expected rate is
-copied from a run.
+coasting to rest on the authority, reversal and travel-stop momentum absorption. No expected
+rate is copied from a run.
 
-Every attached remote aim rig presents `ServoAngles` sampled at the view cursor its hull is drawn
-at (`net::rig::present_streamed_aim`); a knocked-out tank's launched turret instead follows its
-replicated `LaunchedTurretPose`, applied on arrival. A presented angle is not a second drive's target, carries no
-local momentum, and `drive_servos` never steps it. The presenter excludes the controlled tank,
-whose ahead-running aim still integrates through `drive_servos` (under review in #187). That own-client path reads stale replicated `EngineRpm`: `publish_engine_rpm`
-only writes dynamic bodies, while client replicas are static. Its available power can therefore
-lag the authority's crank; no deterministic own-client/authority agreement is claimed.
-View interpolation still blends previous and current angles on the view node only.
+Every attached aim rig, own and remote, presents every declared servo slot from `ServoAngles`
+sampled at the view cursor its hull is drawn at (`net::rig::present_streamed_aim`); a knocked-out tank's launched turret instead
+follows its replicated `LaunchedTurretPose`, applied on arrival. A presented angle carries no
+local momentum, and `drive_servos` never steps it. View interpolation blends previous and current
+angles on the authority's view nodes only; a replica draws its sampled angle directly.
 
-`ServoState` and public `ServoAngles` are unchanged; `TankServos` remains authoritative state,
-`RemoteServos` holds client presentation state, and `ServoMechanism` is immutable local
-construction. The owner's ahead-running aim integrates this same law, so a law change bumps
-PROTOCOL_REV: the unoperated coast-down took it to 95.
+`TankServos` and immutable `ServoMechanism` construction stay on the authority. `StreamedServoPose`
+holds only sampled client angles, seeded from the received stream at attachment. Servo law changes do not change a client integration
+contract: the client receives `ServoAngles` and never integrates the law.
 
 Ratchet dispositions: `load-07` is fixed by required explicit `turret.node` construction,
 independent of optic ancestry; `None` is refused before play because complete rigs require that
 handle. Required `gunner_yaw` selects the Gunner's Yaw servo separately, resolved into `GunnerYaw`
-at spawn; the Gunner view names a declared Pitch servo below it. Sight input and the angle stream
-read that yaw handle. Aim targets and optic working angles use its actual parent/rest frame,
+at spawn; the Gunner view names a declared Pitch servo below it. Sight input reads that yaw handle; the angle stream carries every slot in rig order. Aim targets and optic working angles use its actual parent/rest frame,
 so an upstream yaw is applied once. Assembly membership follows the authored structural hierarchy, whose role
 receives the unit-scale gate. Mass and inertia extents carry `Sourced` provenance, with shipped
 `Fixture` labels refused in every build.

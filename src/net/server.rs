@@ -1146,7 +1146,7 @@ fn spawn_player_tank(
                 Position(spawn_pos),
                 // Explicit wire pose prevents Avian's required-component placeholder entering history.
                 Rotation(spawn_rot),
-                ServoAngles::default(),
+                ServoAngles(template.initial_servo_angles()),
                 NetCrew::default(),
                 NetTankStatus::Active,
                 LaunchedTurretPose::default(),
@@ -1377,7 +1377,7 @@ fn spawn_bot_entity(
                 RigidBody::Dynamic,
                 Position(spawn_pos),
                 Rotation(BOT_SPAWN_TURN),
-                ServoAngles::default(),
+                ServoAngles(template.initial_servo_angles()),
                 NetCrew::default(),
             ),
             (
@@ -2645,6 +2645,41 @@ mod tests {
     fn advance(app: &mut App, ticks: u32) {
         let mut clock = app.world_mut().resource_mut::<crate::ShotClock>();
         clock.0 = clock.0.after(crate::sim_tick::TickSpan::of(ticks));
+    }
+
+    /// Player and bot init snapshots must carry every spawn-built servo slot even before the
+    /// first fixed publication tick. An empty placeholder would be refused by peer admission.
+    #[test]
+    fn initial_snapshots_cover_every_servo_before_first_publication() {
+        let mut app = placement_app();
+        app.insert_resource(BotCount(1))
+            .init_resource::<BotSpawns>()
+            .add_systems(Update, (spawn_bots, commit_bot_spawns).chain());
+        let peer = PeerId::Netcode(1);
+        let link = app.world_mut().spawn((RemoteId(peer), Connected)).id();
+        app.world_mut()
+            .resource_mut::<PendingClients>()
+            .0
+            .push(PendingJoin::new(link, peer));
+        app.update();
+        let mut poses = app
+            .world_mut()
+            .query::<(&crate::tank::TankServos, &ServoAngles)>();
+        let mut roots = 0;
+        for (state, pose) in poses.iter(app.world()) {
+            assert!(
+                pose.0
+                    .iter()
+                    .copied()
+                    .eq(state.states.iter().map(|slot| slot.current())),
+                "each initial wire slot must equal the spawn-built mechanism's angle"
+            );
+            roots += 1;
+        }
+        assert_eq!(
+            roots, 2,
+            "fixture: one joined player and one bot exercise both spawn paths"
+        );
     }
 
     /// The game's damage model supplies respawn eligibility. The mode's wait opens on the server:
