@@ -22,7 +22,8 @@ RUN, in order (progress on stderr, the tables on stdout):
      region's quota; that no harness resource is left; one zone that offers both types.
   2. Two security groups: server (UDP PORT from the client group only, SSH from the operator's
      address) and client (SSH from the operator's address).
-  3. Both machines, booting `machine.sh` as user-data (its header lists the boot steps), launched
+  3. Both machines, booting `machine.sh` as user-data (its header lists the boot steps),
+     rendered locally by Node through the backend's shared comment stripper, launched
      with shutdown behaviour `terminate` and powering themselves off at the run's cap. A machine
      that boots without a network is rebooted once (REACH_TIMEOUT_S).
   4. Cold start per machine: launch call to kernel start to each boot step to server listening.
@@ -322,6 +323,17 @@ class Plan:
     archives: dict[str, tuple[str, str]]  # role: (url, checksum line)
     timing: NetTiming
     combat_s: float
+    script: str
+
+
+def machine_script() -> str:
+    try:
+        return subprocess.run(["node", str(ROOT / "backend/scripts/strip-shell-comments.mjs")],
+                              input=(HERE / "machine.sh").read_text(), text=True, capture_output=True, check=True).stdout
+    except OSError as error:
+        raise Refused(f"render machine.sh: {error}; install Node and check the script path") from error
+    except subprocess.CalledProcessError as error:
+        raise Refused("machine.sh embedding refused: fix unsupported shell syntax using the stripper tests") from error
 
 
 def archive(tag: str, role: str) -> tuple[str, str]:
@@ -343,6 +355,7 @@ def tagged_source(tag: str, path: str, absent: str) -> tuple[str, str]:
 
 
 def preflight(s: Settings) -> Plan:
+    script = machine_script()
     aws("sts", "get-caller-identity")
     archives = {role: archive(s.tag, role) for role in ("server", "client")}
     timing = net_timing(*tagged_source(s.tag, NET_TIMING, "does the release carry the tick stamp and "
@@ -408,7 +421,7 @@ def preflight(s: Settings) -> Plan:
     except ValueError as error:
         raise Refused("the operator's public address is not one IPv4 address") from error
     return Plan(image["ImageId"], image["RootDeviceName"], vpc, subnet, zone, f"{operator}/32", archives, timing,
-                combat)
+                combat, script)
 
 
 # ------------------------------------------------------------------------------------- machines
@@ -510,7 +523,7 @@ def user_data(role: str, s: Settings, plan: Plan, public_key: str) -> str:
     values = {"ROLE": role, "CAP_MIN": cap_min(s), "PUBKEY": public_key, "ARCHIVE_URL": url, "ARCHIVE_SHA256": checksum}
     if role == "server":
         values |= {"BOTS": s.bots, "STATS_S": s.window_s}
-    script = (HERE / "machine.sh").read_text()
+    script = plan.script
     assert script.count(SETTINGS_MARK) == 1, "machine.sh holds exactly one settings mark"
     block = "".join(f"{key}={shlex.quote(str(value))}\n" for key, value in values.items())
     return script.replace(SETTINGS_MARK, block, 1)

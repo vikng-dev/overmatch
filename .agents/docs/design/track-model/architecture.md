@@ -184,7 +184,8 @@ seeded with the exact front tangent point, while the view keeps the raw walk spa
 conform resample. One walk, two consumers, no second implementation to drift.
 
 **The sim has ONE force path.** `apply_track_forces` runs `contact_side` per side and then
-`transmission::step` once, on the vehicle's declared tables. There is one drivetrain law and no
+`transmission::prepare_orders` once, then physics calls `transmission::advance` each substep,
+on the vehicle's declared tables. There is one drivetrain law and no
 branch to pick between laws.
 
 **Suspension travel is not optional.** `SideInput::travel` is a required per-position
@@ -1043,16 +1044,15 @@ law on the same main/supply-law baseline: sand and mud's earlier recorded gears 
 under this protocol, so their shift is not attributed to the surface-normal fix. Both current
 entry protocols end with scheduler `Normal` and hill hold false. The sand rolling-entry spread
 is 0.003994 m/s over the final second; every other final-second spread is at most 0.000023 m/s.
-The from-rest F1 hold is the upshift landing gate in `transmission::run_shift_decision`, MEASURED
-headless on the fixture of `headless_test::a_tank_leaves_first_gear_from_rest_on_a_soft_ground`
-(friction 0.4, rolling resistance 0.12) with the scheduler's inputs printed each tick: pinned in F1
+The superseded selector's from-rest F1 hold came from its upshift landing gate, MEASURED
+headless on soft ground (fixture friction 0.4, rolling resistance 0.12), with its inputs printed each tick: pinned in F1
 at 0.6717 m/s (2591 rpm, past the 2300 rpm up band), the shift-landing predictor, charging the
 33.6 kN a side of rolling resistance whole, lands F2 at 0.3617 m/s, 908 rpm, under the gate's fixed
-`shift_down_rpm + POSTSHIFT_MARGIN_RPM` of 1300 rpm, although F2's modelled full-throttle reserve
+downshift threshold plus landing margin of 1300 rpm, although F2's modelled full-throttle reserve
 at that landing is 264 kN against a 19 kN margin; a rolling entry never meets that gate, because
-no downshift consults it. This historical scheduler observation is superseded by the accepted four Driver laws in `drive-control-design-2026-11-02.md`. The lane preserves the landed supply scaling in `drive_target` and
-`transmission::step`. The step's interruption/dwell countdown is extracted without a behavior
-change to keep it below clippy's function-length limit. No wire type changes.
+no downshift consulted it. The current Driver follows `drive-control-design-2026-11-02.md`.
+Supply scaling lives in `drive_target` and `transmission::prepare_orders`; the interruption
+countdown advances once per tick.
 
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|

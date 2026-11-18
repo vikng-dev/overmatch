@@ -6,9 +6,10 @@ import { config, ConfigurationError, SERVER_SETTING_DOMAINS, serverEnvironment, 
 import { newId, randomHex, validVersion, versionOf, tagOf } from "./ids";
 import { diag } from "./reasons";
 import { ProviderError, providerFor, platformCall, isRecord } from "./provider";
-import { registryFor } from "./registry";
+import { registryFor, type JournalResult } from "./registry";
+import { SERVER_LOG_MAX_BYTES, evidenceCall } from "./evidence";
 import { sweep } from "./sweep";
-import type { HeartbeatRequest, JoinRequest } from "./types";
+import type { EndReport, HeartbeatRequest, JoinRequest } from "./types";
 
 export { Fleet } from "./fleet";
 export { Registry } from "./registry";
@@ -26,7 +27,7 @@ function error(status: number, message: string): Response {
 }
 
 class RequestError extends Error {
-	constructor(readonly kind: "bodyRead" | "json" | "pathEncoding" | "fields" | "clientIp", message: string) {
+	constructor(readonly kind: "bodyRead" | "json" | "pathEncoding" | "fields" | "clientIp" | "journalSize" | "journalEncoding" | "endSize" | "endEncoding", message: string, readonly status = 400) {
 		super(message);
 		this.name = "RequestError";
 	}
@@ -34,18 +35,61 @@ class RequestError extends Error {
 
 function invalid(message: string): never { throw new RequestError("fields", message); }
 
-async function body(req: Request): Promise<unknown> {
+async function body(req: Request, boundedEnd = false): Promise<unknown> {
 	if (req.bodyUsed || req.body?.locked) throw new Error("request body must be read once at the route edge");
 	let raw: string;
-	try { raw = await req.text(); }
-	catch {
-		// Only the native request stream runs here; disconnected streams have no stable error subtype.
-		throw new RequestError("bodyRead", "request body could not be read");
+	if (boundedEnd) raw = await boundedBody(req, "end");
+	else {
+		try { raw = await req.text(); }
+		catch {
+			// Only the native request stream runs here; disconnected streams have no stable error subtype.
+			throw new RequestError("bodyRead", "request body could not be read");
+		}
 	}
 	try { return JSON.parse(raw); }
 	catch (err) {
 		if (!(err instanceof SyntaxError)) throw err;
 		throw new RequestError("json", "body must be a JSON object");
+	}
+}
+
+/** Stream admission bounds bytes before decoding/concatenation; Content-Length can only refuse early. */
+async function boundedBody(req: Request, kind: "journal" | "end"): Promise<string> {
+	if (req.bodyUsed || req.body?.locked) throw new Error("request body must be read once at the route edge");
+	const declared = req.headers.get("content-length");
+	if (declared !== null && (!/^[0-9]+$/.test(declared) || Number(declared) > SERVER_LOG_MAX_BYTES)) {
+		throw new RequestError(`${kind}Size`, `${kind} exceeds byte cap`, 413);
+	}
+	if (!req.body) return "";
+	const reader = req.body.getReader();
+	const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+	let size = 0, raw = "";
+	try {
+		while (true) {
+			let chunk: ReadableStreamReadResult<Uint8Array>;
+			try { chunk = await reader.read(); }
+			catch {
+				// Native request streams have no stable platform failure subtype.
+				throw new RequestError("bodyRead", `${kind} could not be read`);
+			}
+			if (chunk.done) break;
+			size += chunk.value.byteLength;
+			if (size > SERVER_LOG_MAX_BYTES) throw new RequestError(`${kind}Size`, `${kind} exceeds byte cap`, 413);
+			try { raw += decoder.decode(chunk.value, { stream: true }); }
+			catch (err) {
+				if (!(err instanceof TypeError)) throw err;
+				throw new RequestError(`${kind}Encoding`, `${kind} must be UTF-8`);
+			}
+		}
+		try { return raw + decoder.decode(); }
+		catch (err) {
+			if (!(err instanceof TypeError)) throw err;
+			throw new RequestError(`${kind}Encoding`, `${kind} must be UTF-8`);
+		}
+	} finally {
+		// Cancellation must not wait for an untrusted producer to acknowledge it.
+		void reader.cancel().catch(() => console.warn("report stream cancellation failed", kind));
+		reader.releaseLock();
 	}
 }
 
@@ -86,13 +130,11 @@ function parseJoin(b: unknown): JoinRequest {
 	const p = pings === undefined ? {} : pings;
 	if (typeof p !== "object" || p === null || Array.isArray(p)) invalid("pings: expected an object of location id to ms");
 	if (Object.keys(p).length > MAX_LOCATIONS) invalid(`pings: expected at most ${MAX_LOCATIONS} locations`);
-	const entries: [string, number][] = [];
 	for (const [k, v] of Object.entries(p)) {
 		if (!locationId(k)) invalid("pings: expected 1-128 character Unicode location ids");
 		if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > MAX_PING_MS) invalid(`pings: expected integer ms from 0 to ${MAX_PING_MS}`);
-		entries.push([k, v]);
 	}
-	return { version, locations: [...new Set(locations as string[])], pings: Object.fromEntries(entries) };
+	return { version, locations: [...new Set(locations as string[])], pings: p as Record<string, number> };
 }
 
 function parseHeartbeat(b: unknown): HeartbeatRequest {
@@ -136,12 +178,32 @@ async function route(req: Request, env: Env): Promise<Response> {
 		return t ? json(t) : error(404, "unknown ticket");
 	}
 
+	const journal = /^\/v1\/servers\/([^/]+)\/journal$/.exec(path);
+	if (journal && method === "POST") {
+		const id = pathSegment(journal[1]);
+		const version = versionOf(id);
+		const refuse = (status: number, cause: string) => {
+			console.warn("journal refused", status, cause);
+			return error(status, cause);
+		};
+		if (!version) return refuse(410, "unknown server");
+		const secret = bearer(req);
+		const registry = registryFor(env, version);
+		const admission = await platformCall<JournalResult>("journalAdmission", () => registry.journalAdmission(id, secret));
+		if (admission.status !== 204) return refuse(admission.status, admission.error);
+		const truncated = req.headers.get("x-journal-truncated");
+		if (truncated !== "0" && truncated !== "1") return refuse(400, "journal truncation flag required");
+		const raw = await boundedBody(req, "journal");
+		const saved = await evidenceCall<JournalResult>("journal", () => registry.journal(id, secret, raw, truncated === "1"));
+		return saved.status === 204 ? new Response(null, { status: 204 }) : refuse(saved.status, saved.error);
+	}
+
 	let m = /^\/v1\/servers\/([^/]+)\/(heartbeat|end)$/.exec(path);
 	if (m && method === "POST") {
 		const id = pathSegment(m[1]);
 		const version = versionOf(id);
 		if (!version) return error(410, "unknown server");
-		const b = await body(req);
+		const b = await body(req, m[2] === "end");
 		let r;
 		if (m[2] === "heartbeat") {
 			const hb = parseHeartbeat(b);
@@ -156,8 +218,14 @@ async function route(req: Request, env: Env): Promise<Response> {
 			// An omitted reason is the protocol's ordinary exit report.
 			const reason = b.reason === undefined ? "exit" : b.reason;
 			const crash = b.crash;
+			const journalAvailable = b.journalAvailable;
+			if ((reason.startsWith("boot-") || journalAvailable !== undefined) && typeof journalAvailable !== "boolean") invalid("journalAvailable: expected boolean");
+			if (journalAvailable !== undefined && !reason.startsWith("boot-")) invalid("journalAvailable: only boot failures report unit creation");
 			const secret = bearer(req);
-			r = await platformCall("end", async () => registryFor(env, version).end(id, secret, reason.slice(0, 200), crash));
+			const report: EndReport = typeof journalAvailable === "boolean"
+				? { source: "boot", reason: reason.slice(0, 200), crash, journalAvailable }
+				: { source: "process", reason: reason.slice(0, 200), crash };
+			r = await evidenceCall("end", async () => registryFor(env, version).end(id, secret, report));
 		}
 		if (r.status === 204) return new Response(null, { status: 204 });
 		return error(r.status, r.error ?? (r.status === 410 ? "unknown server" : "error"));
@@ -225,7 +293,7 @@ export default {
 			}
 			if (err instanceof RequestError) {
 				console.warn("request refused", err.kind);
-				return error(400, err.message);
+				return error(err.status, err.message);
 			}
 			if (!(err instanceof ProviderError)) throw err;
 			console.warn("platform unavailable", diag(err));

@@ -335,15 +335,20 @@ class Command(unittest.TestCase):
         self.assertEqual(corner["off"]["n"], glass["off"]["n"])
 
     def test_an_off_run_that_showed_the_surface_is_refused(self) -> None:
-        (self.dir / "on.log").write_text(shows("Slice", 60.0) + "\n")
-        (self.dir / "off.client.jsonl").write_text(stream(80.0))
-        (self.dir / "off.log").write_text(shows("Slice", 61.0) + "\n")
-        code, _, err = self.run_main(
-            "--stream", str(self.dir / "off.client.jsonl"), "--log", str(self.dir / "off.log"),
-            "--surface", "corner", "--windows-from", str(self.dir / "on.log"),
-        )
-        self.assertNotEqual(code, 0)
-        self.assertIn("not an off run", err)
+        # The game's damage-model view: every opening must invalidate the paired off baseline.
+        for surface, opening in [("corner", shows("Slice", 61.0)),
+                                 ("glass", shows("Victim", 61.0)),
+                                 ("glass", f"{PREFIX}pen cam: the x-ray is on at t=61.000 s (Time<Real>)")]:
+            with self.subTest(surface=surface, opening=opening):
+                (self.dir / "on.log").write_text(shows("Slice" if surface == "corner" else "Victim", 60.0) + "\n")
+                (self.dir / "off.client.jsonl").write_text(stream(80.0))
+                (self.dir / "off.log").write_text(opening + "\n")
+                code, _, err = self.run_main(
+                    "--stream", str(self.dir / "off.client.jsonl"), "--log", str(self.dir / "off.log"),
+                    "--surface", surface, "--windows-from", str(self.dir / "on.log"),
+                )
+                self.assertNotEqual(code, 0)
+                self.assertIn("not an off run", err)
 
     def test_a_requested_surface_without_a_segment_fails(self) -> None:
         (self.dir / "on.client.jsonl").write_text(stream(80.0))

@@ -716,10 +716,11 @@ impl SimulateInput {
         };
     }
 
-    /// [`Drive::Park`]'s stop, past its run: the service brake (full reverse demand on a forward
-    /// hull) until the hull is under the transmission's parked speed, then nothing for good.
-    /// The replicated speed trails the hull, so the release lands after the stop; the
-    /// transmission's stop-to-reverse pause keeps that late release from reversing.
+    /// After the run, hold reverse demand on a forward hull until replicated speed reads a
+    /// stop below `assets/driving/actuation.ron::park_engage_speed`, then release permanently.
+    /// If the hull is still above that speed after its belts have been held for
+    /// `assets/driving/actuation.ron::reversal_hold_s`, the gearbox selects reverse and the
+    /// same demand drives backward, exactly as a player holding reverse would see.
     fn stop(&mut self, t: u32, speed: Option<f32>, command: &mut TankCommand) {
         let Drive::Park { throttle_ticks } = self.drive else {
             return;
@@ -743,8 +744,14 @@ pub(crate) fn simulate_watchdog(
     fixed: Res<Time<Fixed>>,
     mut exit: MessageWriter<AppExit>,
     timeline: Res<LocalTimeline>,
+    terminal: Res<super::client::ClosedConnection>,
     mut trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
+    if let Some(cause) = &terminal.cause {
+        error!("client: simulation refused: {cause}");
+        exit.write(AppExit::error());
+        return;
+    }
     let now = time.startup().elapsed();
     if simulate.ticks >= simulate.total && matches!(simulate.clock, ScriptClock::Released { .. }) {
         simulate.clock = ScriptClock::Finished;
@@ -1082,6 +1089,27 @@ pub(crate) fn spawn_pose() -> Option<(Vec2, Quat)> {
 
 #[cfg(test)]
 mod tests {
+    /// Script runners rely on every terminal refusal producing a failing AppExit,
+    /// even when script completion is ready in the same frame.
+    #[test]
+    fn a_scripted_refusal_exits_nonzero_before_success() {
+        use bevy::prelude::*;
+
+        for cause in crate::net::client::refusals::refusal_kinds() {
+            let mut app = crate::net::client::refusals::direct_app();
+            app.update();
+            let mut sim = super::SimulateInput::new(&super::Script::parse("(ticks: 2)").unwrap());
+            sim.hold_slot(std::time::Duration::ZERO);
+            sim.release(std::time::Duration::ZERO);
+            sim.ticks = sim.total;
+            app.insert_resource(sim);
+            crate::net::client::install_script_watchdog(&mut app);
+            app.world_mut().write_message(cause);
+            app.update();
+            assert_eq!(app.should_exit(), Some(AppExit::error()));
+        }
+    }
+
     /// The ram recipe holds full throttle for its requested interval and never fires. An
     /// ignored duration or inherited primary click would make its measured workload invalid.
     #[test]
@@ -1346,13 +1374,10 @@ mod tests {
         sim.hold_slot(Duration::ZERO);
         sim.release(Duration::ZERO);
         sim.ticks = sim.total;
-        let mut app = App::new();
+        let mut app = crate::net::client::refusals::direct_app();
         app.insert_resource(sim)
-            .insert_resource(Time::<Real>::default())
-            .insert_resource(Time::<Fixed>::from_hz(64.0))
-            .init_resource::<lightyear::prelude::LocalTimeline>()
-            .insert_resource(crate::shot_trace::ShotTrace::for_test(&path, None))
-            .add_systems(Update, super::simulate_watchdog);
+            .insert_resource(crate::shot_trace::ShotTrace::for_test(&path, None));
+        crate::net::client::install_script_watchdog(&mut app);
         app.update();
         app.update();
         assert!(matches!(

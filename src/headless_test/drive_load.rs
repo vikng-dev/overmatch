@@ -144,7 +144,9 @@ impl Measurements {
         if probe.shifting && (!self.was_shifting || state.gear != self.last_gear) {
             self.finish_landing();
             let speed = probe.sensed_speed
-                - probe.sensed_resistance_n * f32::from(gear.trans().shift_ticks.get()) * probe.dt
+                - probe.sensed_resistance_n
+                    * f32::from(gear.trans().shift_ticks.get())
+                    * crate::sim_tick::sim_timestep().as_secs_f32()
                     / gear.landing_mass();
             let price = price_driver_force(
                 gear.trans(),

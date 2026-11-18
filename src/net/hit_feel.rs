@@ -337,11 +337,11 @@ mod tests {
         assert_eq!(worst_drop(&modules(&[100]), &modules(&[99])), Some((0, 1)));
     }
 
-    /// The damage flash follows the display: a snapshot whose pool fell short of a whole point
+    /// The game's damage-model flash follows the display: a pool reduced by less than a whole point
     /// shows the same points and raises nothing, and the snapshot that takes it past one raises a
     /// one-point drop. The player relies on it: a flash with no point shown lost is a hit the HUD
     /// cannot explain. A memory of raw pool units, or one rounded to nearest, fails here. Fixture
-    /// pool: 30 HP points.
+    /// pool: one HP point, with the smallest nonempty holding and an emptied holding.
     #[test]
     fn a_drop_short_of_a_whole_point_raises_no_flash() {
         use crate::ballistics::POOL_UNITS_PER_HP;
@@ -353,10 +353,14 @@ mod tests {
             }],
             swap: None,
         };
-        let full = slot_memory(&net(30 * POOL_UNITS_PER_HP));
-        let short = slot_memory(&net(30 * POOL_UNITS_PER_HP - 600));
-        assert_eq!(worst_drop(&full, &short), None, "0.6 points shows full");
-        let past = slot_memory(&net(29 * POOL_UNITS_PER_HP - 1));
+        let full = slot_memory(&net(POOL_UNITS_PER_HP));
+        let short = slot_memory(&net(1));
+        assert_eq!(
+            worst_drop(&full, &short),
+            None,
+            "a nonempty fraction still shows one point"
+        );
+        let past = slot_memory(&net(0));
         assert_eq!(
             worst_drop(&short, &past),
             Some((0, 1)),

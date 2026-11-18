@@ -27,7 +27,7 @@ pub(crate) enum Flow {
     /// Before the first derivation, and the offline root's asset load. Nothing is spawned for it.
     #[default]
     Boot,
-    /// Matchmaking mode with no link: the Join menu.
+    /// No client link: the matchmaking Join menu or a direct connection's terminal status.
     Lobby,
     /// A link exists whose match has nothing to show yet: the loading screen, which covers the
     /// view through the asset load and the connect until this client's own tank is presented

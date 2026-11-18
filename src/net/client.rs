@@ -6,7 +6,6 @@
 use super::admission::JoinRefusal;
 use super::compatibility::Compatibility;
 use core::time::Duration;
-use std::borrow::Cow;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
@@ -449,6 +448,7 @@ pub fn run() -> AppExit {
 
     let mut app = App::new();
     if headless {
+        // Resolution: 2 ms polling resolves network arrivals within the fixed gameplay tick.
         app.add_plugins(crate::gpu_less_default_plugins(None))
             .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)));
         // After `LogPlugin` has built, like `run_window::mount`'s line on a windowed root.
@@ -553,8 +553,7 @@ pub fn run() -> AppExit {
     super::frontier::install(&mut app);
     // The connection state machine: gate the FIRST connect on the tank assets, then auto-retry a
     // failed/dropped connection on a short backoff. See [`drive_connection`] for the full states.
-    app.init_resource::<ConnectRetry>()
-        .add_systems(Update, drive_connection);
+    install_connection_lifecycle(&mut app);
     let client_id = template.client_id;
     match target {
         LinkTarget::Direct {
@@ -567,9 +566,9 @@ pub fn run() -> AppExit {
                 "client: target server {server_addr} (source: {}), client_id={client_id}",
                 source.label()
             );
-            let mut client_entity = app.world_mut().spawn(template.bundle(server_addr, [0; 32]));
-            if let Some(seeded) = template.seeded() {
-                client_entity.insert(seeded);
+            install_direct_link(&mut app, &template, server_addr);
+            if !headless {
+                install_direct_connect_screen(&mut app);
             }
         }
         LinkTarget::Matchmaking { api, source } => {
@@ -589,22 +588,14 @@ pub fn run() -> AppExit {
     // Connect screens share `NetClientPlugin`'s window gate; headless automation observes
     // `drive_connection` logs instead.
     if !headless {
-        app.add_plugins(connect_screen_plugin)
-            // The screen is derived after this frame's connection state and before any owner
-            // declares an overlay from it.
-            .add_systems(
-                Update,
-                (latch_tank_seen, derive_flow)
-                    .chain()
-                    .after(drive_connection)
-                    .before(crate::overlay::OverlaySet::Declare),
-            );
+        app.add_plugins(connect_screen_plugin);
+        install_screen_flow(&mut app);
     }
 
     install_replica_consumers(&mut app);
     if simulate {
-        app.add_systems(Update, harness::simulate_watchdog)
-            .add_systems(FixedPreUpdate, harness::buffer_input);
+        install_script_watchdog(&mut app);
+        app.add_systems(FixedPreUpdate, harness::buffer_input);
     } else {
         install_device_feed(&mut app);
     }
@@ -615,6 +606,18 @@ pub fn run() -> AppExit {
     // omit `feed_frame_input`, so overlay idling cannot fight `harness::buffer_input`.
 
     app.run()
+}
+
+/// Latch the presented tank before deriving this frame's screen, after connection state and
+/// before any owner declares an overlay from it. Requires `flow::plugin` and `ConnectRetry`.
+fn install_screen_flow(app: &mut App) {
+    app.add_systems(
+        Update,
+        (latch_tank_seen, derive_flow)
+            .chain()
+            .after(drive_connection)
+            .before(crate::overlay::OverlaySet::Declare),
+    );
 }
 
 /// The game's netcode and damage-model presentation: the common replica consumer schedule,
@@ -703,28 +706,60 @@ struct ConnectRetry {
     /// A retry fired past the [`client_policy`] reconnect budget has failed. A hitch still
     /// permits an attempt on resume; `Connected` clears exhaustion.
     exhausted: bool,
-    /// An authenticated refusal is terminal and supplies the visible cause.
-    refusal: Option<JoinRefusal>,
     /// This link's match has presented the client's own tank at least once
     /// ([`latch_tank_seen`]): the loading screen gives way to the match.
     tank_seen: bool,
 }
 
-/// Retry growth and cap are required client policy data; direct links retry indefinitely.
+/// Retry growth and cap are required client policy data.
 fn reconnect_backoff_secs(attempts: u32) -> f64 {
     let policy = client_policy();
     (policy.reconnect_base_s.0 + policy.reconnect_step_s.0 * f64::from(attempts))
         .min(policy.reconnect_cap_s.0)
 }
 
+/// Observe live success and authenticated denial before terminal handling: a successful retry
+/// clears its failed-attempt ledger, and a denial outranks scripted completion in the same frame.
+fn observe_connection(
+    links: Query<(&NetcodeClient, Option<&StatedRecord>, Has<Connected>)>,
+    mut retry: ResMut<ConnectRetry>,
+    mut gone: MessageWriter<super::matchmaking::ServerGone>,
+) {
+    let (netcode, stated, connected) = match links.single() {
+        Ok(link) => link,
+        // No link before matchmaking, or after a terminal close.
+        Err(QuerySingleError::NoEntities(_)) => return,
+        Err(error @ QuerySingleError::MultipleEntities(_)) => {
+            panic!(
+                "at most one client link exists (`spawn_matched_link` refuses a second): {error}"
+            )
+        }
+    };
+    if let Some(reason) = netcode.inner.denied_reason() {
+        let stated = stated.expect("every client link states its record (`netcode_link`)");
+        let refusal = JoinRefusal::from_netcode(reason, &stated.0);
+        warn!("client: refused by the server: {}", refusal.message());
+        gone.write(super::matchmaking::ServerGone::Admission(refusal));
+        return;
+    }
+    if connected {
+        retry.connected_once = true;
+        retry.attempts = 0;
+        retry.next_retry_at = None;
+        retry.down_since = None;
+        retry.last_attempt_at = None;
+        retry.exhausted = false;
+    }
+}
+
 /// Frame-rate first-connect/retry driver over the single link's markers.
 ///
-/// * `Connected`: clear retry ledger, latch `connected_once`; later loss shows the reconnect overlay.
+/// * `Connected`: [`observe_connection`] has reset the ledger; leave the healthy link alone.
 /// * Uninitiated: await tank assets so the replicated root assembles whole from extracted data
 ///   with view pop-in of CLAIMED ~one frame. `SimPlugin` / `world::plugin` supplies real terrain
 ///   on both peers for track probes; no local ground spawn.
 /// * `Connecting`: await netcode's SendingConnectionRequest/ChallengeResponse.
-/// * Authenticated denial: retain the typed cause for the label, stop retries.
+/// * Authenticated denial: the lifecycle closes the link before retries.
 /// * Failed/disconnected: back off, then trigger `Connect` on the same link/client id. A transient
 ///   disconnect can remain `Linked`; UDP `LinkStart` then skips it, reusing the source socket.
 fn drive_connection(
@@ -737,15 +772,13 @@ fn drive_connection(
             Has<Connected>,
             Has<Connecting>,
             Option<&Disconnected>,
-            &NetcodeClient,
-            Option<&StatedRecord>,
         ),
         (With<NetcodeClient>, Without<Leaving>),
     >,
     mut retry: ResMut<ConnectRetry>,
     mut commands: Commands,
 ) {
-    let (entity, connected, connecting, disconnected, netcode, stated) = match client.single() {
+    let (entity, connected, connecting, disconnected) = match client.single() {
         Ok(link) => link,
         // No link to drive: the Join menu before a ticket, or the one link is being left.
         Err(QuerySingleError::NoEntities(_)) => return,
@@ -756,26 +789,8 @@ fn drive_connection(
         }
     };
 
-    if let Some(reason) = netcode.inner.denied_reason() {
-        if retry.refusal.is_none() {
-            let stated = stated.expect("every client link states its record (`netcode_link`)");
-            let refusal = JoinRefusal::from_netcode(reason, &stated.0);
-            warn!("client: refused by the server: {}", refusal.message());
-            retry.refusal = Some(refusal);
-        }
-        retry.next_retry_at = None;
-        return;
-    }
-
     let now = real.elapsed_secs_f64();
     if connected {
-        retry.refusal = None;
-        retry.connected_once = true;
-        retry.attempts = 0;
-        retry.next_retry_at = None;
-        retry.down_since = None;
-        retry.last_attempt_at = None;
-        retry.exhausted = false;
         return;
     }
     if retry.connected_once && retry.down_since.is_none() {
@@ -829,7 +844,7 @@ fn drive_connection(
     }
 }
 
-/// A headless adapter for the real refusal reader and its rendered joining label.
+/// A headless adapter for the shipped lifecycle and its rendered connection label.
 #[cfg(test)]
 pub(super) fn mount_refusal_probe(app: &mut App) {
     // The probe starts initiated, so the asset gate is never read: an unloaded handle stands in.
@@ -838,15 +853,15 @@ pub(super) fn mount_refusal_probe(app: &mut App) {
         scene: None,
         effects: Vec::new(),
     });
-    app.init_resource::<ConnectRetry>()
-        .add_systems(Update, (drive_connection, update_joining_screen).chain());
+    install_connection_lifecycle(app);
+    app.add_systems(Update, update_joining_screen.after(drive_connection));
     app.world_mut().resource_mut::<ConnectRetry>().initiated = true;
     app.world_mut().spawn((Text::default(), JoiningText));
 }
 
 #[cfg(test)]
-pub(super) fn refusal_probe(app: &mut App) -> (Option<JoinRefusal>, String) {
-    let refusal = app.world().resource::<ConnectRetry>().refusal.clone();
+pub(super) fn refusal_probe(app: &mut App) -> (Option<super::matchmaking::ServerGone>, String) {
+    let refusal = app.world().resource::<ClosedConnection>().cause.clone();
     let label = app
         .world_mut()
         .query_filtered::<&Text, With<JoiningText>>()
@@ -913,6 +928,7 @@ fn derive_flow(
 fn spawn_matched_link(
     mut ready: MessageReader<super::matchmaking::MatchReady>,
     template: Res<ClientLinkTemplate>,
+    mut terminal: ResMut<ClosedConnection>,
     links: Query<(), With<NetcodeClient>>,
     mut commands: Commands,
 ) {
@@ -935,20 +951,79 @@ fn spawn_matched_link(
         link.insert(seeded);
     }
     commands.insert_resource(ConnectRetry::default());
+    terminal.cause = None;
+    terminal.connected_once = false;
 }
 
-/// Matchmaking mode's link systems: spawn the link for a ready match, and close it on every exit
-/// from it — never connected, the server gone, or the player leaving. Shared by [`run`] and the
-/// hosted end-to-end test.
+/// The retry ledger and terminal cause the connect screen reads. A UI fixture with no link calls this
+/// alone; every client composition gets it through `install_connection_lifecycle`.
+pub(super) fn init_connection_state(app: &mut App) {
+    app.init_resource::<ConnectRetry>()
+        .init_resource::<ClosedConnection>();
+}
+
+/// The connection driver and terminal handling shared by every client composition.
+pub(super) fn install_connection_lifecycle(app: &mut App) {
+    init_connection_state(app);
+    app.add_message::<super::matchmaking::ServerGone>()
+        .add_message::<super::matchmaking::MatchClosed>()
+        // Refusals remove the link before the driver can issue another Connect.
+        .add_systems(
+            Update,
+            (
+                observe_connection,
+                close_lost_match.in_set(RefusalHandling),
+                drive_connection,
+            )
+                .chain(),
+        );
+}
+
+/// Update producers finish admission before terminal handling can remove the link.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct RefusalHandling;
+
+/// Script exit observes terminal handling before it can report success or a timeout.
+pub(super) fn install_script_watchdog(app: &mut App) {
+    app.add_systems(Update, harness::simulate_watchdog.after(close_lost_match));
+}
+
+/// None means no terminal failure: before connection, while healthy, or after a voluntary leave.
+/// A cause survives message expiry and retry-ledger reset until the player joins another match.
+#[derive(Resource, Default)]
+pub(super) struct ClosedConnection {
+    pub(super) cause: Option<super::matchmaking::ServerGone>,
+    /// Selects the lobby's failed-join or lost-server wording after the retry ledger is cleared.
+    connected_once: bool,
+}
+
+/// A fixed endpoint uses the direct-connect server's development key.
+fn install_direct_link(app: &mut App, template: &ClientLinkTemplate, server_addr: SocketAddr) {
+    let mut link = app.world_mut().spawn(template.bundle(server_addr, [0; 32]));
+    if let Some(seeded) = template.seeded() {
+        link.insert(seeded);
+    }
+}
+
+/// A direct window has no lobby card; its no-link screen keeps the terminal cause visible.
+/// Requires the connection lifecycle, `flow::plugin` and the shared connect screen.
+fn install_direct_connect_screen(app: &mut App) {
+    app.add_systems(OnEnter(crate::flow::Flow::Lobby), spawn_joining_screen);
+}
+
+/// Matchmaking's tickets and voluntary exits. Requires [`install_connection_lifecycle`] for
+/// terminal failures; [`run`] and the hosted end-to-end test share both mounts.
 pub(super) fn install_matchmaking_link(app: &mut App, api: &str) {
     super::matchmaking::install(app, api);
     app.add_systems(
         Update,
         (
-            spawn_matched_link,
-            start_leaving,
-            finish_leaving,
-            close_lost_match.after(drive_connection),
+            spawn_matched_link.before(observe_connection),
+            close_exhausted_match
+                .after(observe_connection)
+                .before(close_lost_match),
+            start_leaving.before(close_lost_match),
+            finish_leaving.after(close_lost_match),
         ),
     );
 }
@@ -994,51 +1069,44 @@ fn finish_leaving(
     }
 }
 
-/// Close on a refusal, a server-gone report, the [`client_policy`] failed-join threshold, or
-/// exhausted reconnects. A once-connected link ends the match; one that never connected is a failed
-/// join.
-fn close_verdict(
-    retry: &ConnectRetry,
-    gone: Option<String>,
-) -> Option<super::matchmaking::MatchClosed> {
-    use super::matchmaking::MatchClosed;
-    let refusal = retry
-        .refusal
-        .as_ref()
-        .map(|refusal| refusal.message().into_owned());
-    if let Some(reason) = refusal.or(gone) {
-        return Some(if retry.connected_once {
-            MatchClosed::Ended(reason)
-        } else {
-            MatchClosed::Unreachable(reason)
-        });
-    }
+/// Only matchmade links give up on silence; a direct endpoint keeps retrying indefinitely.
+fn close_exhausted_match(
+    retry: Res<ConnectRetry>,
+    mut gone: MessageWriter<super::matchmaking::ServerGone>,
+) {
+    use super::matchmaking::ServerGone;
     if !retry.connected_once {
-        return (retry.attempts >= client_policy().unanswered_after_attempts.0)
-            .then(|| MatchClosed::Unreachable("could not reach the match server".into()));
+        if retry.attempts >= client_policy().unanswered_after_attempts.0 {
+            gone.write(ServerGone::Unreachable);
+        }
+    } else if retry.exhausted {
+        gone.write(ServerGone::StoppedAnswering);
     }
-    retry
-        .exhausted
-        .then(|| MatchClosed::Ended("it stopped answering".into()))
 }
 
-/// Close the match's link on a [`close_verdict`]: despawn it, start the connection ledger afresh
-/// and tell the lobby why.
+/// Keep the first typed cause even without a link. A voluntary leave owns its disconnect. The link's
+/// removal prevents reconnects; MatchClosed is the matchmaking lobby's existing display channel.
 fn close_lost_match(
     mut retry: ResMut<ConnectRetry>,
     mut gone: MessageReader<super::matchmaking::ServerGone>,
+    mut terminal: ResMut<ClosedConnection>,
     links: Query<Entity, (With<NetcodeClient>, Without<Leaving>)>,
+    leaving: Query<(), With<Leaving>>,
     mut closed: MessageWriter<super::matchmaking::MatchClosed>,
     mut commands: Commands,
 ) {
-    let gone = gone.read().last().map(|gone| gone.0.clone());
-    let Some(verdict) = close_verdict(&retry, gone) else {
+    let first = gone.read().next().cloned();
+    gone.clear();
+    if terminal.cause.is_some() || !leaving.is_empty() {
+        return;
+    }
+    let Some(cause) = first else {
         return;
     };
-    let link = match links.single() {
-        Ok(link) => link,
-        // Nothing left to close: the link is already being left (`Leaving`) or gone.
-        Err(QuerySingleError::NoEntities(_)) => return,
+    match links.single() {
+        Ok(link) => commands.entity(link).despawn(),
+        // A decoded refusal can arrive after the link has gone; its cause must still be shown.
+        Err(QuerySingleError::NoEntities(_)) => {}
         Err(error @ QuerySingleError::MultipleEntities(_)) => {
             panic!(
                 "at most one client link exists (`spawn_matched_link` refuses a second): {error}"
@@ -1046,23 +1114,27 @@ fn close_lost_match(
         }
     };
     warn!(
-        "client: closing the match link after {} attempts: {verdict:?}",
+        "client: closing the link after {} attempts: {cause}",
         retry.attempts
     );
-    commands.entity(link).despawn();
+    let reason = cause.to_string();
+    let verdict = if retry.connected_once {
+        super::matchmaking::MatchClosed::Ended(reason)
+    } else {
+        super::matchmaking::MatchClosed::Unreachable(reason)
+    };
+    terminal.cause = Some(cause);
+    terminal.connected_once = retry.connected_once;
     *retry = ConnectRetry::default();
     closed.write(verdict);
 }
 
-/// The connect screens. The first connect is the [`Flow::Joining`](crate::flow::Flow) screen,
-/// spawned on entering it and labelled from [`ConnectRetry`]; a match's dropped link is
-/// `Overlay::ConnectStatus`, declared only in a match, in the `Declare` phase,
-/// before the cursor owner derives the input license from the set.
+/// Requires the connection lifecycle's retry ledger and terminal cause. In a match, link loss declares
+/// the reconnect overlay in `OverlaySet::Declare`, before the cursor owner derives input licensing.
 pub(super) fn connect_screen_plugin(app: &mut App) {
     use crate::flow::{Flow, InMatchSystems};
     crate::overlay::look::get();
-    app.init_resource::<ConnectRetry>()
-        .add_systems(Startup, spawn_connect_status)
+    app.add_systems(Startup, spawn_connect_status)
         .add_systems(OnEnter(Flow::Joining), spawn_joining_screen)
         .add_systems(
             Update,
@@ -1070,17 +1142,14 @@ pub(super) fn connect_screen_plugin(app: &mut App) {
                 update_connect_status
                     .in_set(crate::overlay::OverlaySet::Declare)
                     .in_set(InMatchSystems),
-                update_joining_screen.run_if(in_state(Flow::Joining)),
+                update_joining_screen
+                    .run_if(in_state(Flow::Joining).or_else(in_state(Flow::Lobby))),
             ),
         );
 }
 
-/// Joining-screen marker; label content comes from `ConnectRetry`.
 #[derive(Component)]
 struct JoiningText;
-
-#[derive(Component)]
-struct ConnectStatusText;
 
 /// Spawn the persistent reconnect overlay; [`update_connect_status`] declares its presence, while
 /// `overlay::apply_overlay_visibility` owns visibility. The `OverlayNode` hook stamps its z.
@@ -1093,20 +1162,26 @@ fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
             Visibility::Hidden,
         ),
         RECONNECT_LABEL,
-        ConnectStatusText,
+        (),
         Some(crate::overlay::look::color(
             crate::overlay::look::get().connect_scrim_srgba,
         )),
     );
 }
 
-/// Spawn the loading screen: the match world is not yet anyone's view, so its scrim is opaque.
-fn spawn_joining_screen(mut commands: Commands, fonts: Res<UiFonts>, retry: Res<ConnectRetry>) {
+/// The connect label also owns a direct client's terminal screen; both cover the world.
+fn spawn_joining_screen(
+    mut commands: Commands,
+    fonts: Res<UiFonts>,
+    retry: Res<ConnectRetry>,
+    terminal: Res<ClosedConnection>,
+    flow: Res<State<crate::flow::Flow>>,
+) {
     crate::ui_font::spawn_overlay(
         &mut commands,
         &fonts.hud,
-        crate::flow::FlowScoped(crate::flow::Flow::Joining),
-        screen_label(&retry),
+        crate::flow::FlowScoped(*flow.get()),
+        connection_label(&retry, &terminal),
         JoiningText,
         Some(crate::overlay::look::color(
             crate::overlay::look::get().joining_scrim_srgba,
@@ -1114,15 +1189,16 @@ fn spawn_joining_screen(mut commands: Commands, fonts: Res<UiFonts>, retry: Res<
     );
 }
 
-/// The loading screen's label: a refusal's cause, the asset load and the wait for this client's
-/// tank, a dropped link, or the connect attempts.
+/// Loading assets or the own tank, reconnecting, or waiting for an initial server response.
 fn screen_label(retry: &ConnectRetry) -> String {
-    match &retry.refusal {
-        Some(reason) => reason.message().into_owned(),
-        None if !retry.initiated => "LOADING…".to_owned(),
-        None if retry.connected_once && retry.down_since.is_some() => RECONNECT_LABEL.to_owned(),
-        None if retry.connected_once => "LOADING…".to_owned(),
-        None => joining_label(retry.attempts),
+    if !retry.initiated {
+        "LOADING…".to_owned()
+    } else if retry.connected_once && retry.down_since.is_some() {
+        RECONNECT_LABEL.to_owned()
+    } else if retry.connected_once {
+        "LOADING…".to_owned()
+    } else {
+        joining_label(retry.attempts)
     }
 }
 
@@ -1140,8 +1216,23 @@ fn joining_label(attempts: u32) -> String {
     }
 }
 
-fn update_joining_screen(retry: Res<ConnectRetry>, mut text: Query<&mut Text, With<JoiningText>>) {
-    let label = screen_label(&retry);
+/// Terminal causes use the same label as connection progress, with network text sanitized.
+fn connection_label(retry: &ConnectRetry, terminal: &ClosedConnection) -> String {
+    match &terminal.cause {
+        Some(cause) => super::matchmaking::connection_failure_label(
+            &cause.to_string(),
+            terminal.connected_once,
+        ),
+        None => screen_label(retry),
+    }
+}
+
+fn update_joining_screen(
+    retry: Res<ConnectRetry>,
+    terminal: Res<ClosedConnection>,
+    mut text: Query<&mut Text, With<JoiningText>>,
+) {
+    let label = connection_label(&retry, &terminal);
     for mut text in &mut text {
         if text.0 != label {
             text.0.clone_from(&label);
@@ -1154,20 +1245,9 @@ fn update_joining_screen(retry: Res<ConnectRetry>, mut text: Query<&mut Text, Wi
 fn update_connect_status(
     links: Query<Has<Connected>, (With<NetcodeClient>, Without<Leaving>)>,
     mut overlays: ResMut<crate::overlay::Overlays>,
-    retry: Res<ConnectRetry>,
-    mut labels: Query<&mut Text, With<ConnectStatusText>>,
 ) {
     let down = links.iter().any(|connected| !connected);
     overlays.declare(crate::overlay::Overlay::ConnectStatus, down);
-    let label = retry
-        .refusal
-        .as_ref()
-        .map_or(Cow::Borrowed(RECONNECT_LABEL), JoinRefusal::message);
-    for mut text in &mut labels {
-        if text.0 != label {
-            text.0 = label.clone().into_owned();
-        }
-    }
 }
 
 /// Parse without touching DNS so address shape and source precedence remain unit-testable offline.
@@ -3688,57 +3768,6 @@ mod tests {
         );
     }
 
-    /// Exercise server-gone, failed-join and exhausted-reconnect exits. A never-connected close
-    /// is a failed join; a once-connected close ends the match. Time alone cannot exhaust retries.
-    /// Authenticated refusal is covered by the admission probes, outside these cases.
-    #[test]
-    fn match_link_closes_on_each_exit_and_not_before() {
-        use super::super::matchmaking::MatchClosed;
-        let joining = |attempts| ConnectRetry {
-            initiated: true,
-            attempts,
-            ..default()
-        };
-        let threshold = client_policy().unanswered_after_attempts.0;
-        let joining_before = joining(threshold - 1);
-        assert_eq!(close_verdict(&joining_before, None), None);
-        assert_eq!(
-            close_verdict(&joining(threshold), None),
-            Some(MatchClosed::Unreachable(
-                "could not reach the match server".into()
-            ))
-        );
-        assert_eq!(
-            close_verdict(&joining_before, Some("start failed".into())),
-            Some(MatchClosed::Unreachable("start failed".into())),
-            "a server gone before the first connect is a failed join"
-        );
-
-        let down = |exhausted| ConnectRetry {
-            initiated: true,
-            connected_once: true,
-            attempts: 40,
-            down_since: Some(10.0),
-            last_attempt_at: Some(10.0 + 10.0 * client_policy().reconnect_give_up_s.0),
-            exhausted,
-            ..default()
-        };
-        assert_eq!(
-            close_verdict(&down(false), None),
-            None,
-            "a dropped match keeps reconnecting until a retry past the give-up has failed"
-        );
-        assert!(matches!(
-            close_verdict(&down(true), None),
-            Some(MatchClosed::Ended(reason)) if reason.contains("stopped answering")
-        ));
-        assert_eq!(
-            close_verdict(&down(false), Some("server stopped".into())),
-            Some(MatchClosed::Ended("server stopped".into())),
-            "the Worker's verdict closes at once"
-        );
-    }
-
     /// The backoff never exceeds the cap, no matter how many attempts have piled up — an
     /// indefinitely-retrying client still re-checks for a server at least that often. Also asserts
     /// monotonic growth so a broken schedule cannot hide behind a still-correct cap.
@@ -3975,3 +4004,6 @@ mod arrival_device_tests {
         assert!(!world.resource::<FrameInput>().command.fire_secondary);
     }
 }
+
+#[cfg(test)]
+pub(super) mod refusals;

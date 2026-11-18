@@ -216,10 +216,10 @@ fn hold_commands(
         return;
     }
     published.set_if_neq(MatchCommands::Held);
-    for (mut raw, mut parsed) in &mut tanks {
+    tanks.par_iter_mut().for_each(|(mut raw, mut parsed)| {
         *parsed = ParsedTankCommand::hold();
         raw.set_if_neq(parsed.command());
-    }
+    });
 }
 
 /// Results has swept the tanks; every other phase permits placement.
@@ -249,6 +249,7 @@ mod tests {
     #[test]
     fn a_tank_before_its_battle_snapshot_commands_nothing() {
         use bevy::ecs::system::RunSystemOnce;
+        bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
         let mut world = World::new();
         world.insert_resource(MatchCommands::Live);
         // Fixture intent: nonzero drive and a fire edge expose an unheld pre-snapshot command.
@@ -274,6 +275,7 @@ mod tests {
     #[test]
     fn phase_publication_matches_the_command_hold() {
         use bevy::ecs::system::RunSystemOnce;
+        bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
         let mut world = World::new();
         world.insert_resource(MatchCommands::Live);
         let battle = world.spawn(BattleState::default()).id();

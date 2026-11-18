@@ -288,23 +288,16 @@ fn request_respawn(
     {
         return;
     }
-    // Same-frame guard against a phantom `RESPAWNING…`: a menu opened THIS frame (R+Esc together) or
-    // an alt-tab (`focus_declare` declares the menu) is already in the reconciled set — we run after
-    // `OverlaySet::Toggle`, so both the declarers AND Esc have written — but `PlayerInputSet`'s cursor
-    // gate hasn't caught up yet (the cursor owner
-    // releases later this frame). If input is blocked, refuse: do not write the wire `respawn` edge
-    // (`feed_frame_input` would zero it anyway) nor latch `AwaitingRespawn`, so the overlay never
-    // sticks on `RESPAWNING…` for a request the server never sees. `window_focused = true` because a
-    // focus loss is itself represented in the set as the declared menu.
+    // Menu/focus declarations and Esc have reconciled this frame, before the cursor gate updates.
+    // Refuse blocked input before latching a wait for an edge that feed_frame_input would erase.
+    // Focus loss declares the menu, so `window_focused = true` reads the same blocking state.
     if overlay::input_blocked(&overlays, true) {
         return;
     }
     for mut command in &mut dead_own {
         command.respawn = true;
-        // Latch the wait so the overlay switches to "respawning…" and stays up across the round-trip
-        // even after the old tank despawns (`toggle_death_screen`). Scoped to the dead-tank query, so
-        // it can only latch when there is actually a dead own tank to respawn. Arm the timeout so a
-        // request that never yields a live tank reverts to `Died` instead of sticking forever.
+        // The game's damage-model view: keep the wait through the old tank's despawn gap;
+        // a missing authority answer expires at the retry deadline.
         awaiting.active = true;
         awaiting.deadline = time.elapsed_secs_f64() + RESPAWN_TIMEOUT_SECS;
     }
@@ -511,17 +504,15 @@ mod tests {
     /// a late gate hides an allowed request. Fixture identities and starting ticks.
     #[test]
     fn the_respawn_prompt_and_key_follow_the_authority_opening() {
-        use super::super::battle_mode::BattleMode;
-        use super::super::score::{Respawn, RespawnGate, RespawnWait, Standing};
+        use super::super::score::{Respawn, RespawnGate, Standing};
         use crate::sim_tick::{SimTick, TickSpan};
         use bevy::ecs::system::RunSystemOnce;
 
         let timestep = crate::sim_tick::sim_timestep();
-        let wait = RespawnWait::new(BattleMode::shipped().respawn_wait, timestep).ticks();
-        assert!(wait > 0, "the chosen mode waits before allowing respawn");
         let (who, life) = (CombatantId(1), CombatantLife(2));
-        for start in [0, u32::MAX - wait / 2] {
-            for elapsed in [0, wait - 1, wait, wait + 1] {
+        // Fixture openings: immediate and delayed, both across tick wrap.
+        for (wait, start) in [(0_u32, 0), (0, u32::MAX), (3, 0), (3, u32::MAX - 1)] {
+            for elapsed in 0..=wait + 1 {
                 let mut world = World::new();
                 world.insert_resource(Time::<()>::default());
                 let mut fixed = Time::<Fixed>::default();

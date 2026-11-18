@@ -256,14 +256,32 @@ pub(crate) struct ElementOutputProbe {
     pub dwell: u32,
 }
 
+/// Tick-integrated belt quantities for work/energy readers; instantaneous probes retain their h.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct BeltWorkProbe {
+    pub start_speeds: [f32; 2],
+    pub sprocket_work_j: [f64; 2],
+    /// Solver friction charged at each substep's surface velocity (J).
+    pub conveyor_work_j: f64,
+    /// Time-centred travel for force work, distinct from explicit phase advection.
+    pub travel_m: [f64; 2],
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct TransmissionProbe {
+    pub belt_work: BeltWorkProbe,
     pub assignments_tried: usize,
+    pub mechanical_assignments: usize,
+    pub mechanical_rows: usize,
+    pub mechanical_advances: usize,
+    pub max_substep_assignments: usize,
+    pub max_substep_rows: usize,
     pub throttle: f32,
     pub steer: f32,
     pub side_commands: [f32; 2],
     pub speeds: [f32; 2],
     pub reactions: [f32; 2],
+    /// Duration of this mechanical sample, independent of the Driver's fixed tick.
     pub dt: f32,
     pub direction: f32,
     /// What the Driver felt of the hull this tick (`track::driver`); zeros when nothing was sensed.
@@ -291,6 +309,8 @@ pub(crate) struct TransmissionProbe {
     pub tau_c: f32,
     pub engaged: bool,
     pub locked: bool,
+    pub driving: bool,
+    pub brakes_slide: bool,
     pub shifting: bool,
     pub clutch_force_n: f32,
     pub steering_force_n: f32,

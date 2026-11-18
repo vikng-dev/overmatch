@@ -13,8 +13,10 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use avian3d::collision::contact_types::ContactId;
 use avian3d::prelude::{AngularVelocity, Collisions, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
+use bevy::tasks::ComputeTaskPool;
 use serde_json::{Value, json};
 
 use crate::tank::{
@@ -65,6 +67,9 @@ impl std::fmt::Display for SinkError {
 }
 impl std::error::Error for SinkError {}
 
+/// Resolution: batch flushes to limit synchronous I/O while retaining a recent crash tail.
+const JSONL_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Shared JSONL sink. Non-finite floats serialize as `null`, preserving valid JSON. An armed
 /// recorder must produce its stream: an I/O failure ends the run visibly, never a partial success.
 pub(crate) struct JsonlSink {
@@ -84,12 +89,11 @@ impl JsonlSink {
         })
     }
 
-    /// Append a row, refusing the run if its output can no longer be honoured.
     pub(crate) fn write(&mut self, row: &Value) {
         writeln!(self.writer, "{row}")
             .map_err(|error| SinkError::Write(self.path.clone(), error))
             .unwrap_or_else(crate::refuse_start);
-        if self.last_flush.elapsed() >= Duration::from_secs(1) {
+        if self.last_flush.elapsed() >= JSONL_FLUSH_INTERVAL {
             self.flush().unwrap_or_else(crate::refuse_start);
             self.last_flush = Instant::now();
         }
@@ -374,6 +378,57 @@ fn record_frame(
     }
 }
 
+/// Reusable pair work and per-thread results; no contact references survive the fixed tick.
+#[derive(Default)]
+struct TickContacts {
+    pairs: Vec<ContactId>,
+    summaries: Parallel<Vec<([Option<Entity>; 2], f32)>>,
+    by_body: std::collections::HashMap<Entity, (u32, f32)>,
+}
+
+impl TickContacts {
+    fn update(&mut self, collisions: &Collisions) {
+        self.pairs.clear();
+        self.pairs
+            .extend(collisions.iter().map(|pair| pair.contact_id));
+        let pool = ComputeTaskPool::get();
+        let chunk_size = self.pairs.len().div_ceil(pool.thread_num()).max(1);
+        let summaries = &self.summaries;
+        pool.scope(|scope| {
+            for ids in self.pairs.chunks(chunk_size) {
+                scope.spawn(async move {
+                    summaries.scope(|rows| {
+                        for &id in ids {
+                            let (_, pair) = collisions
+                                .graph()
+                                .get_by_id(id)
+                                .expect("pair IDs came from this immutable contact graph");
+                            // Only touching, overlapping pairs contribute; negative separations
+                            // clamp to zero penetration rather than retaining stale AABB contacts.
+                            if pair.is_touching() && !pair.aabbs_disjoint() {
+                                let deepest = pair
+                                    .find_deepest_contact()
+                                    .map_or(0.0, |point| point.penetration)
+                                    .max(0.0);
+                                rows.push(([pair.body1, pair.body2], deepest));
+                            }
+                        }
+                    });
+                });
+            }
+        });
+        self.by_body.clear();
+        // Counts and maxima commute; reduce shared body incidence after pair evaluation.
+        for (bodies, deepest) in self.summaries.iter_mut().flat_map(|rows| rows.drain(..)) {
+            for body in bodies.into_iter().flatten() {
+                let entry = self.by_body.entry(body).or_insert((0, 0.0));
+                entry.0 += 1;
+                entry.1 = entry.1.max(deepest);
+            }
+        }
+    }
+}
+
 /// Per fixed gameplay tick, per tank root: current pose and velocities plus contact state
 /// (grounded track sides, per-side belt loads, collision pairs). Runs in `FixedLast`, after
 /// physics and contact updates. Client poses are presented server state, never predictions.
@@ -404,7 +459,7 @@ fn record_tick(
     >,
     // The rig chain for each row's skeleton bore (`rig_world_pose`).
     rig_chain: (Query<&ChildOf>, Query<&Transform>),
-    collisions: Collisions,
+    (collisions, mut contacts): (Collisions, Local<TickContacts>),
     // Each tank's row is prepared on the compute pool; the writer commits them in entity order.
     (mut tick_counter, mut rows): (Local<u64>, Local<Parallel<Vec<(Entity, Value)>>>),
     // The local fixed clock and the view clock a client row is stamped from.
@@ -412,10 +467,7 @@ fn record_tick(
         Option<Res<LocalTimeline>>,
         Option<Res<crate::net::view_clock::ViewClock>>,
     ),
-    // The cross-world pairing key `own` is "the player's own tank" in each role. On a client and
-    // in single-player it is the game `Controlled` marker (in the roots query). On the server it is
-    // `ControlledBy`, which `spawn_player_tank` inserts on every player tank (the ownerless test bot
-    // has none); neither marker replicates to the other side, so this query is empty off-server.
+    // `own` joins roles: ControlledBy on authority player tanks, Controlled on clients/offline.
     owners: Query<(), With<ControlledBy>>,
 ) {
     let (role, sim_fields) = (trace.role, trace.sim_fields);
@@ -432,24 +484,7 @@ fn record_tick(
         _ => Some(local_tick),
     };
 
-    // `hc`/`pen` include only touching, overlapping Avian pairs. A non-overlapping AABB makes a
-    // contact record stale for this diagnostic; negative separations clamp to zero penetration.
-    let mut contacts: std::collections::HashMap<Entity, (u32, f32)> =
-        std::collections::HashMap::new();
-    for pair in collisions.iter() {
-        if !pair.is_touching() || pair.aabbs_disjoint() {
-            continue;
-        }
-        let deepest = pair
-            .find_deepest_contact()
-            .map_or(0.0, |point| point.penetration)
-            .max(0.0);
-        for body in [pair.body1, pair.body2].into_iter().flatten() {
-            let entry = contacts.entry(body).or_insert((0, 0.0));
-            entry.0 += 1;
-            entry.1 = entry.1.max(deepest);
-        }
-    }
+    contacts.update(&collisions);
 
     roots.par_iter().for_each(
         |(
@@ -477,8 +512,7 @@ fn record_tick(
                 .iter()
                 .filter(|side| !side.is_empty())
                 .count();
-            // Round to ~0.1 N: solver-noise digits past that are neither meaningful nor worth
-            // the row width.
+            // Resolution: 0.1 N omits solver-noise digits from the diagnostic row.
             let side_sum = |f: fn(&crate::track::forces::BeltContact) -> f32| -> Vec<Value> {
                 track_contacts
                     .0
@@ -494,7 +528,8 @@ fn record_tick(
 
             // Contact pairs whose rigid body is this tank root, and the deepest penetration among them
             // — the collision-stress signal the jitter correlates with.
-            let (hull_contacts, penetration) = contacts.get(&entity).copied().unwrap_or((0, 0.0));
+            let (hull_contacts, penetration) =
+                contacts.by_body.get(&entity).copied().unwrap_or((0, 0.0));
 
             let own = if role == "server" {
                 owners.get(entity).is_ok()
@@ -556,7 +591,6 @@ fn record_tick(
                 "hc": hull_contacts,
                 "pen": num(penetration),
                 "ctl": controlled,
-                // Cross-world tank identity for the hash join (world-independent — never the entity id).
                 "own": own,
                 // The per-tick authority-simulation hash: `h` combined, then the per-component
                 // breakdown so a difference localizes to pose vs velocity vs carried sim.
@@ -615,17 +649,14 @@ fn record_tick(
                     .collect();
                 // Canonical transmission order; null on non-owned replicas (owner-only wire state).
                 let trn = transmission.map_or(Value::Null, |transmission| {
-                    let mut trn =
-                        Vec::with_capacity(transmission_state_projection(&transmission.0).len());
-                    for field in transmission_state_projection(&transmission.0) {
-                        match field {
-                            TransmissionProjectionValue::U8(value) => trn.push(Value::from(value)),
-                            TransmissionProjectionValue::Bool(value) => {
-                                trn.push(Value::from(value))
-                            }
-                            TransmissionProjectionValue::F32(value) => trn.push(num(value)),
-                        }
-                    }
+                    let trn = transmission_state_projection(&transmission.0)
+                        .into_iter()
+                        .map(|field| match field {
+                            TransmissionProjectionValue::U8(value) => Value::from(value),
+                            TransmissionProjectionValue::Bool(value) => Value::from(value),
+                            TransmissionProjectionValue::F32(value) => num(value),
+                        })
+                        .collect();
                     Value::Array(trn)
                 });
                 row.as_object_mut()

@@ -512,3 +512,27 @@ Access hostname/audience configuration, real end-to-end play and both shutdown a
 forced-silent recovery remain unmeasured here. The independent age rule is covered offline; no
 24-hour live soak was run. No account price/quota claim or spend ceiling is made. The current key
 can still be abused outside the Worker's cap; revocation does not itself clean retained resources.
+
+## Live proof, second attempt (2026-11-17 UTC, alpha.20, proving Worker)
+
+MEASURED, one launch, after the image-owner fix was applied with `host-setup apply`:
+
+- Step 2: `issue-key --env aws-proving` installed the pair; `verify` passed.
+- Step 4: the first join launched one machine at the first boot attempt. The Worker recorded ready
+  31 s after the request (start deadline 240 s). Both clients received tickets for the same server,
+  connected, replicated both tanks and received 64 ticks/s with 0 holds and 0 cuts for 90 s, in two
+  runs against the same machine. Peak players recorded: 2.
+- The test itself failed both runs with `in match: 0, tanks seen: 2`: its client app never mounts
+  `latch_tank_seen`, so it cannot reach `Flow::InMatch` against any server. That is a defect of the
+  test's hand-copied client wiring, not of hosting; the test's assertion of normal hosted play is
+  therefore still open.
+- Step 6: the server reported `empty for 300 s`; the Worker ended the session and the machine was
+  terminated by the API (`Client.UserInitiatedShutdown`). The on-machine power-off guard was not
+  witnessed. The report arrived 8.7 min after the last client process exited, against an expected
+  5 min plus the link timeout: unexplained, and the machine's journal was not captured (no
+  `server_logs` row), so it cannot be settled from this run.
+- Step 7: instances, volumes and interfaces counted 0; `revoke-key --env aws-proving` and `verify`
+  passed; the host user holds 0 keys. The keyless proving Worker's scheduled sweep now records
+  `list: credentials … refused` on every run, which is its correct answer without a key.
+- Not done: step 3's `/admin/aws-proof` dry runs and the `/admin` Fleet-empty reading (both need the
+  owner's Access login); a forced silent boot (step 5).

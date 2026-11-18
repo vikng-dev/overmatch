@@ -727,6 +727,7 @@ mod tests {
     /// Runs the census once on an idle tick (fixture: one-second step); whether it captured.
     fn record(world: &mut World) -> bool {
         use bevy::ecs::system::RunSystemOnce;
+        ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
         world.init_resource::<avian3d::dynamics::solver::SolverDiagnostics>();
         world.init_resource::<crate::avian_ext::solver_cost::ContactVisits>();
         world.init_resource::<avian3d::collision::CollisionDiagnostics>();
@@ -778,8 +779,6 @@ mod tests {
     /// body's touch and the tank's touch on another construction are not the ram's impact.
     #[test]
     fn a_sweep_touch_before_any_solver_contact_sets_the_impact_tick() {
-        use bevy::tasks::TaskPool;
-        ComputeTaskPool::get_or_init(TaskPool::default);
         let mut world = World::new();
         world.init_resource::<ContactTransfers>();
         world.init_resource::<SweepAccount>();
@@ -816,8 +815,6 @@ mod tests {
     /// still opens the observation; a mutant that waits or times out after impact fails here.
     #[test]
     fn approach_watchdog_ends_only_an_uncontacted_capture() {
-        use bevy::tasks::TaskPool;
-        ComputeTaskPool::get_or_init(TaskPool::default);
         for contact_at_limit in [false, true] {
             let mut world = World::new();
             world.init_resource::<ContactTransfers>();

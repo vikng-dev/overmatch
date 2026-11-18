@@ -236,6 +236,7 @@ pub fn plugin(app: &mut App) {
         // Tags meshes as the glb instantiates, independently of `RigGeom`.
         .add_plugins(mesh_layers::plugin)
         .add_plugins(crate::offline_physics())
+        .add_plugins(belt::drivetrain_plugin)
         .add_plugins(crate::contact_transfer::sim_plugin)
         // The soft runs' law against loose pieces, as the game solves it.
         .add_plugins(crate::track::soft_run::plugin)
@@ -371,9 +372,9 @@ fn mount_harness(app: &mut App, scenario: harness::Harness) {
                     .run_if(resource_exists::<harness::HarnessLog>),
             )
             .add_systems(
-                FixedUpdate,
+                FixedPostUpdate,
                 harness::harness_record
-                    .after(apply_belt_support_field)
+                    .after(avian3d::prelude::PhysicsSystems::Writeback)
                     .run_if(resource_exists::<harness::HarnessLog>),
             );
     }

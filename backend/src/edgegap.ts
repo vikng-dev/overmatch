@@ -35,6 +35,7 @@ export const SERVER_LOG_BODY_MAX_BYTES = 16 * 1024 * 1024;
 export class Edgegap implements Provider {
 	readonly inventory = { scoped: false, maxAgeMs: null };
 	readonly requiresHttps = false;
+	readonly logs = { kind: "pull" as const, read: (id: string) => this.containerLogs(id) };
 	readonly starts;
 	constructor(
 		private readonly api: URL,

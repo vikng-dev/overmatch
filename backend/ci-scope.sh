@@ -1,5 +1,6 @@
 #!/bin/sh
-# Does the range BASE..HEAD touch the backend? Prints and writes `affected=true|false` to
+# Does the range BASE..HEAD touch backend code or its workflow? The workflow checks embedded
+# host inputs unconditionally. Prints and writes `affected=true|false` to
 # $GITHUB_OUTPUT. Fails toward running: a manual dispatch, a missing or all-zero base (new branch,
 # force push, shallow clone) and an unresolvable range all answer true.
 #
@@ -13,7 +14,7 @@ case "$event" in
 	*)
 		if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
 			&& git cat-file -e "$base^{commit}" 2>/dev/null && git cat-file -e "$head^{commit}" 2>/dev/null; then
-			if git diff --quiet "$base" "$head" -- backend .github/workflows/backend.yml scripts/aws/machine.sh scripts/aws/host_setup.py scripts/aws/host-policy.json scripts/aws/host-image.json src/net/server.rs; then
+			if git diff --quiet "$base" "$head" -- ':(top)backend' ':(top).github/workflows/backend.yml'; then
 				affected=false
 			fi
 		fi

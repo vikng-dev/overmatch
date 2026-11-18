@@ -71,8 +71,46 @@ pub(crate) struct Solution {
     pub speeds: Vec<f64>,
     pub rows: Vec<RowResult>,
     /// Deterministic work across every static-to-dynamic stage.
+    #[cfg(feature = "bitprobe")]
     pub assignments_tried: usize,
     assignment: Vec<State>,
+}
+
+/// The accepted KKT faces remain a valid search seed while row identities stay unchanged.
+/// Bounds and targets may move; each trial still checks feasibility and optimality afresh.
+#[derive(Default)]
+pub(crate) struct WarmStart {
+    layout: Vec<(Vec<f64>, bool)>,
+    limits: Vec<Vec<f64>>,
+    assignment: Vec<State>,
+}
+
+impl WarmStart {
+    fn seed(&mut self, rows: &[Row], limits: &[ImpulseLimit]) -> Vec<State> {
+        let matches = self.layout.len() == rows.len()
+            && self.limits.len() == limits.len()
+            && self
+                .layout
+                .iter()
+                .zip(rows)
+                .all(|((jacobian, dynamic), row)| {
+                    *jacobian == row.jacobian && *dynamic == row.dynamic.is_some()
+                })
+            && self
+                .limits
+                .iter()
+                .zip(limits)
+                .all(|(a, b)| *a == b.coefficients);
+        if !matches {
+            self.layout = rows
+                .iter()
+                .map(|r| (r.jacobian.clone(), r.dynamic.is_some()))
+                .collect();
+            self.limits = limits.iter().map(|l| l.coefficients.clone()).collect();
+            self.assignment = vec![State::Interior; rows.len() + limits.len()];
+        }
+        self.assignment.clone()
+    }
 }
 
 #[cfg(feature = "bitprobe")]
@@ -100,14 +138,19 @@ pub(crate) struct ImpulseLimit {
 
 #[cfg(test)]
 fn solve(speeds: &[Speed], rows: &[Row]) -> Solution {
-    solve_limited(speeds, rows, &[])
+    solve_limited(speeds, rows, &[], &mut WarmStart::default())
 }
 
 /// Enumerate box faces and active combination faces. The bordered KKT system includes the
 /// combination's multiplier: interior impulses need not have zero physical slip at that face.
 /// A compact nonempty polytope has an optimum; choose an extreme point of its minimizer face
 /// and an independent normal-cone basis to obtain a nonsingular assignment.
-pub(crate) fn solve_limited(speeds: &[Speed], rows: &[Row], limits: &[ImpulseLimit]) -> Solution {
+pub(crate) fn solve_limited(
+    speeds: &[Speed],
+    rows: &[Row],
+    limits: &[ImpulseLimit],
+    warm: &mut WarmStart,
+) -> Solution {
     for limit in limits {
         assert!(
             limit.coefficients.len() == rows.len()
@@ -171,15 +214,17 @@ pub(crate) fn solve_limited(speeds: &[Speed], rows: &[Row], limits: &[ImpulseLim
             row.bounds
         });
     }
-    let mut seed = vec![State::Interior; rows.len() + limits.len()];
+    let mut seed = warm.seed(rows, limits);
     for (i, bound) in bounds.iter().enumerate() {
         if bound.lower == bound.upper {
             seed[i] = State::Lower;
         }
     }
+    #[cfg(feature = "bitprobe")]
     let mut assignments_tried = 0;
     loop {
         let search = Search {
+            #[cfg(feature = "bitprobe")]
             assignments_tried: std::cell::Cell::new(0),
             speeds,
             rows,
@@ -192,8 +237,11 @@ pub(crate) fn solve_limited(speeds: &[Speed], rows: &[Row], limits: &[ImpulseLim
                 search.neighbours(&seed, &mut Vec::with_capacity(rows.len()), distance)
             })
             .expect("the loaded metric must leave an optimal independent KKT basis above the rank threshold; admission certifies only unloaded conditioning");
-        assignments_tried += search.assignments_tried.get();
-        result.assignments_tried = assignments_tried;
+        #[cfg(feature = "bitprobe")]
+        {
+            assignments_tried += search.assignments_tried.get();
+            result.assignments_tried = assignments_tried;
+        }
         let mut broke = false;
         for (i, row) in rows.iter().enumerate() {
             if !dynamic[i]
@@ -210,6 +258,7 @@ pub(crate) fn solve_limited(speeds: &[Speed], rows: &[Row], limits: &[ImpulseLim
         if !broke {
             #[cfg(feature = "bitprobe")]
             ASSIGNMENT_WORK.with(|work| work.set(work.get() + assignments_tried));
+            warm.assignment.clone_from(&result.assignment);
             return result;
         }
         seed = result.assignment;
@@ -217,6 +266,7 @@ pub(crate) fn solve_limited(speeds: &[Speed], rows: &[Row], limits: &[ImpulseLim
 }
 
 struct Search<'a> {
+    #[cfg(feature = "bitprobe")]
     assignments_tried: std::cell::Cell<usize>,
     speeds: &'a [Speed],
     rows: &'a [Row],
@@ -270,6 +320,7 @@ impl Search<'_> {
     }
 
     fn trial(&self, states: &[State]) -> Option<Solution> {
+        #[cfg(feature = "bitprobe")]
         self.assignments_tried.set(self.assignments_tried.get() + 1);
         let n = self.rows.len();
         let interior: Vec<_> = (0..n).filter(|&i| states[i] == State::Interior).collect();
@@ -435,6 +486,7 @@ impl Search<'_> {
             "an accepted finite independent block produces finite speeds and impulses"
         );
         Some(Solution {
+            #[cfg(feature = "bitprobe")]
             assignments_tried: 0,
             assignment: states.to_vec(),
             speeds: velocity,

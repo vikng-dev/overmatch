@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod pose;
+pub(super) use pose::PoseRefusal;
 mod scenario;
 
 use scenario::Scenario;
@@ -245,7 +246,7 @@ fn refuse_peer_pose(
     // No refusal is the normal state of a valid stream.
     if let Some(refusal) = storage.global.remove::<pose::PoseRefusal>() {
         warn!("client: refusing server debris pose: {refusal}");
-        gone.write(super::matchmaking::ServerGone(refusal.to_string()));
+        gone.write(super::matchmaking::ServerGone::Debris(refusal));
     }
 }
 
