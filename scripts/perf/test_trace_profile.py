@@ -243,7 +243,6 @@ class TraceProfileTest(unittest.TestCase):
             profile(trace, window, str(out))
         with self.assertRaisesRegex(OutputError, r"out.*embedded null byte.*writable"):
             profile(trace, window, "out\x00.json")
-        # A non-UTF-8 terminal gets the same operator-facing refusal.
         failure = UnicodeEncodeError("ascii", "µ", 0, 1, "fixture: terminal encoding")
         with patch("builtins.print", side_effect=failure):
             with self.assertRaisesRegex(OutputError, r"out\.json: .*summary.*terminal"):
