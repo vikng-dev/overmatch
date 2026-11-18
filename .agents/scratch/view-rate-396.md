@@ -102,7 +102,8 @@ positive. Both rejected states ran once under a temporary hook, deleted before t
 
 ## Cut margin: the capped stall cuts
 
-The design expected 0 cuts on the real-UDP 1 s capped stall. MEASURED, it cuts once:
+The design expected 0 cuts on the real-UDP 1 s capped stall. MEASURED, it cuts once, and the
+owner accepted that cut; the expectation and its cause are stated in the motion contract.
 
 | 1 s capped stall | Law | Main |
 |---|---|---|
@@ -111,15 +112,8 @@ The design expected 0 cuts on the real-UDP 1 s capped stall. MEASURED, it cuts o
 | Headless: peak backlog at the cut gate | 248.13 ms | 218.83 ms |
 | Headless: cuts | 0 | 0 |
 
-The floor and the server's debt cap read the same `admission_s` (250 ms as shipped), so a capped
-stall's debt alone fills the floor. Main stays under it because it is already running at `1+v`
-when the debt lands. The law resumes at q, which the stall's one-second map segment has pulled to
-about a tick per second, and ramps at the bandwidth; the ramp costs 25 to 30 ms of backlog
-(MEASURED +24.7 ms over UDP, +29.3 ms headless), the design's predicted 20–25 ms. Over UDP that
-crosses the gate. This is the law, not the implementation: the release state and omega are the
-design's. Not taken here, each a change to a settled decision or to data: a floor above the
-admission cap (`view_cut_s` above `admission_s`), a faster release state, or accepting one cut
-after a capped stall.
+The ramp costs +24.7 ms over UDP and +29.3 ms headless (MEASURED), against the design's predicted
+20–25 ms. The law, `view_cut_s` and the release state are unchanged.
 
 ## Stall and spike re-measurements
 
@@ -162,14 +156,29 @@ failures measured with its own rounded cursor. No mutant here breaks
 clamps, which no candidate changes. `irregular_production_coverage_observations` prints the
 coverage table and asserts only the class invariants.
 
-The released-stall fixture is 0.8 of the continuity floor (200 ms as shipped), so a lower floor
-keeps it a paced backlog rather than a correct cut. `assets/net_timing.ron` refuses `view_rate`
-outside `(0, 1)` at load, naming the file and the fix; `view_rate_outside_zero_to_one_is_refused_at_load`
-covers 1, 1.5, 0, -0.2, NaN and infinity and loads `1 - EPSILON`.
+Fixtures follow the timing data they depend on. The released-stall fixture is 0.8 of the
+continuity floor (200 ms as shipped), and the stall fixture resumes production at the end of
+the silence when the cap admits no whole tick. The hold-flag proof places its newest tick from
+the floor, so its forced cut stays a cut under any floor, and sizes its rising-delay frame as
+`T / (2 - v)`, which keeps the target short of the newest tick and the request past it at any
+`v` in `(0, 1)`. `assets/net_timing.ron` refuses `view_rate` outside `(0, 1)` at load, naming the
+file, the field and the fix; `view_rate_outside_zero_to_one_is_refused_at_load` covers 1, 1.5,
+0, -0.2, NaN and infinity and loads `1 - EPSILON`.
+
+Stamps are outside input. A positive frame-start interval too short for u32::MAX ticks times T
+over it to stay finite is refused at admission as `StreamRefusal::Interval`, through the same
+visible match close as an out-of-order stamp, so the stream rate is finite by construction.
+`a_stamp_interval_too_short_to_time_is_refused_before_pacing` uses the review's counterexample:
+stamps 0, 0 and the smallest positive f64. MEASURED once with the check disabled under a
+temporary hook, since deleted: the third stamp is admitted, q is 1.2 on the first frame and NaN
+on the second, and `requested.min(newest)` moves the cursor from tick 2 to the newest tick 3 in
+one frame, unpaced and not held; the test fails at its refusal assertion. The hold-flag proof
+also ran once at v of 0.01, 0.1, 0.9 and 0.999 and at floors of T, 0.6 s and 1 s, and passed.
 
 ## Validation
 
 All compiling commands ran through `scripts/serial-cargo` with `--features dev_ui,bitprobe` and
 `OVERMATCH_UNATTENDED=1 OVERMATCH_MUTE=1`; no window or capture was opened. After the merge of
-`main`: `net::protocol` passed, `cargo fmt --all --check`, CI clippy and the server build passed,
-and the full library suite passed.
+`main` and again after the review fixes: `cargo fmt --all --check`, CI clippy, the server-only
+build, the targeted `net::` and `tests::doc_citations` tests (including `net::protocol`) and the
+full library suite passed.

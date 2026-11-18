@@ -101,15 +101,19 @@ fn stall(at_s: f64, pause_s: f64, admission_s: f64) -> impl Fn(u32) -> f64 {
     let first = (at_s / tick_s()).ceil() as u32;
     let debt = (pause_s.min(admission_s) / tick_s()).floor() as u32;
     let compute_s = 0.001;
+    // Regular production resumes a tick after the last debt tick, or ends the silence when the
+    // cap admits no whole tick.
+    let resumed_s = match debt.checked_sub(1) {
+        Some(last) => at_s + pause_s + f64::from(last) * compute_s + tick_s(),
+        None => at_s + pause_s,
+    };
     move |k| {
         if k < first {
             regular(k)
         } else if k < first + debt {
             at_s + pause_s + f64::from(k - first) * compute_s
         } else {
-            at_s + pause_s
-                + f64::from(debt - 1) * compute_s
-                + f64::from(k + 1 - first - debt) * tick_s()
+            resumed_s + f64::from(k - first - debt) * tick_s()
         }
     }
 }
@@ -655,38 +659,43 @@ fn playback_acceleration_stays_within_the_derived_law() {
 #[test]
 fn hold_flags_exactly_requests_past_the_newest_tick() {
     let timing = Timing::shipped();
-    let (t, w) = (tick_s(), timing.view_window_s);
+    let (t, w, v) = (tick_s(), timing.view_window_s, timing.view_rate);
     let advance = |clock: &mut ViewClock, now_s: f64, dt_s: f64| {
         clock.advance(now_s, dt_s, t, &timing, timing.admission_s)
     };
     // Fixture: binary multiples of T place the target exactly. Ticks complete with lateness
     // 2.5 T; tick 1, when `first_x` is given, sets a higher maximum and expires after frame 1.
+    // The newest tick lies far enough past tick 2 that a target half a tick short of it is a
+    // backlog above the continuity floor; tick 3 completes only when a case sends it.
+    let top = (timing.view_cut_s.max(timing.admission_s) / t).ceil() as u32 + 4;
+    let newest = f64::from(top);
     let cut_below_newest = |first_x: f64| {
         let mut clock = ViewClock::default();
-        let (now0, now1) = (2.0 * t + t + first_x, 39.5 * t + t + first_x);
-        clock.sample(Tick(1), stamp(t), now1 - w, t + first_x);
-        clock.sample(Tick(2), stamp(2.0 * t), now0, 2.0 * t + 2.5 * t);
+        let (now0, now1) = (2.0 * t + t + first_x, (newest - 0.5) * t + t + first_x);
+        clock.sample(Tick(1), stamp(t), now1 - w, t + first_x, t);
+        clock.sample(Tick(2), stamp(2.0 * t), now0, 2.0 * t + 2.5 * t, t);
         advance(&mut clock, now0, t);
-        for tick in (3..=40).filter(|&tick| tick != 35) {
+        for tick in 4..=top {
             let s = f64::from(tick) * t;
-            clock.sample(Tick(tick), stamp(s), now1, s + 2.5 * t);
+            clock.sample(Tick(tick), stamp(s), now1, s + 2.5 * t, t);
         }
         let cut = advance(&mut clock, now1, now1 - now0).expect("the backlog exceeds the budget");
-        assert_eq!(number(cut.to), 39.5);
+        assert_eq!(number(cut.to), newest - 0.5);
         assert!(!clock.held);
         (clock, now1)
     };
-    // Falling delay: tick 1's lateness 3 T expires, so the delay falls by v dt to 3.9 T and the
-    // target point reaches 40.1 T; the whole half-tick request completes onto tick 40.
+    // Falling delay: tick 1's lateness 3 T expires, so the delay falls by v dt from 4 T and the
+    // target point passes the newest tick by v / 2 of a tick; the stream rate is 1, so the whole
+    // half-tick request completes exactly onto it.
     let (mut clock, now1) = cut_below_newest(3.0 * t);
     let now2 = now1 + 0.5 * t;
     clock.expire(now2, w);
     advance(&mut clock, now2, 0.5 * t);
     assert!(
-        now2 - clock.delta_s.unwrap() > 40.0 * t,
+        now2 - clock.delta_s.unwrap() > newest * t,
         "the target clamps to the newest tick"
     );
-    assert_eq!(clock.now(), Some(Tick(40).into()));
+    assert_eq!(clock.now(), Some(Tick(top).into()));
     assert!(
         !clock.held,
         "a completed request onto a clamped target is not held"
@@ -698,18 +707,22 @@ fn hold_flags_exactly_requests_past_the_newest_tick() {
         clock.expire(now, w);
         advance(&mut clock, now, frame_s());
         assert!(clock.held, "a silent stream holds every frame");
-        assert_eq!(clock.now(), Some(Tick(40).into()));
+        assert_eq!(clock.now(), Some(Tick(top).into()));
     }
-    // Rising delay: tick 35 completes late, raising the target by T, while 0.6 T passes.
+    // Rising delay: tick 3 completes late, raising the delay target by T. DERIVED: over a frame
+    // h = T / (2 - v) the delay rises by v h, so the target moves h (1 - v) < T / 2 and stays
+    // short of the newest tick. The cursor, leading by v h, gives back v h (1 - (1 + x) e^-x)
+    // of its advance h, x = omega h < 1 / kappa, which is under v h / 2 = h - T / 2: it passes.
+    let h = t / (2.0 - v);
     let (mut clock, now1) = cut_below_newest(2.5 * t);
-    clock.sample(Tick(35), stamp(35.0 * t), now1, 35.0 * t + 3.5 * t);
-    let now2 = now1 + 0.6 * t;
-    advance(&mut clock, now2, 0.6 * t);
+    clock.sample(Tick(3), stamp(3.0 * t), now1, 3.0 * t + 3.5 * t, t);
+    let now2 = now1 + h;
+    advance(&mut clock, now2, h);
     assert!(
-        clock.inverse(now2 - clock.delta_s.unwrap()).unwrap() < 40.0,
+        clock.inverse(now2 - clock.delta_s.unwrap()).unwrap() < newest,
         "the target is behind the newest tick"
     );
-    assert_eq!(clock.now(), Some(Tick(40).into()));
+    assert_eq!(clock.now(), Some(Tick(top).into()));
     assert!(clock.held, "a request past the newest tick is held");
 }
 
@@ -734,7 +747,7 @@ fn a_released_hold_resumes_at_the_stream_rate_and_closes_its_backlog_at_the_slew
     let mut clock = ViewClock::default();
     for tick in 1..=8 {
         let s = f64::from(tick) * t;
-        clock.sample(Tick(tick), stamp(s), s + 2.5 * t, s + 2.5 * t);
+        clock.sample(Tick(tick), stamp(s), s + 2.5 * t, s + 2.5 * t, t);
         clock.advance(s + 2.5 * t, t, t, &timing, timing.admission_s);
     }
     let mut now = 10.5 * t;
@@ -748,7 +761,7 @@ fn a_released_hold_resumes_at_the_stream_rate_and_closes_its_backlog_at_the_slew
     }
     for tick in 9..=12 {
         let s = f64::from(tick) * t;
-        clock.sample(Tick(tick), stamp(s), now, s + 2.5 * t);
+        clock.sample(Tick(tick), stamp(s), now, s + 2.5 * t, t);
     }
     now += frame_s();
     let before = number(clock.now().unwrap());

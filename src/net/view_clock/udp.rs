@@ -304,7 +304,7 @@ fn server_stall_and_delay_spike_playback_observations() {
             .world()
             .resource::<Time<Real>>()
             .elapsed_secs_f64();
-        // Fixture: a 200 ms server computation, or a 500 ms downlink blackout.
+        // Fixture: a 200 ms or capped 1 s server computation, or a 500 ms downlink blackout.
         let mut last = pair.client.world().resource::<ViewClock>().now().unwrap();
         let mut holds = 0.0;
         let mut peak_delta = baseline;

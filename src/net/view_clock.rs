@@ -159,7 +159,7 @@ impl ViewClock {
         );
     }
 
-    fn complete(&mut self, checkpoint: RepliconTick, now_s: f64, previous_s: f64) {
+    fn complete(&mut self, checkpoint: RepliconTick, now_s: f64, previous_s: f64, tick_s: f64) {
         self.completion.completed_ticks += 1;
         let Some(arrival) = self.pending.remove(&checkpoint) else {
             // Initial reliable state, receipt overflow or a skipped stale stamp can leave no
@@ -177,24 +177,32 @@ impl ViewClock {
                 .max((now_s - arrival.seen_s) * 1e3);
         }
         let before = self.received;
-        self.sample(arrival.tick, arrival.stamp, now_s, previous_s);
+        self.sample(arrival.tick, arrival.stamp, now_s, previous_s, tick_s);
         self.completion.sampled_ticks += self.received - before;
     }
 
-    fn sample(&mut self, tick: Tick, stamp: TickStamp, now_s: f64, previous_s: f64) {
+    fn sample(&mut self, tick: Tick, stamp: TickStamp, now_s: f64, previous_s: f64, tick_s: f64) {
         let start = stamp.frame_start_s();
-        if self
+        let before = self.stamps.range(..tick).next_back().map(|(_, &s)| s);
+        let after = self
             .stamps
-            .range(..tick)
-            .next_back()
-            .is_some_and(|(_, before)| *before > start)
-            || self
-                .stamps
-                .range((std::ops::Bound::Excluded(tick), std::ops::Bound::Unbounded))
-                .next()
-                .is_some_and(|(_, after)| *after < start)
-        {
+            .range((std::ops::Bound::Excluded(tick), std::ops::Bound::Unbounded))
+            .next()
+            .map(|(_, &s)| s);
+        if before.is_some_and(|before| before > start) || after.is_some_and(|after| after < start) {
             self.refusal = Some(StreamRefusal::Order { tick });
+            return;
+        }
+        // Tick numbers are u32, so a span of the map holds at most u32::MAX ticks: a positive
+        // interval at least u32::MAX T / f64::MAX long keeps every slope between stamps finite.
+        // Equal stamps carry no time and bound no slope.
+        let untimed = |interval_s: f64| {
+            interval_s > 0.0 && (f64::from(u32::MAX) * tick_s / interval_s).is_infinite()
+        };
+        if before.is_some_and(|before| untimed(start - before))
+            || after.is_some_and(|after| untimed(after - start))
+        {
+            self.refusal = Some(StreamRefusal::Interval { tick });
             return;
         }
 
@@ -315,9 +323,9 @@ impl ViewClock {
         Some(low + fraction * (high - low))
     }
 
-    /// The map's tick at `time_s`, unquantized: only the public cursor rounds to U0F16. Clamp
-    /// the inverse to received facts. Equal frame stamps choose the latest tick; no time exists
-    /// between those samples. Missing stamps are bridged, never extrapolated.
+    /// The map's tick at `time_s`, clamped to received facts. Equal frame stamps choose the
+    /// latest tick; no time exists between those samples. Missing stamps are bridged, never
+    /// extrapolated.
     fn inverse(&self, time_s: f64) -> Option<f64> {
         let mut before: Option<(Tick, f64)> = None;
         for (&tick, &stamp) in &self.stamps {
@@ -362,7 +370,8 @@ impl ViewClock {
     /// The stream's rate at the target point, from map facts only: each advance of the point
     /// filters the map's mean slope over it at the pacing bandwidth, so a hold (no advance)
     /// freezes it and the release spans the gap with its mean slope. The first cursor frame
-    /// reads the slope across the retained map; equal end stamps read as the cap.
+    /// reads the slope across the retained map; equal end stamps read as the cap. Admission
+    /// keeps every slope between stamps finite (`ViewClock::sample`).
     fn learn(&mut self, point_s: f64, point: f64, tick_s: f64, v: f64) -> f64 {
         let rate = match self.stream {
             None => {
@@ -412,6 +421,8 @@ impl ViewClock {
             .zip(self.stamps.last_key_value())
             .map(|((_, first), (_, newest))| (first, newest))
             .expect("an applied delay has completed stamps");
+        // A target before the map, as at startup, is the oldest stamp: the stream rate reads no
+        // time the map does not hold.
         let point_s = desired_s.clamp(first_s, newest_s);
         let point = self
             .inverse(point_s)
@@ -546,6 +557,7 @@ fn capture_trace_tick(
 pub(super) enum StreamRefusal {
     Order { tick: Tick },
     Range { tick: Tick },
+    Interval { tick: Tick },
 }
 impl std::fmt::Display for StreamRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -558,6 +570,10 @@ impl std::fmt::Display for StreamRefusal {
                 f,
                 "server tick {tick:?} has an unrepresentable lateness spread; refusing the stream"
             ),
+            Self::Interval { tick } => write!(
+                f,
+                "server tick {tick:?} has a frame-start interval too short to time; refusing the stream"
+            ),
         }
     }
 }
@@ -569,8 +585,15 @@ pub(super) fn publish_weapon_clock(clock: Res<ViewClock>, mut weapon: ResMut<cra
     } // Waiting for a stamp pair cannot mature a countdown.
 }
 
+/// The two clocks a receipt is measured in: local Real time and the authority tick.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ReceiptClocks<'w> {
+    real: Res<'w, Time<Real>>,
+    tick: Res<'w, lightyear::core::tick::TickDuration>,
+}
+
 fn receive(
-    real: Res<Time<Real>>,
+    clocks: ReceiptClocks,
     timing: Res<Timing>,
     checkpoints: Res<ReplicationCheckpointMap>,
     mut storage: ResMut<ReplicationStorage>,
@@ -578,7 +601,7 @@ fn receive(
     mut gone: MessageWriter<super::matchmaking::ServerGone>,
     mut clock: ResMut<ViewClock>,
 ) {
-    let now = real.elapsed_secs_f64();
+    let now = clocks.real.elapsed_secs_f64();
     clock.frame += 1;
     clock.expire(now, timing.view_window_s);
     let received = storage.global.get_or_default::<ReceivedStamps>();
@@ -598,7 +621,12 @@ fn receive(
     // newest completed tick. Replicon's contains() assumes old ticks complete after 64 ticks;
     // these events instead require every message of that particular tick to have been applied.
     for event in completed.read() {
-        clock.complete(event.tick, now, now - real.delta_secs_f64());
+        clock.complete(
+            event.tick,
+            now,
+            now - clocks.real.delta_secs_f64(),
+            clocks.tick.0.as_secs_f64(),
+        );
     }
     if let Some(refusal) = clock.refusal.take() {
         warn!("client: {refusal}");
@@ -815,12 +843,13 @@ mod tests {
         let tick_s = super::super::server::TICK.as_secs_f64();
         let mut clock = ViewClock::default();
         // Fixture: the middle stamp is lost; epoch offset is unchanged.
-        clock.sample(Tick(1), stamp(0.0), 0.5, 0.25);
+        clock.sample(Tick(1), stamp(0.0), 0.5, 0.25, tick_s);
         clock.sample(
             Tick(3),
             stamp(2.0 * tick_s),
             0.5 + 2.0 * tick_s,
             0.25 + 2.0 * tick_s,
+            tick_s,
         );
         assert_eq!(clock.intervals(), [2.0 * tick_s]);
         assert_eq!(
@@ -845,6 +874,7 @@ mod tests {
                 stamp(start),
                 seen * timing.view_window_s,
                 start + x,
+                super::super::server::TICK.as_secs_f64(),
             );
         }
         assert_eq!(clock.target(&mut clock.intervals()), Some(8.125));
@@ -871,7 +901,12 @@ mod tests {
                 f64::from(tick),
             );
             if tracker.confirm(checkpoint, 1) {
-                clock.complete(checkpoint, f64::from(tick), f64::from(tick));
+                clock.complete(
+                    checkpoint,
+                    f64::from(tick),
+                    f64::from(tick),
+                    super::super::server::TICK.as_secs_f64(),
+                );
             }
         }
         assert!(
@@ -904,7 +939,7 @@ mod tests {
             let s = f64::from(tick) * tick_s;
             // Fixture: independently arriving completed samples, then an increased link bound.
             let x = if tick > change_at { 0.100 } else { 0.040 };
-            clock.sample(Tick(tick), stamp(s), s + x + tick_s, s + x);
+            clock.sample(Tick(tick), stamp(s), s + x + tick_s, s + x, tick_s);
             clock.expire(s + x + tick_s, timing.view_window_s);
             let cut = clock.advance(s + x + tick_s, tick_s, tick_s, &timing, cap_s);
             assert!(cut.is_none(), "a bounded delay change is paced, not cut");
@@ -945,7 +980,13 @@ mod tests {
             let mut clock = ViewClock::default();
             for tick in 1..=4 {
                 let s = f64::from(tick) * tick_s;
-                clock.sample(Tick(tick), stamp(s), s + offset + 0.040, s + offset + 0.030);
+                clock.sample(
+                    Tick(tick),
+                    stamp(s),
+                    s + offset + 0.040,
+                    s + offset + 0.030,
+                    tick_s,
+                );
                 clock.advance(s + offset + 0.040, tick_s, tick_s, &timing, admission_s);
             }
             let before = clock.now().unwrap();
@@ -968,7 +1009,13 @@ mod tests {
             assert_eq!(clock.now().unwrap(), TickInstant::from(Tick(4)));
             for tick in 1000..1004 {
                 let s = f64::from(tick) * tick_s;
-                clock.sample(Tick(tick), stamp(s), s + offset + 0.040, s + offset + 0.030);
+                clock.sample(
+                    Tick(tick),
+                    stamp(s),
+                    s + offset + 0.040,
+                    s + offset + 0.030,
+                    tick_s,
+                );
             }
             let s = 1003.0 * tick_s;
             let cut = clock
@@ -994,18 +1041,45 @@ mod tests {
     /// stream before division/interpolation; loss and reordering of a consistent stream are legal.
     #[test]
     fn out_of_order_receipts_are_valid_but_reversed_time_is_refused() {
+        let tick_s = super::super::server::TICK.as_secs_f64();
         let mut clock = ViewClock::default();
         for tick in [1, 3, 2] {
-            clock.sample(Tick(tick), stamp(f64::from(tick)), 4.0, 3.0);
+            clock.sample(Tick(tick), stamp(f64::from(tick)), 4.0, 3.0, tick_s);
         }
         assert!(clock.refusal.is_none());
         assert_eq!(clock.inverse(2.5), Some(2.5));
-        clock.sample(Tick(4), stamp(0.0), 5.0, 4.0);
+        clock.sample(Tick(4), stamp(0.0), 5.0, 4.0, tick_s);
         assert!(matches!(
             clock.refusal,
             Some(StreamRefusal::Order { tick: Tick(4) })
         ));
         assert_eq!(clock.newest(), Some(Tick(3)));
+    }
+
+    /// The stream rate divides ticks by stamp intervals, and the pacing loop relies on it being
+    /// finite. Equal stamps carry no time and are legal; a peer's positive interval too short for
+    /// that division is refused at admission, before any rate reads it.
+    #[test]
+    fn a_stamp_interval_too_short_to_time_is_refused_before_pacing() {
+        let timing = Timing::shipped();
+        let tick_s = super::super::server::TICK.as_secs_f64();
+        let mut clock = ViewClock::default();
+        // Fixture: two equal stamps, then the smallest positive one, all individually valid,
+        // each with lateness 0.5 s. Admitted, the third would let the target point advance by
+        // that interval: an infinite slope at a zero gain, a NaN stream rate.
+        for (tick, start) in [(1, 0.0), (2, 0.0), (3, f64::from_bits(1))] {
+            clock.sample(Tick(tick), stamp(start), 1.0, start + 0.5, tick_s);
+        }
+        assert!(matches!(
+            clock.refusal,
+            Some(StreamRefusal::Interval { tick: Tick(3) })
+        ));
+        assert_eq!(clock.newest(), Some(Tick(2)));
+        for now_s in [0.5, 0.5 + tick_s] {
+            clock.advance(now_s, tick_s, tick_s, &timing, timing.admission_s);
+        }
+        let stream = clock.stream.expect("the cursor has a stream rate");
+        assert!(stream.rate.is_finite() && clock.rate.is_finite());
     }
     /// A replacement authority may start at an earlier tick. The shipped installer must clear
     /// both the view epoch on disconnect and queued old receipts on connect, without an arming latch.
@@ -1063,7 +1137,7 @@ mod tests {
                 let x = 20.0 + 0.040 + server * epsilon;
                 let now = server + x + tick_s;
                 clock.expire(now, timing.view_window_s);
-                clock.sample(Tick(tick), stamp(server), now, server + x);
+                clock.sample(Tick(tick), stamp(server), now, server + x, tick_s);
                 clock.advance(
                     now,
                     tick_s * (1.0 + epsilon),
@@ -1100,6 +1174,7 @@ mod tests {
                 TickStamp::new(start, work as f32).unwrap(),
                 start + work + down,
                 start + work + down - frame,
+                tick,
             );
         }
         let target = clock.target(&mut clock.intervals()).unwrap();
@@ -1116,6 +1191,7 @@ mod tests {
             TickStamp::new(9.0 * tick, 1.0).unwrap(),
             9.0 * tick + 1.0 + down,
             9.0 * tick + 1.0 + down - frame,
+            tick,
         );
         assert!(
             (clock.target(&mut clock.intervals()).unwrap() - (tick + 1.0 + down - frame)).abs()
