@@ -30,6 +30,7 @@
 //! budgeted sag, over a self-healing filter memory.
 
 use super::*;
+use avian3d::dynamics::solver::schedule::SubstepSolverSystems;
 
 use crate::track::forces::{
     ForceParams, SideInput, SideReport, SideState, contact_side, phase_decompose,
@@ -111,7 +112,6 @@ pub(super) fn apply_belt_support_field(
                 &avian3d::prelude::ComputedAngularInertia,
                 &avian3d::prelude::ComputedCenterOfMass,
             ),
-            &'static mut crate::track::sim::TrackDrive,
             &'static mut crate::track::sim::TrackRise,
         ),
         With<Hull>,
@@ -120,17 +120,16 @@ pub(super) fn apply_belt_support_field(
     raw: Res<RawDriveInput>,
     mut shaped: ResMut<ShapedDrive>,
     (time, gravity): (Res<Time>, Res<avian3d::prelude::Gravity>),
-    mut belt: ResMut<BeltSpeed>,
-    mut phase: ResMut<BeltPhase>,
+    belt: Res<BeltSpeed>,
+    phase: Res<BeltPhase>,
     mut contacts: ResMut<BeltContacts>,
     mut dynamics: ResMut<SideDynamics>,
     mut grip: ResMut<BeltGrip>,
     mut grip_elements: ResMut<BeltGripElements>,
-    // The transmission's shared parameters stay grouped.
     transmission_params: (
         Res<RigTransmission>,
         ResMut<TransState>,
-        ResMut<TransTelemetry>,
+        ResMut<PendingDrivetrain>,
     ),
     rig: (Res<RigGeom>, Res<RigSpec>, Res<EnvelopeLaw>),
     rubble: RubbleQuery,
@@ -147,11 +146,11 @@ pub(super) fn apply_belt_support_field(
         ResMut<super::rubble::RubbleTouches>,
     ),
 ) {
-    let (transmission, mut trans_state, mut telemetry) = transmission_params;
+    let (transmission, mut trans_state, mut pending) = transmission_params;
     let (geom, rig_spec, envelope) = rig;
-    let (hull_entity, hull_pos, hull_rot, (mut forces, mass, inertia, com), mut motion, mut rise) =
-        hull.single_mut()
-            .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
+    let (hull_entity, hull_pos, hull_rot, (mut forces, mass, inertia, com), mut rise) = hull
+        .single_mut()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let affine = bevy::math::Affine3A::from_rotation_translation(hull_rot.0, hull_pos.0);
     // The game adapter's hull body (`track::sim::apply_track_forces`).
     let hull_body = crate::track::sim::HullBody {
@@ -257,11 +256,15 @@ pub(super) fn apply_belt_support_field(
     let (reactions, reaction_slopes) =
         crate::track::sim::belt_reactions(&reports, &hull_body, hull_pos.0, dt);
 
-    // Phase 2 — ONE joint drivetrain solve on the vehicle's declared tables.
-    let tr = transmission::step(
+    // Orders stay constant while the physics substeps advance the mechanical state.
+    let mut tick = transmission::DriveTick::new(
         &construction,
         &transmission.0,
-        &mut trans_state.0,
+        transmission::DriveState {
+            transmission: trans_state.0,
+            speeds: [belt.get(Side::Left), belt.get(Side::Right)],
+            phases: [phase.get(Side::Left), phase.get(Side::Right)],
+        },
         &TransmissionInput {
             supply: transmission::DriveSupply::WHOLE,
             intent: crate::track::drive::DriveIntent::Axes(raw.0),
@@ -275,10 +278,9 @@ pub(super) fn apply_belt_support_field(
             dt,
         },
     );
-    trans_state.1.drove(&tr);
-    telemetry.0 = Some(tr);
+    tick.warm = std::mem::take(&mut pending.1);
+    pending.0 = Some(tick);
 
-    // Phase 3 — apply forces in per-side report order, commit the state.
     touches.0.clear();
     for (si, report) in reports.into_iter().enumerate() {
         let side = Side::ALL[si];
@@ -308,23 +310,111 @@ pub(super) fn apply_belt_support_field(
                 tangential_force: c.tangential_force(),
             });
         }
-        *dynamics.engine.get_mut(side) = tr.forces[si];
         *dynamics.reaction.get_mut(side) = report.belt_reaction;
         *grip.0.get_mut(side) = report.state.grip;
         rise.0[si] = report.rise;
-        // Phase advects at the PRE-update speed (the belt advects before it re-integrates).
-        let pre = belt.get(side);
-        let advected = phase.get(side) + f64::from(pre * dt);
-        let speed = if hard_reactions[si].is_some() && tr.held[si] {
-            0.0
-        } else {
-            tr.next_speeds[si]
-        };
-        belt.set(side, speed);
-        phase.set(side, advected);
-        motion.sides[si] = crate::track::sim::TrackDriveSide {
-            speed,
-            phase: advected,
+    }
+}
+
+/// Empty until the first sampled pass; built with the rig's other simulation storage.
+#[derive(Resource, Default)]
+pub(super) struct PendingDrivetrain(Option<transmission::DriveTick>, transmission::WarmStart);
+
+pub(super) fn drivetrain_plugin(app: &mut App) {
+    use avian3d::prelude::*;
+    app.init_resource::<PendingDrivetrain>()
+        .init_resource::<crate::track::stop_contacts::BeltConstraints>()
+        .add_systems(
+            PhysicsSchedule,
+            crate::track::stop_contacts::prepare_belt_surfaces.in_set(SolverSystems::PreSubstep),
+        )
+        .add_systems(
+            SubstepSchedule,
+            (
+                advance_drivetrain,
+                update_belt_surfaces.ambiguous_with(crate::avian_ext::solver_cost::VisitCounts),
+            )
+                .chain()
+                .after(SubstepSolverSystems::WarmStart)
+                .before(SubstepSolverSystems::SolveConstraints)
+                .run_if(sim_running)
+                .run_if(resource_exists::<RigGeom>),
+        )
+        .add_systems(
+            PhysicsSchedule,
+            commit_drivetrain
+                .in_set(SolverSystems::PostSubstep)
+                .run_if(sim_running)
+                .run_if(resource_exists::<RigGeom>),
+        );
+}
+
+fn advance_drivetrain(
+    time: Res<Time<avian3d::prelude::Substeps>>,
+    rig: Res<RigSpec>,
+    transmission: Res<RigTransmission>,
+    mut pending: ResMut<PendingDrivetrain>,
+) {
+    if let Some(tick) = pending.0.as_mut() {
+        // No sample before the first fixed driving pass.
+        tick.advance(
+            &transmission::DriveConstruction::new(rig.grip, rig.belt_inertia),
+            &transmission.0,
+            time.delta_secs(),
+        );
+    }
+}
+
+fn update_belt_surfaces(
+    mut graph: ResMut<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>,
+    belts: Res<crate::track::stop_contacts::BeltConstraints>,
+    pending: Res<PendingDrivetrain>,
+    hull: Query<&crate::track::sim::TrackDrive, With<Hull>>,
+) {
+    belts.update(&mut graph, |body| {
+        let motion = hull
+            .get(body)
+            .expect("every sandbox belt face belongs to its one hull");
+        pending
+            .0
+            .as_ref()
+            .map_or_else(|| motion.sides.map(|s| s.speed), |tick| tick.state.speeds)
+    });
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sandbox commits its one owner's mechanical state and telemetry"
+)]
+fn commit_drivetrain(
+    substeps: Res<avian3d::prelude::SubstepCount>,
+    mut pending: ResMut<PendingDrivetrain>,
+    mut state: ResMut<TransState>,
+    mut telemetry: ResMut<TransTelemetry>,
+    mut belt: ResMut<BeltSpeed>,
+    mut phase: ResMut<BeltPhase>,
+    mut dynamics: ResMut<SideDynamics>,
+    mut hull: Query<&mut crate::track::sim::TrackDrive, With<Hull>>,
+) {
+    let Some(tick) = pending.0.take() else {
+        return;
+    }; // No sample before the first fixed pass.
+    let report = tick.report(substeps.0);
+    pending.1 = tick.warm;
+    state.0 = tick.state.transmission;
+    state.1.drove(&report);
+    telemetry.0 = Some(report);
+    let mut motion = hull
+        .single_mut()
+        .expect("the built sandbox has exactly one hull");
+    for side in Side::ALL {
+        let i = side.index();
+        belt.set(side, tick.state.speeds[i]);
+        phase.set(side, tick.state.phases[i]);
+        *dynamics.engine.get_mut(side) = report.forces[i];
+        motion.sides[i] = crate::track::sim::TrackDriveSide {
+            speed: tick.state.speeds[i],
+            phase: tick.state.phases[i],
         };
     }
 }

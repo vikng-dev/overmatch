@@ -716,10 +716,11 @@ impl SimulateInput {
         };
     }
 
-    /// [`Drive::Park`]'s stop, past its run: the service brake (full reverse demand on a forward
-    /// hull) until the hull is under the transmission's parked speed, then nothing for good.
-    /// The replicated speed trails the hull, so the release lands after the stop; the
-    /// transmission's stop-to-reverse pause keeps that late release from reversing.
+    /// After the run, hold reverse demand on a forward hull until replicated speed reads a
+    /// stop below `assets/driving/actuation.ron::park_engage_speed`, then release permanently.
+    /// If the hull is still above that speed after its belts have been held for
+    /// `assets/driving/actuation.ron::reversal_hold_s`, the gearbox selects reverse and the
+    /// same demand drives backward, exactly as a player holding reverse would see.
     fn stop(&mut self, t: u32, speed: Option<f32>, command: &mut TankCommand) {
         let Drive::Park { throttle_ticks } = self.drive else {
             return;

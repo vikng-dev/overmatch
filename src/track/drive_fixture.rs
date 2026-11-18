@@ -93,7 +93,52 @@ pub(crate) fn step(
     state: &mut TransmissionState,
     input: &TransmissionInput,
 ) -> TransmissionReport {
-    super::transmission::step(&construction(fp), tp, state, input)
+    let fp = construction(fp);
+    let orders = super::transmission::prepare_orders(&fp, tp, state, input);
+    let mut mechanical = super::transmission::DriveState {
+        transmission: *state,
+        speeds: input.speeds,
+        phases: [0.0; 2],
+    };
+    let report = super::transmission::advance(
+        &fp,
+        tp,
+        &mut mechanical,
+        &orders,
+        &mut super::block::WarmStart::default(),
+        input.dt,
+    );
+    *state = mechanical.transmission;
+    report
+}
+
+/// One Driver decision and the physics clock's substep call sequence, for tick-level invariants.
+pub(crate) fn substep_tick(
+    fp: &FixtureConstruction,
+    tp: &TransmissionParams,
+    state: &mut TransmissionState,
+    input: &TransmissionInput,
+) -> TransmissionReport {
+    let fp = construction(fp);
+    let mut tick = super::transmission::DriveTick::new(
+        &fp,
+        tp,
+        super::transmission::DriveState {
+            transmission: *state,
+            speeds: input.speeds,
+            phases: [0.0; 2],
+        },
+        input,
+    );
+    let count = app_substeps();
+    let h = std::time::Duration::from_secs_f32(input.dt)
+        .div_f64(f64::from(count))
+        .as_secs_f32();
+    for _ in 0..count {
+        tick.advance(&fp, tp, h);
+    }
+    *state = tick.state.transmission;
+    tick.report(count)
 }
 
 /// Fixture: a second torque curve and ladder, independent of the shipped vehicle.
@@ -367,4 +412,15 @@ pub(crate) fn affordable_launch(
                 ClutchState::Slip,
             ) >= felt(inp).resistance
         })
+}
+
+/// Arithmetic fixtures read the same physics plugin's resource as the shipped app.
+pub(crate) fn app_substeps() -> u32 {
+    use bevy::prelude::*;
+    static COUNT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, crate::offline_physics()));
+        app.world().resource::<avian3d::prelude::SubstepCount>().0
+    })
 }

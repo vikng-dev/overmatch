@@ -31,9 +31,9 @@ run's datum is the rest outer face, so a tank carried on pieces alone rides lowe
   every gripping patch sliding, or a sampled support that can move. The drivetrain is no part of
   the rest: drive demand wakes a sleeping tank within its tick, and without it the tank's
   transmission keeps stepping on its last pass's belt loads with the belts at rest; a step that
-  holds both belts and slides no brake commits if the tank still rests once the tick's wakes have
-  applied, so a repaired engine spools up under the resting hull, and any other step wakes the
-  tank (`track::sim::wake_driven_tanks`, `track::sim::settle_rest`). A support that goes, is
+  holds both belts and slides no brake commits once after the physics substeps, even after a late
+  island wake, so a repaired engine spools up under the resting hull; any other step wakes the
+  tank (`track::sim::wake_driven_tanks`, `track::sim::commit_drivetrains`). A support that goes, is
   disabled, turns sensor or changes wakes it as it wakes a sleeping piece (`debris`); a round's
   impulse and the tank's own shot wake it through the engine's waking impulse
   (`track::sim::apply_explicit_impulse`), and a moving body or a falling piece through its island

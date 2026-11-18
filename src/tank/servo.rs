@@ -371,7 +371,8 @@ pub(crate) fn restore_servo_truth(
 }
 
 /// Each tank integrates its own slots from its own crew, modules and crank and this update's
-/// commands, and writes only its own integrator, so tanks evaluate on the compute pool (Bevy
+/// commands. Powered traverse reads the previous tick's EngineRpm: crank publication follows
+/// driving physics, after this fixed-update reader. Tanks write only their own integrators (Bevy
 /// 0.20.1's `QueryParIter`); a tank's slots step in slot order.
 pub(crate) fn drive_servos(
     time: Res<Time>,

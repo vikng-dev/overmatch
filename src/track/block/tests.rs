@@ -510,7 +510,7 @@ fn combination_faces_have_checker_certified_optima_including_interior_sliding() 
         if case % 7 == 0 {
             limits[0].coefficients = vec![1.0, 0.0];
         }
-        let result = solve_limited(&speeds, &rows, &limits);
+        let result = solve_limited(&speeds, &rows, &limits, &mut WarmStart::default());
         certify_polygon(&speeds, &rows, &limits, &result);
     }
     // Fixture: unrestricted optimum (-1,-1); the aggregate allows only p0+p1 >= -1.
@@ -524,7 +524,7 @@ fn combination_faces_have_checker_certified_optima_including_interior_sliding() 
             upper: 1.0,
         },
     }];
-    let result = solve_limited(&speeds, &rows, &limits);
+    let result = solve_limited(&speeds, &rows, &limits, &mut WarmStart::default());
     certify_polygon(&speeds, &rows, &limits, &result);
     assert_eq!(result.speeds, [0.5, 0.5]);
 }
@@ -542,7 +542,7 @@ fn a_combination_can_resolve_redundant_impulses_without_duplicate_speed_snaps() 
             upper: 0.0,
         },
     }];
-    let result = solve_limited(&speeds, &rows, &limits);
+    let result = solve_limited(&speeds, &rows, &limits, &mut WarmStart::default());
     certify_polygon(&speeds, &rows, &limits, &result);
     assert_eq!(result.speeds, [0.0]);
 }
@@ -561,7 +561,7 @@ fn overflowing_combination_system_is_a_visible_bug() {
             upper: 1.0,
         },
     }];
-    solve_limited(&speeds, &rows, &limits);
+    solve_limited(&speeds, &rows, &limits, &mut WarmStart::default());
 }
 
 /// The same constrained optimum must survive changes of row-impulse units. A rank decision
@@ -582,7 +582,7 @@ fn combination_optimality_is_invariant_under_row_impulse_units() {
                 upper: 1.0,
             },
         }];
-        let result = solve_limited(&speeds, &rows, &limits);
+        let result = solve_limited(&speeds, &rows, &limits, &mut WarmStart::default());
         certify_polygon(&speeds, &rows, &limits, &result);
         // Resolution: f64 elimination and inverse changes of units.
         assert!(result.speeds.iter().all(|v| (v - 0.5).abs() < 1e-10));
@@ -598,7 +598,7 @@ fn combination_optimality_is_invariant_under_row_impulse_units() {
             upper: 1.0,
         },
     }];
-    let result = solve_limited(&speeds[..1], &rows, &limits);
+    let result = solve_limited(&speeds[..1], &rows, &limits, &mut WarmStart::default());
     certify_polygon(&speeds[..1], &rows, &limits, &result);
 }
 
@@ -615,7 +615,7 @@ fn singleton_impulses_do_not_create_a_physical_equality_or_roundoff_force() {
             upper: 1.0,
         },
     }];
-    let result = solve_limited(&speeds, &rows, &limits);
+    let result = solve_limited(&speeds, &rows, &limits, &mut WarmStart::default());
     certify_polygon(&speeds, &rows, &limits, &result);
     assert_eq!(
         result.rows.iter().map(|r| r.impulse).collect::<Vec<_>>(),
@@ -640,7 +640,7 @@ fn combination_units_cannot_accept_the_wrong_optimality_sign() {
                     upper: scale,
                 },
             }];
-            let result = solve_limited(&speeds, &rows, &limits);
+            let result = solve_limited(&speeds, &rows, &limits, &mut WarmStart::default());
             certify_polygon(&speeds, &rows, &limits, &result);
             // Resolution: independently derived symmetric optimum, f64 accumulation allowance.
             assert!(result.speeds.iter().all(|v| (v - sign * 0.5).abs() < 1e-10));
@@ -817,7 +817,7 @@ fn n_row_reference_covers_dynamic_restart_and_the_production_topology() {
                 upper: 0.4,
             },
         }];
-        let result = solve_limited(&speeds, &rows, &limits);
+        let result = solve_limited(&speeds, &rows, &limits, &mut WarmStart::default());
         let (reference, dynamic) = reference_limited(&speeds, &rows, &limits);
         for (a, b) in result.speeds.iter().zip(reference) {
             assert!((a - b).abs() < 1e-7, "constrained speed differs: {a} {b}");
@@ -870,4 +870,37 @@ fn near_dependent_construction_is_refused_while_exact_dependencies_are_admitted(
         &[[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
         0
     ));
+}
+
+/// Repeated owner solves rely on reusing the accepted faces, while changed row identities
+/// must start without history. Fixture: one saturated row whose optimum is the lower bound.
+#[test]
+#[cfg(feature = "bitprobe")]
+fn accepted_faces_warm_the_next_solve_until_the_layout_changes() {
+    let speeds = [Speed {
+        value: 4.0,
+        inertia: 2.0,
+        free_impulse: 0.0,
+    }];
+    let mut rows = [Row {
+        jacobian: vec![1.0],
+        target: 0.0,
+        bounds: Bounds {
+            lower: -1.0,
+            upper: 1.0,
+        },
+        dynamic: None,
+    }];
+    let mut warm = WarmStart::default();
+    let cold = solve_limited(&speeds, &rows, &[], &mut warm);
+    let hot = solve_limited(&speeds, &rows, &[], &mut warm);
+    assert_eq!(hot.assignments_tried, 1);
+    assert_eq!(hot.speeds, cold.speeds);
+    // Fixture: a changed row with the same winning face. Reusing history would take one trial,
+    // while a fresh Interior seed must reject its over-capacity impulse before finding that face.
+    rows[0].jacobian[0] = 2.0;
+    let changed = solve_limited(&speeds, &rows, &[], &mut warm);
+    let fresh = solve_limited(&speeds, &rows, &[], &mut WarmStart::default());
+    assert_eq!(changed.assignments_tried, fresh.assignments_tried);
+    assert_eq!(changed.speeds, fresh.speeds);
 }

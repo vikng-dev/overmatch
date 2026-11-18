@@ -520,6 +520,10 @@ const CASES: &[Case] = &[
 
 fn run(case: &Case, tag: &str) {
     let mut bed = (case.bed)();
+    println!(
+        "BELTLAUNCH {}",
+        json!({"tag":tag,"label":case.label,"state":format!("{:?}",bed.app.world().get::<crate::track::sim::TankTransmission>(bed.tank).unwrap().0),"sense":format!("{:?}",bed.app.world().get::<crate::track::driver::DriverSense>(bed.tank).unwrap().reading),"probe":format!("{:?}",bed.app.world().get::<crate::track::sim::TrackGripEffect>(bed.tank).unwrap().transmission_probe)})
+    );
     let (mut ticks, mut modes, mut pieces) = (Vec::new(), Value::Null, BTreeMap::new());
     for tick in 0..case.seconds * TICKS {
         bed.tick(case.throttle, case.steer);
