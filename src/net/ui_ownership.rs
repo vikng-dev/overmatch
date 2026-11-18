@@ -208,6 +208,7 @@ fn client_ui_app() -> App {
     .init_asset::<crate::spec::TankSpec>();
     // The one player view `camera::spawn_camera` declares at startup, which the HUD reprojects through.
     app.world_mut().spawn(crate::view::PlayerView);
+    super::client::init_connection_state(&mut app);
     app.add_plugins((crate::ui_font::plugin, crate::flow::plugin))
         .add_plugins((
             // Local notch feedback belongs to device gather, as in `NetClientPlugin`.

@@ -334,3 +334,23 @@ are operator work outside this lane. Existing archive/crash migrations must alre
 
    Finish with ordinary proving bytes redeployed, no temporary uid/timeout markers, no timer,
    crash endpoint or retained experiment flag, and the zero-runtime-resource checks in step 5.
+
+## Live proof results (2026-11-18 UTC, 0.7.0-alpha.21, proving Worker)
+
+MEASURED, one launch per case. Steps 1 to 6 above were run; step 7's remaining variants were not.
+
+| Case | Ready | End | Machine state reason | Session row | Archive |
+|---|---|---|---|---|---|
+| Empty match, clean exit | 34 s after the request | server exit at 300 s empty | `Client.InstanceInitiatedShutdown` | `ended`, `server: empty for 300 s` | one row, 526 kB, not truncated, no error, no crash row |
+| Server process killed (SIGKILL by a proof-only timer, 90 s after start) | 27 s | machine gone 125 s after ready | `Client.InstanceInitiatedShutdown` | `lost`, `the server stopped reporting` | one row, 155 kB, not truncated, no error; journal shows `code=killed, status=9/KILL` |
+
+Both machines powered themselves off through the stop hook: the on-machine guard that slice 3's
+proof could not witness. Neither archive holds a 64-hex run, a dotted address, a key id or a
+bearer value.
+
+Gap found: every journal line carries the machine's default hostname, which embeds its private
+IPv4 address in dashed form, and neither sanitiser masked that shape. Fixed in the lane that
+follows this proof.
+
+Afterwards: the proof edit was restored, the ordinary build redeployed to the proving Worker, the
+hosting key revoked, and the region read back at zero instances, volumes and interfaces.
