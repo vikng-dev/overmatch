@@ -492,6 +492,7 @@ fn bandwidth(v: f64, tick_s: f64) -> f64 {
     v / (kappa * tick_s)
 }
 
+#[cfg(test)]
 fn number(cursor: TickInstant) -> f64 {
     f64::from(cursor.tick().0) + f64::from(cursor.overstep().to_f32())
 }

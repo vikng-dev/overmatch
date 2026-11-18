@@ -436,6 +436,7 @@ fn a_regular_server_at_any_followable_speed_plays_at_its_speed_without_holds_or_
 ///   follows leading by at most 2 s v / omega; after the slew that lead decays within
 ///   (2 s v / omega) (1 + x) e^-x. Under a cursor quantum the cursor cannot reach a tick its
 ///   target has not.
+///
 /// Before that, the old median under-covers the slower cadence and the cursor holds; a speed-up
 /// over-covers, so it never holds.
 #[test]
@@ -470,12 +471,17 @@ fn a_server_speed_change_locks_in_once_the_delay_covers_the_new_cadence() {
             .map(|f| (f.at_s, f.lead_s))
             .max_by(|a, b| a.1.total_cmp(&b.1))
             .unwrap();
+        let (lag_at, lag) = frames
+            .iter()
+            .map(|f| (f.at_s, -f.lead_s))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
         let first_move = frames
             .iter()
             .find(|f| (f.applied_s - frames[0].applied_s).abs() > 1e-12)
             .map(|f| f.at_s - switch_s);
         println!(
-            "MEASURED speed {from} to {to}: held_frames={} episodes={} last_hold_after_s={:?} lead_max_ms={:.3} at_s={:.3} lag_max_ms={:.3} rate=[{:.4},{:.4}] delay_first_moves_after_s={first_move:?} DERIVED covered_after_s={:.3} lead_bound_ms={:.3}",
+            "MEASURED speed {from} to {to}: held_frames={} episodes={} last_hold_after_s={:?} lead_max_ms={:.3} at_s={:.3} lag_max_ms={:.3} at_s={:.3} rate=[{:.4},{:.4}] delay_first_moves_after_s={first_move:?} DERIVED covered_after_s={:.3} lead_bound_ms={:.3}",
             frames.iter().filter(|f| f.held).count(),
             hold_episodes(&frames),
             frames
@@ -485,7 +491,8 @@ fn a_server_speed_change_locks_in_once_the_delay_covers_the_new_cadence() {
                 .map(|f| f.at_s - switch_s),
             lead * 1e3,
             lead_at - switch_s,
-            -frames.iter().map(|f| f.lead_s).fold(f64::MAX, f64::min) * 1e3,
+            lag * 1e3,
+            lag_at - switch_s,
             frames.iter().map(Frame::rate).fold(f64::MAX, f64::min),
             frames.iter().map(Frame::rate).fold(f64::MIN, f64::max),
             covered_s - switch_s,
@@ -622,9 +629,11 @@ fn playback_acceleration_stays_within_the_derived_law() {
     let delay_worst = worst(&slewed);
     assert!(slewed.iter().all(|f| !f.held && !f.cut));
     println!(
-        "MEASURED speed {from} to {to}: worst_rate_change_per_frame={speed_worst:.5} DERIVED limit={speed_limit:.5}; delay step: worst={delay_worst:.5} rate=[{:.4},{:.4}] DERIVED limit={delay_limit:.5}",
+        "MEASURED speed {from} to {to}: worst_rate_change_per_frame={speed_worst:.5} DERIVED limit={speed_limit:.5}; delay step: worst={delay_worst:.5} rate=[{:.4},{:.4}] lag_max_ms={:.3} DERIVED limit={delay_limit:.5} slew_lag_ms={:.3}",
         slewed.iter().map(Frame::rate).fold(f64::MAX, f64::min),
         slewed.iter().map(Frame::rate).fold(f64::MIN, f64::max),
+        -slewed.iter().map(|f| f.lead_s).fold(f64::MAX, f64::min) * 1e3,
+        2.0 * v / omega * 1e3,
     );
     assert!(
         speed_worst <= speed_limit,
@@ -759,9 +768,11 @@ fn a_released_hold_resumes_at_the_stream_rate_and_closes_its_backlog_at_the_slew
         "the released cursor resumes at the stream's rate: {rate}"
     );
 
-    // Fixture: regular production, a 200 ms server silence inside the admission cap, then the
-    // admitted debt spent one tick per 1 ms server frame.
-    let (stall_s, pause_s) = (w * 2.0, 0.200);
+    // Fixture: regular production, a server silence of 0.8 of the continuity floor (200 ms as
+    // shipped; the rest is margin for the release's ramp), then the admitted debt spent one tick
+    // per 1 ms server frame.
+    let floor_s = timing.view_cut_s.max(timing.admission_s);
+    let (stall_s, pause_s) = (w * 2.0, 0.8 * floor_s);
     let start = stall(stall_s, pause_s, timing.admission_s);
     let mut stream = Stream::new();
     stream.run(stall_s, &start, &constant_link);
@@ -775,7 +786,7 @@ fn a_released_hold_resumes_at_the_stream_rate_and_closes_its_backlog_at_the_slew
     );
     assert!(
         frames.iter().all(|f| !f.cut),
-        "a backlog inside the admission cap is paced, not cut"
+        "a backlog inside the continuity floor is paced, not cut"
     );
     let (peak, backlog_s) = frames
         .iter()
@@ -790,7 +801,8 @@ fn a_released_hold_resumes_at_the_stream_rate_and_closes_its_backlog_at_the_slew
         .find(|f| f.lead_s.abs() <= 1e-3)
         .expect("the backlog closes");
     println!(
-        "MEASURED released 200 ms stall: held_ms={:.3} episodes={} backlog_ms={:.3} gate_backlog_ms={:.3} lead_max_ms={:.4} within_1ms_after_peak_ms={:.1} DERIVED deadline_ms={:.1}",
+        "MEASURED released {:.0} ms stall: held_ms={:.3} episodes={} backlog_ms={:.3} gate_backlog_ms={:.3} lead_max_ms={:.4} within_1ms_after_peak_ms={:.1} DERIVED deadline_ms={:.1}",
+        pause_s * 1e3,
         frames.iter().filter(|f| f.held).count() as f64 * frame_s() * 1e3,
         hold_episodes(&frames),
         backlog_s * 1e3,

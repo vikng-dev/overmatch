@@ -14,37 +14,55 @@ work, network delivery and whole-tick completion delay enter one lateness term. 
 lost ticks. There is **no outlier exclusion, clipping or percentile**: every admitted sample can
 be the maximum until its local receipt age exceeds W. W is required `view_window_s` data.
 
-Applied delay slews toward the target at at most v seconds per Real second. Inverting the
-frame-start map gives a target cursor clamped to received endpoints; equal frame stamps choose
-the latest tick. The cursor does not follow that target segment by segment, which would replay
-each tick's production interval as playback speed. It advances at the stream's measured rate,
-steered by a critically damped phase loop of natural frequency `omega = e v / T`. The measured
-rate is the window's: T times the ticks its retained samples span over the stamp time they span,
-capped at `1+v`. Production phase telescopes out of it, so a regular server at any speed up to
-`1+v` plays at that speed with no steady lead, and alternating intervals do not reach the rate;
-a nearest-rank median interval would flip between them and replay them as speed. After a speed
-change the window mixes both speeds until it turns over, W and a link time later; the loop
-carries the rate error meanwhile, with at most `2 |error| / omega` of lead or lag in the
-continuous limit.
-The loop's rate response to target phase has L1 norm `2 omega / e`, so production phase noise
-within one tick peak to peak moves the rate by at most v, and a slewing delay changes the rate
-by at most `v^2 / T` per second instead of stepping it. From zero rate deviation its response to
-a phase step does not overshoot. Progress is forward-only, because each frame's advance is
-clamped nonnegative and retained facts never retire the newest tick below the cursor, and is
-capped at `(1+v)` simulation seconds per Real second; a released backlog closes at that cap. A
-frame is held when the newest completed tick stops the cursor by more than a cursor quantum:
-the cursor's request lies past that tick, or the inverse clamped the target to it. A hold stops
-the cursor, which accelerates from rest on release; it extrapolates nothing. Target backlog measured in
-simulation ticks above `max(view_cut_s, admission_s)` cuts forward once, warns and counts the
-discontinuity. Server time admission and this continuity floor read the same required
-`admission_s` field; no client virtual-time default chooses it.
+Applied delay slews toward the target at at most v seconds per Real second; timing data with v
+outside `(0, 1)` is refused at load. Inverting the frame-start map at `now - delay`, clamped to the first and
+newest retained stamps, gives the target point; equal frame stamps choose the latest tick. The
+cursor does not follow that target segment by segment, which would replay each tick's production
+interval as playback speed. It advances about the stream rate q, steered by an exact critically
+damped step of natural frequency `omega = v / (kappa T)`. q is learned from map facts only: each
+advance of the target point filters the map's mean slope over that advance at the same omega, so
+a hold, which does not advance the point, freezes q. Neither the cursor nor the statistics window
+enters q. The first cursor frame reads the slope across the retained map. Production
+phase telescopes out of a slope, so a regular server at any speed below `1+v` plays at that
+speed with no steady lead. The cursor's rate is stored absolute, so a change of q never steps
+playback.
+
+With q and the loop both at omega, the rate's response to target phase is the kernel
+`omega^2 (3 - 5x + x^2) e^-x`, `x = omega t`, of zero area and L1 norm `2 kappa omega`;
+`kappa = 0.8754` has a closed form, stated in `bandwidth`. DERIVED from it: production phase
+within p peak to peak moves the rate by at most `v p / T`; a step d in the stream's speed leads or
+lags the target by at most `0.840 |d| / omega` (28.7 ms for `d = 0.5`) and accelerates playback by
+at most `0.80 |d| omega`; a slewing delay offsets the cursor from the target by `2 v / omega`
+(27.4 ms) and accelerates it by at most `v omega / e`. Progress is forward-only, because each frame's advance is clamped
+nonnegative and retained facts never retire the newest tick below the cursor, and is capped at
+`(1+v)` simulation seconds per Real second; a released backlog closes at that cap without
+overshoot.
+
+A frame is held when its rate-limited request passes the newest completed tick by more than a
+cursor quantum; a request that lands on a clamped target is not held. The cursor and the inverse
+are exact inside the clock, and only the published cursor rounds to U0F16, so rounding never
+feeds back into the loop. A hold extrapolates nothing. The frame after a hold, and after a cut,
+resumes at q by decision: a hold is a gap in facts, not a change in the stream's speed. Release
+is therefore a rate step from 0 to q. Target backlog measured in simulation ticks above
+`max(view_cut_s, admission_s)` cuts forward once, warns and counts the discontinuity. Server time
+admission and this continuity floor read the same required `admission_s` field; no client
+virtual-time default chooses it.
 
 The target covers lateness, not production phase. A smooth cursor needs the production phase
 above its mean at the tick that sets the lateness maximum, and the nearest-rank median of
 alternating production intervals is the short one about half the time; on a link without
-lateness slack such production holds. A sudden slowdown holds until the window turns over: the
-median interval and the window's rate both lag the new speed. The measurements and the open estimator
-question are in [the pacing report](../../scratch/view-rate-396.md).
+lateness slack such production holds. A sudden slowdown holds until the median interval turns
+over, about `W / (1+s)` after the step. A law within the phase bound cannot stop as abruptly as
+one that follows the target segment by segment: while decelerating it leads, and at a link
+without slack any lead is a contact. A slowdown's last hold may therefore trail the
+segment-by-segment rule's by up to `14.4 / omega` (DERIVED 0.98 s; MEASURED +0.125 s at half
+speed, 0 at three quarters, +0.208 s at nine tenths).
+
+q dips through a stall's long map segment, so the cursor resumes slowly and ramps, and a stall's
+peak backlog runs above the segment-by-segment rule's. With the admitted debt exactly at the
+cap, the release crosses the cut gate: over real UDP a 1 s capped stall peaks at 263.7 ms of
+backlog against 239.1 ms and cuts once, 16.9 ticks (MEASURED). The measurements, the open
+estimator question and the cut margin are in [the pacing report](../../scratch/view-rate-396.md).
 
 The retained maximum makes server-work spikes and network spikes equally expensive. A spike can
 produce a hold, a forward cut, then slow playback while delay grows and fast playback after the
