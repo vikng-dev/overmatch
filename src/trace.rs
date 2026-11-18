@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use avian3d::prelude::{AngularVelocity, Collisions, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
+use bevy::tasks::{ComputeTaskPool, ParallelSlice};
 use serde_json::{Value, json};
 
 use crate::tank::{
@@ -412,10 +413,7 @@ fn record_tick(
         Option<Res<LocalTimeline>>,
         Option<Res<crate::net::view_clock::ViewClock>>,
     ),
-    // The cross-world pairing key `own` is "the player's own tank" in each role. On a client and
-    // in single-player it is the game `Controlled` marker (in the roots query). On the server it is
-    // `ControlledBy`, which `spawn_player_tank` inserts on every player tank (the ownerless test bot
-    // has none); neither marker replicates to the other side, so this query is empty off-server.
+    // `own` joins roles: ControlledBy on authority player tanks, Controlled on clients/offline.
     owners: Query<(), With<ControlledBy>>,
 ) {
     let (role, sim_fields) = (trace.role, trace.sim_fields);
@@ -436,15 +434,23 @@ fn record_tick(
     // contact record stale for this diagnostic; negative separations clamp to zero penetration.
     let mut contacts: std::collections::HashMap<Entity, (u32, f32)> =
         std::collections::HashMap::new();
-    for pair in collisions.iter() {
-        if !pair.is_touching() || pair.aabbs_disjoint() {
-            continue;
-        }
-        let deepest = pair
-            .find_deepest_contact()
-            .map_or(0.0, |point| point.penetration)
-            .max(0.0);
-        for body in [pair.body1, pair.body2].into_iter().flatten() {
+    let pairs: Vec<_> = collisions.iter().collect();
+    let summaries = pairs.par_splat_map(ComputeTaskPool::get(), None, |_, pairs| {
+        pairs
+            .iter()
+            .filter(|pair| pair.is_touching() && !pair.aabbs_disjoint())
+            .map(|pair| {
+                let deepest = pair
+                    .find_deepest_contact()
+                    .map_or(0.0, |point| point.penetration)
+                    .max(0.0);
+                ([pair.body1, pair.body2], deepest)
+            })
+            .collect::<Vec<_>>()
+    });
+    // Counts and maxima commute; shared body incidence is reduced only after pair evaluation.
+    for (bodies, deepest) in summaries.into_iter().flatten() {
+        for body in bodies.into_iter().flatten() {
             let entry = contacts.entry(body).or_insert((0, 0.0));
             entry.0 += 1;
             entry.1 = entry.1.max(deepest);
@@ -477,8 +483,7 @@ fn record_tick(
                 .iter()
                 .filter(|side| !side.is_empty())
                 .count();
-            // Round to ~0.1 N: solver-noise digits past that are neither meaningful nor worth
-            // the row width.
+            // Resolution: 0.1 N omits solver-noise digits from the diagnostic row.
             let side_sum = |f: fn(&crate::track::forces::BeltContact) -> f32| -> Vec<Value> {
                 track_contacts
                     .0
@@ -556,7 +561,6 @@ fn record_tick(
                 "hc": hull_contacts,
                 "pen": num(penetration),
                 "ctl": controlled,
-                // Cross-world tank identity for the hash join (world-independent — never the entity id).
                 "own": own,
                 // The per-tick authority-simulation hash: `h` combined, then the per-component
                 // breakdown so a difference localizes to pose vs velocity vs carried sim.
