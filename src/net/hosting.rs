@@ -1870,12 +1870,12 @@ mod tests {
         for _ in 0..2_000 {
             server.update();
             if !challenged
-                && !server
+                && server
                     .world_mut()
                     .query_filtered::<(), (With<LinkOf>, With<Connecting>)>()
                     .iter(server.world())
-                    .collect::<Vec<_>>()
-                    .is_empty()
+                    .next()
+                    .is_some()
             {
                 admission.set_open(false);
                 challenged = true;

@@ -46,6 +46,21 @@ pub(in crate::net) fn direct_app() -> App {
     app
 }
 
+fn matchmade_app() -> App {
+    let mut app = super::match_exit::client_app();
+    finish(&mut app);
+    app.update();
+    crate::net::matchmaking::ready_fixture(
+        app.world_mut(),
+        crate::net::matchmaking::ReadyMatch {
+            addr: "127.0.0.1:9".parse().unwrap(),
+            key: [0; 32], // Fixture endpoint and development key.
+        },
+    );
+    app.update();
+    app
+}
+
 pub(in crate::net) fn refusal_kinds() -> Vec<ServerGone> {
     vec![
         ServerGone::Admission(crate::net::admission::JoinRefusal::ServerFull),
@@ -212,17 +227,7 @@ fn a_direct_link_keeps_retrying_past_the_matchmade_threshold() {
 fn matchmade_links_give_up_at_the_owned_attempt_threshold() {
     let threshold = client_policy().unanswered_after_attempts.0;
     for attempts in [threshold - 1, threshold] {
-        let mut app = super::match_exit::client_app();
-        finish(&mut app);
-        app.update();
-        crate::net::matchmaking::ready_fixture(
-            app.world_mut(),
-            crate::net::matchmaking::ReadyMatch {
-                addr: "127.0.0.1:9".parse().unwrap(),
-                key: [0; 32], // Fixture endpoint and development key.
-            },
-        );
-        app.update();
+        let mut app = matchmade_app();
         let mut retry = app.world_mut().resource_mut::<ConnectRetry>();
         retry.initiated = true;
         retry.attempts = attempts;
@@ -262,17 +267,7 @@ fn assert_retained(app: &App, cause: &ServerGone) {
 #[test]
 fn matchmade_refusals_reach_the_existing_lobby_status() {
     for cause in refusal_kinds() {
-        let mut app = super::match_exit::client_app();
-        finish(&mut app);
-        app.update();
-        crate::net::matchmaking::ready_fixture(
-            app.world_mut(),
-            crate::net::matchmaking::ReadyMatch {
-                addr: "127.0.0.1:9".parse().unwrap(),
-                key: [0; 32], // Fixture endpoint and dev key.
-            },
-        );
-        app.update();
+        let mut app = matchmade_app();
         app.world_mut()
             .resource_mut::<ConnectRetry>()
             .connected_once = true;
@@ -338,17 +333,7 @@ fn construction_admission_closes_before_a_due_reconnect_in_the_same_update() {
 /// met the give-up limit. The shipped lifecycle observes success before deciding a terminal close.
 #[test]
 fn a_successful_retry_clears_the_failed_attempt_ledger_before_terminal_handling() {
-    let mut app = super::match_exit::client_app();
-    finish(&mut app);
-    app.update();
-    crate::net::matchmaking::ready_fixture(
-        app.world_mut(),
-        crate::net::matchmaking::ReadyMatch {
-            addr: "127.0.0.1:9".parse().unwrap(),
-            key: [0; 32], // Fixture endpoint and development key.
-        },
-    );
-    app.update();
+    let mut app = matchmade_app();
     let world = app.world_mut();
     let link = world
         .query_filtered::<Entity, With<NetcodeClient>>()
