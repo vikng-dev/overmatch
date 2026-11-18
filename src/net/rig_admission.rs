@@ -1,5 +1,5 @@
-//! Network-only admission for the two parent-local angles carried by ServoAngles.
-//! Static ancestors compose locally; any other moving ancestor needs a stream the game lacks.
+//! Network admission for the Gunner chain: every declared servo is streamed, while other
+//! moving ancestors have no parent-local pose in ServoAngles.
 
 use std::collections::BTreeSet;
 
@@ -28,8 +28,8 @@ fn admit(blueprint: Res<TankBlueprint>) {
         while let Some(index) = parent {
             let node = &geometry.nodes[index];
             assert!(
-                node.name == yaw || node.name == pitch || !moving.contains(node.name.as_str()),
-                "{}: {field} {axis:?}: moving ancestor {:?} is absent from ServoAngles; parent this aim chain only through static frames and its streamed yaw/pitch before network play",
+                spec.servos.contains_key(&node.name) || !moving.contains(node.name.as_str()),
+                "{}: {field} {axis:?}: moving ancestor {:?} is absent from ServoAngles; parent this aim chain only through static frames and declared servos before network play",
                 blueprint.file,
                 node.name
             );
@@ -44,10 +44,10 @@ mod tests {
     use crate::bake::{NodeGeometry, TankGeometry};
     use crate::spec::ViewKind;
 
-    /// Remote clients can compose static construction but cannot invent an ancestor's motion.
-    /// Mount the production admission plugin: dropping that gate admits these concealed axes.
+    /// Remote clients can compose static frames and streamed servos, but cannot invent a
+    /// roadwheel ancestor's motion. The production gate must distinguish those moving roles.
     #[test]
-    fn network_admission_refuses_unstreamed_moving_ancestors_of_either_axis() {
+    fn network_admission_accepts_servo_ancestors_but_refuses_unstreamed_motion() {
         for (concealed, servo) in [None, Some("yaw"), Some("pitch")]
             .into_iter()
             .flat_map(|axis| [false, true].map(|servo| (axis, servo)))
@@ -56,7 +56,7 @@ mod tests {
             let mut app = App::new();
             app.insert_resource(blueprint).add_plugins(plugin);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.update()));
-            if concealed.is_none() {
+            if concealed.is_none() || servo {
                 result.unwrap();
             } else {
                 let error = result.unwrap_err();

@@ -8,19 +8,12 @@ use super::matchmaking::ServerGone;
 use super::protocol::{ServoAngles, ServoAnglesError, ServoAnglesWire};
 use crate::tank::TankTemplate;
 
-/// This composition's rig in the template's name-sorted slot order.
+/// This composition's rig in the template's assembled slot order.
 struct ServoSlots(Vec<Option<(f32, f32)>>);
 
 impl ServoSlots {
     fn from_template(template: &TankTemplate) -> Self {
-        let mut entries: Vec<_> = template.spec().servos.iter().collect();
-        entries.sort_unstable_by_key(|(name, _)| *name);
-        Self(
-            entries
-                .into_iter()
-                .map(|(_, spec)| spec.travel_limits())
-                .collect(),
-        )
+        Self(template.servo_travel_limits().collect())
     }
 }
 

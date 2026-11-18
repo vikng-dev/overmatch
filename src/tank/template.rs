@@ -390,6 +390,11 @@ impl TankTemplate {
         &self.spec
     }
 
+    /// Travel limits in assembled [`ServoIndex`] order; `None` denotes continuous travel.
+    pub(crate) fn servo_travel_limits(&self) -> impl Iterator<Item = Option<(f32, f32)>> + '_ {
+        self.servos.iter().map(|servo| servo.spec.travel_limits())
+    }
+
     pub(crate) fn track_colliders(&self) -> &TrackColliders {
         &self.track_colliders
     }

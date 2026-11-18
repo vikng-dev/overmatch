@@ -6,6 +6,24 @@ use lightyear::prelude::client::NetcodeClient;
 use lightyear::prelude::*;
 use std::time::Duration;
 
+/// Receive admission must apply each mount's stops to its assembled wire slot. Clients would
+/// otherwise accept another mount's travel or refuse valid authority angles.
+#[test]
+fn wire_limits_match_assembled_servo_indices() {
+    use crate::tank::{ServoIndex, ServoSpec};
+
+    let (_, template) = crate::tank::shipped_construction();
+    let slots = ServoSlots::from_template(&template);
+    let mut world = World::new();
+    crate::tank::spawn_headless_tank(&mut world.commands(), &template, Transform::IDENTITY);
+    world.flush();
+    let mut servos = world.query::<(&ServoIndex, &ServoSpec)>();
+    assert_eq!(servos.iter(&world).count(), slots.0.len());
+    for (index, spec) in servos.iter(&world) {
+        assert_eq!(slots.0[index.0], spec.travel_limits());
+    }
+}
+
 /// Clients rely on the installed codec refusing mutations before interpolation. Bypassing the
 /// checked registration loses the visible cause; admitting the record puts invalid game state in
 /// history. The shipped lifecycle must close the link and report the cause in the lobby; leaving

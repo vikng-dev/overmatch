@@ -148,13 +148,8 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     entity
 }
 
-/// Spawn the production simulation body without presentation assets.
-///
-/// Two instruments are deliberately headless and share this: the bitprobe differential harness and
-/// the §13.6 ray fuzzer (`ballistics::fuzz`). Both need the same template-built body, colliders and
-/// simulation state as an authority tank, and neither wants a `WorldAssetRoot`, an asset
-/// handle, or a view-binding observer. [`TankTemplate::assemble`] remains the one simulation
-/// constructor.
+/// Bitprobe and `ballistics::fuzz` (§13.6) need the production authority body, colliders and state
+/// without view assets or binding. `TankTemplate::assemble` is their shared simulation constructor.
 pub(crate) fn spawn_headless_tank<B: Bundle>(
     commands: &mut Commands,
     template: &TankTemplate,
