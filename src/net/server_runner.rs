@@ -615,22 +615,27 @@ mod tests {
         assert_eq!(clock.sleeps.lock().unwrap().len(), 3);
     }
 
-    /// One-tick frames must not lengthen catch-up: a stall admits the same simulated time as
-    /// Bevy's virtual cap, and everything past that bound is skipped, not owed.
+    /// The server carries a fractional admitted tick as debt and discards only wall time beyond
+    /// the configured cap. A whole-tick-only accounting mutant loses that remainder.
     #[test]
-    fn a_stall_past_the_cap_admits_exactly_the_cap_and_skips_the_rest() {
+    fn a_fractional_cap_keeps_its_remainder_and_discards_only_excess_wall_time() {
         let tick = super::super::server::TICK;
         let clock = TestClock {
             now: Arc::new(Mutex::new(Instant::now())),
             sleeps: default(),
             oversleep: Duration::ZERO,
         };
-        let admitted = Duration::from_secs_f64(super::super::timing::Timing::shipped().admission_s);
+        // Fixture admission: three whole ticks and a half-tick remainder.
+        let admitted = tick * 3 + tick / 2;
         let cap_ticks = (admitted.as_nanos() / tick.as_nanos()) as usize;
         // Fixture: a wall stall four times the admission bound, then costless frames.
         let mut work = vec![admitted * 4];
         work.resize(cap_ticks + 3, Duration::ZERO);
         let (mut app, frames) = probe(clock.clone(), work);
+        app.insert_resource(super::super::timing::Timing {
+            admission_s: admitted.as_secs_f64(),
+            ..super::super::timing::Timing::shipped()
+        });
         assert_eq!(app.run(), bevy::app::AppExit::Success);
         let frames = frames.0.lock().unwrap();
         assert!(frames.iter().all(|frame| frame.ticks == 1), "{frames:?}");
@@ -642,7 +647,11 @@ mod tests {
         assert_eq!(clock.sleeps.lock().unwrap().len(), 3);
         // Wall time past the bound never reached the simulation.
         let settled = &frames[cap_ticks];
-        assert_eq!(settled.elapsed - settled.fixed_elapsed, admitted * 3);
+        let remainder = admitted - tick * cap_ticks as u32;
+        assert_eq!(
+            settled.elapsed - settled.fixed_elapsed,
+            admitted * 3 + remainder
+        );
         let last = frames.last().unwrap();
         assert_eq!(last.discarded, (admitted * 3, 1), "one batch dropped it");
         assert_wall_accounted(&frames);
