@@ -68,6 +68,28 @@ impl Timing {
         .validated(FILE)
     }
 
+    /// The timing the view clock's law proofs run on, so no permitted change to the shipped data
+    /// can break a proof of the law. Fields the view clock does not read stay shipped.
+    #[cfg(test)]
+    pub(super) fn view_fixture() -> Self {
+        Self {
+            // Fixture: a slew whose pacing memory, 20 / omega = 1.4 s, fits seven times in the
+            // window, and whose lead over one frame, near 0.1 tick, spans thousands of the
+            // 1/65536-tick hold quanta.
+            view_rate: 0.2,
+            // Fixture: a window that holds a delay step and its settling, short enough that the
+            // real-UDP proofs' two-window warm-up stays cheap.
+            view_window_s: 10.0,
+            // Fixture: the server's debt cap and the cut floor, sixteen ticks each: a 200 ms
+            // silence stays paced under them, and the forced backlogs of the hold and outage
+            // proofs pass them.
+            admission_s: 0.25,
+            view_cut_s: 0.25,
+            ..Self::shipped()
+        }
+        .validated("the view clock's test fixture")
+    }
+
     /// The load gate: every refusal names `file`, the field and the fix.
     fn validated(self, file: &str) -> Self {
         for (field, value) in [

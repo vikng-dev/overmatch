@@ -156,14 +156,15 @@ failures measured with its own rounded cursor. No mutant here breaks
 clamps, which no candidate changes. `irregular_production_coverage_observations` prints the
 coverage table and asserts only the class invariants.
 
-Fixtures follow the timing data they depend on. The released-stall fixture is 0.8 of the
-continuity floor (200 ms as shipped), and the stall fixture resumes production at the end of
-the silence when the cap admits no whole tick. The hold-flag proof places its newest tick from
-the floor, so its forced cut stays a cut under any floor, and sizes its rising-delay frame as
-`T / (2 - v)`, which keeps the target short of the newest tick and the request past it at any
-`v` in `(0, 1)`. `assets/net_timing.ron` refuses `view_rate` outside `(0, 1)` at load, naming the
-file, the field and the fix; `view_rate_outside_zero_to_one_is_refused_at_load` covers 1, 1.5,
-0, -0.2, NaN and infinity and loads `1 - EPSILON`.
+Every law proof in `src/net/view_clock.rs`, `pacing.rs` and `udp.rs` runs on
+`Timing::view_fixture` (v = 0.2, W = 10 s, debt cap and cut floor 0.25 s, each labelled with its
+reason), so no permitted change to `assets/net_timing.ron` can break a proof of the law; bounds
+are derived from the fixture's values. The fixture equals today's shipped view timing, so every
+MEASURED row above stands. One test keeps the shipped timing, because its claim is about the
+shipped values: `shipped_timing_stall_and_delay_spike_playback_observations`, the F21 record of
+how the shipped default plays. `assets/net_timing.ron` refuses `view_rate` outside `(0, 1)` at
+load, naming the file, the field and the fix; `view_rate_outside_zero_to_one_is_refused_at_load`
+covers 1, 1.5, 0, -0.2, NaN and infinity and loads `1 - EPSILON`.
 
 Stamps are outside input. A positive frame-start interval too short for u32::MAX ticks times T
 over it to stay finite is refused at admission as `StreamRefusal::Interval`, through the same
@@ -172,8 +173,7 @@ visible match close as an out-of-order stamp, so the stream rate is finite by co
 stamps 0, 0 and the smallest positive f64. MEASURED once with the check disabled under a
 temporary hook, since deleted: the third stamp is admitted, q is 1.2 on the first frame and NaN
 on the second, and `requested.min(newest)` moves the cursor from tick 2 to the newest tick 3 in
-one frame, unpaced and not held; the test fails at its refusal assertion. The hold-flag proof
-also ran once at v of 0.01, 0.1, 0.9 and 0.999 and at floors of T, 0.6 s and 1 s, and passed.
+one frame, unpaced and not held; the test fails at its refusal assertion.
 
 ## Validation
 

@@ -585,15 +585,13 @@ pub(super) fn publish_weapon_clock(clock: Res<ViewClock>, mut weapon: ResMut<cra
     } // Waiting for a stamp pair cannot mature a countdown.
 }
 
-/// The two clocks a receipt is measured in: local Real time and the authority tick.
-#[derive(bevy::ecs::system::SystemParam)]
-struct ReceiptClocks<'w> {
-    real: Res<'w, Time<Real>>,
-    tick: Res<'w, lightyear::core::tick::TickDuration>,
-}
-
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system's parameters are its accesses: two clocks, the timing data, the three replication receipt sources, the refusal channel and the view clock, with no subset that hides anything as a group"
+)]
 fn receive(
-    clocks: ReceiptClocks,
+    real: Res<Time<Real>>,
+    tick_duration: Res<lightyear::core::tick::TickDuration>,
     timing: Res<Timing>,
     checkpoints: Res<ReplicationCheckpointMap>,
     mut storage: ResMut<ReplicationStorage>,
@@ -601,7 +599,7 @@ fn receive(
     mut gone: MessageWriter<super::matchmaking::ServerGone>,
     mut clock: ResMut<ViewClock>,
 ) {
-    let now = clocks.real.elapsed_secs_f64();
+    let now = real.elapsed_secs_f64();
     clock.frame += 1;
     clock.expire(now, timing.view_window_s);
     let received = storage.global.get_or_default::<ReceivedStamps>();
@@ -624,8 +622,8 @@ fn receive(
         clock.complete(
             event.tick,
             now,
-            now - clocks.real.delta_secs_f64(),
-            clocks.tick.0.as_secs_f64(),
+            now - real.delta_secs_f64(),
+            tick_duration.0.as_secs_f64(),
         );
     }
     if let Some(refusal) = clock.refusal.take() {
@@ -653,7 +651,7 @@ mod tests {
         for frame_s in [0.0625, 1.0] {
             let mut app = App::new();
             app.add_plugins(MinimalPlugins)
-                .init_resource::<Timing>()
+                .insert_resource(Timing::view_fixture())
                 .insert_resource(lightyear::core::tick::TickDuration(
                     super::super::server::TICK,
                 ))
@@ -717,6 +715,7 @@ mod tests {
         ));
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
+            .insert_resource(Timing::view_fixture())
             .init_resource::<ReplicationStorage>()
             .init_resource::<ReplicationCheckpointMap>()
             .init_resource::<InterpolationTimeline>()
@@ -810,7 +809,7 @@ mod tests {
 
         let _udp = super::super::test_harness::lock_real_udp_test();
         let (mut server, mut client) = super::super::client::match_exit::in_match();
-        client.init_resource::<Timing>();
+        client.insert_resource(Timing::view_fixture());
         install(&mut client);
         server
             .world_mut()
@@ -861,7 +860,7 @@ mod tests {
     /// D3 forgets expired lateness without discarding the unknown clock offset.
     #[test]
     fn target_forgets_expired_lateness_and_preserves_the_clock_offset() {
-        let timing = Timing::shipped();
+        let timing = Timing::view_fixture();
         let mut clock = ViewClock::default();
         // Fixture: observations at fractions of the authored window, with a late oldest tick.
         for (tick, start, x, seen) in [
@@ -926,7 +925,7 @@ mod tests {
     #[test]
     fn paced_delay_changes_keep_the_cursor_and_an_old_public_path_forward() {
         use crate::ballistics::path::Replica;
-        let timing = Timing::shipped();
+        let timing = Timing::view_fixture();
         let tick_s = super::super::server::TICK.as_secs_f64();
         let cap_s = timing.admission_s;
         let mut clock = ViewClock::default();
@@ -971,7 +970,7 @@ mod tests {
     /// unknown epoch as a duration. Both clock-origin choices must produce the same cursor.
     #[test]
     fn a_link_outage_cuts_once_and_clock_origins_cancel() {
-        let timing = Timing::shipped();
+        let timing = Timing::view_fixture();
         let tick_s = super::super::server::TICK.as_secs_f64();
         let admission_s = timing.admission_s;
         let mut cuts = Vec::new();
@@ -1061,7 +1060,7 @@ mod tests {
     /// that division is refused at admission, before any rate reads it.
     #[test]
     fn a_stamp_interval_too_short_to_time_is_refused_before_pacing() {
-        let timing = Timing::shipped();
+        let timing = Timing::view_fixture();
         let tick_s = super::super::server::TICK.as_secs_f64();
         let mut clock = ViewClock::default();
         // Fixture: two equal stamps, then the smallest positive one, all individually valid,
@@ -1087,7 +1086,8 @@ mod tests {
     fn connection_boundaries_clear_the_cursor_and_old_tick_receipts() {
         use lightyear::prelude::{PeerId, RemoteId};
         let mut app = App::new();
-        app.init_resource::<ReplicationStorage>();
+        app.insert_resource(Timing::view_fixture())
+            .init_resource::<ReplicationStorage>();
         install(&mut app);
         app.world_mut()
             .resource_mut::<ViewClock>()
@@ -1125,7 +1125,7 @@ mod tests {
     /// Hull presentation relies on a window-bounded epoch error, not a synchronized local tick.
     #[test]
     fn oscillator_drift_is_bounded_by_the_lateness_window() {
-        let timing = Timing::shipped();
+        let timing = Timing::view_fixture();
         let tick_s = super::super::server::TICK.as_secs_f64();
         // Fixture: +/-50 ppm oscillator error, arbitrary offset and a constant clean-link delay.
         for epsilon in [-50e-6_f64, 50e-6] {
@@ -1162,7 +1162,7 @@ mod tests {
     /// Frame-start lateness includes compute, including isolated stalls, without a second term.
     #[test]
     fn frame_start_lateness_covers_both_compute_and_link_work() {
-        let timing = Timing::shipped();
+        let timing = Timing::view_fixture();
         let tick = super::super::server::TICK.as_secs_f64();
         // Fixture: binary fractions make the missing compute term an exact counterexample.
         let (work, down, frame) = (tick / 4.0, tick / 4.0, tick / 8.0);

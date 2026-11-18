@@ -1,7 +1,8 @@
 //! Installer-mounted pacing proofs. Fixture production stamps reach the shipped view clock
-//! through the replication completion path; production and link times are fixture data. Every
-//! bound is derived here from v, T, W and the kernel constant kappa, never read from the
-//! implementation. The law and its derivations: `.agents/docs/design/net-motion-contract.md`.
+//! through the replication completion path; production, link and timing data
+//! (`Timing::view_fixture`) are fixtures. Every bound is derived here from v, T, W and the kernel
+//! constant kappa, never read from the implementation. The law and its derivations:
+//! `.agents/docs/design/net-motion-contract.md`.
 use super::*;
 use bevy::time::TimeUpdateStrategy;
 
@@ -52,8 +53,17 @@ fn memory_s(v: f64) -> f64 {
 /// The least x beyond which `decay(x)` stays below `level`, for a decay that falls monotonically
 /// past its peak at x >= 0.
 fn decayed_by(level: f64, decay: impl Fn(f64) -> f64) -> f64 {
-    let (mut low, mut high) = (0.0, 100.0);
-    for _ in 0..200 {
+    // Resolution: x = 100 is past every horizon these laws ask for (e^-100 is below 1e-43), and
+    // 200 halvings narrow that bracket to 100 / 2^200 = 6e-59, below one ulp of any answer above
+    // 1e-42, at 200 evaluations of a closed form per call.
+    const CEILING: f64 = 100.0;
+    const HALVINGS: u32 = 200;
+    assert!(
+        decay(CEILING) < level,
+        "the decay is still above {level} at x = {CEILING}, so no horizon within the search exists"
+    );
+    let (mut low, mut high) = (0.0, CEILING);
+    for _ in 0..HALVINGS {
         let mid = (low + high) / 2.0;
         if decay(mid) < level {
             high = mid
@@ -101,12 +111,11 @@ fn stall(at_s: f64, pause_s: f64, admission_s: f64) -> impl Fn(u32) -> f64 {
     let first = (at_s / tick_s()).ceil() as u32;
     let debt = (pause_s.min(admission_s) / tick_s()).floor() as u32;
     let compute_s = 0.001;
-    // Regular production resumes a tick after the last debt tick, or ends the silence when the
-    // cap admits no whole tick.
-    let resumed_s = match debt.checked_sub(1) {
-        Some(last) => at_s + pause_s + f64::from(last) * compute_s + tick_s(),
-        None => at_s + pause_s,
-    };
+    // Regular production resumes a tick after the last debt tick.
+    let last = debt
+        .checked_sub(1)
+        .expect("a stall fixture admits at least one whole tick of debt");
+    let resumed_s = at_s + pause_s + f64::from(last) * compute_s + tick_s();
     move |k| {
         if k < first {
             regular(k)
@@ -150,6 +159,7 @@ impl Stream {
     fn new() -> Self {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
+            .insert_resource(Timing::view_fixture())
             .init_resource::<ReplicationStorage>()
             .init_resource::<ReplicationCheckpointMap>()
             .init_resource::<InterpolationTimeline>()
@@ -312,7 +322,7 @@ fn constant_link(_: u32, s: f64) -> f64 {
 /// applied delay's range. Following the stamp map segment by segment leaves this band.
 #[test]
 fn irregular_production_plays_at_a_regular_rate() {
-    let timing = Timing::shipped();
+    let timing = Timing::view_fixture();
     let v = timing.view_rate;
     // Fixture: the late ticks start on schedule. The delay covers the tick that sets its
     // lateness maximum only from a production phase below the mean; the observations report
@@ -350,7 +360,7 @@ fn irregular_production_plays_at_a_regular_rate() {
 /// asserts the class invariants.
 #[test]
 fn irregular_production_coverage_observations() {
-    let timing = Timing::shipped();
+    let timing = Timing::view_fixture();
     let link = constant_link as fn(u32, f64) -> f64;
     for (name, start, complete) in [
         ("regular, constant link", regular as fn(u32) -> f64, link),
@@ -386,7 +396,7 @@ fn irregular_production_coverage_observations() {
 /// v / T times it.
 #[test]
 fn a_regular_server_at_any_followable_speed_plays_at_its_speed_without_holds_or_lead() {
-    let timing = Timing::shipped();
+    let timing = Timing::view_fixture();
     let v = timing.view_rate;
     let settle_s = timing.view_window_s * 2.0;
     // Fixture: server speeds from half real time to halfway into the slew limit's headroom.
@@ -445,7 +455,7 @@ fn a_regular_server_at_any_followable_speed_plays_at_its_speed_without_holds_or_
 /// over-covers, so it never holds.
 #[test]
 fn a_server_speed_change_locks_in_once_the_delay_covers_the_new_cadence() {
-    let timing = Timing::shipped();
+    let timing = Timing::view_fixture();
     let v = timing.view_rate;
     let omega = expected_bandwidth(v);
     let w = timing.view_window_s;
@@ -527,7 +537,7 @@ fn a_server_speed_change_locks_in_once_the_delay_covers_the_new_cadence() {
 /// phase it moves.
 #[test]
 fn a_server_stall_leaves_the_rate_unchanged_across_the_statistics_window() {
-    let timing = Timing::shipped();
+    let timing = Timing::view_fixture();
     let v = timing.view_rate;
     let w = timing.view_window_s;
     // Fixture: a 1 s server silence at two windows; the server admits its capped debt.
@@ -578,7 +588,7 @@ fn a_server_stall_leaves_the_rate_unchanged_across_the_statistics_window() {
 /// steps playback by each of its updates.
 #[test]
 fn playback_acceleration_stays_within_the_derived_law() {
-    let timing = Timing::shipped();
+    let timing = Timing::view_fixture();
     let v = timing.view_rate;
     let omega = expected_bandwidth(v);
     let root = 13.0_f64.sqrt();
@@ -658,16 +668,16 @@ fn playback_acceleration_stays_within_the_derived_law() {
 ///   though the target has not reached the newest stamp.
 #[test]
 fn hold_flags_exactly_requests_past_the_newest_tick() {
-    let timing = Timing::shipped();
-    let (t, w, v) = (tick_s(), timing.view_window_s, timing.view_rate);
+    let timing = Timing::view_fixture();
+    let (t, w) = (tick_s(), timing.view_window_s);
     let advance = |clock: &mut ViewClock, now_s: f64, dt_s: f64| {
         clock.advance(now_s, dt_s, t, &timing, timing.admission_s)
     };
     // Fixture: binary multiples of T place the target exactly. Ticks complete with lateness
     // 2.5 T; tick 1, when `first_x` is given, sets a higher maximum and expires after frame 1.
-    // The newest tick lies far enough past tick 2 that a target half a tick short of it is a
-    // backlog above the continuity floor; tick 3 completes only when a case sends it.
-    let top = (timing.view_cut_s.max(timing.admission_s) / t).ceil() as u32 + 4;
+    // Tick 3 completes only when a case sends it. The cut's backlog, 37.5 T, passes the fixture's
+    // sixteen-tick floor.
+    let top = 40;
     let newest = f64::from(top);
     let cut_below_newest = |first_x: f64| {
         let mut clock = ViewClock::default();
@@ -684,9 +694,9 @@ fn hold_flags_exactly_requests_past_the_newest_tick() {
         assert!(!clock.held);
         (clock, now1)
     };
-    // Falling delay: tick 1's lateness 3 T expires, so the delay falls by v dt from 4 T and the
-    // target point passes the newest tick by v / 2 of a tick; the stream rate is 1, so the whole
-    // half-tick request completes exactly onto it.
+    // Falling delay: tick 1's lateness 3 T expires, so the delay falls by v dt to 3.9 T and the
+    // target point reaches 40.1 T; the stream rate is 1, so the whole half-tick request
+    // completes exactly onto tick 40.
     let (mut clock, now1) = cut_below_newest(3.0 * t);
     let now2 = now1 + 0.5 * t;
     clock.expire(now2, w);
@@ -709,11 +719,10 @@ fn hold_flags_exactly_requests_past_the_newest_tick() {
         assert!(clock.held, "a silent stream holds every frame");
         assert_eq!(clock.now(), Some(Tick(top).into()));
     }
-    // Rising delay: tick 3 completes late, raising the delay target by T. DERIVED: over a frame
-    // h = T / (2 - v) the delay rises by v h, so the target moves h (1 - v) < T / 2 and stays
-    // short of the newest tick. The cursor, leading by v h, gives back v h (1 - (1 + x) e^-x)
-    // of its advance h, x = omega h < 1 / kappa, which is under v h / 2 = h - T / 2: it passes.
-    let h = t / (2.0 - v);
+    // Rising delay: tick 3 completes late, raising the delay target by T, over a frame of 0.6 T.
+    // The delay rises by 0.12 T, so the target moves 0.48 T and stays short of tick 40; the
+    // cursor, leading by 0.12 T, still advances nearly 0.6 T and passes it.
+    let h = 0.6 * t;
     let (mut clock, now1) = cut_below_newest(2.5 * t);
     clock.sample(Tick(3), stamp(3.0 * t), now1, 3.0 * t + 3.5 * t, t);
     let now2 = now1 + h;
@@ -739,7 +748,7 @@ fn hold_flags_exactly_requests_past_the_newest_tick() {
 ///   exit's decay time.
 #[test]
 fn a_released_hold_resumes_at_the_stream_rate_and_closes_its_backlog_at_the_slew_limit() {
-    let timing = Timing::shipped();
+    let timing = Timing::view_fixture();
     let (t, v, w) = (tick_s(), timing.view_rate, timing.view_window_s);
     let omega = expected_bandwidth(v);
     // Fixture: a regular stream completing with lateness 2.5 T stops completing after tick 8;
@@ -781,11 +790,10 @@ fn a_released_hold_resumes_at_the_stream_rate_and_closes_its_backlog_at_the_slew
         "the released cursor resumes at the stream's rate: {rate}"
     );
 
-    // Fixture: regular production, a server silence of 0.8 of the continuity floor (200 ms as
-    // shipped; the rest is margin for the release's ramp), then the admitted debt spent one tick
-    // per 1 ms server frame.
-    let floor_s = timing.view_cut_s.max(timing.admission_s);
-    let (stall_s, pause_s) = (w * 2.0, 0.8 * floor_s);
+    // Fixture: regular production, a 200 ms server silence inside the fixture's 250 ms floor (the
+    // rest is margin for the release's ramp), then the admitted debt spent one tick per 1 ms
+    // server frame.
+    let (stall_s, pause_s) = (w * 2.0, 0.200);
     let start = stall(stall_s, pause_s, timing.admission_s);
     let mut stream = Stream::new();
     stream.run(stall_s, &start, &constant_link);
@@ -850,7 +858,7 @@ fn a_released_hold_resumes_at_the_stream_rate_and_closes_its_backlog_at_the_slew
 /// except at a cut.
 #[test]
 fn any_frame_length_keeps_the_cursor_forward_behind_facts_and_within_the_slew_limit() {
-    let timing = Timing::shipped();
+    let timing = Timing::view_fixture();
     let v = timing.view_rate;
     let start = |k: u32| if late(k) { regular(k) } else { jittered(k) };
     let settle_s = timing.view_window_s * 2.0;
