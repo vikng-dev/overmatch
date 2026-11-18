@@ -26,11 +26,10 @@ const MAGIC: &str = "overmatch-compat";
 /// [`USER_DATA_BYTES`].
 const MAX_RECORD_BYTES: usize = u8::MAX as usize;
 
-/// The longest `ver` a record states. A client renders a refusing server's version, so this bounds
-/// the text a server of another build can put on the player's screen.
+/// Resolution: bound untrusted version text parsing and refusal-screen work to 32 bytes.
 const MAX_VERSION_BYTES: usize = 32;
 
-/// The longest content key a record states: a client renders a refusing server's differing keys.
+/// Resolution: bound each untrusted content key's parsing and refusal-screen work to 16 bytes.
 const MAX_KEY_BYTES: usize = 16;
 
 /// A build's handshake identity, in the order a difference is acted on.
