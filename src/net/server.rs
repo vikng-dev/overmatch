@@ -44,7 +44,8 @@ const PORT: u16 = 5888;
 // Resolution: the authority evaluates gameplay at 64 Hz, shared with Lightyear's timeline.
 pub(super) const TICK: Duration = Duration::from_nanos(15_625_000);
 
-/// Hosting timeout has one owner: the pinned transport configuration.
+/// The client connect token owns link timeout (`src/net/client.rs::netcode_link`),
+/// which selects the pinned NetcodeConfig default. Hosting uses the same interval.
 pub(super) fn connection_timeout() -> Duration {
     Duration::from_secs(NetcodeConfig::default().client_timeout_secs as u64)
 }
