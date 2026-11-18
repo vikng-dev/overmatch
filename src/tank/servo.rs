@@ -313,7 +313,7 @@ fn slot_state(states: &[ServoState], slot: usize) -> &ServoState {
         .expect("every registered servo slot belongs to its selected mechanism state")
 }
 
-fn registered_angle(
+pub(crate) fn registered_angle(
     root: Entity,
     slot: usize,
     authority: &Query<&TankServos>,

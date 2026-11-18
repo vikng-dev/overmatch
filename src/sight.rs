@@ -23,7 +23,7 @@ use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
     Controlled, ServoIndex, ServoRest, ServoSpec, StreamedServoPose, Tank, TankServos, TankViews,
-    rig_world_pose, selected, shortest_angle,
+    registered_angle, rig_world_pose, shortest_angle,
 };
 use crate::view::PlayerView;
 
@@ -322,27 +322,13 @@ pub(crate) struct LiveServos<'w, 's> {
 }
 
 impl LiveServos<'_, '_> {
-    /// The optic clamps intent against this live lay; [`selected`] owns the state source.
+    /// The optic clamps intent against this live lay; [`registered_angle`] owns the slot lookup.
     fn angle(&self, tank: Entity, servo: Entity) -> f32 {
         let slot = self
             .slots
             .get(servo)
             .expect("every declared rig servo receives its index at complete spawn");
-        let angle = selected(
-            self.streamed.get(tank).ok().map(|pose| {
-                *pose
-                    .0
-                    .get(slot.0)
-                    .expect("the root's complete servo vector covers every declared slot")
-            }),
-            self.states.get(tank).ok().map(|authority| {
-                authority
-                    .states
-                    .get(slot.0)
-                    .expect("the root's complete servo vector covers every declared slot")
-                    .current()
-            }),
-        );
+        let angle = registered_angle(tank, slot.0, &self.states, &self.streamed, None);
         assert!(
             angle.is_finite(),
             "the live servo state holds finite angles"
@@ -718,7 +704,9 @@ mod tests {
     /// Optic intent follows the replica's live lay. A replica vector missing a declared slot must
     /// fail rather than clamp intent against an angle it does not hold.
     #[test]
-    #[should_panic(expected = "the root's complete servo vector")]
+    #[should_panic(
+        expected = "every registered servo slot belongs to its selected mechanism state"
+    )]
     fn an_incomplete_replica_servo_vector_refuses_the_lay() {
         use bevy::ecs::system::RunSystemOnce;
         let mut app = App::new();

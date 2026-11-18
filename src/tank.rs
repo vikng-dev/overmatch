@@ -38,7 +38,7 @@ pub use scenario::{client_plugin, sp_spawn_plugin};
 pub use servo::{
     ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, servo_pose, shortest_angle,
 };
-pub(crate) use servo::{ServoRest, StreamedServoPose, selected, servo_aim_frame};
+pub(crate) use servo::{ServoRest, StreamedServoPose, registered_angle, selected, servo_aim_frame};
 #[cfg(test)]
 pub(crate) use servo::{drive_servos, restore_servo_truth};
 pub(crate) use spawn::TANK_SPEC_PATH;
