@@ -700,7 +700,6 @@ impl SimulateInput {
             _ if driving => (1.0, self.steer),
             _ => (0.0, 0.0),
         };
-        command.brake = false;
         command.aim = Some(self.aim.at(t));
         command.range = self.range;
         let firing = self.fire_until.is_none_or(|until| t < until);
@@ -717,8 +716,11 @@ impl SimulateInput {
         };
     }
 
-    /// Hold the explicit service brake after the run until a replicated stop is observed,
-    /// then release it permanently. An unknown speed keeps the brake held.
+    /// After the run, hold reverse demand on a forward hull until replicated speed reads a
+    /// stop below `assets/driving/actuation.ron::park_engage_speed`, then release permanently.
+    /// If the hull is still above that speed after its belts have been held for
+    /// `assets/driving/actuation.ron::reversal_hold_s`, the gearbox selects reverse and the
+    /// same demand drives backward, exactly as a player holding reverse would see.
     fn stop(&mut self, t: u32, speed: Option<f32>, command: &mut TankCommand) {
         let Drive::Park { throttle_ticks } = self.drive else {
             return;
@@ -728,7 +730,7 @@ impl SimulateInput {
         }
         // No replicated velocity yet is no reading of a stop.
         if speed.is_none_or(|speed| speed >= crate::track::transmission::park_engage_speed()) {
-            command.brake = true;
+            command.throttle = -1.0;
         } else {
             self.parked = true;
         }
@@ -1122,21 +1124,21 @@ mod tests {
             Some(2.0 * park_engage_speed()),
             Some(0.5 * park_engage_speed()),
         );
-        let mut command = crate::command::TankCommand::default();
         let mut at = |tick, speed| {
+            let mut command = crate::command::TankCommand::default();
             sim.write(tick, true, &mut command);
             sim.stop(tick, speed, &mut command);
             assert!(!command.fire_primary && !command.fire_secondary);
-            (command.throttle, command.brake)
+            command.throttle
         };
         let run = super::RUN_LEAD;
-        assert_eq!(at(run - 1, moving), (0.0, false));
-        assert_eq!(at(run, stopped), (1.0, false));
-        assert_eq!(at(run + 99, stopped), (1.0, false));
-        assert_eq!(at(run + 100, moving), (0.0, true));
-        assert_eq!(at(run + 101, None), (0.0, true));
-        assert_eq!(at(run + 102, stopped), (0.0, false));
-        assert_eq!(at(run + 103, moving), (0.0, false));
+        assert_eq!(at(run - 1, moving), 0.0);
+        assert_eq!(at(run, stopped), 1.0);
+        assert_eq!(at(run + 99, stopped), 1.0);
+        assert_eq!(at(run + 100, moving), -1.0);
+        assert_eq!(at(run + 101, None), -1.0);
+        assert_eq!(at(run + 102, stopped), 0.0);
+        assert_eq!(at(run + 103, moving), 0.0);
     }
 
     use core::time::Duration;

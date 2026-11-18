@@ -1,6 +1,6 @@
 # Drivetrain slice 3: Relocate
 
-The first report below records `d38b955b`. The second-fix section records the current lane.
+The first report records `d38b955b`; the second fix records `ffec36e8`. The closing section records the current lane.
 
 Subject: the game's driving physics, game state only. Where an engine's HP state is involved,
 the subject is the game's damage model: an HP pool emptied means the engine is knocked out.
@@ -216,8 +216,7 @@ The six-lens independent review and merge to main belong to the orchestrator. Th
 
 Subject: the game's driving physics and damage model, game state only. An engine whose HP pool
 is emptied is knocked out. Parent `8bd41440` merges `main` into the lane before these fixes;
-its driving source is `d38b955b`. The sections above record the first fix, not the current wire
-revision or surface-list implementation.
+its driving source is `d38b955b`. The sections above record the first fix.
 
 ### Finding dispositions and decisions
 
@@ -240,8 +239,9 @@ revision or surface-list implementation.
   `SolverSystems::PreSubstep`. Avian's pinned `solver/schedule.rs` chains
   `PrepareContactConstraints -> PreSubstep -> Substep`; `solver/plugin.rs` clears and fills the
   constraint vectors only during preparation, and its substep passes mutate their elements
-  without changing identities. Serial preparation assigns addresses and writers only; face
-  geometry evaluates in parallel batches and publishes in graph order. The list includes overflow. Each substep borrows only listed
+  without changing identities. Preparation batches contact lookup, belt-membership filtering,
+  owner selection and face geometry over the constraint set on the compute pool, then publishes
+  in graph order. The list includes overflow. Each substep borrows only listed
   constraints, computes on disjoint references in batches sized from actual constraint count
   and compute-pool workers, and joins before the solve. A belt-on-belt constraint belongs to the
   lower Entity of its owners, reads both owners after advance, and has one writer. Empty lists
@@ -249,17 +249,17 @@ revision or surface-list implementation.
   lookup or pose query. The game and sandbox share this path. Tests cover both collider orders,
   consecutive speeds, shared ownership, overflow, ordinary-surface preservation and empty lists.
 - **P3s:** the resting publication test now has an awake changed-speed positive control and
-  opens its Driver ledger before delivery. The harness park recipe sends an explicit service
-  brake, clears that held level when the stop is observed, and never requests reverse. Its
-  comment and persistent-command witness match that behavior; no backlog row remains. The
+  opens its Driver ledger before delivery. The harness park recipe retains main's reverse-demand
+  behavior and assertions; its comment names the release condition and reverse-selection risk,
+  with both parameters owned by `assets/driving/actuation.ron`. The
   redundant steering/side-stop fixture compares production `held`, `driving` and brake-slide
   results across cold and accepted seeds. Both repeated explanations identified by brevity
   were removed.
 
-The brake level crosses `TankCommand`, `InputLevels`, parsing and action staging into
-`DriveIntent::Brake`. Its codec/staging and command-to-intent witnesses pass. `InputLevels` is
-in `WIRE_TYPE_DEFS`: **PROTOCOL_REV=107**, **WIRE_TYPES_HASH=0x29519dbc6a7b2a71**. `LaunchState`'s
-wire definition did not change. The protocol tests passed after the required manifest re-pin.
+The wire is unchanged from main: **PROTOCOL_REV=106**,
+**WIRE_TYPES_HASH=0x4d79ba6d019c1235**. `TankCommand`, `InputLevels`, their transport tests and
+protocol pins match main exactly. Explicit `DriveIntent::Brake` remains local to the
+in-process rubble-arrival probe; it is not a player input.
 
 ### Cost
 
@@ -340,7 +340,7 @@ the sole production solve path. Raw logs: `/tmp/drive-r2-{47,before,cold}-settle
 
 ### Final verification
 
-Final Rust source stayed fixed through these checks. Compiles used `scripts/serial-cargo` with
+Second-fix Rust source stayed fixed through these checks. Compiles used `scripts/serial-cargo` with
 `dev_ui,bitprobe`, except the requested no-default-feature server check.
 
 - `cargo fmt --all --check`: passed.
@@ -358,3 +358,70 @@ Final Rust source stayed fixed through these checks. Compiles used `scripts/seri
 
 Final logs: `/tmp/drive-r2-final-{fmt,clippy,sim,launch,redundant,surfaces,scorecard,harness,input,command,protocol,server,suite}.log`.
 The lane commits locally; independent six-lens landing review, merge and release belong to the orchestrator.
+
+
+## Closing round
+
+Decision: use Avian's existing immutable constraint storage; no fork patch or serial fallback.
+Verified `GraphColor::contact_constraints` is `Vec<ContactConstraint>` in
+`vendor/avian3d-0.8.0-overmatch/src/dynamics/solver/constraint_graph.rs`. Preparation first gathers
+constraint references in graph order, then batches contact lookup, belt filtering, lower-Entity
+owner selection and geometry on `ComputeTaskPool`. Bevy 0.20.1's `ParallelSlice::par_splat_map`
+returns batches in input order, so the bounded commit retains graph order, including overflow.
+The arithmetic and the solver's inputs are unchanged.
+
+The script-only brake input and everything added to transport it are removed. The harness recipe
+and its assertions match main; only the stop comment changes. It releases when replicated speed
+reads a stop below `assets/driving/actuation.ron::park_engage_speed`. If the hull remains above
+that speed after its belts have been held for `assets/driving/actuation.ron::reversal_hold_s`,
+the gearbox selects reverse and the held demand drives backward, just as player reverse does.
+The in-process rubble arrival keeps its direct `DriveIntent::Brake`.
+
+`Bed::measure_drive_cost` now accumulates world-constraint counts in a running total instead of
+retaining the per-tick vector. Its reported mean has the same numerator and denominator.
+
+### Closing cost
+
+MEASURED on the local Apple M4, edit profile, `dev_ui,bitprobe`: one invocation of the existing
+five-fixture probe, three runs each, 640 measured ticks per run. Local observations only;
+these are not hosted two-core measurements. The previous means below are the second-fix table's
+DERIVED means; no dispatch threshold or physics parameter changed.
+
+| Fixture | Previous mean us/tick | Closing us/tick, runs 1 / 2 / 3 | Closing mean us/tick |
+|---|---:|---|---:|
+| parked-yard | 71.650 | 72.308 / 70.634 / 69.360 | 70.767 |
+| flat cost g2 tight | 121.967 | 117.615 / 116.936 / 120.325 | 118.292 |
+| flat cost g4 wide | 121.106 | 117.915 / 117.791 / 120.790 | 118.832 |
+| flat cost neutral pivot | 120.066 | 115.044 / 116.137 / 119.229 | 116.803 |
+| parked-loose-field | 87.340 | 96.580 / 97.057 / 97.255 | 96.964 |
+
+Closing means are DERIVED from the three measured run means. The loose-field mean increased
+from 87.340 to 96.964 us/tick while moving its 452 ordinary-constraint lookups and belt checks
+into compute-pool batches; these runs do not separately measure dispatch cost. The moving
+fixtures still report zero world constraints. Parked-yard retains MEASURED 12.4328125 mean tank
+contact points per tick; the loose field retains zero. Solver arithmetic is unchanged.
+Raw log: `/tmp/drive-close-cost.log`.
+
+### Closing verification
+
+- `cargo fmt --all --check` and CI clippy passed.
+- Targeted module tests passed: MEASURED `net::protocol` 18, `net::harness` 21,
+  `net::input_arrival` 27, `command::` 16, `track::` 387; DERIVED 469 total, zero failures.
+- `net::protocol::tests::wire_types_are_pinned` passed with main's exact
+  `WIRE_TYPES_HASH=0x4d79ba6d019c1235`, `PROTOCOL_REV=106`. The command, input-level definitions,
+  their transport tests and protocol source have no diff against main.
+- The existing `scheduled_substeps_equal_direct_advances_and_publish_only_after_the_loop`
+  equality proof passed, including its active belt-contact surface-velocity checks. Belt-contact
+  witnesses also passed. No solver-input change, so the full suite was not repeated.
+- `check --no-default-features --bin overmatch-server` passed with the three existing dead-code
+  warnings for weapon audio, engine audio and steering readout.
+- The existing ignored cost probe passed once, producing all 15 run records.
+- The initial broad `command` substring filter also selected an unchanged input-arrival bridge
+  test, which failed because `ComputeTaskPool` was not initialized. The same exact test fails
+  alone (`/tmp/drive-close-pool-repro.log`): it runs `apply_inputs`' existing `par_iter_mut` in a
+  bare `World`. Both its test and production input-arrival file match main exactly. Decision:
+  leave that unrelated fixture unchanged; the intended `command::` module and the whole
+  `net::input_arrival` module both pass. No unrelated fix is included.
+
+Logs: `/tmp/drive-r3-{fmt,clippy,net-protocol,net-harness,net-input_arrival}.log`,
+`/tmp/drive-close-{command,track,server,cost}.log`. No source edits during the runs.

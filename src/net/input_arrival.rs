@@ -28,7 +28,6 @@ const WITHDRAWAL_RESERVE: usize = 1 + 1;
 pub(super) struct InputLevels {
     pub throttle: f32,
     pub steer: f32,
-    pub brake: bool,
     pub aim: Option<AimIntent>,
     pub range: f32,
 }
@@ -38,7 +37,6 @@ impl From<TankCommand> for InputLevels {
         Self {
             throttle: c.throttle,
             steer: c.steer,
-            brake: c.brake,
             aim: c.aim,
             range: c.range,
         }
@@ -49,7 +47,6 @@ impl InputLevels {
         ParsedTankCommand::try_from(TankCommand {
             throttle: self.throttle,
             steer: self.steer,
-            brake: self.brake,
             aim: self.aim,
             range: self.range,
             ..default()

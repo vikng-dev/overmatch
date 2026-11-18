@@ -289,7 +289,7 @@ impl Bed {
         let mut work = Vec::with_capacity(ticks);
         let mut mechanical = [0usize; 5];
         let mut contact_points = Vec::with_capacity(ticks);
-        let mut world_constraints = Vec::with_capacity(ticks);
+        let mut world_constraints = 0usize;
         for _ in 0..ticks {
             self.tick(throttle, steer);
             costs.push(
@@ -318,13 +318,11 @@ impl Bed {
                 .app
                 .world()
                 .resource::<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>();
-            world_constraints.push(
-                graph
-                    .colors
-                    .iter()
-                    .map(|c| c.contact_constraints.len())
-                    .sum::<usize>(),
-            );
+            world_constraints += graph
+                .colors
+                .iter()
+                .map(|c| c.contact_constraints.len())
+                .sum::<usize>();
             // Sleeping bodies have no solver index and no active contact rows.
             let count = self
                 .app
@@ -347,7 +345,7 @@ impl Bed {
         costs.sort_by(f64::total_cmp);
         println!(
             "DRIVECOST {}",
-            json!({"world_constraints_mean_tick":world_constraints.iter().sum::<usize>() as f64 / ticks as f64, "label":label, "run":run, "ticks":ticks, "mean_us":costs.iter().sum::<f64>() / ticks as f64, "median_us":costs[ticks / 2], "assignments_mean_tick":work.iter().sum::<usize>() as f64 / ticks as f64, "assignments_max_tick":work.iter().max().unwrap(), "mechanical_advances":mechanical[0], "rows_mean_substep":mechanical[1] as f64 / mechanical[0] as f64, "assignments_mean_substep":mechanical[2] as f64 / mechanical[0] as f64, "rows_max_substep":mechanical[3], "assignments_max_substep":mechanical[4], "active_tank_contact_points_mean_tick":contact_points.iter().sum::<usize>() as f64 / ticks as f64, "active_tank_contact_points_max_tick":contact_points.iter().max().unwrap()})
+            json!({"world_constraints_mean_tick":world_constraints as f64 / ticks as f64, "label":label, "run":run, "ticks":ticks, "mean_us":costs.iter().sum::<f64>() / ticks as f64, "median_us":costs[ticks / 2], "assignments_mean_tick":work.iter().sum::<usize>() as f64 / ticks as f64, "assignments_max_tick":work.iter().max().unwrap(), "mechanical_advances":mechanical[0], "rows_mean_substep":mechanical[1] as f64 / mechanical[0] as f64, "assignments_mean_substep":mechanical[2] as f64 / mechanical[0] as f64, "rows_max_substep":mechanical[3], "assignments_max_substep":mechanical[4], "active_tank_contact_points_mean_tick":contact_points.iter().sum::<usize>() as f64 / ticks as f64, "active_tank_contact_points_max_tick":contact_points.iter().max().unwrap()})
         );
     }
 

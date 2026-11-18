@@ -273,32 +273,39 @@ impl BeltConstraints {
         use bevy::tasks::{ComputeTaskPool, ParallelSlice};
         self.owners.clear();
         self.order.clear();
-        // This serial boundary assigns addresses and writers only; geometry is independent work.
-        let mut work = Vec::new();
-        for (color, group) in graph.colors.iter().enumerate() {
-            for (index, constraint) in group.contact_constraints.iter().enumerate() {
-                let (_, pair) = contacts
-                    .get_by_id(constraint.contact_id)
-                    .expect("a prepared constraint retains its contact pair");
-                let mut surfaces = Vec::new();
-                for (collider, sign) in [(pair.collider1, -1.0), (pair.collider2, 1.0)] {
-                    let Ok((face, of)) = faces.get(collider) else {
-                        continue; // Ordinary surface: no belt motion on its body.
-                    };
-                    surfaces.push((face, of.body, sign));
-                }
-                if let Some(owner) = surfaces.iter().map(|(_, body, _)| *body).min() {
-                    work.push((owner, color, index, constraint, pair, surfaces));
-                }
-            }
-        }
+        let work: Vec<_> = graph
+            .colors
+            .iter()
+            .enumerate()
+            .flat_map(|(color, group)| {
+                group
+                    .contact_constraints
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, constraint)| (color, index, constraint))
+            })
+            .collect();
         if work.is_empty() {
-            return; // No active belt constraints need geometry or task dispatch.
+            return; // No active constraints need lookup or task dispatch.
         }
         let prepared = work.par_splat_map(ComputeTaskPool::get(), None, |_, batch| {
             batch
                 .iter()
-                .map(|(owner, color, index, constraint, pair, surfaces)| {
+                .filter_map(|(color, index, constraint)| {
+                    let (_, pair) = contacts
+                        .get_by_id(constraint.contact_id)
+                        .expect("a prepared constraint retains its contact pair");
+                    let surfaces: Vec<_> = [(pair.collider1, -1.0), (pair.collider2, 1.0)]
+                        .into_iter()
+                        .filter_map(|(collider, sign)| {
+                            match faces.get(collider) {
+                                Ok((face, of)) => Some((face, of.body, sign)),
+                                Err(_) => None, // Ordinary surface: no belt motion on its body.
+                            }
+                        })
+                        .collect();
+                    // Ordinary surfaces have no belt owner or moving-face velocity to publish.
+                    let owner = surfaces.iter().map(|(_, body, _)| *body).min()?;
                     let points = &pair.manifolds[constraint.manifold_index].points;
                     let centre = points.iter().map(|p| p.point).sum::<Vec3>() / points.len() as f32;
                     let faces = surfaces
@@ -320,18 +327,18 @@ impl BeltConstraints {
                             )
                         })
                         .collect();
-                    (
-                        *owner,
+                    Some((
+                        owner,
                         SurfaceConstraint {
                             color: *color,
                             index: *index,
                             faces,
                         },
-                    )
+                    ))
                 })
                 .collect::<Vec<_>>()
         });
-        // Publish in graph order so substeps can take disjoint borrows without a scan or sort.
+        // Commit in graph order: substeps split disjoint mutable borrows by these indices.
         for (owner, row) in prepared.into_iter().flatten() {
             let owned = self.owners.entry(owner).or_default();
             self.order.push((owner, owned.len()));

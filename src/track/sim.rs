@@ -1084,7 +1084,7 @@ pub(crate) fn drive_target(
     let supply = drive_supply(tank, caps, volumes);
     let repairing = supply.control_authority
         && tank.is_some_and(|tank| crate::damage::repair::underway(tank, volumes));
-    let intent = if command.held() || command.brake || repairing {
+    let intent = if command.held() || repairing {
         DriveIntent::Brake
     } else {
         DriveIntent::Axes(DriveAxes {
@@ -2316,28 +2316,6 @@ mod tests {
                 "a changed accepted speed must trigger replication"
             );
         }
-    }
-
-    /// An explicit brake is an action independent of axis demand; the harness park recipe
-    /// relies on the command boundary selecting service brakes even with retained axes.
-    #[test]
-    fn explicit_command_brake_selects_brake_intent() {
-        use bevy::ecs::system::RunSystemOnce;
-        let command = ParsedTankCommand::try_from(crate::command::TankCommand {
-            brake: true,
-            throttle: 1.0,
-            steer: 1.0,
-            ..default()
-        })
-        .unwrap();
-        World::new()
-            .run_system_once(move |volumes: Query<VolumeFacets>| {
-                assert_eq!(
-                    drive_target(&command, None, None, &volumes).intent,
-                    DriveIntent::Brake
-                );
-            })
-            .unwrap();
     }
 
     fn finish_tick(

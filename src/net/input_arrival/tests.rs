@@ -650,7 +650,6 @@ fn measure_input_and_answer_payload_sizes() {
         InputLevels {
             throttle: 1.0,
             steer: 0.0,
-            brake: false,
             aim: Some(AimIntent::HullLocal(Vec3::NEG_Z)),
             range: 100.0,
         },
@@ -1224,28 +1223,4 @@ fn recovery_freshness_uses_the_authored_copy_budget() {
         );
         assert!(client.pending.iter().all(|edge| edge.copies == budget));
     }
-}
-
-/// Scripted parks rely on a held service brake crossing the same level codec as the axes.
-/// Action staging must preserve that level until the next absolute snapshot releases it.
-#[test]
-fn explicit_brake_survives_level_transport_and_action_staging() {
-    let raw = TankCommand {
-        brake: true,
-        throttle: 1.0,
-        steer: 1.0,
-        ..default()
-    };
-    let bytes = postcard::to_allocvec(&InputLevels::from(raw)).unwrap();
-    let levels: InputLevels = postcard::from_bytes(&bytes).unwrap();
-    let parsed = levels.parse().unwrap().with_actions(TankCommand::default());
-    assert!(parsed.brake);
-    assert_eq!(parsed.throttle, raw.throttle);
-    assert_eq!(parsed.steer, raw.steer);
-    assert!(
-        !InputLevels::from(TankCommand::default())
-            .parse()
-            .unwrap()
-            .brake
-    );
 }
