@@ -76,6 +76,27 @@ class TraceProfileTest(unittest.TestCase):
         with self.assertRaisesRegex(TraceError, r"t\.json:2: a record's phase is list"):
             list(Trace(path))
 
+    def test_timestamps_are_finite_floats_before_accounting(self) -> None:
+        """The profiler stores doubles; unrepresentable trace input must refuse at its row."""
+        for ts in [10 ** 400, float("inf"), float("-inf"), float("nan")]:
+            with self.subTest(ts=ts):
+                trace = Trace(self.file("t.json", "[\n" + record("B", "system: name=a", ts) + "\n]"))
+                with self.assertRaisesRegex(TraceError, r"t\.json:2: ts .*finite.*recapture"):
+                    list(trace)
+        trace = Trace(self.file("t.json", "[\n" + record("B", "system: name=a", 1) + "\n]"))
+        self.assertIs(type(next(iter(trace))[1].ts), float)
+
+    def test_utf8_torn_at_the_tail_is_reported_but_not_inside_the_trace(self) -> None:
+        """A SIGKILL may split a UTF-8 codepoint; an interior encoding fault cannot be skipped."""
+        path = Path(self.dir.name) / "t.json"
+        path.write_bytes(b'[\n{"name":"\xc3')
+        trace = Trace(str(path))
+        self.assertEqual(list(trace), [])
+        self.assertEqual(trace.torn_tail, 2)
+        path.write_bytes(path.read_bytes() + b'\n]')
+        with self.assertRaisesRegex(TraceError, r"t\.json:2: malformed record"):
+            list(Trace(str(path)))
+
     def test_the_phases_it_ignores_are_skipped(self) -> None:
         """The thread-name (`M`) and instant (`i`) records Bevy's chrome trace writes are skipped,
         the spans around them read: refusing them would refuse every real trace."""
@@ -103,7 +124,7 @@ class TraceProfileTest(unittest.TestCase):
     def test_a_span_begun_inside_the_window_and_never_ended_is_refused(self) -> None:
         """A span open when the trace ends counts nowhere, so one begun inside the window would
         leave its period short: refused, naming its begin line."""
-        with self.assertRaisesRegex(TraceError, r":2: thread 1's system 'a', begun at 5 µs"):
+        with self.assertRaisesRegex(TraceError, r":2: thread 1's system 'a', begun at 5\.0 µs"):
             self.run_profile([record("B", "system: name=a", 5)], 0, 10)
 
     def test_an_unwritable_output_path_is_refused_naming_it(self) -> None:

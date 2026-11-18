@@ -123,7 +123,15 @@ class Trace:
         if type(span.ts) not in (int, float) or type(span.tid) is not int or type(span.name) is not str:
             raise TraceError(f"{self.path}:{self.lines}: a {ph} record needs a numeric ts, an "
                              f"integer tid and a string name, not {span}")
-        return span
+        try:
+            ts = float(span.ts)
+        except OverflowError as e:
+            raise TraceError(f"{self.path}:{self.lines}: ts exceeds finite float range; "
+                             "recapture with numeric timestamps in microseconds") from e
+        if not math.isfinite(ts):
+            raise TraceError(f"{self.path}:{self.lines}: ts must be finite; "
+                             "recapture with numeric timestamps in microseconds")
+        return span._replace(ts=ts)
 
     def __iter__(self) -> Iterator[tuple[int, Span]]:
         closed = torn = None  # the closing `]`'s line; (line, why) of a record that did not parse
@@ -147,8 +155,8 @@ class Trace:
                     continue
                 try:
                     record = json.loads(raw.removesuffix(b","))
-                except json.JSONDecodeError as e:
-                    torn = (self.lines, f"{e.msg} at column {e.colno}")
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                    torn = (self.lines, str(e))
                     continue
                 span = self.admit(record)
                 if span is not None:
