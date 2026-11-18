@@ -62,7 +62,7 @@ fn record_closed(mut closed: MessageReader<MatchClosed>, mut log: ResMut<Closed>
     log.0.extend(closed.read().cloned());
 }
 
-fn client_app() -> App {
+pub(super) fn client_app() -> App {
     let mut app = base_app();
     app.add_plugins(ClientPlugins {
         tick_duration: TICK,
@@ -80,8 +80,7 @@ fn client_app() -> App {
         scene: None,
         effects: Vec::new(),
     });
-    app.init_resource::<ConnectRetry>()
-        .add_systems(Update, drive_connection);
+    install_connection_lifecycle(&mut app);
     // A closed local port: the lobby's location fetch fails at once, which no exit depends on.
     install_matchmaking_link(&mut app, "http://127.0.0.1:9");
     install_screen_flow(&mut app);

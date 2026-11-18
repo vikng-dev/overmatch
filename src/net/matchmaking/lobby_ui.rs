@@ -64,7 +64,7 @@ pub(super) enum ListView {
 
 /// Replace every character outside printable ASCII: common Latin-1 letters by their base letter,
 /// anything else by `?`.
-pub(super) fn printable(text: &str) -> String {
+pub(in crate::net) fn printable(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             ' '..='~' => c,

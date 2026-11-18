@@ -151,6 +151,7 @@ pub(super) fn install_client(app: &mut App) {
                 refuse_peer_record,
             )
                 .chain()
+                .before(super::client::RefusalHandling)
                 .before(ReplicaSet),
         );
 }
@@ -395,7 +396,7 @@ fn receive_ledger(
 }
 
 #[derive(Message, Debug, Clone, PartialEq)]
-enum ConstructionRefusal {
+pub(super) enum ConstructionRefusal {
     DuplicateLedgers,
     UntaggedLedger,
     UntaggedPiece,
@@ -526,7 +527,9 @@ fn refuse_peer_record(
 ) {
     if let Some(refusal) = refused.read().next() {
         warn!("client: {refusal}");
-        gone.write(super::matchmaking::ServerGone(refusal.to_string()));
+        gone.write(super::matchmaking::ServerGone::Construction(
+            refusal.clone(),
+        ));
     }
 }
 
@@ -1131,7 +1134,7 @@ mod tests {
             .world_mut()
             .resource_mut::<Messages<super::super::matchmaking::ServerGone>>()
             .drain()
-            .map(|cause| cause.0)
+            .map(|cause| cause.to_string())
             .collect();
         assert_eq!(causes, [expected.to_string()]);
     }

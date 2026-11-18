@@ -37,6 +37,7 @@ mod ticket;
 mod worker;
 
 use contract::LocationsResponse;
+pub(super) use lobby_ui::printable;
 use picker::PingTable;
 pub(super) use ticket::ReadyMatch;
 use ticket::{JoinFlow, Phase, StatusEvent};
@@ -57,9 +58,34 @@ pub(super) enum MatchClosed {
     Left,
 }
 
-/// The ticket of the match whose link is down answered `failed`: its server is gone.
+/// Terminal outside-input and transport causes, retained locally until their presentation.
+/// This message is not part of the wire protocol.
 #[derive(Message, Debug, Clone)]
-pub(super) struct ServerGone(pub(super) String);
+pub(super) enum ServerGone {
+    Construction(super::construction::ConstructionRefusal),
+    Debris(super::debris_stress::PoseRefusal),
+    TickStamp(super::tick_stamp::StampRefusal),
+    Stream(super::view_clock::StreamRefusal),
+    Admission(super::admission::JoinRefusal),
+    Matchmaking(String),
+    Unreachable,
+    StoppedAnswering,
+}
+
+impl std::fmt::Display for ServerGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Construction(cause) => cause.fmt(f),
+            Self::Debris(cause) => cause.fmt(f),
+            Self::TickStamp(cause) => cause.fmt(f),
+            Self::Stream(cause) => cause.fmt(f),
+            Self::Admission(cause) => f.write_str(&cause.message()),
+            Self::Matchmaking(cause) => f.write_str(cause),
+            Self::Unreachable => f.write_str("could not reach the match server"),
+            Self::StoppedAnswering => f.write_str("it stopped answering"),
+        }
+    }
+}
 
 /// The player asked to leave the match.
 #[derive(Message, Debug, Clone, Copy)]
@@ -158,7 +184,12 @@ pub(super) fn install(app: &mut App, api: &str) {
         .add_systems(
             Update,
             (
-                (receive_replies, take_closed, poll_ticket).chain(),
+                (
+                    receive_replies.before(super::client::RefusalHandling),
+                    take_closed.after(super::client::RefusalHandling),
+                    poll_ticket,
+                )
+                    .chain(),
                 (lobby_ui::refresh_list, lobby_ui::refresh_footer)
                     .after(poll_ticket)
                     .run_if(in_state(Flow::Lobby)),
@@ -218,7 +249,7 @@ fn receive_replies(
                 }
                 StatusEvent::ServerGone(reason) => {
                     warn!("matchmaking: the match's server is gone: {reason}");
-                    gone.write(ServerGone(reason));
+                    gone.write(ServerGone::Matchmaking(reason));
                 }
                 StatusEvent::Nothing => {}
             },

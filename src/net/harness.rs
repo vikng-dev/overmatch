@@ -744,8 +744,14 @@ pub(crate) fn simulate_watchdog(
     fixed: Res<Time<Fixed>>,
     mut exit: MessageWriter<AppExit>,
     timeline: Res<LocalTimeline>,
+    terminal: Res<super::client::ClosedConnection>,
     mut trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
+    if let Some(cause) = &terminal.0 {
+        error!("client: simulation refused: {cause}");
+        exit.write(AppExit::error());
+        return;
+    }
     let now = time.startup().elapsed();
     if simulate.ticks >= simulate.total && matches!(simulate.clock, ScriptClock::Released { .. }) {
         simulate.clock = ScriptClock::Finished;
@@ -1083,6 +1089,55 @@ pub(crate) fn spawn_pose() -> Option<(Vec2, Quat)> {
 
 #[cfg(test)]
 mod tests {
+    /// Script runners rely on the shipped lifecycle turning every terminal cause into a failing
+    /// AppExit and a diagnostic naming that cause, even when script completion is also ready.
+    #[test]
+    fn a_scripted_refusal_exits_nonzero_with_its_cause_before_success() {
+        use bevy::prelude::*;
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct Capture(Mutex<Vec<u8>>);
+        impl Write for &Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().write(bytes)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for cause in crate::net::client::refusals::refusal_kinds() {
+            let mut app = crate::net::client::refusals::direct_app();
+            app.update();
+            let mut sim = super::SimulateInput::new(&super::Script::parse("(ticks: 2)").unwrap());
+            sim.hold_slot(std::time::Duration::ZERO);
+            sim.release(std::time::Duration::ZERO);
+            sim.ticks = sim.total;
+            app.insert_resource(sim);
+            crate::net::client::install_script_watchdog(&mut app);
+            // Keep the diagnostic on this thread so its test-local subscriber sees it.
+            app.edit_schedule(Update, |schedule| {
+                schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+            });
+            app.world_mut().write_message(cause.clone());
+            let log = Arc::new(Capture::default());
+            let subscriber = bevy::log::tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(log.clone())
+                .finish();
+            bevy::log::tracing::subscriber::with_default(subscriber, || app.update());
+            assert_eq!(app.should_exit(), Some(AppExit::error()));
+            let message = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+            assert!(
+                message.contains(&format!("client: simulation refused: {cause}")),
+                "{message}"
+            );
+        }
+    }
+
     /// The ram recipe holds full throttle for its requested interval and never fires. An
     /// ignored duration or inherited primary click would make its measured workload invalid.
     #[test]
@@ -1352,6 +1407,7 @@ mod tests {
             .insert_resource(Time::<Real>::default())
             .insert_resource(Time::<Fixed>::from_hz(64.0))
             .init_resource::<lightyear::prelude::LocalTimeline>()
+            .init_resource::<super::super::client::ClosedConnection>()
             .insert_resource(crate::shot_trace::ShotTrace::for_test(&path, None))
             .add_systems(Update, super::simulate_watchdog);
         app.update();
