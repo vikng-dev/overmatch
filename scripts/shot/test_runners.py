@@ -50,6 +50,13 @@ assert os.environ['OVERMATCH_WINDOW'] == 'hidden'
 out = Path(os.environ['OUT'])
 harness = Path(os.environ['OVERMATCH_HARNESS'])
 first = harness.name in ('target.harness.ron', 'a.harness.ron')
+if harness.name in ('a.harness.ron', 'b.harness.ron'):
+    import re
+    fields = dict(re.findall(r'(\w+): (\d+)', harness.read_text()))
+    assert 0 < int(fields['fire_until']) < int(fields['ticks']), 'both peers observe after release'
+    if not first:
+        peer = dict(re.findall(r'(\w+): (\d+)', (out / 'a.harness.ron').read_text()))
+        assert (fields['fire_until'], fields['ticks']) == (peer['fire_until'], peer['ticks']), 'the cohort has one capture window'
 if harness.name == 'shooter.harness.ron':
     import re
     fields = dict(re.findall(r'(\w+): (\d+)', harness.read_text()))
