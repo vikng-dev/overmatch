@@ -242,7 +242,7 @@ for form in forms:
     text = text.replace(form, "[credential]")
 # Multiline values and split Debug arrays are unmasked: no src/net or vendored netcode emitter.
 # Live report/netcode secrets are caught by their hex/array shapes.
-text = re.sub(r"(\bOVERMATCH_[A-Z_]+[ \t]*[:=])[^\n]*", r"\1[credential]", text, flags=re.I)
+text = re.sub(r"(\bOVERMATCH_(?:[A-Z_]+[ \t]*=|(?=[A-Z_]*(?:SECRET|KEY|TOKEN|TICKET))[A-Z_]+[ \t]*:))[^\n]*", r"\1[credential]", text, flags=re.I)
 text = re.sub(r"((?<![A-Za-z0-9])(?:ticket|secret|tokens?|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment)\b[\x22\x27]?[ \t]*[:=][ \t]*(?:(?:Bearer|Basic)[ \t]+)?)(?:\[[^\[\]\n]*\]|\{[^{}\n]*\}|\x22(?:\\[^\n]|[^\x22\\\n])*\x22|\x27(?:\\[^\n]|[^\x27\\\n])*\x27|[^\s,;]+)", r"\1[credential]", text, flags=re.I)
 text = re.sub(r"https?://\S+", "[url]", text, flags=re.I)
 text = re.sub(r"(?<![0-9a-f])(?:0x)?[0-9a-f]{64,}(?![0-9a-f])", "[credential]", text, flags=re.I)

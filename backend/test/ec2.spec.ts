@@ -746,7 +746,6 @@ describe("machine journal admission and operator archive", () => {
 	it.each(["journal", "end"] as const)("expected D1 failures cross real %s RPC as data; SQL bugs still reject", async (operation) => {
 		const s = await server();
 		const sink = operation === "journal" ? "server_logs" : "server_crashes";
-		// Inject only at the D1 edge inside the actual DO method, so the fault crosses RPC.
 		await failD1Once(V, `INSERT INTO ${sink}`);
 		const report = () => operation === "journal" ? push(s) : call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, { crash: "panic fixture" }, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
 		const response = await report();

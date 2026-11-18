@@ -23,10 +23,8 @@ const journalSum = (name) => {
   return match[1].split(/\s*\+\s*/).reduce((total, term) => total + journalValue(term.trim()), 0);
 };
 const journal = {
-  ...Object.fromEntries([
-    ["maxBytes", "MAX_BYTES"], ["captureS", "CAPTURE_S"], ["connectS", "CONNECT_S"], ["uploadS", "UPLOAD_S"],
-  ].map(([key, name]) => [key, journalValue(`JOURNAL_${name}`)])),
-  graceS: journalSum("GRACE_S"), stopS: journalSum("STOP_S"),
+  maxBytes: journalValue("JOURNAL_MAX_BYTES"),
+  graceS: journalSum("GRACE_S"),
 };
 const port = read("../../src/net/server.rs").match(/^const PORT: u16 = ([0-9]+);$/m);
 if (!port) throw new Error("server.rs: expected one PORT; update embed-host.mjs");

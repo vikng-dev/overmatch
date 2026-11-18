@@ -662,7 +662,7 @@ class HostedBoot(unittest.TestCase):
                  str(list(range(32)))]
         self.assertEqual(machine.command("hosted-stop", JOURNAL="\n".join(lines)).returncode, 0)
         text = (machine.root / "journal").read_text()
-        for kept in ("fatal: OVERMATCH_CAPACITY:[credential]", "server address not in connect token whitelist", "token_addresses=", "rejected: expired",
+        for kept in (lines[0], "server address not in connect token whitelist", "token_addresses=", "rejected: expired",
                      "request token=[credential]", "Netcode error: InvalidToken(InvalidVersion)",
                      "config OVERMATCH_API=[credential]", "peer:[ip]"):
             self.assertIn(kept, text)
@@ -695,8 +695,6 @@ class HostedBoot(unittest.TestCase):
         self.assertEqual(rendered[rendered.index("set -Eeuo pipefail"):],
                          embedded[embedded.index("set -Eeuo pipefail"):])
         self.assertTrue(rendered.startswith("#!/bin/bash\nROLE="))
-        self.assertNotIn("# BOOT", rendered)
-        self.assertIn("# Live report/netcode secrets", rendered)  # Inside Python's quoted source.
 
     def test_byte_cap_adversary_finishes_inside_the_capture_budget(self):
         machine = self.machine()

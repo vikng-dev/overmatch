@@ -443,7 +443,7 @@ describe("archive storage races and failure diagnostics", () => {
 });
 
 describe("bounded archive redaction", () => {
-	it.each(redactionCases)("masks the complete value in $raw for stored evidence", ({ raw, expected }) => {
+	it.each(redactionCases)("preserves diagnostics and masks credentials in $raw for stored evidence", ({ raw, expected }) => {
 		expect(sanitizedTail(raw, "").log).toBe(expected);
 	});
 
@@ -452,7 +452,7 @@ describe("bounded archive redaction", () => {
 		const configError = "fatal: OVERMATCH_CAPACITY: expected an integer from 1 to 256";
 		const netcode = "server ignored connection request. server address not in connect token whitelist token_addresses=[192.0.2.1:5888] server_addr=192.0.2.2:5888";
 		const { log } = sanitizedTail([configError, netcode, "Netcode error: InvalidToken(InvalidVersion)", "request token=opaque-value rejected: expired", "OVERMATCH_API=value"].join("\n"), "");
-		expect(log).toContain("fatal: OVERMATCH_CAPACITY:[credential]");
+		expect(log).toContain(configError);
 		expect(log).toContain("Netcode error: InvalidToken(InvalidVersion)");
 		expect(log).toContain("server address not in connect token whitelist token_addresses=[[ip]:5888]");
 		expect(log).toContain("request token=[credential] rejected: expired");

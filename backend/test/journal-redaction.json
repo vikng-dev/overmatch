@@ -13,7 +13,63 @@
   },
   {
     "raw": "OVERMATCH_X: v",
-    "expected": "OVERMATCH_X:[credential]"
+    "expected": "OVERMATCH_X: v"
+  },
+  {
+    "raw": "OVERMATCH_X=v",
+    "expected": "OVERMATCH_X=[credential]"
+  },
+  {
+    "raw": "OVERMATCH_REPORT_SECRET: v",
+    "expected": "OVERMATCH_REPORT_SECRET:[credential]"
+  },
+  {
+    "raw": "overmatch_netcode_key : v",
+    "expected": "overmatch_netcode_key :[credential]"
+  },
+  {
+    "raw": "OVERMATCH_CONNECT_TOKENS: v",
+    "expected": "OVERMATCH_CONNECT_TOKENS:[credential]"
+  },
+  {
+    "raw": "OVERMATCH_TICKETS: v",
+    "expected": "OVERMATCH_TICKETS:[credential]"
+  },
+  {
+    "raw": "OVERMATCH_X: diagnostic OVERMATCH_REPORT_SECRET: v",
+    "expected": "OVERMATCH_X: diagnostic OVERMATCH_REPORT_SECRET:[credential]"
+  },
+  {
+    "raw": "OVERMATCH_X: diagnostic OVERMATCH_X=v",
+    "expected": "OVERMATCH_X: diagnostic OVERMATCH_X=[credential]"
+  },
+  {
+    "raw": "fatal: OVERMATCH_CAPACITY: expected an integer from 1 to 256",
+    "expected": "fatal: OVERMATCH_CAPACITY: expected an integer from 1 to 256"
+  },
+  {
+    "raw": "fatal: OVERMATCH_SERVER_ID: expected 1-256 URL-unreserved characters (A-Z a-z 0-9 . _ ~ -)",
+    "expected": "fatal: OVERMATCH_SERVER_ID: expected 1-256 URL-unreserved characters (A-Z a-z 0-9 . _ ~ -)"
+  },
+  {
+    "raw": "fatal: OVERMATCH_API: expected an http:// or https:// base URL",
+    "expected": "fatal: OVERMATCH_API: expected an http:// or https:// base URL"
+  },
+  {
+    "raw": "fatal: OVERMATCH_HEARTBEAT_INTERVAL_S: expected a positive number of seconds, at most 86400",
+    "expected": "fatal: OVERMATCH_HEARTBEAT_INTERVAL_S: expected a positive number of seconds, at most 86400"
+  },
+  {
+    "raw": "fatal: OVERMATCH_EMPTY_EXIT_S: expected a positive number of seconds, at most 86400",
+    "expected": "fatal: OVERMATCH_EMPTY_EXIT_S: expected a positive number of seconds, at most 86400"
+  },
+  {
+    "raw": "fatal: OVERMATCH_CAPACITY: required in hosted mode",
+    "expected": "fatal: OVERMATCH_CAPACITY: required in hosted mode"
+  },
+  {
+    "raw": "fatal: OVERMATCH_API: not valid UTF-8",
+    "expected": "fatal: OVERMATCH_API: not valid UTF-8"
   },
   {
     "raw": "Authorization: Basic value-after-basic",

@@ -104,9 +104,10 @@ metadata reach root-only `/run` tmpfs files. Redaction can expand short addresse
 cap the resulting UTF-8 tail again without splitting a code point. Hosted script/header/env
 files remain root-only; systemd reads the environment before dropping to the service user.
 
-Redact values, preserving labels and surrounding prose. `OVERMATCH_` assignments accept `=` or
-`:`, masking the rest of the line; this also masks a configuration error's description after the
-colon while keeping its variable name. Credential labels match after underscores (including
+Redact values, preserving labels and surrounding prose. Every `OVERMATCH_` assignment using `=`
+masks the rest of the line. The `:` form does so only when the variable name contains `SECRET`,
+`KEY`, `TOKEN` or `TICKET` (case-insensitive); other configuration-error descriptions survive.
+Credential labels match after underscores (including
 `report_secret`, `connect_token`, `tokens`), accept Basic/Bearer authorization and consume escaped
 quotes without exposing the remaining value. Netcode's whitelist diagnostic keeps its message
 and address-field labels while masking addresses. Multiline values, multiline Debug arrays,
@@ -132,7 +133,7 @@ Audit of **every pattern** in the Worker and embedded Python sanitiser (n = boun
 | Pattern family | Why it is linear |
 |---|---|
 | Exact provider/own credential replacement | A fixed number of literal searches; generated credentials have fixed length. The hex-shape check is fully anchored and fixed-width. |
-| `OVERMATCH_...[:=]` | Fixed prefix at a word boundary; the name/spacing run cannot contain another eligible start. Its value is a newline-delimited single pass. |
+| `OVERMATCH_...[:=]` | Fixed prefix at a word boundary; the name/spacing run cannot contain another eligible start. A colon form's lookahead scans only the name for fixed secret markers and cannot be re-entered by suffix backtracking. A fixed number of name scans precedes the newline-delimited value pass. |
 | Credential labels/values | Finite fixed-length labels. Space runs cannot contain another label start. Value alternatives have distinct delimiters; bracket/object interiors exclude both opening and closing delimiters, preventing repeated suffix scans on unfinished nested dumps. Quoted values consume disjoint escaped-character/non-quote spans through an unescaped quote or fail once on an unfinished run. Unquoted values consume through whitespace/comma/semicolon. A fixed number of scans per span. |
 | HTTP(S) URL | Fixed `http` start and a maximal non-space value; success consumes the complete run. No failing unbounded suffix after it. |
 | Hex, including `0x` and adjacent non-hex letters | Negative hex lookbehind permits one attempt per maximal hex run, including `k` + hex. Optional `0x` is bounded, the final negative hex lookahead accepts the run end. It cannot retry at every hex digit. |
@@ -159,7 +160,7 @@ harness test compares its rendered script bytes with the generated Worker embed,
 lexer tests cover quoted/heredoc comment lines and typed build refusals. The worst-realistic
 launch test still requires at least 1 KiB headroom below EC2's 16 KiB cap.
 
-MEASURED: backend typecheck passed; full backend tests passed (263 production-path, 126 EC2,
+MEASURED: backend typecheck passed; full backend tests passed (277 production-path, 126 EC2,
 plus 2 Node comment-stripper tests),
 `python3 scripts/aws/test_host_setup.py` passed (26 tests), and the harness passed (40 tests).
 Shellcheck, `node backend/scripts/embed-host.mjs --check`, `cargo fmt --all --check` and
@@ -167,11 +168,12 @@ Shellcheck, `node backend/scripts/embed-host.mjs --check`, `cargo fmt --all --ch
 and adapter invariant fixtures reject loudly; these are asserted failures, not unhandled test errors.
 
 MEASURED at the 1,048,576-byte cap: the production TypeScript sanitiser bundled and run in
-Node took 27.3 ms on the ticket adversary. The installed machine command, including fixture
-process/I/O work, took 251.1 ms. These are local observations, not hosted CPU measurements;
+Node took 32.9 ms on the ticket adversary, 16.7 ms on a repeated-secret name without a delimiter,
+and 14.7 ms on an ordinary name with a colon. The installed machine command, including fixture
+process/I/O work, took 248.0 ms on the ticket adversary. These are local observations, not hosted CPU measurements;
 both regression gates pass against the DERIVED 4,000 ms Resolution bound above. MEASURED real
-`hostedScript` output for the stress fixture: 13,285 UTF-8 bytes, leaving 3,099 bytes against
-EC2's 16,384-byte limit; documented `machine.sh` is 16,271 bytes. Launch bytes and credentials
+`hostedScript` output for the stress fixture: 13,339 UTF-8 bytes, leaving 3,045 bytes against
+EC2's 16,384-byte limit; documented `machine.sh` is 16,325 bytes. Launch bytes and credentials
 are never printed by these measurements.
 
 The shared `failD1Once(version, SQL fragment)` fixture injects failures inside the actual Registry

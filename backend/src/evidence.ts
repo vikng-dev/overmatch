@@ -14,7 +14,7 @@ export function sanitizedTail(raw: string, providerToken: string): { log: string
 	// Multiline values and split Debug arrays are unmasked: src/net and vendored netcode emit
 	// neither; live report/netcode secrets are caught by their hex/array shapes.
 	clean = clean
-		.replace(/(\bOVERMATCH_[A-Z_]+[ \t]*[:=])[^\n]*/gi, "$1[credential]")
+		.replace(/(\bOVERMATCH_(?:[A-Z_]+[ \t]*=|(?=[A-Z_]*(?:SECRET|KEY|TOKEN|TICKET))[A-Z_]+[ \t]*:))[^\n]*/gi, "$1[credential]")
 		.replace(/((?<![A-Za-z0-9])(?:ticket|secret|tokens?|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment)\b["']?[ \t]*[:=][ \t]*(?:(?:Bearer|Basic)[ \t]+)?)(?:\[[^\[\]\n]*\]|\{[^{}\n]*\}|"(?:\\[^\n]|[^"\\\n])*"|'(?:\\[^\n]|[^'\\\n])*'|[^\s,;]+)/gi, "$1[credential]")
 		.replace(/https?:\/\/\S+/gi, "[url]")
 		.replace(/(?<![0-9a-f])(?:0x)?[0-9a-f]{64,}(?![0-9a-f])/gi, "[credential]")
