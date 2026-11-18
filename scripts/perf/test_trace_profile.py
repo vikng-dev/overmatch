@@ -8,16 +8,18 @@ both profiles are written: its per-system tables rely on every record being coun
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from trace_profile import OutputError, Trace, TraceError, WindowError, profile  # noqa: E402
+from trace_profile import OutputError, Trace, TraceError, WindowError, profile, read_window  # noqa: E402
 
 
 def record(ph: str, name: str, ts: float, tid: int = 1) -> str:
@@ -127,6 +129,85 @@ class TraceProfileTest(unittest.TestCase):
         with self.assertRaisesRegex(WindowError, r"w\.json: field w1_us is missing; .*rerun the wrapper"):
             profile(trace, window, str(Path(self.dir.name) / "out.json"))
 
+    def test_file_admission_refuses_all_read_and_decode_failures(self) -> None:
+        """The wrapper sees a typed refusal with location and repair for each file kind,
+        including a read failure after a valid row, not a successful partial trace."""
+        class InterruptedRead(io.BytesIO):
+            def __next__(self):
+                if self.tell():
+                    raise OSError("fixture: read interrupted")
+                return super().__next__()
+
+        for kind, error, read, good in [
+            ("trace", TraceError, lambda path: list(Trace(path)), b"[\n"),
+            ("window", WindowError, read_window, b'{"w0_us":0,"w1_us":1}'),
+        ]:
+            path = str(Path(self.dir.name) / f"{kind}.json")
+            for failure in [FileNotFoundError("fixture: missing"), PermissionError("fixture: denied"),
+                            OSError("fixture: device failure"), ValueError("embedded null byte")]:
+                with self.subTest(kind=kind, failure=type(failure).__name__):
+                    with patch("builtins.open", side_effect=failure):
+                        with self.assertRaisesRegex(error, rf"{re.escape(path)}: .*; .*rerun"):
+                            read(path)
+            with self.subTest(kind=kind, failure="mid-read"):
+                stream = InterruptedRead(good) if kind == "trace" else MagicMock()
+                if kind == "window":
+                    stream.__enter__.return_value.read.side_effect = OSError("fixture: read interrupted")
+                with patch("builtins.open", return_value=stream):
+                    location = re.escape(path) + (":2" if kind == "trace" else "")
+                    with self.assertRaisesRegex(error, rf"{location}: .*read interrupted.*; .*rerun"):
+                        read(path)
+
+            with self.subTest(kind=kind, failure="close"):
+                stream = MagicMock()
+                stream.__enter__.return_value = io.BytesIO(good)
+                stream.__exit__.side_effect = OSError("fixture: close interrupted")
+                with patch("builtins.open", return_value=stream):
+                    with self.assertRaisesRegex(error, rf"{re.escape(path)}(?::\d+)?: .*close interrupted.*; .*rerun"):
+                        read(path)
+
+        previous = sys.get_int_max_str_digits()
+        self.addCleanup(sys.set_int_max_str_digits, previous)
+        digits = sys.int_info.str_digits_check_threshold
+        sys.set_int_max_str_digits(digits)
+        for raw in [b"\xff", b"{", b"[" * (sys.getrecursionlimit() + 1),
+                    b"1" * (digits + 1)]:
+            for kind, error, read in [("trace", TraceError, lambda path: list(Trace(path))),
+                                      ("window", WindowError, read_window)]:
+                with self.subTest(kind=kind, raw=raw[:20]):
+                    path = Path(self.dir.name) / f"{kind}.json"
+                    path.write_bytes(b"[\n" + raw + b"\n]" if kind == "trace" else raw)
+                    with self.assertRaisesRegex(error, rf"{re.escape(str(path))}(?::\d+)?: .*; .*rerun"):
+                        read(str(path))
+
+    def test_window_decode_errors_keep_the_source_row(self) -> None:
+        """The operator can repair the actual row, including encoding errors after a newline."""
+        for raw in [b'{\n"w0_us":0,\n"w1_us":\xff}', b'{\n"w0_us":0,\n"w1_us":}']:
+            with self.subTest(raw=raw):
+                path = Path(self.dir.name) / "w.json"
+                path.write_bytes(raw)
+                with self.assertRaisesRegex(WindowError, r"w\.json:3: .*; .*rerun"):
+                    read_window(str(path))
+
+    def test_admission_refuses_wrong_shapes_and_unusable_numbers(self) -> None:
+        """Accounting and display consume admitted values without type, overflow or encoding
+        exceptions; malformed input is refused with its source and repair."""
+        for raw in [None, [], "row", 1, True, {}, {"ph": []}, {"ph": "X"},
+                    *({"ph": "B", "ts": ts, "tid": tid, "name": name}
+                      for ts, tid, name in [(None, 1, "a"), (True, 1, "a"), (1, [], "a"),
+                                            (1, True, "a"), (1, 1, []), (1, 1, "\ud800")])]:
+            with self.subTest(trace=raw):
+                path = self.file("t.json", "[\n" + json.dumps(raw) + "\n]")
+                with self.assertRaisesRegex(TraceError, r"t\.json:2: .*; .*rerun"):
+                    list(Trace(path))
+        for raw in [None, [], "window", 1, True, {}, {"w0_us": 0},
+                    *({"w0_us": value, "w1_us": 1} for value in
+                      [None, True, [], {}, "0", 10 ** 400, float("inf"), float("nan"), 1, 2])]:
+            with self.subTest(window=raw):
+                path = self.file("w.json", json.dumps(raw))
+                with self.assertRaisesRegex(WindowError, r"w\.json: .*; .*rerun"):
+                    read_window(path)
+
     def test_an_end_that_does_not_close_the_innermost_span_is_refused(self) -> None:
         """An end must close its thread's innermost open span; any other pairing is refused,
         naming the line, the thread and the open span, instead of timing against the wrong
@@ -158,6 +239,15 @@ class TraceProfileTest(unittest.TestCase):
         refusal = rf"{re.escape(str(out))}: cannot write .* create its directory"
         with self.assertRaisesRegex(OutputError, refusal):
             profile(trace, window, str(out))
+        with self.assertRaisesRegex(OutputError, r"out.*embedded null byte.*writable"):
+            profile(trace, window, "out\x00.json")
+        # The same operator-facing refusal covers a disconnected or non-UTF-8 terminal.
+        for failure in [BrokenPipeError("fixture: disconnected"),
+                        UnicodeEncodeError("ascii", "µ", 0, 1, "fixture: terminal encoding")]:
+            with self.subTest(summary=failure):
+                with patch("builtins.print", side_effect=failure):
+                    with self.assertRaisesRegex(OutputError, r"out\.json: .*summary.*terminal"):
+                        profile(trace, window, str(Path(self.dir.name) / "out.json"))
 
 
 if __name__ == "__main__":

@@ -245,15 +245,19 @@ describe("stopped match servers leave evidence for the operator", () => {
 	it("cancels an oversized log stream at the byte limit and still stops the deployment", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp();
-		// Fixture: four chunks reach the cap exactly; only the fifth may cancel the stream.
-		const chunkBytes = SERVER_LOG_BODY_MAX_BYTES / 4;
+		// Fixture: integer chunks plus the remainder reach the cap; only the extra byte cancels.
+		const chunkBytes = Math.floor(SERVER_LOG_BODY_MAX_BYTES / 4);
+		const chunks = [new Uint8Array(chunkBytes), new Uint8Array(chunkBytes), new Uint8Array(chunkBytes),
+			new Uint8Array(SERVER_LOG_BODY_MAX_BYTES - 3 * chunkBytes), new Uint8Array(1)];
+		for (const chunk of chunks) chunk.fill(120);
+		chunks[0].set(new TextEncoder().encode('{"logs":"'));
+		let nextChunk = 0;
 		let bytesRead = 0;
 		let cancelled = false;
 		edgegap.logResponse = () => new Response(new ReadableStream<Uint8Array>({
 			pull(controller) {
 				if (bytesRead > SERVER_LOG_BODY_MAX_BYTES) throw new Error("read beyond the oversized chunk");
-				const chunk = new Uint8Array(chunkBytes).fill(120);
-				if (bytesRead === 0) chunk.set(new TextEncoder().encode('{"logs":"'));
+				const chunk = chunks[nextChunk++];
 				bytesRead += chunk.byteLength;
 				controller.enqueue(chunk);
 			},
@@ -261,7 +265,7 @@ describe("stopped match servers leave evidence for the operator", () => {
 		}, { highWaterMark: 0 }));
 		await end(s);
 		expect(cancelled).toBe(true);
-		expect(bytesRead).toBe((Math.floor(SERVER_LOG_BODY_MAX_BYTES / chunkBytes) + 1) * chunkBytes);
+		expect(bytesRead).toBe(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
 		expect(await archive(s.deploymentId)).toMatchObject({ log: null, error: "logs HTTP 413 unknown" });
 		expect(edgegap.deployment().status).toBe("Status.TERMINATED");
 	});

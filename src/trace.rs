@@ -89,7 +89,6 @@ impl JsonlSink {
         })
     }
 
-    /// Append a row, refusing the run if its output can no longer be honoured.
     pub(crate) fn write(&mut self, row: &Value) {
         writeln!(self.writer, "{row}")
             .map_err(|error| SinkError::Write(self.path.clone(), error))
@@ -650,17 +649,14 @@ fn record_tick(
                     .collect();
                 // Canonical transmission order; null on non-owned replicas (owner-only wire state).
                 let trn = transmission.map_or(Value::Null, |transmission| {
-                    let mut trn =
-                        Vec::with_capacity(transmission_state_projection(&transmission.0).len());
-                    for field in transmission_state_projection(&transmission.0) {
-                        match field {
-                            TransmissionProjectionValue::U8(value) => trn.push(Value::from(value)),
-                            TransmissionProjectionValue::Bool(value) => {
-                                trn.push(Value::from(value))
-                            }
-                            TransmissionProjectionValue::F32(value) => trn.push(num(value)),
-                        }
-                    }
+                    let trn = transmission_state_projection(&transmission.0)
+                        .into_iter()
+                        .map(|field| match field {
+                            TransmissionProjectionValue::U8(value) => Value::from(value),
+                            TransmissionProjectionValue::Bool(value) => Value::from(value),
+                            TransmissionProjectionValue::F32(value) => num(value),
+                        })
+                        .collect();
                     Value::Array(trn)
                 });
                 row.as_object_mut()

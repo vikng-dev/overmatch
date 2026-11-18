@@ -46,6 +46,7 @@ NAME_FIELD = re.compile(r'^(system|system_commands|schedule): name=(.*)$')
 # The phases tracing-chrome 0.7's Threaded style (bevy_log 0.20.1's chrome layer) writes besides B
 # and E, which carry no span time; any other phase is refused.
 IGNORED_PHASES = {"i": "an instant event (a log line)", "M": "a thread's name"}
+TRACE_REPAIR = "recapture with bounded numeric fields and nesting by rerunning tick-trace.sh"
 WINDOW_REPAIR = ('tick-trace.sh writes it; rerun the wrapper, or write {"w0_us": <start>, '
                  '"w1_us": <end>} in µs from the server\'s launch, start before end')
 
@@ -79,23 +80,28 @@ class Window(NamedTuple):
 
 def read_window(path: str) -> Window:
     try:
-        with open(path) as f:
-            raw = json.load(f)
-    except OSError as e:
-        raise WindowError(f"{path}: cannot read the window ({e.strerror}); {WINDOW_REPAIR}") from e
-    except json.JSONDecodeError as e:
-        raise WindowError(f"{path}:{e.lineno}: the window is not JSON ({e.msg}); "
-                          f"{WINDOW_REPAIR}") from e
-    if not isinstance(raw, dict):
-        raise WindowError(f"{path}: the window is not a JSON object; {WINDOW_REPAIR}")
-    for field in ("w0_us", "w1_us"):
-        if type(raw.get(field)) not in (int, float):
-            got = f"is {raw[field]!r}, not a number" if field in raw else "is missing"
-            raise WindowError(f"{path}: field {field} {got}; {WINDOW_REPAIR}")
-    if not raw["w0_us"] < raw["w1_us"]:
-        raise WindowError(f"{path}: w0_us {raw['w0_us']} is not before w1_us {raw['w1_us']}; "
-                          f"{WINDOW_REPAIR}")
-    return Window(raw["w0_us"], raw["w1_us"], raw)
+        with open(path, "rb") as f:
+            raw = json.loads(f.read().decode("utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("the window is not a JSON object")
+        bounds = []
+        for field in ("w0_us", "w1_us"):
+            if type(raw.get(field)) not in (int, float):
+                got = f"is {raw[field]!r}, not a number" if field in raw else "is missing"
+                raise ValueError(f"field {field} {got}")
+            bound = float(raw[field])
+            if not math.isfinite(bound):
+                raise ValueError(f"field {field} must be finite")
+            bounds.append(bound)
+        if not bounds[0] < bounds[1]:
+            raise ValueError(f"w0_us {bounds[0]} is not before w1_us {bounds[1]}")
+        return Window(*bounds, raw)
+    except (OSError, ValueError, OverflowError, RecursionError) as e:
+        line = e.lineno if isinstance(e, json.JSONDecodeError) else None
+        if isinstance(e, UnicodeDecodeError):
+            line = e.object[:e.start].count(b"\n") + 1
+        location = f"{path}:{line}" if line is not None else path
+        raise WindowError(f"{location}: {e}; {WINDOW_REPAIR}") from e
 
 
 class Trace:
@@ -108,63 +114,68 @@ class Trace:
         self.lines = 0
         self.torn_tail: int | None = None
 
-    def admit(self, record: object) -> Span | None:
+    def _admit(self, record: object) -> Span | None:
         """The record as a Span, or None for a phase in IGNORED_PHASES."""
         ph = record.get("ph") if isinstance(record, dict) else None
         if not isinstance(ph, str):
-            raise TraceError(f"{self.path}:{self.lines}: a record's phase is "
-                             f"{type(ph).__name__}, not a string")
+            raise ValueError(f"a record's phase is {type(ph).__name__}, not a string")
         if ph in IGNORED_PHASES:
             return None
         if ph not in ("B", "E"):
-            raise TraceError(f"{self.path}:{self.lines}: phase {ph!r} is neither a span begin or "
-                             f"end (B, E) nor one the profiler ignores ({', '.join(IGNORED_PHASES)})")
+            raise ValueError(f"phase {ph!r} is neither a span begin or end (B, E) nor one the "
+                             f"profiler ignores ({', '.join(IGNORED_PHASES)})")
         span = Span(ph, record.get("ts"), record.get("tid"), record.get("name"))
         if type(span.ts) not in (int, float) or type(span.tid) is not int or type(span.name) is not str:
-            raise TraceError(f"{self.path}:{self.lines}: a {ph} record needs a numeric ts, an "
-                             f"integer tid and a string name, not {span}")
+            raise ValueError(f"a {ph} record needs a numeric ts, an integer tid and a string name, "
+                             f"not {span}")
         try:
             ts = float(span.ts)
         except OverflowError as e:
-            raise TraceError(f"{self.path}:{self.lines}: ts exceeds finite float range; "
-                             "recapture with numeric timestamps in microseconds") from e
+            raise ValueError("ts exceeds finite float range") from e
         if not math.isfinite(ts):
-            raise TraceError(f"{self.path}:{self.lines}: ts must be finite; "
-                             "recapture with numeric timestamps in microseconds")
+            raise ValueError("ts must be finite")
+        span.name.encode("utf-8")  # Names reach the operator's UTF-8 summary, not just JSON.
         return span._replace(ts=ts)
 
     def __iter__(self) -> Iterator[tuple[int, Span]]:
         closed = torn = None  # the closing `]`'s line; (line, why) of a record that did not parse
+        self.lines = 0
+        self.torn_tail = None
+        line = None
         try:
-            f = open(self.path, "rb")
-        except OSError as e:
-            raise TraceError(f"{self.path}: cannot read the trace ({e.strerror})") from e
-        with f:
-            for self.lines, raw in enumerate(f, 1):
-                if torn:
-                    raise TraceError(f"{self.path}:{torn[0]}: malformed record ({torn[1]}), "
-                                     f"and line {self.lines} follows it: only the last may be torn")
-                if closed:
-                    raise TraceError(f"{self.path}:{self.lines}: a line after the closing ] "
-                                     f"on line {closed}")
-                raw = raw.strip()
-                if raw == b"]":
-                    closed = self.lines
-                    continue
-                if self.lines == 1 and raw == b"[":
-                    continue
-                try:
-                    record = json.loads(raw.removesuffix(b","))
-                except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                    torn = (self.lines, str(e))
-                    continue
-                except (ValueError, RecursionError) as e:
-                    raise TraceError(f"{self.path}:{self.lines}: record exceeds JSON decoder limits; "
-                                     "recapture with bounded numeric fields and nesting") from e
-                span = self.admit(record)
-                if span is not None:
-                    yield self.lines, span
-        self.torn_tail = torn[0] if torn else None
+            with open(self.path, "rb") as f:
+                while True:
+                    line = self.lines + 1
+                    raw = next(f, None)
+                    if raw is None:
+                        break
+                    self.lines = line
+                    if torn:
+                        line = torn[0]
+                        raise ValueError(f"malformed record ({torn[1]}), and line {self.lines} "
+                                         "follows it: only the last may be torn")
+                    if closed:
+                        raise ValueError(f"a line after the closing ] on line {closed}")
+                    raw = raw.strip()
+                    if raw == b"]":
+                        closed = self.lines
+                        continue
+                    if self.lines == 1 and raw == b"[":
+                        continue
+                    try:
+                        record = json.loads(raw.removesuffix(b","))
+                    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                        torn = (self.lines, str(e))
+                        continue
+                    except (ValueError, RecursionError) as e:
+                        raise ValueError(f"record exceeds JSON decoder limits ({e})") from e
+                    span = self._admit(record)
+                    if span is not None:
+                        yield self.lines, span
+            self.torn_tail = torn[0] if torn else None
+        except (OSError, ValueError, OverflowError, RecursionError) as e:
+            location = f"{self.path}:{line}" if line is not None else self.path
+            raise TraceError(f"{location}: {e}; {TRACE_REPAIR}") from e
 
 
 def clean(v: str) -> str:
@@ -235,7 +246,7 @@ def profile(trace_path: str, window_path: str, out_path: str) -> int:
             inner = (f"{stack[-1][0]} {stack[-1][1]!r}, begun at {stack[-1][2]} µs on line "
                      f"{stack[-1][6]}") if stack else "none"
             raise TraceError(f"{trace_path}:{line}: thread {tid} ends {kind} {name!r} at {ts} µs, "
-                             f"but its innermost open span is {inner}")
+                             f"but its innermost open span is {inner}; {TRACE_REPAIR}")
         _, _, start, child, sched, has_sched, _ = stack.pop()
         dur = ts - start
         if stack and kind in ("system", "schedule", "system_commands"):
@@ -270,7 +281,7 @@ def profile(trace_path: str, window_path: str, out_path: str) -> int:
         for kind, name, start, *_, line in stack:
             if in_window(start):
                 raise TraceError(f"{trace_path}:{line}: thread {tid}'s {kind} {name!r}, begun at "
-                                 f"{start} µs inside the window, never ends")
+                                 f"{start} µs inside the window, never ends; {TRACE_REPAIR}")
             open_at_end += 1
 
     ticks.sort()
@@ -279,8 +290,8 @@ def profile(trace_path: str, window_path: str, out_path: str) -> int:
     periods = range(first, last)  # complete periods inside the window
     n = len(periods)
     if n < 10:
-        print(f"only {n} tick periods in the window", file=sys.stderr)
-        return 1
+        raise TraceError(f"{trace_path}: only {n} tick periods in window {window_path}; "
+                         "recapture a longer window with tick-trace.sh")
 
     def window_of(a: array) -> list[float]:
         vals = list(a[first:last])
@@ -354,19 +365,19 @@ def profile(trace_path: str, window_path: str, out_path: str) -> int:
         "schedules": schedules,
     }
     try:
-        with open(out_path, "w") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             json.dump(out, f, indent=1)
-    except OSError as e:
-        raise OutputError(f"{out_path}: cannot write the profile ({e.strerror}); create its "
-                          f"directory or pass a writable path") from e
-    print(f"{trace_path}: {trace.lines} lines, {n} tick periods (mean {out['period_us_mean']:.0f} µs), "
-          f"leaf busy mean {mean_leaf:.0f} µs/tick, physics leaf {out['physics_leaf_us']['mean']:.0f}, "
-          f"{len(rows)} leaf keys, {open_at_end} spans open at the end, "
-          f"torn last line: {trace.torn_tail or 'none'}")
-    for r in rows[:25]:
-        print(f"  {r['mean_us']:8.1f} {r['p95_us']:8.1f} {100*r['share_of_busy']:5.1f}% {r['runs_per_tick']:5.2f} {r['schedule']:<18} {r['kind']:<15} {r['name']}")
-    for s in schedules[:15]:
-        print(f"  sched {s['mean_us']:8.1f} {s['p95_us']:8.1f} {s['runs_per_tick']:5.2f} {s['name']}")
+        print(f"{trace_path}: {trace.lines} lines, {n} tick periods (mean {out['period_us_mean']:.0f} µs), "
+              f"leaf busy mean {mean_leaf:.0f} µs/tick, physics leaf {out['physics_leaf_us']['mean']:.0f}, "
+              f"{len(rows)} leaf keys, {open_at_end} spans open at the end, "
+              f"torn last line: {trace.torn_tail or 'none'}")
+        for r in rows[:25]:
+            print(f"  {r['mean_us']:8.1f} {r['p95_us']:8.1f} {100*r['share_of_busy']:5.1f}% {r['runs_per_tick']:5.2f} {r['schedule']:<18} {r['kind']:<15} {r['name']}")
+        for s in schedules[:15]:
+            print(f"  sched {s['mean_us']:8.1f} {s['p95_us']:8.1f} {s['runs_per_tick']:5.2f} {s['name']}")
+    except (OSError, ValueError, RecursionError) as e:
+        raise OutputError(f"{out_path}: cannot write the profile or summary ({e}); create its "
+                          "directory or pass a writable UTF-8 output and terminal") from e
     return 0
 
 
