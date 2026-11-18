@@ -385,10 +385,11 @@ def main() -> int:
 
 
 def parse_marks_has(marks: list[Mark], surface: str) -> bool:
-    """Whether `marks` open the class at all (a run start for the kill cam, a slot mark else)."""
+    """Whether `marks` open the class at all (a run start, slot mark, or x-ray opening)."""
     if surface == "killcam":
         return any(m.label == "run-start" for m in marks)
-    return any(m.label == surface for m in marks)
+    opening = {surface, "glass-on"} if surface == "glass" else {surface}
+    return any(m.label in opening for m in marks)
 
 
 if __name__ == "__main__":

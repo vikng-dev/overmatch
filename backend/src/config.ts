@@ -1,6 +1,5 @@
 // Operator tunables are wrangler `vars` entries; production-server.json owns the production CPU
 // allocation (CLAIMED: owner's hosting choice), shared with scripts/ci/edgegap-version.sh.
-// Invalid production allocation refuses startup; operator settings are checked once per immutable environment.
 
 import productionServer from "../production-server.json";
 import { parseProviderName } from "./provider";
@@ -94,6 +93,18 @@ function num(env: Env, key: keyof Env, min: number, scale = 1): number {
 		throw new ConfigurationError(key, `need a finite number >= ${min} with a finite converted value`);
 	}
 	return v * scale;
+}
+
+// Resolution: reserve clock epochs through 2100 so duration admission is stable across reloads.
+// DERIVED: ECMAScript TimeClip's 8.64e15 ms limit minus that fixed clock horizon; SQLite
+// deadlines also retain integer-millisecond precision within this range.
+const MAX_ALARM_DURATION_MS = 8.64e15 - Date.UTC(2100, 0, 1);
+
+// The provider's shorter bound is the signed 32-bit delay accepted by setTimeout.
+function milliseconds(env: Env, key: keyof Env, min: number, scale: number, max = MAX_ALARM_DURATION_MS): number {
+	const value = num(env, key, min, scale);
+	if (value > max) throw new ConfigurationError(key, `duration must be <= ${max / scale} ${key.endsWith("_DAYS") ? "days" : "seconds"}; reduce this setting in wrangler vars`);
+	return value;
 }
 
 function serverNumber(env: Env, key: keyof typeof SERVER_SETTING_DOMAINS, scale = 1): number {
@@ -211,17 +222,17 @@ export function config(env: Env): Config {
 		provider, access, locationHint: hint as DurableObjectLocationHint | "",
 		capacity: serverNumber(env, "CAPACITY"),
 		heartbeatIntervalMs: serverNumber(env, "HEARTBEAT_INTERVAL_S", s),
-		heartbeatDeadlineMs: num(env, "HEARTBEAT_DEADLINE_S", 1, s),
-		startDeadlineMs: num(env, "START_DEADLINE_S", 1, s),
-		statusPollMs: num(env, "STATUS_POLL_S", 1, s),
-		reservationTtlMs: num(env, "RESERVATION_TTL_S", 0, s),
-		ticketTtlMs: num(env, "TICKET_TTL_S", 1, s),
+		heartbeatDeadlineMs: milliseconds(env, "HEARTBEAT_DEADLINE_S", 1, s),
+		startDeadlineMs: milliseconds(env, "START_DEADLINE_S", 1, s),
+		statusPollMs: milliseconds(env, "STATUS_POLL_S", 1, s),
+		reservationTtlMs: milliseconds(env, "RESERVATION_TTL_S", 0, s),
+		ticketTtlMs: milliseconds(env, "TICKET_TTL_S", 1, s),
 		emptyExitS: serverNumber(env, "EMPTY_EXIT_S"),
 		serverStatsS: serverNumber(env, "SERVER_STATS_S"),
-		serverLogRetentionMs: num(env, "SERVER_LOG_RETENTION_DAYS", 1, 24 * 60 * 60 * s),
-		endedRetentionMs: num(env, "ENDED_RETENTION_S", 0, s),
-		locationsCacheMs: num(env, "LOCATIONS_CACHE_S", 0, s),
-		providerTimeoutMs: num(env, "PROVIDER_TIMEOUT_S", 0.05, s),
+		serverLogRetentionMs: milliseconds(env, "SERVER_LOG_RETENTION_DAYS", 1, 24 * 60 * 60 * s),
+		endedRetentionMs: milliseconds(env, "ENDED_RETENTION_S", 0, s),
+		locationsCacheMs: milliseconds(env, "LOCATIONS_CACHE_S", 0, s),
+		providerTimeoutMs: milliseconds(env, "PROVIDER_TIMEOUT_S", 0.05, s, 2 ** 31 - 1),
 		vcpuPerServer,
 	};
 	configurations.set(env, cfg);

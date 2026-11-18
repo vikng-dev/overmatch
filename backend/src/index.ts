@@ -130,13 +130,11 @@ function parseJoin(b: unknown): JoinRequest {
 	const p = pings === undefined ? {} : pings;
 	if (typeof p !== "object" || p === null || Array.isArray(p)) invalid("pings: expected an object of location id to ms");
 	if (Object.keys(p).length > MAX_LOCATIONS) invalid(`pings: expected at most ${MAX_LOCATIONS} locations`);
-	const entries: [string, number][] = [];
 	for (const [k, v] of Object.entries(p)) {
 		if (!locationId(k)) invalid("pings: expected 1-128 character Unicode location ids");
 		if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > MAX_PING_MS) invalid(`pings: expected integer ms from 0 to ${MAX_PING_MS}`);
-		entries.push([k, v]);
 	}
-	return { version, locations: [...new Set(locations as string[])], pings: Object.fromEntries(entries) };
+	return { version, locations: [...new Set(locations as string[])], pings: p as Record<string, number> };
 }
 
 function parseHeartbeat(b: unknown): HeartbeatRequest {

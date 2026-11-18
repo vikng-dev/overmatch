@@ -448,6 +448,7 @@ pub fn run() -> AppExit {
 
     let mut app = App::new();
     if headless {
+        // Resolution: 2 ms polling resolves network arrivals within the fixed gameplay tick.
         app.add_plugins(crate::gpu_less_default_plugins(None))
             .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)));
         // After `LogPlugin` has built, like `run_window::mount`'s line on a windowed root.

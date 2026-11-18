@@ -109,6 +109,6 @@ describe("contract/*.json matches the handlers", () => {
 		await join(joinReq);
 		const vars = edgegap.deployment(0).body.env_vars as { key: string; value: string }[];
 		expect(vars.map((v) => v.key).sort()).toEqual(Object.keys(serverEnv).sort());
-		expect(vars.find((v) => v.key === "OVERMATCH_SERVER_STATS_S")?.value).toBe(env.SERVER_STATS_S);
+		expect(Number(vars.find((v) => v.key === "OVERMATCH_SERVER_STATS_S")?.value)).toBe(config(env).serverStatsS);
 	});
 });

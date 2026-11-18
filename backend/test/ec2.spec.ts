@@ -279,13 +279,15 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 		expect(ec2.machines).toHaveLength(1);
 	});
 
-	it("two lost answers retain the claim; alarm lookup adopts it without another launch", async () => {
-		ec2.loseResponses = 2;
+	it("lost answers retain the claim; alarm lookup adopts it without another launch", async () => {
+		ec2.loseResponses = Infinity;
 		const t = await join(request());
+		const launches = ec2.launches().length;
+		expect((await registry(V).snapshot())[0].deployment_id).toBeNull();
 		await age(V, cfg.statusPollMs + 1);
 		await runDurableObjectAlarm(registry(V));
 		expect(ec2.machines).toHaveLength(1);
-		expect(ec2.launches()).toHaveLength(2);
+		expect(ec2.launches()).toHaveLength(launches);
 		expect((await registry(V).snapshot())[0].deployment_id).toBe(ec2.machines[0].id);
 		expect(await ticket(t)).toEqual({ state: "starting" });
 	});

@@ -37,6 +37,8 @@ CLIENT="$BIN/overmatch"
 READY="$OUT/workload.ready"
 # DERIVED: 64 Hz fixed ticks.
 TICKS=$((RUN_S * 64))
+# Resolution: both peers observe a bounded 128-tick quiet tail after trigger release.
+CAPTURE_TICKS=$((TICKS + 128))
 
 mkdir -p "$OUT"
 cd "$REPO"
@@ -71,13 +73,13 @@ for _ in {1..150}; do
 done
 grep -q "listening" "$OUT/server.log"
 
-# One scripted client: $1 trace/log name, $2 hull-local aim point, $3 first primary tick, $4 run
-# ticks. The aims are fixture data: a's at b's engine bay (1.2 m up, 2.2 m rearward of its origin,
+# One scripted client: $1 trace/log name, $2 hull-local aim point, $3 first primary tick.
+# The aims are fixture data: a's at b's engine bay (1.2 m up, 2.2 m rearward of its origin,
 # as the offline target-fires scenario lays it), b's at a's front hull, so a round costs a
 # component, not the tank.
 client() {
-  printf '(drive: Fire(primary: true, secondary: true), fire_tick: %s, fire_interval: 256, aim: Point((%s)), range_m: 12, ticks: %s)\n' \
-    "$3" "$2" "$4" >"$OUT/$1.harness.ron"
+  printf '(drive: Fire(primary: true, secondary: true), fire_tick: %s, fire_interval: 256, fire_until: %s, aim: Point((%s)), range_m: 12, ticks: %s)\n' \
+    "$3" "$TICKS" "$2" "$CAPTURE_TICKS" >"$OUT/$1.harness.ron"
   exec env SPIKE_WORKLOAD_READY="$READY" OVERMATCH_WINDOW=hidden \
     OVERMATCH_HARNESS="$OUT/$1.harness.ron" OVERMATCH_SERVER=127.0.0.1:5888 \
     SPIKE_LATENCY_MS="$LAT" SPIKE_JITTER_MS="$JIT" SPIKE_JITTER_SEED="$SEED" \
@@ -91,10 +93,9 @@ client() {
 # lane on reconnect. The analyzer refuses such a run from the server trace's `link` rows (a
 # connect count other than one per client) and exits non-zero, which this script, its last
 # command, returns; a rerun is warm.
-# DERIVED: both scripts play from the shared tool barrier; the first client
-# runs 128 ticks longer so it is still present for the second's last rounds, and their primaries
-# are 128 ticks (half an interval) apart so the two main guns do not fire together.
-client a "8,1.2,2.2" 320 "$((TICKS + 128))" &
+# Both scripts share the barrier, trigger end and capture end. Their primaries are 128 ticks
+# (half an interval, DERIVED) apart so the two main guns do not fire together.
+client a "8,1.2,2.2" 320 &
 FIRST_PID=$!
 for _ in {1..150}; do
   grep -q "client connected" "$OUT/server.log" 2>/dev/null && break
@@ -102,16 +103,24 @@ for _ in {1..150}; do
 done
 grep -q "client connected" "$OUT/server.log"
 
-client b "-8,0.8,-2.2" 448 "$TICKS" &
+client b "-8,0.8,-2.2" 448 &
 SECOND_PID=$!
 await_harness_slots "$READY" "$FIRST_PID" "$OUT/a.log" "$SECOND_PID" "$OUT/b.log" || exit 1
 wait "$SECOND_PID"
 SECOND_PID=""
 wait "$FIRST_PID"
 FIRST_PID=""
-kill "$SERVER_PID" 2>/dev/null || true
-wait "$SERVER_PID" 2>/dev/null || true
+# Only a SIGTERM requested here is a successful server shutdown. A crash after the final
+# shot must not be hidden by otherwise complete traces.
+shutdown_sent=0
+kill -TERM "$SERVER_PID" 2>/dev/null && shutdown_sent=1
+server_status=0
+wait "$SERVER_PID" 2>/dev/null || server_status=$?
 SERVER_PID=""
+if [[ "$shutdown_sent" != 1 || "$server_status" != 143 ]]; then
+  echo "server exited unexpectedly (status=$server_status, shutdown_sent=$shutdown_sent); see $OUT/server.log" >&2
+  exit "$((server_status == 0 ? 1 : server_status))"
+fi
 
 uv run scripts/shot/pencam_latency.py --server "$OUT/server.server.jsonl" \
   --client "$OUT/a.client.jsonl" --client "$OUT/b.client.jsonl" \

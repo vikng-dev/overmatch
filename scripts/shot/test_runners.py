@@ -50,10 +50,13 @@ assert os.environ['OVERMATCH_WINDOW'] == 'hidden'
 out = Path(os.environ['OUT'])
 harness = Path(os.environ['OVERMATCH_HARNESS'])
 first = harness.name in ('target.harness.ron', 'a.harness.ron')
-if harness.name == 'shooter.harness.ron':
+if harness.name in ('a.harness.ron', 'b.harness.ron', 'shooter.harness.ron'):
     import re
     fields = dict(re.findall(r'(\w+): (\d+)', harness.read_text()))
     assert 0 < int(fields['fire_until']) < int(fields['ticks']), 'the capture observes after release'
+    if harness.name == 'b.harness.ron':
+        peer = dict(re.findall(r'(\w+): (\d+)', (out / 'a.harness.ron').read_text()))
+        assert (fields['fire_until'], fields['ticks']) == (peer['fire_until'], peer['ticks']), 'the cohort has one capture window'
 role = 'first' if first else 'second'
 (out / (role + '.pid')).write_text(str(os.getpid()))
 ready = Path(os.environ['SPIKE_WORKLOAD_READY'])
@@ -106,6 +109,8 @@ fi
                     self.assertEqual(process.returncode, 0, stdout + stderr)
                 else:
                     self.assertNotEqual(process.returncode, 0, stdout + stderr)
+                if failure == "server-failure" and runner == RUNNERS[1]:
+                    self.assertEqual(process.returncode, 17, "pen-cam preserves the fixture server's failure status")
                 for pid_file in out.glob("*.pid"):
                     with self.assertRaises(ProcessLookupError, msg=f"cleanup owns {pid_file.name}"):
                         os.kill(int(pid_file.read_text()), 0)
@@ -136,10 +141,11 @@ fi
     def test_mg_requires_plate_contacts_in_addition_to_private_receipts(self):
         self.assertIn("MG fixture reached no armour plate", self.run_case(RUNNERS[0], "armour"))
 
-    def test_mg_server_exit_after_last_input_refuses_analysis(self):
-        for failure in ("server-failure", "server-clean-exit"):
-            with self.subTest(failure=failure):
-                self.assertIn("server exited unexpectedly", self.run_case(RUNNERS[0], failure))
+    def test_server_exit_after_last_input_refuses_analysis(self):
+        for runner in RUNNERS:
+            for failure in ("server-failure", "server-clean-exit"):
+                with self.subTest(runner=runner.name, failure=failure):
+                    self.assertIn("server exited unexpectedly", self.run_case(runner, failure))
 
 
 if __name__ == "__main__":

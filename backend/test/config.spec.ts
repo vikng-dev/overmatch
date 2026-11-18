@@ -41,13 +41,7 @@ describe("operator settings admission", () => {
 			if ("exclusiveMin" in domain) invalid.push(domain.min);
 			if ("exclusiveMax" in domain) invalid.push(domain.max);
 			for (const value of invalid) {
-				try {
-					config({ ...env, [setting]: String(value) });
-					throw new Error("out-of-domain launch setting was accepted");
-				} catch (err) {
-					expect(err).toBeInstanceOf(ConfigurationError);
-					expect(err).toMatchObject({ setting });
-				}
+				expect(() => config({ ...env, [setting]: String(value) })).toThrow(expect.objectContaining({ constructor: ConfigurationError, setting }));
 			}
 		}
 	});
@@ -57,13 +51,7 @@ describe("operator settings admission", () => {
 		const settings = { ...env, PROVIDER: "ec2", WORKER_ENV: "fixture", AWS_ACCESS_KEY_ID: undefined, AWS_SECRET_ACCESS_KEY: undefined, AWS_HOST_CONFIG: undefined };
 		expect(() => config({ ...settings, [setting]: undefined })).not.toThrow();
 		for (const value of ["", " ", "\t", "\ud800", null, 0]) {
-			try {
-				config({ ...settings, [setting]: value });
-				throw new Error("supplied malformed optional setting was accepted");
-			} catch (err) {
-				expect(err).toBeInstanceOf(ConfigurationError);
-				expect(err).toMatchObject({ setting });
-			}
+			expect(() => config({ ...settings, [setting]: value })).toThrow(expect.objectContaining({ constructor: ConfigurationError, setting }));
 		}
 	});
 
@@ -96,14 +84,30 @@ describe("operator settings admission", () => {
 	it.each(["JOIN_ATTEMPTS", "USD_PER_VCPU_MINUTE", "CAPACITY", "HEARTBEAT_INTERVAL_S", "HEARTBEAT_DEADLINE_S", "START_DEADLINE_S", "STATUS_POLL_S", "RESERVATION_TTL_S", "TICKET_TTL_S", "EMPTY_EXIT_S", "SERVER_STATS_S", "SERVER_LOG_RETENTION_DAYS", "ENDED_RETENTION_S", "LOCATIONS_CACHE_S", "PROVIDER_TIMEOUT_S"])("%s refuses malformed numbers with a named typed error", async (setting) => {
 		const { config, ConfigurationError } = await import("../src/config");
 		for (const value of ["fixture-invalid", "", " ", "0x10", "Infinity", "1e1000"]) {
-			try {
-				config({ ...env, [setting]: value });
-				throw new Error("invalid operator number was accepted");
-			} catch (err) {
-				expect(err).toBeInstanceOf(ConfigurationError);
-				expect(err).toMatchObject({ setting });
-				expect((err as Error).message).not.toContain("fixture-invalid");
-			}
+			expect(() => config({ ...env, [setting]: value })).toThrow(expect.objectContaining({ constructor: ConfigurationError, setting, message: expect.not.stringContaining("fixture-invalid") }));
 		}
 	});
+	it.each(["HEARTBEAT_DEADLINE_S", "START_DEADLINE_S", "STATUS_POLL_S", "RESERVATION_TTL_S", "TICKET_TTL_S", "SERVER_LOG_RETENTION_DAYS", "ENDED_RETENTION_S", "LOCATIONS_CACHE_S", "PROVIDER_TIMEOUT_S"] as const)("%s refuses durations before an alarm or timer can overflow", async (setting) => {
+		const { config, ConfigurationError } = await import("../src/config");
+		expect(() => config({ ...env, [setting]: "1e100" })).toThrow(expect.objectContaining({ constructor: ConfigurationError, setting, message: expect.stringContaining("reduce this setting in wrangler vars") }));
+	});
+
+	it("alarm durations fit the Date range through the fixed 2100 clock horizon", async () => {
+		const { config, ConfigurationError } = await import("../src/config");
+		// DERIVED: ECMAScript TimeClip limit less the last supported clock epoch.
+		const maxSeconds = (8.64e15 - Date.UTC(2100, 0, 1)) / 1000;
+		for (const now of [Date.UTC(2026, 0, 1), Date.UTC(2099, 11, 31)]) {
+			vi.spyOn(Date, "now").mockReturnValue(now);
+			expect(config({ ...env, HEARTBEAT_DEADLINE_S: String(maxSeconds) }).heartbeatDeadlineMs).toBe(maxSeconds * 1000);
+			expect(() => config({ ...env, HEARTBEAT_DEADLINE_S: String(maxSeconds + 1) })).toThrow(expect.objectContaining({ constructor: ConfigurationError, setting: "HEARTBEAT_DEADLINE_S", message: expect.stringContaining(`<= ${maxSeconds} seconds`) }));
+		}
+		vi.restoreAllMocks();
+	});
+
+	it("the HTTP deadline fits setTimeout's signed 32-bit millisecond domain", async () => {
+		const { config, ConfigurationError } = await import("../src/config");
+		expect(config({ ...env, PROVIDER_TIMEOUT_S: String((2 ** 31 - 1) / 1000) }).providerTimeoutMs).toBe(2 ** 31 - 1);
+		expect(() => config({ ...env, PROVIDER_TIMEOUT_S: String(2 ** 31 / 1000) })).toThrow(expect.objectContaining({ constructor: ConfigurationError, setting: "PROVIDER_TIMEOUT_S" }));
+	});
+
 });
