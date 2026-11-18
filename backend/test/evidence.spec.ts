@@ -1,11 +1,13 @@
 import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
+import redactionCases from "./journal-redaction.json";
 import { config } from "../src/config";
 import { edgegapFor, SERVER_LOG_BODY_MAX_BYTES } from "../src/edgegap";
-import { SERVER_LOG_MAX_BYTES, stopWithEvidence } from "../src/evidence";
+import { SERVER_LOG_MAX_BYTES, stopWithEvidence, sanitizedTail, recordJournal, recordMissingJournal, evidenceResult } from "../src/evidence";
+import { ProviderError } from "../src/provider";
 import { idOf } from "../src/ids";
 import { sweep } from "../src/sweep";
-import { age, bringUp, call, env, join, launched, registry } from "./helpers";
+import { failD1Once, age, bringUp, call, env, join, launched, registry } from "./helpers";
 
 const V = "0.5.0";
 
@@ -20,6 +22,18 @@ async function end(s: { id: string; secret: string }): Promise<void> {
 }
 
 describe("stopped match servers leave evidence for the operator", () => {
+	it("the operator cannot push into a provider whose stop owns log pull", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = launched();
+		const response = await call("POST", `/v1/servers/${s.id}/journal`, "pushed log", {
+			authorization: `Bearer ${s.secret}`, "x-journal-truncated": "0",
+		});
+		expect(response.status).toBe(410);
+		expect(await archive(s.deploymentId)).toBeNull();
+		await end(s);
+		expect(edgegap.count("GET", `/v1/deployment/${s.deploymentId}/container-logs`)).toBe(1);
+	});
+
 	it("records authenticated panic text before log capture, sanitises it, and calls the session a crash", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp();
@@ -132,10 +146,20 @@ describe("stopped match servers leave evidence for the operator", () => {
 		}
 	});
 
+	it("a D1 outage is a typed end refusal after stop and ticket replacement, across real RPC", async () => {
+		await join({ version: V, locations: ["Paris", "Frankfurt"], pings: {} });
+		const s = launched();
+		await failD1Once(V, "INSERT INTO server_crashes");
+		expect((await call("POST", `/v1/servers/${s.id}/end`, { crash: "panic fixture" }, { authorization: `Bearer ${s.secret}` })).status).toBe(503);
+		expect(edgegap.deployment().status).toBe("Status.TERMINATED");
+		expect(edgegap.deployments.size).toBe(2);
+		expect((await registry(V).snapshot()).find((row) => row.id === s.id)!.state).toBe("ended");
+	});
+
 	it("bounds a crash's sanitised UTF-8 bytes without corrupting its tail", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp();
-		const crash = "old head\n" + "界".repeat(SERVER_LOG_MAX_BYTES) + "\nlast frame";
+		const crash = "old head\n" + "界::1 ".repeat(Math.floor((SERVER_LOG_MAX_BYTES - 128) / 7)) + "\nlast frame";
 		expect((await call("POST", `/v1/servers/${s.id}/end`, { crash }, { authorization: `Bearer ${s.secret}` })).status).toBe(204);
 		const saved = await env.DB.prepare("SELECT crash, truncated FROM server_crashes WHERE server_id = ?1").bind(s.id).first<{ crash: string; truncated: number }>();
 		expect(saved!.truncated).toBe(1);
@@ -394,5 +418,74 @@ describe("stopped match servers leave evidence for the operator", () => {
 		expect(await archive("old")).toBeNull();
 		expect(await archive("failed")).toBeNull();
 		expect(await archive("kept")).not.toBeNull();
+	});
+});
+
+
+describe("archive storage races and failure diagnostics", () => {
+	it.each(["marker", "archive"])("an admitted push preserves its archive when %s commits first", async (first) => {
+		// D1 serializes these writes in one of these two orders after journalAdmission succeeds.
+		// Neither the deadline check nor a real archive may erase the operator's evidence.
+		const marker = () => recordMissingJournal(env, "fixture-server", "fixture-deployment", config(env).providerTimeoutMs);
+		const push = () => recordJournal(env, "fixture-server", "fixture-deployment", "late diagnostic", true, config(env).providerTimeoutMs);
+		if (first === "marker") await marker();
+		expect(await push()).toBe(true);
+		await marker();
+		expect(await archive("fixture-deployment")).toMatchObject({ log: "late diagnostic", truncated: 1, error: null });
+		expect(await recordJournal(env, "fixture-server", "fixture-deployment", "replacement", false, config(env).providerTimeoutMs)).toBe(false);
+		expect(await archive("fixture-deployment")).toMatchObject({ log: "late diagnostic", truncated: 1, error: null });
+	});
+
+	it.each(["journalStorage:storage", "fleet:transport", "history:storage"])("RPC failure cause preserves %s for the caller", async (op) => {
+		expect(await evidenceResult("fixture-server", async () => { throw new ProviderError(op, 0, "unknown"); }))
+			.toEqual({ ok: false, cause: op });
+	});
+});
+
+describe("bounded archive redaction", () => {
+	it.each(redactionCases)("preserves diagnostics and masks credentials in $raw for stored evidence", ({ raw, expected }) => {
+		expect(sanitizedTail(raw, "").log).toBe(expected);
+	});
+
+	it("configuration names and netcode diagnostics survive value redaction for the operator", () => {
+		// hosting.rs ConfigError::Display and the vendored server.rs whitelist info! shape.
+		const configError = "fatal: OVERMATCH_CAPACITY: expected an integer from 1 to 256";
+		const netcode = "server ignored connection request. server address not in connect token whitelist token_addresses=[192.0.2.1:5888] server_addr=192.0.2.2:5888";
+		const { log } = sanitizedTail([configError, netcode, "Netcode error: InvalidToken(InvalidVersion)", "request token=opaque-value rejected: expired", "OVERMATCH_API=value"].join("\n"), "");
+		expect(log).toContain(configError);
+		expect(log).toContain("Netcode error: InvalidToken(InvalidVersion)");
+		expect(log).toContain("server address not in connect token whitelist token_addresses=[[ip]:5888]");
+		expect(log).toContain("request token=[credential] rejected: expired");
+		expect(log).toContain("OVERMATCH_API=[credential]");
+		expect(log).not.toContain("opaque-value");
+	});
+
+	it("the complete byte-cap adversary is processed within a generous linear-time budget", async () => {
+		// Resolution: DERIVED cap / 256 KiB per second; slow CI may spend 4 s at 1 MiB,
+		// but the former quadratic scan takes minutes and must fail this gate.
+		const boundMs = SERVER_LOG_MAX_BYTES / (256 * 1024) * 1000;
+		const raw = "a-".repeat(SERVER_LOG_MAX_BYTES / 2);
+		// Worker clocks advance at I/O; yield before and after CPU work to measure wall time.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const start = performance.now();
+		expect(sanitizedTail(raw, "").log).toBe(raw);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const elapsed = performance.now() - start;
+		console.warn(`Worker sanitiser at ${SERVER_LOG_MAX_BYTES} bytes: ${elapsed.toFixed(1)} ms (Resolution bound ${boundMs} ms)`);
+		expect(elapsed).toBeLessThan(boundMs);
+	});
+
+	it.each(["declared", "chunked"])("end crash input is refused at the stream byte cap (%s)", async (kind) => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp();
+		let reads = 0;
+		const body = new ReadableStream<Uint8Array>({ pull(c) { reads++; c.enqueue(new Uint8Array(SERVER_LOG_MAX_BYTES / 2 + 1).fill(120)); } }, { highWaterMark: 0 });
+		const response = await (await import("../src/index")).default.fetch(new Request(`https://api.overmatch.test/v1/servers/${s.id}/end`, {
+			method: "POST", body, headers: { authorization: `Bearer ${s.secret}`, ...(kind === "declared" ? { "content-length": String(SERVER_LOG_MAX_BYTES + 1) } : {}) },
+		}), env);
+		expect(response.status).toBe(413);
+		expect(reads).toBe(kind === "declared" ? 0 : 2);
+		expect((await registry(V).snapshot())[0].state).toBe("ready");
+		expect(await env.DB.prepare("SELECT * FROM server_crashes WHERE server_id = ?1").bind(s.id).first()).toBeNull();
 	});
 });

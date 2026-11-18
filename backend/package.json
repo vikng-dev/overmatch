@@ -7,7 +7,7 @@
     "deploy": "wrangler deploy",
     "types": "wrangler types src/worker-configuration.d.ts",
     "typecheck": "node scripts/embed-host.mjs --check && wrangler types src/worker-configuration.d.ts > /dev/null && tsc --noEmit -p . && tsc --noEmit -p test",
-    "test": "vitest run && vitest run --config vitest.ec2.config.ts",
+    "test": "node --test scripts/strip-shell-comments.test.mjs && vitest run && vitest run --config vitest.ec2.config.ts",
     "pretest": "node scripts/embed-host.mjs --check",
     "build": "wrangler deploy --dry-run --outdir dist"
   },

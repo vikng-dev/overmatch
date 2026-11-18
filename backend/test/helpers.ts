@@ -1,3 +1,4 @@
+import { vi } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
 import type { D1Migration } from "cloudflare:test";
 import { env as providedEnv, exports } from "cloudflare:workers";
@@ -52,7 +53,7 @@ export async function age(version: string, ms: number): Promise<void> {
 	await runInDurableObject(registry(version), (_: Registry, state) => {
 		state.storage.sql.exec(
 			`UPDATE servers SET created_at = created_at - ?1, last_seen = last_seen - ?1, next_poll_at = next_poll_at - ?1,
-			   ready_at = ready_at - ?1, ended_at = ended_at - ?1, stop_at = stop_at - ?1`,
+			   journal_deadline = CASE WHEN journal_deadline > 0 THEN journal_deadline - ?1 ELSE journal_deadline END, ready_at = ready_at - ?1, ended_at = ended_at - ?1, stop_at = stop_at - ?1`,
 			ms,
 		);
 		state.storage.sql.exec("UPDATE tickets SET created_at = created_at - ?1, attached_at = attached_at - ?1", ms);
@@ -81,4 +82,19 @@ export async function bringUp(n = 0, players = 0): Promise<{ id: string; secret:
 
 export function expectStatus(res: Response, status: number): void {
 	if (res.status !== status) throw new Error(`expected HTTP ${status}, got ${res.status}`);
+}
+
+/** Fail one matching D1 prepare inside the real DO, so the caller exercises the RPC boundary. */
+export async function failD1Once(version: string, fragment: string): Promise<void> {
+	await runInDurableObject(registry(version), (instance) => {
+		const db = (instance as unknown as { env: { DB: D1Database } }).env.DB;
+		const prepare = db.prepare.bind(db);
+		const fault = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+			if (sql.includes(fragment)) {
+				fault.mockRestore();
+				throw new Error("D1_ERROR: Network connection lost.");
+			}
+			return prepare(sql);
+		});
+	});
 }

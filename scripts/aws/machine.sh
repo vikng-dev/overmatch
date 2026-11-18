@@ -12,6 +12,7 @@
 #             a machine the operator can reach always answers `state`.
 #   packages  (client only) libasound2t64: the unchanged client links libasound.so.2;
 #             the dedicated server is built without audio and needs no package install.
+#   updates   (hosted only) mask and verify automatic updater services before play.
 #   downloaded, verified, unpacked
 #             the release archive by explicit tag, checked against the checksum line the operator
 #             read from the release's own `.sha256`, unpacked into /opt/overmatch.
@@ -28,13 +29,34 @@
 #   sample <unit>...      start the 1 Hz sampler (unit `om-sampler`) of those units and the host.
 #   samples               the sampler's lines.
 #   journal <unit>        that unit's journal, kernel-time stamped.
+# HOSTED COMMANDS (privileged systemd hook):
+#   hosted-stop           bounded push-journal, then request power-off even on capture failure.
+#   push-journal          redact and upload one capped journal using the root-only report header.
 # @settings
 set -Eeuo pipefail
 
 STATE=/var/lib/om-harness
 INSTALL=/opt/overmatch
+# Resolution: storage/pipe byte cap; at most cap + 1 newline-sized records need reading.
+JOURNAL_MAX_BYTES=1048576
+# Resolution: kill the entire capture/redaction/upload process group, independently of I/O.
+JOURNAL_CAPTURE_S=12
+# Resolution: curl connection and total deadlines, nested inside the capture kill.
+JOURNAL_CONNECT_S=3
+JOURNAL_UPLOAD_S=8
+# Resolution: end-reply receipt, process exit and Worker alarm/shutdown scheduling jitter.
+JOURNAL_GRACE_MARGIN_S=10
+# DERIVED Resolution: the Worker waits for capture (upload included) plus reply/exit scheduling.
+# shellcheck disable=SC2034 # Consumed by embed-host.mjs as the Worker grace.
+JOURNAL_GRACE_S=$((JOURNAL_CAPTURE_S + JOURNAL_GRACE_MARGIN_S))
+# Resolution: service process teardown and dispatch of the privileged post-stop hook.
+JOURNAL_STOP_MARGIN_S=5
+# DERIVED Resolution: systemd permits capture (upload included) plus local teardown/dispatch.
+JOURNAL_STOP_S=$((JOURNAL_CAPTURE_S + JOURNAL_STOP_MARGIN_S))
+JOURNAL_MAX_LINES=$((JOURNAL_MAX_BYTES + 1))
+
 # The scripted client's session (src/net/harness.rs `Script`): hull parked, never firing, turret
-# sweeping (~1.3 rad/s) so every tick carries a changing aim, the way a scanning player's does.
+# sweeping at CLIENT_SCRIPT's taste so every tick carries changing aim, as a scanning player does.
 CLIENT_SCRIPT='(drive: Idle, aim: Sweep(radius_m: 800, rate_rad_s: 1.28), ticks: %s)'
 
 uptime_s() {
@@ -49,11 +71,16 @@ boot_failed() {
   trap - ERR
   mark "failed $step" || echo 'boot phase recording failed' >&2
   if [[ "$ROLE" == hosted ]]; then
-    # A failed callback cannot keep a failed machine alive. No journal is uploaded here.
+    # Unit creation is the journal fact; stop its hook synchronously before fallback power-off.
+    local journal=false
+    [[ ! -f /etc/systemd/system/overmatch-server.service ]] || journal=true
     curl --silent --show-error --fail --max-time 10 \
       --header @/etc/overmatch-report-header --header 'Content-Type: application/json' \
-      --data "{\"reason\":\"boot-$step\"}" \
+      --data "{\"reason\":\"boot-$step\",\"journalAvailable\":$journal}" \
       "$HOSTED_API/v1/servers/$HOSTED_SERVER_ID/end" >/dev/null 2>&1 || echo 'boot report failed' >&2
+    if [[ -f /etc/systemd/system/overmatch-server.service ]]; then
+      systemctl stop overmatch-server || echo 'failed unit stop reported failure' >&2
+    fi
     systemctl --no-block poweroff
   fi
   exit 1
@@ -150,7 +177,8 @@ boot() {
     useradd --system --no-create-home --shell /usr/sbin/nologin overmatch
     if [[ "$ROLE" == hosted ]]; then
       environment='EnvironmentFile=/etc/overmatch-host.env'
-      stop_post='ExecStopPost=+/usr/bin/systemctl --no-block poweroff'
+      stop_post="ExecStopPost=+/usr/local/bin/om-harness hosted-stop
+TimeoutStopSec=${JOURNAL_STOP_S}s"
     else
       environment="Environment=OVERMATCH_BOT=$BOTS OVERMATCH_SERVER_STATS_S=$STATS_S"
       stop_post=''
@@ -159,6 +187,8 @@ boot() {
     cat >/etc/systemd/system/overmatch-server.service <<UNIT
 [Unit]
 Description=Overmatch dedicated server
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 User=overmatch
@@ -175,6 +205,69 @@ UNIT
     mark started
   fi
   mark ready
+}
+
+# One privileged post-stop command owns capture then power-off. An asynchronous power-off in an
+# earlier ExecStopPost could cancel the upload. The outer timeout kills journalctl/redaction/curl
+# together; neither a failed upload nor a stuck journal reader can hold the machine alive.
+cmd_hosted_stop() {
+  if ! timeout --signal=KILL "$JOURNAL_CAPTURE_S" /usr/local/bin/om-harness push-journal; then
+    echo 'journal push failed; powering off' >&2
+  fi
+  systemctl --no-block poweroff
+}
+
+cmd_push_journal() {
+  umask 077
+  # Bound records and bytes before Python; raw bytes stay in the pipe, redacted output in tmpfs.
+  journalctl -b -n "$JOURNAL_MAX_LINES" -u overmatch-server -o short-monotonic --no-pager -q |
+    tail -c "$((JOURNAL_MAX_BYTES + 1))" |
+    python3 -c '
+import base64, pathlib, re, sys
+cap = int(sys.argv[1])
+raw = sys.stdin.buffer.read()
+truncated = len(raw) > cap
+# A cut line may have lost its credential label. Discard it before pattern matching.
+if truncated:
+    raw = raw.split(b"\n", 1)[1] if b"\n" in raw else b""
+text = raw.decode("utf-8", errors="ignore")
+credential = pathlib.Path("/etc/overmatch-report-header").read_text().strip().removeprefix("Authorization: Bearer ")
+forms = [credential, base64.b64encode(credential.encode()).decode()]
+if re.fullmatch(r"[0-9a-f]{64}", credential, re.I):
+    hexes = [credential.lower(), credential.upper()]
+    forms = [p + h for h in hexes for p in ("0x", "0X")] + forms + hexes
+    forms += [base64.b64encode(h.encode()).decode() for h in hexes]
+    forms += [base64.b64encode(bytes.fromhex(credential)).decode()]
+for form in forms:
+    text = text.replace(form, "[credential]")
+# Multiline values and split Debug arrays are unmasked: no src/net or vendored netcode emitter.
+# Live report/netcode secrets are caught by their hex/array shapes.
+text = re.sub(r"(\bOVERMATCH_(?:[A-Z_]+[ \t]*=|(?=[A-Z_]*(?:SECRET|KEY|TOKEN|TICKET))[A-Z_]+[ \t]*:))[^\n]*", r"\1[credential]", text, flags=re.I)
+text = re.sub(r"((?<![A-Za-z0-9])(?:ticket|secret|tokens?|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment)\b[\x22\x27]?[ \t]*[:=][ \t]*(?:(?:Bearer|Basic)[ \t]+)?)(?:\[[^\[\]\n]*\]|\{[^{}\n]*\}|\x22(?:\\[^\n]|[^\x22\\\n])*\x22|\x27(?:\\[^\n]|[^\x27\\\n])*\x27|[^\s,;]+)", r"\1[credential]", text, flags=re.I)
+text = re.sub(r"https?://\S+", "[url]", text, flags=re.I)
+text = re.sub(r"(?<![0-9a-f])(?:0x)?[0-9a-f]{64,}(?![0-9a-f])", "[credential]", text, flags=re.I)
+text = re.sub(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]+\.[0-9a-f]{32}\b", "[ticket]", text, flags=re.I)
+# NetcodeConfig Debug exposes byte arrays; no server path emits its key as base64.
+text = re.sub(r"\[(?:[ \t]*[0-9]{1,3}[ \t]*,){31}[ \t]*[0-9]{1,3}[ \t]*\]", "[credential]", text)
+def ipv6(match):
+    token = match[0]
+    colon = token.find(":")
+    if colon < 0: return token
+    prefix = token[:colon + 1] if colon > 0 and re.search(r"[g-z_]", token[:colon], re.I) else ""
+    candidate = token[len(prefix):]
+    return prefix + "[ip]" if re.fullmatch(r"[0-9a-f:.]+(?:%[a-z0-9]+)?", candidate, re.I) and re.search(r"[0-9a-f]", candidate, re.I) and ("::" in candidate or candidate.count(":") >= 3) else token
+text = re.sub(r"[a-z0-9_:.%]+", ipv6, text, flags=re.I)
+text = re.sub(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}", "[ip]", text)
+encoded = text.encode("utf-8")
+truncated = truncated or len(encoded) > cap
+pathlib.Path("/run/overmatch-journal").write_bytes(encoded[-cap:].decode("utf-8", errors="ignore").encode("utf-8"))
+pathlib.Path("/run/overmatch-journal-header").write_text("X-Journal-Truncated: " + str(int(truncated)) + "\n")
+' "$JOURNAL_MAX_BYTES"
+  # One attempt inside the whole-capture kill; upload failure never postpones power-off.
+  curl --silent --show-error --fail --connect-timeout "$JOURNAL_CONNECT_S" --max-time "$JOURNAL_UPLOAD_S" \
+    --header @/etc/overmatch-report-header --header @/run/overmatch-journal-header \
+    --header 'Content-Type: text/plain; charset=utf-8' --data-binary @/run/overmatch-journal \
+    "$HOSTED_API/v1/servers/$HOSTED_SERVER_ID/journal" >/dev/null 2>&1
 }
 
 # The kernel time of the first journal line of <unit> holding <text>; nothing when the query
@@ -250,6 +343,8 @@ cmd_sample() {
 main() {
   case "${1:-}" in
     "") boot ;;
+    hosted-stop) cmd_hosted_stop ;;
+    push-journal) cmd_push_journal ;;
     state) cmd_state ;;
     host) printf 'cpus %s\nmodel %s\n' "$(nproc)" "$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)" ;;
     uptime-echo) cmd_uptime_echo ;;

@@ -4,18 +4,19 @@ import policy from "../../scripts/aws/host-policy.json";
 import rootContract from "../../scripts/aws/host-image.json";
 import production from "../production-server.json";
 import hosting from "../aws-hosting.json";
-import { Ec2 } from "../src/ec2";
+import { Ec2, hostedScript } from "../src/ec2";
 import { host, machineScript } from "../src/host.generated";
 import { newId, tagOf } from "../src/ids";
 import { adminPage } from "../src/admin";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { config, serverEnvironment } from "../src/config";
+import { config, serverEnvironment, SERVER_SETTING_DOMAINS } from "../src/config";
 import { sweep } from "../src/sweep";
 import { signV4 } from "../src/sigv4";
 import { FakeEc2, resourceTags } from "./fake-ec2";
-import { age, call, env, heartbeat, join, registry, ticket } from "./helpers";
-import { RELEASE_CACHE_MS } from "../src/release";
+import { failD1Once, age, call, env, heartbeat, join, registry, ticket } from "./helpers";
+import { serverRelease, RELEASE_CACHE_MS } from "../src/release";
 import worker from "../src/index";
+import { JOURNAL_WINDOW_MS, SERVER_LOG_MAX_BYTES } from "../src/evidence";
 import { REASONS } from "../src/reasons";
 
 let ec2: FakeEc2;
@@ -125,7 +126,26 @@ describe("EC2 request contract", () => {
 		expect(settings.OVERMATCH_REPORT_SECRET).toMatch(/^[a-f0-9]{64}$/);
 		expect(m.script.slice(m.script.indexOf("set -Eeuo pipefail"))).toBe(machineScript.slice(machineScript.indexOf("set -Eeuo pipefail")));
 		expect(m.script).toContain("ROLE='hosted'");
-		expect(new TextEncoder().encode(m.script).byteLength).toBeLessThanOrEqual(16 * 1024);
+		const bytes = new TextEncoder().encode(m.script).byteLength;
+		expect(bytes, `user data is ${bytes} bytes; shrink machine.sh or settings before exceeding EC2 16384-byte limit`).toBeLessThanOrEqual(16 * 1024);
+	});
+
+	it("worst realistic rendered user data leaves at least 1 KiB for future launch settings", async () => {
+		// Fixture: maximum version/DNS lengths, a port, and full-precision accepted timings.
+		const version = "0.8.0-" + "v".repeat(64 - "0.8.0-".length);
+		const origin = `https://${[63, 63, 63, 61].map((n) => "a".repeat(n)).join(".")}:65535`;
+		const id = newId(version);
+		const settings = { ...cfg, capacity: SERVER_SETTING_DOMAINS.CAPACITY.max,
+			heartbeatIntervalMs: 12345.678901234567 * 1000,
+			emptyExitS: 12345.678901234567, serverStatsS: 0.0010000000000000002 };
+		const script = hostedScript({ version, city: hosting.location.city, tag: tagOf(id), clientIp: null, webhookUrl: "",
+			release: await serverRelease(version, cfg.providerTimeoutMs),
+			env: serverEnvironment(settings, id, origin, "a".repeat(64), "b".repeat(64)) });
+		const bytes = new TextEncoder().encode(script).byteLength;
+		const headroom = 16 * 1024 - bytes;
+		console.warn(`Rendered worst realistic user data: ${bytes} bytes; ${headroom} bytes headroom`);
+		expect(bytes, `${bytes} bytes exceeds EC2 16384-byte limit; shrink machine.sh or settings`).toBeLessThanOrEqual(16 * 1024);
+		expect(headroom, `${bytes} bytes leaves ${headroom} bytes; shrink embedded boot code or settings`).toBeGreaterThanOrEqual(1024);
 	});
 
 	it("matches AWS's published IAM ListUsers SigV4 vector (2015-08-30)", async () => {
@@ -211,6 +231,9 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 		expect((await heartbeat(s.OVERMATCH_SERVER_ID, s.OVERMATCH_REPORT_SECRET, { players: 2, capacity: cfg.capacity, state: "open" })).status).toBe(204);
 		expect(await ticket(t)).toMatchObject({ state: "ready", address: "192.0.2.1", port: host.port, key: s.OVERMATCH_NETCODE_KEY });
 		expect((await call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, {}, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` })).status).toBe(204);
+		expect(m.state).toBe("running"); // The process must receive its reply before its stop hook can push.
+		await age(V, provider().logs.exitGraceMs + 1);
+		await runDurableObjectAlarm(registry(V));
 		expect(m.state).toBe("terminated");
 		expect(await provider().reservations()).toHaveLength(0);
 	});
@@ -241,7 +264,8 @@ describe("EC2 lifecycle behind the shipped proving Worker", () => {
 		const t = await join(request());
 		for (let i = 0; i < hosting.startAttempts; i++) {
 			const s = ec2.settings(ec2.machines[i]);
-			await call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, { reason: "boot-verify" }, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
+			await call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, { reason: "boot-verify", journalAvailable: false }, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
+			expect(ec2.machines[i].state).toBe("terminated");
 		}
 		expect(ec2.machines).toHaveLength(hosting.startAttempts);
 		expect((await ticket(t)).state).toBe("failed");
@@ -597,5 +621,204 @@ describe("operator-only provider-key authorization proof", () => {
 		ec2.errors = [{code: "UnauthorizedOperation", status: 403}];
 		expect((await call("POST", "/admin/aws-proof", {version: V}, await authorization())).status).toBe(503);
 		expect(ec2.machines).toHaveLength(0);
+	});
+});
+
+
+describe("machine journal admission and operator archive", () => {
+	it("the machine and Worker agree on the byte admission contract", () => {
+		expect(Number(/JOURNAL_MAX_BYTES=(\d+)/.exec(machineScript)![1])).toBe(SERVER_LOG_MAX_BYTES);
+	});
+	async function server() {
+		await join(request());
+		const machine = ec2.machines[0];
+		const values = ec2.settings(machine);
+		return { machine, OVERMATCH_SERVER_ID: values.OVERMATCH_SERVER_ID,
+			OVERMATCH_REPORT_SECRET: values.OVERMATCH_REPORT_SECRET, OVERMATCH_NETCODE_KEY: values.OVERMATCH_NETCODE_KEY };
+	}
+	async function push(s: { OVERMATCH_SERVER_ID: string; OVERMATCH_REPORT_SECRET: string }, body: BodyInit = "last diagnostic", headers: Record<string, string> = {}) {
+		return worker.fetch(new Request(`https://api.overmatch.test/v1/servers/${s.OVERMATCH_SERVER_ID}/journal`, {
+			method: "POST", headers: { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}`, "x-journal-truncated": "0", ...headers }, body,
+		}), env);
+	}
+	async function archive(id: string) {
+		// The README query, with only its provider identity substituted; operators rely on this join.
+		return env.DB.prepare("SELECT crash, log, error FROM server_logs LEFT JOIN server_crashes USING (server_id) WHERE deployment_id = ?1").bind(id).first();
+	}
+	it.each([false, true])("the operator reads the final journal after a clean/crash=%s report before fallback termination", async (crash) => {
+		const s = await server();
+		await heartbeat(s.OVERMATCH_SERVER_ID, s.OVERMATCH_REPORT_SECRET, { players: 0, capacity: cfg.capacity, state: "open" });
+		const end = await call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, crash ? { crash: "panic fixture" } : { reason: "empty" }, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
+		expect(end.status).toBe(204);
+		expect(s.machine.state).toBe("running");
+		expect(ec2.requests.filter((q) => q.get("Action") === "TerminateInstances")).toHaveLength(0);
+		expect((await push(s, "final diagnostic")).status).toBe(204);
+		expect(await archive(s.machine.id)).toEqual({ crash: crash ? "panic fixture" : null, log: "final diagnostic", error: null });
+		await abortAllDurableObjects(); // The grace and capture survive eviction.
+		await age(V, provider().logs.exitGraceMs + 1);
+		await runDurableObjectAlarm(registry(V));
+		expect(s.machine.state).toBe("terminated");
+		expect(await archive(s.machine.id)).toMatchObject({ log: "final diagnostic" });
+	});
+	it.each(["wrong", "missing", "unknown"])("outside %s identity is visibly refused before reading a body or storing an archive", async (kind) => {
+		const s = await server();
+		let read = false;
+		const body = new ReadableStream<Uint8Array>({ pull() { read = true; throw new Error("unauthorized body read"); } }, { highWaterMark: 0 });
+		const warn = vi.spyOn(console, "warn");
+		const res = await push({ ...s, OVERMATCH_SERVER_ID: kind === "unknown" ? newId(V) : s.OVERMATCH_SERVER_ID }, body,
+			{ authorization: kind === "missing" ? "" : `Bearer ${kind === "wrong" ? "wrong" : s.OVERMATCH_REPORT_SECRET}` });
+		expect(res.status).toBe(kind === "unknown" ? 410 : 401);
+		expect(read).toBe(false);
+		expect(warn).toHaveBeenCalledWith("journal refused", res.status, expect.any(String));
+		expect(await archive(s.machine.id)).toBeNull();
+		warn.mockRestore();
+	});
+	it("leaked own credential encodings are replaced with a row-only warning and keep the archive", async () => {
+		const s = await server();
+		const hex = [s.OVERMATCH_REPORT_SECRET.toLowerCase(), s.OVERMATCH_REPORT_SECRET.toUpperCase()];
+		const forms = [...hex.flatMap((v) => [v, "0x" + v, "0X" + v, btoa(v)]),
+			btoa(String.fromCharCode(...s.OVERMATCH_REPORT_SECRET.match(/../g)!.map((b) => parseInt(b, 16))))];
+		const warn = vi.spyOn(console, "warn");
+		expect((await push(s, forms.join("\n") + "\nlast diagnostic")).status).toBe(204);
+		expect(warn).toHaveBeenCalledWith("journal credential replaced", s.OVERMATCH_SERVER_ID);
+		const saved = JSON.stringify(await archive(s.machine.id));
+		for (const value of forms) expect(saved).not.toContain(value);
+		expect(saved).toContain("last diagnostic");
+		expect(warn.mock.calls.flat().join(" ")).not.toContain(s.OVERMATCH_REPORT_SECRET);
+		warn.mockRestore();
+	});
+	it("concurrent second pushes cannot replace the operator's first archive", async () => {
+		const s = await server();
+		const results = await Promise.all([push(s, "first candidate"), push(s, "second candidate")]);
+		expect(results.map((r) => r.status).sort()).toEqual([204, 409]);
+		const saved = await archive(s.machine.id);
+		expect((await push(s, "replacement")).status).toBe(409);
+		expect(await archive(s.machine.id)).toEqual(saved);
+	});
+	it("the operator cannot store an unbounded body with either a claimed length or a chunked stream", async () => {
+		const s = await server();
+		let reads = 0;
+		const body = () => new ReadableStream<Uint8Array>({
+			pull(controller) { reads++; controller.enqueue(new Uint8Array(SERVER_LOG_MAX_BYTES / 2 + 1).fill(120)); },
+		}, { highWaterMark: 0 });
+		expect((await push(s, body(), { "content-length": String(SERVER_LOG_MAX_BYTES + 1) })).status).toBe(413);
+		expect(reads).toBe(0);
+		const warn = vi.spyOn(console, "warn");
+		expect((await push(s, body())).status).toBe(413);
+		expect(reads).toBe(2);
+		expect(warn).toHaveBeenCalledWith("request refused", "journalSize");
+		expect(await archive(s.machine.id)).toBeNull();
+		warn.mockRestore();
+	});
+	it("expired server credentials cannot create late archives for the operator", async () => {
+		const s = await server();
+		await age(V, cfg.startDeadlineMs + JOURNAL_WINDOW_MS + 1);
+		expect((await push(s)).status).toBe(410);
+		expect(await archive(s.machine.id)).toBeNull();
+	});
+	it("a stopping row's admission deadline cannot slide forward with stop retries", async () => {
+		const s = await server();
+		await call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, {}, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
+		await age(V, JOURNAL_WINDOW_MS + 1);
+		ec2.stopPending = true;
+		await runDurableObjectAlarm(registry(V));
+		expect((await push(s)).status).toBe(410);
+	});
+	it("a spontaneous process exit can archive without an end report, including after provider termination", async () => {
+		const s = await server();
+		await heartbeat(s.OVERMATCH_SERVER_ID, s.OVERMATCH_REPORT_SECRET, { players: 0, capacity: cfg.capacity, state: "open" });
+		await age(V, cfg.heartbeatDeadlineMs + 1);
+		await runDurableObjectAlarm(registry(V));
+		expect(s.machine.state).toBe("terminated");
+		expect((await push(s)).status).toBe(204);
+	});
+	it("each machine redaction form is also sanitized at the durable-storage edge for the operator", async () => {
+		const s = await server();
+		const patterns = [s.OVERMATCH_NETCODE_KEY, "private_key=[1, 2]", "netcode-key=[3, 4]", "password=value", "token=value",
+			"secret=value", "Authorization: Bearer other", "env_vars={}", "environment={}", "OVERMATCH_API=value", "ticket=value",
+			"MC44LjA." + "b".repeat(32), "https://worker.example/path", "http://example/path", "192.0.2.1", "2001:db8::1", "::1", "::ffff:192.0.2.1", "fe80::1%eth0", "peer:2001:db8::1", "0x" + "a".repeat(64), "k" + "b".repeat(64), JSON.stringify(Array.from({ length: 32 }, (_, i) => i))];
+		expect((await push(s, patterns.join("\n") + "\nlast diagnostic", { "x-journal-truncated": "1" })).status).toBe(204);
+		const saved = JSON.stringify(await archive(s.machine.id));
+		for (const value of patterns) expect(saved).not.toContain(value);
+		expect(saved).toContain("last diagnostic");
+		expect(await env.DB.prepare("SELECT truncated FROM server_logs WHERE server_id = ?1").bind(s.OVERMATCH_SERVER_ID).first()).toEqual({ truncated: 1 });
+	});
+	it.each(["journal", "end"] as const)("expected D1 failures cross real %s RPC as data; SQL bugs still reject", async (operation) => {
+		const s = await server();
+		const sink = operation === "journal" ? "server_logs" : "server_crashes";
+		await failD1Once(V, `INSERT INTO ${sink}`);
+		const report = () => operation === "journal" ? push(s) : call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, { crash: "panic fixture" }, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
+		const response = await report();
+		expect(response.status).toBe(503);
+		expect(await response.json()).toEqual({ error: "service unavailable; retry later" });
+		await env.DB.prepare(`ALTER TABLE ${sink} RENAME TO fixture_evidence_unavailable`).run();
+		try { await expect(report()).rejects.toThrow("no such table"); }
+		finally { await env.DB.prepare(`ALTER TABLE fixture_evidence_unavailable RENAME TO ${sink}`).run(); }
+	});
+
+	it("missing pushes leave a visible NULL archive after the fixed window even after eviction", async () => {
+		const s = await server();
+		await call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, {}, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
+		await age(V, provider().logs.exitGraceMs + 1);
+		await runDurableObjectAlarm(registry(V));
+		expect(s.machine.state).toBe("terminated");
+		expect(await archive(s.machine.id)).toBeNull();
+		await abortAllDurableObjects();
+		await age(V, JOURNAL_WINDOW_MS + 1);
+		await runDurableObjectAlarm(registry(V));
+		expect(await archive(s.machine.id)).toMatchObject({ log: null, error: "journal push window closed without an archive" });
+		expect((await push(s)).status).toBe(410);
+	});
+
+	it("an archive-close D1 outage keeps the durable check pending until storage recovers", async () => {
+		const s = await server();
+		await call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, {}, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
+		await age(V, JOURNAL_WINDOW_MS + 1);
+		await failD1Once(V, "journal push window closed");
+		await runDurableObjectAlarm(registry(V));
+		expect(await archive(s.machine.id)).toBeNull();
+		expect(s.machine.state).toBe("terminated"); // Evidence failure cannot retain a machine/slot.
+		await abortAllDurableObjects();
+		await age(V, cfg.statusPollMs + 1);
+		await runDurableObjectAlarm(registry(V));
+		expect(await archive(s.machine.id)).toMatchObject({ log: null, error: "journal push window closed without an archive" });
+	});
+
+	it.each([undefined, null, "true"])("boot reports without a boolean unit fact (%s) are refused before changing state", async (journalAvailable) => {
+		const s = await server();
+		const response = await call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, { reason: "boot-start", journalAvailable }, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({ error: "journalAvailable: expected boolean" });
+		expect(s.machine.state).toBe("running");
+		expect((await registry(V).snapshot())[0].state).toBe("starting");
+	});
+
+	it.each([false, true])("boot unit creation=%s is the fact controlling termination grace", async (journalAvailable) => {
+		const s = await server();
+		const response = await call("POST", `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`, { reason: "boot-start", journalAvailable }, { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` });
+		expect(response.status).toBe(204);
+		expect(s.machine.state).toBe(journalAvailable ? "running" : "terminated");
+	});
+
+	it.each([false, true])("repeated end with crash=%s cannot move the original durable stop time", async (crash) => {
+		const s = await server();
+		const path = `/v1/servers/${s.OVERMATCH_SERVER_ID}/end`;
+		const headers = { authorization: `Bearer ${s.OVERMATCH_REPORT_SECRET}` };
+		expect((await call("POST", path, {}, headers)).status).toBe(204);
+		await age(V, provider().logs.exitGraceMs / 2);
+		const stopAt = () => runInDurableObject(registry(V), (_, state) => state.storage.sql.exec<{ stop_at: number }>("SELECT stop_at FROM servers WHERE id = ?", s.OVERMATCH_SERVER_ID).one().stop_at);
+		const original = await stopAt();
+		expect((await call("POST", path, crash ? { crash: "late panic fixture" } : {}, headers)).status).toBe(crash ? 204 : 410);
+		expect(await stopAt()).toBe(original);
+		await age(V, provider().logs.exitGraceMs / 2 + 1);
+		await runDurableObjectAlarm(registry(V));
+		expect(s.machine.state).toBe("terminated");
+	});
+
+	it("invalid UTF-8 and missing metadata are typed refusals rather than corrupt operator archives", async () => {
+		const s = await server();
+		expect((await push(s, new Uint8Array([255]))).status).toBe(400);
+		expect((await push(s, "text", { "x-journal-truncated": "invalid" })).status).toBe(400);
+		expect(await archive(s.machine.id)).toBeNull();
 	});
 });

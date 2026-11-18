@@ -82,6 +82,8 @@ export class Ec2 implements Provider {
 	readonly inventory = { scoped: true, maxAgeMs: (HOST_CAP_MIN + hosting.sweepMarginMinutes) * 60_000 };
 	readonly usdPerVcpuMinute = null;
 	readonly requiresHttps = true;
+	// Resolution: machine-owned capture + upload allowance + report/exit/scheduling margin.
+	readonly logs = { kind: "push" as const, exitGraceMs: host.journal.graceS * 1000 };
 	readonly verifyRelease = serverRelease;
 	private readonly settings: Extract<ProviderConfig, { name: "ec2" }>;
 	constructor(private readonly env: Env, private readonly timeoutMs: number) {
