@@ -1,7 +1,7 @@
 //! Terminal handling through the shipped lifecycle and connect-screen mounts.
 
 use super::*;
-use crate::net::matchmaking::ServerGone;
+use crate::net::matchmaking::{ServerGone, printable};
 use crate::net::test_harness::{TICK, base_app, finish};
 
 #[derive(Resource, Default)]
@@ -17,6 +17,8 @@ pub(in crate::net) fn direct_app() -> App {
         tick_duration: TICK,
     });
     crate::net::protocol::plugin(&mut app);
+    // The explicit direct-screen mount does not depend on Flow already being initialized.
+    install_direct_connect_screen(&mut app);
     app.init_asset::<Font>()
         .add_plugins((crate::ui_font::plugin, crate::flow::plugin))
         .insert_state(AppState::Playing)
@@ -47,6 +49,8 @@ pub(in crate::net) fn direct_app() -> App {
 pub(in crate::net) fn refusal_kinds() -> Vec<ServerGone> {
     vec![
         ServerGone::Admission(crate::net::admission::JoinRefusal::ServerFull),
+        // Fixture Worker diagnostic also exercises sanitization independently of cause wording.
+        ServerGone::Matchmaking("fixture server start failed — try again".into()),
         ServerGone::Construction(crate::net::construction::ConstructionRefusal::DuplicateLedgers),
         ServerGone::Debris(crate::net::debris_stress::PoseRefusal::Position),
         ServerGone::TickStamp(crate::net::tick_stamp::StampRefusal::invalid_fixture()),
@@ -56,16 +60,28 @@ pub(in crate::net) fn refusal_kinds() -> Vec<ServerGone> {
 }
 
 /// Direct players rely on every stream refusal surviving the retry reset and message expiry,
-/// closing before a due reconnect, and reaching the same label as an unreachable server.
+/// closing before a due reconnect, and reaching the direct connection screen.
 #[test]
 fn direct_refusals_close_without_reconnect_and_retain_the_typed_cause_until_shown() {
-    for cause in refusal_kinds() {
+    for (cause, connected_once) in refusal_kinds()
+        .into_iter()
+        .flat_map(|cause| [(cause.clone(), false), (cause, true)])
+    {
         let mut app = direct_app();
         app.update();
-        let expected = cause.to_string();
+        let expected = format!(
+            "{}: {}",
+            if connected_once {
+                "Match server lost"
+            } else {
+                "Couldn't join"
+            },
+            printable(&cause.to_string())
+        );
         // Fixture: an already initiated retry is due now, so reconnecting would reach netcode.
         let mut retry = app.world_mut().resource_mut::<ConnectRetry>();
         retry.initiated = true;
+        retry.connected_once = connected_once;
         retry.next_retry_at = Some(0.0);
         app.world_mut().write_message(cause.clone());
         app.update();
@@ -128,7 +144,8 @@ fn a_refusal_without_a_link_survives_until_the_direct_screen_shows_it() {
     for _ in 0..3 {
         app.update();
     } // Fixture: the no-link screen is already present.
-    let cause = refusal_kinds().remove(1);
+    let cause =
+        ServerGone::Construction(crate::net::construction::ConstructionRefusal::DuplicateLedgers);
     app.world_mut().write_message(cause.clone());
     app.update();
     app.world_mut().write_message(ServerGone::StoppedAnswering);
@@ -139,33 +156,99 @@ fn a_refusal_without_a_link_survives_until_the_direct_screen_shows_it() {
         world
             .query_filtered::<&Text, With<JoiningText>>()
             .iter(world)
-            .any(|text| text.0 == cause.to_string())
+            .any(|text| text.0 == format!("Couldn't join: {}", printable(&cause.to_string())))
     );
 }
 
-/// Direct players use the existing connect label for silence as well as explicit refusals.
+/// Direct players can start the server later: silence past matchmaking's give-up threshold
+/// must retain the link and issue another Connect, with the existing unreachable hint.
 #[test]
-fn an_unreachable_direct_server_shows_its_cause_after_the_link_closes() {
-    let mut app = direct_app();
-    app.world_mut().resource_mut::<ConnectRetry>().attempts =
-        client_policy().unanswered_after_attempts.0;
-    for _ in 0..4 {
+fn a_direct_link_keeps_retrying_past_the_matchmade_threshold() {
+    for connected_once in [false, true] {
+        let mut app = direct_app();
         app.update();
-    } // Fixture: close, derive and enter the no-link screen.
-    let world = app.world_mut();
-    assert!(
-        world
-            .query_filtered::<&Text, With<JoiningText>>()
-            .iter(world)
-            .any(|text| text.0 == ServerGone::Unreachable.to_string())
-    );
+        let mut retry = app.world_mut().resource_mut::<ConnectRetry>();
+        retry.initiated = true;
+        retry.connected_once = connected_once;
+        retry.exhausted = true;
+        if connected_once {
+            retry.down_since = Some(0.0);
+            retry.last_attempt_at = Some(client_policy().reconnect_give_up_s.0);
+        }
+        retry.attempts = client_policy().unanswered_after_attempts.0;
+        retry.next_retry_at = Some(0.0);
+        app.update();
+        assert_eq!(app.world().resource::<Connects>().0, 1);
+        assert!(app.world().resource::<ClosedConnection>().cause.is_none());
+        assert!(
+            app.world().resource::<ConnectRetry>().attempts
+                > client_policy().unanswered_after_attempts.0
+        );
+        let world = app.world_mut();
+        assert_eq!(
+            world
+                .query_filtered::<(), With<NetcodeClient>>()
+                .iter(world)
+                .count(),
+            1
+        );
+        assert!(
+            world
+                .query_filtered::<&Text, With<JoiningText>>()
+                .iter(world)
+                .any(|text| text.0
+                    == if connected_once {
+                        RECONNECT_LABEL.to_owned()
+                    } else {
+                        joining_label(client_policy().unanswered_after_attempts.0)
+                    })
+        );
+    }
+}
+
+/// Matchmade players return to the lobby at the policy's unanswered-attempt limit;
+/// one fewer failed attempt must still permit the server to answer.
+#[test]
+fn matchmade_links_give_up_at_the_owned_attempt_threshold() {
+    let threshold = client_policy().unanswered_after_attempts.0;
+    for attempts in [threshold - 1, threshold] {
+        let mut app = super::match_exit::client_app();
+        finish(&mut app);
+        app.update();
+        crate::net::matchmaking::ready_fixture(
+            app.world_mut(),
+            crate::net::matchmaking::ReadyMatch {
+                addr: "127.0.0.1:9".parse().unwrap(),
+                key: [0; 32], // Fixture endpoint and development key.
+            },
+        );
+        app.update();
+        let mut retry = app.world_mut().resource_mut::<ConnectRetry>();
+        retry.initiated = true;
+        retry.attempts = attempts;
+        retry.next_retry_at = Some(f64::MAX); // Fixture: no further attempt falls due this frame.
+        app.update();
+        if attempts == threshold {
+            assert_retained(&app, &ServerGone::Unreachable);
+        } else {
+            assert!(app.world().resource::<ClosedConnection>().cause.is_none());
+        }
+        let world = app.world_mut();
+        assert_eq!(
+            world
+                .query_filtered::<(), With<NetcodeClient>>()
+                .iter(world)
+                .count(),
+            usize::from(attempts < threshold)
+        );
+    }
 }
 
 fn assert_retained(app: &App, cause: &ServerGone) {
     let retained = app
         .world()
         .resource::<ClosedConnection>()
-        .0
+        .cause
         .as_ref()
         .expect("terminal cause retained");
     assert_eq!(
@@ -199,9 +282,13 @@ fn matchmade_refusals_reach_the_existing_lobby_status() {
         } // Fixture: close and enter the lobby.
         assert_retained(&app, &cause);
         let world = app.world_mut();
-        assert!(world.query::<&Text>().iter(world).any(
-            |text| text.0.contains("Match server lost") && text.0.contains(&cause.to_string())
-        ));
+        assert!(
+            world
+                .query::<&Text>()
+                .iter(world)
+                .any(|text| text.0.contains("Match server lost")
+                    && text.0.contains(&printable(&cause.to_string())))
+        );
         assert!(
             world
                 .query_filtered::<(), With<NetcodeClient>>()
@@ -240,18 +327,27 @@ fn construction_admission_closes_before_a_due_reconnect_in_the_same_update() {
         "admission must precede reconnect"
     );
     assert!(matches!(
-        world.resource::<ClosedConnection>().0,
+        world.resource::<ClosedConnection>().cause,
         Some(ServerGone::Construction(
             crate::net::construction::ConstructionRefusal::UntaggedLedger
         ))
     ));
 }
 
-/// A player whose retry just connected must keep that link, even when its previous attempt ledger
+/// A matchmade player whose retry just connected must keep that link, even when its previous attempt ledger
 /// met the give-up limit. The shipped lifecycle observes success before deciding a terminal close.
 #[test]
 fn a_successful_retry_clears_the_failed_attempt_ledger_before_terminal_handling() {
-    let mut app = direct_app();
+    let mut app = super::match_exit::client_app();
+    finish(&mut app);
+    app.update();
+    crate::net::matchmaking::ready_fixture(
+        app.world_mut(),
+        crate::net::matchmaking::ReadyMatch {
+            addr: "127.0.0.1:9".parse().unwrap(),
+            key: [0; 32], // Fixture endpoint and development key.
+        },
+    );
     app.update();
     let world = app.world_mut();
     let link = world
@@ -268,7 +364,7 @@ fn a_successful_retry_clears_the_failed_attempt_ledger_before_terminal_handling(
     retry.exhausted = true;
     world.run_schedule(Update);
     assert!(world.get_entity(link).is_ok());
-    assert!(world.resource::<ClosedConnection>().0.is_none());
+    assert!(world.resource::<ClosedConnection>().cause.is_none());
     let retry = world.resource::<ConnectRetry>();
     assert!(retry.connected_once && !retry.exhausted);
     assert_eq!(retry.attempts, 0);

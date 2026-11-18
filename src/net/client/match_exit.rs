@@ -196,35 +196,48 @@ fn replicate_one_root(server: &mut App, client: &mut App) {
     panic!("the replicated root never reached the client within {REPLICATE_STEPS} steps");
 }
 
+/// A concurrent refusal must preserve the voluntary disconnect and its Left outcome.
 #[test]
 fn leave_match_disconnects_drops_the_link_and_returns_to_the_lobby() {
     let _udp = lock_real_udp_test();
-    let (mut server, mut client) = in_match();
-    replicate_one_root(&mut server, &mut client);
-    client.world_mut().write_message(LeaveMatch);
-    for _ in 0..LEAVE_FRAMES {
-        step(Some(&mut server), &mut client);
-    }
-    assert!(links(&mut client).is_empty(), "the left link is removed");
-    assert_eq!(replicas(&mut client), 0, "no replica outlives the link");
-    assert_eq!(flow(&client), Flow::Lobby);
-    assert_eq!(
-        client.world().resource::<Closed>().0,
-        vec![MatchClosed::Left]
-    );
-    let mut dropped = false;
-    for _ in 0..SERVER_DROP_STEPS {
-        if server_clients(&mut server) == 0 {
-            dropped = true;
-            break;
+    for cause in [None, Some(super::refusals::refusal_kinds().remove(0))] {
+        let (mut server, mut client) = in_match();
+        replicate_one_root(&mut server, &mut client);
+        client.world_mut().write_message(LeaveMatch);
+        if let Some(cause) = cause {
+            client.world_mut().write_message(cause);
         }
-        step(Some(&mut server), &mut client);
+        for _ in 0..LEAVE_FRAMES {
+            step(Some(&mut server), &mut client);
+        }
+        assert!(links(&mut client).is_empty(), "the left link is removed");
+        assert_eq!(replicas(&mut client), 0, "no replica outlives the link");
+        assert_eq!(flow(&client), Flow::Lobby);
+        assert_eq!(
+            client.world().resource::<Closed>().0,
+            vec![MatchClosed::Left]
+        );
+        let mut dropped = false;
+        for _ in 0..SERVER_DROP_STEPS {
+            if server_clients(&mut server) == 0 {
+                dropped = true;
+                break;
+            }
+            step(Some(&mut server), &mut client);
+        }
+        assert!(
+            dropped,
+            "the server still holds the client {SERVER_DROP_STEPS} steps after the leave: the \
+             disconnect never reached it"
+        );
+        assert!(
+            client
+                .world()
+                .resource::<ClosedConnection>()
+                .cause
+                .is_none()
+        );
     }
-    assert!(
-        dropped,
-        "the server still holds the client {SERVER_DROP_STEPS} steps after the leave: the \
-         disconnect never reached it"
-    );
 }
 
 /// A returning player must be told that the match's server was lost. Drive the shipped client
@@ -254,11 +267,18 @@ fn an_ended_match_tells_the_player_its_server_was_lost() {
         panic!("losing a connected server must end the match with its cause");
     };
     let reason = reason.clone();
+    assert!(matches!(
+        client.world().resource::<ClosedConnection>().cause,
+        Some(crate::net::matchmaking::ServerGone::StoppedAnswering)
+    ));
     let world = client.world_mut();
     assert!(
         world.query::<&Text>().iter(world).any(|text| {
             let message = text.0.to_ascii_lowercase();
-            message.contains("match server lost") && text.0.contains(&reason)
+            message.contains("match server lost")
+                && text
+                    .0
+                    .contains(&crate::net::matchmaking::printable(&reason))
         }),
         "the lobby must tell the returning player their match server was lost and why"
     );

@@ -278,6 +278,15 @@ mod tests {
             }
         }
         assert!(observed, "a refused stamp must close the match visibly");
+        assert!(matches!(
+            client
+                .world()
+                .resource::<super::super::client::ClosedConnection>()
+                .cause,
+            Some(super::super::matchmaking::ServerGone::TickStamp(
+                StampRefusal(wire::StampRefusal::Invalid(_))
+            ))
+        ));
         super::super::client::match_exit::advance_past_reconnect_window(&mut client);
         for _ in 0..8 {
             server.update();
@@ -301,7 +310,9 @@ mod tests {
                 .world_mut()
                 .query::<&Text>()
                 .iter(client.world())
-                .any(|text| text.0.contains(&cause)),
+                .any(|text| text
+                    .0
+                    .contains(&super::super::matchmaking::printable(&cause))),
             "the lobby must show the refusal cause"
         );
     }

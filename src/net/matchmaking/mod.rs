@@ -37,6 +37,8 @@ mod ticket;
 mod worker;
 
 use contract::LocationsResponse;
+pub(super) use lobby_ui::connection_failure_label;
+#[cfg(test)]
 pub(super) use lobby_ui::printable;
 use picker::PingTable;
 pub(super) use ticket::ReadyMatch;

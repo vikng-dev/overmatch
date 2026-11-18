@@ -952,6 +952,15 @@ mod tests {
             }
         }
         assert!(observed, "the receive refusal reaches the match-close path");
+        assert!(matches!(
+            client
+                .world()
+                .resource::<super::super::client::ClosedConnection>()
+                .cause,
+            Some(super::super::matchmaking::ServerGone::Construction(
+                ConstructionRefusal::DuplicateLedgers
+            ))
+        ));
         // The wire entities normally belong to the link; this injected fixture owns their cleanup.
         let ledgers: Vec<_> = client
             .world_mut()
@@ -982,7 +991,9 @@ mod tests {
                 .world_mut()
                 .query::<&Text>()
                 .iter(client.world())
-                .any(|text| text.0.contains(&expected))
+                .any(|text| text
+                    .0
+                    .contains(&super::super::matchmaking::printable(&expected)))
         );
     }
 

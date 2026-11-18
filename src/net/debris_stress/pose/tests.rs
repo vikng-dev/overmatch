@@ -161,13 +161,22 @@ fn malformed_updates_are_visibly_refused_before_interpolation() {
         *client.world().resource::<State<crate::flow::Flow>>().get(),
         crate::flow::Flow::Lobby
     );
+    assert!(matches!(
+        client
+            .world()
+            .resource::<crate::net::client::ClosedConnection>()
+            .cause,
+        Some(crate::net::matchmaking::ServerGone::Debris(
+            PoseRefusal::Rotation
+        ))
+    ));
     let cause = PoseRefusal::Rotation.to_string();
     assert!(
         client
             .world_mut()
             .query::<&Text>()
             .iter(client.world())
-            .any(|text| text.0.contains(&cause)),
+            .any(|text| text.0.contains(&crate::net::matchmaking::printable(&cause))),
         "the production lobby tells the player why the stream was refused"
     );
 }

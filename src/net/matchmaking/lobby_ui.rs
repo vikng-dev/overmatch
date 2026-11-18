@@ -452,6 +452,16 @@ pub(super) fn refresh_list(
     *shown = Some((list_entity, view));
 }
 
+/// Failed joins and lost servers share their wording across the lobby and direct screen.
+pub(in crate::net) fn connection_failure_label(reason: &str, connected_once: bool) -> String {
+    let heading = if connected_once {
+        "Match server lost"
+    } else {
+        "Couldn't join"
+    };
+    format!("{heading}: {}", printable(reason))
+}
+
 /// The status line's text and colour for the current lobby state.
 fn status(lobby: &Lobby, now: f64) -> (String, Color) {
     let look = &look::get().lobby;
@@ -464,12 +474,12 @@ fn status(lobby: &Lobby, now: f64) -> (String, Color) {
     }
     if let Some(reason) = flow.failure() {
         return (
-            format!("Couldn't join: {}", printable(reason)),
+            connection_failure_label(reason, false),
             look::color(look.warn_srgba),
         );
     }
     if let Some(reason) = flow.ended() {
-        return (format!("Match server lost: {}", printable(reason)), TEXT);
+        return (connection_failure_label(reason, true), TEXT);
     }
     match &lobby.locations {
         Locations::Loaded(_) if lobby.selection.is_empty() => {
