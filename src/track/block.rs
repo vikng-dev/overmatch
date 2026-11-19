@@ -78,148 +78,112 @@ pub(crate) struct Solution {
     #[cfg(feature = "bitprobe")]
     pub assignments_tried: usize,
     assignment: Vec<State>,
-    multipliers: Vec<f64>,
-    equalities: Vec<usize>,
-    snap_basis: Vec<usize>,
 }
 
 /// Affine response while a bounded block stays on one KKT face.
 #[derive(Clone, Debug)]
 pub(crate) struct FaceResponse {
     pub(crate) mobility: Vec<Vec<f64>>,
-    impulses: Vec<Vec<f64>>,
-    multipliers: Vec<Vec<f64>>,
+}
+
+struct FaceSystem {
+    interior: Vec<usize>,
+    active: Vec<usize>,
+    matrix: Vec<Vec<f64>>,
+}
+
+fn face_system(
+    speeds: &[Speed],
+    rows: &[Row],
+    limits: &[ImpulseLimit],
+    states: &[State],
+) -> FaceSystem {
+    let interior: Vec<_> = (0..rows.len())
+        .filter(|&i| states[i] == State::Interior)
+        .collect();
+    let active: Vec<_> = (0..limits.len())
+        .filter(|&i| states[rows.len() + i] != State::Interior)
+        .collect();
+    let nf = interior.len();
+    let size = nf + active.len();
+    let mut matrix = vec![vec![0.0; size + 1]; size];
+    for (i, &ri) in interior.iter().enumerate() {
+        for (j, &rj) in interior.iter().enumerate() {
+            matrix[i][j] = rows[ri]
+                .jacobian
+                .iter()
+                .zip(&rows[rj].jacobian)
+                .zip(speeds)
+                .map(|((a, b), s)| a * b / s.inertia)
+                .sum();
+        }
+        for (j, &li) in active.iter().enumerate() {
+            matrix[i][nf + j] = limits[li].coefficients[ri];
+            matrix[nf + j][i] = limits[li].coefficients[ri];
+        }
+    }
+    FaceSystem {
+        interior,
+        active,
+        matrix,
+    }
 }
 
 impl Solution {
+    pub(crate) fn same_face(&self, other: &Self) -> bool {
+        self.assignment == other.assignment
+            && self
+                .rows
+                .iter()
+                .zip(&other.rows)
+                .all(|(a, b)| a.dynamic == b.dynamic)
+    }
+
     pub(crate) fn response(
         &self,
         speeds: &[Speed],
         rows: &[Row],
         limits: &[ImpulseLimit],
     ) -> FaceResponse {
-        let interior: Vec<_> = (0..rows.len())
-            .filter(|&i| self.assignment[i] == State::Interior)
-            .collect();
-        let active: Vec<_> = (0..limits.len())
-            .filter(|&i| self.assignment[rows.len() + i] != State::Interior)
-            .collect();
+        let FaceSystem {
+            interior, matrix, ..
+        } = face_system(speeds, rows, limits, &self.assignment);
         let nf = interior.len();
-        let size = nf + active.len();
-        let mut response = FaceResponse {
-            mobility: Vec::new(),
-            impulses: Vec::new(),
-            multipliers: Vec::new(),
-        };
+        let size = matrix.len();
+        let mut mobility = Vec::with_capacity(speeds.len());
         for column in 0..speeds.len() {
-            let mut matrix = vec![vec![0.0; size + 1]; size];
+            let mut matrix = matrix.clone();
             for (i, &ri) in interior.iter().enumerate() {
-                for (j, &rj) in interior.iter().enumerate() {
-                    matrix[i][j] = rows[ri]
-                        .jacobian
-                        .iter()
-                        .zip(&rows[rj].jacobian)
-                        .zip(speeds)
-                        .map(|((a, b), s)| a * b / s.inertia)
-                        .sum();
-                }
                 matrix[i][size] = -rows[ri].jacobian[column] / speeds[column].inertia;
-                for (j, &li) in active.iter().enumerate() {
-                    matrix[i][nf + j] = limits[li].coefficients[ri];
-                    matrix[nf + j][i] = limits[li].coefficients[ri];
-                }
             }
             let answer = eliminate_bordered(&mut matrix, nf)
                 .expect("the accepted KKT face has an independent response basis");
-            let velocity = speeds
-                .iter()
-                .enumerate()
-                .map(|(j, s)| {
-                    let free = if j == column { 1.0 } else { 0.0 };
-                    let response = (free
-                        + interior
-                            .iter()
-                            .zip(&answer)
-                            .map(|(&i, p)| rows[i].jacobian[j] * p)
-                            .sum::<f64>())
-                        / s.inertia;
-                    // Resolution: cancellation while projecting a held coordinate leaves f64 ulps.
-                    if response.abs() <= RESOLUTION / (s.inertia * speeds[column].inertia).sqrt() {
-                        0.0
-                    } else {
-                        response
-                    }
-                })
-                .collect();
-            let mut impulse = vec![0.0; rows.len()];
-            for (&i, &p) in interior.iter().zip(&answer) {
-                impulse[i] = p;
-            }
-            let mut multiplier = vec![0.0; limits.len()];
-            for (&i, &mu) in active.iter().zip(&answer[nf..]) {
-                multiplier[i] = mu;
-            }
-            response.mobility.push(velocity);
-            response.impulses.push(impulse);
-            response.multipliers.push(multiplier);
+            mobility.push(
+                speeds
+                    .iter()
+                    .enumerate()
+                    .map(|(j, s)| {
+                        let free = if j == column { 1.0 } else { 0.0 };
+                        let response = (free
+                            + interior
+                                .iter()
+                                .zip(&answer)
+                                .map(|(&i, p)| rows[i].jacobian[j] * p)
+                                .sum::<f64>())
+                            / s.inertia;
+                        // Resolution: projection onto a held coordinate retains f64 cancellation ulps.
+                        if response.abs()
+                            <= RESOLUTION / (s.inertia * speeds[column].inertia).sqrt()
+                        {
+                            0.0
+                        } else {
+                            response
+                        }
+                    })
+                    .collect(),
+            );
         }
-        response
-    }
-}
-
-impl FaceResponse {
-    /// None means a bound, multiplier sign or equality basis changed: the active-set search
-    /// must select another face. Reuse is certified by the same KKT gate as the full solve.
-    pub(crate) fn apply(
-        &self,
-        base: &Solution,
-        rows: &[Row],
-        limits: &[ImpulseLimit],
-        impulse: &[f64],
-    ) -> Option<Solution> {
-        assert!(
-            rows.iter().all(|r| r.dynamic.is_none()),
-            "affine contact response holds one static/sliding regime fixed"
-        );
-        let mut next = base.clone();
-        for (column, &p) in impulse.iter().enumerate() {
-            for (v, a) in next.speeds.iter_mut().zip(&self.mobility[column]) {
-                *v += a * p;
-            }
-            for (q, a) in next.rows.iter_mut().zip(&self.impulses[column]) {
-                q.impulse += a * p;
-            }
-            for (mu, a) in next.multipliers.iter_mut().zip(&self.multipliers[column]) {
-                *mu += a * p;
-            }
-        }
-        let mut impulses: Vec<_> = next.rows.iter().map(|q| q.impulse).collect();
-        let bounds: Vec<_> = rows.iter().map(|r| r.bounds).collect();
-        if !check_face(
-            rows,
-            &bounds,
-            limits,
-            &next.assignment,
-            &next.speeds,
-            &mut impulses,
-            &next.multipliers,
-        ) {
-            return None;
-        }
-        if physical_equalities(rows, limits, &next.assignment, &next.multipliers) != base.equalities
-        {
-            return None;
-        }
-        for (row, p) in next.rows.iter_mut().zip(impulses) {
-            row.impulse = p;
-        }
-        snap(&mut next.speeds, rows, &next.snap_basis);
-        #[cfg(feature = "bitprobe")]
-        {
-            next.assignments_tried = 1;
-            ASSIGNMENT_WORK.with(|work| work.set(work.get() + 1));
-        }
-        Some(next)
+        FaceResponse { mobility }
     }
 }
 
@@ -580,10 +544,11 @@ impl Search<'_> {
         #[cfg(feature = "bitprobe")]
         self.assignments_tried.set(self.assignments_tried.get() + 1);
         let n = self.rows.len();
-        let interior: Vec<_> = (0..n).filter(|&i| states[i] == State::Interior).collect();
-        let active: Vec<_> = (0..self.limits.len())
-            .filter(|&i| states[n + i] != State::Interior)
-            .collect();
+        let FaceSystem {
+            interior,
+            active,
+            mut matrix,
+        } = face_system(self.speeds, self.rows, self.limits, states);
         let mut impulses: Vec<_> = (0..n)
             .map(|i| match states[i] {
                 State::Interior => 0.0,
@@ -609,25 +574,11 @@ impl Search<'_> {
         let fixed = velocity_for(&impulses);
         let nf = interior.len();
         let size = nf + active.len();
-        let mut matrix = vec![vec![0.0; size + 1]; size];
         for (i, &ri) in interior.iter().enumerate() {
-            for (j, &rj) in interior.iter().enumerate() {
-                matrix[i][j] = self.rows[ri]
-                    .jacobian
-                    .iter()
-                    .zip(&self.rows[rj].jacobian)
-                    .zip(self.speeds)
-                    .map(|((a, b), s)| a * b / s.inertia)
-                    .sum();
-            }
             matrix[i][size] = self.rows[ri].target - dot(&self.rows[ri].jacobian, &fixed);
         }
         for (j, &li) in active.iter().enumerate() {
             let limit = &self.limits[li];
-            for (i, &ri) in interior.iter().enumerate() {
-                matrix[i][nf + j] = limit.coefficients[ri];
-                matrix[nf + j][i] = limit.coefficients[ri];
-            }
             matrix[nf + j][size] = match states[n + li] {
                 State::Lower => limit.bounds.lower,
                 State::Upper => limit.bounds.upper,
@@ -700,9 +651,6 @@ impl Search<'_> {
             #[cfg(feature = "bitprobe")]
             assignments_tried: 0,
             assignment: states.to_vec(),
-            multipliers,
-            equalities: snapped,
-            snap_basis: independent,
             speeds: velocity,
             rows: impulses
                 .into_iter()

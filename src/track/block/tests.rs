@@ -919,10 +919,8 @@ fn constrained_mobility_reflects_inertia_and_releases_exhausted_stops() {
     // Resolution: f64 KKT elimination and inertial projection.
     assert!((mobility[1][1] - expected).abs() < 1e-12);
     assert!((mobility[1][0] - 2.0 * expected).abs() < 1e-12);
-    let response = locked.response(&speeds, std::slice::from_ref(&clutch), &[]);
-    let shifted = response
-        .apply(&locked, std::slice::from_ref(&clutch), &[], &[0.0, 3.0])
-        .unwrap();
+    let shifted_speeds = [speeds[0], speed(0.0, 7.0, 3.0)];
+    let shifted = solve(&shifted_speeds, std::slice::from_ref(&clutch));
     assert!((shifted.speeds[1] - 3.0 * expected).abs() < 1e-12);
     let rows = [clutch, row(&[0.0, 1.0], 4.0)];
     for impulse in [2.0, 8.0] {
@@ -930,18 +928,6 @@ fn constrained_mobility_reflects_inertia_and_releases_exhausted_stops() {
         let solved = solve(&loaded, &rows);
         let mobility = solved.response(&loaded, &rows, &[]).mobility;
         if impulse < 4.0 {
-            let response = solved.response(&loaded, &rows, &[]);
-            assert!(
-                response.apply(&solved, &rows, &[], &[0.0, 6.0]).is_none(),
-                "crossing a bound must leave the cached face"
-            );
-            assert_eq!(
-                response
-                    .apply(&solved, &rows, &[], &[0.0, 1.0])
-                    .unwrap()
-                    .speeds[1],
-                0.0
-            );
             assert_eq!(mobility[1][1], 0.0);
             assert_eq!(solved.speeds[1], 0.0);
         } else {

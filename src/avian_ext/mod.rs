@@ -35,4 +35,5 @@ pub fn plugin(app: &mut App) {
     island_wake::plugin(app);
     compliance::plugin(app);
     solver_cost::plugin(app);
+    surface_motion::register();
 }

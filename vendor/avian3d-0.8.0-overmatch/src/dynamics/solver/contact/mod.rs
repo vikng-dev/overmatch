@@ -25,7 +25,10 @@ pub enum SurfaceFrictionStage {
     /// Mirror the rigid-body warm impulse into the scalar coordinates, at this scale.
     WarmStart(f32),
     /// Solve finite-surface friction after the normal row.
-    Solve,
+    Solve {
+        /// Whether the normal pass includes positional bias.
+        biased: bool,
+    },
 }
 
 /// Callback operating under the contact constraint's exclusive body ownership.
@@ -399,7 +402,7 @@ impl ContactConstraint {
                 body2,
                 inertia1,
                 inertia2,
-                SurfaceFrictionStage::Solve,
+                SurfaceFrictionStage::Solve { biased: USE_BIAS },
             );
         }
     }

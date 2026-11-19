@@ -1,46 +1,29 @@
-//! Finite-inertia moving surfaces inside Avian's contact solve. The fork supplies scalar
-//! coordinates and process-wide dispatch; this seam owns their Coulomb law. A friction impulse
-//! changes both rigid bodies and every moving-surface coordinate before the next contact reads
-//! them. Avian's graph colors preserve that ownership, including its serial overflow color.
+//! Finite-surface Coulomb rows under Avian's graph-colored body ownership. The seam depends only
+//! on Bevy and Avian; each mechanical owner supplies its speed and constrained/free mobility.
+//! The contact design and observations live in `track-contact.md`.
 
 use avian3d::dynamics::solver::{
     contact::{ContactConstraint, SurfaceFrictionStage},
-    solver_body::{SolverBody, SolverBodyInertia, SurfaceCoordinate},
+    solver_body::{SolverBody, SolverBodyInertia, SurfaceCoordinate, SurfaceData, SurfaceScratch},
 };
 use bevy::math::{DVec2, Vec2, Vec3};
 
-use crate::track::transmission::{self, PreparedDrive};
-use avian3d::dynamics::solver::solver_body::{SurfaceData, SurfaceScratch};
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct SurfaceSpeed {
-    pub(crate) velocity: f32,
-    pub(crate) inverse_inertia: f32,
+/// An owner re-solves from one interval's start and current contact totals. `push` reports a
+/// changed mechanical face; free mobility stays fixed over the interval and bounds each
+/// face's constrained mobility from above.
+pub(crate) trait SurfaceModel: core::any::Any + Send + Sync + core::fmt::Debug {
+    fn clone_model(&self) -> Box<dyn SurfaceModel>;
+    fn speed(&self, index: usize) -> f64;
+    fn mobility(&self, index: usize) -> f64;
+    fn free_mobility(&self, index: usize) -> f64;
+    fn push(&mut self, index: usize, impulse: f64) -> bool;
 }
 
-#[derive(Clone, Debug)]
-struct Evaluation {
-    speeds: Vec<f64>,
-    potential: f64,
-    mobility: Vec<Vec<f64>>,
-    solved: Option<crate::track::block::Solution>,
-    response: Option<std::sync::Arc<crate::track::block::FaceResponse>>,
-}
-
-/// Game-owned mechanical scratch. Every candidate reuses the same interval's free momentum
-/// and bounded rows; contact impulses never receive another motor or brake budget.
-#[derive(Clone, Debug)]
-pub(crate) struct Coordinates {
-    pub(crate) initial: Vec<SurfaceSpeed>,
-    pub(crate) prepared: Option<PreparedDrive>,
-    impulses: Vec<f64>,
-    sliding: Vec<Option<crate::track::block::Bounds>>,
-    current: Evaluation,
-}
-
-impl SurfaceData for Coordinates {
+#[derive(Debug)]
+struct Scratch(Box<dyn SurfaceModel>);
+impl SurfaceData for Scratch {
     fn clone_box(&self) -> Box<dyn SurfaceData> {
-        Box::new(self.clone())
+        Box::new(Self(self.0.clone_model()))
     }
 }
 
@@ -48,405 +31,33 @@ pub(crate) fn register() {
     avian3d::dynamics::solver::contact::SURFACE_FRICTION.get_or_init(|| solve);
 }
 
-impl Coordinates {
-    pub(crate) fn free(initial: Vec<SurfaceSpeed>) -> Self {
-        register();
-        assert!(
-            initial.iter().all(|s| s.velocity.is_finite()
-                && s.inverse_inertia.is_finite()
-                && s.inverse_inertia >= 0.0),
-            "prepared surface coordinates have finite speed and nonnegative finite mobility"
-        );
-        let current = Evaluation {
-            speeds: initial.iter().map(|s| f64::from(s.velocity)).collect(),
-            potential: 0.0,
-            mobility: initial
-                .iter()
-                .enumerate()
-                .map(|(i, _)| {
-                    initial
-                        .iter()
-                        .enumerate()
-                        .map(|(j, s)| {
-                            if i == j {
-                                f64::from(s.inverse_inertia)
-                            } else {
-                                0.0
-                            }
-                        })
-                        .collect()
-                })
-                .collect(),
-            solved: None,
-            response: None,
-        };
-        Self {
-            impulses: vec![0.0; initial.len()],
-            initial,
-            prepared: None,
-            sliding: Vec::new(),
-            current,
-        }
-    }
-
-    pub(crate) fn drivetrain(prepared: PreparedDrive) -> Self {
-        let initial = prepared.mechanical.speeds[1..]
-            .iter()
-            .map(|s| SurfaceSpeed {
-                velocity: s.value as f32,
-                inverse_inertia: (1.0 / s.inertia) as f32,
-            })
-            .collect();
-        let mut state = Self::free(initial);
-        state.prepared = Some(prepared);
-        let mechanical = &mut state
-            .prepared
-            .as_mut()
-            .expect("a drivetrain prepares its rows")
-            .mechanical;
-        let starting: Vec<_> = mechanical.speeds.iter().map(|s| s.value).collect();
-        // The starting row speed selects its regime. Free motor load alone cannot break a stop
-        // before the contact has had its chance to share that load.
-        state.sliding = mechanical
-            .rows
-            .iter_mut()
-            .map(|row| {
-                let sliding = row.dynamic.take();
-                if row.starts_sliding(&starting)
-                    && let Some(bounds) = sliding
-                {
-                    row.bounds = bounds;
-                    None
-                } else {
-                    sliding
-                }
-            })
-            .collect();
-        state.current = state.evaluate(&state.impulses);
-        state
-    }
-
-    fn evaluate(&self, impulses: &[f64]) -> Evaluation {
-        assert!(
-            impulses.iter().all(|p| p.is_finite()),
-            "contact impulses are finite"
-        );
-        if let Some(prepared) = &self.prepared {
-            let mechanical = &prepared.mechanical;
-            let change = [
-                0.0,
-                impulses[0] - self.impulses[0],
-                impulses[1] - self.impulses[1],
-            ];
-            let cached = self
-                .current
-                .response
-                .as_ref()
-                .zip(self.current.solved.as_ref())
-                .and_then(|(response, base)| {
-                    response.apply(base, &mechanical.rows, &mechanical.limits, &change)
-                });
-            let (solved, response) = if let Some(solved) = cached {
-                (
-                    solved,
-                    std::sync::Arc::clone(
-                        self.current
-                            .response
-                            .as_ref()
-                            .expect("a certified cached face has its response"),
-                    ),
-                )
-            } else {
-                let mut warm = transmission::WarmStart::default();
-                if let Some(solved) = &self.current.solved {
-                    warm.remember(&mechanical.rows, &mechanical.limits, solved);
-                }
-                let solved = mechanical.solve([impulses[0], impulses[1]], &mut warm);
-                let response = std::sync::Arc::new(solved.response(
-                    &mechanical.speeds,
-                    &mechanical.rows,
-                    &mechanical.limits,
-                ));
-                (solved, response)
-            };
-            Evaluation {
-                speeds: solved.speeds[1..].to_vec(),
-                potential: mechanical.potential(&solved),
-                mobility: Vec::new(),
-                solved: Some(solved),
-                response: Some(response),
-            }
-        } else {
-            Evaluation {
-                speeds: self
-                    .initial
-                    .iter()
-                    .zip(impulses)
-                    .map(|(s, p)| f64::from(s.velocity) + f64::from(s.inverse_inertia) * p)
-                    .collect(),
-                potential: self
-                    .initial
-                    .iter()
-                    .zip(impulses)
-                    .map(|(s, p)| {
-                        f64::from(s.velocity) * p + 0.5 * f64::from(s.inverse_inertia) * p * p
-                    })
-                    .sum(),
-                mobility: self.current.mobility.clone(),
-                solved: None,
-                response: None,
-            }
-        }
-    }
-
-    fn trial(
-        &self,
-        coordinate: SurfaceCoordinate,
-        impulse: f64,
-    ) -> std::borrow::Cow<'_, Evaluation> {
-        if impulse == 0.0 {
-            return std::borrow::Cow::Borrowed(&self.current);
-        }
-        let mut impulses = self.impulses.clone();
-        *impulses
-            .get_mut(coordinate.index)
-            .expect("a contact binds its owner's prepared coordinate") += impulse;
-        std::borrow::Cow::Owned(self.evaluate(&impulses))
-    }
-
-    fn failed_static<'a>(&'a self, speeds: &'a [f64]) -> impl Iterator<Item = usize> + 'a {
-        self.sliding
-            .iter()
-            .enumerate()
-            .filter_map(move |(i, sliding)| {
-                let mechanical = self
-                    .prepared
-                    .as_ref()
-                    .expect("static elements have prepared mechanics");
-                let row = &mechanical.mechanical.rows[i];
-                let slip = row
-                    .jacobian
-                    .iter()
-                    .zip(speeds)
-                    .map(|(a, v)| a * v)
-                    .sum::<f64>()
-                    - row.target;
-                (sliding.is_some() && slip.abs() > row.slip_tolerance(speeds)).then_some(i)
-            })
-    }
-
-    fn release_static(&mut self, speeds: &[f64]) -> bool {
-        let failed: Vec<_> = self.failed_static(speeds).collect();
-        if failed.is_empty() {
-            return false;
-        }
-        let mechanical = &mut self
-            .prepared
-            .as_mut()
-            .expect("static elements have prepared mechanics")
-            .mechanical;
-        for i in failed {
-            mechanical.rows[i].bounds = self.sliding[i]
-                .take()
-                .expect("a static element retains its sliding bounds");
-        }
-        self.current = self.evaluate(&self.impulses);
-        true
-    }
-
-    fn break_static(&mut self, coordinate: SurfaceCoordinate, impulse: f64) -> bool {
-        if !self.sliding.iter().any(Option::is_some) {
-            return false;
-        } // No static row can change regime.
-        let trial = self.trial(coordinate, impulse);
-        let speeds = trial
-            .solved
-            .as_ref()
-            .expect("a mechanical trial has a solution")
-            .speeds
-            .clone();
-        drop(trial);
-        self.release_static(&speeds)
-    }
-
-    fn settled(&self) -> std::borrow::Cow<'_, Self> {
-        let Some(solved) = &self.current.solved else {
-            return std::borrow::Cow::Borrowed(self);
-        }; // No mechanical rows.
-        if self.failed_static(&solved.speeds).next().is_none() {
-            return std::borrow::Cow::Borrowed(self);
-        }
-        // An owner with no contact still completes the same static-to-sliding law before readback.
-        let mut settled = self.clone();
-        loop {
-            let speeds = settled
-                .current
-                .solved
-                .as_ref()
-                .expect("a mechanical owner has a solution")
-                .speeds
-                .clone();
-            if !settled.release_static(&speeds) {
-                break;
-            }
-        }
-        std::borrow::Cow::Owned(settled)
-    }
-
-    fn accept_impulses(&mut self, impulses: Vec<f64>) {
-        let current = self.evaluate(&impulses);
-        self.impulses = impulses;
-        self.current = current;
-    }
-
-    fn exchange(&mut self, coordinate: SurfaceCoordinate, impulse: Vec3) {
-        let _ = self
-            .impulses
-            .get(coordinate.index)
-            .expect("a contact binds its owner's prepared coordinate");
-        let p = f64::from(coordinate.direction.dot(impulse));
-        assert!(
-            p.is_finite(),
-            "a surface exchange supplies a finite generalized impulse"
-        );
-        if p == 0.0 {
-            return;
-        } // No momentum changed.
-        let mut next = self.impulses.clone();
-        next[coordinate.index] += p;
-        self.accept_impulses(next);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn speeds(&self) -> [f32; 2] {
-        self.current
-            .speeds
-            .iter()
-            .map(|s| *s as f32)
-            .collect::<Vec<_>>()
-            .try_into()
-            .expect("a belt owner prepares exactly two coordinates")
-    }
-
-    #[cfg(test)]
-    pub(crate) fn contact_impulses(&self) -> [f64; 2] {
-        self.impulses
-            .as_slice()
-            .try_into()
-            .expect("a belt owner has two contact impulses")
-    }
-
-    pub(crate) fn remember(&self, warm: &mut transmission::WarmStart) {
-        let prepared = self
-            .prepared
-            .as_ref()
-            .expect("a mechanical owner prepares its rows");
-        warm.remember(
-            &prepared.mechanical.rows,
-            &prepared.mechanical.limits,
-            self.current
-                .solved
-                .as_ref()
-                .expect("prepared rows have a solution"),
-        );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn add_impulses(&mut self, impulses: [f64; 2]) {
-        let mut next = self.impulses.clone();
-        for (p, add) in next.iter_mut().zip(impulses) {
-            *p += add;
-        }
-        self.accept_impulses(next);
-    }
-
-    pub(crate) fn finish(
-        &self,
-        tp: &transmission::TransmissionParams,
-        state: &mut transmission::DriveState,
-        h: f32,
-    ) -> transmission::TransmissionReport {
-        transmission::finish_advance(
-            tp,
-            state,
-            self.prepared
-                .as_ref()
-                .expect("a dynamic drivetrain prepares its bounded mechanical rows"),
-            self.current
-                .solved
-                .as_ref()
-                .expect("prepared rows have a solved response"),
-            h,
-        )
-    }
-
-    #[cfg(feature = "bitprobe")]
-    pub(crate) fn work(&self) -> f64 {
-        self.initial
-            .iter()
-            .zip(&self.current.speeds)
-            .zip(&self.impulses)
-            .map(|((from, to), p)| p * (f64::from(from.velocity) + to) * 0.5)
-            .sum()
-    }
-
-    pub(crate) fn install(self, body: &mut SolverBody) {
-        body.surface_scratch = Some(SurfaceScratch(Box::new(self)));
-    }
+pub(crate) fn install(model: impl SurfaceModel, body: &mut SolverBody) {
+    body.surface_scratch = Some(SurfaceScratch(Box::new(Scratch(Box::new(model)))));
 }
 
-pub(crate) fn surface(body: &SolverBody) -> &Coordinates {
+pub(crate) fn surface(body: &SolverBody) -> &dyn SurfaceModel {
     let data: &dyn core::any::Any = body
         .surface_scratch
         .as_ref()
         .expect("a surface owner prepares scratch before contact solving")
         .0
         .as_ref();
-    data.downcast_ref()
-        .expect("the registered surface adapter owns this scratch type")
+    &*data
+        .downcast_ref::<Scratch>()
+        .expect("the registered seam owns its scratch wrapper")
+        .0
 }
-
-pub(crate) fn surface_mut(body: &mut SolverBody) -> &mut Coordinates {
+pub(crate) fn surface_mut(body: &mut SolverBody) -> &mut dyn SurfaceModel {
     let data: &mut dyn core::any::Any = body
         .surface_scratch
         .as_mut()
         .expect("a surface owner prepares scratch before contact solving")
         .0
         .as_mut();
-    data.downcast_mut()
-        .expect("the registered surface adapter owns this scratch type")
-}
-
-/// Both adapters finish the same bounded rows and read the same final coordinates. Only a
-/// contact-free static-to-sliding transition needs replacement scratch at the shared commit.
-pub(crate) fn read_back(
-    body: &SolverBody,
-    tick: &mut transmission::DriveTick,
-    tp: &transmission::TransmissionParams,
-    h: f32,
-) -> Option<Coordinates> {
-    let settled = surface(body).settled();
-    tick.finish_contact(tp, &settled, h);
-    match settled {
-        std::borrow::Cow::Borrowed(_) => None,
-        std::borrow::Cow::Owned(state) => Some(state),
-    }
-}
-
-pub(crate) fn belt_coordinates(speeds: [f32; 2], inverse: f32) -> Coordinates {
-    Coordinates::free(
-        speeds
-            .map(|velocity| SurfaceSpeed {
-                velocity,
-                inverse_inertia: inverse,
-            })
-            .into(),
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn solved_speeds(body: &SolverBody) -> [f32; 2] {
-    surface(body).speeds()
+    &mut *data
+        .downcast_mut::<Scratch>()
+        .expect("the registered seam owns its scratch wrapper")
+        .0
 }
 
 /// Applied tangential momentum, shared by the load ledger and the headless contact account.
@@ -471,94 +82,105 @@ fn exchange_pair(
     bodies: (&mut SolverBody, &mut SolverBody),
     coordinates: [Option<SurfaceCoordinate>; 2],
     impulse: Vec3,
-) {
-    for (body, coordinate) in [(bodies.0, coordinates[0]), (bodies.1, coordinates[1])] {
+    applied: &mut [f64; 2],
+) -> bool {
+    let mut changed = false;
+    for (side, (body, coordinate)) in [(bodies.0, coordinates[0]), (bodies.1, coordinates[1])]
+        .into_iter()
+        .enumerate()
+    {
         if let Some(c) = coordinate {
-            surface_mut(body).exchange(c, impulse);
+            let next = f64::from(c.direction.dot(impulse));
+            changed |= surface_mut(body).push(c.index, next - applied[side]);
+            applied[side] = next;
         }
     }
-}
-
-struct ContactMetric<'a> {
-    rigid: [f64; 3],
-    gradient: DVec2,
-    tangents: [Vec3; 2],
-    previous: DVec2,
-    surfaces: [Option<(&'a Coordinates, SurfaceCoordinate)>; 2],
+    changed
 }
 
 fn product(w: [f64; 3], p: DVec2) -> DVec2 {
     DVec2::new(w[0] * p.x + w[1] * p.y, w[1] * p.x + w[2] * p.y)
 }
 
-impl ContactMetric<'_> {
-    fn evaluate(&self, p: DVec2) -> (f64, DVec2, [f64; 3]) {
-        let mut value = self.gradient.dot(p) + 0.5 * p.dot(product(self.rigid, p));
-        let mut gradient = self.gradient + product(self.rigid, p);
+struct ContactMetric {
+    rigid: [f64; 3],
+    gradient: DVec2,
+    tangents: [Vec3; 2],
+    previous: DVec2,
+    coordinates: [Option<SurfaceCoordinate>; 2],
+}
+
+impl ContactMetric {
+    fn evaluate(
+        &self,
+        bodies: (&SolverBody, &SolverBody),
+        p: DVec2,
+        free: bool,
+    ) -> (DVec2, [f64; 3]) {
         let mut metric = self.rigid;
-        for &(state, c) in self.surfaces.iter().flatten() {
-            let q = DVec2::new(
-                f64::from(c.direction.dot(self.tangents[0])),
-                f64::from(c.direction.dot(self.tangents[1])),
-            );
-            let result = state.trial(c, q.dot(p - self.previous));
-            value += result.potential;
-            gradient += q * result.speeds[c.index];
-            let inverse = result.response.as_ref().map_or_else(
-                || result.mobility[c.index][c.index],
-                |response| response.mobility[c.index + 1][c.index + 1],
-            );
-            metric[0] += inverse * q.x * q.x;
-            metric[1] += inverse * q.x * q.y;
-            metric[2] += inverse * q.y * q.y;
+        let mut gradient = self.gradient + product(self.rigid, p - self.previous);
+        for (body, c) in [
+            (bodies.0, self.coordinates[0]),
+            (bodies.1, self.coordinates[1]),
+        ] {
+            if let Some(c) = c {
+                let state = surface(body);
+                let q = DVec2::new(
+                    f64::from(c.direction.dot(self.tangents[0])),
+                    f64::from(c.direction.dot(self.tangents[1])),
+                );
+                gradient += q * state.speed(c.index);
+                let inverse = if free {
+                    state.free_mobility(c.index)
+                } else {
+                    state.mobility(c.index)
+                };
+                metric[0] += inverse * q.x * q.x;
+                metric[1] += inverse * q.x * q.y;
+                metric[2] += inverse * q.y * q.y;
+            }
         }
-        assert!(
-            value.is_finite() && gradient.is_finite(),
-            "finite contact and mechanical rows have finite work and slip"
-        );
-        (value, gradient, metric)
+        (gradient, metric)
     }
 
-    /// Minimize the contact's Coulomb disk after eliminating the bounded mechanical rows.
-    /// Held brakes therefore have zero mobility within capacity; locked clutches reflect crank
-    /// inertia. A bound changes the KKT face, not a timestep-dependent brake correction.
-    fn minimum(&self, radius: f64) -> DVec2 {
+    fn minimum(&self, bodies: (&mut SolverBody, &mut SolverBody), radius: f64) -> DVec2 {
+        let (one, two) = bodies;
         let mut p = self.previous;
-        if p.length() > radius {
-            p *= radius / p.length();
-        }
-        // Resolution: semismooth Newton solves the piecewise-quadratic response to f64 roundoff.
-        // The iteration limit detects a broken solver; it never publishes an unconverged result.
-        let mut evaluated = self.evaluate(p);
-        for _ in 0..64 {
-            let (value, gradient, metric) = evaluated;
-            let candidate = disk_minimum(metric, gradient - product(metric, p), radius);
-            let delta = candidate - p;
-            // Resolution: impulses are carried to f32 body velocities after this f64 solve.
-            if delta.length() <= 1e-9 * (1.0 + p.length()) {
-                return candidate;
+        let mut evaluated = self.evaluate((one, two), p, false);
+        let mut applied = [0.0; 2];
+        // Resolution: one current-face step and at most one corrective face step per visit.
+        for _ in 0..2 {
+            let (gradient, metric) = evaluated;
+            // Resolution: candidates share the rigid solver's f32 impulse storage.
+            let next = disk_minimum(metric, gradient - product(metric, p), radius)
+                .as_vec2()
+                .as_dvec2();
+            let delta = next.as_vec2() - self.previous.as_vec2();
+            let impulse = self.tangents[0] * delta.x + self.tangents[1] * delta.y;
+            if !exchange_pair((one, two), self.coordinates, impulse, &mut applied) {
+                return next;
             }
-            let mut fraction = 1.0;
-            loop {
-                let next = p + fraction * delta;
-                let trial = self.evaluate(next);
-                let next_value = trial.0;
-                // Resolution: objective evaluation can cancel the crank's much larger energy.
-                let rounding = 64.0 * f64::EPSILON * (1.0 + value.abs() + next_value.abs());
-                // Resolution: sufficient decrease keeps Newton steps inside a descending face.
-                if next_value <= value + 0.0001 * fraction * gradient.dot(delta) + rounding {
-                    p = next;
-                    evaluated = trial;
-                    break;
-                }
-                fraction *= 0.5;
-                assert!(
-                    fraction >= f64::EPSILON,
-                    "a convex contact Newton step has a descending fraction"
-                );
-            }
+            p = next;
+            evaluated = self.evaluate((one, two), p, false);
         }
-        panic!("the constrained surface contact must converge before exchanging momentum")
+        // Drop this point's entire warm impulse before measuring slip. Zero impulse is the
+        // work reference; a warm base can already contain numerical energy.
+        exchange_pair(
+            (one, two),
+            self.coordinates,
+            -self.tangents[0] * self.previous.x as f32 - self.tangents[1] * self.previous.y as f32,
+            &mut applied,
+        );
+        let (gradient, free) = self.evaluate((one, two), DVec2::ZERO, true);
+        let next = disk_minimum(free, gradient, radius);
+        let delta = next.as_vec2() - self.previous.as_vec2();
+        exchange_pair(
+            (one, two),
+            self.coordinates,
+            self.tangents[0] * delta.x + self.tangents[1] * delta.y,
+            &mut applied,
+        );
+        next
     }
 }
 
@@ -639,9 +261,9 @@ fn disk_minimum(w: [f64; 3], g: DVec2, radius: f64) -> DVec2 {
     evaluate(hi).expect("positive friction regularization resolves every inertial mode")
 }
 
-/// Scalar warm impulses are applied exactly once here. Both normal passes share the same
-/// bounded mechanical budget: friction precedes position integration and relaxes afterwards,
-/// so a holding brake does not depend on cached friction to prevent travel.
+/// Both passes share one accumulated impulse and interval budget. Fresh belt contacts need
+/// friction before integration: the cleared and warm-started slab witnesses require no travel
+/// under a holding brake. Relaxation alone holds final speed after allowing that travel.
 pub fn solve(
     constraint: &mut ContactConstraint,
     body1: &mut SolverBody,
@@ -661,7 +283,7 @@ pub fn solve(
         }; // Frictionless contact.
         if let SurfaceFrictionStage::WarmStart(coefficient) = stage {
             let p = tangents[0] * part.impulse.x + tangents[1] * part.impulse.y;
-            exchange_pair((body1, body2), coordinates, p * coefficient);
+            exchange_pair((body1, body2), coordinates, p * coefficient, &mut [0.0; 2]);
             part.impulse *= coefficient;
             continue;
         }
@@ -677,37 +299,22 @@ pub fn solve(
                     + cross2[a].dot(i2 * cross2[b]),
             )
         };
-        let rigid = [mass(0, 0), mass(0, 1), mass(1, 1)];
-        let previous = part.impulse.as_dvec2();
-        let next = loop {
-            let metric = ContactMetric {
-                rigid,
-                gradient: DVec2::new(
-                    f64::from(velocity.dot(tangents[0])),
-                    f64::from(velocity.dot(tangents[1])),
-                ) - product(rigid, previous),
-                tangents,
-                previous,
-                surfaces: [
-                    coordinates[0].map(|c| (surface(body1), c)),
-                    coordinates[1].map(|c| (surface(body2), c)),
-                ],
-            };
-            let next = metric
-                .minimum(f64::from(constraint.friction * point.normal_part.impulse))
-                .as_vec2();
-            let p =
-                tangents[0] * (next.x - part.impulse.x) + tangents[1] * (next.y - part.impulse.y);
-            let mut changed = false;
-            for (body, c) in [(&mut *body1, coordinates[0]), (&mut *body2, coordinates[1])] {
-                if let Some(c) = c {
-                    changed |= surface_mut(body).break_static(c, f64::from(c.direction.dot(p)));
-                }
-            }
-            if !changed {
-                break next;
-            }
+        let metric = ContactMetric {
+            rigid: [mass(0, 0), mass(0, 1), mass(1, 1)],
+            gradient: DVec2::new(
+                f64::from(velocity.dot(tangents[0])),
+                f64::from(velocity.dot(tangents[1])),
+            ),
+            tangents,
+            previous: part.impulse.as_dvec2(),
+            coordinates,
         };
+        let next = metric
+            .minimum(
+                (body1, body2),
+                f64::from(constraint.friction * point.normal_part.impulse),
+            )
+            .as_vec2();
         let delta = next - part.impulse;
         part.impulse = next;
         let p = tangents[0] * delta.x + tangents[1] * delta.y;
@@ -715,13 +322,13 @@ pub fn solve(
         body1.angular_velocity -= i1 * r1.cross(p);
         body2.linear_velocity += p * inertia2.effective_inv_mass();
         body2.angular_velocity += i2 * r2.cross(p);
-        exchange_pair((body1, body2), coordinates, p);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::track::surface_motion::{free_fixture, surface};
     use avian3d::collision::contact_types::ContactId;
     use avian3d::dynamics::solver::{
         contact::{ContactConstraintPoint, ContactNormalPart, ContactTangentPart},
@@ -732,11 +339,7 @@ mod tests {
 
     fn belt_body(velocity: f32, inverse_inertia: f32) -> SolverBody {
         let mut body = SolverBody::default();
-        Coordinates::free(vec![SurfaceSpeed {
-            velocity,
-            inverse_inertia,
-        }])
-        .install(&mut body);
+        free_fixture([velocity, 0.0], inverse_inertia.recip()).install(&mut body);
         body
     }
     fn point_mass(mass: f32) -> SolverBodyInertia {
@@ -870,9 +473,8 @@ mod tests {
                     let mut body = belt_body(1.68, 1.0 / belt);
                     let mut fixed = SolverBody::DUMMY;
                     let mut constraint = contact(mass);
-                    let initial = 0.5
-                        * f64::from(belt)
-                        * f64::from(surface(&body).current.speeds[0] as f32).powi(2);
+                    let initial =
+                        0.5 * f64::from(belt) * f64::from(surface(&body).speed(0) as f32).powi(2);
                     constraint.warm_start(
                         &mut body,
                         &mut fixed,
@@ -889,11 +491,10 @@ mod tests {
                         &inertia,
                         &SolverBodyInertia::DUMMY,
                     );
-                    let final_energy =
-                        0.5 * f64::from(mass) * body.linear_velocity.as_dvec3().length_squared()
-                            + 0.5
-                                * f64::from(belt)
-                                * f64::from(surface(&body).current.speeds[0] as f32).powi(2);
+                    let final_energy = 0.5
+                        * f64::from(mass)
+                        * body.linear_velocity.as_dvec3().length_squared()
+                        + 0.5 * f64::from(belt) * f64::from(surface(&body).speed(0) as f32).powi(2);
                     let budget = constraint.friction * constraint.points[0].normal_part.impulse;
                     let expected = (1.68 / (1.0 / mass + 1.0 / belt)).min(budget);
                     let delivered = constraint.points[0].tangent_part.as_ref().unwrap().impulse;
@@ -932,8 +533,8 @@ mod tests {
             (1.68 + 2.0 + 0.4) / (1.0 / 10_000.0 + 1.0 / 3000.0 + 1.0 / 4750.0 + 1.0 / 2000.0);
         relax(&mut constraint, &mut one, &mut two, &i1, &i2);
         // Resolution: f32 exchange at each owner, relative to its fixture speed.
-        assert!((surface(&one).current.speeds[0] as f32 - (1.68 - expected / 4750.0)).abs() < 1e-6);
-        assert!((surface(&two).current.speeds[0] as f32 - (-2.0 + expected / 2000.0)).abs() < 1e-6);
+        assert!((surface(&one).speed(0) as f32 - (1.68 - expected / 4750.0)).abs() < 1e-6);
+        assert!((surface(&two).speed(0) as f32 - (-2.0 + expected / 2000.0)).abs() < 1e-6);
     }
     /// Both bodies rely on equal/opposite linear momentum and torque at the actual anchor.
     /// Fixture: unequal point masses and diagonal angular inertias, with off-centre contacts.
@@ -988,10 +589,6 @@ mod tests {
         close(one.linear_velocity * 10_000.0, -p);
         close(two.linear_velocity * 3000.0, p);
         close(
-            one.linear_velocity * 10_000.0 + two.linear_velocity * 3000.0,
-            Vec3::ZERO,
-        );
-        close(
             angular[0] * one.angular_velocity,
             -row.points[0].anchor1.cross(p),
         );
@@ -999,8 +596,8 @@ mod tests {
             angular[1] * two.angular_velocity,
             row.points[0].anchor2.cross(p),
         );
-        let belt1 = 4750.0 * (surface(&one).current.speeds[0] - 1.68_f32 as f64);
-        let belt2 = 2000.0 * (surface(&two).current.speeds[0] + 2.0);
+        let belt1 = 4750.0 * (surface(&one).speed(0) - 1.68_f32 as f64);
+        let belt2 = 2000.0 * (surface(&two).speed(0) + 2.0);
         // Resolution: the contact's world impulse and its direction dot product are f32.
         assert!((belt1 + f64::from(p.z)).abs() <= 2e-6 * (1.0 + f64::from(p.length())));
         assert!((belt2 - f64::from(p.z)).abs() <= 2e-6 * (1.0 + f64::from(p.length())));
@@ -1093,5 +690,201 @@ mod tests {
     #[should_panic(expected = "finite inertias and contact velocities")]
     fn zero_friction_budget_still_checks_finite_inputs() {
         disk_minimum([1.0, 0.0, 1.0], DVec2::new(f64::NAN, 0.0), 0.0);
+    }
+    /// The game's contact physics: numerical warm impulses cannot supply energy to an
+    /// unpowered drivetrain and rigid body initially at rest, including bounded clutch faces.
+    #[test]
+    fn bounded_drivetrain_warm_start_cannot_create_energy_from_rest() {
+        use crate::track::drive_fixture::{class_drivetrains, construction};
+        use crate::track::transmission::{
+            DriveState, DriveSupply, DriveTick, LaunchState, TransmissionState,
+        };
+        for (class, (fp, tp)) in class_drivetrains().into_iter().enumerate() {
+            let fp = construction(&fp);
+            let h = 1.0 / 384.0; // Fixture interval, s.
+            for mass in [1000.0_f32, 100_000.0, 100_000_000.0] {
+                for scale in [1.0, 4.0, 16.0, 64.0, 256.0] {
+                    let state = DriveState {
+                        transmission: TransmissionState {
+                            omega_e: 0.0,
+                            park: false,
+                            mean_hold: false,
+                            launch: LaunchState::Locked,
+                            ..TransmissionState::from_spec(&tp)
+                        },
+                        speeds: [0.0; 2],
+                        phases: [0.0; 2],
+                    };
+                    let supply = DriveSupply {
+                        control_authority: false,
+                        task_rate: 0.0,
+                        engine_in_action: false,
+                        transmission_condition: 1.0,
+                    };
+                    let mut tick = DriveTick::contact_only(
+                        &fp,
+                        &tp,
+                        state,
+                        crate::track::drive::DriveTarget {
+                            supply,
+                            intent: crate::track::drive::DriveIntent::Axes(
+                                crate::track::drive::DriveAxes::default(),
+                            ),
+                        },
+                        h,
+                    );
+                    let k = tp.ratio(false, tick.state.transmission.gear) / tp.sprocket_radius;
+                    // DERIVED fixture impulse scale from both finite coupling budgets.
+                    let warm = scale * h * (tp.clutch_capacity * k + 2.0 * tp.steer_capacity_n);
+                    let mut body = SolverBody::default();
+                    tick.prepare_contact(&fp, &tp, h, false).install(&mut body);
+                    assert_eq!(
+                        surface(&body).kinetic_energy(),
+                        0.0,
+                        "the fixture must be passive and initially at rest"
+                    );
+                    let mut fixed = SolverBody::DUMMY;
+                    let mut row = contact(mass);
+                    row.points[0].tangent_part.as_mut().unwrap().impulse = Vec2::new(warm, 0.0);
+                    row.warm_start(
+                        &mut body,
+                        &mut fixed,
+                        &point_mass(mass),
+                        &SolverBodyInertia::DUMMY,
+                        1.0,
+                    );
+                    row.points[0].normal_part.impulse = 4.0 * warm / row.friction;
+                    relax(
+                        &mut row,
+                        &mut body,
+                        &mut fixed,
+                        &point_mass(mass),
+                        &SolverBodyInertia::DUMMY,
+                    );
+                    let energy =
+                        0.5 * f64::from(mass) * body.linear_velocity.as_dvec3().length_squared()
+                            + surface(&body).kinetic_energy();
+                    // DERIVED: allow 64 f32 ulps of warm-momentum cancellation, priced at free mobility.
+                    let dp = 64.0 * f64::from(f32::EPSILON * warm);
+                    let rounding = 0.5 * dp * dp * f64::from(1.0 / mass + 1.0 / fp.belt_inertia);
+                    let impulse = row.points[0].tangent_part.as_ref().unwrap().impulse;
+                    println!(
+                        "PASSIVE_WARM class={class} mass={mass} warm={warm} impulse={impulse:?} body={:?} energy={energy} J rounding={rounding} J",
+                        body.linear_velocity
+                    );
+                    assert!(
+                        energy <= rounding,
+                        "passive warm start created {energy} J from rest (roundoff {rounding} J), class={class}, mass={mass}, warm={warm}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A numerical warm start cannot leave more energy than a frictionless visit from the
+    /// same moving state. The hull and passive drivetrain rely on composed contact passivity.
+    #[test]
+    fn bounded_drivetrain_moving_warm_start_cannot_exceed_frictionless_energy() {
+        use crate::track::drive_fixture::{class_drivetrains, construction};
+        use crate::track::transmission::{
+            DriveState, DriveSupply, DriveTick, LaunchState, TransmissionState,
+        };
+        for (class, (fp, tp)) in class_drivetrains().into_iter().enumerate() {
+            let fp = construction(&fp);
+            let h = 1.0 / 384.0; // Fixture interval, s.
+            for mass in [1000.0_f32, 100_000.0, 100_000_000.0] {
+                for scale in [1.0, 4.0, 16.0, 64.0, 256.0] {
+                    let state = DriveState {
+                        transmission: TransmissionState {
+                            omega_e: 0.0,
+                            park: false,
+                            mean_hold: false,
+                            launch: LaunchState::Locked,
+                            ..TransmissionState::from_spec(&tp)
+                        },
+                        speeds: [0.0; 2],
+                        phases: [0.0; 2],
+                    };
+                    let mut tick = DriveTick::contact_only(
+                        &fp,
+                        &tp,
+                        state,
+                        crate::track::drive::DriveTarget {
+                            supply: DriveSupply {
+                                control_authority: false,
+                                task_rate: 0.0,
+                                engine_in_action: false,
+                                transmission_condition: 1.0,
+                            },
+                            intent: crate::track::drive::DriveIntent::Axes(
+                                crate::track::drive::DriveAxes::default(),
+                            ),
+                        },
+                        h,
+                    );
+                    let k = tp.ratio(false, tick.state.transmission.gear) / tp.sprocket_radius;
+                    let warm = scale * h * (tp.clutch_capacity * k + 2.0 * tp.steer_capacity_n);
+                    for velocity in [-1.68, 1.68] {
+                        // Fixture hull motion, m/s.
+                        let mut body = SolverBody::default();
+                        tick.prepare_contact(&fp, &tp, h, false).install(&mut body);
+                        body.linear_velocity = Vec3::Z * velocity;
+                        let energy = |body: &SolverBody| {
+                            0.5 * f64::from(mass) * body.linear_velocity.as_dvec3().length_squared()
+                                + surface(body).kinetic_energy()
+                        };
+                        let mut reference = body.clone();
+                        let mut fixed = SolverBody::DUMMY;
+                        let mut frictionless = contact(mass);
+                        frictionless.friction = 0.0;
+                        frictionless.points[0]
+                            .tangent_part
+                            .as_mut()
+                            .unwrap()
+                            .impulse = Vec2::ZERO;
+                        relax(
+                            &mut frictionless,
+                            &mut reference,
+                            &mut fixed,
+                            &point_mass(mass),
+                            &SolverBodyInertia::DUMMY,
+                        );
+                        let baseline = energy(&reference);
+                        let mut row = contact(mass);
+                        row.points[0].tangent_part.as_mut().unwrap().impulse = Vec2::new(warm, 0.0);
+                        row.warm_start(
+                            &mut body,
+                            &mut fixed,
+                            &point_mass(mass),
+                            &SolverBodyInertia::DUMMY,
+                            1.0,
+                        );
+                        row.points[0].normal_part.impulse = 4.0 * warm / row.friction;
+                        relax(
+                            &mut row,
+                            &mut body,
+                            &mut fixed,
+                            &point_mass(mass),
+                            &SolverBodyInertia::DUMMY,
+                        );
+                        // DERIVED: 64 f32 ulps of warm cancellation plus moving momentum,
+                        // priced through the free mobility and the initial velocity.
+                        let dp = 64.0
+                            * f64::from(f32::EPSILON)
+                            * (f64::from(warm) + f64::from(mass * velocity).abs());
+                        let rounding = f64::from(velocity).abs() * dp
+                            + 0.5 * dp * dp * f64::from(1.0 / mass + 1.0 / fp.belt_inertia);
+                        let after = energy(&body);
+                        println!(
+                            "PASSIVE_MOVING class={class} mass={mass} warm={warm} v={velocity} energy={after} frictionless={baseline} allowance={rounding} J"
+                        );
+                        assert!(
+                            after <= baseline + rounding,
+                            "moving contact energy {after} > frictionless {baseline} + {rounding} J, class={class}, mass={mass}, warm={warm}, v={velocity}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

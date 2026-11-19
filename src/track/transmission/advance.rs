@@ -147,7 +147,7 @@ impl DriveTick {
         tp: &TransmissionParams,
         h: f32,
         resting: bool,
-    ) -> crate::avian_ext::surface_motion::Coordinates {
+    ) -> super::super::surface_motion::Coordinates {
         if !self.contacts_started {
             if resting {
                 // The sleeping trial is a prediction. A real wake replays that interval once.
@@ -157,7 +157,7 @@ impl DriveTick {
             }
             self.contacts_started = true;
         }
-        crate::avian_ext::surface_motion::Coordinates::drivetrain(super::prepare_advance(
+        super::super::surface_motion::Coordinates::drivetrain(super::prepare_advance(
             fp,
             tp,
             &self.state,
@@ -169,11 +169,10 @@ impl DriveTick {
     pub(crate) fn finish_contact(
         &mut self,
         tp: &TransmissionParams,
-        coordinates: &crate::avian_ext::surface_motion::Coordinates,
+        coordinates: &super::super::surface_motion::Coordinates,
         h: f32,
     ) {
-        let report = coordinates.finish(tp, &mut self.state, h);
-        coordinates.remember(&mut self.warm);
+        let report = coordinates.finish(tp, &mut self.state, &mut self.warm, h);
         self.record(report, h);
         #[cfg(feature = "bitprobe")]
         {
@@ -181,8 +180,7 @@ impl DriveTick {
         }
     }
 
-    /// The game's damage model: no sampled driving pass means no served task or sampled load.
-    /// Contact-only time still advances the constructed brake and clutch at their real capacity.
+    /// An unsampled interval retains real supply and intent; only the sampled ground load is absent.
     pub(crate) fn contact_only(
         fp: &DriveConstruction,
         tp: &TransmissionParams,
@@ -190,21 +188,20 @@ impl DriveTick {
         target: DriveTarget,
         h: f32,
     ) -> Self {
-        let mut supply = target.supply;
-        supply.task_rate = 0.0;
+        let axes = match target.intent {
+            DriveIntent::Axes(axes) => axes,
+            DriveIntent::Brake => DriveAxes::default(),
+        };
         Self::new(
             fp,
             tp,
             state,
             &TransmissionInput {
-                supply,
-                intent: match target.intent {
-                    DriveIntent::Brake => DriveIntent::Brake,
-                    DriveIntent::Axes(_) => DriveIntent::Axes(DriveAxes::default()),
-                },
-                throttle: 0.0,
-                steer: 0.0,
-                side_commands: [0.0; 2],
+                supply: target.supply,
+                intent: target.intent,
+                throttle: axes.throttle,
+                steer: axes.steer,
+                side_commands: axes.side_commands(),
                 speeds: state.speeds,
                 reactions: [0.0; 2],
                 reaction_slopes: [0.0; 2],
@@ -241,5 +238,43 @@ impl DriveTick {
             report.bitprobe.brakes_slide = self.brakes_slide;
         }
         report
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A physics wake without sampling still receives the real operator and power supply.
+    /// Scheduling may erase only the absent sampled ground load, never throttle or task service.
+    #[test]
+    fn contact_only_preserves_supply_and_intent_and_omits_only_sampled_load() {
+        use crate::track::drive_fixture::{class_drivetrains, construction};
+        for (fp, tp) in class_drivetrains() {
+            let fp = construction(&fp);
+            let axes = DriveAxes {
+                throttle: 0.7,
+                steer: 0.4,
+            }; // Fixture operator axes.
+            let target = DriveTarget {
+                supply: DriveSupply::WHOLE,
+                intent: DriveIntent::Axes(axes),
+            };
+            let state = DriveState {
+                transmission: TransmissionState::from_spec(&tp),
+                speeds: [0.0; 2],
+                phases: [0.0; 2],
+            };
+            let tick = DriveTick::contact_only(&fp, &tp, state, target, 1.0 / 384.0);
+            let input = tick.orders.controls.input;
+            assert_eq!(input.supply, target.supply);
+            assert_eq!(input.intent, target.intent);
+            assert_eq!(input.throttle, axes.throttle);
+            assert_eq!(input.steer, axes.steer);
+            assert_eq!(input.side_commands, axes.side_commands());
+            assert_eq!(input.reactions, [0.0; 2]);
+            assert_eq!(input.reaction_slopes, [0.0; 2]);
+            assert!(input.sensed.is_none());
+        }
     }
 }

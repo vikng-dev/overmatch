@@ -262,6 +262,9 @@ fn bind_surface(
 
 /// Avian retains constraint geometry throughout its substep loop. Bind each contact once;
 /// scalar speeds themselves are prepared per substep and changed by the contact solver.
+/// The single parallel graph walk binds the geometry in its stable solver order; storing both
+/// optional coefficients on the constraint keeps warm start and both contact passes under the
+/// same graph-colored ownership, without another lookup or shared mutable registry per point.
 pub(crate) fn prepare_belt_surfaces(
     mut graph: ResMut<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>,
     contacts: Res<avian3d::prelude::ContactGraph>,
@@ -484,7 +487,6 @@ mod tests {
                             let coordinate = constraint.surface_coordinates[side].unwrap();
                             assert_eq!(coordinate.index, Side::Left.index());
                             assert!(constraint.surface_coordinates[1-side].is_none());
-                            assert!(constraint.surface_coordinates.iter().any(Option::is_some));
                             // Resolution: repeated world/local rotations differ by f32 roundoff.
                             assert!((coordinate.direction-sign*(rotation*direction)).length()<1e-5);
                         })
@@ -555,7 +557,6 @@ mod tests {
             );
             assert_eq!(rows[0].tangent_velocity, Vec3::X);
             assert_eq!(rows[2].tangent_velocity, Vec3::X);
-            assert!(rows[1].surface_coordinates.iter().any(Option::is_some));
             let coordinates = rows[1].surface_coordinates.map(Option::unwrap);
             assert!(coordinates.iter().all(|c| c.index == Side::Left.index()));
             // Fixture speeds: the two exposed faces contribute to the same relative row.

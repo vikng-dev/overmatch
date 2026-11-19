@@ -26,20 +26,13 @@ The existing 0.8.0 mechanisms cannot supply that coordinate:
 The local extension exposes adapter-typed, cloneable transient scratch in `SolverBody` and
 surface-coordinate coefficients on `ContactConstraint`. One process-wide friction callback is
 registered before any coordinates are bound. It runs under graph coloring after both normal
-passes, including before position integration, and receives warm start after the rigid-body warm
-impulse. Its accumulator records the applied
-impulse; game-side readers share one accessor for that convention. Ordinary contacts retain stock
-friction. Scratch is rebuilt before solving, including after deserialization.
+passes, with pass identity, and receives warm start after the rigid-body warm impulse. The seam
+chooses when to solve. Its accumulator records the applied impulse; game-side readers share
+one accessor for that convention. Ordinary contacts retain stock friction. Scratch is rebuilt
+before solving, including after deserialization.
 
-The game owns all mechanics and energy bookkeeping. It prepares the crank/belt block once per
-substep, then eliminates its bounded brake, clutch and steering rows inside the Coulomb-disk
-contact minimization. A holding brake has zero mobility within capacity; locked clutches reflect
-crank inertia, and sampled reaction slopes contribute to the response. Each candidate reuses the
-same free momentum and impulse bounds. Static capacity can shrink to sliding capacity during the
-solve, never receive a new budget. Both normal passes share that budget and one accumulated
-contact impulse. The affine response on a KKT face is cached only while the full solve's
-feasibility and complementarity checks certify it. Readback commits the resulting crank and
-belt speeds once.
+The game owns the surface trait, capped contact row and drivetrain implementation; their
+mechanical law and measurements live in `.agents/docs/design/track-model/track-contact.md`.
 
 Native-constraint witnesses cover mass ratios, scaled warm starts, energy, and both bodies'
 linear and angular momentum at nonzero anchors. Production scheduling witnesses compare final

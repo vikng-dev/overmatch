@@ -41,6 +41,7 @@ pub(crate) mod rubble;
 pub(crate) mod schedule_path;
 pub(crate) mod soft_run;
 pub(crate) mod stop_contacts;
+pub(crate) mod surface_motion;
 // The belt's SHADOW CASTER: a low-poly ribbon swept along the same drawn polyline the shoes are
 // placed on, so the 1.08 M-triangle shoe pool can stop being re-submitted into every cascade. Pure
 // geometry + the mode knob; `view` owns the entities.

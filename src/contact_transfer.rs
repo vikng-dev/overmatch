@@ -1401,13 +1401,7 @@ mod tests {
                     let body = bodies.get_mut(index).unwrap();
                     if body.surface_scratch.is_none() {
                         // Fixture: one surface, initially 1.5 m/s, scalar inertia 500 kg.
-                        crate::avian_ext::surface_motion::Coordinates::free(vec![
-                            crate::avian_ext::surface_motion::SurfaceSpeed {
-                                velocity: 1.5,
-                                inverse_inertia: 1.0 / 500.0,
-                            },
-                        ])
-                        .install(body);
+                        crate::track::surface_motion::free_fixture([1.5, 0.0], 500.0).install(body);
                     }
                 }
             }

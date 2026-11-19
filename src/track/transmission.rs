@@ -1672,21 +1672,6 @@ impl MechanicalRows {
         }
         super::block::solve_limited(&speeds, &self.rows, &self.limits, warm)
     }
-
-    pub(crate) fn potential(&self, solved: &super::block::Solution) -> f64 {
-        // The minimized dual plus free kinetic energy has gradient equal to solved speed.
-        self.speeds
-            .iter()
-            .zip(&solved.speeds)
-            .map(|(s, v)| 0.5 * s.inertia * v * v)
-            .sum::<f64>()
-            - self
-                .rows
-                .iter()
-                .zip(&solved.rows)
-                .map(|(r, p)| r.target * p.impulse)
-                .sum::<f64>()
-    }
 }
 
 fn prepare_rows(
@@ -2255,9 +2240,13 @@ pub(crate) struct PreparedDrive {
     pub(crate) mechanical: MechanicalRows,
     controls: Controls,
     power: f32,
+    #[cfg(feature = "bitprobe")]
     omega_pre: f32,
+    #[cfg(feature = "bitprobe")]
     mean: f32,
+    #[cfg(feature = "bitprobe")]
     ratio: f32,
+    #[cfg(feature = "bitprobe")]
     k: f32,
     #[cfg(feature = "bitprobe")]
     probe: TransmissionProbe,
@@ -2290,6 +2279,7 @@ pub(crate) fn prepare_advance(
     let mut probe = input_probe(st, inp, mean, (inp.speeds[0] - inp.speeds[1]) * 0.5);
     let ratio = tp.ratio(st.reverse, st.gear);
     let k = ratio / tp.sprocket_radius;
+    #[cfg(feature = "bitprobe")]
     let omega_pre = st.omega_e;
     let (torque, power) = crank_free_torque(
         tp,
@@ -2309,9 +2299,13 @@ pub(crate) fn prepare_advance(
         mechanical,
         controls,
         power,
+        #[cfg(feature = "bitprobe")]
         omega_pre,
+        #[cfg(feature = "bitprobe")]
         mean,
+        #[cfg(feature = "bitprobe")]
         ratio,
+        #[cfg(feature = "bitprobe")]
         k,
         #[cfg(feature = "bitprobe")]
         probe,
@@ -2329,12 +2323,9 @@ pub(crate) fn finish_advance(
         ref mechanical,
         controls,
         power,
-        omega_pre,
-        mean,
-        ratio,
-        k,
         #[cfg(feature = "bitprobe")]
         mut probe,
+        ..
     } = *prepared;
     let inp = &controls.input;
     let st = &mut state.transmission;
@@ -2342,6 +2333,13 @@ pub(crate) fn finish_advance(
     report.power_available = power;
     #[cfg(feature = "bitprobe")]
     {
+        let PreparedDrive {
+            omega_pre,
+            mean,
+            ratio,
+            k,
+            ..
+        } = *prepared;
         force_probe(
             tp,
             inp,
@@ -2392,16 +2390,7 @@ pub(crate) fn finish_advance(
         report.bitprobe = probe;
     }
     #[cfg(not(feature = "bitprobe"))]
-    let _ = (
-        tp,
-        inp,
-        omega_pre,
-        mean,
-        ratio,
-        k,
-        clutch_torque,
-        steer_force,
-    );
+    let _ = (tp, inp, clutch_torque, steer_force);
     for (phase, speed) in state.phases.iter_mut().zip(state.speeds) {
         *phase += f64::from(speed * h);
     }

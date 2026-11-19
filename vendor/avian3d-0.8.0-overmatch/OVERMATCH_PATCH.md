@@ -15,8 +15,7 @@ Subject: the game's server physics (rigid bodies, contacts, rest). Game state on
 Each patch takes one form, named in its section:
 
 - **hook**: a narrow extension point inside an upstream file; the law it serves lives in the game
-  (`src/avian_ext/`, one file per seam). `avian_ext::plugin` or the feature's owning adapter
-  installs it after `PhysicsPlugins`.
+  (`src/avian_ext/`, one file per seam). `avian_ext::plugin` installs it after `PhysicsPlugins`.
 - **module**: a self-contained fork file with a few call sites in upstream files.
 - **game-side**: no fork line; the game attaches through public schedule slots, components and
   resources.
@@ -24,7 +23,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff --minimal -ruN`
-of `src/` against the published crate: 979 in all (MEASURED), 901 in upstream files and 78 in the
+of `src/` against the published crate: 982 in all (MEASURED), 904 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -683,8 +682,8 @@ pass-count, reset, serial/parallel and overflow assertions.
 Form: **hook**, for a game divergence; the finite-surface law has one game-side owner.
 `SolverBody::surface_scratch` carries cloneable adapter-owned transient state;
 `ContactConstraint::surface_coordinates` binds coefficients in relative contact velocity.
-One registered callback dispatches warm start and friction after both normal passes under
-graph-colored body ownership.
+`avian_ext::plugin` registers one callback. It dispatches warm start and identifies each normal
+pass under graph-colored body ownership; the seam chooses which passes run friction.
 Ordinary contacts retain stock friction. `SurfaceFrictionStage` owns the applied-impulse
 accumulator contract. No work tally or drivetrain law lives in the fork.
 

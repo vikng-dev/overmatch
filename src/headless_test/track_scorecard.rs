@@ -3347,7 +3347,26 @@ fn solver_friction_readout_matches_hull_momentum_on_loose_pieces() {
     let mut least_grip = f32::INFINITY;
     let pull = TICKS;
     for tick in 0..pull {
+        let previous_hard = bed.hard_reactions();
         bed.tick(1.0, 0.0);
+        if tick > 0 {
+            let (closed, heading) = bed
+                .app
+                .world()
+                .get::<crate::track::driver::DriverSense>(bed.tank)
+                .unwrap()
+                .closed_contact_sample()
+                .expect("the preceding driven interval closes a ledger sample");
+            for (actual, hard) in closed.into_iter().zip(previous_hard) {
+                let expected = hard.map_or(0.0, |h| h.friction.dot(heading));
+                // DERIVED: solver-only support adds one f32 dot product to the closed sample.
+                let rounding = 8.0 * f32::EPSILON * (1.0 + expected.abs());
+                assert!(
+                    (actual - expected).abs() <= rounding,
+                    "Driver hard-contact ledger {actual} != solver readout {expected}"
+                );
+            }
+        }
         assert!(
             bed.spring_forces().is_empty(),
             "the sampled support carried the hull at tick {tick}"
@@ -3511,104 +3530,125 @@ fn parked_solver_slab_creep() {
     }
 }
 
-/// Local two-worker observation of the Relax stage; an isolated run installs the host's compute
-/// allocation before booting the shipped composition. Timing is reported, never a pass condition.
-#[test]
-#[ignore = "two-worker contact cost observation; run in an isolated test process"]
-fn constrained_belt_relax_cost_with_two_workers() {
-    use avian3d::dynamics::solver::constraint_graph::ConstraintGraph;
-    use bevy::tasks::{ComputeTaskPool, TaskPoolBuilder};
-    let pool = ComputeTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(2).build());
-    assert_eq!(
-        pool.thread_num(),
-        2,
-        "run this observation alone to install the hosted allocation"
-    );
-    fn slippery_contacts(mut graph: ResMut<ConstraintGraph>) {
-        for row in graph
-            .colors
-            .iter_mut()
-            .flat_map(|color| &mut color.contact_constraints)
-        {
-            if row.surface_coordinates.iter().any(Option::is_some) {
-                row.friction = 0.01; // Fixture: low grip forces sliding points through the disk boundary solve.
-            }
-        }
-    }
-    for low_grip in [false, true] {
-        let mut bed = slab_bed();
-        if low_grip {
-            bed.app.add_systems(
-                PhysicsSchedule,
-                slippery_contacts
-                    .in_set(SolverSystems::PreSubstep)
-                    .after(crate::track::stop_contacts::prepare_belt_surfaces)
-                    .before(crate::contact_transfer::PrepareReading),
-            );
-        }
-        let mut costs = Vec::new();
-        let mut biased_costs = Vec::new();
-        let mut boundary = 0;
-        let mut points = 0;
-        for _ in 0..2 * TICKS {
-            bed.tick(1.0, 0.0);
-            biased_costs.push(
-                bed.app
-                    .world()
-                    .resource::<avian3d::dynamics::solver::SolverDiagnostics>()
-                    .solve_constraints
-                    .as_secs_f64()
-                    * 1e6,
-            );
-            costs.push(
-                bed.app
-                    .world()
-                    .resource::<avian3d::dynamics::solver::SolverDiagnostics>()
-                    .relax_velocities
-                    .as_secs_f64()
-                    * 1e6,
-            );
-            for row in bed
-                .app
-                .world()
-                .resource::<ConstraintGraph>()
-                .colors
-                .iter()
-                .flat_map(|c| &c.contact_constraints)
-            {
-                if row.surface_coordinates.iter().all(Option::is_none) {
-                    continue;
-                } // Ordinary slab/ground rows.
-                for point in &row.points {
-                    let Some(tangent) = &point.tangent_part else {
-                        continue;
-                    }; // Frictionless point.
-                    let radius = row.friction * point.normal_part.impulse;
-                    points += 1;
-                    // Resolution: f32 assembly of a disk-bound impulse.
-                    boundary += usize::from(
-                        radius > 0.0
-                            && tangent.impulse.length() >= radius * (1.0 - 8.0 * f32::EPSILON),
+/// Fixture: independent shipped tanks on broad slabs or separated loose pieces. Two compute
+/// workers expose population dispatch; the release probe prices the whole contact passes.
+fn belt_cost_bed(population: usize, debris: bool) -> Bed {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    let level = 0.402; // Fixture support top plus initial contact allowance, m.
+    let (_, template) = crate::tank::shipped_construction();
+    for owner in 0..population {
+        let offset = Vec3::X * (owner as f32 * 12.0); // Fixture: disjoint owners and supports.
+        if debris {
+            for side in [-1.0, 1.0] {
+                for along in [-2.0, 0.0, 2.0] {
+                    bed.spawn_piece(
+                        offset + Vec3::new(side * 1.5, 0.2, along),
+                        Vec3::new(1.5, 0.4, 1.5),
                     );
                 }
             }
+        } else {
+            bed.spawn_piece(offset + Vec3::Y * 0.201, Vec3::new(8.0, 0.4, 16.0));
         }
-        println!(
-            "MEASURED two-worker solver-only slab biased contact pass, low_grip={low_grip}: mean {} us/tick",
-            biased_costs.iter().sum::<f64>() / biased_costs.len() as f64
-        );
-        costs.sort_by(f64::total_cmp);
-        println!(
-            "MEASURED two-worker solver-only slab Relax, low_grip={low_grip}: mean {} us/tick, median {} us/tick, peak {} us/tick; {boundary}/{points} final-substep points on the disk boundary",
-            costs.iter().sum::<f64>() / costs.len() as f64,
-            costs[costs.len() / 2],
-            costs.last().unwrap()
-        );
-        if low_grip {
-            assert!(
-                boundary > 0,
-                "the sliding-cost witness must exercise the Coulomb boundary"
+        if owner > 0 {
+            let at = offset + Vec3::Y * (level + bed.rest_y);
+            let world = bed.app.world_mut();
+            let mut commands = world.commands();
+            crate::tank::spawn_headless_tank(
+                &mut commands,
+                &template,
+                (
+                    Transform::from_translation(at),
+                    crate::eased_dynamic_body(),
+                    SleepingDisabled,
+                    crate::command::TankCommand::default(),
+                ),
             );
+            world.flush();
         }
+    }
+    bed.place(Vec3::Y * level, Quat::IDENTITY);
+    bed.app
+        .world_mut()
+        .entity_mut(bed.tank)
+        .insert(SleepingDisabled);
+    bed.start();
+    for _ in 0..TICKS {
+        bed.tick(0.0, 0.0);
+    }
+    bed
+}
+
+#[derive(Resource, Default)]
+struct BeltCostPoints(usize);
+
+fn count_belt_cost_points(
+    mut count: ResMut<BeltCostPoints>,
+    graph: Res<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>,
+    contacts: Res<avian3d::prelude::ContactGraph>,
+    faces: Query<(), With<crate::track::stop_contacts::BeltFace>>,
+) {
+    for row in graph.colors.iter().flat_map(|c| &c.contact_constraints) {
+        let (_, pair) = contacts
+            .get_by_id(row.contact_id)
+            .expect("a live constraint retains its contact pair");
+        if faces.contains(pair.collider1) || faces.contains(pair.collider2) {
+            count.0 += row
+                .points
+                .iter()
+                .filter(|p| p.tangent_part.is_some())
+                .count();
+        }
+    }
+}
+
+/// Whole contact passes, including normal rows, normalized by belt-face visits. Run alone in
+/// release so the global compute pool has two workers; tick time includes the whole app update.
+#[test]
+#[ignore = "release population cost; run alone with --release --ignored --nocapture --test-threads=1"]
+fn constrained_belt_relax_cost_with_two_workers() {
+    use bevy::tasks::{ComputeTaskPool, TaskPoolBuilder};
+    let pool = ComputeTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(2).build());
+    assert_eq!(pool.thread_num(), 2, "run this observation alone");
+    for (population, debris) in [(1, false), (8, false), (1, true), (8, true)] {
+        let mut bed = belt_cost_bed(population, debris);
+        bed.app.init_resource::<BeltCostPoints>().add_systems(
+            SubstepSchedule,
+            count_belt_cost_points
+                .after(avian3d::dynamics::solver::schedule::SubstepSolverSystems::Relax),
+        );
+        let (mut biased, mut relax, mut update) = (0.0, 0.0, 0.0);
+        let ticks = 2 * TICKS; // Fixture: two seconds at full throttle after settling.
+        for _ in 0..ticks {
+            {
+                let world = bed.app.world_mut();
+                let mut commands =
+                    world.query_filtered::<&mut crate::command::TankCommand, With<Tank>>();
+                for mut command in commands.iter_mut(world) {
+                    command.throttle = 1.0;
+                    command.steer = 0.0;
+                }
+            }
+            let start = std::time::Instant::now();
+            bed.tick(1.0, 0.0);
+            update += start.elapsed().as_secs_f64() * 1e6;
+            let diagnostics = bed
+                .app
+                .world()
+                .resource::<avian3d::dynamics::solver::SolverDiagnostics>();
+            biased += diagnostics.solve_constraints.as_secs_f64() * 1e6;
+            relax += diagnostics.relax_velocities.as_secs_f64() * 1e6;
+        }
+        let points = bed.app.world().resource::<BeltCostPoints>().0;
+        assert!(points > 0, "pricing requires belt-face contacts");
+        println!(
+            "MEASURED belt-cost population={population} debris={debris}: biased_us_tick={} relax_us_tick={} biased_us_point={} relax_us_point={} update_us_tick={} visits={points}; optimized={}, two compute workers, full throttle",
+            biased / ticks as f64,
+            relax / ticks as f64,
+            biased / points as f64,
+            relax / points as f64,
+            update / ticks as f64,
+            !cfg!(debug_assertions)
+        );
     }
 }
